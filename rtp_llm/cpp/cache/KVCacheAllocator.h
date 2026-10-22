@@ -20,8 +20,6 @@ struct KVCacheTokenCapacity {
     size_t available_tokens = 0;
 };
 
-
-
 class KVCacheAllocator {
 public:
     KVCacheAllocator(const CacheConfig&                 config,
@@ -85,8 +83,6 @@ public:
         use_cuda_malloc_block_pool_ = use_cuda_malloc_block_pool;
     }
 
-    // REBASE CONFLICT CONTEXT(2413e8e03): keep new base CP slot mapping and
-    // SharedBlockCache hooks while adding the source branch cudaMalloc pool flag.
     void setCPSlotMapper(std::shared_ptr<CPSlotMapper> cp_slot_mapper) {
         cp_slot_mapper_ = std::move(cp_slot_mapper);
     }

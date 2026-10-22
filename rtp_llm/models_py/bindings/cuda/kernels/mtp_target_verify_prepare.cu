@@ -11,26 +11,41 @@
 namespace rtp_llm {
 
 namespace {
-__global__ void deepinferGreedyFinalizeRtp(const int32_t* draft,const int32_t* target,int32_t* out,
-                                         int32_t* lengths,int64_t* rows,int64_t* total,int batch,int steps,int token_stride){
+__global__ void deepinferGreedyFinalizeRtp(const int32_t* draft,
+                                           const int32_t* target,
+                                           int32_t*       out,
+                                           int32_t*       lengths,
+                                           int64_t*       rows,
+                                           int64_t*       total,
+                                           int            batch,
+                                           int            steps,
+                                           int            token_stride) {
     __shared__ int64_t partial[256];
-    int64_t sum=0;
-    for(int b=threadIdx.x;b<batch;b+=blockDim.x){
-        int last=steps;
-        for(int j=0;j<steps;j++){
-            int token=target[(b*(steps+1)+j)*token_stride+token_stride-1];
-            if(token!=draft[b*steps+j]){last=j;break;}
+    int64_t            sum = 0;
+    for (int b = threadIdx.x; b < batch; b += blockDim.x) {
+        int last = steps;
+        for (int j = 0; j < steps; j++) {
+            int token = target[(b * (steps + 1) + j) * token_stride + token_stride - 1];
+            if (token != draft[b * steps + j]) {
+                last = j;
+                break;
+            }
         }
-        for(int j=0;j<=steps;j++)
-            out[b*(steps+1)+j]=j<=last?target[(b*(steps+1)+j)*token_stride+token_stride-1]:0;
-        lengths[b]=last+1;rows[b]=last+1;sum+=last+1;
+        for (int j = 0; j <= steps; j++)
+            out[b * (steps + 1) + j] = j <= last ? target[(b * (steps + 1) + j) * token_stride + token_stride - 1] : 0;
+        lengths[b] = last + 1;
+        rows[b]    = last + 1;
+        sum += last + 1;
     }
-    partial[threadIdx.x]=sum;__syncthreads();
-    for(int offset=128;offset;offset/=2){
-        if(threadIdx.x<offset)partial[threadIdx.x]+=partial[threadIdx.x+offset];
+    partial[threadIdx.x] = sum;
+    __syncthreads();
+    for (int offset = 128; offset; offset /= 2) {
+        if (threadIdx.x < offset)
+            partial[threadIdx.x] += partial[threadIdx.x + offset];
         __syncthreads();
     }
-    if(threadIdx.x==0)total[0]=partial[0];
+    if (threadIdx.x == 0)
+        total[0] = partial[0];
 }
 __global__ void mtpAcceptMetricsKernel(const int32_t* lengths, int64_t* rows, int64_t* total, int32_t count) {
     __shared__ int64_t sums[256];
@@ -79,22 +94,25 @@ __global__ void mtpPublishStateKernel(const int32_t*       lengths,
     }
 }
 
-struct MtpPreviousRows { const int32_t* rows[128]; };
+struct MtpPreviousRows {
+    const int32_t* rows[128];
+};
 __global__ void mtpPublishStateRowsKernel(const int32_t*       lengths,
-                                      const int32_t*       tokens,
-                                      MtpPreviousRows       previous,
-                                      const __nv_bfloat16* hidden,
-                                      int32_t*             next,
-                                      int32_t*             selected,
-                                      __nv_bfloat16*       output_hidden,
-                                      int32_t              stride,
-                                      int32_t              width, int32_t offset) {
+                                          const int32_t*       tokens,
+                                          MtpPreviousRows      previous,
+                                          const __nv_bfloat16* hidden,
+                                          int32_t*             next,
+                                          int32_t*             selected,
+                                          __nv_bfloat16*       output_hidden,
+                                          int32_t              stride,
+                                          int32_t              width,
+                                          int32_t              offset) {
     const int32_t row      = blockIdx.y + offset;
     const int32_t col      = blockIdx.x * blockDim.x + threadIdx.x;
     const int32_t accepted = lengths[row];
     if (col == 0) {
         selected[row] = tokens[row * stride + accepted - 1];
-        next[row] = *previous.rows[blockIdx.y] + accepted;
+        next[row]     = *previous.rows[blockIdx.y] + accepted;
     }
     if (col < width) {
         output_hidden[row * width + col] = hidden[(row * stride + accepted - 1) * width + col];
@@ -365,15 +383,15 @@ void checkCudaI32Vector(const torch::Tensor& tensor, const char* name, int64_t b
 
 }  // namespace
 
-bool tryMtpPublishState(const torch::Tensor& accept_lengths,
-                        const torch::Tensor& accepted_tokens,
-                        const torch::Tensor& previous_lengths,
-                        const torch::Tensor& hidden_states,
-                        int32_t              tokens_per_batch,
-                        torch::Tensor&       next_lengths,
-                        torch::Tensor&       selected_tokens,
-                        torch::Tensor&       selected_hidden,
-                        cudaStream_t         stream,
+bool tryMtpPublishState(const torch::Tensor&               accept_lengths,
+                        const torch::Tensor&               accepted_tokens,
+                        const torch::Tensor&               previous_lengths,
+                        const torch::Tensor&               hidden_states,
+                        int32_t                            tokens_per_batch,
+                        torch::Tensor&                     next_lengths,
+                        torch::Tensor&                     selected_tokens,
+                        torch::Tensor&                     selected_hidden,
+                        cudaStream_t                       stream,
                         const std::vector<const int32_t*>& previous_rows) {
     if (!accept_lengths.defined() || !accepted_tokens.defined() || !accept_lengths.is_cuda()
         || accept_lengths.scalar_type() != torch::kInt32 || !accept_lengths.is_contiguous()
@@ -409,15 +427,20 @@ bool tryMtpPublishState(const torch::Tensor& accept_lengths,
         return true;
     if (!previous_rows.empty()) {
         for (int32_t offset = 0; offset < batch; offset += 128) {
-            const int32_t count = std::min<int64_t>(batch - offset, 128);
+            const int32_t   count = std::min<int64_t>(batch - offset, 128);
             MtpPreviousRows previous{};
             std::copy_n(previous_rows.begin() + offset, count, previous.rows);
             mtpPublishStateRowsKernel<<<dim3(std::max((width + 255) / 256, 1), count), 256, 0, stream>>>(
-                accept_lengths.data_ptr<int32_t>(), accepted_tokens.data_ptr<int32_t>(), previous,
+                accept_lengths.data_ptr<int32_t>(),
+                accepted_tokens.data_ptr<int32_t>(),
+                previous,
                 has_hidden ? reinterpret_cast<const __nv_bfloat16*>(hidden_states.data_ptr<at::BFloat16>()) : nullptr,
-                next_lengths.data_ptr<int32_t>(), selected_tokens.data_ptr<int32_t>(),
+                next_lengths.data_ptr<int32_t>(),
+                selected_tokens.data_ptr<int32_t>(),
                 has_hidden ? reinterpret_cast<__nv_bfloat16*>(selected_hidden.data_ptr<at::BFloat16>()) : nullptr,
-                tokens_per_batch, width, offset);
+                tokens_per_batch,
+                width,
+                offset);
         }
         return true;
     }
@@ -436,11 +459,11 @@ bool tryMtpPublishState(const torch::Tensor& accept_lengths,
 
 bool tryMtpGreedyFinalize(const torch::Tensor& draft,
                           const torch::Tensor& target,
-                          torch::Tensor& tokens,
-                          torch::Tensor& lengths,
-                          torch::Tensor& rows,
-                          torch::Tensor& total,
-                          cudaStream_t stream) {
+                          torch::Tensor&       tokens,
+                          torch::Tensor&       lengths,
+                          torch::Tensor&       rows,
+                          torch::Tensor&       total,
+                          cudaStream_t         stream) {
     const torch::Tensor* tensors[] = {&draft, &target, &tokens, &lengths};
     for (const auto* tensor : tensors) {
         if (!tensor->defined() || !tensor->is_cuda() || tensor->scalar_type() != torch::kInt32
@@ -449,19 +472,24 @@ bool tryMtpGreedyFinalize(const torch::Tensor& draft,
     }
     if (draft.dim() != 2 || target.dim() != 2 || tokens.dim() != 2 || lengths.dim() != 1)
         return false;
-    const auto batch = draft.size(0);
-    const auto steps = draft.size(1);
+    const auto batch  = draft.size(0);
+    const auto steps  = draft.size(1);
     const auto stride = target.size(1);
     if (batch <= 0 || batch > 65535 || steps <= 0 || steps > 32 || stride <= 0 || stride > INT_MAX
-        || target.size(0) != batch * (steps + 1) || target.numel() > INT_MAX
-        || tokens.size(0) != batch || tokens.size(1) != steps + 1 || lengths.numel() != batch)
+        || target.size(0) != batch * (steps + 1) || target.numel() > INT_MAX || tokens.size(0) != batch
+        || tokens.size(1) != steps + 1 || lengths.numel() != batch)
         return false;
-    rows = torch::empty({batch}, lengths.options().dtype(torch::kInt64));
+    rows  = torch::empty({batch}, lengths.options().dtype(torch::kInt64));
     total = torch::empty({1}, rows.options());
-    deepinferGreedyFinalizeRtp<<<1, 256, 0, stream>>>(
-        draft.data_ptr<int32_t>(), target.data_ptr<int32_t>(), tokens.data_ptr<int32_t>(),
-        lengths.data_ptr<int32_t>(), rows.data_ptr<int64_t>(), total.data_ptr<int64_t>(),
-        static_cast<int>(batch), static_cast<int>(steps), static_cast<int>(stride));
+    deepinferGreedyFinalizeRtp<<<1, 256, 0, stream>>>(draft.data_ptr<int32_t>(),
+                                                      target.data_ptr<int32_t>(),
+                                                      tokens.data_ptr<int32_t>(),
+                                                      lengths.data_ptr<int32_t>(),
+                                                      rows.data_ptr<int64_t>(),
+                                                      total.data_ptr<int64_t>(),
+                                                      static_cast<int>(batch),
+                                                      static_cast<int>(steps),
+                                                      static_cast<int>(stride));
     return true;
 }
 
@@ -1246,9 +1274,6 @@ void invokeMtpSelectedRowLogProbs(const torch::Tensor& logits,
     }
 }
 
-// REBASE CONFLICT CONTEXT(518707c73): source branch added this fused
-// shift/append launcher to eliminate sync-heavy CPU token manipulation. Keep it
-// with the new base dispatch-state prepare launcher above.
 void invokeMtpPrefillShiftAppend(const torch::Tensor& combo_tokens_in,
                                  const torch::Tensor& input_lengths,
                                  const torch::Tensor& batch_offsets,

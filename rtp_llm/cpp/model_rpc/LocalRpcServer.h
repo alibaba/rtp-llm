@@ -36,9 +36,9 @@ public:
 
     virtual void startDeferredServices();
     virtual void updateRuntimeEndpoints(const RuntimeConfig& runtime_config);
-    void setDeferServiceStart(bool defer) {
+    void         setDeferServiceStart(bool defer) {
         defer_tp_broadcaster_ = defer;
-        defer_engine_loop_ = defer;
+        defer_engine_loop_    = defer;
     }
 
     grpc::Status
@@ -160,7 +160,7 @@ protected:
     std::shared_ptr<EngineBase>           engine_;
     std::shared_ptr<MultimodalProcessor>  mm_processor_;
     EngineInitParams                      maga_init_params_;
-    ProposeModelEngineInitParams*         propose_maga_init_params_;
+    ProposeModelEngineInitParams*         propose_maga_init_params_{nullptr};
     kmonitor::MetricsReporterPtr          metrics_reporter_;
     std::atomic<size_t>                   onflight_requests_{0};
     std::shared_ptr<RpcServerRuntimeMeta> meta_;

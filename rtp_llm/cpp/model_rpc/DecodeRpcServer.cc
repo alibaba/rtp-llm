@@ -2,6 +2,7 @@
 #include <atomic>
 #include <mutex>
 #include <memory>
+#include <stdexcept>
 #include <unistd.h>
 #include <limits.h>
 #include <condition_variable>
@@ -31,10 +32,10 @@ using grpc::ClientContext;
 using grpc::CompletionQueue;
 using grpc::ClientAsyncResponseReader;
 
-const int LOAD_TIMEOUT_MS         = 5 * 1000;
-const int EXTRA_TIMEOUT_MS        = 100;
+const int LOAD_TIMEOUT_MS              = 5 * 1000;
+const int EXTRA_TIMEOUT_MS             = 100;
 const int CACHE_LOAD_RETIRE_TIMEOUT_MS = 5000;
-const int RDMA_CONNECT_RETRY_TIME = 3;
+const int RDMA_CONNECT_RETRY_TIME      = 3;
 
 namespace {
 torch::TensorOptions runtimeCudaI32Options() {
@@ -140,6 +141,9 @@ void DecodeRpcServer::allocateResource(DecodeGenerateContext& decode_context) {
     RTP_LLM_LOG_DEBUG("request [%s] start to allocate resource", decode_context.request_key.c_str());
     auto input                  = QueryConverter::transQuery(&decode_context.allocate_request.input());
     decode_context.request_info = input->request_info;
+    if (input->generate_config->isPrefillOnly()) {
+        throw std::invalid_argument("prefill-only request cannot enter decode resource allocation");
+    }
     if (applyTimelineGate(decode_context.request_key,
                           input->generate_config->gen_timeline,
                           input->generate_config->profile_step,
@@ -160,12 +164,15 @@ void DecodeRpcServer::allocateResource(DecodeGenerateContext& decode_context) {
         this_thread::sleep_for(chrono::milliseconds(1));
     }
     if (generate_stream->hasError()) {
-        auto   stream_error = generate_stream->statusInfo();
-        RTP_LLM_LOG_ERROR("[KV_RPC] KV_ALLOC_FAILED request=[%s] code=%d seq_length=%d free_blocks=%zu available_blocks=%zu",
-                          decode_context.request_key.c_str(), static_cast<int>(stream_error.code()),
-                          generate_stream->seqLength(), engine_->resourceContext().cache_manager->freeBlocksNum(),
-                          engine_->resourceContext().cache_manager->availableBlocksNum());
-        string error_msg    = stream_error.ToString();
+        auto stream_error = generate_stream->statusInfo();
+        RTP_LLM_LOG_ERROR(
+            "[KV_RPC] KV_ALLOC_FAILED request=[%s] code=%d seq_length=%d free_blocks=%zu available_blocks=%zu",
+            decode_context.request_key.c_str(),
+            static_cast<int>(stream_error.code()),
+            generate_stream->seqLength(),
+            engine_->resourceContext().cache_manager->freeBlocksNum(),
+            engine_->resourceContext().cache_manager->availableBlocksNum());
+        string error_msg = stream_error.ToString();
         if (error_msg.empty()) {
             error_msg = "malloc kv cache block failed at decode node";
         }
@@ -251,6 +258,13 @@ void DecodeRpcServer::localGenerate(DecodeGenerateContext& decode_context) {
                       generate_request.stage() == RemoteStage::GENERATE,
                       grpc::StatusCode::INTERNAL,
                       "message first status != RemoteStage::GENERATE");
+    if (generate_stream->generateConfig()->isPrefillOnly()) {
+        decode_context.error_info =
+            ErrorInfo(ErrorCode::INVALID_PARAMS, "prefill-only request cannot enter decode generation");
+        decode_context.error_status =
+            serializeErrorMsg(decode_context.request_key, decode_context.request_info, decode_context.error_info);
+        return;
+    }
     decode_context.time_info.updateGenerateBeginTime();
     generate_stream->setIsContextStream(false);
     generate_stream->step();
@@ -313,9 +327,6 @@ void DecodeRpcServer::localGenerate(DecodeGenerateContext& decode_context) {
                                                 torch::TensorOptions().dtype(torch::kInt32).pinned_memory(true));
         memcpy(sp_output_buffer->tokens.data_ptr<int>(), propose_tokens.data(), propose_tokens.size() * sizeof(int));
 
-        // REBASE CONFLICT CONTEXT(b08feda05): new base pins grpc tensors for
-        // safe non-blocking host lifetime; source branch also publishes GPU
-        // speculative state for MTP graft prefill cudagraph. Keep both.
         auto propose_probs_t  = pinGrpcTensor(QueryConverter::transTensor(generate_request.propose_probs()));
         auto propose_hidden_t = pinGrpcTensor(QueryConverter::transTensor(generate_request.propose_hidden()));
 
@@ -557,16 +568,17 @@ ErrorInfo DecodeRpcServer::loadCacheAsyncForTp(DecodeGenerateContext& decode_con
         int64_t                           diagnostic_submit_us = 0;
     };
 
-    uint32_t                 worker_size = resource_.grpc_workers.size();
-    vector<WorkerRpcContext> all_context(worker_size);
-    uint32_t                 cq_size = worker_size % 2 == 0 ? worker_size / 2 : worker_size / 2 + 1;
-    vector<CompletionQueue>  completion_queues(cq_size);
-    KvWorkerRpcCleanup<WorkerRpcContext> rpc_cleanup{all_context,
-                  completion_queues,
-                  std::chrono::system_clock::now()
-                      + std::chrono::milliseconds(load_context.timeout_ms + 2 * CACHE_LOAD_RETIRE_TIMEOUT_MS),
-                  load_context.request_key,
-                  !load_context.block_ids_by_group.empty()};
+    uint32_t                             worker_size = resource_.grpc_workers.size();
+    vector<WorkerRpcContext>             all_context(worker_size);
+    uint32_t                             cq_size = worker_size % 2 == 0 ? worker_size / 2 : worker_size / 2 + 1;
+    vector<CompletionQueue>              completion_queues(cq_size);
+    KvWorkerRpcCleanup<WorkerRpcContext> rpc_cleanup{
+        all_context,
+        completion_queues,
+        std::chrono::system_clock::now()
+            + std::chrono::milliseconds(load_context.timeout_ms + 2 * CACHE_LOAD_RETIRE_TIMEOUT_MS),
+        load_context.request_key,
+        !load_context.block_ids_by_group.empty()};
     vector<uint32_t> each_finished_count(cq_size, 0);
     if (worker_size == 0 || cq_size == 0) {
         RTP_LLM_LOG_WARNING("request:[%s] cq_size or worker_size is 0, worker size = %d, cq size = %d",
@@ -596,8 +608,9 @@ ErrorInfo DecodeRpcServer::loadCacheAsyncForTp(DecodeGenerateContext& decode_con
         // diagnostics record only this allowlisted metadata, not request contents.
         static std::atomic<uint64_t> attempt_sequence{0};
         try {
-            rpc_context.diagnostic_attempt_id = std::to_string(getpid()) + "-" + std::to_string(currentTimeUs())
-                + "-" + std::to_string(attempt_sequence.fetch_add(1, std::memory_order_relaxed));
+            rpc_context.diagnostic_attempt_id =
+                std::to_string(getpid()) + "-" + std::to_string(currentTimeUs()) + "-"
+                + std::to_string(attempt_sequence.fetch_add(1, std::memory_order_relaxed));
             rpc_context.client_context->AddMetadata("x-rtp-rpc-attempt-id", rpc_context.diagnostic_attempt_id);
         } catch (...) {
             // Diagnostic metadata must not prevent submission under memory pressure.
@@ -617,8 +630,13 @@ ErrorInfo DecodeRpcServer::loadCacheAsyncForTp(DecodeGenerateContext& decode_con
         rpc_context.diagnostic_submit_us = currentTimeUs();
         RTP_LLM_LOG_DEBUG("[KV_RPC] RPC_SUBMIT request=[%s] attempt=%s worker=%s worker_index=%d "
                           "channel=%p context=%p timeout_ms=%ld block_groups=%zu",
-                          decode_context.request_key.c_str(), rpc_context.diagnostic_attempt_id.c_str(), worker.c_str(), i,
-                          connect_status.value().channel.get(), rpc_context.client_context.get(), remaining_ms,
+                          decode_context.request_key.c_str(),
+                          rpc_context.diagnostic_attempt_id.c_str(),
+                          worker.c_str(),
+                          i,
+                          connect_status.value().channel.get(),
+                          rpc_context.client_context.get(),
+                          remaining_ms,
                           load_context.block_ids_by_group.size());
         rpc_context.submitted = true;
         std::unique_ptr<ClientAsyncResponseReader<BroadcastLoadResponsePB>> reader(rpc_context.stub->AsyncRemoteLoad(
@@ -638,7 +656,9 @@ ErrorInfo DecodeRpcServer::loadCacheAsyncForTp(DecodeGenerateContext& decode_con
         auto cost_time_ms = (currentTimeUs() - load_cache_begin_time_us) / 1000;
         if (cost_time_ms > total_timeout_ms) {
             RTP_LLM_LOG_WARNING("[KV_RPC] RPC_WAIT_EXIT request=[%s] reason=load_deadline elapsed_ms=%ld limit_ms=%ld",
-                                decode_context.request_key.c_str(), cost_time_ms, total_timeout_ms);
+                                decode_context.request_key.c_str(),
+                                cost_time_ms,
+                                total_timeout_ms);
             error_msg = "load cache timeout : cost time is " + std::to_string(cost_time_ms)
                         + "ms, "
                           "total timeout for load cache is "
@@ -671,30 +691,40 @@ ErrorInfo DecodeRpcServer::loadCacheAsyncForTp(DecodeGenerateContext& decode_con
             each_finished_count[i]++;
             if (result != CompletionQueue::GOT_EVENT || !ok) {
                 RTP_LLM_LOG_ERROR("[KV_RPC] RPC_CQ_FAILED request=[%s] cq_index=%u result=%d ok=%d",
-                                  decode_context.request_key.c_str(), i, static_cast<int>(result), ok);
+                                  decode_context.request_key.c_str(),
+                                  i,
+                                  static_cast<int>(result),
+                                  ok);
                 string error_msg = "async get next event from grpc completion queue failed";
                 return ErrorInfo(ErrorCode::LOAD_KV_CACHE_FAILED, error_msg);
             }
-            auto        rank             = reinterpret_cast<uintptr_t>(got_tag);
+            auto rank                    = reinterpret_cast<uintptr_t>(got_tag);
             all_context[rank].completed  = true;
             const auto& status           = all_context[rank].status;
             const auto& response         = all_context[rank].response;
             const auto& pb_error_code    = response.error_info().error_code();
             const auto& pb_error_message = response.error_info().error_message();
-            const auto completion_log_level =
+            const auto  completion_log_level =
                 status.ok() && pb_error_code == ErrorCodePB::NONE_ERROR ? alog::LOG_LEVEL_DEBUG : alog::LOG_LEVEL_INFO;
             RTP_LLM_LOG(completion_log_level,
                         "[KV_RPC] RPC_COMPLETE request=[%s] attempt=%s worker_index=%zu context=%p "
                         "elapsed_us=%ld grpc_code=%d business_code=%d",
-                        decode_context.request_key.c_str(), all_context[rank].diagnostic_attempt_id.c_str(), rank,
-                        all_context[rank].client_context.get(), currentTimeUs() - all_context[rank].diagnostic_submit_us,
-                        status.error_code(), status.ok() ? static_cast<int>(pb_error_code) : -1);
+                        decode_context.request_key.c_str(),
+                        all_context[rank].diagnostic_attempt_id.c_str(),
+                        rank,
+                        all_context[rank].client_context.get(),
+                        currentTimeUs() - all_context[rank].diagnostic_submit_us,
+                        status.error_code(),
+                        status.ok() ? static_cast<int>(pb_error_code) : -1);
             if (!status.ok()) {
-                logKvRpcFailure(decode_context.request_key, all_context[rank].diagnostic_attempt_id,
-                                rank, status, *all_context[rank].client_context);
+                logKvRpcFailure(decode_context.request_key,
+                                all_context[rank].diagnostic_attempt_id,
+                                rank,
+                                status,
+                                *all_context[rank].client_context);
             }
-            min_response_done_time_us    = std::min(min_response_done_time_us, response.done_time_us());
-            max_response_done_time_us    = std::max(max_response_done_time_us, response.done_time_us());
+            min_response_done_time_us = std::min(min_response_done_time_us, response.done_time_us());
+            max_response_done_time_us = std::max(max_response_done_time_us, response.done_time_us());
             RTP_LLM_LOG_DEBUG("request [%s] load cache for rank [%d] done", decode_context.request_key.c_str(), rank);
             if (!status.ok()) {
                 all_success = false;
@@ -862,7 +892,7 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext&               loa
                    std::chrono::steady_clock::now()
                        + std::chrono::milliseconds(load_context.timeout_ms + CACHE_LOAD_RETIRE_TIMEOUT_MS),
                    request_key};
-    const bool                                is_page_level_rr = load_context.prefill_cp_size > 1
+    const bool is_page_level_rr = load_context.prefill_cp_size > 1
                                   && static_cast<int>(load_context.peer_addrs.size()) == load_context.prefill_cp_size;
     auto layerGroupIds = [](const CacheConfig& cfg, bool use_hybrid, size_t layer_id) {
         std::vector<int> layer_gids;
@@ -1328,21 +1358,24 @@ grpc::Status DecodeRpcServer::RemoteLoad(grpc::ServerContext*          server_co
     std::string diagnostic_attempt_id = "missing";
     try {
         const auto& metadata = server_context->client_metadata();
-        const auto it = metadata.find("x-rtp-rpc-attempt-id");
+        const auto  it       = metadata.find("x-rtp-rpc-attempt-id");
         if (it != metadata.end()) {
             const auto value = it->second;
-            const bool valid = value.size() > 0 && value.size() <= 96
-                && std::all_of(value.begin(), value.end(), [](unsigned char c) {
-                    return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')
-                        || c == '-' || c == '_' || c == '.' || c == ':';
+            const bool valid =
+                value.size() > 0 && value.size() <= 96 && std::all_of(value.begin(), value.end(), [](unsigned char c) {
+                    return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '-'
+                           || c == '_' || c == '.' || c == ':';
                 });
             diagnostic_attempt_id = valid ? std::string(value.data(), value.size()) : "invalid";
         }
     } catch (...) {}
-    RTP_LLM_LOG_DEBUG("[KV_RPC] REMOTE_LOAD_ENTER request=[%s] attempt=%s peer=%s worker_dp_rank=%lld request_dp_rank=%lld",
-                      request->request_key().c_str(), diagnostic_attempt_id.c_str(), server_context->peer().c_str(),
-                      static_cast<long long>(maga_init_params_.parallelism_config.dp_rank),
-                      static_cast<long long>(request->dp_rank()));
+    RTP_LLM_LOG_DEBUG(
+        "[KV_RPC] REMOTE_LOAD_ENTER request=[%s] attempt=%s peer=%s worker_dp_rank=%lld request_dp_rank=%lld",
+        request->request_key().c_str(),
+        diagnostic_attempt_id.c_str(),
+        server_context->peer().c_str(),
+        static_cast<long long>(maga_init_params_.parallelism_config.dp_rank),
+        static_cast<long long>(request->dp_rank()));
     if (request->dp_rank() != maga_init_params_.parallelism_config.dp_rank) {
         RTP_LLM_LOG_INFO("[KV_RPC] REMOTE_LOAD_RETURN attempt=%s reason=different_dp_rank grpc_code=0",
                          diagnostic_attempt_id.c_str());
@@ -1364,7 +1397,10 @@ grpc::Status DecodeRpcServer::RemoteLoad(grpc::ServerContext*          server_co
 
     // TODO(xinfei.sxf) add retry
     RTP_LLM_LOG_DEBUG("[KV_RPC] KV_LOAD_BEGIN request=[%s] attempt=%s block_groups=%zu timeout_ms=%ld",
-                      request->request_key().c_str(), diagnostic_attempt_id.c_str(), block_ids_by_group.size(), request->timeout_ms());
+                      request->request_key().c_str(),
+                      diagnostic_attempt_id.c_str(),
+                      block_ids_by_group.size(),
+                      request->timeout_ms());
     auto error_info = loadCache({request->request_id(),
                                  request->request_key(),
                                  peer_addrs,
@@ -1385,7 +1421,9 @@ grpc::Status DecodeRpcServer::RemoteLoad(grpc::ServerContext*          server_co
         error_info.hasError() || request_cancelled ? alog::LOG_LEVEL_INFO : alog::LOG_LEVEL_DEBUG;
     RTP_LLM_LOG(return_log_level,
                 "[KV_RPC] REMOTE_LOAD_RETURN request=[%s] attempt=%s business_code=%d grpc_code=0 cancelled=%d",
-                request->request_key().c_str(), diagnostic_attempt_id.c_str(), static_cast<int>(error_info.code()),
+                request->request_key().c_str(),
+                diagnostic_attempt_id.c_str(),
+                static_cast<int>(error_info.code()),
                 request_cancelled);
     RTP_LLM_LOG_DEBUG("request: %s, remote load cache grpc done", request->request_key().c_str());
     return grpc::Status::OK;
@@ -1460,6 +1498,13 @@ grpc::Status DecodeRpcServer::RemoteGenerate(grpc::ServerContext* server_context
         EXECUTE_STAGE_FUNC(loadCacheFromPrefill, decode_context);
         EXECUTE_STAGE_FUNC(localGenerate, decode_context);
         decode_context.stat_info.nextStage();
+    } catch (const std::invalid_argument& e) {
+        auto error_msg = "request [" + decode_context.request_key + "] catch invalid argument [" + e.what() + "]";
+        decode_context.error_info = ErrorInfo(ErrorCode::INVALID_PARAMS, error_msg);
+        decode_context.error_status =
+            serializeErrorMsg(decode_context.request_key, decode_context.request_info, decode_context.error_info);
+        reportEarlyFinishTask(decode_context, static_cast<int64_t>(ErrorCode::INVALID_PARAMS), error_msg);
+        return decode_context.error_status;
     } catch (const std::exception& e) {
         auto error_msg              = "request [" + decode_context.request_key + "] catch exception [" + e.what() + "]";
         decode_context.error_status = grpc::Status(grpc::StatusCode::INTERNAL, error_msg);

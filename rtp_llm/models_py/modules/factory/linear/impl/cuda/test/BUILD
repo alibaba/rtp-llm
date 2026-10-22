@@ -46,9 +46,7 @@ py_test(
     exec_properties = {'gpu':'SM100_ARM'},
 )
 
-# REBASE CONFLICT CONTEXT(e2e00e570): source branch added this external-scale
-# DeepGEMM test while the new base already had the SM100/ARM fp4 test above.
-# Keep both test targets.
+
 py_test(
     name = "fp8_deepgemm_linear_external_scale_test",
     srcs = ["fp8_deepgemm_linear_external_scale_test.py"],

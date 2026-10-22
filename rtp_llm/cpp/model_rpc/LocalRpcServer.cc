@@ -2,6 +2,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <memory>
+#include <stdexcept>
 #include <unordered_set>
 #include "rtp_llm/cpp/engine_base/stream/GenerateTypes.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
@@ -89,7 +90,7 @@ void LocalRpcServer::updateRuntimeEndpoints(const RuntimeConfig& runtime_config)
     if (!defer_tp_broadcaster_) {
         RTP_LLM_FAIL("runtime endpoints can only be updated before deferred services start");
     }
-    maga_init_params_.runtime_config.worker_addrs = runtime_config.worker_addrs;
+    maga_init_params_.runtime_config.worker_addrs      = runtime_config.worker_addrs;
     maga_init_params_.runtime_config.worker_grpc_addrs = runtime_config.worker_grpc_addrs;
 }
 
@@ -187,42 +188,65 @@ grpc::Status LocalRpcServer::GenerateStreamCall(grpc::ServerContext*            
                                                 grpc::ServerWriter<GenerateOutputsPB>* writer) {
     RTP_LLM_PROFILE_SCOPE("rpc.generate_stream_call");
     AtomicGuard request_guard(onflight_requests_);
-    auto        request_id = request->request_id();
+    if (request == nullptr) {
+        return serializeErrorMsg("unknown", ErrorInfo(ErrorCode::INVALID_PARAMS, "generate request must not be null"));
+    }
+    auto request_id = request->request_id();
     RTP_LLM_LOG_DEBUG("receive request %ld", request_id);
     auto generate_context =
         GenerateContext(request_id, request->generate_config().timeout_ms(), context, metrics_reporter_, meta_);
-    auto input                    = QueryConverter::transQuery(request);
-    generate_context.request_info = input->request_info;
-    if (applyTimelineGate(generate_context.request_key,
-                          input->generate_config->gen_timeline,
-                          input->generate_config->profile_step,
-                          input->generate_config->profile_trace_name)) {
-        input->generate_config->gen_timeline = true;
-    }
-
-    // need to check client has buffer at first
-    if (mm_processor_ != nullptr && input->multimodal_inputs) {
-        RTP_LLM_PROFILE_SCOPE("rpc.mm_update_features");
-        auto mm_res = mm_processor_->updateMultimodalFeatures(input);
-        if (!mm_res.ok()) {
-            generate_context.error_info = mm_res;
-            generate_context.error_status =
-                serializeErrorMsg(generate_context.request_key, generate_context.request_info, mm_res);
+    try {
+        generate_context.request_info = QueryConverter::transRequestInfo(request->request_info());
+        auto input                    = QueryConverter::transQuery(request);
+        generate_context.request_info = input->request_info;
+        if (writer == nullptr) {
+            throw std::invalid_argument("generate response writer must not be null");
         }
+        if (!engine_) {
+            throw std::runtime_error("LocalRpcServer engine is not initialized");
+        }
+        if (applyTimelineGate(generate_context.request_key,
+                              input->generate_config->gen_timeline,
+                              input->generate_config->profile_step,
+                              input->generate_config->profile_trace_name)) {
+            input->generate_config->gen_timeline = true;
+        }
+
+        // need to check client has buffer at first
+        if (mm_processor_ != nullptr && input->multimodal_inputs) {
+            RTP_LLM_PROFILE_SCOPE("rpc.mm_update_features");
+            auto mm_res = mm_processor_->updateMultimodalFeatures(input);
+            if (!mm_res.ok()) {
+                generate_context.error_info = mm_res;
+                generate_context.error_status =
+                    serializeErrorMsg(generate_context.request_key, generate_context.request_info, mm_res);
+            }
+        }
+        CHECK_ERROR_STATUS(generate_context);
+
+        RTP_LLM_LOG_DEBUG("request [%ld] trans to stream success", request_id);
+        {
+            RTP_LLM_PROFILE_SCOPE("rpc.enqueue_engine");
+            generate_context.setStream(engine_->enqueue(input));
+        }
+
+        RTP_LLM_LOG_DEBUG("request [%ld] enqueue success", request_id);
+        generate_context.error_status =
+            pollStreamOutput(context, generate_context.request_key, writer, generate_context.getStream());
+        meta_->dequeue(generate_context.request_id, generate_context.getStream());
+        return generate_context.error_status;
+    } catch (const std::invalid_argument& e) {
+        generate_context.error_info = ErrorInfo(ErrorCode::INVALID_PARAMS, e.what());
+    } catch (const std::exception& e) {
+        generate_context.error_info = ErrorInfo(ErrorCode::EXECUTION_EXCEPTION,
+                                                "GenerateStreamCall failed with exception: " + std::string(e.what()));
+    } catch (...) {
+        generate_context.error_info =
+            ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "GenerateStreamCall failed with unknown exception");
     }
-    CHECK_ERROR_STATUS(generate_context);
-
-    RTP_LLM_LOG_DEBUG("request [%ld] trans to stream success", request_id);
-    {
-        RTP_LLM_PROFILE_SCOPE("rpc.enqueue_engine");
-        generate_context.setStream(engine_->enqueue(input));
-    }
-
-    RTP_LLM_LOG_DEBUG("request [%ld] enqueue success", request_id);
-
+    // Set the context before destruction so failures retain request metrics and stream cleanup.
     generate_context.error_status =
-        pollStreamOutput(context, generate_context.request_key, writer, generate_context.getStream());
-    meta_->dequeue(generate_context.request_id, generate_context.getStream());
+        serializeErrorMsg(generate_context.request_key, generate_context.request_info, generate_context.error_info);
     return generate_context.error_status;
 }
 

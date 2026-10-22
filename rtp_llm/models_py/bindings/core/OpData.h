@@ -90,6 +90,8 @@ struct GptModelInputs {
     // CP prefill exit must materialize the full [seq, hidden] all_hidden_states
     // (true) or may gather only the last-token rows lm_head needs (false).
     bool need_all_hidden_states = false;
+    bool skip_lm_head           = false;
+    bool capture_hidden_states  = false;
     bool need_moe_gating        = false;
     bool warmup                 = false;
     bool skip_run               = false;
@@ -108,6 +110,10 @@ struct GptModelInputs {
 
     // not sync to other tp rank
     std::vector<std::string> trace_ids;
+
+    // Root-owned control message, serialized as the appended terminalStop shape hint.
+    // Unlike skip_run, this parks the normal engine at a collective-safe boundary.
+    bool terminal_stop = false;
 
 public:
     std::string debugString(bool force = false) const;
@@ -201,18 +207,18 @@ struct CacheStoreInputs {
     size_t context_batch_size = 0;
     size_t decoder_batch_size = 0;
 
-    torch::Tensor            request_id;             // [context_batch_size]
-    torch::Tensor            request_pd_separation;  // [context_batch_size]
+    torch::Tensor                                   request_id;             // [context_batch_size]
+    torch::Tensor                                   request_pd_separation;  // [context_batch_size]
     std::shared_ptr<const std::vector<std::string>> cache_keys =
         std::make_shared<const std::vector<std::string>>();  // [context_batch_size, global_max_blocks]
-    size_t                   tokens_per_block;
-    size_t                   kv_block_stride_bytes = 0;
-    size_t                   kv_scale_stride_bytes = 0;
-    bool                     pd_separation         = false;
-    size_t                   model_id              = 0;
-    bool                     decode_entrance       = false;
-    bool                     warmup;
-    bool                     use_opaque_kv_cache_store = false;
+    size_t tokens_per_block;
+    size_t kv_block_stride_bytes = 0;
+    size_t kv_scale_stride_bytes = 0;
+    bool   pd_separation         = false;
+    size_t model_id              = 0;
+    bool   decode_entrance       = false;
+    bool   warmup;
+    bool   use_opaque_kv_cache_store = false;
 
     int               layer_id    = 0;
     KVCacheRegionName region_name = KVCacheRegionName::DEFAULT;

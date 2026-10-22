@@ -26,7 +26,7 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
     // TP ranks do not see overflowed dimensions when allocating buffers.
     auto shape_hints_t   = torch::empty({(int64_t)shape_hints_size}, torch::kInt64).pin_memory();
     auto shape_hints_ptr = shape_hints_t.data_ptr<int64_t>();
-    shape_hints_ptr[GptModelInputIndex::recordExecutionId]     = inputs.record_execution_id;
+    shape_hints_ptr[GptModelInputIndex::recordExecutionId] = inputs.record_execution_id;
     shape_hints_ptr[GptModelInputIndex::comboTokens] = inputs.combo_tokens.defined() ? inputs.combo_tokens.numel() : 0;
     shape_hints_ptr[GptModelInputIndex::inputLengths] =
         inputs.input_lengths.defined() ? inputs.input_lengths.numel() : 0;
@@ -68,11 +68,14 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
             0;
     shape_hints_ptr[GptModelInputIndex::needAllLogits]       = inputs.need_all_logits;
     shape_hints_ptr[GptModelInputIndex::needAllHiddenStates] = inputs.need_all_hidden_states;
+    shape_hints_ptr[GptModelInputIndex::skipLmHead]          = inputs.skip_lm_head;
+    shape_hints_ptr[GptModelInputIndex::captureHiddenStates] = inputs.capture_hidden_states;
     shape_hints_ptr[GptModelInputIndex::mtpHiddenStates] =
         inputs.last_hidden_states.defined() ? inputs.last_hidden_states.numel() : 0;
     shape_hints_ptr[GptModelInputIndex::mtpHiddenStatesDtype] =
         inputs.last_hidden_states.defined() ? (std::uint8_t)torchDTypeToDataType(inputs.last_hidden_states.dtype()) : 0;
-    shape_hints_ptr[GptModelInputIndex::skipRun] = inputs.skip_run;
+    shape_hints_ptr[GptModelInputIndex::skipRun]      = inputs.skip_run;
+    shape_hints_ptr[GptModelInputIndex::terminalStop] = inputs.terminal_stop;
     shape_hints_ptr[GptModelInputIndex::gptModelRequestLength] =
         inputs.request_id.defined() ? inputs.request_id.numel() : 0;
     shape_hints_ptr[GptModelInputIndex::isFakeStream] = inputs.is_fake_stream;
@@ -109,10 +112,13 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
     int32_t*      mm_features_shape_ptr = nullptr;
     inputs.need_all_logits              = shape_hints_ptr[GptModelInputIndex::needAllLogits];
     inputs.need_all_hidden_states       = shape_hints_ptr[GptModelInputIndex::needAllHiddenStates];
+    inputs.skip_lm_head                 = shape_hints_ptr[GptModelInputIndex::skipLmHead];
+    inputs.capture_hidden_states        = shape_hints_ptr[GptModelInputIndex::captureHiddenStates];
     inputs.skip_run                     = shape_hints_ptr[GptModelInputIndex::skipRun];
     inputs.is_fake_stream               = shape_hints_ptr[GptModelInputIndex::isFakeStream];
     inputs.record_execution_id          = shape_hints_ptr[GptModelInputIndex::recordExecutionId];
-    if (inputs.skip_run) {
+    inputs.terminal_stop                = shape_hints_ptr[GptModelInputIndex::terminalStop];
+    if (inputs.terminal_stop || inputs.skip_run) {
         return;
     }
     const size_t mm_features_num = shape_hints_ptr[GptModelInputIndex::mmFeaturesNum];

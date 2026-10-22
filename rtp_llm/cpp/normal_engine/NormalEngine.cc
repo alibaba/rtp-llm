@@ -5,6 +5,7 @@
 #include "rtp_llm/cpp/normal_engine/NormalGenerateStream.h"
 #include "rtp_llm/cpp/utils/StatusUtil.h"
 #include "rtp_llm/cpp/engine_base/schedulers/FIFOScheduler.h"
+#include "rtp_llm/cpp/engine_base/schedulers/SchedulerUtils.h"
 #include "rtp_llm/cpp/engine_base/schedulers/BatchDecodeScheduler.h"
 #include "rtp_llm/cpp/engine_base/schedulers/GatherBatchScheduler.h"
 #include "rtp_llm/cpp/cache/CacheConfigCreator.h"
@@ -27,6 +28,8 @@
 #include <list>
 #include <memory>
 #include <thread>
+#include <typeinfo>
+#include <stdexcept>
 #include <random>
 
 #if USING_CUDA
@@ -150,7 +153,7 @@ void preallocateTorchCudaPoolForPrefill(RoleType role_type, int device_id) {
 
 NormalEngine::NormalEngine(const EngineInitParams&                       params,
                            std::unique_ptr<ProposeModelEngineInitParams> propose_params,
-                           bool defer_loop_start):
+                           bool                                          defer_loop_start):
     EngineBase(params),
     model_config_(params.model_config_),
     parallelism_config(params.parallelism_config),
@@ -356,7 +359,7 @@ absl::StatusOr<GenerateStreamPtr> NormalEngine::preRun(const std::shared_ptr<Gen
                                                          nullptr,
                                                          0,
                                                          mode == preRunMode::prefill_warm_up);
-    stream->setReserveStep(reserve_step_);
+    stream->setReserveStep(reserveStepForStream(reserve_step_, stream->generateConfig()->isPrefillOnly()));
     if (mode == preRunMode::decode_warm_up) {
         stream->setIsContextStream(false);
         size_t seq_size_per_block = model_config_.attn_config.tokens_per_block;
@@ -451,7 +454,7 @@ WarmUpResult NormalEngine::prefillWarmUp(const EngineInitParams& params) {
     THROW_IF_STATUSOR_ERROR(preRun(fake_input, preRunMode::prefill_warm_up));
     const auto max_consumed = getGpuExecStatus().device_memory_status.max_consumed_bytes;
     rtp_llm::setTraceMemory(false);
-    (void)executor_.reset(nullptr);
+    executor_.reset();
     cudaDeviceSynchronize();
     c10::cuda::CUDACachingAllocator::emptyCache();
     const auto device_status = getGpuExecStatus();
@@ -503,7 +506,7 @@ WarmUpResult NormalEngine::decodeWarmUp(const EngineInitParams& params) {
     THROW_IF_STATUSOR_ERROR(preRun(fake_input, preRunMode::decode_warm_up));
     const auto max_consumed = getGpuExecStatus().device_memory_status.max_consumed_bytes;
     rtp_llm::setTraceMemory(false);
-    (void)executor_.reset(nullptr);
+    executor_.reset();
     cudaDeviceSynchronize();
     c10::cuda::CUDACachingAllocator::emptyCache();
     const auto device_status = getGpuExecStatus();
@@ -547,8 +550,7 @@ std::shared_ptr<GenerateStream> NormalEngine::createMinFakeStream(int32_t max_ne
     return stream;
 }
 
-void NormalEngine::initCacheManager(std::optional<WarmUpResult> warm_up_result,
-                                    bool defer_connector_start) {
+void NormalEngine::initCacheManager(std::optional<WarmUpResult> warm_up_result, bool defer_connector_start) {
     const bool use_cuda_malloc_block_pool = shouldUseCudaMallocKVCacheBacking(pd_sep_config, cache_store_config);
     if (propose_params_ && propose_params_->draftModel()) {
         auto config = CacheConfigCreator::createSpConfig(model_config_,
@@ -694,12 +696,80 @@ absl::Status NormalEngine::stop() {
     return status;
 }
 
+bool NormalEngine::usesTerminalStop() const {
+    return !propose_params_ && parallelism_config.dp_size == 1 && parallelism_config.tp_size > 1
+           && !runtime_config.use_batch_decode_scheduler && !runtime_config.use_gather_batch_scheduler
+           && !ffn_disaggregate_config.enable_ffn_disaggregate;
+}
+
+absl::Status NormalEngine::validateTerminalStop() const {
+    const auto& pc = parallelism_config;
+    // collective_torch maps TP to WORLD only in this topology. CP uses TP;
+    // EP must be local or the same full world, never another communication group.
+    if (!usesTerminalStop() || pc.pp_size != 1 || pc.world_size != pc.tp_size || pc.dp_rank != 0 || pc.world_rank < 0
+        || pc.world_rank >= pc.world_size || pc.tp_rank != pc.world_rank
+        || (pc.ep_size != 1 && pc.ep_size != pc.tp_size) || pc.ep_rank != pc.world_rank % pc.ep_size
+        || pc.ffn_sp_size < 1 || pc.tp_size % pc.ffn_sp_size != 0 || pc.ffn_tp_size != pc.tp_size / pc.ffn_sp_size
+        || pc.ffn_tp_rank != pc.tp_rank % pc.ffn_tp_size || pc.ffn_disaggregate_config.enable_ffn_disaggregate
+        || pc.prefill_cp_config.prefill_cp_size < 0
+        || (pc.prefill_cp_config.prefill_cp_size > 1 && pc.prefill_cp_config.prefill_cp_size != pc.tp_size)
+        || !scheduler_ || typeid(*scheduler_) != typeid(FIFOScheduler) || !executor_
+        || !executor_->supportsTerminalStop()) {
+        return absl::FailedPreconditionError(
+            "terminal stop requires ordinary FIFO, non-MTP, non-FFN disaggregate, and one TP world covering CP/EP");
+    }
+    return absl::OkStatus();
+}
+
 int64_t NormalEngine::completedSteps() const {
-    return propose_params_ ? static_cast<int64_t>(published_completed_steps_.load(std::memory_order_relaxed)) : -1;
+    if (propose_params_) {
+        return static_cast<int64_t>(published_completed_steps_.load(std::memory_order_relaxed));
+    }
+    // Advertise the protocol, not an idle-step counter. Topology is checked by
+    // arm so an unknown/invalid world cannot silently fall back to force-stop.
+    return usesTerminalStop() ? kTerminalStopCapability : -1;
+}
+
+absl::Status NormalEngine::armTerminalStop(int64_t target_step, int64_t timeout_ms) {
+    auto status = validateTerminalStop();
+    if (!status.ok()) {
+        return status;
+    }
+    if (target_step != kTerminalStopTarget) {
+        return absl::InvalidArgumentError("terminal stop requires target 0");
+    }
+    if (!running_ || stop_started_ || armed_stop_cancel_requested_) {
+        return absl::FailedPreconditionError("terminal stop cannot arm a stopped or cancelled engine");
+    }
+    int64_t expected_target = -1;
+    if (!armed_stop_target_step_.compare_exchange_strong(expected_target, target_step, std::memory_order_acq_rel)
+        && expected_target != target_step) {
+        return absl::FailedPreconditionError("normal engine has a different stop target");
+    }
+    // Do not reset the observation: a follower may receive root's terminal
+    // input before its control-plane arm arrives.
+    pause_.store(false, std::memory_order_release);
+    static_cast<FIFOScheduler*>(scheduler_.get())->notifyControlWakeup();
+    auto ack_status = waitForCoordinatedStopAck(
+        running_,
+        [this]() { return terminal_stop_observed_.load(std::memory_order_acquire); },
+        timeout_ms,
+        "terminal arm");
+    if (!ack_status.ok()) {
+        return ack_status;
+    }
+    if (!terminal_stop_observed_.load(std::memory_order_acquire)) {
+        return absl::FailedPreconditionError("engine stopped before observing terminal input");
+    }
+    RTP_LLM_LOG_INFO("armed normal engine terminal stop: tp_rank=%ld", parallelism_config.tp_rank);
+    return absl::OkStatus();
 }
 
 absl::Status NormalEngine::armStopAtStep(int64_t target_step, int64_t timeout_ms) {
-    if (!propose_params_ || target_step < 0) {
+    if (!propose_params_) {
+        return armTerminalStop(target_step, timeout_ms);
+    }
+    if (target_step < 0) {
         return absl::InvalidArgumentError("coordinated stop requires MTP and a non-negative target");
     }
     // Publish first, then wait for the engine thread to acknowledge the exact
@@ -716,7 +786,7 @@ absl::Status NormalEngine::armStopAtStep(int64_t target_step, int64_t timeout_ms
     }
     // Shutdown must be able to make progress after SetPause. The loop's pause
     // wait already treats resume as a control-plane operation.
-    pause_          = false;
+    pause_.store(false, std::memory_order_release);
     auto ack_status = waitForCoordinatedStopAck(
         running_,
         [this]() { return armed_stop_observed_step_.load(std::memory_order_acquire) >= 0; },
@@ -734,6 +804,17 @@ absl::Status NormalEngine::armStopAtStep(int64_t target_step, int64_t timeout_ms
 }
 
 absl::Status NormalEngine::cancelArmedStop(int64_t timeout_ms) {
+    if (usesTerminalStop()) {
+        auto status = validateTerminalStop();
+        if (!status.ok()) {
+            return status;
+        }
+        // The terminal abort protocol must first arm even a late root. An
+        // absent target is not evidence that this rank is outside a collective.
+        if (armed_stop_target_step_.load(std::memory_order_acquire) != kTerminalStopTarget) {
+            return absl::FailedPreconditionError("terminal cancellation requires an armed boundary");
+        }
+    }
     if (armed_stop_target_step_.load(std::memory_order_acquire) < 0) {
         return absl::OkStatus();
     }
@@ -752,7 +833,23 @@ absl::Status NormalEngine::cancelArmedStop(int64_t timeout_ms) {
 }
 
 absl::Status NormalEngine::stopAtStep(int64_t target_step) {
-    if (!propose_params_ || target_step < 0) {
+    if (!propose_params_) {
+        auto status = validateTerminalStop();
+        if (!status.ok()) {
+            return status;
+        }
+        if (target_step != kTerminalStopTarget || armed_stop_cancel_requested_) {
+            return absl::FailedPreconditionError("invalid or cancelled terminal stop commit");
+        }
+        if (stop_started_.load(std::memory_order_acquire)) {
+            return stop_target_step_.load(std::memory_order_acquire) == target_step ?
+                       absl::OkStatus() :
+                       absl::FailedPreconditionError("normal engine stopped without terminal commit");
+        }
+        if (!running_) {
+            return absl::FailedPreconditionError("terminal stop cannot commit a stopped engine");
+        }
+    } else if (target_step < 0) {
         return stop();
     }
     if (armed_stop_target_step_.load(std::memory_order_acquire) != target_step) {
@@ -761,6 +858,9 @@ absl::Status NormalEngine::stopAtStep(int64_t target_step) {
             return arm_status;
         }
     }
+    if (!propose_params_ && !terminal_stop_observed_.load(std::memory_order_acquire)) {
+        return absl::FailedPreconditionError("terminal stop commit requires an observed terminal input");
+    }
     stop_target_step_.store(target_step, std::memory_order_release);
     bool expected_stop = false;
     if (!stop_started_.compare_exchange_strong(expected_stop, true, std::memory_order_release)) {
@@ -768,7 +868,7 @@ absl::Status NormalEngine::stopAtStep(int64_t target_step) {
                    absl::OkStatus() :
                    absl::FailedPreconditionError("normal engine is already stopping");
     }
-    pause_ = false;
+    pause_.store(false, std::memory_order_release);
     if (loop_thread_) {
         loop_thread_->join();
         loop_thread_.reset();
@@ -859,7 +959,19 @@ void NormalEngine::loop() {
             RTP_LLM_LOG_ERROR("step running error: %s", status.ToString().c_str());
             THROW_IF_STATUS_ERROR(trySaveStepError());
         }
-        if (stop_started_.load(std::memory_order_relaxed)) {
+        if (!propose_params_ && terminal_stop_observed_.load(std::memory_order_acquire)) {
+            // Receiving terminal is sufficient to park, even before local arm.
+            // Never enter another collective while the all-rank decision is pending.
+            while (running_ && !stop_started_.load(std::memory_order_acquire)) {
+                if (armed_stop_cancel_requested_.load(std::memory_order_acquire)) {
+                    armed_stop_cancel_observed_.store(true, std::memory_order_release);
+                }
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            }
+            running_ = false;
+            break;
+        }
+        if (propose_params_ && stop_started_.load(std::memory_order_relaxed)) {
             const auto target_step = stop_target_step_.load(std::memory_order_acquire);
             if (target_step >= 0 && completed_steps_ >= static_cast<uint64_t>(target_step)) {
                 running_ = false;
@@ -867,7 +979,7 @@ void NormalEngine::loop() {
             }
         }
         const auto armed_target = armed_stop_target_step_.load(std::memory_order_acquire);
-        if (armed_target >= 0) {
+        if (propose_params_ && armed_target >= 0) {
             const auto completed_step = completed_steps_;
             armed_stop_observed_step_.store(static_cast<int64_t>(completed_step), std::memory_order_release);
             if (armed_stop_cancel_requested_.load(std::memory_order_acquire)) {
@@ -913,36 +1025,158 @@ absl::Status NormalEngine::trySaveStepError() const {
     return absl::UnimplementedError("can not save yet!");
 }
 
-std::shared_ptr<GenerateStream> NormalEngine::makeStream(const std::shared_ptr<GenerateInput>& input) {
-    std::shared_ptr<GenerateStream> stream = std::make_shared<NormalGenerateStream>(
+bool NormalEngine::validateStreamForScheduling(const GenerateStreamPtr& stream) const {
+    if (stream->hasError()) {
+        return false;
+    }
+    if (pd_sep_config.role_type != RoleType::DECODE || !stream->generateConfig()->isPrefillOnly()) {
+        return true;
+    }
+    stream->reportError(ErrorCode::INVALID_PARAMS, kDecodeRolePrefillOnlyError);
+    return false;
+}
+
+std::shared_ptr<GenerateStream> NormalEngine::createStream(const std::shared_ptr<GenerateInput>& input) {
+    try {
+        input->generate_config->validatePrefillOnly();
+    } catch (const std::invalid_argument& error) {
+        // Keep invalid request handling on the stream error path instead of exposing
+        // validation exceptions to direct engine callers or RPC adapters.
+        auto safe_input              = std::make_shared<GenerateInput>(*input);
+        auto safe_config             = std::make_shared<GenerateConfig>(*input->generate_config);
+        safe_config->max_new_tokens  = 1;
+        safe_config->return_logprobs = false;
+        safe_input->generate_config  = std::move(safe_config);
+        auto stream                  = std::make_shared<NormalGenerateStream>(
+            safe_input, model_config_, runtime_config, resource_context_, metrics_reporter_);
+        stream->reportError(ErrorCode::INVALID_PARAMS, error.what());
+        return stream;
+    }
+
+    auto stream = std::make_shared<NormalGenerateStream>(
         input, model_config_, runtime_config, resource_context_, metrics_reporter_);
+    const auto& config = *stream->generateConfig();
+    if (parallelism_config.tp_rank != 0 || pd_sep_config.role_type == RoleType::DECODE || stream->hasError()
+        || (!config.capture_hidden_states && !config.isPrefillOnly())) {
+        return stream;
+    }
+    if (config.capture_hidden_states && config.reuse_cache) {
+        RTP_LLM_LOG_WARNING(
+            "skip hidden-state capture for request %ld: capture_hidden_states conflicts with reuse_cache",
+            stream->streamId());
+        return stream;
+    }
+    if (!stream->isHiddenStateCaptureCandidate()) {
+        RTP_LLM_LOG_WARNING("skip hidden-state capture for request %ld: unsupported or incomplete context input",
+                            stream->streamId());
+        return stream;
+    }
+    // The constructor has applied the system prefix, but no KV allocation/load has run.
+    const std::weak_ptr<Executor> owner      = executor_;
+    const int64_t                 request_id = stream->streamId();
+    const auto                    cancel     = [owner, request_id] {
+        if (auto executor = owner.lock()) {
+            executor->cancelHiddenStateCapture(request_id);
+        }
+    };
+    bool reserved = false;
+    try {
+        reserved = executor_ && executor_->tryReserveHiddenStateCapture(request_id, stream->inputLength());
+        if (reserved) {
+            stream->setHiddenStateCaptureReservation(cancel);
+        } else if (config.capture_hidden_states) {
+            RTP_LLM_LOG_WARNING("skip hidden-state capture for request %ld: reservation unavailable", request_id);
+        }
+    } catch (const std::exception& error) {
+        // Only the CPU-side reservation is isolated here, never model/CUDA execution errors.
+        RTP_LLM_LOG_WARNING(
+            "skip hidden-state capture for request %ld: reservation failed: %s", request_id, error.what());
+        if (reserved) {
+            try {
+                cancel();
+            } catch (...) {
+                RTP_LLM_LOG_WARNING("hidden-state capture reservation rollback failed for request %ld", request_id);
+            }
+        }
+    }
+    return stream;
+}
+
+std::shared_ptr<GenerateStream> NormalEngine::makeStream(const std::shared_ptr<GenerateInput>& input) {
+    auto stream = createStream(input);
+    // DecodeRpcServer allocates the destination KV table before enqueue/P-D handoff.
+    stream->setReserveStep(reserveStepForStream(reserve_step_, stream->generateConfig()->isPrefillOnly()));
+    (void)validateStreamForScheduling(stream);
     return stream;
 }
 
 void NormalEngine::enqueue(std::shared_ptr<GenerateStream>& stream) {
-    stream->setReserveStep(reserve_step_);
-    (void)scheduler_->enqueue(stream);
+    stream->setReserveStep(reserveStepForStream(reserve_step_, stream->generateConfig()->isPrefillOnly()));
+    if (!validateStreamForScheduling(stream)) {
+        stream->cancelHiddenStateCapture();
+        return;
+    }
+    if (!scheduler_->enqueue(stream).ok()) {
+        stream->cancelHiddenStateCapture();
+    }
 }
 
 std::shared_ptr<GenerateStream> NormalEngine::enqueue(const std::shared_ptr<GenerateInput>& input) {
-    std::shared_ptr<GenerateStream> stream = std::make_shared<NormalGenerateStream>(
-        input, model_config_, runtime_config, resource_context_, metrics_reporter_);
-    stream->setReserveStep(reserve_step_);
-    (void)scheduler_->enqueue(stream);
+    auto stream = makeStream(input);
+    enqueue(stream);
     return stream;
 }
 
 std::pair<std::vector<bool>, std::vector<GenerateStreamPtr>>
 NormalEngine::enqueueMultiple(const std::vector<std::shared_ptr<GenerateInput>>& inputs) {
     std::vector<GenerateStreamPtr> streams;
+    std::vector<GenerateStreamPtr> schedulable_streams;
+    std::vector<size_t>            schedulable_indexes;
     streams.reserve(inputs.size());
+    schedulable_streams.reserve(inputs.size());
+    schedulable_indexes.reserve(inputs.size());
     for (auto& inp : inputs) {
-        auto stream = std::make_shared<NormalGenerateStream>(
-            inp, model_config_, runtime_config, resource_context_, metrics_reporter_);
-        stream->setReserveStep(reserve_step_);
+        auto stream = createStream(inp);
+        stream->setReserveStep(reserveStepForStream(reserve_step_, stream->generateConfig()->isPrefillOnly()));
         streams.push_back(stream);
     }
-    return scheduler_->enqueueGroup(streams);
+
+    std::vector<GenerateStreamPtr> streams_for_mode_check;
+    streams_for_mode_check.reserve(streams.size());
+    for (const auto& stream : streams) {
+        if (!stream->hasError()) {
+            streams_for_mode_check.push_back(stream);
+        }
+    }
+
+    if (hasMixedExecutionModes(streams_for_mode_check)) {
+        for (const auto& stream : streams) {
+            if (!stream->hasError()) {
+                stream->reportError(ErrorCode::INVALID_PARAMS, kMixedForceBatchGroupError);
+            }
+            stream->cancelHiddenStateCapture();
+        }
+        return {std::vector<bool>(streams.size(), false), std::move(streams)};
+    }
+
+    for (size_t i = 0; i < streams.size(); ++i) {
+        if (validateStreamForScheduling(streams[i])) {
+            schedulable_indexes.push_back(i);
+            schedulable_streams.push_back(streams[i]);
+        } else {
+            streams[i]->cancelHiddenStateCapture();
+        }
+    }
+
+    auto              schedulable_result = scheduler_->enqueueGroup(schedulable_streams);
+    std::vector<bool> enqueue_successes(streams.size(), false);
+    for (size_t i = 0; i < schedulable_indexes.size(); ++i) {
+        enqueue_successes[schedulable_indexes[i]] = schedulable_result.first[i];
+        if (!schedulable_result.first[i]) {
+            schedulable_streams[i]->cancelHiddenStateCapture();
+        }
+    }
+    return {std::move(enqueue_successes), std::move(streams)};
 }
 
 void NormalEngine::maybeRefreshCacheStatusSnapshot(const std::list<GenerateStreamPtr>& streams) {
@@ -958,7 +1192,7 @@ absl::Status NormalEngine::step() {
     if (!running_ || (stop_started_ && stop_target_step_.load(std::memory_order_relaxed) < 0)) {
         return absl::OkStatus();
     }
-    while (pause_) {
+    while (pause_.load(std::memory_order_acquire)) {
         if (!running_ || (stop_started_ && stop_target_step_.load(std::memory_order_relaxed) < 0)) {
             return absl::OkStatus();
         }
@@ -983,7 +1217,11 @@ absl::Status NormalEngine::step() {
         // When TP > 1, all ranks must enter process() together so that
         // tpSyncModelInputs (collective broadcast) does not deadlock.
         // The skip_run flag inside process() handles the "no work" case.
-        if (streams.empty() && parallelism_config.tp_size <= 1) {
+        if (!propose_params_ && armed_stop_target_step_.load(std::memory_order_acquire) == kTerminalStopTarget) {
+            executor_->requestTerminalStop();
+        }
+        if (shouldEarlyReturnEmptyBatch(
+                streams.empty(), parallelism_config.tp_size, ffn_disaggregate_config.enable_ffn_disaggregate)) {
             return absl::OkStatus();
         }
     }
@@ -1005,6 +1243,11 @@ absl::Status NormalEngine::step() {
             }
         }
         if (status.ok() && !propose_params_) {
+            if (executor_->terminalStopObserved()) {
+                terminal_stop_observed_.store(true, std::memory_order_release);
+                RTP_LLM_LOG_INFO("normal engine observed terminal input: tp_rank=%ld", parallelism_config.tp_rank);
+                return status;
+            }
             maybeRefreshCacheStatusSnapshot(streams);
         }
     }
@@ -1050,6 +1293,18 @@ bool NormalEngine::isEagle() {
     return false;
 }
 
+size_t NormalEngine::reserveStepForStream(size_t configured_reserve_step, bool is_prefill_only) {
+    return is_prefill_only ? 0 : configured_reserve_step;
+}
+
+bool NormalEngine::shouldEarlyReturnEmptyBatch(bool streams_empty, int64_t tp_size, bool enable_ffn_disaggregate) {
+    return streams_empty && tp_size == 1 && !enable_ffn_disaggregate;
+}
+
+bool NormalEngine::shouldAddMtpFakePrefill(bool has_prefill, bool use_batch_decode_scheduler, int64_t dp_size) {
+    return !has_prefill && (!use_batch_decode_scheduler || dp_size > 1);
+}
+
 void NormalEngine::mayAddFakeStream(std::list<GenerateStreamPtr>& streams) {
     if (!running_) {
         return;
@@ -1080,7 +1335,8 @@ void NormalEngine::mayAddFakeStream(std::list<GenerateStreamPtr>& streams) {
                         has_decode = true;
                     }
                 }
-                if (!has_prefill && !runtime_config.use_batch_decode_scheduler) {
+                if (shouldAddMtpFakePrefill(
+                        has_prefill, runtime_config.use_batch_decode_scheduler, parallelism_config.dp_size)) {
                     streams.emplace_back(
                         MtpExecutor::createMinFakePrefillStream(1, model_config_, runtime_config, resource_context_));
                 }

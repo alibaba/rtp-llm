@@ -131,15 +131,20 @@ size_t ZigZagProcessor::handleOutputs(torch::Tensor&                            
     RTP_LLM_FAIL("Context parallel not supported on ROCm");
     return 0;
 #else
-    int prefill_cp_size = parallelism_config_.tp_size;
+    int         prefill_cp_size = parallelism_config_.tp_size;
+    const auto& output_indices  = cp_params.prefill_cp_output_indices;
+    if (prefill_cp_size == 1) {
+        // Single-rank collectives leave the receive buffer untouched; still strip per-request padding.
+        hidden_states = hidden_states.index_select(0, output_indices);
+        return output_indices.size(0);
+    }
 
     auto all_hidden_t =
         torch::empty({hidden_states.size(0) * prefill_cp_size, hidden_states.size(1)}, hidden_states.options());
     execAllGather({{all_hidden_t}, ParallelMode::TP, {hidden_states}, false});
 
-    const auto& output_indices = cp_params.prefill_cp_output_indices;
-    int64_t     num_valid_tokens = output_indices.size(0);
-    hidden_states                = all_hidden_t.index_select(0, output_indices);
+    int64_t num_valid_tokens = output_indices.size(0);
+    hidden_states            = all_hidden_t.index_select(0, output_indices);
     return num_valid_tokens;
 #endif
 }
@@ -155,8 +160,8 @@ torch::Tensor ZigZagProcessor::computeLocalLastHidden(const torch::Tensor&      
 
     // Map each requested output row (in restored valid-seq order) to its
     // chunk-concat flat index, without ever materializing the full sequence.
-    torch::Tensor sel = cp_params.prefill_cp_output_indices.index_select(0, inputs.lm_output_indexes.to(torch::kLong))
-                            .to(torch::kLong);
+    torch::Tensor sel =
+        cp_params.prefill_cp_output_indices.index_select(0, inputs.lm_output_indexes.to(torch::kLong)).to(torch::kLong);
 
     const int64_t num_lm = sel.size(0);
 

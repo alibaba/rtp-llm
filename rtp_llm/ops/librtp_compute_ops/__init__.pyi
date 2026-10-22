@@ -296,6 +296,14 @@ class PyModelInitResources:
     def max_context_batch_size(self) -> int: ...
 
 class PyModelInputs:
+    @property
+    def capture_hidden_states(self) -> bool:
+        """
+        Capture configured hidden states for this homogeneous target-prefill batch
+        """
+
+    @capture_hidden_states.setter
+    def capture_hidden_states(self, arg0: bool) -> None: ...
     @typing.overload
     def __init__(self) -> None: ...
     @typing.overload

@@ -34,6 +34,8 @@ public:
                             std::function<void()>                  profile_step_start      = nullptr,
                             std::function<void()>                  profile_step_finish     = nullptr);
     ~NormalExecutor();
+    bool         tryReserveHiddenStateCapture(int64_t request_id, int64_t valid_tokens) override;
+    void         cancelHiddenStateCapture(int64_t request_id) override;
     absl::Status process(const std::list<GenerateStreamPtr>& streams, int64_t schedule_time_us = 0) override;
     void         reportMetrics(const StreamGroups&                        stream_groups,
                                RtpLLMExecutorMetricsCollector&            executor_collector,
@@ -54,6 +56,15 @@ public:
     static ModelFactory test_model_factory;
 
     bool updateEplbConfig(const EPLBConfig& config) override;
+    bool supportsTerminalStop() const override {
+        return !warm_up_ && !is_propose_ && !enable_ffn_disaggregate_;
+    }
+    void requestTerminalStop() override {
+        terminal_stop_requested_ = true;
+    }
+    bool terminalStopObserved() const override {
+        return terminal_stop_observed_;
+    }
 
 protected:
     // Stream-async dispatch gate. Reuses the same env var as MtpExecutor so a
@@ -69,11 +80,11 @@ protected:
     // Stream-async dispatch. Records sampler_event on the main stream after
     // sampler_->forward, then forks the bookkeeping worker to wait on the
     // event and run dispatch + per-stream update off the main thread.
-    absl::Status dispatchOutputAsync(const StreamGroups&           stream_groups,
-                                     GptModelOutputs               model_output,
-                                     SamplerOutput                 sampler_output,
-                                     std::shared_ptr<torch::Event> sampler_event,
-                                     std::function<void()>         profile_step_finish,
+    absl::Status dispatchOutputAsync(const StreamGroups&            stream_groups,
+                                     GptModelOutputs                model_output,
+                                     SamplerOutput                  sampler_output,
+                                     std::shared_ptr<torch::Event>  sampler_event,
+                                     std::function<void()>          profile_step_finish,
                                      std::shared_ptr<RecordedBatch> recorded_batch = nullptr);
 
     void publishNormalDeviceState(const StreamGroups& stream_groups, const SamplerOutput& sampler_output);
@@ -106,6 +117,8 @@ private:
     WallClockMetricsLoopReporter<RtpLLMWallClockTokenPSMetrics, RtpLLMTokenPSMetricsCollector> wall_tps_reporter_;
     bool enable_ffn_disaggregate_ = false;
     bool enable_detail_log_       = false;
+    bool terminal_stop_requested_ = false;
+    bool terminal_stop_observed_  = false;
 
     bool                  is_propose_          = false;
     int                   propose_model_index_ = 0;

@@ -27,3 +27,16 @@ py_test(
     exec_properties = {'gpu':'H20'},
 )
 
+
+py_test(
+    name = "model_config_override_test",
+    srcs = ["model_config_override_test.py"],
+    data = ["//:th_transformer_config"],
+    deps = [
+        "//rtp_llm:config",
+        "//rtp_llm:config_ops",
+        "//rtp_llm:pydantic",
+        "//rtp_llm:transformers",
+    ],
+)
+

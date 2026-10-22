@@ -9,6 +9,10 @@
 namespace py = pybind11;
 using namespace rtp_llm;
 
+namespace rtp_llm {
+void registerExecCtxOps(pybind11::module& m);
+}  // namespace rtp_llm
+
 namespace unittest {
 
 // Test-only wrapper class to expose protected methods for unit testing
@@ -113,7 +117,43 @@ torch::Tensor zigzagComputeLocalLastHidden(const torch::Tensor& hidden_chunk,
     return processor.computeLocalLastHidden(hidden_chunk.contiguous().clone(), inputs, cp_params).cpu().clone();
 }
 
+std::tuple<torch::Tensor, size_t> zigzagHandleOutputs(const torch::Tensor& hidden_chunk,
+                                                      const torch::Tensor& output_indices,
+                                                      const torch::Tensor& lm_output_indexes,
+                                                      int                  cp_rank,
+                                                      int                  cp_size,
+                                                      bool                 last_hidden_only) {
+    ParallelismConfig parallelism_config;
+    parallelism_config.tp_rank = cp_rank;
+    parallelism_config.tp_size = cp_size;
+    ZigZagProcessor processor(parallelism_config);
+
+    GptModelInputs inputs;
+    inputs.lm_output_indexes = lm_output_indexes.contiguous().clone();
+
+    torch_ext::PyContextParallelParams cp_params;
+    cp_params.prefill_cp_output_indices = output_indices.contiguous().clone();
+
+    auto hidden_states = hidden_chunk.contiguous().clone();
+    if (last_hidden_only) {
+        processor.handleOutputsLastHidden(hidden_states, inputs, cp_params);
+        return std::make_tuple(hidden_states, hidden_states.size(0));
+    }
+    const auto valid_tokens = processor.handleOutputs(hidden_states, inputs, cp_params);
+    return std::make_tuple(hidden_states, valid_tokens);
+}
+
 PYBIND11_MODULE(libth_context_parallel_py_wrapper_test, m) {
+    rtp_llm::registerExecCtxOps(m);
+    m.def("handle_outputs",
+          &zigzagHandleOutputs,
+          py::arg("hidden_chunk"),
+          py::arg("output_indices"),
+          py::arg("lm_output_indexes"),
+          py::arg("cp_rank"),
+          py::arg("cp_size"),
+          py::arg("last_hidden_only") = false);
+
     m.def("context_parallel_load_balance_split",
           &zigzagProcessorPlanWrapper,
           py::arg("total_input_tokens"),

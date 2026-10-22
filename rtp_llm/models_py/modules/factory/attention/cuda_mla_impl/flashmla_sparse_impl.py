@@ -158,11 +158,6 @@ class SparseMlaOp(object):
         global_2d = triton_convert_req_index_to_global_index(
             req_id=self.mla_params.batch_indice_d,
             block_table=self.block_table,
-            # REBASE CONFLICT CONTEXT(e2e00e570): source branch passed
-            # `token_indices=topk_2d, BLOCK_SIZE=self.token_per_block`; new
-            # base renamed the kernel parameters to separate block-table tokens
-            # from physical cache entries. Keep the new API and the source
-            # branch's 2D topk normalization.
             token_indices=topk_2d,
             TOKENS_PER_BLOCK_FOR_BLOCK_TABLE=self.token_per_block,
             ENTRIES_PER_BLOCK=self.token_per_block,
