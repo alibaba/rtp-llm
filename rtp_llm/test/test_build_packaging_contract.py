@@ -1072,7 +1072,42 @@ class BuildPackagingContractTest(TestCase):
         )
 
     def test_cuda129_rtp_kernel_pin_contains_sm120_cubins(self):
-        """Keep the SM120-capable rtp-kernel builds across packaging migrations."""
+        """Keep the SM120-capable kernel stacks across packaging migrations."""
+        # Native CUDA13 must retain main's SM120-aware DeepGemm recipe/dispatch.
+        deepgemm_lock = (
+            PROJECT_ROOT / "deps/requirements_lock_torch_gpu_cuda13.txt"
+        ).read_text()
+        deepgemm_locked = re.search(
+            r"^deep-gemm @ (\S+) \\\n\s+--hash=sha256:([0-9a-f]{64})",
+            deepgemm_lock,
+            re.MULTILINE,
+        )
+        self.assertIsNotNone(deepgemm_locked)
+        deepgemm_url, deepgemm_hash = deepgemm_locked.groups()
+        expected_deepgemm = re.sub(r"^http://", "https://", deepgemm_url)
+        expected_deepgemm += "#sha256=" + deepgemm_hash
+        deepgemm_owners = [("OSS", _oss_optional_extras()["cuda13"])]
+        for root in (PROJECT_ROOT, PROJECT_ROOT.parent):
+            overlay = root / "internal_source/pyproject_internal.toml"
+            if not overlay.exists():
+                continue
+            with overlay.open("rb") as stream:
+                internal = tomllib.load(stream)
+            if "project" in internal:
+                deepgemm_owners.append(
+                    ("internal", internal["project"]["optional-dependencies"]["cuda13"])
+                )
+            break
+        for owner, dependencies in deepgemm_owners:
+            with self.subTest(cuda13_deepgemm_owner=owner):
+                pins = [
+                    Requirement(req)
+                    for req in dependencies
+                    if Requirement(req).name.replace("_", "-") == "deep-gemm"
+                ]
+                self.assertEqual(len(pins), 1)
+                self.assertEqual(pins[0].url, expected_deepgemm)
+                self.assertTrue(pins[0].url.startswith("https://"))
         # CUDA13 Native metadata must consume the same hash-pinned artifact as
         # main's real Bazel dependency owner, retaining public-wheel HTTPS.
         lock = (
