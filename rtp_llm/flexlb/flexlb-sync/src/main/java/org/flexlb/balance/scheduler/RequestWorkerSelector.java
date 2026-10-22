@@ -48,6 +48,12 @@ public class RequestWorkerSelector {
                         modelMetaConfig, "modelMetaConfig").requiredRoles());
     }
 
+    public int currentPrefillWorkerCount(String group) { return prefillSelector.currentPrefillWorkerCount(group); }
+
+    public List<RequestRoute> hotspotMigrationCandidates() {
+        return prefillSelector.hotspotMigrationCandidates();
+    }
+
     public PlacementResult<RequestRoute, PlacementKey> select(RequestContext context, String policyGroup) {
         Request request = context == null ? null : context.data().getRequest();
         SchedulingMetadata metadata = context == null ? null : context.data().getSchedulingMetadata();
@@ -102,6 +108,18 @@ public class RequestWorkerSelector {
                 else { Failures.rethrow(cleanup, "route selection cleanup failed"); }
             }
         }
+    }
+
+    PrefillQueueShedding.Estimate estimateQueuedWork(RequestContext context, String policyGroup) {
+        // A pinned VIT selection further restricts the eligible Prefill pool.
+        var selectedVit = context.data().getRequest().getSelectedVit();
+        String group = selectedVit == null ? policyGroup : selectedVit.getGroup();
+        for (RoleType role : requiredRoles) {
+            if (role.supportsPrefill()) {
+                return prefillSelector.estimateQueuedWork(context.data().getRequest(), role, group);
+            }
+        }
+        return null;
     }
 
     public Response routeVit(RequestContext context) {

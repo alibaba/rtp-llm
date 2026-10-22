@@ -60,6 +60,29 @@ import static org.mockito.Mockito.when;
 class GlobalQueueProgressTest {
 
     @Test
+    void cacheSheddingRemovesLowBenefitOnlyAndDoesNotCrossPools() throws Exception {
+        var policy = new org.flexlb.config.PrefillQueueSheddingConfig();
+        policy.setExpectedWaitThresholdMs(1_000L);
+        try (Fixture f = new Fixture(RoleType.PREFILL, false, policy)) {
+            when(f.router.estimateQueuedWork(any(), nullable(String.class))).thenAnswer(call -> {
+                RequestContext ctx = call.getArgument(0);
+                return new PrefillQueueShedding.Estimate(100, ctx.data().getRequestId() == 1201L ? 0 : 90, 600, 1);
+            });
+            doReturn(PlacementResult.blocked(new PlacementKey(RoleType.PREFILL, "a", null)))
+                    .when(f.router).select(any(), nullable(String.class));
+            f.submit(1201L, "a");
+            f.submit(1202L, "a");
+            f.submit(1203L, "b");
+            var response = ArgumentCaptor.forClass(Response.class);
+            verify(f.lifecycle, timeout(5_000)).publish(eq(f.contexts.get(1201L)), response.capture(), eq(false));
+            assertEquals(org.flexlb.dao.loadbalance.StrategyErrorType.RESOURCE_EXHAUSTED.getErrorCode(), response.getValue().getCode());
+            verify(f.lifecycle, never()).publish(eq(f.contexts.get(1202L)), any(), eq(false));
+            verify(f.lifecycle, never()).publish(eq(f.contexts.get(1203L)), any(), eq(false));
+            verify(f.eviction, never()).tryReclaim(any(), any());
+        }
+    }
+
+    @Test
     void releasingBlockedPlanPublishesCapacityBeforeParking() throws Exception {
         try (Fixture f = new Fixture(RoleType.PREFILL)) {
             AtomicInteger attempts = new AtomicInteger();
@@ -725,6 +748,11 @@ class GlobalQueueProgressTest {
         }
 
         private Fixture(RoleType role, boolean preempt) {
+            this(role, preempt, null);
+        }
+
+        private Fixture(RoleType role, boolean preempt, org.flexlb.config.PrefillQueueSheddingConfig shedding) {
+            config.queueScheduler().setPrefillQueueShedding(shedding);
             this.role = role;
             SchedulingTestConfig.useFifoQueue(config);
             if (preempt) {

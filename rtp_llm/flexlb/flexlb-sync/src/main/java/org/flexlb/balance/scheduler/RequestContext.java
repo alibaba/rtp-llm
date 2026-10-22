@@ -44,6 +44,13 @@ public final class RequestContext {
     private long absoluteDeadline;
     private boolean requestDeadlineConsumed;
     private long inactivityMs;
+    /** One local queue migration per request; retries retain the source to prevent ping-pong. */
+    private volatile org.flexlb.balance.endpoint.PrefillEndpoint prefillMigrationSource;
+    public org.flexlb.balance.endpoint.PrefillEndpoint prefillMigrationSource() { return prefillMigrationSource; }
+    void markPrefillMigrationSource(org.flexlb.balance.endpoint.PrefillEndpoint source) {
+        if (prefillMigrationSource != null) { throw new IllegalStateException("request already migrated"); }
+        prefillMigrationSource = Objects.requireNonNull(source);
+    }
 
     public RequestContext(FlexlbConfig config) {
         data = new RequestData(Objects.requireNonNull(config));

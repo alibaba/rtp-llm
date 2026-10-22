@@ -295,6 +295,13 @@ public final class SchedulerRuntime implements RequestTaskScheduler {
     }
 
     /** Startup wiring: register the placement owner once for ordered shutdown. */
+    /** Published immutable trend values; no request or endpoint traversal on the HTTP thread. */
+    public Map<String, Object> prefillTrafficSnapshot() {
+        AbstractRequestScheduler current;
+        synchronized (schedulerLock) { current = scheduler; }
+        return current instanceof QueuedRequestScheduler queued ? queued.trafficTrendSnapshot() : Map.of();
+    }
+
     void registerScheduler(AbstractRequestScheduler scheduler) {
         synchronized (schedulerLock) {
             checkState(isAccepting(), "scheduler is closed");

@@ -104,6 +104,37 @@ class QueuedDeliveryWithdrawalRaceTest {
         }
     }
 
+    @Test
+    @Timeout(15)
+    void migrationReturnsLocalReservationsAndRetainsIdentityAndDeadline() throws Exception {
+        try (var fixture = new Fixture()) {
+            long deadline = fixture.context.data().getRequestExpiresAtMs();
+            assertTrue(fixture.owner.migrateQueuedRoute(fixture.route));
+            assertSame(fixture.prefill, fixture.context.prefillMigrationSource());
+            assertNull(fixture.context.snapshot().route());
+            assertNull(fixture.context.snapshot().placement());
+            assertEquals(0, fixture.prefill.ownership.progress().queueDepth());
+            assertEquals(DecodeResources.Ownership.NONE, fixture.decode.ownership(fixture.reservation));
+            assertFalse(fixture.future.isDone(), "migration must not return a failure to the client");
+            assertEquals(deadline, fixture.context.data().getRequestExpiresAtMs());
+            assertFalse(fixture.owner.migrateQueuedRoute(fixture.route), "one migration per request prevents ping-pong");
+            verify(fixture.client, never()).batchEnqueueAsync(anyString(), anyInt(), any());
+            fixture.future.cancel(false);
+        }
+    }
+
+    @Test
+    @Timeout(15)
+    void migrationCannotWithdrawAnEngineDelivery() throws Exception {
+        try (var fixture = new Fixture()) {
+            fixture.select(evaluator(() -> {}));
+            fixture.runtime.deliveries().awaitDeliveries();
+            fixture.assertDelivered();
+            assertFalse(fixture.owner.migrateQueuedRoute(fixture.route));
+            assertNull(fixture.context.prefillMigrationSource());
+        }
+    }
+
     private static PrefillTimePredictor.Evaluator evaluator(Runnable predictionBarrier) {
         return new PrefillTimePredictor.Evaluator() {
             @Override public long estimateMs(long total, long hit) { return 1L; }

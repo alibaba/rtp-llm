@@ -29,6 +29,30 @@ public final class RoutingConfig {
         private ExecutionTimeEstimatorConfig executionTimeEstimator =
                 new ExecutionTimeEstimatorConfig();
         private CacheAffinityConfig cacheAffinity;
+        /** Opt-in cache-first routing; null preserves shortest-TTFT behavior. */
+        private TokenBalanceConfig tokenBalance;
+    }
+
+    @Getter
+    @Setter
+    public static final class TokenBalanceConfig {
+        /** Above this percentage, the largest reusable prefix wins without a TTFT cap. */
+        private double minPrefixHitPercent = 50.0;
+        /** Exact sliding window of successful completion observations. */
+        private long windowMs = 10_000L;
+        /** Backpressure at this pending uncached work; one oversized request may enter an empty worker. */
+        private long maxPendingComputeTokens = 140_000L;
+        /** Optional escape from an overloaded cache leader for small, aged requests. */
+        private HotspotRescueConfig hotspotRescue;
+    }
+
+    @Getter
+    @Setter
+    public static final class HotspotRescueConfig {
+        private long minWaitMs = 5_000L;
+        /** Total input, not just uncached tokens: a cache miss on the target must stay cheap. */
+        private long maxInputTokens = 32_768L;
+        private long maxIdlePendingTokens = 0L;
     }
 
     @Getter
@@ -48,7 +72,7 @@ public final class RoutingConfig {
     @Setter
     public static final class CacheAffinityConfig {
         /** Maximum TTFT penalty accepted for choosing a cache leader. */
-        private long maxExtraTtftMs;
+        private volatile long maxExtraTtftMs;
 
         /** Minimum reusable-prefix percentage required before affinity applies. */
         private double minPrefixHitPercent = 5;

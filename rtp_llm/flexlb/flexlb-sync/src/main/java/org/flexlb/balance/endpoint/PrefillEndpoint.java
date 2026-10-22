@@ -105,6 +105,8 @@ public class PrefillEndpoint extends WorkerEndpoint {
         this.deliveryProjection = RouteProjection.forDelivery(dispatcher.mode());
         this.projectionOrder = config.isPriorityOrdering() ? PRIORITY_PROJECTION_ORDER : FIFO_PROJECTION_ORDER;
         this.ownership = new PrefillState(new ReentrantLock(), PrefillActiveIndex.disabled(), System::currentTimeMillis);
+        var balance = config.getRouter().getRoles().getPrefill().getTokenBalance();
+        if (balance != null) { ownership.enableTokenWorkload(balance.getWindowMs(), balance.getMaxPendingComputeTokens()); }
 
     }
 

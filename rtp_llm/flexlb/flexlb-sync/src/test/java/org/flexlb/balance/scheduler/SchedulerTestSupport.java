@@ -225,6 +225,7 @@ public final class SchedulerTestSupport {
             ReflectionTestUtils.setField(queue, "plannerCount", Math.max(2, config.getInternalRuntime().getQueuePlannerThreads()));
             ReflectionTestUtils.setField(queue, "queueSettings", QueueExecutionSettings.capture(config));
             ReflectionTestUtils.setField(queue, "orderedQueue", new OrderedRequestQueue(config.isPriorityOrdering()));
+            ReflectionTestUtils.setField(queue, "shedding", config.queueScheduler().getPrefillQueueShedding());
             ReflectionTestUtils.setField(queue, "scanBudgetMultiplier", config.queueScheduler().getScanBudgetMultiplier());
             var oldAvailability = (PlacementAvailability) ReflectionTestUtils.getField(queue, "availability");
             var listener = (PlacementAvailability.Listener) ReflectionTestUtils.getField(queue, "availabilityListener");

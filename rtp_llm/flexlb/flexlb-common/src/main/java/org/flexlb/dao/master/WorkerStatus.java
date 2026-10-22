@@ -134,7 +134,8 @@ public class WorkerStatus {
             long lastSuccessfulPollUs,
             long successfulPollIntervalUs,
             long consecutiveTransportFailures,
-            boolean reportedAlive) {
+            boolean reportedAlive,
+            boolean responseObserved) {
 
         public PollHealth {
             checkArgument(lastSuccessfulPollUs >= 0L
@@ -288,7 +289,7 @@ public class WorkerStatus {
                 new AppliedStatusCursor(-1L, -1L)));
         long discoveredAtUs = TimeUnit.NANOSECONDS.toMicros(System.nanoTime());
         pollHealth = new AtomicReference<>(new PollHealth(
-                discoveredAtUs, 0L, 0L, false));
+                discoveredAtUs, 0L, 0L, false, false));
     }
 
     /** Create one fully initialized service-discovery generation. */
@@ -324,6 +325,23 @@ public class WorkerStatus {
     @JsonIgnore
     public long getGenerationId() {
         return generationId;
+    }
+
+    public record AppliedObservation(long observedAtUs, long statusVersion) { }
+    private volatile AppliedObservation appliedObservation = new AppliedObservation(0L, -1L);
+
+    public AppliedObservation appliedObservation() {
+        return appliedObservation;
+    }
+
+    public void recordAppliedObservation(StatusObservation observation, long receivedAtUs) {
+        requireGenerationLock();
+        requireActiveGeneration();
+        checkArgument(observation.owner() == this
+                        && observation.statusVersion() != null
+                        && observation.statusVersion() == appliedStatusCursor().statusVersion(),
+                "observation must match the committed generation and version");
+        appliedObservation = new AppliedObservation(receivedAtUs, observation.statusVersion());
     }
 
     public TopologySnapshot topologySnapshot() {
@@ -413,7 +431,7 @@ public class WorkerStatus {
                 nowUs,
                 nowUs - current.lastSuccessfulPollUs(),
                 0L,
-                reportedAlive));
+                reportedAlive, true));
     }
 
     /** Record a transport failure without rewriting reported Engine state. */
@@ -426,7 +444,7 @@ public class WorkerStatus {
                 current.consecutiveTransportFailures() == Long.MAX_VALUE
                         ? Long.MAX_VALUE
                         : current.consecutiveTransportFailures() + 1L,
-                current.reportedAlive()));
+                current.reportedAlive(), current.responseObserved()));
     }
 
     public void requireGenerationLock() {

@@ -83,6 +83,7 @@ class GrpcWorkerStatusRunnerTest {
             }
         }
 
+        assertEquals(0L, status.appliedObservation().observedAtUs());
         assertNull(registry.get(role, status.getIpPort()));
         assertTrue(directory.statusSnapshot(role).isEmpty());
         assertNull(status.tryBeginStatusPoll(), "retired generation cannot poll again");
@@ -148,12 +149,23 @@ class GrpcWorkerStatusRunnerTest {
                 .thenReturn(CompletableFuture.completedFuture(response),
                         CompletableFuture.completedFuture(response.toBuilder().setStatusVersion(2L).build()));
 
+        List<Runnable> pendingCallbacks = new ArrayList<>();
+        long beforeReceiveUs = System.nanoTime() / 1000;
         new GrpcWorkerStatusRunner(
                 "test-model",
                 status, pollLease, directory,
                 mock(EngineHealthReporter.class), grpc, 5_000L,
-                mock(CacheAwareService.class), Runnable::run)
+                mock(CacheAwareService.class), pendingCallbacks::add)
                 .run();
+        long afterReceiveUs = System.nanoTime() / 1000;
+        assertEquals(0L, status.appliedObservation().observedAtUs(),
+                "RPC completion must not imply successful application");
+        assertEquals(1, pendingCallbacks.size());
+        pendingCallbacks.removeFirst().run();
+        assertTrue(status.appliedObservation().observedAtUs() >= beforeReceiveUs);
+        assertTrue(status.appliedObservation().observedAtUs() <= afterReceiveUs,
+                "applied observation age includes callback queue residence");
+        assertEquals(response.getStatusVersion(), status.appliedObservation().statusVersion());
 
         assertTrue(publicationHeldLock.get(),
                 "publication must commit under the generation lock");
@@ -214,12 +226,23 @@ class GrpcWorkerStatusRunnerTest {
         when(grpc.getWorkerStatusAsync(
                 anyString(), anyInt(), anyLong(), anyLong(), any()))
                 .thenReturn(CompletableFuture.completedFuture(response));
+        List<Runnable> pendingCallbacks = new ArrayList<>();
+        long beforeReceiveUs = System.nanoTime() / 1000;
         new GrpcWorkerStatusRunner(
                 "test-model",
                 status, pollLease, directory,
                 mock(EngineHealthReporter.class), grpc, 5_000L,
-                mock(CacheAwareService.class), Runnable::run)
+                mock(CacheAwareService.class), pendingCallbacks::add)
                 .run();
+        long afterReceiveUs = System.nanoTime() / 1000;
+        assertEquals(0L, status.appliedObservation().observedAtUs(),
+                "RPC completion must not imply successful application");
+        assertEquals(1, pendingCallbacks.size());
+        pendingCallbacks.removeFirst().run();
+        assertTrue(status.appliedObservation().observedAtUs() >= beforeReceiveUs);
+        assertTrue(status.appliedObservation().observedAtUs() <= afterReceiveUs,
+                "applied observation age includes callback queue residence");
+        assertEquals(response.getStatusVersion(), status.appliedObservation().statusVersion());
 
         ArgumentCaptor<WorkerStatus.StatusObservation> observation =
                 ArgumentCaptor.forClass(WorkerStatus.StatusObservation.class);
@@ -262,6 +285,7 @@ class GrpcWorkerStatusRunnerTest {
 
         assertTrue(registry.statusSnapshot(role).isEmpty());
         assertNull(status.tryBeginStatusPoll(), "a missing committed endpoint retires its status generation");
+        assertEquals(0L, status.appliedObservation().observedAtUs());
         assertNull(registry.get(role, status.getIpPort()));
         verify(registry, org.mockito.Mockito.never()).publishPreparedEndpoint(
                 anyString(), org.mockito.Mockito.same(status), any(WorkerStatus.PreparedStatus.class));

@@ -187,7 +187,7 @@ class EngineSyncRunnerTest {
                 8080, 8081, "test-site"));
         when(status.pollHealth()).thenReturn(new WorkerStatus.PollHealth(
                 System.nanoTime() / 1_000 - 2_000_000L,
-                20_000L, 0L, true));
+                20_000L, 0L, true, true));
         discover(directory, status);
         RunnerTestSupport.publishEndpoint(
                 registry, RoleType.PREFILL, ipPort, status);

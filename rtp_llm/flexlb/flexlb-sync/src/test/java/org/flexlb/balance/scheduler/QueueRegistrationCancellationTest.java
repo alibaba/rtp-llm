@@ -105,14 +105,66 @@ class QueueRegistrationCancellationTest {
         }
     }
 
+    @Test
+    void cacheVictimTerminatesAndHighHitStillExpiresWithoutNewArrivals() throws Exception {
+        var policy = new org.flexlb.config.PrefillQueueSheddingConfig();
+        policy.setExpectedWaitThresholdMs(100L);
+        policy.setMaxWaitMs(800L);
+        try (Fixture f = new Fixture(policy)) {
+            when(f.router.select(any(), nullable(String.class))).thenReturn(PlacementResult.blocked(
+                    new PlacementKey(org.flexlb.dao.route.RoleType.PREFILL, null, null)));
+            when(f.router.estimateQueuedWork(any(), nullable(String.class))).thenAnswer(call -> {
+                RequestContext context = call.getArgument(0);
+                return new PrefillQueueShedding.Estimate(100, context.data().getRequestId() == 910L ? 0 : 99, 100, 1);
+            });
+            var cold = f.context(910L);
+            var hot = f.context(911L);
+            cold.data().setSchedulingMetadata(org.flexlb.dao.SchedulingMetadata.explicit(50,
+                    f.config.resolveExpiresAtMs(System.currentTimeMillis())));
+            hot.data().setSchedulingMetadata(org.flexlb.dao.SchedulingMetadata.explicit(50,
+                    f.config.resolveExpiresAtMs(System.currentTimeMillis())));
+            var coldResult = f.queue.submit(cold);
+            var hotResult = f.queue.submit(hot);
+            assertEquals(StrategyErrorType.RESOURCE_EXHAUSTED.getErrorCode(), coldResult.get(2, TimeUnit.SECONDS).getCode());
+            assertFalse(hotResult.get(2, TimeUnit.SECONDS).isSuccess());
+            assertTrue(System.currentTimeMillis() >= hot.data().getRequestExpiresAtMs());
+            assertEquals(CancelReason.DEADLINE_EXCEEDED, hot.snapshot().cancellation().reason());
+            RequestProtocolTestSupport.awaitCondition(() -> RequestProtocolTestSupport.queuedCount(f.queue) == 0);
+            assertEquals(0, RequestProtocolTestSupport.queuedCount(f.queue));
+        }
+    }
+
+    @Test
+    void decodeOnlyPressureDoesNotTriggerCacheEviction() throws Exception {
+        var policy = new org.flexlb.config.PrefillQueueSheddingConfig();
+        policy.setExpectedWaitThresholdMs(1L);
+        try (Fixture f = new Fixture(policy)) {
+            when(f.router.select(any(), nullable(String.class))).thenReturn(PlacementResult.blocked(
+                    new PlacementKey(org.flexlb.dao.route.RoleType.DECODE, null, null)));
+            when(f.router.estimateQueuedWork(any(), nullable(String.class)))
+                    .thenReturn(new PrefillQueueShedding.Estimate(100, 0, 10_000, 1));
+            var result = f.queue.submit(f.context(912L));
+            assertThrows(java.util.concurrent.TimeoutException.class, () -> result.get(300, TimeUnit.MILLISECONDS));
+            f.queue.cancel(912L, 0L, CancelReason.CLIENT_CANCELLED);
+            assertEquals(StrategyErrorType.REQUEST_CANCELLED.getErrorCode(), result.get(2, TimeUnit.SECONDS).getCode());
+        }
+    }
+
     private static final class Fixture implements AutoCloseable {
         final FlexlbConfig config = SchedulingTestConfig.batchConfig();
         final RequestWorkerSelector router = mock(RequestWorkerSelector.class);
         final SchedulerRuntime runtime;
         final QueuedRequestScheduler queue;
 
-        Fixture() {
+        Fixture() { this(null); }
+
+        Fixture(org.flexlb.config.PrefillQueueSheddingConfig policy) {
+            config.queueScheduler().setPrefillQueueShedding(policy);
             SchedulingTestConfig.useFifoQueue(config);
+            if (policy != null) {
+                SchedulingTestConfig.useNonBatchDispatcher(config);
+                config.queueScheduler().getDecision().setType(org.flexlb.config.DecisionPolicyConfig.Type.SINGLE);
+            }
             var service = mock(ConfigService.class);
             when(service.loadBalanceConfig()).thenReturn(config);
             var batches = mock(DeliveryMetricsReporter.class);

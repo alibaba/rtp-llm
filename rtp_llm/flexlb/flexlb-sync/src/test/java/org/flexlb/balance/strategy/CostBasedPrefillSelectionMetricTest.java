@@ -298,6 +298,19 @@ class CostBasedPrefillSelectionMetricTest {
     }
 
     @Test
+    void cacheAffinityBudgetUpdateAndRestoreReachTheExistingSelector() {
+        configureFocusedAffinity();
+        PrefillCandidateSet candidates = candidates(
+                new long[] {100L, 105L}, new long[] {500L, 600L});
+        var affinity = config.getRouter().getRoles().getPrefill().getCacheAffinity();
+        assertEquals(1, strategy.selectBestCandidate(candidates, 100L, RoleType.PREFILL, null, 1_000L));
+        affinity.setMaxExtraTtftMs(0L);
+        assertEquals(0, strategy.selectBestCandidate(candidates, 100L, RoleType.PREFILL, null, 1_000L));
+        affinity.setMaxExtraTtftMs(10L);
+        assertEquals(1, strategy.selectBestCandidate(candidates, 100L, RoleType.PREFILL, null, 1_000L));
+    }
+
+    @Test
     void strictlyGreaterCacheHitOverridesTheBaselineCandidate() {
         configureFocusedAffinity();
         PrefillCandidateSet candidates = candidates(
@@ -394,6 +407,91 @@ class CostBasedPrefillSelectionMetricTest {
         }
         verify(cacheReporter, times(4)).reportCacheAffinityDecision(
                 RoleType.PREFILL, "10.1.0.2", "CACHE_LEADER");
+    }
+
+    @Test
+    void tokenBalanceIgnoresTtftAndUsesAcceptedUncachedWork() {
+        registry.close();
+        config.getRouter().getRoles().getPrefill().setTokenBalance(new RoutingConfig.TokenBalanceConfig());
+        registry = StrategyTestSupport.endpointRegistry(SchedulingTestConfig.configService(config));
+        publish("10.0.0.1", 8080); publish("10.0.0.2", 8080);
+        strategy = new CostBasedPrefillStrategy(registry, cache, reporter, cacheReporter,
+                SchedulingTestConfig.configService(config));
+        var a = (PrefillEndpoint) registry.get(RoleType.PREFILL, "10.0.0.1:8080");
+        var b = (PrefillEndpoint) registry.get(RoleType.PREFILL, "10.0.0.2:8080");
+        var set = new PrefillCandidateSet();
+        set.reset(2);
+        set.addCandidate(a.ipPort(), a, new RouteProjection.Candidate(RouteProjection.Candidate.State.MODELED,
+                100_000, 100, RouteProjection.Candidate.InitialHeadDisposition.NONE, "", null, 900, 900), 0);
+        set.addCandidate(b.ipPort(), b, new RouteProjection.Candidate(RouteProjection.Candidate.State.MODELED,
+                1, 1, RouteProjection.Candidate.InitialHeadDisposition.NONE, "", null, 0, 0), 0);
+        assertEquals(0, strategy.selectBestCandidate(set, 1, RoleType.PREFILL, null, 1000));
+        var route = mock(RequestRoute.class);
+        when(route.requestId()).thenReturn(123456L);
+        when(route.seqLen()).thenReturn(200_000L);
+        var lease = a.ownership.reserveUnqueuedRoute(route, 1, 0).reservation();
+        // A saturated cache leader parks globally instead of losing the prefix on an idle worker.
+        assertEquals(-1, strategy.selectBestCandidate(set, 1, RoleType.PREFILL, null, 1000));
+        set.reset(2);
+        set.addCandidate(a.ipPort(), a, new RouteProjection.Candidate(RouteProjection.Candidate.State.MODELED,
+                1, 1, RouteProjection.Candidate.InitialHeadDisposition.NONE, "", null, 0, 0), 0);
+        set.addCandidate(b.ipPort(), b, new RouteProjection.Candidate(RouteProjection.Candidate.State.MODELED,
+                100_000, 100, RouteProjection.Candidate.InitialHeadDisposition.NONE, "", null, 0, 0), 0);
+        assertEquals(1, strategy.selectBestCandidate(set, 1, RoleType.PREFILL, null, 1000));
+        a.ownership.release(lease, null);
+        try (var first = select(); var second = select()) {
+            org.junit.jupiter.api.Assertions.assertNotEquals(first.prefillEp(), second.prefillEp(),
+                    "parallel plans must balance before either admission commits");
+            long now = System.nanoTime() / 1_000_000L;
+            assertEquals(2000, a.ownership.tokenWorkload(now).plannedTokens()
+                    + b.ownership.tokenWorkload(now).plannedTokens());
+            var accepted = first.prefillEp().ownership.reserveUnqueuedRoute(first, 1, 0).reservation();
+            assertEquals(0, first.prefillEp().ownership.tokenWorkload(now).plannedTokens());
+            assertEquals(1000, first.prefillEp().ownership.tokenWorkload(now).pendingTokens());
+            first.prefillEp().ownership.release(accepted, null);
+        }
+        long now = System.nanoTime() / 1_000_000L;
+        assertEquals(0, a.ownership.tokenWorkload(now).score());
+        assertEquals(0, b.ownership.tokenWorkload(now).score());
+    }
+
+    @Test
+    void agedShortRequestUsesNewIdleWorkerButFreshAndLongRequestsKeepAffinity() {
+        registry.close();
+        var balance = new RoutingConfig.TokenBalanceConfig();
+        balance.setHotspotRescue(new RoutingConfig.HotspotRescueConfig());
+        config.getRouter().getRoles().getPrefill().setTokenBalance(balance);
+        registry = StrategyTestSupport.endpointRegistry(SchedulingTestConfig.configService(config));
+        publish("10.0.0.1", 8080);
+        strategy = new CostBasedPrefillStrategy(registry, cache, reporter, cacheReporter,
+                SchedulingTestConfig.configService(config));
+        var source = (PrefillEndpoint) registry.get(RoleType.PREFILL, "10.0.0.1:8080");
+        var running = mock(RequestRoute.class);
+        when(running.requestId()).thenReturn(99999L);
+        when(running.seqLen()).thenReturn(200_000L);
+        var lease = source.ownership.reserveUnqueuedRoute(running, 10000, 0).reservation();
+        when(cache.findMatchingEngines(any(), any(), any())).thenReturn(Map.of("10.0.0.1:8080", 9));
+        for (int phase = 0; phase < 4; phase++) {
+            if (phase == 1) { publish("10.0.0.2", 8080); }
+            long length = phase == 3 ? 40000L : 1000L;
+            var ctx = new RequestContext(config);
+            ctx.data().setRequest(Request.builder().requestId(10001L + phase).seqLen(length).rawPriority(50)
+                    .blockCacheKeys(List.of(1L,2L,3L,4L,5L,6L,7L,8L,9L)).cacheKeyBlockSize(length / 10).build());
+            long now = System.currentTimeMillis();
+            ctx.data().setSchedulingMetadata(SchedulingMetadata.explicit(50, now + 60000));
+            ctx.register(ctx.data().getRequestId(), phase == 2 ? now : now - 10000, now + 60000, 60000);
+            try (var route = new RequestRoute(ctx)) {
+                var result = strategy.select(ctx.data().getRequest(), ctx.data().getSchedulingMetadata(), RoleType.PREFILL, null, route);
+                if (phase == 1) {
+                    assertEquals(PlacementResult.Status.SUCCESS, result.status());
+                    assertEquals("10.0.0.2", route.prefill().getServerIp());
+                    assertEquals(0, route.hitCache(), "migration must account for cold recomputation");
+                } else {
+                    assertEquals(PlacementResult.Status.BLOCKED, result.status());
+                }
+            }
+        }
+        source.ownership.release(lease, null);
     }
 
     private RequestRoute select() {
