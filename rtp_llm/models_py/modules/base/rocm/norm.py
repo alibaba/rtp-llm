@@ -4,8 +4,9 @@ import torch
 import torch.nn.functional as F
 from aiter import layernorm2d_fwd as layernorm2d_fwd
 from aiter import layernorm2d_fwd_with_add as layernorm2d_fwd_with_add
-from aiter import rms_norm, rmsnorm2d_fwd_opus, rmsnorm2d_fwd_with_add_opus
+from aiter import rms_norm, rmsnorm2d_fwd_opus
 from aiter import rmsnorm2d_fwd_with_add as fused_add_rmsnorm
+from aiter import rmsnorm2d_fwd_with_add_opus
 from torch import nn
 
 from rtp_llm.models_py.modules.base.common.norm import (
@@ -133,7 +134,9 @@ class AddBiasResLayerNorm(BaseAddBiasResLayerNorm):
                 self.weight.data,
                 self.beta,
                 self.variance_epsilon,
-                0,
+                # The binding launches on this explicit stream. A null stream
+                # bypasses PyTorch's graph capture and producer/consumer ordering.
+                torch.cuda.current_stream(hidden_states.device).cuda_stream,
             )
             return hidden_states
 
