@@ -1,9 +1,13 @@
 """Remote Execution client wrapping the REAPI Execute RPC."""
 
 import atexit
+import hashlib
+import json
 import logging
 import os
 import signal
+import sys
+import tempfile
 import threading
 import time
 from dataclasses import dataclass, field
@@ -1053,6 +1057,113 @@ class FailoverRemoteExecutor:
         retry_kwargs["env_vars"] = env_vars
         return retry_kwargs
 
+    @staticmethod
+    def _attempt_archive_directory(kwargs: Dict) -> Optional[Path]:
+        stream = kwargs.get("stream_stdout_file") or kwargs.get("stream_stderr_file")
+        if stream is None:
+            return None
+        try:
+            parent = Path(stream).parent
+            parent.mkdir(parents=True, exist_ok=True)
+            # The plugin can retry execute() itself, so attempt numbers alone
+            # are not unique even within one test's stream directory.
+            return Path(tempfile.mkdtemp(prefix="attempts-", dir=parent))
+        except Exception:
+            log.warning("[REMOTE_ATTEMPT_ARCHIVE] cannot create archive", exc_info=True)
+            return None
+
+    @staticmethod
+    def _archive_attempt(directory, number, endpoint, kwargs, result, observed, error):
+        if directory is None:
+            return
+        try:
+            target = directory / f"attempt-{number + 1:04d}"
+            target.mkdir()
+            report = {
+                "attempt": number + 1,
+                "executor_endpoint": endpoint,
+                "observed_stage": observed.get("stage"),
+                "observed_operation": observed.get("operation"),
+                "exception_type": type(error).__name__ if error is not None else None,
+                "result": None,
+                "streams": {},
+                "collection_errors": [],
+            }
+            if result is not None:
+
+                def digest(value):
+                    return (
+                        {"hash": value.hash, "size_bytes": value.size_bytes}
+                        if value is not None
+                        else None
+                    )
+
+                report["result"] = {
+                    key: getattr(result, key)
+                    for key in (
+                        "exit_code",
+                        "worker_host_ip",
+                        "metadata_worker",
+                        "cached_result",
+                        "response_status_code",
+                        "response_status_message",
+                        "executor_endpoint",
+                        "operation_name",
+                        "last_stage",
+                        "infra_category",
+                        "failover_attempts",
+                        "operation_done",
+                    )
+                }
+                report["result"].update(
+                    stdout_digest=digest(result.stdout_digest),
+                    stderr_digest=digest(result.stderr_digest),
+                    output_files={
+                        key: digest(value) for key, value in result.output_files.items()
+                    },
+                )
+            for name in ("stdout", "stderr"):
+                # Preserve both the observed live stream and the returned raw
+                # response. They can differ (partial tails or REAPI errors).
+                sources = []
+                path = kwargs.get(f"stream_{name}_file")
+                if path is not None:
+                    sources.append((f"remote_{name}.log", Path(path)))
+                if result is not None:
+                    sources.append(
+                        (f"result_{name}.log", getattr(result, f"{name}_raw"))
+                    )
+                for filename, source in sources:
+                    try:
+                        data = (
+                            source.read_bytes() if isinstance(source, Path) else source
+                        )
+                        (target / filename).write_bytes(data)
+                        report["streams"][filename] = {
+                            "bytes": len(data),
+                            "sha256": hashlib.sha256(data).hexdigest(),
+                        }
+                    except Exception as exc:
+                        report["collection_errors"].append(
+                            {"file": filename, "error_type": type(exc).__name__}
+                        )
+            (target / "result.json").write_text(json.dumps(report, indent=2) + "\n")
+            if report["collection_errors"]:
+                log.warning(
+                    "[REMOTE_ATTEMPT_ARCHIVE] incomplete archive at %s: %s",
+                    target,
+                    report["collection_errors"],
+                )
+        except Exception:
+            # Evidence collection must not replace the real result/exception,
+            # alter failover eligibility, or consume another remote attempt.
+            log.warning(
+                "[REMOTE_ATTEMPT_ARCHIVE] archive failed at %s attempt=%s",
+                directory,
+                number + 1,
+                exc_info=True,
+            )
+
     def execute(self, **kwargs) -> ExecutionResult:
         min_retry_remaining_seconds = int(
             kwargs.pop("min_retry_remaining_seconds", 0) or 0
@@ -1062,6 +1173,7 @@ class FailoverRemoteExecutor:
         endpoint = self.pool.current_endpoint()
         tried = []
         last_result: Optional[ExecutionResult] = None
+        archive_directory = self._attempt_archive_directory(kwargs)
 
         while True:
             remaining = self._remaining_seconds(global_deadline_epoch)
@@ -1093,10 +1205,21 @@ class FailoverRemoteExecutor:
                     return last_result
 
             executor = self._new_executor(endpoint)
+            attempt_number, attempt_endpoint = attempts, endpoint
+            result = None
+            observed = {}
+            original_on_stage = kwargs.get("on_stage")
+
+            def on_stage(stage, operation):
+                observed.update(stage=stage, operation=operation)
+                if original_on_stage is not None:
+                    original_on_stage(stage, operation)
+
             try:
                 tried.append(endpoint)
                 attempt_kwargs = self._kwargs_for_budget(kwargs, remaining)
                 attempt_kwargs = self._kwargs_for_attempt(attempt_kwargs, attempts)
+                attempt_kwargs = dict(attempt_kwargs, on_stage=on_stage)
                 result = executor.execute(**attempt_kwargs)
                 last_result = result
                 result.failover_attempts = attempts
@@ -1149,7 +1272,19 @@ class FailoverRemoteExecutor:
                     self.max_failovers,
                 )
             finally:
-                executor.close()
+                error = sys.exc_info()[1]
+                try:
+                    executor.close()
+                finally:
+                    self._archive_attempt(
+                        archive_directory,
+                        attempt_number,
+                        attempt_endpoint,
+                        kwargs,
+                        result,
+                        observed,
+                        error,
+                    )
 
     def download_output(self, digest: re_pb2.Digest) -> str:
         data = self.cas.download_blob(digest)
