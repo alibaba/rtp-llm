@@ -3,7 +3,7 @@ import unittest
 
 import torch
 
-from rtp_llm.cpp.cuda_graph.tests.libtest_cuda_graph_runner import CudaGraphRunner
+from rtp_llm.cpp.cuda_graph.tests.cuda_graph_test_runner import CudaGraphRunner
 from rtp_llm.ops.compute_ops import PyModelInputs, PyModelOutputs
 
 WARMUP_ENV = "RTP_LLM_CUDA_GRAPH_WARMUP_FORWARD"
