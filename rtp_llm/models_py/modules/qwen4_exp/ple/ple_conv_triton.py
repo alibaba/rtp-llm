@@ -24,7 +24,10 @@ def _ple_conv(
     INITIAL_ROW_STRIDE: tl.constexpr,
     BLOCK: tl.constexpr,
 ):
-    offset = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
+    # The linear offset covers gated.numel() elements; past ~2^31/10240 rows
+    # (reachable with max_seq_len=262144 in one unchunked prefill step) an
+    # int32 program offset would wrap, so promote before multiplying.
+    offset = tl.program_id(0).to(tl.int64) * BLOCK + tl.arange(0, BLOCK)
     row, col = offset // WIDTH, offset % WIDTH
     batch, token = row // LENGTH, row % LENGTH
     valid = row < ROWS
