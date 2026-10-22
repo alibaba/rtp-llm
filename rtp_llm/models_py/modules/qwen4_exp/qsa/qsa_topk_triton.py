@@ -165,7 +165,7 @@ def try_select_qsa_tokens(
         return None
     rows, columns = scores.shape
     if scores_are_masked and not packed_count:
-        from rtp_llm.models_py.kernels.cuda.qwen4_qsa_topk import try_cub_qsa_tokens
+        from rtp_llm.models_py.modules.qwen4_exp.qsa.cub_topk import try_cub_qsa_tokens
 
         output = try_cub_qsa_tokens(scores, lengths, finite_only=finite_only)
         if output is not None:

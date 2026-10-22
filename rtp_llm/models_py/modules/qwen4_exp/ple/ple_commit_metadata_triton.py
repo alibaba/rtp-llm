@@ -12,7 +12,7 @@ import triton
 import triton.language as tl
 
 from rtp_llm.models.qwen4_exp.qwen4_exp_kv_cache import PLE_NGRAM_CTX_TAG, PLE_STATE_TAG
-from rtp_llm.models_py.model_desc.qwen4_exp_runtime.cache_views import PLECacheViews
+from rtp_llm.models_py.model_desc.qwen4_exp_runtime.ple_cache_views import PLECacheViews
 from rtp_llm.models_py.modules.qwen4_exp.ple.ple_commit_triton import (
     _write_pair_verdict,
 )

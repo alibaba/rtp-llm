@@ -9,9 +9,9 @@ from dataclasses import dataclass
 
 import torch
 
-from rtp_llm.model_loader.fp8_weight import FP8_STORAGE_SCALE_SUFFIX
 from rtp_llm.models_py.modules.base.common.fp8_linear import Fp8Linear
 from rtp_llm.models_py.modules.factory.linear.factory import LinearFactory
+from rtp_llm.utils.fp8_constants import FP8_STORAGE_SCALE_SUFFIX
 
 
 @dataclass(frozen=True)

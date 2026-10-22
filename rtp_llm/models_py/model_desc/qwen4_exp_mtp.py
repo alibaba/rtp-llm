@@ -14,16 +14,14 @@ from rtp_llm.models_py.model_desc.qwen4_exp import Qwen4ExpModel
 from rtp_llm.models_py.model_desc.qwen4_exp_runtime.draft_head_graph import (
     DraftHeadGraph,
 )
-from rtp_llm.models_py.model_desc.qwen4_exp_runtime.weight_views import (
-    Qwen4LinearFactory as LinearFactory,
-)
-from rtp_llm.models_py.model_desc.qwen4_exp_runtime.weight_views import (
-    annotate_compute_inventory,
-)
 from rtp_llm.models_py.modules.base.common.zero_centered_rms_norm import (
     exact_head_rms_norm,
 )
 from rtp_llm.models_py.modules.hybrid.gated_residual import grouped_rms_norm
+from rtp_llm.models_py.modules.qwen4_exp.weight_views import (
+    Qwen4LinearFactory as LinearFactory,
+    annotate_compute_inventory,
+)
 from rtp_llm.ops import HybridAttentionType, ParallelismConfig
 from rtp_llm.ops.compute_ops import PyModelInputs
 from rtp_llm.utils.model_weight import W
