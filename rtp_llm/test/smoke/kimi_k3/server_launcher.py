@@ -20,6 +20,10 @@ from pathlib import Path
 def launch_config(args):
     fp8_gemm = bool(getattr(args, "fp8_gemm", False))
     fp8_kv_cache = bool(getattr(args, "fp8_kv_cache", False))
+    warm_up = bool(getattr(args, "warm_up", False))
+    model_warm_up = bool(getattr(args, "model_warm_up", False))
+    if model_warm_up and not warm_up:
+        raise ValueError("model warmup requires --warm-up")
     checkpoint = Path(args.checkpoint).resolve(strict=True)
     draft = Path(args.draft_checkpoint).resolve(strict=True)
     config = json.loads((checkpoint / "config.json").read_text())
@@ -213,7 +217,8 @@ def launch_config(args):
         "decode_retry_times": 0,
         "load_cache_timeout_ms": 7200000,
         "load_method": "fastsafetensors",
-        "warm_up": 0,
+        "warm_up": int(warm_up),
+        "model_warm_up": int(model_warm_up),
         "reserver_runtime_mem_mb": reserve_runtime_mem_mb,
     }
     if orthogonal_smoke and args.role == "PREFILL":
@@ -512,6 +517,14 @@ def main():
         help="Enable ordinary E4M3 MLA operands and KV cache via the existing FP8_KV_CACHE setting",
     )
     parser.add_argument(
+        "--warm-up", action="store_true", help="Enable startup request warmup"
+    )
+    parser.add_argument(
+        "--model-warm-up",
+        action="store_true",
+        help="Enable model kernel warmup; requires --warm-up",
+    )
+    parser.add_argument(
         "--moe-strategy",
         choices=["mega_moe", "mega_moe_se", "mega_moe_k3", "mega_moe_k3_se"],
         default="mega_moe",
@@ -586,21 +599,24 @@ def main():
         require_bazel_destination(jit_cache_root)
     if args.runtime_tmp_dir is None:
         (run / "tmp").mkdir(mode=0o700)
-    for key, subdir in {
-        "LOG_PATH": "logs",
-        "TRITON_CACHE_DIR": "triton",
-        "DG_JIT_CACHE_DIR": "deep-gemm",
-        "FLASHINFER_WORKSPACE_BASE": "flashinfer",
-    }.items():
-        cache_root = (
-            jit_cache_root
-            if key in {"TRITON_CACHE_DIR", "DG_JIT_CACHE_DIR"} and jit_cache_root
-            else run
-        )
-        directory = cache_root / subdir
-        directory.mkdir(exist_ok=bool(jit_cache_root))
-        inherited[key] = str(directory)
-        environment[key] = str(directory)
+    logs = run / "logs"
+    logs.mkdir()
+    inherited["LOG_PATH"] = str(logs)
+    environment["LOG_PATH"] = str(logs)
+    # An explicit local root opts these components out of remote snapshots.
+    # Without it, leave their paths unset for the shared JIT manager to assign.
+    if jit_cache_root:
+        for key, subdir in {
+            "TRITON_CACHE_DIR": "triton",
+            "DG_JIT_CACHE_DIR": "deep-gemm",
+            "FLASHINFER_WORKSPACE_BASE": "flashinfer",
+        }.items():
+            if inherited.get(key, "").strip():
+                continue
+            directory = jit_cache_root / subdir
+            directory.mkdir(exist_ok=True)
+            inherited[key] = str(directory)
+            environment[key] = str(directory)
     for label, checkpoint in (
         ("target", args.checkpoint),
         ("draft", args.draft_checkpoint),

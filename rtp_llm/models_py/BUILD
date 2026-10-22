@@ -54,6 +54,18 @@ requirement(flashattn)
 
 
 filegroup(
+    name = "bounded_projection_jit_test_sources",
+    srcs = [
+        "modules/kimi_k3/bounded_projection_jit_warmup.py",
+        "modules/kimi_k3/kernel_jit_warmup.py",
+        "modules/dsv41/dsv4_kernel_jit_warmup.py",
+        "modules/factory/attention/mla_prefill_plan.py",
+    ],
+    visibility = ["//rtp_llm/models_py/modules/kimi_k3/test:__pkg__"],
+)
+
+
+filegroup(
     name = "cutlass_moe_config",
     srcs = glob(["kernels/cuda/fp8_kernel/cutlass_groupgemm/*"]),
     visibility = ["//visibility:public"],

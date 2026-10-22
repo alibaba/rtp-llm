@@ -71,6 +71,42 @@ py_test(
     target_compatible_with = _CUDA13_ONLY,
 )
 
+# Importing the K3 model loads CUDA native libraries even with its launches mocked.
+# Keep separate targets because tags cannot use select().
+py_test(
+    name = "test_k3_fused_shared_jit_warmup",
+    srcs = ["test_k3_fused_shared_jit_warmup.py"],
+    main = "test_k3_fused_shared_jit_warmup.py",
+    deps = [
+        "//rtp_llm/models_py:modules",
+        "//rtp_llm:testlib",
+    ],
+    env = {"GPU_COUNT": "1"},
+    exec_properties = {"gpu": "L20_CU13", "gpu_count": "1"},
+    tags = ["L20_CU13"],
+    target_compatible_with = select({
+        "@//:using_cuda13_x86": [],
+        "//conditions:default": ["@platforms//:incompatible"],
+    }),
+)
+
+py_test(
+    name = "test_k3_fused_shared_jit_warmup_arm",
+    srcs = ["test_k3_fused_shared_jit_warmup.py"],
+    main = "test_k3_fused_shared_jit_warmup.py",
+    deps = [
+        "//rtp_llm/models_py:modules",
+        "//rtp_llm:testlib",
+    ],
+    env = {"GPU_COUNT": "1"},
+    exec_properties = {"gpu": "SM100_ARM_CU13", "gpu_count": "1"},
+    tags = ["SM100_ARM_CU13"],
+    target_compatible_with = select({
+        "@//:using_cuda13_arm": [],
+        "//conditions:default": ["@platforms//:incompatible"],
+    }),
+)
+
 py_test(
     name = "mega_moe_static_buf_test",
     srcs = ["mega_moe_static_buf_test.py"],
