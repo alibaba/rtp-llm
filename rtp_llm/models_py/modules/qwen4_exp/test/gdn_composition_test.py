@@ -129,6 +129,9 @@ class GdnCompositionTest(unittest.TestCase):
                     local_num_v_heads=value_heads,
                     head_v_dim=dim,
                 )
+                owner._output_project = partial(
+                    Qwen3NextGatedDeltaNet._output_project, owner
+                )
                 handles = []
                 patcher = None
                 hooked_calls = []
