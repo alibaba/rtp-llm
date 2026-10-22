@@ -1330,6 +1330,78 @@ TEST_F(MtpBatchStreamProcessorTest, testExpandTargetVerifyPositionIdsInitializes
               toVec<int>(model_input.combo_position_ids));
 }
 
+TEST_F(MtpBatchStreamProcessorTest, testPrepareTargetVerifyPositionsPreservesAxesAndSourceStorage) {
+    ModelConfig                 model_config;
+    PDSepConfig                 pd_sep_config;
+    ProfilingDebugLoggingConfig profiling_debug_logging_config;
+    CacheConfig                 cache_config = makeProcessorCacheConfig();
+    SpeculativeExecutionConfig  sp_config;
+    model_config.max_seq_len                           = 262144;
+    model_config.vocab_size                            = 4;
+    model_config.num_layers                            = 1;
+    model_config.mm_model_config.mm_position_ids_style = MROPE;
+    model_config.attn_config.rope_config.index_factor  = 3;
+    sp_config.gen_num_per_cycle                        = 4;
+    MtpBatchStreamProcessor processor(
+        model_config, pd_sep_config, profiling_debug_logging_config, cache_config, sp_config, false);
+
+    auto           bases = torch::tensor({7, 11, 29, 101, 103, 107}, torch::kInt32);
+    GptModelInputs input;
+    input.combo_position_ids = bases;
+    ASSERT_TRUE(processor.expandTargetVerifyPositionIdsForPrepare(input, 2));
+    EXPECT_TRUE(input.combo_position_ids.is_pinned());
+    EXPECT_TRUE(input.combo_position_ids.is_contiguous());
+    EXPECT_TRUE(input.combo_position_ids.device().is_cpu());
+    EXPECT_NE(input.combo_position_ids.data_ptr(), bases.data_ptr());
+    const vector<int> expected{7,   11,  29,  8,   12,  30,  9,   13,  31,  10,  14,  32,  11,  15,  33,
+                               101, 103, 107, 102, 104, 108, 103, 105, 109, 104, 106, 110, 105, 107, 111};
+    EXPECT_EQ(expected, toVec<int>(input.combo_position_ids));
+    EXPECT_EQ((vector<int>{7, 11, 29, 101, 103, 107}), toVec<int>(bases));
+    // A later draft step can replace or mutate its own bases without changing
+    // the independently owned input staged by the async target prepare.
+    bases.fill_(999);
+    EXPECT_EQ(expected, toVec<int>(input.combo_position_ids));
+}
+
+TEST_F(MtpBatchStreamProcessorTest, testPrepareTargetVerifyPositionsScalarFactorAndUnknownLayouts) {
+    ModelConfig                 model_config;
+    PDSepConfig                 pd_sep_config;
+    ProfilingDebugLoggingConfig profiling_debug_logging_config;
+    CacheConfig                 cache_config = makeProcessorCacheConfig();
+    SpeculativeExecutionConfig  sp_config;
+    model_config.max_seq_len                          = 262144;
+    model_config.vocab_size                           = 4;
+    model_config.num_layers                           = 1;
+    model_config.attn_config.rope_config.index_factor = 1;
+    sp_config.gen_num_per_cycle                       = 4;
+    MtpBatchStreamProcessor processor(
+        model_config, pd_sep_config, profiling_debug_logging_config, cache_config, sp_config, false);
+    GptModelInputs input;
+    input.combo_position_ids = torch::tensor({7, 31}, torch::kInt32);
+    ASSERT_TRUE(processor.expandTargetVerifyPositionIdsForPrepare(input, 2));
+    EXPECT_EQ((vector<int>{7, 8, 9, 10, 11, 31, 32, 33, 34, 35}), toVec<int>(input.combo_position_ids));
+
+    auto unchanged_fallback = [&](torch::Tensor positions, size_t batch_size) {
+        input.combo_position_ids = positions;
+        auto original            = positions.clone();
+        auto pointer             = positions.data_ptr();
+        EXPECT_FALSE(processor.expandTargetVerifyPositionIdsForPrepare(input, batch_size));
+        EXPECT_EQ(pointer, input.combo_position_ids.data_ptr());
+        EXPECT_TRUE(torch::equal(original, input.combo_position_ids));
+    };
+    unchanged_fallback(torch::tensor({7, 31}, torch::kInt64), 2);
+    unchanged_fallback(torch::tensor({7, 31}, torch::kInt32), 3);
+    unchanged_fallback(torch::tensor({7, 31}, torch::kInt32), 0);
+    unchanged_fallback(torch::tensor({std::numeric_limits<int32_t>::max()}, torch::kInt32), 1);
+    unchanged_fallback(torch::tensor({7, 31, 47, 51}, torch::kInt32).slice(0, 0, 4, 2), 2);
+#if USING_CUDA
+    unchanged_fallback(torch::tensor({7, 31}, torch::kInt32).to(torch::kCUDA), 2);
+#endif
+    input.combo_position_ids = torch::Tensor();
+    EXPECT_FALSE(processor.expandTargetVerifyPositionIdsForPrepare(input, 2));
+    EXPECT_FALSE(input.combo_position_ids.defined());
+}
+
 TEST_F(MtpBatchStreamProcessorTest, testUpdateOneStepDraftSamplerOutput) {
     ModelConfig                 model_config;
     RuntimeConfig               runtime_config;

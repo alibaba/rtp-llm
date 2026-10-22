@@ -441,8 +441,8 @@ static std::shared_ptr<NormalGenerateStream> makeFakeStream(int                 
     return fake_stream;
 }
 
-static SpeculativeExecutorStreamOutputPtr makeFakeSPOutputBuffer(
-    DataType data_type, size_t hidden_size, size_t vocab_size, size_t propose_step, bool is_dspark) {
+static SpeculativeExecutorStreamOutputPtr
+makeFakeSPOutputBuffer(DataType data_type, size_t hidden_size, size_t vocab_size, size_t propose_step, bool is_dspark) {
     auto sp_buffer = std::make_shared<SpeculativeExecutorStreamOutput>();
 
     sp_buffer->propose_step = propose_step;
@@ -1614,6 +1614,14 @@ void MtpExecutor::launchTargetVerifyPrepareAsync(const GptModelInputs& model_inp
     model_input_copy.sequence_lengths =
         torch::empty({0}, torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA));
     model_input_copy.is_target_verify = true;
+    if (!is_dspark_ && propose_step_ > 1 && !(useStreamAsync() && useDropBroadSync())) {
+        // Initial TP synchronization has published the real host position bases
+        // on every rank. Expand them before graph preparation, which also stages
+        // TextMrope's private position buffer. The later draft loop replaces only
+        // its own position tensor; it does not advance the stable host stream.
+        // DROP_BROAD_SYNC may expose stale host positions and keeps its old path.
+        batch_stream_processor_->expandTargetVerifyPositionIdsForPrepare(model_input_copy, batch_size);
+    }
     ensureModelInputsOnCuda(model_input_copy, "decode.target_prepare");
 
     // Device-first inputs are produced on the main stream; the async prepare
@@ -1951,7 +1959,7 @@ GptModelOutputs MtpExecutor::runDraftPrefillForward(GptModelInputs& model_input)
     maybePrintModelInput(draft_prefill_input, "decode post draft model");
     ensureModelInputsOnCuda(draft_prefill_input, "decode.draft_prefill_forward");
     GptModelOutputs draft_prefill_model_output =
-    forwardModel(prefill_model, draft_prefill_input, ModelInputsModelRole::DRAFT_PREFILL);
+        forwardModel(prefill_model, draft_prefill_input, ModelInputsModelRole::DRAFT_PREFILL);
     // Ordinary MTP chains this output into the next autoregressive draft step.
     maybeOverrideLastHiddenWithMtpBuffer(draft_prefill_model_output, *prefill_model);
     return draft_prefill_model_output;
