@@ -5,6 +5,7 @@ py_library(
     srcs = [
         "checkpoint_guard.py",
         "grammar_smoke.py",
+        "jit_smoke.py",
         "logprobs_smoke.py",
         "request_smoke.py",
         "result_check.py",
@@ -31,6 +32,7 @@ py_library(
 _OFFLINE_TESTS = [
     "test_checkpoint_guard",
     "test_grammar_smoke",
+    "test_jit_smoke",
     "test_logprobs_smoke",
     "test_orthogonal_smoke",
     "test_request_smoke",

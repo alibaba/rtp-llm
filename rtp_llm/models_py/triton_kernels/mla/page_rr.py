@@ -57,8 +57,8 @@ def _metadata(descriptor, device):
     return metadata
 
 
-@triton.jit
-def _request_for_index(Offsets, index, REQUESTS: tl.constexpr):
+@triton.jit(do_not_specialize=["REQUESTS"])
+def _request_for_index(Offsets, index, REQUESTS):
     # upper_bound skips empty requests, including consecutive empty prefixes.
     lo = 0
     hi = REQUESTS
@@ -71,13 +71,20 @@ def _request_for_index(Offsets, index, REQUESTS: tl.constexpr):
     return lo
 
 
-@triton.jit
+@triton.jit(
+    do_not_specialize=[
+        "REQUESTS",
+        "TABLE_WIDTH",
+        "TABLE_REQUEST_STRIDE",
+        "TABLE_PAGE_STRIDE",
+    ]
+)
 def _pack_prefix_kernel(
     Cache,
     Table,
     Metadata,
     Output,
-    REQUESTS: tl.constexpr,
+    REQUESTS,
     PAGE_TOKENS: tl.constexpr,
     KERNEL_PAGE_TOKENS: tl.constexpr,
     SHARDS: tl.constexpr,
@@ -87,13 +94,13 @@ def _pack_prefix_kernel(
     CACHE_BLOCK_STRIDE: tl.constexpr,
     CACHE_TOKEN_STRIDE: tl.constexpr,
     CACHE_FEATURE_STRIDE: tl.constexpr,
-    TABLE_WIDTH: tl.constexpr,
-    TABLE_REQUEST_STRIDE: tl.constexpr,
-    TABLE_PAGE_STRIDE: tl.constexpr,
+    TABLE_WIDTH,
+    TABLE_REQUEST_STRIDE,
+    TABLE_PAGE_STRIDE,
     BLOCK: tl.constexpr,
 ):
     packed_page = tl.program_id(0).to(tl.int64)
-    row_width: tl.constexpr = REQUESTS + 1
+    row_width = REQUESTS + 1
     request_indices = Metadata
     global_page_starts = Metadata + row_width
     prefix_lens = Metadata + 2 * row_width
@@ -150,20 +157,20 @@ def _pack_prefix_kernel(
     )
 
 
-@triton.jit
+@triton.jit(do_not_specialize=["REQUESTS", "LOCAL_PAGES"])
 def _restore_prefix_kernel(
     Gathered,
     Metadata,
     Output,
-    REQUESTS: tl.constexpr,
+    REQUESTS,
     PAGE_TOKENS: tl.constexpr,
     SHARDS: tl.constexpr,
-    LOCAL_PAGES: tl.constexpr,
+    LOCAL_PAGES,
     FEATURES: tl.constexpr,
     BLOCK: tl.constexpr,
 ):
     tile = tl.program_id(0).to(tl.int64)
-    row_width: tl.constexpr = REQUESTS + 1
+    row_width = REQUESTS + 1
     global_page_starts = Metadata + row_width
     prefix_lens = Metadata + 2 * row_width
     local_page_offsets = Metadata + 3 * row_width
@@ -239,7 +246,7 @@ def restore_prefix_cuda(gathered, descriptor, output):
         )
 
 
-@triton.jit
+@triton.jit(do_not_specialize=["table_width", "table_stride"])
 def _page_rr_cache_slot(
     position, batch, active, table, table_width, table_stride,
     page_size: tl.constexpr, kernel_page_size: tl.constexpr,
@@ -265,13 +272,34 @@ def _page_rr_cache_slot(
     return tl.where(owner & in_table & (physical_page > 0), slot, -1)
 
 
-@triton.jit
+@triton.jit(
+    do_not_specialize=[
+        "tokens",
+        "valid_tokens",
+        "table_width",
+        "table_stride",
+        "request_count",
+        "fixed_q_len",
+        "max_q_len",
+    ]
+)
 def _prepare_prefill_metadata(
-    padding_offset, prefix_lengths, table, slots, tokens, valid_tokens,
-    table_width, table_stride,
-    request_count: tl.constexpr, fixed_q_len: tl.constexpr, max_q_len: tl.constexpr,
-    page_size: tl.constexpr, kernel_page_size: tl.constexpr,
-    cp_size: tl.constexpr, cp_rank: tl.constexpr, block: tl.constexpr,
+    padding_offset,
+    prefix_lengths,
+    table,
+    slots,
+    tokens,
+    valid_tokens,
+    table_width,
+    table_stride,
+    request_count,
+    fixed_q_len,
+    max_q_len,
+    page_size: tl.constexpr,
+    kernel_page_size: tl.constexpr,
+    cp_size: tl.constexpr,
+    cp_rank: tl.constexpr,
+    block: tl.constexpr,
 ):
     row = tl.program_id(0) * block + tl.arange(0, block)
     valid = row < tokens
@@ -294,7 +322,15 @@ def _prepare_prefill_metadata(
     tl.store(slots + row, slot, valid)
 
 
-@triton.jit
+@triton.jit(
+    do_not_specialize=[
+        "rows",
+        "table_width",
+        "table_stride",
+        "queries",
+        "request_count",
+    ]
+)
 def _prepare_decode_metadata(
     sequence_base,
     capture_lengths,
@@ -308,7 +344,7 @@ def _prepare_decode_metadata(
     rows,
     table_width,
     table_stride,
-    queries: tl.constexpr,
+    queries,
     page_size: tl.constexpr,
     kernel_page_size: tl.constexpr,
     cp_size: tl.constexpr,
@@ -316,7 +352,7 @@ def _prepare_decode_metadata(
     multi_query_update: tl.constexpr,
     graph_decode: tl.constexpr,
     mtp_update: tl.constexpr,
-    request_count: tl.constexpr,
+    request_count,
     has_valid_mask: tl.constexpr,
     block: tl.constexpr,
     table_block: tl.constexpr = 128,
