@@ -1072,7 +1072,43 @@ class BuildPackagingContractTest(TestCase):
         )
 
     def test_cuda129_rtp_kernel_pin_contains_sm120_cubins(self):
-        """Keep the SM120-capable rtp-kernel build across packaging migrations."""
+        """Keep the SM120-capable rtp-kernel builds across packaging migrations."""
+        # CUDA13 Native metadata must consume the same hash-pinned artifact as
+        # main's real Bazel dependency owner, retaining public-wheel HTTPS.
+        lock = (
+            PROJECT_ROOT / "deps/requirements_lock_torch_gpu_cuda13.txt"
+        ).read_text()
+        locked = re.search(
+            r"^rtp-kernel @ (\S+) \\\n\s+--hash=sha256:([0-9a-f]{64})",
+            lock,
+            re.MULTILINE,
+        )
+        self.assertIsNotNone(locked)
+        main_url, main_hash = locked.groups()
+        expected_url = re.sub(r"^http://", "https://", main_url)
+        expected_url += "#sha256=" + main_hash
+        cuda13_owners = [("OSS", _oss_optional_extras()["cuda13"])]
+        for root in (PROJECT_ROOT, PROJECT_ROOT.parent):
+            overlay = root / "internal_source/pyproject_internal.toml"
+            if not overlay.exists():
+                continue
+            with overlay.open("rb") as stream:
+                internal = tomllib.load(stream)
+            if "project" in internal:
+                cuda13_owners.append(
+                    ("internal", internal["project"]["optional-dependencies"]["cuda13"])
+                )
+            break
+        for owner, dependencies in cuda13_owners:
+            with self.subTest(cuda13_owner=owner):
+                kernels = [
+                    Requirement(req)
+                    for req in dependencies
+                    if Requirement(req).name in ("rtp_kernel", "rtp-kernel")
+                ]
+                self.assertEqual(len(kernels), 1)
+                self.assertEqual(kernels[0].url, expected_url)
+                self.assertTrue(kernels[0].url.startswith("https://"))
         public_deps = _oss_optional_extras()["cuda12_9"]
         public_pins = [req for req in public_deps if req.startswith("rtp_kernel @ ")]
         self.assertEqual(len(public_pins), 1)
