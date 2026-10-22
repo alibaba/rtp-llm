@@ -96,6 +96,12 @@ py_test(
 )
 
 py_test(
+    name = "cache_key_routing_identity_test",
+    srcs = ["cache_key_routing_identity_test.py"],
+    deps = ["//rtp_llm/server:server"],
+)
+
+py_test(
     name = "mm_hash_rpc_test",
     srcs = ["mm_hash_rpc_test.py"],
     deps = ["//rtp_llm:testlib"],
