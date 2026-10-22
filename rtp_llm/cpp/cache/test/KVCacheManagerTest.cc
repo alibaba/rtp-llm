@@ -339,6 +339,23 @@ TEST_F(KVCacheManagerTest, WarmupConfigSmoke) {
     EXPECT_EQ(cache_manager->freeBlocksNum(), 0);
 }
 
+// SCR discards pinned host KV before the template checkpoint. Layered prefill
+// keeps its host suffix in the same MLA pool, so both layouts must be released.
+TEST_F(KVCacheManagerTest, MlaHostCachePoolCoversLayeredPrefillSuffix) {
+    auto plain = makeSimpleMhaCacheConfig(
+        /*layer_num=*/1, /*block_num=*/4, /*tokens_per_block=*/2, rtp_llm::DataType::TYPE_INT8);
+    EXPECT_FALSE(KVCacheManager::usesMlaHostCachePool(plain));
+
+    auto decode                    = plain;
+    decode.dsa_mla_resident_tokens = decode.seq_size_per_block;
+    EXPECT_TRUE(KVCacheManager::usesMlaHostCachePool(decode));
+
+    auto prefill                       = plain;
+    prefill.dsa_prefill_staging_tokens = prefill.seq_size_per_block;
+    prefill.dsa_prefill_hbm_layers     = 1;
+    EXPECT_TRUE(KVCacheManager::usesMlaHostCachePool(prefill));
+}
+
 TEST_F(KVCacheManagerTest, DSV4IndependentPoolsFixedBackingFollowsMemorySwitch) {
     auto expect_pool_backing = [](RoleType role_type, bool fixed_pool_use_memory) {
         auto config = makeCompactDSV4ManagerConfig(/*block_num=*/8);

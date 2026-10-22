@@ -75,9 +75,14 @@ public:
         int block_index, int layer_id, KVCacheRegionName region_name, int partition_count, int partition_id) const;
 
     CacheLayerLayout allLayerCacheBase() const;
-    // The optional GLM host-KV optimization uses the existing single MLA pool.
+    // Both GLM host-KV optimizations keep pinned host memory inside the single
+    // MLA pool: the decode working set and the layered-prefill host suffix.
+    // The SCR template checkpoint must release either of them.
+    static bool usesMlaHostCachePool(const CacheConfig& config) {
+        return config.dsa_mla_resident_tokens > 0 || config.dsa_prefill_staging_tokens > 0;
+    }
     BlockPoolPtr mlaHostCachePool() const {
-        return config_.dsa_mla_resident_tokens && allocator_ ? allocator_->getBlockPool() : nullptr;
+        return usesMlaHostCachePool(config_) && allocator_ ? allocator_->getBlockPool() : nullptr;
     }
     std::vector<torch::Tensor> gpuCacheTensors() const {
         return allocator_ ? allocator_->gpuCacheTensors() : std::vector<torch::Tensor>{};
