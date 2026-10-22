@@ -21,11 +21,13 @@ if is_cuda():
     from .fp8_gemm_linear import CudaFp8GEMMLinear
     from .fp8_per_tensor_linear import CudaFp8PerTensorLinear
 
+    # Register independent FP8 backends before the optional FP4 import. Missing
+    # rtp_kernel.nvfp4 must not remove working FP8 strategies from the factory.
+    LinearFactory.register(CudaFp8PerTensorLinear)
+    LinearFactory.register(CudaFp8GEMMLinear)
+
     major, minor = get_sm()
     if major >= 10:
         from .fp4_linear import CudaFp4GEMMLinear
 
         LinearFactory.register(CudaFp4GEMMLinear)
-
-    LinearFactory.register(CudaFp8PerTensorLinear)
-    LinearFactory.register(CudaFp8GEMMLinear)
