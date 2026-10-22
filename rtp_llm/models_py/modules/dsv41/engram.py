@@ -24,10 +24,10 @@ import logging
 import math
 import mmap
 import os
+import re
 import shutil
 import threading
 import time
-import uuid
 import weakref
 from concurrent.futures import CancelledError, ThreadPoolExecutor, TimeoutError
 from pathlib import Path
@@ -318,27 +318,151 @@ def _prefault_host_tensor(tensor: torch.Tensor, name: str) -> None:
     )
 
 
-def _live_leases(data_path: Path):
-    leases = []
-    for lease in data_path.parent.glob(data_path.name + ".lease.*"):
+_SHARED_TABLE_DIR = Path("/dev/shm")
+_DIGEST_CHARS = 24
+# A release must not wait forever: GC may run a finalizer while this thread
+# holds the same digest's lock. Long holders are loaders that lease the table.
+_RELEASE_LOCK_TIMEOUT_S = 5.0
+
+
+def _shared_table_prefix() -> str:
+    return f"rtp_llm_engram_{os.getuid()}_"
+
+
+def _lock_table(lock_path: Path, timeout: Optional[float] = None) -> Optional[int]:
+    """Return an fd holding ``lock_path`` exclusively, or None on timeout.
+
+    ``timeout=None`` waits indefinitely and ``0`` tries once.
+    """
+    deadline = None if timeout is None else time.monotonic() + timeout
+    while True:
+        fd = os.open(lock_path, os.O_RDWR | os.O_CREAT | os.O_CLOEXEC, 0o600)
         try:
-            pid = int(lease.name.split(".lease.", 1)[1].split(".", 1)[0])
-            os.kill(pid, 0)
-        except ProcessLookupError:
-            lease.unlink(missing_ok=True)
-        except (ValueError, PermissionError):
-            leases.append(lease)
-        else:
-            leases.append(lease)
-    return leases
+            fcntl.flock(fd, fcntl.LOCK_EX | (0 if deadline is None else fcntl.LOCK_NB))
+            # A reclaimer may unlink the lock after we opened it; retry on the
+            # successor so both processes never hold different inodes.
+            if os.path.samestat(os.fstat(fd), os.stat(lock_path)):
+                return fd
+        except BlockingIOError:
+            if time.monotonic() >= deadline:
+                os.close(fd)
+                return None
+            time.sleep(0.01)
+        except FileNotFoundError:
+            pass
+        except BaseException:
+            os.close(fd)
+            raise
+        os.close(fd)
 
 
-def _release_shared_table(data_path, lock_path, lease_path):
-    with open(lock_path, "a+b") as lock:
-        fcntl.flock(lock, fcntl.LOCK_EX)
-        Path(lease_path).unlink(missing_ok=True)
-        if not _live_leases(Path(data_path)):
-            Path(data_path).unlink(missing_ok=True)
+def _prune_stale_files(data_path: Path) -> bool:
+    """Remove dead writers' files; return whether a legacy writer is alive.
+
+    The caller must hold the creation lock, which every creator holds while
+    writing its ``.tmp`` file, so any such file belongs to a dead creator.
+    ``.lease``/``.partial`` files come from earlier versions that tracked
+    writers by PID and used another lock; honor them while that PID lives so
+    mixed versions sharing /dev/shm never lose a live table.
+    """
+    for temporary in data_path.parent.glob(data_path.name + ".tmp.*"):
+        temporary.unlink(missing_ok=True)
+    alive = False
+    for marker in (".lease.", ".partial."):
+        for path in data_path.parent.glob(data_path.name + marker + "*"):
+            try:
+                os.kill(int(path.name.split(marker, 1)[1].split(".", 1)[0]), 0)
+            except (ProcessLookupError, ValueError):
+                path.unlink(missing_ok=True)
+            except PermissionError:
+                alive = True
+            else:
+                alive = True
+    return alive
+
+
+def _reclaim_unused_table(data_path: Path) -> bool:
+    """Delete a table nobody maps. The caller must hold its creation lock.
+
+    Readers hold LOCK_SH on the data file for their lifetime. The kernel drops
+    it on any exit, including SIGKILL.
+    """
+    if _prune_stale_files(data_path):
+        return False
+    try:
+        fd = os.open(data_path, os.O_RDONLY | os.O_CLOEXEC)
+    except FileNotFoundError:
+        pass
+    else:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            return False
+        finally:
+            os.close(fd)
+    data_path.unlink(missing_ok=True)
+    return True
+
+
+def _reclaim_with_lock(data_path: Path, timeout: Optional[float]) -> None:
+    lock_path = Path(str(data_path) + ".lock")
+    fd = _lock_table(lock_path, timeout)
+    if fd is None:
+        return
+    try:
+        if _reclaim_unused_table(data_path):
+            lock_path.unlink(missing_ok=True)
+    finally:
+        os.close(fd)
+
+
+def reclaim_stale_shared_tables(keep: Optional[Path] = None) -> None:
+    """Remove this user's tables left by crashed or SIGKILLed workers.
+
+    A table is keyed by checkpoint identity, so a restart with another
+    checkpoint never reopens the old one. Busy locks are skipped instead of
+    awaited to avoid lock-order deadlocks between concurrent loaders.
+    """
+    prefix = _shared_table_prefix()
+    table_name = re.compile(re.escape(prefix) + rf"[0-9a-f]{{{_DIGEST_CHARS}}}(?=\.|$)")
+    names = set()
+    for path in _SHARED_TABLE_DIR.glob(prefix + "*"):
+        match = table_name.match(path.name)
+        if match:
+            names.add(match.group())
+    for name in sorted(names):
+        if keep is None or name != keep.name:
+            try:
+                _reclaim_with_lock(_SHARED_TABLE_DIR / name, timeout=0)
+            except OSError as error:
+                logger.warning("Failed to reclaim Engram table %s: %s", name, error)
+
+
+def _map_shared_table(data_path: Path, nbytes: int):
+    """Lease and map a table. The caller must hold its creation lock.
+
+    The lease is taken before the caller drops the lock, so a concurrent
+    release cannot observe this reader as absent. mmap dups the fd it maps;
+    the lease needs its own open file description, or closing it would leave
+    LOCK_SH held by the mapping.
+    """
+    lease = open(data_path, "rb")
+    try:
+        fcntl.flock(lease, fcntl.LOCK_SH)
+        with open(data_path, "r+b") as file:
+            mapping = mmap.mmap(file.fileno(), nbytes)
+    except BaseException:
+        lease.close()
+        raise
+    return lease, mapping
+
+
+def _release_shared_table(data_path, lease_file):
+    lease_file.close()  # Drops this process's LOCK_SH.
+    try:
+        _reclaim_with_lock(Path(data_path), _RELEASE_LOCK_TIMEOUT_S)
+    except OSError as error:
+        logger.warning("Failed to release Engram table %s: %s", data_path, error)
 
 
 class _CudaArrayView:
@@ -359,27 +483,23 @@ class _PinnedSharedTable:
     Disk-backed MAP_SHARED mappings cannot be CUDA-registered on all drivers.
     A tmpfs mapping supports registration without the private COW copies that
     pinning a safetensors MAP_PRIVATE mapping could introduce. A lock protects
-    one-time creation. Per-process leases remove the file after the last reader
-    exits; stale leases from SIGKILL are pruned on the next access.
+    one-time creation. Each reader holds LOCK_SH on the file while mapped; the
+    last reader to release it removes the file. Tables orphaned by SIGKILL, for
+    any checkpoint, are reclaimed when the next table is loaded.
     """
 
     def __init__(self, weight, scales, source_identity, device):
-        digest = hashlib.sha256(source_identity.encode()).hexdigest()[:24]
-        data_path = Path("/dev/shm") / f"rtp_llm_engram_{os.getuid()}_{digest}"
-        lock_path = Path("/tmp") / (data_path.name + ".lock")
-        lease_path = Path(str(data_path) + f".lease.{os.getpid()}.{uuid.uuid4().hex}")
+        digest = hashlib.sha256(source_identity.encode()).hexdigest()[:_DIGEST_CHARS]
+        data_path = _SHARED_TABLE_DIR / (_shared_table_prefix() + digest)
         weight_bytes = weight.numel()
         total_bytes = weight_bytes + scales.numel()
         if weight.element_size() != 1 or scales.element_size() != 1:
             raise ValueError("Pinned Engram tables require native FP8/E8M0 bytes")
-        with open(lock_path, "a+b") as lock:
-            fcntl.flock(lock, fcntl.LOCK_EX)
-            _live_leases(data_path)
-            for partial in data_path.parent.glob(data_path.name + ".partial.*"):
-                try:
-                    os.kill(int(partial.name.rsplit(".", 1)[1]), 0)
-                except ProcessLookupError:
-                    partial.unlink(missing_ok=True)
+        # Free orphans first so they do not count against the space check.
+        reclaim_stale_shared_tables(keep=data_path)
+        lock = _lock_table(Path(str(data_path) + ".lock"))
+        try:
+            _prune_stale_files(data_path)
             if not data_path.exists():
                 free = shutil.disk_usage(data_path.parent).free
                 if free < total_bytes:
@@ -387,7 +507,7 @@ class _PinnedSharedTable:
                         f"Engram needs {total_bytes / 1024**3:.2f} GiB shared RAM, "
                         f"but /dev/shm has {free / 1024**3:.2f} GiB free"
                     )
-                partial = Path(str(data_path) + f".partial.{os.getpid()}")
+                partial = Path(str(data_path) + f".tmp.{os.getpid()}")
                 try:
                     with open(partial, "w+b") as file:
                         os.chmod(partial, 0o600)
@@ -420,15 +540,15 @@ class _PinnedSharedTable:
                 raise RuntimeError(
                     f"Engram shared table has an invalid size: {data_path}"
                 )
-            with open(data_path, "r+b") as file:
-                mapping = mmap.mmap(file.fileno(), total_bytes)
-            lease_path.touch(mode=0o600)
+            lease, mapping = _map_shared_table(data_path, total_bytes)
+            self._lease_finalizer = weakref.finalize(
+                self, _release_shared_table, str(data_path), lease
+            )
+        finally:
+            os.close(lock)
         self.storage = torch.frombuffer(mapping, dtype=torch.uint8)
         self.weight = self.storage[:weight_bytes].view(weight.dtype).view(weight.shape)
         self.scales = self.storage[weight_bytes:].view(torch.uint8).view(scales.shape)
-        self._lease_finalizer = weakref.finalize(
-            self, _release_shared_table, str(data_path), str(lock_path), str(lease_path)
-        )
         self.device = torch.device(device)
         from cuda.bindings import runtime
 

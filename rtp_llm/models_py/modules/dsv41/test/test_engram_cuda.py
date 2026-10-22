@@ -878,5 +878,26 @@ class EngramCudaTest(unittest.TestCase):
             self.assertIsNone(model._lookup_work)
 
 
+@unittest.skipUnless(torch.cuda.is_available(), "requires a CUDA GPU")
+class PinnedSharedTableLifetimeTest(unittest.TestCase):
+    def test_last_reader_removes_shared_memory_file(self):
+        weight = torch.randn(64, 32).to(torch.float8_e4m3fn)
+        scales = torch.randint(125, 130, (64, 1), dtype=torch.uint8)
+        identity = "lifetime-" + uuid.uuid4().hex
+        first = _PinnedSharedTable(weight, scales, identity, "cuda:0")
+        second = _PinnedSharedTable(weight, scales, identity, "cuda:0")
+        path = first._lease_finalizer.peek()[2][0]
+        self.assertEqual(path, second._lease_finalizer.peek()[2][0])
+        self.assertTrue(os.path.exists(path))
+        first._registration_finalizer()
+        first._lease_finalizer()
+        self.assertTrue(os.path.exists(path))
+        torch.testing.assert_close(second.scales, scales, rtol=0, atol=0)
+        second._registration_finalizer()
+        second._lease_finalizer()
+        self.assertFalse(os.path.exists(path))
+        self.assertFalse(os.path.exists(path + ".lock"))
+
+
 if __name__ == "__main__":
     unittest.main()

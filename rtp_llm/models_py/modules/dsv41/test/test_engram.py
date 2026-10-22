@@ -1,9 +1,13 @@
 """CPU-only checks for V4.1 history, checkpoint format, and gate semantics."""
 
+import fcntl
 import importlib.util
 import json
 import math
 import os
+import shutil
+import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -289,6 +293,116 @@ class EngramTest(unittest.TestCase):
             output = model(hidden, hashes)
             self.assertEqual(output.shape, hidden.shape)
             self.assertTrue(bool(output.isfinite().all()))
+
+
+class SharedTableLeaseTest(unittest.TestCase):
+    """The /dev/shm table must not outlive its readers, even after SIGKILL."""
+
+    def setUp(self):
+        self.dir = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.dir)
+        patcher = patch.object(engram, "_SHARED_TABLE_DIR", self.dir)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def _table(self, char):
+        path = self.dir / (engram._shared_table_prefix() + char * engram._DIGEST_CHARS)
+        path.write_bytes(b"table")
+        return path
+
+    def _names(self):
+        return sorted(path.name for path in self.dir.iterdir())
+
+    def _dead_pid(self):
+        with subprocess.Popen([sys.executable, "-c", ""]) as process:
+            pass
+        return process.pid
+
+    def test_reclaims_orphans_left_by_other_checkpoints(self):
+        stale, kept = self._table("a"), self._table("b")
+        dead = self._dead_pid()
+        suffixes = (
+            ".lock",
+            f".tmp.{os.getpid()}",
+            f".partial.{dead}",
+            f".lease.{dead}.x",
+        )
+        for suffix in suffixes:
+            Path(str(stale) + suffix).touch()
+        engram.reclaim_stale_shared_tables(keep=kept)
+        self.assertEqual(self._names(), [kept.name])
+
+    def test_live_legacy_lease_or_partial_keeps_table(self):
+        for marker in (".lease.", ".partial."):
+            table = self._table("f")
+            writer = Path(f"{table}{marker}{os.getpid()}.legacy")
+            writer.touch()
+            engram.reclaim_stale_shared_tables()
+            self.assertTrue(table.exists())
+            writer.unlink()
+            engram.reclaim_stale_shared_tables()
+            self.assertEqual(self._names(), [])
+
+    def test_ignores_names_outside_table_pattern(self):
+        prefix = engram._shared_table_prefix()
+        for name in (prefix + "abc.lock", prefix + "g" * engram._DIGEST_CHARS):
+            (self.dir / name).touch()
+        engram.reclaim_stale_shared_tables()
+        self.assertEqual(len(self._names()), 2)
+
+    def test_live_reader_keeps_table_until_sigkill(self):
+        table = self._table("c")
+        with subprocess.Popen(
+            [
+                sys.executable,
+                "-c",
+                "import fcntl, sys\n"
+                "lease = open(sys.argv[1], 'rb')\n"
+                "fcntl.flock(lease, fcntl.LOCK_SH)\n"
+                "print(flush=True)\n"
+                "sys.stdin.read()",
+                str(table),
+            ],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+        ) as reader:
+            try:
+                reader.stdout.readline()
+                engram.reclaim_stale_shared_tables()
+                self.assertTrue(table.exists())
+            finally:
+                reader.kill()
+        engram.reclaim_stale_shared_tables()
+        self.assertEqual(self._names(), [])
+
+    def test_busy_creation_lock_is_skipped(self):
+        table = self._table("d")
+        lock = engram._lock_table(Path(str(table) + ".lock"))
+        try:
+            engram.reclaim_stale_shared_tables()
+            self.assertTrue(table.exists())
+        finally:
+            os.close(lock)
+
+    def test_release_with_live_mapping_removes_table(self):
+        table = self._table("g")
+        lease, mapping = engram._map_shared_table(table, len(b"table"))
+        try:
+            engram._release_shared_table(str(table), lease)
+            self.assertEqual(self._names(), [])
+            self.assertEqual(mapping[:], b"table")
+        finally:
+            mapping.close()
+
+    def test_last_release_removes_table_and_lock(self):
+        table = self._table("e")
+        leases = [open(table, "rb") for _ in range(2)]
+        for lease in leases:
+            fcntl.flock(lease, fcntl.LOCK_SH)
+        engram._release_shared_table(str(table), leases[0])
+        self.assertTrue(table.exists())
+        engram._release_shared_table(str(table), leases[1])
+        self.assertEqual(self._names(), [])
 
 
 if __name__ == "__main__":
