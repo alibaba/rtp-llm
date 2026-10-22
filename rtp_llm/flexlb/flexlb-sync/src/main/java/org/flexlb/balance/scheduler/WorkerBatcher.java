@@ -1009,7 +1009,7 @@ public final class WorkerBatcher {
     private ActiveQueueSnapshot snapshotActiveQueue() {
         long version;
         long inputVersion;
-        List<ScheduledRequest> items;
+        PrefillActiveIndex.Capture captured;
         queueLock.lock();
         try {
             version = queueVersion.get();
@@ -1018,11 +1018,11 @@ public final class WorkerBatcher {
                 return new ActiveQueueSnapshot(
                         version, inputVersion, List.of());
             }
-            items = activeIndex.capture().items();
+            captured = activeIndex.capture();
         } finally {
             queueLock.unlock();
         }
-        return new ActiveQueueSnapshot(version, inputVersion, items);
+        return new ActiveQueueSnapshot(version, inputVersion, captured.items());
     }
 
     private record ActiveQueueSnapshot(
@@ -1114,7 +1114,7 @@ public final class WorkerBatcher {
                         maxDecisionRequests(), capacity.batchTokenCapacity(),
                         capacity.batchKvCapacity(), predictedExecutionBudgetMs(),
                         collectionWindowMs()),
-                ownership.activeItems().isEmpty() ? null : admissionBlockUnderLock());
+                activeIndex.isEmpty() ? null : admissionBlockUnderLock());
     }
 
     private BatchCapacitySnapshot batchCapacitySnapshot() {
