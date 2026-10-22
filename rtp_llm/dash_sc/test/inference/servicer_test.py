@@ -11,6 +11,8 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import gc
+import weakref
 import json
 import logging
 import struct
@@ -3030,6 +3032,47 @@ class _FakeGrpcContext:
 
 
 class DashScInferenceServicerTest(unittest.IsolatedAsyncioTestCase):
+    async def test_terminal_exception_does_not_retain_request_iterator(self):
+        class RequestIterator:
+            def __aiter__(self):
+                return self
+
+            async def __anext__(self):
+                raise asyncio.CancelledError()
+
+        async def run(log_failure=False):
+            iterator = RequestIterator()
+            ref = weakref.ref(iterator)
+            servicer = DashScInferenceServicer(backend_visitor=object())
+            try:
+                async for _ in servicer.ModelStreamInfer(iterator, _FakeGrpcContext()):
+                    pass
+            except asyncio.CancelledError:
+                self.assertFalse(log_failure)
+            except RuntimeError as error:
+                self.assertTrue(log_failure)
+                self.assertEqual(str(error), "report failed")
+            return ref
+
+        def fail_report(*args, **kwargs):
+            raise RuntimeError("report failed")
+
+        enabled = gc.isenabled()
+        gc.disable()
+        try:
+            ref = await run()
+            self.assertIsNone(ref())
+            for name in ("emit_access_log", "report_frontend_rpc_done"):
+                with self.subTest(name=name), patch(
+                    "rtp_llm.dash_sc.inference.servicer." + name, fail_report
+                ):
+                    ref = await run(log_failure=True)
+                    self.assertIsNone(ref())
+        finally:
+            if enabled:
+                gc.enable()
+            gc.collect()
+
     def _valid_infer_request(self) -> predict_v2_pb2.ModelInferRequest:
         req = predict_v2_pb2.ModelInferRequest()
         req.id = "srv-1"

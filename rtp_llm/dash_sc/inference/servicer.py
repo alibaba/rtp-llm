@@ -1951,22 +1951,28 @@ class DashScInferenceServicer(predict_v2_pb2_grpc.GRPCInferenceServiceServicer):
             record.record_aux_info(getattr(e, "aux_info", None), overwrite=False)
             raise
         finally:
-            _ensure_span()
-            end_ts = record.resolve_status(context, exc)
             try:
-                # Log first, metrics second — a kmonitor hiccup must never delay or
-                # drop the access record (user-mandated ordering).
-                emit_access_log(
-                    record,
-                    rank_id=self._rank_id,
-                    server_id=self._server_id,
-                    end_ts=end_ts,
-                )
-                report_frontend_rpc_done(
-                    record,
-                    rank_id=self._rank_id,
-                    server_id=self._server_id,
-                    status=record.status,
-                )
+                _ensure_span()
+                end_ts = record.resolve_status(context, exc)
+                try:
+                    # Log first, metrics second — a kmonitor hiccup must never delay or
+                    # drop the access record (user-mandated ordering).
+                    emit_access_log(
+                        record,
+                        rank_id=self._rank_id,
+                        server_id=self._server_id,
+                        end_ts=end_ts,
+                    )
+                    report_frontend_rpc_done(
+                        record,
+                        rank_id=self._rank_id,
+                        server_id=self._server_id,
+                        status=record.status,
+                    )
+                finally:
+                    _finish_server_trace(trace_state, record, exc)
             finally:
-                _finish_server_trace(trace_state, record, exc)
+                # Break exception -> traceback -> request frame reference cycles,
+                # including when access logging or tracing raises during cleanup.
+                exc = None
+                response_iter = None
