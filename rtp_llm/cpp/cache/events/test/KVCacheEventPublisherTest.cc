@@ -236,8 +236,8 @@ KVCacheEventPublisherContext makeContext() {
     context.host_ip_port      = "127.0.0.1:9000";
     context.model_name        = "test_model";
     context.dtype             = "BF16";
-    context.specs = {{"rtp_llm_hbm_64_full", "event_report://127.0.0.1:9000/hbm?size=4096", 4096},
-                     {"rtp_llm_hbm_64_tail", "event_report://127.0.0.1:9000/hbm?size=1024", 1024}};
+    context.specs = {{"rtp_llm_hbm_64_full", "event_report://127.0.0.1:9000/hbm"},
+                     {"rtp_llm_hbm_64_tail", "event_report://127.0.0.1:9000/hbm"}};
     context.block_size_tokens = 64;
     context.tp_size           = 2;
     context.dp_size           = 1;
@@ -499,10 +499,11 @@ TEST(KVCacheEventPublisherTest, KVCMPublisherRegistersSnapshotsAndReportsDeltas)
     ASSERT_FALSE(registration.HasParseError());
     ASSERT_EQ(registration["location_spec_infos"].Size(), 2u);
     EXPECT_STREQ(registration["location_spec_infos"][0]["name"].GetString(), "rtp_llm_hbm_64_full");
-    EXPECT_EQ(registration["location_spec_infos"][0]["size"].GetInt64(), 4096);
+    EXPECT_FALSE(registration["location_spec_infos"][0].HasMember("size"));
     EXPECT_STREQ(registration["location_spec_infos"][1]["name"].GetString(), "rtp_llm_hbm_64_tail");
-    EXPECT_EQ(registration["location_spec_infos"][1]["size"].GetInt64(), 1024);
+    EXPECT_FALSE(registration["location_spec_infos"][1].HasMember("size"));
     EXPECT_EQ(registration["location_spec_groups"][0]["spec_names"].Size(), 2u);
+    EXPECT_EQ(requests.front().body.find("size="), std::string::npos);
 
     bool   saw_node_register = false;
     bool   saw_snapshot      = false;

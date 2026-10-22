@@ -27,7 +27,6 @@ struct KVCacheEventPublisherConfig {
 struct KVCacheEventSpec {
     std::string name;
     std::string location_uri;
-    int64_t     size_bytes = 0;
 };
 
 struct KVCacheEventPublisherContext {

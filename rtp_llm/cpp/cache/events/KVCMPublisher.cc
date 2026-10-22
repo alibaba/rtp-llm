@@ -421,8 +421,6 @@ std::string buildRegisterInstanceRequest(const KVCacheEventPublisherContext& con
     for (const auto& spec : context.specs) {
         writer.StartObject();
         writeString(writer, "name", spec.name);
-        writer.Key("size");
-        writer.Int64(spec.size_bytes);
         writer.EndObject();
     }
     writer.EndArray();
@@ -745,7 +743,7 @@ public:
 private:
     bool isConfigValid() const {
         for (auto it = context_.specs.begin(); it != context_.specs.end(); ++it) {
-            if (it->name.empty() || it->location_uri.empty() || it->size_bytes <= 0
+            if (it->name.empty() || it->location_uri.empty()
                 || std::any_of(context_.specs.begin(), it, [&](const auto& spec) { return spec.name == it->name; })) {
                 return false;
             }
