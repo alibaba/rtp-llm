@@ -10,6 +10,7 @@ import io.netty.util.concurrent.DefaultEventExecutorChooserFactory;
 import io.netty.util.concurrent.DefaultThreadFactory;
 import io.netty.util.concurrent.RejectedExecutionHandlers;
 import io.netty.util.internal.PlatformDependent;
+
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
 import org.springframework.context.annotation.Bean;
@@ -38,7 +39,8 @@ public class ChannelConfiguration {
                 TimeUnit.MINUTES,
                 new LinkedBlockingQueue<>(
                         config.getInternalRuntime().getGrpcClientExecutorQueueCapacity()),
-                new NamedThreadFactory("engine-grpc-client-executor"));
+                new NamedThreadFactory("engine-grpc-client-executor"),
+                new GrpcCallbackCallerRunsPolicy());
     }
 
     /**
@@ -59,7 +61,7 @@ public class ChannelConfiguration {
                 TimeUnit.MINUTES,
                 new LinkedBlockingQueue<>(2000),
                 new NamedThreadFactory("flexlb-forwarder-channel-executor"),
-                new ThreadPoolExecutor.AbortPolicy());
+                new GrpcCallbackCallerRunsPolicy());
     }
 
     @Bean

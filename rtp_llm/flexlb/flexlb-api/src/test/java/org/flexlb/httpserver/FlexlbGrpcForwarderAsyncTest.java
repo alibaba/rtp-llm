@@ -1,5 +1,18 @@
 package org.flexlb.httpserver;
 
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertTimeoutPreemptively;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.junit.jupiter.api.Assumptions.assumeTrue;
+import static org.mockito.Mockito.doThrow;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.times;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.when;
+
+import io.grpc.ConnectivityState;
 import io.grpc.Context;
 import io.grpc.ManagedChannel;
 import io.grpc.Server;
@@ -22,6 +35,7 @@ import io.opentelemetry.sdk.trace.SdkTracerProvider;
 import io.opentelemetry.sdk.trace.data.SpanData;
 import io.opentelemetry.sdk.trace.export.SimpleSpanProcessor;
 import io.opentelemetry.sdk.trace.export.SpanExporter;
+
 import org.flexlb.config.ConfigService;
 import org.flexlb.consistency.LBStatusConsistencyService;
 import org.flexlb.interceptor.GrpcTraceInterceptor;
@@ -33,6 +47,7 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
 
 import java.lang.reflect.Field;
+import java.net.InetSocketAddress;
 import java.time.Duration;
 import java.util.Map;
 import java.util.concurrent.CompletionStage;
@@ -42,18 +57,6 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
-
-import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertFalse;
-import static org.junit.jupiter.api.Assertions.assertNotNull;
-import static org.junit.jupiter.api.Assertions.assertTimeoutPreemptively;
-import static org.junit.jupiter.api.Assertions.assertTrue;
-import static org.junit.jupiter.api.Assumptions.assumeTrue;
-import static org.mockito.Mockito.doThrow;
-import static org.mockito.Mockito.mock;
-import static org.mockito.Mockito.times;
-import static org.mockito.Mockito.verify;
-import static org.mockito.Mockito.when;
 
 class FlexlbGrpcForwarderAsyncTest {
 
@@ -721,7 +724,7 @@ class FlexlbGrpcForwarderAsyncTest {
         private static RpcFixture startService(FlexlbServiceGrpc.FlexlbServiceImplBase service)
                 throws Exception {
             Server server =
-                    NettyServerBuilder.forPort(0)
+                    NettyServerBuilder.forAddress(new InetSocketAddress("127.0.0.1", 0))
                             .directExecutor()
                             .intercept(new GrpcTraceInterceptor())
                             .addService(service)
@@ -732,7 +735,35 @@ class FlexlbGrpcForwarderAsyncTest {
                             .directExecutor()
                             .usePlaintext()
                             .build();
-            return new RpcFixture(server, channel);
+            RpcFixture fixture = new RpcFixture(server, channel);
+            try {
+                fixture.awaitTransportReady();
+                return fixture;
+            } catch (Exception | Error startupFailure) {
+                try {
+                    fixture.close();
+                } catch (Exception cleanupFailure) {
+                    startupFailure.addSuppressed(cleanupFailure);
+                }
+                throw startupFailure;
+            }
+        }
+
+        private void awaitTransportReady() throws InterruptedException {
+            // Channel creation is lazy. Business deadlines must start after the
+            // loopback TCP/HTTP2 handshake, rather than measuring fixture startup.
+            long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+            ConnectivityState state = channel.getState(true);
+            while (state != ConnectivityState.READY) {
+                long remaining = deadline - System.nanoTime();
+                assertTrue(remaining > 0, "loopback gRPC transport did not become READY: " + state);
+                CountDownLatch changed = new CountDownLatch(1);
+                channel.notifyWhenStateChanged(state, changed::countDown);
+                assertTrue(
+                        changed.await(remaining, TimeUnit.NANOSECONDS),
+                        "loopback gRPC transport readiness timed out: " + state);
+                state = channel.getState(true);
+            }
         }
 
         @Override

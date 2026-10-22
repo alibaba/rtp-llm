@@ -4,6 +4,9 @@ import com.google.common.util.concurrent.FutureCallback;
 import com.google.common.util.concurrent.Futures;
 import com.google.common.util.concurrent.ListenableFuture;
 import io.grpc.ManagedChannel;
+import io.grpc.Deadline;
+import io.grpc.Context;
+import io.grpc.Contexts;
 import io.grpc.Status;
 import io.grpc.internal.GrpcUtil;
 import io.grpc.netty.NettyChannelBuilder;
@@ -123,7 +126,10 @@ public class EngineGrpcClient extends AbstractGrpcClient {
                                                            long requestTimeoutMs,
                                                            ServiceType serviceType) {
         CompletableFuture<R> resultFuture = new CompletableFuture<>();
+        Context.CancellableContext operationContext = Context.current().withCancellation();
+        resultFuture.whenComplete((ignored, failure) -> operationContext.cancel(failure));
         long startTime = System.nanoTime();
+        Deadline deadline = Deadline.after(requestTimeoutMs, TimeUnit.MILLISECONDS);
         Invoker invoker = null;
         String phase = "CHANNEL_SETUP";
         GrpcCallTrace trace = null;
@@ -150,14 +156,15 @@ public class EngineGrpcClient extends AbstractGrpcClient {
             GrpcFutureStubWrapper stubWrapper = new GrpcFutureStubWrapper(
                     RpcServiceGrpc.newFutureStub(finalInvoker.getChannel()),
                     MultimodalRpcServiceGrpc.newFutureStub(finalInvoker.getChannel())
-            ).withDeadlineAfter(requestTimeoutMs, TimeUnit.MILLISECONDS).withTrace(callTrace);
+            ).withDeadline(deadline).withTrace(callTrace);
 
-            ListenableFuture<R> listenableFuture = grpcCall.apply(stubWrapper);
+            ListenableFuture<R> listenableFuture = startInContext(operationContext, grpcCall, stubWrapper);
 
             phase = "CALLBACK_REGISTRATION";
             Futures.addCallback(listenableFuture, new FutureCallback<R>() {
                 @Override
                 public void onSuccess(R response) {
+                    if (resultFuture.isDone()) { return; }
                     callTrace.markCallbackStarted();
                     try {
                         reportSuccessfulCall(serviceType, startTime, false, ip, port);
@@ -169,13 +176,14 @@ public class EngineGrpcClient extends AbstractGrpcClient {
 
                 @Override
                 public void onFailure(Throwable t) {
+                    if (resultFuture.isDone()) { return; }
                     callTrace.markCallbackStarted();
                     try {
-                        if (shouldRetry(serviceType, t, callTrace)) {
+                        if (!resultFuture.isDone() && shouldRetry(serviceType, t, callTrace)) {
                             finalInvoker.markExpired();
                             long connectionDuration = finalInvoker.getConnectionDuration();
                             reportConnectionDuration(serviceType, connectionDuration, ip, port);
-                            retryWithNewChannelAsync(channelKey, finalInvoker, grpcCall, requestTimeoutMs,
+                            retryWithNewChannelAsync(channelKey, finalInvoker, grpcCall, operationContext, deadline,
                                     ip, port, serviceType, resultFuture, startTime, t);
                         } else {
                             completeFailure(resultFuture, t, null, serviceType, false, "CALL_RESULT",
@@ -200,12 +208,24 @@ public class EngineGrpcClient extends AbstractGrpcClient {
     private <R> void retryWithNewChannelAsync(String channelKey,
                                                Invoker staleInvoker,
                                                Function<GrpcFutureStubWrapper, ListenableFuture<R>> grpcCall,
-                                               long requestTimeoutMs,
+                                               Context operationContext,
+                                               Deadline deadline,
                                                String ip, int port,
                                                ServiceType serviceType,
                                                CompletableFuture<R> resultFuture,
                                                long originalStartTime,
                                                Throwable firstFailure) {
+        if (resultFuture.isDone()) {
+            return;
+        }
+        if (deadline.isExpired() || operationContext.isCancelled()) {
+            Status status = operationContext.isCancelled() ? Contexts.statusFromCancelled(operationContext)
+                    : Status.DEADLINE_EXCEEDED.withDescription("RPC deadline expired before retry");
+            completeFailure(resultFuture,
+                    status.asRuntimeException(),
+                    firstFailure, serviceType, true, "RETRY_DEADLINE", staleInvoker, null, ip, port);
+            return;
+        }
         Invoker invoker = null;
         String phase = "CHANNEL_SETUP";
         GrpcCallTrace trace = null;
@@ -215,6 +235,9 @@ public class EngineGrpcClient extends AbstractGrpcClient {
             ManagedChannel newChannel = createChannel(channelKey);
             invoker = replaceInvoker(channelKey, staleInvoker, newChannel);
             final Invoker newInvoker = invoker;
+            if (resultFuture.isDone()) {
+                return;
+            }
 
             debugSafely("Retrying async gRPC call with new channel for {}:{} {}", ip, port, serviceType);
 
@@ -222,14 +245,15 @@ public class EngineGrpcClient extends AbstractGrpcClient {
             GrpcFutureStubWrapper stubWrapper = new GrpcFutureStubWrapper(
                     RpcServiceGrpc.newFutureStub(newInvoker.getChannel()),
                     MultimodalRpcServiceGrpc.newFutureStub(newInvoker.getChannel())
-            ).withDeadlineAfter(requestTimeoutMs, TimeUnit.MILLISECONDS).withTrace(callTrace);
+            ).withDeadline(deadline).withTrace(callTrace);
 
-            ListenableFuture<R> listenableFuture = grpcCall.apply(stubWrapper);
+            ListenableFuture<R> listenableFuture = startInContext(operationContext, grpcCall, stubWrapper);
 
             phase = "CALLBACK_REGISTRATION";
             Futures.addCallback(listenableFuture, new FutureCallback<R>() {
                 @Override
                 public void onSuccess(R response) {
+                    if (resultFuture.isDone()) { return; }
                     callTrace.markCallbackStarted();
                     try {
                         reportSuccessfulCall(serviceType, originalStartTime, true, ip, port);
@@ -241,6 +265,7 @@ public class EngineGrpcClient extends AbstractGrpcClient {
 
                 @Override
                 public void onFailure(Throwable t) {
+                    if (resultFuture.isDone()) { return; }
                     callTrace.markCallbackStarted();
                     completeFailure(resultFuture, t, firstFailure, serviceType, true, "CALL_RESULT",
                             newInvoker, callTrace, ip, port);
@@ -249,6 +274,20 @@ public class EngineGrpcClient extends AbstractGrpcClient {
 
         } catch (RuntimeException | Error failure) {
             completeFailure(resultFuture, failure, firstFailure, serviceType, true, phase, invoker, trace, ip, port);
+        }
+    }
+
+    private static <R> ListenableFuture<R> startInContext(
+            Context context, Function<GrpcFutureStubWrapper, ListenableFuture<R>> grpcCall,
+            GrpcFutureStubWrapper stub) {
+        // One owner covers both attempts, including cancellation while the stub
+        // is starting and has not yet returned its future. gRPC propagates this
+        // context to the transport and checks it before starting a cancelled call.
+        Context previous = context.attach();
+        try {
+            return grpcCall.apply(stub);
+        } finally {
+            context.detach(previous);
         }
     }
 
