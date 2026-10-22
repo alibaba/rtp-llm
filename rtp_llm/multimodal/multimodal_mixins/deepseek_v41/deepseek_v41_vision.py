@@ -7,7 +7,7 @@ import os
 import sys
 import threading
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from functools import partial
 from pathlib import Path
 
@@ -16,6 +16,10 @@ from PIL import Image
 from torch import nn
 
 from rtp_llm.metrics import GaugeMetrics
+from rtp_llm.models_py.modules.dsv41.vision_preprocess_tables import (
+    ResizeTables,
+    prepare_resize_tables,
+)
 from rtp_llm.multimodal.multimodal_mixins.deepseek_v41.deepseek_v41_processor import (
     _METRIC_TAGS,
     V41ImageProcessorConfig,
@@ -50,6 +54,7 @@ class _DecodedImage:
     """CPU-only result of the generic media decoder inside the ViT backend."""
 
     rgb: torch.Tensor
+    resize_tables: ResizeTables | None = None
 
 
 @dataclass(frozen=True)
@@ -183,7 +188,43 @@ class DeepSeekV41VisionEmbedding(nn.Module, MultiModalEmbeddingInterface):
             warmup_preprocess(
                 self._device, patch_size=self.processor_config.vision_patch_size
             )
+            self._warmup_packed_kernels()
         return result
+
+    @torch.inference_mode()
+    def _warmup_packed_kernels(self):
+        """Warm native packed kernels before accepting requests."""
+        from rtp_llm.models_py.modules.dsv41._vision_rope_triton import (
+            apply_vision_qk_rope,
+        )
+        from rtp_llm.models_py.modules.dsv41.vision_residual_add import (
+            apply_vision_residual_rmsnorm,
+        )
+        from rtp_llm.utils.cuda_graph_gate import cuda_graph_gate
+
+        if (
+            not self.vision.blocks
+            or torch.cuda.get_device_capability(self._device)[0] != 10
+        ):
+            return
+        block = self.vision.blocks[0]
+        if (block.attn.n_heads, block.attn.head_dim) != (16, 64):
+            return
+        with cuda_graph_gate.operation(), torch.cuda.device(self._device):
+            qkv = torch.zeros(8, 3072, device=self._device, dtype=torch.bfloat16)
+            q, k, _ = [part.view(8, 16, 64) for part in qkv.chunk(3, -1)]
+            cos = torch.ones(8, 1, 32, device=self._device)
+            sin = torch.zeros_like(cos)
+            apply_vision_qk_rope(q, k, cos, sin)
+            x = torch.zeros(8, 1024, device=self._device, dtype=torch.bfloat16)
+            apply_vision_residual_rmsnorm(x, x, block.norm1.weight, block.norm1.eps)
+            if block.attn._attention_backend == "fa4":
+                from rtp_llm.models_py.modules.dsv41.vision_attention import (
+                    warmup_vision_fa4_varlen,
+                )
+
+                warmup_vision_fa4_varlen(self._device)
+            torch.cuda.current_stream().synchronize()
 
     def _resolve_resource_budget(self):
         with self._resource_lock:
@@ -236,10 +277,17 @@ class DeepSeekV41VisionEmbedding(nn.Module, MultiModalEmbeddingInterface):
             for block in self.vision.blocks
         ) + (self.training, "residual_rmsnorm_r4_bf16", "quack_concat")
 
-    def _forward_packed(self, patches, grids, *, rotary=None):
+    def _forward_packed(self, patches, grids, *, rotary=None, cu_seqlens=None):
         from .packed_vision import forward_packed
 
-        return forward_packed(self.vision, self.aligner, patches, grids, rotary=rotary)
+        return forward_packed(
+            self.vision,
+            self.aligner,
+            patches,
+            grids,
+            rotary=rotary,
+            cu_seqlens=cu_seqlens,
+        )
 
     def _prepare_graph_forward(self, grids):
         # Own each table, including when >32 distinct geometries evict the
@@ -250,11 +298,21 @@ class DeepSeekV41VisionEmbedding(nn.Module, MultiModalEmbeddingInterface):
             )
             for h, w in grids
         ]
-        forward = partial(self._forward_packed, rotary=rotary)
+        from .packed_vision import prepare_fa4_cu_seqlens
+
+        cu_seqlens = None
+        if (
+            self.vision.blocks
+            and self.vision.blocks[0].attn._attention_backend == "fa4"
+        ):
+            cu_seqlens = prepare_fa4_cu_seqlens(grids, self._device)
+        forward = partial(self._forward_packed, rotary=rotary, cu_seqlens=cu_seqlens)
         # Conservative per-entry charge even for tables shared with other keys.
         forward.graph_owned_bytes = sum(
             tensor.numel() * tensor.element_size() for pair in rotary for tensor in pair
         )
+        if cu_seqlens is not None:
+            forward.graph_owned_bytes += cu_seqlens.numel() * cu_seqlens.element_size()
         return forward
 
     def run_embedding_idle_work(self):
@@ -410,10 +468,20 @@ class DeepSeekV41VisionEmbedding(nn.Module, MultiModalEmbeddingInterface):
         self._resolve_resource_budget()
         if self._rgb_uploader is None:
             self._rgb_uploader = RGBBatchUploader(self._device, self._staging_max_bytes)
-        return self._rgb_uploader.upload(
+        staged = self._rgb_uploader.upload(
             [[image.rgb for image in group] for group in groups],
             [isinstance(data, _DecodedImage) for data in data_list],
         )
+        if staged is not None:
+            for index, (original, uploaded) in enumerate(zip(groups, staged.data_list)):
+                items = [
+                    replace(dst, resize_tables=src.resize_tables)
+                    for src, dst in zip(original, self._image_group(uploaded))
+                ]
+                staged.data_list[index] = (
+                    items[0] if isinstance(uploaded, UploadedImage) else items
+                )
+        return staged
 
     @torch.inference_mode()
     def encode_images_packed(self, images) -> list[torch.Tensor]:
@@ -485,8 +553,9 @@ class DeepSeekV41VisionEmbedding(nn.Module, MultiModalEmbeddingInterface):
     ):
         """Decode one bounded work item in MMProcessEngine's CPU executor.
 
-        GPU mode returns an owned CPU RGB tensor. Grid selection later uses
-        CPU shape metadata; H2D, resize, pad, normalization and patch folding
+        GPU mode returns owned CPU RGB plus immutable CPU resize tables.
+        The tables stay with the work item through asynchronous H2D staging;
+        resize, pad, normalization and patch folding
         are submitted by the GPU-owning scheduler thread.
         """
         if not mm_inputs or any(
@@ -509,7 +578,16 @@ class DeepSeekV41VisionEmbedding(nn.Module, MultiModalEmbeddingInterface):
             try:
                 with Image.open(payload) as image:
                     if gpu_preprocess:
-                        results.append(_DecodedImage(_rgb_tensor(image)))
+                        rgb = _rgb_tensor(image)
+                        _, _, target_h, target_w = plan_image_grid(
+                            rgb.shape[1], rgb.shape[0], processor_config
+                        )
+                        tables = prepare_resize_tables(
+                            tuple(rgb.shape[:2]),
+                            (target_h, target_w),
+                            patch_size=processor_config.vision_patch_size,
+                        )
+                        results.append(_DecodedImage(rgb, tables))
                     else:
                         patches, vit_h, vit_w, _, _ = preprocess_image(
                             image, processor_config
@@ -593,6 +671,11 @@ class DeepSeekV41VisionEmbedding(nn.Module, MultiModalEmbeddingInterface):
                 (n_vit_h * patch, n_vit_w * patch),
                 patch,
                 self._device,
+                **(
+                    {"tables": image.resize_tables}
+                    if image.resize_tables is not None
+                    else {}
+                ),
             )
         return _RuntimeImage(patches, n_vit_h, n_vit_w)
 

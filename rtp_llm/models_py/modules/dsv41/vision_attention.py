@@ -54,3 +54,55 @@ def apply_vision_fa4(q, k, v):
     with torch.cuda.device(q.device):
         output, _ = _fa4_forward()(q, k, v, softmax_scale=0.125, causal=False)
     return output
+
+
+@lru_cache(maxsize=1)
+def _fa4_varlen_forward():
+    from flash_attn.cute import flash_attn_varlen_func
+
+    return flash_attn_varlen_func
+
+
+def apply_vision_fa4_varlen(q, k, v, cu_seqlens, max_seqlen):
+    """Attend within each image in packed THD storage, without regrouping copies.
+
+    The caller owns the cumulative image boundaries and their stream readiness.
+    They are built once per forward, or retained with an exact-shape graph.
+    """
+    if q.ndim != 3 or not _supported(*(t.unsqueeze(0) for t in (q, k, v))):
+        return None
+    if (
+        cu_seqlens.device != q.device
+        or cu_seqlens.dtype != torch.int32
+        or cu_seqlens.ndim != 1
+        or not cu_seqlens.is_contiguous()
+        or cu_seqlens.numel() < 2
+        or max_seqlen <= 0
+    ):
+        raise ValueError("invalid packed vision attention boundaries")
+    with torch.cuda.device(q.device):
+        output, _ = _fa4_varlen_forward()(
+            q,
+            k,
+            v,
+            cu_seqlens_q=cu_seqlens,
+            cu_seqlens_k=cu_seqlens,
+            max_seqlen_q=max_seqlen,
+            max_seqlen_k=max_seqlen,
+            softmax_scale=0.125,
+            causal=False,
+        )
+    return output
+
+
+@torch.inference_mode()
+def warmup_vision_fa4_varlen(device):
+    """Compile the short/long sequence variants using native producer strides."""
+    with torch.cuda.device(device):
+        for length in (8, 512):
+            rows = 2 * length
+            qk = torch.zeros(rows, 32, 64, device=device, dtype=torch.bfloat16)
+            qkv = torch.zeros(rows, 3072, device=device, dtype=torch.bfloat16)
+            v = qkv[:, 2048:].view(rows, 16, 64)
+            cu = torch.tensor([0, length, rows], device=device, dtype=torch.int32)
+            apply_vision_fa4_varlen(qk[:, :16], qk[:, 16:], v, cu, length)

@@ -332,3 +332,13 @@ py_test(
     tags = ["SM100_ARM_CU13"],
     exec_properties = {"gpu": "SM100_ARM_CU13", "gpu_count": "1"},
 )
+
+py_test(
+    name = "deepseek_v41_dynamic_batch_gpu_test",
+    srcs = ["deepseek_v41_dynamic_batch_gpu_test.py"],
+    deps = ["//rtp_llm:testlib"],
+    size = "large",
+    env = {"GPU_COUNT": "1", "WORLD_SIZE": "1"},
+    tags = ["SM103_CU13"],
+    exec_properties = {"gpu": "SM103_CU13", "gpu_count": "1"},
+)
