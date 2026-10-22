@@ -15,12 +15,21 @@ def _generate_grpc_proto_impl(ctx):
     print("output_dir: {}".format(output_dir))
 
     # use create_grpc_proto generate proto py files
-    ctx.actions.run(
+    # Preserve the exec-configured py_binary runfiles and the configured action Python.
+    tool = ctx.attr.create_grpc_proto[DefaultInfo].files_to_run
+    ctx.actions.run_shell(
         outputs = [pb2_file, pb2_grpc_file],
         inputs = [proto_file],
-        executable = ctx.executable.create_grpc_proto,
-        arguments = [proto_file.path, output_dir],
-        tools = [ctx.executable.create_grpc_proto]
+        tools = [tool],
+        arguments = [tool.executable.path, proto_file.path, output_dir],
+        use_default_shell_env = True,
+        command = """set -eu
+: "${PYTHON_BIN_PATH:?PYTHON_BIN_PATH must identify the configured execution Python}"
+case "$PYTHON_BIN_PATH" in
+    */*) export PATH="${PYTHON_BIN_PATH%/*}:${PATH:-/usr/bin:/bin}" ;;
+esac
+exec "$PYTHON_BIN_PATH" "$1" "$2" "$3"
+""",
     )
 
     # pack as py_library
