@@ -860,6 +860,28 @@ void KVCacheManager::initCacheEventPublisher(std::shared_ptr<KVCacheEventReporte
             return;
         }
 
+        const std::vector<std::string> full_group_tags{"global_kv_1", "global_kv_2", "indexer_kv"};
+        const auto&                    group_sets       = block_tree_cache_->groupSets();
+        const bool                     merge_full_specs =
+            std::any_of(group_sets.begin(), group_sets.end(), [&](const auto& group_set) {
+                if (group_set->groupType() != CacheGroupType::FULL) {
+                    return false;
+                }
+                const auto& members = group_set->groupTags();
+                return std::all_of(full_group_tags.begin(), full_group_tags.end(), [&](const auto& tag) {
+                    return std::find(reuse_group_tags.begin(), reuse_group_tags.end(), tag) != reuse_group_tags.end()
+                           && std::find(members.begin(), members.end(), tag) != members.end();
+                });
+            });
+        if (merge_full_specs) {
+            // One representative still requires every member of the shared FULL GroupSet to be resident.
+            reuse_group_tags.erase(
+                std::remove_if(reuse_group_tags.begin(), reuse_group_tags.end(), [](const auto& tag) {
+                    return tag == "global_kv_2" || tag == "indexer_kv";
+                }),
+                reuse_group_tags.end());
+        }
+
         KVCacheEventPublisherConfig publisher_config;
         publisher_config.manager_endpoint = kv_cache_config_.kv_cache_event_manager_endpoint;
         publisher_config.enable_vipserver = kv_cache_config_.kvcm_enable_vipserver;
@@ -880,8 +902,9 @@ void KVCacheManager::initCacheEventPublisher(std::shared_ptr<KVCacheEventReporte
         // Pipeline parallelism is rejected above because a unique PP owner is
         // not represented in ParallelismConfig yet.
         for (const auto& tag : reuse_group_tags) {
-            publisher_context.specs.push_back({cacheEventSpecName(publisher_context.block_size_tokens, tag),
-                                               "event_report://" + publisher_context.host_ip_port + "/hbm"});
+            const auto name = merge_full_specs && tag == "global_kv_1" ?
+                                  "F" : cacheEventSpecName(publisher_context.block_size_tokens, tag);
+            publisher_context.specs.push_back({name, "event_report://" + publisher_context.host_ip_port + "/hbm"});
         }
         publisher_context.tp_size = static_cast<int32_t>(parallelism_config_.tp_size);
         publisher_context.dp_size = static_cast<int32_t>(parallelism_config_.dp_size);
