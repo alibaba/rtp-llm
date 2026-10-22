@@ -1234,6 +1234,23 @@ TEST_F(NormalEngineTest, testCodebookDynamicBeamEndToEndAndFakeStream) {
     EXPECT_TRUE(torch::equal(initial_masks, engine->resource_context_.codebook_masks));
 }
 
+TEST_F(NormalEngineTest, testRejectsInvalidBeamWidths) {
+    CustomConfig config;
+    config.output_vocab_ids = {0, 10, 11, 12};
+    auto engine             = createMockEngine(config);
+    for (const auto& widths : std::vector<std::vector<int>>{{0}, {2, 0}, {0, 2}, {2, -1}}) {
+        auto input                                 = std::make_shared<GenerateInput>();
+        input->input_ids                           = torch::tensor({8, 9}, torch::kInt32);
+        input->generate_config                     = std::make_shared<GenerateConfig>();
+        input->generate_config->max_new_tokens     = 2;
+        input->generate_config->variable_num_beams = widths;
+        auto rejected                              = engine->enqueue(input);
+        ASSERT_TRUE(rejected->hasError());
+        EXPECT_EQ(rejected->statusInfo().code(), ErrorCode::INVALID_PARAMS);
+        EXPECT_EQ(input->generate_config->variable_num_beams, widths);
+    }
+}
+
 TEST_F(NormalEngineTest, testCodebookEqualSmallBeamsUseV2) {
     CustomConfig config;
     config.output_vocab_ids    = {0, 10, 20};

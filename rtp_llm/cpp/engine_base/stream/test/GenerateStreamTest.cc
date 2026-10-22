@@ -1440,6 +1440,33 @@ TEST_F(GenerateStreamTest, codebookChecksCandidatesAndVariableBeamSchedule) {
     EXPECT_FALSE(codebookStream(small_union, config)->hasError());
 }
 
+TEST_F(GenerateStreamTest, rejectsNonPositiveBeamWidthsBeforeAllocation) {
+    for (const int mode : {0, 1, 2}) {
+        auto model = codebookModelConfig();
+        if (mode < 2) {
+            model.output_vocab_groups.clear();
+        }
+        if (mode == 0) {
+            model.output_vocab_ids.clear();
+        }
+        for (const auto& widths : std::vector<std::vector<int>>{{0}, {2, 0}, {0, 2}, {-1}, {2, -1}, {2, 2, 0}}) {
+            auto config               = codebookGenerateConfig();
+            config.variable_num_beams = widths;
+            auto stream               = codebookStream(model, config);
+            ASSERT_TRUE(stream->hasError());
+            EXPECT_EQ(stream->statusInfo().code(), ErrorCode::INVALID_PARAMS);
+            EXPECT_EQ(config.variable_num_beams, widths);
+        }
+        for (const int width : {0, -1}) {
+            auto config      = codebookGenerateConfig();
+            config.num_beams = width;
+            auto stream      = codebookStream(model, config);
+            ASSERT_TRUE(stream->hasError());
+            EXPECT_EQ(stream->statusInfo().code(), ErrorCode::INVALID_PARAMS);
+        }
+    }
+}
+
 TEST_F(GenerateStreamTest, codebookRejectsMalformedGroups) {
     const auto config = codebookGenerateConfig();
     for (const std::vector<std::vector<int64_t>>& groups : std::vector<std::vector<std::vector<int64_t>>>{

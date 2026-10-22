@@ -131,7 +131,19 @@ GenerateStream::GenerateStream(const shared_ptr<GenerateInput>& input,
     dtype_(model_config.data_type),
     hidden_size_(model_config.hidden_size) {
     RTP_LLM_PROFILE_FUNCTION();
-    stream_async_reserve_ = useStreamAsyncReserveTokens();
+    stream_async_reserve_      = useStreamAsyncReserveTokens();
+    const auto& request_config = *generate_input_->generate_config;
+    const bool  invalid_beams  = request_config.num_beams <= 0
+                               || std::any_of(request_config.variable_num_beams.begin(),
+                                              request_config.variable_num_beams.end(),
+                                              [](int width) { return width <= 0; });
+    if (invalid_beams) {
+        // Build a safe error stream without allocating from invalid beam dimensions.
+        generate_input_                             = std::make_shared<GenerateInput>(*input);
+        generate_input_->generate_config            = std::make_shared<GenerateConfig>(request_config);
+        generate_input_->generate_config->num_beams = 1;
+        generate_input_->generate_config->variable_num_beams.clear();
+    }
     generate_input_->generate_config->validatePrefillOnly();
     if (!updatePrefix(resource_context.system_prompt)) {
         return;
@@ -172,6 +184,12 @@ GenerateStream::GenerateStream(const shared_ptr<GenerateInput>& input,
     stream_cache_resource_->init(init_batch_size);
 
     setReturnAllProbs(generate_input_->generate_config->return_all_probs);
+
+    if (invalid_beams) {
+        reportError(ErrorCode::INVALID_PARAMS,
+                    "num_beams and every variable_num_beams entry must be greater than zero");
+        return;
+    }
 
     if (!model_config.output_vocab_groups.empty()) {
         if (auto error =
