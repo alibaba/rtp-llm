@@ -3,7 +3,7 @@ from types import SimpleNamespace
 
 import torch
 
-from rtp_llm.models_py.model_desc.qwen4_exp_runtime.cache_views import PLECacheViews
+from rtp_llm.models_py.model_desc.qwen4_exp_runtime.ple_cache_views import PLECacheViews
 from rtp_llm.models_py.model_desc.qwen4_exp_runtime.ple_state import (
     _PLETargetTransaction,
 )

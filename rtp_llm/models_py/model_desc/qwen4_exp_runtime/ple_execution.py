@@ -15,7 +15,7 @@ from rtp_llm.models_py.model_desc.qwen4_exp_runtime.pd_publication import (
 )
 from rtp_llm.ops.compute_ops import PyAttentionInputs, PyModelInputs
 
-from .cache_views import PLECacheViews
+from .ple_cache_views import PLECacheViews
 from .ple_state import PLELookupResult
 from .ple_transaction import PLETransactionCoordinator
 

@@ -441,7 +441,7 @@ def select_draft_graph_tokens(
         max_ctx_len=int(kv_table.shape[1]) * 32,
         validate_block_table=False,
     )
-    from rtp_llm.models_py.kernels.cuda.qwen4_qsa_topk import try_cub_draft_qsa_tokens
+    from rtp_llm.models_py.modules.qwen4_exp.qsa.cub_topk import try_cub_draft_qsa_tokens
 
     if int(indexer.token_budget) == 2048:
         packed = try_cub_draft_qsa_tokens(

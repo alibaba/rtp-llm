@@ -25,7 +25,7 @@ from rtp_llm.models.qwen4_exp.qwen4_exp_kv_cache import (
     build_qwen4_exp_kv_cache_spec_descs,
 )
 from rtp_llm.models_py.model_desc import generic_moe, qwen3_next, qwen4_exp
-from rtp_llm.models_py.model_desc.qwen4_exp_runtime.cache_views import PLECacheViews
+from rtp_llm.models_py.model_desc.qwen4_exp_runtime.ple_cache_views import PLECacheViews
 from rtp_llm.models_py.model_desc.qwen4_exp_runtime.ple_state import (
     _PLETargetLayerStage,
     _PLETargetTransaction,

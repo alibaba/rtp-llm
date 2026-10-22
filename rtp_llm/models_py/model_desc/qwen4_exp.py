@@ -26,11 +26,11 @@ from rtp_llm.models_py.model_desc.qwen3_next import (
     Qwen35Model,
     _is_cuda_graph_forward,
 )
-from rtp_llm.models_py.model_desc.qwen4_exp_runtime.cache_views import PLECacheViews
 from rtp_llm.models_py.model_desc.qwen4_exp_runtime.pd_publication import (
     prepare_side_cache_store_writers,
     publish_layer_side_caches,
 )
+from rtp_llm.models_py.model_desc.qwen4_exp_runtime.ple_cache_views import PLECacheViews
 from rtp_llm.models_py.model_desc.qwen4_exp_runtime.ple_execution import (
     PLEExecution,
     ple_input_ids,
@@ -43,12 +43,6 @@ from rtp_llm.models_py.model_desc.qwen4_exp_runtime.ple_transaction import (
 )
 from rtp_llm.models_py.model_desc.qwen4_exp_runtime.qsa_context import (
     Qwen4ExpQSARuntimeContext,
-)
-from rtp_llm.models_py.model_desc.qwen4_exp_runtime.weight_views import (
-    Qwen4LinearFactory,
-    annotate_compute_inventory,
-    prepare_compute_weights,
-    record_projection_consumer,
 )
 from rtp_llm.models_py.modules import FMHAImplBase
 from rtp_llm.models_py.modules.base.common.zero_centered_rms_norm import (
@@ -65,6 +59,12 @@ from rtp_llm.models_py.modules.qwen4_exp.ple.ple import (
     Qwen4ExpPLELayer,
 )
 from rtp_llm.models_py.modules.qwen4_exp.qsa.indexer import Qwen4ExpQSAIndexer
+from rtp_llm.models_py.modules.qwen4_exp.weight_views import (
+    Qwen4LinearFactory,
+    annotate_compute_inventory,
+    prepare_compute_weights,
+    record_projection_consumer,
+)
 from rtp_llm.ops import (
     AttentionConfigs,
     HWKernelConfig,
