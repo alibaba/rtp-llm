@@ -1,4 +1,5 @@
 load("@arch_config//:arch_select.bzl", "telemetry_test_deps")
+load("@pip_dsv4_test//:requirements.bzl", test_requirement = "requirement")
 
 py_test(
     name = "custom_output_response_test",
@@ -19,6 +20,7 @@ py_test(
         "//rtp_llm/utils/test:testdata",
     ],
     deps = [
+        test_requirement("pytest"),
         "//rtp_llm:_ft_pickler",
         "//rtp_llm:config",
         "//rtp_llm:models",
@@ -39,6 +41,7 @@ py_test(
         "frontend_server_test.py",
     ],
     deps = [
+        test_requirement("pytest"),
         "//rtp_llm:testlib",
     ] + telemetry_test_deps(),
     exec_properties = {"gpu": "L20_CU13"},
@@ -78,6 +81,8 @@ py_test(
         "//rtp_llm/test/model_test/fake_test/testdata",
     ],
     deps = [
+        test_requirement("pytest"),
+        "//rtp_llm:numpy",
         "//rtp_llm:frontend",
         "//rtp_llm:testlib",
     ],
