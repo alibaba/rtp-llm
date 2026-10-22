@@ -1,5 +1,11 @@
+from __future__ import annotations
+
+from typing import TYPE_CHECKING
+
 import torch
-from flashinfer import BatchPrefillWithPagedKVCacheWrapper
+
+if TYPE_CHECKING:
+    from flashinfer import BatchPrefillWithPagedKVCacheWrapper
 
 
 def plan_prefix_paged_attention(

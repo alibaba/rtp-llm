@@ -570,7 +570,7 @@ TEST_F(CudaSamplerTest, testFlashinferKernelTopK1) {
     ASSERT_EQ(toHostFloat(cum_log_probs_t), initial_cum_log_probs);
 }
 
-TEST_F(CudaSamplerTest, testFlashinferSeedOffsetSameAcrossBatchRows) {
+TEST_F(CudaSamplerTest, testCudaSamplingSeedOffsetSameAcrossBatchRows) {
     constexpr int64_t batch_size = 4;
     constexpr int64_t vocab_size = 6;
     auto              probs      = cudaTensor(
@@ -599,7 +599,7 @@ TEST_F(CudaSamplerTest, testFlashinferSeedOffsetSameAcrossBatchRows) {
     }
 }
 
-TEST_F(CudaSamplerTest, testFlashinferKernelTopK) {
+TEST_F(CudaSamplerTest, testCudaSamplingKernelTopK) {
     size_t batch_size = 4;
     auto   logits_t   = cudaTensor(
         {
@@ -659,7 +659,7 @@ TEST_F(CudaSamplerTest, testFlashinferKernelTopK) {
     assertTokenIn(output_token_ids_host, 23, {7, 8});
 }
 
-TEST_F(CudaSamplerTest, testFlashinferKernelTopP) {
+TEST_F(CudaSamplerTest, testCudaSamplingKernelTopP) {
     size_t batch_size = 4;
     auto   logits_t   = cudaTensor(
         {
@@ -811,7 +811,7 @@ TEST_F(CudaSamplerTest, testCumLogProbsUsesSamplingDistributionInOriginalMode) {
     }
 }
 
-TEST_F(CudaSamplerTest, testFlashinferKernelTopKTopP) {
+TEST_F(CudaSamplerTest, testCudaSamplingKernelTopKTopP) {
     size_t batch_size = 4;
     auto   logits_t   = cudaTensor(
         {
@@ -872,7 +872,7 @@ TEST_F(CudaSamplerTest, testFlashinferKernelTopKTopP) {
     assertTokenIn(output_token_ids_host, 23, {7, 8});
 }
 
-TEST_F(CudaSamplerTest, testFlashinferKernelFailed) {
+TEST_F(CudaSamplerTest, testCudaSamplingKernelFailed) {
     size_t batch_size = 4;
     auto   logits_t   = cudaTensor(
         {
@@ -1155,4 +1155,330 @@ TEST_F(CudaSamplerTest, testDoSample) {
                             batch_size,
                             step,
                             10);
+}
+
+// Preserve main's distinct TopK1 nullopt fixture alongside the Native cum-log-prob regression.
+TEST_F(CudaSamplerTest, testCudaSamplingKernelTopK1) {
+    size_t batch_size = 4;
+    auto   logits_t   = cudaTensor(
+        {
+            0,    0,    0,     0.1, 0.2,  0.3,   0,     0,     0, 0.01,   0.987, 0.887, 0.99999, 0.1,
+            0.2,  0.3,  0,     0,   0.99, 0.989, 0.221, 0,     0, 0.1,    0.2,   0.321, 0,       0.4432,
+            0.44, 0.01, 0.221, 0,   0,    0.1,   0.2,   0.321, 0, 0.4432, 0.44,  0.01,
+        },
+        {(int64_t)batch_size, 10});
+    size_t step             = 5;
+    auto output_token_ids_t = cudaIntTensor({100, 1, 1, 1, 1, 0, 1, 1, 0, 0, 0, 0, 1, 0, 1, 0, 0, 0, 1, 0, 0, 0, 0, 0},
+                                            {(int64_t)batch_size, (int64_t)(step + 1)});
+
+    auto sequence_lengths_t = cudaIntTensor({5, 5, 5, 5}, {4});
+    auto input_lengths_t    = cudaIntTensor({-1, -1, -1, -1}, {4});
+
+    auto top_k_t      = pinnedIntTensor({1, 1, 1, 1});
+    auto top_p_t      = pinnedFloatTensor({1.0, 1.0, 1.0, 1.0});
+    auto temperture_t = pinnedFloatTensor({1.0, 10.0, 1.0, 10.0});
+
+    std::vector<at::Generator> generator;
+    generator.resize(batch_size);
+
+    GreedyParams params({
+        logits_t,
+        input_lengths_t,
+        sequence_lengths_t,
+        output_token_ids_t,
+        step,
+        top_k_t,
+        top_p_t,
+        temperture_t,
+        nullopt,
+        nullopt,
+        nullopt,
+        nullopt,
+        false,
+        nullopt,
+        nullopt,
+        nullopt,
+        nullopt,
+        generator,
+    });
+    auto         greedy_output = execSampleGreedy(params);
+    check_cuda_error();
+    auto output_token_ids_host = toHostInt(output_token_ids_t);
+    ASSERT_EQ(output_token_ids_host[5], 5);
+    ASSERT_EQ(output_token_ids_host[11], 2);
+    ASSERT_EQ(output_token_ids_host[17], 7);
+    ASSERT_EQ(output_token_ids_host[23], 7);
+}
+
+// Keep original Native selectors alongside main names; identical bodies are not distinct coverage.
+TEST_F(CudaSamplerTest, testFlashinferSeedOffsetSameAcrossBatchRows) {
+    constexpr int64_t batch_size = 4;
+    constexpr int64_t vocab_size = 6;
+    auto              probs      = cudaTensor(
+        {
+            0.04, 0.08, 0.12, 0.18, 0.24, 0.34, 0.04, 0.08, 0.12, 0.18, 0.24, 0.34,
+            0.04, 0.08, 0.12, 0.18, 0.24, 0.34, 0.04, 0.08, 0.12, 0.18, 0.24, 0.34,
+        },
+        {batch_size, vocab_size});
+    auto int_options  = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA);
+    auto bool_options = torch::TensorOptions().dtype(torch::kBool).device(torch::kCUDA);
+    auto seed_options = torch::TensorOptions().dtype(torch::kInt64).device(torch::kCUDA);
+    auto output       = torch::empty({batch_size}, int_options);
+    auto valid        = torch::empty({batch_size}, bool_options);
+    auto seed         = torch::full({batch_size}, 20260706, seed_options);
+    auto offset       = torch::full({batch_size}, 128, seed_options);
+    auto stream       = at::cuda::getCurrentCUDAStream().stream();
+
+    rtp_llm::top_k_sampling_from_probs(
+        probs, output, valid, std::nullopt, std::nullopt, 0, true, seed, 0, offset, 0, (int64_t)stream);
+    cudaDeviceSynchronize();
+
+    assertAllValid(valid);
+    auto output_host = toHostInt(output);
+    for (int64_t i = 1; i < batch_size; ++i) {
+        ASSERT_EQ(output_host[0], output_host[i]);
+    }
+}
+
+TEST_F(CudaSamplerTest, testFlashinferKernelTopK) {
+    size_t batch_size = 4;
+    auto   logits_t   = cudaTensor(
+        {
+            0,    0,    0,     0.1, 0.2,  0.3,   0,     0,     0, 0.01,   0.987, 0.887, 0.99999, 0.1,
+            0.2,  0.3,  0,     0,   0.99, 0.989, 0.221, 0,     0, 0.1,    0.2,   0.321, 0,       0.4432,
+            0.44, 0.01, 0.221, 0,   0,    0.1,   0.2,   0.321, 0, 0.4432, 0.44,  0.01,
+        },
+        {(int64_t)batch_size, 10});
+    size_t step             = 5;
+    auto output_token_ids_t = cudaIntTensor({100, 1, 1, 1, 1, 0, 1, 1, 0, 0, 0, 0, 1, 0, 1, 0, 0, 0, 1, 0, 0, 0, 0, 0},
+                                            {(int64_t)batch_size, (int64_t)(step + 1)});
+
+    auto sequence_lengths_t = cudaIntTensor({5, 5, 5, 5}, {4});
+    auto input_lengths_t    = cudaIntTensor({-1, -1, -1, -1}, {4});
+
+    auto top_k_t      = pinnedIntTensor({1, 1, 3, 2});
+    auto top_p_t      = pinnedFloatTensor({1.0, 1.0, 1.0, 1.0});
+    auto temperture_t = pinnedFloatTensor({1.0, 10.0, 1.0, 10.0});
+
+    std::vector<at::Generator> generator;
+    generator.resize(batch_size);
+
+    GreedyParams params({
+        logits_t,
+        input_lengths_t,
+        sequence_lengths_t,
+        output_token_ids_t,
+        step,
+        top_k_t,
+        top_p_t,
+        temperture_t,
+        nullopt,
+        nullopt,
+        nullopt,
+        nullopt,
+        false,
+        nullopt,
+        nullopt,
+        nullopt,
+        nullopt,
+        generator,
+    });
+    auto         greedy_output = execSampleGreedy(params);
+    check_cuda_error();
+    ASSERT_TRUE(greedy_output.success.defined());
+    ASSERT_EQ(greedy_output.success.numel(), 4);
+    auto         success_cpu = greedy_output.success.cpu();
+    auto         success     = success_cpu.data_ptr<bool>();
+    vector<bool> expect_success{true, true, true, true};
+    for (int i = 0; i < expect_success.size(); ++i) {
+        ASSERT_EQ(success[i], (bool)expect_success[i]);
+    }
+    auto output_token_ids_host = toHostInt(output_token_ids_t);
+    ASSERT_EQ(output_token_ids_host[5], 5);
+    ASSERT_EQ(output_token_ids_host[11], 2);
+    assertTokenIn(output_token_ids_host, 17, {5, 7, 8});
+    assertTokenIn(output_token_ids_host, 23, {7, 8});
+}
+
+TEST_F(CudaSamplerTest, testFlashinferKernelTopP) {
+    size_t batch_size = 4;
+    auto   logits_t   = cudaTensor(
+        {
+            0,    0,    0,     0.1, 0.2,  0.3,   0,     0,     0, 0.01,   0.987, 0.887, 0.99999, 0.1,
+            0.2,  0.3,  0,     0,   0.99, 0.989, 0.221, 0,     0, 0.1,    0.2,   0.321, 0,       0.4432,
+            0.44, 0.01, 0.221, 0,   0,    0.1,   0.2,   0.321, 0, 0.4432, 0.44,  0.01,
+        },
+        {(int64_t)batch_size, 10});
+    size_t step             = 5;
+    auto output_token_ids_t = cudaIntTensor({100, 1, 1, 1, 1, 0, 1, 1, 0, 0, 0, 0, 1, 0, 1, 0, 0, 0, 1, 0, 0, 0, 0, 0},
+                                            {(int64_t)batch_size, (int64_t)(step + 1)});
+
+    auto sequence_lengths_t = cudaIntTensor({5, 5, 5, 5}, {4});
+    auto input_lengths_t    = cudaIntTensor({-1, -1, -1, -1}, {4});
+
+    auto top_k_t      = pinnedIntTensor({0, 0, 0, 0});
+    auto top_p_t      = pinnedFloatTensor({0.1, 0.1, 0.6, 0.8});
+    auto temperture_t = pinnedFloatTensor({1.0, 10.0, 1.0, 10.0});
+
+    std::vector<at::Generator> generator;
+    generator.resize(batch_size);
+
+    GreedyParams params({
+        logits_t,
+        input_lengths_t,
+        sequence_lengths_t,
+        output_token_ids_t,
+        step,
+        top_k_t,
+        top_p_t,
+        temperture_t,
+        nullopt,
+        nullopt,
+        nullopt,
+        nullopt,
+        false,
+        nullopt,
+        nullopt,
+        nullopt,
+        nullopt,
+        generator,
+    });
+    auto         greedy_output = execSampleGreedy(params);
+    check_cuda_error();
+    ASSERT_TRUE(greedy_output.success.defined());
+    ASSERT_EQ(greedy_output.success.numel(), 4);
+
+    auto         success_cpu = greedy_output.success.cpu();
+    auto         success     = success_cpu.data_ptr<bool>();
+    vector<bool> expect_success{true, true, true, true};
+    for (int i = 0; i < expect_success.size(); ++i) {
+        ASSERT_EQ(success[i], expect_success[i]);
+    }
+
+    auto output_token_ids_host = toHostInt(output_token_ids_t);
+    ASSERT_EQ(output_token_ids_host[5], 5);
+    ASSERT_EQ(output_token_ids_host[11], 2);
+    assertTokenIn(output_token_ids_host, 17, {7, 8, 5, 0, 4, 3});
+    assertTokenIn(output_token_ids_host, 23, {7, 8, 5, 0, 4, 3, 9, 1});
+}
+
+TEST_F(CudaSamplerTest, testFlashinferKernelTopKTopP) {
+    size_t batch_size = 4;
+    auto   logits_t   = cudaTensor(
+        {
+            0,    0,    0,     0.1, 0.2,  0.3,   0,     0,     0, 0.01,   0.987, 0.887, 0.99999, 0.1,
+            0.2,  0.3,  0,     0,   0.99, 0.989, 0.221, 0,     0, 0.1,    0.2,   0.321, 0,       0.4432,
+            0.44, 0.01, 0.221, 0,   0,    0.1,   0.2,   0.321, 0, 0.4432, 0.44,  0.01,
+        },
+        {(int64_t)batch_size, 10});
+    size_t step             = 5;
+    auto output_token_ids_t = cudaIntTensor({100, 1, 1, 1, 1, 0, 1, 1, 0, 0, 0, 0, 1, 0, 1, 0, 0, 0, 1, 0, 0, 0, 0, 0},
+                                            {(int64_t)batch_size, (int64_t)(step + 1)});
+
+    auto sequence_lengths_t = cudaIntTensor({5, 5, 5, 5}, {4});
+    auto input_lengths_t    = cudaIntTensor({-1, -1, -1, -1}, {4});
+
+    auto top_k_t      = pinnedIntTensor({1, 0, 0, 2});
+    auto top_p_t      = pinnedFloatTensor({0.2, 0.2, 0.6, 0.6});
+    auto temperture_t = pinnedFloatTensor({1.0, 10.0, 1.0, 10.0});
+
+    std::vector<at::Generator> generator;
+    generator.resize(batch_size);
+
+    GreedyParams params({
+        logits_t,
+        input_lengths_t,
+        sequence_lengths_t,
+        output_token_ids_t,
+        step,
+        top_k_t,
+        top_p_t,
+        temperture_t,
+        nullopt,
+        nullopt,
+        nullopt,
+        nullopt,
+        false,
+        nullopt,
+        nullopt,
+        nullopt,
+        nullopt,
+        generator,
+    });
+    auto         greedy_output = execSampleGreedy(params);
+    check_cuda_error();
+    ASSERT_TRUE(greedy_output.success.defined());
+    ASSERT_EQ(greedy_output.success.numel(), 4);
+
+    auto         success_cpu = greedy_output.success.cpu();
+    auto         success     = success_cpu.data_ptr<bool>();
+    vector<bool> expect_success{true, true, true, true};
+    for (int i = 0; i < expect_success.size(); ++i) {
+        ASSERT_EQ(success[i], expect_success[i]);
+    }
+    auto output_token_ids_host = toHostInt(output_token_ids_t);
+    ASSERT_EQ(output_token_ids_host[5], 5);
+    assertTokenIn(output_token_ids_host, 11, {2, 8});
+    assertTokenIn(output_token_ids_host, 17, {7, 8, 5, 0, 4, 3});
+    assertTokenIn(output_token_ids_host, 23, {7, 8});
+}
+
+TEST_F(CudaSamplerTest, testFlashinferKernelFailed) {
+    size_t batch_size = 4;
+    auto   logits_t   = cudaTensor(
+        {
+            0,    0,    0,     0.1, 0.2,  0.3,   0,     0,     0, 0.01,   0.987, 0.887, 0.99999, 0.1,
+            0.2,  0.3,  0,     0,   0.99, 0.989, 0.221, 0,     0, 0.1,    0.2,   0.321, 0,       0.4432,
+            0.44, 0.01, 0.221, 0,   0,    0.1,   0.2,   0.321, 0, 0.4432, 0.44,  0.01,
+        },
+        {(int64_t)batch_size, 10});
+    size_t step             = 5;
+    auto output_token_ids_t = cudaIntTensor({100, 1, 1, 1, 1, 0, 1, 1, 0, 0, 0, 0, 1, 0, 1, 0, 0, 0, 1, 0, 0, 0, 0, 0},
+                                            {(int64_t)batch_size, (int64_t)(step + 1)});
+
+    auto sequence_lengths_t = cudaIntTensor({5, 5, 5, 5}, {4});
+    auto input_lengths_t    = cudaIntTensor({-1, -1, -1, -1}, {4});
+
+    auto top_k_t      = pinnedIntTensor({1, 2, 2, 2});
+    auto top_p_t      = pinnedFloatTensor({-1.0, -1.0, 0.6, 0.2});
+    auto temperture_t = pinnedFloatTensor({1.0, 10.0, 1.0, 10.0});
+
+    std::vector<at::Generator> generator;
+    generator.resize(batch_size);
+
+    GreedyParams params({
+        logits_t,
+        input_lengths_t,
+        sequence_lengths_t,
+        output_token_ids_t,
+        step,
+        top_k_t,
+        top_p_t,
+        temperture_t,
+        nullopt,
+        nullopt,
+        nullopt,
+        nullopt,
+        false,
+        nullopt,
+        nullopt,
+        nullopt,
+        nullopt,
+        generator,
+    });
+    auto         greedy_output = execSampleGreedy(params);
+    check_cuda_error();
+
+    ASSERT_TRUE(greedy_output.success.defined());
+    ASSERT_EQ(greedy_output.success.numel(), 4);
+
+    auto         success_cpu = greedy_output.success.cpu();
+    auto         success     = success_cpu.data_ptr<bool>();
+    vector<bool> expect_success{false, false, true, true};
+    for (int i = 0; i < expect_success.size(); ++i) {
+        ASSERT_EQ(success[i], expect_success[i]);
+    }
+    auto output_token_ids_host = toHostInt(output_token_ids_t);
+    assertTokenIn(output_token_ids_host, 17, {7, 8});
+    assertTokenIn(output_token_ids_host, 23, {7, 8});
 }

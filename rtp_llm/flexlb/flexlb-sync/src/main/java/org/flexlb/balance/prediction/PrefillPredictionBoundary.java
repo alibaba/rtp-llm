@@ -40,7 +40,7 @@ public final class PrefillPredictionBoundary {
         requireValidDecisionGroupMs(predictedMs);
         return predictedMs >= Long.MAX_VALUE
                 ? Long.MAX_VALUE
-                : (long) predictedMs;
+                : (long) Math.ceil(predictedMs);
     }
 
     /** Require a finite, non-negative group duration. */

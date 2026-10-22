@@ -9,8 +9,8 @@ import org.flexlb.balance.prediction.PrefillTimePredictor;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.Iterator;
-import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.NoSuchElementException;
 import java.util.PriorityQueue;
 
 /** Pure frozen-snapshot TTFT projection shared by endpoint selection policies. */
@@ -26,20 +26,9 @@ final class RouteTimelineProjector {
     private long seqLen;
     private long hitCache;
     private long routingCacheMatchTokens;
-    private RouteProjection.Demand demand;
-    private long pendingRequestCount;
     private final ProjectedCandidate result = new ProjectedCandidate();
 
     RouteTimelineProjector() {
-    }
-
-    void reset(
-            RouteProjection.Probe incoming,
-            long pendingRequestCount) {
-        reset(incoming.requestId(), incoming.priority(), incoming.enqueuedAtMs(),
-                incoming.expiresAtMs(), incoming.seqLen(), incoming.hitCache(),
-                incoming.routingCacheMatchTokens(), incoming.demand(),
-                pendingRequestCount);
     }
 
     void reset(
@@ -49,9 +38,7 @@ final class RouteTimelineProjector {
             long expiresAtMs,
             long seqLen,
             long hitCache,
-            long routingCacheMatchTokens,
-            RouteProjection.Demand demand,
-            long pendingRequestCount) {
+            long routingCacheMatchTokens) {
         this.requestId = requestId;
         this.priority = priority;
         this.enqueuedAtMs = enqueuedAtMs;
@@ -59,8 +46,6 @@ final class RouteTimelineProjector {
         this.seqLen = seqLen;
         this.hitCache = hitCache;
         this.routingCacheMatchTokens = routingCacheMatchTokens;
-        this.demand = demand;
-        this.pendingRequestCount = pendingRequestCount;
     }
 
     /**
@@ -155,9 +140,6 @@ final class RouteTimelineProjector {
             return candidate(
                     RouteProjection.Candidate.State.MODELED,
                     completionMs,
-                    demand.drainRequired()
-                            ? completionMs
-                            : RouteProjection.Candidate.UNKNOWN,
                     incomingPrefillMs,
                     RouteProjection.Candidate.InitialHeadDisposition.NONE,
                     "SERIAL_FROZEN_DIRECT");
@@ -198,11 +180,7 @@ final class RouteTimelineProjector {
             initialHeadDisposition = ordered.initialHeadDisposition();
         }
         long cursorMs = committedMs;
-        long probeCompletionMs = -1L;
-        boolean probeSeen = false;
-        boolean drainKnown = true;
         long decisionNowMs = projectionAtMs;
-        String drainDetail = "SERIAL_FROZEN_QUEUE";
 
         while (!ordered.isEmpty()) {
             ExpirationPrune expiration = ordered.pruneExpired(decisionNowMs);
@@ -218,44 +196,27 @@ final class RouteTimelineProjector {
             }
 
             GroupPlanner.Item head = ordered.head();
-            GroupPlanner.Shape headShape =
-                    GroupPlanner.Shape.empty().add(head.seqLen());
-            if (!headShape.fitsKv(queue.constraints().batchKvCapacity())) {
-                if (probeSeen) {
-                    drainDetail = "DRAIN_BLOCKED_PREFILL_KV_CAPACITY";
-                    drainKnown = false;
-                    break;
-                }
+            if (head.seqLen() > queue.constraints().batchKvCapacity()) {
                 return blocked(
                         incomingPrefillMs,
                         initialHeadDisposition,
                         "PREFILL_KV_CAPACITY");
             }
 
+            int probePosition = ordered.probePosition();
             final GroupPlanner.Plan<GroupPlanner.Item> plan;
+            final RouteProjection.GroupPlanning planning;
             try {
-                RouteProjection.GroupPlanning planning =
-                        deliveryProjection.planning(predictions);
+                planning = queue.constraints().predictedExecutionBudgetMs() > 0L
+                        ? deliveryProjection.planning(predictions) : null;
                 plan = GroupPlanner.plan(
-                        ordered.items(),
+                        ordered,
                         GroupPlanner.itemAccess(),
                         queue.constraints(),
                         decisionNowMs,
-                        items -> {
-                            int projectedProbeIndex =
-                                    identityIndexOf(items, probe);
-                            int requiredThroughIndex = projectedProbeIndex >= 0
-                                    ? projectedProbeIndex
-                                    : items.size() - 1;
-                            return planning.durationMs(
-                                    items, requiredThroughIndex);
-                        });
+                        planning == null ? null : items -> planning.durationMs(
+                                items, Math.min(probePosition, items.size() - 1)));
             } catch (PredictionFailure predictionFailure) {
-                if (probeSeen) {
-                    drainDetail = "DRAIN_PREDICTION_UNAVAILABLE";
-                    drainKnown = false;
-                    break;
-                }
                 return unavailable(
                         predictionFailure.detail("BATCH_PREDICTION_FAILED"));
             }
@@ -278,57 +239,26 @@ final class RouteTimelineProjector {
             long readyInMs = elapsedFromNow(projectionAtMs, decisionNowMs);
             long startMs = Math.max(cursorMs, readyInMs);
 
-            int probeIndex = identityIndexOf(plan.items(), probe);
-            boolean containsProbe = probeIndex >= 0;
             try {
                 RouteProjection.GroupService service =
-                        deliveryProjection.service(plan, predictions);
-                if (containsProbe) {
-                    probeCompletionMs = saturatedAdd(
-                            startMs, service.completionOffsetMs(probeIndex));
-                    // A suffix prediction failure affects drain only after
-                    // this exact completion offset has been established.
-                    probeSeen = true;
+                        deliveryProjection.service(plan, predictions, planning);
+                if (probePosition < plan.items().size()) {
+                    return candidate(
+                            RouteProjection.Candidate.State.MODELED,
+                            saturatedAdd(startMs, service.completionOffsetMs(probePosition)),
+                            incomingPrefillMs,
+                            initialHeadDisposition,
+                            "SERIAL_FROZEN_QUEUE");
                 }
-                if (!containsProbe || demand.drainRequired()) {
-                    cursorMs = saturatedAdd(
-                            startMs, service.totalDurationMs());
-                } else {
-                    cursorMs = probeCompletionMs;
-                }
+                cursorMs = saturatedAdd(startMs, service.totalDurationMs());
             } catch (PredictionFailure predictionFailure) {
-                if (probeSeen) {
-                    drainDetail = "DRAIN_PREDICTION_UNAVAILABLE";
-                    drainKnown = false;
-                    break;
-                }
                 return unavailable(
                         predictionFailure.detail("SERVICE_PREDICTION_FAILED"));
             }
-
-            if (containsProbe) {
-                probeSeen = true;
-            }
             ordered.removePlannedPrefix(plan.items().size());
-
-            if (probeSeen && !demand.drainRequired()) {
-                return modeledTtftOnly(
-                        probeCompletionMs, incomingPrefillMs,
-                        initialHeadDisposition);
-            }
         }
-
-        if (probeCompletionMs < 0L) {
-            throw new IllegalStateException(
-                    "projected queue exhausted before planning the probe");
-        }
-        return candidate(
-                RouteProjection.Candidate.State.MODELED,
-                probeCompletionMs,
-                drainKnown ? cursorMs : RouteProjection.Candidate.UNKNOWN,
-                incomingPrefillMs,
-                initialHeadDisposition,
-                drainDetail);
+        throw new IllegalStateException(
+                "projected queue exhausted before planning the probe");
     }
 
     private RouteProjection.CandidateView projectIdleSingleton(
@@ -349,25 +279,9 @@ final class RouteTimelineProjector {
         return candidate(
                 RouteProjection.Candidate.State.MODELED,
                 completionMs,
-                demand.drainRequired()
-                        ? completionMs
-                        : RouteProjection.Candidate.UNKNOWN,
                 incomingPrefillMs,
                 RouteProjection.Candidate.InitialHeadDisposition.NONE,
                 "EMPTY_ACTIVE_QUEUE_SINGLETON");
-    }
-
-    private RouteProjection.CandidateView modeledTtftOnly(
-            long probeCompletionMs,
-            long incomingPrefillMs,
-            RouteProjection.Candidate.InitialHeadDisposition initialHeadDisposition) {
-        return candidate(
-                RouteProjection.Candidate.State.MODELED,
-                probeCompletionMs,
-                RouteProjection.Candidate.UNKNOWN,
-                incomingPrefillMs,
-                initialHeadDisposition,
-                "SERIAL_FROZEN_QUEUE_TTFT_ONLY");
     }
 
     private static boolean containsCommittedRequest(
@@ -399,48 +313,35 @@ final class RouteTimelineProjector {
     private record ExpirationPrune(
             boolean probeExpired,
             boolean initialHeadExpired) {
-    }
-
-    private static int identityIndexOf(
-            List<GroupPlanner.Item> items,
-            GroupPlanner.Item target) {
-        for (int i = 0; i < items.size(); i++) {
-            if (items.get(i) == target) {
-                return i;
-            }
-        }
-        return -1;
+        private static final ExpirationPrune NONE = new ExpirationPrune(false, false);
     }
 
     /**
-     * Mutable projection-only view over one already ordered queue snapshot.
-     *
-     * <p>{@link LinkedHashSet} preserves scheduling order while supporting
-     * constant-time arbitrary expiry and prefix removal. The expiry heap lets a
-     * monotonically advancing decision clock visit each deadline once instead
-     * of rescanning every remaining item for every decision group.
+     * Ordered snapshot plus probe. Prefix consumption advances an index; expiry
+     * clears individual slots. Deadlines are indexed only when collection reaches
+     * the first expiry; ordinary projections need only the queue order.
      */
-    private static final class ProjectedQueue {
+    private static final class ProjectedQueue implements Iterable<GroupPlanner.Item> {
 
-        private static final Comparator<ProjectionNode> EXPIRY_ORDER =
-                Comparator.comparingLong(
-                                (ProjectionNode node) -> node.item.expiresAtMs())
-                        .thenComparingInt(node -> node.ordinal);
-
-        private final LinkedHashSet<ProjectionNode> live;
-        private final PriorityQueue<ProjectionNode> expiry;
-        private final ProjectionNode probeNode;
-        private final ProjectionNode initialHeadNode;
+        private final GroupPlanner.Item[] itemsInQueueOrder;
+        private final long earliestExpiryMs;
+        private PriorityQueue<Integer> expiryIndexes;
+        private final int probeIndex;
+        private final int initialHeadIndex;
+        private int headIndex;
+        // Number of live, unconsumed items before the probe; holes do not count.
+        private int itemsBeforeProbe;
 
         private ProjectedQueue(
-                List<ProjectionNode> orderedNodes,
-                ProjectionNode probeNode,
-                ProjectionNode initialHeadNode) {
-            this.live = new LinkedHashSet<>(orderedNodes);
-            this.expiry = new PriorityQueue<>(EXPIRY_ORDER);
-            this.expiry.addAll(orderedNodes);
-            this.probeNode = probeNode;
-            this.initialHeadNode = initialHeadNode;
+                GroupPlanner.Item[] itemsInQueueOrder,
+                int probeIndex,
+                int initialHeadIndex,
+                long earliestExpiryMs) {
+            this.itemsInQueueOrder = itemsInQueueOrder;
+            this.earliestExpiryMs = earliestExpiryMs;
+            this.probeIndex = probeIndex;
+            this.itemsBeforeProbe = probeIndex;
+            this.initialHeadIndex = initialHeadIndex;
         }
 
         private static ProjectedQueue create(
@@ -448,72 +349,74 @@ final class RouteTimelineProjector {
                 GroupPlanner.Item probe,
                 GroupPlanner.Item initialActiveHead,
                 Comparator<GroupPlanner.Item> order) {
-            List<ProjectionNode> orderedNodes = new ArrayList<>(
-                    eligibleActive.size() + 1);
-            ProjectionNode probeNode = null;
-            ProjectionNode initialHeadNode = null;
-            int ordinal = 0;
+            GroupPlanner.Item[] itemsInQueueOrder = new GroupPlanner.Item[eligibleActive.size() + 1];
+            int probeIndex = -1;
+            int initialHeadIndex = -1;
+            long earliestExpiryMs = probe.expiresAtMs();
+            int index = 0;
             for (GroupPlanner.Item item : eligibleActive) {
-                if (probeNode == null && order.compare(probe, item) < 0) {
-                    probeNode = new ProjectionNode(probe, ordinal++);
-                    orderedNodes.add(probeNode);
+                earliestExpiryMs = Math.min(earliestExpiryMs, item.expiresAtMs());
+                if (probeIndex < 0 && order.compare(probe, item) < 0) {
+                    probeIndex = index;
+                    itemsInQueueOrder[index++] = probe;
                 }
-                ProjectionNode node = new ProjectionNode(item, ordinal++);
-                orderedNodes.add(node);
                 if (item == initialActiveHead) {
-                    initialHeadNode = node;
+                    initialHeadIndex = index;
                 }
+                itemsInQueueOrder[index++] = item;
             }
-            if (probeNode == null) {
-                probeNode = new ProjectionNode(probe, ordinal);
-                orderedNodes.add(probeNode);
+            if (probeIndex < 0) {
+                probeIndex = index;
+                itemsInQueueOrder[index] = probe;
             }
-            return new ProjectedQueue(
-                    orderedNodes, probeNode, initialHeadNode);
+            return new ProjectedQueue(itemsInQueueOrder, probeIndex, initialHeadIndex, earliestExpiryMs);
+        }
+
+        private int probePosition() {
+            return itemsBeforeProbe;
         }
 
         private boolean isEmpty() {
-            return live.isEmpty();
+            return headIndex == itemsInQueueOrder.length;
         }
 
         private RouteProjection.Candidate.InitialHeadDisposition
                 initialHeadDisposition() {
-            if (initialHeadNode == null) {
+            if (initialHeadIndex < 0) {
                 return RouteProjection.Candidate.InitialHeadDisposition.TERMINAL_PRUNED;
             }
-            return initialHeadNode.ordinal < probeNode.ordinal
+            return initialHeadIndex < probeIndex
                     ? RouteProjection.Candidate.InitialHeadDisposition.BEFORE_PROBE
                     : RouteProjection.Candidate.InitialHeadDisposition.AFTER_PROBE;
         }
 
         private GroupPlanner.Item head() {
-            Iterator<ProjectionNode> iterator = live.iterator();
-            if (!iterator.hasNext()) {
+            if (isEmpty()) {
                 throw new IllegalStateException("projected queue is empty");
             }
-            return iterator.next().item;
+            return itemsInQueueOrder[headIndex];
         }
 
-        /**
-         * Lazy ordered view consumed directly by the shared planner. The
-         * planner stops at the first mode/capacity/prediction boundary, so a
-         * short feasible prefix never causes a long suffix to be copied and
-         * rescanned.
-         */
-        private Iterable<GroupPlanner.Item> items() {
-            return () -> {
-                Iterator<ProjectionNode> nodes = live.iterator();
-                return new Iterator<>() {
-                    @Override
-                    public boolean hasNext() {
-                        return nodes.hasNext();
-                    }
+        @Override
+        public Iterator<GroupPlanner.Item> iterator() {
+            return new Iterator<>() {
+                private int index = headIndex;
 
-                    @Override
-                    public GroupPlanner.Item next() {
-                        return nodes.next().item;
+                @Override
+                public boolean hasNext() {
+                    while (index < itemsInQueueOrder.length && itemsInQueueOrder[index] == null) {
+                        index++;
                     }
-                };
+                    return index < itemsInQueueOrder.length;
+                }
+
+                @Override
+                public GroupPlanner.Item next() {
+                    if (!hasNext()) {
+                        throw new NoSuchElementException();
+                    }
+                    return itemsInQueueOrder[index++];
+                }
             };
         }
 
@@ -522,50 +425,61 @@ final class RouteTimelineProjector {
                 throw new IllegalArgumentException(
                         "planned prefix must contain at least one item");
             }
-            Iterator<ProjectionNode> iterator = live.iterator();
             for (int removed = 0; removed < count; removed++) {
-                if (!iterator.hasNext()) {
+                if (isEmpty()) {
                     throw new IllegalStateException(
                             "planner selected beyond the projected queue prefix");
                 }
-                iterator.next();
-                iterator.remove();
+                if (headIndex < probeIndex) {
+                    itemsBeforeProbe--;
+                }
+                // Keep consumed items readable while their indexes remain in the expiry heap.
+                headIndex++;
+                while (headIndex < itemsInQueueOrder.length && itemsInQueueOrder[headIndex] == null) {
+                    headIndex++;
+                }
             }
         }
 
         private ExpirationPrune pruneExpired(long nowMs) {
+            if (expiryIndexes == null) {
+                if (nowMs < earliestExpiryMs) {
+                    return ExpirationPrune.NONE;
+                }
+                expiryIndexes = new PriorityQueue<>(itemsInQueueOrder.length - headIndex,
+                        Comparator.comparingLong((Integer index) -> itemsInQueueOrder[index].expiresAtMs())
+                                .thenComparingInt(Integer::intValue));
+                for (int index = headIndex; index < itemsInQueueOrder.length; index++) {
+                    expiryIndexes.add(index);
+                }
+            }
             boolean probeExpired = false;
             boolean initialHeadExpired = false;
-            while (!expiry.isEmpty()) {
-                ProjectionNode next = expiry.peek();
-                if (!expiredAt(next.item, nowMs)) {
+            while (!expiryIndexes.isEmpty()) {
+                int expiredIndex = expiryIndexes.peek();
+                if (!expiredAt(itemsInQueueOrder[expiredIndex], nowMs)) {
                     break;
                 }
-                expiry.remove();
-                if (!live.remove(next)) {
+                // Remove from the heap before clearing a slot used by its comparator.
+                expiryIndexes.remove();
+                if (expiredIndex < headIndex) {
                     continue;
                 }
-                if (next == probeNode) {
+                if (expiredIndex < probeIndex) {
+                    itemsBeforeProbe--;
+                }
+                itemsInQueueOrder[expiredIndex] = null;
+                if (expiredIndex == probeIndex) {
                     probeExpired = true;
                 }
-                if (next == initialHeadNode) {
+                if (expiredIndex == initialHeadIndex) {
                     initialHeadExpired = true;
                 }
             }
+            while (headIndex < itemsInQueueOrder.length && itemsInQueueOrder[headIndex] == null) {
+                headIndex++;
+            }
             return new ExpirationPrune(probeExpired, initialHeadExpired);
-        }
-    }
-
-    /** Identity node: default Object equality is required by the live set. */
-    private static final class ProjectionNode {
-        private final GroupPlanner.Item item;
-        private final int ordinal;
-
-        private ProjectionNode(
-                GroupPlanner.Item item,
-                int ordinal) {
-            this.item = item;
-            this.ordinal = ordinal;
         }
     }
 
@@ -577,7 +491,7 @@ final class RouteTimelineProjector {
         return candidate(
                 RouteProjection.Candidate.State.UNAVAILABLE,
                 RouteProjection.Candidate.UNKNOWN,
-                RouteProjection.Candidate.UNKNOWN, 0L,
+                0L,
                 RouteProjection.Candidate.InitialHeadDisposition.NONE, detail);
     }
 
@@ -586,7 +500,7 @@ final class RouteTimelineProjector {
         return candidate(
                 RouteProjection.Candidate.State.UNMODELED_ENGINE_WORK,
                 RouteProjection.Candidate.UNKNOWN,
-                RouteProjection.Candidate.UNKNOWN, incomingPrefillMs,
+                incomingPrefillMs,
                 RouteProjection.Candidate.InitialHeadDisposition.NONE,
                 "ENGINE_WORK_UNOBSERVABLE");
     }
@@ -598,26 +512,20 @@ final class RouteTimelineProjector {
         return candidate(
                 RouteProjection.Candidate.State.BLOCKED,
                 RouteProjection.Candidate.UNKNOWN,
-                RouteProjection.Candidate.UNKNOWN, incomingPrefillMs,
+                incomingPrefillMs,
                 initialHeadDisposition, detail);
     }
 
     private RouteProjection.CandidateView candidate(
             RouteProjection.Candidate.State state,
             long projectedTtftMs,
-            long projectedDrainMs,
             long incomingPrefillMs,
             RouteProjection.Candidate.InitialHeadDisposition headDisposition,
             String detail) {
-        boolean carriesPending = state == RouteProjection.Candidate.State.MODELED
-                || state == RouteProjection.Candidate.State.UNMODELED_ENGINE_WORK;
         result.reset(
-                state, projectedTtftMs, projectedDrainMs, incomingPrefillMs,
+                state, projectedTtftMs, incomingPrefillMs,
                 headDisposition, detail, null,
-                hitCache, routingCacheMatchTokens,
-                carriesPending
-                        ? pendingRequestCount
-                        : RouteProjection.Candidate.UNKNOWN);
+                hitCache, routingCacheMatchTokens);
         return result;
     }
 
@@ -626,36 +534,30 @@ final class RouteTimelineProjector {
             implements RouteProjection.CandidateView {
         private RouteProjection.Candidate.State state;
         private long projectedTtftMsValue;
-        private long projectedDrainMsValue;
         private long incomingPrefillMs;
         private RouteProjection.Candidate.InitialHeadDisposition headDisposition;
         private String detail;
         private org.flexlb.dao.route.RoleType blockerRole;
         private long cacheHitTokens;
         private long routingCacheMatchTokens;
-        private long pendingCountValue;
 
         private void reset(
                 RouteProjection.Candidate.State exactState,
                 long exactProjectedTtftMs,
-                long exactProjectedDrainMs,
                 long exactIncomingPrefillMs,
                 RouteProjection.Candidate.InitialHeadDisposition exactHeadDisposition,
                 String exactDetail,
                 org.flexlb.dao.route.RoleType exactBlockerRole,
                 long exactCacheHitTokens,
-                long exactRoutingCacheMatchTokens,
-                long exactPendingCount) {
+                long exactRoutingCacheMatchTokens) {
             state = exactState;
             projectedTtftMsValue = exactProjectedTtftMs;
-            projectedDrainMsValue = exactProjectedDrainMs;
             incomingPrefillMs = exactIncomingPrefillMs;
             headDisposition = exactHeadDisposition;
             detail = exactDetail;
             blockerRole = exactBlockerRole;
             cacheHitTokens = exactCacheHitTokens;
             routingCacheMatchTokens = exactRoutingCacheMatchTokens;
-            pendingCountValue = exactPendingCount;
         }
 
         @Override
@@ -666,11 +568,6 @@ final class RouteTimelineProjector {
         @Override
         public long projectedTtftMsValue() {
             return projectedTtftMsValue;
-        }
-
-        @Override
-        public long projectedDrainMsValue() {
-            return projectedDrainMsValue;
         }
 
         @Override
@@ -704,10 +601,6 @@ final class RouteTimelineProjector {
             return routingCacheMatchTokens;
         }
 
-        @Override
-        public long pendingCountValue() {
-            return pendingCountValue;
-        }
     }
 
     private static long saturatedAdd(long left, long right) {
@@ -790,7 +683,20 @@ final class RouteTimelineProjector {
         }
 
         @Override
-        public double singletonBatchPlanningDurationMs(
+        public PrefillTimePredictor.BatchPrediction newBatchPrediction() {
+            PrefillTimePredictor.BatchPrediction batch = evaluator.newBatchPrediction();
+            return (seqLen, hitCache) -> {
+                try {
+                    return PrefillPredictionBoundary.requireValidDecisionGroupMs(batch.append(seqLen, hitCache));
+                } catch (InvalidPrefillPredictionException invalidPrediction) {
+                    throw PredictionFailure.invalid(invalidPrediction);
+                } catch (RuntimeException predictionFailure) {
+                    throw PredictionFailure.execution(predictionFailure);
+                }
+            };
+        }
+
+        private double singletonBatchPlanningDurationMs(
                 long seqLen, long hitCache) {
             Object snapshot = evaluator.snapshotIdentity();
             if (cachedBatchSnapshot == snapshot
@@ -846,8 +752,7 @@ final class RouteTimelineProjector {
             return features;
         }
 
-        @Override
-        public long committedGroupDurationMs(double predictedMs) {
+        private long committedGroupDurationMs(double predictedMs) {
             try {
                 return PrefillPredictionBoundary.committedDecisionGroupMs(predictedMs);
             } catch (InvalidPrefillPredictionException invalidPrediction) {
@@ -864,10 +769,7 @@ final class RouteTimelineProjector {
         }
     }
 
-    /**
-     * Unified predictor failure signal. Call sites decide whether the failed
-     * prediction is still needed for probe TTFT or only for suffix drain.
-     */
+    /** Predictor failures preserve the distinction between execution and invalid values. */
     private static final class PredictionFailure extends RuntimeException {
         private final boolean invalidValue;
 

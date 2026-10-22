@@ -28,8 +28,23 @@ public interface PrefillTimePredictor {
         /** Estimate one request from its input and cache-hit token counts. */
         long estimateMs(long totalTokens, long hitTokens);
 
+        /** Fresh state for one append-only planning operation on this immutable model. */
+        default BatchPrediction newBatchPrediction() {
+            java.util.List<PrefillBatchFeatures.Item> items = new java.util.ArrayList<>();
+            return (seqLen, hitCache) -> {
+                items.add(new PrefillBatchFeatures.Item(seqLen, hitCache));
+                return predictBatchMs(new PrefillBatchFeatures(items));
+            };
+        }
+
         /** Estimate one payload-free batch. */
         double predictBatchMs(PrefillBatchFeatures features);
+    }
+
+    /** Not shared or reused after a membership/model change; result retains fractional milliseconds. */
+    @FunctionalInterface
+    interface BatchPrediction {
+        double append(long seqLen, long hitCache);
     }
 
     enum LearningResult {

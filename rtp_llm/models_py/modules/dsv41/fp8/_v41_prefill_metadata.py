@@ -1,0 +1,265 @@
+"""Device-only V4.1 prefill slot and scoring-bound metadata.
+
+Slots preserve the physical-owner/kernel-page distinction and STATE's
+intra-block ring slices. Prefill producers supply nonnegative positions
+and valid request IDs; invalid positions are skipped before table loads.
+"""
+
+from __future__ import annotations
+
+import torch
+import triton
+import triton.language as tl
+
+
+def _integer_vector(value, rows, device):
+    return (
+        value.device == device
+        and value.ndim == 1
+        and value.numel() == rows
+        and value.dtype in (torch.int32, torch.int64)
+        and value.stride(0) > 0
+    )
+
+
+@triton.jit(do_not_specialize=["ROWS", "BATCH", "PS", "LS", "RS"])
+def _chunk_metadata_kernel(
+    prefixes,
+    lengths,
+    requests,
+    output,
+    ROWS,
+    BATCH,
+    PS,
+    LS,
+    RS,
+    RATIO: tl.constexpr,
+    WINDOW: tl.constexpr,
+    REPLAY: tl.constexpr,
+):
+    index = tl.arange(0, 128)
+    prefix = tl.load(prefixes + index * PS, index < BATCH, other=0).to(tl.int64)
+    length = tl.load(lengths + index * LS, index < BATCH, other=0).to(tl.int64)
+    tail = tl.full((128,), 0, tl.int64) if REPLAY else tl.minimum(prefix, WINDOW - 1)
+    size = prefix + length
+    if RATIO == 2:
+        size = size >> 1
+    chunk = size + length + tail
+    offset = tl.cumsum(chunk) - chunk
+    row = tl.program_id(0) * 128 + index
+    request = tl.load(requests + row * RS, row < ROWS, other=0).to(tl.int64)
+    request = tl.where(request < 0, request + BATCH, request)
+    valid = (request >= 0) & (request < BATCH)
+    if tl.sum(((row < ROWS) & ~valid).to(tl.int32), 0) > 0:
+        tl.inline_asm_elementwise(
+            "trap; // dummy $0", "=r", [], dtype=tl.int32, is_pure=False, pack=1
+        )
+    request = tl.minimum(tl.maximum(request, 0), 127).to(tl.int32)
+    tl.store(output + row, tl.gather(offset, request, 0), row < ROWS)
+    tl.store(output + ROWS + row, tl.gather(size, request, 0), row < ROWS)
+    tl.store(output + 2 * ROWS + row, tl.gather(prefix - tail, request, 0), row < ROWS)
+
+
+def try_chunk_metadata(prefixes, lengths, requests, ratio, window, replay):
+    """Original long-arithmetic chunk offsets, counts and SWA starts in one launch."""
+    if not (
+        isinstance(prefixes, torch.Tensor)
+        and isinstance(lengths, torch.Tensor)
+        and isinstance(requests, torch.Tensor)
+        and prefixes.is_cuda
+        and torch.version.hip is None
+        and 2 <= prefixes.numel() <= 128
+        and _integer_vector(prefixes, prefixes.numel(), prefixes.device)
+        and _integer_vector(lengths, prefixes.numel(), prefixes.device)
+        and _integer_vector(requests, requests.numel(), prefixes.device)
+        and prefixes.dtype == lengths.dtype
+        and requests.dtype == torch.int64
+        and ratio in (1, 2)
+        and type(window) is int
+        and window > 0
+        and type(replay) is bool
+    ):
+        return None
+    rows = requests.numel()
+    output = torch.empty((3, rows, 1), dtype=torch.int64, device=prefixes.device)
+    if rows:
+        _chunk_metadata_kernel[(triton.cdiv(rows, 128),)](
+            prefixes,
+            lengths,
+            requests,
+            output,
+            rows,
+            prefixes.numel(),
+            prefixes.stride(0),
+            lengths.stride(0),
+            requests.stride(0),
+            ratio,
+            window,
+            replay,
+            num_warps=4,
+        )
+    return output.unbind(0)
+
+
+@triton.jit(do_not_specialize=["ROWS", "REQUESTS", "COLS", "TABLE_STRIDE"])
+def _prefill_slots_kernel(
+    positions,
+    requests,
+    table,
+    seq_ends,
+    out,
+    ROWS,
+    REQUESTS,
+    COLS,
+    POS_STRIDE: tl.constexpr,
+    REQ_STRIDE: tl.constexpr,
+    TABLE_STRIDE,
+    END_STRIDE: tl.constexpr,
+    EB: tl.constexpr,
+    TPB: tl.constexpr,
+    OWNER_TPB: tl.constexpr,
+    RATIO: tl.constexpr,
+    CP: tl.constexpr,
+    RANK: tl.constexpr,
+    STATE: tl.constexpr,
+    HAS_ENDS: tl.constexpr,
+    TILE: tl.constexpr,
+):
+    row = tl.program_id(0) * TILE + tl.arange(0, TILE)
+    pos = tl.load(positions + row * POS_STRIDE, row < ROWS, other=0).to(tl.int64)
+    req = tl.load(requests + row * REQ_STRIDE, row < ROWS, other=0).to(tl.int64)
+    valid = (row < ROWS) & (pos >= 0) & (req >= 0) & (req < REQUESTS)
+    pos = tl.maximum(pos, 0)
+    if STATE:
+        raw_column = pos // TPB
+        column = raw_column % COLS
+        offset = pos % (EB * CP)
+        valid &= offset // EB == RANK
+        offset %= EB
+        if HAS_ENDS:
+            seq_end = tl.load(seq_ends + req * END_STRIDE, valid, other=0).to(tl.int64)
+            effective_end = tl.minimum((raw_column + 1) * TPB, seq_end)
+            valid &= pos + EB * CP >= effective_end
+    else:
+        owner_block = pos // OWNER_TPB
+        column = owner_block // CP * (OWNER_TPB // TPB) + pos % OWNER_TPB // TPB
+        offset = pos % TPB // RATIO
+        valid &= (owner_block % CP == RANK) & (column < COLS)
+        valid &= (pos + 1) % RATIO == 0
+    block = tl.load(table + req * TABLE_STRIDE + column, valid, other=0).to(tl.int64)
+    slot = tl.where(valid & (block > 0), block * EB + offset, -1)
+    tl.store(out + row, slot, row < ROWS)
+
+
+def try_slot_mapping(
+    positions,
+    requests,
+    table,
+    entries_per_block,
+    tokens_per_block,
+    ratio,
+    cp_size=1,
+    cp_rank=0,
+    *,
+    owner_tokens_per_block=None,
+    state=False,
+    seq_ends=None,
+):
+    """Return int64 slots, or None before launch for unsupported metadata."""
+    if not (
+        positions.is_cuda
+        and torch.version.hip is None
+        and positions.ndim == 1
+        and positions.numel() > 0
+        and _integer_vector(positions, positions.numel(), positions.device)
+        and _integer_vector(requests, positions.numel(), positions.device)
+        and table.device == positions.device
+        and table.ndim == 2
+        and table.dtype in (torch.int32, torch.int64)
+        and table.shape[0] > 0
+        and table.shape[1] > 0
+        and table.stride(1) == 1
+        and table.stride(0) >= table.shape[1]
+        and entries_per_block > 0
+        and tokens_per_block > 0
+        and ratio in (1, 2)
+        and cp_size > 0
+        and 0 <= cp_rank < cp_size
+    ):
+        return None
+    owner_tpb = owner_tokens_per_block or tokens_per_block
+    if owner_tpb <= 0 or (not state and owner_tpb % tokens_per_block):
+        return None
+    if seq_ends is not None and not _integer_vector(
+        seq_ends, table.shape[0], positions.device
+    ):
+        return None
+    out = torch.empty(positions.shape, dtype=torch.int64, device=positions.device)
+    _prefill_slots_kernel[(triton.cdiv(positions.numel(), 256),)](
+        positions,
+        requests,
+        table,
+        seq_ends if seq_ends is not None else positions,
+        out,
+        positions.numel(),
+        table.shape[0],
+        table.shape[1],
+        positions.stride(0),
+        requests.stride(0),
+        table.stride(0),
+        seq_ends.stride(0) if seq_ends is not None else 1,
+        entries_per_block,
+        tokens_per_block,
+        owner_tpb,
+        ratio,
+        cp_size,
+        cp_rank,
+        state,
+        seq_ends is not None,
+        256,
+    )
+    return out
+
+
+@triton.jit(do_not_specialize=["ROWS", "WIDTH"])
+def _prefill_bounds_kernel(
+    positions,
+    bounds,
+    ROWS,
+    STRIDE: tl.constexpr,
+    WIDTH,
+    RATIO: tl.constexpr,
+    TILE: tl.constexpr,
+):
+    row = tl.program_id(0) * TILE + tl.arange(0, TILE)
+    pos = tl.load(positions + row * STRIDE, row < ROWS, other=-1).to(tl.int64)
+    length = tl.minimum(tl.maximum(pos + 1, 0) // RATIO, WIDTH).to(tl.int32)
+    tl.store(bounds + row, 0, row < ROWS)
+    tl.store(bounds + ROWS + row, length, row < ROWS)
+
+
+def try_score_bounds(positions, width, ratio):
+    """Build reusable int32 starts/ends directly from device positions."""
+    if not (
+        positions.is_cuda
+        and torch.version.hip is None
+        and positions.ndim == 1
+        and positions.numel() > 0
+        and _integer_vector(positions, positions.numel(), positions.device)
+        and 0 < width < 2**31
+        and ratio in (1, 2)
+    ):
+        return None
+    bounds = torch.empty(
+        (2, positions.numel()), dtype=torch.int32, device=positions.device
+    )
+    _prefill_bounds_kernel[(triton.cdiv(positions.numel(), 256),)](
+        positions,
+        bounds,
+        positions.numel(),
+        positions.stride(0),
+        width,
+        ratio,
+        256,
+    )
+    return bounds.unbind(0)

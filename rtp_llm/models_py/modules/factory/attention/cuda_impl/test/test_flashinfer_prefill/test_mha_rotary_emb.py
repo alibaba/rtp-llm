@@ -2,12 +2,10 @@
 
 import math
 import unittest
-from types import SimpleNamespace
-from typing import Tuple
 
 import pytest
-
-pytestmark = [pytest.mark.gpu(type="H20")]
+from types import SimpleNamespace
+from typing import Tuple
 
 import torch
 from flashinfer import get_batch_indices_positions, get_seq_lens
@@ -29,6 +27,9 @@ from rtp_llm.ops.compute_ops import (
     get_typemeta,
     init_exec_ctx,
 )
+
+
+pytestmark = [pytest.mark.gpu(type="H20")]
 
 
 class RopeParams:
@@ -169,6 +170,7 @@ def apply_rope_reference(
     return q_rope, k_rope
 
 
+@unittest.skipUnless(torch.cuda.is_available(), "CUDA required")
 class TestPartialMrope(unittest.TestCase):
     def test_scalar_positions_preserve_non_rotary_dimensions(self):
         # Qwen3.5 uses 64 rotary dimensions within each 256-dimensional head.

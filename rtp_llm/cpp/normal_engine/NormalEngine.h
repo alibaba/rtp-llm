@@ -1,6 +1,7 @@
 #pragma once
 
 #include <atomic>
+#include <functional>
 #include <memory>
 #include "absl/status/status.h"
 #include "kmonitor/client/MetricsReporter.h"
@@ -47,6 +48,8 @@ public:
 
 private:
     void                            initScheduler();
+    std::shared_ptr<GenerateStream> createStream(const std::shared_ptr<GenerateInput>& input);
+    bool                            validateStreamForScheduling(const GenerateStreamPtr& stream) const;
     std::shared_ptr<GenerateStream> createMinFakeStream(int32_t max_new_tokens);
     WarmUpResult                    warmUp(const EngineInitParams& params);
     WarmUpResult                    prefillWarmUp(const EngineInitParams& params);
@@ -54,14 +57,21 @@ private:
     void                            initLoadBalance();
     absl::Status                    trySaveStepError() const;
     void                            loop();
+    void                            normalizeSystemPromptCacheConfig();
     void                            initCacheManager(std::optional<WarmUpResult> warm_up_result);
+    static void                     initializeAndPublishCacheManager(ResourceContext&                            resource_context,
+                                                                     int&                                        kv_cache_group_num,
+                                                                     RoleType                                    role_type,
+                                                                     std::shared_ptr<KVCacheManager>             cache_manager,
+                                                                     const std::function<bool(KVCacheManager&)>& initializer);
     absl::Status                    initSystemPrompt();
     std::shared_ptr<GenerateInput>  makeFakeInput(size_t seq_len);
     size_t                          getWarmUpInputLength() const;
-    static size_t                   warmUpReservedBlockCount(size_t seq_len,
-                                                            size_t reserve_tokens,
-                                                            size_t tokens_per_block);
-    void                            mayAddFakeStream(std::list<GenerateStreamPtr>& streams);
+    static size_t                   reserveStepForStream(size_t configured_reserve_step, bool is_prefill_only);
+    static size_t warmUpReservedBlockCount(size_t seq_len, size_t reserve_tokens, size_t tokens_per_block);
+    static bool   shouldEarlyReturnEmptyBatch(bool streams_empty, int64_t tp_size, bool enable_ffn_disaggregate);
+    static bool   shouldAddMtpFakePrefill(bool has_prefill, bool use_batch_decode_scheduler, int64_t dp_size);
+    void          mayAddFakeStream(std::list<GenerateStreamPtr>& streams);
 
     void initExecutor(const EngineInitParams& params, std::unique_ptr<ProposeModelEngineInitParams>& propose_params);
 
@@ -74,6 +84,7 @@ private:
     std::atomic<bool>                             running_{false};
     std::unique_ptr<Executor>                     executor_;
     ModelConfig                                   model_config_;
+    py::object                                    custom_output_selector_;
     ParallelismConfig                             parallelism_config;
     RuntimeConfig                                 runtime_config;
     EPLBConfig                                    eplb_config;

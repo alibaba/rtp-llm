@@ -18,6 +18,8 @@ void top_k_renorm_probs(torch::Tensor                probs,
                         int64_t                      top_k_val,
                         uintptr_t                    stream = 0);
 
+// Sampling rejects rows with non-finite/negative entries or no positive mass.
+// Failed rows return token -1 and, when requested, success=false.
 void top_p_sampling_from_probs(torch::Tensor                probs,
                                torch::Tensor                output,
                                std::optional<torch::Tensor> maybe_indices,
@@ -26,7 +28,8 @@ void top_p_sampling_from_probs(torch::Tensor                probs,
                                bool                         deterministic,
                                torch::Tensor                philox_seed,
                                torch::Tensor                philox_offset,
-                               uintptr_t                    stream = 0);
+                               uintptr_t                    stream  = 0,
+                               std::optional<torch::Tensor> success = std::nullopt);
 void top_k_sampling_from_probs(torch::Tensor                probs,
                                torch::Tensor                output,
                                std::optional<torch::Tensor> maybe_indices,
@@ -35,7 +38,8 @@ void top_k_sampling_from_probs(torch::Tensor                probs,
                                bool                         deterministic,
                                torch::Tensor                philox_seed,
                                torch::Tensor                philox_offset,
-                               uintptr_t                    stream = 0);
+                               uintptr_t                    stream  = 0,
+                               std::optional<torch::Tensor> success = std::nullopt);
 void top_k_top_p_sampling_from_probs(torch::Tensor                probs,
                                      torch::Tensor                output,
                                      std::optional<torch::Tensor> maybe_indices,
@@ -46,5 +50,12 @@ void top_k_top_p_sampling_from_probs(torch::Tensor                probs,
                                      bool                         deterministic,
                                      torch::Tensor                philox_seed,
                                      torch::Tensor                philox_offset,
-                                     uintptr_t                    stream = 0);
+                                     uintptr_t                    stream  = 0,
+                                     std::optional<torch::Tensor> success = std::nullopt);
+
+void finalize_sampling_probs(torch::Tensor                probs,
+                             torch::Tensor                samples,
+                             torch::Tensor                success,
+                             std::optional<torch::Tensor> log_probs,
+                             uintptr_t                    stream = 0);
 }  // namespace rtp_llm

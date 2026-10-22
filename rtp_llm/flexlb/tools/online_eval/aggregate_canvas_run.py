@@ -47,7 +47,7 @@ confirmed_running — summed from the G3 prometheus gauges), inflight_age_ts /
 kv_ts / batcher_ts / dispatch_reason_ts (G3 master prometheus; the reason series is
 per-second dispatch rate derived from the dispatch_reason_total counters).
 cancel_qps_ts additionally carries master/prefill/decode cancel split rates
-(census unknown/finished/tombstone diff for the master side; per-engine
+(census unknown/finished/terminal record diff for the master side; per-engine
 cancelled_rids matched against master terminal lines for prefill/decode).
 All series are rebased to the first
 per-request send time (negative t = pre-send warmup).
@@ -1012,7 +1012,7 @@ if not _stats_anchor:
 
 # ---- cancel 按角色拆分（master / prefill / decode 三条速率线） --------
 # cancel_rpcs 的完备分解是 census 四项（mock 集群累计计数）：
-#   * unknown / finished / tombstone：cancel RPC 到达引擎时引擎已无该请求
+#   * unknown / finished / terminal record：cancel RPC 到达引擎时引擎已无该请求
 #     的活跃条目（从未认识 / 已终态 / 优先级抢占墓碑重复）——这些取消
 #     由 master 调度层发起（queueTimeout/deadline 到期、decode endpoint
 #     generation retired 批量取消等，请求未到引擎或已离开）→ 归 master
@@ -1096,7 +1096,7 @@ for kv in mock_stats:
         master_cancel_cum = (
             int(float(kv.get("cancel_census_unknown", 0) or 0))
             + int(float(kv.get("cancel_census_finished", 0) or 0))
-            + int(float(kv.get("cancel_census_tombstone", 0) or 0))
+            + int(float(kv.get("cancel_census_already_cancelled", 0) or 0))
         )
     except (TypeError, ValueError):
         continue

@@ -31,6 +31,7 @@ from setuptools import setup as setuptools_setup
 from setuptools.command.build_ext import build_ext
 from setuptools.command.build_py import build_py
 from setuptools.command.sdist import sdist
+from setuptools.command.egg_info import FileList
 
 # Force line-buffered stdout so prints appear in real-time in CI (no TTY)
 if hasattr(sys.stdout, "reconfigure"):
@@ -1275,6 +1276,40 @@ def stage_bazel_outputs(
     print(f"  Copied {copied_count} staged Bazel output(s)")
 
 
+def copy_staged_outputs_to_build_lib(
+    project_root: Path, build_lib: Path, staged_outputs: list
+) -> None:
+    """Copy fresh publishable outputs, keeping test-only outputs out of wheels."""
+    if project_root.resolve() == build_lib.resolve():
+        raise ValueError("wheel build_lib must be separate from the source tree")
+    files = []
+    for kind, target, output_specs in staged_outputs:
+        for output_spec in output_specs:
+            _, relative = _normalize_staged_output(output_spec)
+            # Preserve the existing libs/test/* wheel exclusion. Test outputs
+            # remain fully built and staged in the source for remote sessions.
+            if kind == _STAGED_OUTPUT_TEST or (
+                kind != _STAGED_OUTPUT_PYTHON and Path(relative).parts[0] == "test"
+            ):
+                continue
+            relative = Path("rtp_llm") / (
+                Path(relative) if kind == _STAGED_OUTPUT_PYTHON else Path("libs") / relative
+            )
+            source = project_root / relative
+            if not source.is_file():
+                raise RuntimeError(f"Missing staged wheel output for {target}: {source}")
+            files.append((source, build_lib / relative))
+
+    # build_py may have copied an older build's libraries before build_ext ran.
+    # Never let those extra files leak into a wheel for the new target selection.
+    libs = build_lib / "rtp_llm" / "libs"
+    if libs.exists():
+        shutil.rmtree(libs)
+    for source, destination in files:
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source, destination)
+
+
 def _pybind_stubgen_preload(module: str) -> str:
     """Return the production load path required before introspecting a module."""
     if module == "libth_transformer":
@@ -1344,7 +1379,9 @@ def generate_pyi_stubs(project_root: Path) -> None:
                     "import rtp_llm.ops, runpy, sys; "
                     f"{preload}"
                     f"sys.argv = ['pybind11_stubgen', {module!r}, '-o', {str(ops_dir)!r}]; "
-                    "runpy.run_module('pybind11_stubgen', run_name='__main__')",
+                    "runpy.run_module('pybind11_stubgen', run_name='__main__'); "
+                    "from _build.stubgen import validate_generated_stub; "
+                    f"validate_generated_stub({str(ops_dir / (module + '.pyi'))!r}, {module!r})",
                 ],
                 cwd=str(project_root),
                 env=stubgen_env,
@@ -1476,6 +1513,12 @@ class BuildBazelExtension(build_ext):
         for ext in self.extensions:
             if isinstance(ext, BazelExtension):
                 ext.build()
+                if not self.inplace and not should_skip_bazel_build():
+                    copy_staged_outputs_to_build_lib(
+                        get_project_root(),
+                        Path(self.build_lib),
+                        _selected_bazel_staged_outputs(detect_build_config()),
+                    )
         non_bazel = [e for e in self.extensions if not isinstance(e, BazelExtension)]
         if non_bazel:
             orig = self.extensions
@@ -1870,6 +1913,12 @@ class BuildPyWithProto(build_py):
 
     def run(self):
         ensure_proto_files_generated(get_project_root())
+        if self.distribution.has_ext_modules():
+            self.run_command("build_ext")
+            # Metadata preparation may have captured an older Native build.
+            self.__dict__.pop("data_files", None)
+            if self.distribution.have_run.get("egg_info"):
+                self.get_finalized_command("egg_info").find_sources()
         super().run()
 
 
@@ -1879,6 +1928,24 @@ class SdistWithProto(sdist):
     def run(self):
         ensure_proto_files_generated(get_project_root())
         super().run()
+
+    def _source_files(self, files):
+        # Keep Bazel's source closure out of egg_info's wheel package-data list.
+        # Standard sdist invokes this from the project root, after proto generation.
+        filelist = FileList()
+        filelist.extend(os.path.normpath(path) for path in files)
+        filelist.findall()
+        manifest = get_project_root() / "_build" / "sdist_sources.txt"
+        for line in manifest.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if line and not line.startswith("#"):
+                filelist.process_template_line(line)
+        filelist.sort()
+        filelist.remove_duplicates()
+        return filelist.files
+
+    def make_release_tree(self, base_dir, files):
+        super().make_release_tree(base_dir, self._source_files(files))
 
 
 cmdclass["build_py"] = BuildPyWithProto

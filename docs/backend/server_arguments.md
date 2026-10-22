@@ -109,7 +109,6 @@ The following legacy options and environment variables were removed and must no 
 | Arguments | Description | Defaults |
 |-----------|-------------|----------|
 | `--max-batch-size` | Override system maximum batch size. | 0 |
-| `--enable-flashinfer-sample-kernel` | Enables FlashInfer sampling kernel. | True |
 
 ## Logging & Profiling
 

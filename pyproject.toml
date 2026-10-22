@@ -11,7 +11,8 @@ requires = [
     "protobuf==4.25",
     "tomli; python_version < '3.11'",
 ]
-build-backend = "setuptools.build_meta"
+build-backend = "_build.backend"
+backend-path = ["."]
 
 [project]
 name = "rtp-llm"
@@ -77,7 +78,7 @@ package-dir = {"" = "."}
 # tests would produce installed wheels whose pytest plugins fail at startup.
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["rtp_llm", "rtp_llm.*"]
+include = ["rtp_llm", "rtp_llm.*", "_build"]
 
 # ``dependencies`` is dynamic but no source is declared here: setuptools accepts
 # ``install_requires=`` from setup.py for any field marked dynamic in [project]
@@ -107,6 +108,8 @@ rtp_llm = [
     "test/**/*.yml",
     "test/**/*.sh",
     "test/**/*.jinja",
+    "test/model_test/fake_test/testdata/qwen_7b/tokenizer/qwen.tiktoken",
+    "test/model_test/fake_test/testdata/llama/fake/hf_source/tokenizer.model",
     "dash_sc/test/**/*.json",
     # Multimodal tests live under rtp_llm/multimodal/test (a pytest testpath) and load fixtures
     # such as testdata/qwen2_vl/1.jpg + preprocessor_config.json; ship them so installed-wheel

@@ -25,79 +25,103 @@ Set **`--model_type`** explicitly for grid mode (and whenever `model_type` canno
 
 `batch_size` is the batch on **each** DP rank when `dp_size` > 1.
 
-### Pytest entrypoints
+### Bazel targets (manual)
 
-CI performance tests run through pytest profile `perf_sm9x`, backed by
-`rtp_llm/test/remote_tests/test_perf_remote.py` and
-`internal_source/rtp_llm/test/perf_test/perf_defs.py`.
+Repository defaults (see `rtp_llm/test/perf_test/BUILD`):
 
-For local/manual experiments, the Python entrypoint accepts model, workload,
-engine, repetition, and output settings independently.
+- **`//rtp_llm/test/perf_test:grid_perf_test`** — grid example with `qwen35_moe`, small `batch_size` / `input_len`, decode-only (`--partial 1`), `seq_size_per_block=1024`.
+- **`//rtp_llm/test/perf_test:distribution_perf_test`** — distribution sampling with ShareGPT (`--dataset_name sharegpt`), tunable `max_seq_len` / `concurrency_limit`.
+- **`//rtp_llm/test/perf_test:model_perf_test`** — model-agnostic entrypoint with no baked-in checkpoint or topology. Use this target for a new model; supply all model and engine values at invocation time.
+
+#### Reusable model target
+
+`model_perf_test` exposes model, workload, engine, repetition, and output
+settings independently:
 
 | Group | Interface | Meaning |
 | --- | --- | --- |
-| Model | `--model_type`, `--checkpoint_path`, `--tokenizer_path` | Model implementation and local/Hub paths. |
-| Workload | `--batch_size=1,2,4`, `--input_len=1024,4096`, `--partial=2` | Grid shape and phase (0 both, 1 decode, 2 prefill). |
-| Engine | `--engine_arg=NAME=VALUE` | Repeatable engine option. |
-| Environment | `--engine_env=NAME=VALUE` | Repeatable default; an existing environment value wins. |
-| Repetitions | `--warmup_runs=1`, `--measure_runs=3`, `--profile_runs=0` | Warmup, measurement, and profiling counts per case. |
-| Output | `--result_dir=/path/to/results` | Directory for results and diagnostics. |
+| Model | `--test_arg=--model_type=...`, `--test_arg=--checkpoint_path=...`, `--test_arg=--tokenizer_path=...` | Model implementation and local/Hub paths. |
+| Workload | `--test_arg=--batch_size=1,2,4`, `--test_arg=--input_len=1024,4096`, `--test_arg=--partial=2` | Grid shape and phase (`0` both, `1` decode, `2` prefill). |
+| Engine | `--test_arg=--engine_arg=NAME=VALUE` | Any engine flag, repeatable; e.g. `tp_size=8`, `ep_size=8`, `fp8_kv_cache=1`. |
+| Engine environment | `--test_arg=--engine_env=NAME=VALUE` | Repeatable environment default. An explicit Bazel `--test_env` value wins. |
+| Repetitions | `--test_arg=--warmup_runs=1`, `--test_arg=--measure_runs=3`, `--test_arg=--profile_runs=0` | Per-case warmup, measurement, and optional profiling runs. |
+| Output | `--test_arg=--result_dir=...` | Defaults to Bazel's `TEST_UNDECLARED_OUTPUTS_DIR`. |
 
-For example:
+Example for a new prefill model:
 
 ```shell
-python -m rtp_llm.test.perf_test.batch_decode_test \
-    --model_type=deepseek_v4 \
-    --checkpoint_path=/models/DeepSeek-V4 \
-    --tokenizer_path=/models/DeepSeek-V4 \
-    --batch_size=1,2,4,8 \
-    --input_len=1024,4096,16384,65536 \
-    --partial=2 --decode_test_length=1 \
-    --engine_arg=tp_size=8 --engine_arg=ep_size=8 \
-    --engine_arg=world_size=8 --engine_arg=fp8_kv_cache=1 \
-    --engine_arg=load_method=fastsafetensors \
-    --warmup_runs=1 --measure_runs=3 --profile_runs=0 \
-    --result_dir=/tmp/rtp-perf-results
+bazelisk test //rtp_llm/test/perf_test:model_perf_test \
+    --config=cuda13 \
+    --test_arg=--model_type=deepseek_v4 \
+    --test_arg=--checkpoint_path=/models/DeepSeek-V4 \
+    --test_arg=--tokenizer_path=/models/DeepSeek-V4 \
+    --test_arg=--batch_size=1,2,4,8 \
+    --test_arg=--input_len=1024,4096,16384,65536 \
+    --test_arg=--partial=2 \
+    --test_arg=--decode_test_length=1 \
+    --test_arg=--engine_arg=tp_size=8 \
+    --test_arg=--engine_arg=ep_size=8 \
+    --test_arg=--engine_arg=world_size=8 \
+    --test_arg=--engine_arg=fp8_kv_cache=1 \
+    --test_arg=--engine_arg=load_method=fastsafetensors \
+    --test_arg=--measure_runs=3 \
+    --test_arg=--profile_runs=0 \
+    --test_env=PERF_GRID_WARMUP_RUNS=1
 ```
 
-Engine arguments are forwarded as normal engine CLI options. Raw engine flags
-remain supported; specify each flag in only one form to avoid ambiguous values.
+`--engine_arg=NAME=VALUE` is forwarded as the normal engine CLI pair
+`--NAME VALUE`. Existing raw engine flags remain supported, so old targets do
+not change. Keep a given engine flag in one form in a command to avoid
+ambiguous duplicate values.
 
-Each run writes `test_info.json` (schema version 2), including model paths,
-workload, effective repetitions, redacted invocation, engine arguments and
-environment names. Its status changes from `running` to `completed` only after
-successful completion. Prefill and decode result files contain one record per
-batch-size/input-length point. Profiler output goes under `timelines/`.
+#### Output contract
 
-Startup or request failures return a nonzero exit code and retain diagnostics.
-The entrypoint does not infer model-specific topology; supply the required
-engine settings explicitly.
+Every run writes under the result directory:
 
-Additional local examples:
+* `test_info.json` (schema version 2): model paths/type, workload settings,
+  effective repetition counts, redacted invocation, forwarded engine
+  arguments, and engine environment variable names. Secret-like values are
+  not persisted. It is written once before server startup (`status=running`)
+  and again on successful completion (`status=completed`).
+* `Prefill_Result.json` and/or `Decode_Result.json`: one record per
+  batch-size/input-length point, with success rate, wait time, prefill/decode
+  timing, and `generate_config`.
+* Profiler JSON files, when enabled, are moved into `timelines/`.
+
+The test exits non-zero if server startup or requests fail while preserving
+the output directory for diagnosis. The generic target does not infer a
+model-specific topology: pass every required engine flag explicitly and keep
+`test_info.json` with the result.
+
+Example (SM90; adjust configs for your stack e.g. `cuda13`):
 
 ```shell
 # Grid: override sizes and run decode + prefill (partial=0) or decode-only
-python rtp_llm/test/perf_test/batch_decode_test.py \
-    --batch_size=1,2,4,8 \
-    --input_len=128,1024,2048 \
-    --partial=0
+bazelisk test //rtp_llm/test/perf_test:grid_perf_test \
+    --config=cuda13 \
+    --test_arg=--batch_size=1,2,4,8 \
+    --test_arg=--input_len=128,1024,2048 \
+    --test_arg=--partial=0
 
 # Grid: custom local checkpoint and model type
-python rtp_llm/test/perf_test/batch_decode_test.py \
-    --checkpoint_path=/path/to/local/ckpt \
-    --tokenizer_path=/path/to/local/tokenizer \
-    --model_type=qwen35_moe
+bazelisk test //rtp_llm/test/perf_test:grid_perf_test \
+    --config=cuda13 \
+    --test_arg=--checkpoint_path=/path/to/local/ckpt \
+    --test_arg=--tokenizer_path=/path/to/local/tokenizer \
+    --test_arg=--model_type=qwen35_moe
 
-# Distribution mode
-python rtp_llm/test/perf_test/batch_decode_test.py \
-    --dataset_name=sharegpt \
-    --model_type=qwen35_moe
+# Distribution mode (use distribution_perf_test or pass dataset flags via test_arg)
+bazelisk test //rtp_llm/test/perf_test:distribution_perf_test \
+    --config=cuda13 \
+    --test_arg=--model_type=qwen35_moe
 ```
 
 Optional environment for the engine, e.g. `INT8_MODE=1`:
 
 ```shell
-INT8_MODE=1 python rtp_llm/test/perf_test/batch_decode_test.py
+bazelisk test //rtp_llm/test/perf_test:grid_perf_test \
+    --config=cuda13 \
+    --test_env=INT8_MODE=1
 ```
 
 ### Prefill vs decode only
@@ -105,7 +129,9 @@ INT8_MODE=1 python rtp_llm/test/perf_test/batch_decode_test.py
 When prefill and decode need different engine configs, restrict phases with **`--partial`**: `0` = both (default), `1` = decode grid only, `2` = prefill only. Example decode-only:
 
 ```shell
-python rtp_llm/test/perf_test/batch_decode_test.py --partial=1
+bazelisk test //rtp_llm/test/perf_test:grid_perf_test \
+    --config=cuda13 \
+    --test_arg=--partial=1
 ```
 
 ## Multi Node Benchmark
@@ -145,7 +171,7 @@ build_config:
   # open_source_url: "git@github.com:alibaba/rtp-llm.git"
   open_source_ref: "origin/feature/yiyin_multi_benchmark"
   ft_sub_dir: "rtp_llm_perf_test"
-  bazel_build_args: '" --jobs 64 --verbose_failures --config=cuda12_6 "'
+  bazel_build_args: '" --jobs 64 --verbose_failures --config=cuda13 "'
 ```
 
 Fifth part is the common configuration shared across all benchmarks.

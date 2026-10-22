@@ -104,4 +104,25 @@ class WorkerOfflineTest extends FlexLBMockTestBase {
         assertEquals(1, mockPrefillWorker.getEnqueueCount(), "Unsent request must never reach the worker");
         assertEquals(0, mockDecodeWorker.getEnqueueCount());
     }
+    @Timeout(20)
+    void workerOffline_uncertainDispatchExpiresWithoutAuthoritativeStatus() throws Exception {
+        config.getRequestLifecycle().getRequest().setTimeoutMs(1_800L);
+        CompletableFuture<Response> first = submitRequest(20001);
+        Response acknowledged = first.get(5, TimeUnit.SECONDS);
+        assertTrue(acknowledged.isSuccess());
+        assertTrue(acknowledged.isEnqueuedByMaster());
+
+        mockPrefillWorker.stop();
+        Thread.sleep(500); // Let the gRPC channel process the worker's GOAWAY.
+
+        int existingBatches = getPrefillEndpoint().getInflightBatchCount();
+        Response rejected = submitRequest(20002).get(5, TimeUnit.SECONDS);
+        assertFalse(rejected.isSuccess());
+        assertEquals(StrategyErrorType.BATCH_DISPATCH_FAILED.getErrorCode(), rejected.getCode());
+        assertTrue(rejected.getErrorMessage() != null && !rejected.getErrorMessage().isEmpty());
+        assertEquals(existingBatches, getPrefillEndpoint().getInflightBatchCount());
+        assertEquals(1, mockPrefillWorker.getEnqueueCount());
+        assertEquals(0, mockDecodeWorker.getEnqueueCount());
+        assertTrue(first.join().isSuccess(), "cleanup does not replace an already published ACK");
+    }
 }

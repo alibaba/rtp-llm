@@ -19,6 +19,7 @@ public enum StrategyErrorType {
     NO_VIT_WORKER(8405, true),
     NO_FRONTEND_WORKER(8407, true),
     INVALID_REQUEST(8406, false),
+    VIT_ROUTE_STALE(8408, false),
 
     // queue error
     QUEUE_FULL(8502, false, "TooManyRequests"),
@@ -27,6 +28,8 @@ public enum StrategyErrorType {
 
     // batch dispatch error
     BATCH_DISPATCH_FAILED(8510, true),
+    // Current routing/dispatch identity; retain the legacy enum above separately.
+    DISPATCH_FAILED(8510, true),
     BATCH_SLO_EXPIRED(8511, false),
     BATCH_BUILD_FAILED(8512, false),
     // worker (decode engine) execution failure — non-retryable to prevent retry storms
@@ -39,6 +42,8 @@ public enum StrategyErrorType {
     // (VERSION_MISMATCH / eviction CONFLICT on every attempt, design doc 16.3).
     // Distinct from NO_AVAILABLE_WORKER, which still covers capacity shortage.
     SCHEDULER_PLAN_CONFLICT(8515, false),
+    // Returned only before scheduler admission; the same request may run on another node.
+    NOT_MASTER(8517, false),
     // Auto-TPM victim terminal: an already-admitted request was cancelled by
     // a strictly higher-priority admission attempt.
     PRIORITY_PREEMPTED(8429, false),
@@ -66,7 +71,8 @@ public enum StrategyErrorType {
 
     static {
         for (StrategyErrorType type : values()) {
-            ERROR_CODE_MAP.put(type.errorCode, type);
+            // Keep legacy numeric decoding when a new name shares an existing wire code.
+            ERROR_CODE_MAP.putIfAbsent(type.errorCode, type);
         }
     }
 
@@ -110,6 +116,15 @@ public enum StrategyErrorType {
      */
     public static StrategyErrorType fromErrorCode(int errorCode) {
         return ERROR_CODE_MAP.get(errorCode);
+    }
+
+    public boolean acceptsAdmissionRejectReason(AdmissionRejectReason reason) {
+        return switch (this) {
+            case PRIORITY_ADMISSION_REJECTED -> reason == AdmissionRejectReason.HIGHER_PRIORITY_AHEAD
+                    || reason == AdmissionRejectReason.SAME_PRIORITY_AHEAD;
+            case RESOURCE_EXHAUSTED -> reason == AdmissionRejectReason.RESOURCE_EXHAUSTED;
+            default -> reason == AdmissionRejectReason.UNSPECIFIED;
+        };
     }
 
     @Override

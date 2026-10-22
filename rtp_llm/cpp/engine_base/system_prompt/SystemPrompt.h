@@ -4,6 +4,7 @@
 #include <mutex>
 #include <optional>
 #include <string>
+#include <unordered_map>
 #include <vector>
 #include "rtp_llm/cpp/engine_base/stream/GenerateTypes.h"
 
@@ -11,11 +12,12 @@ namespace rtp_llm {
 
 struct SystemPromptParams {
     SystemPromptParams() {}
-    SystemPromptParams(const std::vector<int>& prompt_tokens, const std::vector<int>& block_ids):
-        prompt_tokens(prompt_tokens), block_ids(block_ids) {}
+    SystemPromptParams(const std::vector<int>&                                  prompt_tokens,
+                       const std::unordered_map<std::string, std::vector<int>>& group_block_ids):
+        prompt_tokens(prompt_tokens), group_block_ids(group_block_ids) {}
 
     std::vector<int> prompt_tokens;
-    std::vector<int> block_ids;
+    std::unordered_map<std::string, std::vector<int>> group_block_ids;
 };
 
 class SystemPrompt {

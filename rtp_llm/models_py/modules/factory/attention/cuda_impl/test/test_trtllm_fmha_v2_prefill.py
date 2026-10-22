@@ -6,9 +6,11 @@ This mode is used for dynamic batch processing.
 """
 
 import unittest
+from unittest import mock
 
 import torch
 
+from rtp_llm.models_py.modules.factory.attention.cuda_impl import trt
 from rtp_llm.models_py.modules.factory.attention.cuda_impl.test.trt_tests.test_trt_base import (
     TRTLLMFMHAv2TestBase,
 )
@@ -25,7 +27,21 @@ from rtp_llm.ops import KvCacheDataType, RopeStyle
 from rtp_llm.ops.compute_ops import get_typemeta
 
 
-class _TRTLLMFMHAv2PrefillCases:
+class TestTRTLLMWorkspaceReuse(unittest.TestCase):
+    def test_workspace_reuse_after_inference_mode(self):
+        with mock.patch.object(trt, "_g_trtllm_fmha_v2_workspace_pool", []):
+            with torch.inference_mode():
+                workspace = trt._get_trtllm_fmha_v2_workspace("cpu", 128)
+                workspace.fill_(1)
+                trt._release_trtllm_fmha_v2_workspace(workspace)
+            reused = trt._get_trtllm_fmha_v2_workspace("cpu", 128)
+            self.assertEqual(reused.data_ptr(), workspace.data_ptr())
+            self.assertEqual(reused.count_nonzero().item(), 0)
+            reused.fill_(2)
+            self.assertTrue(torch.all(reused == 2).item())
+
+
+class TestTRTLLMFMHAv2PrefillOpBF16(TRTLLMFMHAv2TestBase):
     """Test suite for TRTLLMFMHAv2PrefillOp in non-padded mode
 
     TRTLLMFMHAv2PrefillOp:
@@ -267,6 +283,23 @@ class _TRTLLMFMHAv2PrefillCases:
 
                 torch.testing.assert_close(graph_output, expect_output, rtol=0, atol=0)
 
+    def test_prefill_cuda_graph_rope_kv_and_dynamic_batch(self):
+        """Gate GQA and packed-MHA prefill graphs on SM90 and SM12x."""
+        if self.kv_cache_dtype != KvCacheDataType.BASE:
+            self.skipTest("generation-prefill CUDA graph requires BF16 KV cache")
+        if not (is_sm90() or is_sm12x()):
+            self.skipTest(
+                "generation-prefill CUDA graph is allowlisted on SM90 and SM12x"
+            )
+
+        for head_num_kv in (2, 8):
+            for token_capacity in (64, 256):
+                with self.subTest(
+                    head_num_kv=head_num_kv, token_capacity=token_capacity
+                ):
+                    self._run_prefill_cuda_graph_rope_kv_and_dynamic_batch(
+                        head_num_kv, token_capacity
+                    )
 
     def _run_prefill_cuda_graph_rope_kv_and_dynamic_batch(
         self, head_num_kv: int, token_capacity: int
@@ -634,27 +667,7 @@ class _TRTLLMFMHAv2PrefillCases:
         self._run_impl_rope_correctness(RopeStyle.Base)
 
 
-class TestTRTLLMFMHAv2PrefillOpBF16(_TRTLLMFMHAv2PrefillCases, TRTLLMFMHAv2TestBase):
-    # Graph replay is a BF16-only case; FP8 inherits only the common tests.
-    def test_prefill_cuda_graph_rope_kv_and_dynamic_batch(self):
-        """Gate GQA and packed-MHA prefill graphs on SM90 and SM12x."""
-        if not (is_sm90() or is_sm12x()):
-            self.skipTest(
-                "generation-prefill CUDA graph is allowlisted on SM90 and SM12x"
-            )
-
-        for head_num_kv in (2, 8):
-            for token_capacity in (64, 256):
-                with self.subTest(
-                    head_num_kv=head_num_kv, token_capacity=token_capacity
-                ):
-                    self._run_prefill_cuda_graph_rope_kv_and_dynamic_batch(
-                        head_num_kv, token_capacity
-                    )
-
-
-
-class TestTRTLLMFMHAv2PrefillOpFP8(_TRTLLMFMHAv2PrefillCases, TRTLLMFMHAv2TestBase):
+class TestTRTLLMFMHAv2PrefillOpFP8(TestTRTLLMFMHAv2PrefillOpBF16):
     kv_cache_dtype = KvCacheDataType.FP8
 
     def setUp(self):

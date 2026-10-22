@@ -1,5 +1,5 @@
 load("//:def.bzl", "cc_test_wrapper", "copts")
-load("@rtp_llm//bazel:defs.bzl", "torch_deps")
+load("@arch_config//:arch_select.bzl", "telemetry_test_deps", "torch_deps")
 load("//bazel:device_defs.bzl",
     "device_impl_target", "device_test_envs")
 
@@ -21,6 +21,35 @@ test_copts = [
     "-fno-access-control",
 ] + copts()
 
+py_test(
+    name = "rpc_error_code_proto_test",
+    size = "small",
+    srcs = ["rpc_error_code_proto_test.py"],
+    deps = [
+        "//rtp_llm:protobuf",
+        "//rtp_llm/cpp/model_rpc/proto:model_rpc_service_py_proto",
+    ],
+)
+
+py_test (
+    name = "model_rpc_client_test",
+    srcs = ["model_rpc_client_test.py"],
+    deps = [
+        "//rtp_llm:config",
+        "//rtp_llm:pydantic",
+        "//rtp_llm:testlib",
+        "//rtp_llm:torch",
+        "//rtp_llm:utils",
+        "//rtp_llm/cpp/model_rpc:model_rpc_client",
+        "//rtp_llm/cpp/model_rpc/proto:model_rpc_service_py_proto",
+        "//rtp_llm/test/model_test/test_util",
+    ] + telemetry_test_deps(),
+    data = [
+        "//:th_transformer",
+    ],
+    exec_properties = {"gpu": "L20_CU13"},
+    tags = ["L20_CU13"],
+)
 
 test_deps = [
     "//rtp_llm/cpp/testing:device_test_utils",
@@ -58,7 +87,24 @@ cc_test(
     copts = test_copts,
     deps = test_deps,
     env = {},
-    exec_properties = {'gpu':'A10'},
+    exec_properties = {"gpu": "L20_CU13"},
+    tags = ["L20_CU13"],
+)
+
+cc_test(
+    name = "generate_context_lifecycle_test",
+    srcs = [
+        "GenerateContextLifecycleTest.cc",
+        "RpcHandlerLifecycleTest.cc",
+    ],
+    copts = test_copts,
+    deps = test_deps + [
+        "//rtp_llm/cpp/cache/test:cache_config_test_utils",
+        "//rtp_llm/cpp/engine_base/schedulers:schedulers",
+    ],
+    env = {},
+    exec_properties = {"gpu": "H20_CU13"},
+    tags = ["H20_CU13"],
 )
 
 cc_test(
@@ -73,7 +119,8 @@ cc_test(
     env = {
         "TEST_USING_DEVICE": "CUDA",
     },
-    exec_properties = {'gpu':'A10'},
+    exec_properties = {"gpu": "L20_CU13"},
+    tags = ["L20_CU13"],
 )
 
 cc_test(
@@ -83,12 +130,14 @@ cc_test(
     ],
     data = [],
     copts = test_copts,
-    deps = test_deps + [
-        "//rtp_llm/cpp/model_rpc:model_rpc_pool",
+    deps = [
+        "//rtp_llm/cpp/model_rpc:broadcast_manager",
+        "//rtp_llm/cpp/model_rpc/proto:model_rpc_service_cc_proto",
+        "@com_google_googletest//:gtest",
+        "@com_google_googletest//:gtest_main",
         "@havenask//aios/autil:net",
     ],
     env = {},
-    exec_properties = {'gpu':'A10'},
 )
 
 cc_test(
@@ -97,16 +146,21 @@ cc_test(
     copts = test_copts,
     deps = test_deps,
     env = {},
-    exec_properties = {'gpu':'A10'},
+    exec_properties = {"gpu": "L20_CU13"},
+    tags = ["L20_CU13"],
 )
 
 cc_test(
     name = "decode_rpc_server_test",
     srcs = ["DecodeRpcServerTest.cc"],
     copts = test_copts,
-    deps = test_deps,
+    deps = test_deps + [
+        "//rtp_llm/cpp/cache:kv_cache_specs",
+        "//rtp_llm/cpp/cache/test:cache_config_test_utils",
+    ],
     env = {},
-    exec_properties = {'gpu':'A10'},
+    exec_properties = {"gpu": "L20_CU13"},
+    tags = ["L20_CU13"],
 )
 
 cc_test(
@@ -119,7 +173,7 @@ cc_test(
         "//rtp_llm/cpp/cache:recent_cache_key_window",
         "@com_google_googletest//:gtest",
         "@com_google_googletest//:gtest_main",
-    ] + cuda13_torch_link_deps,
+    ],
 )
 
 cc_test(
@@ -128,11 +182,11 @@ cc_test(
         "ResponseBufferTest.cc",
     ],
     copts = test_copts,
-    deps = test_deps,
-    env = {
-        "TEST_USING_DEVICE": "CUDA",
-    },
-    exec_properties = {'gpu':'A10'},
+    deps = [
+        "//rtp_llm/cpp/model_rpc:response_buffer",
+        "@com_google_googletest//:gtest",
+        "@com_google_googletest//:gtest_main",
+    ],
 )
 
 cc_test(
@@ -141,11 +195,14 @@ cc_test(
         "PrefillBatchRpcServerTest.cc",
     ],
     copts = test_copts,
-    deps = test_deps,
+    deps = test_deps + [
+        "@io_opentelemetry_cpp//exporters/memory:in_memory_span_exporter",
+    ],
     env = {
         "TEST_USING_DEVICE": "CUDA",
     },
-    exec_properties = {'gpu':'A10'},
+    exec_properties = {"gpu": "L20_CU13"},
+    tags = ["L20_CU13"],
 )
 
 cc_test(
@@ -160,7 +217,8 @@ cc_test(
     env = {
         "TEST_USING_DEVICE": "CUDA",
     },
-    exec_properties = {'gpu':'A10'},
+    exec_properties = {"gpu": "L20_CU13"},
+    tags = ["L20_CU13"],
 )
 
 cc_test(
@@ -173,7 +231,8 @@ cc_test(
     env = {
         "TEST_USING_DEVICE": "CUDA",
     },
-    exec_properties = {'gpu':'A10'},
+    exec_properties = {"gpu": "L20_CU13"},
+    tags = ["L20_CU13"],
 )
 
 cc_test(
@@ -185,4 +244,138 @@ cc_test(
         "@com_google_googletest//:gtest",
         "@com_google_googletest//:gtest_main",
     ],
+)
+
+# Original Native A10 route; current adopted source API providers are explicit.
+cc_test(
+    name = "local_rpc_server_test_native_a10",
+    srcs = ["LocalRpcServerTest.cc"],
+    copts = test_copts,
+    deps = test_deps,
+    env = {},
+    exec_properties = {'gpu':'A10'},
+    tags = ["A10"],
+)
+
+# Original Native A10 route; current adopted source API providers are explicit.
+cc_test(
+    name = "query_converter_test_native_a10",
+    srcs = [
+        "QueryConverterTest.cc",
+    ],
+    copts = test_copts,
+    deps = test_deps + [
+        "//rtp_llm/cpp/models:logits_processor",
+    ],
+    env = {
+        "TEST_USING_DEVICE": "CUDA",
+    },
+    exec_properties = {'gpu':'A10'},
+    tags = ["A10"],
+)
+
+# Original Native A10 route; current adopted source API providers are explicit.
+cc_test(
+    name = "broadcast_manager_test_native_a10",
+    srcs = [
+        "BroadcastManagerTest.cc",
+    ],
+    data = [],
+    copts = test_copts,
+    deps = test_deps + [
+        "//rtp_llm/cpp/model_rpc:model_rpc_pool",
+        "@havenask//aios/autil:net",
+    ],
+    env = {},
+    exec_properties = {'gpu':'A10'},
+    tags = ["A10"],
+)
+
+# Original Native A10 route; current adopted source API providers are explicit.
+cc_test(
+    name = "prefill_rpc_server_test_native_a10",
+    srcs = ["PrefillRpcServerTest.cc"],
+    copts = test_copts,
+    deps = test_deps,
+    env = {},
+    exec_properties = {'gpu':'A10'},
+    tags = ["A10"],
+)
+
+# Original Native A10 route; current adopted source API providers are explicit.
+cc_test(
+    name = "decode_rpc_server_test_native_a10",
+    srcs = ["DecodeRpcServerTest.cc"],
+    copts = test_copts,
+    deps = test_deps + [
+        "//rtp_llm/cpp/cache:kv_cache_specs",
+        "//rtp_llm/cpp/cache/test:cache_config_test_utils",
+    ],
+    env = {},
+    exec_properties = {'gpu':'A10'},
+    tags = ["A10"],
+)
+
+# Original Native A10 route; current adopted source API providers are explicit.
+cc_test(
+    name = "response_buffer_test_native_a10",
+    srcs = [
+        "ResponseBufferTest.cc",
+    ],
+    copts = test_copts,
+    deps = test_deps,
+    env = {
+        "TEST_USING_DEVICE": "CUDA",
+    },
+    exec_properties = {'gpu':'A10'},
+    tags = ["A10"],
+)
+
+# Original Native A10 route; current adopted source API providers are explicit.
+cc_test(
+    name = "prefill_batch_rpc_server_test_native_a10",
+    srcs = [
+        "PrefillBatchRpcServerTest.cc",
+    ],
+    copts = test_copts,
+    deps = test_deps + [
+        "@io_opentelemetry_cpp//exporters/memory:in_memory_span_exporter",
+    ],
+    env = {
+        "TEST_USING_DEVICE": "CUDA",
+    },
+    exec_properties = {'gpu':'A10'},
+    tags = ["A10"],
+)
+
+# Original Native A10 route; current adopted source API providers are explicit.
+cc_test(
+    name = "rpc_writer_cancellation_test_native_a10",
+    srcs = [
+        "RpcWriterCancellationTest.cc",
+    ],
+    copts = test_copts,
+    deps = test_deps + [
+        "@io_opentelemetry_cpp//exporters/memory:in_memory_span_exporter",
+    ],
+    env = {
+        "TEST_USING_DEVICE": "CUDA",
+    },
+    exec_properties = {'gpu':'A10'},
+    tags = ["A10"],
+)
+
+# Original Native A10 route; current adopted source API providers are explicit.
+cc_test(
+    name = "rpc_server_runtime_meta_test_native_a10",
+    srcs = [
+        "RpcServerRuntimeMetaTest.cc",
+    ],
+    copts = test_copts,
+    deps = test_deps,
+    env = {
+        "TEST_USING_DEVICE": "CUDA",
+    },
+    exec_properties = {'gpu':'A10'},
+    tags = ["A10"],
 )

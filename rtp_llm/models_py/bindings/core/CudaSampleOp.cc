@@ -24,6 +24,8 @@ namespace rtp_llm {
 
 namespace {
 
+#if USING_CUDA || USING_ROCM
+
 struct RejectionSamplingLaunchConfig {
     int batch_size;
     int num_speculative_tokens;
@@ -117,6 +119,8 @@ RejectionSamplingLaunchConfig validateRejectionSamplingParams(const RejectionSam
             static_cast<int>(target_vocab_size),
             static_cast<int>(target_token_stride)};
 }
+
+#endif  // USING_CUDA || USING_ROCM
 
 }  // anonymous namespace
 
@@ -456,15 +460,15 @@ GreedyOutput sampleGreedy(const GreedyParams& params) {
     }
 
     // fast path for topk = 1
-    auto top_k_ptr = reinterpret_cast<uint32_t*>(params.top_k.data_ptr<int32_t>());
+    // TODO: Support output_all_probs and cum_log_probs in this fast path.
+    auto top_k_ptr = params.top_k.data_ptr<int32_t>();
     if (std::all_of(top_k_ptr, top_k_ptr + batch_size, [&](auto t) { return t == 1; })
-        && !params.output_all_probs.has_value()) {
+        && !params.output_all_probs.has_value() && !params.cum_log_probs.has_value()) {
         torch::Tensor samples_t =
             transposed_tokens.slice(0, transposed_tokens.size(0) - 1, transposed_tokens.size(0)).squeeze(0);
         torch::Tensor probs_t         = params.logits;
         torch::Tensor selected_tokens = torch::argmax(probs_t, -1, /*keepdim=*/false);
         samples_t.copy_(selected_tokens, true);
-        // Top-k filtering leaves a one-hot sampling distribution, so log p(selected) is zero.
 
         auto output_tokens = transposed_tokens.transpose(0, 1).contiguous();
         params.token_ids.copy_(output_tokens, true);
@@ -582,7 +586,7 @@ void mappingDraft2Target(const MappingDraft2TargetParams& params) {
     }
 }
 
-#else  // !USING_CUDA — ROCm platform
+#elif USING_ROCM
 
 }  // namespace rtp_llm — temporarily close for includes
 
@@ -697,154 +701,103 @@ GreedyOutput sampleGreedy(const GreedyParams& params) {
         }
     }
 
-    auto       top_k_ptr     = reinterpret_cast<uint32_t*>(params.top_k.data_ptr<int32_t>());
-    const bool all_top_k_one = std::all_of(top_k_ptr, top_k_ptr + batch_size, [](auto t) { return t == 1; });
-    if (all_top_k_one && !params.cum_log_probs.has_value() && !params.return_original_all_probs
-        && (!params.output_all_probs.has_value() || params.output_all_probs->size(1) == vocab_size_padded)) {
-        torch::Tensor samples_t =
-            transposed_tokens.slice(0, transposed_tokens.size(0) - 1, transposed_tokens.size(0)).squeeze(0);
-        torch::Tensor selected_tokens = torch::argmax(params.logits, -1, /*keepdim=*/false);
-        samples_t.copy_(selected_tokens);
-        if (params.output_all_probs.has_value()) {
-            params.output_all_probs->zero_().scatter_(1, selected_tokens.unsqueeze(1), 1.0);
-        }
+    // 3. Preserve the Native per-request generator/multinomial contract. Invalid
+    // rows are isolated before sampling so they cannot consume a healthy row's RNG.
+    auto top_k_ptr = params.top_k.data_ptr<int32_t>();
+    auto top_p_ptr = params.top_p.data_ptr<float>();
+    const bool all_top_k_one = std::all_of(top_k_ptr, top_k_ptr + batch_size, [](auto k) { return k == 1; });
+    std::transform(top_p_ptr, top_p_ptr + batch_size, top_p_ptr,
+                   [](auto p) { return std::abs(p) < 1e-7 ? 1.0f : p; });
 
-        auto output_tokens = transposed_tokens.transpose(0, 1).contiguous();
-        params.token_ids.copy_(output_tokens);
-
-        return GreedyOutput{};
-    }
-
-    // 4. Compute softmax probabilities
     auto probs_t = torch::softmax(params.logits, -1);
     params.logits.copy_(probs_t);
-
+    auto success = torch::isfinite(probs_t).all(-1).logical_and(probs_t.ge(0).all(-1))
+                       .logical_and(probs_t.sum(-1).gt(0));
+    auto filtered_probs = probs_t.clone();
+    filtered_probs.masked_fill_(success.logical_not().unsqueeze(1), 0.0f);
     auto samples_t = transposed_tokens.slice(0, transposed_tokens.size(0) - 1, transposed_tokens.size(0)).flatten();
-    auto top_k_t   = params.top_k;
-    auto top_p_t   = params.top_p;
-    auto top_p_ptr = params.top_p.data_ptr<float>();
+    samples_t.fill_(-1);
 
-    torch::Tensor output_all_probs_t;
-    if (params.output_all_probs.has_value()) {
-        output_all_probs_t = params.output_all_probs.value();
-    }
-    if (params.cum_log_probs.has_value() && !output_all_probs_t.defined()) {
-        output_all_probs_t = torch::zeros_like(probs_t);
-    }
-    const auto output_width = output_all_probs_t.defined() ? output_all_probs_t.size(1) : probs_t.size(1);
-    RTP_LLM_CHECK_WITH_INFO(output_width > 0 && output_width <= probs_t.size(1),
-                            "output probability width must be in (0, padded vocab size]");
-    const bool need_full_sampling_probs = output_all_probs_t.defined() && output_width < probs_t.size(1);
-    auto       sampling_probs_t         = need_full_sampling_probs ? torch::zeros_like(probs_t) : output_all_probs_t;
-    const bool need_renorm_probs        = sampling_probs_t.defined() && !params.return_original_all_probs;
-    if (params.return_original_all_probs && sampling_probs_t.defined()) {
-        sampling_probs_t.copy_(probs_t);
-    }
-
-    std::transform(top_p_ptr, top_p_ptr + batch_size, top_p_ptr, [&](auto t) { return std::abs(t) < 1e-7 ? 1.0 : t; });
-
-    // 6. Sample
-    torch::Tensor filtered_probs;
     if (all_top_k_one) {
-        torch::Tensor selected_tokens = torch::argmax(probs_t, -1, /*keepdim=*/false);
-        samples_t.copy_(selected_tokens);
-        filtered_probs = torch::zeros_like(probs_t).scatter_(1, selected_tokens.unsqueeze(1), 1.0);
-        if (need_renorm_probs) {
-            sampling_probs_t.copy_(filtered_probs);
-        }
+        auto selected = torch::argmax(filtered_probs, -1);
+        filtered_probs.zero_().scatter_(1, selected.unsqueeze(1), 1.0f);
+        filtered_probs.masked_fill_(success.logical_not().unsqueeze(1), 0.0f);
+        samples_t.copy_(selected);
+        samples_t.masked_fill_(success.logical_not(), -1);
     } else {
-        // Use pure PyTorch sampling instead of FlashInfer ROCm kernels.
-        // FlashInfer's ROCm sampling kernels (top_p_sampling_from_probs,
-        // top_k_sampling_from_probs, top_k_top_p_sampling_from_probs) crash
-        // with GPU memory access faults in multi-GPU (TP>1) configurations.
-        // torch::multinomial is well-tested and handles all cases correctly.
-        //
-        // Clone only when return_original_all_probs is set, so the ORIGINAL
-        // all-probs output can be generated from the untouched softmax
-        // distribution. Otherwise reuse probs_t in-place to avoid the copy.
-        filtered_probs = params.return_original_all_probs ? probs_t.clone() : probs_t;
-
-        // Apply top_k filtering if needed
-        auto renormalize = [&] { filtered_probs.div_(filtered_probs.sum(-1, /*keepdim=*/true).clamp_min(1e-10)); };
-        bool has_top_k = !std::all_of(top_k_ptr, top_k_ptr + batch_size, [](auto t) { return t <= 0; });
+        auto renormalize = [&] {
+            filtered_probs.div_(filtered_probs.sum(-1, /*keepdim=*/true).clamp_min(1e-10));
+        };
+        const bool has_top_k = !std::all_of(top_k_ptr, top_k_ptr + batch_size, [](auto k) { return k <= 0; });
         if (has_top_k) {
-            for (int64_t b = 0; b < (int64_t)batch_size; b++) {
-                int k = top_k_ptr[b] <= 0 ? vocab_size_padded : top_k_ptr[b];
-                if ((int64_t)k < vocab_size_padded) {
-                    auto row                    = filtered_probs[b];
-                    auto [topk_vals, topk_inds] = row.topk(k);
-                    auto min_val                = topk_vals[-1];
-                    row.masked_fill_(row < min_val, 0.0f);
+            for (int64_t row = 0; row < static_cast<int64_t>(batch_size); ++row) {
+                const int64_t k = top_k_ptr[row] <= 0 ? vocab_size_padded : top_k_ptr[row];
+                if (k < vocab_size_padded) {
+                    auto row_probs = filtered_probs[row];
+                    auto top_values = std::get<0>(row_probs.topk(k));
+                    row_probs.masked_fill_(row_probs < top_values[-1], 0.0f);
                 }
             }
             renormalize();
         }
-        // Apply top_p (nucleus) filtering if needed
-        bool has_top_p =
-            !std::all_of(top_p_ptr, top_p_ptr + batch_size, [](auto t) { return std::abs(t - 1.0f) < 1e-7; });
+        const bool has_top_p = !std::all_of(top_p_ptr, top_p_ptr + batch_size,
+                                            [](auto p) { return std::abs(p - 1.0f) < 1e-7; });
         if (has_top_p) {
-            for (int64_t b = 0; b < (int64_t)batch_size; b++) {
-                float p = top_p_ptr[b];
+            for (int64_t row = 0; row < static_cast<int64_t>(batch_size); ++row) {
+                const float p = top_p_ptr[row];
                 if (std::abs(p - 1.0f) >= 1e-7) {
-                    auto row                            = filtered_probs[b];
-                    auto [sorted_probs, sorted_indices] = row.sort(/*dim=*/0, /*descending=*/true);
-                    auto cumsum                         = sorted_probs.cumsum(0);
-                    auto mask                           = cumsum - sorted_probs > p;
-                    sorted_probs.masked_fill_(mask, 0.0f);
-                    row.scatter_(0, sorted_indices, sorted_probs);
+                    auto row_probs = filtered_probs[row];
+                    auto [sorted_probs, sorted_indices] = row_probs.sort(/*dim=*/0, /*descending=*/true);
+                    sorted_probs.masked_fill_(sorted_probs.cumsum(0) - sorted_probs > p, 0.0f);
+                    row_probs.scatter_(0, sorted_indices, sorted_probs);
                 }
             }
             renormalize();
         }
-        // Honor request-level random_seed: when generators differ across the
-        // batch, sample each row independently with its own generator.
-        bool has_any_generator = false;
-        for (int64_t i = 0; i < (int64_t)batch_size; i++) {
-            if (params.generator[i].defined()) {
-                has_any_generator = true;
-                break;
-            }
-        }
-        if (!has_any_generator) {
+        success = success.logical_and(torch::isfinite(filtered_probs).all(-1))
+                      .logical_and(filtered_probs.sum(-1).gt(0));
+        auto valid_host = success.to(torch::kCPU).contiguous();
+        const auto valid_ptr = valid_host.data_ptr<bool>();
+        const bool has_any_generator = std::any_of(params.generator.begin(), params.generator.end(),
+                                                   [](const auto& generator) { return generator.defined(); });
+        if (!has_any_generator && valid_host.all().item<bool>()) {
             auto selected = torch::multinomial(filtered_probs, 1, /*replacement=*/false).squeeze(-1);
             samples_t.copy_(selected);
         } else {
-            for (int64_t i = 0; i < (int64_t)batch_size; i++) {
-                auto row_dist = filtered_probs[i].unsqueeze(0);
-                // multinomial(row_dist, 1) is [1, 1]; squeeze(-1) leaves a [1] tensor. Write it into
-                // the length-1 slice samples_t[i:i+1] (also [1]); copying [1] into the 0-D scalar
-                // samples_t[i] fails the shape check and crashes seeded ROCm sampling.
-                if (params.generator[i].defined()) {
-                    auto row_sample = torch::multinomial(row_dist, 1, /*replacement=*/false, params.generator[i]).squeeze(-1);
-                    samples_t.slice(0, i, i + 1).copy_(row_sample);
-                } else {
-                    auto row_sample = torch::multinomial(row_dist, 1, /*replacement=*/false).squeeze(-1);
-                    samples_t.slice(0, i, i + 1).copy_(row_sample);
+            for (int64_t row = 0; row < static_cast<int64_t>(batch_size); ++row) {
+                if (!valid_ptr[row]) {
+                    continue;
                 }
+                auto row_dist = filtered_probs[row].unsqueeze(0);
+                auto generator = row < static_cast<int64_t>(params.generator.size()) && params.generator[row].defined() ?
+                                     std::make_optional(params.generator[row]) : std::nullopt;
+                auto selected = torch::multinomial(row_dist, 1, /*replacement=*/false, generator).squeeze(-1);
+                samples_t.slice(0, row, row + 1).copy_(selected);
             }
         }
-        if (need_renorm_probs) {
-            sampling_probs_t.copy_(filtered_probs);
-        }
     }
 
-    if (need_full_sampling_probs) {
-        output_all_probs_t.copy_(sampling_probs_t.slice(1, 0, output_width));
+    // ORIGINAL output stays unfiltered, but cum_log_probs always uses the actual
+    // sampling distribution. Failed rows never gather through token -1.
+    filtered_probs.masked_fill_(success.logical_not().unsqueeze(1), 0.0f);
+    if (params.output_all_probs.has_value()) {
+        auto output = params.output_all_probs.value();
+        const auto width = output.size(1);
+        RTP_LLM_CHECK_WITH_INFO(width > 0 && width <= probs_t.size(1),
+                                "output probability width must be in (0, padded vocab size]");
+        auto output_probs = params.return_original_all_probs ? probs_t.clone() : filtered_probs;
+        output_probs.masked_fill_(success.logical_not().unsqueeze(1), 0.0f);
+        output.copy_(output_probs.slice(1, 0, width));
     }
-
-    // 7. Update cum_log_probs using the final sampling distribution.
-    // filtered_probs is already the normalized distribution used for sampling
-    // (top_k/top_p filtered and renormalized); do not log_softmax it again.
     if (params.cum_log_probs.has_value()) {
-        auto cum_log_probs_t = params.cum_log_probs.value();
-        auto gathered = filtered_probs.gather(-1, samples_t.unsqueeze(-1).to(torch::kLong)).squeeze(-1);
-        cum_log_probs_t.add_(gathered.log().to(cum_log_probs_t.device()));
+        auto selected = filtered_probs.gather(1, samples_t.to(torch::kLong).clamp_min(0).unsqueeze(1)).squeeze(1).log();
+        selected.masked_fill_(success.logical_not(), -std::numeric_limits<float>::infinity());
+        auto cumulative = params.cum_log_probs.value();
+        cumulative.add_(selected.to(cumulative.device()));
     }
-
-    // 8. Copy results back
     auto output_tokens = transposed_tokens.transpose(0, 1).contiguous();
     params.token_ids.copy_(output_tokens);
-    return GreedyOutput{};
+    return {success};
 }
 
 torch::Tensor sampleFromProbs(const torch::Tensor& probabilities) {
@@ -966,6 +919,234 @@ void mappingDraft2Target(const MappingDraft2TargetParams& params) {
     }
 }
 
-#endif  // USING_CUDA
+#else  // Generic PyTorch fallback
+
+GreedyOutput sampleGreedy(const GreedyParams& params) {
+    const auto batch_size        = params.logits.size(0);
+    const auto vocab_size_padded = params.logits.size(1);
+    const auto device            = params.logits.device();
+
+    auto          device_tokens     = params.token_ids.to(device);
+    auto          transposed_tokens = device_tokens.transpose(0, 1).contiguous();
+    torch::Tensor original_logits;
+    torch::Tensor do_sample_device;
+    if (params.do_sample.has_value()) {
+        RTP_LLM_CHECK_WITH_INFO(params.do_sample.value().numel() == batch_size,
+                                "do_sample length must match batch size");
+        do_sample_device = params.do_sample.value().to(device).reshape({batch_size, 1});
+        if (!params.do_sample.value().all().item<bool>()) {
+            original_logits = params.logits.clone();
+        }
+    }
+
+    if (std::any_of(params.temperature.data_ptr<float>(),
+                    params.temperature.data_ptr<float>() + batch_size,
+                    [](auto temperature) { return temperature != 1.0f; })) {
+        auto temperature = params.temperature.to(device).reshape({batch_size, 1});
+        params.logits.div_(temperature);
+    }
+
+    if (params.repetition_penalty.has_value()) {
+        RTP_LLM_CHECK(params.presence_penalty.has_value() && params.frequency_penalty.has_value());
+        const auto& repetition_penalty = params.repetition_penalty.value();
+        const auto& presence_penalty   = params.presence_penalty.value();
+        const auto& frequency_penalty  = params.frequency_penalty.value();
+        const bool  has_penalty        = std::any_of(repetition_penalty.data_ptr<float>(),
+                                             repetition_penalty.data_ptr<float>() + batch_size,
+                                             [](auto penalty) { return penalty != 1.0f; })
+                                 || std::any_of(presence_penalty.data_ptr<float>(),
+                                                presence_penalty.data_ptr<float>() + batch_size,
+                                                [](auto penalty) { return penalty != 0.0f; })
+                                 || std::any_of(frequency_penalty.data_ptr<float>(),
+                                                frequency_penalty.data_ptr<float>() + batch_size,
+                                                [](auto penalty) { return penalty != 0.0f; });
+        if (has_penalty) {
+            auto       effective_lengths  = params.input_lengths.clone();
+            const auto decoder_batch_size = params.sequence_lengths.size(0);
+            if (decoder_batch_size > 0) {
+                effective_lengths.narrow(0, 0, decoder_batch_size).copy_(params.sequence_lengths);
+            }
+
+            auto history = device_tokens.slice(1, 0, params.step + 1).to(torch::kLong);
+            auto positions =
+                torch::arange(history.size(1), torch::TensorOptions().dtype(torch::kLong).device(device)).unsqueeze(0);
+            auto lengths = effective_lengths.to(device).to(torch::kLong).unsqueeze(1);
+            auto valid   = positions.lt(lengths).logical_and(history.ge(0)).logical_and(history.lt(vocab_size_padded));
+            auto safe_history = history.clamp(0, vocab_size_padded - 1);
+            auto counts       = torch::zeros({batch_size, vocab_size_padded},
+                                       torch::TensorOptions().dtype(torch::kInt32).device(device));
+            counts.scatter_add_(1, safe_history, valid.to(torch::kInt32));
+
+            auto seen                 = counts.gt(0);
+            auto repetition_penalty_d = repetition_penalty.to(device).reshape({batch_size, 1});
+            auto repeated_logits      = torch::where(
+                params.logits.lt(0), params.logits * repetition_penalty_d, params.logits / repetition_penalty_d);
+            params.logits.copy_(torch::where(seen, repeated_logits, params.logits));
+            params.logits.sub_(presence_penalty.to(device).reshape({batch_size, 1}) * seen.to(params.logits.dtype())
+                               + frequency_penalty.to(device).reshape({batch_size, 1})
+                                     * counts.to(params.logits.dtype()));
+        }
+    }
+
+    const auto decoder_batch_size = params.sequence_lengths.size(0);
+    if (decoder_batch_size > 0 && params.no_repeat_ngram_size.has_value()) {
+        RTP_LLM_CHECK_WITH_INFO(params.no_repeat_ngram_size.value().numel() >= decoder_batch_size,
+                                "no_repeat_ngram_size length is smaller than decoder batch size");
+        RTP_LLM_CHECK_WITH_INFO(params.sequence_lengths.device().is_cpu()
+                                    && params.no_repeat_ngram_size.value().device().is_cpu()
+                                    && device_tokens.device().is_cpu(),
+                                "generic no-repeat n-gram fallback requires CPU tensors");
+        auto       sequence_lengths_ptr = params.sequence_lengths.data_ptr<int32_t>();
+        auto       ngram_sizes_ptr      = params.no_repeat_ngram_size.value().data_ptr<int32_t>();
+        auto       tokens_ptr           = device_tokens.data_ptr<int32_t>();
+        const auto token_stride         = device_tokens.size(1);
+
+        for (int64_t batch = 0; batch < decoder_batch_size; ++batch) {
+            const int64_t ngram_size = ngram_sizes_ptr[batch];
+            // sequence_lengths already counts valid history tokens; the final column is the output slot.
+            const int64_t length = sequence_lengths_ptr[batch];
+            RTP_LLM_CHECK_WITH_INFO(length >= 0 && length < token_stride,
+                                    "sequence length is outside the token history");
+            if (ngram_size <= 0 || length < ngram_size) {
+                continue;
+            }
+            const auto* row = tokens_ptr + batch * token_stride;
+            for (int64_t start = 0; start <= length - ngram_size; ++start) {
+                bool matches_suffix = true;
+                for (int64_t offset = 0; offset < ngram_size - 1; ++offset) {
+                    if (row[start + offset] != row[length - ngram_size + 1 + offset]) {
+                        matches_suffix = false;
+                        break;
+                    }
+                }
+                if (matches_suffix) {
+                    const auto banned_token = row[start + ngram_size - 1];
+                    if (banned_token >= 0 && banned_token < vocab_size_padded) {
+                        auto logits_row = params.logits.select(0, batch);
+                        logits_row.index_put_({banned_token}, -std::numeric_limits<float>::infinity());
+                    }
+                }
+            }
+        }
+    }
+
+    if (original_logits.defined()) {
+        params.logits.copy_(torch::where(do_sample_device, params.logits, original_logits));
+    }
+
+    auto top_k_ptr = params.top_k.data_ptr<int32_t>();
+    // TODO: Support output_all_probs and cum_log_probs in this top-k=1 fast path.
+    if (std::all_of(top_k_ptr, top_k_ptr + batch_size, [](auto top_k) { return top_k == 1; })
+        && !params.output_all_probs.has_value() && !params.cum_log_probs.has_value()) {
+        auto samples = transposed_tokens.select(0, transposed_tokens.size(0) - 1);
+        samples.copy_(torch::argmax(params.logits, -1, /*keepdim=*/false));
+        params.token_ids.copy_(transposed_tokens.transpose(0, 1).contiguous());
+        return GreedyOutput{};
+    }
+
+    auto probs = torch::softmax(params.logits, -1);
+    params.logits.copy_(probs);
+    auto filtered_probs = probs.clone();
+    auto top_p_ptr      = params.top_p.data_ptr<float>();
+    std::transform(
+        top_p_ptr, top_p_ptr + batch_size, top_p_ptr, [](auto top_p) { return std::abs(top_p) < 1e-7 ? 1.0f : top_p; });
+
+    int64_t max_bounded_top_k = 0;
+    for (int64_t batch = 0; batch < batch_size; ++batch) {
+        const int64_t top_k = top_k_ptr[batch];
+        if (top_k > 0 && top_k < vocab_size_padded) {
+            max_bounded_top_k = std::max(max_bounded_top_k, top_k);
+        }
+    }
+    if (max_bounded_top_k > 0) {
+        auto top_k_device = params.top_k.to(device).to(torch::kLong);
+        auto bounded_rows = top_k_device.gt(0).logical_and(top_k_device.lt(vocab_size_padded));
+        auto row_indices  = torch::nonzero(bounded_rows).squeeze(1);
+        auto active_probs = filtered_probs.index_select(0, row_indices);
+        auto active_top_k = top_k_device.index_select(0, row_indices);
+
+        // PyTorch topk accepts one k for the whole tensor. Compute the largest requested
+        // k once, then gather each row's actual kth value and filter the active rows in one
+        // batched operation. Using a threshold preserves the old fallback's tie behavior.
+        auto topk_values   = std::get<0>(active_probs.topk(max_bounded_top_k, /*dim=*/-1));
+        auto kth_positions = active_top_k.sub(1).unsqueeze(1);
+        auto kth_values    = topk_values.gather(1, kth_positions);
+        active_probs.masked_fill_(active_probs.lt(kth_values), 0.0f);
+        filtered_probs.index_copy_(0, row_indices, active_probs);
+    }
+
+    const bool has_top_p =
+        !std::all_of(top_p_ptr, top_p_ptr + batch_size, [](auto top_p) { return std::abs(top_p - 1.0f) < 1e-7; });
+    if (has_top_p) {
+        auto top_p_device = params.top_p.to(device);
+        auto active_rows  = top_p_device.sub(1.0f).abs().ge(1e-7);
+        auto row_indices  = torch::nonzero(active_rows).squeeze(1);
+        auto active_probs = filtered_probs.index_select(0, row_indices);
+        auto active_top_p = top_p_device.index_select(0, row_indices).unsqueeze(1);
+
+        auto [sorted_probs, sorted_indices] = active_probs.sort(/*dim=*/-1, /*descending=*/true);
+        auto cumulative_probs               = sorted_probs.cumsum(-1);
+        auto outside_nucleus                = cumulative_probs - sorted_probs > active_top_p;
+        sorted_probs.masked_fill_(outside_nucleus, 0.0f);
+        active_probs.zero_().scatter_(1, sorted_indices, sorted_probs);
+        filtered_probs.index_copy_(0, row_indices, active_probs);
+    }
+
+    auto row_sums = filtered_probs.sum(-1, /*keepdim=*/true);
+    filtered_probs.div_(row_sums.clamp_min(1e-10));
+    auto selected = torch::empty({batch_size}, torch::TensorOptions().dtype(torch::kLong).device(device));
+    // TODO: Use batched multinomial sampling when no per-request generator is specified.
+    for (int64_t batch = 0; batch < batch_size; ++batch) {
+        c10::optional<at::Generator> generator = c10::nullopt;
+        if (batch < static_cast<int64_t>(params.generator.size()) && params.generator[batch].defined()) {
+            generator = params.generator[batch];
+        }
+        auto sample = at::multinomial(filtered_probs.select(0, batch),
+                                      /*num_samples=*/1,
+                                      /*replacement=*/false,
+                                      generator);
+        selected.select(0, batch).copy_(sample.select(0, 0));
+    }
+    transposed_tokens.select(0, transposed_tokens.size(0) - 1).copy_(selected);
+
+    torch::Tensor probability_output;
+    if (params.output_all_probs.has_value()) {
+        probability_output = params.output_all_probs.value();
+    } else if (params.cum_log_probs.has_value()) {
+        probability_output = torch::empty_like(probs);
+    }
+    if (probability_output.defined()) {
+        probability_output.copy_(params.return_original_all_probs ? probs : filtered_probs);
+    }
+    if (params.cum_log_probs.has_value()) {
+        auto selected_probs = probability_output.gather(1, selected.to(torch::kLong).unsqueeze(1)).squeeze(1);
+        params.cum_log_probs.value().add_(selected_probs.log());
+    }
+
+    params.token_ids.copy_(transposed_tokens.transpose(0, 1).contiguous());
+    return GreedyOutput{};
+}
+
+void rejectionSampling(const RejectionSamplingParams&) {
+    RTP_LLM_CHECK_WITH_INFO(false, "rejection sampling is not supported on this device");
+}
+
+void mappingDraft2Target(const MappingDraft2TargetParams& params) {
+    if (!params.d2t_map.defined() || params.d2t_map.numel() == 0) {
+        return;
+    }
+    RTP_LLM_CHECK_WITH_INFO(params.d2t_map.dtype() == torch::kInt64, "mappingDraft2Target: d2t_map must be int64");
+    RTP_LLM_CHECK_WITH_INFO(params.tokens.device() == params.d2t_map.device(),
+                            "mappingDraft2Target: tokens and d2t_map must be on the same device");
+
+    auto token_rows    = params.tokens.reshape({-1, params.token_stride});
+    auto active_tokens = token_rows.narrow(0, 0, params.batch_size).slice(1, params.token_offset, params.token_stride);
+    auto valid_tokens  = active_tokens.ge(0).logical_and(active_tokens.lt(params.d2t_map.numel()));
+    auto safe_tokens   = active_tokens.to(torch::kLong).clamp(0, params.d2t_map.numel() - 1);
+    auto mapped_tokens = params.d2t_map.index_select(0, safe_tokens.flatten()).reshape_as(active_tokens);
+    active_tokens.copy_(torch::where(valid_tokens, mapped_tokens.to(active_tokens.dtype()), active_tokens));
+}
+
+#endif  // USING_CUDA / USING_ROCM / generic fallback
 
 }  // namespace rtp_llm

@@ -36,7 +36,7 @@ class EngineGrpcClientBatchDeliveryTest {
         executor = (ThreadPoolExecutor) Executors.newFixedThreadPool(2);
         eventLoop = new NioEventLoopGroup(1);
         client = new EngineGrpcClient(mock(CustomNameResolver.class), executor, eventLoop,
-                mock(GrpcReporter.class), 20);
+                mock(GrpcReporter.class), 20, 5000L);
     }
 
     @AfterEach

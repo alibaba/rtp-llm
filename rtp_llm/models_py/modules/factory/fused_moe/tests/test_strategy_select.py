@@ -181,14 +181,41 @@ class Fp8Fp4StrategySelectionTest(unittest.TestCase):
             self.assertFalse(_has_fp8_fp4_grouped_kernel())
 
     @patch(
+        "rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors.mega_moe._mega_moe_available",
+        return_value=False,
+    )
+    @patch(
         "rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors.mega_moe_se._mega_moe_se_available",
         return_value=False,
     )
-    def test_explicit_mega_se_rejects_unavailable_backend(self, _):
+    def test_explicit_mega_se_rejects_unavailable_backend(self, _, __):
         with self.assertRaisesRegex(ValueError, "MOE_STRATEGY='mega_moe_se'"):
             _registry().get_strategy(
                 _config(ep_size=2, n_shared_experts=2, strategy="mega_moe_se")
             )
+
+    @patch(
+        "rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors.mega_moe._mega_moe_available",
+        return_value=True,
+    )
+    @patch(
+        "rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors.mega_moe_se._mega_moe_se_available",
+        return_value=False,
+    )
+    def test_explicit_mega_se_uses_routed_and_standalone_shared(self, _, __):
+        from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors.mega_moe import (
+            MegaMoeExecutor,
+        )
+
+        strategy = _registry().get_strategy(
+            _config(ep_size=2, n_shared_experts=2, strategy="mega_moe_se")
+        )
+        self.assertIsInstance(strategy, CudaMegaMoeSEStrategy)
+        executor = strategy.get_attributes().get_executor_class()
+        self.assertIs(executor, MegaMoeExecutor)
+        # This flag makes the layer retain FP8 shared weights and construct
+        # the existing shared-expert executor plus FP32 combine epilogue.
+        self.assertFalse(executor.includes_shared_expert)
 
     @patch(
         "rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors.mega_moe._mega_moe_available",

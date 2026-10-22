@@ -155,9 +155,7 @@ class FlashInferAllReduceUnitTest(unittest.TestCase):
         module = SimpleNamespace(get_flashinfer_allreduce=lambda: fast_path)
 
         with patch.object(collective, "_get_flashinfer_allreduce", return_value=module):
-            result = collective.all_reduce(
-                tensor, collective.Group.TP, inplace=False
-            )
+            result = collective.all_reduce(tensor, collective.Group.TP, inplace=False)
         self.assertIs(result, reduced)
         torch.testing.assert_close(tensor, original)
 

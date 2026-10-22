@@ -1,12 +1,12 @@
-"""UT for DSV4's framework C++ RMSNorm path.
+"""UT for DSV4's shared FlashInfer RMSNorm path.
 
 DSV4's attention and FFN norms use the shared ``RMSNorm`` module, which
-delegates to the single-launch ``rtp_llm_ops.rmsnorm`` implementation.  The
+delegates to the single-launch ``flashinfer.norm.rmsnorm`` implementation.  The
 block flattens N-D model inputs to the operator's 2D contract and restores the
 original shape afterwards.
 
 This UT verifies:
-  1) Numerical agreement of the live C++ path vs the pinned pre-integration
+  1) Numerical agreement of the live FlashInfer path vs the pinned pre-integration
      torch baseline, across decode + prefill shapes.
   2) Wall-clock improvement vs the torch baseline.
 
@@ -111,7 +111,7 @@ def bench_token_sweep():
     print(f"  [dim={dim}]")
     print(
         "    {:>6}  {:>10}  {:>10}  {:>10}".format(
-            "T", "torch (6-launch)", "C++ rmsnorm", "speedup"
+            "T", "torch (6-launch)", "FlashInfer", "speedup"
         )
     )
     Tlist = [1, 8, 16, 64, 128, 256, 4096, 65536]
@@ -152,7 +152,7 @@ if __name__ == "__main__":
     for T, t_base, t_live in results:
         if not (t_live < t_base):
             print(
-                f"  [FAIL] T={T}: live C++={t_live*1e3:.2f}us "
+                f"  [FAIL] T={T}: FlashInfer={t_live*1e3:.2f}us "
                 f"not < torch={t_base*1e3:.2f}us"
             )
             fail = True

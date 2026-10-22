@@ -1,7 +1,7 @@
 """CUDA FP8 DeepGEMM quantized Linear implementation"""
 
 import logging
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
 
 import torch
 
@@ -16,7 +16,9 @@ from rtp_llm.models_py.kernels.cuda.fp8_kernel import (
     sgl_per_token_group_quant_fp8,
 )
 from rtp_llm.models_py.modules.factory.linear import LinearBase
-from rtp_llm.ops import HWKernelConfig
+
+if TYPE_CHECKING:
+    from rtp_llm.ops import HWKernelConfig
 
 logger = logging.getLogger(__name__)
 

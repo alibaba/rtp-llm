@@ -12,7 +12,7 @@ import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.ServerStatus;
 import org.flexlb.dao.route.Endpoint;
 import org.flexlb.dao.route.RoleType;
-import org.flexlb.discovery.FileServiceDiscovery;
+import org.flexlb.discovery.LocalServiceDiscovery;
 import org.flexlb.mock.FlexLBMockTestBase;
 import org.flexlb.mock.MockPrefillWorker;
 import org.flexlb.mock.MockWorkerBehavior;
@@ -56,7 +56,7 @@ import static org.mockito.Mockito.when;
 
 /**
  * End-to-end validation of dynamic service discovery through the REAL master
- * pipeline: FileServiceDiscovery (file re-read per poll) → WorkerAddressService
+ * pipeline: LocalServiceDiscovery (file re-read per poll) → WorkerAddressService
  * (domain → hosts, http→grpc conversion) → EngineSyncRunner (20 ms re-pull,
  * getOrCreateWorkerStatus, eviction of vanished entries) → GrpcWorkerStatusRunner
  * (gRPC status check) → EndpointRegistry.ensureEndpoint (routing candidate set)
@@ -106,7 +106,7 @@ class FileDiscoveryDynamicScaleEndToEndTest extends FlexLBMockTestBase {
     private MockPrefillWorker workerB;
     private MockPrefillWorker workerC;
     private Path discoveryFile;
-    private FileServiceDiscovery fileServiceDiscovery;
+    private LocalServiceDiscovery fileServiceDiscovery;
     private WorkerAddressService workerAddressService;
     private EngineGrpcService engineGrpcService;
     private EngineHealthReporter healthReporter;
@@ -119,13 +119,15 @@ class FileDiscoveryDynamicScaleEndToEndTest extends FlexLBMockTestBase {
     void setUpFileDiscoveryPipeline() throws Exception {
         // Second initial prefill worker (B), started by the base helper.
         workerB = addPrefillWorker(MockWorkerBehavior.builder().build());
+        completeAcceptedBatches(mockPrefillWorker);
+        completeAcceptedBatches(workerB);
 
         // Initial discovery file: A + B on the prefill domain, base decode worker.
         discoveryFile = tempDir.resolve("discovery-" + System.nanoTime() + ".json");
         writeDiscoveryFileAtomic(List.of(prefillIpPort, workerIpPort(workerB)));
 
         // Real file-backed ServiceDiscovery — re-reads the file on every poll.
-        fileServiceDiscovery = new FileServiceDiscovery(discoveryFile.toString());
+        fileServiceDiscovery = new LocalServiceDiscovery(discoveryFile.toString());
 
         // Model topology: upstream builds ModelMetaConfig from the
         // MODEL_SERVICE_CONFIG env; mocking it keeps this test hermetic while
@@ -180,6 +182,11 @@ class FileDiscoveryDynamicScaleEndToEndTest extends FlexLBMockTestBase {
                 false,
                 STATUS_STALE_AFTER_US);
 
+        EngineSyncRunner decodeSyncRunner = new EngineSyncRunner(
+                MODEL_NAME, engineWorkerStatus, workerAddressService, statusCheckExecutor,
+                healthReporter, engineGrpcService, RoleType.DECODE, cacheAwareService,
+                cacheIntervalService, 5_000L, new LongAdder(), 1L, false, STATUS_STALE_AFTER_US);
+
         syncScheduler = Executors.newSingleThreadScheduledExecutor(r -> {
             Thread thread = new Thread(r, "e2e-engine-sync");
             thread.setDaemon(true);
@@ -187,6 +194,7 @@ class FileDiscoveryDynamicScaleEndToEndTest extends FlexLBMockTestBase {
         });
         // Production cadence: the master re-pulls the discovery list every SYNC_STATUS_INTERVAL.
         syncScheduler.scheduleAtFixedRate(prefillSyncRunner, 0, SYNC_INTERVAL_MS, TimeUnit.MILLISECONDS);
+        syncScheduler.scheduleAtFixedRate(decodeSyncRunner, 0, SYNC_INTERVAL_MS, TimeUnit.MILLISECONDS);
     }
 
     @AfterEach
@@ -230,6 +238,8 @@ class FileDiscoveryDynamicScaleEndToEndTest extends FlexLBMockTestBase {
         long startMs = System.nanoTime();
         awaitUntil(3_000, () -> mockPrefillWorker.getWorkerStatusCallCount() > 0
                         && workerB.getWorkerStatusCallCount() > 0
+                        && mockDecodeWorker.getWorkerStatusCallCount() > 0
+                        && endpointRegistry.endpointAddressSnapshot(RoleType.DECODE).contains(decodeIpPort)
                         && prefillAddressesRoutable(prefillIpPort, workerIpPort(workerB)),
                 "discovery loop should poll both initial workers and publish "
                         + "routable prefill endpoints for both");
@@ -247,6 +257,7 @@ class FileDiscoveryDynamicScaleEndToEndTest extends FlexLBMockTestBase {
         // ─── Phase 2: start C (NOT registered) → add to file → it must converge ───
         workerC = new MockPrefillWorker(MockWorkerBehavior.builder().build());
         workerC.start(0);
+        completeAcceptedBatches(workerC);
         String cIpPort = workerIpPort(workerC);
         writeDiscoveryFileAtomic(List.of(prefillIpPort, workerIpPort(workerB), cIpPort));
 
@@ -324,7 +335,7 @@ class FileDiscoveryDynamicScaleEndToEndTest extends FlexLBMockTestBase {
     @Override
     protected DefaultRouter createRouter() {
         DefaultRouter roundRobin = mock(DefaultRouter.class);
-        when(roundRobin.routeForQueue(any(BalanceContext.class), any())).thenAnswer(inv -> {
+        when(roundRobin.select(any(BalanceContext.class), any())).thenAnswer(inv -> {
             BalanceContext ctx = inv.getArgument(0);
             List<String> candidates = new ArrayList<>(
                     endpointRegistry.endpointAddressSnapshot(RoleType.PREFILL));
@@ -340,7 +351,7 @@ class FileDiscoveryDynamicScaleEndToEndTest extends FlexLBMockTestBase {
             int httpPort = Integer.parseInt(parts[1]);
             // admittedRoute() converts this response into the exact pinned
             // queue admission the scheduler consumes — including the Decode KV
-            // reservation (QueueRouteAdmission.reserveQueuedPinned) the batcher
+            // reservation (RouteAdmission.reserveQueuedPinned) the batcher
             // later marks queued; without it admission would hit NOT_QUEUED ->
             // OwnershipLost and the request would never complete.
             return admittedRoute(ctx,
@@ -376,6 +387,13 @@ class FileDiscoveryDynamicScaleEndToEndTest extends FlexLBMockTestBase {
     // ════════════════════════════════════════════════════════════════
     //  Helpers
     // ════════════════════════════════════════════════════════════════
+
+    private void completeAcceptedBatches(MockPrefillWorker worker) {
+        worker.getRpcService().onAcceptedBatch(batch -> {
+            worker.getRpcService().completeBatch(batch);
+            mockDecodeWorker.getRpcService().completeBatch(batch);
+        });
+    }
 
     /** Submit {@code count} requests and wait for every ACK to complete successfully. */
     private void drainRequests(int count) throws Exception {

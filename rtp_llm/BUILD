@@ -1,146 +1,942 @@
 package(default_visibility = ["//visibility:public"])
 
-exports_files(["release_version.py"])
+exports_files([
+    "ops/libth_transformer_config.pyi",
+    "ops/librtp_compute_ops/__init__.pyi",
+])
 
-# Compatibility shims: Python packages are managed by pip/pyproject.toml.
-# These empty targets keep unmigrated Bazel callers analyzable.
+load("@rules_python//python:packaging.bzl", "py_package", "py_wheel")
+# make different torch for different device when in compiling
+load("//bazel:defs.bzl", "upload_pkg", "copy_target_to", "upload_wheel", "rename_wheel", "rename_wheel_aarch64")
+load("@arch_config//:arch_select.bzl", "requirement", "whl_deps", "internal_deps", "jit_deps", "platform_deps", "triton_deps")
+load("//bazel:bundle.bzl", "bundle_files", "bundle_tar")
+
+load("@release_version//:defs.bzl", "RELEASE_VERSION")
+
+load(
+    "@local_config_rocm//rocm:build_defs.bzl",
+    "rocm_default_copts",
+    _if_rocm = "if_rocm",
+)
+
+if_rocm = _if_rocm
+
+
+flashinfer = [
+    "apache-tvm-ffi",
+    "flashinfer-python",
+]
+
+flashinfer_with_cache = [
+    "apache-tvm-ffi",
+    "flashinfer-python",
+    "flashinfer-cubin",
+    "nvidia-cutlass-dsl",
+]
+
+# flashinfer-jit-cache is intentionally absent: the precompiled AOT modules
+# (~8.4G, every arch family) are dead weight in per-arch images — flashinfer
+# falls back to runtime nvcc JIT on first use, and the CI bazel workers reuse
+# the JIT cache via /tmp/rtp-llm/.jit_cache plus the REMOTE_JIT_DIR snapshot.
+
+flashmla = [
+    "fast-hadamard-transform",
+    "flash-mla",
+    "flash-mla-legacy",
+    "tilelang",
+]
+
+deep = [
+    "deep_gemm",
+    "deep_ep"
+]
+
+rtp_kernel = [
+    "rtp-kernel"
+]
+
+flashattn2 = ["flash_attn"]
+flashattn = flashattn2 + ["flash-attn-3"]
+
+xft_dep = select({
+    "@//:using_arm": [],
+    "//:xft_use_icx": [
+        # "xfastertransformer_devel_icx",
+    ],
+    "//conditions:default": [
+        # "xfastertransformer_devel",
+    ],
+})
+
+arch_dep = select({
+    "@//:using_arm": [],
+    "@//:using_cuda12_arm": [],
+    "//conditions:default": [":decord", ":av"],
+})
+
+arch_with_version_dep = select({
+    "@//:using_arm": [],
+    "@//:using_cuda12_arm": [],
+    "//conditions:default": ["decord==0.6.0", "av==16.1.0"],
+})
+
+requirement([
+    "sentencepiece",
+    "transformers",
+    "pynvml",
+    "tiktoken",
+    "protobuf",
+    "grpcio-tools",
+    "setuptools",
+    "Pillow",
+    "pillow-heif",
+    "pillow-avif-plugin",
+    "lru-dict",
+    "cpm_kernels",
+    "uvicorn",
+    "fastapi",
+    "psutil",
+    "pyarrow",
+    "pyodps",
+    "thrift",
+    "torch",
+    "torchvision",
+    "triton",
+    "triton-kernels",
+    "numpy",
+    "safetensors",
+    "einops",
+    "prettytable",
+    "timm",
+    "aiohttp",
+    "onnx",
+    "sentence-transformers",
+    "orjson",
+    "xfastertransformer_devel",
+    "xfastertransformer_devel_icx",
+    "decord",
+    "av",
+    # add qwen agent package
+    "pydantic",
+    "json5",
+    "jsonschema",
+    "dashscope",
+    "jieba",
+    "openai",
+    "oss2",
+    "pyOpenSSL",
+    "requests",
+    "nest_asyncio",
+    "blobfile",
+    "partial_json_parser",
+    "librosa",
+    "matplotlib", # required by qwen vl tokenizer
+    "pyrsmi",
+    "amdsmi",
+    "fast-safetensors",
+    "setproctitle",
+    "bitsandbytes",
+    "portalocker",
+    "concurrent_log_handler",
+    "aiter",
+    "fastsafetensors",
+    "pybind11_stubgen",
+    "watchdog",
+    "zstandard",
+    "xgrammar",
+] + deep + flashinfer_with_cache + flashmla + rtp_kernel + flashattn)
+
+
+_JIT_CACHE_SRCS = [
+    "utils/jit_cache_manager.py",
+    "utils/jit_cache_store.py",
+    "utils/jit_cache_deep_gemm.py",
+]
+_JIT_CACHE_ENV_SRCS = ["utils/jit_cache_env.py"]
 
 py_library(
-    name = "uvicorn",
-    srcs = [],
-    deps = [],
+    name = "utils",
+    srcs = glob([
+        "utils/**/*.py",
+    ], exclude = _JIT_CACHE_SRCS + _JIT_CACHE_ENV_SRCS + [
+        "utils/warmup.py",
+        "utils/test/*.py",
+        "utils/test/**/*.py",
+    ]),
+    deps = [
+        ":jit_cache_env",
+        ":torch",
+        ":safetensors",
+        #":decord",
+        ":lru-dict",
+        ":cpm_kernels",
+        ":prettytable",
+        ":psutil",
+        "//rtp_llm/aios/kmonitor:kmonitor_py",
+    ] + arch_dep + internal_deps()
 )
 
 py_library(
-    name = "fastapi",
-    srcs = [],
-    deps = [],
+    name = "warmup",
+    srcs = ["utils/warmup.py"],
 )
 
 py_library(
-    name = "psutil",
-    srcs = [],
-    deps = [],
+    name = "jit_cache_env",
+    srcs = _JIT_CACHE_ENV_SRCS,
+    visibility = ["//visibility:public"],
 )
 
 py_library(
-    name = "tiktoken",
-    srcs = [],
-    deps = [],
+    name = "jit_cache_manager_lib",
+    srcs = _JIT_CACHE_SRCS,
+    deps = [
+        ":jit_cache_env",
+        ":utils",
+        ":watchdog",
+        ":zstandard",
+    ],
+    visibility = ["//visibility:public"],
 )
 
 py_library(
-    name = "pydantic",
-    srcs = [],
-    deps = [],
+    name = "eplb",
+    srcs = glob([
+        "eplb/*.py",
+    ]),
+    deps = [
+        ":utils",
+    ],
 )
 
 py_library(
-    name = "json5",
-    srcs = [],
-    deps = [],
+    name = "gang",
+    srcs = glob([
+        "gang/*.py",
+    ])
 )
 
 py_library(
-    name = "dashscope",
-    srcs = [],
-    deps = [],
-)
-
-py_library(
-    name = "jieba",
-    srcs = [],
-    deps = [],
-)
-
-py_library(
-    name = "partial_json_parser",
-    srcs = [],
-    deps = [],
-)
-
-py_library(
-    name = "openai",
-    srcs = [],
-    deps = [],
-)
-
-py_library(
-    name = "grpcio-tools",
-    srcs = [],
-    deps = [],
-)
-
-py_library(
-    name = "setuptools",
-    srcs = [],
-    deps = [],
-)
-
-py_library(
-    name = "torch",
-    srcs = [],
-    deps = [],
-)
-
-py_library(
-    name = "config",
-    srcs = [],
-    deps = [],
-)
-
-py_library(
-    name = "models",
-    srcs = [],
-    deps = [],
-)
-
-py_library(
-    name = "openai_api",
-    srcs = [],
-    deps = [],
+    name = "_ft_pickler",
+    srcs = ["_ft_pickler.py"],
 )
 
 py_library(
     name = "ops",
-    srcs = [],
-    deps = [],
+    srcs = glob([
+        "ops/**/*.py",
+    ]),
+    data = [
+        "//:th_grammar_tokenizer_info",
+    ],
+    deps = [
+        ":torch",
+        ":utils",
+    ],
 )
 
 py_library(
-    name = "telemetry",
-    srcs = [],
-    deps = [],
+    name = "pipeline",
+    srcs = glob([
+        "pipeline/**/*.py",
+    ]),
 )
 
 py_library(
-    name = "rtp_llm_lib",
-    srcs = [],
-    deps = [],
+    name = "device",
+    srcs = glob([
+        "device/**/*.py",
+    ]),
+    deps = [
+        ":torch",
+        ":psutil",
+        ":utils",
+        ":ops",
+    ],
+)
+
+py_library(
+    name = "multimodal",
+    srcs = glob([
+        "multimodal/*.py",
+        "multimodal/**/*.py",
+    ]),
+    deps = [
+        ":utils",
+        ":Pillow",
+        ":pillow-heif",
+        ":pillow-avif-plugin",
+        ":nest_asyncio",
+        ":matplotlib",
+        ":torchvision",
+        ":protobuf",
+        ":pyOpenSSL",
+    ] + select({
+        "@//:using_arm": [],
+	    "@//:using_rocm": ["pyrsmi", "amdsmi"],
+        "@//:using_cpu": [],
+        "@//:using_cuda12_arm": [],
+        "//conditions:default": ["flash_attn"]
+    }) + arch_dep,
+)
+
+py_library(
+    name = "models",
+    srcs = glob([
+        "models/*.py",
+        "models/**/*.py",
+    ], exclude=["models/test/*.py"]),
+    deps = [
+        ":sentencepiece",
+        ":sentence-transformers",
+        ":transformers",
+        ":prettytable",
+        ":pynvml",
+        ":tiktoken",
+        ":protobuf",
+        ":torch",
+        ":triton",
+        ":einops",
+        ":utils",
+        ":ops",
+        ":timm",
+        ":onnx",
+        #":decord",
+        "//rtp_llm/model_loader:loader",
+        "//rtp_llm/models_py:models",
+        ":multimodal",
+    ] + select({
+        # cuda13 locks ship deep-gemm and deep-ep.
+        "@//:using_cuda13_x86": deep,
+        "@//:using_cuda13_arm": deep,
+        "@//:using_cuda": deep,
+        "//conditions:default": []
+    }) + select({
+        # cuda13 tests use the matching cubins from the pip lock.
+        # The jit-cache wheel is installed through Requires-Dist in runtime images.
+        "@//:using_cuda13_x86": flashinfer + ["flashinfer-cubin", "nvidia-cutlass-dsl", "flash-mla", "fast-hadamard-transform", "tilelang"],
+        "@//:using_cuda13_arm": flashinfer + ["nvidia-cutlass-dsl", "flash-mla", "flash-mla-legacy", "tilelang"],
+        "@//:using_cuda12_9_x86": flashinfer_with_cache + flashmla,
+        "@//:using_cuda12_arm": flashinfer_with_cache + ["flash-mla", "fast-hadamard-transform"],
+        "@//:cuda_pre_12_9": flashinfer,
+        "//conditions:default": []
+    }) + select({
+        "@//:using_cuda13_x86": rtp_kernel,
+        "@//:using_cuda13_arm": rtp_kernel,
+        "@//:using_cuda12_9_x86": rtp_kernel,
+        "@//:using_cuda12_arm": rtp_kernel,
+        "@//:cuda_pre_12_9": [],
+        "//conditions:default": []
+    }) + select({
+        "@//:using_cuda13_x86": flashattn2,
+        "@//:using_cuda13_arm": [],
+        "@//:using_cuda12_9_x86": flashattn,
+        "@//:using_cuda12_arm": flashattn,
+        "@//:cuda_pre_12_9": [],
+        "//conditions:default": []
+    }) + select({
+        "@//:using_arm": [],
+        "@//:using_cuda13_arm": [],
+        "@//:using_cuda12_arm": [],
+        # "//:xft_use_icx": [
+        #     "xfastertransformer_devel_icx",
+        # ],
+        "//conditions:default": [
+            "xfastertransformer_devel",
+        ],
+    }) + select({
+        "@//:using_arm": [],
+	    "@//:using_rocm": ["pyrsmi", "amdsmi"],
+        "@//:using_cpu": [],
+        "@//:using_cuda13_arm": [],
+        "@//:using_cuda12_arm": [],
+        "//conditions:default": []
+    }) + triton_deps(["triton"]) + internal_deps(),
+)
+
+py_library(
+    name = "vipserver",
+    srcs = glob([
+        "vipserver/*.py",
+    ]),
+)
+
+filegroup(
+    name = "alog_config",
+    srcs = ["config/alog.conf"],
+    visibility = ["//visibility:public"],
+)
+
+py_library(
+    name = "release_version",
+    srcs = ["release_version.py"],
+    visibility = ["//visibility:public"],
+)
+
+py_library(
+    name = "config",
+    srcs = glob([
+        "config/*.py",
+        "config/**/*.py",
+    ]),
+    deps = [
+        "//rtp_llm/distribute:distribute",
+        ":multimodal"
+    ],
+    data = [":alog_config"]
+)
+
+py_library(
+    name = "config_ops",
+    deps = [
+        ":config",
+        ":ops"
+    ],
 )
 
 py_library(
     name = "structure",
-    srcs = [],
-    deps = [],
+    srcs = glob([
+        "structure/*.py",
+    ])
 )
 
 py_library(
-    name = "testlib",
-    srcs = [],
-    deps = [],
-    data = [],
+    name = "cli",
+    deps = [
+        ":config",
+        ":release_version"
+    ],
+    srcs = glob([
+        "cli/*.py",
+    ])
+)
+
+filegroup(
+    name = "async_model_files",
+    srcs = glob(["async_decoder_engine/**/*.py"]),
 )
 
 py_library(
-    name = "utils",
-    srcs = [],
-    deps = [],
+    name = "async_model",
+    srcs = [
+        ":async_model_files"
+    ],
+    deps = [
+        ":utils",
+        ":ops",
+        ":config",
+        ":structure",
+        "//rtp_llm/cpp/model_rpc:model_rpc_client",
+    ],
+)
+
+py_library(
+    name = "openai_api",
+    srcs = glob([
+        "openai/*.py",
+        "openai/**/*.py",
+    ]),
+    deps = [
+        ":utils",
+        ":ops",
+        ":config",
+        ":structure",
+        ":telemetry",
+    ],
+    data = [
+        "openai/renderers/qwen_agent/utils/qwen.tiktoken"
+    ],
+)
+
+py_library(
+    name = "telemetry",
+    srcs = glob([
+        "telemetry/*.py",
+    ]),
+    visibility = ["//visibility:public"],
+    # The tracing SDK is optional at runtime; tracing.py degrades to a no-op
+    # when the import is unavailable, so telemetry never blocks inference.
+)
+
+py_library(
+    name = "frontend",
+    srcs = glob([
+        "frontend/*.py",
+        "frontend/**/*.py",
+    ]),
+    deps = [
+        ":openai_api",
+        ":telemetry",
+    ]
 )
 
 py_library(
     name = "sdk",
-    srcs = [],
-    deps = [],
-    data = [],
+    srcs = [
+        '__init__.py',
+        'model_factory.py',
+        'start_server.py',
+        'start_frontend_server.py',
+        'start_backend_server.py',
+        'start_dash_sc_server.py',
+        '_ft_pickler.py',
+        'model_factory_register.py',
+    ],
+    deps = [
+        "//rtp_llm/server:server",
+        ":uvicorn",
+        ":fastapi",
+        ":psutil",
+        ":oss2",
+        ":orjson",
+        ":requests",
+        # add qwen agent package
+        ":pydantic",
+        ":json5",
+        ":dashscope",
+        ":jieba",
+        ":openai",
+        ":librosa",
+        ":setproctitle",
+        ":portalocker",
+        ":concurrent_log_handler",
+        ":blobfile",
+        ":partial_json_parser",
+        ":utils",
+        ":config_ops",
+        ":warmup",
+        ":jit_cache_manager_lib",
+    ],
+    data = jit_deps(),
+    imports = ["."],
+)
+
+py_library(
+    name = "kserve_server",
+    srcs = [
+        'kserve_server.py',
+    ],
+    deps = [
+        ":sdk",
+        ":models",
+    ],
+    imports = ["."],
+)
+
+py_library(
+    name = "plugins",
+    srcs = glob([
+        "plugins/*.py",
+    ])
+)
+
+py_library(
+    name = "tokenizer",
+    srcs = glob([
+        "tokenizer/*.py",
+    ])
+)
+
+py_library(
+    name = "embedding",
+    srcs = glob([
+        "embedding/*.py",
+    ])
+)
+
+py_library(
+    name = "lora",
+    srcs = glob([
+        "lora/*.py",
+    ])
+)
+
+py_library(
+    name = "rtp_llm_frontend_lib",
+    deps = [
+        ":utils",
+        ":eplb",
+        ":ops",
+        ":pipeline",
+        ":device",
+        ":cli",
+        ":config",
+        ":structure",
+        "//rtp_llm/server:server",
+        ":plugins",
+        "//rtp_llm/cpp/model_rpc:model_rpc_client",
+        "//rtp_llm/dash_sc:dash_sc_grpc_server",
+        ":openai_api",
+        ":lora",
+        ":sdk",
+        ":frontend",
+        ":embedding",
+        "//rtp_llm/tools:model_assistant",
+        "//rtp_llm/distribute:distribute",
+        ":tokenizer",
+        "//rtp_llm/aios/kmonitor:kmonitor_py",
+        "//rtp_llm/metrics:metrics",
+        "//rtp_llm/access_logger:access_logger",
+    ],
+    data = [
+        "//rtp_llm/libs:frontend_libs"
+    ]
+)
+
+py_library(
+    name = "rtp_llm_lib",
+    deps = [
+        ":rtp_llm_frontend_lib",
+    ] + select({
+        "@//:using_rocm": [
+            ":models",
+            ":async_model",
+            ":embedding",
+            "//rtp_llm/tools/convert:convert",
+            ":aiter",
+            ":triton-kernels",
+        ],
+        "//conditions:default": [
+            ":models",
+            ":async_model",
+            ":embedding",
+            "//rtp_llm/tools/convert:convert",
+        ],
+            }) + select({
+                "//conditions:default": [],
+            }),
+    data = [
+        "//rtp_llm/libs:libs"
+    ]
+)
+
+py_library(
+    name = "rtp_llm_package_libs",
+    deps = [
+        ":rtp_llm_lib",
+    ],
+    data = [
+        "//rtp_llm/libs:whl_package_libs"
+    ]
+)
+
+py_package(
+    name = "rtp_llm_frontend_package",
+    deps = [
+        ":rtp_llm_frontend_lib",
+    ],
+    packages = [
+        "rtp_llm"
+    ],
+)
+
+py_package(
+    name = "rtp_llm_package",
+    deps = [
+        ":rtp_llm_package_libs",
+    ] + jit_deps(),
+    packages = [
+        "rtp_llm",
+    ] + select({
+        "@//:using_cuda12": deep,
+        "//conditions:default": [],
+    }),
+)
+
+whl_reqs = [
+    "filelock>=3.20.0",
+    "jinja2",
+    "sympy",
+    "typing-extensions",
+    "importlib_metadata",
+    "transformers==5.2.0",
+    "sentencepiece==0.2.0",
+    "fastapi==0.115.6",
+    "grpcio-tools==1.57.0",
+    "uvicorn==0.30.0",
+    "setuptools==60.5.0",
+    "dacite",
+    "pynvml",
+    "thrift",
+    "numpy<2.0a0,>=1.25",
+    "psutil",
+    "tiktoken==0.7.0",
+    "lru-dict",
+    "py-spy",
+    "pyarrow==14.0.0",
+    "safetensors",
+    "cpm_kernels",
+    "Pillow",
+    "pillow-heif",
+    "pillow-avif-plugin",
+    "protobuf==4.25",
+    "einops",
+    "prettytable",
+    "pydantic",
+    "timm==0.9.12",
+    "onnx",
+    "sentence-transformers==5.2.0",
+    # "xfastertransformer_devel==1.8.1.1",
+    # "xfastertransformer_devel_icx==1.8.1.1",
+    "grpcio==1.62.0",
+    #"decord==0.6.0",
+    "oss2",
+    "orjson",
+    "aiohttp",
+    "watchdog==6.0.0",
+    "zstandard==0.25.0",
+    "json5",
+    "jsonschema==4.26.0",
+    "dashscope>=1.11.0",
+    "jieba",
+    "openai",
+    "nest_asyncio",
+    "blobfile",
+    "partial_json_parser",
+    "librosa",
+    "matplotlib",
+    "setproctitle",
+    "bitsandbytes",
+    "portalocker",
+    "concurrent_log_handler",
+    "apache-tvm-ffi",
+    "xgrammar==0.2.5",
+    # OTel trace runtime; keep the pinned protobuf compatibility constraint.
+    "opentelemetry-sdk==1.44.0",
+    "opentelemetry-exporter-otlp-proto-http==1.15.0",
+] + whl_deps() + platform_deps() + xft_dep
+
+# Frontend-only requirement set: the frontend lane is CPU serving (HTTP + gRPC
+# client + tokenizer), so the engine's platform CUDA tree (whl_deps: torch-cuda,
+# nvidia wheels, flashinfer/deep_gemm/flash_attn/tilelang/rtp-kernel...) and the
+# model-loading ML extras are dead weight there.  torch stays (the pybind
+# config/repetition .so's link the torch C++ ABI and ~20 modules import its CPU
+# API) but as the official CPU wheel — the .so's are linked -Wl,--as-needed so
+# their CUDA DT_NEEDED entries (zero referenced symbols) drop out.  Keep the
+# transformers/otel/tokenizer pins aligned with whl_reqs above.
+whl_reqs_frontend = [
+    "torch @ https://download.pytorch.org/whl/cpu/torch-2.11.0%2Bcpu-cp310-cp310-manylinux_2_28_x86_64.whl",
+    "filelock>=3.20.0",
+    "jinja2",
+    "sympy",
+    "typing-extensions",
+    "importlib_metadata",
+    "transformers==5.2.0",
+    "sentencepiece==0.2.0",
+    "fastapi==0.115.6",
+    "uvicorn==0.30.0",
+    "setuptools==60.5.0",
+    "pynvml",
+    "thrift",
+    "numpy<2.0a0,>=1.25",
+    "psutil",
+    "tiktoken==0.7.0",
+    "lru-dict",
+    "Pillow",
+    "pillow-heif",
+    "pillow-avif-plugin",
+    "protobuf==4.25",
+    "prettytable",
+    "pydantic",
+    "grpcio==1.62.0",
+    "oss2",
+    "orjson",
+    "aiohttp",
+    "watchdog==6.0.0",
+    "zstandard==0.25.0",
+    "json5",
+    "jsonschema==4.26.0",
+    "dashscope>=1.11.0",
+    "jieba",
+    "openai",
+    "nest_asyncio",
+    "partial_json_parser",
+    "setproctitle",
+    "portalocker",
+    "concurrent_log_handler",
+    "apache-tvm-ffi",
+    "xgrammar==0.2.5",
+    # OTel trace runtime; keep the pinned protobuf compatibility constraint.
+    "opentelemetry-sdk==1.44.0",
+    "opentelemetry-exporter-otlp-proto-http==1.15.0",
+]
+
+py_wheel(
+    name = "rtp_llm_frontend_whl",
+    distribution = "rtp_llm_frontend",
+    python_tag = "py3",
+    tags = ["manual", "local", "no-remote"],
+    version = RELEASE_VERSION,
+    deps = [
+        ":rtp_llm_frontend_package",
+        "@rtp_deps//:extension_package_frontend"
+    ],
+    requires = whl_reqs_frontend,
+)
+
+rename_wheel(
+    name = "rtp_llm_frontend",
+    package_name = "rtp_llm_frontend-%s" % RELEASE_VERSION,
+    src = ":rtp_llm_frontend_whl",
+)
+
+# Standalone DashSc gRPC server wheel: dash_sc proto + dash_sc_grpc_server, no full frontend app.
+# Run: python -m rtp_llm.dash_sc.server [--port 8000] or: rtp-llm-dash-sc-grpc [--port 8000]
+py_library(
+    name = "dash_sc_grpc_standalone_lib",
+    srcs = ["__init__.py"],
+    deps = [
+        "//rtp_llm/dash_sc:dash_sc_grpc_server",
+    ],
+    visibility = ["//visibility:private"],
+)
+
+py_package(
+    name = "dash_sc_grpc_standalone_package",
+    deps = [":dash_sc_grpc_standalone_lib"],
+    packages = ["rtp_llm"],
+)
+
+whl_reqs_dash_sc_grpc = [
+    "grpcio>=1.57.0",
+    "jsonschema==4.26.0",
+    "protobuf>=4.25",
+    "xgrammar==0.2.5",
+]
+
+py_wheel(
+    name = "rtp_llm_dash_sc_grpc_whl",
+    distribution = "rtp_llm_dash_sc_grpc",
+    python_tag = "py3",
+    tags = ["manual", "local", "no-remote"],
+    version = RELEASE_VERSION,
+    entry_points = {
+        "console_scripts": [
+            "rtp-llm-dash-sc-grpc = rtp_llm.dash_sc.server:main",
+        ]
+    },
+    deps = [":dash_sc_grpc_standalone_package"],
+    requires = whl_reqs_dash_sc_grpc,
+)
+
+rename_wheel(
+    name = "rtp_llm_dash_sc_grpc",
+    package_name = "rtp_llm_dash_sc_grpc-%s" % RELEASE_VERSION,
+    src = ":rtp_llm_dash_sc_grpc_whl",
+)
+
+# target for wheel
+py_wheel(
+    name = "rtp_llm_whl",
+    distribution = "rtp_llm",
+    python_tag = "py3",
+    tags = ["manual", "local", "no-remote"],
+    version = RELEASE_VERSION,
+    entry_points = {
+        "console_scripts": [
+            "rtp-llm = rtp_llm.cli.main:main",
+        ]
+    },
+    deps = [
+        ":rtp_llm_package",
+        "@rtp_deps//:extension_package"
+    ],
+    requires = whl_reqs,
+)
+
+py_wheel(
+    name = "rtp_llm_kserve_whl",
+    distribution = "rtp_llm",
+    python_tag = "py3",
+    tags = ["manual", "local"],
+    version = RELEASE_VERSION,
+    deps = [
+        ":rtp_llm_package",
+        "@rtp_deps//:extension_package",
+    ],
+    requires = whl_reqs + [
+        "kserve",
+    ] + xft_dep + arch_with_version_dep,
+)
+
+py_package(
+    name = "rtp_llm_deepgemm_pkg",
+    deps = select({
+        "@//:using_cuda13_x86": [],
+        "@//:using_cuda13_arm": [],
+        "@//:using_cuda12": ["@deep_gemm_ext//:deep_gemm"],
+        "//conditions:default": [],
+    }),
+    packages = [
+        "deep_gemm",
+    ],
+)
+
+py_wheel(
+    name = "rtp_llm_deepgemm_whl",
+    distribution = "rtp_llm_deep_gemm",
+    python_tag = "py3",
+    tags = ["manual", "local", "no-remote"],
+    version = RELEASE_VERSION,
+    deps = [
+        ":rtp_llm_deepgemm_pkg",
+    ],
+    requires = [],
+)
+
+rename_wheel_aarch64(
+    name = "rtp_llm_aarch64",
+    package_name = "rtp_llm-%s" % RELEASE_VERSION,
+    src = ":rtp_llm_whl",
+)
+
+rename_wheel(
+    name = "rtp_llm",
+    package_name = "rtp_llm-%s" % RELEASE_VERSION,
+    src = ":rtp_llm_whl",
+)
+
+rename_wheel(
+    name = "rtp_llm_cuda12",
+    package_name = "rtp_llm-%s+cuda121" % RELEASE_VERSION,
+    src = ":rtp_llm_whl",
+)
+
+py_library(
+    name = "testlib",
+    data = [
+        "//rtp_llm/test/model_test/fake_test/testdata:testdata",
+        "//:th_transformer",
+        "//:rtp_compute_ops",
+    ],
+    deps = [
+        ":rtp_llm_lib",
+        "//rtp_llm/test/utils:test_util",
+        "@rtp_deps//:extension_lib",
+        ":aiohttp",
+    ]
+)
+
+# CPU-clean variant of :testlib for tests that never load CUDA artifacts at
+# runtime. It keeps the pure-py rtp_llm subset and the minimal runtime config
+# .so (libth_transformer_config), and does not carry :th_transformer /
+# :rtp_compute_ops / :rtp_llm_lib, so its runfiles stay free of the CUDA
+# toolchain closure.
+py_library(
+    name = "testlib_lite",
+    data = [
+        "//rtp_llm/test/model_test/fake_test/testdata:testdata",
+        "//rtp_llm/libs:libth_transformer_config_so",
+    ],
+    deps = [
+        ":config",
+        ":utils",
+        ":ops",
+        ":openai_api",
+        ":pydantic",
+        "//rtp_llm/test/utils:test_util",
+        "@rtp_deps//:extension_lib",
+        ":aiohttp",
+    ]
 )

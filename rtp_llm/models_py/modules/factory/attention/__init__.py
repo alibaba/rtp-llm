@@ -80,10 +80,7 @@ elif device_type == DeviceType.Cuda:
         FlashInferTRTLLMPrefillImpl,
         FlashInferTRTLLMSpecDecodeImpl,
     )
-    from rtp_llm.models_py.modules.factory.attention.cuda_impl.xqa import (
-        XQAImpl,
-        get_xqa_impl,
-    )
+    from rtp_llm.models_py.modules.factory.attention.cuda_impl.xqa import XQADecodeImpl
 
     PREFILL_MHA_IMPS.extend(
         [
@@ -100,12 +97,7 @@ elif device_type == DeviceType.Cuda:
         ]
     )
     DECODE_MHA_IMPS.append(FlashInferTRTLLMDecodeImpl)
-    # Preserve the established accumulation path before trying FlashInfer's
-    # XQA fallback; the two implementations can differ by less than one ULP.
-    DECODE_MHA_IMPS.append(XQAImpl)
-    _xqa_decode_impl = get_xqa_impl()
-    if _xqa_decode_impl is not XQAImpl:
-        DECODE_MHA_IMPS.append(_xqa_decode_impl)
+    DECODE_MHA_IMPS.append(XQADecodeImpl)
     if PyFlashinferDecodeImpl is not None:
         DECODE_MHA_IMPS.append(PyFlashinferDecodeImpl)
 
@@ -150,6 +142,25 @@ if extension and hasattr(extension, "register_attention"):
         prefill_mla_imps=PREFILL_MLA_IMPS,
         decode_mla_imps=DECODE_MLA_IMPS,
     )
+elif device_type == DeviceType.Ppu:
+    # PPU uses the CUDA-flavored attention implementations.
+    from rtp_llm.models_py.modules.factory.attention.cuda_impl.py_flashinfer_mha import (
+        PyFlashinferDecodeImpl,
+        PyFlashinferHybridPrefillImpl,
+        PyFlashinferPagedPrefillImpl,
+        PyFlashinferPrefillImpl,
+    )
+
+    PREFILL_MHA_IMPS.append(PyFlashinferPrefillImpl)
+    PREFILL_MHA_IMPS.append(PyFlashinferHybridPrefillImpl)
+    PREFILL_MHA_IMPS.append(PyFlashinferPagedPrefillImpl)
+    DECODE_MHA_IMPS.append(PyFlashinferDecodeImpl)
+
+    from rtp_llm.models_py.modules.factory.attention.cuda_cp_impl.prefill_cp_flashinfer import (
+        CPFlashInferImpl,
+    )
+
+    PREFILL_MHA_IMPS.append(CPFlashInferImpl)
 
 
 def _validate_impl_names() -> None:

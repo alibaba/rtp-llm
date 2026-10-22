@@ -115,7 +115,7 @@ std::optional<P2PConnectorSchedulerDecode::AsyncReadCallResults> P2PConnectorSch
     const std::string&                                      unique_key,
     int64_t                                                 deadline_ms,
     const std::vector<std::shared_ptr<LayerCacheBuffer>>&   layer_cache_buffers,
-    GenerateStream*                                         generate_stream,
+    ::rtp_llm::GenerateStream*                              generate_stream,
     const std::shared_ptr<DecodeSchedulerMetricsCollector>& collector,
     ErrorInfo&                                              out_error,
     int                                                     prefill_tp_size) {

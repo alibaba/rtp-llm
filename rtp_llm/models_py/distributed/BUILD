@@ -1,7 +1,3 @@
-load("@arch_config//:arch_select.bzl", "deep_ep_py_deps")
-
-deep_ep_py_deps()
-
 py_library(
     name = "collective_torch",
     srcs = [
@@ -22,7 +18,12 @@ py_library(
     deps = [
         "//rtp_llm:torch",
     ] + select({
-        "@//:using_cuda12":["deep_ep_py"],
+        "@//:using_cuda13_x86": ["//rtp_llm/models_py:deep_ep"],
+        "@//:using_cuda13_arm": ["//rtp_llm/models_py:deep_ep"],
+        "@//:using_cuda12": ["//rtp_llm/models_py:deep_ep"],
+        "@//:using_ppu": ["//rtp_llm/models_py:deep_ep"],
+        "@//:using_rocm": [],
+        "@//:using_cpu": [],
         "//conditions:default": [],
     }),
     visibility = ["//visibility:public"],

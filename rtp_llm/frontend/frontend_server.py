@@ -1,4 +1,5 @@
 import asyncio
+import inspect
 import json
 import logging
 import threading
@@ -148,6 +149,7 @@ class FrontendServer(object):
             py_env_configs.profiling_debug_logging_config.log_file_backup_count,
             rank_id,
             server_id,
+            disable_access_log=py_env_configs.misc_config.disable_access_log,
         )
         self._frontend_worker = None
         self._openai_endpoint = None
@@ -458,13 +460,12 @@ class FrontendServer(object):
             # `request_id` is the Bailian Unitrace index key: spans without it
             # are accepted upstream but unsearchable (verified 2026-07-26)
             trace_state.set_attribute("request_id", str(request_id))
-            trace_state.set_attribute("rtp_llm.request_id", request_id)
             trace_state.set_attribute(trace_attrs.HTTP_REQUEST_METHOD, "POST")
             trace_state.set_attribute(trace_attrs.HTTP_METHOD, "POST")
 
-        def generate_call():
+        async def generate_call():
             assert self._openai_endpoint != None
-            response = self._openai_endpoint.chat_completion(
+            response = await self._openai_endpoint.chat_completion_async(
                 request_id, request, raw_request
             )
             assert isinstance(
@@ -703,6 +704,8 @@ class FrontendServer(object):
         assert self._frontend_worker is not None
         start_time = current_time_ms()
         response_generator = generate_call()
+        if inspect.isawaitable(response_generator):
+            response_generator = await response_generator
         return CompleteResponseAsyncGenerator(
             __gen_response_with_report(start_time, response_generator),
             response_generator._collect_complete_response_func,

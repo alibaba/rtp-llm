@@ -85,13 +85,8 @@ class GrpcTimeoutTest extends FlexLBMockTestBase {
     }
 
     @Override
-    protected FlexlbConfig createConfig() {
-        FlexlbConfig cfg = super.createConfig();
-        DispatcherConfig dispatcher = assertInstanceOf(
-                DispatcherConfig.class, cfg.getDispatcher());
-        dispatcher.setEnqueueRpcTimeoutMs(500); // will time out
-        return cfg;
-    }
+    protected long enqueueTimeoutMillis() { return 500L; }
+
 
     @Test
     @Timeout(15)
@@ -109,7 +104,7 @@ class GrpcTimeoutTest extends FlexLBMockTestBase {
         assertTrue(mockPrefillWorker.getEnqueueCount() >= 1,
                 "Prefill worker should have received at least 1 EnqueueBatch call");
         assertFalse(mockPrefillWorker.getRpcService().isCancelled(10001L));
-        assertTrue(scheduler.ownsRequestGeneration(10001L));
+        assertTrue(ownsRequestGeneration(10001L));
 
         // 4. The uncertain request remains charged instead of being unsafely rolled back.
         assertEquals(1, getPrefillEndpoint().getInflightBatchCount());
@@ -149,5 +144,34 @@ class GrpcTimeoutTest extends FlexLBMockTestBase {
         mockPrefillWorker.setBehavior(MockWorkerBehavior.builder().build());
         assertTrue(submitRequest(10002).get(5, TimeUnit.SECONDS).isSuccess(),
                 "Subsequent request should succeed after recovery");
+    }
+    @Timeout(15)
+    void grpcTimeout_requestExpiresWithoutEngineEvidenceAndRecovers() throws Exception {
+        config.getRequestLifecycle().getRequest().setTimeoutMs(1_800L);
+        CompletableFuture<Response> future = submitRequest(10001);
+
+        // The RPC expires before the request lease: uncertainty remains pending briefly.
+        assertThrows(TimeoutException.class,
+                () -> future.get(750, TimeUnit.MILLISECONDS));
+        assertFalse(future.isDone());
+        assertTrue(mockPrefillWorker.getEnqueueCount() >= 1,
+                "the worker records EnqueueBatch before delaying its ACK");
+        assertEquals(1, getPrefillEndpoint().getInflightBatchCount());
+        assertEquals(1, getPrefillEndpoint().getLocallyOwnedRequestCount());
+        assertEquals(1, getDecodeEndpoint().getInflightCount());
+        assertEquals(0, mockDecodeWorker.getEnqueueCount());
+
+        // Same original 1.8s lease and 5s observation: silence is not a release proof.
+        assertThrows(TimeoutException.class, () -> future.get(5, TimeUnit.SECONDS));
+        assertFalse(future.isDone());
+        assertTrue(ownsRequestGeneration(10001L));
+        assertEquals(1, getPrefillEndpoint().getInflightBatchCount());
+        assertEquals(1, getPrefillEndpoint().getLocallyOwnedRequestCount());
+        assertEquals(1, getDecodeEndpoint().getInflightCount());
+
+        mockPrefillWorker.setBehavior(MockWorkerBehavior.builder().build());
+        Response recovered = submitRequest(10002).get(5, TimeUnit.SECONDS);
+        assertTrue(recovered.isSuccess(), "the same gRPC channel remains usable after expiry");
+        assertFalse(future.isDone(), "later traffic cannot settle the uncertain generation");
     }
 }

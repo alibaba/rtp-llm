@@ -2,6 +2,8 @@
 
 #include "autil/legacy/jsonizable.h"
 #include "rtp_llm/cpp/engine_base/schedulers/SchedulerBase.h"
+#include "rtp_llm/cpp/engine_base/schedulers/SchedulerUtils.h"
+#include "rtp_llm/cpp/engine_base/stream/GenerateStream.h"
 #include "rtp_llm/cpp/cache/KVCacheManager.h"
 #include "rtp_llm/cpp/cache/Types.h"
 #include <atomic>
@@ -76,6 +78,15 @@ public:
     // valid streams are admitted as ordinary individual streams.
     std::pair<std::vector<bool>, std::vector<GenerateStreamPtr>>
     enqueueGroup(const std::vector<GenerateStreamPtr>& streams) override {
+        if (hasMixedExecutionModes(streams)) {
+            for (const auto& stream : streams) {
+                if (!stream->hasError()) {
+                    stream->reportError(ErrorCode::INVALID_PARAMS, kMixedForceBatchGroupError);
+                }
+            }
+            return {std::vector<bool>(streams.size(), false), streams};
+        }
+
         std::vector<bool> enqueue_successes;
         enqueue_successes.reserve(streams.size());
         std::vector<GenerateStreamPtr> stream_enqueued;
@@ -145,18 +156,32 @@ public:
     }
 
     void evaluateWaitingStreams() {
-        // 清理 waiting_streams_ 中有错误或已结束的 stream
-        waiting_streams_.remove_if([](const auto& s) {
-            return s->hasError() || s->getStatus() == StreamState::FINISHED;
-        });
-
-        // Group streams by ReturnAllProbsMode to avoid mixing DEFAULT and ORIGINAL
-        // in one batch.  NONE streams are wildcards and can join either group.
-        std::map<ReturnAllProbsMode, std::list<GenerateStreamPtr>> mode_groups;
-        for (auto& s : waiting_streams_) {
-            if (!s->hasError()) {
-                mode_groups[s->getReturnAllProbs()].push_back(s);
+        // Finalize errors before selecting; cancelled streams must release their resources.
+        for (auto it = waiting_streams_.begin(); it != waiting_streams_.end();) {
+            if ((*it)->hasError()) {
+                (*it)->moveToNext();
+                it = waiting_streams_.erase(it);
+            } else if ((*it)->getStatus() == StreamState::FINISHED) {
+                it = waiting_streams_.erase(it);
+            } else {
+                ++it;
             }
+        }
+        draining_mixed_modes_ = false;
+        if (waiting_streams_.empty()) {
+            return;
+        }
+
+        // Preserve the main prefill/decode boundary. Only the oldest execution mode
+        // participates in this round's Native ReturnAllProbs grouping and FIFO policy.
+        const bool prefill_only = isPrefillOnly(waiting_streams_.front());
+        std::map<ReturnAllProbsMode, std::list<GenerateStreamPtr>> mode_groups;
+        for (auto& stream : waiting_streams_) {
+            if (isPrefillOnly(stream) != prefill_only) {
+                draining_mixed_modes_ = true;
+                continue;
+            }
+            mode_groups[stream->getReturnAllProbs()].push_back(stream);
         }
 
         // Choose which ReturnAllProbsMode group to serve this round.
@@ -261,18 +286,18 @@ public:
                     std::this_thread::sleep_for(std::chrono::milliseconds(1));
                 }
             }
-            // 过滤 FINISHED stream，仅将 RUNNING stream 加入 running_streams_
-            new_streams.remove_if([](const auto& s) { return s->getStatus() == StreamState::FINISHED; });
-            running_streams_.insert(running_streams_.end(), new_streams.begin(), new_streams.end());
-            // 从waiting_streams_中移除已调度的stream
-            // Use a set + single remove_if to avoid O(batch_size * waiting_size)
+            // Remove every selected stream, including one that finished while loading.
+            // Keep Native's linear queue cleanup while preserving main's state routing.
             std::unordered_set<GenerateStream*> scheduled_ptrs;
             scheduled_ptrs.reserve(new_streams.size());
-            for (auto& stream : new_streams) {
+            for (const auto& stream : new_streams) {
                 scheduled_ptrs.insert(stream.get());
+                if (stream->getStatus() == StreamState::RUNNING) {
+                    running_streams_.push_back(stream);
+                }
             }
-            waiting_streams_.remove_if([&](const GenerateStreamPtr& s) {
-                return scheduled_ptrs.count(s.get()) > 0;
+            waiting_streams_.remove_if([&](const GenerateStreamPtr& stream) {
+                return scheduled_ptrs.count(stream.get()) > 0;
             });
         }
     }
@@ -287,7 +312,7 @@ public:
             if (dp_rank_ != 0) {
                 (*it)->setGenTimeline(false);
             }
-            if (scheduler_type_ == SchedulerType::kBatchDecode) {
+            if (scheduler_type_ == SchedulerType::kBatchDecode && !isPrefillOnly(*it)) {
                 (*it)->setIsContextStream(false);
                 // for linear attn, incrKVBlock to clear unused linear block
                 (*it)->moveToNext();
@@ -327,6 +352,10 @@ public:
         // LOADING_CACHE -> DONE/WAITING: error / load cache done
         evaluateAndUpdateStreams(loading_cache_streams_);
         evaluateAndUpdateStreams(running_streams_);
+
+        if (waiting_streams_.empty()) {
+            draining_mixed_modes_ = false;
+        }
 
         // When no work is running, evaluate the waiting group using the requested batch policy.
         if (running_streams_.empty() && !waiting_streams_.empty()) {
@@ -369,6 +398,7 @@ private:
     uint32_t                     batch_size_;
     std::atomic<bool>            require_full_batch_{false};
     bool                         reorder_request_;
+    bool                         draining_mixed_modes_ = false;
     uint32_t                     current_step_ = 0;
 
     std::shared_ptr<KVCacheManager> cache_manager_;

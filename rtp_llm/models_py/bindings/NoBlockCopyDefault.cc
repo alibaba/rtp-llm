@@ -3,6 +3,10 @@
 
 namespace rtp_llm {
 
+std::shared_ptr<DeviceHostCopyStreams> acquireDeviceHostCopyStreams(int device_index) {
+    return std::make_shared<DeviceHostCopyStreams>(device_index, 0, 0);
+}
+
 void execNoBlockCopy(const MultiCopyParams& params) {
     RTP_LLM_CHECK_WITH_INFO(params.multi_src.size() == params.multi_dst.size(),
                             "multi_src.size(%zu) != multi_dst.size(%zu)",
@@ -14,8 +18,13 @@ void execNoBlockCopy(const MultiCopyParams& params) {
     }
 }
 
-bool execBatchedMemoryCopy(const BatchedMemoryCopyParams& params) {
-    return params.tiles.empty();
+void execNoBlockCopy(const MultiCopyParams& params, const DeviceHostCopyExecutionContext&) {
+    execNoBlockCopy(params);
+}
+
+BatchedMemoryCopyStatus execBatchedMemoryCopy(const BatchedMemoryCopyParams& params,
+                                              const DeviceHostCopyExecutionContext&) {
+    return params.tiles.empty() ? BatchedMemoryCopyStatus::SUCCESS : BatchedMemoryCopyStatus::NOT_SUPPORTED;
 }
 
 bool execStagedMemoryCopy(const StagedMemoryCopyParams& params, StagedMemoryCopyScratch*) {

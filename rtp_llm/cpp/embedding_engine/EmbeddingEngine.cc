@@ -40,6 +40,16 @@ EmbeddingEngine::~EmbeddingEngine() {
     (void)stop();
 }
 
+void EmbeddingEngine::startTimelineProfiling(const std::string& trace_name,
+                                             int                start_step,
+                                             int                num_steps,
+                                             bool               enable_all_rank) {
+    if (enable_all_rank && parallelism_config.tp_size > 1) {
+        throw std::invalid_argument("embedding profiling does not support broadcasting to all TP ranks");
+    }
+    step_profiler_.configure(true, trace_name, start_step, num_steps);
+}
+
 absl::Status EmbeddingEngine::startLoop() {
     RTP_LLM_LOG_INFO("start embedding engine");
     running_     = true;

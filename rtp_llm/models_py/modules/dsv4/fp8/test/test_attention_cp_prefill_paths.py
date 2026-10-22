@@ -423,7 +423,12 @@ class AttentionRawQMergeWorkspaceTest(unittest.TestCase):
                     {
                         "flash_mla": SimpleNamespace(
                             flash_mla_sparse_fwd=fake_flash_mla_sparse_fwd
-                        )
+                        ),
+                        # The production shim prefers the isolated legacy
+                        # wheel; alias the fake under both names.
+                        "flash_mla_legacy": SimpleNamespace(
+                            flash_mla_sparse_fwd=fake_flash_mla_sparse_fwd
+                        ),
                     },
                 )
             )

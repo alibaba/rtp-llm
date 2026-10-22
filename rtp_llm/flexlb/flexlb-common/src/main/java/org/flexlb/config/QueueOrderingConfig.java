@@ -19,9 +19,16 @@ public final class QueueOrderingConfig {
     private int defaultPriority = 50;
     private PreemptionConfig preemption;
 
+    public void setType(Type type) {
+        this.type = type;
+        if (type == Type.PRIORITY && preemption == null) {
+            preemption = new PreemptionConfig();
+        }
+    }
+
     public static QueueOrderingConfig priority() {
         QueueOrderingConfig config = new QueueOrderingConfig();
-        config.type = Type.PRIORITY;
+        config.setType(Type.PRIORITY);
         return config;
     }
 

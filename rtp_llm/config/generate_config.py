@@ -10,6 +10,8 @@ from pydantic import (
     ConfigDict,
     Field,
     PrivateAttr,
+    TypeAdapter,
+    ValidationError,
     field_serializer,
     field_validator,
     model_validator,
@@ -24,6 +26,7 @@ from rtp_llm.config.response_format import (
     parse_response_format,
 )
 from rtp_llm.config.thinking_mode import (
+    INT32_MAX,
     THINK_MODE_ADAPTIVE,
     THINK_MODE_DISABLED,
     THINK_MODE_ENABLED,
@@ -144,7 +147,7 @@ class GenerateConfig(BaseModel):
     repetition_penalty: Union[List[float], float] = 1.0
     presence_penalty: Union[List[float], float] = 0.0
     frequency_penalty: Union[List[float], float] = 0.0
-    min_new_tokens: Union[List[int], int] = 0
+    min_new_tokens: int = 0
     no_repeat_ngram_size: Optional[Union[List[int], int]] = None
     # 生成式推荐：组合 token 粒度去重与曝光过滤。
     # combo_token_size 表示一个商品由多少个连续 token 组成（例如三层语义 ID = 3），0 表示关闭该功能。
@@ -247,6 +250,7 @@ class GenerateConfig(BaseModel):
     # multimodal preprocess
     resized_shape: Optional[List[int]] = None
     max_pixels: Optional[int] = None
+    max_long_side_pixel: int = -1
     min_pixels: Optional[int] = None
     fps: Optional[int] = None
     min_frames: Optional[int] = None
@@ -269,6 +273,9 @@ class GenerateConfig(BaseModel):
 
     enable_memory_cache: bool = True
 
+    enable_disk_cache: bool = True
+
+    # Protocol compatibility: BlockTreeCache DEVICE uploads follow deployment backend configuration.
     enable_remote_cache: bool = True
     group_timeout: Optional[int] = None  # ms
 
@@ -292,7 +299,6 @@ class GenerateConfig(BaseModel):
         避免畸形客户端高 QPS 下无界日志刷屏。
         """
         global _last_sanitize_warn_time
-        _INT32_MAX = 2**31 - 1
         if v is None:
             return 0
         try:
@@ -315,16 +321,16 @@ class GenerateConfig(BaseModel):
                 )
                 _last_sanitize_warn_time = now
             return 0
-        if val > _INT32_MAX:
+        if val > INT32_MAX:
             now = time.monotonic()
             if now - _last_sanitize_warn_time >= _SANITIZE_WARN_INTERVAL:
                 logging.getLogger(__name__).warning(
                     "cross_seq_diverge_start_combo exceeds int32 max (%d), clamped to %d",
                     val,
-                    _INT32_MAX,
+                    INT32_MAX,
                 )
                 _last_sanitize_warn_time = now
-            return _INT32_MAX
+            return INT32_MAX
         # "过大" 告警已移至 _check_cross_seq_ban_compatibility，仅在特性启用时触发，
         # 与 C++ 侧 (enable_cross_seq_ban && diverge_start_combo > threshold) 行为一致。
         return val
@@ -334,6 +340,15 @@ class GenerateConfig(BaseModel):
     def _clamp_diverge_start_combo(cls, v):
         """构造路径入口：委托给 _sanitize_diverge_start_combo。"""
         return cls._sanitize_diverge_start_combo(v)
+
+    @field_validator("max_new_tokens")
+    @classmethod
+    def _validate_max_new_tokens(cls, value: int) -> int:
+        if value < 0:
+            raise ValueError(
+                f"max_new_tokens must be greater than or equal to 0, got {value}"
+            )
+        return value
 
     @model_validator(mode="after")
     def _check_cross_seq_ban_compatibility(self):
@@ -461,9 +476,39 @@ class GenerateConfig(BaseModel):
             self.response_format = ResponseFormat(type="json_object")
         self.json_format = False
 
+    def _validate_prefill_only(self) -> None:
+        # Match C++ validatePrefillOnly(): reject negative limits before prompt
+        # scoring can normalize them, even outside prefill-only mode.
+        self._validate_max_new_tokens(self.max_new_tokens)
+        if self.return_prompt_logits:
+            self.enforce_prompt_scoring_constraints()
+        if not self.is_prefill_only():
+            return
+        unsupported = {
+            "min_new_tokens": self.min_new_tokens > 0,
+            "num_beams": self.num_beams > 1,
+            "variable_num_beams": bool(self.variable_num_beams),
+            "num_return_sequences": self.num_return_sequences > 1,
+            "return_logits": self.return_logits,
+            "calculate_loss": self.calculate_loss != 0,
+            "return_softmax_probs": self.return_softmax_probs,
+            "return_all_probs": self.return_all_probs != ReturnAllProbsMode.NONE,
+            "return_cum_log_probs": self.return_cum_log_probs,
+            "return_hidden_states": self.return_hidden_states,
+            "return_all_hidden_states": self.return_all_hidden_states,
+        }
+        for field, enabled in unsupported.items():
+            if enabled:
+                raise ValueError(f"max_new_tokens == 0 does not support {field}")
+
     @model_validator(mode="after")
     def _normalize_legacy_json_format(self):
         self._consume_legacy_json_format()
+        return self
+
+    @model_validator(mode="after")
+    def _validate_prefill_only_config(self):
+        self._validate_prefill_only()
         return self
 
     def gen_hash_value(self):
@@ -481,6 +526,9 @@ class GenerateConfig(BaseModel):
             if len(self.variable_num_beams) == 0
             else max(self.variable_num_beams)
         )
+
+    def is_prefill_only(self) -> bool:
+        return self.max_new_tokens == 0
 
     def has_num_beams(self):
         return self.max_num_beams() > 1
@@ -503,8 +551,92 @@ class GenerateConfig(BaseModel):
                 ) from e
         return value
 
+    def _apply_update(self, new: Dict[str, Any]) -> set[str]:
+        updated_fields: set[str] = set()
+        model_fields = type(self).model_fields
+        for key, value in new.items():
+            if key not in model_fields:
+                continue
+            parsed_value = self._parse_update_value(key, value)
+            if key == "cross_seq_diverge_start_combo":
+                parsed_value = self._sanitize_diverge_start_combo(parsed_value)
+            elif key == "return_all_probs":
+                parsed_value = self._coerce_return_all_probs(parsed_value)
+            try:
+                validated_value = TypeAdapter(
+                    model_fields[key].annotation
+                ).validate_python(parsed_value)
+            except ValidationError as e:
+                raise FtRuntimeException(
+                    ExceptionType.ERROR_INPUT_FORMAT_ERROR,
+                    f"{key}: {str(e)}",
+                ) from e
+            if key == "max_new_tokens":
+                try:
+                    validated_value = self._validate_max_new_tokens(validated_value)
+                except ValueError as e:
+                    raise FtRuntimeException(
+                        ExceptionType.ERROR_INPUT_FORMAT_ERROR, str(e)
+                    ) from e
+            setattr(self, key, validated_value)
+            updated_fields.add(key)
+        # setattr 不会触发 field_validator / model_validator，手动补偿：
+        # 1) 若 num_return_sequences 变化，重置深度告警标志以允许重新检测
+        if "num_return_sequences" in new:
+            self._diverge_depth_warned = False
+        # 2) 用户显式传入 enable_cross_sequence_ban 时，视为重新表态，清除自动降级标志
+        if "enable_cross_sequence_ban" in new:
+            self._ban_auto_downgraded = False
+        # 3) 兼容 structured-output 旧入口
+        self._consume_legacy_json_format()
+        # 4) prefill-only 仅支持基础 target prefill/capture，并且必须执行完整 prompt
+        try:
+            self._validate_prefill_only()
+        except ValueError as e:
+            raise FtRuntimeException(
+                ExceptionType.ERROR_INPUT_FORMAT_ERROR, str(e)
+            ) from e
+        # 5) 跨序列去重兼容性
+        self._check_cross_seq_ban_compatibility()
+        # Do not run full validate() here: update() also loads checkpoint
+        # generation_config.json, whose unrelated startup semantics are unchanged.
+        return updated_fields
+
+    def _validated_update(
+        self, new: Dict[str, Any]
+    ) -> tuple["GenerateConfig", set[str]]:
+        candidate = self.model_copy(deep=True)
+        updated_fields = candidate._apply_update(new)
+        return candidate, updated_fields
+
+    def _commit_update(self, candidate: "GenerateConfig") -> None:
+        # Keep the instance identity while replacing the validated state. Updating
+        # the mappings avoids depending on Pydantic's private attribute layout and
+        # preserves PrivateAttr state as part of the atomic commit.
+        self.__dict__.clear()
+        self.__dict__.update(candidate.__dict__)
+        self.__pydantic_extra__ = (
+            None
+            if candidate.__pydantic_extra__ is None
+            else candidate.__pydantic_extra__.copy()
+        )
+        self.__pydantic_fields_set__ = candidate.__pydantic_fields_set__.copy()
+        self.__pydantic_private__ = (
+            None
+            if candidate.__pydantic_private__ is None
+            else candidate.__pydantic_private__.copy()
+        )
+
     def update(self, new: Dict[str, Any]):
-        """批量更新字段。
+        """Normalize and validate a batch update atomically before applying it.
+
+        Declared fields are updated on a deep-copied candidate. Field-specific
+        normalization, annotation coercion, prefill-only validation, and existing
+        cross-sequence compatibility checks run before commit. This intentionally
+        does not run full ``validate()``, so unrelated checkpoint
+        ``generation_config.json`` startup semantics remain unchanged. Pydantic
+        type failures are exposed as ``FtRuntimeException`` and leave this config
+        unchanged.
 
         降级/重启用语义：
           - 当条件不满足时，enable_cross_sequence_ban 会被自动降级为 False。
@@ -513,45 +645,14 @@ class GenerateConfig(BaseModel):
           - 若用户在同一次 update 中显式传入 enable_cross_sequence_ban，视为用户重新表态，
             自动重启用启发式不会覆盖其显式意图。
         """
-        for key, value in new.items():
-            if hasattr(self, key):
-                setattr(self, key, self._parse_update_value(key, value))
-        # setattr 不会触发 field_validator / model_validator，手动补偿：
-        # 1) cross_seq_diverge_start_combo 的 clamp/类型兜底
-        if "cross_seq_diverge_start_combo" in new:
-            self.cross_seq_diverge_start_combo = self._sanitize_diverge_start_combo(
-                self.cross_seq_diverge_start_combo
-            )
-        # 2) 若 num_return_sequences 变化，重置深度告警标志以允许重新检测
-        if "num_return_sequences" in new:
-            self._diverge_depth_warned = False
-        # 3) 用户显式传入 enable_cross_sequence_ban 时，视为重新表态，清除自动降级标志
-        if "enable_cross_sequence_ban" in new:
-            self._ban_auto_downgraded = False
-        # 4) 兼容 structured-output 旧入口
-        self._consume_legacy_json_format()
-        # 5) 跨序列去重兼容性
-        self._check_cross_seq_ban_compatibility()
+        candidate, _ = self._validated_update(new)
+        self._commit_update(candidate)
 
     def update_and_pop(self, new: Dict[str, Any]):
-        """批量更新字段并返回未被消费的 key。校验策略同 update()。"""
-        to_remove: List[str] = []
-        for key, value in new.items():
-            if hasattr(self, key):
-                setattr(self, key, self._parse_update_value(key, value))
-                to_remove.append(key)
-        # setattr 不会触发 field_validator / model_validator，手动补偿：
-        if "cross_seq_diverge_start_combo" in new:
-            self.cross_seq_diverge_start_combo = self._sanitize_diverge_start_combo(
-                self.cross_seq_diverge_start_combo
-            )
-        if "num_return_sequences" in new:
-            self._diverge_depth_warned = False
-        if "enable_cross_sequence_ban" in new:
-            self._ban_auto_downgraded = False
-        self._consume_legacy_json_format()
-        self._check_cross_seq_ban_compatibility()
-        return {k: v for k, v in new.items() if k not in to_remove}
+        """Validate atomically and return keys not consumed by the update."""
+        candidate, updated_fields = self._validated_update(new)
+        self._commit_update(candidate)
+        return {k: v for k, v in new.items() if k not in updated_fields}
 
     @staticmethod
     def create_generate_config(
@@ -614,6 +715,14 @@ class GenerateConfig(BaseModel):
         later request enrichment may only update grammar-independent fields.
         """
 
+        env_budget = getattr(generate_env_config, "max_thinking_tokens", None)
+        if (
+            env_budget is not None
+            and "max_thinking_tokens" not in self.model_fields_set
+        ):
+            self.max_thinking_tokens = (
+                INT32_MAX if int(env_budget) < 0 else int(env_budget)
+            )
         requested_mode = self.thinking_mode
         if requested_mode == ThinkingMode.UNSPECIFIED and enable_thinking is None:
             requested_mode = thinking_mode_from_value(generate_env_config.think_mode)
@@ -712,8 +821,14 @@ class GenerateConfig(BaseModel):
                 self.stop_words_list.append(item)
 
     def validate(self) -> None:
-        """Validate regular GenerateConfig fields without preparing grammar."""
+        """Validate regular fields without preparing grammar.
+
+        When ``return_prompt_logits`` is enabled, this normalizes
+        ``max_new_tokens``, ``is_streaming``, ``reuse_cache``, and
+        ``can_use_pd_separation`` in place.
+        """
         try:
+            self._validate_prefill_only()
             check_with_info(
                 is_union_positive_integer(self.top_k),
                 f"top_k {self.top_k} is wrong data type",

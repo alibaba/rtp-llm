@@ -68,10 +68,14 @@ def read_env_value(env_name: str, default_value: Any, arg_type: type) -> Any:
             return int(env_value)
         elif arg_type == float:
             return float(env_value)
+        elif arg_type is str2bool:
+            # Do not fall back on invalid booleans: the normal server_args entry
+            # rejects them, so this helper must fail instead of masking the typo.
+            return str2bool(env_value)
         else:
             return str(env_value)
     except (ValueError, TypeError):
-        # 如果转换失败，返回默认值
+        # 如果转换失败，返回默认值（bool 的 ArgumentTypeError 不在此列，直接向上抛出）
         return default_value
 
 

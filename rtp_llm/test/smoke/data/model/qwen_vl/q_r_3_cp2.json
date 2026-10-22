@@ -40,7 +40,7 @@
                         "index": 0,
                         "message": {
                             "role": "assistant",
-                            "content": "This is a heartwarming, sun-drenched photograph capturing a tender moment between a woman and her dog on a beach at sunset.\n\n**Key Elements:**\n\n*   **The Subjects:** A woman with long, dark hair, wearing a plaid shirt and dark pants, is sitting on the sand. Beside her, a large, light-colored Labrador Retriever, wearing a colorful harness, is sitting upright. The dog is reaching its paw out to gently touch the woman's hand in a",
+                            "content": "This is a heartwarming, sun-drenched photograph capturing a tender moment between a woman and her dog on a beach at sunset.\n\n**Key Elements:**\n\n*   **The Subjects:** A woman with long, dark hair, wearing a plaid shirt and dark pants, is sitting on the sand. She is smiling warmly, looking at her dog. Beside her, a large, light-colored Labrador Retriever, wearing a colorful harness, sits attentively, extending its paw to give a",
                             "partial": false
                         },
                         "finish_reason": "length"

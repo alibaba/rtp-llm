@@ -1,4 +1,5 @@
 import fcntl
+import hashlib
 import io
 import json
 import logging
@@ -14,6 +15,11 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 import zstandard as zstd
+
+from rtp_llm.utils.jit_cache_deep_gemm import (
+    SNAPSHOT_MANIFEST,
+    validate_deepjit_snapshot,
+)
 
 SNAPSHOT_SUFFIX, MTIME_MANIFEST = ".jit_snapshot.tar.zst", ".jit_mtime_ns.json"
 SNAPSHOT_KEEP, STALE_REMOTE_TMP_S, STALE_BATON_S = 20, 1800.0, 7200.0
@@ -34,8 +40,23 @@ def pack_zstd_tar(archive: Path, files: dict[str, Path]) -> None:
         with zstd.open(
             archive, "wb", cctx=zstd.ZstdCompressor(write_checksum=True)
         ) as body, tarfile.open(fileobj=body, mode="w|", dereference=True) as tar:
+            deepjit_hashes = {}
             for name, path in sorted(files.items()):
-                tar.add(path, arcname=name, recursive=False)
+                if name.startswith("deep_gemm/"):
+                    payload = path.read_bytes()
+                    deepjit_hashes[name] = hashlib.sha256(payload).hexdigest()
+                    info = tar.gettarinfo(str(path), arcname=name)
+                    info.size = len(payload)
+                    tar.addfile(info, io.BytesIO(payload))
+                else:
+                    tar.add(path, arcname=name, recursive=False)
+            if deepjit_hashes:
+                payload = json.dumps(
+                    {"schema_version": 1, "files": deepjit_hashes}, sort_keys=True
+                ).encode()
+                info = tarfile.TarInfo(SNAPSHOT_MANIFEST)
+                info.size = len(payload)
+                tar.addfile(info, io.BytesIO(payload))
             if any(file_sig(files[name]) != sig for name, sig in before.items()):
                 raise SnapshotRaced("files changed while packing")
             manifest = json.dumps({n: s[3] for n, s in before.items()}).encode()
@@ -65,6 +86,7 @@ def extract_zstd_tar(archive: Path, target: Path) -> None:
     with zstd.open(archive, "rb") as body, tarfile.open(fileobj=body, mode="r|") as tar:
         kwargs = {"filter": "data"} if hasattr(tarfile, "data_filter") else {}
         tar.extractall(target, members=_safe_members(tar, target), **kwargs)
+    validate_deepjit_snapshot(target)
     for name, ns in json.loads((target / MTIME_MANIFEST).read_text()).items():
         os.utime(_safe_path(target, name), ns=(ns, ns))
     (target / MTIME_MANIFEST).unlink()

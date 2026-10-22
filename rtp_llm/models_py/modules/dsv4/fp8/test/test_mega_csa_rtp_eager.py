@@ -1,0 +1,787 @@
+"""RTP correctness test for the TP1 Mega CSA attention sublayer.
+
+This intentionally builds one real AttentionFP8 layer with deterministic
+random weights instead of loading a complete DSV4 checkpoint.  The cache is
+backed by native LayerKVCache objects and production-shaped tagged pools.  The reference is the original attention branch in
+``Block.forward_decode`` (mHC pre, RMSNorm, AttentionFP8, mHC post), with an
+independent but identically initialized cache.
+"""
+
+from __future__ import annotations
+
+import os
+import unittest
+from dataclasses import dataclass
+from unittest.mock import patch
+
+import torch
+
+from rtp_llm.models_py.modules import RMSNorm
+from rtp_llm.models_py.modules.dsv4.fp8._indexer_quant_triton import (
+    dequantize_indexer_k,
+    quantize_indexer_k,
+)
+from rtp_llm.models_py.modules.dsv4.fp8._swa_dequant_triton import (
+    dequantize_slots_to_bf16,
+)
+from rtp_llm.models_py.modules.dsv4.fp8._swa_kv_insert_triton import (
+    quantize_and_insert_k_cache,
+)
+from rtp_llm.models_py.modules.dsv4.fp8.attention import AttentionFP8
+from rtp_llm.models_py.modules.dsv4.fp8.decode.decode_attn_metadata import (
+    build_decode_metadata_fp8,
+)
+from rtp_llm.models_py.modules.dsv4.fp8.decode.mega_csa_adapter import MegaCSAAdapter
+from rtp_llm.models_py.modules.dsv4.fp8.decode.mega_csa_runtime import MegaCSARuntime
+from rtp_llm.models_py.modules.dsv4.fp8.decode.mega_csa_weights import (
+    DIM,
+    FLASH_GEOMETRY,
+    HC,
+    HEAD_DIM,
+    INDEX_HEAD_DIM,
+    INDEX_HEADS,
+    PRO_GEOMETRY,
+    ROPE_DIM,
+    CSAGeometry,
+)
+from rtp_llm.models_py.modules.dsv4.fp8.test.mega_attention_test_utils import (
+    TaggedKVCache,
+    check_dynamic_graph_replays,
+    slots_from_block_table,
+)
+from rtp_llm.models_py.modules.dsv4.hc import build_hc_unit
+from rtp_llm.models_py.modules.dsv4.kv_cache_utils import (
+    CSA_KV,
+    CSA_STATE,
+    INDEXER_KV,
+    INDEXER_STATE,
+    SWA_KV,
+)
+from rtp_llm.test.utils.numeric_util import calc_diff
+from rtp_llm.utils.model_weight import W
+
+_TEST_MAX_SEQ_LEN = 4096
+_MODEL_MAX_SEQ_LEN = 65536
+_TOKENS_PER_BLOCK = 256
+_COMPRESSED_ENTRIES_PER_BLOCK = _TOKENS_PER_BLOCK // 4
+_SWA_ENTRIES_PER_BLOCK = 128
+_STATE_ENTRIES_PER_BLOCK = 8
+_KV_ENTRY_BYTES = 584
+_INDEXER_ENTRY_BYTES = 132
+_KV_BLOCK_ALIGNMENT_BYTES = 576
+_O_LORA_RANK = 1024
+
+
+def _align_up(value: int, alignment: int) -> int:
+    return (value + alignment - 1) // alignment * alignment
+
+
+def _random_bf16(
+    shape: tuple[int, ...], device: torch.device, *, scale: float = 0.02
+) -> torch.Tensor:
+    return torch.randn(shape, device=device, dtype=torch.bfloat16).mul_(scale)
+
+
+def _random_fp8(
+    shape: tuple[int, ...], device: torch.device, *, scale: float = 0.02
+) -> torch.Tensor:
+    return _random_bf16(shape, device, scale=scale).to(torch.float8_e4m3fn)
+
+
+def _ue8m0_scale(
+    shape: tuple[int, int], device: torch.device, source: int
+) -> torch.Tensor:
+    rows = torch.arange(shape[0], dtype=torch.int64, device=device).unsqueeze(1)
+    columns = torch.arange(shape[1], dtype=torch.int64, device=device).unsqueeze(0)
+    exponents = 124 + (source + rows * 3 + columns * 5) % 7
+    return exponents.to(torch.uint8).view(torch.float8_e8m0fnu)
+
+
+def _make_layer_weights(
+    device: torch.device, g: CSAGeometry
+) -> dict[str, torch.Tensor]:
+    torch.manual_seed(20260815)
+    weights = {
+        W.v4_attn_wq_a_w: _random_fp8((g.q_lora_rank, g.dim), device),
+        W.v4_attn_wq_a_s: _ue8m0_scale((g.q_lora_rank // 128, g.dim // 128), device, 0),
+        W.v4_attn_wkv_w: _random_fp8((HEAD_DIM, g.dim), device),
+        W.v4_attn_wkv_s: _ue8m0_scale((HEAD_DIM // 128, g.dim // 128), device, 1),
+        W.v4_attn_wq_b_w: _random_fp8(
+            (g.main_heads * HEAD_DIM, g.q_lora_rank), device, scale=0.03
+        ),
+        W.v4_attn_wq_b_s: _ue8m0_scale(
+            (g.main_heads * HEAD_DIM // 128, g.q_lora_rank // 128), device, 2
+        ),
+        W.v4_indexer_wq_b_w: _random_fp8(
+            (INDEX_HEADS * INDEX_HEAD_DIM, g.q_lora_rank), device, scale=0.03
+        ),
+        W.v4_indexer_wq_b_s: _ue8m0_scale(
+            (INDEX_HEADS * INDEX_HEAD_DIM // 128, g.q_lora_rank // 128), device, 3
+        ),
+        W.v4_compressor_wkv: _random_bf16((2 * HEAD_DIM, g.dim), device),
+        W.v4_compressor_wgate: _random_bf16((2 * HEAD_DIM, g.dim), device),
+        W.v4_indexer_compressor_wkv: _random_bf16((2 * INDEX_HEAD_DIM, g.dim), device),
+        W.v4_indexer_compressor_wgate: _random_bf16(
+            (2 * INDEX_HEAD_DIM, g.dim), device
+        ),
+        W.v4_indexer_weights_proj_w: _random_bf16((INDEX_HEADS, g.dim), device),
+        W.v4_attn_q_norm: torch.rand(g.q_lora_rank, device=device).add_(0.5).bfloat16(),
+        W.v4_attn_kv_norm: torch.rand(HEAD_DIM, device=device).add_(0.5).bfloat16(),
+        W.v4_indexer_compressor_norm: torch.rand(INDEX_HEAD_DIM, device=device)
+        .add_(0.5)
+        .bfloat16(),
+        W.v4_compressor_norm: torch.rand(HEAD_DIM, device=device).add_(0.5).bfloat16(),
+        W.v4_compressor_ape: torch.randn(4, 2 * HEAD_DIM, device=device).mul_(0.02),
+        W.v4_indexer_compressor_ape: torch.randn(
+            4, 2 * INDEX_HEAD_DIM, device=device
+        ).mul_(0.02),
+        W.v4_hc_attn_fn: torch.randn(24, HC * g.dim, device=device).mul_(0.01),
+        W.v4_hc_attn_base: torch.randn(24, device=device).mul_(0.1),
+        W.v4_hc_attn_scale: torch.rand(3, device=device).add_(0.5),
+        W.v4_attn_norm: torch.rand(g.dim, device=device).add_(0.5).bfloat16(),
+        W.v4_attn_sink: torch.randn(g.main_heads, device=device),
+    }
+
+    o_group_input = g.main_heads * HEAD_DIM // g.o_groups
+    weights.update(
+        {
+            W.v4_attn_wo_a_w: _random_fp8(
+                (g.o_groups * _O_LORA_RANK, o_group_input), device, scale=0.01
+            ),
+            W.v4_attn_wo_a_s: _ue8m0_scale(
+                (g.o_groups * _O_LORA_RANK // 128, o_group_input // 128), device, 4
+            ),
+            W.v4_attn_wo_b_w: _random_fp8(
+                (g.dim, g.o_groups * _O_LORA_RANK), device, scale=0.01
+            ),
+            W.v4_attn_wo_b_s: _ue8m0_scale(
+                (g.dim // 128, g.o_groups * _O_LORA_RANK // 128), device, 5
+            ),
+        }
+    )
+    return weights
+
+
+class _AttentionBlock(torch.nn.Module):
+    def __init__(
+        self, attention: AttentionFP8, layer_weights: dict[str, torch.Tensor]
+    ) -> None:
+        super().__init__()
+        self.attn = attention
+        self.attn_norm = RMSNorm(layer_weights[W.v4_attn_norm], 1.0e-6)
+        self.attn_hc = build_hc_unit(
+            layer_weights[W.v4_hc_attn_fn],
+            layer_weights[W.v4_hc_attn_base],
+            layer_weights[W.v4_hc_attn_scale],
+            dim=attention.dim,
+            hc_mult=HC,
+            hc_sinkhorn_iters=20,
+            norm_eps=1.0e-6,
+            hc_eps=1.0e-6,
+            layer_id=0,
+            name="attn",
+        )
+
+
+@dataclass
+class _Pools:
+    kv_cache: TaggedKVCache
+    tensors: dict[str, torch.Tensor]
+    block_tables: dict[str, torch.Tensor]
+    entries_per_block: dict[str, int]
+    tokens_per_block: dict[str, int]
+    max_seq_len: int
+
+    def reset(self) -> None:
+        self.tensors[CSA_KV].zero_()
+        self.tensors[INDEXER_KV].zero_()
+        self.tensors[SWA_KV].zero_()
+        main = self.tensors[CSA_STATE].view(
+            self.tensors[CSA_STATE].shape[0], _STATE_ENTRIES_PER_BLOCK, 4 * HEAD_DIM
+        )
+        indexer = self.tensors[INDEXER_STATE].view(
+            self.tensors[INDEXER_STATE].shape[0],
+            _STATE_ENTRIES_PER_BLOCK,
+            4 * INDEX_HEAD_DIM,
+        )
+        main[..., : 2 * HEAD_DIM].zero_()
+        main[..., 2 * HEAD_DIM :].fill_(float("-inf"))
+        indexer[..., : 2 * INDEX_HEAD_DIM].zero_()
+        indexer[..., 2 * INDEX_HEAD_DIM :].fill_(float("-inf"))
+
+    def packed_view(
+        self, attn_type: str, entries_per_block: int, entry_bytes: int
+    ) -> torch.Tensor:
+        raw = self.tensors[attn_type]
+        return raw.as_strided(
+            (int(raw.shape[0]), entries_per_block, entry_bytes),
+            (int(raw.stride(0)), entry_bytes, 1),
+        )
+
+
+def _make_pools(
+    device: torch.device,
+    batch_size: int,
+    max_seq_len: int = _TEST_MAX_SEQ_LEN,
+) -> _Pools:
+    compressed_pages_per_request = max_seq_len // _TOKENS_PER_BLOCK
+    compressed_blocks = 1 + batch_size * compressed_pages_per_request
+    fixed_blocks_per_request = 2
+    fixed_blocks = 1 + batch_size * fixed_blocks_per_request
+    csa_stride = _align_up(
+        _COMPRESSED_ENTRIES_PER_BLOCK * _KV_ENTRY_BYTES,
+        _KV_BLOCK_ALIGNMENT_BYTES,
+    )
+    swa_stride = _align_up(
+        _SWA_ENTRIES_PER_BLOCK * _KV_ENTRY_BYTES,
+        _KV_BLOCK_ALIGNMENT_BYTES,
+    )
+    tensors = {
+        CSA_KV: torch.zeros(
+            compressed_blocks, csa_stride, dtype=torch.uint8, device=device
+        ),
+        INDEXER_KV: torch.zeros(
+            compressed_blocks,
+            _COMPRESSED_ENTRIES_PER_BLOCK * _INDEXER_ENTRY_BYTES,
+            dtype=torch.uint8,
+            device=device,
+        ),
+        INDEXER_STATE: torch.empty(
+            fixed_blocks,
+            _STATE_ENTRIES_PER_BLOCK * 4 * INDEX_HEAD_DIM,
+            dtype=torch.float32,
+            device=device,
+        ),
+        CSA_STATE: torch.empty(
+            fixed_blocks,
+            _STATE_ENTRIES_PER_BLOCK * 4 * HEAD_DIM,
+            dtype=torch.float32,
+            device=device,
+        ),
+        SWA_KV: torch.zeros(fixed_blocks, swa_stride, dtype=torch.uint8, device=device),
+    }
+
+    compressed_tables = torch.arange(
+        1,
+        1 + batch_size * compressed_pages_per_request,
+        dtype=torch.int32,
+        device=device,
+    ).view(batch_size, compressed_pages_per_request)
+    fixed_tables = torch.arange(
+        1,
+        1 + batch_size * fixed_blocks_per_request,
+        dtype=torch.int32,
+        device=device,
+    ).view(batch_size, fixed_blocks_per_request)
+    block_tables = {
+        CSA_KV: compressed_tables,
+        INDEXER_KV: compressed_tables.clone(),
+        INDEXER_STATE: fixed_tables,
+        CSA_STATE: fixed_tables.clone(),
+        SWA_KV: fixed_tables.clone(),
+    }
+    entries = {
+        CSA_KV: _COMPRESSED_ENTRIES_PER_BLOCK,
+        INDEXER_KV: _COMPRESSED_ENTRIES_PER_BLOCK,
+        INDEXER_STATE: _STATE_ENTRIES_PER_BLOCK,
+        CSA_STATE: _STATE_ENTRIES_PER_BLOCK,
+        SWA_KV: _SWA_ENTRIES_PER_BLOCK,
+    }
+    tokens = {attn_type: _TOKENS_PER_BLOCK for attn_type in entries}
+
+    kv_cache = TaggedKVCache(tensors, _TOKENS_PER_BLOCK)
+
+    pools = _Pools(kv_cache, tensors, block_tables, entries, tokens, max_seq_len)
+    pools.reset()
+    return pools
+
+
+def _fill_random_context(pools: _Pools, device: torch.device, seed: int) -> None:
+    generator = torch.Generator(device=device).manual_seed(seed)
+    batch_size = int(pools.block_tables[CSA_KV].shape[0])
+    compressed_count = batch_size * (pools.max_seq_len // 4)
+    compressed_slots = torch.arange(
+        _COMPRESSED_ENTRIES_PER_BLOCK,
+        _COMPRESSED_ENTRIES_PER_BLOCK + compressed_count,
+        dtype=torch.int64,
+        device=device,
+    )
+    swa_slots = slots_from_block_table(
+        pools.block_tables[SWA_KV], _SWA_ENTRIES_PER_BLOCK
+    )
+    main = torch.randn(
+        compressed_count,
+        HEAD_DIM,
+        generator=generator,
+        dtype=torch.bfloat16,
+        device=device,
+    ).mul_(0.05)
+    indexer = torch.randn(
+        compressed_count,
+        INDEX_HEAD_DIM,
+        generator=generator,
+        dtype=torch.bfloat16,
+        device=device,
+    ).mul_(0.05)
+    swa = torch.randn(
+        swa_slots.numel(),
+        HEAD_DIM,
+        generator=generator,
+        dtype=torch.bfloat16,
+        device=device,
+    ).mul_(0.05)
+    quantize_and_insert_k_cache(
+        main,
+        pools.packed_view(CSA_KV, _COMPRESSED_ENTRIES_PER_BLOCK, _KV_ENTRY_BYTES),
+        compressed_slots,
+    )
+    quantize_indexer_k(
+        indexer,
+        compressed_slots,
+        pools.packed_view(
+            INDEXER_KV, _COMPRESSED_ENTRIES_PER_BLOCK, _INDEXER_ENTRY_BYTES
+        ),
+    )
+    quantize_and_insert_k_cache(
+        swa,
+        pools.packed_view(SWA_KV, _SWA_ENTRIES_PER_BLOCK, _KV_ENTRY_BYTES),
+        swa_slots,
+    )
+
+
+class MegaCSARTPEagerTest(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        if not torch.cuda.is_available():
+            raise unittest.SkipTest("CUDA is required")
+        capability = torch.cuda.get_device_capability()
+        if capability not in ((10, 0), (10, 3)):
+            raise unittest.SkipTest(
+                f"Mega CSA requires sm_100a/sm_103a, got {capability}"
+            )
+
+        cls.device = torch.device("cuda", torch.cuda.current_device())
+        environment = {"DSV4_HC_IMPL": "tilelang"}
+        test_tmpdir = os.environ.get("TEST_TMPDIR")
+        if test_tmpdir:
+            environment["TILELANG_CACHE_DIR"] = os.path.join(
+                test_tmpdir, "tilelang_cache"
+            )
+        env_patch = patch.dict(os.environ, environment)
+        env_patch.start()
+        cls.addClassCleanup(env_patch.stop)
+        cls.block, cls.runtime, cls.adapter = cls._make_layer(cls.device, PRO_GEOMETRY)
+        cls.mega_pools = _make_pools(cls.device, batch_size=1)
+        cls.reference_pools = _make_pools(cls.device, batch_size=1)
+
+    @staticmethod
+    def _make_layer(device: torch.device, g: CSAGeometry):
+        weights = _make_layer_weights(device, g)
+        attention = AttentionFP8(
+            layer_id=0,
+            dim=g.dim,
+            n_heads=g.main_heads,
+            q_lora_rank=g.q_lora_rank,
+            head_dim=HEAD_DIM,
+            rope_head_dim=ROPE_DIM,
+            o_lora_rank=_O_LORA_RANK,
+            o_groups=g.o_groups,
+            window_size=128,
+            compress_ratio=4,
+            compress_rope_theta=160000.0,
+            rope_theta=10000.0,
+            rope_factor=16.0,
+            beta_fast=32,
+            beta_slow=1,
+            original_seq_len=65536,
+            max_batch_size=256,
+            max_seq_len=_MODEL_MAX_SEQ_LEN,
+            index_n_heads=INDEX_HEADS,
+            index_head_dim=INDEX_HEAD_DIM,
+            index_topk=g.index_topk,
+            norm_eps=1.0e-6,
+            layer_weights=weights,
+            tp_size=1,
+            tp_rank=0,
+        )
+        attention.init_rope_cache(device)
+        block = _AttentionBlock(attention, weights)
+        runtime = MegaCSARuntime()
+        return block, runtime, MegaCSAAdapter(block, weights, runtime)
+
+    def setUp(self) -> None:
+        self.mega_pools.reset()
+        self.reference_pools.reset()
+
+    def _metadata(self, position: int, pools: _Pools, q_len: int = 1):
+        batch_size = int(pools.block_tables[CSA_KV].shape[0])
+        return build_decode_metadata_fp8(
+            attention_inputs=torch.full(
+                (batch_size,), position, dtype=torch.int32, device=self.device
+            ),
+            q_len=q_len,
+            window_size=128,
+            head_dim=HEAD_DIM,
+            max_seq_len=pools.max_seq_len,
+            compress_ratios=[4],
+            index_topk=self.block.attn.indexer.index_topk,
+            device=self.device,
+            paged_block_tables=pools.block_tables,
+            paged_pool_entries_per_block=pools.entries_per_block,
+            paged_pool_tokens_per_block=pools.tokens_per_block,
+        )
+
+    @torch.inference_mode()
+    def _forward_mega(
+        self, hidden: torch.Tensor, metadata: object, pools: _Pools
+    ) -> torch.Tensor:
+        output = self.adapter.forward_attention_sublayer(
+            self.block,
+            hidden,
+            metadata,
+            kv_cache=pools.kv_cache,
+        )
+        return output
+
+    @torch.inference_mode()
+    def _forward_reference(
+        self, hidden: torch.Tensor, metadata: object, pools: _Pools
+    ) -> torch.Tensor:
+        residual = hidden
+        x_pre, post, comb = self.block.attn_hc.pre(hidden)
+        bsz, q_len, dim = x_pre.shape
+        x_pre = self.block.attn_norm(x_pre.reshape(bsz * q_len, dim)).view(
+            bsz, q_len, dim
+        )
+        attn_out = self.block.attn.forward_decode(
+            x_pre,
+            metadata,
+            kv_cache=pools.kv_cache,
+        )
+        output = self.block.attn_hc.post(attn_out, residual, post, comb)
+        return output
+
+    @torch.inference_mode()
+    def _run_mega_step(
+        self, position: int, hidden: torch.Tensor, pools: _Pools
+    ) -> tuple[torch.Tensor, object]:
+        metadata = self._metadata(position, pools, int(hidden.shape[1]))
+        self.runtime.begin_decode(metadata)
+        output = self._forward_mega(hidden, metadata, pools)
+        self.assertEqual(tuple(output.shape), tuple(hidden.shape))
+        self.assertTrue(torch.isfinite(output).all().item())
+        return output, metadata
+
+    @torch.inference_mode()
+    def _run_reference_step(
+        self, position: int, hidden: torch.Tensor, pools: _Pools
+    ) -> tuple[torch.Tensor, object]:
+        metadata = self._metadata(position, pools, int(hidden.shape[1]))
+        output = self._forward_reference(hidden, metadata, pools)
+        self.assertEqual(tuple(output.shape), tuple(hidden.shape))
+        self.assertTrue(torch.isfinite(output).all().item())
+        return output, metadata
+
+    def _assert_written_pools_match(
+        self,
+        mega_metadata: object,
+        reference_metadata: object,
+        mega_pools: _Pools,
+        reference_pools: _Pools,
+        *,
+        label: str,
+    ) -> None:
+        cache_specs = (
+            ("CSA KV", CSA_KV, _KV_ENTRY_BYTES, dequantize_slots_to_bf16),
+            (
+                "Indexer KV",
+                INDEXER_KV,
+                _INDEXER_ENTRY_BYTES,
+                dequantize_indexer_k,
+            ),
+            ("SWA KV", SWA_KV, _KV_ENTRY_BYTES, dequantize_slots_to_bf16),
+        )
+        for name, attn_type, entry_bytes, dequantize in cache_specs:
+            mega_slots = mega_metadata.pool_write_slot_mappings[attn_type]
+            reference_slots = reference_metadata.pool_write_slot_mappings[attn_type]
+            torch.testing.assert_close(mega_slots, reference_slots, rtol=0.0, atol=0.0)
+            valid = mega_slots >= 0
+            self.assertTrue(valid.any().item(), msg=f"{label} {name}")
+            mega_value = dequantize(
+                mega_pools.packed_view(
+                    attn_type, mega_pools.entries_per_block[attn_type], entry_bytes
+                ),
+                mega_slots[valid].to(torch.int64),
+            )
+            reference_value = dequantize(
+                reference_pools.packed_view(
+                    attn_type,
+                    reference_pools.entries_per_block[attn_type],
+                    entry_bytes,
+                ),
+                reference_slots[valid].to(torch.int64),
+            )
+            value_diff = calc_diff(mega_value.float(), reference_value.float())
+            print(f"{label} Mega/reference {name} calc_diff: {value_diff:.6e}")
+            self.assertLess(value_diff, 1.0e-3, msg=f"{label} {name}")
+
+        for name, attn_type in (
+            ("CSA state", CSA_STATE),
+            ("Indexer state", INDEXER_STATE),
+        ):
+            mega_slots = mega_metadata.compressor_state_slot_mappings[attn_type]
+            reference_slots = reference_metadata.compressor_state_slot_mappings[
+                attn_type
+            ]
+            torch.testing.assert_close(mega_slots, reference_slots, rtol=0.0, atol=0.0)
+            state_dim = HEAD_DIM if attn_type == CSA_STATE else INDEX_HEAD_DIM
+            mega_state_rows = mega_pools.tensors[attn_type].view(-1, 4 * state_dim)
+            reference_state_rows = reference_pools.tensors[attn_type].view(
+                -1, 4 * state_dim
+            )
+            mega_state = mega_state_rows[mega_slots.long()]
+            reference_state = reference_state_rows[reference_slots.long()]
+            mega_finite = torch.isfinite(mega_state)
+            reference_finite = torch.isfinite(reference_state)
+            torch.testing.assert_close(
+                mega_finite, reference_finite, rtol=0.0, atol=0.0
+            )
+            value_diff = calc_diff(
+                mega_state[mega_finite], reference_state[reference_finite]
+            )
+            print(f"{label} Mega/reference {name} calc_diff: {value_diff:.6e}")
+            self.assertLess(value_diff, 1.0e-4, msg=f"{label} {name}")
+
+    @torch.inference_mode()
+    def _run_until_boundary(self, hidden_seed: int) -> torch.Tensor:
+        generator = torch.Generator(device=self.device).manual_seed(hidden_seed)
+        output = None
+        for position in range(4):
+            hidden = torch.randn(
+                (1, 1, HC, DIM),
+                generator=generator,
+                device=self.device,
+                dtype=torch.bfloat16,
+            ).mul_(0.05)
+            output, _ = self._run_mega_step(position, hidden, self.mega_pools)
+        assert output is not None
+        return output.clone()
+
+    def test_cuda_graph_capture_and_replay(self) -> None:
+        check_dynamic_graph_replays(self, _make_pools, _fill_random_context)
+
+    def test_eager_compression_boundary_and_slot_reuse(self) -> None:
+        first = self._run_until_boundary(hidden_seed=11)
+        self.assertTrue(self.mega_pools.tensors[CSA_KV][1].any().item())
+        self.assertTrue(self.mega_pools.tensors[INDEXER_KV][1].any().item())
+        self.assertTrue(self.mega_pools.tensors[SWA_KV][1].any().item())
+        first_pools = {
+            kind: value.clone() for kind, value in self.mega_pools.tensors.items()
+        }
+
+        self.mega_pools.reset()
+        second = self._run_until_boundary(hidden_seed=11)
+        self.assertTrue(torch.isfinite(second).all().item())
+        torch.testing.assert_close(first, second, rtol=0.0, atol=0.0)
+        for kind, first_pool in first_pools.items():
+            torch.testing.assert_close(
+                first_pool, self.mega_pools.tensors[kind], rtol=0.0, atol=0.0
+            )
+
+    def test_matches_original_rtp_attention_sublayer(self) -> None:
+        generator = torch.Generator(device=self.device).manual_seed(2026)
+        mega_output = reference_output = None
+        mega_metadata = reference_metadata = None
+
+        for position in range(4):
+            hidden = torch.randn(
+                (1, 1, HC, DIM),
+                generator=generator,
+                device=self.device,
+                dtype=torch.bfloat16,
+            ).mul_(0.05)
+            reference_output, reference_metadata = self._run_reference_step(
+                position, hidden.clone(), self.reference_pools
+            )
+            mega_output, mega_metadata = self._run_mega_step(
+                position, hidden.clone(), self.mega_pools
+            )
+
+        assert mega_output is not None and reference_output is not None
+        assert mega_metadata is not None and reference_metadata is not None
+        output_diff = calc_diff(mega_output.float(), reference_output.float())
+        print(f"Mega/reference attention sublayer calc_diff: {output_diff:.6e}")
+        self.assertLess(output_diff, 1.0e-3)
+
+        torch.testing.assert_close(
+            mega_metadata.topk_buffer_compressed,
+            reference_metadata.topk_buffer_compressed,
+            rtol=0.0,
+            atol=0.0,
+        )
+
+        main_slot = torch.tensor(
+            [_COMPRESSED_ENTRIES_PER_BLOCK], dtype=torch.int64, device=self.device
+        )
+        swa_slot = torch.tensor(
+            [_SWA_ENTRIES_PER_BLOCK + 3], dtype=torch.int64, device=self.device
+        )
+        mega_main = dequantize_slots_to_bf16(
+            self.mega_pools.packed_view(
+                CSA_KV, _COMPRESSED_ENTRIES_PER_BLOCK, _KV_ENTRY_BYTES
+            ),
+            main_slot,
+        )
+        reference_main = dequantize_slots_to_bf16(
+            self.reference_pools.packed_view(
+                CSA_KV, _COMPRESSED_ENTRIES_PER_BLOCK, _KV_ENTRY_BYTES
+            ),
+            main_slot,
+        )
+        mega_swa = dequantize_slots_to_bf16(
+            self.mega_pools.packed_view(
+                SWA_KV, _SWA_ENTRIES_PER_BLOCK, _KV_ENTRY_BYTES
+            ),
+            swa_slot,
+        )
+        reference_swa = dequantize_slots_to_bf16(
+            self.reference_pools.packed_view(
+                SWA_KV, _SWA_ENTRIES_PER_BLOCK, _KV_ENTRY_BYTES
+            ),
+            swa_slot,
+        )
+        mega_indexer = dequantize_indexer_k(
+            self.mega_pools.packed_view(
+                INDEXER_KV, _COMPRESSED_ENTRIES_PER_BLOCK, _INDEXER_ENTRY_BYTES
+            ),
+            main_slot,
+        )
+        reference_indexer = dequantize_indexer_k(
+            self.reference_pools.packed_view(
+                INDEXER_KV, _COMPRESSED_ENTRIES_PER_BLOCK, _INDEXER_ENTRY_BYTES
+            ),
+            main_slot,
+        )
+        for name, mega_value, reference_value in (
+            ("CSA KV", mega_main, reference_main),
+            ("Indexer KV", mega_indexer, reference_indexer),
+            ("SWA KV", mega_swa, reference_swa),
+        ):
+            value_diff = calc_diff(mega_value.float(), reference_value.float())
+            print(f"Mega/reference {name} calc_diff: {value_diff:.6e}")
+            self.assertLess(value_diff, 1.0e-3, msg=name)
+
+        for name, attn_type in (
+            ("CSA state", CSA_STATE),
+            ("Indexer state", INDEXER_STATE),
+        ):
+            mega_state = self.mega_pools.tensors[attn_type]
+            reference_state = self.reference_pools.tensors[attn_type]
+            mega_finite = torch.isfinite(mega_state)
+            reference_finite = torch.isfinite(reference_state)
+            torch.testing.assert_close(
+                mega_finite, reference_finite, rtol=0.0, atol=0.0
+            )
+            value_diff = calc_diff(
+                mega_state[mega_finite], reference_state[reference_finite]
+            )
+            print(f"Mega/reference {name} calc_diff: {value_diff:.6e}")
+            self.assertLess(value_diff, 1.0e-4, msg=name)
+
+    def test_matches_original_rtp_at_nontrivial_topk_context(self) -> None:
+        # Exercise Pro TopK-1024 selection from 2048 compressed entries.
+        mega_pools = _make_pools(self.device, batch_size=1, max_seq_len=8192)
+        reference_pools = _make_pools(self.device, batch_size=1, max_seq_len=8192)
+        _fill_random_context(mega_pools, self.device, seed=31415)
+        _fill_random_context(reference_pools, self.device, seed=31415)
+        generator = torch.Generator(device=self.device).manual_seed(27182)
+        hidden = torch.randn(
+            (1, 1, HC, DIM),
+            generator=generator,
+            device=self.device,
+            dtype=torch.bfloat16,
+        ).mul_(0.05)
+
+        reference_output, reference_metadata = self._run_reference_step(
+            reference_pools.max_seq_len - 1,
+            hidden.clone(),
+            reference_pools,
+        )
+        mega_output, mega_metadata = self._run_mega_step(
+            mega_pools.max_seq_len - 1,
+            hidden.clone(),
+            mega_pools,
+        )
+        output_diff = calc_diff(mega_output.float(), reference_output.float())
+        mega_topk = {
+            index
+            for index in mega_metadata.topk_buffer_compressed.flatten().tolist()
+            if index >= 0
+        }
+        reference_topk = {
+            index
+            for index in reference_metadata.topk_buffer_compressed.flatten().tolist()
+            if index >= 0
+        }
+        overlap = len(mega_topk & reference_topk)
+        valid_topk = len(reference_topk)
+        print(
+            "Mega/reference long-context attention sublayer "
+            f"calc_diff: {output_diff:.6e}; "
+            f"valid TopK overlap: {overlap}/{valid_topk}"
+        )
+        self.assertLess(output_diff, 1.0e-3)
+        self.assertEqual(valid_topk, PRO_GEOMETRY.index_topk)
+        self.assertEqual(len(mega_topk), valid_topk)
+        self.assertGreaterEqual(overlap, int(0.97 * valid_topk))
+
+    def test_mtp_matches_original_rtp_across_compression_boundary(self) -> None:
+        self._check_mtp_compression_boundary(position=61)
+
+    def test_flash_mtp_matches_original_rtp_across_compression_boundary(self) -> None:
+        self.block, self.runtime, self.adapter = self._make_layer(
+            self.device, FLASH_GEOMETRY
+        )
+        # 1024 compressed entries exercise Flash's TopK-512 selection.
+        self._check_mtp_compression_boundary(position=4093)
+
+    def _check_mtp_compression_boundary(self, position: int) -> None:
+        batch_size, q_len = 2, 3
+        mega_pools = _make_pools(self.device, batch_size=batch_size)
+        reference_pools = _make_pools(self.device, batch_size=batch_size)
+        _fill_random_context(mega_pools, self.device, seed=1618)
+        _fill_random_context(reference_pools, self.device, seed=1618)
+        generator = torch.Generator(device=self.device).manual_seed(2718)
+        hidden = torch.randn(
+            (batch_size, q_len, HC, self.block.attn.dim),
+            generator=generator,
+            device=self.device,
+            dtype=torch.bfloat16,
+        ).mul_(0.05)
+
+        # The last query token crosses a ratio-4 compression boundary.
+        reference_output, reference_metadata = self._run_reference_step(
+            position, hidden.clone(), reference_pools
+        )
+        mega_output, mega_metadata = self._run_mega_step(
+            position, hidden.clone(), mega_pools
+        )
+
+        output_diff = calc_diff(mega_output.float(), reference_output.float())
+        print(
+            "Mega/reference CSA MTP attention sublayer "
+            f"dim={self.block.attn.dim}, B={batch_size}, S={q_len}: "
+            f"calc_diff={output_diff:.6e}"
+        )
+        self.assertLess(output_diff, 1.0e-3)
+        self._assert_written_pools_match(
+            mega_metadata,
+            reference_metadata,
+            mega_pools,
+            reference_pools,
+            label=f"CSA MTP B={batch_size} S={q_len}",
+        )
+
+
+if __name__ == "__main__":
+    unittest.main()

@@ -25,7 +25,7 @@ public final class PlacementAvailability {
         TOPOLOGY
     }
 
-    record Event(PlacementKey key, long sequence, ChangeKind kind) {
+    record Event(PlacementKey key, ChangeKind kind) {
 
         Event {
             Objects.requireNonNull(key, "key");
@@ -68,14 +68,18 @@ public final class PlacementAvailability {
     private void publish(PlacementKey key, ChangeKind kind) {
         Objects.requireNonNull(key, "key");
         long next = sequence.incrementAndGet();
-        lastChanged.put(key, next);
+        // Publishers may reach these keys out of sequence; every edge retains
+        // the newest version even when an older publication finishes later.
+        lastChanged.merge(key, next, Math::max);
         if (key.endpoint() != null) {
-            lastChanged.put(new PlacementKey(key.role(), key.group()), next);
+            // Exact waiters follow role/address across topology group changes.
+            lastChanged.merge(PlacementKey.exact(key.role(), null, key.endpoint()), next, Math::max);
+            lastChanged.merge(new PlacementKey(key.role(), key.group()), next, Math::max);
         }
         if (key.group() != null) {
-            lastChanged.put(PlacementKey.anyGroup(key.role()), next);
+            lastChanged.merge(PlacementKey.anyGroup(key.role()), next, Math::max);
         }
-        Event event = new Event(key, next, kind);
+        Event event = new Event(key, kind);
         // One physical capacity edge produces one callback. The exact key is
         // sufficient for group/role waiters through their relevance match and
         // avoids three global-lock acquisitions for every endpoint release.

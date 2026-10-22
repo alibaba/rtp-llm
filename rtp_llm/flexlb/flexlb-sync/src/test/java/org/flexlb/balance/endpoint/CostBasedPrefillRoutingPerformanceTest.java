@@ -116,8 +116,6 @@ class CostBasedPrefillRoutingPerformanceTest {
 
     private CostBasedPrefillStrategy createStrategy() {
         FlexlbConfig config = new FlexlbConfig();
-        config.getScheduler().getCapacity()
-                .setMaxWaitingRequestsPerPrefillWorker(1_000_000);
 
         ConfigService configService = Mockito.mock(ConfigService.class);
         Mockito.when(configService.loadBalanceConfig()).thenReturn(config);
@@ -241,9 +239,8 @@ class CostBasedPrefillRoutingPerformanceTest {
         request.setRequestId(requestId);
         request.setSeqLen(1_024L);
         request.setBlockCacheKeys(List.of(1L, 2L, 3L, 4L));
-        BalanceContext context = new BalanceContext();
+        BalanceContext context = new BalanceContext(config);
         context.setRequest(request);
-        context.setConfig(config);
         context.setSchedulingMetadata(SchedulingMetadata.explicit(
                 request.getPriority(), System.currentTimeMillis() + 50_000L));
         return context;

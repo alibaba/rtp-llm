@@ -47,10 +47,10 @@ import static org.mockito.Mockito.mock;
  * evidence): a REAL {@link MockControlServer} on a real HTTP port +
  * {@link HttpMockEngineCancelChannel} pointed at it, asserting:
  * <ul>
- *   <li>a live request and its priority-cancel tombstone return ACCEPTED;
+ *   <li>a live request and its priority-cancel terminal record return ACCEPTED;
  *       completed-before-cancel requests return NOT_FOUND; never-seen rids
- *       (including wrongly routed Prefill targets) return TOMBSTONED with the
- *       absent-fence tombstone installed engine-side (block-2 fix — the
+ *       (including wrongly routed Prefill targets) return REQUEST_FENCED with the
+ *       request fence installed engine-side (block-2 fix — the
  *       channel previously crashed on this branch with an unknown status),</li>
  *   <li>armed cancel fault injections (cancel_no_respond / cancel_error /
  *       cancel_unexpected_status) surface as failed channel futures with
@@ -160,7 +160,7 @@ class HttpMockCancelIntegrationTest {
                 "a truly running request must report the RUNNING phase");
     }
 
-    // ──────────── idempotent tombstone / NOT_FOUND unknown request ────────────
+    // ──────────── idempotent terminal record / NOT_FOUND unknown request ────────────
 
     @Test
     void httpRepeatedPriorityCancelStaysAcceptedAndPublishesOneTerminal() throws Exception {
@@ -189,17 +189,17 @@ class HttpMockCancelIntegrationTest {
     }
 
     @Test
-    void httpCancelUnknownRequestIsTombstonedAndFencesLaterEnqueue() throws Exception {
+    void httpCancelUnknownRequestIsFencedAndRejectsLaterEnqueue() throws Exception {
         startGatedDecodeCluster(false);
         EngineCancelChannel channel = channel();
 
         CancelAck outcome = channel
                 .cancel(target(prefillService.getGrpcPort()), 424242L, 5_000)
                 .get(5, TimeUnit.SECONDS);
-        // Never-seen rid over the HTTP control plane: TOMBSTONED with the
-        // ABSENT_FENCE tombstone installed engine-side (block-2 fix — the
+        // Never-seen rid over the HTTP control plane: REQUEST_FENCED with the
+        // ABSENT_FENCE record installed engine-side (block-2 fix — the
         // channel previously crashed on this branch with an unknown status).
-        assertEquals(CancelAck.TOMBSTONED, outcome);
+        assertEquals(CancelAck.REQUEST_FENCED, outcome);
 
         // Raw control-plane JSON evidence of the three-branch contract.
         HttpResponse<String> raw = HttpClient.newHttpClient().send(
@@ -247,9 +247,9 @@ class HttpMockCancelIntegrationTest {
                 .get(5, TimeUnit.SECONDS);
 
         // The wrong Prefill never saw rid 23: the never-seen branch answers
-        // TOMBSTONED — never a scan of other workers (that would have found
+        // REQUEST_FENCED — never a scan of other workers (that would have found
         // and cancelled the live request elsewhere).
-        assertEquals(CancelAck.TOMBSTONED, outcome);
+        assertEquals(CancelAck.REQUEST_FENCED, outcome);
         assertTrue(decodeService.getInflightCount() > 0,
                 "the control plane must not find and cancel a request on another worker");
     }

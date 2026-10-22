@@ -50,7 +50,9 @@ def _remote_code_lock_dir() -> str:
 
 @contextlib.contextmanager
 def _hf_dynamic_module_guard(
-    tokenizer_path: str, tokenizer_config: Dict[str, Any]
+    tokenizer_path: str,
+    tokenizer_config: Dict[str, Any],
+    model_config: Optional[Dict[str, Any]] = None,
 ) -> Iterator[bool]:
     """Serialize HF ``transformers_modules`` cache population across processes.
 
@@ -77,12 +79,14 @@ def _hf_dynamic_module_guard(
 
     Holding an exclusive file lock across the load closes that window. The lock
     is only taken for models that actually use remote code (``auto_map`` present
-    in tokenizer_config.json), so ordinary tokenizers are unaffected.
+    in tokenizer_config.json or the model config), so ordinary tokenizers are unaffected.
 
     Yields True when the lock is held, False when guarding was not needed or the
     lock could not be acquired.
     """
-    if not tokenizer_config.get("auto_map"):
+    if not tokenizer_config.get("auto_map") and not _uses_remote_tokenizer_code(
+        model_config or {}, tokenizer_config
+    ):
         yield False
         return
 
@@ -120,6 +124,16 @@ def _hf_dynamic_module_guard(
             os.close(fd)
 
 
+def _uses_remote_tokenizer_code(
+    model_config: Dict[str, Any], tokenizer_config: Dict[str, Any]
+) -> bool:
+    for config in (model_config, tokenizer_config):
+        auto_map = config.get("auto_map")
+        if isinstance(auto_map, dict) and auto_map.get("AutoTokenizer"):
+            return True
+    return False
+
+
 class BaseTokenizer:
     def __init__(
         self, tokenizer_path: str, config_json: Optional[Dict[str, Any]] = None
@@ -152,7 +166,9 @@ class BaseTokenizer:
             )
 
         try:
-            with _hf_dynamic_module_guard(tokenizer_path, tokenizer_config) as guarded:
+            with _hf_dynamic_module_guard(
+                tokenizer_path, tokenizer_config, config_json
+            ) as guarded:
                 try:
                     self.tokenizer = _load()
                 except AttributeError as e:

@@ -1458,6 +1458,7 @@ class BuildPackagingContractTest(TestCase):
             "DISABLED_benchmarkScoreTokenIdsTorchCopyVsMemcpy",
             "DISABLED_benchmarkLatestFlashinferSamplingVsCurrentRtp",
             "DISABLED_compareLatestFlashinferSamplingAccuracyVsCurrentRtp",
+            "DISABLED_RunRank",
         }
         actual = set()
         pattern = re.compile(r"TEST(?:_F|_P)?\([^,]+,\s*(DISABLED_[A-Za-z0-9_]+)")
@@ -1956,11 +1957,14 @@ class BuildPackagingContractTest(TestCase):
         with open(PROJECT_ROOT / "pyproject.toml", "rb") as f:
             pyproject = tomllib.load(f)
 
+        find_cfg = pyproject["tool"]["setuptools"]["packages"]["find"]
         packages = set(
             find_namespace_packages(
-                where=str(PROJECT_ROOT), include=["rtp_llm", "rtp_llm.*"]
+                where=str(PROJECT_ROOT), include=find_cfg["include"]
             )
         )
+        self.assertIn("_build", packages)
+        self.assertTrue((PROJECT_ROOT / "_build/reapi_retry.py").is_file())
 
         self.assertIn("rtp_llm.test.remote_tests", packages)
         self.assertIn("rtp_llm.test.smoke_framework", packages)

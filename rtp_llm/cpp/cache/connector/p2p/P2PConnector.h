@@ -1,6 +1,6 @@
 #pragma once
 
-#include "rtp_llm/cpp/cache/connector/KVCacheConnector.h"
+#include "rtp_llm/cpp/cache/connector/p2p/support/KVCacheConnector.h"
 #include "rtp_llm/cpp/cache/connector/p2p/P2PConnectorConfig.h"
 #include "rtp_llm/cpp/cache/connector/p2p/LayerBlockConverter.h"
 #include <c10/core/Event.h>
@@ -46,16 +46,17 @@ public:
     std::shared_ptr<AsyncMatchContext> asyncMatch(const KVCacheResourcePtr&    resource,
                                                   const std::shared_ptr<Meta>& meta) override;
 
-    std::shared_ptr<AsyncContext> asyncRead(const KVCacheResourcePtr&                 resource,
-                                            const std::shared_ptr<Meta>&              meta,
-                                            const std::shared_ptr<AsyncMatchContext>& match_context,
-                                            int                                       start_read_block_index,
-                                            int                                       read_block_num) override;
+    std::shared_ptr<::rtp_llm::legacy::p2p::AsyncContext>
+    asyncRead(const KVCacheResourcePtr&                 resource,
+              const std::shared_ptr<Meta>&              meta,
+              const std::shared_ptr<AsyncMatchContext>& match_context,
+              int                                       start_read_block_index,
+              int                                       read_block_num) override;
 
-    std::shared_ptr<AsyncContext> asyncWrite(const KVCacheResourcePtr&    resource,
-                                             const std::shared_ptr<Meta>& meta) override;
+    std::shared_ptr<::rtp_llm::legacy::p2p::AsyncContext> asyncWrite(const KVCacheResourcePtr&    resource,
+                                                                     const std::shared_ptr<Meta>& meta) override;
 
-    std::shared_ptr<AsyncContext>
+    std::shared_ptr<::rtp_llm::legacy::p2p::AsyncContext>
     asyncWriteByLayer(int layer_id, const std::shared_ptr<KVCacheConnectorLayerContext>& layer_context) override;
 
 public:

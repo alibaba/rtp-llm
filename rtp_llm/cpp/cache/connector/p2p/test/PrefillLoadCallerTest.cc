@@ -104,12 +104,13 @@ TEST_F(PrefillLoadCallerTest, Load_ReturnNotNull_RequestFailed) {
 }
 
 TEST_F(PrefillLoadCallerTest, Load_ReturnNotNull_Timeout) {
-    // 设置服务器延迟响应
-    server_->service()->setSleepMillis(200);
+    // Keep enough time for the local RPC to reach the server even on a loaded
+    // test host, then make the handler exceed the client deadline.
+    server_->service()->setSleepMillis(1500);
 
     std::string unique_key   = "test_load_timeout";
     int64_t     request_id   = 1003;
-    int64_t     deadline_ms  = currentTimeMs() + 10;  // 很短的超时时间
+    int64_t     deadline_ms  = currentTimeMs() + 500;
     std::string prefill_ip   = "127.0.0.1";
     uint32_t    prefill_port = static_cast<uint32_t>(server_->listenPort());
 

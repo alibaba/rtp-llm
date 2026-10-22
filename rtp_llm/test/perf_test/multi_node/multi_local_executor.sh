@@ -69,9 +69,98 @@ checkout_code() {
     echo "成功下载大文件..."
   fi
   if [ "$CLEAR_BAZEL_CACHE" = true ]; then
+    configure_native_install_platform || exit 1;
     (rm -rf $WORK_DIR/bazel_cache) || true;
     (bazelisk clean --expunge) || true;
   fi
+}
+
+configure_native_install_platform() {
+  if [ "${BUILD_FROM_SCRATCH:-2}" -le 0 ]; then
+    return 0
+  fi
+  local native_install_config
+  native_install_config=$(/opt/conda310/bin/python3 - "$PWD" <<'RTP_NATIVE_CONFIG_PY'
+import importlib.util
+import os
+from pathlib import Path
+import platform
+import re
+import shlex
+import sys
+
+
+def resolve_native_install_config(root, compile_args, install_args, install_is_set, machine):
+    """Match direct Native platform selectors, without probing SDKs or interpreting Bazel aliases."""
+    spec = importlib.util.spec_from_file_location("rtp_perf_platform", Path(root) / "_build/platform.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    supported = set(module.get_platform_config_versions()) & set(module.get_config_to_extras())
+
+    def selected(raw, label):
+        tokens = shlex.split(raw)
+        names = []
+        i = 0
+        while i < len(tokens):
+            token = tokens[i]
+            if token == "--config":
+                i += 1
+                if i == len(tokens) or tokens[i].startswith("-"):
+                    raise ValueError("Missing --config value in " + label)
+                names.append(tokens[i])
+            elif token.startswith("--config="):
+                names.append(token.split("=", 1)[1])
+            i += 1
+        direct = supported.intersection(names)
+        if len(direct) != 1:
+            raise ValueError(label + " must specify exactly one supported direct platform; aliases are not resolved")
+        return next(iter(direct)), names
+
+    def for_machine(name):
+        if machine == "aarch64" and name.startswith("cuda") and not name.endswith("_arm"):
+            arm = name + "_arm"
+            if arm not in supported:
+                raise ValueError("No defined ARM Native dependency configuration for " + name)
+            return arm
+        if machine != "aarch64" and name.endswith("_arm"):
+            raise ValueError("ARM dependency configuration on a non-ARM host")
+        return name
+
+    compile_platform, compile_names = selected(compile_args, "BAZEL_BUILD_ARGS")
+    if set(compile_names).intersection(module.DEPRECATED_PIP_PLATFORM_CONFIGS):
+        raise ValueError("BAZEL_BUILD_ARGS requests a platform deprecated by Native metadata")
+    # The existing unquoted shell variable expansion does not reinterpret quote
+    # characters inside its value. Do not validate an argv different from Bazel's.
+    compile_pattern = r"(?<!\S)--config(?:=|\s+)" + re.escape(compile_platform) + r"(?=\s|$)"
+    if len(re.findall(compile_pattern, compile_args)) != compile_names.count(compile_platform):
+        raise ValueError("Quoted compile platform selector does not match the original shell argv")
+    wanted = for_machine(compile_platform)
+    if not install_is_set:
+        return "--config=" + wanted
+    install_platform, names = selected(install_args, "RTP_BAZEL_CONFIG")
+    if set(names).intersection(module.DEPRECATED_PIP_PLATFORM_CONFIGS):
+        raise ValueError("RTP_BAZEL_CONFIG requests a platform deprecated by Native metadata")
+    if for_machine(install_platform) != wanted:
+        raise ValueError("Conflicting explicit platform selectors in BAZEL_BUILD_ARGS and RTP_BAZEL_CONFIG")
+    # Preserve other install arguments verbatim. Native metadata requires the
+    # --config= form and does not append _arm to an explicit CUDA selector.
+    pattern = r"(?<!\S)--config(?:=|\s+)" + re.escape(install_platform) + r"(?=\s|$)"
+    normalized, count = re.subn(pattern, "--config=" + wanted, install_args)
+    if count != names.count(install_platform):
+        raise ValueError("Quoted platform selector is not supported by Native metadata")
+    return normalized
+
+
+if __name__ == "__main__":
+    try:
+        print(resolve_native_install_config(sys.argv[1], os.environ.get("BAZEL_BUILD_ARGS", ""),
+              os.environ.get("RTP_BAZEL_CONFIG", ""), "RTP_BAZEL_CONFIG" in os.environ, platform.machine()))
+    except (OSError, ValueError, ImportError, AttributeError) as error:
+        print("Native dependency configuration preflight failed: " + str(error), file=sys.stderr)
+        raise SystemExit(1)
+RTP_NATIVE_CONFIG_PY
+  ) || return 1
+  export RTP_BAZEL_CONFIG="$native_install_config"
 }
 
 install_requirements() {
@@ -182,6 +271,8 @@ local_build_script() {
     echo "Applying patches..."
     bash -euo pipefail -c "$PATCH_COMMANDS" || exit 1;
   fi
+  # Align dependency metadata with the existing explicit build platform.
+  configure_native_install_platform || exit 1;
   # Pip install requirements
   install_requirements || exit 1;
   # Build with all args

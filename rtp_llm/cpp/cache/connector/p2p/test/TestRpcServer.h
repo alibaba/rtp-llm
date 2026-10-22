@@ -32,6 +32,7 @@ public:
     int  getBroadcastTpCallCount() const;
     int  getBroadcastTpCancelCallCount() const;
     int  getStartLoadCallCount() const;
+    int  getStartLoadCancelledCallCount() const;
     int  getGenerateStreamCallCount() const;
     void resetCallCounts();
 
@@ -47,6 +48,7 @@ private:
     std::atomic<int> broadcast_tp_call_count_{0};
     std::atomic<int> broadcast_tp_cancel_call_count_{0};
     std::atomic<int> start_load_call_count_{0};
+    std::atomic<int> start_load_cancelled_call_count_{0};
     std::atomic<int> generate_stream_call_count_{0};
 };
 

@@ -1,3 +1,4 @@
+import argparse
 import importlib
 import io
 import json
@@ -35,6 +36,267 @@ class CustomAllReduceArgumentsTest(TestCase):
             configs = server_args.setup_args([])
 
         self.assertIs(configs.ft_disable_custom_ar_override, True)
+
+
+class CacheConfigArgumentsTest(TestCase):
+    # Keep the supported startup fields explicit, independently of parser registration.
+    samples = {
+        "enable_vipserver": True,
+        "vipserver_domain": "vip.example",
+        "server_address": "127.0.0.1:1234",
+        "instance_group": "legacy-group",
+        "meta_channel_retry_time": 7,
+        "meta_channel_connection_timeout": 123,
+        "meta_channel_call_timeout": 234,
+        "storage_thread_num": 5,
+        "storage_queue_size": 17,
+        "put_timeout_ms": 345,
+        "get_timeout_ms": 456,
+        "model_sdk_config": '[{"type":"local"}]',
+        "model_user_data": "legacy-data",
+        "model_extra_info": "legacy-extra",
+        "instance_id_salt": "legacy-salt",
+        "asyncwrapper_thread_num": 6,
+        "asyncwrapper_queue_size": 19,
+        "get_broadcast_timeout": 567,
+        "put_broadcast_timeout": 678,
+        "client_config": '{"legacy":{}}',
+    }
+
+    tier_samples = {
+        "enable_memory_cache": ("enable_host_cache", True),
+        "enable_disk_cache": ("enable_memory_cache_disk", True),
+        "memory_cache_size_mb": ("host_cache_size_mb", 1024),
+        "memory_cache_sync_timeout_ms": ("host_cache_sync_timeout_ms", 1234),
+        "block_tree_memory_evict_low_watermark_ratio": (
+            "block_tree_host_evict_low_watermark_ratio",
+            0.72,
+        ),
+        "block_tree_memory_evict_high_watermark_ratio": (
+            "block_tree_host_evict_high_watermark_ratio",
+            0.82,
+        ),
+        "disk_cache_paths": ("memory_cache_disk_paths", "/tmp/cache-args-test"),
+        "disk_cache_size_mb": ("memory_cache_disk_size_mb", 2048),
+        "disk_cache_buffered_io": ("memory_cache_disk_buffered_io", False),
+        "disk_cache_sync_timeout_ms": ("memory_cache_disk_sync_timeout_ms", 2345),
+    }
+
+    @classmethod
+    def startup_samples(cls):
+        return {
+            **{f"kvcm_{name}": value for name, value in cls.samples.items()},
+            **{name: value for name, (_, value) in cls.tier_samples.items()},
+        }
+
+    @classmethod
+    def startup_env(cls, samples):
+        # Deployments keep the historical RECO_* environment contract while
+        # the public CLI and in-process config use kvcm_* names.
+        return {
+            **{
+                f"RECO_{name.upper()}": str(samples[f"kvcm_{name}"])
+                for name in cls.samples
+            },
+            **{name.upper(): str(samples[name]) for name in cls.tier_samples},
+        }
+
+    @classmethod
+    def removed_names(cls):
+        return {
+            **{f"kvcm_{name}": f"reco_{name}" for name in cls.samples},
+            **{name: old_name for name, (old_name, _) in cls.tier_samples.items()},
+        }
+
+    def parse_cache_config(self, args, env, use_sys_argv=False):
+        from rtp_llm.ops import KVCacheConfig
+        from rtp_llm.server.server_args.kv_cache_group_args import (
+            init_kv_cache_group_args,
+        )
+        from rtp_llm.server.server_args.server_args import EnvArgumentParser
+
+        config = KVCacheConfig()
+        parser = EnvArgumentParser()
+        parser.set_root_config(config)
+        init_kv_cache_group_args(parser, config)
+        argv = ["server", *args] if use_sys_argv else ["server"]
+        with patch.dict(os.environ, env, clear=True), patch.object(sys, "argv", argv):
+            parser.parse_args(None if use_sys_argv else args)
+        return config
+
+    def test_crc_default_and_environment(self):
+        for args in (None, []):
+            for env, expected in (
+                ({}, True),
+                ({"ENABLE_CRC": "0"}, False),
+                ({"ENABLE_CRC": "1"}, True),
+            ):
+                with self.subTest(args=args, env=env):
+                    config = self.parse_cache_config(args, env)
+                    self.assertIs(config.enable_crc, expected)
+
+    def test_crc_cli_overrides_environment(self):
+        for value, expected, env_value in (("0", False, "1"), ("1", True, "0")):
+            for args in (["--enable_crc", value], [f"--enable_crc={value}"]):
+                for use_sys_argv in (False, True):
+                    with self.subTest(args=args, use_sys_argv=use_sys_argv):
+                        config = self.parse_cache_config(
+                            args, {"ENABLE_CRC": env_value}, use_sys_argv
+                        )
+                        self.assertIs(config.enable_crc, expected)
+
+    def test_crc_rejects_invalid_boolean(self):
+        for args, env in (
+            (None, {"ENABLE_CRC": "invalid"}),
+            ([], {"ENABLE_CRC": "invalid"}),
+            (["--enable_crc", "invalid"], {}),
+        ):
+            with self.subTest(args=args, env=env), patch(
+                "sys.stderr", new_callable=io.StringIO
+            ) as stderr:
+                with self.assertRaises(SystemExit) as raised:
+                    self.parse_cache_config(args, env)
+                self.assertEqual(raised.exception.code, 2)
+                self.assertIn("Boolean value expected", stderr.getvalue())
+
+    def test_canonical_env_and_cli_bind_all_fields(self):
+        samples = self.startup_samples()
+        env = self.startup_env(samples)
+        args = [
+            part
+            for name, value in samples.items()
+            for part in (f"--{name}", str(value))
+        ]
+        for config in (
+            self.parse_cache_config(None, env),
+            self.parse_cache_config([], env),
+            self.parse_cache_config(args, {}),
+        ):
+            for name, value in samples.items():
+                with self.subTest(name=name):
+                    self.assertEqual(getattr(config, name), value)
+
+    def test_canonical_env_preserves_false_zero_and_empty(self):
+        samples = self.startup_samples()
+        empty_samples = {name: type(value)() for name, value in samples.items()}
+        env = self.startup_env(empty_samples)
+        for args in (None, []):
+            config = self.parse_cache_config(args, env)
+            for name, value in samples.items():
+                with self.subTest(name=name, args=args):
+                    self.assertEqual(getattr(config, name), type(value)())
+
+    def test_canonical_cli_overrides_environment(self):
+        samples = self.startup_samples()
+        empty_samples = {name: type(value)() for name, value in samples.items()}
+        env = self.startup_env(empty_samples)
+        for equals in (False, True):
+            args = []
+            for name, value in samples.items():
+                flag = f"--{name}"
+                args.extend([f"{flag}={value}"] if equals else [flag, str(value)])
+            for use_sys_argv in (False, True):
+                config = self.parse_cache_config(args, env, use_sys_argv)
+                for name, value in samples.items():
+                    with self.subTest(
+                        name=name, equals=equals, use_sys_argv=use_sys_argv
+                    ):
+                        self.assertEqual(getattr(config, name), value)
+
+    def test_removed_cli_names_are_rejected(self):
+        samples = self.startup_samples()
+        for name, old_name in self.removed_names().items():
+            with self.subTest(old_name=old_name), patch(
+                "sys.stderr", new_callable=io.StringIO
+            ) as stderr:
+                with self.assertRaises(SystemExit) as raised:
+                    self.parse_cache_config([f"--{old_name}", str(samples[name])], {})
+                self.assertEqual(raised.exception.code, 2)
+                self.assertIn(
+                    f"unrecognized arguments: --{old_name}", stderr.getvalue()
+                )
+
+    def test_removed_kvcm_and_tier_environment_names_do_not_change_defaults(self):
+        samples = self.startup_samples()
+        env = {
+            **{
+                f"KVCM_{name.upper()}": str(samples[f"kvcm_{name}"])
+                for name in self.samples
+            },
+            **{
+                old_name.upper(): str(samples[name])
+                for name, (old_name, _) in self.tier_samples.items()
+            },
+        }
+        defaults = self.parse_cache_config([], {})
+        for args in (None, []):
+            config = self.parse_cache_config(args, env)
+            for name in samples:
+                with self.subTest(name=name, args=args):
+                    self.assertEqual(getattr(config, name), getattr(defaults, name))
+
+    def test_removed_sm_copy_cli_is_rejected(self):
+        # This copy optimization was removed with the old connector. It is
+        # not an alias for the independent disk-cache tier switch.
+        with patch("sys.stderr", new_callable=io.StringIO) as stderr:
+            with self.assertRaises(SystemExit) as raised:
+                self.parse_cache_config(["--enable_memory_cache_sm_copy", "1"], {})
+        self.assertEqual(raised.exception.code, 2)
+        self.assertIn(
+            "unrecognized arguments: --enable_memory_cache_sm_copy", stderr.getvalue()
+        )
+
+    def test_removed_sm_copy_env_does_not_enable_disk_cache(self):
+        defaults = self.parse_cache_config([], {})
+        for value in ("0", "1"):
+            for args in (None, []):
+                with self.subTest(value=value, args=args):
+                    config = self.parse_cache_config(
+                        args, {"ENABLE_MEMORY_CACHE_SM_COPY": value}
+                    )
+                    self.assertFalse(hasattr(config, "enable_memory_cache_sm_copy"))
+                    self.assertEqual(config.__getstate__(), defaults.__getstate__())
+                    self.assertFalse(config.enable_disk_cache)
+
+    def test_memory_names_match_config_attributes_and_pickle(self):
+        from rtp_llm.ops import KVCacheConfig
+        from rtp_llm.server.server_args.kv_cache_group_args import (
+            init_kv_cache_group_args,
+        )
+        from rtp_llm.server.server_args.server_args import EnvArgumentParser
+
+        config = KVCacheConfig()
+        parser = EnvArgumentParser()
+        init_kv_cache_group_args(parser, config)
+        mappings = parser.get_env_mappings()
+        for field_name, (old_name, value) in self.tier_samples.items():
+            if "memory" not in field_name:
+                continue
+            with self.subTest(field_name=field_name):
+                action = parser._option_string_actions[f"--{field_name}"]
+                self.assertEqual(action.dest, field_name)
+                self.assertEqual(mappings[field_name], field_name.upper())
+                self.assertNotIn(f"--{old_name}", parser._option_string_actions)
+                self.assertFalse(hasattr(config, old_name))
+                setattr(config, field_name, value)
+        restored = pickle.loads(pickle.dumps(config))
+        for field_name, (_, value) in self.tier_samples.items():
+            if "memory" in field_name:
+                self.assertEqual(getattr(restored, field_name), value)
+
+    def test_properties_share_storage_and_pickle(self):
+        from rtp_llm.ops import KVCacheConfig
+
+        config = KVCacheConfig()
+        for name, value in self.samples.items():
+            setattr(config, f"reco_{name}", value)
+            self.assertEqual(getattr(config, f"kvcm_{name}"), value)
+        restored = pickle.loads(pickle.dumps(config))
+        for name, value in self.samples.items():
+            with self.subTest(name=name):
+                self.assertEqual(getattr(restored, f"reco_{name}"), value)
+                setattr(restored, f"kvcm_{name}", type(value)())
+                self.assertEqual(getattr(restored, f"reco_{name}"), type(value)())
 
 
 class ServerArgsPyEnvConfigsTest(TestCase):
@@ -166,6 +428,30 @@ class ServerArgsPyEnvConfigsTest(TestCase):
 
 
 class ServerArgsSetTest(TestCase):
+
+    def test_deprecated_disable_flashinfer_native_is_accepted(self):
+        sys.argv = ["prog", "--disable_flashinfer_native", "1"]
+
+        import rtp_llm.server.server_args.server_args
+
+        importlib.reload(rtp_llm.server.server_args.server_args)
+        with self.assertWarnsRegex(
+            DeprecationWarning, "--disable_flashinfer_native is deprecated"
+        ):
+            py_env_configs = rtp_llm.server.server_args.server_args.setup_args()
+
+        self.assertEqual(py_env_configs.fmha_config.attn_backend, "auto")
+
+    def test_leader_address_env_is_bound_to_distribute_config(self):
+        os.environ["LEADER_ADDRESS"] = "10.0.0.5"
+        sys.argv = ["prog"]
+
+        import rtp_llm.server.server_args.server_args
+
+        importlib.reload(rtp_llm.server.server_args.server_args)
+        py_env_configs = rtp_llm.server.server_args.server_args.setup_args()
+
+        self.assertEqual(py_env_configs.distribute_config.leader_address, "10.0.0.5")
     def setUp(self):
         self._environ_backup = os.environ.copy()
         self._argv_backup = sys.argv.copy()
@@ -196,6 +482,85 @@ class ServerArgsSetTest(TestCase):
         config.torch_allocator_dump_auth_header = "bad header"
         with self.assertRaisesRegex(ValueError, "valid HTTP header"):
             config.validate_allocator_dump_config()
+
+    def test_graph_capture_bootstrap_pickle_and_trace_json_round_trip(self):
+        from rtp_llm.config.model_config import ModelConfig, _apply_model_override_args
+        from rtp_llm.ops import HiddenStateCaptureDtype
+        from rtp_llm.server.server_args import server_args
+        from rtp_llm.telemetry.config import CONFIG_ENV, parse_trace_config
+
+        trace_json = json.dumps(
+            {
+                "enabled": True,
+                "endpoint": "http://127.0.0.1:4318/v1/traces",
+                "headers": {"x-test": "round-trip"},
+                "sampler_ratio": 0.25,
+            }
+        )
+        for dtype_name in ("bf16", "fp8_e4m3"):
+            with self.subTest(dtype=dtype_name), patch.dict(
+                os.environ,
+                {
+                    CONFIG_ENV: trace_json,
+                    "JSON_MODEL_OVERRIDE_ARGS": json.dumps(
+                        {
+                            "hidden_state_capture_layer_ids": [1],
+                            "hidden_state_capture_dtype": (
+                                "fp8_e4m3" if dtype_name == "bf16" else "bf16"
+                            ),
+                        }
+                    ),
+                },
+            ):
+                configs = server_args.setup_args(
+                    [
+                        "--enable_cuda_graph",
+                        "1",
+                        "--generation_prefill_cuda_graph_max_requests",
+                        "3",
+                        "--max_context_batch_size",
+                        "3",
+                        "--generation_prefill_capture_config",
+                        "32,64",
+                        "--json_model_override_args",
+                        json.dumps(
+                            {
+                                "hidden_state_capture_layer_ids": [2, 0],
+                                "hidden_state_capture_dtype": dtype_name,
+                            }
+                        ),
+                    ]
+                )
+                # ModelConfig has no pickle contract; transport the existing
+                # bootstrap inputs and apply them through the production path.
+                hw_config, model_args, restored_trace_json = pickle.loads(
+                    pickle.dumps(
+                        (
+                            configs.py_hw_kernel_config,
+                            configs.model_args,
+                            os.environ[CONFIG_ENV],
+                        )
+                    )
+                )
+                model_config = ModelConfig()
+                model_config.num_layers = 4
+                _apply_model_override_args(model_config, model_args)
+                self.assertEqual(model_config.hidden_state_capture_layer_ids, [2, 0])
+                self.assertEqual(
+                    model_config.hidden_state_capture_dtype,
+                    HiddenStateCaptureDtype.__members__[dtype_name.upper()],
+                )
+                self.assertTrue(hw_config.enable_cuda_graph)
+                self.assertEqual(
+                    hw_config.generation_prefill_cuda_graph_max_requests, 3
+                )
+                self.assertEqual(
+                    hw_config.generation_prefill_capture_token_buckets, [32, 64]
+                )
+                trace_config = parse_trace_config(restored_trace_json)
+                self.assertEqual(trace_config, parse_trace_config(trace_json))
+                self.assertTrue(trace_config.enabled)
+                self.assertEqual(trace_config.sampler_ratio, 0.25)
 
     def test_env_vars_set_to_py_env_configs(self):
         """Test that environment variables are correctly set to py_env_configs."""
@@ -229,6 +594,7 @@ class ServerArgsSetTest(TestCase):
         os.environ["ENABLE_CUDA_GRAPH"] = "1"
         os.environ["GENERATION_PREFILL_CUDA_GRAPH_MAX_REQUESTS"] = "4"
         os.environ["GENERATION_PREFILL_CAPTURE_CONFIG"] = "64,128,256"
+        os.environ["OUTPUT_DISPATCHER_WORKER_COUNT"] = "3"
 
         sys.argv = ["prog"]
 
@@ -329,6 +695,7 @@ class ServerArgsSetTest(TestCase):
             "dfs://bucket/jit/cache",
         )
 
+        # Verify disable_flashinfer_hybrid_prefill
         self.assertTrue(py_env_configs.fmha_config.disable_flashinfer_hybrid_prefill)
         self.assertEqual(
             py_env_configs.py_hw_kernel_config.generation_prefill_capture_token_buckets,
@@ -339,17 +706,9 @@ class ServerArgsSetTest(TestCase):
             py_env_configs.py_hw_kernel_config.generation_prefill_cuda_graph_max_requests,
             4,
         )
-
-    def test_leader_address_env_is_bound_to_distribute_config(self):
-        os.environ["LEADER_ADDRESS"] = "10.0.0.5"
-        sys.argv = ["prog"]
-
-        import rtp_llm.server.server_args.server_args
-
-        importlib.reload(rtp_llm.server.server_args.server_args)
-        py_env_configs = rtp_llm.server.server_args.server_args.setup_args()
-
-        self.assertEqual(py_env_configs.distribute_config.leader_address, "10.0.0.5")
+        self.assertEqual(
+            py_env_configs.runtime_config.output_dispatcher_worker_count, 3
+        )
 
     def test_cmd_args_set_to_py_env_configs(self):
         """Test that command line arguments are correctly set to py_env_configs."""
@@ -385,8 +744,18 @@ class ServerArgsSetTest(TestCase):
             "4",
             "--cache_store_rdma_worker_thread_count",
             "2",
+            "--enable_flashinfer_trtllm_gen",
+            "false",
+            "--enable_flashinfer_trt_fmha_v2",
+            "false",
+            "--enable_paged_flashinfer_trt_fmha_v2",
+            "false",
+            "--disable_flashinfer_native",
+            "true",
             "--disable_flashinfer_hybrid_prefill",
             "true",
+            "--output_dispatcher_worker_count",
+            "4",
             # Note: max_seq_len is in ModelConfig, not ModelArgs
             # It will be set when ModelConfig is created from model_args
         ]
@@ -395,7 +764,29 @@ class ServerArgsSetTest(TestCase):
         import rtp_llm.server.server_args.server_args
 
         importlib.reload(rtp_llm.server.server_args.server_args)
-        py_env_configs = rtp_llm.server.server_args.server_args.setup_args()
+        # Preserve each original argument/value as explicit rejection coverage:
+        # these active boolean selectors were removed by the Native API.
+        for flag in (
+            "--enable_flashinfer_trtllm_gen",
+            "--enable_flashinfer_trt_fmha_v2",
+            "--enable_paged_flashinfer_trt_fmha_v2",
+        ):
+            index = sys.argv.index(flag)
+            value = sys.argv[index + 1]
+            with self.subTest(removed_flag=flag, value=value), patch(
+                "sys.stderr", new_callable=io.StringIO
+            ) as stderr:
+                with self.assertRaises(SystemExit) as raised:
+                    rtp_llm.server.server_args.server_args.setup_args([flag, value])
+                self.assertEqual(raised.exception.code, 2)
+                self.assertIn("unrecognized arguments", stderr.getvalue())
+                self.assertIn(flag, stderr.getvalue())
+            del sys.argv[index : index + 2]
+
+        with self.assertWarnsRegex(
+            DeprecationWarning, "--disable_flashinfer_native is deprecated"
+        ):
+            py_env_configs = rtp_llm.server.server_args.server_args.setup_args()
 
         # Verify model_args
         self.assertEqual(py_env_configs.model_args.model_type, "llama")
@@ -450,6 +841,8 @@ class ServerArgsSetTest(TestCase):
         self.assertEqual(py_env_configs.cache_store_config.rdma_io_thread_count, 4)
         self.assertEqual(py_env_configs.cache_store_config.rdma_worker_thread_count, 2)
 
+        # Verify fmha_config
+        self.assertEqual(py_env_configs.fmha_config.attn_backend, "auto")
         self.assertTrue(py_env_configs.fmha_config.disable_flashinfer_hybrid_prefill)
         self.assertEqual(
             py_env_configs.py_hw_kernel_config.generation_prefill_cuda_graph_max_requests,
@@ -458,6 +851,9 @@ class ServerArgsSetTest(TestCase):
         self.assertEqual(
             py_env_configs.py_hw_kernel_config.generation_prefill_capture_token_buckets,
             HWKernelConfig().generation_prefill_capture_token_buckets,
+        )
+        self.assertEqual(
+            py_env_configs.runtime_config.output_dispatcher_worker_count, 4
         )
 
     def test_generation_prefill_cuda_graph_cli_binding_and_validation(self):
@@ -909,6 +1305,37 @@ class ServerArgsSetTest(TestCase):
             _parse_generation_prefill_capture_config("64,invalid")
         self.assertIsInstance(caught.exception.__cause__, ValueError)
 
+    def test_output_dispatcher_worker_count_boundaries(self):
+        from rtp_llm.server.server_args import server_args
+
+        for source in ("cli", "env", "env_only"):
+            for value in ("0", "2", "-1", "1.5", "invalid"):
+                with self.subTest(source=source, value=value):
+                    env = (
+                        {"OUTPUT_DISPATCHER_WORKER_COUNT": value}
+                        if source != "cli"
+                        else {}
+                    )
+                    args = (
+                        ["--output_dispatcher_worker_count", value]
+                        if source == "cli"
+                        else []
+                    )
+                    if source == "env_only":
+                        args = None
+                    with patch.dict(os.environ, env, clear=True), patch.object(
+                        sys, "argv", ["prog"]
+                    ):
+                        if value in ("0", "2"):
+                            configs = server_args.setup_args(args)
+                            self.assertEqual(
+                                configs.runtime_config.output_dispatcher_worker_count,
+                                int(value),
+                            )
+                        else:
+                            with self.assertRaises(SystemExit):
+                                server_args.setup_args(args)
+
     def test_model_warm_up_env_and_global_master(self):
         os.environ["WARM_UP"] = "0"
         os.environ["WARM_UP_WITH_LOSS"] = "1"
@@ -1209,19 +1636,6 @@ class ServerArgsSetTest(TestCase):
         self.assertEqual(cfg.vit_config.gpu_max_batch_size, 8)
         self.assertEqual(cfg.vit_config.gpu_batch_wait_ms, 500)
 
-    def test_deprecated_disable_flashinfer_native_is_accepted(self):
-        sys.argv = ["prog", "--disable_flashinfer_native", "1"]
-
-        import rtp_llm.server.server_args.server_args
-
-        importlib.reload(rtp_llm.server.server_args.server_args)
-        with self.assertWarnsRegex(
-            DeprecationWarning, "--disable_flashinfer_native is deprecated"
-        ):
-            py_env_configs = rtp_llm.server.server_args.server_args.setup_args()
-
-        self.assertEqual(py_env_configs.fmha_config.attn_backend, "auto")
-
     def test_repetition_detection_config(self):
         """Test that repetition detection args bind to PyEnvConfigs."""
         sys.argv = [
@@ -1282,8 +1696,7 @@ class ServerArgsSetTest(TestCase):
             config["client_config"]["grpc.max_receive_message_length"], expected
         )
         self.assertEqual(
-            config["server_config"]["grpc.max_receive_message_length"],
-            64 * 1024 * 1024,
+            config["server_config"]["grpc.max_receive_message_length"], expected
         )
 
 
@@ -1417,6 +1830,28 @@ class ServerArgsGrammarConfigTest(TestCase):
                 sys.argv = ["prog", flag, "0"]
                 with self.assertRaises(SystemExit):
                     self._setup()
+
+
+class GenerateArgsFromEnvTest(TestCase):
+    def test_str2bool_environment_value_is_not_dropped(self):
+        from rtp_llm.server.server_args.generate_args_from_env_clean import (
+            format_argument_pair,
+            read_env_value,
+        )
+        from rtp_llm.server.server_args.util import str2bool
+
+        with patch.dict(os.environ, {"ENABLE_CRC": "0"}, clear=True):
+            value = read_env_value("ENABLE_CRC", True, str2bool)
+        self.assertIs(value, False)
+        self.assertEqual(format_argument_pair("--enable_crc", value), ["--enable_crc", "0"])
+
+    def test_invalid_str2bool_environment_value_is_rejected(self):
+        from rtp_llm.server.server_args.generate_args_from_env_clean import read_env_value
+        from rtp_llm.server.server_args.util import str2bool
+
+        with patch.dict(os.environ, {"ENABLE_CRC": "not-a-bool"}, clear=True):
+            with self.assertRaises(argparse.ArgumentTypeError):
+                read_env_value("ENABLE_CRC", True, str2bool)
 
 
 if __name__ == "__main__":

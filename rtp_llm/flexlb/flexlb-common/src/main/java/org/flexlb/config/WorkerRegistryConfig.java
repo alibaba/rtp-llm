@@ -19,6 +19,7 @@ public final class WorkerRegistryConfig {
         private long statusPollIntervalMs = 20;
         private long statusRpcTimeoutMs = 5000;
         private long statusStaleAfterMs = 10_000;
+        private long cleanupIntervalMs = 3000;
         private long vitStatusRpcTimeoutMs = DEFAULT_VIT_STATUS_RPC_TIMEOUT_MS;
         private boolean retainVitAliveOnTimeout = DEFAULT_RETAIN_VIT_ALIVE_ON_TIMEOUT;
     }

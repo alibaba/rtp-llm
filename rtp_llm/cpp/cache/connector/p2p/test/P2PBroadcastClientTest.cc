@@ -41,6 +41,9 @@ protected:
                 waited_ms += 10;
             }
         }
+        // done() is updated by BroadcastManager's completion thread; consume
+        // the terminal status even when it changed between loop iterations.
+        result->checkDone();
     }
 
 protected:

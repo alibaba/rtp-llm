@@ -18,6 +18,23 @@ http_archive(
     patch_args = ["-p1"],
 )
 
+# @rtp_deps — OSS default resolves to github-opensource/deps/ (public URLs).
+# Internal monorepo overrides to ../internal_source/deps via
+#     common --override_repository=rtp_deps=../internal_source/deps
+# in internal_source/.internal_bazelrc. The two deps trees declare the same
+# http_deps() / git_deps() symbol surface; the override swaps in internal-
+# mirror URLs plus internal-only accelerator and transport dependencies.
+# Keep the relative-path form: %workspace%/.. in try-imported rcs mis-resolves
+# on Bazel 6.x for --override_repository.
+local_repository(
+    name = "rtp_deps",
+    path = "deps",
+)
+
+load("@rtp_deps//:git.bzl", "rules_python_deps")
+
+rules_python_deps()
+
 load("@rules_pkg//:deps.bzl", "rules_pkg_dependencies")
 
 rules_pkg_dependencies()
@@ -50,19 +67,6 @@ rocm_configure(name = "local_config_rocm")
 
 python_configure(name = "local_config_python")
 
-# @rtp_deps — OSS default resolves to github-opensource/deps/ (public URLs).
-# Internal monorepo overrides to ../internal_source/deps via
-#     common --override_repository=rtp_deps=../internal_source/deps
-# in internal_source/.internal_bazelrc. The two deps trees declare the same
-# http_deps() / git_deps() symbol surface; the override swaps in internal-
-# mirror URLs plus internal-only accelerator and transport dependencies.
-# Keep the relative-path form: %workspace%/.. in try-imported rcs mis-resolves
-# on Bazel 6.x for --override_repository.
-local_repository(
-    name = "rtp_deps",
-    path = "deps",
-)
-
 local_repository(
     name = "arch_config",
     path = "arch_config",
@@ -87,6 +91,37 @@ opentelemetry_cpp_deps()
 load("@rules_python//python:repositories.bzl", "py_repositories")
 
 py_repositories()
+
+load("@rtp_deps//:pip.bzl", "pip_deps")
+
+pip_deps()
+
+load("@pip_cpu_torch//:requirements.bzl", pip_cpu_torch_install_deps = "install_deps")
+pip_cpu_torch_install_deps()
+
+load("@pip_arm_torch//:requirements.bzl", pip_arm_torch_install_deps = "install_deps")
+pip_arm_torch_install_deps()
+
+load("@pip_ppu_torch//:requirements.bzl", pip_ppu_torch_install_deps = "install_deps")
+pip_ppu_torch_install_deps()
+
+load("@pip_gpu_cuda12_torch//:requirements.bzl", pip_gpu_cuda12_torch_install_deps = "install_deps")
+pip_gpu_cuda12_torch_install_deps()
+
+load("@pip_gpu_cuda12_9_torch//:requirements.bzl", pip_gpu_cuda12_9_torch_install_deps = "install_deps")
+pip_gpu_cuda12_9_torch_install_deps()
+
+load("@pip_gpu_cuda13_torch//:requirements.bzl", pip_gpu_cuda13_torch_install_deps = "install_deps")
+pip_gpu_cuda13_torch_install_deps()
+
+load("@pip_cuda12_arm_torch//:requirements.bzl", pip_cuda12_arm_torch_install_deps = "install_deps")
+pip_cuda12_arm_torch_install_deps()
+
+load("@pip_cuda13_arm_torch//:requirements.bzl", pip_cuda13_arm_torch_install_deps = "install_deps")
+pip_cuda13_arm_torch_install_deps()
+
+load("@pip_gpu_rocm_torch//:requirements.bzl", pip_gpu_rocm_torch_install_deps = "install_deps")
+pip_gpu_rocm_torch_install_deps()
 
 load("//:def.bzl", "read_release_version", "torch_local_repository")
 read_release_version(name = "release_version")

@@ -24,7 +24,8 @@
                         "index": 0,
                         "message": {
                             "role": "assistant",
-                            "content": "Certainly! Here are several thoughtful and relevant questions focused on"
+                            "content": "Certainly! Here are several thoughtful and relevant questions focused on",
+                            "partial": false
                         },
                         "finish_reason": "length"
                     }

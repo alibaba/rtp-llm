@@ -106,7 +106,8 @@ class EngineSyncRunnerTest {
     @Test
     void should_apply_configured_vit_policy_to_scheduled_status_polls() {
         FlexlbConfig config = ConfigService.parse("""
-                {"workerRegistry":{"health":{
+                {"requestLifecycle":{"request":{"timeoutMs":60000},"decision":{"lifetime":2.0}},
+                 "workerRegistry":{"health":{
                     "statusRpcTimeoutMs":20,
                     "vitStatusRpcTimeoutMs":1000,
                     "retainVitAliveOnTimeout":false,
@@ -250,7 +251,7 @@ class EngineSyncRunnerTest {
     @Test
     void should_remove_status_and_endpoint_when_service_discovery_is_empty() {
         ConfigService configService = Mockito.mock(ConfigService.class);
-        Mockito.when(configService.loadBalanceConfig()).thenReturn(new FlexlbConfig());
+        Mockito.when(configService.loadBalanceConfig()).thenReturn(org.flexlb.balance.scheduler.SchedulingTestConfig.newConfig());
         EndpointRegistry registry = RunnerTestSupport.endpointRegistry(configService);
         WorkerDirectory directory = new WorkerDirectory(registry);
         String ipPort = "127.0.0.1:8080";
@@ -290,7 +291,7 @@ class EngineSyncRunnerTest {
         // resolves the load-balance config in this scenario. Keep the stub
         // lenient so strict stubbing does not flag it as unnecessary.
         Mockito.lenient().when(configService.loadBalanceConfig())
-                .thenReturn(new FlexlbConfig());
+                .thenReturn(org.flexlb.balance.scheduler.SchedulingTestConfig.newConfig());
         EndpointRegistry registry = RunnerTestSupport.endpointRegistry(configService);
         WorkerDirectory directory = new WorkerDirectory(registry);
         EngineSyncRunner runner = new EngineSyncRunner(
@@ -455,7 +456,7 @@ class EngineSyncRunnerTest {
             String oldGroup, String newGroup) {
         ConfigService configService = Mockito.mock(ConfigService.class);
         Mockito.when(configService.loadBalanceConfig())
-                .thenReturn(new FlexlbConfig());
+                .thenReturn(org.flexlb.balance.scheduler.SchedulingTestConfig.newConfig());
         EndpointRegistry registry = RunnerTestSupport.endpointRegistry(configService);
         WorkerDirectory directory = new WorkerDirectory(registry);
         String ipPort = "127.0.0.1:61000";

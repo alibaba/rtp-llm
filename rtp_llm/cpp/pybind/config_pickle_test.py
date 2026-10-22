@@ -3,7 +3,14 @@ import unittest
 
 import pytest
 
-from rtp_llm.ops import GrammarConfig, HWKernelConfig
+from rtp_llm.ops import (
+    GrammarConfig,
+    HWKernelConfig,
+    MoeConfig,
+    PDSepConfig,
+    RoleType,
+    RuntimeConfig,
+)
 
 
 def _new_grammar_config():
@@ -12,6 +19,10 @@ def _new_grammar_config():
 
 def _new_hw_kernel_config():
     return HWKernelConfig.__new__(HWKernelConfig)
+
+
+def _new_config(config_type):
+    return config_type.__new__(config_type)
 
 
 class _LegacyGrammarConfig:
@@ -51,6 +62,84 @@ class _LegacyHWKernelConfig:
             True,
         )
         return _new_hw_kernel_config, (), legacy_state
+
+
+class _LegacyMoeConfig:
+    def __reduce__(self):
+        legacy_state = (
+            False,
+            True,
+            False,
+            True,
+            False,
+            True,
+            False,
+            7,
+            8192,
+            True,
+            128,
+            "legacy",
+        )
+        return _new_config, (MoeConfig,), legacy_state
+
+
+class _MalformedPDSepConfig:
+    def __init__(self, size):
+        self.size = size
+
+    def __reduce__(self):
+        return _new_config, (PDSepConfig,), (RoleType.PDFUSION,) * self.size
+
+
+class _InvalidTypePDSepConfig:
+    def __reduce__(self):
+        state = [
+            RoleType.PDFUSION,
+            True,
+            "not-an-int",
+        ] + [0] * 19
+        return _new_config, (PDSepConfig,), tuple(state)
+
+
+
+class MoeConfigPickleTest(unittest.TestCase):
+    def test_non_default_fp4_moe_op_round_trip(self):
+        config = MoeConfig()
+        config.fp4_moe_op = "cutlass"
+
+        restored = pickle.loads(pickle.dumps(config))
+
+        self.assertEqual(restored.fp4_moe_op, "cutlass")
+
+    def test_legacy_twelve_tuple_defaults_fp4_moe_op(self):
+        restored = pickle.loads(pickle.dumps(_LegacyMoeConfig()))
+
+        self.assertEqual(restored.moe_strategy, "legacy")
+        self.assertEqual(restored.fp4_moe_op, "auto")
+
+
+class PDSepConfigPickleTest(unittest.TestCase):
+    def test_current_format_round_trip(self):
+        config = PDSepConfig()
+        config.prefill_stop_stream_wait_timeout_ms = 118
+        config.prefill_prepare_resource_pool_size = 119
+
+        restored = pickle.loads(pickle.dumps(config))
+
+        self.assertEqual(restored.prefill_stop_stream_wait_timeout_ms, 118)
+        self.assertEqual(restored.prefill_prepare_resource_pool_size, 119)
+
+
+    def test_rejects_invalid_state_length(self):
+        for size in (20, 21, 23):
+            with self.subTest(size=size), self.assertRaisesRegex(
+                RuntimeError, "expected 22 fields"
+            ):
+                pickle.loads(pickle.dumps(_MalformedPDSepConfig(size)))
+
+    def test_rejects_invalid_state_type_with_context(self):
+        with self.assertRaisesRegex(RuntimeError, "PDSepConfig unpickle error"):
+            pickle.loads(pickle.dumps(_InvalidTypePDSepConfig()))
 
 
 @pytest.mark.H20
@@ -149,6 +238,10 @@ class HWKernelConfigPickleTest(unittest.TestCase):
         config.rocm_disable_custom_ag = True
         config.force_legacy_fp8_ptpc = True
 
+        state = config.__getstate__()
+        self.assertEqual(len(state), 17)
+        self.assertIs(state[16], True)
+
         restored = pickle.loads(pickle.dumps(config))
 
         self.assertEqual(restored.deep_gemm_num_sm, 7)
@@ -200,10 +293,11 @@ class HWKernelConfigPickleTest(unittest.TestCase):
         self.assertEqual(config.generation_prefill_capture_token_buckets, [32, 64, 96])
 
     def test_unsupported_tuple_sizes_are_rejected(self):
-        for size in (13, 18, 19):
-            with self.subTest(size=size), self.assertRaisesRegex(
-                RuntimeError, "Invalid state"
-            ):
+        # Keep every original malformed sample. Native's 15/17-field layouts
+        # are supported, but tuple(range(size)) still has invalid field types.
+        for size in (13, 15, 17, 18, 19):
+            error = "HWKernelConfig unpickle error" if size in (15, 17) else "Invalid state"
+            with self.subTest(size=size), self.assertRaisesRegex(RuntimeError, error):
                 config = _new_hw_kernel_config()
                 config.__setstate__(tuple(range(size)))
 
@@ -229,6 +323,28 @@ class HWKernelConfigPickleTest(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "HWKernelConfig unpickle error"):
             config = _new_hw_kernel_config()
             config.__setstate__(malformed_state)
+
+
+class RuntimeConfigPickleTest(unittest.TestCase):
+    def test_output_dispatcher_worker_count_round_trip(self):
+        config = RuntimeConfig()
+        config.output_dispatcher_worker_count = 3
+
+        restored = pickle.loads(pickle.dumps(config))
+
+        self.assertEqual(restored.output_dispatcher_worker_count, 3)
+
+    def test_previous_formats_default_to_serial_dispatch(self):
+        config = RuntimeConfig()
+        config.output_dispatcher_worker_count = 3
+        config.model_warm_up = False
+        state = config.__getstate__()
+        for size in (12, 13):
+            with self.subTest(size=size):
+                restored = RuntimeConfig.__new__(RuntimeConfig)
+                restored.__setstate__(state[:size])
+                self.assertEqual(restored.output_dispatcher_worker_count, 0)
+                self.assertEqual(restored.model_warm_up, size == 12)
 
 
 if __name__ == "__main__":

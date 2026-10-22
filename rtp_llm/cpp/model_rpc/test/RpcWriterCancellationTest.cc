@@ -87,6 +87,7 @@ public:
         if (read_calls != 1) {
             return false;
         }
+        response->mutable_flatten_output()->add_finished(false);
         response->mutable_flatten_output()->add_aux_info();
         return true;
     }
@@ -262,6 +263,8 @@ TEST(RpcWriterCancellationTest, DecodeFirstReadCancellationReturnsCancelled) {
         EXPECT_EQ(client_status.error_code(), grpc::StatusCode::CANCELLED);
         ASSERT_TRUE(server_status.has_value());
         EXPECT_EQ(server_status->error_code(), grpc::StatusCode::CANCELLED);
+        EXPECT_EQ(log_capture.content().find("GenerateContext destroyed before RPC handling completed"),
+                  std::string::npos);
 
         if (reached_read_path) {
             break;

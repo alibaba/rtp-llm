@@ -1,7 +1,7 @@
 #pragma once
 
-#include "rtp_llm/cpp/cache/connector/AsyncContext.h"
-#include "rtp_llm/cpp/cache/connector/KVCacheConnector.h"
+#include "rtp_llm/cpp/cache/connector/p2p/support/AsyncContext.h"
+#include "rtp_llm/cpp/cache/connector/p2p/support/KVCacheConnector.h"
 #include "rtp_llm/cpp/cache/connector/p2p/P2PConnectorMetrics.h"
 #include "rtp_llm/cpp/cache/connector/p2p/P2PBroadcastClient.h"
 #include "rtp_llm/cpp/cache/connector/p2p/PrefillLoadCaller.h"
@@ -15,6 +15,8 @@
 #include <vector>
 
 namespace rtp_llm {
+
+class P2PConnectorAsyncReadContextChecker;
 
 /// @brief PD 分离场景下的匹配上下文，始终全量匹配
 class P2PConnectorAsyncMatchContext: public AsyncMatchContext {
@@ -32,7 +34,7 @@ private:
     const KVCacheResourcePtr resource_;
 };
 
-class P2PConnectorAsyncReadContext: public AsyncContext {
+class P2PConnectorAsyncReadContext: public ::rtp_llm::legacy::p2p::AsyncContext {
 public:
     P2PConnectorAsyncReadContext(const KVCacheResourcePtr&                               resource,
                                  const std::shared_ptr<P2PBroadcastClient::Result>&      tp_sync_result,
@@ -73,6 +75,8 @@ public:
     ErrorInfo errorInfo() const override;
 
 private:
+    friend class P2PConnectorAsyncReadContextChecker;
+
     struct MergedReadOutcome {
         bool        success{false};
         ErrorCode   error_code{ErrorCode::NONE_ERROR};
@@ -83,6 +87,11 @@ private:
     MergedReadOutcome mergeReadResultsWhenBothDone() const;
     /// @param allow_transfer_not_done_hold 为 false 时不再进入 transfer_not_done 等待窗口（用于 hold 到期后的终态）
     void applyMergedReadOutcome(const MergedReadOutcome& outcome, bool allow_transfer_not_done_hold = true);
+    /// Checker threads must never propagate RPC completion exceptions across
+    /// the pthread boundary. Cancel unfinished peers and publish one terminal
+    /// failure while preserving the original exception message.
+    void failFromChecker(const std::shared_ptr<P2PBroadcastClient>& tp_broadcast_client,
+                         const std::string&                         error_message) noexcept;
 
     const KVCacheResourcePtr                               resource_;
     const std::shared_ptr<P2PBroadcastClient::Result>      tp_sync_result_;
@@ -105,7 +114,7 @@ private:
 /// @brief P2P 按层写入的异步上下文。
 /// Write-by-layer is fire-and-forget; actual transfer status is tracked separately.
 /// @note done()/success() 恒为 true，仅满足 AsyncContext 接口形态，不得据此推断真实传输结果。
-class P2PConnectorAsyncWriteByLayerContext: public AsyncContext {
+class P2PConnectorAsyncWriteByLayerContext: public ::rtp_llm::legacy::p2p::AsyncContext {
 public:
     P2PConnectorAsyncWriteByLayerContext(const KVCacheResourcePtr& resource): resource_(resource) {}
     virtual ~P2PConnectorAsyncWriteByLayerContext() {}

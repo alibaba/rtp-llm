@@ -1,8 +1,11 @@
 package(default_visibility = ["//visibility:public"])
+load("@arch_config//:arch_select.bzl", "requirement")
 
-# test_util provides shared Python test helpers (numeric comparison, port
-# allocation, stream utilities, etc.) used by Bazel py_test targets that
-# have not yet been migrated to pytest.
+requirement([
+    "filelock",
+    "torch",
+])
+
 py_library(
     name = "test_util",
     srcs = [
@@ -23,23 +26,38 @@ py_library(
     visibility = ["//visibility:public"],
 )
 
-# gpu_lock is a Bazel py_binary used as `--run_under` for cc_test targets
-# (see github-opensource/setup.py BazelTest command). It serializes GPU
-# access across parallel cpp_ut runs by acquiring a filelock per device
-# in /tmp/rtp_llm/smoke/test/gpu_status/, then execs the test as a
-# subprocess. Pure stdlib + filelock — no torch import on the wrapper
-# path, so no extra Bazel deps are required.
-#
-# This BUILD file survived the pyproject/uv migration only for this one
-# target; everything else under rtp_llm/test/utils/ is exercised via
-# pytest, not Bazel.
+py_library(
+    name = "jit_sys_path_setup",
+    srcs = ["jit_sys_path_setup.py"],
+    deps = [":filelock", "//rtp_llm:jit_cache_env"],
+)
+
 py_binary(
     name = "gpu_lock",
-    srcs = [
-        "device_resource.py",
-        "jit_sys_path_setup.py",
-    ],
+    deps = [":jit_sys_path_setup", ":filelock", ":torch"],
     main = "device_resource.py",
+    srcs = ["device_resource.py"],
+)
+
+py_library(
+    name = "device_resource",
+    deps = [":filelock"],
+    srcs = ["device_resource.py"],
+)
+
+py_library(
+    name = "maga_server_manager",
+    srcs = ["maga_server_manager.py"],
+    deps = [":test_util", "//rtp_llm:jit_cache_env"],
+    visibility = ["//visibility:public"],
+)
+
+py_test(
+    name = "port_util_test",
+    srcs = ["port_util_test.py"],
+    deps = [
+        ":test_util",
+    ],
 )
 
 py_test(
@@ -58,4 +76,12 @@ py_test(
         ":test_util",
         ":torch",
     ],
+)
+
+
+py_test(
+    name = "device_resource_test",
+    srcs = ["device_resource_test.py"],
+    env = {"GPU_COUNT": "0"},
+    deps = [":device_resource"],
 )

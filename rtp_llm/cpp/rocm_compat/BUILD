@@ -7,11 +7,6 @@ config_setting(
     visibility = ["//visibility:public"],
 )
 
-config_setting(
-    name = "use_accl_ep",
-    define_values = {"use_accl_ep": "true"},
-)
-
 cc_library(
     name = "deep_ep_buffer",
     visibility = ["//visibility:public"],

@@ -499,8 +499,7 @@ class FrontendApp(object):
         )
 
     def start(self):
-        # trace telemetry runtime: per-process init after spawn; no-op unless
-        # RTP_LLM_OTEL_TRACE_ENABLE is set
+        # spawn 后独立初始化；仅合法且启用的 JSON 配置会创建 Trace 运行时。
         init_telemetry("frontend", 0)
         self.frontend_server.start()
         app = self.create_app()
@@ -809,6 +808,8 @@ class FrontendApp(object):
             request: Request, req: Union[str, Dict[Any, Any]] = Body(default={})
         ):
             check_not_draining(request)
+            if self.frontend_server.is_embedding:
+                return await self.frontend_server._embedding_endpoint.start_profile(req)
             result = await self.grpc_client.post_request("start_profile", req)
             return result
 

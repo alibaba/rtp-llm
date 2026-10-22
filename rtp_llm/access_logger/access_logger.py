@@ -1,4 +1,5 @@
 import logging
+import os
 import time
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -6,6 +7,7 @@ from rtp_llm.access_logger.json_util import dump_json
 from rtp_llm.access_logger.log_utils import get_handler
 from rtp_llm.access_logger.py_access_log import PyAccessLog, RequestLog, ResponseLog
 from rtp_llm.ops import MultimodalInput
+from rtp_llm.server.server_args.util import str2bool
 from rtp_llm.structure.request_constants import request_id_field_name
 
 ACCESS_LOGGER_NAME = "access_logger"
@@ -51,14 +53,25 @@ def init_logger(
     rank_id: Optional[int] = None,
     server_id: Optional[int] = None,
     async_mode: bool = True,
+    disable_access_log: Optional[bool] = None,
 ) -> None:
     access_logger = logging.getLogger(logger_name)
+    # Parsed configuration takes precedence over the legacy environment fallback.
+    access_logger.disabled = (
+        str2bool(os.environ.get("DISABLE_ACCESS_LOG", "0"))
+        if disable_access_log is None
+        else disable_access_log
+    )
+    for old_handler in access_logger.handlers[:]:
+        access_logger.removeHandler(old_handler)
+        old_handler.close()
+    access_logger.parent = None
+    if access_logger.disabled:
+        return
     handler = get_handler(
         filename, log_path, backup_count, rank_id, server_id, async_mode
     )
     formatter = logging.Formatter("%(message)s")
-    access_logger.handlers.clear()
-    access_logger.parent = None
     if handler is not None:
         handler.setFormatter(formatter)
         access_logger.addHandler(handler)
@@ -72,7 +85,19 @@ class AccessLogger:
         rank_id: Optional[int] = None,
         server_id: Optional[int] = None,
         async_mode: bool = True,
+        disable_access_log: Optional[bool] = None,
     ) -> None:
+        self.async_mode = async_mode
+        self.rank_id = rank_id
+        self.server_id = server_id
+        self.logger: Optional[logging.Logger] = None
+        self.query_logger: Optional[logging.Logger] = None
+        if disable_access_log is None:
+            disable_access_log = str2bool(os.environ.get("DISABLE_ACCESS_LOG", "0"))
+        # Disable before creating handlers/threads, and before serializing any
+        # request or response. A no-op file handler alone still pays that cost.
+        if disable_access_log:
+            return
         init_logger(
             ACCESS_LOGGER_NAME,
             "access.log",
@@ -81,6 +106,7 @@ class AccessLogger:
             rank_id,
             server_id,
             async_mode,
+            disable_access_log=disable_access_log,
         )
         init_logger(
             QUERY_ACCESS_LOGGER_NAME,
@@ -90,12 +116,10 @@ class AccessLogger:
             rank_id,
             server_id,
             async_mode,
+            disable_access_log=disable_access_log,
         )
         self.logger = logging.getLogger(ACCESS_LOGGER_NAME)
         self.query_logger = logging.getLogger(QUERY_ACCESS_LOGGER_NAME)
-        self.async_mode = async_mode
-        self.rank_id = rank_id
-        self.server_id = server_id
         logging.info(
             f"AccessLogger created: async_mode={async_mode}, rank_id={rank_id}, server_id={server_id}"
         )
@@ -105,6 +129,8 @@ class AccessLogger:
         return request.get("private_request", False)
 
     def log_access(self, request: Dict[str, Any], response: ResponseLog) -> None:
+        if self.logger is None:
+            return
         request_log = RequestLog.from_request(request)
         access_log = PyAccessLog(
             request=request_log, response=response, id=request[request_id_field_name]
@@ -112,6 +138,8 @@ class AccessLogger:
         self.logger.info(dump_json(_attach_trace_ids(access_log)))
 
     def log_query_access(self, request: Dict[str, Any]) -> None:
+        if self.query_logger is None:
+            return
         if not self.is_private_request(request):
             request_log = RequestLog.from_request(request)
             response_log = ResponseLog()
@@ -123,6 +151,8 @@ class AccessLogger:
             self.query_logger.info(dump_json(_attach_trace_ids(access_log)))
 
     def log_success_access(self, request: Dict[str, Any], response: Any) -> None:
+        if self.logger is None:
+            return
         if not self.is_private_request(request):
             response_log = ResponseLog()
             response_log.add_response(response)
@@ -134,6 +164,8 @@ class AccessLogger:
         exception: BaseException,
         response: Optional[Dict[str, Any]] = None,
     ) -> None:
+        if self.logger is None:
+            return
         response_log = ResponseLog()
         if response is not None:
             response_log.add_response(response)
@@ -154,7 +186,17 @@ class MMAccessLogger(AccessLogger):
         rank_id: Optional[int] = None,
         server_id: Optional[int] = None,
         async_mode: bool = True,
+        disable_access_log: Optional[bool] = None,
     ) -> None:
+        self.async_mode = async_mode
+        self.rank_id = rank_id
+        self.server_id = server_id
+        self.logger: Optional[logging.Logger] = None
+        self.query_logger: Optional[logging.Logger] = None
+        if disable_access_log is None:
+            disable_access_log = str2bool(os.environ.get("DISABLE_ACCESS_LOG", "0"))
+        if disable_access_log:
+            return
         init_logger(
             MM_ACCESS_LOGGER_NAME,
             "mm_access.log",
@@ -163,6 +205,7 @@ class MMAccessLogger(AccessLogger):
             rank_id,
             server_id,
             async_mode,
+            disable_access_log=disable_access_log,
         )
         init_logger(
             MM_QUERY_ACCESS_LOGGER_NAME,
@@ -172,17 +215,21 @@ class MMAccessLogger(AccessLogger):
             rank_id,
             server_id,
             async_mode,
+            disable_access_log=disable_access_log,
         )
         self.logger = logging.getLogger(MM_ACCESS_LOGGER_NAME)
         self.query_logger = logging.getLogger(MM_QUERY_ACCESS_LOGGER_NAME)
 
     def log(
         self,
-        logger,
+        logger: Optional[logging.Logger],
         request: List[MultimodalInput],
         exception: Optional[BaseException] = None,
         response: Optional[Any] = None,
+        request_id: int = 0,
     ) -> None:
+        if logger is None:
+            return
         current_time = time.time()
         local_time = time.localtime(current_time)
         log_time = (
@@ -192,6 +239,7 @@ class MMAccessLogger(AccessLogger):
         logger.info(
             dump_json(
                 {
+                    "id": request_id,
                     "query": [mm_input.to_string() for mm_input in request],
                     "log_time": log_time,
                     "exception": exception,
@@ -200,15 +248,20 @@ class MMAccessLogger(AccessLogger):
             )
         )
 
-    def log_query_access(self, mm_inputs: List[MultimodalInput]) -> None:
-        self.log(self.query_logger, mm_inputs)
+    def log_query_access(
+        self, mm_inputs: List[MultimodalInput], request_id: int = 0
+    ) -> None:
+        self.log(self.query_logger, mm_inputs, request_id=request_id)
 
     def log_exception_access(
-        self, mm_inputs: List[MultimodalInput], exception: BaseException
+        self,
+        mm_inputs: List[MultimodalInput],
+        exception: BaseException,
+        request_id: int = 0,
     ) -> None:
-        self.log(self.logger, mm_inputs, exception=exception)
+        self.log(self.logger, mm_inputs, exception=exception, request_id=request_id)
 
     def log_success_access(
-        self, mm_inputs: List[MultimodalInput], response: Any
+        self, mm_inputs: List[MultimodalInput], response: Any, request_id: int = 0
     ) -> None:
-        self.log(self.logger, mm_inputs, response=response)
+        self.log(self.logger, mm_inputs, response=response, request_id=request_id)

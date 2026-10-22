@@ -97,6 +97,9 @@ public:
         }
         json.Jsonize("local_reuse_len", local_reuse_len, local_reuse_len);
         json.Jsonize("remote_reuse_len", remote_reuse_len, remote_reuse_len);
+        json.Jsonize("disk_reuse_len", disk_reuse_len, disk_reuse_len);
+        json.Jsonize("prefill_disk_reuse_len", prefill_disk_reuse_len, prefill_disk_reuse_len);
+        json.Jsonize("decode_disk_reuse_len", decode_disk_reuse_len, decode_disk_reuse_len);
         json.Jsonize("speculative_draft_rounds", speculative_draft_rounds, speculative_draft_rounds);
         json.Jsonize("speculative_accepted_tokens_per_pos",
                      speculative_accepted_tokens_per_pos,
@@ -133,6 +136,8 @@ public:
             json.Jsonize("output_ids", output_ids.value(), output_ids.value());
         if (input_ids.has_value())
             json.Jsonize("input_ids", input_ids.value(), input_ids.value());
+        if (custom_output.has_value())
+            json.Jsonize("custom_output", custom_output.value(), custom_output.value());
     }
     bool                                           finished;
     std::vector<std::string>                       response;
@@ -142,6 +147,7 @@ public:
     std::optional<std::vector<std::vector<float>>> hidden_states;
     std::optional<std::vector<std::vector<int>>>   output_ids;
     std::optional<std::vector<std::vector<int>>>   input_ids;
+    std::optional<Any>                             custom_output;
 };
 
 class BatchResponse: public Jsonizable {

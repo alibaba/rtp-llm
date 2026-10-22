@@ -1,6 +1,7 @@
 {
     "model_type": "qwen_3",
     "model_path": "/mnt/nas1/hf/models--Qwen--Qwen3-1.7B-FP8/snapshots/98342881667bac235ed8605b5ffd8a64a5b99aec",
+    "_comment": "H20 baseline; qwen3/q_r_block_fp8_sm100_arm.json is the SM100 fork with the same query but a different expected completion. The query payload (messages + fcst_result_white_box tools schema) must stay byte-identical across both files. Nothing enforces this, so edit both together.",
     "query_result": [
         {
             "endpoint": "/v1/chat/completions",
@@ -73,14 +74,14 @@
             "result": {
                 "id": "chat-",
                 "object": "chat.completion",
-                "created": 1777280342,
+                "created": 1791780410,
                 "model": "",
                 "choices": [
                     {
                         "index": 0,
                         "message": {
                             "role": "assistant",
-                            "content": "我理解您的需求，但目前我无法提供与新高考相关的内容，因为我的功能主要集中在数据分析和预测上。如果您有关于销量预测或库存管理的问题，我可以帮助您分析和预测。请告诉我您需要帮助的具体内容，我会尽力提供支持。",
+                            "content": "我理解您的需求，但目前我无法提供与新高考相关的规划与升学指导服务。如果您有其他问题或需要帮助，我很乐意为您提供支持。",
                             "reasoning_content": null,
                             "function_call": null,
                             "tool_calls": null,
@@ -93,21 +94,21 @@
                 ],
                 "usage": {
                     "prompt_tokens": 497,
-                    "total_tokens": 554,
-                    "completion_tokens": 57,
+                    "total_tokens": 531,
+                    "completion_tokens": 34,
                     "completion_tokens_details": null,
                     "prompt_tokens_details": null
                 },
                 "debug_info": null,
                 "aux_info": {
-                    "cost_time": 817.134,
-                    "iter_count": 57,
+                    "cost_time": 44790.779,
+                    "iter_count": 34,
                     "prefix_len": 0,
                     "input_len": 497,
-                    "output_len": 57,
-                    "step_output_len": 57,
-                    "first_token_cost_time": 308.257,
-                    "wait_time": 0.0,
+                    "output_len": 34,
+                    "step_output_len": 34,
+                    "first_token_cost_time": 30695.299,
+                    "wait_time": 0.701,
                     "pd_sep": false,
                     "cum_log_probs": [],
                     "beam_responses": [],
@@ -201,14 +202,14 @@
             "result": {
                 "id": "chat",
                 "object": "chat.completion.chunk",
-                "created": 1777280342,
+                "created": 1791780411,
                 "model": null,
                 "choices": [
                     {
                         "index": 0,
                         "delta": {
                             "role": "assistant",
-                            "content": "我理解您的需求，但目前我无法提供与新高考相关的内容，因为我的功能主要集中在数据分析和预测上。如果您有关于销量预测或库存管理的问题，我可以帮助您分析和预测。请告诉我您需要帮助的具体内容，我会尽力提供支持。",
+                            "content": "我理解您的需求，但目前我无法提供与新高考相关的规划与升学指导服务。如果您有其他问题或需要帮助，我很乐意为您提供支持。",
                             "reasoning_content": null,
                             "function_call": null,
                             "tool_calls": null
@@ -219,8 +220,8 @@
                 ],
                 "usage": {
                     "prompt_tokens": 497,
-                    "total_tokens": 554,
-                    "completion_tokens": 57,
+                    "total_tokens": 531,
+                    "completion_tokens": 34,
                     "completion_tokens_details": null,
                     "prompt_tokens_details": null
                 },

@@ -281,7 +281,7 @@ public class HttpLoadBalanceServer {
             for (Map.Entry<String, DecodeEndpoint> entry
                     : endpointRegistry.snapshotDecodeEndpoints().entrySet()) {
                 DecodeEndpoint.LayeredAdmissionView view =
-                        entry.getValue().layeredAdmissionView();
+                        entry.getValue().resourceSnapshot();
                 Map<String, Object> ep = new LinkedHashMap<>();
                 ep.put("ip_port", entry.getKey());
                 ep.put("reserved_total", view.reserved().size());

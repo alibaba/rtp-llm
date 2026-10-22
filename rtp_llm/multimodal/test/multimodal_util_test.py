@@ -2,8 +2,9 @@ import base64
 import io
 import logging
 import tempfile
+import time
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import pytest
 import requests
@@ -12,8 +13,15 @@ pytestmark = [pytest.mark.gpu(type="A10")]
 from PIL import Image
 
 from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
+from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2 import MMPreprocessConfigPB
 from rtp_llm.multimodal.mm_error_messages import MMErr, format_mm_rpc_error
-from rtp_llm.multimodal.multimodal_util import get_bytes_io_from_url
+from rtp_llm.multimodal.multimodal_util import (
+    collect_download_timing,
+    get_bytes_io_from_url,
+    request_get,
+    trans_config,
+    url_data_cache_,
+)
 
 
 class _FakeResponse:
@@ -61,6 +69,48 @@ class TestMultiModalUtil(unittest.TestCase):
             self.assertTrue(
                 Image.open(get_bytes_io_from_url(temp_path)).size == image.size
             )
+
+    def test_trans_config_preserves_fps_and_long_side_limit(self):
+        config = trans_config(MMPreprocessConfigPB(fps=2, max_long_side_pixel=1008))
+
+        self.assertEqual(config.fps, 2)
+        self.assertEqual(config.max_long_side_pixel, 1008)
+
+    def test_native_python_input_converts_to_real_cpp_config(self):
+        import torch
+
+        from rtp_llm.multimodal import multimodal_util as util
+        from rtp_llm.ops import MultimodalInput as CppMultimodalInput
+
+        tensor = torch.ones(2, 3)
+        config = util.MMPreprocessConfig(32, 48, 64, 128, 2, 3, 7)
+        inp = util.MultimodalInput("local://image", util.MMUrlType.IMAGE, config, tensor)
+        converted = util.trans_mm_input([inp])[0]
+        self.assertIsInstance(converted, CppMultimodalInput)
+        self.assertEqual(converted.url, inp.url)
+        self.assertEqual(converted.mm_type, int(util.MMUrlType.IMAGE))
+        torch.testing.assert_close(converted.tensor, tensor)
+        for field in ("width", "height", "min_pixels", "max_pixels", "fps", "min_frames", "max_frames"):
+            with self.subTest(field=field):
+                self.assertEqual(getattr(converted.mm_preprocess_config, field), getattr(config, field))
+        self.assertEqual(converted.mm_preprocess_config.crop_positions, [])
+        self.assertEqual(converted.mm_preprocess_config.mm_timeout_ms, -1)
+        self.assertEqual(converted.mm_preprocess_config.max_long_side_pixel, -1)
+
+    def test_main_cpp_input_keeps_all_preprocess_fields(self):
+        import torch
+
+        from rtp_llm.multimodal import multimodal_util as util
+        from rtp_llm.ops import MMPreprocessConfig, MultimodalInput
+
+        config = MMPreprocessConfig(crop_positions=[0.25, 0.5], mm_timeout_ms=1200,
+                                    max_long_side_pixel=1008)
+        inp = MultimodalInput("local://image", int(util.MMUrlType.IMAGE), torch.ones(1), config)
+        converted = util.trans_mm_input([inp])[0]
+        self.assertIsInstance(converted, MultimodalInput)
+        self.assertEqual(converted.mm_preprocess_config.crop_positions, [0.25, 0.5])
+        self.assertEqual(converted.mm_preprocess_config.mm_timeout_ms, 1200)
+        self.assertEqual(converted.mm_preprocess_config.max_long_side_pixel, 1008)
 
     def test_base64(self):
         buffer = io.BytesIO()
@@ -190,6 +240,36 @@ class TestMultiModalUtil(unittest.TestCase):
         self.assertEqual(first.tell(), 1)
         self.assertTrue(response.closed)
 
+    def test_request_get_retries_connect_timeout_twice(self):
+        response = _FakeResponse()
+        request_impl = Mock(
+            side_effect=[
+                requests.exceptions.ConnectTimeout(),
+                requests.exceptions.ConnectTimeout(),
+                response,
+            ]
+        )
+        with patch("rtp_llm.multimodal.multimodal_util.REQUEST_GET", request_impl):
+            self.assertIs(request_get("https://example.com/image", {}), response)
+
+        self.assertEqual(request_impl.call_count, 3)
+
+    def test_request_get_stops_after_two_connect_timeout_retries(self):
+        request_impl = Mock(side_effect=requests.exceptions.ConnectTimeout())
+        with patch("rtp_llm.multimodal.multimodal_util.REQUEST_GET", request_impl):
+            with self.assertRaises(requests.exceptions.ConnectTimeout):
+                request_get("https://example.com/image", {})
+
+        self.assertEqual(request_impl.call_count, 3)
+
+    def test_request_get_does_not_retry_read_timeout(self):
+        request_impl = Mock(side_effect=requests.exceptions.ReadTimeout())
+        with patch("rtp_llm.multimodal.multimodal_util.REQUEST_GET", request_impl):
+            with self.assertRaises(requests.exceptions.ReadTimeout):
+                request_get("https://example.com/image", {})
+
+        self.assertEqual(request_impl.call_count, 1)
+
     def test_http_timeout(self):
         with patch(
             "rtp_llm.multimodal.multimodal_util.request_get",
@@ -235,6 +315,30 @@ class TestMultiModalUtil(unittest.TestCase):
             )
         self.assertFalse(response.content_accessed)
         self.assertTrue(response.closed)
+
+    def test_download_timing_excludes_cache_hits(self):
+        """The preprocess timing context records misses and leaves hits at zero."""
+
+        def slow_download(*args):
+            time.sleep(0.01)
+            return b"payload"
+
+        with patch.object(
+            url_data_cache_, "check_cache", return_value=None
+        ), patch.object(url_data_cache_, "insert_cache"), patch(
+            "rtp_llm.multimodal.multimodal_util._download_http_content",
+            side_effect=slow_download,
+        ):
+            with collect_download_timing() as timing:
+                get_bytes_io_from_url("https://example.com/timing")
+        self.assertGreaterEqual(timing.elapsed_ms, 5.0)
+
+        with patch.object(
+            url_data_cache_, "check_cache", return_value=b"payload"
+        ):
+            with collect_download_timing() as cache_timing:
+                get_bytes_io_from_url("https://example.com/cached")
+        self.assertEqual(cache_timing.elapsed_ms, 0.0)
 
 
 if __name__ == "__main__":

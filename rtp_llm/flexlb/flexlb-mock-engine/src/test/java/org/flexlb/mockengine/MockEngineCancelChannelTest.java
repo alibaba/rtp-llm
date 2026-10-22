@@ -39,19 +39,19 @@ import static org.mockito.Mockito.mock;
  * <ul>
  *   <li>accepted: a live request on the addressed worker is cancelled and its
  *       CANCELLED completion surfaces in WorkerStatus;</li>
- *   <li>idempotent: an accepted priority-cancel tombstone stays ACCEPTED;</li>
+ *   <li>idempotent: an accepted priority-cancel terminal record stays ACCEPTED;</li>
  *   <li>not found: a completed-before-cancel request answers NOT_FOUND
  *       (production seen-but-terminal branch) and does not scan another
  *       Prefill for a match;</li>
- *   <li>tombstoned: a never-seen rid answers TOMBSTONED, installs the
- *       ABSENT_FENCE tombstone, and a racing later Enqueue of that rid is
+ *   <li>request_fenced: a never-seen rid answers REQUEST_FENCED, installs the
+ *       ABSENT_FENCE record, and a racing later Enqueue of that rid is
  *       rejected pre-admission with the typed 8429 error;</li>
  *   <li>failed: Decode rejects the Prefill-owned Cancel RPC;</li>
  *   <li>unsupported: endpoint whose port maps to no mock engine;</li>
  *   <li>fault injections: an armed cancel_no_respond / cancel_error /
  *       cancel_unexpected_status is an RPC-LAYER failure — the future hangs /
  *       fails, the engine cancel state machine is never touched (no fences,
- *       no tombstones, no census branch), and clearing the injection restores
+ *       no terminal records, no census branch), and clearing the injection restores
  *       the normal path.</li>
  * </ul>
  */
@@ -155,7 +155,7 @@ class MockEngineCancelChannelTest {
                 "original Prefill must report authoritative typed CANCELED+8429");
     }
 
-    // ---- not found after natural completion / idempotent cancel tombstone ----
+    // ---- not found after natural completion / idempotent cancel terminal record ----
 
     @Test
     void cancelAfterCompletionIsNotFound() throws Exception {
@@ -173,7 +173,7 @@ class MockEngineCancelChannelTest {
         // Production-faithful branch (C++ Cancel handler):
         // seen-but-terminal answers NOT_FOUND — the completion record
         // stays in the retain-window backlog for GetWorkerStatus delivery
-        // (TOMBSTONED is reserved for never-seen rids).
+        // (REQUEST_FENCED is reserved for never-seen rids).
         assertEquals(CancelAck.NOT_FOUND, outcome);
         // Behavior: the request had already finished; nothing is re-inflight.
         assertEquals(0, prefill.getInflightCount());
@@ -200,7 +200,7 @@ class MockEngineCancelChannelTest {
                 .cancel(target(prefill.getGrpcPort()), 21L, 2_000)
                 .get(2, TimeUnit.SECONDS);
         assertEquals(CancelAck.ACCEPTED, second,
-                "accepted priority-cancel tombstones are idempotent");
+                "accepted priority-cancel terminal records are idempotent");
         long terminalCount = workerStatus(prefill, -1).getFinishedTaskListList().stream()
                 .filter(task -> task.getRequestId() == 21L
                         && task.getErrorInfo().getErrorCode() == 8429L
@@ -216,7 +216,7 @@ class MockEngineCancelChannelTest {
     // ---- not found: unknown request id / wrong worker ----
 
     @Test
-    void cancelUnknownRequestIsTombstonedAndFencesLaterEnqueue() throws Exception {
+    void cancelUnknownRequestIsFencedAndRejectsLaterEnqueue() throws Exception {
         startCluster(model("10"), 1, 1);
         JavaMockEngineCluster.FastRpcService prefill = prefillServices.get(0);
         EngineCancelChannel channel = new MockEngineCancelChannel(services);
@@ -224,16 +224,16 @@ class MockEngineCancelChannelTest {
         CancelAck outcome = channel
                 .cancel(target(prefill.getGrpcPort()), 424242L, 2_000)
                 .get(2, TimeUnit.SECONDS);
-        // Never-seen rid: TOMBSTONED — the ABSENT_FENCE tombstone is
+        // Never-seen rid: REQUEST_FENCED — the ABSENT_FENCE record is
         // installed (production Prefill contract).
-        assertEquals(CancelAck.TOMBSTONED, outcome);
+        assertEquals(CancelAck.REQUEST_FENCED, outcome);
 
-        // Fence idempotence: a retried cancel still reads TOMBSTONED (it
-        // must NOT flip onto the ACCEPTED ACTIVE_CANCEL tombstone branch).
+        // Fence idempotence: a retried cancel still reads REQUEST_FENCED (it
+        // must NOT flip onto the ACCEPTED ACTIVE_CANCEL terminal record branch).
         CancelAck retry = channel
                 .cancel(target(prefill.getGrpcPort()), 424242L, 2_000)
                 .get(2, TimeUnit.SECONDS);
-        assertEquals(CancelAck.TOMBSTONED, retry);
+        assertEquals(CancelAck.REQUEST_FENCED, retry);
 
         // The absent fence rejects a racing later Enqueue of the same rid
         // with the typed 8429 error, pre-admission: no success ack, no
@@ -327,7 +327,7 @@ class MockEngineCancelChannelTest {
         }
 
         // After the injection clears, the same rid cancels normally — proof
-        // the fault path installed no tombstone and no fence.
+        // the fault path installed no terminal record and no fence.
         CancelAck outcome = channel
                 .cancel(target(prefill.getGrpcPort()), 41L, 2_000)
                 .get(2, TimeUnit.SECONDS);
@@ -342,7 +342,7 @@ class MockEngineCancelChannelTest {
         EngineCancelChannel channel = new MockEngineCancelChannel(services);
 
         // A never-seen rid: a REAL cancel would install the ABSENT_FENCE
-        // tombstone and answer TOMBSTONED — the injected transport failure
+        // terminal record and answer REQUEST_FENCED — the injected transport failure
         // must short-circuit before any of that.
         prefill.setFaultConfig(prefill.getFaultConfig().toBuilder()
                 .cancelError(true)
@@ -357,8 +357,8 @@ class MockEngineCancelChannelTest {
                     "the transport-layer failure surfaces as IllegalStateException");
             assertEquals(1L, cluster.stats().cancelCensusInjected.sum(),
                     "the injected arrival must be censused");
-            assertEquals(0L, cluster.stats().cancelCensusTombstone.sum(),
-                    "an injected cancel must NOT install the absent-fence tombstone");
+            assertEquals(0L, cluster.stats().cancelCensusAlreadyCancelled.sum(),
+                    "an injected cancel must NOT install the request fence");
             assertEquals(0L, cluster.stats().cancelCensusUnknown.sum(),
                     "the engine cancel state machine was never entered");
         } finally {
@@ -395,8 +395,8 @@ class MockEngineCancelChannelTest {
                     "the failure must name the out-of-contract status mapping");
             assertEquals(1L, cluster.stats().cancelCensusInjected.sum(),
                     "the injected arrival must be censused");
-            assertEquals(0L, cluster.stats().cancelCensusTombstone.sum(),
-                    "an injected cancel must NOT install the absent-fence tombstone");
+            assertEquals(0L, cluster.stats().cancelCensusAlreadyCancelled.sum(),
+                    "an injected cancel must NOT install the request fence");
         } finally {
             prefill.clearFaultConfig();
         }

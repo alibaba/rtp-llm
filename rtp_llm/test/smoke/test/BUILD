@@ -18,3 +18,13 @@ py_test(
     legacy_create_init = 0,
     deps = SMOKE_FRAMEWORK_DEPS,
 )
+
+# Controller lifecycle interfaces only; imports still use the real framework.
+py_test(
+    name = "multi_inst_case_runner_test",
+    srcs = ["multi_inst_case_runner_test.py"],
+    data = ["//rtp_llm/test/smoke:smoke_framework_srcs"],
+    imports = ["../.."],
+    legacy_create_init = 0,
+    deps = SMOKE_FRAMEWORK_DEPS,
+)

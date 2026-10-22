@@ -4,31 +4,26 @@ import unittest
 from unittest.mock import patch
 
 import pytest
-import torch
-import torch.nn.functional as F
 
 pytestmark = [pytest.mark.gpu(type="SM100_ARM")]
 
-from rtp_llm.test.utils.numeric_util import calc_diff
+import torch
+import torch.nn.functional as F
+from flashinfer import fp4_quantize
 
-try:
-    from flashinfer import fp4_quantize
-
-    from rtp_llm.models_py.modules.factory.linear.impl.cuda.fp4_linear import (
-        CudaFp4GEMMLinear,
-    )
-except (ImportError, RuntimeError) as e:
-    pytest.skip(f"FP4 CUDA stack unavailable: {e}", allow_module_level=True)
 from rtp_llm.config.quant_config import init_quant_config
 from rtp_llm.device.device_impl import CudaImpl
+from rtp_llm.models_py.modules.factory.linear.impl.cuda.fp4_linear import (
+    CudaFp4GEMMLinear,
+)
+from rtp_llm.test.utils.numeric_util import calc_diff
 
 
 class CudaFp4GEMMLinearTest(unittest.TestCase):
 
     def setUp(self):
         """Setup test environment"""
-        # Snapshot os.environ so per-test RTP_LLM_FP4_GEMM_BACKEND mutations are
-        # rolled back automatically, avoiding cross-test ordering dependencies.
+        # Restore per-test backend environment changes after each case.
         env_patcher = patch.dict(os.environ)
         env_patcher.start()
         self.addCleanup(env_patcher.stop)
@@ -44,6 +39,7 @@ class CudaFp4GEMMLinearTest(unittest.TestCase):
         self.hidden_size = 1024  # k
         self.output_size = 512  # n
         self.batch_sizes = [1, 32, 64, 128, 256]  # m
+        torch.manual_seed(42)
         weight_fp16 = (
             torch.randn(
                 self.output_size,

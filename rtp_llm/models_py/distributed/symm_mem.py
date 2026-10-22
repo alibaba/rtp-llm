@@ -167,9 +167,9 @@ class TorchSymmMemCommunicator:
             reason = f"world size {self.world_size} not supported"
 
         if local_ok:
-            self.max_size = TORCH_SYMM_MEM_ALL_REDUCE_MAX_SIZES[
-                self.device_capability
-            ][self.world_size]
+            self.max_size = TORCH_SYMM_MEM_ALL_REDUCE_MAX_SIZES[self.device_capability][
+                self.world_size
+            ]
             try:
                 self.buffer = torch_symm_mem.empty(
                     self.max_size // self.dtype.itemsize,
@@ -196,10 +196,13 @@ class TorchSymmMemCommunicator:
             self.buffer = None
             self.disabled = True
             return
+
         self._group_name = self.group.group_name
         handle = torch_symm_mem.rendezvous(self.buffer, group=self._group_name)
 
-        # Every rank must agree before selecting the symmetric-memory fast path.
+        # The post-rendezvous checks are local verdicts too. If they split the
+        # group, some ranks would call multimem_all_reduce_ while others fall
+        # back to NCCL, which diverges at request time instead of at startup.
         local_ok = True
         if handle.multicast_ptr == 0:
             local_ok = False
@@ -406,9 +409,7 @@ def init_symm_mem_communicator(
     """
     global _symm_mem_comm
     if not _custom_all_reduce_enabled(disable_custom_all_reduce):
-        logging.info(
-            "TorchSymmMemCommunicator disabled by FT_DISABLE_CUSTOM_AR"
-        )
+        logging.info("TorchSymmMemCommunicator disabled by FT_DISABLE_CUSTOM_AR")
         _symm_mem_comm = None
         return None
     symm_mem_comm = TorchSymmMemCommunicator(tp_group, torch.cuda.current_device())

@@ -48,6 +48,8 @@ struct StreamUpdateInfo {
     std::optional<ErrorInfo>          error_info;
     GenerationPrefillCudaGraphStatus  generation_prefill_cuda_graph_status{
         GenerationPrefillCudaGraphStatus::NOT_REQUESTED};
+    // Appended to preserve existing aggregate initializers. CPU context rows.
+    const torch::Tensor custom_output{};
 };
 
 struct StreamSpecUpdateInfo {
@@ -241,8 +243,10 @@ public:
     int     localReuseLength() const;
     int     deviceReuseLength() const;
     int     remoteReuseLength() const;
-    void    setMemoryReuseLength(int length);
-    int     memoryReuseLength() const;
+    void    setHostReuseLength(int length);
+    int     hostReuseLength() const;
+    void    setDiskReuseLength(int length);
+    int     diskReuseLength() const;
     void    setInitialReuseLength(int initial_reuse_length);
     void    incLastOutputPos();
     void    setPrefillReuseLength(int64_t total, int64_t local, int64_t remote, int64_t memory);
@@ -277,6 +281,7 @@ public:
     torch::Tensor              multimodalLocations() const;
 
     int64_t getTimeoutMs() const;
+    bool    checkTimeoutAndHasError();
     void    recordWaitLatency();
     void    recordSchedulerEnqueueTime(int64_t time_us);
     void    recordCanRunTime();
@@ -324,6 +329,7 @@ public:
         reportEventWithoutLock(StreamEvents::Error, error_code, error_msg);
     }
     bool         hasEvent(StreamEvents::EventType event) const;
+    void         clearCanRun();
     virtual bool hasError() const;
     ErrorInfo    statusInfo();
     std::string  stopReason();
@@ -336,14 +342,16 @@ public:
 
     virtual StreamState getStatus() const;
     bool                isFinished() const;  // Returns true if stream is finished
-    bool                isActive() const;    // Returns true if stream is active (no error and not finished)
+    // Complete a Decode stream owned by the RPC handler, before scheduler enqueue.
+    bool finishWithoutGenerate();
+    bool isActive() const;  // Returns true if stream is active (no error and not finished)
 
     // A response consumer may observe GenerateDone before the scheduler has
     // committed RUNNING -> FINISHED. Preserve that successful completion and
     // wait for scheduler-owned resource release; otherwise publish cancellation
     // and wait for the same terminal transition.
     bool finishOrCancel(int64_t wait_timeout_ms, const std::string& cancel_reason);
-    bool                isSubGenerateDoneWithoutLock(int batch_id) const;
+    bool isSubGenerateDoneWithoutLock(int batch_id) const;
 
     size_t iterCount() const;
     size_t spIterCount() const;
@@ -596,6 +604,7 @@ public:
         // carries this beside next_seq_len so MRoPE target-verify graphs can
         // be prepared without consulting worker-owned host bookkeeping.
         torch::Tensor next_position_ids_gpu;
+        torch::Tensor engram_token_window_gpu;
         torch::Tensor propose_tokens_gpu;
         // Immutable physical and logical-to-kernel page tables for the next
         // speculative round. The async worker may still be committing the
@@ -629,6 +638,10 @@ public:
         state.epoch      = ++mtp_async_epoch_counter_;
         mtp_async_state_ = std::move(state);
         return mtp_async_state_.epoch;
+    }
+    void setEngramTokenWindowGpu(torch::Tensor history) {
+        std::lock_guard<std::mutex> lock(*mtp_async_state_mutex_);
+        mtp_async_state_.engram_token_window_gpu = std::move(history);
     }
     MtpAsyncDeviceState getMtpAsyncDeviceState() const {
         std::lock_guard<std::mutex> lock(*mtp_async_state_mutex_);
@@ -722,8 +735,9 @@ public:
     // token and the committed sequence length after that token.
     struct NormalAsyncDeviceState {
         uint64_t      epoch = 0;
-        torch::Tensor last_sample_token_gpu;  // [1] int32
-        torch::Tensor next_seq_len_gpu;       // [1] int32, seqLength after sample
+        torch::Tensor last_sample_token_gpu;    // [1] int32
+        torch::Tensor next_seq_len_gpu;         // [1] int32, seqLength after sample
+        torch::Tensor engram_token_window_gpu;  // [1,4], current token first
         // Host seqLength before the sampled token represented by this state.
         // -1 = unset (first iter / cleared).
         int last_real_seq_len = -1;
@@ -776,7 +790,8 @@ public:
     }
 
     bool reuseCache() const {
-        return generate_input_->generate_config->reuse_cache;
+        const auto& config = *generate_input_->generate_config;
+        return config.reuse_cache && !config.isPrefillOnly();
     }
 
     bool enableDeviceCache() const {
@@ -785,6 +800,10 @@ public:
 
     bool enableMemoryCache() const {
         return generate_input_->generate_config->enable_memory_cache;
+    }
+
+    bool enableDiskCache() const {
+        return generate_input_->generate_config->enable_disk_cache;
     }
 
     bool enableRemoteCache() const {
@@ -849,7 +868,6 @@ protected:
     void                     resizeSubGenerateStatus(size_t new_size);
 
     void reportStreamMetrics();
-    void reportCacheReuseMetrics() const;
     void reportMetricOnce();
 
 protected:
@@ -879,17 +897,18 @@ protected:
     // Prefill-to-decode transition is committed by the output/bookkeeping
     // worker and observed by the scheduler thread. Keep this flag atomic; the
     // shared_ptr preserves the existing CopyOnWrite sharing semantics.
-    std::shared_ptr<std::atomic<bool>>    is_context_stream_;
-    size_t                                iter_count_    = 0;
-    size_t                                sp_iter_count_ = 0;
-    std::vector<int32_t>                  speculative_accepted_tokens_per_pos_;
-    size_t                                last_output_pos_      = 0;
-    int                                   initial_reuse_length_ = 0;
-    int                                   reuse_length_         = 0;
-    int                                   local_reuse_length_   = 0;
-    int                                   device_reuse_length_  = 0;
-    int                                   remote_reuse_length_  = 0;
-    int                                   memory_reuse_length_  = 0;
+    std::shared_ptr<std::atomic<bool>> is_context_stream_;
+    size_t                             iter_count_    = 0;
+    size_t                             sp_iter_count_ = 0;
+    std::vector<int32_t>               speculative_accepted_tokens_per_pos_;
+    size_t                             last_output_pos_      = 0;
+    int                                initial_reuse_length_ = 0;
+    int                                reuse_length_         = 0;
+    int                                local_reuse_length_   = 0;
+    int                                device_reuse_length_  = 0;
+    int                                remote_reuse_length_  = 0;
+    int                                host_reuse_length_    = 0;
+    int                                disk_reuse_length_    = 0;
     // prefill reuse info (PD-sep); read/write only under output_mutex_
     int64_t prefill_total_reuse_len_  = 0;
     int64_t prefill_local_reuse_len_  = 0;
@@ -922,6 +941,7 @@ protected:
     torch::Tensor                            softmax_probs_;
     torch::Tensor                            loss_;
     torch::Tensor                            last_hidden_states_;
+    torch::Tensor                            custom_output_;
     int                                      loss_index_ = 0;
     std::shared_ptr<std::mutex>              mutex_;
     std::shared_ptr<std::condition_variable> consumer_cv_;

@@ -1,13 +1,11 @@
 from __future__ import annotations
 
 import concurrent.futures
-import glob
 import json
 import logging
 import os
 import shutil
 import signal
-import subprocess
 import threading
 import time
 import traceback
@@ -67,6 +65,9 @@ from rtp_llm.test.smoke.similarity_comparer import SimilarityComparer
 from rtp_llm.test.smoke.tau2_bench_comparer import Tau2BenchComparer
 from rtp_llm.test.smoke.task_info import TaskInfo, TaskStates
 from rtp_llm.test.smoke.worker_status_comparer import WorkerStatusComparer
+from rtp_llm.test.utils.coredump_util import (
+    summarize_and_cleanup_coredumps as _summarize_and_cleanup_coredumps,
+)
 
 # NOTE: rtp_llm.utils.util / rtp_llm.test.utils.maga_server_manager are imported
 # lazily where used (str_to_bool inlined below; MagaServerManager imported inside
@@ -128,68 +129,6 @@ def _iterate_modidfy_qr(origin: Dict[str, Any], new: Dict[str, Any]):
             _iterate_modidfy_qr(origin[key], new[key])
         else:
             origin[key] = new[key]
-
-
-def _summarize_and_cleanup_coredumps(output_dir: str) -> None:
-    """Scan output_dir for core dump files, write a summary log, then delete them."""
-    if not output_dir or not os.path.isdir(output_dir):
-        return
-    core_files = glob.glob(os.path.join(output_dir, "core-*")) + glob.glob(
-        os.path.join(output_dir, "core.*")
-    )
-    if not core_files:
-        return
-
-    summary_path = os.path.join(output_dir, "coredump_summary.log")
-    total_size = 0
-    lines = [f"[COREDUMP_SUMMARY] Found {len(core_files)} core dump(s)\n"]
-    for path in sorted(core_files):
-        name = os.path.basename(path)
-        try:
-            size = os.path.getsize(path)
-        except OSError:
-            size = -1
-        total_size += max(size, 0)
-        size_mb = size / (1024 * 1024) if size >= 0 else -1
-
-        # Use `file` command to extract process name / signal info
-        file_info = ""
-        try:
-            result = subprocess.run(
-                ["file", path],
-                capture_output=True,
-                text=True,
-                timeout=30,
-            )
-            if result.returncode == 0:
-                file_info = result.stdout.strip()
-        except Exception:
-            file_info = "(file command failed)"
-
-        line = f"  {name}  size={size_mb:.1f}MB  info={file_info}"
-        lines.append(line)
-        logging.info(f"[COREDUMP_SUMMARY] {line}")
-
-    lines.append(
-        f"\n[COREDUMP_SUMMARY] Total core dump size: {total_size / (1024*1024):.1f}MB"
-    )
-    lines.append(
-        "[COREDUMP_SUMMARY] Core dump files deleted to reduce artifact size.\n"
-    )
-
-    try:
-        with open(summary_path, "w") as f:
-            f.write("\n".join(lines))
-        logging.info(f"[COREDUMP_SUMMARY] Summary written to {summary_path}")
-    except OSError as e:
-        logging.warning(f"[COREDUMP_SUMMARY] Failed to write summary: {e}")
-
-    for path in core_files:
-        try:
-            os.remove(path)
-            logging.info(f"[COREDUMP_SUMMARY] Deleted {os.path.basename(path)}")
-        except OSError as e:
-            logging.warning(f"[COREDUMP_SUMMARY] Failed to delete {path}: {e}")
 
 
 class CaseRunner(object):
@@ -436,15 +375,22 @@ class CaseRunner(object):
 
     def _start_remote_kvcm_server(self) -> Optional[RemoteKVCMServer]:
         if "TEST_SRCDIR" in os.environ:
-            # Legacy Bazel-test compatibility path; Smoke CI now uses pytest.
-            # Runfiles tree has the http_archive contents under
-            # external/remote_kv_cache_manager_server/.
-            srcdir = os.environ["TEST_SRCDIR"]
-            workspace = os.environ.get("TEST_WORKSPACE", "rtp_llm")
-            server_path = os.path.join(
-                srcdir, workspace, "external/remote_kv_cache_manager_server"
+            runfiles_root = os.path.join(
+                os.environ["TEST_SRCDIR"], os.environ.get("TEST_WORKSPACE", "rtp_llm")
             )
-            kvcm_src_logs_path = os.path.join(srcdir, "rtp_llm/logs")
+            server_path = os.path.join(
+                runfiles_root,
+                "3rdparty",
+                "remote_kv_cache_manager",
+                "bin",
+                "kv_cache_manager_bin",
+            )
+            if not os.path.isfile(server_path):
+                raise FileNotFoundError(
+                    "kv_cache_manager_bin is absent from Bazel runfiles"
+                )
+            server_path = os.path.dirname(os.path.dirname(server_path))
+            kvcm_src_logs_path = os.path.join(os.environ["TEST_SRCDIR"], "rtp_llm/logs")
         else:
             # pytest+REAPI path — setup.py stages `kv_cache_manager_bin` from
             # a top-level Bazel output into rtp_llm/libs/kv_cache_manager_server/bin/.
@@ -1073,7 +1019,7 @@ class CaseRunner(object):
         for env_str in env_list:
             k, v = env_str.split("=", 1)
             v = self._expand_env_value(v)
-            if k == "MEMORY_CACHE_DISK_PATHS":
+            if k in ("DISK_CACHE_PATHS", "MEMORY_CACHE_DISK_PATHS"):
                 self._prepare_memory_cache_disk_paths(v)
             env_dict.update({k: v})
             logging.info(f"env dict update {k}:{v}")
@@ -1105,7 +1051,7 @@ class CaseRunner(object):
                     os.path.commonpath([abs_path, root]) == root for root in safe_roots
                 ):
                     raise RuntimeError(
-                        f"refuse to clean MEMORY_CACHE_DISK_PATHS outside test dirs: {abs_path}"
+                        f"refuse to clean DISK_CACHE_PATHS outside test dirs: {abs_path}"
                     )
                 shutil.rmtree(abs_path)
                 logging.info("cleaned memory cache disk path: %s", abs_path)

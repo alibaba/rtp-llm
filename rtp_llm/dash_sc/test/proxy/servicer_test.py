@@ -938,7 +938,6 @@ class TraceMetadataMergeTest(unittest.TestCase):
         )
 
 
-@unittest.skipUnless(tracing.OTEL_AVAILABLE, "opentelemetry not installed")
 class ProxyTracingTest(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self) -> None:
         from opentelemetry.sdk.trace.export.in_memory_span_exporter import (

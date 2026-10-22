@@ -21,18 +21,18 @@ class RequestDeliveryPreparationLoggingTest {
   ListAppender<ILoggingEvent> sink=new ListAppender<>(); sink.start(); logger.addAppender(sink); logger.setLevel(Level.ERROR);
   var config=SchedulingTestConfig.batchConfig();
   ConfigService service=mock(ConfigService.class); when(service.loadBalanceConfig()).thenReturn(config);
-  var registry=new RequestRegistry(service,mock(BatchSchedulerReporter.class),mock(RequestSchedulerReporter.class),mock(org.flexlb.balance.eviction.EngineCancelChannel.class));
+  var registry=new RequestRegistry(service,mock(BatchSchedulerReporter.class),mock(RequestSchedulerReporter.class));
   try {
    var context=RequestLifecycleTestSupport.context(config,903L);
-   var future=registry.register(context, 100); var slot=registry.requestSlot(903L);
+   var future=registry.register(context); var slot=registry.requestSlot(903L);
    var item=new ScheduledRequest(context,future,new Response(),null,null,mock(PrefillEndpoint.class),null,null,slot.createdAtMs());
    var failure=new IllegalStateException("preparation cause",new IllegalArgumentException("nested cause"));
-   try(var admission=registry.claimAdmissionMutation(903L,future)) {
+   try(var admission=registry.claimAdmissionHandle(903L,future)) {
     assertNotNull(admission); assertTrue(registry.commitItemForPublication(item,()->true));
-    registry.failPrepared(item,failure);
+    registry.failDeliveryPreparation(item,failure);
    }
    assertFalse(future.get(2,TimeUnit.SECONDS).isSuccess());
-   registry.failPrepared(item,failure);
+   registry.failDeliveryPreparation(item,failure);
    var events=sink.list.stream().filter(e->e.getFormattedMessage().contains("dispatch preparation failed")).toList();
    assertEquals(1,events.size(),"accepted failure must retain one diagnostic; stale repeat must not log");
    var event=events.get(0); assertEquals(Level.ERROR,event.getLevel());

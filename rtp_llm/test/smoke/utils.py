@@ -9,13 +9,15 @@ from typing import Any
 from rtp_llm.test.smoke import common_def
 
 
-def create_temporary_copy(rel_path: str):
+def create_temporary_copy(rel_path: str, preserve_path: bool = False):
     match = re.match(r"^data:[^,]*;base64,", rel_path)
     if match:
         return rel_path
     if rel_path.startswith("http"):
         return rel_path
     path = os.path.abspath(os.path.join(common_def.REL_PATH, rel_path))
+    if preserve_path:
+        return path
     tmp = tempfile.NamedTemporaryFile(delete=False)
     shutil.copy2(path, tmp.name)
     return tmp.name

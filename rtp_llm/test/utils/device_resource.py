@@ -8,6 +8,7 @@ import socket
 import subprocess
 import sys
 import time
+import threading
 import traceback
 from contextlib import ExitStack
 from typing import Any, Dict, List, Optional
@@ -255,7 +256,125 @@ def get_device_info():
     return None
 
 
-get_cuda_info = get_device_info
+python_code = """
+import torch
+import json
+import os
+import sys
+
+def report_driver_details():
+    details = {"torch_cuda": torch.version.cuda}
+    try:
+        details["cuda_root"] = os.path.realpath("/usr/local/cuda")
+        with open("/proc/driver/nvidia/version") as f:
+            details["kernel_driver"] = f.read().strip()
+        with open("/proc/self/maps") as f:
+            details["libcuda"] = sorted({
+                line.split(maxsplit=5)[-1].strip() for line in f if "/libcuda.so" in line
+            })
+    except OSError as e:
+        details["driver_details_error"] = str(e)
+    print("CUDA probe diagnostics: " + json.dumps(details), file=sys.stderr)
+
+try:
+    if torch.cuda.is_available():
+        device_info = {torch.cuda.get_device_name(0): torch.cuda.device_count()}
+    else:
+        device_info = {}
+        report_driver_details()
+    print(json.dumps(device_info))
+except Exception as e:
+    report_driver_details()
+    # 捕获并打印内部错误，避免子进程静默失败
+    print(json.dumps({"error": str(e), "note": "Failed to get CUDA info"}), file=sys.stderr)
+    sys.exit(1) # 告知外部进程执行失败
+"""
+
+
+def _retry_native_cuda_driver(result):
+    # An obsolete compat libcuda can shadow the worker's valid host driver.
+    # Probe in a fresh process: an initialized CUDA runtime cannot switch libs.
+    library_path = os.environ.get("LD_LIBRARY_PATH", "")
+    native_path = ":".join(
+        part
+        for part in library_path.split(":")
+        if not (
+            "cuda" in part
+            and (part.rstrip("/").endswith("/compat") or "/compat/" in part)
+        )
+    )
+    if native_path == library_path:
+        raise RuntimeError(
+            "CUDA driver mismatch (803): align the worker's libcuda libraries "
+            f"with its host driver. Host: {get_ip()}. Probe: {result.stderr.strip()}"
+        )
+    native = subprocess.run(
+        [sys.executable, "-c", python_code],
+        env={**os.environ, "LD_LIBRARY_PATH": native_path},
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    try:
+        native_info = json.loads(native.stdout) if native.returncode == 0 else {}
+    except ValueError:
+        native_info = {}
+    if not native_info or not all(
+        isinstance(count, int) and count > 0 for count in native_info.values()
+    ):
+        raise RuntimeError(
+            "CUDA driver mismatch (803): both configured compat and native "
+            "driver probes failed. Align the worker's libcuda libraries "
+            f"with its host driver. Host: {get_ip()}. "
+            f"Configured probe: {result.stderr.strip()}. Native probe: {native.stderr.strip()}"
+        )
+    os.environ["LD_LIBRARY_PATH"] = native_path
+    logging.warning(
+        "CUDA compat probe failed with 803; using the working native driver"
+    )
+    return native
+
+
+_CUDA_PROBE_LOCK = threading.Lock()
+
+
+def get_cuda_info():
+    with _CUDA_PROBE_LOCK:
+        result = subprocess.run(
+            [sys.executable, "-c", python_code],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if (
+            "Error 803:" in result.stderr
+            or "system has unsupported display driver" in result.stderr
+        ):
+            result = _retry_native_cuda_driver(result)
+        logging.info(
+            f"cuda info result: {result.stdout}, return code: {result.returncode}"
+        )
+
+        try:
+            if result.returncode != 0:
+                raise Exception(f"get cuda info returncode error, self ip: {get_ip()}")
+            cuda_info = json.loads(result.stdout)
+            if not cuda_info:
+                return None
+        except Exception as e:
+            # fallback to get device count when subprocess execute failed
+            import torch
+
+            if torch.cuda.is_available():
+                device_info = {torch.cuda.get_device_name(0): torch.cuda.device_count()}
+            else:
+                device_info = {}
+            cuda_info = device_info
+
+        name = list(cuda_info.keys())[0]
+        count = cuda_info[name]
+        return name, count
+
 
 
 def get_ip():
@@ -701,31 +820,26 @@ def _get_required_gpu_count(device_available: bool = True) -> int:
     return 1 if device_available else 0
 
 
-if __name__ == "__main__":
+def main():
+    # Explicit CPU targets must not probe devices or initialize a GPU runtime.
+    if os.environ.get("GPU_COUNT") == "0":
+        os.environ["CUDA_VISIBLE_DEVICES"] = ""
+        os.environ["HIP_VISIBLE_DEVICES"] = ""
+        return _run_child(sys.argv[1:])
     device_info = get_device_info()
-    # `--run_under=gpu_lock` wraps the entire Bazel C++ suite, including tests
-    # dispatched to CPU workers. Lock one GPU by default when a device exists;
-    # a caller that explicitly requests GPUs still fails on a CPU-only worker.
     require_count = _get_required_gpu_count(device_available=device_info is not None)
-
-    if not device_info:
+    if device_info is None:
         if require_count > 0:
             raise RuntimeError(
                 f"[device_resource] GPU_COUNT={require_count} requested but no GPU detected "
-                f"(nvidia-smi / rocm-smi not found or returned no devices)"
+                "(nvidia-smi / rocm-smi not found or returned no devices)"
             )
-        logging.warning(
-            "[device_resource] no GPU detected, running without GPU isolation"
-        )
-        sys.exit(_run_child(sys.argv[1:]))
-
+        logging.warning("[device_resource] no GPU detected, running without GPU isolation")
+        return _run_child(sys.argv[1:])
     if require_count == 0:
-        logging.info("[device_resource] GPU_COUNT=0; skipping GPU lock")
-        sys.exit(_run_child(sys.argv[1:]))
-
+        return _run_child(sys.argv[1:])
     device_name, _ = device_info
     env_name = _get_visible_devices_env(device_name)
-
     with DeviceResource(require_count) as gpu_resource:
         os.environ[env_name] = ",".join(gpu_resource.gpu_ids)
         sys.stderr.write(
@@ -733,12 +847,10 @@ if __name__ == "__main__":
             f"locked={gpu_resource.gpu_ids} pid={os.getpid()}\n"
         )
         sys.stderr.flush()
-        # Keep JIT-backed dependencies on the same stable package paths used by
-        # the legacy Bazel GPU wrapper. setup_jit_cache() injects those paths
-        # into the native pytest child via PYTHONPATH when runfiles are absent.
         from jit_sys_path_setup import setup_jit_cache
-
         setup_jit_cache()
-        exit_code = _run_child(sys.argv[1:])
-        logging.info("exitcode: %d", exit_code)
-        sys.exit(exit_code)
+        return _run_child(sys.argv[1:])
+
+
+if __name__ == "__main__":
+    sys.exit(main())

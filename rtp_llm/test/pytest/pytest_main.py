@@ -5,6 +5,8 @@ import os
 import sys
 import tempfile
 
+from rtp_llm.utils.jit_cache_env import configure_cache_env
+
 
 class ExecutionCount:
     def __init__(self):
@@ -33,8 +35,11 @@ def main():
     # DeepGEMM may import before the model's HOME fallback. NVCC needs an
     # absolute cache path because its compiler subprocess can change directory.
     cache_root = os.environ.get("TEST_TMPDIR") or tempfile.gettempdir()
-    os.environ["DG_JIT_CACHE_DIR"] = os.path.abspath(
-        os.environ.get("DG_JIT_CACHE_DIR") or os.path.join(cache_root, "deep_gemm")
+    configure_cache_env(
+        "DG_JIT_CACHE_DIR",
+        os.path.abspath(
+            os.environ.get("DG_JIT_CACHE_DIR") or os.path.join(cache_root, "deep_gemm")
+        ),
     )
 
     if options.cuda_devices:

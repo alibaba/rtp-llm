@@ -97,7 +97,7 @@ public class GrpcEngineCancelChannel implements EngineCancelChannel {
         return switch (response.getStatus()) {
             case CANCEL_STATUS_ACCEPTED -> CancelAck.ACCEPTED;
             case CANCEL_STATUS_NOT_FOUND -> CancelAck.NOT_FOUND;
-            case CANCEL_STATUS_TOMBSTONED -> CancelAck.TOMBSTONED;
+            case CANCEL_STATUS_TOMBSTONED -> CancelAck.REQUEST_FENCED;
             case CANCEL_STATUS_UNSPECIFIED, UNRECOGNIZED -> CancelAck.FAILED;
         };
     }

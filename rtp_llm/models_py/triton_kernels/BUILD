@@ -1,24 +1,28 @@
-package(default_visibility = ["//visibility:public"])
+load("@pip_gpu_rocm_torch//:requirements.bzl", requirement_gpu_rocm = "requirement")
 
-# Python deps (triton, torch, etc.) are managed by pip/pyproject.toml.
-# This BUILD only declares package boundaries for Bazel-visible test targets.
-
-py_library(
-    name = "common",
-    srcs = glob(["common/*.py"]),
-)
-
-# Aiter and FlyDSL are installed by the Python-native ROCm wheel dependencies.
-# Keep the source files in the Bazel package so AMD tests and packaging see the
-# same module inventory as upstream main.
-py_library(
-    name = "fla",
-    srcs = glob(["fla/*.py"]),
-    deps = [":common"],
+alias(
+    name = "autotune_cache",
+    actual = "//rtp_llm/models_py/triton_kernels/autotune_cache",
     visibility = ["//visibility:public"],
 )
 
-# Include the patched source in the RTP wheel, not just Bazel's external tree.
+py_library(
+    name = "fla",
+    srcs = glob(["fla/*.py"]) + select({
+        "@rtp_llm//:using_rocm": [":aiter_gdr_decode_padding_source"],
+        "//conditions:default": [],
+    }),
+    deps = [":common"] + select({
+        "@rtp_llm//:using_rocm": [
+            requirement_gpu_rocm("amd-aiter"),
+            requirement_gpu_rocm("flydsl"),
+        ],
+        "//conditions:default": [],
+    }),
+    visibility = ["//visibility:public"]
+)
+
+# Package the pinned native source for padding-store provenance verification.
 genrule(
     name = "aiter_gdr_decode_padding_source",
     srcs = ["@aiter//:gdr_decode_source"],
@@ -30,37 +34,49 @@ py_library(
     name = "kimi_kda",
     srcs = glob(["kimi_kda/*.py"]),
     deps = [
+        ":autotune_cache",
         ":common",
         ":fla",
-        "//rtp_llm/models_py/triton_kernels/autotune_cache:autotune_cache",
     ],
-)
-
-py_library(
-    name = "moe",
-    srcs = glob(["moe/*.py"]),
-    deps = [":common"],
+    visibility = ["//visibility:public"]
 )
 
 py_library(
     name = "causal_conv1d",
     srcs = glob(["causal_conv1d/*.py"]),
+    visibility = ["//visibility:public"]
+)
+
+py_library(
+    name = "moe",
+    srcs = glob(["moe/*.py"]),
+    deps = ["//rtp_llm/models_py:utils"],
+    visibility = ["//visibility:public"],
+)
+
+py_library(
+    name = "common",
+    srcs = glob(["common/*.py"]),
+    visibility = ["//visibility:public"]
 )
 
 py_library(
     name = "sparse_mla",
     srcs = glob(["sparse_mla/*.py"]),
+    visibility = ["//visibility:public"]
 )
 
 py_library(
     name = "triton_kernels",
+    srcs = ["legacy_fp8_indexer_score.py"],
     deps = [
-        ":common",
+        ":autotune_cache",
         ":fla",
         ":kimi_kda",
-        ":moe",
         ":causal_conv1d",
+        ":moe",
+        ":common",
         ":sparse_mla",
     ],
-    visibility = ["//visibility:public"],
+    visibility = ["//visibility:public"]
 )

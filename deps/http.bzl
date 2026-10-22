@@ -1,24 +1,40 @@
-"""@rtp_deps OSS version — http_archive / http_file deps with public URLs.
-
-Used by a fresh github.com/alibaba/rtp-llm clone (no internal_source). Internal
-monorepo overrides @rtp_deps to ../internal_source/deps via
-`--override_repository=rtp_deps=../internal_source/deps` in
-internal_source/.internal_bazelrc, which loads the internal-mirror version
-of these entries plus internal-only accelerator and transport dependencies.
-
-Adding a new shared entry: also add it to internal_source/deps/http.bzl with
-the internal-mirror URL. The two files drift independently; sha256 should
-match across both URLs when the artifact is the same mirror of the same
-upstream.
-"""
-
 load("@bazel_tools//tools/build_defs/repo:http.bzl", "http_archive", "http_file")
 
 def clean_dep(dep):
     return str(Label(dep))
 
 def http_deps():
-    # Bazel build tooling
+    http_archive(
+        name = "nvcomp_cuda13_x86",
+        urls = [
+            "https://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/rtp_llm/nvcomp/5.0.0.6/nvidia_nvcomp_cu13-5.0.0.6-py3-none-manylinux_2_28_x86_64.whl",
+            "https://files.pythonhosted.org/packages/56/c9/f8a1b957f949ab4c4dc29e7f56316a2224b92c78cad9a66aeab2b36f8857/nvidia_nvcomp_cu13-5.0.0.6-py3-none-manylinux_2_28_x86_64.whl",
+        ],
+        sha256 = "91a4e4b1dc15b0f38e54a3353c917086c99c9f415e1ad79a57d5f28d62b68a4d",
+        type = "zip",
+        build_file = clean_dep("@rtp_llm//3rdparty/nvcomp:nvcomp.BUILD"),
+    )
+    http_archive(
+        name = "nvcomp_cuda13_arm",
+        urls = [
+            "https://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/rtp_llm/nvcomp/5.0.0.6/nvidia_nvcomp_cu13-5.0.0.6-py3-none-manylinux_2_28_aarch64.whl",
+            "https://files.pythonhosted.org/packages/a3/86/e5eccb10e8be41501dfb7191a6b2cff32558d0bba3370ae67f37561caf43/nvidia_nvcomp_cu13-5.0.0.6-py3-none-manylinux_2_28_aarch64.whl",
+        ],
+        sha256 = "13910a5e5dbf7d4ce21c807c801a1f10c261b9a2d538896e93b736c21d7d6b1d",
+        type = "zip",
+        build_file = clean_dep("@rtp_llm//3rdparty/nvcomp:nvcomp.BUILD"),
+    )
+    # WORKSPACE may already own rules_pkg and load its providers.
+    if not native.existing_rule("rules_pkg"):
+        http_archive(
+            name = "rules_pkg",
+            urls = [
+                "https://mirror.bazel.build/github.com/bazelbuild/rules_pkg/releases/download/0.6.0/rules_pkg-0.6.0.tar.gz",
+                "https://github.com/bazelbuild/rules_pkg/releases/download/0.6.0/rules_pkg-0.6.0.tar.gz",
+            ],
+            sha256 = "62eeb544ff1ef41d786e329e1536c1d541bb9bcad27ae984d57f18f314018e66",
+        )
+
     http_archive(
         name = "bazel_skylib",
         sha256 = "cd55a062e763b9349921f0f5db8c3933288dc8ba4f76dd9416aac68acee3cb94",
@@ -76,6 +92,16 @@ def http_deps():
     )
 
     http_archive(
+        name = "torch_2.11_py310_cuda-aarch64",
+        sha256 = "4af01fad0822353e766770ff2c7d6bdc2cbcc2ac7fcd6da93a9e3c6f3f932b21",
+        urls = [
+            "https://rtp-maga.cn-zhangjiakou.oss.aliyuncs.com/rtp_llm/arm_pkg/torch-2.11.0%2Bcu130-cp310-cp310-manylinux_2_28_aarch64.whl",
+        ],
+        type = "zip",
+        build_file = clean_dep("@rtp_llm//:BUILD.pytorch"),
+    )
+
+    http_archive(
         name = "torch_rocm",
         sha256 = "521d1febc9bfebe44fb321727ad550dcaf05900dd917b20bed52fb307f43bf3a",
         urls = [
@@ -87,11 +113,9 @@ def http_deps():
 
     http_archive(
         name = "aiter",
-        patches = ["@rtp_llm//patches/aiter:0001-gdr-decode-zero-padding.patch"],
-        patch_args = ["-p1"],
-        sha256 = "b6bce60a81cbc2de6eda78c3f75506337cec921e62224d0d2a5e0475a2aba9a1",
+        sha256 = "47840027132b1caf0e0985a8376d3e6d24f31c994983482378a5caf46ad6c50f",
         urls = [
-            "https://sinian-metrics-platform.oss-cn-hangzhou.aliyuncs.com/kis/AMD/aiter/aiter-0.1.21.dev80%2Bg987203ba5.d20260825-cp310-cp310-linux_x86_64.whl",
+            "https://sinian-metrics-platform.oss-cn-hangzhou.aliyuncs.com/kis/AMD/aiter/amd_aiter-0.1.23.dev134%2Bg8449f416b-cp310-cp310-linux_x86_64.whl",
         ],
         type = "zip",
         build_file = clean_dep("@rtp_llm//:BUILD.aiter"),
@@ -117,24 +141,17 @@ def http_deps():
     http_archive(
         # Hedron's Compile Commands Extractor for Bazel
         name = "hedron_compile_commands",
-        sha256 = "658122cfb1f25be76ea212b00f5eb047d8e2adc8bcf923b918461f2b1e37cdf2",
-        strip_prefix = "bazel-compile-commands-extractor-4f28899228fb3ad0126897876f147ca15026151e",
         urls = ["https://github.com/hedronvision/bazel-compile-commands-extractor/archive/4f28899228fb3ad0126897876f147ca15026151e.tar.gz"],
+        strip_prefix = "bazel-compile-commands-extractor-4f28899228fb3ad0126897876f147ca15026151e",
+        sha256 = "658122cfb1f25be76ea212b00f5eb047d8e2adc8bcf923b918461f2b1e37cdf2",
     )
 
-    # hf3fs_rpm — consumed by //3rdparty/3fs:hf3fs_files (rpm_library).
-    # Required by //:th_transformer on CUDA + ROCm analysis graphs.
     http_file(
         name = "hf3fs_rpm",
         urls = ["https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/package/3fs/hf3fs-1.3.0-1.alios7.x86_64.rpm"],
         sha256 = "dd375f794557a1135934b40b23a7435569644922c5c7116cb69dd36f699ad5a4",
     )
 
-    # remote_kv_cache_manager_client_rpm — consumed by
-    # //3rdparty/remote_kv_cache_manager:remote_kv_cache_manager_client
-    # (rpm_library wraps it into a cc_library). Unconditionally pulled by
-    # //rtp_llm/cpp/cache/connector/remote_connector:client on the
-    # //:th_transformer dep graph for all platforms.
     http_file(
         name = "remote_kv_cache_manager_client_rpm",
         urls = [
@@ -143,13 +160,40 @@ def http_deps():
         sha256 = "8a50e27c6c009bb2e9d55c7ff44ccef53268cc0b67559b95fd7e22221f1e9600",
     )
 
-    # remote_kv_cache_manager_server — tarball with bin/kv_cache_manager_bin.
-    # Consumed by smoke tests that exercise the remote kv cache manager path.
+    http_file(
+        name = "remote_kv_cache_manager_client_rpm_cuda130_x86",
+        urls = [
+            "https://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/kv_cache_manager/client/kv-cache-manager-client-2026_09_15_17_40-cuda130.x86_64.rpm",
+        ],
+        sha256 = "392ac1aadf4ea9e3bad177a69ae8f35c5c1c59888c8505e8bee01cb8fe88d9e0",
+    )
+
+    http_file(
+        name = "remote_kv_cache_manager_client_rpm_cuda130_arm",
+        urls = [
+            "https://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/kv_cache_manager/client/kv-cache-manager-client-2026_09_15_17_39-cuda130.aarch64.rpm",
+        ],
+        sha256 = "84e482dfd219df4a7a240061f43627eafb0e79d582bd67228e2d5cac7ba8ffe4",
+    )
+
     http_archive(
         name = "remote_kv_cache_manager_server",
         urls = [
             "https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/package/kvcm/kv_cache_manager_server_2026_04_29_14_32.tar.gz",
         ],
         sha256 = "6808080358f137c78205495b70b560261d59abff6eeddafc861e7511104c5b1a",
-        build_file_content = "exports_files([\"bin/kv_cache_manager_bin\"])\n",
+        build_file_content = """
+exports_files(["bin/kv_cache_manager_bin"])
+        """,
+    )
+
+    http_archive(
+        name = "remote_kv_cache_manager_server_cuda130",
+        urls = [
+            "https://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/kv_cache_manager/server/kv_cache_manager_server_2026_08_19_20_01.tar.gz",
+        ],
+        sha256 = "facbcee3395e3fa129cf45c7034d82e576fefc5af7017fead26ed795bb6f7bf6",
+        build_file_content = """
+exports_files(["bin/kv_cache_manager_bin"])
+        """,
     )

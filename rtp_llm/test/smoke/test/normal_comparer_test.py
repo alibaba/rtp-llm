@@ -2,6 +2,7 @@ import copy
 import json
 import unittest
 
+from rtp_llm.test.smoke.base_comparer import _asserts_cold_cache
 from rtp_llm.test.smoke.common_def import QueryStatus, SmokeException, Tracer
 from rtp_llm.test.smoke.normal_comparer import NormalComparer, QueryInfo
 
@@ -134,6 +135,109 @@ class NormalComparerGraphStatusTest(unittest.TestCase):
                     )
 
 
+class NormalComparerDiskReuseTest(unittest.TestCase):
+    DISK_FIELDS = (
+        "disk_reuse_len",
+        "prefill_disk_reuse_len",
+        "decode_disk_reuse_len",
+    )
+
+    def setUp(self):
+        self.comparer = NormalComparer(None, "", {}, Tracer(), False)
+
+    def _response(self, aux):
+        return self.comparer.format_result({"response": "same output", "aux_info": aux})
+
+    def test_explicit_disk_expectations_survive_parsing_and_reject_mismatch(self):
+        for field in self.DISK_FIELDS:
+            for expected_value, actual_value in ((512, 0), (0, 512), (512, None)):
+                with self.subTest(
+                    field=field, expected=expected_value, actual=actual_value
+                ):
+                    expected = self._response({field: expected_value})
+                    self.assertEqual(getattr(expected.aux_info, field), expected_value)
+                    with self.assertRaises(SmokeException) as raised:
+                        self.comparer.compare_result(
+                            expected, self._response({field: actual_value})
+                        )
+                    self.assertEqual(
+                        raised.exception.error_status, QueryStatus.COMPARE_FAILED
+                    )
+                    self.assertIn(field, raised.exception.message)
+
+    def test_matching_disk_expectations_pass(self):
+        for field in self.DISK_FIELDS:
+            for value in (0, 512):
+                with self.subTest(field=field, value=value):
+                    self.comparer.compare_result(
+                        self._response({field: value}), self._response({field: value})
+                    )
+
+    def test_undeclared_or_null_disk_expectation_does_not_add_constraint(self):
+        for field in self.DISK_FIELDS:
+            for expected in ({}, {field: None}):
+                with self.subTest(field=field, expected=expected):
+                    self.comparer.compare_result(
+                        self._response(expected), self._response({field: 512})
+                    )
+
+    def test_disk_only_cold_expectation_controls_retry_classification(self):
+        for field in self.DISK_FIELDS:
+            for reuse_enabled in (False, True):
+                for value in (0, 512):
+                    with self.subTest(field=field, reuse=reuse_enabled, value=value):
+                        self.assertEqual(
+                            _asserts_cold_cache(
+                                {
+                                    "_reuse_cache_enabled": reuse_enabled,
+                                    "result": {"aux_info": {field: value}},
+                                }
+                            ),
+                            reuse_enabled and value == 0,
+                        )
+
+    def test_mixed_tier_expectations_are_cold_only_when_all_fields_are_zero(self):
+        for disk_field in self.DISK_FIELDS:
+            prefix = disk_field.removesuffix("disk_reuse_len")
+            for tier in ("local", "memory", "remote"):
+                other_field = f"{prefix}{tier}_reuse_len"
+                for disk_value, other_value in ((0, 0), (0, 512), (512, 0), (512, 512)):
+                    for reuse_enabled in (False, True):
+                        with self.subTest(
+                            disk_field=disk_field,
+                            other_field=other_field,
+                            disk_value=disk_value,
+                            other_value=other_value,
+                            reuse_enabled=reuse_enabled,
+                        ):
+                            self.assertEqual(
+                                _asserts_cold_cache(
+                                    {
+                                        "_reuse_cache_enabled": reuse_enabled,
+                                        "result": {
+                                            "aux_info": {
+                                                disk_field: disk_value,
+                                                other_field: other_value,
+                                            }
+                                        },
+                                    }
+                                ),
+                                reuse_enabled and disk_value == 0 and other_value == 0,
+                            )
+
+    def test_warm_disk_expectation_is_not_misclassified_by_other_zero_fields(self):
+        for field in self.DISK_FIELDS:
+            with self.subTest(field=field):
+                self.assertFalse(
+                    _asserts_cold_cache(
+                        {
+                            "_reuse_cache_enabled": True,
+                            "result": {"aux_info": {"reuse_len": 0, field: 512}},
+                        }
+                    )
+                )
+
+
 class NormalComparerPromptScoringTest(unittest.TestCase):
     def setUp(self):
         # Value comparison needs neither server setup nor tensor golden files.
@@ -193,6 +297,33 @@ class NormalComparerPromptScoringTest(unittest.TestCase):
     def test_unrequested_prompt_scoring_preserves_legacy_comparison(self):
         self.comparer.compare_result(
             self._parse({"response": "same output"}), self._parse(self.payload)
+        )
+
+
+class NormalComparerIncrementalResponseTest(unittest.TestCase):
+    def setUp(self):
+        self.comparer = NormalComparer(None, "", {}, Tracer(), False)
+        self.query = QueryInfo(prompt="test", yield_generator=True)
+        self.query.generate_config.return_incremental = True
+
+    def test_empty_incremental_chunks_report_visit_failure(self):
+        for response in ([], [b"data: [DONE]"], [None, b"data: [DONE]"]):
+            with self.subTest(response=response):
+                with self.assertRaises(SmokeException) as raised:
+                    self.comparer.curl_response_to_json(self.query, response)
+                self.assertEqual(raised.exception.error_status, QueryStatus.VISIT_FAILED)
+                self.assertIn("Streaming response chunks are empty", raised.exception.message)
+
+    def test_incremental_chunks_keep_response_and_final_metadata(self):
+        chunks = [
+            {"response": "first", "aux_info": {"iter_count": 1}, "finished": False},
+            {"response": "second", "aux_info": {"iter_count": 2}, "finished": True},
+        ]
+        response = [("data: " + json.dumps(chunk)).encode("utf-8") for chunk in chunks]
+        response.append(b"data: [DONE]")
+        self.assertEqual(
+            self.comparer.curl_response_to_json(self.query, response),
+            {"response": "firstsecond", "aux_info": {"iter_count": 2}, "finished": True},
         )
 
 

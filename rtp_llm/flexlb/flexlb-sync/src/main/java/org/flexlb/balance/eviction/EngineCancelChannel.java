@@ -46,7 +46,7 @@ public interface EngineCancelChannel {
          * Prefill atomically fenced this request id while it was absent. Any
          * racing later Enqueue is rejected before reaching the scheduler.
          */
-        TOMBSTONED,
+        REQUEST_FENCED,
         /** Endpoint has no cancel path at all — planning-gate violation. */
         UNSUPPORTED,
         /** Transport-layer failure (RPC error/timeout, or unroutable cancel). */

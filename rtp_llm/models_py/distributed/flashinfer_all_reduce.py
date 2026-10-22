@@ -15,7 +15,6 @@ import torch
 import torch.distributed as dist
 from torch.distributed import ProcessGroup
 
-
 _MIB = 1024 * 1024
 _MAX_WORKSPACE_BYTES = {
     2: 64 * _MIB,

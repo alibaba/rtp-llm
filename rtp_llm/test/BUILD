@@ -6,7 +6,8 @@ py_test(
     deps = [
         "//rtp_llm:testlib",
     ],
-    exec_properties = {'gpu':'A10'},
+    exec_properties = {"gpu": "L20_CU13"},
+    tags = ["L20_CU13"],
 )
 
 py_test(
@@ -15,13 +16,14 @@ py_test(
         "generate_config_test.py",
     ],
     data = [
-        "//rtp_llm/test/model_test/fake_test/testdata:testdata",
-        "//rtp_llm:sdk"
+        "//rtp_llm:sdk",
+        "//rtp_llm/test/model_test/fake_test/testdata",
     ],
     deps = [
         "//rtp_llm:testlib",
     ],
-    exec_properties = {'gpu':'A10'},
+    exec_properties = {"gpu": "L20_CU13"},
+    tags = ["L20_CU13"],
 )
 
 py_test(
@@ -30,15 +32,16 @@ py_test(
         "slice_stop_word_list_test.py",
     ],
     data = [
-        "//rtp_llm/test/model_test/fake_test/testdata:testdata",
-        "//rtp_llm:sdk"
+        "//rtp_llm:sdk",
+        "//rtp_llm/test/model_test/fake_test/testdata",
     ],
     deps = [
         "//rtp_llm:testlib",
         "//rtp_llm/test/model_test/test_util",
     ],
     imports = ["aios/kmonitor/python_client"],
-    exec_properties = {'gpu':'A10'},
+    exec_properties = {"gpu": "L20_CU13"},
+    tags = ["L20_CU13"],
 )
 
 py_test(
@@ -52,7 +55,6 @@ py_test(
         "//rtp_llm/test/model_test/test_util",
     ],
     imports = [],
-    exec_properties = {'gpu':'A10'},
 )
 
 py_test(
@@ -65,7 +67,8 @@ py_test(
         "//rtp_llm:testlib",
     ],
     imports = [],
-    exec_properties = {'gpu':'A10'},
+    exec_properties = {"gpu": "L20_CU13"},
+    tags = ["L20_CU13"],
 )
 
 py_test(
@@ -78,7 +81,8 @@ py_test(
         "//rtp_llm:testlib",
     ],
     imports = [],
-    exec_properties = {'gpu':'A10'},
+    exec_properties = {"gpu": "L20_CU13"},
+    tags = ["L20_CU13"],
 )
 
 py_test(
@@ -90,7 +94,8 @@ py_test(
     deps = [
         "//rtp_llm:testlib",
     ],
-    exec_properties = {'gpu':'A10'},
+    exec_properties = {"gpu": "L20_CU13"},
+    tags = ["L20_CU13"],
 )
 
 py_test(
@@ -104,7 +109,8 @@ py_test(
         "//rtp_llm/test/model_test/test_util",
     ],
     imports = [],
-    exec_properties = {'gpu':'A10'},
+    exec_properties = {"gpu": "L20_CU13"},
+    tags = ["L20_CU13"],
 )
 
 py_test(
@@ -117,10 +123,11 @@ py_test(
         "//rtp_llm:testlib",
     ],
     data = [
-        "//rtp_llm/test/model_test/fake_test/testdata:testdata",
+        "//rtp_llm/test/model_test/fake_test/testdata",
         "//rtp_llm/test/tokenizer_test:testdata",
     ],
-    exec_properties = {'gpu':'A10'},
+    exec_properties = {"gpu": "L20_CU13"},
+    tags = ["L20_CU13"],
 )
 
 py_test(
@@ -132,11 +139,11 @@ py_test(
         "//rtp_llm:sdk",
     ],
     deps = [
-        "//rtp_llm:uvicorn",
         "//rtp_llm:fastapi",
         "//rtp_llm:psutil",
-        "//rtp_llm:tiktoken",
         "//rtp_llm:testlib",
+        "//rtp_llm:tiktoken",
+        "//rtp_llm:uvicorn",
     ],
     imports = ["aios/kmonitor/python_client"],
     tags = ["manual"],
@@ -151,7 +158,8 @@ py_test(
     deps = [
         "//rtp_llm:testlib",
     ],
-    exec_properties = {'gpu':'A10'},
+    exec_properties = {"gpu": "L20_CU13"},
+    tags = ["L20_CU13"],
 )
 
 py_test(
@@ -164,12 +172,12 @@ py_test(
         "//rtp_llm/test/prompt_scoring_data:testdata",
     ],
     deps = [
-        "//rtp_llm/test/utils:maga_server_manager",
-        "//rtp_llm:uvicorn",
         "//rtp_llm:fastapi",
         "//rtp_llm:psutil",
-        "//rtp_llm:tiktoken",
         "//rtp_llm:testlib",
+        "//rtp_llm:tiktoken",
+        "//rtp_llm:uvicorn",
+        "//rtp_llm/test/utils:maga_server_manager",
     ],
     imports = ["aios/kmonitor/python_client"],
     tags = ["manual"],
@@ -179,7 +187,7 @@ py_test(
 py_test(
     name = "concurrency_limit_test",
     srcs = [
-        "concurrency_limit_test.py"
+        "concurrency_limit_test.py",
     ],
     deps = [
         "//rtp_llm:sdk",
@@ -192,8 +200,11 @@ py_test(
     # (concurrency_limit_test.py:166, :204), so this reports OK (skipped=2) and
     # passes having tested nothing -- while reserving a GPU. Drop the two skips
     # to bring it back; until then it should not look like a passing gate.
-    tags = ["manual"],
-    exec_properties = {'gpu':'A10'},
+    tags = [
+        "L20_CU13",
+        "manual",
+    ],
+    exec_properties = {"gpu": "L20_CU13"},
 )
 
 py_test(
@@ -213,10 +224,11 @@ py_test(
         "//rtp_llm:Pillow",
     ],
     data = [
-        "//rtp_llm/test/model_test/fake_test/testdata:testdata",
+        "//rtp_llm/test/model_test/fake_test/testdata",
         "//rtp_llm/test/tokenizer_test:testdata",
     ],
-    exec_properties = {'gpu':'A10'},
+    exec_properties = {"gpu": "L20_CU13"},
+    tags = ["L20_CU13"],
 )
 
 py_test(
@@ -225,10 +237,11 @@ py_test(
         "pipeline_test.py",
     ],
     deps = [
-        "//rtp_llm:testlib",
         "//rtp_llm:sdk",
+        "//rtp_llm:testlib",
     ],
-    exec_properties = {'gpu':'A10'},
+    exec_properties = {"gpu": "L20_CU13"},
+    tags = ["L20_CU13"],
 )
 
 py_test(
@@ -239,7 +252,8 @@ py_test(
     deps = [
         "//rtp_llm:testlib",
     ],
-    exec_properties = {'gpu':'A10'},
+    exec_properties = {"gpu": "L20_CU13"},
+    tags = ["L20_CU13"],
 )
 
 py_test(
@@ -251,7 +265,8 @@ py_test(
         "//rtp_llm:sdk",
         "//rtp_llm:testlib",
     ],
-    exec_properties = {'gpu':'A10'},
+    exec_properties = {"gpu": "L20_CU13"},
+    tags = ["L20_CU13"],
 )
 
 py_test(
@@ -260,10 +275,11 @@ py_test(
         "auto_configure_deepep_test.py",
     ],
     deps = [
-        "//rtp_llm:testlib",
         "//rtp_llm:sdk",
+        "//rtp_llm:testlib",
     ],
-    exec_properties = {'gpu':'A10'},
+    exec_properties = {"gpu": "L20_CU13"},
+    tags = ["L20_CU13"],
 )
 
 py_test(
@@ -273,10 +289,9 @@ py_test(
     ],
     data = [],
     deps = [
-        "//rtp_llm:testlib"
+        "//rtp_llm:testlib",
     ],
     imports = [],
-    exec_properties = {'gpu':'A10'},
 )
 
 py_test(
@@ -287,7 +302,6 @@ py_test(
     data=[],
     deps=["//rtp_llm:testlib"],
     imports=[],
-    exec_properties = {'gpu':'A10'},
 )
 
 py_test(
@@ -298,7 +312,6 @@ py_test(
     data=[],
     deps=["//rtp_llm:testlib"],
     imports=[],
-    exec_properties = {'gpu':'A10'},
 )
 
 py_test(
@@ -308,10 +321,9 @@ py_test(
     ],
     data = [],
     deps = [
-        "//rtp_llm:testlib"
+        "//rtp_llm:testlib",
     ],
     imports = [],
-    exec_properties = {'gpu':'A10'},
 )
 
 py_test(
@@ -322,7 +334,6 @@ py_test(
     data=[],
     deps=["//rtp_llm:testlib"],
     imports=[],
-    exec_properties = {'gpu':'A10'},
 )
 
 py_test(
@@ -343,7 +354,8 @@ py_test(
     data=[],
     deps=["//rtp_llm:testlib"],
     imports=[],
-    exec_properties = {'gpu':'A10'},
+    exec_properties = {"gpu": "L20_CU13"},
+    tags = ["L20_CU13"],
 )
 
 py_test(
@@ -354,7 +366,8 @@ py_test(
     data=[],
     deps=["//rtp_llm:testlib"],
     imports=[],
-    exec_properties = {'gpu':'A10'},
+    exec_properties = {"gpu": "L20_CU13"},
+    tags = ["L20_CU13"],
 )
 
 py_test(
@@ -362,12 +375,13 @@ py_test(
     srcs=[
         "incremental_streaming_test.py",
     ],
-    data=[
-        "//rtp_llm/test/model_test/fake_test/testdata:testdata",
+    data = [
+        "//rtp_llm/test/model_test/fake_test/testdata",
     ],
     deps=["//rtp_llm:testlib"],
     imports=[],
-    exec_properties = {'gpu':'A10'},
+    exec_properties = {"gpu": "L20_CU13"},
+    tags = ["L20_CU13"],
 )
 
 py_test(
@@ -378,7 +392,6 @@ py_test(
     data=[],
     deps=["//rtp_llm:testlib"],
     imports=[],
-    exec_properties = {'gpu':'A10'},
 )
 
 py_test(
@@ -389,7 +402,8 @@ py_test(
     data=[],
     deps=["//rtp_llm:testlib"],
     imports=[],
-    exec_properties = {'gpu':'A10'},
+    exec_properties = {"gpu": "L20_CU13"},
+    tags = ["L20_CU13"],
 )
 
 py_test(
@@ -400,7 +414,8 @@ py_test(
     data=[],
     deps=["//rtp_llm:testlib"],
     imports=[],
-    exec_properties = {'gpu':'A10'},
+    exec_properties = {"gpu": "L20_CU13"},
+    tags = ["L20_CU13"],
 )
 
 py_test(
@@ -414,11 +429,12 @@ py_test(
     ],
     deps=["//rtp_llm:testlib"],
     imports=[],
-    exec_properties = {'gpu':'A10'},
+    exec_properties = {"gpu": "L20_CU13"},
+    tags = ["L20_CU13"],
 )
 
 # NOTE: 纯配置校验测试，但 generate_config.py 导入链拉起 rtp_llm.ops (CUDA .so)，import 阶段需 CUDA worker 在场。
-# 不需要 H20：默认 remote_default_exec_properties(gpu=gpu_cuda12) 的通用 CUDA 机器即可，故不再固定 exec_properties。
+# 不需要 H20：任一通用 CUDA 13 worker 即可；本用例固定 L20_CU13。
 # TODO(panyang): 拆分 rtp_llm.ops lazy-import 后移除 GPU 约束。
 py_test(
     name = "test_generate_config_validators",
@@ -428,5 +444,38 @@ py_test(
     deps = [
         "//rtp_llm:testlib",
     ],
-    exec_properties = {'gpu':'A10'},
+    exec_properties = {"gpu": "L20_CU13"},
+    tags = ["L20_CU13"],
+)
+
+py_test(
+    name = "deepseekv41_renderer_test",
+    srcs = ["deepseekv41_renderer_test.py"],
+    deps = ["//rtp_llm:testlib"],
+    tags = ["SM100_ARM_CU13"],
+    exec_properties = {"gpu": "SM100_ARM_CU13", "gpu_count": "1"},
+)
+
+py_test(
+    name = "deepseek_v41_image_renderer_test",
+    srcs = ["deepseek_v41_image_renderer_test.py"],
+    deps = ["//rtp_llm:testlib"],
+    tags = ["SM100_ARM_CU13"],
+    exec_properties = {"gpu": "SM100_ARM_CU13", "gpu_count": "1"},
+)
+
+py_test(
+    name = "v41_recipe_endpoint_test",
+    srcs = ["v41_recipe_endpoint_test.py"],
+    deps = ["//rtp_llm:testlib"],
+    tags = ["SM100_ARM_CU13"],
+    exec_properties = {"gpu": "SM100_ARM_CU13", "gpu_count": "1"},
+)
+
+py_test(
+    name = "v41_recipe_protocol_test",
+    srcs = ["v41_recipe_protocol_test.py"],
+    deps = ["//rtp_llm:testlib"],
+    tags = ["SM100_ARM_CU13"],
+    exec_properties = {"gpu": "SM100_ARM_CU13", "gpu_count": "1"},
 )

@@ -30,31 +30,30 @@ class RouteProjectionTest {
         WorkSnapshot current = new WorkSnapshot(20L, List.of(new WorkSnapshot.RequestWork(
                 1L, WorkSnapshot.Phase.ENGINE_RUNNING, 993L)), List.of(), 0L);
         assertEquals(
-                RouteProjection.project(new RouteProjection.Inputs(emptyQueue(20L), current, 1L),
-                        probe(RouteProjection.Demand.TTFT_AND_DRAIN), new CountingEvaluator(), routeProjection()),
-                RouteProjection.project(new RouteProjection.Inputs(emptyQueue(20L), cached, 1L),
-                        probe(RouteProjection.Demand.TTFT_AND_DRAIN), new CountingEvaluator(), routeProjection()));
+                RouteProjection.project(new RouteProjection.Inputs(emptyQueue(20L), current),
+                        probe(), new CountingEvaluator(), routeProjection()),
+                RouteProjection.project(new RouteProjection.Inputs(emptyQueue(20L), cached),
+                        probe(), new CountingEvaluator(), routeProjection()));
     }
 
     @Test
-    void queueWorkAndPendingCountComeFromOneCanonicalInput() {
-        RouteProjection.Inputs inputs = inputs(13L, 7L);
+    void queueAndWorkComeFromOneCanonicalInput() {
+        RouteProjection.Inputs inputs = inputs(13L);
         CountingEvaluator evaluator = new CountingEvaluator();
 
         RouteProjection.Candidate result = RouteProjection.project(
                 inputs,
-                probe(RouteProjection.Demand.TTFT_AND_DRAIN),
+                probe(),
                 evaluator,
                 routeProjection());
 
         assertTrue(result.selectable());
-        assertEquals(7L, result.requiredPendingCount());
         assertEquals(20L, result.incomingPrefillMs());
         assertTrue(evaluator.invocations() > 0);
 
         assertThrows(IllegalArgumentException.class,
                 () -> new RouteProjection.Inputs(
-                        emptyQueue(13L), emptyWork(14L), 7L));
+                        emptyQueue(13L), emptyWork(14L)));
     }
 
     @Test
@@ -71,8 +70,8 @@ class RouteProjectionTest {
 
         assertNotSame(captured, predictor.evaluator());
         RouteProjection.Candidate result = RouteProjection.project(
-                inputs(31L, 0L),
-                probe(RouteProjection.Demand.TTFT_AND_DRAIN),
+                inputs(31L),
+                probe(),
                 captured,
                 routeProjection());
         assertTrue(result.selectable());
@@ -81,51 +80,39 @@ class RouteProjectionTest {
     }
 
     @Test
-    void candidatePendingCountExistsExactlyForUsableProjection() {
+    void onlyModeledCandidateCarriesKnownTtft() {
         assertThrows(IllegalArgumentException.class,
                 () -> candidate(RouteProjection.Candidate.State.MODELED,
-                        OptionalLong.of(10L), OptionalLong.empty()));
+                        OptionalLong.empty()));
         assertThrows(IllegalArgumentException.class,
                 () -> candidate(RouteProjection.Candidate.State.UNAVAILABLE,
-                        OptionalLong.empty(), OptionalLong.of(1L)));
+                        OptionalLong.of(1L)));
         assertThrows(IllegalArgumentException.class,
-                () -> new RouteProjection.Candidate(
-                        RouteProjection.Candidate.State.MODELED,
-                        -2L, RouteProjection.Candidate.UNKNOWN, 0L,
-                        RouteProjection.Candidate.InitialHeadDisposition.NONE,
-                        "invalid", null, 0L, 0L, 1L));
+                () -> candidate(RouteProjection.Candidate.State.MODELED,
+                        OptionalLong.of(-2L)));
 
-        RouteProjection.Candidate modeledCandidate =
-                candidate(RouteProjection.Candidate.State.MODELED,
-                        OptionalLong.of(10L), OptionalLong.of(20L));
-        RouteProjection.Candidate unmodeledCandidate =
-                candidate(RouteProjection.Candidate.State.UNMODELED_ENGINE_WORK,
-                        OptionalLong.empty(), OptionalLong.of(2L));
-        assertEquals(20L, modeledCandidate.requiredPendingCount());
-        assertEquals(2L, unmodeledCandidate.requiredPendingCount());
-        assertTrue(unmodeledCandidate.engineWorkUnmodeled());
+        RouteProjection.Candidate modeled = candidate(
+                RouteProjection.Candidate.State.MODELED, OptionalLong.of(10L));
+        RouteProjection.Candidate unmodeled = candidate(
+                RouteProjection.Candidate.State.UNMODELED_ENGINE_WORK, OptionalLong.empty());
+        assertEquals(10L, modeled.requiredProjectedTtftMs());
+        assertTrue(unmodeled.engineWorkUnmodeled());
     }
 
     private static RouteProjection.Candidate candidate(
             RouteProjection.Candidate.State state,
-            OptionalLong projectedTtftMs,
-            OptionalLong pendingCount) {
+            OptionalLong projectedTtftMs) {
         return new RouteProjection.Candidate(
                 state,
                 projectedTtftMs.orElse(RouteProjection.Candidate.UNKNOWN),
-                RouteProjection.Candidate.UNKNOWN,
                 0L,
                 RouteProjection.Candidate.InitialHeadDisposition.NONE,
-                state.name(), null, 0L, 0L,
-                pendingCount.orElse(RouteProjection.Candidate.UNKNOWN));
+                state.name(), null, 0L, 0L);
     }
 
-    private static RouteProjection.Inputs inputs(
-            long capturedAtMs, long pendingCount) {
+    private static RouteProjection.Inputs inputs(long capturedAtMs) {
         return new RouteProjection.Inputs(
-                emptyQueue(capturedAtMs),
-                emptyWork(capturedAtMs),
-                pendingCount);
+                emptyQueue(capturedAtMs), emptyWork(capturedAtMs));
     }
 
     private static QueueSnapshot emptyQueue(long capturedAtMs) {
@@ -144,11 +131,10 @@ class RouteProjectionTest {
                 capturedAtMs, List.of(), List.of(), 0L);
     }
 
-    private static RouteProjection.Probe probe(
-            RouteProjection.Demand demand) {
+    private static RouteProjection.Probe probe() {
         return new RouteProjection.Probe(
                 99L, 50, 13L, Long.MAX_VALUE,
-                20L, 0L, 0L, demand);
+                20L, 0L, 0L);
     }
 
     private static RouteProjection.DeliveryProjection routeProjection() {

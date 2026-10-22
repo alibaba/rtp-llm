@@ -35,7 +35,7 @@ public class MonitorClientConfig {
     /**
      * Fallback: create NoOpFlexMonitor when neither kmonitor nor micrometer is available.
      * To enable kmonitor-based monitoring, add internal_source/kmonitor-java dependency
-     * and set environment variable FLEXLB_MONITOR_ENABLED=true
+     * and leave flexlb.monitor.enabled=true
      */
     @Bean
     @ConditionalOnMissingBean(FlexMonitor.class)
