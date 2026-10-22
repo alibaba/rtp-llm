@@ -636,3 +636,167 @@ def test_moe_runtime_gate_precedes_file_write_without_native_substitute(
     with pytest.raises(ModuleNotFoundError, match="controlled Native import failure"):
         validate_generated_stub(str(path), FAST_TOPK_MODULE)
     assert path.read_bytes() == original
+
+
+# CI 82339742/82339721/82339730 emit SupportsInt for the actual int64_t
+# input caster. The optional int64_t pre argument uses the same caster.
+MOE_SUPPORTS_INT_HEADERS = {
+    name: header.replace(": int", ": typing.SupportsInt")
+    for name, header in MOE_HEADERS.items()
+}
+
+
+@pytest.mark.parametrize("name", list(MOE_HEADERS))
+@pytest.mark.parametrize("optional_style", ["union", "typing"])
+def test_moe_supports_int_real_parser_preserves_exact_binding_doc(name, optional_style):
+    from _build.stubgen import verify_moe_docstring
+
+    header = MOE_SUPPORTS_INT_HEADERS[name]
+    doc = header.removeprefix("def ").removesuffix(":")
+    if optional_style == "typing":
+        doc = doc.replace(
+            "torch.Tensor | None", "typing.Optional[torch.Tensor]"
+        ).replace("typing.SupportsInt | None", "typing.Optional[typing.SupportsInt]")
+    verify_moe_docstring(name, doc + "\n\nOriginal MoE documentation.\n", header)
+
+
+@pytest.mark.parametrize("name", list(MOE_HEADERS))
+def test_moe_supports_int_overloads_preserve_annotations_and_call_shapes(name):
+    from _build.stubgen import normalize_moe_defaults
+
+    original = _moe_stub(name)
+    source = original.replace(MOE_HEADERS[name], MOE_SUPPORTS_INT_HEADERS[name])
+    normalized, changed = normalize_moe_defaults(source, FAST_TOPK_MODULE)
+    reference, _ = normalize_moe_defaults(original, FAST_TOPK_MODULE)
+    assert changed == [name]
+    # Exact AST equality after only the annotation spelling is restored binds
+    # these call shapes to the exhaustive original positional/keyword checks.
+    assert ast.dump(
+        ast.parse(normalized.replace("typing.SupportsInt", "int"))
+    ) == ast.dump(ast.parse(reference))
+    functions = [
+        n for n in ast.parse(normalized).body if isinstance(n, ast.FunctionDef)
+    ]
+    for function in functions:
+        args = function.args.args + function.args.kwonlyargs
+        integers = (
+            {"topk"}
+            if name == "moe_post_reorder"
+            else {"n_expert", "n_local_expert", "topk"}
+        )
+        for arg in args:
+            if arg.arg in integers:
+                assert ast.unparse(arg.annotation) == "typing.SupportsInt"
+            if arg.arg == "align_block_size":
+                assert ast.unparse(arg.annotation) == "typing.SupportsInt | None"
+        assert not function.args.defaults
+        assert all(value is None for value in function.args.kw_defaults)
+    assert normalized.count('"""Original MoE documentation."""') == 1
+    assert normalize_moe_defaults(normalized, FAST_TOPK_MODULE) == (normalized, [])
+
+
+@pytest.mark.parametrize("name", list(MOE_HEADERS))
+@pytest.mark.parametrize("runtime_supports_int", [False, True])
+def test_moe_runtime_annotation_must_match_this_generated_header(
+    name, runtime_supports_int
+):
+    from _build.stubgen import verify_moe_docstring
+
+    actual = (
+        MOE_SUPPORTS_INT_HEADERS[name] if runtime_supports_int else MOE_HEADERS[name]
+    )
+    other = (
+        MOE_HEADERS[name] if runtime_supports_int else MOE_SUPPORTS_INT_HEADERS[name]
+    )
+    doc = actual.removeprefix("def ").removesuffix(":")
+    verify_moe_docstring(name, doc, actual)
+    with pytest.raises(ValueError, match="runtime signature changed"):
+        verify_moe_docstring(name, doc, other)
+
+
+@pytest.mark.parametrize("name", list(MOE_HEADERS))
+@pytest.mark.parametrize("replacement", ["typing.SupportsIndex", "float", "typing.Any"])
+def test_moe_supports_int_other_numeric_annotations_fail_closed(
+    name, replacement, tmp_path
+):
+    from _build.stubgen import normalize_moe_defaults, verify_moe_docstring
+
+    header = MOE_SUPPORTS_INT_HEADERS[name].replace(
+        "topk: typing.SupportsInt", "topk: " + replacement
+    )
+    source = _moe_stub(name).replace(MOE_HEADERS[name], header)
+    assert normalize_moe_defaults(source, FAST_TOPK_MODULE) == (source, [])
+    with pytest.raises(ValueError, match="runtime signature changed"):
+        verify_moe_docstring(name, header.removeprefix("def ").removesuffix(":"))
+    path = tmp_path / "unknown.pyi"
+    path.write_text(source)
+    with pytest.raises(SyntaxError):
+        validate_generated_stub(str(path), FAST_TOPK_MODULE)
+    assert path.read_text() == source
+
+
+def test_moe_pre_mixed_integer_casters_are_not_an_allowed_signature():
+    from _build.stubgen import normalize_moe_defaults, verify_moe_docstring
+
+    name = "moe_pre_reorder"
+    header = MOE_SUPPORTS_INT_HEADERS[name].replace(
+        "topk: typing.SupportsInt", "topk: int"
+    )
+    source = _moe_stub(name).replace(MOE_HEADERS[name], header)
+    assert normalize_moe_defaults(source, FAST_TOPK_MODULE) == (source, [])
+    with pytest.raises(SyntaxError):
+        normalize_keyword_field(source)
+    with pytest.raises(ValueError, match="runtime signature changed"):
+        verify_moe_docstring(name, header.removeprefix("def ").removesuffix(":"))
+
+
+@pytest.mark.parametrize("name", list(MOE_HEADERS))
+def test_moe_two_annotation_variants_cannot_duplicate_a_binding(name):
+    from _build.stubgen import normalize_moe_defaults
+
+    source = _moe_stub(name) + MOE_SUPPORTS_INT_HEADERS[name] + "\n    ...\n"
+    with pytest.raises(ValueError, match="Ambiguous"):
+        normalize_moe_defaults(source, FAST_TOPK_MODULE)
+    literal = '"""\n' + MOE_SUPPORTS_INT_HEADERS[name] + '\n"""\nvalue: int\n'
+    assert normalize_moe_defaults(literal, FAST_TOPK_MODULE) == (literal, [])
+
+
+@pytest.mark.parametrize("name", list(MOE_HEADERS))
+def test_moe_supports_int_still_requires_real_runtime_before_write(
+    name, tmp_path, monkeypatch
+):
+    source = _moe_stub(name).replace(MOE_HEADERS[name], MOE_SUPPORTS_INT_HEADERS[name])
+    path = tmp_path / "runtime.pyi"
+    path.write_text(source)
+    original_import = importlib.import_module
+
+    def fail_native_import(module, *args, **kwargs):
+        if module == FAST_TOPK_MODULE:
+            raise ModuleNotFoundError("controlled Native import failure")
+        return original_import(module, *args, **kwargs)
+
+    monkeypatch.setattr(importlib, "import_module", fail_native_import)
+    with pytest.raises(ModuleNotFoundError, match="controlled Native import failure"):
+        validate_generated_stub(str(path), FAST_TOPK_MODULE)
+    assert path.read_text() == source
+
+
+def test_moe_supports_int_composes_with_existing_exact_fast_topk():
+    from _build.stubgen import normalize_moe_defaults
+
+    source = FAST_TOPK_STUB + "\n".join(
+        _moe_stub(name)
+        .replace(MOE_HEADERS[name], MOE_SUPPORTS_INT_HEADERS[name])
+        .split("import torch\n", 1)[1]
+        for name in MOE_HEADERS
+    )
+    normalized, fast = normalize_fast_topk_defaults(source, FAST_TOPK_MODULE)
+    normalized, moe = normalize_moe_defaults(normalized, FAST_TOPK_MODULE)
+    assert fast and moe == list(MOE_HEADERS)
+    normalize_keyword_field(normalized)
+    assert (
+        len([n for n in ast.parse(normalized).body if isinstance(n, ast.FunctionDef)])
+        == 8
+    )
+    with pytest.raises(SyntaxError):
+        normalize_keyword_field(normalized + "bad: invalid::CxxType\n")

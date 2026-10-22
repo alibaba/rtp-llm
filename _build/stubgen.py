@@ -84,6 +84,7 @@ def verify_fast_topk_docstring(doc: str) -> None:
 
 
 # These two exact declarations are generated from RegisterCudaOps.cc / ep_utils.h.
+# Both pybind integer input spellings are retained, never narrowed to int.
 # No other nontrailing default is accepted by this closed signature table.
 _MOE_PARAMETERS = {
     "moe_pre_reorder": (
@@ -117,12 +118,46 @@ _MOE_PARAMETERS = {
 }
 
 
-def _moe_signature(name: str) -> str:
+_MOE_INTEGER_ANNOTATIONS = ("int", "typing.SupportsInt")
+
+
+def _moe_parameters(name: str, integer_annotation: str):
+    if integer_annotation not in _MOE_INTEGER_ANNOTATIONS:
+        raise ValueError("Unknown MoE integer annotation")
     parameters, defaults = _MOE_PARAMETERS[name]
+    return (
+        tuple(arg.replace(": int", ": " + integer_annotation) for arg in parameters),
+        defaults,
+    )
+
+
+def _moe_signature(name: str, integer_annotation: str = "int") -> str:
+    parameters, defaults = _moe_parameters(name, integer_annotation)
     arguments = [
         arg + (" = None" if i in defaults else "") for i, arg in enumerate(parameters)
     ]
     return f"def {name}({', '.join(arguments)}) -> None:"
+
+
+def _moe_declarations(source: str):
+    lines = source.splitlines(keepends=True)
+    signatures = {
+        _moe_signature(name, annotation): (name, annotation)
+        for name in _MOE_PARAMETERS
+        for annotation in _MOE_INTEGER_ANNOTATIONS
+    }
+    definitions = []
+    for token in tokenize.generate_tokens(io.StringIO(source).readline):
+        if (
+            token.type == tokenize.NAME
+            and token.string == "def"
+            and token.start[1] == 0
+        ):
+            index = token.start[0] - 1
+            match = signatures.get(lines[index].rstrip("\r\n"))
+            if match is not None:
+                definitions.append((index, *match))
+    return definitions
 
 
 def normalize_moe_defaults(source: str, module_name: str) -> tuple[str, list[str]]:
@@ -136,28 +171,17 @@ def normalize_moe_defaults(source: str, module_name: str) -> tuple[str, list[str
     if module_name != _FAST_TOPK_MODULE:
         return source, []
     lines = source.splitlines(keepends=True)
-    signatures = {_moe_signature(name): name for name in _MOE_PARAMETERS}
-    definitions = []
-    for token in tokenize.generate_tokens(io.StringIO(source).readline):
-        if (
-            token.type == tokenize.NAME
-            and token.string == "def"
-            and token.start[1] == 0
-        ):
-            index = token.start[0] - 1
-            name = signatures.get(lines[index].rstrip("\r\n"))
-            if name is not None:
-                definitions.append((index, name))
-    names = [name for _, name in definitions]
+    definitions = _moe_declarations(source)
+    names = [name for _, name, _ in definitions]
     if len(names) != len(set(names)):
         raise ValueError("Ambiguous MoE declarations")
-    for index, name in definitions:
+    for index, name, annotation in definitions:
         previous = next(
             (line.strip() for line in reversed(lines[:index]) if line.strip()), ""
         )
         if previous.startswith("@"):
             raise ValueError(f"Unexpected decorated {name} declaration")
-        parameters, defaults = _MOE_PARAMETERS[name]
+        parameters, defaults = _moe_parameters(name, annotation)
         overloads = []
         for mask in range(1 << len(defaults)):
             omitted = {
@@ -177,7 +201,9 @@ def normalize_moe_defaults(source: str, module_name: str) -> tuple[str, list[str
     return "".join(lines), names
 
 
-def verify_moe_docstring(name: str, doc: str) -> None:
+def verify_moe_docstring(
+    name: str, doc: str, expected_signature: str | None = None
+) -> None:
     """Reject changes to a complete real runtime signature using the actual parser."""
     from pybind11_stubgen import arg_parser, stub_parser_from_args
     from pybind11_stubgen.printer import Printer
@@ -187,9 +213,15 @@ def verify_moe_docstring(name: str, doc: str) -> None:
         raise ValueError("Unknown MoE binding")
     parser = stub_parser_from_args(arg_parser().parse_args([_FAST_TOPK_MODULE]))
     functions = parser.parse_function_docstring(Identifier(name), doc.splitlines())
-    if len(functions) != 1 or Printer(invalid_expr_as_ellipses=False).print_function(
-        functions[0]
-    )[0] != _moe_signature(name):
+    if len(functions) != 1:
+        raise ValueError(f"{name} runtime signature changed")
+    signature = Printer(invalid_expr_as_ellipses=False).print_function(functions[0])[0]
+    allowed = {
+        _moe_signature(name, annotation) for annotation in _MOE_INTEGER_ANNOTATIONS
+    }
+    if signature not in allowed or (
+        expected_signature is not None and signature != expected_signature
+    ):
         raise ValueError(f"{name} runtime signature changed")
 
 
@@ -278,14 +310,19 @@ def validate_generated_stub(path: str, module_name: str) -> dict:
     if moe_overloads:
         module = importlib.import_module(module_name)
         proofs = {}
+        generated = {
+            name: _moe_signature(name, annotation)
+            for _, name, annotation in _moe_declarations(source)
+        }
         for name in moe_overloads:
             function = getattr(module, name)
             if not inspect.isbuiltin(function) or function.__module__ != module_name:
                 raise ValueError(f"{name} requires its real Native binding")
-            verify_moe_docstring(name, function.__doc__ or "")
+            verify_moe_docstring(name, function.__doc__ or "", generated[name])
             parameters, defaults = _MOE_PARAMETERS[name]
             proofs[name] = {
                 "runtime_signature": function.__doc__.splitlines()[0],
+                "generated_signature": generated[name],
                 "count": 1 << len(defaults),
                 "required_arguments": [
                     arg.split(":", 1)[0]
