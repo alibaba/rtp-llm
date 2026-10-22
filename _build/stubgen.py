@@ -3,8 +3,84 @@
 import ast
 import importlib
 import inspect
+import io
 import re
+import tokenize
 from pathlib import Path
+
+_FAST_TOPK_MODULE = "librtp_compute_ops.rtp_llm_ops"
+_FAST_TOPK_NAME = "fast_topk_transform_fused"
+_FAST_TOPK_SIGNATURE = (
+    "def fast_topk_transform_fused(score: torch.Tensor, lengths: torch.Tensor, "
+    "dst_page_table: torch.Tensor, src_page_table: torch.Tensor | None = None, "
+    "cu_seqlens_q: torch.Tensor, row_starts: torch.Tensor | None = None) -> None:"
+)
+
+
+def normalize_fast_topk_defaults(source: str, module_name: str) -> tuple[str, bool]:
+    """Express the existing nontrailing pybind default using exact overloads.
+
+    An explicitly supplied src_page_table keeps the original positional order.
+    Omitting it requires cu_seqlens_q (and any row_starts) by keyword. Neither
+    overload makes cu_seqlens_q optional or changes the extension's call API.
+    Only the observed complete signature in its real module is rewritten.
+    """
+    if module_name != _FAST_TOPK_MODULE:
+        return source, False
+    lines = source.splitlines(keepends=True)
+    definitions = [
+        token.start[0] - 1
+        for token in tokenize.generate_tokens(io.StringIO(source).readline)
+        if token.type == tokenize.NAME
+        and token.string == "def"
+        and token.start[1] == 0
+        and lines[token.start[0] - 1].rstrip("\r\n") == _FAST_TOPK_SIGNATURE
+    ]
+    if not definitions:
+        return source, False
+    if len(definitions) != 1:
+        raise ValueError("Ambiguous fast_topk_transform_fused declarations")
+    index = definitions[0]
+    previous = next(
+        (line.strip() for line in reversed(lines[:index]) if line.strip()), ""
+    )
+    if previous.startswith("@"):
+        raise ValueError("Unexpected decorated fast_topk_transform_fused declaration")
+    explicit = _FAST_TOPK_SIGNATURE.replace(
+        "src_page_table: torch.Tensor | None = None,",
+        "src_page_table: torch.Tensor | None,",
+    )
+    omitted = _FAST_TOPK_SIGNATURE.replace(
+        "src_page_table: torch.Tensor | None = None, ", "*, "
+    )
+    lines[index] = (
+        "import typing\n"
+        "@typing.overload\n"
+        f"{explicit}\n"
+        "    ...\n"
+        "@typing.overload\n"
+        f"{omitted}\n"
+    )
+    # The original generated body/docstring stays on the second overload.
+    return "".join(lines), True
+
+
+def verify_fast_topk_docstring(doc: str) -> None:
+    """Use the actual generator parser to verify the complete runtime signature."""
+    from pybind11_stubgen import arg_parser, stub_parser_from_args
+    from pybind11_stubgen.printer import Printer
+    from pybind11_stubgen.structs import Identifier
+
+    parser = stub_parser_from_args(arg_parser().parse_args([_FAST_TOPK_MODULE]))
+    functions = parser.parse_function_docstring(
+        Identifier(_FAST_TOPK_NAME), doc.splitlines()
+    )
+    if (
+        len(functions) != 1
+        or Printer(invalid_expr_as_ellipses=False).print_function(functions[0])[0]
+        != _FAST_TOPK_SIGNATURE
+    ):
+        raise ValueError("fast_topk_transform_fused runtime signature changed")
 
 
 def normalize_keyword_field(source: str) -> tuple[str, bool]:
@@ -68,12 +144,26 @@ def validate_generated_stub(path: str, module_name: str) -> dict:
     """Validate one complete real generated module, preserving runtime members."""
     target = Path(path)
     source = target.read_text(encoding="utf-8")
-    normalized, changed = normalize_keyword_field(source)
+    normalized, overloads = normalize_fast_topk_defaults(source, module_name)
+    normalized, changed = normalize_keyword_field(normalized)
     proof = {
         "module": module_name,
         "AST_parse": True,
         "keyword_field_documented": changed,
     }
+    if overloads:
+        module = importlib.import_module(module_name)
+        function = getattr(module, _FAST_TOPK_NAME)
+        if not inspect.isbuiltin(function) or function.__module__ != module_name:
+            raise ValueError(
+                "fast_topk_transform_fused requires its real Native binding"
+            )
+        verify_fast_topk_docstring(function.__doc__ or "")
+        proof["fast_topk_overloads"] = {
+            "runtime_signature": function.__doc__.splitlines()[0],
+            "count": 2,
+            "cu_seqlens_q_required": True,
+        }
     if changed:
         # Import the genuine extension already loaded by the production preload.
         module = importlib.import_module(module_name)
@@ -92,6 +182,7 @@ def validate_generated_stub(path: str, module_name: str) -> dict:
                 name: int(value) for name, value in enum.__members__.items()
             },
         }
+    if changed or overloads:
         target.write_text(normalized, encoding="utf-8")
     return proof
 

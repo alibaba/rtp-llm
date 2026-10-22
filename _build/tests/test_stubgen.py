@@ -2,15 +2,19 @@
 
 import ast
 import importlib
+import inspect
+import itertools
 import subprocess
 import sys
 
 import pytest
 
 from _build.stubgen import (
+    normalize_fast_topk_defaults,
     normalize_keyword_field,
     validate_generated_module,
     validate_generated_stub,
+    verify_fast_topk_docstring,
 )
 
 STUB = """from __future__ import annotations
@@ -191,3 +195,205 @@ def test_missing_flat_stub_fails(generated_python_layout):
     (output / (name + ".pyi")).unlink()
     with pytest.raises(FileNotFoundError, match="Required generated stub missing"):
         validate_generated_module(str(output), name)
+
+
+# Exact generated line retained in CI 82325810, not a substitute Native module.
+FAST_TOPK_HEADER = (
+    "def fast_topk_transform_fused(score: torch.Tensor, lengths: torch.Tensor, "
+    "dst_page_table: torch.Tensor, src_page_table: torch.Tensor | None = None, "
+    "cu_seqlens_q: torch.Tensor, row_starts: torch.Tensor | None = None) -> None:"
+)
+FAST_TOPK_STUB = (
+    "from __future__ import annotations\nimport torch\n"
+    + FAST_TOPK_HEADER
+    + '\n    """Fast TopK Transform Fused kernel"""\n'
+)
+FAST_TOPK_MODULE = "librtp_compute_ops.rtp_llm_ops"
+
+
+def test_observed_nontrailing_default_becomes_two_exact_overloads():
+    with pytest.raises(SyntaxError, match="non-default argument follows default"):
+        ast.parse(FAST_TOPK_STUB)
+    normalized, changed = normalize_fast_topk_defaults(FAST_TOPK_STUB, FAST_TOPK_MODULE)
+    assert changed
+    functions = [
+        node for node in ast.parse(normalized).body if isinstance(node, ast.FunctionDef)
+    ]
+    assert len(functions) == 2
+    assert [ast.unparse(node.decorator_list[0]) for node in functions] == [
+        "typing.overload",
+        "typing.overload",
+    ]
+    assert [arg.arg for arg in functions[0].args.args] == [
+        "score",
+        "lengths",
+        "dst_page_table",
+        "src_page_table",
+        "cu_seqlens_q",
+        "row_starts",
+    ]
+    assert [arg.arg for arg in functions[1].args.args] == [
+        "score",
+        "lengths",
+        "dst_page_table",
+    ]
+    assert [arg.arg for arg in functions[1].args.kwonlyargs] == [
+        "cu_seqlens_q",
+        "row_starts",
+    ]
+    assert len(functions[0].args.defaults) == 1
+    assert functions[1].args.kw_defaults[0] is None
+    assert ast.unparse(functions[1].args.kw_defaults[1]) == "None"
+    assert all(ast.unparse(node.returns) == "None" for node in functions)
+    assert normalized.count('"""Fast TopK Transform Fused kernel"""') == 1
+    assert normalize_fast_topk_defaults(normalized, FAST_TOPK_MODULE) == (
+        normalized,
+        False,
+    )
+
+
+def test_overloads_preserve_every_original_argument_binding_shape():
+    """Use standard Python Signature binding; no Native functions are imitated."""
+    normalized, _ = normalize_fast_topk_defaults(FAST_TOPK_STUB, FAST_TOPK_MODULE)
+    functions = [
+        node for node in ast.parse(normalized).body if isinstance(node, ast.FunctionDef)
+    ]
+    signatures = []
+    for node in functions:
+        parameters = []
+        first_default = len(node.args.args) - len(node.args.defaults)
+        for index, arg in enumerate(node.args.args):
+            default = None if index >= first_default else inspect.Parameter.empty
+            parameters.append(
+                inspect.Parameter(
+                    arg.arg, inspect.Parameter.POSITIONAL_OR_KEYWORD, default=default
+                )
+            )
+        for arg, default_node in zip(node.args.kwonlyargs, node.args.kw_defaults):
+            default = inspect.Parameter.empty if default_node is None else None
+            parameters.append(
+                inspect.Parameter(
+                    arg.arg, inspect.Parameter.KEYWORD_ONLY, default=default
+                )
+            )
+        signatures.append(inspect.Signature(parameters))
+    names = [
+        "score",
+        "lengths",
+        "dst_page_table",
+        "src_page_table",
+        "cu_seqlens_q",
+        "row_starts",
+    ]
+    required = {"score", "lengths", "dst_page_table", "cu_seqlens_q"}
+    # Includes all-keyword, mixed, omitted/explicit-None src and row, duplicates,
+    # missing required arguments, extra positionals, and unknown keywords.
+    for positional_count, presence in itertools.product(
+        range(8), itertools.product([False, True], repeat=7)
+    ):
+        args = tuple(None if i in (3, 5) else i for i in range(positional_count))
+        kwargs = {
+            name: None if name in ("src_page_table", "row_starts") else name
+            for name, included in zip(names + ["unknown"], presence)
+            if included
+        }
+        supplied = set(names[:positional_count]) | set(kwargs)
+        expected = (
+            positional_count <= 6
+            and "unknown" not in kwargs
+            and not (set(names[:positional_count]) & set(kwargs))
+            and required <= supplied
+        )
+        matches = []
+        for signature in signatures:
+            try:
+                bound = signature.bind(*args, **kwargs)
+            except TypeError:
+                continue
+            bound.apply_defaults()
+            values = dict(bound.arguments)
+            values.setdefault("src_page_table", None)
+            matches.append(values)
+        assert bool(matches) == expected, (args, kwargs)
+        if expected:
+            original = dict(zip(names, args)) | kwargs
+            original.setdefault("src_page_table", None)
+            original.setdefault("row_starts", None)
+            assert matches == [original], (args, kwargs)
+
+
+@pytest.mark.parametrize(
+    "optional", ["torch.Tensor | None", "typing.Optional[torch.Tensor]"]
+)
+def test_real_generator_parser_matches_complete_runtime_doc_signature(optional):
+    doc = (
+        FAST_TOPK_HEADER.removeprefix("def ")
+        .removesuffix(":")
+        .replace("torch.Tensor | None", optional)
+    )
+    verify_fast_topk_docstring(doc + "\n\nFast TopK Transform Fused kernel\n")
+
+
+@pytest.mark.parametrize(
+    "old,new",
+    [
+        ("cu_seqlens_q: torch.Tensor", "cu_seqlens_q: torch.Tensor = None"),
+        (
+            "src_page_table: torch.Tensor | None = None",
+            "src_page_table: torch.Tensor | None",
+        ),
+        ("cu_seqlens_q: torch.Tensor", "cu_seqlens_q: int"),
+        (" -> None:", " -> torch.Tensor:"),
+        ("fast_topk_transform_fused", "other_function"),
+    ],
+)
+def test_changed_runtime_doc_signature_is_rejected(old, new):
+    doc = FAST_TOPK_HEADER.replace(old, new).removeprefix("def ").removesuffix(":")
+    with pytest.raises(ValueError, match="runtime signature changed"):
+        verify_fast_topk_docstring(doc)
+
+
+def test_real_unrelated_builtin_doc_is_not_accepted():
+    with pytest.raises(ValueError, match="runtime signature changed"):
+        verify_fast_topk_docstring(len.__doc__)
+
+
+@pytest.mark.parametrize(
+    "module", ["other_module", "librtp_compute_ops", FAST_TOPK_MODULE + "_extra"]
+)
+def test_nontrailing_default_fix_is_exact_module_only(module):
+    assert normalize_fast_topk_defaults(FAST_TOPK_STUB, module) == (
+        FAST_TOPK_STUB,
+        False,
+    )
+    with pytest.raises(SyntaxError):
+        normalize_keyword_field(FAST_TOPK_STUB)
+
+
+def test_unknown_invalid_signature_and_other_errors_still_fail():
+    altered = FAST_TOPK_STUB.replace("lengths: torch.Tensor", "lengths: int")
+    assert normalize_fast_topk_defaults(altered, FAST_TOPK_MODULE) == (altered, False)
+    with pytest.raises(SyntaxError):
+        normalize_keyword_field(altered)
+    normalized, _ = normalize_fast_topk_defaults(
+        FAST_TOPK_STUB + "bad: invalid::CxxType\n", FAST_TOPK_MODULE
+    )
+    with pytest.raises(SyntaxError):
+        normalize_keyword_field(normalized)
+
+
+def test_duplicate_or_decorated_observed_signature_is_rejected():
+    with pytest.raises(ValueError, match="Ambiguous"):
+        normalize_fast_topk_defaults(
+            FAST_TOPK_STUB + FAST_TOPK_HEADER + "\n    ...\n", FAST_TOPK_MODULE
+        )
+    decorated = FAST_TOPK_STUB.replace(
+        FAST_TOPK_HEADER, "@typing.overload\n" + FAST_TOPK_HEADER
+    )
+    with pytest.raises(ValueError, match="Unexpected decorated"):
+        normalize_fast_topk_defaults(decorated, FAST_TOPK_MODULE)
+
+
+def test_signature_text_in_docstring_is_not_rewritten():
+    source = '"""\n' + FAST_TOPK_HEADER + '\n"""\nvalue: int\n'
+    assert normalize_fast_topk_defaults(source, FAST_TOPK_MODULE) == (source, False)
