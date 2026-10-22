@@ -2,9 +2,9 @@
 
 The owner validates its uniform target plan before preparing this operation.
 Preparation is read-only; run() is the explicit cache mutation boundary.
-The native writer writes page zero during dummy Graph execution too. Readers
-continue to reject that allocator sentinel. Existing per-token scales are read
-by attention unchanged; only this invocation's K/V entries receive unit scales.
+Positive lengths preserve the native writer's dummy-page writes. Inactive
+warmup rows leave the cache and scales untouched. Readers reject page zero;
+only this invocation's active K/V entries receive unit scales.
 """
 
 import math
@@ -67,9 +67,17 @@ def _main_qk_norm_rope_cache(
     sum_narrow = (((s0 + t0) + (s1 + t1)) + (s2 + t2)) + (s3 + t3)
     variance = tl.sum(tl.where(wide, sum_wide, sum_narrow), 0) / 256
     scale = tl.rsqrt(variance + EPS)
-    logical_position = tl.load(LENS + row) - 1
-    physical = tl.load(TABLE + (row // QUERY) * TW + logical_position // 128)
-    valid_page = (physical >= 0) & (physical < PAGES)
+    length = tl.load(LENS + row)
+    logical_position = length - 1
+    page = logical_position // 128
+    # The table lookup itself must stay inside the block table; a stale or
+    # truncated LENS value must not turn into an out-of-bounds TABLE read.
+    # Triton integer division truncates toward zero: (-1) // 128 is zero,
+    # while its remainder is negative. Inactive warmup rows must not write
+    # that negative token offset into the dummy page or its scales.
+    page_in_table = (length > 0) & (page >= 0) & (page < TW)
+    physical = tl.load(TABLE + (row // QUERY) * TW + page, page_in_table, other=0)
+    valid_page = page_in_table & (physical >= 0) & (physical < PAGES)
     frequency = lane
     axis = tl.where(
         (frequency % 3 == 1) & (frequency < H_SECTION * 3),
