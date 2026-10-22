@@ -407,9 +407,12 @@ class PLETransactionCoordinator:
         # Gather/clone launches above are part of prepare, not commit.  Complete
         # them before publishing the plan so the C++ prepare consensus observes
         # any asynchronous failure on this rank before persistent writes begin.
+        # The gathers run on the current stream, so a current-stream
+        # synchronize observes their failures without draining unrelated
+        # streams (async bookkeeping) the way a device-wide sync does.
         if resolution is not None:
             resolution.verify()
-        self._synchronize_ple_transaction(transaction)
+        torch.cuda.current_stream(transaction.prefixes.device).synchronize()
         transaction.prepared_writes = prepared_writes
 
     @staticmethod
