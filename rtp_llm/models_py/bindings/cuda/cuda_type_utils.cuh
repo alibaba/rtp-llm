@@ -136,6 +136,14 @@ inline __device__ T add(T a, T b) {
     return a + b;
 }
 
+// PPU SDK 2.2 uses a stricter Clang two-phase lookup.  The float2 operator+
+// overload is declared later in this header, so make this instantiation
+// explicit instead of relying on a declaration that is not yet visible.
+template<>
+inline __device__ float2 add(float2 a, float2 b) {
+    return make_float2(a.x + b.x, a.y + b.y);
+}
+
 template<>
 inline __device__ Float8_ add(Float8_ a, Float8_ b) {
     return {add(a.x, b.x), add(a.y, b.y), add(a.z, b.z), add(a.w, b.w)};

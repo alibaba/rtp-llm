@@ -144,11 +144,67 @@ NeedBlocksInfo SWACacheManager::getNeedBlocks(int                      common_se
     return info;
 }
 
-bool SWACacheManager::malloc(BlockIds&                block_ids,
-                             int                      seq_len,
-                             bool                     enable_reuse_cache,
-                             int                      reserve_step,
-                             std::vector<size_t>*     backfilled_positions,
+bool SWACacheManager::preparePrefillChunk(BlockIds& block_ids, int chunk_end,
+                                          std::vector<size_t>* backfilled_positions) {
+    backfilled_positions->clear();
+    const int slots = needBlocksNum(chunk_end, 0);
+    if (slots <= 0 || slots > static_cast<int>(block_ids.blocksNum())) {
+        RTP_LLM_LOG_WARNING("chunk end exceeds admitted state table: end=%d slots=%d size=%zu",
+                            chunk_end,
+                            slots,
+                            block_ids.blocksNum());
+        return false;
+    }
+    std::vector<size_t> missing;
+    for (int i = std::max(0, slots - activeTailBlockCount()); i < slots; ++i) {
+        if (isNullBlockIdx(block_ids.blocks()[i])) {
+            missing.push_back(static_cast<size_t>(i));
+        }
+    }
+    if (missing.empty()) {
+        return true;
+    }
+    if (freeBlocksNum() < missing.size() && !ensureFreeBlocks(missing.size())) {
+        return false;
+    }
+    auto allocated = block_pool_->malloc(missing.size());
+    if (!allocated.has_value() || allocated->size() != missing.size()) {
+        return false;
+    }
+    block_pool_->incRef(*allocated);
+    for (size_t i = 0; i < missing.size(); ++i) {
+        block_ids.setAt(missing[i], (*allocated)[i]);
+    }
+    *backfilled_positions = std::move(missing);
+    return true;
+}
+
+void SWACacheManager::releaseBeforePrefillChunk(BlockIds& block_ids, int chunk_start,
+                                                bool enable_reuse_cache) {
+    // Retain the prior chunk's tail until this chunk has consumed it. Admission
+    // also owns the final prompt tail; do not prune future slots here.
+    const int first_needed = std::max(0, needBlocksNum(chunk_start, 0) - activeTailBlockCount());
+    const bool reuse = effectiveReuseCacheForAllocation(enable_reuse_cache);
+    const int step = std::max(1, linear_step_);
+    BlockIndicesType released;
+    std::vector<size_t> positions;
+    for (int i = 0; i < first_needed; ++i) {
+        const auto block = block_ids.blocks()[i];
+        if (isNullBlockIdx(block) || (reuse && (i + 1) % step == 0)) continue;
+        released.push_back(block);
+        positions.push_back(static_cast<size_t>(i));
+    }
+    if (!released.empty()) {
+        block_pool_->decRef(released);
+        block_ids.remove(positions);
+    }
+}
+
+bool SWACacheManager::malloc(BlockIds&                 block_ids,
+                             int                       seq_len,
+                             bool                      enable_reuse_cache,
+                             int                       reserve_step,
+                             std::vector<size_t>*      backfilled_positions,
                              const RequiredPositions& required_positions) {
     if (backfilled_positions != nullptr) {
         backfilled_positions->clear();
@@ -244,10 +300,19 @@ void SWACacheManager::removeSkippedBlocks(BlockIds& block_ids, bool enable_reuse
     const bool effective_reuse_enabled = effectiveReuseCacheForAllocation(enable_reuse_cache);
     const int  active_tail_blocks      = activeTailBlockCount();
     const int  block_size              = static_cast<int>(block_indices.size());
+    // reserve_step is a token count, while this loop indexes physical blocks.
+    // Keep enough extra blocks for the speculative window even when it crosses
+    // a block boundary, without retaining one whole block per draft token.
+    const int reserve_tokens   = std::max(reserve_step, 0);
+    const int tokens_per_block = seqSizePerBlock();
+    RTP_LLM_CHECK_WITH_INFO(tokens_per_block > 0,
+                            "invalid tokens_per_block for SWA skipped-block removal: %d",
+                            tokens_per_block);
+    const int reserve_blocks   = reserve_tokens / tokens_per_block + (reserve_tokens % tokens_per_block != 0);
 
     BlockIndicesType    blocks_to_free;
     std::vector<size_t> pos_to_remove;
-    for (int i = block_size - active_tail_blocks - 1 - reserve_step; i >= 0; i--) {
+    for (int i = block_size - active_tail_blocks - 1 - reserve_blocks; i >= 0; i--) {
         if (isNullBlockIdx(block_indices[i])) {
             continue;
         }

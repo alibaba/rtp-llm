@@ -860,7 +860,12 @@ def _get_startup_real_warmup_request_token_len(
                 "model_args.max_seq_len should be greater than speculative "
                 f"reserve_step, got max_seq_len={max_len}, reserve_step={reserve_step}"
             )
-        max_request_token_len = min(max_request_token_len, max_len - reserve_step)
+        # GenerateStream caps total tokens at max_seq_len - reserveStep().
+        # Leave room for an actual output as well as the speculative reserve.
+        max_request_token_len = min(
+            max_request_token_len,
+            max_len - reserve_step - STARTUP_REAL_WARMUP_MAX_NEW_TOKENS,
+        )
     if max_request_token_len <= 0:
         raise ValueError(
             "startup real warmup request token len should be positive, got "
@@ -988,36 +993,28 @@ async def _run_startup_real_warmup_grpc(py_env_configs: PyEnvConfigs):
                     chunk_count += 1
                     if outputs.generate_outputs:
                         last_aux = outputs.generate_outputs[0].aux_info
-                if last_aux is not None:
-                    logging.info(
-                        "DSV4 startup grpc warmup request finished, addr=%s, request_id=%d, "
-                        "target_token_len=%d, request_token_len=%d, max_new_tokens=%d, "
-                        "chunks=%d, input_len=%s, "
-                        "reuse_len=%s, output_len=%s, cost=%.2fs",
-                        addr,
-                        request_id,
-                        token_len,
-                        request_token_len,
-                        max_new_tokens,
-                        chunk_count,
-                        getattr(last_aux, "input_len", None),
-                        getattr(last_aux, "reuse_len", None),
-                        getattr(last_aux, "output_len", None),
-                        time.time() - begin,
+                if last_aux is None or getattr(last_aux, "output_len", 0) < 1:
+                    raise RuntimeError(
+                        "DSV4 startup grpc warmup produced no generated tokens: "
+                        f"addr={addr}, request_token_len={request_token_len}, "
+                        f"chunks={chunk_count}"
                     )
-                else:
-                    logging.info(
-                        "DSV4 startup grpc warmup request finished, addr=%s, request_id=%d, "
-                        "target_token_len=%d, request_token_len=%d, max_new_tokens=%d, "
-                        "chunks=%d, aux_info=None, cost=%.2fs",
-                        addr,
-                        request_id,
-                        token_len,
-                        request_token_len,
-                        max_new_tokens,
-                        chunk_count,
-                        time.time() - begin,
-                    )
+                logging.info(
+                    "DSV4 startup grpc warmup request finished, addr=%s, request_id=%d, "
+                    "target_token_len=%d, request_token_len=%d, max_new_tokens=%d, "
+                    "chunks=%d, input_len=%s, "
+                    "reuse_len=%s, output_len=%s, cost=%.2fs",
+                    addr,
+                    request_id,
+                    token_len,
+                    request_token_len,
+                    max_new_tokens,
+                    chunk_count,
+                    getattr(last_aux, "input_len", None),
+                    getattr(last_aux, "reuse_len", None),
+                    getattr(last_aux, "output_len", None),
+                    time.time() - begin,
+                )
         finally:
             try:
                 await client.close()

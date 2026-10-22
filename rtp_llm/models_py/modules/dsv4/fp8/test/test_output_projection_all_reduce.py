@@ -32,6 +32,7 @@ class OutputProjectionAllReduceTest(unittest.TestCase):
             n_groups=1,
             n_heads=1,
             o_lora_rank=1,
+            wo_a=None,
             wo_a_w=torch.empty(1),
             wo_a_s=torch.empty(1),
             wo_b=object(),

@@ -1,3 +1,5 @@
+import os
+
 import torch
 
 from ....mhc.head_fuse_kernel import _mhc_head_fuse
@@ -11,6 +13,7 @@ def mhc_head_fuse(
     *,
     rms_eps: float,
     mhc_pre_eps: float,
+    enable_pdl: bool | None = None,
 ) -> torch.Tensor:
     assert residual.dtype == torch.bfloat16
     assert fn.dtype == torch.float32
@@ -32,11 +35,17 @@ def mhc_head_fuse(
     out = torch.empty(
         num_tokens, hidden_size, dtype=torch.bfloat16, device=residual.device
     )
+    if enable_pdl is None:
+        enable_pdl = os.environ.get(
+            "DSV4_MHC_HEAD_FUSE_PDL",
+            os.environ.get("DSV4_MHC_POST_PDL", "1"),
+        ) != "0"
     _mhc_head_fuse(
         hidden_size,
         rms_eps,
         mhc_pre_eps,
         mhc_mult=mhc_mult,
+        enable_pdl=enable_pdl,
     )(
         residual_flat,
         fn,

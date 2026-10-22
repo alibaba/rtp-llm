@@ -12,14 +12,15 @@ RoPE-rotated portion (NoPE = first 448 dims). This maps exactly to the
 
 This module provides:
 
-  * :func:`quantize_v4_kv_decode` — fast path. Splits V4 K into
+  * :func:`quantize_v4_kv_decode` — generic CUDA wrapper. Splits V4 K into
     ``(kv_c, k_pe)`` and dispatches the existing CUDA kernel
     ``compute_ops.concat_and_cache_mla(..., "fp8_model1_mla", scale)``.
-    Used by ``Attention.forward_decode_fp8`` (Stage 4D).
+    The current paged AttentionFP8 path uses its dedicated SWA writer instead;
+    this wrapper remains a platform-neutral MODEL1 contract utility.
 
-  * :func:`reference_quantize_v4_kv_decode` — pure-PyTorch oracle that
-    implements the SAME byte-level layout on CPU. Used by unit tests on
-    dev boxes without CUDA / without the compute_ops shared library.
+  * :func:`reference_quantize_v4_kv_decode` — pure-PyTorch reference that
+    implements the same byte-level layout on CPU. Independent golden fixtures,
+    rather than this implementation itself, are the byte-contract oracle.
 
 The ``slot_mapping`` is the same flat-slot tensor produced by the
 metadata builder (``DSv4DecodeAttnMetadataFP8.slot_mapping_swa`` etc.),
@@ -58,6 +59,91 @@ ENTRY_BYTES = NOPE_ROPE_STRIDE + SCALE_BYTES_PER_TOKEN  # = 584
 FP8_E4M3_MAX = 448.0  # max representable in fp8_e4m3fn
 
 
+def model1_block_payload_bytes(block_size: int) -> int:
+    """Logical MODEL1 payload bytes before any physical block-tail padding."""
+    block_size = int(block_size)
+    if block_size <= 0:
+        raise ValueError(f"MODEL1 block_size must be positive, got {block_size}")
+    return block_size * ENTRY_BYTES
+
+
+def model1_slot_physical_offsets(
+    block_size: int, block_offset: int
+) -> tuple[int, int]:
+    """Return the data and scale offsets for one slot within a MODEL1 block."""
+    block_size = int(block_size)
+    block_offset = int(block_offset)
+    if block_size <= 0:
+        raise ValueError(f"MODEL1 block_size must be positive, got {block_size}")
+    if block_offset < 0 or block_offset >= block_size:
+        raise IndexError(
+            "MODEL1 block_offset out of range: "
+            f"offset={block_offset}, block_size={block_size}"
+        )
+    return (
+        block_offset * NOPE_ROPE_STRIDE,
+        block_size * NOPE_ROPE_STRIDE
+        + block_offset * SCALE_BYTES_PER_TOKEN,
+    )
+
+
+def _validate_model1_cache_tensor(
+    kv_cache_packed: torch.Tensor, block_size: Optional[int] = None
+) -> tuple[int, int]:
+    if kv_cache_packed.dtype != torch.uint8 or kv_cache_packed.dim() != 3:
+        raise ValueError(
+            "MODEL1 cache must be a 3D uint8 tensor, "
+            f"got shape={tuple(kv_cache_packed.shape)}, dtype={kv_cache_packed.dtype}"
+        )
+    if kv_cache_packed.shape[0] <= 0 or kv_cache_packed.shape[1] <= 0:
+        raise ValueError(
+            f"MODEL1 cache dimensions must be non-empty, got {tuple(kv_cache_packed.shape)}"
+        )
+    if kv_cache_packed.shape[2] != ENTRY_BYTES:
+        raise ValueError(
+            f"MODEL1 logical entry must be {ENTRY_BYTES} bytes, "
+            f"got {kv_cache_packed.shape[2]}"
+        )
+    actual_block_size = int(kv_cache_packed.shape[1])
+    if block_size is not None and int(block_size) != actual_block_size:
+        raise ValueError(
+            "MODEL1 block_size must match cache shape[1], "
+            f"got block_size={block_size}, shape={tuple(kv_cache_packed.shape)}"
+        )
+    if (
+        kv_cache_packed.stride(1) != ENTRY_BYTES
+        or kv_cache_packed.stride(2) != 1
+    ):
+        raise ValueError(
+            "MODEL1 logical shape must use strides (physical_block, 584, 1), "
+            f"got strides={tuple(kv_cache_packed.stride())}"
+        )
+    block_stride = int(kv_cache_packed.stride(0))
+    payload_bytes = model1_block_payload_bytes(actual_block_size)
+    if block_stride < payload_bytes:
+        raise ValueError(
+            "MODEL1 physical block stride is smaller than its logical payload: "
+            f"stride={block_stride}, payload={payload_bytes}"
+        )
+    storage_elems = (
+        kv_cache_packed.untyped_storage().nbytes()
+        // kv_cache_packed.element_size()
+    )
+    required_storage_end = (
+        int(kv_cache_packed.storage_offset())
+        + (int(kv_cache_packed.shape[0]) - 1) * block_stride
+        + block_stride
+    )
+    if required_storage_end > storage_elems:
+        raise ValueError(
+            "MODEL1 storage does not cover the final physical block stride: "
+            f"required_end={required_storage_end}, storage_elems={storage_elems}, "
+            f"storage_offset={kv_cache_packed.storage_offset()}, "
+            f"num_blocks={kv_cache_packed.shape[0]}, stride={block_stride}"
+        )
+    return actual_block_size, block_stride
+
+
 def _model1_block_bytes(kv_cache_packed: torch.Tensor, block_idx: int) -> torch.Tensor:
     """Return a 1D byte view for one MODEL1 block.
 
@@ -65,13 +151,18 @@ def _model1_block_bytes(kv_cache_packed: torch.Tensor, block_idx: int) -> torch.
     physical block stride and computes all intra-block offsets manually. The
     logical ``[block_size, 584]`` dimensions are not a true per-slot layout.
     """
-    assert kv_cache_packed.dtype == torch.uint8 and kv_cache_packed.dim() == 3
-    block_stride = int(kv_cache_packed.stride(0))
+    _, block_stride = _validate_model1_cache_tensor(kv_cache_packed)
+    block_idx = int(block_idx)
+    if block_idx < 0 or block_idx >= kv_cache_packed.shape[0]:
+        raise IndexError(
+            "MODEL1 block_idx out of range: "
+            f"index={block_idx}, num_blocks={kv_cache_packed.shape[0]}"
+        )
     blocks = kv_cache_packed.as_strided(
         (kv_cache_packed.shape[0], block_stride),
         (block_stride, 1),
     )
-    return blocks[int(block_idx)]
+    return blocks[block_idx]
 
 
 def _model1_slot_views(
@@ -81,12 +172,12 @@ def _model1_slot_views(
     block_size: Optional[int] = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Return ``(nope_rope[576], scales[8])`` views for one MODEL1 slot."""
-    if block_size is None:
-        block_size = int(kv_cache_packed.shape[1])
+    actual_block_size, _ = _validate_model1_cache_tensor(
+        kv_cache_packed, block_size
+    )
     block = _model1_block_bytes(kv_cache_packed, block_idx)
-    nope_rope_start = int(block_offset) * NOPE_ROPE_STRIDE
-    scale_start = (
-        int(block_size) * NOPE_ROPE_STRIDE + int(block_offset) * SCALE_BYTES_PER_TOKEN
+    nope_rope_start, scale_start = model1_slot_physical_offsets(
+        actual_block_size, block_offset
     )
     return (
         block[nope_rope_start : nope_rope_start + NOPE_ROPE_STRIDE],
@@ -129,13 +220,9 @@ def quantize_v4_kv_decode(
         kv_cache_packed: ``[num_blocks, block_size, 584]`` uint8 — packed
             FP8 cache. Modified in place.
     """
-    assert (
-        k_bf16.dim() == 2 and k_bf16.shape[1] == NOPE_DIM + ROPE_DIM
-    ), f"k_bf16 expected [T, 512], got {tuple(k_bf16.shape)}"
-    assert (
-        kv_cache_packed.dtype == torch.uint8
-        and kv_cache_packed.shape[-1] == ENTRY_BYTES
-    ), f"kv_cache_packed expected [..., 584] uint8, got {kv_cache_packed.shape}/{kv_cache_packed.dtype}"
+    if k_bf16.dim() != 2 or k_bf16.shape[1] != NOPE_DIM + ROPE_DIM:
+        raise ValueError(f"k_bf16 expected [T, 512], got {tuple(k_bf16.shape)}")
+    _validate_model1_cache_tensor(kv_cache_packed)
 
     # Split V4 K into (kv_c[NoPE], k_pe[RoPE])
     kv_c = k_bf16[:, :NOPE_DIM].contiguous()
@@ -214,11 +301,9 @@ def reference_quantize_v4_kv_decode(
             from the flat ``slot_mapping`` entries the same way the CUDA
             kernel does.
     """
-    assert k_bf16.dim() == 2 and k_bf16.shape[1] == NOPE_DIM + ROPE_DIM
-    assert (
-        kv_cache_packed.dtype == torch.uint8
-        and kv_cache_packed.shape[-1] == ENTRY_BYTES
-    )
+    if k_bf16.dim() != 2 or k_bf16.shape[1] != NOPE_DIM + ROPE_DIM:
+        raise ValueError(f"k_bf16 expected [T, 512], got {tuple(k_bf16.shape)}")
+    _validate_model1_cache_tensor(kv_cache_packed, block_size)
 
     T = k_bf16.shape[0]
     if slot_mapping.dtype != torch.long:
@@ -246,6 +331,7 @@ def reference_quantize_v4_kv_decode(
             tile_quant = _quantize_to_fp8_e4m3(tile, scale)  # [64] uint8
             base = tile_idx * TILE_SIZE
             nope_bytes[base : base + TILE_SIZE] = bytes(tile_quant.tolist())
+        scale_bytes[-1] = 0
 
         # ---- RoPE: 64 bf16 → 128 bytes (no quantization) ----
         rope_bytes = k_pe_token.contiguous().view(torch.uint8)  # [128] uint8

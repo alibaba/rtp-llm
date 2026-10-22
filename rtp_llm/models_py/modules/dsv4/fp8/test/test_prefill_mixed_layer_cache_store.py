@@ -106,6 +106,7 @@ class _FakeLayer:
         *,
         kv_cache=None,
         block_tables_by_type=None,
+        numerical_status=None,
     ):
         meta = self.attn._prefill_meta_shared
         assert meta is not None
@@ -160,14 +161,14 @@ class _FakeV4:
     def _propagate_cp_ctx(self, cp_ctx) -> None:
         self.events.append(("propagate_cp", cp_ctx))
 
-    def embed(self, input_ids):
+    def _embed(self, input_ids):
         base = input_ids.to(torch.float32).unsqueeze(-1)
         return base.repeat(1, 4)
 
     def _hc_head_reduce(self, h):
         return h.mean(dim=1)
 
-    def norm(self, h):
+    def _norm(self, h):
         return h
 
 

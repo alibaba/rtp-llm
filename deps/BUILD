@@ -5,6 +5,10 @@ load(":pip.bzl", "PIP_EXTRA_ARGS")
 exports_files([
     "http.bzl",
     "requirements_base.txt",
+    "requirements_base_ppu.txt",
+    "requirements_lock_torch_ppu.txt",
+    "requirements_ppu.in",
+    "requirements_torch_ppu.txt",
     "requirements_lock_rocm.txt",
     "requirements_rocm.txt",
 ])
@@ -38,6 +42,18 @@ py_library(
     name = "extension_lib",
     deps = [],
     visibility = ["//visibility:public"],
+)
+
+compile_pip_requirements(
+    name = "requirements_torch_ppu",
+    src = "requirements_ppu.in",
+    extra_args = PIP_EXTRA_ARGS,
+    extra_data = [
+        "//:requirements_base_ppu.txt",
+        "//:requirements_torch_ppu.txt",
+    ],
+    requirements_txt = "requirements_lock_torch_ppu.txt",
+    tags = ["manual"],
 )
 
 compile_pip_requirements(

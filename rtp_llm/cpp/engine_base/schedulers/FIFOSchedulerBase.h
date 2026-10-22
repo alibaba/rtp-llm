@@ -14,6 +14,7 @@
 #include "rtp_llm/cpp/config/ConfigModules.h"
 #include "rtp_llm/cpp/engine_base/schedulers/EngineScheduleInfo.h"
 #include "rtp_llm/cpp/engine_base/schedulers/SchedulerBase.h"
+#include "rtp_llm/cpp/engine_base/stream/ChunkedPrefill.h"
 #include "rtp_llm/cpp/engine_base/stream/GenerateTypes.h"
 #include "rtp_llm/cpp/metrics/RtpLLMMetrics.h"
 
@@ -65,15 +66,21 @@ protected:
         return 0;
     }
     virtual void fillExtraMetrics(RtpLLMSchedulerMetricsCollector& collector) const {}
+    virtual void appendExtraRunningTaskList(std::vector<EngineScheduleInfo::TaskInfo>& task_list) const {}
 
     bool   checkInputLength(const GenerateStreamPtr& stream);
+    absl::Status checkChunkedPrefillRequest(const GenerateStreamPtr& stream);
+    std::list<GenerateStreamPtr> selectPrefillPrefix(std::list<GenerateStreamPtr>& active_streams);
     void   cancelStreams(std::list<GenerateStreamPtr>& streams);
+    bool   refreshAndReapTerminalStreams(std::list<GenerateStreamPtr>& streams);
     size_t                              evaluateAndUpdateStreams(std::list<GenerateStreamPtr>&              streams,
                                                                  const std::unordered_set<GenerateStream*>* admitted_streams = nullptr);
     std::unordered_set<GenerateStream*> evaluateWaitingStreams(std::list<GenerateStreamPtr>& waiting_streams,
                                                                bool include_running_mode = true);
     void   addStreamToNewState(const GenerateStreamPtr& stream, StreamState new_state);
     size_t countInitedKVCacheStreams() const;
+    void   appendTaskInfos(std::vector<EngineScheduleInfo::TaskInfo>& task_list,
+                           const std::list<GenerateStreamPtr>&         streams) const;
 
 protected:
     PDSepConfig                     pd_sep_config_;
@@ -88,6 +95,9 @@ protected:
     size_t                          max_batch_tokens_size_   = 0;
     size_t                          max_generate_batch_size_ = 1;
     size_t                          max_inited_kv_cache_streams_ = 0;
+    int64_t                         prefill_chunk_size_      = 0;
+    int64_t                         prefill_chunk_batch_tokens_ = 0;
+    bool                            align_final_suffix_     = false;
     bool                            need_fill_fake_stream_   = false;
     std::atomic<bool>               stop_                    = false;
     bool                            schedule_trigger_        = false;

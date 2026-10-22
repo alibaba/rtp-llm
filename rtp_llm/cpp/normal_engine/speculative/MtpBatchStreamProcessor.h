@@ -25,6 +25,12 @@ public:
         dspark_mask_token_id_(static_cast<int32_t>(sp_config.sp_dspark_mask_token_id)),
         dspark_sample_from_anchor_(sp_config.sp_dspark_sample_from_anchor) {}
 
+    void setDraftToTargetMap(const torch::Tensor& mapping) {
+        draft_to_target_map_ = mapping;
+    }
+
+    torch::Tensor targetDraftProbs(const torch::Tensor& probs) const;
+
     absl::Status dispatchPrefill(const StreamGroups& stream_groups,
                                  const MergedOutput& prefill_output,
                                  const MergedOutput& propose_output) const;
@@ -189,10 +195,11 @@ protected:
     }
 
     int     propose_step_;
-    size_t  vocab_size_                = 0;
-    bool    is_dspark_                 = false;
-    int32_t dspark_mask_token_id_      = -1;
-    bool    dspark_sample_from_anchor_ = true;
+    size_t  vocab_size_                   = 0;
+    torch::Tensor draft_to_target_map_;
+    bool    is_dspark_                    = false;
+    int32_t dspark_mask_token_id_         = -1;
+    bool    dspark_sample_from_anchor_     = true;
 
     // Decode-round constants are grow-only device buffers.  Keeping them on
     // device is required by RTP_LLM_STREAM_ASYNC: no accept-length D2H is

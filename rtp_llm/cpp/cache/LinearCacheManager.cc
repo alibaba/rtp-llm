@@ -284,17 +284,27 @@ bool LinearCacheManager::malloc(BlockIds&                block_ids,
 }
 
 void LinearCacheManager::removeSkippedBlocks(BlockIds& block_ids, bool enable_reuse_cache, int reserve_step) {
+    const int last_position = static_cast<int>(block_ids.blocksNum()) - retainedTailBlockCount() - 1 - reserve_step;
+    removeSkippedBlocksThrough(block_ids, last_position, enable_reuse_cache);
+}
+
+void LinearCacheManager::removeSkippedBlocksBefore(BlockIds& block_ids, int prefix_len, bool enable_reuse_cache) {
+    // Keep the state loaded by this forward, even if its grant crosses several
+    // blocks. Later slots include the destination and the admission-time tail.
+    const int last_position = prefix_len > 0 ? (prefix_len - 1) / seqSizePerBlock() - 1 : -1;
+    removeSkippedBlocksThrough(block_ids, last_position, enable_reuse_cache);
+}
+
+void LinearCacheManager::removeSkippedBlocksThrough(BlockIds& block_ids, int last_position, bool enable_reuse_cache) {
     const auto& block_indices = block_ids.blocks();
     if (block_indices.empty()) {
         return;
     }
-    const int step                 = std::max(1, linear_step_);
-    const int retained_tail_blocks = retainedTailBlockCount();
-    const int block_size           = static_cast<int>(block_indices.size());
+    const int step = std::max(1, linear_step_);
 
     BlockIndicesType    blocks_to_free;
     std::vector<size_t> pos_to_remove;
-    for (int i = block_size - retained_tail_blocks - 1 - reserve_step; i >= 0; i--) {
+    for (int i = std::min(last_position, static_cast<int>(block_indices.size()) - 1); i >= 0; i--) {
         if (isNullBlockIdx(block_indices[i])) {
             continue;
         }

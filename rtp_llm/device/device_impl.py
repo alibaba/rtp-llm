@@ -5,7 +5,6 @@ from typing import List, Optional
 
 import psutil
 import torch
-
 from rtp_llm.device.device_base import DeviceBase, MemInfo
 from rtp_llm.ops.compute_ops import (
     preprocess_gemm_weight_by_key,
@@ -147,6 +146,21 @@ class GpuImpl(DeviceBase):
 
     def get_device_id(self) -> int:
         return torch.cuda.current_device()
+
+    def device_string(self, local_rank: int) -> str:
+        return f"cuda:{local_rank}"
+
+    def runtime_context(self, local_rank: int):
+        from rtp_llm.device.runtime import DeviceRuntimeContext
+
+        if self.get_device_id() != local_rank:
+            raise RuntimeError("Capture platform only after setting the worker device")
+        return DeviceRuntimeContext(
+            self.get_device_type(),
+            torch.cuda.get_device_name(local_rank),
+            local_rank,
+            device_string=self.device_string(local_rank),
+        )
 
     def unpack_int32_into_int16(self, w_packed: torch.Tensor, int8: bool):
         if int8:
@@ -708,6 +722,16 @@ class CudaImpl(GpuImpl):
 
 
 class PpuImpl(CudaImpl):
+    def prepare_model_runtime(self, model_config, engine_config) -> None:
+        from rtp_llm.platforms.ppu.runtime import prepare_model_runtime
+
+        prepare_model_runtime(model_config, engine_config)
+
+    def configure_model_weight_loader(self, model_config, loader) -> None:
+        from rtp_llm.platforms.ppu.runtime import configure_model_weight_loader
+
+        configure_model_weight_loader(model_config, loader)
+
     @property
     def support_dio_load(self) -> bool:
         return False

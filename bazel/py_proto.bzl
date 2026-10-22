@@ -20,7 +20,8 @@ def _generate_grpc_proto_impl(ctx):
         inputs = [proto_file],
         executable = ctx.executable.create_grpc_proto,
         arguments = [proto_file.path, output_dir],
-        tools = [ctx.executable.create_grpc_proto]
+        tools = [ctx.executable.create_grpc_proto],
+        use_default_shell_env = True,
     )
 
     # pack as py_library

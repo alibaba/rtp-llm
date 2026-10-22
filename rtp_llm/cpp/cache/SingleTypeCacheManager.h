@@ -56,6 +56,10 @@ public:
                         std::vector<size_t>*     backfilled_positions = nullptr,
                         const RequiredPositions& required_positions   = {})                                        = 0;
     virtual void removeSkippedBlocks(BlockIds& block_ids, bool enable_reuse_cache = false, int reserve_step = 0) = 0;
+    // FULL/LINEAR resources retain their admission-time allocation. Sparse tail
+    // groups override these to backfill a chunk tail without changing table width.
+    virtual bool preparePrefillChunk(BlockIds&, int, std::vector<size_t>*) { return true; }
+    virtual void releaseBeforePrefillChunk(BlockIds&, int, bool) {}
     virtual int  needBlocksNum(int seq_len, int current_blocks, int reserve_step = 0) const                      = 0;
     // Estimate peak additional blocks needed when generating remaining_tokens more tokens.
     virtual int estimatePeakNeedBlocks(int                     seq_len,

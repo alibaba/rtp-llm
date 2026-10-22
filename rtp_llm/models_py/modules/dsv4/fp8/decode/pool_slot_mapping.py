@@ -24,6 +24,9 @@ from __future__ import annotations
 import torch
 
 
+_SLOT_INDEX_DTYPES = (torch.int32, torch.int64)
+
+
 def compute_kv_pool_slot_mapping(
     block_table: torch.Tensor,
     abs_pos: torch.Tensor,
@@ -59,20 +62,74 @@ def compute_kv_pool_slot_mapping(
         ``[B * q_len_per_req]`` int64 of global flat slots. ``-1`` marks
         skip (caller passes ``mask_negative=True`` to the write op).
     """
-    if abs_pos.numel() == 0:
-        return torch.empty(0, dtype=torch.long, device=abs_pos.device)
     pool_entries_per_block = int(pool_entries_per_block)
     pool_tokens_per_block = int(pool_tokens_per_block)
     ring_entries = int(ring_entries)
-    assert pool_entries_per_block > 0
-    assert pool_tokens_per_block > 0
-    assert ring_entries > 0
+    if pool_entries_per_block <= 0:
+        raise ValueError(
+            "pool_entries_per_block must be positive, "
+            f"got {pool_entries_per_block}"
+        )
+    if pool_tokens_per_block <= 0:
+        raise ValueError(
+            "pool_tokens_per_block must be positive, "
+            f"got {pool_tokens_per_block}"
+        )
+    if ring_entries <= 0:
+        raise ValueError(f"ring_entries must be positive, got {ring_entries}")
+    if (
+        block_table.dim() != 2
+        or block_table.shape[0] <= 0
+        or block_table.shape[1] <= 0
+    ):
+        raise ValueError(
+            "block_table must have non-empty shape [B, max_blocks_per_req], "
+            f"got {tuple(block_table.shape)}"
+        )
+    if abs_pos.dim() != 1:
+        raise ValueError(f"abs_pos must be 1D, got shape={tuple(abs_pos.shape)}")
+    if block_table.dtype not in _SLOT_INDEX_DTYPES:
+        raise TypeError(
+            "block_table must use int32 or int64 indices, "
+            f"got dtype={block_table.dtype}"
+        )
+    if abs_pos.dtype not in _SLOT_INDEX_DTYPES:
+        raise TypeError(
+            f"abs_pos must use int32 or int64 indices, got dtype={abs_pos.dtype}"
+        )
+    if block_table.device != abs_pos.device:
+        raise ValueError(
+            "block_table and abs_pos must be on the same device, "
+            f"got block_table={block_table.device}, abs_pos={abs_pos.device}"
+        )
+    if valid_mask is not None and valid_mask.shape != abs_pos.shape:
+        raise ValueError(
+            "valid_mask must match abs_pos shape, "
+            f"got valid_mask={tuple(valid_mask.shape)}, abs_pos={tuple(abs_pos.shape)}"
+        )
+    if valid_mask is not None and valid_mask.dtype != torch.bool:
+        raise TypeError(f"valid_mask must be bool, got dtype={valid_mask.dtype}")
+    if valid_mask is not None and valid_mask.device != abs_pos.device:
+        raise ValueError(
+            "valid_mask and abs_pos must be on the same device, "
+            f"got valid_mask={valid_mask.device}, abs_pos={abs_pos.device}"
+        )
+    if ring_entries > pool_entries_per_block:
+        raise ValueError(
+            "ring_entries cannot exceed pool_entries_per_block, "
+            f"got ring_entries={ring_entries}, entries={pool_entries_per_block}"
+        )
+    if abs_pos.numel() == 0:
+        return torch.empty(0, dtype=torch.long, device=abs_pos.device)
 
     B = block_table.shape[0]
     T_total = abs_pos.shape[0]
-    assert T_total % B == 0, f"abs_pos ({T_total}) must be divisible by batch ({B})"
+    if T_total % B != 0:
+        raise ValueError(f"abs_pos ({T_total}) must be divisible by batch ({B})")
     q_len = T_total // B
 
+    # Validate the index dtype before promoting to int64 so the arithmetic does
+    # not overflow int32 for large global positions.
     abs_pos_i64 = abs_pos.to(torch.long)
     # Per-token request index (request-major flat layout).
     req_idx = (
@@ -86,7 +143,7 @@ def compute_kv_pool_slot_mapping(
     # range, then mask the output back to -1.
     skip = abs_pos_i64 < 0
     if valid_mask is not None:
-        skip = skip | (~valid_mask.to(torch.bool))
+        skip = skip | (~valid_mask)
     safe_pos = torch.where(skip, torch.zeros_like(abs_pos_i64), abs_pos_i64)
 
     block_in_seq = safe_pos // pool_tokens_per_block
@@ -94,11 +151,15 @@ def compute_kv_pool_slot_mapping(
 
     # Clamp block_in_seq to [0, max_blocks-1] to keep gather in range when
     # abs_pos overflows the request's allocation (shouldn't happen for valid
-    # tokens; defensive against sentinel rows beyond [:bsz]).
+    # tokens; defensive against sentinel rows beyond [:bsz]). Mainline
+    # semantics: keep clamping so beyond-table positions still write through
+    # the last table column; callers that must skip rows pass valid_mask.
     max_blocks = block_table.shape[1]
     block_in_seq = block_in_seq.clamp_(0, max_blocks - 1)
 
     # Gather block_id per token.
+    # block_table's integer/device contract was checked above; promote only to
+    # make the returned flat slots unconditionally int64.
     flat_bt = block_table.to(torch.long)
     block_id = flat_bt[req_idx, block_in_seq]
     global_slot = block_id * pool_entries_per_block + in_block
