@@ -218,10 +218,7 @@ class WorkerBatcherSchedulingTest {
             assertSame(
                     route,
                     queue.updateQueue(
-                            PrefillState.QueueChange.ENQUEUE,
-                            route,
-                            16L,
-                            System.currentTimeMillis()));
+                            PrefillState.QueueChange.ENQUEUE, route, System.currentTimeMillis()));
         } finally {
             queue.lock.unlock();
         }
@@ -264,7 +261,6 @@ class WorkerBatcherSchedulingTest {
                         queue.updateQueue(
                                 PrefillState.QueueChange.REMOVE,
                                 route,
-                                0L,
                                 System.currentTimeMillis()));
             } finally {
                 queue.lock.unlock();
@@ -402,10 +398,7 @@ class WorkerBatcherSchedulingTest {
             assertSame(
                     request,
                     state.updateQueue(
-                            PrefillState.QueueChange.ENQUEUE,
-                            request,
-                            0L,
-                            System.currentTimeMillis()));
+                            PrefillState.QueueChange.ENQUEUE, request, System.currentTimeMillis()));
         } finally {
             state.lock.unlock();
         }
@@ -440,10 +433,7 @@ class WorkerBatcherSchedulingTest {
             assertSame(
                     request,
                     state.updateQueue(
-                            PrefillState.QueueChange.ENQUEUE,
-                            request,
-                            0L,
-                            System.currentTimeMillis()));
+                            PrefillState.QueueChange.ENQUEUE, request, System.currentTimeMillis()));
         } finally {
             state.lock.unlock();
         }
@@ -517,10 +507,7 @@ class WorkerBatcherSchedulingTest {
             assertSame(
                     request,
                     state.updateQueue(
-                            PrefillState.QueueChange.ENQUEUE,
-                            request,
-                            0L,
-                            System.currentTimeMillis()));
+                            PrefillState.QueueChange.ENQUEUE, request, System.currentTimeMillis()));
         } finally {
             state.lock.unlock();
         }
@@ -585,6 +572,50 @@ class WorkerBatcherSchedulingTest {
             delivery.allowFirstPrepare.countDown();
             delivery.allowSecondPrepare.countDown();
         }
+    }
+
+    @Test
+    @Timeout(10)
+    void nonBatchSlotReleaseWakesTheWaitingHeadWithoutPolling() throws Exception {
+        FlexlbConfig config = singleConfig();
+        config.setDispatcher(org.flexlb.config.ConfigTestSupport.nonBatch());
+        config.getDispatcher().setMaxInflightPerPrefillWorker(1);
+        var endpoint =
+                org.flexlb.balance.endpoint.EndpointTestSupport.unstartedPrefill(
+                        config,
+                        WorkerStatus.createDiscovered(
+                                RoleType.PREFILL, null, "127.0.0.1", 8080, 9090, null),
+                        SchedulerTestSupport.dispatcher(),
+                        mock(AbstractRequestScheduler.class));
+        WorkerBatcher worker = org.flexlb.balance.endpoint.EndpointTestSupport.batcher(endpoint);
+        runtimes.add(worker);
+        var occupied = item(config, endpoint, 31L, 50, System.currentTimeMillis());
+        var reservation = endpoint.ownership.reserveUnqueuedRoute(occupied, 1L, 1L).reservation();
+        assertNotNull(reservation);
+        var waiting = new CountDownLatch(1);
+        var resumed = new CountDownLatch(1);
+        var attempts = new AtomicInteger();
+        doAnswer(
+                        call -> {
+                            attempts.incrementAndGet();
+                            if (!endpoint.ownership.requestCapacityAvailable(1, 1)) {
+                                waiting.countDown();
+                                return CapacityBoundary.deliveryUnavailable(
+                                        CapacityBoundary.Resource.PREFILL_REQUEST);
+                            }
+                            resumed.countDown();
+                            return CapacityBoundary.OWNERSHIP_LOST;
+                        })
+                .when(worker)
+                .processSelection(any(), anyString(), any(), any());
+        worker.start();
+        assertTrue(worker.offer(item(config, endpoint, 32L, 50, System.currentTimeMillis())));
+        await(waiting);
+        assertTrue(worker.offer(item(config, endpoint, 33L, 50, System.currentTimeMillis())));
+        TimeUnit.MILLISECONDS.sleep(100L);
+        assertEquals(1, attempts.get(), "backlog publication must not poll a full delivery slot");
+        assertTrue(endpoint.release(reservation, null));
+        await(resumed);
     }
 
     @Test

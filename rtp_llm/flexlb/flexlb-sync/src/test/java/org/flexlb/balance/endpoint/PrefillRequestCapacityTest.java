@@ -39,26 +39,23 @@ class PrefillRequestCapacityTest {
                     System::currentTimeMillis);
 
     @Test
-    void waitingPreparedAndCommittedRequestsShareOneCount() {
-        RequestRoute queued = item(1), immediate = item(2);
+    void queuedOwnersDoNotConsumeImmediateDeliveryCapacity() {
+        RequestRoute queued = item(1), immediate = item(2), another = item(3);
         assertTrue(enqueue(queued, 2L));
-        var registration = reserve(immediate, 2L).reservation();
-        assertNotNull(registration);
-        assertEquals(2L, state.admissionSummary(0, 0L).occupiedRequests());
-        assertFalse(enqueue(item(3), 2L));
-        assertEquals(PrefillState.CapacityStatus.CAPACITY_FULL, reserve(item(3), 2L).status());
-        try (var handoff = commit(immediate, registration)) {
-            assertEquals(2L, state.admissionSummary(0, 0L).occupiedRequests());
-        }
-        EndpointTestSupport.rollback(registration);
-        assertEquals(
-                2L,
-                state.admissionSummary(0, 0L).occupiedRequests(),
-                "ACK and capability closure cannot release Engine ownership");
+        var first = reserve(immediate, 2L).reservation();
+        assertNotNull(first);
+        var second = reserve(another, 2L).reservation();
+        assertNotNull(second);
+        assertEquals(PrefillState.CapacityStatus.CAPACITY_FULL, reserve(item(4), 2L).status());
+        try (var handoff = commit(immediate, first)) {}
+        EndpointTestSupport.rollback(first);
+        assertFalse(state.requestCapacityAvailable(2, 1), "committed execution retains its slot");
         assertTrue(EndpointTestSupport.releaseRequest(state, immediate));
         assertFalse(EndpointTestSupport.releaseRequest(state, immediate));
-        assertTrue(enqueue(item(3), 2L));
-        assertEquals(2L, state.admissionSummary(0, 0L).occupiedRequests());
+        assertTrue(state.requestCapacityAvailable(2, 1));
+        EndpointTestSupport.rollback(second);
+        assertTrue(state.requestCapacityAvailable(2, 2));
+        assertEquals(1L, state.progress().outstandingRequests());
     }
 
     @Test
@@ -146,7 +143,7 @@ class PrefillRequestCapacityTest {
     @Test
     void immediateAdmissionChecksCurrentCapacityAfterOtherOwnershipChanges() {
         assertTrue(state.progress().outstandingRequests() < 2L);
-        assertTrue(enqueue(item(1), 2L));
+        assertNotNull(reserve(item(1), 2L).reservation());
         assertNotNull(
                 reserve(item(2), 2L).reservation(),
                 "an intervening ownership mutation does not invalidate remaining capacity");
@@ -174,7 +171,6 @@ class PrefillRequestCapacityTest {
                         state.updateQueue(
                                 PrefillState.QueueChange.REMOVE,
                                 queued,
-                                0L,
                                 System.currentTimeMillis()));
                 assertTrue(
                         reader.submit(() -> state.progress().outstandingRequests() < 1L)
@@ -254,7 +250,6 @@ class PrefillRequestCapacityTest {
                             direct.updateQueue(
                                     PrefillState.QueueChange.ENQUEUE,
                                     item(1),
-                                    1L,
                                     System.currentTimeMillis()));
             assertTrue(direct.progress().outstandingRequests() < 1L);
             assertEquals(0L, direct.admissionSummary(0, 0L).occupiedRequests());
@@ -292,101 +287,39 @@ class PrefillRequestCapacityTest {
             assertSame(
                     first,
                     ledger.updateQueue(
-                            PrefillState.QueueChange.ENQUEUE,
-                            first,
-                            2L,
-                            System.currentTimeMillis()));
+                            PrefillState.QueueChange.ENQUEUE, first, System.currentTimeMillis()));
             assertSame(
                     second,
                     ledger.updateQueue(
-                            PrefillState.QueueChange.ENQUEUE,
-                            second,
-                            2L,
-                            System.currentTimeMillis()));
-            assertNull(
-                    ledger.updateQueue(
-                            PrefillState.QueueChange.ENQUEUE,
-                            incoming,
-                            2L,
-                            System.currentTimeMillis()));
+                            PrefillState.QueueChange.ENQUEUE, second, System.currentTimeMillis()));
             Class<? extends Throwable> failureType =
                     fatal ? AssertionError.class : IllegalStateException.class;
             assertThrows(
                     failureType,
-                    () -> ledger.replaceQueuedRoutesLocked(incoming, 2L).equals(List.of(first)));
+                    () ->
+                            ledger.updateQueue(
+                                    PrefillState.QueueChange.ENQUEUE,
+                                    incoming,
+                                    System.currentTimeMillis()));
             assertEquals(List.of(first, second), ledger.captureQueue(Integer.MAX_VALUE).items());
             assertEquals(2L, ledger.admissionSummary(0, 0L).occupiedRequests());
 
             failInsertion.set(false);
-            assertTrue(ledger.replaceQueuedRoutesLocked(incoming, 2L).equals(List.of(first)));
-            assertEquals(List.of(second, incoming), ledger.captureQueue(Integer.MAX_VALUE).items());
-            assertEquals(2L, ledger.admissionSummary(0, 0L).occupiedRequests());
+            assertSame(
+                    incoming,
+                    ledger.updateQueue(
+                            PrefillState.QueueChange.ENQUEUE,
+                            incoming,
+                            System.currentTimeMillis()));
+            assertEquals(
+                    List.of(first, second, incoming),
+                    ledger.captureQueue(Integer.MAX_VALUE).items());
+            assertEquals(3L, ledger.admissionSummary(0, 0L).occupiedRequests());
             assertNull(
                     ledger.updateQueue(
-                            PrefillState.QueueChange.REMOVE, first, 0L, System.currentTimeMillis()),
-                    "a displaced owner cannot release the replacement");
-            assertFalse(
-                    ledger.replaceQueuedRoutesLocked(item(3), 2L).equals(List.of(second)),
-                    "a reused request ID cannot replace its current queue owner");
-            assertSame(incoming, ledger.captureQueue(Integer.MAX_VALUE).items().getLast());
-            assertEquals(2L, ledger.admissionSummary(0, 0L).occupiedRequests());
-        } finally {
-            lock.unlock();
-        }
-    }
-
-    @ParameterizedTest
-    @ValueSource(strings = {"duplicate", "foreign", "missing"})
-    void replacementRevalidatesEverySelectedOwnerBeforeAnyMutation(String mismatch) {
-        RequestRoute first = item(1), second = item(2), incoming = item(3);
-        when(first.priority()).thenReturn(20);
-        when(second.priority()).thenReturn(20);
-        when(incoming.priority()).thenReturn(80);
-        PrefillState ledger =
-                new PrefillState(
-                        lock,
-                        PrefillActiveIndex.ordered(
-                                16, Comparator.comparingLong(RequestRoute::requestId)),
-                        System::currentTimeMillis);
-        lock.lock();
-        try {
-            assertSame(
-                    first,
-                    ledger.updateQueue(
-                            PrefillState.QueueChange.ENQUEUE,
-                            first,
-                            2L,
-                            System.currentTimeMillis()));
-            assertSame(
-                    second,
-                    ledger.updateQueue(
-                            PrefillState.QueueChange.ENQUEUE,
-                            second,
-                            2L,
-                            System.currentTimeMillis()));
-            List<RequestRoute> victims =
-                    switch (mismatch) {
-                        case "duplicate" -> List.of(first, first);
-                        case "foreign" -> List.of(first, item(2));
-                        case "missing" -> List.of(first);
-                        default -> throw new AssertionError(mismatch);
-                    };
-
-            try (var planner =
-                    org.mockito.Mockito.mockStatic(
-                            org.flexlb.balance.eviction.EvictionPlanner.class)) {
-                planner.when(
-                                () ->
-                                        org.flexlb.balance.eviction.EvictionPlanner
-                                                .selectPrefillVictims(
-                                                        org.mockito.ArgumentMatchers.anyList(),
-                                                        org.mockito.ArgumentMatchers.eq(80),
-                                                        org.mockito.ArgumentMatchers.eq(2L)))
-                        .thenReturn(victims);
-                assertTrue(ledger.replaceQueuedRoutesLocked(incoming, 1L).isEmpty());
-            }
-            assertEquals(List.of(first, second), ledger.captureQueue(Integer.MAX_VALUE).items());
-            assertEquals(2L, ledger.admissionSummary(0, 0L).occupiedRequests());
+                            PrefillState.QueueChange.ENQUEUE, item(3), System.currentTimeMillis()),
+                    "a reused id cannot replace its current queue owner");
+            assertTrue(ledger.requestCapacityAvailable(1L, 1));
         } finally {
             lock.unlock();
         }
@@ -451,10 +384,7 @@ class PrefillRequestCapacityTest {
         lock.lock();
         try {
             return state.updateQueue(
-                            PrefillState.QueueChange.ENQUEUE,
-                            item,
-                            limit,
-                            System.currentTimeMillis())
+                            PrefillState.QueueChange.ENQUEUE, item, System.currentTimeMillis())
                     == item;
         } finally {
             lock.unlock();

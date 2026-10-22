@@ -901,7 +901,7 @@ class RequestWorkerSelectorTest {
                         org.mockito.ArgumentMatchers.eq(RoleType.PREFILL),
                         org.mockito.ArgumentMatchers.eq(null),
                         org.mockito.ArgumentMatchers.any(RequestRoute.class)))
-                .thenReturn(PlacementResult.blocked(RoleType.DECODE));
+                .thenReturn(PlacementResult.blocked(PlacementKey.anyGroup(RoleType.DECODE)));
 
         PlacementResult<RequestRoute, PlacementKey> blocked =
                 router.select(context, router.resolvePolicyGroup(context));
@@ -1275,7 +1275,16 @@ class RequestWorkerSelectorTest {
                                     org.mockito.ArgumentMatchers.eq(role),
                                     org.mockito.ArgumentMatchers.eq(group),
                                     org.mockito.ArgumentMatchers.any(RequestRoute.class)))
-                            .thenReturn(result);
+                            .thenReturn(
+                                    new PlacementResult<>(
+                                            result.status(),
+                                            result.value(),
+                                            result.failure(),
+                                            result.blocker() == null
+                                                    ? null
+                                                    : new PlacementKey(
+                                                            result.blocker(), group, null),
+                                            result.diagnostics()));
             case DECODE ->
                     when(decodeSelector.select(
                                     org.mockito.ArgumentMatchers.eq(context.data().getRequest()),

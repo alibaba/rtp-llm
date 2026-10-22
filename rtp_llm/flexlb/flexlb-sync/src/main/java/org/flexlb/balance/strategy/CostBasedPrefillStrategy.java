@@ -8,12 +8,12 @@ import org.flexlb.balance.endpoint.WorkerEndpoint;
 import org.flexlb.balance.prediction.PrefillTimePredictor;
 import org.flexlb.balance.projection.RouteProjection;
 import org.flexlb.balance.projection.RouteTimelineProjector;
+import org.flexlb.balance.scheduler.PlacementKey;
 import org.flexlb.balance.scheduler.RequestRoute;
 import org.flexlb.cache.monitor.CacheMetricsReporter;
 import org.flexlb.cache.service.CacheAwareService;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.RoutingConfig;
-import org.flexlb.config.VictimStage;
 import org.flexlb.dao.SchedulingMetadata;
 import org.flexlb.dao.loadbalance.AdmissionRejectReason;
 import org.flexlb.dao.loadbalance.DebugInfo;
@@ -51,7 +51,7 @@ public class CostBasedPrefillStrategy {
     private final EndpointRoundRobin tieRotation = new EndpointRoundRobin();
 
     private final boolean priorityOrdering;
-    private final boolean preemptQueued;
+    private final boolean queueScheduling;
     private final Long cacheAffinityExtraTtftMs;
     private final double cacheAffinityMinHitRate;
     private final String deliveryMode;
@@ -68,7 +68,7 @@ public class CostBasedPrefillStrategy {
         this.cacheMetricsReporter = cacheMetricsReporter;
         var config = configService.loadBalanceConfig();
         priorityOrdering = config.isPriorityOrdering();
-        preemptQueued = config.allowsPreemption(VictimStage.PREFILL_QUEUED);
+        queueScheduling = config.isQueue();
         deliveryMode = config.getDispatcher().typeName();
         var affinity = config.getRouter().getRoles().getPrefill().getCacheAffinity();
         cacheAffinityExtraTtftMs =
@@ -77,7 +77,7 @@ public class CostBasedPrefillStrategy {
                 affinity == null ? 0.0 : normalizedHitRate(affinity.getMinPrefixHitPercent());
     }
 
-    public PlacementResult<ServerStatus, RoleType> select(
+    public PlacementResult<ServerStatus, PlacementKey> select(
             Request request,
             SchedulingMetadata metadata,
             RoleType roleType,
@@ -94,7 +94,7 @@ public class CostBasedPrefillStrategy {
         }
     }
 
-    private PlacementResult<ServerStatus, RoleType> selectCandidate(
+    private PlacementResult<ServerStatus, PlacementKey> selectCandidate(
             Request request,
             SchedulingMetadata metadata,
             RoleType roleType,
@@ -108,8 +108,11 @@ public class CostBasedPrefillStrategy {
                 discoverAvailableEndpoints(request, metadata, roleType, group);
         if (discovery.candidates().isEmpty()) {
             Logger.debug("Prefill select failed: no admission capacity, request_id={}", requestId);
-            return classifyAdmissionFailure(
-                    discovery.directory(), metadata.priority(), roleType, group);
+            return blockedWithDiagnostics(
+                    Response.error(roleType.getErrorType()),
+                    new PlacementKey(roleType, group, null),
+                    0,
+                    Map.of());
         }
         Map<String, Integer> cacheMatchResults =
                 cacheAwareService.findMatchingEngines(
@@ -136,13 +139,13 @@ public class CostBasedPrefillStrategy {
             if (poolWideBlocker != null) {
                 return blockedWithDiagnostics(
                         Response.error(StrategyErrorType.RESOURCE_EXHAUSTED),
-                        poolWideBlocker,
+                        new PlacementKey(poolWideBlocker, group, null),
                         discovery.registeredCount(),
                         rejections);
             }
             return blockedWithDiagnostics(
                     Response.error(StrategyErrorType.RESOURCE_EXHAUSTED),
-                    roleType,
+                    new PlacementKey(roleType, group, null),
                     discovery.registeredCount(),
                     rejections);
         }
@@ -155,7 +158,7 @@ public class CostBasedPrefillStrategy {
                     "Prefill select failed: all filtered out, request_id={}, rejections={}",
                     requestId,
                     rejections);
-            return PlacementResult.blocked(roleType);
+            return PlacementResult.blocked(new PlacementKey(roleType, group, null));
         }
 
         PrefillEndpoint best = survivors.endpoint(selectedIndex);
@@ -170,7 +173,42 @@ public class CostBasedPrefillStrategy {
             // The planning endpoint retired or was replaced after the
             // full-fleet snapshot. Re-enter the queue rather than
             // transferring ownership for a stale generation.
-            return PlacementResult.blocked(roleType);
+            return PlacementResult.blocked(new PlacementKey(roleType, group, null));
+        }
+        String admissionBlock = survivors.admissionBlock(selectedIndex);
+        if (admissionBlock != null
+                || !queueScheduling
+                        && !best.ownership.requestCapacityAvailable(best.requestLimit, 1)) {
+            selectedPin.close();
+            Response failure = Response.error(StrategyErrorType.RESOURCE_EXHAUSTED);
+            if (admissionBlock == null) {
+                var reason =
+                        classifyWorkerCapacity(
+                                best.ownership.admissionSummary(
+                                        metadata.priority(), best.requestLimit));
+                failure =
+                        reason == AdmissionRejectReason.HIGHER_PRIORITY_AHEAD
+                                        || reason == AdmissionRejectReason.SAME_PRIORITY_AHEAD
+                                ? Response.error(
+                                        StrategyErrorType.PRIORITY_ADMISSION_REJECTED, reason)
+                                : reason == AdmissionRejectReason.UNSPECIFIED
+                                        ? Response.error(StrategyErrorType.ADMISSION_UNAVAILABLE)
+                                        : failure;
+            }
+            return blockedWithDiagnostics(
+                    failure,
+                    PlacementKey.exact(
+                            roleType,
+                            best.getStatus().topologySnapshot().group(),
+                            survivors.endpointAddress(selectedIndex)),
+                    discovery.registeredCount(),
+                    Map.of(
+                            "reason",
+                            admissionBlock == null ? "PREFILL_CAPACITY" : admissionBlock,
+                            "selectedEndpoint",
+                            survivors.endpointAddress(selectedIndex),
+                            "cacheHitTokens",
+                            bestCacheHit));
         }
         long selectedTtft = survivors.projectedTtftMs(selectedIndex);
         ServerStatus assignment =
@@ -196,48 +234,6 @@ public class CostBasedPrefillStrategy {
         return PlacementResult.success(assignment);
     }
 
-    private static PlacementResult<ServerStatus, RoleType> classifyAdmissionFailure(
-            List<EndpointRegistry.PrefillRoutingEntry> directory,
-            int priority,
-            RoleType role,
-            String group) {
-        AdmissionRejectReason reason = null;
-        int workerCount = 0;
-        long outstandingRequestCount = 0;
-        for (var entry : directory) {
-            PrefillEndpoint endpoint = entry.endpoint();
-            if (group != null && !group.equals(endpoint.getStatus().topologySnapshot().group())) {
-                continue;
-            }
-            workerCount++;
-            var summary = endpoint.ownership.admissionSummary(priority, endpoint.requestLimit);
-            outstandingRequestCount += summary.occupiedRequests();
-            AdmissionRejectReason workerReason = classifyWorkerCapacity(summary);
-            if (reason == null) {
-                reason = workerReason;
-            } else if (reason == AdmissionRejectReason.UNSPECIFIED
-                    || workerReason == AdmissionRejectReason.UNSPECIFIED) {
-                reason = AdmissionRejectReason.UNSPECIFIED;
-            } else if (reason != workerReason) {
-                reason = AdmissionRejectReason.RESOURCE_EXHAUSTED;
-            }
-        }
-        Response failure =
-                reason == null
-                        ? Response.error(role.getErrorType())
-                        : switch (reason) {
-                            case HIGHER_PRIORITY_AHEAD, SAME_PRIORITY_AHEAD ->
-                                    Response.error(
-                                            StrategyErrorType.PRIORITY_ADMISSION_REJECTED, reason);
-                            case RESOURCE_EXHAUSTED ->
-                                    Response.error(StrategyErrorType.RESOURCE_EXHAUSTED);
-                            case UNSPECIFIED ->
-                                    Response.error(StrategyErrorType.ADMISSION_UNAVAILABLE);
-                        };
-        return blockedWithDiagnostics(
-                failure, role, workerCount, Map.of("observedRequests", outstandingRequestCount));
-    }
-
     private static AdmissionRejectReason classifyWorkerCapacity(
             PrefillState.AdmissionSummary summary) {
         long residual = Math.max(0L, summary.requestsToRelease() - summary.lowerPriorityRequests());
@@ -253,14 +249,14 @@ public class CostBasedPrefillStrategy {
         return AdmissionRejectReason.RESOURCE_EXHAUSTED;
     }
 
-    private static PlacementResult<ServerStatus, RoleType> blockedWithDiagnostics(
-            Response failure, RoleType role, int workerCount, Map<String, ?> details) {
+    private static PlacementResult<ServerStatus, PlacementKey> blockedWithDiagnostics(
+            Response failure, PlacementKey key, int workerCount, Map<String, ?> details) {
         return PlacementResult.blocked(
-                role,
+                key,
                 failure,
                 Map.of(
                         "role",
-                        role.name(),
+                        key.role().name(),
                         "workers",
                         workerCount,
                         "observedAtMs",
@@ -431,7 +427,7 @@ public class CostBasedPrefillStrategy {
             RouteProjection.Inputs projectionInputs = ep.captureRouteProjectionInputs();
             PrefillTimePredictor predictor = ep.predictor;
             RouteProjection.CandidateView projection =
-                    projector.projectView(
+                    projector.projectRankingView(
                             projectionInputs,
                             request.getRequestId(),
                             metadata.priority(),
@@ -461,6 +457,11 @@ public class CostBasedPrefillStrategy {
 
             candidates.addCandidate(
                     endpointAddress, ep, projection, projectionInputs.ownershipVersion());
+            var admission =
+                    RouteProjection.applyAdmissionPolicy(projectionInputs.queue(), projection);
+            if (!admission.selectable() && !admission.engineWorkUnmodeled()) {
+                candidates.admissionBlock(admission.detail());
+            }
             if (Logger.isTraceEnabled()) {
                 Logger.trace(
                         "Prefill projection - ip: {}, order: {}, hitCache: {}, ttftMs: {}",
@@ -499,17 +500,10 @@ public class CostBasedPrefillStrategy {
                 continue;
             }
             registered++;
-            if ((endpoint.requestLimit == 0L
-                            || endpoint.ownership.progress().outstandingRequests()
-                                    < endpoint.requestLimit)
-                    || preemptQueued
-                            && endpoint.ownership.canPreemptQueuedRequest(
-                                    metadata.priority(), endpoint.requestLimit)) {
-                if (group == null && matching.isEmpty()) {
-                    matching.ensureCapacity(directory.size());
-                }
-                matching.add(entry);
+            if (group == null && matching.isEmpty()) {
+                matching.ensureCapacity(directory.size());
             }
+            matching.add(entry);
         }
         return new EndpointDiscovery(directory, matching, registered);
     }

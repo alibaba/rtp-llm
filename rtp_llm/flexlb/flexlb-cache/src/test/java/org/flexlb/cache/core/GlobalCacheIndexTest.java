@@ -38,7 +38,7 @@ class GlobalCacheIndexTest {
         globalCacheIndex.removeCacheBlock("engine1", 1L);
         assertEquals(2L, globalCacheIndex.totalBlocks());
         assertEquals(2L, globalCacheIndex.totalMappings());
-        globalCacheIndex.removeAllCacheBlockOfEngine("engine2");
+        globalCacheIndex.removeAllCacheBlockOfEngine("engine2", java.util.Set.of(1L));
         assertEquals(1L, globalCacheIndex.totalBlocks());
         assertEquals(1L, globalCacheIndex.totalMappings());
         globalCacheIndex.removeCacheBlock("missing", 2L);

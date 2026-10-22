@@ -118,7 +118,6 @@ class ConfigServiceTest {
         var health = config.getWorkerRegistry().getHealth();
         assertEquals(20L, health.getStatusPollIntervalMs());
         assertEquals(5000L, health.getStatusRpcTimeoutMs());
-        assertEquals(10000L, health.getStatusStaleAfterMs());
         assertEquals(3000L, health.getCleanupIntervalMs());
         var cache = config.getWorkerRegistry().getCacheStatus();
         assertEquals(30, cache.getTargetDiffSize());

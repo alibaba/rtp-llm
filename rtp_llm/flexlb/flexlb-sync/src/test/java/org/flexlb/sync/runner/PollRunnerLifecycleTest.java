@@ -10,12 +10,10 @@ import org.flexlb.service.grpc.WorkerStatusRpcClient;
 import org.flexlb.service.monitor.EngineHealthReporter;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
-import org.junit.jupiter.params.provider.ValueSource;
 
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.Executor;
 import java.util.concurrent.RejectedExecutionException;
-import java.util.concurrent.atomic.LongAdder;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
@@ -95,19 +93,8 @@ class PollRunnerLifecycleTest {
         Runnable runner =
                 cachePoll
                         ? new GrpcCacheStatusCheckRunner(
-                                "model",
-                                status,
-                                lease,
-                                registry,
-                                reporter,
-                                grpc,
-                                cache,
-                                interval,
-                                500L,
-                                new LongAdder(),
-                                50L,
-                                false,
-                                callbacks)
+                                "model", status, lease, registry, reporter, grpc, cache, interval,
+                                500L, false, callbacks)
                         : new GrpcWorkerStatusRunner(
                                 "model", status, lease, registry, reporter, grpc, 500L, cache,
                                 callbacks);
@@ -135,9 +122,9 @@ class PollRunnerLifecycleTest {
         }
         if (!cachePoll && (failureAt.equals("REPLY") || failureAt.equals("CALLBACK"))) {
             assertEquals(
-                    1L,
-                    status.pollHealth().consecutiveTransportFailures(),
-                    "the original transport failure must be recorded even when its report fails");
+                    0L,
+                    status.pollHealth().consecutiveWorkerFailures(),
+                    "transport failure must not count as worker-reported failure");
         }
         if (cachePoll) {
             verify(grpc).getCacheStatusAsync("127.0.0.1", 19000, -1L, 500L, RoleType.DECODE);
@@ -150,51 +137,6 @@ class PollRunnerLifecycleTest {
                             status.appliedStatusCursor().latestFinishedTaskVersion(),
                             500L,
                             RoleType.DECODE);
-        }
-    }
-
-    @ParameterizedTest
-    @ValueSource(booleans = {false, true})
-    void cachePreparationReleasesLeaseWithoutStartingRpc(boolean skip) {
-        WorkerStatus status =
-                RunnerTestSupport.discovered(
-                        RoleType.PREFILL, null, "127.0.0.1", 8080, 19000, "site");
-        var registry = RunnerTestSupport.endpointRegistry(mock(ConfigService.class));
-        WorkerStatusRpcClient grpc = mock(WorkerStatusRpcClient.class);
-        DynamicCacheIntervalService interval = mock(DynamicCacheIntervalService.class);
-        IllegalStateException failure = new IllegalStateException("interval unavailable");
-        if (skip) {
-            when(interval.getCurrentIntervalMs()).thenReturn(100L);
-        } else {
-            when(interval.getCurrentIntervalMs()).thenThrow(failure);
-        }
-        LongAdder ticks = new LongAdder();
-        ticks.increment();
-        Runnable runner =
-                new GrpcCacheStatusCheckRunner(
-                        "model",
-                        status,
-                        acquire(status, true),
-                        registry,
-                        mock(EngineHealthReporter.class),
-                        grpc,
-                        mock(CacheAwareService.class),
-                        interval,
-                        500L,
-                        ticks,
-                        50L,
-                        false,
-                        Runnable::run);
-
-        if (skip) {
-            runner.run();
-        } else {
-            assertSame(failure, assertThrows(IllegalStateException.class, runner::run));
-        }
-
-        verifyNoInteractions(grpc);
-        try (WorkerStatus.PollLease next = acquire(status, true)) {
-            assertNotNull(next);
         }
     }
 

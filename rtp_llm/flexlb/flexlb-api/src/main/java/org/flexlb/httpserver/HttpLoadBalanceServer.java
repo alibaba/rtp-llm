@@ -179,6 +179,11 @@ public class HttpLoadBalanceServer {
                                     result.setRealMasterHost(
                                             masterStatusService.getMasterHostIpPort());
                                     result.setQueueLength(requests.pendingDeliveryRequestCount());
+                                    result.setRequiresGenerateInput(
+                                            configService
+                                                    .loadBalanceConfig()
+                                                    .getDispatcher()
+                                                    .requiresGenerateInput());
                                     result.setCode(200);
                                     result.setSuccess(true);
                                     result.setWorkerSummary(buildWorkerSummary());

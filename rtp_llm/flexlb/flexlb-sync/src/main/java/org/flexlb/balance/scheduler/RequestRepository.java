@@ -21,6 +21,7 @@ public final class RequestRepository {
         REGISTERED,
         DUPLICATE_ID,
         CONTEXT_BOUND,
+        INPUT_REQUIRED,
         CLOSED
     }
 
@@ -44,6 +45,10 @@ public final class RequestRepository {
                     }
                     if (data.getScheduler() != null || context.snapshot().key() != null) {
                         return RegistrationResult.CONTEXT_BOUND;
+                    }
+                    if (data.getConfig().getDispatcher().requiresGenerateInput()
+                            && !data.hasGenerateInput()) {
+                        return RegistrationResult.INPUT_REQUIRED;
                     }
                     long timeout =
                             data.getConfig().getRequestLifecycle().getRequest().getTimeoutMs();
@@ -126,7 +131,7 @@ public final class RequestRepository {
                     exact.data().getRequestId(),
                     new TerminalRecord(terminal, exact.data().getScheduler()));
             activeRequests.remove(exact.data().getRequestId(), exact);
-            exact.data().discardGenerateInput();
+            exact.data().releaseSchedulingInput();
         }
     }
 

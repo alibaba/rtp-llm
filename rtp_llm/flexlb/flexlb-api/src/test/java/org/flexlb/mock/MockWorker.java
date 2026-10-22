@@ -49,8 +49,9 @@ public abstract class MockWorker {
      * @throws IOException if the server cannot start
      */
     public void start(int port) throws IOException {
+        // Bind the same IPv4 loopback address used by every mock engine client.
         server =
-                NettyServerBuilder.forPort(port)
+                NettyServerBuilder.forAddress(new java.net.InetSocketAddress("127.0.0.1", port))
                         .addService(rpcService)
                         .maxInboundMessageSize(16 * 1024 * 1024)
                         // Match EngineGrpcClient's production keepalive contract.  The

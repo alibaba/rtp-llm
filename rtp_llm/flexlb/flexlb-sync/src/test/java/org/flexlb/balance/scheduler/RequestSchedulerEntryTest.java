@@ -26,7 +26,7 @@ import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.any;
-import static org.mockito.Mockito.doThrow;
+import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.timeout;
 import static org.mockito.Mockito.verify;
@@ -90,11 +90,27 @@ class RequestSchedulerEntryTest {
         var reporter = mock(RecentCacheKeyTraceReporter.class);
         var owner = owner(config, reporter);
         var context = RequestProtocolTestSupport.context(config, 702L);
-        if (reporterFails) {
-            doThrow(new IllegalStateException("reporter unavailable"))
-                    .when(reporter)
-                    .report(context);
-        }
+        var original =
+                context.data().getRequest().toBuilder()
+                        .blockCacheKeys(java.util.List.of(11L, 12L))
+                        .cacheAffinityKeys(java.util.List.of("image"))
+                        .build();
+        context.data().setRequest(original);
+        var observed = new java.util.concurrent.CountDownLatch(1);
+        doAnswer(
+                        call -> {
+                            assertEquals(
+                                    java.util.List.of(11L, 12L),
+                                    context.data().getRequest().getBlockCacheKeys());
+                            assertFalse(context.data().hasGenerateInput());
+                            observed.countDown();
+                            if (reporterFails) {
+                                throw new IllegalStateException("reporter unavailable");
+                            }
+                            return null;
+                        })
+                .when(reporter)
+                .report(context);
         var pending = owner.register(context, () -> {}, StrategyErrorType.BATCH_SLO_EXPIRED);
         try {
             var response = new Response();
@@ -126,6 +142,15 @@ class RequestSchedulerEntryTest {
             assertTrue(published.isSuccess());
             assertSame(published, context.data().getResponse());
             verify(reporter, timeout(3000)).report(context);
+            assertTrue(observed.await(3, TimeUnit.SECONDS));
+            long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(3);
+            while (!context.data().getRequest().getBlockCacheKeys().isEmpty()
+                    && System.nanoTime() < deadline) {
+                Thread.sleep(1L);
+            }
+            assertTrue(context.data().getRequest().getBlockCacheKeys().isEmpty());
+            assertTrue(context.data().getRequest().getCacheAffinityKeys().isEmpty());
+            assertEquals(java.util.List.of(11L, 12L), original.getBlockCacheKeys());
         } finally {
             owner.runtime.shutdown();
         }
@@ -160,7 +185,7 @@ class RequestSchedulerEntryTest {
         context.data().setGenerateInputPb(null);
         try {
             assertEquals(
-                    StrategyErrorType.INVALID_REQUEST.getErrorCode(),
+                    StrategyErrorType.GENERATE_INPUT_REQUIRED.getErrorCode(),
                     owner.submit(context).join().getCode());
             assertFalse(owner.requests.retainsIdentity(701L));
         } finally {

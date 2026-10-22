@@ -480,8 +480,7 @@ public final class PrefillState {
     }
 
     /** One exact queue transition. Worker runtime decisions may hold the same reentrant lock around it. */
-    public RequestRoute updateQueue(
-            QueueChange change, RequestRoute exact, long requestLimit, long nowMs) {
+    public RequestRoute updateQueue(QueueChange change, RequestRoute exact, long nowMs) {
         lock.lock();
         try {
             var route =
@@ -493,7 +492,7 @@ public final class PrefillState {
             }
             var entry = requests.get(route.requestId());
             if (change == QueueChange.ENQUEUE) {
-                if (entry != null || requestLimit > 0L && outstandingRequestCount >= requestLimit) {
+                if (entry != null) {
                     return null;
                 }
                 entry = new RequestEntry(route, OwnershipStage.QUEUED);
@@ -623,87 +622,6 @@ public final class PrefillState {
         }
     }
 
-    public boolean canPreemptQueuedRequest(int priority, long requestLimit) {
-        if (!PriorityNormalizer.hasPriority(priority)) {
-            return false;
-        }
-        lock.lock();
-        try {
-            long required =
-                    requestLimit <= 0L
-                            ? 0L
-                            : Math.max(0L, outstandingRequestCount - requestLimit + 1L);
-            if (required == 0L || required > activeIndex.size()) {
-                return false;
-            }
-            for (RequestRoute route : activeIndex) {
-                var entry = requests.get(route.requestId());
-                if (entry != null
-                        && entry.route == route
-                        && entry.reservation == null
-                        && PriorityNormalizer.hasPriority(route.priority())
-                        && route.priority() < priority
-                        && --required == 0L) {
-                    return true;
-                }
-            }
-            return false;
-        } finally {
-            lock.unlock();
-        }
-    }
-
-    /** The selection and all canonical replacement checks share one ownership transaction. */
-    public List<RequestRoute> replaceQueuedRoutesLocked(RequestRoute incoming, long requestLimit) {
-        checkState(lock.isHeldByCurrentThread(), "Prefill ownership requires queueLock");
-        long required =
-                requestLimit <= 0L ? 0L : Math.max(0L, outstandingRequestCount - requestLimit + 1L);
-        if (requests.containsKey(incoming.requestId())
-                || required == 0L
-                || !PriorityNormalizer.hasPriority(incoming.priority())) {
-            return List.of();
-        }
-        List<RequestRoute> candidates = new ArrayList<>();
-        for (var route : activeIndex) {
-            var entry = requests.get(route.requestId());
-            if (entry != null
-                    && entry.route == route
-                    && entry.ownership == OwnershipStage.QUEUED
-                    && entry.reservation == null) {
-                candidates.add(route);
-            }
-        }
-        var victims =
-                org.flexlb.balance.eviction.EvictionPlanner.selectPrefillVictims(
-                        candidates, incoming.priority(), required);
-        if (victims.size() != required) {
-            return List.of();
-        }
-        // Planner consumes this exact snapshot; all validation precedes insertion or victim
-        // removal.
-        Set<RequestRoute> distinct = java.util.Collections.newSetFromMap(new IdentityHashMap<>());
-        for (var victim : victims) {
-            var entry = requests.get(victim.requestId());
-            if (!distinct.add(victim)
-                    || entry == null
-                    || entry.route != victim
-                    || entry.reservation != null
-                    || entry.ownership != OwnershipStage.QUEUED
-                    || !activeIndex.contains(victim)) {
-                return List.of();
-            }
-        }
-        checkState(
-                updateQueue(QueueChange.ENQUEUE, incoming, 0L, 0L) != null,
-                "replacement lost incoming identity");
-        for (var victim : victims) {
-            checkState(
-                    updateQueue(QueueChange.REMOVE, victim, 0L, 0L) != null,
-                    "replacement lost victim identity");
-        }
-        return victims;
-    }
-
     ReservationResult<BatchReservation> reserveBatch(
             RequestRoute exactHead,
             long batchId,
@@ -734,6 +652,19 @@ public final class PrefillState {
             entry.reservation = lease;
             recordMutationLocked();
             return new ReservationResult<>(CapacityStatus.ACQUIRED, lease);
+        } finally {
+            lock.unlock();
+        }
+    }
+
+    /** Queued routes consume no delivery slots; reserved and committed work do. */
+    public boolean requestCapacityAvailable(long maximum, int requested) {
+        checkArgument(maximum >= 0L && requested > 0, "invalid request capacity");
+        lock.lock();
+        try {
+            long inFlight =
+                    saturatedAdd(requests.size() - activeIndex.size(), unknownEngineRequestCount);
+            return maximum == 0L || requested <= maximum && inFlight <= maximum - requested;
         } finally {
             lock.unlock();
         }
@@ -915,7 +846,7 @@ public final class PrefillState {
             if (requests.containsKey(item.requestId())) {
                 return new ReservationResult<>(CapacityStatus.REQUEST_ALREADY_RESERVED, null);
             }
-            if (maxOutstandingRequests > 0L && outstandingRequestCount >= maxOutstandingRequests) {
+            if (!requestCapacityAvailable(maxOutstandingRequests, 1)) {
                 return new ReservationResult<>(CapacityStatus.CAPACITY_FULL, null);
             }
             RequestEntry entry = new RequestEntry(item, OwnershipStage.DIRECT_RESERVED);

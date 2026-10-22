@@ -13,7 +13,6 @@ import org.junit.jupiter.api.Test;
 import org.mockito.Mockito;
 
 import java.util.concurrent.CompletableFuture;
-import java.util.concurrent.atomic.LongAdder;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.mockito.ArgumentMatchers.anyInt;
@@ -66,8 +65,6 @@ class GrpcCacheStatusCheckRunnerTest {
                         localKvCacheAwareManager,
                         cacheIntervalService,
                         20,
-                        new LongAdder(),
-                        50L,
                         true,
                         Runnable::run)
                 .run();
@@ -112,8 +109,6 @@ class GrpcCacheStatusCheckRunnerTest {
                         localKvCacheAwareManager,
                         cacheIntervalService,
                         20,
-                        new LongAdder(),
-                        50L,
                         true,
                         Runnable::run);
         runner.run();
@@ -197,8 +192,6 @@ class GrpcCacheStatusCheckRunnerTest {
                         localKvCacheAwareManager,
                         cacheIntervalService,
                         20,
-                        new LongAdder(),
-                        50L,
                         true,
                         Runnable::run);
         runner.run();
@@ -226,8 +219,6 @@ class GrpcCacheStatusCheckRunnerTest {
                         localKvCacheAwareManager,
                         cacheIntervalService,
                         20,
-                        new LongAdder(),
-                        50L,
                         debug,
                         Runnable::run)
                 .run();

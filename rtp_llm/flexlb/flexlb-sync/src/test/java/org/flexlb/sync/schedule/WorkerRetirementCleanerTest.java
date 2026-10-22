@@ -27,7 +27,7 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
-class StaleWorkerCleanerTest {
+class WorkerRetirementCleanerTest {
 
     @Test
     void springSchedulesWorkerCleanupAtTheConfiguredInterval() {
@@ -46,7 +46,7 @@ class StaleWorkerCleanerTest {
             context.registerBean(EndpointRegistry.class, () -> mock(EndpointRegistry.class));
             context.registerBean(TaskScheduler.class, () -> mock(TaskScheduler.class));
             context.registerBean(ScheduledAnnotationBeanPostProcessor.class);
-            context.registerBean(StaleWorkerCleaner.class);
+            context.registerBean(WorkerRetirementCleaner.class);
             context.refresh();
             var tasks =
                     context.getBean(ScheduledAnnotationBeanPostProcessor.class).getScheduledTasks();
@@ -54,69 +54,51 @@ class StaleWorkerCleanerTest {
             FixedRateTask task =
                     assertInstanceOf(FixedRateTask.class, tasks.iterator().next().getTask());
             assertEquals(1250L, task.getInterval());
-            assertEquals(10000L, config.getWorkerRegistry().getHealth().getStatusStaleAfterMs());
         }
     }
 
     @Test
-    void detachesEveryExpiredWorkerBeforeAwaitingAnyRetirement() throws Exception {
-        EndpointRegistry registry =
-                org.mockito.Mockito.spy(
-                        RunnerTestSupport.endpointRegistry(mock(ConfigService.class)));
+    void detachesEveryUnavailableWorkerBeforeCacheCleanup() throws Exception {
+        EndpointRegistry registry = RunnerTestSupport.endpointRegistry(mock(ConfigService.class));
         CacheAwareService cache = mock(CacheAwareService.class);
         WorkerStatus first = status("127.0.0.1", 8080);
         WorkerStatus second = status("127.0.0.2", 8080);
         EndpointRegistry directory = registry;
         directory.currentOrDiscover(RoleType.PREFILL, first.getIpPort(), () -> first);
         directory.currentOrDiscover(RoleType.PREFILL, second.getIpPort(), () -> second);
+        first.markRemovedFromDiscovery();
+        second.markRemovedFromDiscovery();
 
-        CountDownLatch firstAwaitEntered = new CountDownLatch(1);
-        CountDownLatch releaseFirstAwait = new CountDownLatch(1);
+        CountDownLatch cleanupEntered = new CountDownLatch(1);
+        CountDownLatch releaseCleanup = new CountDownLatch(1);
         org.mockito.Mockito.doAnswer(
                         invocation -> {
-                            EndpointRegistry.Retirement retirement =
-                                    org.mockito.Mockito.spy(
-                                            (EndpointRegistry.Retirement)
-                                                    invocation.callRealMethod());
-                            org.mockito.Mockito.doAnswer(
-                                            completion -> {
-                                                firstAwaitEntered.countDown();
-                                                assertTrue(
-                                                        releaseFirstAwait.await(
-                                                                5, TimeUnit.SECONDS));
-                                                return completion.callRealMethod();
-                                            })
-                                    .when(retirement)
-                                    .complete(
-                                            org.mockito.ArgumentMatchers.same(cache),
-                                            org.mockito.ArgumentMatchers.any());
-                            return retirement;
+                            cleanupEntered.countDown();
+                            assertTrue(releaseCleanup.await(5, TimeUnit.SECONDS));
+                            return null;
                         })
-                .when(registry)
-                .beginRetirement(RoleType.PREFILL, first.getIpPort(), first);
-
-        ConfigService configService = mock(ConfigService.class);
-        FlexlbConfig config = org.flexlb.balance.scheduler.SchedulingTestConfig.newConfig();
-        config.getWorkerRegistry().getHealth().setStatusStaleAfterMs(0L);
-        when(configService.loadBalanceConfig()).thenReturn(config);
-        StaleWorkerCleaner cleaner = new StaleWorkerCleaner(configService, cache, directory);
+                .when(cache)
+                .removeEngineBlockCache(first.getIpPort());
+        WorkerRetirementCleaner cleaner = new WorkerRetirementCleaner(cache, directory);
         ExecutorService executor = Executors.newSingleThreadExecutor();
         try {
-            Future<?> cleaning = executor.submit(cleaner::cleanExpiredWorkers);
+            Future<?> cleaning = executor.submit(cleaner::retireUnavailableWorkers);
 
-            assertTrue(firstAwaitEntered.await(2, TimeUnit.SECONDS));
+            assertTrue(cleanupEntered.await(2, TimeUnit.SECONDS));
             assertFalse(first.isActiveGeneration());
             assertFalse(
                     second.isActiveGeneration(),
-                    "the second routing gate must close before the first drain waits");
-            releaseFirstAwait.countDown();
-            cleaning.get(5, TimeUnit.SECONDS);
-            assertTrue(directory.statusSnapshot(RoleType.PREFILL).isEmpty());
+                    "both routing gates must close before cache cleanup begins");
+            cleaning.get(2, TimeUnit.SECONDS); // The scan must not wait for external cleanup.
+            releaseCleanup.countDown();
+            org.flexlb.sync.runner.RunnerTestSupport.awaitCondition(
+                    () -> directory.statusSnapshot(RoleType.PREFILL).isEmpty());
             verify(cache).removeEngineBlockCache(first.getIpPort());
             verify(cache).removeEngineBlockCache(second.getIpPort());
         } finally {
-            releaseFirstAwait.countDown();
+            releaseCleanup.countDown();
             executor.shutdownNow();
+            registry.close();
         }
     }
 
@@ -124,7 +106,6 @@ class StaleWorkerCleanerTest {
     void failureToBeginLaterRetirementStillFinalizesAlreadyDetachedWorkers() {
         ConfigService configService = mock(ConfigService.class);
         FlexlbConfig config = org.flexlb.balance.scheduler.SchedulingTestConfig.newConfig();
-        config.getWorkerRegistry().getHealth().setStatusStaleAfterMs(0L);
         when(configService.loadBalanceConfig()).thenReturn(config);
         EndpointRegistry registry =
                 org.mockito.Mockito.spy(RunnerTestSupport.endpointRegistry(configService));
@@ -133,6 +114,8 @@ class StaleWorkerCleanerTest {
         WorkerStatus second = status("127.0.0.2", 8080);
         registry.currentOrDiscover(RoleType.PREFILL, first.getIpPort(), () -> first);
         registry.currentOrDiscover(RoleType.PREFILL, second.getIpPort(), () -> second);
+        first.markRemovedFromDiscovery();
+        second.markRemovedFromDiscovery();
         var began = new java.util.concurrent.atomic.AtomicReference<WorkerStatus>();
         RuntimeException failure = new IllegalStateException("registry closing");
         org.mockito.Mockito.doAnswer(
@@ -156,9 +139,10 @@ class StaleWorkerCleanerTest {
                 org.junit.jupiter.api.Assertions.assertThrows(
                         IllegalStateException.class,
                         () ->
-                                new StaleWorkerCleaner(configService, cache, registry)
-                                        .cleanExpiredWorkers()));
-        assertFalse(registry.statusSnapshot(RoleType.PREFILL).containsValue(began.get()));
+                                new WorkerRetirementCleaner(cache, registry)
+                                        .retireUnavailableWorkers()));
+        org.flexlb.sync.runner.RunnerTestSupport.awaitCondition(
+                () -> !registry.statusSnapshot(RoleType.PREFILL).containsValue(began.get()));
         assertEquals(1, registry.statusSnapshot(RoleType.PREFILL).size());
         assertTrue(
                 registry.statusSnapshot(RoleType.PREFILL)

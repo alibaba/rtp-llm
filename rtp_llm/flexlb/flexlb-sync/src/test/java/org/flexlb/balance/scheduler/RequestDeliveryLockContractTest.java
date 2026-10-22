@@ -134,7 +134,6 @@ class RequestDeliveryLockContractTest {
                 state.updateQueue(
                         PrefillState.QueueChange.ENQUEUE,
                         registered.item(),
-                        0L,
                         System.currentTimeMillis()));
         var worker =
                 org.mockito.Mockito.spy(
@@ -455,7 +454,6 @@ class RequestDeliveryLockContractTest {
                                                                                                 .ENQUEUE,
                                                                                         registered
                                                                                                 .item(),
-                                                                                        0L,
                                                                                         System
                                                                                                 .currentTimeMillis()));
                                                                     } finally {

@@ -6,7 +6,7 @@ import unittest
 from typing import Dict
 from unittest.mock import MagicMock, patch
 
-from rtp_llm.server.host_service import FlexlbHeartbeatInfo, MasterService
+from rtp_llm.server.host_service import FlexlbHeartbeatInfo, HostService, MasterService
 from rtp_llm.vipserver.host import Host
 
 
@@ -259,6 +259,125 @@ class TestMasterService(unittest.TestCase):
 
         self.assertNotIn("10.0.0.1:8000", svc.get_host_health_status())
         self.assertIsNone(svc.get_master_addr())
+
+    @patch("rtp_llm.server.host_service.kmonitor.report")
+    @patch("requests.post")
+    def test_payload_omission_requires_explicit_boolean_capability(
+        self, mock_post: MagicMock, _mock_kmonitor: MagicMock
+    ):
+        addr = "10.0.0.1:8000"
+        vip = MagicMock(domain="master.vip")
+        vip.get_hosts.return_value = [Host("10.0.0.1", "8000")]
+        svc, host_health_map = self._make_service(vip)
+        host_service = object.__new__(HostService)
+        host_service.master_service = svc
+        self.assertTrue(host_service.requires_generate_input(addr))
+
+        for value in (False, True, None, 0, 1, "false", "true", [], {}):
+            with self.subTest(value=value):
+                mock_post.return_value = _json_response(
+                    {"real_master_host": addr, "requires_generate_input": value}
+                )
+                self._refresh(svc, host_health_map)
+                self.assertEqual(
+                    host_service.requires_generate_input(addr), value is not False
+                )
+                self.assertIs(
+                    svc.get_host_health_status()[addr]["requires_generate_input"],
+                    value if type(value) is bool else None,
+                )
+
+        self.assertTrue(host_service.requires_generate_input("unknown:8000"))
+
+    @patch("rtp_llm.server.host_service.kmonitor.report")
+    @patch("requests.post")
+    def test_old_heartbeat_clears_previously_advertised_payload_capability(
+        self, mock_post: MagicMock, _mock_kmonitor: MagicMock
+    ):
+        addr = "10.0.0.1:8000"
+        vip = MagicMock(domain="master.vip")
+        vip.get_hosts.return_value = [Host("10.0.0.1", "8000")]
+        svc, host_health_map = self._make_service(vip)
+        mock_post.return_value = _json_response(
+            {"real_master_host": addr, "requires_generate_input": False}
+        )
+        self._refresh(svc, host_health_map)
+        self.assertFalse(svc.requires_generate_input(addr))
+        previous_snapshot = svc._route_snapshot
+
+        mock_post.return_value = _json_response({"real_master_host": addr})
+        self._refresh(svc, host_health_map)
+
+        self.assertTrue(svc.requires_generate_input(addr))
+        self.assertIsNone(svc.get_host_health_status()[addr]["requires_generate_input"])
+        self.assertIs(
+            previous_snapshot.host_health_status[addr].requires_generate_input, False
+        )
+
+    @patch("rtp_llm.server.host_service.kmonitor.report")
+    @patch("requests.post")
+    def test_first_failed_probe_restores_payload_before_host_becomes_unhealthy(
+        self, mock_post: MagicMock, _mock_kmonitor: MagicMock
+    ):
+        addr = "10.0.0.1:8000"
+        vip = MagicMock(domain="master.vip")
+        vip.get_hosts.return_value = [Host("10.0.0.1", "8000")]
+        svc, host_health_map = self._make_service(vip)
+        mock_post.return_value = _json_response(
+            {"real_master_host": addr, "requires_generate_input": False}
+        )
+        self._refresh(svc, host_health_map)
+        self.assertFalse(svc.requires_generate_input(addr))
+
+        mock_post.return_value = _json_response({}, status_code=503)
+        self._refresh(svc, host_health_map)
+        self.assertEqual(svc.get_host_health_status()[addr]["health"], "healthy")
+        self.assertTrue(svc.requires_generate_input(addr))
+        self._refresh(svc, host_health_map)
+        self.assertEqual(svc.get_host_health_status()[addr]["health"], "unhealthy")
+        self.assertTrue(svc.requires_generate_input(addr))
+
+    @patch("rtp_llm.server.host_service.kmonitor.report")
+    @patch("requests.post")
+    def test_payload_capability_follows_target_host_across_master_change(
+        self, mock_post: MagicMock, _mock_kmonitor: MagicMock
+    ):
+        first, second, new = "10.0.0.1:8000", "10.0.0.2:8000", "10.0.0.3:8000"
+        vip = MagicMock(domain="master.vip")
+        vip.get_hosts.return_value = [
+            Host("10.0.0.1", "8000"),
+            Host("10.0.0.2", "8000"),
+        ]
+        svc, host_health_map = self._make_service(vip)
+
+        def heartbeat(master):
+            def post(url, **_kwargs):
+                payload = {"real_master_host": master}
+                if first in url:
+                    payload["requires_generate_input"] = False
+                elif second in url:
+                    payload["requires_generate_input"] = True
+                return _json_response(payload)
+
+            return post
+
+        mock_post.side_effect = heartbeat(first)
+        self._refresh(svc, host_health_map)
+        self.assertEqual(svc.get_master_addr(), first)
+        self.assertFalse(svc.requires_generate_input(svc.get_master_addr()))
+        self.assertTrue(svc.requires_generate_input(svc.get_slave_addr()))
+
+        mock_post.side_effect = heartbeat(second)
+        self._refresh(svc, host_health_map)
+        self.assertEqual(svc.get_master_addr(), second)
+        self.assertTrue(svc.requires_generate_input(svc.get_master_addr()))
+        self.assertFalse(svc.requires_generate_input(svc.get_slave_addr()))
+
+        vip.get_hosts.return_value = [Host("10.0.0.3", "8000")]
+        mock_post.side_effect = heartbeat(new)
+        self._refresh(svc, host_health_map)
+        self.assertEqual(svc.get_master_addr(), new)
+        self.assertTrue(svc.requires_generate_input(new))
 
 
 if __name__ == "__main__":

@@ -55,6 +55,10 @@ public class PrefillEndpoint extends WorkerEndpoint {
                 && !ownership.ownsSelectionLocked(plan.items(), plan.selectionTimeMs())) {
             return null;
         }
+        if (plan.kind() == PrefillState.CommitKind.QUEUED
+                && !ownership.requestCapacityAvailable(requestLimit, plan.items().size())) {
+            return null;
+        }
         if (plan.batchReservation() != null) {
             return ownership.commitLocked(plan, null);
         }

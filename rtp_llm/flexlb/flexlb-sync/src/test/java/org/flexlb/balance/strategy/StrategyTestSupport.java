@@ -33,12 +33,12 @@ final class StrategyTestSupport {
         return new RequestRoute(context);
     }
 
-    static org.flexlb.balance.PlacementResult<RequestRoute, RoleType> select(
+    static <B> org.flexlb.balance.PlacementResult<RequestRoute, B> select(
             org.flexlb.dao.loadbalance.Request request,
             java.util.function.Function<
                             RequestRoute,
                             org.flexlb.balance.PlacementResult<
-                                    org.flexlb.dao.loadbalance.ServerStatus, RoleType>>
+                                    org.flexlb.dao.loadbalance.ServerStatus, B>>
                     action) {
         RequestRoute route = scope(request);
         try {
@@ -67,12 +67,14 @@ final class StrategyTestSupport {
         return select(request, route -> selector.select(request, metadata, group, route));
     }
 
-    static org.flexlb.balance.PlacementResult<RequestRoute, RoleType> select(
-            CostBasedPrefillStrategy selector,
-            org.flexlb.dao.loadbalance.Request request,
-            org.flexlb.dao.SchedulingMetadata metadata,
-            RoleType role,
-            String group) {
+    static org.flexlb.balance.PlacementResult<
+                    RequestRoute, org.flexlb.balance.scheduler.PlacementKey>
+            select(
+                    CostBasedPrefillStrategy selector,
+                    org.flexlb.dao.loadbalance.Request request,
+                    org.flexlb.dao.SchedulingMetadata metadata,
+                    RoleType role,
+                    String group) {
         return select(request, route -> selector.select(request, metadata, role, group, route));
     }
 

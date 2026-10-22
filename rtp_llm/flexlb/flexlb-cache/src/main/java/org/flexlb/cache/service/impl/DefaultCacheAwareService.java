@@ -8,6 +8,7 @@ import org.flexlb.cache.service.CacheAwareService;
 import org.flexlb.dao.master.CacheStatus;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
+import org.flexlb.metric.SafeFlexMonitor;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
 
@@ -80,7 +81,11 @@ public class DefaultCacheAwareService implements CacheAwareService {
         try {
             if (workerStatus.getCacheStatus() == null) {
                 WorkerCacheUpdateResult result = buildFailureResult("Worker Cache Status is null");
-                cacheMetricsReporter.reportUpdateEngineBlockCacheRT(role, startTime, "0");
+                SafeFlexMonitor.run(
+                        "cache.update.latency",
+                        () ->
+                                cacheMetricsReporter.reportUpdateEngineBlockCacheRT(
+                                        role, startTime, "0"));
                 return result;
             }
 
@@ -88,7 +93,11 @@ public class DefaultCacheAwareService implements CacheAwareService {
             CacheStatus cacheStatus = workerStatus.getCacheStatus();
             if (cacheStatus.getCachedKeys() == null) {
                 WorkerCacheUpdateResult result = buildFailureResult("Worker Cached Keys is null");
-                cacheMetricsReporter.reportUpdateEngineBlockCacheRT(role, startTime, "0");
+                SafeFlexMonitor.run(
+                        "cache.update.latency",
+                        () ->
+                                cacheMetricsReporter.reportUpdateEngineBlockCacheRT(
+                                        role, startTime, "0"));
                 return result;
             }
 
@@ -100,7 +109,11 @@ public class DefaultCacheAwareService implements CacheAwareService {
             WorkerCacheUpdateResult result =
                     WorkerCacheUpdateResult.builder().success(true).build();
 
-            cacheMetricsReporter.reportUpdateEngineBlockCacheRT(role, startTime, "1");
+            SafeFlexMonitor.run(
+                    "cache.update.latency",
+                    () ->
+                            cacheMetricsReporter.reportUpdateEngineBlockCacheRT(
+                                    role, startTime, "1"));
 
             return result;
 
@@ -109,7 +122,11 @@ public class DefaultCacheAwareService implements CacheAwareService {
 
             WorkerCacheUpdateResult result = buildFailureResult(e.getMessage());
 
-            cacheMetricsReporter.reportUpdateEngineBlockCacheRT(role, startTime, "0");
+            SafeFlexMonitor.run(
+                    "cache.update.latency",
+                    () ->
+                            cacheMetricsReporter.reportUpdateEngineBlockCacheRT(
+                                    role, startTime, "0"));
 
             return result;
         }

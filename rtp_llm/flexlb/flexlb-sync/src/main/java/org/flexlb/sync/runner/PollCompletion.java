@@ -1,5 +1,6 @@
 package org.flexlb.sync.runner;
 
+import org.flexlb.dao.master.EndpointTrace.Stage;
 import org.flexlb.dao.master.WorkerStatus;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -22,16 +23,25 @@ final class PollCompletion {
             String address,
             CompletableFuture<T> response,
             BiConsumer<T, Throwable> callback) {
-        response.handleAsync(
+        response.whenComplete(
+                        (value, failure) -> {
+                            lease.trace().record(Stage.RPC_COMPLETED, unwrap(failure));
+                            lease.trace().record(Stage.CALLBACK_READY);
+                        })
+                .handleAsync(
                         (value, failure) -> {
                             try {
+                                lease.trace().record(Stage.CALLBACK_STARTED);
                                 callback.accept(value, unwrap(failure));
                             } catch (Throwable callbackFailure) {
+                                lease.trace().record(Stage.CALLBACK_FAILED, callbackFailure);
                                 logger.error(
                                         "{} callback failed for {}",
                                         kind,
                                         address,
                                         callbackFailure);
+                            } finally {
+                                lease.trace().record(Stage.CALLBACK_ENDED);
                             }
                             return null;
                         },
@@ -40,6 +50,10 @@ final class PollCompletion {
                         (ignored, callbackFailure) -> {
                             lease.close();
                             if (callbackFailure != null) {
+                                lease.trace()
+                                        .record(
+                                                Stage.CALLBACK_SUBMISSION_FAILED,
+                                                unwrap(callbackFailure));
                                 logger.error(
                                         "{} callback was not scheduled for {}",
                                         kind,

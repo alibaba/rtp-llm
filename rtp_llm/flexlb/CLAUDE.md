@@ -432,7 +432,7 @@ Examples:
 - **Java**: 21 (required)
 - **Spring Boot**: 2.7.18
 - **Project Reactor**: 2024.0.10
-- **gRPC**: 1.65.0
+- **gRPC**: 1.65.1
 - **Apache Curator**: 5.4.0 (ZooKeeper client)
 - **Mockito**: 5.20.0 (testing)
 - **Netty**: 4.1.127.Final

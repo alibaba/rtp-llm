@@ -345,12 +345,11 @@ class RequestOrchestratorsTest {
         var endpoints = mock(org.flexlb.balance.endpoint.EndpointRegistry.class);
         var service = mock(ConfigService.class);
         var config = SchedulingTestConfig.newConfig();
-        config.getWorkerRegistry().getHealth().setStatusStaleAfterMs(250L);
         when(service.loadBalanceConfig()).thenReturn(config);
         when(requests.retainsIdentity(91L)).thenReturn(true);
         org.mockito.Mockito.doAnswer(
                         call -> {
-                            assertEquals(250L, call.getArgument(0, Long.class));
+                            assertEquals(10_000L, call.getArgument(0, Long.class));
                             LongPredicate retained = call.getArgument(1);
                             org.junit.jupiter.api.Assertions.assertTrue(retained.test(91L));
                             org.junit.jupiter.api.Assertions.assertFalse(retained.test(92L));
@@ -365,12 +364,12 @@ class RequestOrchestratorsTest {
 
         var order = inOrder(service, requests, endpoints);
         order.verify(requests).isClosed();
-        order.verify(service).loadBalanceConfig();
-        order.verify(requests).expireTerminalRecords(750L);
+        order.verify(requests).expireTerminalRecords(-9_000L);
         order.verify(endpoints)
                 .evictExpiredOrphans(
-                        org.mockito.ArgumentMatchers.eq(250L), org.mockito.ArgumentMatchers.any());
-        org.mockito.Mockito.verify(service, org.mockito.Mockito.times(1)).loadBalanceConfig();
+                        org.mockito.ArgumentMatchers.eq(10_000L),
+                        org.mockito.ArgumentMatchers.any());
+        org.mockito.Mockito.verifyNoInteractions(service);
     }
 
     @Test

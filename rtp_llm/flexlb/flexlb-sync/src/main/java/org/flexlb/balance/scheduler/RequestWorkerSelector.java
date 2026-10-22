@@ -80,7 +80,7 @@ public class RequestWorkerSelector {
                 if (role == RoleType.VIT && request.getSelectedVit() != null) {
                     continue;
                 }
-                PlacementResult<ServerStatus, RoleType> result =
+                PlacementResult<ServerStatus, PlacementKey> result =
                         selectRole(request, metadata, role, group, routing);
                 if (result.status() != PlacementResult.Status.SUCCESS) {
                     Logger.debug(
@@ -92,9 +92,7 @@ public class RequestWorkerSelector {
                                 PlacementResult.rejected(result.failure(), result.diagnostics());
                         case BLOCKED ->
                                 PlacementResult.blocked(
-                                        new PlacementKey(result.blocker(), group, null),
-                                        result.failure(),
-                                        result.diagnostics());
+                                        result.blocker(), result.failure(), result.diagnostics());
                         default ->
                                 throw new IllegalStateException(
                                         "unexpected selector result: " + result.status());
@@ -163,7 +161,7 @@ public class RequestWorkerSelector {
                         .orElse(null);
     }
 
-    private PlacementResult<ServerStatus, RoleType> selectRole(
+    private PlacementResult<ServerStatus, PlacementKey> selectRole(
             Request request,
             SchedulingMetadata metadata,
             RoleType role,
@@ -172,14 +170,29 @@ public class RequestWorkerSelector {
         return switch (role) {
             case PREFILL, PDFUSION ->
                     prefillSelector.select(request, metadata, role, group, routing);
-            case DECODE -> decodeSelector.select(request, metadata, group, routing);
+            case DECODE ->
+                    withGroup(decodeSelector.select(request, metadata, group, routing), group);
             case VIT ->
-                    selectedOrBlocked(
-                            vitSelector.select(request.getRequestId(), role, group, routing), role);
+                    withGroup(
+                            selectedOrBlocked(
+                                    vitSelector.select(
+                                            request.getRequestId(), role, group, routing),
+                                    role),
+                            group);
             case FRONTEND ->
                     throw new IllegalArgumentException(
                             "Endpoint selection is not supported for FRONTEND");
         };
+    }
+
+    private static PlacementResult<ServerStatus, PlacementKey> withGroup(
+            PlacementResult<ServerStatus, RoleType> result, String group) {
+        return new PlacementResult<>(
+                result.status(),
+                result.value(),
+                result.failure(),
+                result.blocker() == null ? null : new PlacementKey(result.blocker(), group, null),
+                result.diagnostics());
     }
 
     private static PlacementResult<ServerStatus, RoleType> selectedOrBlocked(
