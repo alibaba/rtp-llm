@@ -886,6 +886,11 @@ def _selected_bazel_staged_outputs(build_config: str, bazel_args: list = None) -
         staged_outputs.extend(_CUDA_PY_WRAPPER_TEST_BAZEL_STAGED_OUTPUTS)
     if {"cuda13", "cuda13_arm"} & _bazel_config_names(bazel_args):
         staged_outputs.extend(_CUDA13_RUNTIME_BAZEL_STAGED_OUTPUTS)
+        # The CUDA 13 CRC32 binding links nvcomp from a pinned Bazel wheel.
+        # Stage that exact runtime next to the engine's $ORIGIN libraries.
+        staged_outputs.append(
+            (_STAGED_OUTPUT_RUNTIME, "//3rdparty/nvcomp:nvcomp_runtime", ("libnvcomp.so.5",))
+        )
     include_remote_kvcm = _include_remote_kvcm_runtime_outputs(bazel_args)
     if include_remote_kvcm:
         staged_outputs.extend(_REMOTE_KVCM_RUNTIME_BAZEL_STAGED_OUTPUTS)

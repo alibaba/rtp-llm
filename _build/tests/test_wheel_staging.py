@@ -28,7 +28,7 @@ def load_setup():
     return module
 
 
-@pytest.mark.parametrize("config", ["cuda12_6", "cuda12_9", "cuda13", "rocm", "ppu"])
+@pytest.mark.parametrize("config", ["cuda12_6", "cuda12_9", "cuda13", "cuda13_arm", "rocm", "ppu"])
 @pytest.mark.parametrize("stale", [False, True], ids=["cold", "previous-build"])
 def test_first_wheel_contains_all_fresh_selected_outputs(
     tmp_path, monkeypatch, config, stale
@@ -153,3 +153,27 @@ def test_wheel_staging_cannot_remove_source_libraries(tmp_path):
     setup = load_setup()
     with pytest.raises(ValueError, match="separate from the source"):
         setup.copy_staged_outputs_to_build_lib(tmp_path, tmp_path, [])
+
+
+@pytest.mark.parametrize("config", ["cuda13", "cuda13_arm"])
+def test_cuda13_nvcomp_runtime_is_required_and_staged(tmp_path, config):
+    setup = load_setup()
+    output = ("runtime", "//3rdparty/nvcomp:nvcomp_runtime", ("libnvcomp.so.5",))
+    selected = setup._selected_bazel_staged_outputs(config, ["--config=" + config])
+    assert selected.count(output) == 1
+    assert output[1] in setup._bazel_targets_for_staged_outputs(selected)
+    for other in ["cuda12_6", "cuda12_9", "rocm", "ppu"]:
+        assert output not in setup._selected_bazel_staged_outputs(other, ["--config=" + other])
+
+    project = tmp_path / "project"
+    with pytest.raises(RuntimeError, match="libnvcomp.so.5"):
+        setup.stage_bazel_outputs(project, [output])
+
+    # These explicit bytes exercise staging, never a compiler or GPU runtime.
+    built = project / "bazel-bin/3rdparty/nvcomp/libnvcomp.so.5"
+    built.parent.mkdir(parents=True)
+    built.write_bytes(b"runtime-staging-fixture")
+    setup.stage_bazel_outputs(project, [output])
+    build_lib = tmp_path / "build-lib"
+    setup.copy_staged_outputs_to_build_lib(project, build_lib, [output])
+    assert (build_lib / "rtp_llm/libs/libnvcomp.so.5").read_bytes() == built.read_bytes()
