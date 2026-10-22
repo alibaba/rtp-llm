@@ -36,10 +36,8 @@ import triton
 import triton.language as tl
 
 
-@triton.jit
-def _vision_qk_rotary_kernel(
-    QK, COS, SIN, OUT, N: tl.constexpr, ROW_STRIDE: tl.constexpr
-):
+@triton.jit(do_not_specialize=["N"])
+def _vision_qk_rotary_kernel(QK, COS, SIN, OUT, N, ROW_STRIDE: tl.constexpr):
     heads = tl.program_id(0) * 2 + tl.arange(0, 2)
     rows = tl.program_id(1) * 8 + tl.arange(0, 8)
     dims = tl.arange(0, 32)

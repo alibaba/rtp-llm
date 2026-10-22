@@ -1,3 +1,5 @@
+load("//rtp_llm/test/utils:cuda13_sm100_test.bzl", "cuda13_sm100_py_test")
+
 py_test(
     name = "deepseek_v41_preprocess_shape_test",
     srcs = ["deepseek_v41_preprocess_shape_test.py"],
@@ -331,4 +333,12 @@ py_test(
     deps = ["//rtp_llm:testlib"],
     tags = ["SM100_ARM_CU13"],
     exec_properties = {"gpu": "SM100_ARM_CU13", "gpu_count": "1"},
+)
+
+cuda13_sm100_py_test(
+    name = "deepseek_v41_dynamic_batch_gpu_test",
+    srcs = ["deepseek_v41_dynamic_batch_gpu_test.py"],
+    deps = ["//rtp_llm:testlib"],
+    size = "large",
+    env = {"GPU_COUNT": "1", "WORLD_SIZE": "1"},
 )
