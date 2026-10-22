@@ -61,7 +61,7 @@ public class FlexlbGrpcServer {
     private Server server;
     private NioEventLoopGroup bossGroup;
     private ThreadPoolExecutor grpcExecutor;
-    private CountingAbortHandler countingAbortHandler;
+    private CountingCallerRunsHandler countingCallerRunsHandler;
 
     public FlexlbGrpcServer(FlexlbServiceImpl flexlbServiceImpl,
                             ConfigService configService,
@@ -99,13 +99,13 @@ public class FlexlbGrpcServer {
                 executorConfig.getExecutorQueueSize());
 
         this.bossGroup = new NioEventLoopGroup(1, new DefaultThreadFactory("flexlb-grpc-server-boss"));
-        this.countingAbortHandler = new CountingAbortHandler();
+        this.countingCallerRunsHandler = new CountingCallerRunsHandler();
         this.grpcExecutor = new ThreadPoolExecutor(
                 executorConfig.getExecutorCoreSize(), executorConfig.getExecutorMaxSize(),
                 60L, TimeUnit.SECONDS,
                 new LinkedBlockingQueue<>(executorConfig.getExecutorQueueSize()),
                 new DefaultThreadFactory("flexlb-grpc-executor"),
-                countingAbortHandler
+                countingCallerRunsHandler
         );
 
         // Register monitoring metrics for the gRPC server executor
@@ -116,6 +116,7 @@ public class FlexlbGrpcServer {
                 .bossEventLoopGroup(bossGroup)
                 .workerEventLoopGroup(grpcServerEventLoopGroup)
                 .executor(grpcExecutor)
+                .intercept(new GrpcOverloadInterceptor(grpcExecutor))
                 .addService(ServerInterceptors.intercept(flexlbServiceImpl,
                         new GrpcTraceInterceptor(), grpcServerTimingInterceptor, grpcQosHeaderInterceptor))
                 .maxInboundMessageSize(org.flexlb.constant.GrpcConstants.MAX_MESSAGE_SIZE)
@@ -136,7 +137,7 @@ public class FlexlbGrpcServer {
      *   <li>{@code flexlb_grpc_server_executor_pool_size} — gauge: current thread pool size</li>
      *   <li>{@code flexlb_grpc_server_executor_max_pool_size} — gauge: maximum thread pool size</li>
      *   <li>{@code flexlb_grpc_server_executor_completed_tasks_total} — counter: completed task count</li>
-     *   <li>{@code flexlb_grpc_server_executor_caller_runs_total} — counter: AbortPolicy rejections</li>
+     *   <li>{@code flexlb_grpc_server_executor_caller_runs_total} — counter: saturated executor inline executions</li>
      * </ul>
      *
      * <p>When {@link MeterRegistry} is not available (e.g. actuator not on classpath),
@@ -176,8 +177,8 @@ public class FlexlbGrpcServer {
                 .register(meterRegistry);
 
         FunctionCounter.builder(METRIC_PREFIX + MetricConstant.GRPC_SERVER_EXECUTOR_CALLER_RUNS,
-                        countingAbortHandler, handler -> handler.getRejectionCount().doubleValue())
-                .description("gRPC server executor rejection count (AbortPolicy)")
+                        countingCallerRunsHandler, handler -> handler.getCallerRunsCount().doubleValue())
+                .description("gRPC server executor inline executions on saturation")
                 .register(meterRegistry);
 
         Logger.info("FlexLB gRPC server executor metrics registered with MeterRegistry");
@@ -244,32 +245,25 @@ public class FlexlbGrpcServer {
     }
 
     /**
-     * Custom {@link RejectedExecutionHandler} that delegates to
-     * {@link ThreadPoolExecutor.AbortPolicy} and counts the number of
-     * times the rejection policy is triggered.
-     *
-     * <p>The rejection count is exposed as a {@link FunctionCounter} metric
-     * ({@code flexlb_grpc_server_executor_caller_runs_total} — metric name kept
-     * for backward compat). When AbortPolicy fires, it means the executor thread
-     * pool and queue are both saturated. A {@link java.util.concurrent.RejectedExecutionException}
-     * is thrown which gRPC catches and converts into an {@code UNAVAILABLE}
-     * status response to the client. This prevents the Netty EventLoop thread
-     * from being forced to execute the task synchronously (which was the
-     * behaviour with {@code CallerRunsPolicy} and caused ~990 ms blocking).
+     * gRPC executor tasks include message ownership transfers and terminal callbacks.
+     * Throwing here can lose a MessageProducer without closing its retained buffers
+     * (grpc-java 1.65.1 ServerImpl.messagesAvailable). Never discard these tasks.
+     * New RPCs are shed separately by GrpcOverloadInterceptor; already accepted
+     * callbacks apply synchronous backpressure when the bounded queue is full.
      */
-    static class CountingAbortHandler implements RejectedExecutionHandler {
-        private final AtomicLong rejectionCount = new AtomicLong(0);
-        private final ThreadPoolExecutor.AbortPolicy delegate =
-                new ThreadPoolExecutor.AbortPolicy();
+    static class CountingCallerRunsHandler implements RejectedExecutionHandler {
+        private final AtomicLong callerRunsCount = new AtomicLong();
 
         @Override
-        public void rejectedExecution(Runnable r, ThreadPoolExecutor executor) {
-            rejectionCount.incrementAndGet();
-            delegate.rejectedExecution(r, executor);
+        public void rejectedExecution(Runnable task, ThreadPoolExecutor executor) {
+            callerRunsCount.incrementAndGet();
+            // Unlike JDK CallerRunsPolicy, do not silently drop terminal callbacks
+            // racing executor shutdown. The server is drained before shutdown.
+            task.run();
         }
 
-        public AtomicLong getRejectionCount() {
-            return rejectionCount;
+        public AtomicLong getCallerRunsCount() {
+            return callerRunsCount;
         }
     }
 }
