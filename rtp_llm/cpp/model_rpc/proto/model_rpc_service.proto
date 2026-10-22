@@ -650,6 +650,13 @@ message UpdateWeightsRequestPB {
     string method = 3;
 }
 
+// Keep field numbers aligned with the KVCM-capable engine wire contract.
+enum KvCacheGroupModePB {
+    KV_CACHE_GROUP_MODE_UNSPECIFIED = 0;
+    KV_CACHE_GROUP_MODE_FULL_ATTENTION_ONLY = 1;
+    KV_CACHE_GROUP_MODE_WITH_MAMBA = 2;
+}
+
 message WorkerStatusPB {
     string role = 1;              // 字符串角色名，如 "PREFILL"，向后兼容
     // LocalRpcServer::GetWorkerStatus currently does not populate this field, so
@@ -678,6 +685,10 @@ message WorkerStatusPB {
     // avoid constructing a group that the Engine can never admit.
     int64 max_seq_len = 21;
     int64 max_batch_tokens_size = 22;
+    int64 block_size = 23;
+    int32 block_hash_lookahead_tokens = 24;
+    KvCacheGroupModePB kv_cache_group_mode = 25;
+    int32 cache_match_rollback_blocks = 26;
 }
 
 message EmbeddingInputPB {

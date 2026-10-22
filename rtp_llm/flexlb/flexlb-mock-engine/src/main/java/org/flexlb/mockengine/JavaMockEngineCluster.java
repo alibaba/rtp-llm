@@ -112,7 +112,16 @@ public final class JavaMockEngineCluster {
             // Python compat: perf_cfg.setdefault("block_size", args.block_size)
             performance.setBlockSize(config.blockSize);
         }
-        config.engineInitializer = service -> configureWhaleMetrics(service, whaleMonitor);
+        KvcmEventPublisher.Config kvcmConfig = null;
+        try { kvcmConfig = KvcmEventPublisher.Config.fromEnv(System.getenv()); }
+        catch (IllegalArgumentException error) {
+            System.err.println("KVCM event publishing disabled: invalid configuration (see KVCM event documentation)");
+        }
+        KvcmEventPublisher.Config publisherConfig = kvcmConfig;
+        config.engineInitializer = service -> {
+            configureWhaleMetrics(service, whaleMonitor);
+            if (publisherConfig != null) service.enableKvcm(publisherConfig);
+        };
         ClusterStats stats = new ClusterStats();
         EventLoopGroup bossGroup = new NioEventLoopGroup(1);
         EventLoopGroup workerGroup = new NioEventLoopGroup(config.eventLoopThreads);
@@ -1117,6 +1126,22 @@ public final class JavaMockEngineCluster {
         private final ScheduledExecutorService scheduler;
         private final MockPerformanceModel performance;
         private final MockLruBlockCache cache;
+        private KvcmEventPublisher kvcmPublisher;
+
+        void enableKvcm(KvcmEventPublisher.Config config) {
+            if (kvcmPublisher != null || cacheSyncFixture != null)
+                throw new IllegalStateException("KVCM requires the ordinary device cache, without synthetic fixtures");
+            kvcmPublisher = new KvcmEventPublisher(config, cache, host + ":" + (grpcPort - 1),
+                    seqSizePerBlock, () -> !stopped, null);
+            kvcmPublisher.start();
+        }
+
+        boolean setKvcmGroupResident(long key, String group, boolean resident) {
+            if (kvcmPublisher == null) throw new IllegalArgumentException("KVCM publisher is disabled");
+            boolean changed = kvcmPublisher.setGroupResident(key, group, resident);
+            if (changed) cacheVersion.incrementAndGet();
+            return changed;
+        }
         private final ClusterStats stats;
         /** Reported token capacity (per-role; pool is ceil(total/spb) blocks). */
         private final long totalKvTokens;
@@ -1988,6 +2013,8 @@ public final class JavaMockEngineCluster {
                     .setAlive(!stopped)
                     .setRole("RoleType." + roleName)
                     .setRoleType(roleType)
+                    .setBlockSize(seqSizePerBlock)
+                    .setKvCacheGroupMode(EngineRpcService.KvCacheGroupModePB.KV_CACHE_GROUP_MODE_FULL_ATTENTION_ONLY)
                     .setAvailableConcurrency(roleType == EngineRpcService.RoleTypePB.ROLE_TYPE_PREFILL
                             // Python worker_status: max(0, _max_prefill_concurrency - len(_running))
                             ? Math.max(0, maxPrefillConcurrency - activePrefillBatches.get())
@@ -5708,6 +5735,8 @@ public final class JavaMockEngineCluster {
 
         synchronized Map<String, Object> cacheFixture(String operation, int worker, int workers,
                 int unique, int shared, int delta, int intervalMs) {
+            if (kvcmPublisher != null)
+                throw new IllegalArgumentException("synthetic cache fixtures cannot be combined with KVCM events");
             if (!"PREFILL".equals(getRoleName()))
                 throw new IllegalArgumentException("cache fixture requires PREFILL");
             if ("configure".equals(operation)) {
@@ -6161,6 +6190,7 @@ public final class JavaMockEngineCluster {
             requestDeadlines.values().forEach(MockRequestDeadline::close);
             requestDeadlines.clear();
             List<Runnable> close = new ArrayList<>();
+            if (kvcmPublisher != null) close.add(kvcmPublisher::close);
             if (rpcEngine != null) close.add(rpcEngine::stop);
             remotePrefillOwners.forEach((id, owner) -> close.add(() -> {
                 owner.close();
@@ -6864,6 +6894,7 @@ public final class JavaMockEngineCluster {
             }
             // Python cluster.snapshot() adds "stopped" per engine.
             snap.put("stopped", stopped);
+            if (kvcmPublisher != null) snap.put("kvcm", kvcmPublisher.status());
             snap.putAll(admissionSnapshot());
             // Java-only fields retained (do not rename Python fields above).
             snap.put("port", grpcPort);

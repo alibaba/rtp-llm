@@ -190,3 +190,29 @@ Mock 指标使用引擎兼容的 `rtp_llm_*` 名称，并保留 `hippo_app`、`h
 Prefill `context_tps` 按有效计算 token / 对应 batch execution 时间统计；`context_tps_with_cache` 用包含复用的输入 token 及其对应执行时间。它们不是墙钟吞吐；墙钟指标是 `context_wall_tps` / `context_wall_tps_with_cache`。Mock 数值用于验证配置与调度，不代表实际 GPU kernel 性能。
 
 真实规模的部署校准必须执行 [生产配置与监控对齐](production-alignment.md)，不能只修改 P/D 数量或复制一段性能公式。
+
+## Mock 与独立 KVCM
+
+`KV_CACHE_EVENT_PUBLISHER_TYPE=kvcm` 开启设备缓存事件上报。仅完成且可复用的逻辑
+key 进入索引；重复请求与 LRU touch 不新增事件，淘汰产生 DELETE。
+模拟的必需组全部完整后才发布一个合并 key，LINEAR 组不参与。
+协议依据为 `BlockTree::refreshPublishedState`、`logicalCacheSnapshot` 和 `KVCMPublisher`。
+Mock 不存储真实 KV tensor，事件位置只用于路由元数据验证，不能用于远端 tensor 读取。
+
+- 设置独立的 `KV_CACHE_EVENT_INSTANCE_GROUP` 和 `KV_CACHE_EVENT_INSTANCE_ID`。
+  Master 的 KVCM namespace 按 block size 追加后缀时，配合
+  `MOCK_KVCM_APPEND_BLOCK_SIZE=true`；P/D block size 不同时分别注册。
+- VIP 发现使用 `RECO_ENABLE_VIPSERVER=1`、`RECO_VIPSERVER_DOMAIN`，域成员为
+  KVCM RPC 地址；Mock 调用 GetClusterInfo 获取 Meta HTTP leader。
+  固定 HTTP 地址可用 `KV_CACHE_EVENT_MANAGER_ENDPOINT`，不要把 RPC 端口当 HTTP 端口。
+- 每个引擎自动用自身 host:HTTP-port 标识所有者；不接受共享的
+  `KV_CACHE_EVENT_HOST_IP_PORT`。独立 KVCM 的 registry namespace、VIP 和实例组
+  不得指向其他部署。
+- 镜像需要打包 `whale-kvcm-discovery` profile 的 VipServer client。
+  未启用 publisher 时不创建网络客户端。错误上报不阻塞推理，恢复后重注册和全量快照对账。
+- `MOCK_KVCM_GROUPS_JSON` 可声明 tag、FULL/SWA/LINEAR、reuse、size_bytes；
+  默认一个 FULL 组。组缺失模拟通过 `/cache_group_residency` 控制；这是 Mock 专属控制口。
+- 合成 cache fixture 与 publisher 互斥；普通请求缓存与一次性 natural seed 仍走同一设备缓存。
+
+验收分别核对注册、初始快照、请求产生 ADD、淘汰产生 DELETE、Master 查得命中，
+以及重复请求的实际复用量。HTTP 200 或 publisher READY 都不代替 KVCM 业务状态与真实 key 对账。
