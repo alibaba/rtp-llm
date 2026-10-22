@@ -18,14 +18,14 @@ except ModuleNotFoundError as error:
 
 if triton is not None:
 
-    @triton.jit
+    @triton.jit(do_not_specialize=["M"])
     def _vision_residual_rmsnorm_kernel(
         X,
         R,
         W,
         S,
         Y,
-        M: tl.constexpr,
+        M,
         N: tl.constexpr,
         EPS: tl.constexpr,
         ROWS: tl.constexpr,

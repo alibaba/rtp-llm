@@ -295,7 +295,7 @@ def _rgb_tensor(image: Image.Image) -> torch.Tensor:
         )
 
 
-def _preprocess_rgb_on_device(rgb, target_hw, patch_size, device):
+def _preprocess_rgb_on_device(rgb, target_hw, patch_size, device, *, tables=None):
     """Only the GPU-owning caller may enter this boundary; no D2H round trip."""
     from rtp_llm.models_py.modules.dsv41.vision_preprocess_triton import (
         is_supported_shape,
@@ -314,4 +314,6 @@ def _preprocess_rgb_on_device(rgb, target_hw, patch_size, device):
         if torch.cuda.is_current_stream_capturing():
             raise ValueError("V4.1 GPU preprocessing cannot run inside CUDA capture")
         pixels = rgb.to(device=device)
-        return preprocess_rgb_u8(pixels, target_hw, patch_size=patch_size)
+        return preprocess_rgb_u8(
+            pixels, target_hw, patch_size=patch_size, tables=tables
+        )

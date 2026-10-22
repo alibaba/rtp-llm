@@ -9,6 +9,7 @@ from dataclasses import dataclass
 
 import torch
 
+from rtp_llm.models_py.modules.dsv41.vision_preprocess_tables import ResizeTables
 from rtp_llm.multimodal.multimodal_mixins.multimodal_common import PreparedMMInputs
 from rtp_llm.utils.cuda_graph_gate import cuda_graph_gate
 
@@ -18,6 +19,7 @@ class UploadedImage:
     """Device uint8 RGB; shape metadata remains readable without a D2H sync."""
 
     rgb: torch.Tensor
+    resize_tables: ResizeTables | None = None
 
 
 class UploadedRGBBatch(PreparedMMInputs):

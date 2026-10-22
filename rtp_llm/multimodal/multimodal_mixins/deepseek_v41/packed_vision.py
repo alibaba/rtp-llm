@@ -12,6 +12,7 @@ is required. This module never substitutes an eager fallback after a failure.
 """
 
 from collections import OrderedDict
+from itertools import accumulate
 
 import torch
 import torch.nn.functional as F
@@ -53,11 +54,13 @@ def _packed_rotary(attention, q, k, cos, sin):
     return torch.cat(q_parts, dim=0), torch.cat(k_parts, dim=0)
 
 
-def _packed_attention(q, k, v, grids, lengths, *, qk_bhsd=None, backend="sdpa"):
+def _packed_attention(
+    q, k, v, grids, lengths, *, qk_bhsd=None, backend="sdpa", cu_seqlens=None
+):
     if backend == "fa4":
         if qk_bhsd is not None:
             raise ValueError("FA4 consumes native BSHD rotary output, not BHSD")
-        result = _packed_fa4_attention(q, k, v, grids, lengths)
+        result = _packed_fa4_attention(q, k, v, grids, lengths, cu_seqlens=cu_seqlens)
         if result is not None:
             return result
     elif backend != "sdpa":
@@ -105,35 +108,37 @@ def _packed_attention(q, k, v, grids, lengths, *, qk_bhsd=None, backend="sdpa"):
     return torch.cat(outputs, dim=0)
 
 
-def _packed_fa4_attention(q, k, v, grids, lengths):
-    from rtp_llm.models_py.modules.dsv41.vision_attention import apply_vision_fa4
+def prepare_fa4_cu_seqlens(grids, device):
+    """Small per-batch metadata; prepare outside capture and retain with a graph."""
+    if not grids or all(tuple(grid) == tuple(grids[0]) for grid in grids):
+        return None
+    offsets = [0, *accumulate(height * width for height, width in grids)]
+    return torch.tensor(offsets, dtype=torch.int32, device=device)
 
-    groups = OrderedDict()
-    for index, grid in enumerate(grids):
-        groups.setdefault(tuple(grid), []).append(index)
-    if len(groups) == 1:
-        # view preserves the rotary/QKV outer strides; FA4 consumes BSHD and
-        # produces the WO layout directly. No BHSD contiguous round trip.
+
+def _packed_fa4_attention(q, k, v, grids, lengths, *, cu_seqlens=None):
+    from rtp_llm.models_py.modules.dsv41.vision_attention import (
+        apply_vision_fa4,
+        apply_vision_fa4_varlen,
+    )
+
+    if all(tuple(grid) == tuple(grids[0]) for grid in grids):
         tensors = [t.view(len(lengths), lengths[0], *t.shape[1:]) for t in (q, k, v)]
         attended = apply_vision_fa4(*tensors)
-        return None if attended is None else attended.reshape(q.shape[0], -1)
-    parts = [t.split(lengths, dim=0) for t in (q, k, v)]
-    outputs = [None] * len(lengths)
-    for indices in groups.values():
-        tensors = [torch.stack([values[i] for i in indices], dim=0) for values in parts]
-        attended = apply_vision_fa4(*tensors)
-        if attended is None:
-            return None
-        for row, index in enumerate(indices):
-            outputs[index] = attended[row].reshape(lengths[index], -1)
-    return torch.cat(outputs, dim=0)
+    else:
+        if cu_seqlens is None:
+            cu_seqlens = prepare_fa4_cu_seqlens(grids, q.device)
+        attended = apply_vision_fa4_varlen(q, k, v, cu_seqlens, max(lengths))
+    return None if attended is None else attended.reshape(q.shape[0], -1)
 
 
-def forward_packed(vision, aligner, patches, grids, *, rope_bhsd=True, rotary=None):
+def forward_packed(
+    vision, aligner, patches, grids, *, rope_bhsd=True, rotary=None, cu_seqlens=None
+):
     """Return aligned tensors in original image order, without token assembly.
 
     Concatenated rows share patch projection, QKV/WO, norms, and MLP GEMMs.
-    Attention is isolated by image, grouped only for compatible grid shapes.
+    FA4 uses cumulative image boundaries; SDPA groups compatible grid shapes.
     Empty input returns []; a singleton uses this same packed implementation.
     No retry after execution failure or precision tolerance is applied.
 
@@ -152,6 +157,8 @@ def forward_packed(vision, aligner, patches, grids, *, rope_bhsd=True, rotary=No
         if vision.blocks
         else "sdpa"
     )
+    if backend == "fa4" and cu_seqlens is None:
+        cu_seqlens = prepare_fa4_cu_seqlens(grids, patches[0].device)
     use_bhsd = (
         backend == "sdpa"
         and rope_bhsd
@@ -190,7 +197,9 @@ def forward_packed(vision, aligner, patches, grids, *, rope_bhsd=True, rotary=No
             )
         if qk_bhsd is None:
             q, k = _packed_rotary(block.attn, q, k, cos, sin)
-            attention = _packed_attention(q, k, v, grids, lengths, backend=backend)
+            attention = _packed_attention(
+                q, k, v, grids, lengths, backend=backend, cu_seqlens=cu_seqlens
+            )
         else:
             attention = _packed_attention(q, k, v, grids, lengths, qk_bhsd=qk_bhsd)
         attention_output = block.attn.wo(attention)
