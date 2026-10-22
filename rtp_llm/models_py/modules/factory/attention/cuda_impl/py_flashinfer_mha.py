@@ -751,13 +751,18 @@ class PyFlashinferPrefillAttnOp(object):
             q_data_type=self.dtype,
             kv_data_type=self.dtype,
             o_data_type=self.dtype,
-            disable_split_kv=True,
+            # FA2's graph planner pads the launch grid. Its split-KV path
+            # supplies the validity mask for unused CTAs; disabling that path
+            # can leave padded blocks reading uninitialized request indices.
+            disable_split_kv=False,
             **mask_args,
         )
         return self.fmha_params
 
     def __del__(self):
-        release_py_flashinfer_workspace_buffer(self.g_workspace_buffer)
+        workspace = getattr(self, "g_workspace_buffer", None)
+        if workspace is not None:
+            release_py_flashinfer_workspace_buffer(workspace)
 
     def set_params(self, params: rtp_llm_ops.FlashInferMlaAttnParams):
         """Set the params object to be used by this op."""
