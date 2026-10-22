@@ -170,6 +170,60 @@ public:
                     fields["location_spec_groups"] = autil::legacy::ToJson(custom_groups);
                     autil::legacy::FromJson(*config, fields);
                 }
+                const auto configured = client_config_map.at("");
+                if (!configured) {
+                    RTP_LLM_LOG_ERROR("KVCM_CLIENT_CONFIG has no default instance config");
+                    return false;
+                }
+                const auto fields =
+                    autil::legacy::AnyCast<autil::legacy::json::JsonMap>(autil::legacy::ToJson(configured));
+                kvcm::KVCMConfig::LocationSpecInfoMap configured_infos;
+                kvcm::KVCMConfig::LocationSpecGroups configured_groups;
+                autil::legacy::FromJson(configured_infos, fields.at("location_spec_infos"));
+                autil::legacy::FromJson(configured_groups, fields.at("location_spec_groups"));
+                for (const auto& [group_id, group] : group_policy_->groups()) {
+                    (void)group_id;
+                    for (int rank = 0; rank < parallelism_config_.tp_size; ++rank) {
+                        const std::string legacy_name = "tp" + std::to_string(rank) + "_" + group.group_name;
+                        const std::string expected_name = kvcm::genLocationSpecName(rank, group.group_name);
+                        if (legacy_name != expected_name && configured_infos.count(legacy_name) != 0) {
+                            RTP_LLM_LOG_ERROR("KVCM_CLIENT_CONFIG must replace location spec [%s] with [%s]",
+                                              legacy_name.c_str(), expected_name.c_str());
+                            return false;
+                        }
+                    }
+                }
+                for (const auto& [name, size] : *location_infos) {
+                    (void)size;
+                    if (configured_infos.count(name) == 0) {
+                        RTP_LLM_LOG_ERROR("KVCM_CLIENT_CONFIG is missing location spec [%s]", name.c_str());
+                        return false;
+                    }
+                }
+                for (const auto& [name, size] : configured_infos) {
+                    (void)size;
+                    if (location_infos->count(name) == 0) {
+                        RTP_LLM_LOG_ERROR("KVCM_CLIENT_CONFIG has unexpected location spec [%s]", name.c_str());
+                        return false;
+                    }
+                }
+                for (const auto& [name, specs] : *location_groups) {
+                    const auto it = configured_groups.find(name);
+                    if (it == configured_groups.end() || it->second != specs) {
+                        RTP_LLM_LOG_ERROR("KVCM_CLIENT_CONFIG location group [%s] does not match runtime specs",
+                                          name.c_str());
+                        return false;
+                    }
+                }
+                for (const auto& [group_name, specs] : configured_groups) {
+                    for (const auto& name : specs) {
+                        if (location_infos->count(name) == 0) {
+                            RTP_LLM_LOG_ERROR("KVCM_CLIENT_CONFIG location group [%s] has unknown spec [%s]",
+                                              group_name.c_str(), name.c_str());
+                            return false;
+                        }
+                    }
+                }
             } else {
                 client_config_map = genClientConfig();
             }
