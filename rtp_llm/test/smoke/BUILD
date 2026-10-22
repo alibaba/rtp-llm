@@ -85,6 +85,7 @@ cc_binary(
     deps = [
         "//3rdparty/3fs:hf3fs",
         "//3rdparty/remote_kv_cache_manager:remote_kv_cache_manager_client",
+        "//3rdparty/remote_kv_cache_manager:remote_kv_cache_manager_client_headers",
         "@grpc//:grpc++",
         "@havenask//aios/alog:alog",
         "@havenask//aios/autil:lock_free",
