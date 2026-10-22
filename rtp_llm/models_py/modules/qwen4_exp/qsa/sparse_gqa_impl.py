@@ -499,12 +499,18 @@ class SparseGqaFmhaImpl(FMHAImplBase):
         elif qk_norm is not None:
             from .main_qk_norm_rope import try_main_qk_norm_rope
 
-            prepared = try_main_qk_norm_rope(
-                qkv,
-                self.rope_params.position_ids.reshape(-1, 3),
-                qk_norm,
-                self.attn_configs.rope_config,
-            )
+            position_ids = self.rope_params.position_ids
+            # The MRoPE fast path needs one three-axis id per token; anything
+            # else must fall back to the plain norm instead of raising here.
+            if int(position_ids.numel()) % 3 == 0:
+                prepared = try_main_qk_norm_rope(
+                    qkv,
+                    position_ids.reshape(-1, 3),
+                    qk_norm,
+                    self.attn_configs.rope_config,
+                )
+            else:
+                prepared = None
             if prepared is None:
                 qkv = qk_norm(qkv)
             else:

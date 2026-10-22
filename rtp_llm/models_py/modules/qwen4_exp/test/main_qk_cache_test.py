@@ -153,6 +153,43 @@ class MainQkCacheTest(unittest.TestCase):
         )
         self.compare(c)
 
+    def test_inactive_lengths_preserve_cache_and_scale_storage_guards(self):
+        for length in (0, -1, -126, torch.iinfo(torch.int32).min):
+            with self.subTest(length=length):
+                c = self.case(12, 8, 4, [0] * 8)
+                c[3].fill_(1)
+                c[6].zero_()
+                c[7].fill_(length)
+                initial = c[-1]
+                guard_bytes = 32768
+                cache_bytes = initial.kv_cache_base.numel()
+                cache_storage = torch.full(
+                    (cache_bytes + 2 * guard_bytes,),
+                    0x35,
+                    device="cuda",
+                    dtype=torch.uint8,
+                )
+                scale_elems = initial.kv_scale_base.numel()
+                scale_storage = torch.full(
+                    (scale_elems + 256,), 3.0, device="cuda", dtype=torch.float32
+                )
+                cache = SimpleNamespace(
+                    kv_cache_base=cache_storage[guard_bytes : guard_bytes + cache_bytes]
+                    .view(torch.float8_e4m3fn)
+                    .view_as(initial.kv_cache_base),
+                    kv_scale_base=scale_storage[128 : 128 + scale_elems].view_as(
+                        initial.kv_scale_base
+                    ),
+                )
+                before_cache = cache_storage.clone()
+                before_scales = scale_storage.clone()
+                operation = self.prepared(c, cache)
+                self.assertIsNotNone(operation)
+                output = operation.run()
+                self.assertTrue(bool(torch.isfinite(output).all()))
+                torch.testing.assert_close(cache_storage, before_cache, rtol=0, atol=0)
+                torch.testing.assert_close(scale_storage, before_scales, rtol=0, atol=0)
+
     def test_single_row_retains_original_complete_consumer(self):
         for query in (1, 2, 3):
             c = self.case(12, 1, query, [127])
