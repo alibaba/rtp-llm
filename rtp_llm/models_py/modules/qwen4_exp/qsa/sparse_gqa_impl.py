@@ -67,6 +67,7 @@ class SparseGqaFmhaImpl(FMHAImplBase):
         self.is_target_verify = bool(attn_inputs.is_target_verify)
         self._is_mtp_draft = False
         self._selected_indices: Optional[torch.Tensor] = None
+        self._trusted_selected_indices = False
         self._qsa_main_cache_mutation_started = False
         self._qsa_target_visible_lengths = None
         self._validate_runtime_mode()
@@ -212,6 +213,12 @@ class SparseGqaFmhaImpl(FMHAImplBase):
         if self._selected_indices is not None:
             raise RuntimeError("qwen4_exp sparse GQA has an unconsumed selection")
         self._selected_indices = selected_indices
+        self._trusted_selected_indices = False
+
+    def set_trusted_selected_indices(self, selected_indices: torch.Tensor) -> None:
+        """Accept a selection produced by this model's causal QSA indexer."""
+        self.set_selected_indices(selected_indices)
+        self._trusted_selected_indices = True
 
     def _prepare_paged_inputs(
         self,
@@ -447,6 +454,8 @@ class SparseGqaFmhaImpl(FMHAImplBase):
         if selected_indices is not None and self._selected_indices is not None:
             raise RuntimeError("qwen4_exp sparse GQA received two selections")
         uses_stored_selection = selected_indices is None
+        trusted_selected = uses_stored_selection and self._trusted_selected_indices
+        self._trusted_selected_indices = False
         if selected_indices is None:
             selected_indices = self._selected_indices
         if selected_indices is None:
@@ -630,6 +639,7 @@ class SparseGqaFmhaImpl(FMHAImplBase):
 
         outputs = []
         offset = 0
+        validation_kwargs = {"validate_selected": False} if trusted_selected else {}
         for seq_len in lengths:
             end = offset + seq_len
             seq_q = q[offset:end].reshape(1, seq_len, self.head_num, self.head_dim)
@@ -640,6 +650,7 @@ class SparseGqaFmhaImpl(FMHAImplBase):
                 seq_k.transpose(1, 2).contiguous(),
                 seq_v.transpose(1, 2).contiguous(),
                 selected_indices[offset:end].unsqueeze(0).contiguous(),
+                **validation_kwargs,
             )
             outputs.append(seq_out.transpose(1, 2).reshape(seq_len, self.q_width))
             offset = end

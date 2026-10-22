@@ -204,6 +204,7 @@ def sparse_prefill_attn(
     selected: torch.Tensor,
     *,
     blk_k: int = _BLK_K,
+    validate_selected: bool = True,
 ) -> torch.Tensor:
     """Triton sparse FMHA (one program per query position).
 
@@ -247,13 +248,16 @@ def sparse_prefill_attn(
         raise ValueError("bf16 tensors required")
     if selected.dtype != torch.int32:
         raise ValueError("selected must be int32")
-    # Correctness-first synchronization: a bad positive index is a metadata
-    # contract violation, not padding, and must not become an OOB device read.
-    max_selected = int(selected.max().item()) if selected.numel() else -1
-    if max_selected >= T:
-        raise ValueError(
-            f"selected index {max_selected} is outside KV sequence length {T}"
-        )
+    # The internal causal indexer constructs every nonnegative id from a
+    # completed block or the current sequence tail, so it can call with
+    # validate_selected=False. Public and injected selections retain this
+    # strict preflight; the kernel masks invalid ids on either path.
+    if validate_selected:
+        max_selected = int(selected.max().item()) if selected.numel() else -1
+        if max_selected >= T:
+            raise ValueError(
+                f"selected index {max_selected} is outside KV sequence length {T}"
+            )
 
     from .sparse_prefill_bitmap import try_bitmap_prefill
 
