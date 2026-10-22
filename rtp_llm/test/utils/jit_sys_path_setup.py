@@ -88,10 +88,17 @@ def _build_variant(source_path):
 
 
 def _cache_key(package_name, version, source_path):
+    # The interpreter ABI is part of the build identity too: a host can serve
+    # jobs running different Python versions from the same pip variant (the
+    # 2026-10-23 ppu312 pool swap ran cp312 jobs alongside the cp310 bazel
+    # lane), and a cached copy materialized under one interpreter breaks the
+    # other (cp312-abi3 tvm_ffi core.abi3.so references Py_Version, undefined
+    # on 3.10). Key on it so each interpreter stages its own copy.
+    py_tag = "cp%d%d" % sys.version_info[:2]
     variant = _build_variant(source_path)
     if variant is None:
-        return "%s_python-%s" % (package_name, version)
-    return "%s_python-%s__%s" % (package_name, version, variant)
+        return "%s_python-%s-%s" % (package_name, version, py_tag)
+    return "%s_python-%s-%s__%s" % (package_name, version, py_tag, variant)
 
 
 def copy_package_with_lock(package_name, cache_dir):
