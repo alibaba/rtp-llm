@@ -397,3 +397,242 @@ def test_duplicate_or_decorated_observed_signature_is_rejected():
 def test_signature_text_in_docstring_is_not_rewritten():
     source = '"""\n' + FAST_TOPK_HEADER + '\n"""\nvalue: int\n'
     assert normalize_fast_topk_defaults(source, FAST_TOPK_MODULE) == (source, False)
+
+
+# Exact post header is in CI 82334777. Pre is derived from the actual binding
+# and C++ declaration; the real generator parser checks both forms below.
+MOE_HEADERS = {
+    "moe_pre_reorder": (
+        "def moe_pre_reorder(input: torch.Tensor, topk_ids: torch.Tensor, "
+        "token_expert_indices: torch.Tensor, expert_map: torch.Tensor | None = None, "
+        "n_expert: int, n_local_expert: int, topk: int, align_block_size: int | None = None, "
+        "permuted_input: torch.Tensor, expert_first_token_offset: torch.Tensor, "
+        "inv_permuted_idx: torch.Tensor, permuted_idx: torch.Tensor) -> None:"
+    ),
+    "moe_post_reorder": (
+        "def moe_post_reorder(permuted_hidden_states: torch.Tensor, topk_weights: torch.Tensor, "
+        "inv_permuted_idx: torch.Tensor, expert_first_token_offset: torch.Tensor | None = None, "
+        "topk: int, hidden_states: torch.Tensor) -> None:"
+    ),
+}
+
+
+def _moe_stub(name):
+    return (
+        "from __future__ import annotations\nimport torch\n"
+        + MOE_HEADERS[name]
+        + '\n    """Original MoE documentation."""\n'
+    )
+
+
+@pytest.mark.parametrize("name", list(MOE_HEADERS))
+def test_moe_exact_overloads_preserve_required_arguments_and_documentation(name):
+    from _build.stubgen import normalize_moe_defaults
+
+    source = _moe_stub(name)
+    with pytest.raises(SyntaxError, match="non-default argument follows default"):
+        ast.parse(source)
+    normalized, changed = normalize_moe_defaults(source, FAST_TOPK_MODULE)
+    assert changed == [name]
+    functions = [
+        node for node in ast.parse(normalized).body if isinstance(node, ast.FunctionDef)
+    ]
+    assert len(functions) == (4 if name == "moe_pre_reorder" else 2)
+    assert all(
+        ast.unparse(node.decorator_list[0]) == "typing.overload" for node in functions
+    )
+    assert all(
+        not node.args.defaults and all(value is None for value in node.args.kw_defaults)
+        for node in functions
+    )
+    assert all(ast.unparse(node.returns) == "None" for node in functions)
+    assert normalized.count('"""Original MoE documentation."""') == 1
+    assert normalize_moe_defaults(normalized, FAST_TOPK_MODULE) == (normalized, [])
+
+
+@pytest.mark.parametrize("name", list(MOE_HEADERS))
+def test_moe_overloads_preserve_all_positional_keyword_call_shapes(name):
+    """Standard Signature binding checks call shapes, not Native execution."""
+    from _build.stubgen import normalize_moe_defaults
+
+    normalized, _ = normalize_moe_defaults(_moe_stub(name), FAST_TOPK_MODULE)
+    functions = [
+        node for node in ast.parse(normalized).body if isinstance(node, ast.FunctionDef)
+    ]
+    signatures = [
+        inspect.Signature(
+            [
+                *[
+                    inspect.Parameter(arg.arg, inspect.Parameter.POSITIONAL_OR_KEYWORD)
+                    for arg in node.args.args
+                ],
+                *[
+                    inspect.Parameter(arg.arg, inspect.Parameter.KEYWORD_ONLY)
+                    for arg in node.args.kwonlyargs
+                ],
+            ]
+        )
+        for node in functions
+    ]
+    names = [arg.arg for arg in functions[0].args.args]
+    optional = (
+        {"expert_map", "align_block_size"}
+        if name == "moe_pre_reorder"
+        else {"expert_first_token_offset"}
+    )
+    required = set(names) - optional
+    for positional_count, presence in itertools.product(
+        range(len(names) + 2), itertools.product([False, True], repeat=len(names) + 1)
+    ):
+        args = tuple(
+            None if i < len(names) and names[i] in optional else i
+            for i in range(positional_count)
+        )
+        kwargs = {
+            key: None if key in optional else key
+            for key, included in zip(names + ["unknown"], presence)
+            if included
+        }
+        expected = (
+            positional_count <= len(names)
+            and "unknown" not in kwargs
+            and not (set(names[:positional_count]) & set(kwargs))
+            and required <= (set(names[:positional_count]) | set(kwargs))
+        )
+        matches = []
+        for signature in signatures:
+            try:
+                values = dict(signature.bind(*args, **kwargs).arguments)
+            except TypeError:
+                continue
+            for key in optional:
+                values.setdefault(key, None)
+            matches.append(values)
+        assert bool(matches) == expected, (name, args, kwargs)
+        if expected:
+            original = dict(zip(names, args)) | kwargs
+            for key in optional:
+                original.setdefault(key, None)
+            assert matches == [original], (name, args, kwargs)
+
+
+@pytest.mark.parametrize("name", list(MOE_HEADERS))
+@pytest.mark.parametrize("optional_style", ["union", "typing"])
+def test_moe_real_parser_accepts_exact_binding_doc(name, optional_style):
+    from _build.stubgen import verify_moe_docstring
+
+    doc = MOE_HEADERS[name].removeprefix("def ").removesuffix(":")
+    if optional_style == "typing":
+        doc = doc.replace(
+            "torch.Tensor | None", "typing.Optional[torch.Tensor]"
+        ).replace("int | None", "typing.Optional[int]")
+    verify_moe_docstring(name, doc + "\n\nOriginal MoE documentation.\n")
+
+
+@pytest.mark.parametrize("name", list(MOE_HEADERS))
+@pytest.mark.parametrize(
+    "change", ["required_default", "optional_required", "type", "return", "name"]
+)
+def test_moe_changed_runtime_signature_fails_closed(name, change):
+    from _build.stubgen import verify_moe_docstring
+
+    header = MOE_HEADERS[name]
+    replacements = {
+        "required_default": ("topk: int", "topk: int = None"),
+        "optional_required": (" | None = None", " | None"),
+        "type": ("topk: int", "topk: float"),
+        "return": (" -> None:", " -> torch.Tensor:"),
+        "name": (name, name + "_other"),
+    }
+    old, new = replacements[change]
+    doc = header.replace(old, new).removeprefix("def ").removesuffix(":")
+    with pytest.raises(ValueError, match="runtime signature changed"):
+        verify_moe_docstring(name, doc)
+
+
+@pytest.mark.parametrize("name", list(MOE_HEADERS))
+def test_moe_duplicate_decorated_wrong_module_and_doc_literal_are_rejected(name):
+    from _build.stubgen import normalize_moe_defaults
+
+    source = _moe_stub(name)
+    with pytest.raises(ValueError, match="Ambiguous"):
+        normalize_moe_defaults(
+            source + MOE_HEADERS[name] + "\n    ...\n", FAST_TOPK_MODULE
+        )
+    with pytest.raises(ValueError, match="Unexpected decorated"):
+        normalize_moe_defaults(
+            source.replace(MOE_HEADERS[name], "@typing.overload\n" + MOE_HEADERS[name]),
+            FAST_TOPK_MODULE,
+        )
+    for module in ["librtp_compute_ops", FAST_TOPK_MODULE + "_extra", "other_module"]:
+        assert normalize_moe_defaults(source, module) == (source, [])
+    doc_literal = '"""\n' + MOE_HEADERS[name] + '\n"""\nvalue: int\n'
+    assert normalize_moe_defaults(doc_literal, FAST_TOPK_MODULE) == (doc_literal, [])
+
+
+@pytest.mark.parametrize("name", list(MOE_HEADERS))
+def test_moe_unknown_invalid_signature_or_other_errors_still_fail(name, tmp_path):
+    from _build.stubgen import normalize_moe_defaults
+
+    source = _moe_stub(name).replace("topk: int", "topk: float")
+    assert normalize_moe_defaults(source, FAST_TOPK_MODULE) == (source, [])
+    path = tmp_path / "unknown.pyi"
+    path.write_text(source)
+    with pytest.raises(SyntaxError):
+        validate_generated_stub(str(path), FAST_TOPK_MODULE)
+    assert path.read_text() == source
+    normalized, _ = normalize_moe_defaults(
+        _moe_stub(name) + "bad: invalid::CxxType\n", FAST_TOPK_MODULE
+    )
+    with pytest.raises(SyntaxError):
+        normalize_keyword_field(normalized)
+
+
+def test_all_three_exact_nontrailing_signatures_compose_without_hiding_errors():
+    from _build.stubgen import normalize_moe_defaults
+
+    source = FAST_TOPK_STUB + "\n".join(
+        _moe_stub(name).split("import torch\n", 1)[1] for name in MOE_HEADERS
+    )
+    normalized, fast = normalize_fast_topk_defaults(source, FAST_TOPK_MODULE)
+    normalized, moe = normalize_moe_defaults(normalized, FAST_TOPK_MODULE)
+    assert fast and moe == list(MOE_HEADERS)
+    normalize_keyword_field(normalized)
+    assert (
+        len(
+            [
+                node
+                for node in ast.parse(normalized).body
+                if isinstance(node, ast.FunctionDef)
+            ]
+        )
+        == 8
+    )
+
+
+def test_moe_runtime_gate_precedes_file_write_without_native_substitute(
+    tmp_path, monkeypatch
+):
+    from _build.stubgen import normalize_moe_defaults
+
+    # An ordinary existing module is not a Native binding; no fake success path.
+    path = tmp_path / "ordinary.pyi"
+    path.write_text(_moe_stub("moe_post_reorder"))
+    original = path.read_bytes()
+    assert normalize_moe_defaults(path.read_text(), "builtins")[1] == []
+    with pytest.raises(SyntaxError):
+        validate_generated_stub(str(path), "builtins")
+    assert path.read_bytes() == original
+    # Force only a failed import, without assuming the environment lacks Native.
+    # This never supplies a substitute binding or a successful runtime proof.
+    original_import = importlib.import_module
+
+    def fail_native_import(name, *args, **kwargs):
+        if name == FAST_TOPK_MODULE:
+            raise ModuleNotFoundError("controlled Native import failure")
+        return original_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(importlib, "import_module", fail_native_import)
+    with pytest.raises(ModuleNotFoundError, match="controlled Native import failure"):
+        validate_generated_stub(str(path), FAST_TOPK_MODULE)
+    assert path.read_bytes() == original

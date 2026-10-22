@@ -83,6 +83,116 @@ def verify_fast_topk_docstring(doc: str) -> None:
         raise ValueError("fast_topk_transform_fused runtime signature changed")
 
 
+# These two exact declarations are generated from RegisterCudaOps.cc / ep_utils.h.
+# No other nontrailing default is accepted by this closed signature table.
+_MOE_PARAMETERS = {
+    "moe_pre_reorder": (
+        (
+            "input: torch.Tensor",
+            "topk_ids: torch.Tensor",
+            "token_expert_indices: torch.Tensor",
+            "expert_map: torch.Tensor | None",
+            "n_expert: int",
+            "n_local_expert: int",
+            "topk: int",
+            "align_block_size: int | None",
+            "permuted_input: torch.Tensor",
+            "expert_first_token_offset: torch.Tensor",
+            "inv_permuted_idx: torch.Tensor",
+            "permuted_idx: torch.Tensor",
+        ),
+        (3, 7),
+    ),
+    "moe_post_reorder": (
+        (
+            "permuted_hidden_states: torch.Tensor",
+            "topk_weights: torch.Tensor",
+            "inv_permuted_idx: torch.Tensor",
+            "expert_first_token_offset: torch.Tensor | None",
+            "topk: int",
+            "hidden_states: torch.Tensor",
+        ),
+        (3,),
+    ),
+}
+
+
+def _moe_signature(name: str) -> str:
+    parameters, defaults = _MOE_PARAMETERS[name]
+    arguments = [
+        arg + (" = None" if i in defaults else "") for i, arg in enumerate(parameters)
+    ]
+    return f"def {name}({', '.join(arguments)}) -> None:"
+
+
+def normalize_moe_defaults(source: str, module_name: str) -> tuple[str, list[str]]:
+    """Express only the two exact MoE bindings without making required args optional.
+
+    Every subset of omitted default arguments has an overload. Arguments after
+    the first omission must be passed by keyword, exactly as in the real binding.
+    Supplied Optional arguments retain their original position and accept None.
+    The runtime signature is independently checked before any file is written.
+    """
+    if module_name != _FAST_TOPK_MODULE:
+        return source, []
+    lines = source.splitlines(keepends=True)
+    signatures = {_moe_signature(name): name for name in _MOE_PARAMETERS}
+    definitions = []
+    for token in tokenize.generate_tokens(io.StringIO(source).readline):
+        if (
+            token.type == tokenize.NAME
+            and token.string == "def"
+            and token.start[1] == 0
+        ):
+            index = token.start[0] - 1
+            name = signatures.get(lines[index].rstrip("\r\n"))
+            if name is not None:
+                definitions.append((index, name))
+    names = [name for _, name in definitions]
+    if len(names) != len(set(names)):
+        raise ValueError("Ambiguous MoE declarations")
+    for index, name in definitions:
+        previous = next(
+            (line.strip() for line in reversed(lines[:index]) if line.strip()), ""
+        )
+        if previous.startswith("@"):
+            raise ValueError(f"Unexpected decorated {name} declaration")
+        parameters, defaults = _MOE_PARAMETERS[name]
+        overloads = []
+        for mask in range(1 << len(defaults)):
+            omitted = {
+                position for bit, position in enumerate(defaults) if mask & (1 << bit)
+            }
+            arguments = []
+            for position, parameter in enumerate(parameters):
+                if omitted and position == min(omitted):
+                    arguments.append("*")
+                if position not in omitted:
+                    arguments.append(parameter)
+            overloads.append(
+                f"@typing.overload\ndef {name}({', '.join(arguments)}) -> None:\n"
+            )
+        # The original generated body/docstring stays on the last overload.
+        lines[index] = "import typing\n" + "    ...\n".join(overloads)
+    return "".join(lines), names
+
+
+def verify_moe_docstring(name: str, doc: str) -> None:
+    """Reject changes to a complete real runtime signature using the actual parser."""
+    from pybind11_stubgen import arg_parser, stub_parser_from_args
+    from pybind11_stubgen.printer import Printer
+    from pybind11_stubgen.structs import Identifier
+
+    if name not in _MOE_PARAMETERS:
+        raise ValueError("Unknown MoE binding")
+    parser = stub_parser_from_args(arg_parser().parse_args([_FAST_TOPK_MODULE]))
+    functions = parser.parse_function_docstring(Identifier(name), doc.splitlines())
+    if len(functions) != 1 or Printer(invalid_expr_as_ellipses=False).print_function(
+        functions[0]
+    )[0] != _moe_signature(name):
+        raise ValueError(f"{name} runtime signature changed")
+
+
 def normalize_keyword_field(source: str) -> tuple[str, bool]:
     """Represent QuantMethod's runtime ``None`` through its typed member map.
 
@@ -145,6 +255,7 @@ def validate_generated_stub(path: str, module_name: str) -> dict:
     target = Path(path)
     source = target.read_text(encoding="utf-8")
     normalized, overloads = normalize_fast_topk_defaults(source, module_name)
+    normalized, moe_overloads = normalize_moe_defaults(normalized, module_name)
     normalized, changed = normalize_keyword_field(normalized)
     proof = {
         "module": module_name,
@@ -164,6 +275,25 @@ def validate_generated_stub(path: str, module_name: str) -> dict:
             "count": 2,
             "cu_seqlens_q_required": True,
         }
+    if moe_overloads:
+        module = importlib.import_module(module_name)
+        proofs = {}
+        for name in moe_overloads:
+            function = getattr(module, name)
+            if not inspect.isbuiltin(function) or function.__module__ != module_name:
+                raise ValueError(f"{name} requires its real Native binding")
+            verify_moe_docstring(name, function.__doc__ or "")
+            parameters, defaults = _MOE_PARAMETERS[name]
+            proofs[name] = {
+                "runtime_signature": function.__doc__.splitlines()[0],
+                "count": 1 << len(defaults),
+                "required_arguments": [
+                    arg.split(":", 1)[0]
+                    for i, arg in enumerate(parameters)
+                    if i not in defaults
+                ],
+            }
+        proof["moe_overloads"] = proofs
     if changed:
         # Import the genuine extension already loaded by the production preload.
         module = importlib.import_module(module_name)
@@ -182,7 +312,7 @@ def validate_generated_stub(path: str, module_name: str) -> dict:
                 name: int(value) for name, value in enum.__members__.items()
             },
         }
-    if changed or overloads:
+    if changed or overloads or moe_overloads:
         target.write_text(normalized, encoding="utf-8")
     return proof
 
