@@ -6,7 +6,7 @@ import triton.language as tl
 from triton.language.extra import libdevice
 
 
-@triton.jit
+@triton.jit(do_not_specialize=["ROWS"])
 def _prepare(
     X,
     A,
@@ -18,7 +18,7 @@ def _prepare(
     V,
     Alpha,
     Beta,
-    ROWS: tl.constexpr,
+    ROWS,
     KH: tl.constexpr,
     VH: tl.constexpr,
     XSTRIDE: tl.constexpr,

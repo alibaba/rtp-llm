@@ -8,13 +8,13 @@ import triton
 import triton.language as tl
 
 
-@triton.jit
+@triton.jit(do_not_specialize=["N"])
 def _gather_shards(
     ids_ptr,
     shard_ptrs,
     scale_ptr,
     out_ptr,
-    N: tl.constexpr,
+    N,
     SHARD_ROWS: tl.constexpr,
     TOTAL_SHARDS: tl.constexpr,
     D: tl.constexpr,

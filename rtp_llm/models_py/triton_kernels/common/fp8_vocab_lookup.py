@@ -5,14 +5,14 @@ import triton
 import triton.language as tl
 
 
-@triton.jit
+@triton.jit(do_not_specialize=["N"])
 def _vocab_rows(
     Tokens,
     Weight,
     Scale,
     Mask,
     Output,
-    N: tl.constexpr,
+    N,
     V: tl.constexpr,
     D: tl.constexpr,
     TOKEN_STRIDE: tl.constexpr,
@@ -65,11 +65,11 @@ def vocab_rows(tokens, weight, scale, text_mask=None):
     return output
 
 
-@triton.jit
+@triton.jit(do_not_specialize=["N"])
 def _gather_hyper_rows(
     Source,
     Out,
-    N: tl.constexpr,
+    N,
     LOCAL_D: tl.constexpr,
     TP: tl.constexpr,
     BRANCHES: tl.constexpr,
