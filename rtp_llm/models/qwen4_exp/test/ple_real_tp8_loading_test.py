@@ -1,9 +1,9 @@
 """Real-checkpoint TP8 validation for the Qwen3.8-Flash-Next PLE table.
 
-This test is deliberately opt-in: the released PLE table is 102.4 GB and the
-smallest safe production layout is eight H20-class GPUs.  It loads only the 16
-logical table shards owned by each TP rank plus the three tiny integer hash
-metadata tensors; no other model tensor is read.
+This test is deliberately opt-in: the FP8 PLE table is 51.2 GB and the
+production layout uses eight H20-class GPUs.  It loads only the 16
+logical table shards owned by each TP rank, their FP8 scale, and the three tiny
+integer hash metadata tensors; no other model tensor is read.
 
 Set ``QWEN4_EXP_CKPT_DIR`` to the complete checkpoint directory.  The test
 skips when the directory or eight CUDA devices are unavailable.
@@ -41,7 +41,7 @@ _WORLD_SIZE = 8
 _SHARDS_PER_RANK = 16
 _TOTAL_SHARDS = 128
 _PLE_LAYER_INDEX = 1
-_EXPECTED_SHARD_BYTES = 800_003_840
+_EXPECTED_SHARD_BYTES = 400_001_920
 _EXPECTED_RANK_TABLE_BYTES = _SHARDS_PER_RANK * _EXPECTED_SHARD_BYTES
 _METADATA_NAMES = (
     W.qwen4_ple_multipliers,
@@ -102,7 +102,9 @@ def _parallelism_config(rank: int) -> ParallelismConfig:
 
 
 class _IdentityExportedDevice:
-    def maybe_rewrite_weight_by_key(self, _name: str, tensor: torch.Tensor):
+    def maybe_rewrite_weight_by_key(
+        self, _name: str, tensor: torch.Tensor, **_kwargs
+    ):
         return tensor
 
 
@@ -183,6 +185,11 @@ def _worker(rank: int, port: int) -> None:
     )
 
     local_indices = tuple(range(rank * _SHARDS_PER_RANK, (rank + 1) * _SHARDS_PER_RANK))
+    if ngram_descriptor.scale_weight is None:
+        raise AssertionError("FP8 PLE table descriptor is missing its global scale")
+    if not ngram_descriptor.preserve_fp8:
+        raise AssertionError("FP8 PLE table must remain compressed on CPU")
+    scale_key = ngram_descriptor.scale_weight.tensor_name(_PLE_LAYER_INDEX)
     expected_table_keys = [
         ngram_descriptor.weights[index].tensor_name(_PLE_LAYER_INDEX)
         for index in local_indices
@@ -192,7 +199,7 @@ def _worker(rank: int, port: int) -> None:
 
     # Any generic aggregation during table loading is a correctness failure: it
     # would require a second table-sized allocation, and a global aggregation
-    # would materialize the full 102.4 GB table on every rank.
+    # would materialize the full 51.2 GB table on every rank.
     aggregation_error = AssertionError("PLE table loading must not aggregate shards")
     torch.cuda.reset_peak_memory_stats(device)
     allocated_before = torch.cuda.memory_allocated(device)
@@ -208,14 +215,16 @@ def _worker(rank: int, port: int) -> None:
     torch.cuda.synchronize(device)
     peak_delta = torch.cuda.max_memory_allocated(device) - allocated_before
 
-    if source.requests != expected_table_keys:
+    if source.requests != [scale_key, *expected_table_keys]:
         raise AssertionError(
             f"rank {rank} requested unexpected table keys: {source.requests}"
         )
     table_bytes = sum(source.bytes_by_key[key] for key in expected_table_keys)
     if len(expected_table_keys) != _SHARDS_PER_RANK:
         raise AssertionError(f"rank {rank} did not request exactly 16 table shards")
-    if set(source.bytes_by_key.values()) != {_EXPECTED_SHARD_BYTES}:
+    if {source.bytes_by_key[key] for key in expected_table_keys} != {
+        _EXPECTED_SHARD_BYTES
+    }:
         raise AssertionError(
             f"rank {rank} table tensor sizes differ: {source.bytes_by_key}"
         )
@@ -241,7 +250,7 @@ def _worker(rank: int, port: int) -> None:
         )
         metadata[name] = result[name]
 
-    expected_all_keys = expected_table_keys + [
+    expected_all_keys = [scale_key, *expected_table_keys] + [
         descriptors[name].weights[0].tensor_name(_PLE_LAYER_INDEX)
         for name in _METADATA_NAMES
     ]
@@ -273,6 +282,7 @@ def _worker(rank: int, port: int) -> None:
             shard_indices=list(local_indices),
             total_shards=_TOTAL_SHARDS,
             distributed_reduce=True,
+            weight_scale=loaded[W.qwen4_ple_ngram_scale],
         )
 
         # With the released hash metadata, [1, 2, 3] sends exactly two of the
@@ -308,14 +318,17 @@ def _worker(rank: int, port: int) -> None:
         manual_local = torch.zeros(
             len(reference_ids),
             local_shards[0].shape[1],
-            dtype=local_shards[0].dtype,
+            dtype=embedding.output_dtype,
             device=device,
         )
         for position, value in owned:
             global_shard = value // shard_rows
             row = value % shard_rows
             manual_local[position].copy_(
-                local_shards[global_shard - local_indices[0]][row]
+                local_shards[global_shard - local_indices[0]][row].to(
+                    device=device, dtype=embedding.output_dtype
+                )
+                * embedding.weight_scale
             )
 
         actual = embedding(token_history, seq_len=1)

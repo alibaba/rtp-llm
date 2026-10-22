@@ -76,7 +76,13 @@ class CutlassNvfp4ExecutorTest(unittest.TestCase):
 
         qc = FusedMoEQuantConfig(quant_dtype=torch.uint8, block_shape=[16, 16])
         full = CutlassNvfp4Executor(
-            SimpleNamespace(ep_size=1, ep_rank=0), qc, prepared(raw)
+            SimpleNamespace(
+                ep_size=1,
+                ep_rank=0,
+                model_config=SimpleNamespace(enable_qwen4_qsa=False),
+            ),
+            qc,
+            prepared(raw),
         )
         parts = []
         for rank in range(2):
@@ -114,7 +120,12 @@ class CutlassNvfp4ExecutorTest(unittest.TestCase):
             set_parallelism_config(pc)
             parts.append(
                 CutlassNvfp4Executor(
-                    SimpleNamespace(ep_size=1, ep_rank=0, parallelism_config=pc),
+                    SimpleNamespace(
+                        ep_size=1,
+                        ep_rank=0,
+                        parallelism_config=pc,
+                        model_config=SimpleNamespace(enable_qwen4_qsa=False),
+                    ),
                     qc,
                     prepared(local),
                 )
@@ -287,7 +298,11 @@ class CutlassNvfp4ExecutorTest(unittest.TestCase):
             values[an] = torch.stack(a)
             values[ins] = torch.full((E,), 32 / 2688.0, device="cuda")
         ex = CutlassNvfp4Executor(
-            SimpleNamespace(ep_size=1, ep_rank=0),
+            SimpleNamespace(
+                ep_size=1,
+                ep_rank=0,
+                model_config=SimpleNamespace(enable_qwen4_qsa=False),
+            ),
             FusedMoEQuantConfig(quant_dtype=torch.uint8, block_shape=[16, 16]),
             values,
         )
@@ -326,7 +341,11 @@ class CutlassNvfp4ExecutorTest(unittest.TestCase):
                 for name, value in values.items()
             }
             part = CutlassNvfp4Executor(
-                SimpleNamespace(ep_size=2, ep_rank=rank),
+                SimpleNamespace(
+                    ep_size=2,
+                    ep_rank=rank,
+                    model_config=SimpleNamespace(enable_qwen4_qsa=False),
+                ),
                 FusedMoEQuantConfig(quant_dtype=torch.uint8, block_shape=[16, 16]),
                 local,
             )
@@ -380,7 +399,11 @@ class CutlassNvfp4ExecutorTest(unittest.TestCase):
             values[an] = torch.stack(aa)
             values[ins] = torch.full((E,), 32 / 2688.0, device="cuda")
         ex = CutlassNvfp4Executor(
-            SimpleNamespace(ep_size=1, ep_rank=0),
+            SimpleNamespace(
+                ep_size=1,
+                ep_rank=0,
+                model_config=SimpleNamespace(enable_qwen4_qsa=False),
+            ),
             FusedMoEQuantConfig(quant_dtype=torch.uint8, block_shape=[16, 16]),
             values,
         )

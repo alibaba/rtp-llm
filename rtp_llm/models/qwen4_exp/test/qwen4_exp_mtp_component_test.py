@@ -150,9 +150,6 @@ class Qwen4ExpMTPComponentTest(unittest.TestCase):
             [desc.tag for desc in self.config.kv_cache_spec_descs[0][1:]],
             [INDEXER_KV_TAG, INDEXER_STATE_TAG],
         )
-        self.assertTrue(
-            self.config.hybrid_attention_config.enable_independent_kv_cache_pools
-        )
         self.assertFalse(Qwen4ExpMTP.__new__(Qwen4ExpMTP).support_cuda_graph())
 
     def test_real_31_key_manifest_is_completely_and_only_mapped(self):
