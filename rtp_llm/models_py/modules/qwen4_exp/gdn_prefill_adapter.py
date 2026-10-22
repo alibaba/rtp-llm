@@ -15,7 +15,7 @@ from rtp_llm.models_py.triton_kernels.fla.gdn_gating import fused_gdn_gating
 from rtp_llm.models_py.triton_kernels.fla.l2norm import l2norm_fwd
 
 
-@triton.jit
+@triton.jit(do_not_specialize=["TABLE_STRIDE", "CACHE_STRIDE"])
 def _store_page_checkpoints(
     Checkpoints,
     Final,
@@ -24,8 +24,8 @@ def _store_page_checkpoints(
     Prefix,
     Table,
     Cache,
-    TABLE_STRIDE: tl.constexpr,
-    CACHE_STRIDE: tl.constexpr,
+    TABLE_STRIDE,
+    CACHE_STRIDE,
     HEADS: tl.constexpr,
     PAGE: tl.constexpr,
     BLOCK: tl.constexpr,
