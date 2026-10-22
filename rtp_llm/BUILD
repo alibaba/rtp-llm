@@ -86,7 +86,6 @@ requirement([
     "pynvml",
     "tiktoken",
     "protobuf",
-    "prometheus-client",
     "grpcio-tools",
     "setuptools",
     "Pillow",
@@ -469,7 +468,7 @@ py_library(
     deps = [
         ":openai_api",
         ":telemetry",
-        ":prometheus-client",
+        "//rtp_llm/aios/kmonitor:kmonitor_py",
     ]
 )
 
@@ -673,7 +672,6 @@ whl_reqs = [
     "pillow-heif",
     "pillow-avif-plugin",
     "protobuf==4.25",
-    "prometheus-client==0.21.1",
     "einops",
     "prettytable",
     "pydantic",
@@ -740,7 +738,6 @@ whl_reqs_frontend = [
     "pillow-heif",
     "pillow-avif-plugin",
     "protobuf==4.25",
-    "prometheus-client==0.21.1",
     "prettytable",
     "pydantic",
     "grpcio==1.62.0",

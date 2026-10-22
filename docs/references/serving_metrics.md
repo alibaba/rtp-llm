@@ -1,11 +1,11 @@
 # Model-server latency histograms
 
-Set `RTP_LLM_METRICS_ENABLED=1` to expose Prometheus histograms at `GET /metrics`
-on the Python frontend HTTP port. This is independent of tracing: no
-`RTP_LLM_TRACE_CONFIG`, OTLP receiver, access-log reader, or KMonitor gateway is
-required. Existing KMonitor gauges keep their names, units, and reporting paths.
-The new histograms observe individual requests; they are not reconstructed from
-aggregated gauges.
+Set `RTP_LLM_METRICS_ENABLED=1` to collect explicit-bucket latency histograms
+through the existing KMonitor Python client and its Flume reporting worker.
+No Prometheus client, HTTP metrics endpoint, multiprocess directory, tracing,
+or access-log reader is added. Existing KMonitor gauges keep their names,
+units, and reporting paths. The new histograms observe individual requests;
+they are not reconstructed from aggregated gauges.
 
 These metrics follow the types, units, and recommended buckets in the
 [OpenTelemetry GenAI model-server semantic conventions](https://github.com/open-telemetry/semantic-conventions-genai/blob/main/docs/gen-ai/gen-ai-metrics.md#generative-ai-model-server-metrics).
@@ -14,48 +14,71 @@ not a finalized stable standard. The same three histogram definitions are used b
 [Kubernetes SIGs model-serving-signals](https://github.com/kubernetes-sigs/model-serving-signals/blob/main/model-server-contract.md)
 to normalize observations across inference engines.
 
-| Prometheus histogram | OpenTelemetry metric | Observation |
+| KMonitor histogram family | OpenTelemetry metric | Observation |
 | --- | --- | --- |
 | `rtp_llm_server_request_duration_seconds` | `gen_ai.server.request.duration` | From frontend ASGI request entry to the last nonempty response body handed to the server transport. Streaming and non-streaming chat requests are included. Aborted requests use the abort time. |
 | `rtp_llm_server_time_to_first_token_seconds` | `gen_ai.server.time_to_first_token` | From the same request entry to the first visible token-bearing streaming response produced by the frontend. Includes frontend processing, engine queuing and prefill. Recorded only after successful completion. |
 | `rtp_llm_server_time_per_output_token_seconds` | `gen_ai.server.time_per_output_token` | One mean per successful request: `(last_token_time - first_token_time) / (output_tokens - 1)`, measured at the same frontend token boundary. |
 
-Each histogram exposes cumulative `_bucket` samples (including `le="+Inf"`),
-`_sum`, and `_count` in **seconds**. Labels include `gen_ai_operation_name="chat"`
+Each histogram reports cumulative `_bucket` samples (including `le="+Inf"`),
+`_sum`, and `_count`. Observed values and `_sum` use **seconds**; bucket counts
+and `_count` count observations. Labels include `gen_ai_operation_name="chat"`
 and `gen_ai_provider_name="rtp_llm"`. Duration also has a bounded `error_type`:
-empty on success, `client_error`, `server_error`, `internal_error`, or `cancelled`.
+`none` on success, `client_error`, `server_error`, `internal_error`, or `cancelled`.
 An error encoded inside an HTTP 200 SSE response is an error, not a successful
 token-timing observation. Request IDs, prompts, and arbitrary request model names
 are not metric labels. These are RTP-LLM-native metric names with an explicit
 mapping to the common conventions, rather than a complete OTel instrumentation.
 
-## Start and scrape
-
-Python frontend processes share a port through `SO_REUSEPORT`. Enable the
-Prometheus client's multiprocess storage **before** launching any Python process,
-so any frontend's `/metrics` returns the combined histogram counts:
+## Collection and transport
 
 ```sh
-# Use a fresh directory for each complete server run. All frontend processes of
-# this instance must inherit the same directory; separate instances must not.
-export PROMETHEUS_MULTIPROC_DIR="$(mktemp -d /tmp/rtp-llm-metrics.XXXXXX)"
 export RTP_LLM_METRICS_ENABLED=1
 python -m rtp_llm.start_server \
   --checkpoint_path=/path/to/model --model_type=qwen_3 --start_port=8000
 ```
 
-```sh
-curl http://localhost:8000/metrics
+This flag enables observations, not a new exporter. Delivery uses the existing
+KMonitor configuration: the Python report worker connects to
+`HIPPO_SLAVE_IP:4141` when `HIPPO_ROLE_SHORT_NAME` or `HIPPO_ROLE` is nonempty.
+Outside that configuration, the existing worker does not deliver metrics.
+An operational KMonitor/Flume collector is therefore required; setting the flag
+alone on a standalone deployment does not create a scrape endpoint.
+
+`KMonitor.register_histogram_metric(name, buckets, tags)` registers a composite
+metric. `report(value, tags)` places each finite, nonnegative observation into
+one explicit bucket. Each periodic report emits numeric components using the
+existing `py_kmonitor` Flume event format:
+
+```text
+rtp_llm_server_request_duration_seconds_bucket <timestamp> 3 le=0.64 ...
+rtp_llm_server_request_duration_seconds_bucket <timestamp> 5 le=+Inf ...
+rtp_llm_server_request_duration_seconds_sum <timestamp> 4.2 ...
+rtp_llm_server_request_duration_seconds_count <timestamp> 5 ...
 ```
 
-Scrape one endpoint per shared multiprocess directory, not every process as a
-separate target. Histogram data from a restarted worker remains in that directory
-so cumulative counts do not drop. Start with a fresh directory on a full instance
-restart; clean up old directories only after all their workers have stopped.
-A pod-local volume can hold this directory. A scraping sidecar needs HTTP access
-only; it does not need to mount the directory. Initialization fails explicitly
-when metrics are enabled without a valid multiprocess directory. Without the
-opt-in flag, the endpoint and collection are disabled.
+Buckets are cumulative both across boundaries and over the process lifetime;
+`_sum` is in seconds and `_count` counts observations. Snapshots do not reset
+or consume histogram state. With no new requests, later reports repeat the
+same values. A downstream collector must retain the latest snapshot per series,
+not sum consecutive reporting cycles. The protocol still carries scalar events;
+family reconstruction and any Prometheus/OTel export belong in that collector.
+This PR does not implement or claim that downstream conversion.
+
+Every histogram component includes `process_instance_id`, generated once per
+process lifetime, to distinguish multiple frontends and process restarts.
+Collectors must retain this identity while calculating counter increases/rates,
+then aggregate across processes. A restart starts a new series at zero; it must
+not overwrite another frontend's series. Histograms have no shared filesystem
+state and are initialized in each frontend process. In-flight observations since
+the last successful report can be lost on an abrupt process exit, as with the
+existing reporting transport; this is not durable event delivery.
+
+KMonitor's C++ `SUMMARY` uses DDSketch, but the Python frontend uses a separate
+client that does not expose it. This change extends that Python client's existing
+registration, reporting and transport path with explicit buckets. It does not
+rebin DDSketch or modify the C++ summary protocol. Bucket boundaries follow the
+recommendations linked above, preserving exact counts at those boundaries.
 
 ## Coverage and timing boundaries
 
@@ -74,4 +97,4 @@ opt-in flag, the endpoint and collection are disabled.
   and cleanup work does not extend duration. These are frontend observations,
   distinct from engine-only KMonitor latency and client-side network timing.
 - Metrics are independent of trace enablement, sampling, and trace export loss.
-  Counts reset on a full server restart with a fresh multiprocess directory.
+  Cumulative counts belong to each frontend process lifetime.

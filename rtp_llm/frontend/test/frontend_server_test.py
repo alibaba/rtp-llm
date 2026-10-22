@@ -221,6 +221,9 @@ class FrontendServerTest(TestCase):
         self.assertEqual(non_streaming.token_counts, [])
 
     def test_serving_histograms_do_not_require_tracing(self):
+        from rtp_llm.aios.kmonitor.python_client.kmonitor.metrics.histogram_metric import (
+            HistogramMetric,
+        )
         from rtp_llm.frontend.serving_metrics import (
             CURRENT_SERVING_METRICS,
             RequestMetrics,
@@ -229,7 +232,11 @@ class FrontendServerTest(TestCase):
         from rtp_llm.telemetry import CURRENT_TRACE_STATE
 
         async def run_case(is_streaming):
-            metrics = ServingMetrics()
+            monitor = MagicMock()
+            monitor.register_histogram_metric.side_effect = (
+                lambda name, buckets, tags: HistogramMetric(name, tags, buckets)
+            )
+            metrics = ServingMetrics(monitor)
             state = RequestMetrics(metrics)
             state.token_timings_enabled = True
 
@@ -261,17 +268,21 @@ class FrontendServerTest(TestCase):
             finally:
                 CURRENT_TRACE_STATE.reset(trace_token)
                 CURRENT_SERVING_METRICS.reset(metric_token)
-            return metrics.render().decode()
+            return {
+                point.metric_name
+                for metric in (metrics.duration, metrics.ttft, metrics.tpot)
+                for point in metric.fetch_reported_data()
+            }
 
         streaming = asyncio.run(run_case(True))
         non_streaming = asyncio.run(run_case(False))
-        self.assertIn("rtp_llm_server_time_to_first_token_seconds_count{", streaming)
-        self.assertIn("rtp_llm_server_time_per_output_token_seconds_count{", streaming)
+        self.assertIn("rtp_llm_server_time_to_first_token_seconds_count", streaming)
+        self.assertIn("rtp_llm_server_time_per_output_token_seconds_count", streaming)
         self.assertNotIn(
-            "rtp_llm_server_time_to_first_token_seconds_count{", non_streaming
+            "rtp_llm_server_time_to_first_token_seconds_count", non_streaming
         )
         self.assertNotIn(
-            "rtp_llm_server_time_per_output_token_seconds_count{", non_streaming
+            "rtp_llm_server_time_per_output_token_seconds_count", non_streaming
         )
 
     def test_streaming_reconciles_missing_and_rebased_token_accounting(self):

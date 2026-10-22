@@ -1,13 +1,11 @@
 import asyncio
 import os
-import subprocess
-import sys
-import tempfile
 from unittest import TestCase, main
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
-from prometheus_client.parser import text_string_to_metric_families
-
+from rtp_llm.aios.kmonitor.python_client.kmonitor.metrics.histogram_metric import (
+    HistogramMetric,
+)
 from rtp_llm.frontend.serving_metrics import (
     CURRENT_SERVING_METRICS,
     RequestMetrics,
@@ -19,11 +17,19 @@ from rtp_llm.frontend.serving_metrics import (
 PREFIX = "rtp_llm_server_"
 
 
+def make_metrics():
+    kmonitor = Mock()
+    kmonitor.register_histogram_metric.side_effect = (
+        lambda name, buckets, tags: HistogramMetric(name, tags, buckets)
+    )
+    return ServingMetrics(kmonitor)
+
+
 def samples(metrics):
     return {
-        (s.name, tuple(sorted(s.labels.items()))): s.value
-        for family in text_string_to_metric_families(metrics.render().decode())
-        for s in family.samples
+        (point.metric_name, tuple(sorted(point.tags.items()))): point.value
+        for metric in (metrics.duration, metrics.ttft, metrics.tpot)
+        for point in metric.fetch_reported_data()
     }
 
 
@@ -35,7 +41,7 @@ def total(metrics, suffix):
 
 class ServingMetricsTest(TestCase):
     def test_observations_units_buckets_and_idempotence(self):
-        metrics = ServingMetrics()
+        metrics = make_metrics()
         now = [10.0]
         state = RequestMetrics(metrics, lambda: now[0])
         state.token_timings_enabled = True
@@ -51,8 +57,6 @@ class ServingMetricsTest(TestCase):
         self.assertEqual(total(metrics, "request_duration_seconds_sum"), 2)
         self.assertEqual(total(metrics, "time_to_first_token_seconds_sum"), 0.5)
         self.assertEqual(total(metrics, "time_per_output_token_seconds_sum"), 0.5)
-        families = list(text_string_to_metric_families(metrics.render().decode()))
-        self.assertTrue(all(f.type in ("histogram", "gauge") for f in families))
         buckets = [
             (dict(labels)["le"], value)
             for (name, labels), value in samples(metrics).items()
@@ -63,7 +67,7 @@ class ServingMetricsTest(TestCase):
 
     def test_missing_timings_are_not_zero_observations(self):
         for counts in ([1], [None, 3], [2, 3], [1, 1], [1, 3, 2]):
-            metrics = ServingMetrics()
+            metrics = make_metrics()
             now = [0.0]
             state = RequestMetrics(metrics, lambda: now[0])
             state.token_timings_enabled = True
@@ -73,7 +77,7 @@ class ServingMetricsTest(TestCase):
             state.finish(now[0] + 1)
             self.assertEqual(total(metrics, "time_to_first_token_seconds_count"), 1)
             self.assertEqual(total(metrics, "time_per_output_token_seconds_count"), 0)
-        metrics = ServingMetrics()
+        metrics = make_metrics()
         state = RequestMetrics(metrics, lambda: 0)
         state.observe_tokens(True, 32)  # nonstreaming / multiple-choice disabled
         state.finish(1)
@@ -82,7 +86,7 @@ class ServingMetricsTest(TestCase):
 
     def test_middleware_body_boundary_errors_and_context(self):
         for outcome in ("success", "stream_error", "http_error", "cancel", "raise"):
-            metrics = ServingMetrics()
+            metrics = make_metrics()
             now = [0.0]
 
             async def app(scope, receive, send):
@@ -142,58 +146,9 @@ class ServingMetricsTest(TestCase):
                 int(outcome == "success"),
             )
 
-    def test_disabled_and_missing_multiprocess_directory(self):
+    def test_disabled(self):
         with patch.dict(os.environ, {"RTP_LLM_METRICS_ENABLED": "0"}):
             self.assertIsNone(create_serving_metrics())
-        with patch.dict(
-            os.environ,
-            {
-                "RTP_LLM_METRICS_ENABLED": "1",
-                "PROMETHEUS_MULTIPROC_DIR": "/nonexistent/metrics",
-            },
-        ):
-            with self.assertRaises(ValueError):
-                create_serving_metrics()
-
-    def test_multiprocess_scrapes_aggregate_exited_workers_without_duplicates(self):
-        with tempfile.TemporaryDirectory() as directory:
-            env = dict(
-                os.environ,
-                RTP_LLM_METRICS_ENABLED="1",
-                PROMETHEUS_MULTIPROC_DIR=directory,
-            )
-            script = """
-from rtp_llm.frontend.serving_metrics import create_serving_metrics
-metrics = create_serving_metrics()
-metrics.duration.labels("chat", "rtp_llm", "").observe(0.5)
-"""
-            for _ in range(2):
-                subprocess.run([sys.executable, "-c", script], env=env, check=True)
-            output = subprocess.check_output(
-                [
-                    sys.executable,
-                    "-c",
-                    """
-from rtp_llm.frontend.serving_metrics import create_serving_metrics
-metrics = create_serving_metrics()
-assert metrics.render() == metrics.render()
-print(metrics.render().decode())
-""",
-                ],
-                env=env,
-                text=True,
-            )
-            family = next(
-                f
-                for f in text_string_to_metric_families(output)
-                if f.name == PREFIX + "request_duration_seconds"
-            )
-            self.assertEqual(
-                [s.value for s in family.samples if s.name.endswith("_count")], [2]
-            )
-            self.assertEqual(
-                [s.value for s in family.samples if s.name.endswith("_sum")], [1]
-            )
 
 
 if __name__ == "__main__":

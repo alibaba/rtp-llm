@@ -5,7 +5,6 @@ import logging
 import os
 import time
 from contextvars import ContextVar
-from pathlib import Path
 
 CURRENT_SERVING_METRICS = ContextVar("rtp_llm_serving_metrics", default=None)
 
@@ -49,60 +48,23 @@ TOKEN_BUCKETS = (
 def create_serving_metrics():
     if os.environ.get("RTP_LLM_METRICS_ENABLED", "0") != "1":
         return None
-    # Frontends share a listening port via SO_REUSEPORT. A process-local
-    # registry would return a different subset of requests on each scrape.
-    directory = os.environ.get("PROMETHEUS_MULTIPROC_DIR")
-    if not directory or not Path(directory).is_dir():
-        raise ValueError(
-            "RTP_LLM_METRICS_ENABLED=1 requires an existing "
-            "PROMETHEUS_MULTIPROC_DIR, set before starting the server"
-        )
-    from prometheus_client import values
+    from rtp_llm.aios.kmonitor.python_client.kmonitor.kmonitor import KMonitor
 
-    if not values.ValueClass._multiprocess:
-        raise ValueError(
-            "Set PROMETHEUS_MULTIPROC_DIR before importing prometheus_client"
-        )
-    return ServingMetrics(multiprocess=True)
+    return ServingMetrics(KMonitor())
 
 
 class ServingMetrics:
-    def __init__(self, multiprocess=False):
-        from prometheus_client import CollectorRegistry, Histogram
-
-        self.multiprocess = multiprocess
-        self.registry = CollectorRegistry()
-        labels = ("gen_ai_operation_name", "gen_ai_provider_name")
-        self.duration = Histogram(
-            "rtp_llm_server_request_duration_seconds",
-            "Frontend request duration until the last response byte, in seconds.",
-            labels + ("error_type",),
-            buckets=DURATION_BUCKETS,
-            registry=self.registry,
+    def __init__(self, kmonitor):
+        tags = {"gen_ai_operation_name": "chat", "gen_ai_provider_name": "rtp_llm"}
+        self.duration = kmonitor.register_histogram_metric(
+            "rtp_llm_server_request_duration_seconds", DURATION_BUCKETS, tags
         )
-        self.ttft = Histogram(
-            "rtp_llm_server_time_to_first_token_seconds",
-            "Frontend time to first visible output token for successful streams.",
-            labels,
-            buckets=TTFT_BUCKETS,
-            registry=self.registry,
+        self.ttft = kmonitor.register_histogram_metric(
+            "rtp_llm_server_time_to_first_token_seconds", TTFT_BUCKETS, tags
         )
-        self.tpot = Histogram(
-            "rtp_llm_server_time_per_output_token_seconds",
-            "Per successful request mean time per output token after the first.",
-            labels,
-            buckets=TOKEN_BUCKETS,
-            registry=self.registry,
+        self.tpot = kmonitor.register_histogram_metric(
+            "rtp_llm_server_time_per_output_token_seconds", TOKEN_BUCKETS, tags
         )
-
-    def render(self):
-        from prometheus_client import CollectorRegistry, generate_latest, multiprocess
-
-        registry = self.registry
-        if self.multiprocess:
-            registry = CollectorRegistry()
-            multiprocess.MultiProcessCollector(registry)
-        return generate_latest(registry)
 
 
 class RequestMetrics:
@@ -143,20 +105,18 @@ class RequestMetrics:
             return
         self.finished = True
         error = error or self.error
-        self.metrics.duration.labels("chat", "rtp_llm", error).observe(
-            max(0.0, end - self.start)
+        self.metrics.duration.report(
+            max(0.0, end - self.start), {"error_type": error or "none"}
         )
         if error or self.first_token is None:
             return
-        self.metrics.ttft.labels("chat", "rtp_llm").observe(
-            max(0.0, self.first_token - self.start)
-        )
+        self.metrics.ttft.report(max(0.0, self.first_token - self.start))
         if (
             self.exact_tokens
             and self.output_tokens > 1
             and self.last_token > self.first_token
         ):
-            self.metrics.tpot.labels("chat", "rtp_llm").observe(
+            self.metrics.tpot.report(
                 (self.last_token - self.first_token) / (self.output_tokens - 1)
             )
 

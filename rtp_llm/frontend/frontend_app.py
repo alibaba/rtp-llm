@@ -22,7 +22,7 @@ from fastapi import Request as RawRequest
 from fastapi import status
 from fastapi.middleware import Middleware
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import ORJSONResponse, Response, StreamingResponse
+from fastapi.responses import ORJSONResponse, StreamingResponse
 from typing_extensions import override
 from uvicorn import Config, Server
 from uvicorn.loops.auto import auto_loop_setup
@@ -556,15 +556,6 @@ class FrontendApp(object):
         serving_metrics = create_serving_metrics()
         if serving_metrics is not None:
             app.add_middleware(ServingMetricsMiddleware, metrics=serving_metrics)
-
-            @app.get("/metrics", include_in_schema=False)
-            def metrics():
-                from prometheus_client import CONTENT_TYPE_LATEST
-
-                return Response(
-                    serving_metrics.render(),
-                    headers={"Content-Type": CONTENT_TYPE_LATEST},
-                )
 
         allocator_dump_enabled = bool(
             getattr(self.server_config, "enable_torch_allocator_dump", False)

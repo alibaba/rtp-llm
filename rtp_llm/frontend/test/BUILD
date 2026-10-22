@@ -39,7 +39,6 @@ py_test(
         "frontend_server_test.py",
     ],
     deps = [
-        "//rtp_llm:prometheus-client",
         "//rtp_llm:testlib",
     ] + telemetry_test_deps(),
     exec_properties = {"gpu": "L20_CU13"},
@@ -100,6 +99,5 @@ py_test(
     srcs = ["serving_metrics_test.py"],
     deps = [
         "//rtp_llm:frontend",
-        "//rtp_llm:prometheus-client",
     ],
 )
