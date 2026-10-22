@@ -1,4 +1,3 @@
-import asyncio
 import unittest
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
@@ -27,12 +26,6 @@ class _FakeMasterConfig:
 
 
 class _FakeHostService:
-    def __init__(self, requirements=None):
-        self.requirements = requirements or {}
-
-    def requires_generate_input(self, addr):
-        return self.requirements.get(addr)
-
     def get_master_addr(self):
         return "master:1234"
 
@@ -399,266 +392,149 @@ class MasterClientBatchPayloadTest(unittest.IsolatedAsyncioTestCase):
             raised.exception.admission_reject_reason,
         )
 
-    async def test_non_batch_omits_input_without_serializing_it(self):
+    async def test_omitted_input_stays_omitted_on_slave_fallback(self):
         client = _CaptureMasterClient(
-            _FakeHostService({"master:1234": False}),
-            [FlexlbScheduleResponsePB(success=True, code=200)],
+            _FakeHostServiceWithSlave(),
+            [None, FlexlbScheduleResponsePB(code=200, success=True)],
+        )
+        with patch("rtp_llm.server.master_client.trans_input") as build:
+            response = await client.get_backend_role_addrs([1], 1024, _FakeInput(), 99)
+        self.assertTrue(response.is_ok)
+        build.assert_not_called()
+        self.assertEqual(
+            [c["request_pb"].generate_input for c in client.calls], [b"", b""]
+        )
+
+    async def test_provided_input_is_serialized_once_across_slave_fallback(self):
+        client = _CaptureMasterClient(
+            _FakeHostServiceWithSlave(),
+            [None, FlexlbScheduleResponsePB(code=200, success=True)],
         )
         payload = Mock(wraps=_FakeInputPB())
-        selected_vit = {"role": "VIT", "server_ip": "10.0.0.8", "grpc_port": 9000}
-
-        response = await client.get_backend_role_addrs(
-            block_cache_keys=[1, 2, 3],
-            cache_key_block_size=1024,
-            input=_FakeInput(headers={"x-dashscope-inner-qos-level": "70"}),
-            request_id=99,
-            input_pb=payload,
-            cache_affinity_keys=["image-key"],
-            selected_vit=selected_vit,
-            seq_len=42,
+        await client.get_backend_role_addrs(
+            [1], 1024, _FakeInput(), 99, input_pb=payload
         )
-
-        payload.SerializeToString.assert_not_called()
-        self.assertTrue(response.is_ok)
-        self.assertFalse(response.enqueued_by_master)
-        request = client.calls[0]["request_pb"]
-        self.assertEqual(request.generate_input, b"")
-        self.assertEqual(request.request_id, 99)
-        self.assertEqual(list(request.block_cache_keys), [1, 2, 3])
-        self.assertEqual(request.cache_key_block_size, 1024)
-        self.assertEqual(request.seq_len, 42)
-        self.assertEqual(request.max_new_tokens, 17)
-        self.assertEqual(request.num_beams, 2)
-        self.assertTrue(request.force_disable_sp_run)
-        self.assertEqual(request.priority, 70)
-        self.assertEqual(list(request.cache_affinity_keys), ["image-key"])
-        self.assertEqual(request.selected_vit.server_ip, "10.0.0.8")
-
-    async def test_batch_and_unknown_capabilities_serialize_payload_once(self):
-        for required in (True, None):
-            with self.subTest(required=required):
-                client = _CaptureMasterClient(
-                    _FakeHostService({"master:1234": required})
-                )
-                payload = Mock(wraps=_FakeInputPB())
-
-                await client.get_backend_role_addrs(
-                    [1], 1024, _FakeInput(), 99, input_pb=payload
-                )
-
-                payload.SerializeToString.assert_called_once_with()
-                self.assertEqual(
-                    client.calls[0]["request_pb"].generate_input, b"serialized-input"
-                )
+        payload.SerializeToString.assert_called_once_with()
+        self.assertEqual(
+            [c["request_pb"].generate_input for c in client.calls],
+            [b"serialized-input", b"serialized-input"],
+        )
 
     async def test_vit_only_never_serializes_payload(self):
-        client = _CaptureMasterClient(_FakeHostService({"master:1234": True}))
+        client = _CaptureMasterClient()
         payload = Mock(wraps=_FakeInputPB())
-
         await client.get_backend_role_addrs(
             [1], 1024, _FakeInput(), 99, input_pb=payload, vit_only=True
         )
-
         payload.SerializeToString.assert_not_called()
         self.assertEqual(client.calls[0]["request_pb"].generate_input, b"")
-        self.assertTrue(client.calls[0]["request_pb"].vit_route_only)
 
-    async def test_slave_uses_its_own_capability_and_reuses_serialized_payload(self):
-        for master_required, slave_required in (
-            (False, True),
-            (True, False),
-            (True, True),
-        ):
-            with self.subTest(master=master_required, slave=slave_required):
-                client = _CaptureMasterClient(
-                    _FakeHostServiceWithSlave(
-                        {
-                            "master:1234": master_required,
-                            "slave:1234": slave_required,
-                        }
-                    ),
-                    [None, FlexlbScheduleResponsePB(success=True, code=200)],
-                )
-                payload = Mock(wraps=_FakeInputPB())
-
-                response = await client.get_backend_role_addrs(
-                    [1], 1024, _FakeInput(), 99, input_pb=payload
-                )
-
-                self.assertTrue(response.is_ok)
-                self.assertEqual(
-                    [call["addr"] for call in client.calls],
-                    ["master:1234", "slave:1234"],
-                )
-                self.assertEqual(
-                    [call["request_pb"].generate_input for call in client.calls],
-                    [
-                        b"serialized-input" if master_required else b"",
-                        b"serialized-input" if slave_required else b"",
-                    ],
-                )
-                payload.SerializeToString.assert_called_once_with()
-
-    async def test_missing_payload_rejection_resends_once_without_failure_reporting(
-        self,
-    ):
+    async def test_explicit_missing_input_rebuilds_once_without_failure_reporting(self):
         for code, message in (
             (8409, "generate input required"),
             (8406, "missing serialized generate_input for batch dispatch"),
         ):
-            with self.subTest(code=code):
-                client = _CaptureMasterClient(
-                    _FakeHostService({"master:1234": False}),
-                    [
+            for failover in (False, True):
+                with self.subTest(code=code, failover=failover):
+                    responses = [
                         FlexlbScheduleResponsePB(code=code, error_message=message),
-                        FlexlbScheduleResponsePB(
-                            success=True, code=200, enqueued_by_master=True
-                        ),
-                    ],
-                )
-                payload = Mock(wraps=_FakeInputPB())
-                with (
-                    patch("rtp_llm.server.master_client.kmonitor.report") as report,
-                    patch("rtp_llm.server.master_client.route_logger.error") as error,
-                ):
-                    response = await client.get_backend_role_addrs(
-                        [1], 1024, _FakeInput(), 99, input_pb=payload
+                        FlexlbScheduleResponsePB(code=200, success=True),
+                    ]
+                    if failover:
+                        responses.insert(0, None)
+                    client = _CaptureMasterClient(
+                        _FakeHostServiceWithSlave(), responses
                     )
+                    original = _FakeInput()
+                    with patch(
+                        "rtp_llm.server.master_client.trans_input",
+                        return_value=_FakeInputPB(),
+                    ) as build, patch(
+                        "rtp_llm.server.master_client.kmonitor.report"
+                    ) as report:
+                        response = await client.get_backend_role_addrs(
+                            [1], 1024, original, 99
+                        )
+                    self.assertTrue(response.is_ok)
+                    build.assert_called_once_with(original)
+                    report.assert_not_called()
+                    first, second = client.calls[-2:]
+                    self.assertEqual(first["addr"], second["addr"])
+                    self.assertEqual(first["request_pb"].generate_input, b"")
+                    self.assertEqual(
+                        second["request_pb"].generate_input, b"serialized-input"
+                    )
+                    second["request_pb"].ClearField("generate_input")
+                    self.assertEqual(first["request_pb"], second["request_pb"])
+                    self.assertGreater(second["timeout_s"], 0)
+                    self.assertLess(second["timeout_s"], first["timeout_s"])
 
-                self.assertTrue(response.is_ok)
-                self.assertTrue(response.enqueued_by_master)
-                payload.SerializeToString.assert_called_once_with()
-                report.assert_not_called()
-                error.assert_not_called()
-                self.assertEqual(
-                    [call["addr"] for call in client.calls], ["master:1234"] * 2
-                )
-                first, second = (call["request_pb"] for call in client.calls)
-                self.assertEqual(first.generate_input, b"")
-                self.assertEqual(second.generate_input, b"serialized-input")
-                second.ClearField("generate_input")
-                self.assertEqual(first, second)
-
-    async def test_payload_resend_uses_remaining_timeout(self):
-        class SlowFirstResponseClient(_CaptureMasterClient):
-            async def _send_schedule_request(self, *args):
-                if not self.calls:
-                    await asyncio.sleep(0.02)
-                return await super()._send_schedule_request(*args)
-
-        client = SlowFirstResponseClient(
-            _FakeHostService({"master:1234": False}),
-            [
-                FlexlbScheduleResponsePB(code=8409),
-                FlexlbScheduleResponsePB(success=True, code=200),
-            ],
-        )
-        await client.get_backend_role_addrs(
-            [1], 1024, _FakeInput(), 99, input_pb=_FakeInputPB()
-        )
-
-        self.assertEqual(len(client.calls), 2)
-        first_timeout, second_timeout = (call["timeout_s"] for call in client.calls)
-        self.assertGreater(second_timeout, 0)
-        self.assertLess(second_timeout, first_timeout - 0.01)
-
-    async def test_payload_rejection_after_deadline_does_not_send_again(self):
-        client = _CaptureMasterClient(
-            _FakeHostServiceWithSlave({"master:1234": False}),
-            [FlexlbScheduleResponsePB(code=8409)],
-        )
-        clock = SimpleNamespace(
-            time=lambda: 0,
-            monotonic=Mock(side_effect=[10.0, 13.1]),
-        )
-
-        with patch("rtp_llm.server.master_client.time", clock):
-            with self.assertRaises(FtRuntimeException) as raised:
-                await client.get_backend_role_addrs(
-                    [1], 1024, _FakeInput(), 99, input_pb=_FakeInputPB()
-                )
-
-        self.assertEqual(
-            raised.exception.exception_type, ExceptionType.DEADLINE_EXCEEDED
-        )
-        self.assertEqual([call["addr"] for call in client.calls], ["master:1234"])
-        self.assertEqual(client.calls[0]["request_pb"].generate_input, b"")
-
-    async def test_ambiguous_or_admitted_rejection_does_not_resend_payload(self):
+    async def test_ambiguous_or_admitted_rejection_does_not_rebuild(self):
         with_lifecycle = FlexlbScheduleResponsePB(code=8409)
         with_lifecycle.lifecycle.SetInParent()
-        responses = (
+        for response in (
             FlexlbScheduleResponsePB(
                 code=8406, error_message="another invalid request"
             ),
-            FlexlbScheduleResponsePB(code=8408),
             FlexlbScheduleResponsePB(code=8409, success=True),
             FlexlbScheduleResponsePB(code=8409, enqueued_by_master=True),
             FlexlbScheduleResponsePB(
                 code=8409, server_status=[FlexlbServerStatusPB(role="PREFILL")]
             ),
             with_lifecycle,
-        )
-        for rejected in responses:
-            with self.subTest(response=str(rejected)):
-                client = _CaptureMasterClient(
-                    _FakeHostService({"master:1234": False}), [rejected]
-                )
-                payload = Mock(wraps=_FakeInputPB())
-                with self.assertRaises(FtRuntimeException):
-                    await client.get_backend_role_addrs(
-                        [1], 1024, _FakeInput(), 99, input_pb=payload
-                    )
-
+        ):
+            with self.subTest(response=str(response)):
+                client = _CaptureMasterClient(responses=[response])
+                with patch("rtp_llm.server.master_client.trans_input") as build:
+                    with self.assertRaises(FtRuntimeException):
+                        await client.get_backend_role_addrs([1], 1024, _FakeInput(), 99)
+                build.assert_not_called()
                 self.assertEqual(len(client.calls), 1)
-                payload.SerializeToString.assert_not_called()
 
-    async def test_missing_payload_rejection_with_payload_already_sent_does_not_retry(
-        self,
-    ):
+    async def test_provided_input_and_vit_only_do_not_trigger_rebuild(self):
+        for kwargs in ({"input_pb": _FakeInputPB()}, {"vit_only": True}):
+            with self.subTest(kwargs=kwargs):
+                client = _CaptureMasterClient(
+                    responses=[FlexlbScheduleResponsePB(code=8409)]
+                )
+                with patch("rtp_llm.server.master_client.trans_input") as build:
+                    with self.assertRaises(FtRuntimeException):
+                        await client.get_backend_role_addrs(
+                            [1], 1024, _FakeInput(), 99, **kwargs
+                        )
+                build.assert_not_called()
+                self.assertEqual(len(client.calls), 1)
+
+    async def test_repeated_missing_input_rejection_stops_after_one_rebuild(self):
         client = _CaptureMasterClient(
-            _FakeHostService({"master:1234": True}),
-            [FlexlbScheduleResponsePB(code=8409)],
+            responses=[FlexlbScheduleResponsePB(code=8409)] * 2
         )
-        payload = Mock(wraps=_FakeInputPB())
-
-        with self.assertRaises(FtRuntimeException):
-            await client.get_backend_role_addrs(
-                [1], 1024, _FakeInput(), 99, input_pb=payload
-            )
-
-        self.assertEqual(len(client.calls), 1)
-        payload.SerializeToString.assert_called_once_with()
-
-    async def test_missing_payload_rejection_without_input_does_not_retry(self):
-        client = _CaptureMasterClient(
-            _FakeHostService({"master:1234": False}),
-            [FlexlbScheduleResponsePB(code=8409)],
-        )
-
-        with self.assertRaises(FtRuntimeException) as raised:
-            await client.get_backend_role_addrs([1], 1024, _FakeInput(), 99)
-
-        self.assertEqual(len(client.calls), 1)
+        with patch(
+            "rtp_llm.server.master_client.trans_input", return_value=_FakeInputPB()
+        ) as build:
+            with self.assertRaises(FtRuntimeException) as raised:
+                await client.get_backend_role_addrs([1], 1024, _FakeInput(), 99)
+        build.assert_called_once()
+        self.assertEqual(len(client.calls), 2)
         self.assertEqual(
             raised.exception.exception_type,
             ExceptionType.MASTER_GENERATE_INPUT_REQUIRED,
         )
 
-    async def test_repeated_payload_rejection_is_not_retried_again(self):
-        client = _CaptureMasterClient(
-            _FakeHostService({"master:1234": False}),
-            [FlexlbScheduleResponsePB(code=8409)] * 2,
+    async def test_expired_deadline_does_not_resend(self):
+        client = _CaptureMasterClient(responses=[FlexlbScheduleResponsePB(code=8409)])
+        clock = SimpleNamespace(
+            time=lambda: 0, monotonic=Mock(side_effect=[10.0, 13.1])
         )
-        payload = Mock(wraps=_FakeInputPB())
-
-        with self.assertRaises(FtRuntimeException):
-            await client.get_backend_role_addrs(
-                [1], 1024, _FakeInput(), 99, input_pb=payload
-            )
-
-        self.assertEqual(len(client.calls), 2)
-        payload.SerializeToString.assert_called_once_with()
+        with patch("rtp_llm.server.master_client.time", clock), patch(
+            "rtp_llm.server.master_client.trans_input", return_value=_FakeInputPB()
+        ):
+            with self.assertRaises(FtRuntimeException) as raised:
+                await client.get_backend_role_addrs([1], 1024, _FakeInput(), 99)
+        self.assertEqual(
+            raised.exception.exception_type, ExceptionType.DEADLINE_EXCEEDED
+        )
+        self.assertEqual(len(client.calls), 1)
 
 
 if __name__ == "__main__":

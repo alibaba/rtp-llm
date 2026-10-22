@@ -18,6 +18,7 @@ from rtp_llm.config.exceptions import (
 )
 from rtp_llm.config.generate_config import RoleAddr, RoleType
 from rtp_llm.config.py_config_modules import MasterConfig
+from rtp_llm.cpp.model_rpc.model_rpc_client import trans_input
 from rtp_llm.cpp.model_rpc.proto.flexlb_schedule_service_pb2 import (
     CANCEL_REASON_CLIENT_CANCELLED,
     CANCEL_REASON_DEADLINE_EXCEEDED,
@@ -357,7 +358,7 @@ class MasterClient:
 
         request_id is frontend-generated and only used for logging.
         Only connection_failed triggers slave retry and domain fallback.
-        Serialize generate_input only when the target requires it.
+        The caller omits input_pb when Master does not require it.
         """
         master_addr = self.host_service.get_master_addr() if self.host_service else None
         if not master_addr:
@@ -413,24 +414,11 @@ class MasterClient:
                     setattr(request_pb.selected_vit, name, value)
         if vit_only:
             timeout_s = min(timeout_s, 0.5) if timeout_s is not None else 0.5
-        serialized_input = None
-        can_attach = input_pb is not None and not vit_only
-
-        def attach_generate_input():
-            nonlocal serialized_input
-            assert input_pb is not None
-            if serialized_input is None:
-                serialized_input = input_pb.SerializeToString()
-            request_pb.generate_input = serialized_input
+        if input_pb is not None and not vit_only:
+            request_pb.generate_input = input_pb.SerializeToString()
 
         async def send_to(addr):
-            # Capabilities belong to the actual target; master and slave may differ.
-            request_pb.ClearField("generate_input")
-            omit_input = (
-                can_attach and self.host_service.requires_generate_input(addr) is False
-            )
-            if can_attach and not omit_input:
-                attach_generate_input()
+            nonlocal input_pb
             started_at = time.monotonic()
             response = await self._send_schedule_request(
                 addr, request_pb, timeout_s, request_id
@@ -438,7 +426,8 @@ class MasterClient:
             # A heartbeat can be stale, or a follower can forward to a BATCH leader.
             # Both rejection forms are emitted before scheduler admission.
             if (
-                omit_input
+                input_pb is None
+                and not vit_only
                 and response is not None
                 and (
                     response.code == ExceptionType.MASTER_GENERATE_INPUT_REQUIRED
@@ -453,7 +442,8 @@ class MasterClient:
                 and not response.server_status
                 and not response.HasField("lifecycle")
             ):
-                attach_generate_input()
+                input_pb = trans_input(input)
+                request_pb.generate_input = input_pb.SerializeToString()
                 remaining = (
                     timeout_s - (time.monotonic() - started_at)
                     if timeout_s is not None
