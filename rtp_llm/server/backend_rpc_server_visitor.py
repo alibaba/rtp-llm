@@ -411,7 +411,13 @@ class BackendRPCServerVisitor:
                 cache_key_block_size=self._cache_key_block_size(),
                 input=input,
                 request_id=input.request_id,
-                input_pb=trans_input(input),
+                input_pb=(
+                    trans_input(input)
+                    if self.host_service.requires_generate_input(
+                        self.host_service.get_master_addr()
+                    )
+                    else None
+                ),
                 **route_args,
             )
             if (
@@ -505,7 +511,13 @@ class BackendRPCServerVisitor:
                     cache_key_block_size=self._cache_key_block_size(),
                     input=input,
                     request_id=input.request_id,
-                    input_pb=trans_input(input),
+                    input_pb=(
+                        trans_input(input)
+                        if self.host_service.requires_generate_input(
+                            self.host_service.get_master_addr()
+                        )
+                        else None
+                    ),
                     **route_args,
                 )
         except BaseException as e:
