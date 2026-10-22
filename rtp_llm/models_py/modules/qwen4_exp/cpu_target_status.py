@@ -11,8 +11,6 @@ from rtp_llm.models_py.distributed.cpu_status import create_cpu_tp_status
 
 
 def prepare_cpu_target_status(config, parallelism):
-    if os.environ.get("QWEN4_CPU_TARGET_STATUS", "0") != "1":
-        return None
     role = str(getattr(parallelism, "role_type", "")).rsplit(".", 1)[-1]
     if not (
         role == "DECODE"

@@ -9,8 +9,6 @@ The algorithm and API are provided by flashinfer.comm.vllm_ar (Apache-2.0).
 """
 
 import ctypes
-import os
-
 import torch
 import torch.distributed as dist
 
@@ -25,9 +23,7 @@ class FlashInferIpcAllReduce:
         self.ipc = cuda_ipc
         self.max_bytes = max_bytes
         self.capture_calls = 0
-        self.registered_graph_inputs = (
-            os.environ.get("QWEN4_TP_REGISTERED_INPUTS", "0") == "1"
-        )
+        self.registered_graph_inputs = True
         self.meta = cuda_ipc.create_shared_buffer(
             vllm_ar.meta_size() + max_bytes, group
         )

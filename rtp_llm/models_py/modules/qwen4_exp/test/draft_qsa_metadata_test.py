@@ -1,9 +1,7 @@
 """Fused draft addressing/norm keeps all old preparation outputs byte exact."""
 
-import os
 import unittest
 from types import SimpleNamespace
-from unittest.mock import patch
 
 import torch
 
@@ -23,15 +21,6 @@ class DraftQsaMetadataTest(unittest.TestCase):
     def setUp(self):
         if torch.cuda.get_device_capability() != (12, 0):
             self.skipTest("SM120 measured domain")
-        env = patch.dict(
-            os.environ,
-            {
-                "QWEN4_DRAFT_QSA_FUSED": "1",
-                "QWEN4_DRAFT_QSA_METADATA": "1",
-            },
-        )
-        env.start()
-        self.addCleanup(env.stop)
         torch.manual_seed(20261020)
 
     def test_live_metadata_raw_gains_padded_rows_and_two_graphs(self):
@@ -136,9 +125,6 @@ class DraftQsaMetadataTest(unittest.TestCase):
         self.assertIsNone(
             try_prepare_metadata(q, lengths, lengths, cu, None, rope_config=rope)
         )
-        for flag in ("QWEN4_DRAFT_QSA_METADATA", "QWEN4_DRAFT_QSA_FUSED"):
-            with patch.dict(os.environ, {flag: "0"}):
-                self.assertIsNone(try_prepare_metadata(*([None] * 5), rope_config=rope))
 
 
 if __name__ == "__main__":

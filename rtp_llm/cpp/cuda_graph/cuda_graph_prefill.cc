@@ -18,7 +18,7 @@ void CudaGraphRunner::capturePrefill() {
         // we will transfer a `batch size tensor(int)` for `copy kernel`.
         // Prepare common inputs using shared function
         const int capture_batch_size =
-            usesRequestSizedMtpDraftPrefillCudaGraph() ? seq_len / num_tokens_per_bs_ : static_cast<int>(max_bs_);
+            usesFixedCapacityMtpDraftPrefillCudaGraph() ? seq_len / num_tokens_per_bs_ : static_cast<int>(max_bs_);
         prepareCaptureInputs(inputs, capture_batch_size, seq_len);
         // Generation prefill uses Bmax real slots plus one fixed sentinel slot.
         // Capture the conservative layout [0, ..., 0, Tg] so FMHA/RoPE fix

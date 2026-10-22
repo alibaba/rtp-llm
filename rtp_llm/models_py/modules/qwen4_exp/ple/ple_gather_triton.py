@@ -1,7 +1,6 @@
 """Fixed-shape, graph-capturable lookup into the TP-local PLE row shards."""
 
 import ctypes
-import os
 from pathlib import Path
 
 import torch
@@ -127,8 +126,7 @@ def gather_local(
         rows_per_cta = (
             4
             if (
-                os.environ.get("QWEN4_PLE_UVA_ROW_TILING", "0") == "1"
-                and fp8
+                fp8
                 and shards[0].device.type == "cpu"
                 and shards[0].shape[1] == 160
                 and 65536 <= n <= 196608

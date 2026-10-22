@@ -5,7 +5,6 @@ fused state copies. RTP's destination validation, immutable undo, consensus,
 and failure/rollback boundaries remain the responsibility of the coordinator.
 """
 
-import os
 import threading
 
 import torch
@@ -172,8 +171,7 @@ def begin_accepted_pair_resolution(transaction, accept_len):
     falls back to the sequential host validation.
     """
     if not (
-        os.environ.get("QWEN4_PLE_COMMIT_METADATA_FUSED", "0") == "1"
-        and torch.version.hip is None
+        torch.version.hip is None
         and accept_len.is_cuda
         and torch.cuda.get_device_capability(accept_len.device) == (12, 0)
         and accept_len.dtype == torch.int32

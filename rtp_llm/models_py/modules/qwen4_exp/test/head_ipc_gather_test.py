@@ -12,7 +12,7 @@ from rtp_llm.models_py.modules.qwen4_exp.head_ipc_gather import (
 
 
 class HeadIpcGatherTest(unittest.TestCase):
-    def test_default_off_and_unsupported_layouts_allocate_nothing(self):
+    def test_unsupported_layouts_allocate_nothing(self):
         config = SimpleNamespace(_qwen4_full_fp8_nvfp4=True)
         pc = SimpleNamespace(
             role_type="DECODE", tp_size=2, dp_size=1, local_world_size=2
@@ -24,18 +24,15 @@ class HeadIpcGatherTest(unittest.TestCase):
             "rtp_llm.models_py.modules.qwen4_exp.head_ipc_gather.Qwen4HeadIpcGather",
             side_effect=AssertionError("unexpected allocation"),
         ):
-            with patch.dict("os.environ", {"QWEN4_HEAD_IPC_GATHER": "0"}):
-                self.assertIsNone(prepare_head_ipc_gather(config, pc, head))
-            with patch.dict("os.environ", {"QWEN4_HEAD_IPC_GATHER": "1"}):
-                for key, value in [
-                    ("role_type", "PREFILL"),
-                    ("tp_size", 4),
-                    ("dp_size", 2),
-                    ("local_world_size", 4),
-                ]:
-                    changed = SimpleNamespace(**{**vars(pc), key: value})
-                    self.assertIsNone(prepare_head_ipc_gather(config, changed, head))
-                self.assertIsNone(prepare_head_ipc_gather(config, pc, head))
+            for key, value in [
+                ("role_type", "PREFILL"),
+                ("tp_size", 4),
+                ("dp_size", 2),
+                ("local_world_size", 4),
+            ]:
+                changed = SimpleNamespace(**{**vars(pc), key: value})
+                self.assertIsNone(prepare_head_ipc_gather(config, changed, head))
+            self.assertIsNone(prepare_head_ipc_gather(config, pc, head))
 
     def test_invalid_tensor_domains_do_not_touch_native_ops(self):
         workspace = object.__new__(Qwen4HeadIpcGather)

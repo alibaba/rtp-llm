@@ -22,7 +22,13 @@ class DecodeSnapshotTest(unittest.TestCase):
         torch.manual_seed(20261019)
 
     def write(self, args, fused):
-        with patch.dict("os.environ", {"QWEN4_QSA_DECODE_SNAPSHOT": str(int(fused))}):
+        if not fused:
+            with patch(
+                "rtp_llm.models_py.modules.qwen4_exp.qsa.decode_snapshot_triton.try_snapshot_decode",
+                return_value=None,
+            ):
+                return write_decode_key_with_undo_(*args, norm_eps=1.0e-6)
+        else:
             return write_decode_key_with_undo_(*args, norm_eps=1.0e-6)
 
     def test_complete_writer_and_rollback_match_at_every_residue_and_page_edge(self):
@@ -65,11 +71,10 @@ class DecodeSnapshotTest(unittest.TestCase):
             self.assertTrue(
                 torch.equal(getattr(baseline, name), getattr(candidate, name)), name
             )
-        with patch.dict("os.environ", {"QWEN4_QSA_DECODE_SNAPSHOT": "1"}):
-            for positions in (args[1].long(), args[1][::2], args[1][:0]):
-                self.assertIsNone(
-                    try_snapshot_decode(positions, args[5], args[6], args[7], args[8])
-                )
+        for positions in (args[1].long(), args[1][::2], args[1][:0]):
+            self.assertIsNone(
+                try_snapshot_decode(positions, args[5], args[6], args[7], args[8])
+            )
 
     def test_graph_replay_refreshes_all_snapshots_before_original_writer(self):
         for batch in (1, 3, 8, 32):

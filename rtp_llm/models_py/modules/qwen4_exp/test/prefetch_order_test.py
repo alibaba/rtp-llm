@@ -29,7 +29,6 @@ class PrefetchOrderTest(unittest.TestCase):
         self,
         attention,
         *,
-        enabled=True,
         derived=False,
         packed=False,
         has_ple=True,
@@ -81,9 +80,7 @@ class PrefetchOrderTest(unittest.TestCase):
         inputs.attention_inputs = attention
         # Keep the native input adapter and tag selection real. Only the
         # downstream CUDA work is replaced, to observe forward call ordering.
-        with patch.dict(
-            "os.environ", {"QWEN4_PLE_PREFETCH_AFTER_EMBEDDING": str(int(enabled))}
-        ), patch.object(
+        with patch.object(
             qwen4_exp, "_is_cuda_graph_forward", return_value=False
         ), self.assertRaises(
             StopAfterPreparation
@@ -94,16 +91,14 @@ class PrefetchOrderTest(unittest.TestCase):
         )
 
     def test_prefill_embedding_precedes_uva_only_in_the_explicit_target_domain(self):
-        for enabled, prefill, graph, derived, packed in (
-            (False, True, False, False, False),
-            (True, True, False, False, False),
-            (True, True, False, False, True),
-            (True, False, False, False, False),
-            (True, True, True, False, False),
-            (True, True, False, True, False),
+        for prefill, graph, derived, packed in (
+            (True, False, False, False),
+            (True, False, False, True),
+            (False, False, False, False),
+            (True, True, False, False),
+            (True, False, True, False),
         ):
             with self.subTest(
-                enabled=enabled,
                 prefill=prefill,
                 graph=graph,
                 derived=derived,
@@ -111,10 +106,9 @@ class PrefetchOrderTest(unittest.TestCase):
             ):
                 self.check_order(
                     self.attention(prefill=prefill, graph=graph),
-                    enabled=enabled,
                     derived=derived,
                     packed=packed,
-                    delayed=enabled and prefill and not graph and not derived,
+                    delayed=prefill and not graph and not derived,
                 )
 
     def test_tagged_inputs_follow_the_ple_context_mode(self):
@@ -141,18 +135,14 @@ class PrefetchOrderTest(unittest.TestCase):
                             groups, packed=packed, delayed=prefill and not graph
                         )
 
-    def test_disabled_or_unrelated_models_do_not_require_a_ple_context_tag(self):
-        for enabled, derived, has_ple in (
-            (False, False, True),
-            (True, True, True),
-            (True, False, False),
-            (False, False, False),
+    def test_unrelated_models_do_not_require_a_ple_context_tag(self):
+        for derived, has_ple in (
+            (True, True),
+            (False, False),
         ):
-            with self.subTest(enabled=enabled, derived=derived, has_ple=has_ple):
+            with self.subTest(derived=derived, has_ple=has_ple):
                 groups = {"full": self.attention(prefill=True, graph=False)}
-                self.check_order(
-                    groups, enabled=enabled, derived=derived, has_ple=has_ple
-                )
+                self.check_order(groups, derived=derived, has_ple=has_ple)
 
 
 if __name__ == "__main__":

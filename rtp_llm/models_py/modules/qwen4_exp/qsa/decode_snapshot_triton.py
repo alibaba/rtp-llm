@@ -5,8 +5,6 @@ separate launch finishes every read before any request mutates a cache row,
 including reserved sentinel rows shared by inactive completion slots.
 """
 
-import os
-
 import torch
 import triton
 import triton.language as tl
@@ -53,8 +51,7 @@ def _snapshot_decode(
 def try_snapshot_decode(positions, kv, kt, state, st):
     """Return None without writes outside the explicit bounded SM120 path."""
     if not (
-        os.environ.get("QWEN4_QSA_DECODE_SNAPSHOT", "0") == "1"
-        and positions.is_cuda
+        positions.is_cuda
         and torch.version.hip is None
         and torch.cuda.get_device_capability(positions.device) == (12, 0)
         and positions.ndim == 1

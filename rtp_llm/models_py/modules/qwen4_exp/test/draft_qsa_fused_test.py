@@ -6,13 +6,7 @@ from unittest.mock import patch
 
 import torch
 
-from rtp_llm.models_py.modules.qwen4_exp.qsa.draft_decode_positions_triton import (
-    try_prepare_decode_positions,
-)
 from rtp_llm.models_py.modules.qwen4_exp.qsa.draft_prepare_triton import try_prepare
-from rtp_llm.models_py.modules.qwen4_exp.qsa.draft_writer_triton import (
-    try_write_draft_window,
-)
 from rtp_llm.models_py.modules.qwen4_exp.qsa.indexer_compressor import (
     restore_indexer_cache,
 )
@@ -32,25 +26,18 @@ def undo_equal(a, b):
 
 
 def baseline(*args, **kwargs):
-    with patch.dict("os.environ", {"QWEN4_DRAFT_QSA_FUSED": "0"}):
+    with patch(
+        "rtp_llm.models_py.modules.qwen4_exp.qsa.draft_writer_triton.try_write_draft_window",
+        return_value=None,
+    ):
         return write_draft_window_with_undo_(*args, **kwargs)
 
 
 def candidate(*args, **kwargs):
-    with patch.dict("os.environ", {"QWEN4_DRAFT_QSA_FUSED": "1"}):
-        return write_draft_window_with_undo_(*args, **kwargs)
+    return write_draft_window_with_undo_(*args, **kwargs)
 
 
 class DraftQsaFusedTest(unittest.TestCase):
-    def test_disabled_gates_do_not_launch(self):
-        rope = SimpleNamespace(scale=1.0)
-        with patch.dict("os.environ", {"QWEN4_DRAFT_QSA_FUSED": "0"}):
-            self.assertIsNone(try_write_draft_window(*([None] * 11), norm_eps=1e-6))
-            self.assertIsNone(
-                try_prepare(None, None, None, None, None, rope_config=rope)
-            )
-            self.assertIsNone(try_prepare_decode_positions(None, None, None, rope))
-
     def test_unsupported_rope_and_shapes_fall_back(self):
         q = torch.zeros(4, 4, 128, device="cuda", dtype=torch.bfloat16)
         positions = torch.arange(4, device="cuda", dtype=torch.int64)
@@ -59,39 +46,28 @@ class DraftQsaFusedTest(unittest.TestCase):
         base = dict(
             style=RopeStyle.Base, index_factor=3, dim=64, scale=1.0, base=10000.0
         )
-        with patch.dict("os.environ", {"QWEN4_DRAFT_QSA_FUSED": "1"}):
-            for field, value in [
-                ("dim", 32),
-                ("index_factor", 2),
-                ("indexer_is_neox_style", False),
-                ("scale", 0.0),
-            ]:
-                rope = SimpleNamespace(**{**base, field: value})
-                self.assertIsNone(
-                    try_prepare(
-                        q, positions, positions, visible, frequency, rope_config=rope
-                    )
-                )
+        for field, value in [
+            ("dim", 32),
+            ("index_factor", 2),
+            ("indexer_is_neox_style", False),
+            ("scale", 0.0),
+        ]:
+            rope = SimpleNamespace(**{**base, field: value})
             self.assertIsNone(
                 try_prepare(
-                    q,
-                    positions,
-                    positions,
-                    visible,
-                    None,
-                    rope_config=SimpleNamespace(**base),
+                    q, positions, positions, visible, frequency, rope_config=rope
                 )
             )
-            self.assertIsNone(
-                try_prepare(
-                    q,
-                    positions,
-                    positions,
-                    visible.t(),
-                    frequency,
-                    rope_config=SimpleNamespace(**base),
-                )
+        self.assertIsNone(
+            try_prepare(
+                q, positions, positions, visible, None, rope_config=SimpleNamespace(**base)
             )
+        )
+        self.assertIsNone(
+            try_prepare(
+                q, positions, positions, visible.t(), frequency, rope_config=SimpleNamespace(**base)
+            )
+        )
 
     def test_public_writer_ragged_pages_undo_and_dynamic_graph(self):
         result = dict(cases=[], dynamic_generations=0)

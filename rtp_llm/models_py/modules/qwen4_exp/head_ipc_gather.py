@@ -6,7 +6,6 @@ capture retains NCCL; captured local Head projection is unaffected.
 """
 
 import ctypes
-import os
 import threading
 
 import torch
@@ -80,8 +79,6 @@ class Qwen4HeadIpcGather:
 
 
 def prepare_head_ipc_gather(config, parallelism, head):
-    if os.environ.get("QWEN4_HEAD_IPC_GATHER", "0") != "1":
-        return None
     role = str(getattr(parallelism, "role_type", "")).rsplit(".", 1)[-1]
     if not (
         role == "DECODE"

@@ -1,6 +1,5 @@
 """Python model descriptor for the Qwen4-Exp MTP draft."""
 
-import os
 from collections.abc import Mapping
 from typing import Optional
 
@@ -301,8 +300,7 @@ class Qwen4ExpMTPModel(Qwen4ExpModel):
             norm_eps=model_config.layernorm_eps,
         )
         self._draft_head_graph = DraftHeadGraph(
-            enabled=os.environ.get("QWEN4_MTP_HEAD_GRAPH") == "1"
-            and hasattr(self, "_fp8_lm_head")
+            enabled=hasattr(self, "_fp8_lm_head")
         )
         annotate_compute_inventory(self.weight)
 

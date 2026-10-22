@@ -1,4 +1,3 @@
-import os
 import unittest
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
@@ -241,7 +240,7 @@ class MainQkCacheTest(unittest.TestCase):
         for graph in graphs:
             graph.reset()
 
-    def test_target_owner_routes_raw_norm_and_gate_only_with_explicit_flag(self):
+    def test_target_owner_routes_raw_norm_and_gate(self):
         from rtp_llm.models_py.modules.qwen4_exp.qsa.sparse_gqa_impl import (
             SparseGqaFmhaImpl,
         )
@@ -256,10 +255,9 @@ class MainQkCacheTest(unittest.TestCase):
             attn_configs=SimpleNamespace(use_logn_attn=False),
             forward=Mock(return_value=result),
         )
-        with patch.dict(os.environ, {"QWEN4_QSA_FUSED_KV_WRITER": "1"}):
-            actual = SparseGqaFmhaImpl.forward_with_qk_norm_and_output_gate(
-                owner, source, c[-1], 3, gate, c[1]
-            )
+        actual = SparseGqaFmhaImpl.forward_with_qk_norm_and_output_gate(
+            owner, source, c[-1], 3, gate, c[1]
+        )
         self.assertIs(actual, result)
         owner.forward.assert_called_once_with(
             source, c[-1], 3, qk_norm=c[1], output_gate=gate

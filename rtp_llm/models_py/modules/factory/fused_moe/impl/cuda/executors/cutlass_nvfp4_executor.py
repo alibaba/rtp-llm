@@ -75,10 +75,6 @@ class CutlassNvfp4Executor(FusedMoeExpertExecutor):
         pc = getattr(config, "parallelism_config", None)
         self.tp_size = pc.get_ffn_tp_size() if pc is not None else 1
         self.tp_rank = pc.get_ffn_tp_rank() if pc is not None else 0
-        self.prequantize_prefill = bool(
-            getattr(config.model_config, "enable_qwen4_qsa", False)
-            and os.getenv("QWEN4_MOE_PREQUANT_PREFILL", "0") == "1"
-        )
         self.sm120_prefill = None
         library = os.getenv("QWEN4_MOE_SM120_LIBRARY")
         if (
@@ -142,29 +138,9 @@ class CutlassNvfp4Executor(FusedMoeExpertExecutor):
                 ep_rank=self.ep_rank,
             )
             return CombineForwardPayload(fused_expert_output=output)
-        input_sf = None
-        if (
-            self.prequantize_prefill
-            and expert_x.ndim == 2
-            and expert_x.shape[0] >= 128
-            and expert_x.dtype == torch.bfloat16
-            and expert_x.is_contiguous()
-            and expert_x.shape[1] % 16 == 0
-        ):
-            from flashinfer.fp4_quantization import fp4_quantize
-
-            expert_x, input_sf = fp4_quantize(
-                expert_x,
-                self.quant_scales[0],
-                sf_vec_size=16,
-                sf_use_ue8m0=False,
-                is_sf_swizzled_layout=True,
-                enable_pdl=False,
-                backend="cuda",
-            )
         output = cutlass_fused_moe(
             input=expert_x,
-            input_sf=input_sf,
+            input_sf=None,
             token_selected_experts=payload.expert_topk_ids.to(torch.int32),
             token_final_scales=payload.expert_topk_weights.to(torch.float32),
             fc1_expert_weights=self.w1,

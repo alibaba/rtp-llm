@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import math
-import os
 from typing import Any
 
 import torch
@@ -358,11 +357,8 @@ def select_draft_graph_tokens(
         try_prepare_metadata,
     )
 
-    enabled = os.environ.get("QWEN4_DRAFT_QSA_FUSED", "0") == "1"
     get_frequency = getattr(indexer, "rope_inv_freq", None)
-    frequency = (
-        get_frequency(rope_config) if enabled and callable(get_frequency) else None
-    )
+    frequency = get_frequency(rope_config) if callable(get_frequency) else None
     inverse = None
     metadata = try_prepare_metadata(
         q,

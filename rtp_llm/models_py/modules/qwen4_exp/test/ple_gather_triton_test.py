@@ -1,5 +1,4 @@
 import unittest
-from unittest.mock import patch
 
 import torch
 
@@ -71,12 +70,23 @@ class PLEGatherTritonTest(unittest.TestCase):
             ids = torch.arange(n, device="cuda", dtype=torch.int64) % 20 - 2
             for value in (0.00003125, 0.119713, 8.0):
                 scale = torch.tensor([value], device="cuda")
-                with patch.dict("os.environ", {"QWEN4_PLE_UVA_ROW_TILING": "0"}):
-                    expected = gather_local(ids, shards, (0,), 2, pointers, scale=scale)
-                with patch.dict("os.environ", {"QWEN4_PLE_UVA_ROW_TILING": "1"}):
-                    actual = gather_local(ids, shards, (0,), 2, pointers, scale=scale)
+                expected = torch.zeros((n, 160), device="cuda", dtype=torch.bfloat16)
+                valid = (ids >= 0) & (ids < 8)
+                expected[valid] = (
+                    raw.to(device="cuda")
+                    .view(torch.float8_e4m3fn)
+                    .to(torch.bfloat16)
+                    .index_select(0, ids[valid])
+                    .mul(scale.to(torch.bfloat16))
+                )
+                actual = gather_local(ids, shards, (0,), 2, pointers, scale=scale)
+                self.assertTrue(torch.equal(torch.isnan(actual), torch.isnan(expected)))
+                finite = ~torch.isnan(expected)
                 self.assertTrue(
-                    torch.equal(actual.view(torch.int16), expected.view(torch.int16))
+                    torch.equal(
+                        actual[finite].view(torch.int16),
+                        expected[finite].view(torch.int16),
+                    )
                 )
 
     def test_cpu_fp8_prefill_tiling_graph_refreshes_ids_and_scale(self):
@@ -96,12 +106,11 @@ class PLEGatherTritonTest(unittest.TestCase):
         )
         ids = torch.arange(65536, device="cuda", dtype=torch.int64) % 20 - 2
         scale = torch.tensor([0.119713], device="cuda")
-        with patch.dict("os.environ", {"QWEN4_PLE_UVA_ROW_TILING": "1"}):
-            for _ in range(3):
-                gather_local(ids, shards, (0,), 2, pointers, scale=scale)
-            graph = torch.cuda.CUDAGraph()
-            with torch.cuda.graph(graph):
-                actual = gather_local(ids, shards, (0,), 2, pointers, scale=scale)
+        for _ in range(3):
+            gather_local(ids, shards, (0,), 2, pointers, scale=scale)
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            actual = gather_local(ids, shards, (0,), 2, pointers, scale=scale)
         for generation in range(8):
             ids.copy_(
                 (torch.arange(65536, device="cuda", dtype=torch.int64) + generation)
@@ -110,8 +119,7 @@ class PLEGatherTritonTest(unittest.TestCase):
             )
             scale.fill_((generation + 1) * 0.119713)
             graph.replay()
-            with patch.dict("os.environ", {"QWEN4_PLE_UVA_ROW_TILING": "0"}):
-                expected = gather_local(ids, shards, (0,), 2, pointers, scale=scale)
+            expected = gather_local(ids, shards, (0,), 2, pointers, scale=scale)
             self.assertTrue(
                 torch.equal(actual.view(torch.int16), expected.view(torch.int16))
             )

@@ -1,8 +1,6 @@
 """Exercise packed request ownership, padding, gate rounding and graph refresh."""
 
-import os
 import unittest
-from unittest.mock import patch
 
 import torch
 
@@ -16,9 +14,6 @@ from rtp_llm.models_py.modules.qwen4_exp.qsa.draft_metadata_triton import draft_
 @unittest.skipUnless(torch.cuda.is_available(), "CUDA is required")
 class DraftQsaLayoutTest(unittest.TestCase):
     def setUp(self):
-        self.env = patch.dict(os.environ, {"QWEN4_DRAFT_QSA_LAYOUT": "1"})
-        self.env.start()
-        self.addCleanup(self.env.stop)
         torch.manual_seed(107920)
 
     @staticmethod
@@ -119,7 +114,7 @@ class DraftQsaLayoutTest(unittest.TestCase):
                 )
             )
 
-    def test_disabled_and_unqualified_layouts_fall_back(self):
+    def test_unqualified_layouts_fall_back(self):
         qkv = torch.zeros(4, 3584, device="cuda", dtype=torch.bfloat16)
         selected = torch.zeros(4, 2051, device="cuda", dtype=torch.int32)
         sources = torch.arange(4, device="cuda")
@@ -137,10 +132,6 @@ class DraftQsaLayoutTest(unittest.TestCase):
                 qkv[:, ::2], selected, sources, visible, heads=12, head_dim=256
             )
         )
-        with patch.dict(os.environ, {"QWEN4_DRAFT_QSA_LAYOUT": "0"}):
-            self.assertIsNone(
-                try_pack_inputs(qkv, selected, sources, visible, heads=12, head_dim=256)
-            )
 
 
 if __name__ == "__main__":

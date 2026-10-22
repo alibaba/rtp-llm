@@ -15,8 +15,6 @@ from rtp_llm.models_py.distributed.canonical_p2p import init_canonical_p2p
 
 def _worker():
     rank = int(os.environ["LOCAL_RANK"])
-    verify_batch = os.getenv("RTP_LLM_CANONICAL_P2P_VERIFY_BATCH") == "1"
-    os.environ["RTP_LLM_CANONICAL_P2P_VERIFY_BATCH"] = "0"
     torch.cuda.set_device(rank)
     dist.init_process_group("nccl", timeout=datetime.timedelta(seconds=90))
     group = dist.group.WORLD
@@ -43,40 +41,7 @@ def _worker():
             result = init_canonical_p2p(group, device)
         if result is not None:
             raise RuntimeError("peer availability vote split the group")
-        with patch.dict(
-            os.environ, {"RTP_LLM_CANONICAL_P2P_LARGE": "1" if rank != 7 else "0"}
-        ):
-            smaller = init_canonical_p2p(group, device)
-        if smaller is None or smaller.max_elements != 20480:
-            raise RuntimeError("large flag mismatch must retain the40KiB backend")
-        del smaller
-        with patch.dict(
-            os.environ, {"RTP_LLM_CANONICAL_P2P_PINGPONG": "1" if rank != 7 else "0"}
-        ):
-            unpipelined = init_canonical_p2p(group, device)
-        if unpipelined is None or unpipelined.slot is not None:
-            raise RuntimeError("pingpong flag mismatch must retain two-barrier backend")
-        del unpipelined
-        with patch.dict(
-            os.environ,
-            {
-                "RTP_LLM_CANONICAL_P2P_LARGE": "1",
-                "RTP_LLM_CANONICAL_P2P_VERIFY_BATCH": "1" if rank != 7 else "0",
-            },
-        ):
-            mixed_verify = init_canonical_p2p(group, device)
-        if mixed_verify is None or mixed_verify.max_elements != 40960:
-            raise RuntimeError("verify flag mismatch must retain the existing capacity")
-        del mixed_verify
-        with patch.dict(
-            os.environ,
-            {
-                "RTP_LLM_CANONICAL_P2P_LARGE": "1",
-                "RTP_LLM_CANONICAL_P2P_PINGPONG": "1",
-                "RTP_LLM_CANONICAL_P2P_VERIFY_BATCH": "1" if verify_batch else "0",
-            },
-        ):
-            communicator = init_canonical_p2p(group, device)
+        communicator = init_canonical_p2p(group, device)
     if communicator is None:
         raise RuntimeError("requested supported communicator unavailable")
     from types import SimpleNamespace
@@ -149,8 +114,6 @@ def _worker():
     rows = []
     generator = torch.Generator(device=device).manual_seed(12433 + rank)
     counts = (1, 257, 2560, 10240, 20480, 40960)
-    if verify_batch:
-        counts += (81920,)
     for count in counts:
         for inplace in (True, False):
             x = torch.randn(
@@ -253,10 +216,6 @@ def _worker():
         ),
         torch.full((2, 257), rank + 1.0, dtype=torch.bfloat16, device=device).t(),
     ]
-    if verify_batch:
-        unsupported.append(
-            torch.full((81919,), rank + 1.0, dtype=torch.bfloat16, device=device)
-        )
     for x in unsupported:
         if communicator.should_use(x):
             raise RuntimeError("unsupported input selected")
@@ -302,9 +261,6 @@ def _worker():
                     rows=all_rows,
                     changing_graph_replays=64 * len(counts),
                     initialization_fallback_cases=4,
-                    large_mismatch_cases=1,
-                    pingpong_mismatch_cases=1,
-                    verify_batch_mismatch_cases=1,
                     pingpong=True,
                     changing_shape_skew_replays=96,
                     max_elements=communicator.max_elements,
@@ -331,18 +287,9 @@ class CanonicalPeerAllReduceIntegrationTest(unittest.TestCase):
         "requires eight visible SM120 GPUs",
     )
     def test_precision_graph_reuse_and_fallback(self):
-        self._run_integration(verify_batch=False)
+        self._run_integration()
 
-    @unittest.skipUnless(
-        torch.cuda.device_count() == 8
-        and torch.version.hip is None
-        and all(torch.cuda.get_device_capability(r) == (12, 0) for r in range(8)),
-        "requires eight visible SM120 GPUs",
-    )
-    def test_verify_batch_capacity_graph_reuse_and_fallback(self):
-        self._run_integration(verify_batch=True)
-
-    def _run_integration(self, verify_batch):
+    def _run_integration(self):
         import subprocess
         import sys
         import tempfile
@@ -350,7 +297,6 @@ class CanonicalPeerAllReduceIntegrationTest(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as directory:
             env = os.environ.copy()
-            env["RTP_LLM_CANONICAL_P2P_VERIFY_BATCH"] = "1" if verify_batch else "0"
             env["RTP_CANONICAL_P2P_TEST_OUT"] = str(Path(directory) / "result.json")
             subprocess.run(
                 [
@@ -369,7 +315,7 @@ class CanonicalPeerAllReduceIntegrationTest(unittest.TestCase):
             result = json.loads(Path(env["RTP_CANONICAL_P2P_TEST_OUT"]).read_text())
             self.assertTrue(result["passed"])
             self.assertEqual(result["ranks"], 8)
-            self.assertEqual(result["max_elements"], 81920 if verify_batch else 40960)
+            self.assertEqual(result["max_elements"], 40960)
 
 
 if __name__ == "__main__":

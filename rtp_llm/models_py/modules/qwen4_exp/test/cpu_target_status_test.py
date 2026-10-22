@@ -2,7 +2,6 @@ import ctypes
 import datetime
 import errno
 import mmap
-import os
 import tempfile
 import threading
 import time
@@ -71,26 +70,23 @@ class CpuTargetStatusTest(unittest.TestCase):
         self.addCleanup(mapping.close)
         return mapping, pointer
 
-    def test_default_off_and_unsupported_layouts_do_not_bootstrap(self):
+    def test_unsupported_layouts_do_not_bootstrap(self):
         config = SimpleNamespace(is_mtp=False, enable_qwen4_ple=True)
         pc = SimpleNamespace(
             role_type="DECODE", tp_size=2, dp_size=1, local_world_size=2
         )
         with patch.object(policy, "create_cpu_tp_status", side_effect=AssertionError):
-            with patch.dict(os.environ, {"QWEN4_CPU_TARGET_STATUS": "0"}):
-                self.assertIsNone(policy.prepare_cpu_target_status(config, pc))
-            with patch.dict(os.environ, {"QWEN4_CPU_TARGET_STATUS": "1"}):
-                for key, value in [
-                    ("role_type", "PREFILL"),
-                    ("tp_size", 4),
-                    ("dp_size", 2),
-                    ("local_world_size", 4),
-                ]:
-                    altered = SimpleNamespace(**{**vars(pc), key: value})
-                    self.assertIsNone(policy.prepare_cpu_target_status(config, altered))
-                self.assertIsNone(
-                    policy.prepare_cpu_target_status(SimpleNamespace(is_mtp=True), pc)
-                )
+            for key, value in [
+                ("role_type", "PREFILL"),
+                ("tp_size", 4),
+                ("dp_size", 2),
+                ("local_world_size", 4),
+            ]:
+                altered = SimpleNamespace(**{**vars(pc), key: value})
+                self.assertIsNone(policy.prepare_cpu_target_status(config, altered))
+            self.assertIsNone(
+                policy.prepare_cpu_target_status(SimpleNamespace(is_mtp=True), pc)
+            )
 
     def test_native_wait_releases_gil_and_preserves_false(self):
         mapping, pointer = self.mapping()

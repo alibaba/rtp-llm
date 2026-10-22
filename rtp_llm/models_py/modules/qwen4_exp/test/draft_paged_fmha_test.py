@@ -28,8 +28,6 @@ class DraftPagedFmhaTest(unittest.TestCase):
         env = patch.dict(
             os.environ,
             {
-                "QWEN4_DRAFT_QSA_LAYOUT": "1",
-                "QWEN4_DRAFT_QSA_DIRECT": "1",
                 "RTP_LLM_CUDA_GRAPH_WARMUP_FORWARD": "1",
             },
         )
@@ -189,7 +187,7 @@ class DraftPagedFmhaTest(unittest.TestCase):
                 )
             )
 
-    def test_unqualified_metadata_and_gate_fall_back(self):
+    def test_unqualified_metadata_falls_back(self):
         qkv = torch.zeros(4, 3584, device="cuda", dtype=torch.bfloat16)
         selected = torch.zeros(4, 2051, device="cuda", dtype=torch.int32)
         sources = torch.arange(4, device="cuda")
@@ -213,9 +211,6 @@ class DraftPagedFmhaTest(unittest.TestCase):
             )
         self.assertIsNone(try_restore_selection(selected.long(), sources, valid))
         self.assertIsNone(try_restore_selection(selected, sources.int(), valid))
-        with patch.dict(os.environ, {"QWEN4_DRAFT_QSA_DIRECT": "0"}):
-            self.assertIsNone(try_draft_paged_attention(*args, **kwargs))
-            self.assertIsNone(try_restore_selection(selected, sources, valid))
 
 
 if __name__ == "__main__":
