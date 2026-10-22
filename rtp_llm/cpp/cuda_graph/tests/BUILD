@@ -310,6 +310,7 @@ py_test(
         "//:th_transformer",
     ],
     deps = [
+        ":cuda_graph_test_runner",
         "//rtp_llm/test/model_test/test_util",
     ],
     env = {
