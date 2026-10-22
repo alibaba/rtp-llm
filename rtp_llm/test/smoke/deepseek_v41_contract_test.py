@@ -78,6 +78,9 @@ class DeepSeekV41ContractTest(unittest.TestCase):
                 "DSV4_MOE_STRATEGY": self.moe_strategy,
                 "DSV4_USE_MEGA_MOE_SE": "0",
                 "DSV4_USE_MEGA_MOE_FUSED": "0",
+                "DSV4_USE_MEGA_MOE_SM90": os.environ.get(
+                    "DSV4_USE_MEGA_MOE_SM90", "0"
+                ),
                 "DSV41_SWA_BOUNDED_REPLAY": "0",
                 "DSV41_CED": "0",
                 **self.extra_server_env,

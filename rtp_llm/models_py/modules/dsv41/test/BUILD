@@ -97,6 +97,17 @@ py_test(
 )
 
 py_test(
+    name = "test_sm90_mega_moe",
+    srcs = ["test_sm90_mega_moe.py", "//rtp_llm/test/pytest:pytest_main.py"],
+    main = "//rtp_llm/test/pytest:pytest_main.py",
+    args = ["--cuda-devices", "0", "$(location :test_sm90_mega_moe.py)"],
+    deps = ["//rtp_llm:testlib", "//rtp_llm/models_py:modules", test_requirement("pytest")],
+    env = {"GPU_COUNT": "0"},
+    target_compatible_with = select({"@//:using_cuda13_x86": [], "//conditions:default": ["@platforms//:incompatible"]}),
+    legacy_create_init = 0,
+)
+
+py_test(
     name = "test_sm90_dispatch_pad",
     srcs = ["test_sm90_dispatch_pad.py", "//rtp_llm/test/pytest:pytest_main.py"],
     main = "//rtp_llm/test/pytest:pytest_main.py",

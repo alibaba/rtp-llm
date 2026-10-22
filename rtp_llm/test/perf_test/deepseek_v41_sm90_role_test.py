@@ -86,12 +86,18 @@ def recipe(role, mode, checkpoint, tokenizer):
     env = {
         "WORLD_SIZE": "8",
         "LOAD_PYTHON_MODEL": "1",
-        "DSV4_MOE_STRATEGY": "sm90_flashinfer",
+        # Perf A/B switch: SM90_PERF_MOE_STRATEGY=mega_sm90 selects the opt-in
+        # Hopper fused MegaMoE instead of the FlashInfer adapter. The default
+        # keeps the validated adapter so existing numbers stay comparable.
+        "DSV4_MOE_STRATEGY": os.environ.get(
+            "SM90_PERF_MOE_STRATEGY", "sm90_flashinfer"
+        ),
         "MOE_STRATEGY": "auto",
         "DSV41_SM90_MOE_COMM": "v2",
         "DSV41_SM90_V2_NUM_SMS": "0",
         "DSV4_USE_MEGA_MOE_SE": "0",
         "DSV4_USE_MEGA_MOE_FUSED": "0",
+        "DSV4_USE_MEGA_MOE_SM90": os.environ.get("DSV4_USE_MEGA_MOE_SM90", "0"),
         "DSV41_CED": str(int(decode)),
         "DSV41_SWA_BOUNDED_REPLAY": str(int(decode)),
         "DSV41_SM90_DECODE_GRAPH": str(int(decode)),
@@ -99,7 +105,15 @@ def recipe(role, mode, checkpoint, tokenizer):
         "DSV41_SM90_MULTIQUERY_INDEXER": "1",
         "DSV41_ENGRAM_PREFETCH": os.environ.get("DSV41_ENGRAM_PREFETCH", "1"),
         "DSV41_ENGRAM_REGISTER_CHUNK_MB": "256",
-        "DSV4_MOE_CHUNK_PREFILL": "0",
+        # The fused Hopper kernel needs the MoE input chunked (its tile
+        # schedule asserts num_stages >= 2, which a whole CP8 prefill chunk
+        # violates); the FlashInfer/DeepEP baseline was measured unchunked.
+        "DSV4_MOE_CHUNK_PREFILL": (
+            "1"
+            if os.environ.get("SM90_PERF_MOE_STRATEGY", "sm90_flashinfer")
+            == "mega_sm90"
+            else "0"
+        ),
         "ROLE_TYPE": role.upper(),
         "RTP_LLM_PD_ROUTE_RETRY_ON_UNAVAILABLE": "0",
         "FT_SERVER_TEST": "1",
@@ -210,7 +224,12 @@ def validate_startup(text, role):
         for enabled, size in warmup
     ):
         raise AssertionError(f"unexpected optional CP warmup records: {warmup}")
-    if f"SM90 DeepEP V2: role={role}" not in text:
+    if os.environ.get("SM90_PERF_MOE_STRATEGY", "sm90_flashinfer") == "mega_sm90":
+        # The fused Hopper kernel owns dispatch and combine, so DeepEP V2 is
+        # never initialised on that path; assert its own startup marker instead.
+        if "[DSV4 SM90 MegaMoE] allocated symm buffer" not in text:
+            raise AssertionError("SM90 MegaMoE symmetric buffer was not allocated")
+    elif f"SM90 DeepEP V2: role={role}" not in text:
         raise AssertionError("DeepEP V2 was not initialized for the selected role")
 
 
