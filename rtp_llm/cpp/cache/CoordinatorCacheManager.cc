@@ -1,6 +1,7 @@
 #include <algorithm>
 #include <cstdint>
 #include <limits>
+#include <map>
 #include <type_traits>
 #include <unordered_set>
 #include <utility>
@@ -12,6 +13,7 @@
 #include "rtp_llm/cpp/cache/SingleTypeCacheManager.h"
 #include "rtp_llm/cpp/cache/LinearCacheManager.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeCache.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/ScopeRollback.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/group_set/GroupSet.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/load/LoadAsyncContext.h"
 #include "rtp_llm/cpp/cache/CPSlotMapper.h"
@@ -119,7 +121,7 @@ MallocResult CoordinatorCacheManager::initMalloc(const MallocInfo& malloc_info) 
     auto init_result = initMallocForCommonLen(malloc_info);
     if (malloc_info.batch_kv_cache_resource != nullptr) {
         const CacheKeysType& cache_keys        = malloc_info.batch_kv_cache_resource->cacheKeys(0);
-        init_result.block_aligned_input_length = static_cast<int64_t>(cache_keys.size()) * config_.seq_size_per_block;
+        init_result.device_input_length        = static_cast<int64_t>(cache_keys.size()) * config_.seq_size_per_block;
     }
     if (!init_result.success) {
         return finalize_init_failure(init_result);
@@ -138,7 +140,7 @@ MallocResult CoordinatorCacheManager::initMalloc(const MallocInfo& malloc_info) 
             load_context.reset();
             incr_result.match_cost_time_us         = init_result.match_cost_time_us;
             incr_result.match_end_time_us          = init_result.match_end_time_us;
-            incr_result.block_aligned_input_length = init_result.block_aligned_input_length;
+            incr_result.device_input_length        = init_result.device_input_length;
             incr_result.load_attempted             = init_result.load_attempted;
             return finalize_init_failure(std::move(incr_result));
         }
@@ -269,6 +271,80 @@ bool CoordinatorCacheManager::abortPendingLoad(const std::shared_ptr<AsyncContex
     return block_tree_cache_ != nullptr && block_tree_cache_->abortPendingLoad(context);
 }
 
+bool CoordinatorCacheManager::detachSharedBlocksForRecompute(const BatchKVCacheResourcePtr& resource,
+                                                             int                            device_ready_reuse_length) {
+    std::lock_guard<std::mutex> lock(malloc_mutex_);
+    RTP_LLM_CHECK(resource != nullptr && device_ready_reuse_length >= 0);
+
+    const auto groups    = cacheGroups();
+    using BlockLocations = std::map<BlockIdxType, std::vector<std::pair<BlockIds*, size_t>>>;
+    std::vector<BlockLocations>            block_locations(groups.size());
+    std::vector<BlockIndicesType>          allocated_blocks(groups.size());
+    block_tree_cache_detail::ScopeRollback rollback([&] {
+        for (size_t i = 0; i < groups.size(); ++i) {
+            groups[i]->blockPool()->decRef(allocated_blocks[i]);
+        }
+    });
+    for (size_t i = 0; i < groups.size(); ++i) {
+        const auto& group     = groups[i];
+        const auto& pool      = group->blockPool();
+        auto&       locations = block_locations[i];
+        const auto& tag       = group->tag();
+        const int   local_reuse_length =
+            cpEffectiveSeqLenForGroup(cp_slot_mapper_, config_, tag, device_ready_reuse_length);
+        const size_t recompute_begin = local_reuse_length / group->seqSizePerBlock();
+        for (int batch = 0; batch < resource->batchSize(); ++batch) {
+            auto&       ids    = resource->mutableBlockIds(batch, tag);
+            const auto& blocks = ids.blocks();
+            for (size_t pos = recompute_begin; pos < blocks.size(); ++pos) {
+                if (!isNullBlockIdx(blocks[pos])) {
+                    locations[blocks[pos]].emplace_back(&ids, pos);
+                }
+            }
+        }
+        for (auto it = locations.begin(); it != locations.end();) {
+            // Device refCount includes request references and a marker for tree ownership.
+            // This also catches failed load targets still held by joined requests.
+            if (pool->refCount(it->first) <= it->second.size()) {
+                it = locations.erase(it);
+            } else {
+                ++it;
+            }
+        }
+        if (locations.empty()) {
+            continue;
+        }
+        if (!group->ensureFreeBlocks(locations.size() + reserveBlocksForPoolMetrics(i))) {
+            return false;
+        }
+        auto new_blocks = pool->malloc(locations.size());
+        if (!new_blocks) {
+            return false;
+        }
+        pool->incRef(*new_blocks);
+        allocated_blocks[i] = std::move(*new_blocks);
+    }
+    // Reserve every replacement before changing any table. No copy is needed: all
+    // tokens in these blocks will be recomputed from the device-ready prefix.
+    for (size_t group_index = 0; group_index < groups.size(); ++group_index) {
+        const auto& pool  = groups[group_index]->blockPool();
+        size_t      index = 0;
+        for (const auto& [old_block, locations] : block_locations[group_index]) {
+            const auto new_block = allocated_blocks[group_index][index++];
+            for (size_t i = 0; i < locations.size(); ++i) {
+                if (i != 0) {
+                    pool->incRef(new_block);
+                }
+                const auto& [ids, pos] = locations[i];
+                ids->setAt(pos, new_block);
+                pool->decRef(old_block);
+            }
+        }
+    }
+    rollback.dismiss();
+    return true;
+}
+
 uint32_t CoordinatorCacheManager::convertToGlobalLayerId(size_t model_id, int local_layer_id) const {
     if (model_id == 0) {
         // main model: local_layer_id is the global layer id
@@ -365,10 +441,10 @@ std::vector<KVCachePoolMetricsSnapshot> CoordinatorCacheManager::poolMetricsSnap
         snapshot.load_ref_blocks            = pool->referencedBlocksNum(BlockTreeRefType::LOAD);
         snapshot.eviction_target_ref_blocks = pool->referencedBlocksNum(BlockTreeRefType::EVICTION);
         snapshot.store_ref_blocks           = pool->referencedBlocksNum(BlockTreeRefType::STORE);
-        snapshot.used_ratio =
-            snapshot.total_blocks == 0 ?
-                0.0f :
-                static_cast<float>(100.0 * snapshot.used_blocks / static_cast<double>(snapshot.total_blocks));
+        snapshot.used_ratio                 = snapshot.total_blocks == 0 ?
+                                                  0.0f :
+                                                  static_cast<float>(100.0 * (snapshot.total_blocks - snapshot.available_blocks)
+                                                     / static_cast<double>(snapshot.total_blocks));
         snapshots.push_back(std::move(snapshot));
     }
     return snapshots;
