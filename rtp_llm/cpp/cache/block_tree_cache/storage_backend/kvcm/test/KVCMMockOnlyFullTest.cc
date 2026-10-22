@@ -4,10 +4,20 @@
 
 #include "kmonitor/client/MetricsReporter.h"
 #include "kmonitor/client/core/MetricsData.h"
+#include "kvcm_client/HostCacheStateCompat.h"
 #include "rtp_llm/cpp/metrics/RtpLLMMetrics.h"
 
 namespace rtp_llm {
 namespace {
+
+template<typename Match>
+Match hostCacheMatchFixture() {
+    if constexpr (kvcm::HasGlobalHostCacheMatch<Match>::value) {
+        return {"192.0.2.1:1234", 2, 3};
+    } else {
+        return {"192.0.2.1:1234", 2, 1, 3};
+    }
+}
 
 double quarantineGauge(kmonitor::MutableMetric* metric) {
     if (metric == nullptr) {
@@ -87,7 +97,7 @@ TEST(KVCMMockOnlyFullTest, MetadataRpcPreservesFiltersMasksAndHitResponses) {
     EXPECT_EQ(hit.specs(0).uri(), "pace://hit");
     EXPECT_EQ(response.backend_locations(1).locations_size(), 0);
 
-    const kv_cache_manager::HostCacheState hosts{{"192.0.2.1:1234", 2, 1, 3}};
+    const kv_cache_manager::HostCacheState hosts{hostCacheMatchFixture<kv_cache_manager::HostCacheMatch>()};
     EXPECT_CALL(*client, getHostCacheState("", "metadata", kv_cache_manager::QueryType::QT_PREFIX_MATCH,
                                          keys, std::vector<std::string>{"hbm"}, 1))
         .WillOnce(Return(std::make_pair(true, hosts)));
@@ -100,8 +110,12 @@ TEST(KVCMMockOnlyFullTest, MetadataRpcPreservesFiltersMasksAndHitResponses) {
     ASSERT_EQ(response.hosts_size(), 1);
     EXPECT_EQ(response.hosts(0).host_ip_port(), hosts[0].host_ip_port);
     EXPECT_EQ(response.hosts(0).local(), 2);
-    EXPECT_EQ(response.hosts(0).p2p_1_fetch(), 1);
-    EXPECT_EQ(response.hosts(0).p2p_1_total_match(), 3);
+    if (response.hosts(0).has_global()) {
+        EXPECT_EQ(response.hosts(0).global(), 3);
+    } else {
+        EXPECT_EQ(response.hosts(0).p2p_1_fetch(), 1);
+        EXPECT_EQ(response.hosts(0).p2p_1_total_match(), 3);
+    }
 
     const kv_cache_manager::BlockMask offset = kv_cache_manager::BlockMaskOffset{1};
     EXPECT_CALL(*client, removeCache("", "metadata", keys, tokens, offset)).WillOnce(Return(true));

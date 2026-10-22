@@ -908,6 +908,7 @@ message RemoteMetadataRequestPB {
     int32 backend_type = 5; // KVCM StorageType; one backend per request
     repeated string location_spec_names = 6;
     repeated string medium = 7;
+    // P2P-only host selection; newer KVCM SDKs use top_k_host_count plus L2.
     int32 p2p_host_count = 8;
 }
 
@@ -929,8 +930,14 @@ message RemoteBackendKeyLocationsPB {
 message RemoteHostCacheMatchPB {
     string host_ip_port = 1;
     int64 local = 2;
+    // Legacy SDK details. New SDKs do not provide or reconstruct these values.
     int64 p2p_1_fetch = 3;
     int64 p2p_1_total_match = 4;
+    // Presence distinguishes an unsupported global estimate from a real zero.
+    // This is the SDK's union-prefix estimate, not either legacy P2P metric.
+    oneof global_match {
+        int64 global = 5;
+    }
 }
 
 enum RemoteTransferStatusPB {
