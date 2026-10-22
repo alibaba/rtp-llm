@@ -135,14 +135,25 @@ bool streamAsyncReplayPrepEnabled() {
     return enabled;
 }
 
-void callPrepareCudaGraph(py::object attn_pyobj, PyModelInputs& inputs) {
+void callPrepareCudaGraph(py::object attn_pyobj, PyModelInputs& inputs, int valid_request_count) {
     if (!attn_pyobj || attn_pyobj.is_none()) {
         return;
     }
 
+    auto prepare = [valid_request_count](const auto& impl, const auto& attn_inputs) {
+        // Opt-in metadata only: do not change the padded MTP/KV-write lengths.
+        // Python capture geometry is static; this replay's live count is not.
+        if (py::hasattr(impl, "cuda_graph_uses_valid_request_count")
+            && impl.attr("cuda_graph_uses_valid_request_count").template cast<bool>()) {
+            impl.attr("prepare_cuda_graph")(attn_inputs, py::arg("valid_request_count") = valid_request_count);
+        } else {
+            impl.attr("prepare_cuda_graph")(attn_inputs);
+        }
+    };
+
     if (inputs.attention_inputs_by_tag.empty()) {
         if (py::hasattr(attn_pyobj, "prepare_cuda_graph")) {
-            attn_pyobj.attr("prepare_cuda_graph")(inputs.attention_inputs);
+            prepare(attn_pyobj, inputs.attention_inputs);
         }
         return;
     }
@@ -159,13 +170,13 @@ void callPrepareCudaGraph(py::object attn_pyobj, PyModelInputs& inputs) {
             RTP_LLM_CHECK_WITH_INFO(py::hasattr(impl, "prepare_cuda_graph"),
                                     "attention implementation for tag=%s has no prepare_cuda_graph",
                                     tag.c_str());
-            impl.attr("prepare_cuda_graph")(it->second);
+            prepare(impl, it->second);
         }
         return;
     }
 
     if (py::hasattr(attn_pyobj, "prepare_cuda_graph")) {
-        attn_pyobj.attr("prepare_cuda_graph")(inputs.attention_inputs_by_tag);
+        prepare(attn_pyobj, inputs.attention_inputs_by_tag);
     }
 }
 
@@ -1107,7 +1118,7 @@ void CudaGraphRunner::prepareAttentionInputs(const PyModelInputs& inputs,
             cuda_graph::graphGetCurrentStream().synchronize();
         }
         py::gil_scoped_acquire gil;
-        callPrepareCudaGraph(attn_pyobj, py_model_inputs_);
+        callPrepareCudaGraph(attn_pyobj, py_model_inputs_, state.current_batch_size);
     }
     prepared_guard.commit();
     completion_guard.committed = true;

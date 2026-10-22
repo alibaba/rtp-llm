@@ -26,6 +26,7 @@ Caller is responsible for FP8 quantizing Q via
 from __future__ import annotations
 
 import os
+from dataclasses import dataclass
 from functools import lru_cache
 from typing import Optional
 
@@ -186,6 +187,16 @@ def _get_num_sms(device: torch.device) -> int:
 # ---------------------------------------------------------------------------
 
 
+@dataclass(frozen=True)
+class PagedMQAMetadata:
+    """Prepared per-query DG inputs, shared only within a compatible forward."""
+
+    lengths: torch.Tensor
+    tables: torch.Tensor
+    request_ids: torch.Tensor
+    schedule: torch.Tensor
+
+
 def fp8_fp4_paged_indexer_score(
     q_payload: torch.Tensor,  # [B, next_n, H, 64] int8 packed e2m1
     q_sf: torch.Tensor,  # [B, next_n, H] int32 packed UE8M0
@@ -197,11 +208,13 @@ def fp8_fp4_paged_indexer_score(
     max_ctx_len: int,  # output T dim (physical capacity)
     *,
     return_bf16: bool = False,
+    metadata: PagedMQAMetadata | None = None,
 ) -> torch.Tensor:
     """MX-mode FP4 paged indexer logits via DeepGEMM.
 
     Both scale factors use DeepGEMM's packed-UE8M0 int32 form (group 32 along
     the head dim), matching the V4.1-Flash official indexer quantization.
+    Prepared metadata bypasses expansion and scheduling, not score computation.
     """
     from ._v41_mqa_layout import normalize_mqa_logits
 
@@ -209,16 +222,22 @@ def fp8_fp4_paged_indexer_score(
     # Expand only the small block-table metadata for speculative next_n.
     batch, next_n, heads, packed_dim = q_payload.shape
     rows = batch * next_n
-    request_ids = torch.arange(
-        batch, dtype=torch.int32, device=q_payload.device
-    ).repeat_interleave(next_n)
     q = q_payload.reshape(rows, 1, heads, packed_dim).contiguous()
     sf = q_sf.reshape(rows, 1, heads).contiguous()
-    lengths = context_lens.reshape(rows, 1).to(torch.int32).contiguous()
-    tables = block_table.repeat_interleave(next_n, dim=0).contiguous()
-    schedule = _deep_gemm.get_paged_mqa_logits_metadata(
-        lengths, block_size, _get_num_sms(q_payload.device), indices=request_ids
-    )
+    if metadata is None:
+        request_ids = torch.arange(
+            batch, dtype=torch.int32, device=q_payload.device
+        ).repeat_interleave(next_n)
+        lengths = context_lens.reshape(rows, 1).to(torch.int32).contiguous()
+        tables = block_table.repeat_interleave(next_n, dim=0).contiguous()
+        schedule = _deep_gemm.get_paged_mqa_logits_metadata(
+            lengths, block_size, _get_num_sms(q_payload.device), indices=request_ids
+        )
+    else:
+        lengths = metadata.lengths
+        tables = metadata.tables
+        request_ids = metadata.request_ids
+        schedule = metadata.schedule
     operation = _deep_gemm.fp8_fp4_paged_mqa_logits
     options = (
         {"clean_logits": False, "logits_dtype": torch.bfloat16}

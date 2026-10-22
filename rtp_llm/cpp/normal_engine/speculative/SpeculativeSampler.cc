@@ -205,15 +205,22 @@ void SpeculativeSampler::batchSample(SpeculativeSamplerOutput&           sample_
         target_token_ids_d_t = target_token_ids_d_t.to(target_device, true);
     }
 
-    torch::Tensor do_sample =
-        torch::zeros({(long)batch_size}, torch::TensorOptions().dtype(torch::kBool).pinned_memory(true));
+    // Both per-stream masks share one pinned allocation and one device copy.
+    auto masks = torch::empty({2, (long)batch_size},
+                              torch::TensorOptions().dtype(torch::kBool).pinned_memory(true));
+    auto* do_sample_ptr = masks.data_ptr<bool>();
+    auto* force_mask_ptr = do_sample_ptr + batch_size;
+    bool has_force = false;
     int stream_idx = 0;
     for (const GenerateStreamPtr& stream : streams) {
-        do_sample[stream_idx] = stream->generateConfig()->stochastic();
+        do_sample_ptr[stream_idx] = stream->generateConfig()->stochastic();
+        force_mask_ptr[stream_idx] = stream->forceSpAccept();
+        has_force |= force_mask_ptr[stream_idx];
         stream_idx++;
     }
-    buffer_holder_.hold_host(do_sample);
-    auto do_sample_d = do_sample.to(target_device, true);
+    buffer_holder_.hold_host(masks);
+    auto masks_d = masks.to(target_device, true);
+    auto do_sample_d = masks_d.select(0, 0);
 
     // Folded finalization capability (CUDA kernel): the rejection kernel
     // applies the force-accept override and the -1 -> 0 padding reset itself
@@ -223,24 +230,9 @@ void SpeculativeSampler::batchSample(SpeculativeSamplerOutput&           sample_
     // ROCm/generic return false and keep the legacy chain byte-for-byte.
     const bool finalize_in_kernel = execRejectionSamplingSupportsFinalize();
 
-    // Keep the existing device mask construction. CUDA consumes it during
-    // rejection; other backends construct it in the post-rejection scope.
+    // An undefined force mask retains the ordinary rejection path.
     auto build_force_mask_device = [&]() -> torch::Tensor {
-        auto force_mask =
-            torch::zeros({(long)batch_size}, torch::TensorOptions().dtype(torch::kBool).device(target_device));
-        bool has_force = false;
-        int  idx       = 0;
-        for (const auto& stream : streams) {
-            if (stream->forceSpAccept()) {
-                force_mask[idx] = true;
-                has_force       = true;
-            }
-            idx++;
-        }
-        if (!has_force) {
-            return torch::Tensor();
-        }
-        return force_mask;
+        return has_force ? masks_d.select(0, 1) : torch::Tensor();
     };
 
     torch::Tensor force_mask_d;

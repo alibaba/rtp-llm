@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import os
 import unittest
+from dataclasses import replace
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import torch
@@ -363,6 +366,428 @@ class V41DecodeIndexerTest(unittest.TestCase):
         for logical, ratio in [(64, 2), (128, 1)]:
             with self.subTest(logical=logical, ratio=ratio):
                 _check_graph_replay_elided(logical, ratio)
+
+    def test_fused_metadata_rejects_unsupported_inputs_before_launch(self):
+        keys = fused.DecodeIndexerKeys(
+            torch.empty(2, 128, 68, dtype=torch.uint8),
+            torch.ones(2, 4, dtype=torch.int32),
+            512,
+            128,
+        )
+        shared = {}
+        with patch.object(fused, "_fused_decode_metadata_kernel") as kernel:
+            self.assertIsNone(
+                fused.get_decode_metadata(
+                    shared,
+                    keys,
+                    torch.zeros(12, dtype=torch.int64),
+                    batch_size=2,
+                    query_len=6,
+                    compress_ratio=1,
+                )
+            )
+            kernel.__getitem__.assert_not_called()
+        self.assertEqual(shared, {})
+
+    def test_disabled_rope_reuse_bypasses_metadata_before_tensor_access(self):
+        shared = {}
+        keys = fused.DecodeIndexerKeys(object(), object(), 512, 128)
+        with patch.dict(
+            os.environ,
+            {"DSV41_FUSE_INDEXER_METADATA": "1", "DSV41_REUSE_DECODE_ROPE": "0"},
+        ), patch.object(fused, "_fused_decode_metadata_kernel") as kernel:
+            for _ in range(4):
+                self.assertIsNone(
+                    fused.get_decode_metadata(
+                        shared,
+                        keys,
+                        object(),
+                        batch_size=2,
+                        query_len=6,
+                        compress_ratio=1,
+                    )
+                )
+            kernel.__getitem__.assert_not_called()
+        self.assertEqual(shared, {})
+
+    @unittest.skipUnless(torch.cuda.is_available(), "CUDA required")
+    def test_fused_metadata_matches_original_fields_and_isolates_groups(self):
+        if not fused.is_supported(torch.device("cuda"), 128):
+            self.skipTest("SM10x paged indexer required")
+        with patch.dict(os.environ, {"DSV41_FUSE_INDEXER_METADATA": "1"}):
+            for batch, span, context in ((1, 1, 32768), (3, 6, 32768), (64, 6, 131072)):
+                for physical, logical, ratio in (
+                    (128, 128, 1),
+                    (128, 64, 2),
+                    (64, 64, 2),
+                ):
+                    for dtype in (torch.int32, torch.int64):
+                        with self.subTest(
+                            batch=batch,
+                            span=span,
+                            ratio=ratio,
+                            physical=physical,
+                            dtype=dtype,
+                        ):
+                            capacity = context // ratio
+                            cols = (capacity + logical - 1) // logical
+                            storage = torch.arange(
+                                batch * (cols * 2 + 3), device="cuda", dtype=dtype
+                            ).reshape(batch, -1)
+                            table = storage[:, 1 : 1 + 2 * cols : 2]
+                            table[:, 0] = -7
+                            table[:, -1] = 0
+                            positions = torch.arange(
+                                batch * span, device="cuda", dtype=dtype
+                            ) % (context - 1)
+                            positions[-1] = context - 1
+                            positions[0] = -1
+                            keys = fused.DecodeIndexerKeys(
+                                torch.empty(
+                                    2, physical, 68, dtype=torch.uint8, device="cuda"
+                                ),
+                                table,
+                                capacity,
+                                logical,
+                            )
+                            shared = {}
+                            plan = fused.get_decode_metadata(
+                                shared,
+                                keys,
+                                positions,
+                                batch_size=batch,
+                                query_len=span,
+                                compress_ratio=ratio,
+                            )
+                            lengths = ((positions.long() + 1) // ratio).int()
+                            last = (lengths - 1).clamp_min(0)
+                            expected_physical = torch.where(
+                                lengths > 0,
+                                last // logical * physical + last % logical + 1,
+                                0,
+                            )
+                            for actual, expected in (
+                                (plan.lengths, lengths),
+                                (plan.paged.lengths.flatten(), expected_physical),
+                                (plan.safe_table, table.clamp_min(0).int()),
+                                (
+                                    plan.paged.tables,
+                                    table.clamp_min(0)
+                                    .int()
+                                    .repeat_interleave(span, dim=0),
+                                ),
+                                (
+                                    plan.paged.request_ids,
+                                    torch.arange(
+                                        batch, device="cuda", dtype=torch.int32
+                                    ).repeat_interleave(span),
+                                ),
+                            ):
+                                torch.testing.assert_close(
+                                    actual, expected, rtol=0, atol=0
+                                )
+                            # Owners with identical table views share metadata, never KV pools.
+                            view_keys = replace(
+                                keys, pool=keys.pool.clone(), block_table=table[:]
+                            )
+                            self.assertIs(
+                                fused.get_decode_metadata(
+                                    shared,
+                                    view_keys,
+                                    positions[:],
+                                    batch_size=batch,
+                                    query_len=span,
+                                    compress_ratio=ratio,
+                                ),
+                                plan,
+                            )
+                            for other, pos, other_ratio in (
+                                (
+                                    replace(keys, block_table=table.clone()),
+                                    positions,
+                                    ratio,
+                                ),
+                                (
+                                    replace(
+                                        keys,
+                                        block_table=table.as_strided(
+                                            table.shape, (table.stride(0), 1)
+                                        ),
+                                    ),
+                                    positions,
+                                    ratio,
+                                ),
+                                (
+                                    replace(keys, capacity=capacity - 1),
+                                    positions,
+                                    ratio,
+                                ),
+                                (keys, positions.clone(), ratio),
+                                (keys, positions, 3 - ratio),
+                            ):
+                                self.assertIsNot(
+                                    fused.get_decode_metadata(
+                                        shared,
+                                        other,
+                                        pos,
+                                        batch_size=batch,
+                                        query_len=span,
+                                        compress_ratio=other_ratio,
+                                    ),
+                                    plan,
+                                )
+            for disabled in ("DSV41_FUSE_INDEXER_METADATA", "DSV41_REUSE_DECODE_ROPE"):
+                shared = {}
+                with patch.dict(os.environ, {disabled: "0"}), patch.object(
+                    fused, "_fused_decode_metadata_kernel"
+                ) as kernel:
+                    self.assertIsNone(
+                        fused.get_decode_metadata(
+                            shared,
+                            keys,
+                            positions,
+                            batch_size=batch,
+                            query_len=span,
+                            compress_ratio=ratio,
+                        )
+                    )
+                    kernel.__getitem__.assert_not_called()
+                self.assertEqual(shared, {})
+
+    @unittest.skipUnless(torch.cuda.is_available(), "CUDA required")
+    def test_shared_metadata_read_only_across_owners_and_graph_replays(self):
+        if not fused.is_supported(torch.device("cuda"), 128):
+            self.skipTest("SM10x paged indexer required")
+        with patch.dict(
+            os.environ,
+            {"DSV41_FUSE_INDEXER_METADATA": "1", "DSV41_REUSE_DECODE_ROPE": "1"},
+        ):
+            for logical, ratio in ((128, 1), (64, 2)):
+                cases = [
+                    make_case(2, 6, 2053, 128, logical, ratio, seed=seed)[0]
+                    for seed in (42, 43)
+                ]
+                cases[1]["block_table"] = cases[0]["block_table"][:]
+                cases[1]["context_lens"] = cases[0]["context_lens"]
+                positions = cases[0]["context_lens"].flatten().long() * ratio - 1
+
+                def prepared():
+                    shared, outputs = {}, []
+                    first = None
+                    # Distinct pools consume one schedule repeatedly, without rebuilds.
+                    for case in cases * 2:
+                        keys = fused.DecodeIndexerKeys(
+                            case["pool"], case["block_table"], 2053, logical
+                        )
+                        plan = fused.get_decode_metadata(
+                            shared,
+                            keys,
+                            positions,
+                            batch_size=2,
+                            query_len=6,
+                            compress_ratio=ratio,
+                        )
+                        if first is None:
+                            first = plan
+                            tensors = (
+                                plan.lengths,
+                                plan.safe_table,
+                                plan.paged.lengths,
+                                plan.paged.tables,
+                                plan.paged.request_ids,
+                                plan.paged.schedule,
+                            )
+                            before = tuple(t.clone() for t in tensors)
+                        else:
+                            self.assertIs(plan, first)
+                        outputs.append(
+                            fused.score_decode_indexer(
+                                **case, metadata=plan, preserve_score_dtype=True
+                            )
+                        )
+                    return outputs, tensors, before
+
+                stream = torch.cuda.Stream()
+                stream.wait_stream(torch.cuda.current_stream())
+                with torch.cuda.stream(stream):
+                    for _ in range(3):
+                        prepared()
+                torch.cuda.current_stream().wait_stream(stream)
+                graph = torch.cuda.CUDAGraph()
+                with torch.cuda.graph(graph):
+                    captured = prepared()
+                for step in range(3):
+                    for owner, case in enumerate(cases):
+                        update, _ = make_case(
+                            2, 6, 2053, 128, logical, ratio, seed=90 + step * 2 + owner
+                        )
+                        for name in ("q", "weights", "freqs_cis", "pool"):
+                            case[name].copy_(update[name])
+                        if owner == 0:
+                            case["block_table"].copy_(update["block_table"])
+                    lengths = torch.tensor(
+                        [0, 1, 63, 64, 65, 127, 128, 129, 511, 512, 1024, 2053],
+                        device="cuda",
+                        dtype=torch.int32,
+                    ).view(2, 6)
+                    if step == 2:
+                        lengths.zero_()
+                    cases[0]["context_lens"].copy_(lengths)
+                    positions.copy_(lengths.flatten().long() * ratio - 1)
+                    graph.replay()
+                    expected = [
+                        fused.score_decode_indexer(**case, preserve_score_dtype=True)
+                        for case in cases
+                    ]
+                    for actual, tensors, before in (captured, prepared()):
+                        for output, reference in zip(actual, expected * 2):
+                            torch.testing.assert_close(
+                                output, reference, rtol=0, atol=0
+                            )
+                        for tensor, snapshot in zip(tensors, before):
+                            torch.testing.assert_close(tensor, snapshot, rtol=0, atol=0)
+
+    @unittest.skipUnless(torch.cuda.is_available(), "CUDA required")
+    def test_prepared_score_graph_replay_and_forward_cache_lifetime(self):
+        if not fused.is_supported(torch.device("cuda"), 128):
+            self.skipTest("SM10x paged indexer required")
+        from rtp_llm.models_py.modules.dsv41.fp8.attention_v41 import AttentionV41FP8
+
+        with patch.dict(os.environ, {"DSV41_FUSE_INDEXER_METADATA": "1"}):
+            for logical, ratio in ((128, 1), (64, 2)):
+                case, _ = make_case(2, 6, 2053, 128, logical, ratio)
+                keys = fused.DecodeIndexerKeys(
+                    case["pool"], case["block_table"], 2053, logical
+                )
+                positions = case["context_lens"].flatten().long() * ratio - 1
+                shared = {"layers": {0: None, 2: None}}
+                first = SimpleNamespace(layer_id=0, _shared_attention=shared)
+                later = SimpleNamespace(layer_id=2, _shared_attention=shared)
+
+                def prepared():
+                    AttentionV41FP8._begin_forward(first)
+                    self.assertNotIn("decode_indexer_metadata", shared)
+                    plan = fused.get_decode_metadata(
+                        shared,
+                        keys,
+                        positions,
+                        batch_size=2,
+                        query_len=6,
+                        compress_ratio=ratio,
+                    )
+                    AttentionV41FP8._begin_forward(later)
+                    reused = fused.get_decode_metadata(
+                        shared,
+                        keys,
+                        positions,
+                        batch_size=2,
+                        query_len=6,
+                        compress_ratio=ratio,
+                    )
+                    self.assertIs(reused, plan)
+                    return fused.score_decode_indexer(
+                        **case, metadata=plan, preserve_score_dtype=True
+                    )
+
+                stream = torch.cuda.Stream()
+                stream.wait_stream(torch.cuda.current_stream())
+                with torch.cuda.stream(stream):
+                    for _ in range(3):
+                        prepared()
+                torch.cuda.current_stream().wait_stream(stream)
+                graph = torch.cuda.CUDAGraph()
+                with torch.cuda.graph(graph):
+                    output = prepared()
+                for step in range(4):
+                    update, _ = make_case(
+                        2, 6, 2053, 128, logical, ratio, seed=91 + step
+                    )
+                    if step % 2:
+                        update["block_table"][0, 0] = 0
+                        update["block_table"][1, 2] = -7
+                    for name in ("q", "weights", "freqs_cis", "pool", "block_table"):
+                        case[name].copy_(update[name])
+                    lengths = torch.tensor(
+                        [0, 1, 63, 64, 65, 127, 128, 129, 511, 512, 1024, 2053],
+                        device="cuda",
+                        dtype=torch.int32,
+                    ).view(2, 6)
+                    if step == 3:
+                        lengths.zero_()
+                    case["context_lens"].copy_(lengths)
+                    positions.copy_(lengths.flatten().long() * ratio - 1)
+                    graph.replay()
+                    expected = fused.score_decode_indexer(
+                        **case, preserve_score_dtype=True
+                    )
+                    torch.testing.assert_close(output, expected, rtol=0, atol=0)
+                    torch.testing.assert_close(prepared(), expected, rtol=0, atol=0)
+
+    @unittest.skipUnless(torch.cuda.is_available(), "CUDA required")
+    def test_full_layer_selector_uses_prepared_metadata_with_exact_fallback(self):
+        if not fused.is_supported(torch.device("cuda"), 128):
+            self.skipTest("SM10x paged indexer required")
+        from rtp_llm.models_py.modules.dsv41.fp8.attention_v41 import AttentionV41FP8
+
+        for logical, ratio, layer_id in ((128, 1, 20), (64, 2, 2)):
+            case, _ = make_case(2, 6, 2053, 128, logical, ratio)
+            positions = case["context_lens"].flatten().long() * ratio - 1
+            # Real requests have nonnegative positions; keep one short visible row.
+            positions.clamp_min_(0)
+            freqs = torch.ones(2053 * ratio, 32, dtype=torch.complex64, device="cuda")
+            owner = SimpleNamespace(
+                layer_id=layer_id,
+                kv_source_layer_id=layer_id,
+                is_index_source=True,
+                index_n_heads=32,
+                index_head_dim=128,
+                index_topk=512,
+                compress_ratio=ratio,
+                rope_head_dim=64,
+                index_weights=torch.randn(32, 16, dtype=torch.bfloat16, device="cuda"),
+                freqs_cis=freqs,
+                v41_config={},
+                _shared_attention={
+                    "global": {
+                        layer_id: fused.DecodeIndexerKeys(
+                            case["pool"], case["block_table"], 2053, logical
+                        )
+                    }
+                },
+            )
+            x = torch.randn(2, 6, 16, dtype=torch.bfloat16, device="cuda")
+
+            def run(enabled):
+                with patch.dict(os.environ, {"DSV41_FUSE_INDEXER_METADATA": enabled}):
+                    return AttentionV41FP8._select_indices_decode(
+                        owner, x, None, positions, index_q=case["q"].flatten(0, 1)
+                    )
+
+            expected = run("0")
+            with patch.object(
+                fused, "get_decode_metadata", wraps=fused.get_decode_metadata
+            ) as prepare:
+                actual = run("1")
+                self.assertEqual(prepare.call_count, 1)
+            self.assertTrue(owner._shared_attention["decode_indexer_metadata"])
+            torch.testing.assert_close(
+                actual.sort(dim=-1).values, expected.sort(dim=-1).values, rtol=0, atol=0
+            )
+
+            owner._shared_attention.pop("decode_indexer_metadata")
+            with patch.dict(os.environ, {"DSV41_REUSE_DECODE_ROPE": "0"}), patch.object(
+                fused, "_fused_decode_metadata_kernel"
+            ) as kernel:
+                for _ in range(4):
+                    actual = run("1")
+                    torch.testing.assert_close(
+                        actual.sort(dim=-1).values,
+                        expected.sort(dim=-1).values,
+                        rtol=0,
+                        atol=0,
+                    )
+                    self.assertNotIn("decode_indexer_metadata", owner._shared_attention)
+                kernel.__getitem__.assert_not_called()
 
     def test_paged_owner_layout_and_speculative_lengths(self):
         for physical, logical, ratio, b, s in [

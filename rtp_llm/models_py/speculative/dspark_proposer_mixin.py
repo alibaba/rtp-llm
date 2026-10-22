@@ -88,6 +88,15 @@ def map_context_rows(
     if batch_size == 0:
         raise ValueError("cannot map non-empty DSpark context without requests")
 
+    if device.type == "cuda":
+        from rtp_llm.models_py.speculative._dspark_prepare_triton import (
+            try_map_context_rows,
+        )
+
+        mapped = try_map_context_rows(starts, lengths, committed_ends, row_count)
+        if mapped is not None:
+            return mapped
+
     rows = torch.arange(row_count, device=device, dtype=torch.long)
     req = torch.searchsorted(starts.contiguous(), rows, right=True) - 1
     safe_req = req.clamp(0, batch_size - 1)
@@ -368,26 +377,46 @@ class DSparkProposerMixin:
             raise RuntimeError(
                 "DSpark requires prefix_lengths with one value per request"
             )
-        prefix_lengths = (
-            prefix_lengths_source[:batch_size].to(device=device, dtype=torch.int32)
-            if prefix_lengths_source is not None
-            else torch.empty(0, dtype=torch.int32, device=device)
-        )
+        prepared = None
+        if (
+            device.type == "cuda"
+            and inputs.input_ids.device == device
+            and prefix_lengths_source is not None
+            and prefix_lengths_source.device == device
+        ):
+            from rtp_llm.models_py.speculative._dspark_prepare_triton import (
+                try_prepare_proposal,
+            )
 
-        raw_ids = inputs.input_ids.to(device=device, dtype=torch.int32).view(
-            batch_size, width
-        )
-        query_ids = torch.full_like(raw_ids, self._dspark_noise_token_id)
-        if batch_size > 0:
-            query_ids[:, 0].copy_(raw_ids[:, 0])
-        query_positions = prefix_lengths.to(torch.long).view(batch_size, 1)
-        query_positions = query_positions + torch.arange(
-            width, device=device, dtype=torch.long
-        ).view(1, width)
+            prepared = try_prepare_proposal(
+                inputs.input_ids,
+                prefix_lengths_source,
+                width=width,
+                noise_token_id=self._dspark_noise_token_id,
+            )
+        if prepared is not None:
+            query_ids, query_positions, prefix_lengths, active_requests = prepared
+        else:
+            prefix_lengths = (
+                prefix_lengths_source[:batch_size].to(device=device, dtype=torch.int32)
+                if prefix_lengths_source is not None
+                else torch.empty(0, dtype=torch.int32, device=device)
+            )
 
-        # Live requests always carry a non-empty committed prefix (at least
-        # the anchor's context); zero-prefix slots are CUDA-graph padding.
-        active_requests = prefix_lengths > 0
+            raw_ids = inputs.input_ids.to(device=device, dtype=torch.int32).view(
+                batch_size, width
+            )
+            query_ids = torch.full_like(raw_ids, self._dspark_noise_token_id)
+            if batch_size > 0:
+                query_ids[:, 0].copy_(raw_ids[:, 0])
+            query_positions = prefix_lengths.to(torch.long).view(batch_size, 1)
+            query_positions = query_positions + torch.arange(
+                width, device=device, dtype=torch.long
+            ).view(1, width)
+
+            # Zero-prefix slots are CUDA-graph padding; live requests have
+            # at least the anchor's committed context.
+            active_requests = prefix_lengths > 0
 
         hidden = self.forward_query_block(
             query_ids,

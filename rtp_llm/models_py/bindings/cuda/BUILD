@@ -143,6 +143,8 @@ cc_library(
         "*.cc",
     ], exclude = [
         "Bf16GemmOp.cc",
+        "V41FrontGemmOp.cc",
+        "V41QBGemmOp.cc",
         "RegisterCudaOps.cc",
         "SplitKvCacheCopy.cc",
         "NoBlockCopy.cc",
@@ -153,6 +155,8 @@ cc_library(
         "*.h",
     ], exclude = [
         "Bf16GemmOp.h",
+        "V41FrontGemmOp.h",
+        "V41QBGemmOp.h",
         "SplitKvCacheCopy.h",
         "cuda_host_utils.h",
         "launch_utils.h",
@@ -205,6 +209,7 @@ cc_library(
     ],
     copts = copts(),
     deps = [
+        "//rtp_llm/models_py/bindings/cuda/kernels:dsv41_qb_kv",
         "//rtp_llm/models_py/bindings:register_ops_hdr",
         "//rtp_llm/models_py/bindings/cuda/kernels:mla_quant_kernel",
         "//rtp_llm/models_py/bindings/cuda/kernels:deepselect_bf16",
@@ -241,7 +246,12 @@ cc_library(
         ":bf16_gemm_op",
         ":cuda_bindings_base",
         ":cuda_attn_bindings_base",
-    ],
+    ] + select({
+        "@//:using_cuda13_x86": [
+            ":v41_front_gemm_op",
+        ],
+        "//conditions:default": [],
+    }),
     visibility = ["//visibility:public"],
     alwayslink = 1,
 )
@@ -262,4 +272,16 @@ cc_library(
         "//conditions:default": ["@nvcomp_cuda13_x86//:crc32"],
     }),
     visibility = ["//visibility:public"],
+)
+
+cc_library(
+    name = "v41_front_gemm_op",
+    srcs = ["V41FrontGemmOp.cc", "V41QBGemmOp.cc"],
+    hdrs = ["V41FrontGemmOp.h", "V41QBGemmOp.h"],
+    copts = copts(),
+    defines = ["RTP_V41_FRONT_GEMM"],
+    deps = torch_deps() + [
+        "//rtp_llm/models_py/bindings/cuda/kernels:v41_front_gemm",
+        "//rtp_llm/models_py/bindings/cuda/kernels:v41_qb_gemm",
+    ],
 )

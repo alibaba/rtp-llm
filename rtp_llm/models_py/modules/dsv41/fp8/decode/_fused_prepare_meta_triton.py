@@ -25,7 +25,7 @@ import triton
 import triton.language as tl
 
 
-@triton.jit
+@triton.jit(do_not_specialize=["valid_request_count"])
 def _fused_prepare_meta_kernel(
     # inputs
     start_pos_in_ptr,  # [bs] i32
@@ -44,6 +44,8 @@ def _fused_prepare_meta_kernel(
     swa_plus_hca_dense_indices_ptr,  # [B_max, q_len, WINDOW + HCA_DENSE_WIDTH] i32
     # runtime sizes
     bs,
+    valid_requests_ptr,
+    valid_request_count,
     # constants
     Q_LEN: tl.constexpr,
     WINDOW: tl.constexpr,
@@ -59,6 +61,11 @@ def _fused_prepare_meta_kernel(
 ):
     r = tl.program_id(0)
     q = tl.program_id(1)
+    if valid_requests_ptr is not None:
+        if q == 0:
+            # Clear the entire capture-capacity tail, including rows that were
+            # live on an earlier replay and are dummy rows on this one.
+            tl.store(valid_requests_ptr + r, (r < bs) & (r < valid_request_count))
     if r >= bs:
         return
 
@@ -166,6 +173,7 @@ def fused_update_decode_meta_pure(
     meta: Any,
     start_pos: torch.Tensor,
     max_seq_len: int,
+    *, valid_request_count: int | None = None,
 ) -> None:
     """Fuse the pure-start_pos metadata preparation into a single Triton kernel.
 
@@ -180,6 +188,17 @@ def fused_update_decode_meta_pure(
     hca_cmp_global_slots, and topk_buffer_compressed reset separately.
     """
     bs = int(start_pos.shape[0])
+    valid_requests = getattr(meta, "valid_requests", None)
+    live_requests = bs if valid_request_count is None else valid_request_count
+    if not 0 <= live_requests <= bs:
+        raise ValueError("Invalid decode live request count")
+    if valid_requests is not None and not (
+        valid_requests.ndim == 1 and valid_requests.numel() >= bs
+        and valid_requests.dtype == torch.bool
+        and valid_requests.device == start_pos.device
+        and valid_requests.is_contiguous()
+    ):
+        raise ValueError("Decode validity must be contiguous bool storage covering the prepared batch")
     q_len = meta.q_len_per_req
     window_size = meta.window_size
     index_topk = meta.topk_buffer_compressed.shape[-1]
@@ -213,7 +232,7 @@ def fused_update_decode_meta_pure(
     # is never actually consumed by ``tl.arange`` on the width=0 path.
     BLOCK_HCA = _next_pow2(hca_dense_width)
 
-    grid = (bs, q_len)
+    grid = (bs if valid_requests is None else valid_requests.numel(), q_len)
     _fused_prepare_meta_kernel[grid](
         start_pos,
         meta.start_pos,
@@ -229,6 +248,8 @@ def fused_update_decode_meta_pure(
         topk_total_4,
         topk_total_128,
         bs,
+        valid_requests,
+        live_requests,
         Q_LEN=q_len,
         WINDOW=window_size,
         INDEX_TOPK=max(index_topk, 1),

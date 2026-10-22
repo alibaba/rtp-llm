@@ -125,6 +125,10 @@ class DSv4DecodeAttnMetadataFP8:
 
     # ---- Cuda graph: reserved for Phase 3 (forbid_realloc, fixed addr) ----
     is_cuda_graph: bool = False
+    # Request-major validity, shared by all S queries of a request. CUDA Graph
+    # preparation rewrites every entry before every replay at a stable address.
+    # This is selection-only metadata, never a replacement for KV/MTP lengths.
+    valid_requests: Optional[torch.Tensor] = None  # bool [capture_B]
 
     # ------------------------------------------------------------------
     # Paged-decode metadata (paged BlockPool read/write).
@@ -1034,6 +1038,7 @@ def allocate_decode_metadata_fp8(
         topk_total_by_ratio=topk_total_by_ratio,
         compressed_offset=window_size,
         is_cuda_graph=True,
+        valid_requests=torch.zeros(B, dtype=torch.bool, device=device),
         pool_block_tables=pool_block_tables,
         paged_pool_tokens_per_block=paged_tokens_from_specs,
         pool_write_slot_mappings=pool_write_slot_mappings,
@@ -1062,6 +1067,7 @@ def update_decode_metadata_in_place_fp8(
     paged_pool_tokens_per_block: Optional[Dict[int, int]] = None,
     capture_full_width_lengths: bool = False,
     require_device_metadata: bool = False,
+    valid_request_count: Optional[int] = None,
 ) -> None:
     """Recompute every metadata buffer IN PLACE for new attention inputs.
 
@@ -1097,6 +1103,9 @@ def update_decode_metadata_in_place_fp8(
         require_device_metadata=require_device_metadata,
     )
     bs = int(start_pos.shape[0])
+    live_requests = bs if valid_request_count is None else int(valid_request_count)
+    if not 0 <= live_requests <= bs <= meta.start_pos.numel():
+        raise ValueError("Decode valid request count must fit the prepared/captured batch")
     position_ids_2d = _build_position_ids_2d(start_pos, q_len, device)
     position_ids_flat = position_ids_2d.reshape(-1).contiguous()
     meta.position_ids[: bs * q_len].copy_(position_ids_flat)
@@ -1110,7 +1119,9 @@ def update_decode_metadata_in_place_fp8(
         fused_update_decode_meta_pure,
     )
 
-    fused_update_decode_meta_pure(meta, start_pos, meta.max_seq_len)
+    fused_update_decode_meta_pure(
+        meta, start_pos, meta.max_seq_len, valid_request_count=live_requests,
+    )
 
     # opt_flash_mla: derive FlashMLA topk_length / extra_topk_length from the
     # just-filled compressed_lens + start_pos, in place (graph-stable buffers).
@@ -1556,6 +1567,7 @@ def build_decode_metadata_fp8(
         topk_total_by_ratio=topk_total_by_ratio,
         compressed_offset=window_size,
         is_cuda_graph=False,
+        valid_requests=torch.ones(B, dtype=torch.bool, device=device),
         pool_block_tables=pool_block_tables,
         paged_pool_tokens_per_block=paged_pool_tokens_per_block_resolved,
         pool_write_slot_mappings=pool_write_slot_mappings,
