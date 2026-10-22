@@ -1,4 +1,4 @@
-"""Small-token V4.1 mHC projection with split-K and FP32 RMS reduction.
+"""Decode-sized V4.1 mHC projection with split-K and FP32 RMS reduction.
 
 Like vLLM's delayed mHC, use DeepGEMM's combined projection/square-sum
 primitive to distribute the long K dimension across SMs. Preserve RTP's
@@ -6,6 +6,7 @@ existing TF32 weight rounding and leave delayed mixing to the caller.
 """
 
 import importlib
+import os
 from functools import lru_cache
 
 import torch
@@ -24,6 +25,14 @@ def _has_prenorm_gemm() -> bool:
     return callable(getattr(module, "tf32_hc_prenorm_gemm", None))
 
 
+def max_supported_tokens() -> int:
+    # The <=64 specialization has always selected DeepGEMM directly. Keep
+    # explicit diagnostic overrides for larger batches and share this bound
+    # with startup compilation, whose reduction specializes on every M.
+    backend = os.environ.get("DSV4_MHC_PRE_GEMM_BACKEND", "auto").strip().lower()
+    return 512 if backend in ("", "auto", "deepgemm", "dg") else 64
+
+
 def is_supported(residual: torch.Tensor, fn: torch.Tensor) -> bool:
     """Static inference gate; large prefills retain the existing implementation."""
     if (
@@ -36,7 +45,7 @@ def is_supported(residual: torch.Tensor, fn: torch.Tensor) -> bool:
         or fn.dtype != torch.float32
         or fn.shape != (24, 20480)
         or not fn.is_contiguous()
-        or residual.numel() // 20480 > 64
+        or residual.numel() // 20480 > max_supported_tokens()
         or (torch.is_grad_enabled() and (residual.requires_grad or fn.requires_grad))
     ):
         return False

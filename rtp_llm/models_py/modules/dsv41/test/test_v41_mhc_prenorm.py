@@ -152,8 +152,9 @@ class V41MHCPreNormCudaTest(unittest.TestCase):
         return actual
 
     @torch.no_grad()
+    @patch.dict(os.environ, {"DSV4_MHC_PRE_GEMM_BACKEND": "deepgemm"})
     def test_token_boundaries_and_3d_4d_layouts(self):
-        for tokens in (1, 6, 24, 31, 64):
+        for tokens in (1, 6, 24, 31, 64, 65, 128, 384, 512):
             residual, fn, base, scale = self._inputs(tokens)
             batch = 4 if tokens in (24, 64) else 1
             for layout in (residual, residual.reshape(batch, -1, 4, 5120)):
@@ -161,6 +162,25 @@ class V41MHCPreNormCudaTest(unittest.TestCase):
                     self.assertTrue(is_supported(layout, fn))
                     actual = self._check_mixes_and_coefficients(layout, fn, base, scale)
                     self.assertEqual(actual.shape, (*layout.shape[:-2], 24))
+
+    @torch.no_grad()
+    def test_explicit_tilelang_backends_keep_large_token_fallback(self):
+        for backend in ("tilelang_single", "tilelang", "single"):
+            with self.subTest(backend=backend), patch.dict(
+                os.environ, {"DSV4_MHC_PRE_GEMM_BACKEND": backend}
+            ):
+                residual, fn, _, _ = self._inputs(64)
+                self.assertTrue(is_supported(residual, fn))
+                self.assertIsNotNone(prenorm(residual, fn, _EPS))
+                with patch(
+                    "rtp_llm.models_py.kernels.cuda.deepgemm_wrapper.tf32_hc_prenorm_gemm"
+                ) as gemm:
+                    for tokens in (65, 512):
+                        with self.subTest(tokens=tokens):
+                            residual, fn, _, _ = self._inputs(tokens)
+                            self.assertFalse(is_supported(residual, fn))
+                            self.assertIsNone(prenorm(residual, fn, _EPS))
+                    gemm.assert_not_called()
 
     @torch.no_grad()
     def test_zero_epsilon_and_large_amplitude(self):
@@ -274,7 +294,7 @@ class V41MHCPreNormCudaTest(unittest.TestCase):
             (residual, fn[:23]),
             (residual[:, :3], fn),
             (residual.unsqueeze(0).unsqueeze(0), fn),
-            (torch.empty(65, 4, 5120, device="cuda", dtype=torch.bfloat16), fn),
+            (torch.empty(513, 4, 5120, device="cuda", dtype=torch.bfloat16), fn),
         ]
         for source, weight in cases:
             with self.subTest(

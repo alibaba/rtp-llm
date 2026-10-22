@@ -103,10 +103,10 @@ class DelayedHCUnit(HCUnitBase):
                 and torch.cuda.get_device_capability(x.device)[0] == 10
                 and (residual.shape[1] > 64 or is_supported(residual, self.fn))
             ):
-                small_deepgemm = residual.shape[1] <= 64
+                use_deepgemm = is_supported(residual, self.fn)
                 pre, post, comb, y = ops.mhc_pre_big_fuse(
                     residual,
-                    prepare_tf32_weight(self.fn) if small_deepgemm else self.fn,
+                    prepare_tf32_weight(self.fn) if use_deepgemm else self.fn,
                     self.scale,
                     self.base,
                     rms_eps=self.norm_eps,
@@ -115,7 +115,7 @@ class DelayedHCUnit(HCUnitBase):
                     mhc_post_mult_value=2.0,
                     sinkhorn_repeat=self.hc_sinkhorn_iters,
                     previous_pre_mix=previous.pre_mix_out,
-                    gemm_backend="deepgemm" if small_deepgemm else None,
+                    gemm_backend="deepgemm" if use_deepgemm else None,
                 )
                 self.pre_mix_out = pre.reshape(*shape[:-1])
                 return (
