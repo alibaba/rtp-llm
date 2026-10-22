@@ -102,10 +102,14 @@ void reportPoolCacheMetrics(const kmonitor::MetricsReporterPtr& metrics_reporter
         if (should_log) {
             RTP_LLM_LOG_INFO("kvc tier[%s]: total=%zu free=%zu available=%zu capacity_bytes=%zu "
                              "occupied_bytes=%zu indexer_bytes=%zu working_set_bytes=%zu",
-                             pool_snapshot.storage.c_str(), pool_snapshot.total_blocks,
-                             pool_snapshot.free_blocks, pool_snapshot.available_blocks,
-                             pool_snapshot.capacity_bytes, pool_snapshot.occupied_bytes,
-                             pool_snapshot.indexer_bytes, pool_snapshot.working_set_bytes);
+                             pool_snapshot.storage.c_str(),
+                             pool_snapshot.total_blocks,
+                             pool_snapshot.free_blocks,
+                             pool_snapshot.available_blocks,
+                             pool_snapshot.capacity_bytes,
+                             pool_snapshot.occupied_bytes,
+                             pool_snapshot.indexer_bytes,
+                             pool_snapshot.working_set_bytes);
         }
     }
     metrics_reporter->report<RtpLLMCachePoolMetrics, RtpLLMCachePoolMetricsCollector>(&pool_tags, &pool_collector);
@@ -132,18 +136,16 @@ KVCacheManager::KVCacheManager(const CacheConfig&                 config,
     pd_sep_config_(pd_sep_config),
     cache_store_config_(cache_store_config),
     use_cuda_malloc_block_pool_(use_cuda_malloc_block_pool) {
-    // REBASE CONFLICT CONTEXT(2413e8e03): keep new base DSV4 fixed-pool backing
-    // configuration; source branch only adds cudaMalloc backing when RDMA cache
-    // store requests it.
+
     if (config_.state_block_size_bytes > 0 || config_.swa_block_size_bytes > 0) {
         config_.fixed_pool_uses_pinned_cpu = kv_cache_config_.dsv4_fixed_pool_use_memory;
     }
     RTP_LLM_CHECK_WITH_INFO(!config_.dsa_prefill_staging_tokens || pd_sep_config_.role_type == RoleType::PREFILL,
                             "layered MLA cache supports PREFILL services only");
     if (warmup) {
-        config_.block_num = 1;
-        config_.dsa_mla_resident_tokens = 0;
-        config_.dsa_mla_hbm_blocks = 0;
+        config_.block_num                  = 1;
+        config_.dsa_mla_resident_tokens    = 0;
+        config_.dsa_mla_hbm_blocks         = 0;
         config_.dsa_prefill_staging_tokens = 0;
     } else {
         allocateAndSync();
@@ -219,9 +221,7 @@ bool KVCacheManager::init(bool defer_connector_start) {
 
     const bool is_hybrid = config_.groupNums() > 1;
     if (config_.use_independent_block_pools) {
-        // REBASE CONFLICT CONTEXT(2413e8e03): preserve the new base role-aware
-        // HybridPool allocator constructor while later setting the source branch's
-        // cudaMalloc block-pool flag through KVCacheAllocator.
+
         allocator_ = std::make_shared<rtp_llm::HybridPoolKVCacheAllocator>(config_,
                                                                            AllocationType::DEVICE,
                                                                            metrics_reporter_,
@@ -240,8 +240,6 @@ bool KVCacheManager::init(bool defer_connector_start) {
         allocator_->setUseCudaMallocBlockPool(true);
     }
 
-    // REBASE CONFLICT CONTEXT(2413e8e03): keep new base SharedBlockCache and CP
-    // slot mapper wiring, then initialize with source branch cudaMalloc setting if enabled.
     allocator_->setCPSlotMapper(cp_slot_mapper_);
     allocator_->setSharedBlockCache(shared_cache);
     RTP_LLM_CHECK_WITH_INFO(allocator_->init(), "KVCacheAllocator init failed");
@@ -252,8 +250,7 @@ bool KVCacheManager::init(bool defer_connector_start) {
     }
 
     if (defer_connector_start) {
-        RTP_LLM_LOG_INFO(
-            "deferring memory/remote/P2P cache connector initialization until SCR release");
+        RTP_LLM_LOG_INFO("deferring memory/remote/P2P cache connector initialization until SCR release");
     } else {
         initConnectorCoordinator();
     }
@@ -380,15 +377,15 @@ CacheLayerLayout KVCacheManager::allLayerCacheBase() const {
 CacheLayerLayout KVCacheManager::getMainModelCacheLayerLayout() const {
     CacheLayerLayout layout;
 
-    auto  all_layout        = allocator_->allLayerCacheBase();
-    layout.dsa_mla_resident_tokens = all_layout.dsa_mla_resident_tokens;
-    layout.dsa_mla_hbm_blocks = all_layout.dsa_mla_hbm_blocks;
+    auto all_layout                   = allocator_->allLayerCacheBase();
+    layout.dsa_mla_resident_tokens    = all_layout.dsa_mla_resident_tokens;
+    layout.dsa_mla_hbm_blocks         = all_layout.dsa_mla_hbm_blocks;
     layout.dsa_prefill_staging_tokens = all_layout.dsa_prefill_staging_tokens;
     layout.dsa_prefill_hbm_layers     = all_layout.dsa_prefill_hbm_layers;
     layout.dsa_prefill_staging_layers = all_layout.dsa_prefill_staging_layers;
-    layout.block_generations = all_layout.block_generations;
-    auto& all_layer_tensors = all_layout.layers_to_kv_buffer_ptrs;
-    auto& all_scale_tensors = all_layout.layers_to_scale_buffer_ptrs;
+    layout.block_generations          = all_layout.block_generations;
+    auto& all_layer_tensors           = all_layout.layers_to_kv_buffer_ptrs;
+    auto& all_scale_tensors           = all_layout.layers_to_scale_buffer_ptrs;
 
     layout.layer_to_groups.resize(config_.layer_num);
     layout.layer_to_group_ids.resize(config_.layer_num);
@@ -480,12 +477,12 @@ CacheLayerLayout KVCacheManager::getMTPModuleCacheLayerLayout(int mtp_module_id)
         !mtp_global_layer_ids.empty(), "mtp_sub_configs[%d] has no layers across any group", mtp_module_id);
     const uint32_t mtp_layer_num = mtp_sub_config->layer_num;
 
-    auto  all_layout        = allocator_->allLayerCacheBase();
+    auto all_layout                = allocator_->allLayerCacheBase();
     layout.dsa_mla_resident_tokens = all_layout.dsa_mla_resident_tokens;
-    layout.dsa_mla_hbm_blocks = all_layout.dsa_mla_hbm_blocks;
-    layout.block_generations = all_layout.block_generations;
-    auto& all_layer_tensors = all_layout.layers_to_kv_buffer_ptrs;
-    auto& all_scale_tensors = all_layout.layers_to_scale_buffer_ptrs;
+    layout.dsa_mla_hbm_blocks      = all_layout.dsa_mla_hbm_blocks;
+    layout.block_generations       = all_layout.block_generations;
+    auto& all_layer_tensors        = all_layout.layers_to_kv_buffer_ptrs;
+    auto& all_scale_tensors        = all_layout.layers_to_scale_buffer_ptrs;
 
     layout.layer_to_groups.resize(mtp_layer_num);
     layout.layers_to_kv_buffer_ptrs.resize(mtp_layer_num);
@@ -865,9 +862,9 @@ void KVCacheManager::allocateAndSync() {
         config_.dsa_mla_hbm_blocks = std::min(config_.dsa_mla_hbm_blocks, config_.block_num - 1);
         config_.finalizeBlockNums(config_.block_num, runtime_config_);
         for (auto& sub : config_.mtp_sub_configs) {
-            sub->block_num = config_.block_num;
+            sub->block_num               = config_.block_num;
             sub->dsa_mla_resident_tokens = config_.dsa_mla_resident_tokens;
-            sub->dsa_mla_hbm_blocks = config_.dsa_mla_hbm_blocks;
+            sub->dsa_mla_hbm_blocks      = config_.dsa_mla_hbm_blocks;
             sub->finalizeBlockNums(config_.block_num, runtime_config_);
         }
     }
@@ -877,8 +874,7 @@ void KVCacheManager::allocateAndSync() {
 void KVCacheManager::reportMetricsLoop() {
     RTP_LLM_PROFILE_FUNCTION();
     kmonitor::MetricsTags tags;
-    // REBASE CONFLICT CONTEXT(2413e8e03): source branch logged HybridPool metrics
-    // via a local dynamic_cast; new base centralizes that in poolMetricsSnapshots().
+
     constexpr auto kLogInterval  = std::chrono::minutes(1);
     auto           last_log_time = std::chrono::steady_clock::now() - kLogInterval;
     while (!stop_.load(std::memory_order_relaxed)) {

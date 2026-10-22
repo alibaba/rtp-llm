@@ -773,6 +773,24 @@ class KimiLinearModel(GptModelBase):
         self.norm = RMSResNorm(
             weights.get_global_weight(W.final_ln_gamma), eps=model_config.layernorm_eps
         )
+        self._init_capture_context(
+            self._capture_canonical_layer,
+            self._capture_canonical_final,
+        )
+
+    def _capture_canonical_layer(
+        self, hidden_states: torch.Tensor, residual: torch.Tensor | None
+    ) -> torch.Tensor:
+        if residual is None:
+            raise ValueError("residual capture requires a residual tensor")
+        return hidden_states + residual
+
+    def _capture_canonical_final(
+        self, hidden_states: torch.Tensor, residual: torch.Tensor | None
+    ) -> torch.Tensor:
+        if residual is None:
+            raise ValueError("residual finalization requires a residual tensor")
+        return self.norm(hidden_states, residual)[0]
 
     def forward(self, inputs: PyModelInputs, fmha_impl: Any = None) -> PyModelOutputs:
         input_ids: torch.Tensor = inputs.input_ids
@@ -794,6 +812,7 @@ class KimiLinearModel(GptModelBase):
         if fmha_impl is None:
             fmha_impl = self.prepare_fmha_impl(inputs)
 
+        capture = self.capture_context(inputs.capture_hidden_states)
         residual = torch.zeros_like(hidden_states)
 
         for i, decoder_layer in enumerate(self.layers):
@@ -808,7 +827,6 @@ class KimiLinearModel(GptModelBase):
             )
             hidden_states = output.hidden_states
             residual = output.residual
+            capture.capture_layer(i, hidden_states, residual)
 
-        hidden_states, _ = self.norm(hidden_states, residual)
-
-        return PyModelOutputs(hidden_states, fmha_impl.fmha_params)
+        return capture.finalize(hidden_states, residual, fmha_impl.fmha_params)

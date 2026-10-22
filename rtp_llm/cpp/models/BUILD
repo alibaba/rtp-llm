@@ -1,4 +1,5 @@
 load("//:def.bzl", "copts")
+load("//bazel:arch_select.bzl", "torch_deps")
 
 # Sample infos - model sampling data structures
 cc_library(
@@ -154,11 +155,16 @@ cc_library(
         "//rtp_llm/models_py/bindings/core:cache_store_async_writer",
         "//rtp_llm/cpp/utils:debug_utils",
         "//rtp_llm/cpp/utils:profiling_scope",
+        "//rtp_llm/cpp/utils:core_utils",
+        "//rtp_llm/cpp/config:config_modules",
+        "//rtp_llm/cpp/metrics:metrics",
+        "//rtp_llm/models_py/bindings/core:type_convert",
+        "@havenask//aios/autil:time",
         "//rtp_llm/cpp/cuda_graph:cuda_graph_impl",
         "//rtp_llm/cpp/cuda_graph:cuda_graph_base",
         "//rtp_llm/cpp/cuda_graph:cuda_graph_hdrs_lib",
         "//rtp_llm/models_py/bindings/common:fuse_copy_op",
-    ] + select({
+    ] + torch_deps() + select({
         "//:using_cuda": [
             "//rtp_llm/models_py/bindings/cuda/kernels:attention_input_metadata",
             "//rtp_llm/models_py/bindings/cuda/kernels:mtp_token_gather",

@@ -183,14 +183,17 @@ TEST_F(NormalCacheStoreTest, testStore_emptyCache) {
     mutex.unlock();
 }
 
-TEST_F(NormalCacheStoreTest, testStore_invalidParams) {
+TEST_F(NormalCacheStoreTest, testStore_invalidInternalBuffer) {
     ASSERT_TRUE(initCacheStores());
 
     std::mutex mutex;  // for sync test
     auto       store_callback = [&mutex](bool ok, CacheStoreErrorCode ec) {
         mutex.unlock();
         ASSERT_FALSE(ok);
-        ASSERT_EQ(CacheStoreErrorCode::InvalidParams, ec);
+        ASSERT_EQ(CacheStoreErrorCode::StoreFailed, ec);
+        auto context = std::make_shared<StoreContext>(nullptr);
+        context->updateResult(false, ec, std::make_shared<RequestBlockBuffer>("invalid-store"));
+        EXPECT_EQ(context->getErrorInfo().code(), ErrorCode::CACHE_STORE_STORE_FAILED);
     };
 
     mutex.lock();
@@ -500,14 +503,17 @@ TEST_F(NormalCacheStoreTest, testLoad_emptyCache) {
     mutex.unlock();
 }
 
-TEST_F(NormalCacheStoreTest, testLoad_invalidParams) {
+TEST_F(NormalCacheStoreTest, testLoad_invalidInternalParams) {
     ASSERT_TRUE(initCacheStores());
 
     std::mutex mutex;  // for sync test
     auto       load_callback = [&mutex](bool ok, CacheStoreErrorCode ec) {
         mutex.unlock();
         ASSERT_FALSE(ok);
-        ASSERT_EQ(CacheStoreErrorCode::InvalidParams, ec);
+        ASSERT_EQ(CacheStoreErrorCode::LoadErrorUnknown, ec);
+        auto context = std::make_shared<LoadContext>(nullptr, false);
+        context->updateResult(false, ec, std::make_shared<RequestBlockBuffer>("invalid-load"));
+        EXPECT_EQ(context->getErrorInfo().code(), ErrorCode::CACHE_STORE_LOAD_UNKNOWN_ERROR);
     };
 
     mutex.lock();
@@ -524,6 +530,29 @@ TEST_F(NormalCacheStoreTest, testLoad_invalidParams) {
     cache_store1_->load(load_cache, load_callback, autil::NetUtil::getBindIp(), port2_, 0, 1000);
     mutex.lock();  // wait till callback
     mutex.unlock();
+}
+
+TEST_F(NormalCacheStoreTest, testLoad_invalidInternalPeerMetadata) {
+    ASSERT_TRUE(initCacheStores());
+    auto request   = std::make_shared<RequestBlockBuffer>("invalid-peer");
+    int  callbacks = 0;
+    auto callback  = [&callbacks, &request](bool ok, CacheStoreErrorCode ec) {
+        ++callbacks;
+        EXPECT_FALSE(ok);
+        EXPECT_EQ(ec, CacheStoreErrorCode::LoadErrorUnknown);
+        auto context = std::make_shared<LoadContext>(nullptr, false);
+        context->updateResult(false, ec, request);
+        EXPECT_EQ(context->getErrorInfo().code(), ErrorCode::CACHE_STORE_LOAD_UNKNOWN_ERROR);
+    };
+
+    cache_store1_->load(request, callback, "", port2_, 1, 1000);
+    EXPECT_EQ(callbacks, 1);
+    cache_store1_->load(request, callback, autil::NetUtil::getBindIp(), 0, 1, 1000);
+    EXPECT_EQ(callbacks, 2);
+    if (memory_util_->isRdmaMode()) {
+        cache_store1_->load(request, callback, autil::NetUtil::getBindIp(), port2_, 0, 1000);
+        EXPECT_EQ(callbacks, 3);
+    }
 }
 
 TEST_F(NormalCacheStoreTest, testLoad_remoteCallPrefillTimeout) {

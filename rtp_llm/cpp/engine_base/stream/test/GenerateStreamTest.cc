@@ -16,6 +16,21 @@ using namespace std;
 
 namespace rtp_llm {
 
+TEST(GenerateConfigCaptureTest, JsonRoundTripPreservesIndependentCaptureIntent) {
+    GenerateConfig config;
+    EXPECT_FALSE(config.capture_hidden_states);
+    autil::legacy::FromJsonString(config, "{\"max_new_tokens\":4,\"capture_hidden_states\":true,\"reuse_cache\":true}");
+    EXPECT_NO_THROW(config.validatePrefillOnly());
+    EXPECT_TRUE(config.capture_hidden_states);
+    EXPECT_TRUE(config.reuse_cache);
+    GenerateConfig copy;
+    autil::legacy::FromJsonString(copy, autil::legacy::ToJsonString(config));
+    EXPECT_TRUE(copy.capture_hidden_states);
+    EXPECT_TRUE(copy.reuse_cache);
+    EXPECT_EQ(copy.max_new_tokens, 4);
+    EXPECT_NE(copy.debugString().find("capture_hidden_states: 1"), std::string::npos);
+}
+
 class GenerateStreamBuilder {
 public:
     GenerateStreamBuilder() {
@@ -94,20 +109,29 @@ class GenerateStreamTest: public DeviceTestBase {
 protected:
 };
 
-static GenerateStreamPtr makeChunkStream(int input_length, RoleType role = RoleType::PREFILL, int max_new_tokens = 8) {
-    auto input                             = std::make_shared<GenerateInput>();
-    input->input_ids                       = torch::arange(input_length, torch::kInt32);
-    input->generate_config                 = std::make_shared<GenerateConfig>();
-    input->generate_config->max_new_tokens = max_new_tokens;
-    input->generate_config->ignore_eos     = true;
+static GenerateStreamPtr makeChunkStream(int      input_length,
+                                         RoleType role                  = RoleType::PREFILL,
+                                         int      max_new_tokens        = 8,
+                                         bool     capture_hidden_states = false,
+                                         bool     reuse_cache           = false,
+                                         int      chunk_size            = 16,
+                                         bool     global_reuse          = true) {
+    auto input                                    = std::make_shared<GenerateInput>();
+    input->input_ids                              = torch::arange(input_length, torch::kInt32);
+    input->generate_config                        = std::make_shared<GenerateConfig>();
+    input->generate_config->max_new_tokens        = max_new_tokens;
+    input->generate_config->capture_hidden_states = capture_hidden_states;
+    input->generate_config->reuse_cache           = reuse_cache;
+    input->generate_config->ignore_eos            = true;
     ModelConfig model;
     model.max_seq_len = 128;
     model.vocab_size  = 128;
     RuntimeConfig runtime;
-    runtime.fifo_scheduler_config.prefill_chunk_size    = 16;
+    runtime.fifo_scheduler_config.prefill_chunk_size    = chunk_size;
     runtime.fifo_scheduler_config.max_batch_tokens_size = 8;
     ResourceContext resource;
-    resource.role_type = role;
+    resource.role_type   = role;
+    resource.reuse_cache = global_reuse;
     return std::make_shared<NormalGenerateStream>(input, model, runtime, resource, nullptr);
 }
 
@@ -146,8 +170,9 @@ TEST_F(GenerateStreamTest, ChunkPrefillActivationAndCancellation) {
     for (auto role : {RoleType::PREFILL, RoleType::PDFUSION, RoleType::DECODE}) {
         for (int max_new_tokens : {0, 8}) {
             auto stream = makeChunkStream(18, role, max_new_tokens);
-            ASSERT_FALSE(stream->hasError());
-            EXPECT_EQ(stream->chunkedPrefillEnabled(), role != RoleType::DECODE);
+            const bool rejected = role != RoleType::DECODE && max_new_tokens == 0;
+            EXPECT_EQ(stream->hasError(), rejected);
+            EXPECT_EQ(stream->chunkedPrefillEnabled(), role != RoleType::DECODE && !rejected);
         }
     }
     auto stream                      = makeChunkStream(18);
@@ -158,6 +183,163 @@ TEST_F(GenerateStreamTest, ChunkPrefillActivationAndCancellation) {
     EXPECT_EQ(stream->reuseLength(), 0);
     EXPECT_EQ(stream->seqLength(), 18);
     EXPECT_TRUE(stream->hasError());
+}
+
+TEST_F(GenerateStreamTest, FullContextCaptureRejectsChunkModeBeforeReservation) {
+    for (auto role : {RoleType::PREFILL, RoleType::PDFUSION, RoleType::DECODE}) {
+        for (int max_new_tokens : {0, 8}) {
+            for (bool capture : {false, true}) {
+                for (bool reuse : {false, true}) {
+                    for (bool global_reuse : {false, true}) {
+                        for (int chunk_size : {0, 16}) {
+                            SCOPED_TRACE(::testing::Message()
+                                         << "role=" << static_cast<int>(role) << " max_new_tokens=" << max_new_tokens
+                                         << " capture=" << capture << " reuse=" << reuse
+                                         << " global_reuse=" << global_reuse << " chunk_size=" << chunk_size);
+                            auto stream =
+                                makeChunkStream(18, role, max_new_tokens, capture, reuse, chunk_size, global_reuse);
+                            const bool effective_reuse = global_reuse && reuse && max_new_tokens != 0;
+                            const bool full_context =
+                                role != RoleType::DECODE && (max_new_tokens == 0 || (capture && !effective_reuse));
+                            EXPECT_EQ(stream->streamCacheResource().reuseCache(), effective_reuse);
+                            ASSERT_EQ(stream->requiresFullContextForHiddenStateCapture(), full_context);
+                            const bool rejected = chunk_size > 0 && full_context;
+                            ASSERT_EQ(stream->hasError(), rejected);
+                            EXPECT_EQ(stream->chunkedPrefillEnabled(),
+                                      chunk_size > 0 && role != RoleType::DECODE && !rejected);
+                            EXPECT_EQ(stream->isHiddenStateCaptureCandidate(), full_context && !rejected);
+                            EXPECT_EQ(stream->generateConfig()->reuse_cache, reuse);
+                            if (rejected) {
+                                EXPECT_EQ(stream->statusInfo().code(), ErrorCode::INVALID_PARAMS);
+                                EXPECT_EQ(stream->stopReason(),
+                                          "chunked prefill incompatible: full-context hidden-state capture");
+                                EXPECT_FALSE(stream->hasHiddenStateCaptureReservation());
+                                EXPECT_EQ(stream->contextLength(), 18);
+                                EXPECT_EQ(stream->moveToNext(), StreamState::FINISHED);
+                            } else if (full_context) {
+                                EXPECT_EQ(stream->contextLength(), stream->inputLength());
+                                stream->setReuseLength(1);
+                                EXPECT_FALSE(stream->isHiddenStateCaptureCandidate());
+                                stream->setReuseLength(0);
+                                EXPECT_TRUE(stream->isHiddenStateCaptureCandidate());
+                                stream->setSeqLength(stream->inputLength() + 1);
+                                EXPECT_FALSE(stream->isHiddenStateCaptureCandidate());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+TEST_F(GenerateStreamTest, UnexecutedCaptureReservationIsCancelledOnDestruction) {
+    auto cancelled = std::make_shared<std::atomic<int>>(0);
+    {
+        auto stream = GenerateStreamBuilder().createContextStream({1, 2});
+        stream->setHiddenStateCaptureReservation(
+            std::make_shared<HiddenStateCaptureReservation>([cancelled] { ++*cancelled; }));
+        EXPECT_TRUE(stream->hasHiddenStateCaptureReservation());
+    }
+    EXPECT_EQ(cancelled->load(), 1);
+}
+
+TEST_F(GenerateStreamTest, CaptureCancellationIsIdempotentAcrossConcurrentCallers) {
+    auto cancelled = std::make_shared<std::atomic<int>>(0);
+    auto stream    = GenerateStreamBuilder().createContextStream({1, 2});
+    stream->setHiddenStateCaptureReservation(
+        std::make_shared<HiddenStateCaptureReservation>([cancelled] { ++*cancelled; }));
+    std::thread first([&] { stream->cancelHiddenStateCapture(); });
+    std::thread second([&] { stream->cancelHiddenStateCapture(); });
+    first.join();
+    second.join();
+    stream->releaseResource();
+    EXPECT_FALSE(stream->hasHiddenStateCaptureReservation());
+    EXPECT_EQ(cancelled->load(), 1);
+}
+
+TEST_F(GenerateStreamTest, CaptureCancellationFailureDoesNotBecomeAServingError) {
+    auto stream = GenerateStreamBuilder().createContextStream({1, 2});
+    stream->setHiddenStateCaptureReservation(
+        std::make_shared<HiddenStateCaptureReservation>([] { throw std::runtime_error("capture owner unavailable"); }));
+    EXPECT_NO_THROW(stream->cancelHiddenStateCapture());
+    EXPECT_FALSE(stream->hasHiddenStateCaptureReservation());
+    EXPECT_FALSE(stream->hasError());
+}
+
+TEST_F(GenerateStreamTest, CaptureReservationIsSharedWithoutWrappingItsCallback) {
+    auto cancelled   = std::make_shared<int>(0);
+    auto reservation = std::make_shared<HiddenStateCaptureReservation>([cancelled] { ++*cancelled; });
+    auto stream      = GenerateStreamBuilder().createContextStream({1, 2});
+    stream->setHiddenStateCaptureReservation(reservation);
+    EXPECT_EQ(reservation.use_count(), 2);
+    EXPECT_TRUE(stream->hasHiddenStateCaptureReservation());
+    reservation->cancel();
+    EXPECT_FALSE(stream->hasHiddenStateCaptureReservation());
+    stream->cancelHiddenStateCapture();
+    stream.reset();
+    EXPECT_EQ(*cancelled, 1);
+}
+
+TEST_F(GenerateStreamTest, ReplacingCaptureReservationRollsBackOnlyThePreviousToken) {
+    auto old_cancelled = std::make_shared<int>(0);
+    auto new_cancelled = std::make_shared<int>(0);
+    auto stream        = GenerateStreamBuilder().createContextStream({1, 2});
+    stream->setHiddenStateCaptureReservation(
+        std::make_shared<HiddenStateCaptureReservation>([old_cancelled] { ++*old_cancelled; }));
+    stream->setHiddenStateCaptureReservation(
+        std::make_shared<HiddenStateCaptureReservation>([new_cancelled] { ++*new_cancelled; }));
+    EXPECT_EQ(*old_cancelled, 1);
+    EXPECT_EQ(*new_cancelled, 0);
+    EXPECT_TRUE(stream->hasHiddenStateCaptureReservation());
+    stream->setHiddenStateCaptureReservation(nullptr);
+    EXPECT_EQ(*new_cancelled, 1);
+    EXPECT_FALSE(stream->hasHiddenStateCaptureReservation());
+}
+
+TEST_F(GenerateStreamTest, DraftCopyDoesNotOwnTargetCaptureReservation) {
+    auto target_cancelled = std::make_shared<int>(0);
+    auto draft_cancelled  = std::make_shared<int>(0);
+    auto target           = GenerateStreamBuilder().createContextStream({1, 2});
+    auto draft            = GenerateStreamBuilder().createContextStream({1, 2});
+    target->setHiddenStateCaptureReservation(
+        std::make_shared<HiddenStateCaptureReservation>([target_cancelled] { ++*target_cancelled; }));
+    draft->setHiddenStateCaptureReservation(
+        std::make_shared<HiddenStateCaptureReservation>([draft_cancelled] { ++*draft_cancelled; }));
+    draft->CopyOnWrite(*target, false, true);
+    EXPECT_EQ(*draft_cancelled, 1);
+    EXPECT_FALSE(draft->hasHiddenStateCaptureReservation());
+    draft.reset();
+    EXPECT_TRUE(target->hasHiddenStateCaptureReservation());
+    EXPECT_EQ(*target_cancelled, 0);
+    target->cancelHiddenStateCapture();
+    EXPECT_EQ(*target_cancelled, 1);
+}
+
+TEST(HiddenStateCaptureReservationTest, CancellationAndDestructionIsolateAllCallbackExceptions) {
+    for (bool explicit_cancel : {false, true}) {
+        for (bool standard_exception : {false, true}) {
+            SCOPED_TRACE(explicit_cancel);
+            SCOPED_TRACE(standard_exception);
+            int calls = 0;
+            {
+                HiddenStateCaptureReservation reservation([&] {
+                    ++calls;
+                    if (standard_exception) {
+                        throw std::runtime_error("capture cancellation failed");
+                    }
+                    throw 42;
+                });
+                EXPECT_TRUE(reservation.active());
+                if (explicit_cancel) {
+                    EXPECT_NO_THROW(reservation.cancel());
+                    EXPECT_FALSE(reservation.active());
+                    EXPECT_NO_THROW(reservation.cancel());
+                }
+            }
+            EXPECT_EQ(calls, 1);
+        }
+    }
 }
 
 TEST_F(GenerateStreamTest, testAsyncReleaseHandoffAfterWorkerDrains) {
@@ -196,7 +378,7 @@ TEST_F(GenerateStreamTest, testAsyncReleaseConcurrentHandoff) {
         ASSERT_GT(stream->stream_cache_resource_->curBlocksNum(), 0);
         stream->incPendingAsyncBookkeeping();
         std::atomic<bool> start{false};
-        std::thread worker([&] {
+        std::thread       worker([&] {
             while (!start.load(std::memory_order_acquire)) {
                 std::this_thread::yield();
             }
@@ -358,16 +540,16 @@ TEST_F(GenerateStreamTest, testMtpForwardClaimConcurrentRelease) {
 TEST_F(GenerateStreamTest, testMtpMinNewTokensIgnoresEarlyStopWithinAcceptedBatch) {
     for (bool use_eos : {false, true}) {
         for (bool stop_at_minimum : {false, true}) {
-            auto config = std::make_shared<GenerateConfig>();
+            auto config            = std::make_shared<GenerateConfig>();
             config->min_new_tokens = 8;
             config->max_new_tokens = 8;
-            config->aux_info = true;
-            config->is_streaming = false;
-            config->ignore_eos = !use_eos;
+            config->aux_info       = true;
+            config->is_streaming   = false;
+            config->ignore_eos     = !use_eos;
             if (!use_eos) {
                 config->stop_words_list = {{7}};
             }
-            auto stream = GenerateStreamBuilder().createContextStream({1, 2}, config);
+            auto stream                          = GenerateStreamBuilder().createContextStream({1, 2}, config);
             stream->special_tokens_.eos_token_id = 7;
             stream->update({torch::tensor({{3, 4, 5, 6}}, torch::kInt32), 4});
             ASSERT_FALSE(stream->hasOutput());
@@ -869,6 +1051,60 @@ TEST_F(GenerateStreamTest, StopWordsIgnoreThinkAndHonorMinTokens) {
     EXPECT_TRUE(stream->hasEvent(StreamEvents::GenerateDone));
     EXPECT_TRUE(stream->isSubGenerateDoneWithoutLock(0));
     EXPECT_EQ(stream->completeTokenIdsVec(), (std::vector<int>{1, 7, 8, 9, 7}));
+}
+
+TEST_F(GenerateStreamTest, prefillOnlyValidationPreservesCacheSetting) {
+    GenerateConfig config;
+    config.max_new_tokens = 0;
+    config.reuse_cache    = true;
+
+    EXPECT_NO_THROW(config.validatePrefillOnly());
+    EXPECT_TRUE(config.reuse_cache);
+}
+
+TEST_F(GenerateStreamTest, prefillOnlyValidationRejectsUnsupportedConfigWithoutMutation) {
+    struct UnsupportedConfig {
+        const char* name;
+        void (*set)(GenerateConfig&);
+    };
+    constexpr UnsupportedConfig fields[] = {
+        {"min_new_tokens", +[](GenerateConfig& config) { config.min_new_tokens = 1; }},
+        {"num_beams", +[](GenerateConfig& config) { config.num_beams = 2; }},
+        {"variable_num_beams", +[](GenerateConfig& config) { config.variable_num_beams = {1}; }},
+        {"num_return_sequences", +[](GenerateConfig& config) { config.num_return_sequences = 2; }},
+        {"return_logits", +[](GenerateConfig& config) { config.return_logits = true; }},
+        {"calculate_loss", +[](GenerateConfig& config) { config.calculate_loss = 1; }},
+        {"return_softmax_probs", +[](GenerateConfig& config) { config.return_softmax_probs = true; }},
+        {"return_all_probs", +[](GenerateConfig& config) { config.return_all_probs = true; }},
+        {"return_cum_log_probs", +[](GenerateConfig& config) { config.return_cum_log_probs = true; }},
+        {"return_logprobs", +[](GenerateConfig& config) { config.return_logprobs = true; }},
+        {"return_hidden_states", +[](GenerateConfig& config) { config.return_hidden_states = true; }},
+        {"return_all_hidden_states", +[](GenerateConfig& config) { config.return_all_hidden_states = true; }},
+    };
+    for (const auto& field : fields) {
+        SCOPED_TRACE(field.name);
+        GenerateConfig config;
+        config.max_new_tokens = 0;
+        config.reuse_cache    = true;
+        field.set(config);
+
+        try {
+            config.validatePrefillOnly();
+            FAIL() << field.name << " should be rejected";
+        } catch (const std::invalid_argument& error) {
+            EXPECT_NE(std::string(error.what()).find(field.name), std::string::npos);
+        }
+        EXPECT_TRUE(config.reuse_cache);
+    }
+}
+
+TEST_F(GenerateStreamTest, prefillOnlyRejectsNegativeTokenBudget) {
+    GenerateConfig config;
+    config.max_new_tokens = -1;
+    EXPECT_THROW(config.validatePrefillOnly(), std::invalid_argument);
+    EXPECT_EQ(config.max_new_tokens, -1);
+    config.max_new_tokens = 1;
+    EXPECT_NO_THROW(config.validatePrefillOnly());
 }
 
 }  // namespace rtp_llm

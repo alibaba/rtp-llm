@@ -13,6 +13,7 @@
 #include <memory>
 #include <mutex>
 #include <string>
+#include <stdexcept>
 #include <thread>
 #include <unordered_map>
 #include <unordered_set>
@@ -970,6 +971,11 @@ std::vector<PrefillBatchRpcServer::PrepareResult> PrefillBatchRpcServer::prepare
                                     grpc::Status(grpc::StatusCode::INTERNAL, "prepareAllocateResource failed");
                             }
                         }
+                    } catch (const std::invalid_argument& e) {
+                        prefill_context.error_info = ErrorInfo(ErrorCode::INVALID_PARAMS, e.what());
+                        result->stage_status       = serializeErrorMsg(
+                            prefill_context.request_key, prefill_context.request_info, prefill_context.error_info);
+                        prefill_context.error_status = result->stage_status;
                     } catch (const std::exception& e) {
                         result->stage_status = grpc::Status(
                             grpc::StatusCode::INTERNAL, "prepareAllocateResource exception: " + std::string(e.what()));

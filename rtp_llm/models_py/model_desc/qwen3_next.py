@@ -1059,6 +1059,21 @@ class Qwen3NextModel(GptModelBase):
         self.norm = RMSResNorm(
             weights.get_global_weight(W.final_ln_gamma), eps=model_config.layernorm_eps
         )
+        self._init_capture_context(
+            self._capture_canonical_layer,
+            self._capture_canonical_final,
+        )
+
+    def _capture_canonical_layer(
+        self, hidden_states: torch.Tensor, residual: torch.Tensor | None
+    ) -> torch.Tensor:
+        return hidden_states if residual is None else hidden_states + residual
+
+    def _capture_canonical_final(
+        self, hidden_states: torch.Tensor, residual: torch.Tensor | None
+    ) -> torch.Tensor:
+        # Forward owns final normalization, independently of capture.
+        return hidden_states
 
     def _is_hybrid_cache(self) -> bool:
         if self.kv_cache is None:
@@ -1180,6 +1195,7 @@ class Qwen3NextModel(GptModelBase):
         input_ids: torch.Tensor = inputs.input_ids
         inputs_embeds = self.embed_tokens(input_ids)
         hidden_states = inputs_embeds
+        capture = self.capture_context(inputs.capture_hidden_states)
 
         if fmha_impl is None:
             fmha_impl = self.prepare_fmha_impl(inputs)
@@ -1187,7 +1203,11 @@ class Qwen3NextModel(GptModelBase):
         is_capturing = torch.cuda.is_current_stream_capturing()
         if is_capturing:
             self._cuda_graph_captured = True
-        if not getattr(self, "_cuda_graph_captured", False) and not is_capturing:
+        if (
+            not getattr(self, "_cuda_graph_captured", False)
+            and not is_capturing
+            and not capture.enabled
+        ):
             if not getattr(self, "_cublas_warmed", False):
                 self._cublas_warmed = True
                 self._warmup_cublas(hidden_states)
@@ -1262,6 +1282,7 @@ class Qwen3NextModel(GptModelBase):
                 attention_inputs=attention_inputs,
                 attn_meta=attn_meta,
             )
+            capture.capture_layer(i, hidden_states, residual)
 
         hidden_states, residual = self.norm(hidden_states, residual)
-        return PyModelOutputs(hidden_states, fmha_impl.fmha_params)
+        return capture.finalize(hidden_states, fmha_params=fmha_impl.fmha_params)
