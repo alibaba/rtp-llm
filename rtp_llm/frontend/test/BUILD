@@ -93,11 +93,3 @@ py_test(
         "//rtp_llm:testlib",
     ],
 )
-
-py_test(
-    name = "serving_metrics_test",
-    srcs = ["serving_metrics_test.py"],
-    deps = [
-        "//rtp_llm:frontend",
-    ],
-)

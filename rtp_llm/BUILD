@@ -468,7 +468,6 @@ py_library(
     deps = [
         ":openai_api",
         ":telemetry",
-        "//rtp_llm/aios/kmonitor:kmonitor_py",
     ]
 )
 

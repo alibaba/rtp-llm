@@ -19,7 +19,6 @@ from rtp_llm.config.model_config import (
 )
 from rtp_llm.frontend.frontend_worker import FrontendWorker, TokenizerEncodeResponse
 from rtp_llm.frontend.request_id_generator import generate_request_id
-from rtp_llm.frontend.serving_metrics import CURRENT_SERVING_METRICS
 from rtp_llm.metrics import AccMetrics, GaugeMetrics, kmonitor
 from rtp_llm.model_factory import ModelFactory
 from rtp_llm.openai.api_datatype import ChatCompletionRequest
@@ -295,7 +294,6 @@ class FrontendServer(object):
         # (success / cancel / error / finally) all funnel into the idempotent
         # finish() (manual instrumentation, no ASGI middleware).
         trace_state = CURRENT_TRACE_STATE.get()
-        metric_state = CURRENT_SERVING_METRICS.get()
         is_openai_response = request.get("stream", False)
         response_data_prefix = "data: " if is_openai_response else "data:"
         try:
@@ -312,8 +310,6 @@ class FrontendServer(object):
                 _record_http_status(trace_state, 200)
                 trace_state.finish()
         except (asyncio.CancelledError, GeneratorExit) as e:
-            if metric_state is not None:
-                metric_state.error = "cancelled"
             try:
                 await response.aclose()
             except Exception as close_error:
@@ -338,8 +334,6 @@ class FrontendServer(object):
             )
             raise
         except BaseException as e:
-            if metric_state is not None:
-                metric_state.error = "internal_error"
             # 捕获非Cancel以外所有的异常,所以使用BaseException
             if trace_state is not None:
                 # SSE headers already went out as 200; the error only reaches
@@ -430,9 +424,6 @@ class FrontendServer(object):
     async def chat_completion(
         self, request: ChatCompletionRequest, raw_request: Request
     ):
-        metric_state = CURRENT_SERVING_METRICS.get()
-        if metric_state is not None:
-            metric_state.token_timings_enabled = request.n in (None, 1)
         sequence = self._global_controller.increment() % 4096  # 12 bits
         request_id = generate_request_id(
             self.py_env_configs.server_config.ip,
@@ -611,7 +602,6 @@ class FrontendServer(object):
         # generator: StreamingResponse may iterate it from another task whose
         # contextvars snapshot no longer holds CURRENT_TRACE_STATE.
         trace_state = CURRENT_TRACE_STATE.get()
-        metric_state = CURRENT_SERVING_METRICS.get()
 
         async def __gen_response_with_report(start_time: float, response_generator):
             last_iterate_time = current_time_ms()
@@ -621,14 +611,6 @@ class FrontendServer(object):
             iter_count = 0
             async for response in response_generator:
                 end_time = current_time_ms()
-                if metric_state is not None and is_streaming:
-                    try:
-                        metric_state.observe_tokens(
-                            _visible_output_count(response) > 0,
-                            _output_token_total(response),
-                        )
-                    except Exception:
-                        logging.debug("serving token observation failed", exc_info=True)
                 if first_response:
                     first_response = False
                     if trace_state is not None and is_streaming:

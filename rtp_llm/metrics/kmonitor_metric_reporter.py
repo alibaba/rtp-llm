@@ -1,4 +1,5 @@
 import logging
+import os
 from enum import Enum
 from typing import Any, Dict, Union
 
@@ -172,10 +173,47 @@ class GaugeMetrics(Enum):
     VIT_EMBEDDING_CACHE_BYTES_METRIC = "py_rtp_vit_embedding_cache_bytes"
 
 
+# Explicit buckets in seconds, using the public OTel GenAI latency bucket
+# recommendations. Observations retain the existing Gauge timing boundaries;
+# in particular, iteration RT is not a per-request mean TPOT distribution.
+_LATENCY_HISTOGRAMS = {
+    GaugeMetrics.LANTENCY_METRIC: (
+        "py_rtp_framework_rt_seconds",
+        tuple(0.01 * 2**i for i in range(14)),
+    ),
+    GaugeMetrics.RESPONSE_FIRST_TOKEN_RT_METRIC: (
+        "py_rtp_response_first_token_rt_seconds",
+        (
+            0.001,
+            0.005,
+            0.01,
+            0.02,
+            0.04,
+            0.06,
+            0.08,
+            0.1,
+            0.25,
+            0.5,
+            0.75,
+            1,
+            2.5,
+            5,
+            7.5,
+            10,
+        ),
+    ),
+    GaugeMetrics.RESPONSE_ITER_RT_METRIC: (
+        "py_rtp_response_iterate_rt_seconds",
+        (0.01, 0.025, 0.05, 0.075, 0.1, 0.15, 0.2, 0.3, 0.4, 0.5, 0.75, 1, 2.5),
+    ),
+}
+
+
 class MetricReporter(object):
     def __init__(self, kmonitor: Any):
         self._kmon = kmonitor
         self._matic_map: Dict[str, Any] = {}
+        self._histogram_map: Dict[str, Any] = {}
         self._inited = False
 
     def report(
@@ -189,6 +227,17 @@ class MetricReporter(object):
             logging.warning(f"no metric named {metric.name}")
             return
         kmon_metric.report(value, tags)
+        histogram = self._histogram_map.get(metric.value)
+        if histogram is not None:
+            # Use the very same observation and tags; only convert ms to s.
+            # Keep existing Gauge behavior even if histogram reporting fails
+            # (for example a negative elapsed value after a wall-clock jump).
+            try:
+                histogram.report(value / 1000.0, tags)
+            except Exception:
+                logging.exception(
+                    "Failed to report latency histogram for %s", metric.value
+                )
 
     def flush(self) -> None:
         self._kmon.flush()
@@ -205,3 +254,9 @@ class MetricReporter(object):
                 self._matic_map[metric.value] = self._kmon.register_gauge_metric(
                     metric.value
                 )
+
+            if os.environ.get("RTP_LLM_METRICS_ENABLED", "0") == "1":
+                for metric, (name, buckets) in _LATENCY_HISTOGRAMS.items():
+                    self._histogram_map[metric.value] = (
+                        self._kmon.register_histogram_metric(name, buckets)
+                    )

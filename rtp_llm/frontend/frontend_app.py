@@ -36,10 +36,6 @@ from rtp_llm.distribute.distributed_server import (
 )
 from rtp_llm.embedding.embedding_type import TYPE_STR, EmbeddingType
 from rtp_llm.frontend.frontend_server import FrontendServer
-from rtp_llm.frontend.serving_metrics import (
-    ServingMetricsMiddleware,
-    create_serving_metrics,
-)
 from rtp_llm.frontend.shutdown_manager import FrontendShutdownManager
 from rtp_llm.openai.api_datatype import (
     BatchChatCompletionRequest,
@@ -553,10 +549,6 @@ class FrontendApp(object):
             )
         ]
         app = FastAPI(middleware=middleware)
-        serving_metrics = create_serving_metrics()
-        if serving_metrics is not None:
-            app.add_middleware(ServingMetricsMiddleware, metrics=serving_metrics)
-
         allocator_dump_enabled = bool(
             getattr(self.server_config, "enable_torch_allocator_dump", False)
         )
