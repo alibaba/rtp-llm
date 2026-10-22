@@ -37,6 +37,7 @@ import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.spy;
 import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.verifyNoMoreInteractions;
 import static org.mockito.Mockito.when;
@@ -134,13 +135,11 @@ class FlexlbGrpcExecutorMetricsTest {
     }
 
     @Test
-    void reportsActualSaturationAndShutdownRejectionsWithoutRunningRejectedTasks() throws Exception {
+    void reportsSaturationAndShutdownWhilePreservingCallbacks() throws Exception {
         try (Fixture fixture = new Fixture()) {
             fixture.blockFirstTaskAndQueueSecond();
-            Runnable rejectedTask = () -> {
-                throw new AssertionError("Rejected tasks must not execute on the caller");
-            };
-            assertThrows(RejectedExecutionException.class, () -> fixture.executor.execute(rejectedTask));
+            Runnable rejectedTask = mock(Runnable.class);
+            fixture.executor.execute(rejectedTask);
             fixture.assertValue(MetricConstant.GRPC_SERVER_EXECUTOR_REJECTED_TASKS, 1);
             fixture.report();
             fixture.assertValue(MetricConstant.GRPC_SERVER_EXECUTOR_REJECTED_TASKS, 1);
@@ -148,8 +147,9 @@ class FlexlbGrpcExecutorMetricsTest {
             fixture.assertValue(MetricConstant.GRPC_SERVER_EXECUTOR_REJECTED_TASKS, 1);
 
             fixture.executor.shutdown();
-            assertThrows(RejectedExecutionException.class, () -> fixture.executor.execute(rejectedTask));
+            fixture.executor.execute(rejectedTask);
             fixture.assertValue(MetricConstant.GRPC_SERVER_EXECUTOR_REJECTED_TASKS, 2);
+            verify(rejectedTask, times(2)).run();
             fixture.report();
             fixture.assertValue(MetricConstant.GRPC_SERVER_EXECUTOR_REJECTED_TASKS, 2);
             fixture.finishTasks();
@@ -159,7 +159,7 @@ class FlexlbGrpcExecutorMetricsTest {
     }
 
     @Test
-    void monitorFailureStillAbortsTheRejectedTask() {
+    void monitorFailureStillRunsTheCallback() {
         FlexMonitor monitor = mock(FlexMonitor.class);
         doThrow(new IllegalStateException("monitor unavailable")).when(monitor)
                 .report(MetricConstant.GRPC_SERVER_EXECUTOR_REJECTED_TASKS, 1.0);
@@ -171,10 +171,10 @@ class FlexlbGrpcExecutorMetricsTest {
         executor.shutdown();
         Runnable task = mock(Runnable.class);
 
-        assertThrows(RejectedExecutionException.class, () -> executor.execute(task));
+        executor.execute(task);
 
         verify(monitor).report(MetricConstant.GRPC_SERVER_EXECUTOR_REJECTED_TASKS, 1.0);
-        verifyNoInteractions(task);
+        verify(task).run();
     }
 
     private static FlexlbGrpcServer newServer(FlexMonitor monitor) {

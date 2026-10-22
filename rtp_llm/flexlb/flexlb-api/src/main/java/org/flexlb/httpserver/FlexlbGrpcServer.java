@@ -30,6 +30,7 @@ import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.RejectedExecutionHandler;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicLong;
 
 @Component
 public class FlexlbGrpcServer {
@@ -70,7 +71,7 @@ public class FlexlbGrpcServer {
                 configService.loadBalanceConfig().getGrpcServer().getShutdownQuietPeriodMs());
         this.grpcServerEventLoopGroup = grpcServerEventLoopGroup;
         this.monitor = Objects.requireNonNull(monitor, "monitor");
-        this.rejectionHandler = new ReportingAbortHandler(this.monitor);
+        this.rejectionHandler = new ReportingCallerRunsHandler(this.monitor);
         this.grpcServerTimingInterceptor = grpcServerTimingInterceptor;
         this.grpcQosHeaderInterceptor = grpcQosHeaderInterceptor;
     }
@@ -110,6 +111,7 @@ public class FlexlbGrpcServer {
                 .bossEventLoopGroup(bossGroup)
                 .workerEventLoopGroup(grpcServerEventLoopGroup)
                 .executor(grpcExecutor)
+                .intercept(new GrpcOverloadInterceptor(grpcExecutor))
                 .addStreamTracerFactory(grpcServerTimingInterceptor.requestSizeTracerFactory())
                 .addService(ServerInterceptors.intercept(flexlbServiceImpl,
                         new GrpcTraceInterceptor(), grpcServerTimingInterceptor, grpcQosHeaderInterceptor))
@@ -210,15 +212,13 @@ public class FlexlbGrpcServer {
     }
 
     /**
-     * Reports each task rejected because the pool is saturated or shutting down.
-     * AbortPolicy throws instead of running tasks on the calling Netty event loop.
+     * Reports executor saturation while preserving gRPC message and cleanup callbacks.
+     * The existing rejected-task metric counts pool rejections, not discarded RPCs.
      */
-    private static class ReportingAbortHandler implements RejectedExecutionHandler {
+    private static class ReportingCallerRunsHandler extends CountingCallerRunsHandler {
         private final FlexMonitor monitor;
-        private final ThreadPoolExecutor.AbortPolicy delegate =
-                new ThreadPoolExecutor.AbortPolicy();
 
-        ReportingAbortHandler(FlexMonitor monitor) {
+        ReportingCallerRunsHandler(FlexMonitor monitor) {
             this.monitor = monitor;
         }
 
@@ -226,9 +226,33 @@ public class FlexlbGrpcServer {
         public void rejectedExecution(Runnable r, ThreadPoolExecutor executor) {
             try {
                 monitor.report(MetricConstant.GRPC_SERVER_EXECUTOR_REJECTED_TASKS, 1.0);
-            } finally {
-                delegate.rejectedExecution(r, executor);
+            } catch (RuntimeException failure) {
+                Logger.warn("Could not report gRPC executor saturation", failure);
             }
+            super.rejectedExecution(r, executor);
+        }
+    }
+
+    /**
+     * gRPC executor tasks include message ownership transfers and terminal callbacks.
+     * Throwing here can lose a MessageProducer without closing its retained buffers
+     * (grpc-java 1.65.1 ServerImpl.messagesAvailable). Never discard these tasks.
+     * New RPCs are shed separately by GrpcOverloadInterceptor; already accepted
+     * callbacks apply synchronous backpressure when the bounded queue is full.
+     */
+    static class CountingCallerRunsHandler implements RejectedExecutionHandler {
+        private final AtomicLong callerRunsCount = new AtomicLong();
+
+        @Override
+        public void rejectedExecution(Runnable task, ThreadPoolExecutor executor) {
+            callerRunsCount.incrementAndGet();
+            // Unlike JDK CallerRunsPolicy, do not silently drop terminal callbacks
+            // racing executor shutdown. The server is drained before shutdown.
+            task.run();
+        }
+
+        public AtomicLong getCallerRunsCount() {
+            return callerRunsCount;
         }
     }
 }
