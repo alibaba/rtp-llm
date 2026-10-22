@@ -27,6 +27,7 @@ class CudaFp8FlashinferLinear(LinearBase):
     """CUDA FP8 block-scaled Linear using flashinfer's SM90 kernel."""
 
     FLASHINFER_M_THRESHOLD = 32
+    supports_deferred_bias = True
 
     @classmethod
     def can_handle(
@@ -120,6 +121,11 @@ class CudaFp8FlashinferLinear(LinearBase):
             self.weight_scales = self.weight_scales.contiguous()
 
     def forward(self, input: torch.Tensor) -> torch.Tensor:
+        return self._forward_impl(input, apply_bias=True)
+
+    def _forward_impl(
+        self, input: torch.Tensor, apply_bias: bool = True
+    ) -> torch.Tensor:
         M = input.shape[0]
         if input.dtype == torch.bfloat16:
             input_fp8, input_scales = sgl_per_token_group_quant_fp8(
@@ -142,6 +148,18 @@ class CudaFp8FlashinferLinear(LinearBase):
             self.weight_scales,
             out=output,
         )
-        if self.bias is not None:
+        if apply_bias and self.bias is not None:
             output = output + self.bias.to(output.dtype)
+        return output
+
+    def forward_without_bias(self, input: torch.Tensor) -> torch.Tensor:
+        return self._forward_impl(input, apply_bias=False)
+
+    def forward_with_bias_gelu(self, input: torch.Tensor) -> torch.Tensor:
+        output = self.forward_without_bias(input)
+        if self.bias is None:
+            return torch.nn.functional.gelu(output)
+        from rtp_llm.ops.compute_ops import rtp_llm_ops
+
+        rtp_llm_ops.fused_bias_gelu(output, self.bias.to(output.dtype))
         return output

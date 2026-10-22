@@ -155,6 +155,18 @@ class MultimodalEmbeddingTest(TestCase):
             torch.zeros(2, 2, dtype=torch.half),
         )
 
+    def test_noncontiguous_embeddings_use_sequential_copy(self):
+        embeddings = torch.zeros((4, 4), dtype=torch.half)[:, ::2]
+        self.assertFalse(embeddings.is_contiguous())
+        feature = torch.tensor([[1.0, 2.0], [3.0, 4.0]], dtype=torch.half)
+
+        output = MultimodalEmbeddingInjector()(
+            embeddings, [feature], torch.tensor([1], dtype=torch.int32)
+        )
+
+        self.assertIs(output, embeddings)
+        torch.testing.assert_close(output[1:3], feature)
+
 
 if __name__ == "__main__":
     main()

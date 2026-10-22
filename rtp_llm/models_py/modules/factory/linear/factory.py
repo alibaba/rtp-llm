@@ -28,6 +28,28 @@ class LinearFactory:
 
     _strategies: List[Type[LinearBase]] = []
 
+    @staticmethod
+    def _merge_sm120_blockwise_tensors(
+        tensors: List[torch.Tensor], dim: int
+    ) -> torch.Tensor:
+        """Merge logical (K, N) views while preserving physical (N, K) data."""
+        if dim not in (-1, 1) or any(tensor.dim() != 2 for tensor in tensors):
+            raise ValueError(
+                "SM120 FP8_PER_BLOCK merged linear only supports 2D tensors "
+                "merged along the output dimension"
+            )
+        K = tensors[0].shape[0]
+        if any(
+            tensor.shape[0] != K or not tensor.is_contiguous() for tensor in tensors
+        ):
+            raise ValueError(
+                "SM120 FP8_PER_BLOCK merged tensors must have the same K and "
+                "contiguous loader storage"
+            )
+        physical = [tensor.reshape(tensor.shape[1], K) for tensor in tensors]
+        merged_n = sum(tensor.shape[1] for tensor in tensors)
+        return torch.cat(physical, dim=0).reshape(K, merged_n)
+
     @classmethod
     def register(cls, strategy_class: type) -> None:
         """Register a strategy class
@@ -125,11 +147,36 @@ class LinearFactory:
                     "install or register a backend with W8A8 INT8 per-channel "
                     "execution support"
                 )
+            rejection_reasons = []
+            for strategy_class in cls._strategies:
+                try:
+                    reason = strategy_class.rejection_reason(
+                        quant_config,
+                        weight,
+                        weight_scales,
+                        hw_kernel_config,
+                        weight_scale_2,
+                        input_scale,
+                    )
+                except Exception:
+                    logger.debug(
+                        "Linear strategy %s rejection diagnostic failed",
+                        strategy_class.__name__,
+                        exc_info=True,
+                    )
+                    continue
+                if reason is not None and reason not in rejection_reasons:
+                    rejection_reasons.append(reason)
+            details = (
+                f" Rejections: {'; '.join(rejection_reasons)}"
+                if rejection_reasons
+                else ""
+            )
             raise ValueError(
                 f"No suitable Linear strategy found for:"
                 f"weight.dtype={weight.dtype}, "
                 f"has_scales={weight_scales is not None}, "
-                f"quant_config={quant_config}"
+                f"quant_config={quant_config}.{details}"
             )
 
         # Check uniqueness - should only have one matching strategy
@@ -185,13 +232,30 @@ class LinearFactory:
 
         # Merge weights
         weight_tensors = [weights[key] for key in weight_keys]
-        merged_weight = torch.cat(weight_tensors, dim=dim)
+        use_sm120_blockwise_layout = False
+        if use_fp8 and quant_config.get_method() == "FP8_PER_BLOCK":
+            from rtp_llm.models_py.utils.arch import is_sm120
+            from rtp_llm.utils.sm120_fp8_backend import resolve_sm120_fp8_backend
+
+            use_sm120_blockwise_layout = (
+                is_sm120(weight_tensors[0].device)
+                and resolve_sm120_fp8_backend() == "cutlass"
+            )
+        merged_weight = (
+            cls._merge_sm120_blockwise_tensors(weight_tensors, dim)
+            if use_sm120_blockwise_layout
+            else torch.cat(weight_tensors, dim=dim)
+        )
 
         # Merge scales if needed (for both FP8 and NVFP4)
         merged_scales = None
         if (use_fp8 or use_fp4) and scale_keys:
             scale_tensors = [weights[key] for key in scale_keys]
-            merged_scales = torch.cat(scale_tensors, dim=dim)
+            merged_scales = (
+                cls._merge_sm120_blockwise_tensors(scale_tensors, dim)
+                if use_sm120_blockwise_layout
+                else torch.cat(scale_tensors, dim=dim)
+            )
 
         # Merge bias if exists
         merged_bias = None

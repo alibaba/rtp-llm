@@ -54,6 +54,24 @@ void invokeGeneralAddBiasResidualLayerNorm(T*           out,
                                            QUANT_OUT_T* out_quant            = nullptr,
                                            bool         return_normed_output = false);
 
+#if USING_CUDA
+template<typename T>
+void invokeGeneralAddBiasResidualLayerNormQuantFp8(T*           out,
+                                                   T*           norm_output,
+                                                   const T*     input,
+                                                   const T*     bias,
+                                                   const T*     residual,
+                                                   const T*     gamma,
+                                                   const T*     beta,
+                                                   float        eps,
+                                                   int          tokens,
+                                                   int          hidden_dim,
+                                                   void*        out_quant,
+                                                   uint32_t*    scales,
+                                                   int          scale_stride,
+                                                   cudaStream_t stream = 0);
+#endif
+
 template<typename T, typename QUANT_OUT_T = int8_t>
 void invokeGeneralLayerNorm(T*           out,
                             T*           normed_output,
