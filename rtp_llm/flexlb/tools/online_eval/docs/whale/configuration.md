@@ -216,3 +216,12 @@ Mock 不存储真实 KV tensor，事件位置只用于路由元数据验证，�
 
 验收分别核对注册、初始快照、请求产生 ADD、淘汰产生 DELETE、Master 查得命中，
 以及重复请求的实际复用量。HTTP 200 或 publisher READY 都不代替 KVCM 业务状态与真实 key 对账。
+
+Prefill 的 WorkerStatus 反馈遵循 Master 当前 TaskInfo 字段号：运行阶段已准备的
+`prefix_length`（包括冷请求的零命中）设置 `prefix_length_valid=true`，同时上报
+本地 HBM 命中量和字符串请求 ID。排队、分配中、未知任务不能用默认零值冒充已测命中；
+取消保留取消前已知的有效性。对齐依据为 `FIFOScheduler` 的 stream prefix 观察、
+`LocalRpcServer::GetWorkerStatus` 和当前 TaskInfoPB 的有效性契约。
+未模拟的时序保持 0，未模拟的分块进度保持 oneof 缺省；Decode 混合远端/本地来源的
+有效性反馈不在本项 Prefill 支持范围内。自动对账须按同一请求 ID 关联 Master 的
+`cache_hit_comparison`，不能用最终 Decode 响应里的 prefix 代替 Prefill 实际值。

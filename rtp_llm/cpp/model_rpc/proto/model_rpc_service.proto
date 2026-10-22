@@ -642,6 +642,33 @@ message TaskInfoPB {
     int64 execution_time_ms = 13;
     PriorityPreemptionProgressPB priority_preemption_progress = 14;
     int32 priority = 15;
+    // Same wire contract as the KVCM-capable Master. Zero/omitted telemetry is
+    // unknown unless its validity/presence marker says otherwise.
+    bool prefix_length_valid = 16;
+    int64 waiting_entered_time_ms = 17;
+    int64 running_entered_time_ms = 18;
+    int64 request_received_time_ms = 19;
+    int64 input_queue_enqueue_time_ms = 20;
+    int64 input_queue_drain_time_ms = 21;
+    int64 remote_kv_wait_ms = 22;
+    int64 first_token_time_ms = 23;
+    int64 hbm_local_match_tokens = 24;
+    int64 remote_kv_added_match_tokens = 25;
+    int64 first_prefill_step_id = 26;
+    int64 last_prefill_step_id = 27;
+    int64 prefill_step_count = 28;
+    int64 prefill_nonfinal_chunk_tokens_min = 29;
+    int64 prefill_nonfinal_chunk_tokens_max = 30;
+    oneof completed_prefill_tokens_presence {
+        int64 completed_prefill_tokens = 31;
+    }
+    oneof remaining_prefill_tokens_presence {
+        int64 remaining_prefill_tokens = 32;
+    }
+    oneof last_completed_prefill_step_id_presence {
+        int64 last_completed_prefill_step_id = 33;
+    }
+    string request_id_str = 34;
 }
 
 message UpdateWeightsRequestPB {

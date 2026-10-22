@@ -2799,8 +2799,13 @@ public final class JavaMockEngineCluster {
 
         private EngineRpcService.TaskInfoPB cancellationTask(long requestId,
                 EngineRpcService.TaskPhase phase, boolean priorityPreemption) {
-            EngineRpcService.TaskInfoPB.Builder taskBuilder = EngineRpcService.TaskInfoPB.newBuilder()
+            var tracked = runningTasks.get(requestId);
+            // Cancellation preserves a prepared hit, but must not turn a
+            // queued/unknown request's default zero into a measured zero hit.
+            EngineRpcService.TaskInfoPB.Builder taskBuilder =
+                    (tracked == null ? EngineRpcService.TaskInfoPB.newBuilder() : tracked.toBuilder())
                     .setRequestId(requestId)
+                    .setRequestIdStr(Long.toString(requestId))
                     // Pass the ACTUAL phase the request was cancelled in through
                     // to the finished entry (P2-1): a queued opt-in decode
                     // request surfaces KV_ALLOCATED, a queued prefill RECEIVED.
@@ -5193,10 +5198,21 @@ public final class JavaMockEngineCluster {
                                                  long batchId,
                                                  int dpRank,
                                                  EngineRpcService.TaskPhase phase) {
+            // FIFOScheduler publishes the stream's prepared prefix length. The
+            // newer TaskInfo wire contract distinguishes that value from an
+            // unprepared queue/allocation observation, including a valid zero hit.
+            // Decode's mixed remote/local provenance is not modeled here.
+            boolean resolved = roleType == EngineRpcService.RoleTypePB.ROLE_TYPE_PREFILL
+                    && phase == EngineRpcService.TaskPhase.TASK_PHASE_RUNNING;
+            long memoryTokens = memoryCache == null ? 0L
+                    : Math.min(shape.hitTokens(), (long) shape.memoryHitBlocks() * seqSizePerBlock);
             return EngineRpcService.TaskInfoPB.newBuilder()
                     .setRequestId(shape.input().getRequestId())
+                    .setRequestIdStr(Long.toString(shape.input().getRequestId()))
                     .setInputLength(shape.inputLen())
                     .setPrefixLength(shape.hitTokens())
+                    .setPrefixLengthValid(resolved)
+                    .setHbmLocalMatchTokens(resolved ? shape.hitTokens() - memoryTokens : 0L)
                     .setBatchId(batchId)
                     .setPhase(phase)
                     .setDpRank(dpRank)
@@ -5216,12 +5232,8 @@ public final class JavaMockEngineCluster {
                                       long executionMs,
                                       int dpRank) {
             recordRecentExecutionTime(executionMs);
-            EngineRpcService.TaskInfoPB task = EngineRpcService.TaskInfoPB.newBuilder()
-                    .setRequestId(shape.input().getRequestId())
-                    .setInputLength(shape.inputLen())
-                    .setPrefixLength(shape.hitTokens())
-                    .setBatchId(batchId)
-                    .setPhase(EngineRpcService.TaskPhase.TASK_PHASE_RUNNING)
+            EngineRpcService.TaskInfoPB task = task(shape, batchId, dpRank,
+                    EngineRpcService.TaskPhase.TASK_PHASE_RUNNING).toBuilder()
                     .setEndTimeMs(System.currentTimeMillis())
                     .setExecutionTimeMs(executionMs)
                     .setIterateCount(1)
@@ -5247,12 +5259,8 @@ public final class JavaMockEngineCluster {
                                       int dpRank,
                                       long errorCode) {
             recordRecentExecutionTime(executionMs);
-            EngineRpcService.TaskInfoPB task = EngineRpcService.TaskInfoPB.newBuilder()
-                    .setRequestId(shape.input().getRequestId())
-                    .setInputLength(shape.inputLen())
-                    .setPrefixLength(shape.hitTokens())
-                    .setBatchId(batchId)
-                    .setPhase(EngineRpcService.TaskPhase.TASK_PHASE_RUNNING)
+            EngineRpcService.TaskInfoPB task = task(shape, batchId, dpRank,
+                    EngineRpcService.TaskPhase.TASK_PHASE_RUNNING).toBuilder()
                     .setEndTimeMs(System.currentTimeMillis())
                     .setExecutionTimeMs(executionMs)
                     .setIterateCount(1)
