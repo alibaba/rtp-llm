@@ -66,6 +66,8 @@ def cuda13_suites():
                 },
                 envs={
                     "prefill": [
+                        # Keep the first CUDA fault at its originating Prefill operation.
+                        "CUDA_LAUNCH_BLOCKING=1",
                         "ENABLE_DSPARK=1",
                         "SP_TYPE=dspark",
                         "SP_MODEL_TYPE=deepseek_v4_dspark",
