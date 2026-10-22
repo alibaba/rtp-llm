@@ -103,13 +103,13 @@ class AbstractGrpcClientTest {
         var invoker = client.new Invoker("worker", channel);
         long before = System.nanoTime();
 
-        invoker.shutdown(AbstractGrpcClient.CloseReason.REPLACED);
+        invoker.shutdown(AbstractGrpcClient.CloseReason.DISCOVERY_REMOVED);
         var first = invoker.getCloseObservation();
         long after = System.nanoTime();
         invoker.shutdown(AbstractGrpcClient.CloseReason.CLIENT_SHUTDOWN);
 
         assertSame(first, invoker.getCloseObservation());
-        assertEquals(AbstractGrpcClient.CloseReason.REPLACED, first.reason());
+        assertEquals(AbstractGrpcClient.CloseReason.DISCOVERY_REMOVED, first.reason());
         assertTrue(!first.forced());
         assertTrue(first.nanoTime() - before >= 0);
         assertTrue(after - first.nanoTime() >= 0);
