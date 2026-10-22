@@ -367,7 +367,6 @@ class RequestInflightRecoveryTest {
                                                 return prefillState.updateQueue(
                                                                 PrefillState.QueueChange.ENQUEUE,
                                                                 route,
-                                                                Long.MAX_VALUE,
                                                                 System.currentTimeMillis())
                                                         == route;
                                             } finally {
@@ -421,7 +420,6 @@ class RequestInflightRecoveryTest {
                                                 return prefillState.updateQueue(
                                                                 PrefillState.QueueChange.ENQUEUE,
                                                                 item,
-                                                                Long.MAX_VALUE,
                                                                 System.currentTimeMillis())
                                                         == item;
                                             } finally {

@@ -43,7 +43,6 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
-import java.util.concurrent.atomic.LongAdder;
 import java.util.function.BooleanSupplier;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -90,18 +89,6 @@ class FileDiscoveryDynamicScaleEndToEndTest extends FlexLBMockTestBase {
     private static final long SYNC_INTERVAL_MS = 20L;
 
     private static final long CONVERGENCE_CAP_MS = 10_000L;
-
-    /**
-     * Upstream's schedule refactor made disappearance eviction
-     * staleness-gated (retireMissingGenerationIfExpired): a worker dropped
-     * from discovery is retired only once its last successful status poll
-     * is older than this threshold — the 15-arg constructor defaults to
-     * 10 s, which would land exactly on Phase 3's 10 s convergence cap.
-     * The 16-arg constructor exists to inject a short staleness so this
-     * test verifies the eviction mechanism without waiting out the
-     * production TTL.
-     */
-    private static final long STATUS_STALE_AFTER_US = 500_000L;
 
     @TempDir Path tempDir;
 
@@ -183,10 +170,11 @@ class FileDiscoveryDynamicScaleEndToEndTest extends FlexLBMockTestBase {
                         cacheAwareService,
                         cacheIntervalService,
                         5_000L,
-                        new LongAdder(),
+                        0L,
                         1L,
                         false,
-                        STATUS_STALE_AFTER_US);
+                        statusCheckExecutor,
+                        statusCheckExecutor);
 
         EngineSyncRunner decodeSyncRunner =
                 new EngineSyncRunner(
@@ -200,10 +188,11 @@ class FileDiscoveryDynamicScaleEndToEndTest extends FlexLBMockTestBase {
                         cacheAwareService,
                         cacheIntervalService,
                         5_000L,
-                        new LongAdder(),
+                        0L,
                         1L,
                         false,
-                        STATUS_STALE_AFTER_US);
+                        statusCheckExecutor,
+                        statusCheckExecutor);
 
         syncScheduler =
                 Executors.newSingleThreadScheduledExecutor(

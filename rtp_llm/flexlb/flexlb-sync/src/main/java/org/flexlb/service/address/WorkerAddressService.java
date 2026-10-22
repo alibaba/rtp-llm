@@ -111,7 +111,11 @@ public class WorkerAddressService {
     private List<WorkerHost> getServiceHosts(String modelName, String address) {
         Future<List<WorkerHost>> future = null;
         try {
-            future = serviceDiscoveryExecutor.submit(() -> queryServiceHosts(modelName, address));
+            future =
+                    serviceDiscoveryExecutor.submit(
+                            () ->
+                                    java.util.Objects.requireNonNull(
+                                            serviceDiscovery.getHosts(address), "discovery hosts"));
             return future.get(500, TimeUnit.MILLISECONDS);
         } catch (Exception failure) {
             if (failure instanceof InterruptedException) {
@@ -124,13 +128,20 @@ public class WorkerAddressService {
                     modelName,
                     address,
                     failure.getMessage());
-            engineHealthReporter.reportStatusCheckerFail(
-                    modelName,
-                    timeout
-                            ? BalanceStatusEnum.SERVICE_DISCOVERY_TIMEOUT
-                            : BalanceStatusEnum.SERVICE_DISCOVERY_ERROR,
-                    null);
-            return List.of();
+            Throwable reportFailure =
+                    org.flexlb.util.Failures.run(
+                            null,
+                            () ->
+                                    engineHealthReporter.reportStatusCheckerFail(
+                                            modelName,
+                                            timeout
+                                                    ? BalanceStatusEnum.SERVICE_DISCOVERY_TIMEOUT
+                                                    : BalanceStatusEnum.SERVICE_DISCOVERY_ERROR,
+                                            null));
+            if (reportFailure != null) {
+                failure.addSuppressed(reportFailure);
+            }
+            throw new IllegalStateException("Service discovery failed for " + address, failure);
         } finally {
             if (future != null && !future.isDone()) {
                 future.cancel(true);
@@ -163,22 +174,5 @@ public class WorkerAddressService {
             }
         }
         return workerHosts;
-    }
-
-    private List<WorkerHost> queryServiceHosts(String modelName, String address) {
-        long startNanos = System.nanoTime();
-        try {
-            return serviceDiscovery.getHosts(address);
-        } catch (Throwable failure) {
-            logger.error(
-                    "query service discovery exception, cost={}ms, model={}, address={}, msg:{}",
-                    TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startNanos),
-                    modelName,
-                    address,
-                    failure.getMessage());
-            engineHealthReporter.reportStatusCheckerFail(
-                    modelName, BalanceStatusEnum.SERVICE_DISCOVERY_ERROR, null);
-            return new ArrayList<>();
-        }
     }
 }

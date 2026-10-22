@@ -276,50 +276,22 @@ public final class WorkerBatcher {
             return false;
         }
         boolean accepted;
-        List<RequestRoute> victims = List.of();
         queueLock.lock();
         try {
-            if (drainClaimed
-                    || settings.dispatcherType() == DispatcherConfig.Type.NON_BATCH
-                            && prefillEndpoint.isGenerationRetiringOrRetired()) {
+            if (drainClaimed || prefillEndpoint.isGenerationRetiringOrRetired()) {
                 return false;
             }
             accepted =
                     prefillState.updateQueue(
                                     PrefillState.QueueChange.ENQUEUE,
                                     item,
-                                    settings.maxOutstandingRequests(),
                                     System.currentTimeMillis())
                             != null;
-            if (!accepted && !drainClaimed && settings.preemptQueued()) {
-                victims =
-                        prefillEndpoint.ownership.replaceQueuedRoutesLocked(
-                                item, settings.maxOutstandingRequests());
-                accepted = !victims.isEmpty();
-            }
             if (accepted) {
                 stateChanged.signal();
             }
         } finally {
             queueLock.unlock();
-        }
-        if (accepted) {
-            for (RequestRoute victim : victims) {
-                var owner = victim.ctx().data().getScheduler();
-                try {
-                    owner.onQueueEvent(
-                            victim, AbstractRequestScheduler.QueueKind.PREEMPTED, item, null);
-                } catch (Throwable failure) {
-                    owner.runtime.recordFailure(failure);
-                    try {
-                        Logger.error(
-                                "Queued victim notification failed after replacement: request_id={}",
-                                victim.requestId(),
-                                failure);
-                    } catch (Throwable ignored) {
-                    }
-                }
-            }
         }
         return accepted;
     }
@@ -426,7 +398,6 @@ public final class WorkerBatcher {
                             prefillState.updateQueue(
                                     PrefillState.QueueChange.STOP,
                                     null,
-                                    0L,
                                     System.currentTimeMillis());
                 } catch (Throwable claimFailure) {
                     cleanupFailure = Failures.append(cleanupFailure, claimFailure);
@@ -449,7 +420,6 @@ public final class WorkerBatcher {
                             prefillState.updateQueue(
                                             PrefillState.QueueChange.ACK_STOP,
                                             item,
-                                            0L,
                                             System.currentTimeMillis())
                                     != null;
                     if (!acknowledged) {
@@ -502,7 +472,6 @@ public final class WorkerBatcher {
                         prefillState.updateQueue(
                                         PrefillState.QueueChange.REMOVE,
                                         item,
-                                        0L,
                                         System.currentTimeMillis())
                                 != null;
             }
@@ -656,7 +625,12 @@ public final class WorkerBatcher {
                                                         failed,
                                                         now)));
                 if (prep.committed == null) {
-                    return null;
+                    return !prep.batch
+                                    && !prefillState.requestCapacityAvailable(
+                                            prefillEndpoint.requestLimit, 1)
+                            ? CapacityBoundary.deliveryUnavailable(
+                                    CapacityBoundary.Resource.PREFILL_REQUEST)
+                            : null;
                 }
                 prep.reservation = null;
                 boolean removedFailedMember = prep.committed.removedFailedMember();
@@ -823,6 +797,8 @@ public final class WorkerBatcher {
         var runtime = item.ctx().data().getScheduler().runtime;
         return switch (boundary.resource()) {
             case DISPATCH_EXECUTOR -> runtime.deliveries().deliveryCapacityAvailable();
+            case PREFILL_REQUEST ->
+                    prefillState.requestCapacityAvailable(prefillEndpoint.requestLimit, 1);
             case PREFILL_BATCH ->
                     prefillEndpoint.ownership.batchCapacityAvailable(
                             runtime.deliveries().maxInflightBatches);
@@ -846,7 +822,7 @@ public final class WorkerBatcher {
             case DECODE_ENGINE -> {
                 yield item.decodeEp().watchEngineDispatchCapacity(wake);
             }
-            case PREFILL_BATCH -> () -> {};
+            case PREFILL_BATCH, PREFILL_REQUEST -> () -> {};
         };
     }
 
@@ -884,7 +860,6 @@ public final class WorkerBatcher {
                         prefillState.updateQueue(
                                         PrefillState.QueueChange.REMOVE_UNEXPIRED,
                                         blockedItem,
-                                        0L,
                                         nowMs)
                                 != null;
             }
@@ -905,10 +880,7 @@ public final class WorkerBatcher {
             RequestRoute item, CapacityBoundary failure, boolean alreadyRemoved) {
         if (!alreadyRemoved
                 && prefillState.updateQueue(
-                                PrefillState.QueueChange.REMOVE,
-                                item,
-                                0L,
-                                System.currentTimeMillis())
+                                PrefillState.QueueChange.REMOVE, item, System.currentTimeMillis())
                         == null) {
             return;
         }
@@ -1225,6 +1197,12 @@ public final class WorkerBatcher {
         }
 
         CapacityBoundary acquire(RequestRoute item, PrefillTimePredictor.Evaluator evaluator) {
+            if (!batch
+                    && !prefillState.requestCapacityAvailable(
+                            prefillEndpoint.requestLimit, members.size() + 1)) {
+                return CapacityBoundary.deliveryUnavailable(
+                        CapacityBoundary.Resource.PREFILL_REQUEST);
+            }
             if (batch && members.isEmpty()) {
                 try {
                     var execution = runtime.deliveries().tryReserveDelivery();

@@ -27,7 +27,6 @@ import java.util.concurrent.atomic.AtomicReference;
 import static org.flexlb.constant.MetricConstant.GRPC_CALL_COUNT;
 import static org.flexlb.constant.MetricConstant.GRPC_CALL_DURATION;
 import static org.flexlb.constant.MetricConstant.GRPC_CONNECTION_DURATION;
-import static org.flexlb.constant.MetricConstant.GRPC_RESPONSE_SIZE;
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -154,7 +153,7 @@ class EngineGrpcClientMonitoringTest {
         GrpcReporter reporter = new GrpcReporter(monitor);
         assertDoesNotThrow(reporter::init);
         verify(monitor, times(2)).register(anyString(), any(FlexMetricType.class));
-        verify(monitor, times(3))
+        verify(monitor, times(4))
                 .register(anyString(), any(FlexMetricType.class), any(FlexPriorityType.class));
         assertDoesNotThrow(() -> reporter.reportChannelPoolSize(3));
     }
@@ -166,8 +165,7 @@ class EngineGrpcClientMonitoringTest {
                 .when(monitor)
                 .report(eq(GRPC_CALL_DURATION), any(FlexMetricTags.class), anyDouble());
         assertDoesNotThrow(
-                () -> new GrpcReporter(monitor).reportCallMetrics("EnqueueBatch", 10L, 20, false));
-        verify(monitor).report(eq(GRPC_RESPONSE_SIZE), any(FlexMetricTags.class), eq(20.0));
+                () -> new GrpcReporter(monitor).reportCallMetrics("EnqueueBatch", 10L, false));
         verify(monitor).report(eq(GRPC_CALL_COUNT), any(FlexMetricTags.class), eq(1.0));
     }
 
@@ -193,7 +191,7 @@ class EngineGrpcClientMonitoringTest {
                 if (attempts.incrementAndGet() == 1) {
                     observer.onError(
                             Status.UNAVAILABLE
-                                    .withDescription("Connection reset")
+                                    .withCause(new java.net.SocketException("Connection reset"))
                                     .asRuntimeException());
                 } else if (retryFailure != null) {
                     observer.onError(retryFailure.asRuntimeException());
@@ -229,6 +227,7 @@ class EngineGrpcClientMonitoringTest {
                         @Override
                         protected ManagedChannel createChannel(String channelKey) {
                             return InProcessChannelBuilder.forName(serverName)
+                                    .propagateCauseWithStatus(true)
                                     .directExecutor()
                                     .build();
                         }

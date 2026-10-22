@@ -65,6 +65,7 @@ public record CapacityBoundary(
     public enum Resource {
         DISPATCH_EXECUTOR,
         PREFILL_BATCH,
+        PREFILL_REQUEST,
         DECODE_ENGINE
     }
 

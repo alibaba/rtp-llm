@@ -68,7 +68,6 @@ public final class EndpointCleanupTestSupport {
                             state.updateQueue(
                                     PrefillState.QueueChange.ENQUEUE,
                                     item,
-                                    Long.MAX_VALUE,
                                     System.currentTimeMillis()));
                 } finally {
                     lock.unlock();

@@ -18,6 +18,7 @@ from rtp_llm.config.exceptions import (
 )
 from rtp_llm.config.generate_config import RoleAddr, RoleType
 from rtp_llm.config.py_config_modules import MasterConfig
+from rtp_llm.cpp.model_rpc.model_rpc_client import trans_input
 from rtp_llm.cpp.model_rpc.proto.flexlb_schedule_service_pb2 import (
     CANCEL_REASON_CLIENT_CANCELLED,
     CANCEL_REASON_DEADLINE_EXCEEDED,
@@ -357,6 +358,7 @@ class MasterClient:
 
         request_id is frontend-generated and only used for logging.
         Only connection_failed triggers slave retry and domain fallback.
+        The caller omits input_pb when Master does not require it.
         """
         master_addr = self.host_service.get_master_addr() if self.host_service else None
         if not master_addr:
@@ -414,9 +416,48 @@ class MasterClient:
         if input_pb is not None and not vit_only:
             request_pb.generate_input = input_pb.SerializeToString()
 
-        response = await self._send_schedule_request(
-            master_addr, request_pb, timeout_s, request_id
-        )
+        async def send_to(addr):
+            nonlocal input_pb
+            started_at = time.monotonic()
+            response = await self._send_schedule_request(
+                addr, request_pb, timeout_s, request_id
+            )
+            # A heartbeat can be stale, or a follower can forward to a BATCH leader.
+            # Both rejection forms are emitted before scheduler admission.
+            if (
+                input_pb is None
+                and not vit_only
+                and response is not None
+                and (
+                    response.code == ExceptionType.MASTER_GENERATE_INPUT_REQUIRED
+                    or (
+                        response.code == ExceptionType.MASTER_INVALID_REQUEST
+                        and response.error_message
+                        == "missing serialized generate_input for batch dispatch"
+                    )
+                )
+                and not response.success
+                and not response.enqueued_by_master
+                and not response.server_status
+                and not response.HasField("lifecycle")
+            ):
+                input_pb = trans_input(input)
+                request_pb.generate_input = input_pb.SerializeToString()
+                remaining = (
+                    timeout_s - (time.monotonic() - started_at)
+                    if timeout_s is not None
+                    else None
+                )
+                if remaining is not None and remaining <= 0:
+                    raise FtRuntimeException(
+                        ExceptionType.DEADLINE_EXCEEDED, "schedule deadline exceeded"
+                    )
+                response = await self._send_schedule_request(
+                    addr, request_pb, remaining, request_id
+                )
+            return response
+
+        response = await send_to(master_addr)
 
         if response is None and slave_addr:
             route_logger.info(
@@ -424,9 +465,7 @@ class MasterClient:
                 slave_addr,
                 request_id,
             )
-            response = await self._send_schedule_request(
-                slave_addr, request_pb, timeout_s, request_id
-            )
+            response = await send_to(slave_addr)
 
         if response is None:
             return FlexlbResponse.connection_failed_response()

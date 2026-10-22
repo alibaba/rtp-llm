@@ -105,7 +105,7 @@ class RequestSchedulerTest {
             RequestContext missingPayload = context(config, 918L);
             missingPayload.data().setGenerateInputPb(null);
             assertEquals(
-                    StrategyErrorType.INVALID_REQUEST.getErrorCode(),
+                    StrategyErrorType.GENERATE_INPUT_REQUIRED.getErrorCode(),
                     scheduler.submit(missingPayload).join().getCode());
             assertEquals(0, owner.requests.liveRequestCount());
 

@@ -35,10 +35,7 @@ public final class DeliverySettlementTestSupport {
             assertSame(
                     item,
                     prefill.updateQueue(
-                            PrefillState.QueueChange.ENQUEUE,
-                            item,
-                            Long.MAX_VALUE,
-                            System.currentTimeMillis()));
+                            PrefillState.QueueChange.ENQUEUE, item, System.currentTimeMillis()));
         } finally {
             lock.unlock();
         }
@@ -58,7 +55,6 @@ public final class DeliverySettlementTestSupport {
                         prefill.updateQueue(
                                 PrefillState.QueueChange.ENQUEUE,
                                 item,
-                                Long.MAX_VALUE,
                                 System.currentTimeMillis()));
             }
         } finally {

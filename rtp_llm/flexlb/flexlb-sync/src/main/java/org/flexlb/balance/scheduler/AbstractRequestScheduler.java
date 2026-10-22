@@ -97,12 +97,6 @@ public abstract class AbstractRequestScheduler implements RequestScheduler {
                             StrategyErrorType.DISPATCH_FAILED,
                             "request scheduler is not accepting this request configuration"));
         }
-        if (config.getDispatcher().requiresGenerateInput() && !data.hasGenerateInput()) {
-            return CompletableFuture.completedFuture(
-                    Response.buildErrorResponse(
-                            StrategyErrorType.INVALID_REQUEST,
-                            "missing serialized generate_input for batch dispatch"));
-        }
         long expires = data.getRequestExpiresAtMs();
         if (expires <= 0L || System.currentTimeMillis() >= expires) {
             var rejected =
@@ -118,6 +112,12 @@ public abstract class AbstractRequestScheduler implements RequestScheduler {
                         (kind, response, failure) ->
                                 completeExternal(ctx, kind, response, failure));
         var result = requests.register(ctx, this, future);
+        if (result == RequestRepository.RegistrationResult.INPUT_REQUIRED) {
+            return CompletableFuture.completedFuture(
+                    Response.buildErrorResponse(
+                            StrategyErrorType.GENERATE_INPUT_REQUIRED,
+                            "missing serialized generate_input for batch dispatch"));
+        }
         if (result != RequestRepository.RegistrationResult.REGISTERED) {
             return CompletableFuture.completedFuture(
                     Response.buildErrorResponse(
@@ -137,12 +137,14 @@ public abstract class AbstractRequestScheduler implements RequestScheduler {
                         : config.getScheduler().getType().name());
         future.whenComplete(
                 (response, failure) -> {
-                    if (failure == null && response != null && response.isSuccess()) {
-                        try {
+                    try {
+                        if (failure == null && response != null && response.isSuccess()) {
                             cacheTrace.report(ctx);
-                        } catch (RuntimeException error) {
-                            Logger.warn("Route tracing failed", error);
                         }
+                    } catch (RuntimeException error) {
+                        Logger.warn("Route tracing failed", error);
+                    } finally {
+                        ctx.data().releaseSchedulingInput();
                     }
                 });
         runtime.deadlines().update(ctx, ctx.snapshot().deadlines());
@@ -927,6 +929,7 @@ public abstract class AbstractRequestScheduler implements RequestScheduler {
                         publication.close();
                         return;
                     }
+                    ctx.data().discardGenerateInput();
                     candidate =
                             new ResponseCandidate(
                                     ctx, ResponseKind.ACK, null, System.currentTimeMillis());
