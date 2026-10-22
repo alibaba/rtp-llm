@@ -250,6 +250,7 @@ class EmbeddingGraphContractTest(unittest.TestCase):
     def test_bert_graph_reuses_forward_without_preparing_embeddings(self):
         model = BertModel.__new__(BertModel)
         torch.nn.Module.__init__(model)
+        model.config = SimpleNamespace(model_type="bert")
         model.layers = torch.nn.ModuleList()
         model.layer_num = 0
         hidden = torch.randn(3, 4)

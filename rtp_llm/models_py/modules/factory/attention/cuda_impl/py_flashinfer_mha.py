@@ -735,9 +735,14 @@ class PyFlashinferPrefillAttnOp(object):
             if self.mask_builder
             else {}
         )
+        plan_indptr = self.cu_seqlens_host
+        if mask_args.get("custom_mask") is not None:
+            # Mask packing requires CUDA indptr; reuse graph-owned storage.
+            self.cu_seqlens_device.copy_(self.cu_seqlens_host, non_blocking=True)
+            plan_indptr = self.cu_seqlens_device
         self.prefill_wrapper.plan(
-            self.cu_seqlens_host,
-            self.cu_seqlens_host,
+            plan_indptr,
+            plan_indptr,
             self.local_head_num,
             self.local_kv_head_num,
             self.head_dim_qk,

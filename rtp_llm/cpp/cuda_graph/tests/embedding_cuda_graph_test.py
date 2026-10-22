@@ -1,6 +1,7 @@
 """Embedding graph preparation, input validation and request-changing replay."""
 
 import unittest
+from types import SimpleNamespace
 
 import torch
 
@@ -517,6 +518,89 @@ class TestEmbeddingCudaGraph(unittest.TestCase):
                 + token_type_embedding[torch.tensor([1, 2, 3, 4], device="cuda")]
             )
             torch.testing.assert_close(recovery_output.hidden_states, recovery_expected)
+
+
+@unittest.skipUnless(torch.cuda.is_available(), "GPU required")
+class EmbeddingPrefillGraphTest(unittest.TestCase):
+    def test_encoder_graph_replans_layout_and_isolates_padding(self):
+        self._check_encoder_graph(causal=False)
+
+    def test_causal_encoder_graph_replans_layout_and_isolates_padding(self):
+        self._check_encoder_graph(causal=True)
+
+    def _check_encoder_graph(self, causal):
+        if torch.version.hip is None:
+            from rtp_llm.models_py.modules.factory.attention.cuda_impl.py_flashinfer_mha import (
+                PyFlashinferPrefillImpl as DevicePrefillImpl,
+            )
+        else:
+            from rtp_llm.models_py.modules.factory.attention.rocm_impl.aiter import (
+                AiterPrefillImplNonAsm as DevicePrefillImpl,
+            )
+        from rtp_llm.ops import KvCacheDataType
+        from rtp_llm.ops.compute_ops import PyAttentionInputs
+
+        capacity, dim = 8, 64
+        configs = SimpleNamespace(
+            is_causal=causal,
+            kernel_tokens_per_block=8,
+            kv_cache_dtype=KvCacheDataType.BASE,
+            head_num=1,
+            kv_head_num=1,
+            size_per_head=dim,
+            dtype=torch.bfloat16,
+        )
+        inputs = PyAttentionInputs()
+        inputs.input_lengths = torch.tensor([8, 0], dtype=torch.int32).pin_memory()
+        inputs.prefix_lengths = torch.zeros(2, dtype=torch.int32).pin_memory()
+        impl = DevicePrefillImpl(
+            configs,
+            inputs,
+            is_cuda_graph=True,
+            token_capacity=capacity,
+            max_seq_len=capacity,
+        )
+        qkv = torch.randn(capacity, 3 * dim, dtype=torch.bfloat16, device="cuda")
+        stream = torch.cuda.Stream()
+        stream.wait_stream(torch.cuda.current_stream())
+        with torch.cuda.stream(stream):
+            impl.forward(qkv, None)
+            impl.forward(qkv, None)
+        torch.cuda.current_stream().wait_stream(stream)
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph, stream=stream):
+            output = impl.forward(qkv, None)
+        pointer = impl.fmha_impl.cu_seqlens_device.data_ptr()
+        for lengths in ([3, 2], [8, 0], [2, 0], [1, 5], [4, 4]):
+            with self.subTest(lengths=lengths):
+                torch.cuda.synchronize()
+                inputs.input_lengths.copy_(torch.tensor(lengths, dtype=torch.int32))
+                impl.prepare_cuda_graph(inputs)
+                qkv.normal_()
+                real_tokens = sum(lengths)
+                # Adversarial padding would contaminate a real sequence if its
+                # length were incorrectly extended to the token bucket.
+                qkv[real_tokens:].fill_(20)
+                graph.replay()
+                torch.cuda.synchronize()
+                self.assertEqual(impl.fmha_impl.cu_seqlens_device.data_ptr(), pointer)
+                offset = 0
+                for length in lengths:
+                    if length:
+                        q, k, v = qkv[offset : offset + length].chunk(3, dim=-1)
+                        expected = torch.nn.functional.scaled_dot_product_attention(
+                            q[None, None],
+                            k[None, None],
+                            v[None, None],
+                            is_causal=causal,
+                        )[0, 0]
+                        torch.testing.assert_close(
+                            output[offset : offset + length],
+                            expected,
+                            atol=2e-2,
+                            rtol=2e-2,
+                        )
+                    offset += length
 
 
 if __name__ == "__main__":
