@@ -1,6 +1,7 @@
 package org.flexlb.httpserver;
 
 import io.grpc.Context;
+import io.grpc.ConnectivityState;
 import io.grpc.ManagedChannel;
 import io.grpc.Server;
 import io.grpc.Status;
@@ -33,6 +34,7 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
 
 import java.lang.reflect.Field;
+import java.net.InetSocketAddress;
 import java.time.Duration;
 import java.util.Map;
 import java.util.concurrent.CompletionStage;
@@ -595,7 +597,7 @@ class FlexlbGrpcForwarderAsyncTest {
 
         private static RpcFixture startService(
                 FlexlbServiceGrpc.FlexlbServiceImplBase service) throws Exception {
-            Server server = NettyServerBuilder.forPort(0)
+            Server server = NettyServerBuilder.forAddress(new InetSocketAddress("127.0.0.1", 0))
                     .directExecutor()
                     .intercept(new GrpcTraceInterceptor())
                     .addService(service)
@@ -606,7 +608,31 @@ class FlexlbGrpcForwarderAsyncTest {
                     .directExecutor()
                     .usePlaintext()
                     .build();
-            return new RpcFixture(server, channel);
+            RpcFixture fixture = new RpcFixture(server, channel);
+            try {
+                fixture.awaitTransportReady();
+                return fixture;
+            } catch (Exception | Error startupFailure) {
+                try { fixture.close(); }
+                catch (Exception cleanupFailure) { startupFailure.addSuppressed(cleanupFailure); }
+                throw startupFailure;
+            }
+        }
+
+        private void awaitTransportReady() throws InterruptedException {
+            // Channel creation is lazy. Business deadlines must start after the
+            // loopback TCP/HTTP2 handshake, rather than measuring fixture startup.
+            long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+            ConnectivityState state = channel.getState(true);
+            while (state != ConnectivityState.READY) {
+                long remaining = deadline - System.nanoTime();
+                assertTrue(remaining > 0, "loopback gRPC transport did not become READY: " + state);
+                CountDownLatch changed = new CountDownLatch(1);
+                channel.notifyWhenStateChanged(state, changed::countDown);
+                assertTrue(changed.await(remaining, TimeUnit.NANOSECONDS),
+                        "loopback gRPC transport readiness timed out: " + state);
+                state = channel.getState(true);
+            }
         }
 
         @Override

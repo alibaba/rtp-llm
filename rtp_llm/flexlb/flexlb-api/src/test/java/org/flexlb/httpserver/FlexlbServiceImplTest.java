@@ -62,6 +62,7 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.doAnswer;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.mock;
@@ -746,6 +747,253 @@ class FlexlbServiceImplTest {
         assertPvContains("\"scheduleOrigin\":\"LOCAL_STANDALONE\"");
         verify(serverLatencyRecorder).recordArrival(anyLong());
         verify(serverLatencyRecorder).recordCompletion(any(BalanceContext.class), anyLong());
+    }
+
+    @ParameterizedTest
+    @org.junit.jupiter.params.provider.ValueSource(booleans = {false, true})
+    void transportCancellationReleasesRouteEvenAfterResponseClaim(boolean duringPublication) throws Exception {
+        when(lbStatusConsistencyService.isNeedConsistency()).thenReturn(false);
+        CompletableFuture<Response> pendingRoute = new CompletableFuture<>();
+        when(routeService.route(any(BalanceContext.class))).thenAnswer(invocation -> {
+            ((BalanceContext) invocation.getArgument(0)).setAckAtMs(System.currentTimeMillis());
+            return pendingRoute;
+        });
+        Context.CancellableContext inbound = Context.current().withCancellation();
+        UnaryTransportCall call = new UnaryTransportCall();
+        var handler = io.grpc.stub.ServerCalls.asyncUnaryCall(
+                (FlexlbScheduleProtocol.FlexlbScheduleRequestPB request,
+                 StreamObserver<FlexlbScheduleProtocol.FlexlbScheduleResponsePB> observer) ->
+                        service.schedule(request, observer));
+        var listener = inbound.call(() -> handler.startCall(call, new io.grpc.Metadata()));
+        listener.onMessage(FlexlbScheduleProtocol.FlexlbScheduleRequestPB.newBuilder()
+                .setRequestId(99101L).build());
+        inbound.run(listener::onHalfClose);
+        Runnable cancelTransport = () -> {
+            call.cancelled = true;
+            listener.onCancel();
+            inbound.cancel(null);
+        };
+        if (duringPublication) {
+            call.beforeSend = cancelTransport;
+        }
+        Response response = new Response();
+        response.setSuccess(true);
+        response.setCode(200);
+        pendingRoute.complete(response);
+        if (!duringPublication) { cancelTransport.run(); }
+        // Context listener and the transport callback can both report the same cancel.
+        listener.onCancel();
+        verify(routeService, times(1)).cancelRequest("99101", 0L, CancelReason.CLIENT_CANCELLED);
+        assertEquals(duringPublication ? 0 : 1, call.deliveredResponses);
+    }
+
+    @Test
+    void unaryTransportNormalCompletionDoesNotCancelAcceptedRoute() throws Exception {
+        when(lbStatusConsistencyService.isNeedConsistency()).thenReturn(false);
+        Response response = new Response();
+        response.setSuccess(true);
+        response.setCode(200);
+        when(routeService.route(any())).thenReturn(CompletableFuture.completedFuture(response));
+        Context.CancellableContext inbound = Context.current().withCancellation();
+        UnaryTransportCall call = new UnaryTransportCall();
+        var handler = io.grpc.stub.ServerCalls.asyncUnaryCall(
+                (FlexlbScheduleProtocol.FlexlbScheduleRequestPB request,
+                 StreamObserver<FlexlbScheduleProtocol.FlexlbScheduleResponsePB> observer) ->
+                        service.schedule(request, observer));
+        var listener = inbound.call(() -> handler.startCall(call, new io.grpc.Metadata()));
+        listener.onMessage(FlexlbScheduleProtocol.FlexlbScheduleRequestPB.newBuilder()
+                .setRequestId(99102L).build());
+        call.onClose = () -> inbound.cancel(null);
+        inbound.run(listener::onHalfClose);
+        listener.onComplete();
+        inbound.cancel(null);
+        assertEquals(1, call.deliveredResponses);
+        verify(routeService, never()).cancelRequest(anyString(), anyLong(), any());
+    }
+
+    @Test
+    void lateForwardSuccessAfterTransportCancellationIsCompensatedOnce() throws Exception {
+        when(lbStatusConsistencyService.isNeedConsistency()).thenReturn(true);
+        when(lbStatusConsistencyService.isMaster()).thenReturn(false);
+        var forwardResult = new CompletableFuture<FlexlbGrpcForwarder.MasterForwardResult>();
+        when(grpcForwarder.forwardScheduleToMaster(any())).thenReturn(forwardResult);
+        when(grpcForwarder.forwardCompensatingCancelToMaster(any(), anyString(), any(io.opentelemetry.context.Context.class)))
+                .thenReturn(CompletableFuture.completedFuture(FlexlbGrpcForwarder.CancelForwardResult.noMaster()));
+        UnaryTransportCall call = new UnaryTransportCall();
+        var handler = io.grpc.stub.ServerCalls.asyncUnaryCall(
+                (FlexlbScheduleProtocol.FlexlbScheduleRequestPB request,
+                 StreamObserver<FlexlbScheduleProtocol.FlexlbScheduleResponsePB> observer) -> service.schedule(request, observer));
+        var listener = handler.startCall(call, new io.grpc.Metadata());
+        listener.onMessage(FlexlbScheduleProtocol.FlexlbScheduleRequestPB.newBuilder().setRequestId(99103L).build());
+        listener.onHalfClose();
+        call.cancelled = true;
+        listener.onCancel();
+        forwardResult.complete(FlexlbGrpcForwarder.MasterForwardResult.forwarded(
+                FlexlbScheduleProtocol.FlexlbScheduleResponsePB.newBuilder().setSuccess(true).setCode(200).build(), "10.0.0.2:7003"));
+        listener.onCancel();
+        verify(grpcForwarder, times(1)).forwardCompensatingCancelToMaster(any(), eq("10.0.0.2:7003"), any(io.opentelemetry.context.Context.class));
+        assertEquals(0, call.deliveredResponses);
+        verify(routeService, never()).route(any());
+    }
+
+    @Test
+    void lateEncoderForwardCancellationKeepsStringNumericAndPhase() throws Exception {
+        when(lbStatusConsistencyService.isNeedConsistency()).thenReturn(true);
+        when(lbStatusConsistencyService.isMaster()).thenReturn(false);
+        var forwardResult = new CompletableFuture<FlexlbGrpcForwarder.MasterForwardResult>();
+        when(grpcForwarder.forwardScheduleToMaster(any())).thenReturn(forwardResult);
+        when(grpcForwarder.forwardCompensatingCancelToMaster(any(), anyString(), any(io.opentelemetry.context.Context.class)))
+                .thenReturn(CompletableFuture.completedFuture(FlexlbGrpcForwarder.CancelForwardResult.noMaster()));
+        UnaryTransportCall call = new UnaryTransportCall();
+        var handler = io.grpc.stub.ServerCalls.asyncUnaryCall(
+                (FlexlbScheduleProtocol.FlexlbScheduleRequestPB request,
+                 StreamObserver<FlexlbScheduleProtocol.FlexlbScheduleResponsePB> observer) -> service.schedule(request, observer));
+        var listener = handler.startCall(call, new io.grpc.Metadata());
+        listener.onMessage(FlexlbScheduleProtocol.FlexlbScheduleRequestPB.newBuilder().setRequestId(99103L).setRequestIdStr("late-encoder")
+                .addScheduleRoles(FlexlbScheduleProtocol.ScheduleRolePB.SCHEDULE_ROLE_ENCODER).build());
+        listener.onHalfClose();
+        call.cancelled = true;
+        listener.onCancel();
+        forwardResult.complete(FlexlbGrpcForwarder.MasterForwardResult.forwarded(
+                FlexlbScheduleProtocol.FlexlbScheduleResponsePB.newBuilder().setSuccess(true).setCode(200).build(), "10.0.0.2:7003"));
+        listener.onCancel();
+        var cancel = ArgumentCaptor.forClass(FlexlbScheduleProtocol.FlexlbCancelRequestPB.class);
+        verify(grpcForwarder, times(1)).forwardCompensatingCancelToMaster(cancel.capture(), eq("10.0.0.2:7003"), any(io.opentelemetry.context.Context.class));
+        assertEquals("late-encoder", cancel.getValue().getRequestIdStr());
+        assertEquals(99103L, cancel.getValue().getRequestId());
+        assertEquals(FlexlbScheduleProtocol.RequestPhasePB.REQUEST_PHASE_ENCODER, cancel.getValue().getPhase());
+        assertEquals(0, call.deliveredResponses);
+        verify(routeService, never()).route(any());
+    }
+
+    @Test
+    void cancellationBeforeHandlerInstallationIsAppliedAfterOwnerRegistration() {
+        when(lbStatusConsistencyService.isNeedConsistency()).thenReturn(false);
+        when(routeService.route(any())).thenReturn(new CompletableFuture<>());
+        UnaryTransportCall call = new UnaryTransportCall();
+        call.cancelled = true;
+        var handler = io.grpc.stub.ServerCalls.asyncUnaryCall(
+                (FlexlbScheduleProtocol.FlexlbScheduleRequestPB request,
+                 StreamObserver<FlexlbScheduleProtocol.FlexlbScheduleResponsePB> observer) -> service.schedule(request, observer));
+        var listener = handler.startCall(call, new io.grpc.Metadata());
+        listener.onMessage(FlexlbScheduleProtocol.FlexlbScheduleRequestPB.newBuilder().setRequestId(99104L).build());
+        listener.onHalfClose();
+        var ordered = inOrder(routeService);
+        ordered.verify(routeService).route(any());
+        ordered.verify(routeService).cancelRequest("99104", 0L, CancelReason.CLIENT_CANCELLED);
+    }
+
+    @Test
+    void earlyEncoderTransportCancellationUsesPhaseOwner() {
+        when(lbStatusConsistencyService.isNeedConsistency()).thenReturn(false);
+        when(routeService.route(any())).thenReturn(new CompletableFuture<>());
+        UnaryTransportCall call = new UnaryTransportCall();
+        call.cancelled = true;
+        var handler = io.grpc.stub.ServerCalls.asyncUnaryCall(
+                (FlexlbScheduleProtocol.FlexlbScheduleRequestPB request,
+                 StreamObserver<FlexlbScheduleProtocol.FlexlbScheduleResponsePB> observer) -> service.schedule(request, observer));
+        var listener = handler.startCall(call, new io.grpc.Metadata());
+        listener.onMessage(FlexlbScheduleProtocol.FlexlbScheduleRequestPB.newBuilder().setRequestId(99104L).setRequestIdStr("early-encoder")
+                .addScheduleRoles(FlexlbScheduleProtocol.ScheduleRolePB.SCHEDULE_ROLE_ENCODER).build());
+        listener.onHalfClose();
+        var ordered = inOrder(routeService);
+        ordered.verify(routeService).route(any());
+        ordered.verify(routeService).cancelRequest("early-encoder", 0L, CancelReason.CLIENT_CANCELLED, RequestPhase.ENCODER);
+    }
+
+    @Test
+    void telemetryErrorDoesNotPreventResponseOrRetainCancellationListener() {
+        when(lbStatusConsistencyService.isNeedConsistency()).thenReturn(false);
+        var pending = new CompletableFuture<Response>();
+        when(routeService.route(any())).thenAnswer(invocation -> {
+            BalanceContext ctx = invocation.getArgument(0);
+            ctx.setAckAtMs(System.currentTimeMillis());
+            ServerStatus prefill = new ServerStatus(); prefill.setRole(RoleType.PREFILL);
+            Response accounted = new Response(); accounted.setServerStatus(List.of(prefill));
+            ctx.setResponse(accounted);
+            return pending;
+        });
+        org.mockito.Mockito.doThrow(new AssertionError("telemetry failed"))
+                .when(batchSchedulerReporter).reportAckToResponseTimeMs(any(), any(), anyLong());
+        var inbound = Context.current().withCancellation();
+        StreamObserver<FlexlbScheduleProtocol.FlexlbScheduleResponsePB> observer = mock(StreamObserver.class);
+        inbound.run(() -> service.schedule(FlexlbScheduleProtocol.FlexlbScheduleRequestPB.newBuilder().setRequestId(99105L).build(), observer));
+        Response response = new Response();response.setSuccess(true);response.setCode(200);
+        ServerStatus selectedPrefill = new ServerStatus();
+        selectedPrefill.setRole(RoleType.PREFILL); selectedPrefill.setServerIp("10.0.0.11");
+        selectedPrefill.setGrpcPort(8001); response.setServerStatus(List.of(selectedPrefill));
+        pending.complete(response);
+        verify(observer).onNext(any());
+        verify(observer).onCompleted();
+        inbound.cancel(null);
+        verify(routeService, never()).cancelRequest(anyString(), anyLong(), any());
+    }
+
+    @Test
+    void observerErrorStillCancelsAndKeepsTelemetryFailureSuppressed() {
+        when(lbStatusConsistencyService.isNeedConsistency()).thenReturn(false);
+        Response response = new Response();response.setSuccess(true);response.setCode(200);
+        ServerStatus selectedPrefill = new ServerStatus();
+        selectedPrefill.setRole(RoleType.PREFILL); selectedPrefill.setServerIp("10.0.0.11");
+        selectedPrefill.setGrpcPort(8001); response.setServerStatus(List.of(selectedPrefill));
+        when(routeService.route(any())).thenAnswer(invocation -> {
+            BalanceContext ctx = invocation.getArgument(0);
+            ctx.setAckAtMs(System.currentTimeMillis());
+            ServerStatus prefill = new ServerStatus(); prefill.setRole(RoleType.PREFILL);
+            Response accounted = new Response(); accounted.setServerStatus(List.of(prefill));
+            ctx.setResponse(accounted);
+            return CompletableFuture.completedFuture(response);
+        });
+        var deliveryFailure = new AssertionError("observer failed");
+        var telemetryFailure = new AssertionError("telemetry failed");
+        org.mockito.Mockito.doThrow(telemetryFailure).when(batchSchedulerReporter)
+                .reportAckToResponseTimeMs(any(), any(), anyLong());
+        StreamObserver<FlexlbScheduleProtocol.FlexlbScheduleResponsePB> observer = mock(StreamObserver.class);
+        org.mockito.Mockito.doThrow(deliveryFailure).when(observer).onNext(any());
+        service.schedule(FlexlbScheduleProtocol.FlexlbScheduleRequestPB.newBuilder().setRequestId(99106L).build(), observer);
+        verify(routeService).cancelRequest("99106", 0L, CancelReason.CLIENT_CANCELLED);
+        assertEquals(1, deliveryFailure.getSuppressed().length);
+        assertSame(telemetryFailure, deliveryFailure.getSuppressed()[0]);
+    }
+
+    @Test
+    void stateQueryForwardReturnsWithoutWaitingForMaster() {
+        when(lbStatusConsistencyService.isNeedConsistency()).thenReturn(true);
+        when(lbStatusConsistencyService.isMaster()).thenReturn(false);
+        var pending = new CompletableFuture<FlexlbScheduleProtocol.GetRequestStateResponsePB>();
+        when(grpcForwarder.forwardGetRequestStateToMasterAsync(any())).thenReturn(pending);
+        StreamObserver<FlexlbScheduleProtocol.GetRequestStateResponsePB> observer = mock(StreamObserver.class);
+        var query = FlexlbScheduleProtocol.GetRequestStateRequestPB.newBuilder().setRequestId(99107L).setBatchId(901L).build();
+        service.getRequestState(query, observer);
+        verifyNoInteractions(observer);
+        verify(grpcForwarder, never()).forwardGetRequestStateToMaster(any());
+        var found = FlexlbScheduleProtocol.GetRequestStateResponsePB.newBuilder().setFound(true).build();
+        pending.complete(found);
+        verify(observer).onNext(found);
+        verify(observer).onCompleted();
+    }
+
+    private static final class UnaryTransportCall extends io.grpc.ServerCall<
+            FlexlbScheduleProtocol.FlexlbScheduleRequestPB,
+            FlexlbScheduleProtocol.FlexlbScheduleResponsePB> {
+        boolean cancelled;
+        int deliveredResponses;
+        Runnable beforeSend;
+        Runnable onClose;
+        @Override public void request(int count) { }
+        @Override public void sendHeaders(io.grpc.Metadata headers) { }
+        @Override public void sendMessage(FlexlbScheduleProtocol.FlexlbScheduleResponsePB value) {
+            if (beforeSend != null) { beforeSend.run(); }
+            if (!cancelled) { deliveredResponses++; }
+        }
+        @Override public void close(io.grpc.Status status, io.grpc.Metadata trailers) {
+            if (onClose != null) { onClose.run(); }
+        }
+        @Override public boolean isCancelled() { return cancelled; }
+        @Override public io.grpc.MethodDescriptor<FlexlbScheduleProtocol.FlexlbScheduleRequestPB,
+                FlexlbScheduleProtocol.FlexlbScheduleResponsePB> getMethodDescriptor() {
+            return org.flexlb.schedule.grpc.FlexlbServiceGrpc.getScheduleMethod();
+        }
     }
 
     @Test

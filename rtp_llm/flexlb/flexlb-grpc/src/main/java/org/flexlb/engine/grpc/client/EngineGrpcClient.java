@@ -4,6 +4,10 @@ import com.google.common.util.concurrent.FutureCallback;
 import com.google.common.util.concurrent.Futures;
 import com.google.common.util.concurrent.ListenableFuture;
 import io.grpc.ManagedChannel;
+import io.grpc.Context;
+import io.grpc.Deadline;
+import io.grpc.Status;
+import io.grpc.Contexts;
 import io.grpc.StatusRuntimeException;
 import io.netty.channel.EventLoopGroup;
 import org.flexlb.config.CacheMatchConfiguration;
@@ -116,6 +120,9 @@ public class EngineGrpcClient implements EngineAddressResolver.Listener {
             long requestTimeoutMs,
             ServiceType serviceType) {
         CompletableFuture<R> result = new CompletableFuture<>();
+        Context.CancellableContext operationContext = Context.current().withCancellation();
+        result.whenComplete((ignored, error) -> operationContext.cancel(error));
+        Deadline deadline = Deadline.after(requestTimeoutMs, TimeUnit.MILLISECONDS);
         EngineChannelKey channelKey = new EngineChannelKey(ip, port, serviceType);
         long startTime = System.nanoTime();
         try {
@@ -124,13 +131,14 @@ public class EngineGrpcClient implements EngineAddressResolver.Listener {
                     channelKey,
                     pooledChannel,
                     grpcCall,
-                    requestTimeoutMs,
+                    deadline,
+                    operationContext,
                     serviceType,
                     retriesBrokenConnections(serviceType),
                     false,
                     startTime,
                     result);
-        } catch (Exception error) {
+        } catch (RuntimeException | Error error) {
             result.completeExceptionally(error);
         }
         return result;
@@ -140,20 +148,31 @@ public class EngineGrpcClient implements EngineAddressResolver.Listener {
             EngineChannelKey channelKey,
             GrpcChannelPool.PooledChannel pooledChannel,
             Function<GrpcFutureStubWrapper, ListenableFuture<R>> grpcCall,
-            long requestTimeoutMs,
+            Deadline deadline,
+            Context.CancellableContext operationContext,
             ServiceType serviceType,
             boolean retryOnBrokenConnection,
             boolean retry,
             long startTime,
             CompletableFuture<R> result) {
+        if (result.isDone()) { return; }
+        if (deadline.isExpired() || operationContext.isCancelled()) {
+            Status status = operationContext.isCancelled() ? Contexts.statusFromCancelled(operationContext)
+                    : Status.DEADLINE_EXCEEDED.withDescription("RPC deadline expired before retry");
+            result.completeExceptionally(status.asRuntimeException());
+            return;
+        }
         try {
             pooledChannel.markUsed();
-            GrpcFutureStubWrapper stub = createFutureStub(pooledChannel.getChannel())
-                    .withDeadlineAfter(requestTimeoutMs, TimeUnit.MILLISECONDS);
-            ListenableFuture<R> response = grpcCall.apply(stub);
+            GrpcFutureStubWrapper stub = createFutureStub(pooledChannel.getChannel()).withDeadline(deadline);
+            Context previous = operationContext.attach();
+            ListenableFuture<R> response;
+            try { response = grpcCall.apply(stub); }
+            finally { operationContext.detach(previous); }
             Futures.addCallback(response, new FutureCallback<>() {
                 @Override
                 public void onSuccess(R value) {
+                    if (result.isDone()) { return; }
                     try {
                         reportSuccessfulCall(serviceType, startTime, retry, channelKey.ip(), channelKey.port());
                     } finally {
@@ -163,6 +182,7 @@ public class EngineGrpcClient implements EngineAddressResolver.Listener {
 
                 @Override
                 public void onFailure(Throwable error) {
+                    if (result.isDone()) { return; }
                     if (retryOnBrokenConnection
                             && error instanceof StatusRuntimeException statusError
                             && isConnectionBrokenError(statusError)) {
@@ -176,13 +196,14 @@ public class EngineGrpcClient implements EngineAddressResolver.Listener {
                                     channelKey,
                                     replacement,
                                     grpcCall,
-                                    requestTimeoutMs,
+                                    deadline,
+                                    operationContext,
                                     serviceType,
                                     false,
                                     true,
                                     startTime,
                                     result);
-                        } catch (Exception retryError) {
+                        } catch (RuntimeException | Error retryError) {
                             result.completeExceptionally(retryError);
                         }
                         return;
@@ -190,7 +211,7 @@ public class EngineGrpcClient implements EngineAddressResolver.Listener {
                     result.completeExceptionally(error);
                 }
             }, Runnable::run);
-        } catch (Exception error) {
+        } catch (RuntimeException | Error error) {
             result.completeExceptionally(error);
         }
     }
@@ -392,10 +413,9 @@ public class EngineGrpcClient implements EngineAddressResolver.Listener {
     private record GrpcFutureStubWrapper(RpcServiceGrpc.RpcServiceFutureStub rpcServiceStub,
                                          MultimodalRpcServiceGrpc.MultimodalRpcServiceFutureStub multimodalRpcServiceStub) {
 
-        GrpcFutureStubWrapper withDeadlineAfter(long timeout, TimeUnit unit) {
-            return new GrpcFutureStubWrapper(
-                    rpcServiceStub.withDeadlineAfter(timeout, unit),
-                    multimodalRpcServiceStub.withDeadlineAfter(timeout, unit));
+        GrpcFutureStubWrapper withDeadline(Deadline deadline) {
+            return new GrpcFutureStubWrapper(rpcServiceStub.withDeadline(deadline),
+                    multimodalRpcServiceStub.withDeadline(deadline));
         }
     }
 
