@@ -174,6 +174,7 @@ public class WorkerStatus {
         private final Long statusVersion;
         private final Long latestFinishedVersion;
         private final Map<String, TaskObservation> finishedTasks;
+        private final long observedAtUs = System.nanoTime() / 1000;
 
         private StatusObservation(
                 WorkerStatus owner,
@@ -191,6 +192,10 @@ public class WorkerStatus {
         }
 
         /** Exact service-discovery generation which issued this observation. */
+        public long observedAtUs() {
+            return observedAtUs;
+        }
+
         public WorkerStatus owner() {
             return owner;
         }
@@ -260,6 +265,29 @@ public class WorkerStatus {
     private final AtomicReference<CommittedWorkerStatus> committedStatus;
 
     private final AtomicReference<PollHealth> pollHealth;
+
+    /** Diagnostic only: last successfully applied or validated same-version observation. */
+    public record AppliedObservation(long observedAtUs, long statusVersion) { }
+
+    private final AtomicReference<AppliedObservation> appliedObservation =
+            new AtomicReference<>(new AppliedObservation(0L, -1L));
+
+    public AppliedObservation appliedObservation() {
+        return appliedObservation.get();
+    }
+
+    /** Called only after endpoint reduction succeeds; never changes routing policy. */
+    public void recordAppliedObservation(StatusObservation observation) {
+        requireGenerationLock();
+        requireActiveGeneration();
+        if (observation.owner() != this
+                || observation.statusVersion() == null
+                || observation.statusVersion() != appliedStatusCursor().statusVersion()) {
+            throw new IllegalArgumentException("observation does not match committed status");
+        }
+        appliedObservation.set(new AppliedObservation(
+                observation.observedAtUs(), observation.statusVersion()));
+    }
 
     /** Cache polling is independent from worker-status polling. */
     private final AtomicReference<CacheIndexSnapshot> cacheIndexSnapshot =

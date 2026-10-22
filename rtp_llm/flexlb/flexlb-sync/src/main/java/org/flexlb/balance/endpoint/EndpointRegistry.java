@@ -952,6 +952,20 @@ public class EndpointRegistry {
         }
     }
 
+    /** O(1) advisory directory capture; no pins, ledger locks or full-fleet copies. */
+    public record DiagnosticDirectory(
+            List<PrefillRoutingEntry> prefill,
+            List<Map.Entry<String, DecodeEndpoint>> decode) { }
+
+    public DiagnosticDirectory diagnosticDirectory() {
+        return new DiagnosticDirectory(prefillDirectory, decodeDirectory);
+    }
+
+    /** A changed directory makes absence inference unsafe for this capture. */
+    public boolean diagnosticDirectoryUnchanged(DiagnosticDirectory directory) {
+        return directory.prefill() == prefillDirectory && directory.decode() == decodeDirectory;
+    }
+
     /** Immutable point-in-time view; publication remains owned by this registry. */
     @SuppressWarnings("unchecked")
     public Map<String, PrefillEndpoint> snapshotPrefillEndpoints() {

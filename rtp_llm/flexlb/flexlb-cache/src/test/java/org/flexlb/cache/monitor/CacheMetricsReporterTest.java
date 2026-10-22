@@ -13,6 +13,7 @@ import org.mockito.junit.jupiter.MockitoExtension;
 import java.lang.reflect.Field;
 
 import static org.flexlb.constant.MetricConstant.CACHE_AFFINITY_DECISION;
+import static org.flexlb.constant.MetricConstant.CACHE_REMOVE_ENGINE_BLOCK_CACHE_RT;
 import static org.flexlb.constant.MetricConstant.CACHE_ENGINE_LOCAL_BYTES;
 import static org.flexlb.constant.MetricConstant.CACHE_ENGINE_LOCAL_COUNT;
 import static org.flexlb.constant.MetricConstant.CACHE_RECENT_KEY_HIT_COUNT;
@@ -60,6 +61,14 @@ class CacheMetricsReporterTest {
         verify(monitor).register(CACHE_ROUTING_SELECTED_MATCH_TOTAL_TOKENS, FlexMetricType.QPS);
         verify(monitor).register(CACHE_ROUTING_CANDIDATE_MAX_HIT_TOKENS, FlexMetricType.QPS);
         verify(monitor).register(CACHE_AFFINITY_DECISION, FlexMetricType.QPS);
+    }
+
+    @Test
+    void should_register_and_report_engine_retirement_time_in_milliseconds() {
+        reporter.init();
+        verify(monitor).register(CACHE_REMOVE_ENGINE_BLOCK_CACHE_RT, FlexMetricType.GAUGE);
+        reporter.reportEngineCacheRemovalTime(12.5);
+        verify(monitor).report(CACHE_REMOVE_ENGINE_BLOCK_CACHE_RT, 12.5);
     }
 
     @Test

@@ -7,12 +7,10 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
-import java.lang.reflect.Field;
 import java.nio.file.Path;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
@@ -134,7 +132,7 @@ class CancelTerminalBatchIdTest {
         MockPerformanceModel fastModel = model("10");
         newPrefillService(fastModel);
         long finishedId = 300L;
-        enqueue(prefill, batch(99L, slot(0, input(finishedId, 16))));
+        MockEngineTestSupport.enqueueAndFetch(prefill, batch(99L, slot(0, input(finishedId, 16))));
         awaitTerminal(finishedId);
         JavaMockEngineCluster.CancelResult finished = prefill.cancelRequest(finishedId);
         assertTrue(finished.alreadyFinished(),
@@ -146,11 +144,12 @@ class CancelTerminalBatchIdTest {
     private void awaitTerminal(long requestId) throws Exception {
         long deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(10_000);
         while (System.nanoTime() < deadline) {
-            if (completionOf(requestId) != null) {
+            if (completionOf(requestId) != null && ((Number) prefill.getSnapshot().get("prefill_contexts")).intValue() == 0) {
                 return;
             }
             Thread.sleep(10);
         }
+        throw new AssertionError("request did not finish its Fetch context: " + requestId);
     }
 
     // ──────────── Service / model helpers ────────────
@@ -180,25 +179,12 @@ class CancelTerminalBatchIdTest {
         return MockPerformanceModel.load(performance.toString(), master.toString());
     }
 
-    // ──────────── Terminal-frame access (reflection on completions queue) ────────────
+    // ──────────── Terminal-frame access through the status RPC ────────────
 
     private EngineRpcService.TaskInfoPB completionOf(long requestId) throws Exception {
-        Field field = JavaMockEngineCluster.FastRpcService.class
-                .getDeclaredField("completions");
-        field.setAccessible(true);
-        ConcurrentLinkedQueue<?> queue =
-                (ConcurrentLinkedQueue<?>) field.get(prefill);
-        Object latest = null;
-        for (Object element : queue) {
-            Field taskField = element.getClass().getDeclaredField("task");
-            taskField.setAccessible(true);
-            EngineRpcService.TaskInfoPB task =
-                    (EngineRpcService.TaskInfoPB) taskField.get(element);
-            if (task.getRequestId() == requestId) {
-                latest = task;
-            }
-        }
-        return (EngineRpcService.TaskInfoPB) latest;
+        return MockEngineTestSupport.workerStatus(prefill, 0).getFinishedTaskListList().stream()
+                .filter(t -> t.getRequestId() == requestId)
+                .reduce((previous, current) -> current).orElse(null);
     }
 
     // ──────────── Protobuf / RPC helpers ────────────

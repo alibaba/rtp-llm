@@ -117,8 +117,11 @@ public class KvCacheManager {
         if (engineIpPort == null) {
             return;
         }
+        long startedNs = System.nanoTime();
         engineLocalView.removeAllCacheBlockOfEngine(engineIpPort);
         globalCacheIndex.removeAllCacheBlockOfEngine(engineIpPort);
+        cacheMetricsReporter.reportEngineCacheRemovalTime(
+                (System.nanoTime() - startedNs) / 1_000_000.0);
         cacheMetricsReporter.reportGlobalCacheMetrics(
                 globalCacheIndex.totalBlocks(),
                 globalCacheIndex.totalMappings());

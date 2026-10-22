@@ -255,6 +255,9 @@ public class GrpcWorkerStatusRunner implements Runnable {
                     activityProjection = ep.observeStatusHeartbeat(
                             workerStatus, observation);
                 }
+                if (ep != null) {
+                    workerStatus.recordAppliedObservation(observation);
+                }
             } finally {
                 workerStatus.lock.unlock();
                 try {

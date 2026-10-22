@@ -1,0 +1,45 @@
+case_schema_version: 2
+case: request_completion
+program: default
+metadata:
+  kind: functional
+  description: Submitted requests reach a business terminal without stream errors.
+  category: status
+  tags:
+  - smoke
+  - lifecycle
+profiles:
+- batch-window
+- single-nonbatch
+- single-batch
+- window-nonbatch
+environment:
+  backend: java_mock
+  n_prefill: 2
+  n_decode: 2
+execution:
+  timeout_s: 300
+  stage_timeout_s: 60
+  cleanup_timeout_s: 120
+  collection: diagnostic
+parameters:
+  traffic:
+    kind: request_batch
+    input_len: 2048
+    output_len: 2
+    count: 1
+  procedure:
+    setup_timeout_s: 180
+  checks:
+    completed:
+      op: eq
+      expected: true
+      windows: [terminal]
+      output: completed
+      unit: boolean
+    no_errors:
+      op: eq
+      expected: 0
+      windows: [terminal]
+      output: error_count
+      unit: errors
