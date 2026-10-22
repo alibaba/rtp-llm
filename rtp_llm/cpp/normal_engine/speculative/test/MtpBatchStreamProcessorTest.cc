@@ -1104,6 +1104,125 @@ TEST_F(MtpBatchStreamProcessorTest, testUpdatePrefillPostDraftModelInputShiftsCo
     EXPECT_TRUE(model_input.combo_tokens.is_cuda());
     EXPECT_TRUE(model_input.input_lengths.is_cuda());
     EXPECT_TRUE(model_input.prefix_lengths.is_cuda());
+
+    // Fully reused images retain a mask; target mRoPE IDs must remain unchanged.
+    model_input.combo_tokens = torch::tensor({10, 11, 20, 21, 22}, torch::kInt32);
+    model_input.combo_position_ids =
+        torch::tensor({100, 101, 102, 110, 111, 112, 200, 201, 202, 210, 211, 212, 220, 221, 222}, torch::kInt32);
+    model_input.text_tokens_mask  = torch::ones({5}, torch::kInt32);
+    const auto original_positions = model_input.combo_position_ids;
+    processor.updatePrefillPostDraftModelInput(stream_groups, model_input, model_output, sampler_output, holder);
+    EXPECT_EQ((vector<int>{110, 111, 112, 112, 112, 112, 210, 211, 212, 220, 221, 222, 222, 222, 222}),
+              toVec<int>(model_input.combo_position_ids));
+    EXPECT_EQ((vector<int>{100, 101, 102, 110, 111, 112, 200, 201, 202, 210, 211, 212, 220, 221, 222}),
+              toVec<int>(original_positions));
+    EXPECT_TRUE(model_input.multimodal_features->empty());
+    EXPECT_EQ((vector<int>{1, 1, 1, 1, 1}), toVec<int>(model_input.text_tokens_mask));
+}
+
+TEST_F(MtpBatchStreamProcessorTest, testPrepareDraftPrefillMultimodalInputStaysWithinRequests) {
+    ModelConfig model_config;
+    model_config.max_seq_len = 2048;
+    model_config.vocab_size  = 8;
+    model_config.num_layers  = 1;
+    RuntimeConfig           runtime_config;
+    ResourceContext         resource_context;
+    auto                    s1 = createContextStream(model_config, runtime_config, resource_context, {1}, 1);
+    auto                    s2 = createContextStream(model_config, runtime_config, resource_context, {1, 2, 3, 4}, 2);
+    auto                    s3 = createContextStream(model_config, runtime_config, resource_context, {1, 2, 3}, 3);
+    auto                    s4 = createContextStream(model_config, runtime_config, resource_context, {1, 2}, 4);
+    StreamGroups            groups({s1, s2, s3, s4});
+    MtpBatchStreamProcessor processor(model_config,
+                                      PDSepConfig{},
+                                      ProfilingDebugLoggingConfig{},
+                                      makeProcessorCacheConfig(),
+                                      SpeculativeExecutionConfig{},
+                                      false);
+    GptModelInputs          input;
+    input.combo_tokens              = torch::tensor({-9, -10, 1, 2, 3, 1, -11, -12, 2, 3}, torch::kInt32);
+    input.input_lengths             = torch::tensor({1, 4, 3, 2}, torch::kInt32);
+    input.prefix_lengths            = torch::tensor({0, 5, 0, 0}, torch::kInt32);
+    input.text_tokens_mask          = torch::tensor({0, 0, 0, 1, 1, 1, 0, 0, 1, 1}, torch::kInt32);
+    input.combo_tokens_type_ids     = torch::tensor({1, 2, 2, 0, 0, 0, 3, 3, 0, 0}, torch::kInt32);
+    input.mm_features_locs          = torch::tensor({0, 1, 6}, torch::kInt32);
+    const auto f0                   = torch::tensor({10.f, 11.f}).reshape({1, 2});
+    const auto f1                   = torch::tensor({20.f, 21.f, 22.f, 23.f}).reshape({2, 2});
+    const auto f2                   = torch::tensor({30.f, 31.f, 32.f, 33.f}).reshape({2, 2});
+    const auto extra                = torch::arange(8, torch::kFloat32);
+    input.multimodal_features       = std::vector<torch::Tensor>{f0, f1, f2};
+    input.mm_extra_input            = std::vector<torch::Tensor>{torch::zeros({4}), extra, extra};
+    const auto      original_tokens = input.combo_tokens;
+    const auto      original_mask   = input.text_tokens_mask;
+    const auto      original_locs   = input.mm_features_locs;
+    const auto      original_types  = input.combo_tokens_type_ids;
+    GptModelOutputs output;
+    output.all_hidden_states = torch::arange(20, torch::kFloat32).reshape({10, 2});
+    SamplerOutput sample;
+    sample.token_ids = torch::tensor({4, 5, 6, 7}, torch::kInt32).reshape({4, 1});
+    TensorHolder holder;
+    processor.updatePrefillPostDraftModelInput(groups, input, output, sample, holder);
+    EXPECT_EQ((vector<int>{4, 1, 2, 3, 5, -11, -12, 6, 3, 7}), toVec<int>(input.combo_tokens));
+    EXPECT_EQ((vector<int>{1, 0, 1, 1, 1, 0, 0, 1, 1, 1}), toVec<int>(input.text_tokens_mask));
+    EXPECT_EQ((vector<int>{1, 5}), toVec<int>(input.mm_features_locs));
+    EXPECT_EQ((vector<int>{0, 2, 0, 0, 0, 3, 3, 0, 0, 0}), toVec<int>(input.combo_tokens_type_ids));
+    EXPECT_EQ((vector<int>{1, 2, 2, 0, 0, 0, 3, 3, 0, 0}), toVec<int>(original_types));
+    ASSERT_EQ(input.multimodal_features->size(), 2);
+    EXPECT_TRUE(torch::equal(input.multimodal_features.value()[0], f1.slice(0, 1, 2)));
+    EXPECT_TRUE(torch::equal(input.multimodal_features.value()[1], f2));
+    ASSERT_EQ(input.mm_extra_input->size(), 2);
+    EXPECT_EQ((vector<float>{2, 3, 6, 7}), toVec<float>(input.mm_extra_input.value()[0]));
+    EXPECT_TRUE(torch::equal(input.mm_extra_input.value()[1], extra));
+    EXPECT_EQ((vector<int>{-9, -10, 1, 2, 3, 1, -11, -12, 2, 3}), toVec<int>(original_tokens));
+    EXPECT_EQ((vector<int>{0, 0, 0, 1, 1, 1, 0, 0, 1, 1}), toVec<int>(original_mask));
+    EXPECT_EQ((vector<int>{0, 1, 6}), toVec<int>(original_locs));
+    EXPECT_EQ((vector<float>{20, 21, 22, 23}), toVec<float>(f1));
+    EXPECT_EQ((vector<int>{0, 5, 0, 0}), toVec<int>(input.prefix_lengths));
+    EXPECT_EQ(input.last_hidden_states.data_ptr(), output.all_hidden_states.data_ptr());
+
+    // A one-row image can disappear entirely; publish empty loc/extra lists.
+    input.combo_tokens          = torch::tensor({-9}, torch::kInt32);
+    input.input_lengths         = torch::tensor({1}, torch::kInt32);
+    input.prefix_lengths        = torch::tensor({0}, torch::kInt32);
+    input.text_tokens_mask      = torch::tensor({0}, torch::kInt32);
+    input.combo_tokens_type_ids = torch::tensor({1}, torch::kInt32);
+    input.mm_features_locs      = torch::tensor({0}, torch::kInt32);
+    input.multimodal_features   = std::vector<torch::Tensor>{f0};
+    input.mm_extra_input        = std::vector<torch::Tensor>{torch::zeros({4})};
+    sample.token_ids            = torch::tensor({4}, torch::kInt32).reshape({1, 1});
+    processor.updatePrefillPostDraftModelInput(StreamGroups({s1}), input, output, sample, holder);
+    EXPECT_TRUE(input.multimodal_features->empty());
+    EXPECT_TRUE(input.mm_extra_input->empty());
+    EXPECT_EQ(input.mm_features_locs.numel(), 0);
+    EXPECT_EQ((vector<int>{1}), toVec<int>(input.text_tokens_mask));
+    EXPECT_EQ((vector<int>{4}), toVec<int>(input.combo_tokens));
+    EXPECT_EQ((vector<int>{0}), toVec<int>(input.combo_tokens_type_ids));
+}
+
+TEST_F(MtpBatchStreamProcessorTest, testValidatePrefillMultimodalInput) {
+    GenerateInput input;
+    input.input_ids = torch::tensor({1, -100, 2, 3}, torch::kInt32);
+    EXPECT_TRUE(MtpBatchStreamProcessor::validatePrefillMultimodalInput(input).ok());
+    input.multimodal_features = std::vector<torch::Tensor>{torch::ones({2, 2})};
+    input.mm_locs             = torch::tensor({1}, torch::kInt32);
+    EXPECT_FALSE(MtpBatchStreamProcessor::validatePrefillMultimodalInput(input).ok());
+    input.text_tokens_mask = torch::ones({3}, torch::kInt32);
+    EXPECT_FALSE(MtpBatchStreamProcessor::validatePrefillMultimodalInput(input).ok());
+    input.text_tokens_mask = torch::ones({4}, torch::kInt64);
+    EXPECT_FALSE(MtpBatchStreamProcessor::validatePrefillMultimodalInput(input).ok());
+    input.text_tokens_mask = torch::tensor({1, 0, 0, 1}, torch::kInt32);
+    EXPECT_TRUE(MtpBatchStreamProcessor::validatePrefillMultimodalInput(input).ok());
+    for (int loc : {-1, 3}) {
+        input.mm_locs = torch::tensor({loc}, torch::kInt32);
+        EXPECT_FALSE(MtpBatchStreamProcessor::validatePrefillMultimodalInput(input).ok());
+    }
+    input.mm_locs        = torch::tensor({1}, torch::kInt32);
+    input.mm_extra_input = std::vector<torch::Tensor>{torch::zeros({8}), torch::zeros({8})};
+    EXPECT_FALSE(MtpBatchStreamProcessor::validatePrefillMultimodalInput(input).ok());
+    input.mm_extra_input.reset();
+    input.multimodal_features->push_back(torch::ones({1, 2}));
+    EXPECT_FALSE(MtpBatchStreamProcessor::validatePrefillMultimodalInput(input).ok());
+    input.mm_locs = torch::tensor({1, 2}, torch::kInt32);
+    EXPECT_FALSE(MtpBatchStreamProcessor::validatePrefillMultimodalInput(input).ok());
 }
 
 TEST_F(MtpBatchStreamProcessorTest, testUpdateDecodePostDraftModelInputKeepsDenseLayout) {

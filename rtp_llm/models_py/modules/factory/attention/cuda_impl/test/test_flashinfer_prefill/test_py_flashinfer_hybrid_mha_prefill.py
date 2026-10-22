@@ -612,7 +612,7 @@ class TestDynamicFp8HybridUnit(unittest.TestCase):
             ),
         )
         op = _NoReleaseHybridAttnOp.__new__(_NoReleaseHybridAttnOp)
-        op.dynamic_fp8 = True
+        op.use_per_token_fp8_kv_cache = True
         op.fmha_params = params
         op.ragged_wrapper = ragged
         op.prefix_paged_wrapper = prefix
@@ -705,10 +705,9 @@ class TestDynamicFp8HybridUnit(unittest.TestCase):
         config.attn_configs.fp8_kv_cache_mode = 2
         config.attn_configs.is_causal = True
         inputs = harness._create_chunked_prefill_attention_inputs(
-            len(prefix_lengths),
-            prefix_lengths,
-            input_lengths,
-            kernel_page_size,
+            input_lengths=input_lengths,
+            prefix_lengths=prefix_lengths,
+            seq_size_per_block=kernel_page_size,
         )
         block_table = torch.zeros_like(inputs.kv_cache_kernel_block_id)
         physical_page_offset = 0
@@ -848,7 +847,7 @@ class TestDynamicFp8HybridUnit(unittest.TestCase):
             head_size=64,
             physical_page_size=physical_page_size,
             kernel_page_size=kernel_page_size,
-            dynamic_mode=True,
+            use_per_token_fp8_kv_cache=True,
         )
         writer.set_params(params)
 
@@ -915,10 +914,9 @@ class TestDynamicFp8HybridUnit(unittest.TestCase):
                     config.attn_configs.fp8_kv_cache_mode = 2
                     config.attn_configs.is_causal = True
                     inputs = harness._create_chunked_prefill_attention_inputs(
-                        len(prefix_lengths),
-                        prefix_lengths,
-                        input_lengths,
-                        kernel_page_size,
+                        input_lengths=input_lengths,
+                        prefix_lengths=prefix_lengths,
+                        seq_size_per_block=kernel_page_size,
                         dtype=dtype,
                     )
 
@@ -974,7 +972,7 @@ class TestDynamicFp8HybridUnit(unittest.TestCase):
                         head_size=128,
                         physical_page_size=physical_page_size,
                         kernel_page_size=kernel_page_size,
-                        dynamic_mode=True,
+                        use_per_token_fp8_kv_cache=True,
                     )
                     prefix_params = rtp_llm_ops.FlashInferMlaAttnParams()
                     prefix_params.fill_params(
@@ -1061,9 +1059,10 @@ class TestDynamicFp8FactoryGating(unittest.TestCase):
         )
 
     @staticmethod
-    def _impl(name, constructor=None, supports_cuda_graph=False):
+    def _impl(name, constructor=None, supports_cuda_graph=False, supports_fp8=False):
         class Impl:
             accepts_fmha_config = False
+            supports_per_token_fp8_kv_cache = supports_fp8
 
             @staticmethod
             def support(attn_configs, attn_inputs):
@@ -1084,12 +1083,12 @@ class TestDynamicFp8FactoryGating(unittest.TestCase):
         Impl.__name__ = name
         return Impl
 
-    def test_only_native_flashinfer_backend_is_instantiated(self):
+    def test_only_capable_prefill_backend_is_instantiated(self):
         disallowed = self._impl(
             "OtherBackend",
             constructor=lambda: self.fail("disallowed backend was instantiated"),
         )
-        allowed = self._impl("PyFlashinferPrefillImpl")
+        allowed = self._impl("CapablePrefillBackend", supports_fp8=True)
         inputs = SimpleNamespace(is_prefill=True)
         with mock.patch.object(attn_factory, "PREFILL_MHA_IMPS", [disallowed, allowed]):
             result = attn_factory.get_fmha_impl(
@@ -1097,12 +1096,12 @@ class TestDynamicFp8FactoryGating(unittest.TestCase):
             )
         self.assertIsInstance(result, allowed)
 
-    def test_decode_only_instantiates_native_flashinfer_backend(self):
+    def test_only_capable_decode_backend_is_instantiated(self):
         disallowed = self._impl(
             "OtherDecodeBackend",
             constructor=lambda: self.fail("disallowed decode backend was instantiated"),
         )
-        allowed = self._impl("PyFlashinferDecodeImpl")
+        allowed = self._impl("CapableDecodeBackend", supports_fp8=True)
         inputs = SimpleNamespace(is_prefill=False)
         with mock.patch.object(attn_factory, "DECODE_MHA_IMPS", [disallowed, allowed]):
             result = attn_factory.get_fmha_impl(
@@ -1111,7 +1110,9 @@ class TestDynamicFp8FactoryGating(unittest.TestCase):
         self.assertIsInstance(result, allowed)
 
     def test_mode2_cuda_graph_allows_native_single_token_decode(self):
-        allowed = self._impl("PyFlashinferDecodeImpl", supports_cuda_graph=True)
+        allowed = self._impl(
+            "PyFlashinferDecodeImpl", supports_cuda_graph=True, supports_fp8=True
+        )
         inputs = SimpleNamespace(is_prefill=False)
         with mock.patch.object(attn_factory, "DECODE_MHA_IMPS", [allowed]):
             result = attn_factory.get_fmha_impl(
@@ -1123,55 +1124,72 @@ class TestDynamicFp8FactoryGating(unittest.TestCase):
             )
         self.assertIsInstance(result, allowed)
 
-    def test_allowed_backend_constructor_failure_does_not_fallback(self):
-        fallback_calls = []
-
+    def test_constructor_failure_falls_back_only_to_capable_backend(self):
         def fail_constructor():
             raise RuntimeError("construction failed")
 
-        broken = self._impl("PyFlashinferPrefillImpl", fail_constructor)
-        fallback = self._impl(
-            "PyFlashinferPagedPrefillImpl",
-            constructor=lambda: fallback_calls.append(True),
+        broken = self._impl(
+            "PyFlashinferPrefillImpl", fail_constructor, supports_fp8=True
         )
-        with mock.patch.object(attn_factory, "PREFILL_MHA_IMPS", [broken, fallback]):
-            with self.assertRaisesRegex(RuntimeError, "required attention backend"):
+        disallowed = self._impl(
+            "OtherBackend", constructor=lambda: self.fail("incompatible fallback")
+        )
+        fallback = self._impl("PyFlashinferPagedPrefillImpl", supports_fp8=True)
+        with mock.patch.object(
+            attn_factory, "PREFILL_MHA_IMPS", [broken, disallowed, fallback]
+        ):
+            result = attn_factory.get_fmha_impl(
+                self._config(),
+                None,
+                SimpleNamespace(is_prefill=True),
+                parallelism_config=None,
+            )
+        self.assertIsInstance(result, fallback)
+
+    def test_mode2_prefill_graph_requires_graph_capable_backend(self):
+        for supports_graph in (False, True):
+            with self.subTest(supports_graph=supports_graph):
+                backend = self._impl(
+                    "CapablePrefillBackend",
+                    supports_cuda_graph=supports_graph,
+                    supports_fp8=True,
+                )
+                with mock.patch.object(attn_factory, "PREFILL_MHA_IMPS", [backend]):
+                    if not supports_graph:
+                        with self.assertRaisesRegex(
+                            ValueError, "No MHA backend supports per-token"
+                        ):
+                            attn_factory.get_fmha_impl(
+                                self._config(),
+                                None,
+                                SimpleNamespace(is_prefill=True),
+                                is_cuda_graph=True,
+                            )
+                        continue
+                    result = attn_factory.get_fmha_impl(
+                        self._config(),
+                        None,
+                        SimpleNamespace(is_prefill=True),
+                        is_cuda_graph=True,
+                    )
+                    self.assertIsInstance(result, backend)
+
+    def test_mode2_rejects_backend_that_fails_support_check(self):
+        backend = self._impl("CapablePrefillBackend", supports_fp8=True)
+        with mock.patch.object(
+            attn_factory, "PREFILL_MHA_IMPS", [backend]
+        ), mock.patch.object(backend, "support", return_value=False), mock.patch.object(
+            backend, "__new__"
+        ) as constructor:
+            with self.assertRaisesRegex(
+                ValueError, "No MHA backend supports per-token"
+            ):
                 attn_factory.get_fmha_impl(
                     self._config(),
                     None,
                     SimpleNamespace(is_prefill=True),
-                    parallelism_config=None,
                 )
-        self.assertEqual(fallback_calls, [])
-
-    def test_rejects_unsupported_mode2_features_before_selection(self):
-        cases = (
-            ("cuda_graph", lambda config: None, True, "CUDA graph"),
-            ("mla", lambda config: setattr(config, "use_mla", True), False, "MLA"),
-            (
-                "mrope",
-                lambda config: setattr(config.rope_config, "style", RopeStyle.Mrope),
-                False,
-                "MRoPE",
-            ),
-            (
-                "logn",
-                lambda config: setattr(config, "use_logn_attn", True),
-                False,
-                "use_logn_attn",
-            ),
-        )
-        for name, mutate, is_cuda_graph, message in cases:
-            with self.subTest(name=name):
-                config = self._config()
-                mutate(config)
-                with self.assertRaisesRegex(ValueError, message):
-                    attn_factory.get_fmha_impl(
-                        config,
-                        None,
-                        SimpleNamespace(is_prefill=True),
-                        is_cuda_graph=is_cuda_graph,
-                    )
+            constructor.assert_not_called()
 
 
 class TestPyFlashinferHybridPrefillAttnOpFP8(TestPyFlashinferHybridPrefillAttnOp):
@@ -1195,7 +1213,9 @@ class TestPyFlashinferHybridPrefillAttnOpFP8(TestPyFlashinferHybridPrefillAttnOp
         )
         self._enable_qwen35_mrope_mode1(config)
         inputs = self._create_chunked_prefill_attention_inputs(
-            len(prefix_lengths), prefix_lengths, input_lengths, page_size
+            input_lengths=input_lengths,
+            prefix_lengths=prefix_lengths,
+            seq_size_per_block=page_size,
         )
         position_ids = self._add_qwen35_mrope_inputs(
             inputs, input_lengths, prefix_lengths
@@ -1273,7 +1293,7 @@ class TestPyFlashinferHybridPrefillAttnOpFP8(TestPyFlashinferHybridPrefillAttnOp
             config.attn_configs, inputs, config.parallelism_config
         )
         events = []
-        fused_forward = impl.fused_mrope_impl.forward
+        fused_forward = impl.rope_impl.forward
         cache_write = impl.kv_cache_write_op.forward
 
         def observed_fused_forward(qkv_input, cache, params):
@@ -1317,7 +1337,7 @@ class TestPyFlashinferHybridPrefillAttnOpFP8(TestPyFlashinferHybridPrefillAttnOp
             events.append("cache_store")
 
         with mock.patch.object(
-            impl.fused_mrope_impl,
+            impl.rope_impl,
             "forward",
             side_effect=observed_fused_forward,
         ) as fused_mock, mock.patch.object(

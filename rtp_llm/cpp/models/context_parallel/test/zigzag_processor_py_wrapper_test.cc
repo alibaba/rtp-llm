@@ -1,5 +1,6 @@
 #include "rtp_llm/cpp/models/context_parallel/ZigzagProcessor.h"
 #include "rtp_llm/models_py/bindings/OpDefs.h"
+#include "rtp_llm/models_py/bindings/OpDefsUtils.h"
 #include "rtp_llm/models_py/bindings/core/OpData.h"
 #include <pybind11/pybind11.h>
 #include <pybind11/stl.h>
@@ -239,6 +240,19 @@ PYBIND11_MODULE(libth_context_parallel_py_wrapper_test, m) {
           py::arg("cp_rank"),
           py::arg("cp_size"),
           "Remap global per-token side inputs for one context-parallel rank");
+
+    m.def(
+        "calculate_padding_offset",
+        [](const torch::Tensor& input_lengths, const std::optional<torch::Tensor>& prefix_lengths) {
+            torch_ext::PyAttentionInputs inputs;
+            inputs.input_lengths  = input_lengths;
+            inputs.prefix_lengths = prefix_lengths.value_or(torch::Tensor());
+            inputs.total_tokens   = input_lengths.sum().item<int>();
+            calculatePaddingOffset(inputs);
+            return inputs.padding_offset;
+        },
+        py::arg("input_lengths"),
+        py::arg("prefix_lengths") = py::none());
 }
 
 }  // namespace unittest

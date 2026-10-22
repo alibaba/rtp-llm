@@ -24,6 +24,9 @@ from rtp_llm.models_py.modules import (
     LinearFactory,
     RMSNorm,
 )
+from rtp_llm.models_py.modules.base.common.multimodal_embedding import (
+    MultimodalEmbedding,
+)
 from rtp_llm.ops import HWKernelConfig, ParallelismConfig
 from rtp_llm.ops.compute_ops import LayerKVCache, PyModelInputs, PyModelOutputs
 from rtp_llm.utils.model_weight import W
@@ -238,6 +241,8 @@ class AngelSlimQwen3Eagle3Model(GptModelBase):
         self.embed_tokens = Embedding(
             config, parallelism_config, weights.get_global_weight(W.embedding)
         )
+        if config.use_multimodal_embedding:
+            self.embed_tokens = MultimodalEmbedding(self.embed_tokens)
         self.fc = LinearFactory.create_linear_from_weights(
             weights.weights[0],
             W.eagle3_fc_proj,
@@ -287,7 +292,10 @@ class AngelSlimQwen3Eagle3Model(GptModelBase):
                 f"tokens={input_ids.numel()}, hidden_rows={input_hiddens.size(0)}"
             )
 
-        input_embeds = self.embed_tokens(input_ids)
+        if self.config.use_multimodal_embedding:
+            input_embeds = self.embed_tokens(input_ids, model_inputs=inputs)
+        else:
+            input_embeds = self.embed_tokens(input_ids)
         if input_hiddens.size(-1) != self.config.hidden_size:
             expected_width = 3 * self.config.hidden_size
             if input_hiddens.size(-1) != expected_width:

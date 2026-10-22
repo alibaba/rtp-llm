@@ -73,6 +73,8 @@ public:
                                           const SamplerOutput&   sampler_output,
                                           TensorHolder&          host_holder);
 
+    static absl::Status validatePrefillMultimodalInput(const GenerateInput& input);
+
     // DSpARK runs two standard-slot draft calls per round: a commit call
     // (incremental-prefill shape, normalized target feature rows handed off
     // through last_hidden_states) and a

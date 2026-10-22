@@ -13,7 +13,7 @@ namespace rtp_llm {
 
 GptModelInputShapeHints getModelInputShapeHints(const GptModelInputs& inputs) {
     GptModelInputShapeHints shape_hints{};
-    shape_hints[GptModelInputIndex::comboTokens] = inputs.combo_tokens.defined() ? inputs.combo_tokens.numel() : 0;
+    shape_hints[GptModelInputIndex::comboTokens]  = inputs.combo_tokens.defined() ? inputs.combo_tokens.numel() : 0;
     shape_hints[GptModelInputIndex::inputLengths] = inputs.input_lengths.defined() ? inputs.input_lengths.numel() : 0;
     shape_hints[GptModelInputIndex::sequenceLengths] =
         inputs.sequence_lengths.defined() ? inputs.sequence_lengths.numel() : 0;
@@ -41,6 +41,8 @@ GptModelInputShapeHints getModelInputShapeHints(const GptModelInputs& inputs) {
         inputs.lm_output_indexes.defined() ? inputs.lm_output_indexes.numel() : 0;
     shape_hints[GptModelInputIndex::comboPositionIds] =
         inputs.combo_position_ids.defined() ? inputs.combo_position_ids.numel() : 0;
+    shape_hints[GptModelInputIndex::comboTokenTypeIds] =
+        inputs.combo_tokens_type_ids.defined() ? inputs.combo_tokens_type_ids.numel() : 0;
     shape_hints[GptModelInputIndex::textTokensMask] =
         inputs.text_tokens_mask.defined() ? inputs.text_tokens_mask.numel() : 0;
     shape_hints[GptModelInputIndex::mmFeaturesLocs] =
@@ -95,6 +97,9 @@ GptModelInputShapeHints getModelInputShapeHints(const GptModelInputs& inputs) {
     }
     if (inputs.kv_cache_kernel_block_id.defined() && inputs.kv_cache_kernel_block_id.is_cuda()) {
         device_bits |= GptModelInputDeviceBit::kDeviceBitKernelBlockId;
+    }
+    if (inputs.combo_tokens_type_ids.defined() && inputs.combo_tokens_type_ids.is_cuda()) {
+        device_bits |= GptModelInputDeviceBit::kDeviceBitTokenTypeIds;
     }
     shape_hints[GptModelInputIndex::tensorDeviceMap] = static_cast<int64_t>(device_bits);
     return shape_hints;
@@ -195,12 +200,13 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
         cudaSyncAndCheck();
     }
 
-    const auto max_kernel_blocks = checkedHint(GptModelInputIndex::maxKernelBlocksPerBatch, "maxKernelBlocksPerBatch");
-    const auto max_blocks        = checkedHint(GptModelInputIndex::maxBlocksPerBatch, "maxBlocksPerBatch");
-    const auto cache_keys_width  = checkedHint(GptModelInputIndex::cacheKeysWidth, "cacheKeysWidth");
-    const auto kv_cache_group_num      = checkedHint(GptModelInputIndex::kvCacheGroupNum, "kvCacheGroupNum");
-    const auto group_types_len         = checkedHint(GptModelInputIndex::kvCacheGroupTypesLen, "kvCacheGroupTypesLen");
+    const auto max_kernel_blocks  = checkedHint(GptModelInputIndex::maxKernelBlocksPerBatch, "maxKernelBlocksPerBatch");
+    const auto max_blocks         = checkedHint(GptModelInputIndex::maxBlocksPerBatch, "maxBlocksPerBatch");
+    const auto cache_keys_width   = checkedHint(GptModelInputIndex::cacheKeysWidth, "cacheKeysWidth");
+    const auto kv_cache_group_num = checkedHint(GptModelInputIndex::kvCacheGroupNum, "kvCacheGroupNum");
+    const auto group_types_len    = checkedHint(GptModelInputIndex::kvCacheGroupTypesLen, "kvCacheGroupTypesLen");
     const auto combo_position_ids_size = checkedHint(GptModelInputIndex::comboPositionIds, "comboPositionIds");
+    const auto token_type_ids_size     = checkedHint(GptModelInputIndex::comboTokenTypeIds, "comboTokenTypeIds");
     const auto text_tokens_mask_size   = checkedHint(GptModelInputIndex::textTokensMask, "textTokensMask");
     const auto mm_features_locs_size   = checkedHint(GptModelInputIndex::mmFeaturesLocs, "mmFeaturesLocs");
     const auto hidden_states_size      = checkedHint(GptModelInputIndex::mtpHiddenStates, "mtpHiddenStates");
@@ -265,12 +271,10 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
             // RTP_LLM_DEVICE_INPUT publishes it to CUDA. Follow the root bitmap so the packed-buffer
             // classification below stays identical across ranks (otherwise pack/unpack drifts
             // off-by-tensor and non-root unpacks garbage).
-            inputs.kv_cache_kernel_block_id =
-                allocBuf(rtp_llm::DataType::TYPE_INT32,
-                         {kv_cache_group_num,
-                          checkedHint(GptModelInputIndex::inputLengths, "inputLengths"),
-                          max_kernel_blocks},
-                         pickAlloc(GptModelInputDeviceBit::kDeviceBitKernelBlockId));
+            inputs.kv_cache_kernel_block_id = allocBuf(
+                rtp_llm::DataType::TYPE_INT32,
+                {kv_cache_group_num, checkedHint(GptModelInputIndex::inputLengths, "inputLengths"), max_kernel_blocks},
+                pickAlloc(GptModelInputDeviceBit::kDeviceBitKernelBlockId));
             inputs.kv_cache_update_mapping =
                 allocBuf(rtp_llm::DataType::TYPE_INT32,
                          {checkedHint(GptModelInputIndex::kvCacheUpdateCopyNum, "kvCacheUpdateCopyNum"), 3});
@@ -295,6 +299,11 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
         if (combo_position_ids_size) {
             inputs.combo_position_ids = allocBuf(rtp_llm::DataType::TYPE_INT32, {combo_position_ids_size});
         }
+        inputs.combo_tokens_type_ids = token_type_ids_size ?
+                                           allocBuf(rtp_llm::DataType::TYPE_INT32,
+                                                    {token_type_ids_size},
+                                                    pickAlloc(GptModelInputDeviceBit::kDeviceBitTokenTypeIds)) :
+                                           torch::Tensor();
         if (hidden_states_size) {
             // DSpARK prefill seeding makes last_hidden_states' row count
             // independent from combo_tokens, so the row count travels as its own
@@ -366,6 +375,9 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
     collect(inputs.lm_output_indexes);
     if (combo_position_ids_size) {
         collect(inputs.combo_position_ids);
+    }
+    if (token_type_ids_size) {
+        collect(inputs.combo_tokens_type_ids);
     }
     if (text_tokens_mask_size) {
         collect(inputs.text_tokens_mask);

@@ -156,6 +156,37 @@ struct FusedVec<__nv_bfloat16> {
 };
 #endif
 
+template<typename T, typename Vec>
+__device__ void apply_mrope(Vec& value, const T* row, int offset, const int32_t* pos, const RopeConfig& config) {
+    constexpr int width    = FusedVec<T>::size;
+    const int     half_dim = config.dim / 2;
+#pragma unroll
+    for (int i = 0; i < width; ++i) {
+        const int channel = offset + i;
+        if (channel < config.dim) {
+            const int frequency = channel % half_dim;
+            int       axis      = 0;
+            if (config.mrope_interleaved) {
+                if (frequency % 3 == 1 && frequency < 3 * config.mrope_dim2) {
+                    axis = 1;
+                } else if (frequency % 3 == 2 && frequency < 3 * config.mrope_dim3) {
+                    axis = 2;
+                }
+            } else {
+                axis = frequency < config.mrope_dim1 ? 0 : frequency < config.mrope_dim1 + config.mrope_dim2 ? 1 : 2;
+            }
+            const int   paired = channel < half_dim ? channel + half_dim : channel - half_dim;
+            const float angle =
+                static_cast<float>(pos[axis]) / config.scale * powf(config.base, -2.0f * frequency / config.dim);
+            float sine, cosine;
+            sincosf(angle, &sine, &cosine);
+            const float x                   = static_cast<float>(reinterpret_cast<T*>(&value)[i]);
+            const float y                   = static_cast<float>(row[paired]);
+            reinterpret_cast<T*>(&value)[i] = static_cast<T>(x * cosine + (channel < half_dim ? -y : y) * sine);
+        }
+    }
+}
+
 template<typename T, RopeStyle ROPE_STYLE>
 __global__ void fused_rope_quantize_and_write_fp8_kv_cache_kernel(const T* __restrict__ qkv,
                                                                   T* __restrict__ q_output,
@@ -163,9 +194,14 @@ __global__ void fused_rope_quantize_and_write_fp8_kv_cache_kernel(const T* __res
                                                                   float* __restrict__ kv_scales,
                                                                   const int32_t* __restrict__ batch_indices,
                                                                   const int32_t* __restrict__ positions,
+                                                                  const int32_t* __restrict__ rope_position_ids,
+                                                                  const int32_t* __restrict__ kv_lengths,
+                                                                  const int32_t* __restrict__ token_indptr,
+                                                                  const int32_t* __restrict__ decode_input_lengths,
                                                                   const int32_t* __restrict__ page_indptr,
                                                                   const int32_t* __restrict__ page_indices,
                                                                   int64_t       num_tokens,
+                                                                  int64_t       metadata_tokens,
                                                                   int64_t       num_q_heads,
                                                                   int64_t       num_kv_heads,
                                                                   int64_t       head_dim,
@@ -176,6 +212,8 @@ __global__ void fused_rope_quantize_and_write_fp8_kv_cache_kernel(const T* __res
                                                                   int64_t       page_indptr_size,
                                                                   int64_t       page_indices_size,
                                                                   int64_t       cos_sin_rows,
+                                                                  int64_t       token_indptr_size,
+                                                                  bool          output_qkv,
                                                                   RopeConfig    rope_config,
                                                                   const float2* cos_sin_cache) {
     extern __shared__ __align__(sizeof(float2)) char rope_smem[];
@@ -190,6 +228,41 @@ __global__ void fused_rope_quantize_and_write_fp8_kv_cache_kernel(const T* __res
     const bool    in_head      = vec_offset < head_dim;
     const bool    owns_kv      = head_idx < num_kv_heads;
     const int64_t packed_width = (num_q_heads + 2 * num_kv_heads) * head_dim;
+    const int64_t output_width = output_qkv ? packed_width : num_q_heads * head_dim;
+
+    const int64_t live_tokens       = token_indptr == nullptr ? num_tokens : token_indptr[token_indptr_size - 1];
+    const bool    valid_token_count = live_tokens >= 0 && live_tokens <= num_tokens && live_tokens <= metadata_tokens;
+    CUDA_KERNEL_ASSERT_MSG(valid_token_count, "fused FP8 KV cache live token count exceeds QKV or metadata capacity");
+    if (!valid_token_count) {
+        return;
+    }
+    bool active_token = token_idx < live_tokens;
+    if (active_token && decode_input_lengths != nullptr) {
+        const int32_t input_length = decode_input_lengths[token_idx];
+        CUDA_KERNEL_ASSERT_MSG(input_length >= 0, "fused FP8 KV cache decode input length is negative");
+        if (input_length < 0) {
+            return;
+        }
+        active_token = input_length > 0;
+    }
+    if (!active_token) {
+        if (in_head) {
+            *reinterpret_cast<Vec*>(q_output + token_idx * output_width + head_idx * head_dim + vec_offset) = Vec{};
+            if (output_qkv && owns_kv) {
+                const int64_t k_offset = token_idx * output_width + (num_q_heads + head_idx) * head_dim + vec_offset;
+                *reinterpret_cast<Vec*>(q_output + k_offset)                           = Vec{};
+                *reinterpret_cast<Vec*>(q_output + k_offset + num_kv_heads * head_dim) = Vec{};
+            }
+        }
+        return;
+    }
+
+    const int64_t batch_idx   = static_cast<int64_t>(batch_indices[token_idx]);
+    const bool    valid_batch = batch_idx >= 0 && batch_idx + 1 < page_indptr_size;
+    CUDA_KERNEL_ASSERT_MSG(valid_batch, "fused FP8 KV cache batch index is out of bounds");
+    if (!valid_batch) {
+        return;
+    }
 
     Vec q{};
     Vec k{};
@@ -206,25 +279,66 @@ __global__ void fused_rope_quantize_and_write_fp8_kv_cache_kernel(const T* __res
         }
     }
 
-    const int32_t position       = positions[token_idx];
-    const bool    valid_position = position >= 0 && (cos_sin_cache == nullptr || position < cos_sin_rows);
+    const int32_t position             = positions[token_idx];
+    const bool    valid_cache_position = kv_cache == nullptr || position >= 0;
+    CUDA_KERNEL_ASSERT_MSG(valid_cache_position, "fused FP8 KV cache physical position is negative");
+    if (!valid_cache_position) {
+        return;
+    }
+    const int32_t rope_position  = rope_position_ids == nullptr ?
+                                       position :
+                                       rope_position_ids[token_idx * (ROPE_STYLE == RopeStyle::Mrope ? 3 : 1)];
+    bool          valid_position = rope_position >= 0 && (cos_sin_cache == nullptr || rope_position < cos_sin_rows);
+    if constexpr (ROPE_STYLE == RopeStyle::Mrope) {
+        valid_position =
+            valid_position && rope_position_ids[3 * token_idx + 1] >= 0 && rope_position_ids[3 * token_idx + 2] >= 0;
+    }
     CUDA_KERNEL_ASSERT_MSG(valid_position, "fused FP8 KV cache RoPE position is out of bounds");
     if (!valid_position) {
         return;
     }
-    apply_rope<T, Vec, ROPE_STYLE>(
-        rope_config, q, reinterpret_cast<T*>(rope_smem), threadIdx.x, position, position + 1, cos_sin_cache);
-    if (owns_kv) {
+    const int32_t seq_len = kv_lengths == nullptr ? position + 1 : kv_lengths[batch_idx];
+    if (kv_lengths != nullptr) {
+        CUDA_KERNEL_ASSERT_MSG(seq_len > 0, "fused FP8 KV cache live request must have positive KV length");
+        if (seq_len <= 0) {
+            return;
+        }
+    }
+    if constexpr (ROPE_STYLE == RopeStyle::Mrope) {
+        if (in_head) {
+            apply_mrope<T>(q,
+                           qkv + token_idx * packed_width + head_idx * head_dim,
+                           vec_offset,
+                           rope_position_ids + 3 * token_idx,
+                           rope_config);
+            if (owns_kv) {
+                apply_mrope<T>(k,
+                               qkv + token_idx * packed_width + (num_q_heads + head_idx) * head_dim,
+                               vec_offset,
+                               rope_position_ids + 3 * token_idx,
+                               rope_config);
+            }
+        }
+    } else {
         apply_rope<T, Vec, ROPE_STYLE>(
-            rope_config, k, reinterpret_cast<T*>(rope_smem), threadIdx.x, position, position + 1, cos_sin_cache);
+            rope_config, q, reinterpret_cast<T*>(rope_smem), threadIdx.x, rope_position, seq_len, cos_sin_cache);
+        if (owns_kv) {
+            apply_rope<T, Vec, ROPE_STYLE>(
+                rope_config, k, reinterpret_cast<T*>(rope_smem), threadIdx.x, rope_position, seq_len, cos_sin_cache);
+        }
     }
 
     if (in_head) {
-        const int64_t q_offset                       = (token_idx * num_q_heads + head_idx) * head_dim + vec_offset;
+        const int64_t q_offset                       = token_idx * output_width + head_idx * head_dim + vec_offset;
         *reinterpret_cast<Vec*>(q_output + q_offset) = q;
+        if (output_qkv && owns_kv) {
+            const int64_t k_offset = token_idx * output_width + (num_q_heads + head_idx) * head_dim + vec_offset;
+            *reinterpret_cast<Vec*>(q_output + k_offset)                           = k;
+            *reinterpret_cast<Vec*>(q_output + k_offset + num_kv_heads * head_dim) = v;
+        }
     }
 
-    if (!owns_kv) {
+    if (!owns_kv || kv_cache == nullptr) {
         return;
     }
 
@@ -265,16 +379,16 @@ __global__ void fused_rope_quantize_and_write_fp8_kv_cache_kernel(const T* __res
     }
     __syncthreads();
 
-    const int64_t batch_idx   = static_cast<int64_t>(batch_indices[token_idx]);
-    const bool    valid_batch = batch_idx >= 0 && batch_idx + 1 < page_indptr_size;
-    CUDA_KERNEL_ASSERT_MSG(valid_batch, "fused FP8 KV cache batch index is out of bounds");
-    if (!valid_batch || position < 0) {
+    const int64_t page_start       = page_indptr[batch_idx];
+    const int64_t page_end         = page_indptr[batch_idx + 1];
+    const bool    valid_page_range = page_start >= 0 && page_end >= page_start && page_end <= page_indices_size;
+    CUDA_KERNEL_ASSERT_MSG(valid_page_range, "fused FP8 KV cache page range is out of bounds");
+    if (!valid_page_range) {
         return;
     }
     const int64_t page_offset = position / kernel_page_size;
-    const int64_t page_slot   = static_cast<int64_t>(page_indptr[batch_idx]) + page_offset;
-    const bool    valid_slot =
-        page_slot >= 0 && page_slot < page_indices_size && page_slot < static_cast<int64_t>(page_indptr[batch_idx + 1]);
+    const int64_t page_slot   = page_start + page_offset;
+    const bool    valid_slot  = page_offset < page_end - page_start;
     CUDA_KERNEL_ASSERT_MSG(valid_slot, "fused FP8 KV cache page slot is out of bounds");
     if (!valid_slot) {
         return;
@@ -319,23 +433,28 @@ __global__ void fused_rope_quantize_and_write_fp8_kv_cache_kernel(const T* __res
 }
 
 template<typename T, RopeStyle ROPE_STYLE>
-void launch_fused_rope_quantize_and_write(const at::Tensor&    qkv,
-                                          at::Tensor&          q_output,
-                                          at::Tensor&          kv_cache,
-                                          at::Tensor&          kv_scales,
-                                          const at::Tensor&    batch_indices,
-                                          const at::Tensor&    positions,
-                                          const at::Tensor&    page_indptr,
-                                          const at::Tensor&    page_indices,
-                                          int64_t              num_q_heads,
-                                          int64_t              num_kv_heads,
-                                          int64_t              head_dim,
-                                          int64_t              kernel_page_size,
-                                          const CacheGeometry& geometry,
-                                          const RopeConfig&    rope_config,
-                                          const float2*        cos_sin_cache,
-                                          int64_t              cos_sin_rows,
-                                          cudaStream_t         stream) {
+void launch_fused_rope_quantize_and_write(const at::Tensor&                qkv,
+                                          at::Tensor&                      q_output,
+                                          const std::optional<at::Tensor>& kv_cache,
+                                          const std::optional<at::Tensor>& kv_scales,
+                                          const at::Tensor&                batch_indices,
+                                          const at::Tensor&                positions,
+                                          const std::optional<at::Tensor>& rope_position_ids,
+                                          const std::optional<at::Tensor>& kv_lengths,
+                                          const std::optional<at::Tensor>& token_indptr,
+                                          const std::optional<at::Tensor>& decode_input_lengths,
+                                          const at::Tensor&                page_indptr,
+                                          const at::Tensor&                page_indices,
+                                          int64_t                          num_q_heads,
+                                          int64_t                          num_kv_heads,
+                                          int64_t                          head_dim,
+                                          int64_t                          kernel_page_size,
+                                          const CacheGeometry&             geometry,
+                                          const RopeConfig&                rope_config,
+                                          const float2*                    cos_sin_cache,
+                                          int64_t                          cos_sin_rows,
+                                          bool                             output_qkv,
+                                          cudaStream_t                     stream) {
     if (qkv.size(0) == 0) {
         return;
     }
@@ -344,29 +463,41 @@ void launch_fused_rope_quantize_and_write(const at::Tensor&    qkv,
         threads *= 2;
     }
     const dim3   grid(qkv.size(0), num_q_heads);
-    const size_t smem_size = ROPE_STYLE == RopeStyle::No ? 0 : 2 * rope_config.dim * sizeof(T);
-    fused_rope_quantize_and_write_fp8_kv_cache_kernel<T, ROPE_STYLE>
-        <<<grid, threads, smem_size, stream>>>(reinterpret_cast<const T*>(qkv.data_ptr()),
-                                               reinterpret_cast<T*>(q_output.data_ptr()),
-                                               reinterpret_cast<__nv_fp8_e4m3*>(kv_cache.data_ptr()),
-                                               kv_scales.data_ptr<float>(),
-                                               batch_indices.data_ptr<int32_t>(),
-                                               positions.data_ptr<int32_t>(),
-                                               page_indptr.data_ptr<int32_t>(),
-                                               page_indices.data_ptr<int32_t>(),
-                                               qkv.size(0),
-                                               num_q_heads,
-                                               num_kv_heads,
-                                               head_dim,
-                                               geometry.storage_pages,
-                                               kernel_page_size,
-                                               geometry.cache_page_stride,
-                                               geometry.scale_page_stride,
-                                               page_indptr.numel(),
-                                               page_indices.numel(),
-                                               cos_sin_rows,
-                                               rope_config,
-                                               cos_sin_cache);
+    const size_t smem_size       = ROPE_STYLE == RopeStyle::No ? 0 : 2 * rope_config.dim * sizeof(T);
+    int64_t      metadata_tokens = std::min(batch_indices.numel(), positions.numel());
+    if (rope_position_ids) {
+        metadata_tokens =
+            std::min(metadata_tokens, rope_position_ids->numel() / (ROPE_STYLE == RopeStyle::Mrope ? 3 : 1));
+    }
+    fused_rope_quantize_and_write_fp8_kv_cache_kernel<T, ROPE_STYLE><<<grid, threads, smem_size, stream>>>(
+        reinterpret_cast<const T*>(qkv.data_ptr()),
+        reinterpret_cast<T*>(q_output.data_ptr()),
+        kv_cache ? reinterpret_cast<__nv_fp8_e4m3*>(kv_cache->data_ptr()) : nullptr,
+        kv_scales ? kv_scales->data_ptr<float>() : nullptr,
+        batch_indices.data_ptr<int32_t>(),
+        positions.data_ptr<int32_t>(),
+        rope_position_ids ? rope_position_ids->data_ptr<int32_t>() : nullptr,
+        kv_lengths ? kv_lengths->data_ptr<int32_t>() : nullptr,
+        token_indptr ? token_indptr->data_ptr<int32_t>() : nullptr,
+        decode_input_lengths ? decode_input_lengths->data_ptr<int32_t>() : nullptr,
+        page_indptr.data_ptr<int32_t>(),
+        page_indices.data_ptr<int32_t>(),
+        qkv.size(0),
+        metadata_tokens,
+        num_q_heads,
+        num_kv_heads,
+        head_dim,
+        geometry.storage_pages,
+        kernel_page_size,
+        geometry.cache_page_stride,
+        geometry.scale_page_stride,
+        page_indptr.numel(),
+        page_indices.numel(),
+        cos_sin_rows,
+        token_indptr ? token_indptr->numel() : 0,
+        output_qkv,
+        rope_config,
+        cos_sin_cache);
 }
 
 template<typename T, typename IndexT>
@@ -578,8 +709,8 @@ void launch_gather(const at::Tensor&    kv_cache,
 }  // namespace
 
 at::Tensor fused_rope_quantize_and_write_fp8_kv_cache(const at::Tensor&                qkv,
-                                                      at::Tensor&                      kv_cache,
-                                                      at::Tensor&                      kv_scales,
+                                                      const std::optional<at::Tensor>& kv_cache,
+                                                      const std::optional<at::Tensor>& kv_scales,
                                                       const at::Tensor&                batch_indices,
                                                       const at::Tensor&                positions,
                                                       const at::Tensor&                page_indptr,
@@ -588,7 +719,12 @@ at::Tensor fused_rope_quantize_and_write_fp8_kv_cache(const at::Tensor&         
                                                       int64_t                          num_kv_heads,
                                                       int64_t                          kernel_page_size,
                                                       const RopeConfig&                rope_config,
-                                                      const std::optional<at::Tensor>& cos_sin_cache) {
+                                                      const std::optional<at::Tensor>& cos_sin_cache,
+                                                      const std::optional<at::Tensor>& rope_position_ids,
+                                                      const std::optional<at::Tensor>& kv_lengths,
+                                                      const std::optional<at::Tensor>& token_indptr,
+                                                      const std::optional<at::Tensor>& decode_input_lengths,
+                                                      bool                             output_qkv) {
 #ifndef ENABLE_FP8
     TORCH_CHECK(false, "FP8 support is not enabled in this CUDA build");
 #else
@@ -612,35 +748,87 @@ at::Tensor fused_rope_quantize_and_write_fp8_kv_cache(const at::Tensor&         
                 ", got ",
                 head_dim);
     TORCH_CHECK(kernel_page_size > 0, "kernel_page_size must be positive");
-    TORCH_CHECK(batch_indices.dim() == 1 && batch_indices.numel() >= qkv.size(0),
-                "batch_indices must contain at least N elements");
-    TORCH_CHECK(positions.dim() == 1 && positions.numel() >= qkv.size(0), "positions must contain at least N elements");
+    TORCH_CHECK(batch_indices.dim() == 1 && (token_indptr.has_value() || batch_indices.numel() >= qkv.size(0)),
+                "batch_indices must be a vector covering N tokens unless token_indptr masks padding");
+    TORCH_CHECK(positions.dim() == 1 && (token_indptr.has_value() || positions.numel() >= qkv.size(0)),
+                "positions must be a vector covering N tokens unless token_indptr masks padding");
     TORCH_CHECK(page_indptr.dim() == 1 && page_indptr.numel() >= 2, "page_indptr must contain at least two elements");
     TORCH_CHECK(page_indices.dim() == 1, "page_indices must be one-dimensional");
     TORCH_CHECK(batch_indices.scalar_type() == at::ScalarType::Int && positions.scalar_type() == at::ScalarType::Int
                     && page_indptr.scalar_type() == at::ScalarType::Int
                     && page_indices.scalar_type() == at::ScalarType::Int,
                 "batch_indices, positions, page_indptr, and page_indices must have dtype torch.int32");
-    TORCH_CHECK(rope_config.style != RopeStyle::Mrope, "fused dynamic FP8 decode does not support MRoPE");
     if (rope_config.style != RopeStyle::No) {
         TORCH_CHECK(rope_config.dim > 0 && rope_config.dim <= head_dim && rope_config.dim % 2 == 0,
                     "rope_config.dim must be positive, even, and no larger than head_dim");
     }
+    if (rope_config.style == RopeStyle::DynamicNTK || rope_config.style == RopeStyle::QwenDynamicNTK) {
+        TORCH_CHECK(kv_lengths.has_value(), "DynamicNTK and QwenDynamicNTK require per-request kv_lengths");
+    }
+    if (kv_lengths) {
+        check_cuda_contiguous(*kv_lengths, "kv_lengths");
+        check_same_device(qkv, *kv_lengths, "kv_lengths");
+        TORCH_CHECK(kv_lengths->scalar_type() == at::ScalarType::Int && kv_lengths->dim() == 1
+                        && kv_lengths->numel() >= page_indptr.numel() - 1,
+                    "kv_lengths must be an int32 vector covering all requests");
+    }
+    if (rope_config.style == RopeStyle::Mrope) {
+        TORCH_CHECK(rope_config.index_factor == 3 && rope_position_ids.has_value(),
+                    "MRoPE requires explicit three-axis rope_position_ids");
+        TORCH_CHECK(rope_config.mrope_dim1 >= 0 && rope_config.mrope_dim2 >= 0 && rope_config.mrope_dim3 >= 0
+                        && rope_config.mrope_dim1 + rope_config.mrope_dim2 + rope_config.mrope_dim3
+                               == rope_config.dim / 2,
+                    "MRoPE sections must be non-negative and sum to rope_config.dim / 2");
+        TORCH_CHECK(!rope_config.mrope_interleaved
+                        || (3 * rope_config.mrope_dim2 - 1 <= rope_config.dim / 2
+                            && 3 * rope_config.mrope_dim3 <= rope_config.dim / 2),
+                    "interleaved MRoPE sections exceed the rotary dimension");
+        TORCH_CHECK(rope_config.base > 0 && rope_config.scale > 0, "MRoPE base and scale must be positive");
+    }
+    if (rope_position_ids) {
+        check_cuda_contiguous(*rope_position_ids, "rope_position_ids");
+        check_same_device(qkv, *rope_position_ids, "rope_position_ids");
+        const int factor = rope_config.style == RopeStyle::Mrope ? 3 : 1;
+        TORCH_CHECK(rope_position_ids->scalar_type() == at::ScalarType::Int && rope_position_ids->numel() % factor == 0
+                        && (token_indptr.has_value() || rope_position_ids->numel() >= qkv.size(0) * factor),
+                    "rope_position_ids must contain int32 position tuples covering N tokens unless padding is masked");
+    }
+    if (token_indptr) {
+        check_cuda_contiguous(*token_indptr, "token_indptr");
+        check_same_device(qkv, *token_indptr, "token_indptr");
+        TORCH_CHECK(token_indptr->scalar_type() == at::ScalarType::Int && token_indptr->dim() == 1
+                        && token_indptr->numel() > 0,
+                    "token_indptr must be a non-empty int32 vector containing the live token count at its end");
+    }
+    if (decode_input_lengths) {
+        check_cuda_contiguous(*decode_input_lengths, "decode_input_lengths");
+        check_same_device(qkv, *decode_input_lengths, "decode_input_lengths");
+        TORCH_CHECK(decode_input_lengths->scalar_type() == at::ScalarType::Int && decode_input_lengths->dim() == 1
+                        && decode_input_lengths->numel() >= qkv.size(0),
+                    "decode_input_lengths must be an int32 vector covering all decode rows");
+        TORCH_CHECK(page_indptr.numel() == qkv.size(0) + 1,
+                    "decode_input_lengths requires exactly one token per request");
+    }
 
-    check_same_device(kv_cache, qkv, "qkv");
-    check_same_device(kv_cache, kv_scales, "kv_scales");
-    check_same_device(kv_cache, batch_indices, "batch_indices");
-    check_same_device(kv_cache, positions, "positions");
-    check_same_device(kv_cache, page_indptr, "page_indptr");
-    check_same_device(kv_cache, page_indices, "page_indices");
-    const CacheGeometry geometry =
-        validate_cache_geometry(kv_cache, kv_scales, num_kv_heads, head_dim, kernel_page_size, kernel_page_size, 1);
+    check_same_device(qkv, batch_indices, "batch_indices");
+    check_same_device(qkv, positions, "positions");
+    check_same_device(qkv, page_indptr, "page_indptr");
+    check_same_device(qkv, page_indices, "page_indices");
+    TORCH_CHECK(kv_cache.has_value() == kv_scales.has_value(), "kv_cache and kv_scales must be supplied together");
+    TORCH_CHECK(kv_cache.has_value() || output_qkv, "rotation without a cache requires output_qkv=true");
+    CacheGeometry geometry{};
+    if (kv_cache) {
+        check_same_device(qkv, *kv_cache, "kv_cache");
+        check_same_device(qkv, *kv_scales, "kv_scales");
+        geometry = validate_cache_geometry(
+            *kv_cache, *kv_scales, num_kv_heads, head_dim, kernel_page_size, kernel_page_size, 1);
+    }
 
     const float2* cos_sin_ptr  = nullptr;
     int64_t       cos_sin_rows = 0;
     if (cos_sin_cache.has_value() && cos_sin_cache->defined() && cos_sin_cache->numel() != 0) {
         check_cuda_contiguous(*cos_sin_cache, "cos_sin_cache");
-        check_same_device(kv_cache, *cos_sin_cache, "cos_sin_cache");
+        check_same_device(qkv, *cos_sin_cache, "cos_sin_cache");
         TORCH_CHECK(cos_sin_cache->scalar_type() == at::ScalarType::Float,
                     "cos_sin_cache must have dtype torch.float32");
         TORCH_CHECK(cos_sin_cache->dim() == 2 && cos_sin_cache->size(1) == rope_config.dim,
@@ -651,9 +839,10 @@ at::Tensor fused_rope_quantize_and_write_fp8_kv_cache(const at::Tensor&         
         cos_sin_rows = cos_sin_cache->size(0);
     }
 
-    const c10::cuda::CUDAGuard device_guard(kv_cache.device());
-    at::Tensor                 q_output = at::empty({qkv.size(0), num_q_heads, head_dim}, qkv.options());
-    const cudaStream_t         stream   = at::cuda::getCurrentCUDAStream(kv_cache.get_device()).stream();
+    const c10::cuda::CUDAGuard device_guard(qkv.device());
+    at::Tensor                 q_output =
+        output_qkv ? at::empty_like(qkv) : at::empty({qkv.size(0), num_q_heads, head_dim}, qkv.options());
+    const cudaStream_t stream = at::cuda::getCurrentCUDAStream(qkv.get_device()).stream();
 #define LAUNCH_FUSED(input_type)                                                                                       \
     FT_ROPE_SWITCH(rope_config.style, ROPE_STYLE, [&] {                                                                \
         launch_fused_rope_quantize_and_write<input_type, ROPE_STYLE>(qkv,                                              \
@@ -662,6 +851,10 @@ at::Tensor fused_rope_quantize_and_write_fp8_kv_cache(const at::Tensor&         
                                                                      kv_scales,                                        \
                                                                      batch_indices,                                    \
                                                                      positions,                                        \
+                                                                     rope_position_ids,                                \
+                                                                     kv_lengths,                                       \
+                                                                     token_indptr,                                     \
+                                                                     decode_input_lengths,                             \
                                                                      page_indptr,                                      \
                                                                      page_indices,                                     \
                                                                      num_q_heads,                                      \
@@ -672,6 +865,7 @@ at::Tensor fused_rope_quantize_and_write_fp8_kv_cache(const at::Tensor&         
                                                                      rope_config,                                      \
                                                                      cos_sin_ptr,                                      \
                                                                      cos_sin_rows,                                     \
+                                                                     output_qkv,                                       \
                                                                      stream);                                          \
     })
     if (qkv.scalar_type() == at::ScalarType::Half) {

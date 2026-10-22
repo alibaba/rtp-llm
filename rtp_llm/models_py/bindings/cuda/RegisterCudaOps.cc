@@ -81,7 +81,12 @@ void registerPyModuleOps(py::module& rtp_ops_m) {
                   py::arg("num_kv_heads"),
                   py::arg("kernel_page_size"),
                   py::arg("rope_config"),
-                  py::arg("cos_sin_cache") = std::nullopt);
+                  py::arg("cos_sin_cache")        = std::nullopt,
+                  py::arg("rope_position_ids")    = std::nullopt,
+                  py::arg("kv_lengths")           = std::nullopt,
+                  py::arg("token_indptr")         = std::nullopt,
+                  py::arg("decode_input_lengths") = std::nullopt,
+                  py::arg("output_qkv")           = false);
 
     rtp_ops_m.def("quantize_and_write_fp8_kv_cache",
                   &quantize_and_write_fp8_kv_cache,

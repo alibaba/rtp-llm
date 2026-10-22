@@ -55,6 +55,7 @@ class ModelConfig(CppModelConfig):
     # Python-only fields that are allowed to be set
     _python_fields = {
         "is_mtp",
+        "target_is_multimodal",
         "dspark_noise_token_id",
         "dspark_target_layer_ids",
         "dspark_markov_rank",
@@ -204,6 +205,12 @@ class ModelConfig(CppModelConfig):
 
     def is_multimodal(self) -> bool:
         return self.mm_model_config.is_multimodal
+
+    @property
+    def use_multimodal_embedding(self) -> bool:
+        if self.target_is_multimodal is not None:
+            return self.target_is_multimodal
+        return self.is_multimodal()
 
     def eval_model_weight_size(self) -> float:
         """
@@ -537,6 +544,8 @@ class ModelConfig(CppModelConfig):
         super().__init__(*args, **kwargs)
         # Additional Python-only fields
         self.is_mtp: bool = False
+        # None uses this model's multimodal flag; drafts use the target's flag.
+        self.target_is_multimodal: Optional[bool] = None
         # DSpARK draft checkpoint metadata. Runtime proposal width comes only
         # from sp_config.gen_num_per_cycle.
         self.dspark_noise_token_id: Optional[int] = None

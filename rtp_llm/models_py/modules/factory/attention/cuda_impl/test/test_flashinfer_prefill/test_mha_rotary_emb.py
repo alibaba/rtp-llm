@@ -744,7 +744,7 @@ class TestDynamicKVCacheWriteOp(unittest.TestCase):
             head_size=4,
             physical_page_size=32,
             kernel_page_size=8,
-            dynamic_mode=True,
+            use_per_token_fp8_kv_cache=True,
         )
         writer.set_params(
             SimpleNamespace(
@@ -788,7 +788,7 @@ class TestDynamicKVCacheWriteOp(unittest.TestCase):
             head_size=4,
             physical_page_size=16,
             kernel_page_size=8,
-            dynamic_mode=True,
+            use_per_token_fp8_kv_cache=True,
         )
         writer.set_params(
             SimpleNamespace(

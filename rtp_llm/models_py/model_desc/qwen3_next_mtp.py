@@ -22,6 +22,9 @@ from rtp_llm.models_py.modules import (
     RMSNorm,
     RMSResNorm,
 )
+from rtp_llm.models_py.modules.base.common.multimodal_embedding import (
+    MultimodalEmbedding,
+)
 from rtp_llm.ops import HybridAttentionType, ParallelismConfig
 from rtp_llm.ops.compute_ops import PyModelInputs, PyModelOutputs
 from rtp_llm.utils.model_weight import W
@@ -51,6 +54,8 @@ class Qwen3NextMTPModel(GptModelBase):
         self.embed_tokens = Embedding(
             model_config, parallelism_config, weights.get_global_weight(W.embedding)
         )
+        if model_config.use_multimodal_embedding:
+            self.embed_tokens = MultimodalEmbedding(self.embed_tokens)
         self.pre_fc_norm_embedding = RMSNorm(
             weights.global_weights[W.multi_tokens_predict_enorm],
             eps=model_config.layernorm_eps,
@@ -100,8 +105,10 @@ class Qwen3NextMTPModel(GptModelBase):
         return get_group_tags_for_layers(self.kv_cache, full_attention_layers)
 
     def forward(self, inputs: PyModelInputs, fmha_impl: Any = None) -> PyModelOutputs:
-        input_ids: torch.Tensor = inputs.input_ids
-        inputs_embeds = self.embed_tokens(input_ids)
+        if self.config.use_multimodal_embedding:
+            inputs_embeds = self.embed_tokens(inputs.input_ids, model_inputs=inputs)
+        else:
+            inputs_embeds = self.embed_tokens(inputs.input_ids)
         last_hidden_states = inputs.input_hiddens
         e_norm = self.pre_fc_norm_embedding(inputs_embeds)
         h_norm = self.pre_fc_norm_hidden(last_hidden_states)

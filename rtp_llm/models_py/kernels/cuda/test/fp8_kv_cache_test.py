@@ -353,6 +353,267 @@ class Fp8KvCacheTest(unittest.TestCase):
                             scales, oracle_scales, rtol=1e-6, atol=1e-7
                         )
 
+    def test_dynamic_ntk_uses_request_lengths_for_qk_and_cache(self) -> None:
+        torch.manual_seed(43)
+        qkv = torch.randn(4, 4 * 64, device="cuda", dtype=torch.float16)
+        batch = torch.tensor([0, 0, 1, 1], device="cuda", dtype=torch.int32)
+        positions = torch.tensor([6, 7, 7, 8], device="cuda", dtype=torch.int32)
+        lengths = torch.tensor([8, 9], device="cuda", dtype=torch.int32)
+        indptr = torch.tensor([0, 2, 5], device="cuda", dtype=torch.int32)
+        pages = torch.tensor([4, 0, 3, 1, 2], device="cuda", dtype=torch.int32)
+        rope = RopeConfig()
+        rope.dim, rope.max_pos, rope.scale = 64, 8, 2.0
+        for style in (RopeStyle.DynamicNTK, RopeStyle.QwenDynamicNTK):
+            with self.subTest(style=style):
+                rope.style = style
+                cache = torch.zeros(
+                    (5, 2, 1, 4, 64), device="cuda", dtype=torch.float8_e4m3fn
+                )
+                scales = torch.ones((5, 8), device="cuda")
+                output = rtp_llm_ops.fused_rope_quantize_and_write_fp8_kv_cache(
+                    qkv,
+                    cache,
+                    scales,
+                    batch,
+                    positions,
+                    indptr,
+                    pages,
+                    2,
+                    1,
+                    4,
+                    rope,
+                    output_qkv=True,
+                    kv_lengths=lengths,
+                ).view(4, 4, 64)
+                expected = qkv.view(4, 4, 64).clone()
+                token_lengths = lengths[batch.long()].float()
+                if style == RopeStyle.DynamicNTK:
+                    factor = rope.scale * token_lengths / rope.max_pos - (
+                        rope.scale - 1
+                    )
+                else:
+                    factor = (
+                        2 ** torch.ceil(torch.log2(token_lengths / rope.max_pos) + 1)
+                        - 1
+                    )
+                bases = torch.where(
+                    token_lengths > rope.max_pos,
+                    rope.base * factor ** (64 / 62),
+                    rope.base,
+                )
+                # Match apply_rope's integer conversion of the adjusted base.
+                bases = bases.to(torch.int32).float()
+                frequency = torch.arange(32, device="cuda").float() / 32
+                angles = positions.float()[:, None] * bases[:, None] ** -frequency
+                cosine, sine = angles.cos()[:, None], angles.sin()[:, None]
+                first, second = (
+                    expected[:, :3, :32].float(),
+                    expected[:, :3, 32:].float(),
+                )
+                expected[:, :3] = torch.cat(
+                    (first * cosine - second * sine, second * cosine + first * sine), -1
+                ).to(qkv.dtype)
+                torch.testing.assert_close(output, expected, rtol=2e-3, atol=2e-3)
+                restored = cache.float() * scales.view(5, 2, 1, 4, 1)
+                for token, (page, offset) in enumerate(
+                    ((0, 2), (0, 3), (1, 3), (2, 0))
+                ):
+                    torch.testing.assert_close(
+                        restored[page, :, 0, offset],
+                        expected[token, 2:].float(),
+                        rtol=0.13,
+                        atol=0.02,
+                    )
+
+    def test_dynamic_ntk_requires_request_length_metadata(self) -> None:
+        qkv = torch.zeros(2, 3 * 64, device="cuda", dtype=torch.float16)
+        batch = torch.tensor([0, 1], device="cuda", dtype=torch.int32)
+        positions = torch.zeros_like(batch)
+        indptr = torch.tensor([0, 0, 0], device="cuda", dtype=torch.int32)
+        pages = torch.empty(0, device="cuda", dtype=torch.int32)
+        rope = RopeConfig()
+        rope.dim, rope.max_pos = 64, 8
+        for style in (RopeStyle.DynamicNTK, RopeStyle.QwenDynamicNTK):
+            rope.style = style
+            for lengths in (None, torch.ones(1, device="cuda", dtype=torch.int32)):
+                with self.subTest(style=style, missing=lengths is None):
+                    with self.assertRaisesRegex(RuntimeError, "kv_lengths"):
+                        rtp_llm_ops.fused_rope_quantize_and_write_fp8_kv_cache(
+                            qkv,
+                            None,
+                            None,
+                            batch,
+                            positions,
+                            indptr,
+                            pages,
+                            1,
+                            1,
+                            4,
+                            rope,
+                            output_qkv=True,
+                            kv_lengths=lengths,
+                        )
+
+    def test_fused_mrope_prefill_rotates_and_writes_only_live_tokens(self) -> None:
+        torch.manual_seed(42)
+        heads, kv_heads, head_dim, rotary_dim, page_size = 4, 2, 64, 32, 4
+        live_tokens, capacity = 3, 5
+        positions = torch.tensor([3, 4, 1], device="cuda", dtype=torch.int32)
+        logical_positions = torch.tensor(
+            [[0, 0, 0], [7, 3, 1], [8, 4, 2]], device="cuda", dtype=torch.int32
+        )
+        batch_indices = torch.tensor([0, 0, 1], device="cuda", dtype=torch.int32)
+        token_indptr = torch.tensor([0, 2, 3], device="cuda", dtype=torch.int32)
+        page_indptr = torch.tensor([0, 2, 3], device="cuda", dtype=torch.int32)
+        page_indices = torch.tensor([4, 1, 3], device="cuda", dtype=torch.int32)
+        rope = RopeConfig()
+        rope.style = RopeStyle.Mrope
+        rope.dim = rotary_dim
+        rope.index_factor = 3
+        rope.mrope_dim1, rope.mrope_dim2, rope.mrope_dim3 = 6, 5, 5
+        rope.scale = 2.0
+
+        for dtype, interleaved in ((torch.float16, False), (torch.bfloat16, True)):
+            with self.subTest(dtype=dtype, interleaved=interleaved):
+                rope.mrope_interleaved = interleaved
+                qkv = torch.randn(
+                    capacity,
+                    (heads + 2 * kv_heads) * head_dim,
+                    device="cuda",
+                    dtype=dtype,
+                )
+                raw = qkv[:live_tokens].view(
+                    live_tokens, heads + 2 * kv_heads, head_dim
+                )
+                expected = raw.clone()
+                frequency = torch.arange(rotary_dim // 2, device="cuda")
+                if interleaved:
+                    axes = frequency % 3
+                    axes[frequency >= 15] = 0
+                else:
+                    axes = torch.repeat_interleave(
+                        torch.arange(3, device="cuda"),
+                        torch.tensor([6, 5, 5], device="cuda"),
+                    )
+                angles = (
+                    logical_positions[:, axes].float()
+                    / rope.scale
+                    * (rope.base ** (-2.0 * frequency.float() / rotary_dim))
+                )
+                cosine, sine = angles.cos()[:, None], angles.sin()[:, None]
+                first = raw[:, : heads + kv_heads, : rotary_dim // 2].float()
+                second = raw[
+                    :, : heads + kv_heads, rotary_dim // 2 : rotary_dim
+                ].float()
+                expected[:, : heads + kv_heads, :rotary_dim] = torch.cat(
+                    (first * cosine - second * sine, second * cosine + first * sine), -1
+                ).to(dtype)
+                cache = torch.full(
+                    (6, 2, kv_heads, page_size, head_dim),
+                    3.0,
+                    device="cuda",
+                    dtype=torch.float8_e4m3fn,
+                )
+                scales = torch.full((6, 2 * kv_heads * page_size), 13.0, device="cuda")
+
+                def run(payload, scale):
+                    return rtp_llm_ops.fused_rope_quantize_and_write_fp8_kv_cache(
+                        qkv,
+                        payload,
+                        scale,
+                        batch_indices,
+                        positions,
+                        page_indptr,
+                        page_indices,
+                        heads,
+                        kv_heads,
+                        page_size,
+                        rope,
+                        rope_position_ids=logical_positions,
+                        token_indptr=token_indptr,
+                        output_qkv=True,
+                    )
+
+                output = run(cache, scales).view_as(qkv)
+                torch.testing.assert_close(
+                    output[:live_tokens], expected.flatten(1), rtol=2e-3, atol=2e-3
+                )
+                torch.testing.assert_close(
+                    output[live_tokens:], torch.zeros_like(output[live_tokens:])
+                )
+                torch.testing.assert_close(run(None, None), output, rtol=0, atol=0)
+                # Partial RoPE must leave the remaining channels and all V unchanged.
+                torch.testing.assert_close(
+                    output[:live_tokens].view_as(raw)[:, :, rotary_dim:],
+                    raw[:, :, rotary_dim:],
+                    rtol=0,
+                    atol=0,
+                )
+                expected_cache = torch.full_like(cache, 3.0)
+                expected_scales = torch.full_like(scales, 13.0)
+                quantize_and_write_fp8_kv_cache(
+                    expected[:, heads : heads + kv_heads].contiguous(),
+                    expected[:, heads + kv_heads :].contiguous(),
+                    expected_cache,
+                    expected_scales,
+                    torch.tensor([4, 1, 3], device="cuda", dtype=torch.int32),
+                    torch.tensor([3, 0, 1], device="cuda", dtype=torch.int32),
+                    page_size,
+                    page_size,
+                    1,
+                )
+                torch.testing.assert_close(
+                    cache.float(), expected_cache.float(), rtol=0, atol=0
+                )
+                torch.testing.assert_close(
+                    scales, expected_scales, rtol=1e-6, atol=1e-7
+                )
+
+    def test_fused_decode_padding_does_not_overwrite_live_cache(self) -> None:
+        qkv = torch.randn(2, 3 * 64, device="cuda", dtype=torch.bfloat16)
+        cache = torch.full(
+            (1, 2, 1, 4, 64), 3.0, device="cuda", dtype=torch.float8_e4m3fn
+        )
+        scales = torch.full((1, 8), 13.0, device="cuda")
+        rope = RopeConfig()
+        rope.style = RopeStyle.No
+        batch = torch.tensor([0, 1], device="cuda", dtype=torch.int32)
+        positions = torch.tensor([0, 0], device="cuda", dtype=torch.int32)
+        indptr = torch.tensor([0, 1, 2], device="cuda", dtype=torch.int32)
+        pages = torch.tensor([0, 0], device="cuda", dtype=torch.int32)
+        lengths = torch.tensor([1, 0], device="cuda", dtype=torch.int32)
+
+        def run():
+            return rtp_llm_ops.fused_rope_quantize_and_write_fp8_kv_cache(
+                qkv,
+                cache,
+                scales,
+                batch,
+                positions,
+                indptr,
+                pages,
+                1,
+                1,
+                4,
+                rope,
+                decode_input_lengths=lengths,
+            )
+
+        output = run()
+        torch.testing.assert_close(output[0].flatten(), qkv[0, :64])
+        torch.testing.assert_close(output[1], torch.zeros_like(output[1]))
+        restored = cache[0, :, 0, 0].float() * scales.view(2, 4)[:, :1]
+        torch.testing.assert_close(
+            restored, qkv[0, 64:].view(2, 64).float(), rtol=0.13, atol=0.02
+        )
+        payload_before, scales_before = cache.clone(), scales.clone()
+        lengths.zero_()
+        torch.testing.assert_close(run(), torch.zeros_like(output))
+        torch.testing.assert_close(
+            cache.float(), payload_before.float(), rtol=0, atol=0
+        )
+        torch.testing.assert_close(scales, scales_before, rtol=0, atol=0)
+
     def test_fused_decode_prepare_sanitizes_nonfinite_kv(self) -> None:
         qkv = torch.tensor(
             [

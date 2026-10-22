@@ -10,14 +10,12 @@ import torch
 from attention_ref import compute_flashinfer_decode_reference
 from base_attention_test import BaseAttentionTest, compare_tensors
 
-from rtp_llm.models_py.modules.factory.attention.attn_factory import (
-    _validate_dynamic_fp8_config,
-)
 from rtp_llm.models_py.modules.factory.attention.cuda_impl.py_flashinfer_mha import (
     PyFlashinferDecodeAttnOp,
     PyFlashinferDecodeImpl,
-    _create_dynamic_fp8_decode_wrapper,
-    _validate_dynamic_fp8_scale,
+    _create_per_token_fp8_kv_cache_decode_wrapper,
+    _supports_per_token_fp8_kv_cache,
+    _validate_fp8_kv_cache_scales,
 )
 from rtp_llm.ops import KvCacheDataType, RopeConfig, RopeStyle
 from rtp_llm.ops.compute_ops import (
@@ -42,7 +40,9 @@ class TestDynamicFp8DirectScaleNumerics(unittest.TestCase):
     def test_large_negative_logits_preserve_constant_values(self):
         for dtype in (torch.float16, torch.bfloat16):
             workspace = torch.empty(128 * 1024 * 1024, dtype=torch.uint8, device="cuda")
-            wrapper = _create_dynamic_fp8_decode_wrapper(workspace, dtype, dtype, 128)
+            wrapper = _create_per_token_fp8_kv_cache_decode_wrapper(
+                workspace, dtype, dtype, 128
+            )
             for length in (
                 33,
                 63,
@@ -89,7 +89,9 @@ class TestDynamicFp8DirectScaleNumerics(unittest.TestCase):
         for dtype in (torch.float16, torch.bfloat16):
             torch.manual_seed(2026)
             workspace = torch.empty(128 * 1024 * 1024, dtype=torch.uint8, device="cuda")
-            wrapper = _create_dynamic_fp8_decode_wrapper(workspace, dtype, dtype, 128)
+            wrapper = _create_per_token_fp8_kv_cache_decode_wrapper(
+                workspace, dtype, dtype, 128
+            )
             for length in (33, 129, 4095, 4096, 4097, 4807, 8191):
                 pages = (length + 63) // 64
                 raw = torch.randn(pages, 2, 4, 64, 128, device="cuda")
@@ -158,7 +160,7 @@ class TestDynamicFp8DirectScaleNumerics(unittest.TestCase):
                 workspace = torch.empty(
                     128 * 1024 * 1024, dtype=torch.uint8, device="cuda"
                 )
-                wrapper = _create_dynamic_fp8_decode_wrapper(
+                wrapper = _create_per_token_fp8_kv_cache_decode_wrapper(
                     workspace, dtype, dtype, 128
                 )
                 raw = torch.randn(6, 2, 4, 16, 128, device="cuda", dtype=dtype).float()
@@ -566,12 +568,19 @@ class TestPyFlashinferDecodeAttnOp(BaseAttentionTest):
         )
 
 
-class TestPyFlashinferDecodeCudaGraph(BaseAttentionTest):
-    """Test CUDA graph buffer management for PyFlashinferDecodeAttnOp.
+class _DecodeGraphInputs:
+    """Expose a device input-length mirror for Python graph tests."""
 
-    These tests exercise the Python prepare/replay boundary. End-to-end CUDA
-    graph capture and replay remains covered by the model smoke test.
-    """
+    def __init__(self, inputs: PyAttentionInputs):
+        self.inputs = inputs
+        self.input_lengths_device = inputs.input_lengths.cuda()
+
+    def __getattr__(self, name):
+        return getattr(self.inputs, name)
+
+
+class TestPyFlashinferDecodeCudaGraph(BaseAttentionTest):
+    """Test graph planning, buffer stability, and numerical replay correctness."""
 
     def _create_cuda_graph_inputs(
         self,
@@ -606,6 +615,7 @@ class TestPyFlashinferDecodeCudaGraph(BaseAttentionTest):
         attn_inputs.input_lengths = torch.ones(
             batch_size, dtype=torch.int32
         ).pin_memory()
+        attn_inputs.input_lengths[active_batch_size:] = 0
         attn_inputs.prefix_lengths = torch.empty(0, dtype=torch.int32).pin_memory()
 
         kv_cache_block_id = self._create_kv_cache_block_ids(
@@ -874,8 +884,7 @@ class TestPyFlashinferDecodeCudaGraph(BaseAttentionTest):
         attn_op.prepare_for_cuda_graph_replay(inputs)
         torch.cuda.synchronize()
 
-        # A blocking host-index copy in FlashInfer.plan used to wait for all
-        # earlier work on this stream, preventing cross-step graph submission.
+        # Planning must not synchronize GPU work queued before it on the stream.
         previous_forward = torch.cuda.Event()
         torch.cuda._sleep(200_000_000)
         previous_forward.record()
@@ -976,31 +985,6 @@ class TestPyFlashinferDecodeCudaGraph(BaseAttentionTest):
                         ),
                         capture_pointers,
                     )
-
-    def test_dynamic_fp8_cuda_graph_rejects_changed_plan(self):
-        config = self._create_config(
-            head_num=32,
-            head_num_kv=8,
-            size_per_head=128,
-            seq_size_per_block=64,
-            data_type="bf16",
-        )
-        config.attn_configs.kv_cache_dtype = KvCacheDataType.FP8
-        config.attn_configs.fp8_kv_cache_mode = 2
-        inputs = self._create_cuda_graph_inputs(
-            2,
-            [64, 65],
-            config.seq_size_per_block,
-        )
-        attn_op = PyFlashinferDecodeAttnOp(config.attn_configs, inputs)
-        attn_op.set_params(rtp_llm_ops.FlashInferMlaAttnParams())
-        attn_op.prepare(inputs)
-
-        changed_plan = list(attn_op.decode_wrapper._plan_info)
-        changed_plan[0] += 1
-        attn_op.decode_wrapper._plan_info = changed_plan
-        with self.assertRaisesRegex(RuntimeError, "plan or buffer addresses changed"):
-            attn_op._validate_dynamic_fp8_cuda_graph_state()
 
     def test_dynamic_fp8_direct_decode_real_cuda_graph_replay(self):
         config = self._create_config(
@@ -1166,10 +1150,10 @@ class TestPyFlashinferDecodeCudaGraph(BaseAttentionTest):
         config.attn_configs.fp8_kv_cache_mode = 2
         config.attn_configs.need_rope_kv_cache = False
         capture_bs = 2
-        capture_inputs = self._create_cuda_graph_inputs(
-            capture_bs,
-            [130, 131],
-            config.seq_size_per_block,
+        capture_inputs = _DecodeGraphInputs(
+            self._create_cuda_graph_inputs(
+                capture_bs, [130, 131], config.seq_size_per_block
+            )
         )
         impl = PyFlashinferDecodeImpl(config.attn_configs, capture_inputs)
         local_head_num = config.head_num // config.tp_size
@@ -1222,6 +1206,9 @@ class TestPyFlashinferDecodeCudaGraph(BaseAttentionTest):
                 block_id_offset=block_id_offset,
             )
             impl.prepare_cuda_graph(replay_inputs)
+            capture_inputs.input_lengths_device.copy_(
+                replay_inputs.input_lengths, non_blocking=True
+            )
             graph.replay()
             torch.cuda.synchronize()
 
@@ -1545,6 +1532,7 @@ class TestDynamicFp8DecodeUnit(unittest.TestCase):
             need_rope_kv_cache=True,
             rope_config=rope_config,
             max_seq_len=128,
+            gen_num_per_cycle=1,
         )
 
     def test_mode2_rejects_legacy_flashinfer_before_jit(self):
@@ -1557,7 +1545,7 @@ class TestDynamicFp8DecodeUnit(unittest.TestCase):
             with self.assertRaisesRegex(
                 RuntimeError, r"requires FlashInfer >= 0\.6\.9.*0\.2\.5"
             ):
-                _create_dynamic_fp8_decode_wrapper(
+                _create_per_token_fp8_kv_cache_decode_wrapper(
                     torch.empty(0), torch.float16, torch.float16, 128
                 )
             generator.assert_not_called()
@@ -1572,7 +1560,7 @@ class TestDynamicFp8DecodeUnit(unittest.TestCase):
             f"{module}.flashinfer_decode.gen_customize_batch_prefill_module"
         ) as generator:
             with self.assertRaisesRegex(RuntimeError, "JitSpec batch-prefill API"):
-                _create_dynamic_fp8_decode_wrapper(
+                _create_per_token_fp8_kv_cache_decode_wrapper(
                     torch.empty(0), torch.float16, torch.float16, 128
                 )
             generator.assert_not_called()
@@ -1584,11 +1572,13 @@ class TestDynamicFp8DecodeUnit(unittest.TestCase):
         with mock.patch(f"{module}.flashinfer.__version__", "0.6.9"), mock.patch(
             f"{module}.flashinfer_decode.gen_customize_batch_prefill_module",
             return_value=object(),
-        ), mock.patch.dict(f"{module}._g_dynamic_fp8_jit_modules", clear=True) as cache:
+        ), mock.patch.dict(
+            f"{module}._g_fp8_kv_cache_jit_modules", clear=True
+        ) as cache:
             with self.assertRaisesRegex(
                 RuntimeError, "extra_include_dirs and build_and_load"
             ):
-                _create_dynamic_fp8_decode_wrapper(
+                _create_per_token_fp8_kv_cache_decode_wrapper(
                     torch.empty(0), torch.float16, torch.float16, 128
                 )
             self.assertEqual(cache, {})
@@ -1605,10 +1595,10 @@ class TestDynamicFp8DecodeUnit(unittest.TestCase):
             f"{module}.flashinfer_decode.gen_customize_batch_prefill_module",
             return_value=spec,
         ) as generator, mock.patch.dict(
-            f"{module}._g_dynamic_fp8_jit_modules", clear=True
+            f"{module}._g_fp8_kv_cache_jit_modules", clear=True
         ) as cache:
             with self.assertRaisesRegex(RuntimeError, "compile failed"):
-                _create_dynamic_fp8_decode_wrapper(
+                _create_per_token_fp8_kv_cache_decode_wrapper(
                     torch.empty(0), torch.float16, torch.float16, 128
                 )
             generator.assert_called_once()
@@ -1635,9 +1625,9 @@ class TestDynamicFp8DecodeUnit(unittest.TestCase):
                 ), mock.patch(
                     f"{module}.BatchDecodeWithPagedKVCacheWrapper"
                 ), mock.patch.dict(
-                    f"{module}._g_dynamic_fp8_jit_modules", clear=True
+                    f"{module}._g_fp8_kv_cache_jit_modules", clear=True
                 ):
-                    _create_dynamic_fp8_decode_wrapper(
+                    _create_per_token_fp8_kv_cache_decode_wrapper(
                         torch.empty(0), torch.float16, torch.float16, 128
                     )
                 self.assertTrue(
@@ -1676,24 +1666,32 @@ class TestDynamicFp8DecodeUnit(unittest.TestCase):
                 ), mock.patch(
                     f"{module}.BatchDecodeWithPagedKVCacheWrapper"
                 ), mock.patch(
-                    f"{module}._create_dynamic_fp8_decode_wrapper"
+                    f"{module}._create_per_token_fp8_kv_cache_decode_wrapper"
                 ) as dynamic_wrapper:
                     op = _NoReleaseDecodeAttnOp(
                         config, SimpleNamespace(is_cuda_graph=False)
                     )
-                    self.assertFalse(op.dynamic_fp8)
+                    self.assertFalse(op.use_per_token_fp8_kv_cache)
                     dynamic_wrapper.assert_not_called()
 
-    def test_mode2_allows_single_token_and_rejects_speculative_decode(self):
+    def test_mode2_support_checks_geometry_and_unsupported_features(self):
         config = self._config()
         config.use_mla = False
         config.use_logn_attn = False
-        config.gen_num_per_cycle = 1
-        _validate_dynamic_fp8_config(config, is_cuda_graph=False)
-
+        config.size_per_head = 64
         config.gen_num_per_cycle = 2
-        with self.assertRaisesRegex(ValueError, "multi-token decode"):
-            _validate_dynamic_fp8_config(config, is_cuda_graph=False)
+        inputs = SimpleNamespace(is_prefill=True, is_target_verify=True)
+        self.assertTrue(_supports_per_token_fp8_kv_cache(config, inputs))
+        for field, value in (
+            ("use_mla", True),
+            ("use_logn_attn", True),
+            ("size_per_head", 80),
+            ("kernel_tokens_per_block", 7),
+        ):
+            with self.subTest(field=field):
+                invalid = SimpleNamespace(**vars(config))
+                setattr(invalid, field, value)
+                self.assertFalse(_supports_per_token_fp8_kv_cache(invalid, inputs))
 
     def test_mode2_constructs_and_caches_versioned_fa2_direct_scale_jit(self):
         wrappers = [SimpleNamespace(_fixed_batch_size=0) for _ in range(2)]
@@ -1720,7 +1718,7 @@ class TestDynamicFp8DecodeUnit(unittest.TestCase):
             f"{module}.flashinfer_decode.get_batch_prefill_jit_module",
             module_adapter,
         ), mock.patch.dict(
-            f"{module}._g_dynamic_fp8_jit_modules", clear=True
+            f"{module}._g_fp8_kv_cache_jit_modules", clear=True
         ):
             op = _NoReleaseDecodeAttnOp(
                 self._config(), SimpleNamespace(is_cuda_graph=False)
@@ -1779,7 +1777,7 @@ class TestDynamicFp8DecodeUnit(unittest.TestCase):
         op.local_head_num = 4
         op.local_kv_head_num = 2
         op.head_dim_qk = 4
-        op.dynamic_fp8 = True
+        op.use_per_token_fp8_kv_cache = True
         op.physical_page_size = 32
         op.seq_size_per_block = 8
         op.subdivision = 4
@@ -1831,7 +1829,7 @@ class TestDynamicFp8DecodeUnit(unittest.TestCase):
         op.decode_wrapper.run.side_effect = lambda query, _, __: query
         with mock.patch(
             "rtp_llm.models_py.modules.factory.attention.cuda_impl.py_flashinfer_mha."
-            "_validate_dynamic_fp8_scale",
+            "_validate_fp8_kv_cache_scales",
             return_value=cache.kv_scale_base,
         ) as validate_mock, mock.patch(
             "rtp_llm.models_py.modules.factory.attention.cuda_impl.py_flashinfer_mha."
@@ -1906,7 +1904,7 @@ class TestDynamicFp8DecodeUnit(unittest.TestCase):
             kv_cache_base=payload,
             kv_scale_base=valid_scale,
         )
-        self.assertIs(_validate_dynamic_fp8_scale(cache, 2, 8), valid_scale)
+        self.assertIs(_validate_fp8_kv_cache_scales(cache, 2, 8), valid_scale)
 
         invalid_cases = (
             (None, payload, "requires a kv_scale_base tensor"),
@@ -1948,7 +1946,143 @@ class TestDynamicFp8DecodeUnit(unittest.TestCase):
                     kv_scale_base=scale,
                 )
                 with self.assertRaisesRegex(ValueError, message):
-                    _validate_dynamic_fp8_scale(invalid_cache, 2, 8)
+                    _validate_fp8_kv_cache_scales(invalid_cache, 2, 8)
+
+    def test_mrope_decode_graph_updates_positions_pages_and_padding(self):
+        torch.manual_seed(2026)
+        harness = TestPyFlashinferDecodeCudaGraph()
+        harness.device = torch.device("cuda")
+        config = harness._create_config(
+            head_num=4,
+            head_num_kv=2,
+            size_per_head=256,
+            seq_size_per_block=4,
+            data_type="bf16",
+        )
+        harness._enable_qwen35_mrope_mode1(config)
+        config.attn_configs.fp8_kv_cache_mode = 2
+        capacity, page_size, pages = 2, 4, 8
+        block_table = torch.tensor([[4, 1, 6], [2, 5, 3]], dtype=torch.int32)
+
+        def make_inputs(lengths, shift):
+            inputs = harness._create_cuda_graph_inputs(
+                capacity,
+                lengths,
+                page_size,
+                active_batch_size=len(lengths),
+                dtype=torch.bfloat16,
+            )
+            table = block_table.clone()
+            if len(lengths) < capacity:
+                # A padded row aliases a live prefix page to detect stray writes.
+                table[-1, 0] = table[0, 0]
+            inputs.kv_cache_kernel_block_id = table
+            inputs.kv_cache_kernel_block_id_device = table.cuda()
+            positions = torch.arange(capacity, dtype=torch.int32, device="cuda") + shift
+            inputs.combo_position_ids = torch.stack(
+                (positions, positions + 5, positions + 11), -1
+            )
+            inputs.total_tokens = capacity
+            return inputs
+
+        capture_inputs = _DecodeGraphInputs(make_inputs([11, 11], 0))
+        self.assertTrue(
+            PyFlashinferDecodeImpl.support(config.attn_configs, capture_inputs)
+        )
+        impl = PyFlashinferDecodeImpl(config.attn_configs, capture_inputs)
+        cache, _, _ = harness._create_kv_cache(
+            pages, page_size, 2, 256, dtype=torch.float8_e4m3fn
+        )
+        cache.kv_scale_base.fill_(0.125)
+        expected_payload = cache.kv_cache_base.clone()
+        expected_scales = cache.kv_scale_base.clone()
+        qkv = torch.randn(capacity, 8 * 256, device="cuda", dtype=torch.bfloat16)
+        warmup = torch.cuda.Stream()
+        warmup.wait_stream(torch.cuda.current_stream())
+        with torch.cuda.stream(warmup):
+            impl.forward(qkv, cache)
+            impl.forward(qkv, cache)
+        torch.cuda.current_stream().wait_stream(warmup)
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            output = impl.forward(qkv, cache)
+        cache.kv_cache_base.copy_(expected_payload)
+        cache.kv_scale_base.copy_(expected_scales)
+
+        for lengths, shift in (([4, 7], 20), ([5], 40), ([6, 8], 60)):
+            with self.subTest(lengths=lengths):
+                inputs = make_inputs(lengths, shift)
+                impl.prepare_cuda_graph(inputs)
+                capture_inputs.input_lengths_device.copy_(
+                    inputs.input_lengths, non_blocking=True
+                )
+                qkv.normal_()
+                payload_before = cache.kv_cache_base.float()
+                scales_before = cache.kv_scale_base.clone()
+                graph.replay()
+
+                active = len(lengths)
+                raw = qkv[:active].view(active, 8, 256)
+                query, key = harness._apply_qwen35_mrope_reference(
+                    raw[:, :4], raw[:, 4:6], inputs.combo_position_ids[:active]
+                )
+                value = raw[:, 6:]
+                changed = torch.zeros(pages, page_size, device="cuda", dtype=torch.bool)
+                scale_view = expected_scales.view(pages, 2, 2, page_size)
+                for batch, length in enumerate(lengths):
+                    page = int(block_table[batch, (length - 1) // page_size])
+                    offset = (length - 1) % page_size
+                    changed[page, offset] = True
+                    for kv, tensor in enumerate((key, value)):
+                        row = tensor[batch].float()
+                        scale = row.abs().amax(-1) / 448.0
+                        expected_payload[page, kv, :, offset] = (
+                            (row / scale[:, None])
+                            .clamp(-448, 448)
+                            .to(torch.float8_e4m3fn)
+                        )
+                        scale_view[page, kv, :, offset] = scale
+
+                torch.testing.assert_close(
+                    cache.kv_scale_base, expected_scales, rtol=1e-6, atol=1e-7
+                )
+                torch.testing.assert_close(
+                    cache.kv_cache_base.float(),
+                    expected_payload.float(),
+                    rtol=0.13,
+                    atol=0,
+                )
+                torch.testing.assert_close(
+                    cache.kv_cache_base.float().permute(0, 3, 1, 2, 4)[~changed],
+                    payload_before.permute(0, 3, 1, 2, 4)[~changed],
+                    rtol=0,
+                    atol=0,
+                )
+                torch.testing.assert_close(
+                    cache.kv_scale_base.view(pages, 2, 2, page_size).permute(
+                        0, 3, 1, 2
+                    )[~changed],
+                    scales_before.view(pages, 2, 2, page_size).permute(0, 3, 1, 2)[
+                        ~changed
+                    ],
+                    rtol=0,
+                    atol=0,
+                )
+                restored = expected_payload.float() * scale_view[..., None]
+                reference = compute_flashinfer_decode_reference(
+                    query,
+                    restored[:, 0].to(query.dtype),
+                    restored[:, 1].to(query.dtype),
+                    lengths,
+                    [
+                        block_table[b, : math.ceil(length / page_size)].tolist()
+                        for b, length in enumerate(lengths)
+                    ],
+                    page_size,
+                )
+                torch.testing.assert_close(
+                    output[:active], reference, rtol=0.04, atol=0.03
+                )
 
     def test_mode2_decode_impl_with_rope_matches_base_reference_with_subdivision(
         self,
@@ -2155,7 +2289,7 @@ class TestDynamicFp8DecodeUnit(unittest.TestCase):
             ),
         )
         fused_prepare = mock.Mock(
-            side_effect=lambda *args: events.append("fused_prepare") or query
+            side_effect=lambda *args, **kwargs: events.append("fused_prepare") or query
         )
 
         with mock.patch(
@@ -2181,7 +2315,7 @@ class TestDynamicFp8DecodeUnit(unittest.TestCase):
             return_value=False,
         ), mock.patch(
             "rtp_llm.models_py.modules.factory.attention.cuda_impl.py_flashinfer_mha."
-            "_validate_dynamic_fp8_scale",
+            "_validate_fp8_kv_cache_scales",
             return_value=scales,
         ), mock.patch.object(
             rtp_llm_ops,
@@ -2195,7 +2329,7 @@ class TestDynamicFp8DecodeUnit(unittest.TestCase):
             "rtp_llm.models_py.modules.factory.attention.cuda_impl.py_flashinfer_mha."
             "common.apply_write_cache_store"
         ):
-            impl = PyFlashinferDecodeImpl(config, SimpleNamespace())
+            impl = PyFlashinferDecodeImpl(config, SimpleNamespace(is_cuda_graph=False))
             graph_inputs = SimpleNamespace()
             impl.prepare_cuda_graph(graph_inputs)
             output = impl.forward(qkv, cache)
@@ -2243,7 +2377,7 @@ class TestDynamicFp8DecodeUnit(unittest.TestCase):
             "KVCacheWriteOp"
         ) as writer_op, mock.patch(
             "rtp_llm.models_py.modules.factory.attention.cuda_impl.py_flashinfer_mha."
-            "_validate_dynamic_fp8_scale",
+            "_validate_fp8_kv_cache_scales",
             return_value=scales,
         ), mock.patch.object(
             rtp_llm_ops,
@@ -2257,14 +2391,14 @@ class TestDynamicFp8DecodeUnit(unittest.TestCase):
             "rtp_llm.models_py.modules.factory.attention.cuda_impl.py_flashinfer_mha."
             "common.apply_write_cache_store"
         ):
-            impl = PyFlashinferDecodeImpl(config, SimpleNamespace())
+            impl = PyFlashinferDecodeImpl(config, SimpleNamespace(is_cuda_graph=False))
             output = impl.forward(qkv, cache)
 
         rope_op.assert_not_called()
         writer_op.assert_not_called()
         fused_prepare.assert_called_once()
         self.assertEqual(fused_prepare.call_args.args[10].style, RopeStyle.No)
-        self.assertIsNone(fused_prepare.call_args.args[11])
+        self.assertIsNone(fused_prepare.call_args.kwargs["cos_sin_cache"])
         self.assertIs(output, query)
 
 

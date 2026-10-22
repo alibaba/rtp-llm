@@ -304,6 +304,51 @@ class TestContextParallelProcessor(unittest.TestCase):
         self.assertEqual(shuffle_indices.cpu().tolist(), [0, 1, 6, 7])
         self.assertEqual(position_ids.tolist(), [4, 5, 10, 0])
 
+    def test_device_prefix_matches_host_for_plain_and_reused_prefill(self):
+        for length in (7, 8):
+            for prefix_length in (0, 4):
+                with self.subTest(length=length, prefix_length=prefix_length):
+                    host_prefix = torch.tensor([prefix_length], dtype=torch.int32)
+                    device_prefix = host_prefix.cuda()
+                    results = []
+                    for prefix in (host_prefix, device_prefix):
+                        _, _, _, position_ids, shuffle_indices = (
+                            cp_test.remap_multimodal_inputs(
+                                torch.arange(length, dtype=torch.int32),
+                                torch.empty(0, dtype=torch.int32),
+                                [],
+                                [],
+                                torch.empty(0, dtype=torch.int32),
+                                0,
+                                2,
+                                torch.tensor([length], dtype=torch.int32),
+                                torch.empty(0, dtype=torch.int32),
+                                prefix,
+                            )
+                        )
+                        results.append((position_ids.cpu(), shuffle_indices.cpu()))
+                    torch.testing.assert_close(results[0][0], results[1][0])
+                    torch.testing.assert_close(results[0][1], results[1][1])
+                    self.assertTrue(device_prefix.is_cuda)
+                    torch.testing.assert_close(device_prefix.cpu(), host_prefix)
+
+    def test_padding_offset_does_not_require_host_prefix(self):
+        lengths = torch.tensor([2, 3, 1], dtype=torch.int32)
+        expected = torch.tensor([0, 0, 1, 1, 1, 1], dtype=torch.int32)
+        prefixes = [None]
+        for device in ("cpu", "cuda"):
+            prefixes.extend(
+                [
+                    torch.empty(0, dtype=torch.int32, device=device),
+                    torch.tensor([0, 4, 8], dtype=torch.int32, device=device),
+                ]
+            )
+        for prefix in prefixes:
+            with self.subTest(prefix=prefix):
+                actual = cp_test.calculate_padding_offset(lengths, prefix)
+                self.assertEqual(actual.device.type, "cpu")
+                torch.testing.assert_close(actual, expected)
+
     def test_rank_chunk_fully_inside_image_slices_feature_and_deepstack(self):
         combo_tokens = torch.arange(14, dtype=torch.int32)
         feature = torch.arange(20, dtype=torch.float32).reshape(10, 2)

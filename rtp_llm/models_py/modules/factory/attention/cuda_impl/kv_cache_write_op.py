@@ -17,13 +17,12 @@ class KVCacheWriteOp:
         head_size: int,
         physical_page_size: Optional[int] = None,
         kernel_page_size: Optional[int] = None,
-        dynamic_mode: bool = False,
+        use_per_token_fp8_kv_cache: bool = False,
         token_per_block: Optional[int] = None,
     ) -> None:
         """Initialize the KV cache writer for physical/kernel page geometry.
 
-        ``token_per_block`` remains as a compatibility alias for callers that
-        predate separate physical and kernel page sizes.
+        ``token_per_block`` is an alias for ``physical_page_size``.
         """
         if physical_page_size is None:
             physical_page_size = token_per_block
@@ -44,8 +43,8 @@ class KVCacheWriteOp:
         self.physical_page_size = physical_page_size
         self.kernel_page_size = kernel_page_size
         self.subdivision = physical_page_size // kernel_page_size
-        self.dynamic_mode = dynamic_mode
-        # Keep the old attribute for warmup and compatibility users.
+        self.use_per_token_fp8_kv_cache = use_per_token_fp8_kv_cache
+        # Warmup allocates cache pages using the kernel page size.
         self.token_per_block = kernel_page_size
         self.params = None
 
@@ -74,7 +73,7 @@ class KVCacheWriteOp:
             batch_indices = self.params.batch_indice_d.narrow(0, 0, nnz)
             positions = self.params.positions_d.narrow(0, 0, nnz)
 
-            if self.dynamic_mode:
+            if self.use_per_token_fp8_kv_cache:
                 kv_scales = getattr(kv_cache, "kv_scale_base", None)
                 if kv_scales is None or kv_scales.numel() == 0:
                     raise ValueError(
@@ -109,7 +108,7 @@ class KVCacheWriteOp:
                 )
                 return
 
-            # For legacy/base execution, cache dtype must already match K/V.
+            # Direct cache writes require K/V to match the storage dtype.
             k_cache = kv_cache.kv_cache_base[:, 0, :, :, :]
             v_cache = kv_cache.kv_cache_base[:, 1, :, :, :]
             if key.dtype != k_cache.dtype:
@@ -133,9 +132,8 @@ class KVCacheWriteOp:
                 self.params.paged_kv_last_page_len_d,
                 "HND",
             )
-        elif not self.dynamic_mode:
-            # For legacy/base warmup/JIT compilation - create dummy KV cache.
-            # Dynamic mode intentionally performs no write without a real cache.
+        elif not self.use_per_token_fp8_kv_cache:
+            # Warmup without per-token quantization uses a temporary KV cache.
             (
                 batch_indices,
                 positions,

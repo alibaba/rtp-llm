@@ -27,6 +27,9 @@ from rtp_llm.models_py.modules import (
     SelectTopk,
     SigmoidGateScaleAdd,
 )
+from rtp_llm.models_py.modules.base.common.multimodal_embedding import (
+    MultimodalEmbedding,
+)
 from rtp_llm.models_py.modules.factory.fused_moe.defs.config_adapter import (
     MoEConfigAdapter,
 )
@@ -390,6 +393,8 @@ class GenericMoeModel(GptModelBase):
         self.embed_tokens = Embedding(
             model_config, parallelism_config, weights.get_global_weight(W.embedding)
         )
+        if model_config.use_multimodal_embedding:
+            self.embed_tokens = MultimodalEmbedding(self.embed_tokens)
         # Get enable_cuda_graph from py_hw_kernel_config
         enable_cuda_graph = (
             py_hw_kernel_config.enable_cuda_graph
@@ -451,8 +456,10 @@ class GenericMoeModel(GptModelBase):
         self._mtp_target_hidden_eager_valid_tokens = 0
 
     def forward(self, inputs: PyModelInputs, fmha_impl: Any = None) -> PyModelOutputs:
-        input_ids: torch.Tensor = inputs.input_ids
-        hidden_states = self.embed_tokens(input_ids)
+        if self.config.use_multimodal_embedding:
+            hidden_states = self.embed_tokens(inputs.input_ids, model_inputs=inputs)
+        else:
+            hidden_states = self.embed_tokens(inputs.input_ids)
         if fmha_impl is None:
             fmha_impl = self.prepare_fmha_impl(
                 inputs

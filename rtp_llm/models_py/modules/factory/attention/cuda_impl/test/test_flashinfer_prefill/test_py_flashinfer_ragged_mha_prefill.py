@@ -443,13 +443,12 @@ class TestPyFlashinferPrefillAttnOpFP8(TestPyFlashinferPrefillAttnOp):
         impl = PyFlashinferPrefillImpl(
             config.attn_configs, inputs, config.parallelism_config
         )
-        self.assertIsNone(impl.rope_impl)
-        self.assertIsNotNone(impl.fused_mrope_impl)
+        self.assertIsNotNone(impl.rope_impl)
 
         with mock.patch.object(
-            impl.fused_mrope_impl,
+            impl.rope_impl,
             "forward",
-            wraps=impl.fused_mrope_impl.forward,
+            wraps=impl.rope_impl.forward,
         ) as fused_forward, mock.patch.object(
             impl.kv_cache_write_op,
             "forward",
@@ -541,7 +540,7 @@ class TestPyFlashinferPrefillAttnOpFP8(TestPyFlashinferPrefillAttnOp):
         self.assertFalse(PyFlashinferPrefillImpl.support(config.attn_configs, inputs))
         self._add_qwen35_mrope_inputs(inputs, [2])
         config.attn_configs.fp8_kv_cache_mode = 2
-        self.assertFalse(PyFlashinferPrefillImpl.support(config.attn_configs, inputs))
+        self.assertTrue(PyFlashinferPrefillImpl.support(config.attn_configs, inputs))
 
     def test_out_of_fp8_range_kv(self):
         config = self._create_config(

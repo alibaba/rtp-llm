@@ -14,7 +14,7 @@ from rtp_llm.models_py.modules.factory.attention.cuda_impl.kv_cache_write_op imp
 from rtp_llm.models_py.modules.factory.attention.cuda_impl.py_flashinfer_mha import (
     PyFlashinferPagedPrefillImpl,
     PyFlashinferPrefillPagedAttnOp,
-    attn_kv_dtype,
+    _kv_cache_dtype,
     attn_q_dtype,
 )
 from rtp_llm.models_py.modules.factory.attention.cuda_impl.test.attention_ref import (
@@ -24,7 +24,7 @@ from rtp_llm.models_py.modules.factory.attention.cuda_impl.test.base_attention_t
     BaseAttentionTest,
     fill_paged_kv_cache,
 )
-from rtp_llm.ops import KvCacheDataType
+from rtp_llm.ops import KvCacheDataType, RopeStyle
 from rtp_llm.ops.compute_ops import LayerKVCache
 
 logging.basicConfig(level=logging.INFO, format="%(message)s")
@@ -615,7 +615,7 @@ class TestPyFlashinferPrefillPagedAttnOpFP8(TestPyFlashinferPrefillPagedAttnOp):
             config.attn_configs, inputs, config.parallelism_config
         )
         events = []
-        fused_forward = impl.fused_mrope_impl.forward
+        fused_forward = impl.rope_impl.forward
         cache_write = impl.kv_cache_write_op.forward
 
         def observed_fused_forward(qkv_input, cache, params):
@@ -640,7 +640,7 @@ class TestPyFlashinferPrefillPagedAttnOpFP8(TestPyFlashinferPrefillPagedAttnOp):
             return query
 
         with mock.patch.object(
-            impl.fused_mrope_impl,
+            impl.rope_impl,
             "forward",
             side_effect=observed_fused_forward,
         ) as fused_mock, mock.patch.object(
@@ -666,6 +666,202 @@ class TestPyFlashinferPrefillPagedAttnOpFP8(TestPyFlashinferPrefillPagedAttnOp):
         torch.testing.assert_close(output, expected_q, rtol=1e-2, atol=1e-2)
 
 
+class TestPerTokenFp8PrefillGraph(BaseAttentionTest):
+    def test_dynamic_ntk_graph_reads_updated_request_lengths(self):
+        config = self._create_config(
+            head_num=2, head_num_kv=1, size_per_head=64, seq_size_per_block=4
+        )
+        attn_config = config.attn_configs
+        attn_config.fp8_kv_cache_mode = 2
+        attn_config.kv_cache_dtype = KvCacheDataType.FP8
+        attn_config.need_rope_kv_cache = True
+        rope = attn_config.rope_config
+        rope.style = RopeStyle.DynamicNTK
+        rope.dim, rope.max_pos, rope.scale, rope.base = 64, 8, 2.0, 10000
+
+        def make_inputs(lengths, prefixes):
+            inputs = self._create_chunked_prefill_attention_inputs(
+                lengths, prefixes, 4, is_cuda_graph=True
+            )
+            inputs.total_tokens = 5
+            return inputs
+
+        inputs = make_inputs([2, 2, 0], [10, 18, 0])
+        impl = PyFlashinferPagedPrefillImpl(attn_config, inputs)
+        qkv = torch.randn(5, 4 * 64, device=self.device, dtype=torch.float16)
+        lengths_ptr = impl.fmha_params.kvlen_d.data_ptr()
+
+        def rotate():
+            return impl.rope_impl.forward(
+                qkv, output_qkv=True, token_indptr=impl.fmha_params.qo_indptr_d
+            )
+
+        warmup = torch.cuda.Stream()
+        warmup.wait_stream(torch.cuda.current_stream())
+        with torch.cuda.stream(warmup):
+            rotate()
+        torch.cuda.current_stream().wait_stream(warmup)
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            output = rotate()
+
+        for lengths, prefixes in (
+            ([2, 2, 0], [10, 18, 0]),
+            ([2, 0, 0], [6, 0, 0]),
+            ([2, 2, 0], [8, 10, 0]),
+        ):
+            with self.subTest(lengths=lengths, prefixes=prefixes):
+                impl.prepare_cuda_graph(make_inputs(lengths, prefixes))
+                self.assertEqual(impl.fmha_params.kvlen_d.data_ptr(), lengths_ptr)
+                graph.replay()
+                expected = torch.zeros_like(qkv).view(5, 4, 64)
+                offset = 0
+                for length, prefix in zip(lengths, prefixes):
+                    if not length:
+                        continue
+                    seq_len = prefix + length
+                    base = (
+                        rope.base
+                        if seq_len <= rope.max_pos
+                        else int(
+                            rope.base
+                            * (rope.scale * seq_len / rope.max_pos - (rope.scale - 1))
+                            ** (64 / 62)
+                        )
+                    )
+                    positions = torch.arange(
+                        prefix, seq_len, device=self.device
+                    ).float()
+                    frequency = base ** (
+                        -torch.arange(32, device=self.device).float() / 32
+                    )
+                    angles = positions[:, None] * frequency
+                    cosine, sine = angles.cos()[:, None], angles.sin()[:, None]
+                    raw = qkv[offset : offset + length].view(length, 4, 64)
+                    first, second = raw[:, :3, :32].float(), raw[:, :3, 32:].float()
+                    expected[offset : offset + length, :3] = torch.cat(
+                        (
+                            first * cosine - second * sine,
+                            second * cosine + first * sine,
+                        ),
+                        -1,
+                    ).to(qkv.dtype)
+                    expected[offset : offset + length, 3] = raw[:, 3]
+                    offset += length
+                torch.testing.assert_close(
+                    output, expected.flatten(1), rtol=2e-3, atol=2e-3
+                )
+
+    def test_mrope_graph_replay_updates_pages_positions_and_live_lengths(self):
+        config = self._create_config(
+            head_num=4,
+            head_num_kv=2,
+            size_per_head=256,
+            seq_size_per_block=4,
+            data_type="bf16",
+        )
+        self._enable_qwen35_mrope_mode1(config)
+        config.attn_configs.fp8_kv_cache_mode = 2
+        config.attn_configs.tokens_per_block = 8
+        capacity, page_size = 6, 4
+        table = torch.tensor([[4, 1, 7], [3, 6, 2]], dtype=torch.int32)
+
+        def make_inputs(lengths, prefixes, block_table, shift):
+            inputs = self._create_chunked_prefill_attention_inputs(
+                lengths,
+                prefixes,
+                page_size,
+                dtype=torch.bfloat16,
+                kv_cache_block_id=block_table,
+                is_cuda_graph=True,
+            )
+            inputs.is_target_verify = True
+            inputs.total_tokens = capacity
+            positions = (
+                torch.arange(capacity, device=self.device, dtype=torch.int32) + shift
+            )
+            inputs.combo_position_ids = torch.stack(
+                (positions, positions + 3, positions + 7), -1
+            )
+            return inputs
+
+        inputs = make_inputs([3, 3], [3, 7], table, 0)
+        self.assertTrue(
+            PyFlashinferPagedPrefillImpl.support(config.attn_configs, inputs)
+        )
+        impl = PyFlashinferPagedPrefillImpl(config.attn_configs, inputs)
+        cache, _, _ = self._create_kv_cache(8, page_size, 2, 256, torch.float8_e4m3fn)
+        cache.kv_scale_base.fill_(0.25)
+        initial_payload = cache.kv_cache_base.clone()
+        initial_scales = cache.kv_scale_base.clone()
+        qkv = torch.randn(capacity, 8 * 256, device=self.device, dtype=torch.bfloat16)
+        warmup = torch.cuda.Stream()
+        warmup.wait_stream(torch.cuda.current_stream())
+        with torch.cuda.stream(warmup):
+            impl.forward(qkv, cache)
+            impl.forward(qkv, cache)
+        torch.cuda.current_stream().wait_stream(warmup)
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            output = impl.forward(qkv, cache)
+
+        # Shrink across a page boundary, include an empty request, then grow back.
+        for lengths, prefixes, shift in (
+            ([2, 3], [3, 4], 11),
+            ([2, 0], [3, 0], 21),
+            ([3, 3], [3, 7], 31),
+        ):
+            with self.subTest(lengths=lengths, prefixes=prefixes):
+                replay_table = table.flip(0).contiguous()
+                replay_inputs = make_inputs(lengths, prefixes, replay_table, shift)
+                impl.prepare_cuda_graph(replay_inputs)
+                cache.kv_cache_base.copy_(initial_payload)
+                cache.kv_scale_base.copy_(initial_scales)
+                qkv.normal_()
+                graph.replay()
+                live = sum(lengths)
+                raw = qkv[:live].view(live, 8, 256)
+                query, _ = self._apply_qwen35_mrope_reference(
+                    raw[:, :4], raw[:, 4:6], replay_inputs.combo_position_ids[:live]
+                )
+                scales = cache.kv_scale_base.view(8, 2, 2, page_size)
+                restored = cache.kv_cache_base.float() * scales[..., None]
+                offset = 0
+                for batch, (length, prefix) in enumerate(zip(lengths, prefixes)):
+                    if length == 0:
+                        continue
+                    seq_len = prefix + length
+                    pages = (
+                        replay_table[batch, : math.ceil(seq_len / page_size)]
+                        .to(self.device)
+                        .long()
+                    )
+                    kv = (
+                        restored[pages]
+                        .permute(1, 2, 0, 3, 4)
+                        .flatten(2, 3)[:, :, :seq_len]
+                    )
+                    key, value = kv.repeat_interleave(2, dim=1).unbind(0)
+                    q = query[offset : offset + length].transpose(0, 1).float()
+                    logits = q @ key.transpose(-1, -2) / math.sqrt(256)
+                    mask = torch.arange(seq_len, device=self.device)[None, :] > (
+                        prefix + torch.arange(length, device=self.device)[:, None]
+                    )
+                    reference = (
+                        logits.masked_fill(mask, -float("inf")).softmax(-1) @ value
+                    ).transpose(0, 1)
+                    torch.testing.assert_close(
+                        output[offset : offset + length].float(),
+                        reference,
+                        rtol=0.04,
+                        atol=0.03,
+                    )
+                    offset += length
+                torch.testing.assert_close(
+                    output[live:], torch.zeros_like(output[live:]), rtol=0, atol=0
+                )
+
+
 class _NoReleasePagedAttnOp(PyFlashinferPrefillPagedAttnOp):
     def __del__(self):
         pass
@@ -686,18 +882,21 @@ class TestDynamicFp8PagedPrefillUnit(unittest.TestCase):
             is_causal=True,
         )
 
-    def test_mode2_uses_base_plan_dtypes_and_compact_page_ids(self):
+    def test_mode2_plans_fp8_storage_with_original_page_ids(self):
         config = self._config()
         self.assertEqual(attn_q_dtype(config), torch.bfloat16)
-        self.assertEqual(attn_kv_dtype(config), torch.bfloat16)
+        self.assertEqual(_kv_cache_dtype(config), torch.float8_e4m3fn)
 
         params = SimpleNamespace(
             fill_params=mock.Mock(),
+            qo_indptr_h=torch.tensor([0, 2], dtype=torch.int32),
+            decode_page_indptr_h=torch.tensor([0, 2], dtype=torch.int32),
             decode_page_indptr_d=torch.tensor([0, 2], dtype=torch.int32),
-            page_indice_d=torch.tensor([9, 3, 77], dtype=torch.int32),
+            page_indice_d=torch.tensor([9, 3], dtype=torch.int32),
+            paged_kv_last_page_len_h=torch.tensor([2], dtype=torch.int32),
             paged_kv_last_page_len_d=torch.tensor([2], dtype=torch.int32),
         )
-        wrapper = SimpleNamespace(_qo_indptr_buf=None, plan=mock.Mock())
+        wrapper = SimpleNamespace(_fixed_batch_size=0, plan=mock.Mock())
         op = _NoReleasePagedAttnOp.__new__(_NoReleasePagedAttnOp)
         op.g_workspace_buffer = torch.empty(0)
         op.local_head_num = 4
@@ -705,10 +904,10 @@ class TestDynamicFp8PagedPrefillUnit(unittest.TestCase):
         op.head_dim_qk = 4
         op.page_size = 8
         op.dtype = torch.bfloat16
-        op.kv_dtype = torch.bfloat16
+        op.kv_dtype = torch.float8_e4m3fn
         op.q_dtype = torch.bfloat16
         op.is_causal = True
-        op.dynamic_fp8 = True
+        op.use_per_token_fp8_kv_cache = True
         op.enable_cuda_graph = False
         op.prefill_cuda_graph_copy_params = None
         op.fmha_params = params
@@ -731,21 +930,20 @@ class TestDynamicFp8PagedPrefillUnit(unittest.TestCase):
 
         plan_args = wrapper.plan.call_args.args
         torch.testing.assert_close(
-            plan_args[2], torch.tensor([0, 1], dtype=torch.int32)
+            plan_args[2], torch.tensor([9, 3], dtype=torch.int32)
         )
         torch.testing.assert_close(
-            op._active_source_page_indices, torch.tensor([9, 3], dtype=torch.int32)
-        )
-        torch.testing.assert_close(
-            params.page_indice_d, torch.tensor([9, 3, 77], dtype=torch.int32)
+            params.page_indice_d, torch.tensor([9, 3], dtype=torch.int32)
         )
         self.assertEqual(wrapper.plan.call_args.kwargs["q_data_type"], torch.bfloat16)
-        self.assertEqual(wrapper.plan.call_args.kwargs["kv_data_type"], torch.bfloat16)
+        self.assertEqual(
+            wrapper.plan.call_args.kwargs["kv_data_type"], torch.float8_e4m3fn
+        )
 
-    def test_mode2_forward_gathers_original_pages_without_unit_cast(self):
+    def test_mode2_forward_reads_scales_directly_and_zeros_padding(self):
         op = _NoReleasePagedAttnOp.__new__(_NoReleasePagedAttnOp)
         op.g_workspace_buffer = torch.empty(0)
-        op.dynamic_fp8 = True
+        op.use_per_token_fp8_kv_cache = True
         op.dtype = torch.bfloat16
         op.local_kv_head_num = 2
         op.head_dim_qk = 4
@@ -756,15 +954,21 @@ class TestDynamicFp8PagedPrefillUnit(unittest.TestCase):
         op.fmha_params = SimpleNamespace(
             page_indice_d=torch.tensor([9, 3, 77], dtype=torch.int32)
         )
-        op._active_source_page_indices = op.fmha_params.page_indice_d[:2]
-        op.prefill_wrapper = SimpleNamespace(run=mock.Mock(side_effect=lambda q, _: q))
-        q = torch.randn(2, 4, 4, dtype=torch.bfloat16)
+        op._planned_q_rows = 2
+        op.prefill_wrapper = SimpleNamespace(
+            run=mock.Mock(side_effect=lambda q, _, __, out: out.copy_(q))
+        )
+        q = torch.randn(4, 4, 4, dtype=torch.bfloat16)
         cache = SimpleNamespace(
             kv_cache_base=torch.empty(12, 2, 2, 8, 4, dtype=torch.float8_e4m3fn),
             kv_scale_base=torch.empty(12, 2 * 2 * 8, dtype=torch.float32),
         )
 
         with mock.patch(
+            "rtp_llm.models_py.modules.factory.attention.cuda_impl.py_flashinfer_mha."
+            "_validate_fp8_kv_cache_scales",
+            return_value=cache.kv_scale_base,
+        ), mock.patch(
             "rtp_llm.models_py.modules.factory.attention.cuda_impl.py_flashinfer_mha."
             "rtp_llm_ops.gather_and_dequantize_fp8_kv_cache",
             create=True,
@@ -775,16 +979,12 @@ class TestDynamicFp8PagedPrefillUnit(unittest.TestCase):
         ):
             output = op.forward(q, cache)
 
-        self.assertIs(output, q)
-        gather_mock.assert_called_once()
-        gather_args = gather_mock.call_args.args
-        self.assertIs(gather_args[2], op._active_source_page_indices)
-        torch.testing.assert_close(
-            gather_args[2], torch.tensor([9, 3], dtype=torch.int32)
-        )
-        self.assertEqual(gather_args[3].shape, (2, 2, 2, 8, 4))
-        self.assertEqual(gather_args[3].dtype, torch.bfloat16)
-        self.assertEqual(gather_args[4:], (32, 8, 4))
+        torch.testing.assert_close(output[:2], q[:2])
+        torch.testing.assert_close(output[2:], torch.zeros_like(q[2:]))
+        gather_mock.assert_not_called()
+        run_args = op.prefill_wrapper.run.call_args.args
+        self.assertIs(run_args[1], cache.kv_cache_base)
+        self.assertIs(run_args[2], cache.kv_scale_base)
 
     def test_mode2_end_to_end_attention_matches_base_reference(self):
         if not torch.cuda.is_available():
@@ -837,7 +1037,7 @@ class TestDynamicFp8PagedPrefillUnit(unittest.TestCase):
             head_size=64,
             physical_page_size=config.seq_size_per_block,
             kernel_page_size=config.seq_size_per_block,
-            dynamic_mode=True,
+            use_per_token_fp8_kv_cache=True,
         )
         writer.set_params(params)
         writer.forward(k, v, cache)
@@ -983,7 +1183,7 @@ class TestDynamicFp8PagedPrefillUnit(unittest.TestCase):
                         head_size=128,
                         physical_page_size=physical_page_size,
                         kernel_page_size=kernel_page_size,
-                        dynamic_mode=True,
+                        use_per_token_fp8_kv_cache=True,
                     )
                     writer.set_params(params)
                     writer.forward(k, v, cache)

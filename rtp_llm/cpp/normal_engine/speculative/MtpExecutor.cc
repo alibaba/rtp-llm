@@ -441,8 +441,8 @@ static std::shared_ptr<NormalGenerateStream> makeFakeStream(int                 
     return fake_stream;
 }
 
-static SpeculativeExecutorStreamOutputPtr makeFakeSPOutputBuffer(
-    DataType data_type, size_t hidden_size, size_t vocab_size, size_t propose_step, bool is_dspark) {
+static SpeculativeExecutorStreamOutputPtr
+makeFakeSPOutputBuffer(DataType data_type, size_t hidden_size, size_t vocab_size, size_t propose_step, bool is_dspark) {
     auto sp_buffer = std::make_shared<SpeculativeExecutorStreamOutput>();
 
     sp_buffer->propose_step = propose_step;
@@ -864,11 +864,36 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
     // restored full view to every rank for the draft pass).
     torch::Tensor saved_combo_tokens;
     torch::Tensor saved_input_lengths;
+    const bool    needs_draft_multimodal_input =
+        !is_dspark_ && !model_input.is_fake_stream && model_input.text_tokens_mask.defined();
+    const bool needs_draft_token_type_ids =
+        !is_dspark_ && !model_input.is_fake_stream && model_input.combo_tokens_type_ids.defined();
+    torch::Tensor                             saved_token_type_ids;
+    torch::Tensor                             saved_text_tokens_mask;
+    torch::Tensor                             saved_position_ids;
+    torch::Tensor                             saved_mm_locs;
+    std::optional<std::vector<torch::Tensor>> saved_mm_features;
+    std::optional<std::vector<torch::Tensor>> saved_mm_extra;
     // Only rank 0 restores; non-root ranks get the restored view from the
     // second tpSync, so skip the snapshot copies there.
     if (cp_enabled && isTpRank0()) {
-        saved_combo_tokens  = toCudaWithHostHold(model_input.combo_tokens, buffer_holder_);
-        saved_input_lengths = toCudaWithHostHold(model_input.input_lengths, buffer_holder_);
+        saved_combo_tokens = toCudaWithHostHold(model_input.combo_tokens, buffer_holder_);
+        // CP writes CPU lengths in place. Clone before an asynchronous H2D
+        // snapshot so the draft cannot observe the target's local lengths.
+        saved_input_lengths = toCudaWithHostHold((needs_draft_multimodal_input || needs_draft_token_type_ids) ?
+                                                     model_input.input_lengths.clone() :
+                                                     model_input.input_lengths,
+                                                 buffer_holder_);
+        if (needs_draft_token_type_ids) {
+            saved_token_type_ids = model_input.combo_tokens_type_ids;
+        }
+        if (needs_draft_multimodal_input) {
+            saved_text_tokens_mask = model_input.text_tokens_mask;
+            saved_position_ids     = model_input.combo_position_ids;
+            saved_mm_locs          = model_input.mm_features_locs;
+            saved_mm_features      = model_input.multimodal_features;
+            saved_mm_extra         = model_input.mm_extra_input;
+        }
     }
 
     // target model prefill
@@ -907,6 +932,16 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
         if (cp_enabled) {
             model_input.combo_tokens  = saved_combo_tokens;
             model_input.input_lengths = saved_input_lengths;
+            if (needs_draft_token_type_ids) {
+                model_input.combo_tokens_type_ids = saved_token_type_ids;
+            }
+            if (needs_draft_multimodal_input) {
+                model_input.text_tokens_mask    = saved_text_tokens_mask;
+                model_input.combo_position_ids  = saved_position_ids;
+                model_input.mm_features_locs    = saved_mm_locs;
+                model_input.multimodal_features = std::move(saved_mm_features);
+                model_input.mm_extra_input      = std::move(saved_mm_extra);
+            }
         }
         if (!is_dspark_ && model_input.is_fake_stream) {
             model_input.last_hidden_states = model_output.all_hidden_states;
@@ -924,6 +959,15 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
         // the normalized output produced by its own target forward.
         if (cp_enabled || is_dspark_) {
             model_input.last_hidden_states = torch::Tensor();
+        }
+        if (needs_draft_multimodal_input && !isTpRank0()) {
+            // tpSync allocates only nonempty fields. A feature may disappear
+            // when its sole row is shifted out; do not retain target metadata.
+            model_input.text_tokens_mask   = torch::Tensor();
+            model_input.combo_position_ids = torch::Tensor();
+            model_input.mm_features_locs   = torch::Tensor();
+            model_input.multimodal_features.reset();
+            model_input.mm_extra_input.reset();
         }
         tpSyncModelInputs(model_input, parallelism_config_);
         maybePrintModelInput(model_input, "prefill post draft model");
@@ -1951,7 +1995,7 @@ GptModelOutputs MtpExecutor::runDraftPrefillForward(GptModelInputs& model_input)
     maybePrintModelInput(draft_prefill_input, "decode post draft model");
     ensureModelInputsOnCuda(draft_prefill_input, "decode.draft_prefill_forward");
     GptModelOutputs draft_prefill_model_output =
-    forwardModel(prefill_model, draft_prefill_input, ModelInputsModelRole::DRAFT_PREFILL);
+        forwardModel(prefill_model, draft_prefill_input, ModelInputsModelRole::DRAFT_PREFILL);
     // Ordinary MTP chains this output into the next autoregressive draft step.
     maybeOverrideLastHiddenWithMtpBuffer(draft_prefill_model_output, *prefill_model);
     return draft_prefill_model_output;
@@ -2055,6 +2099,15 @@ void MtpExecutor::prepareStreams(const std::list<GenerateStreamPtr>& streams,
 
         // split streams into prefill and decode
         if (stream->isContextStream()) {
+            if (!is_dspark_ && !stream->generateInput()->fake_query) {
+                const auto status = MtpBatchStreamProcessor::validatePrefillMultimodalInput(*stream->generateInput());
+                if (!status.ok()) {
+                    // Reject before entering collectives, not between target
+                    // and draft forwards where peer ranks would be waiting.
+                    stream->reportError(ErrorCode::INVALID_PARAMS, status.ToString());
+                    continue;
+                }
+            }
             prefill_streams.push_back(stream);
         } else {
             stream->setScoreLen(propose_step_ + 1);

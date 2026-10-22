@@ -9,6 +9,9 @@ from rtp_llm.models_py.model_desc.block_map import select_fmha_impl_for_layer
 from rtp_llm.models_py.model_desc.module_base import GptModelBase
 from rtp_llm.models_py.model_desc.qwen3 import Qwen3DecoderLayer
 from rtp_llm.models_py.modules import AttnImplFactory, Embedding, LinearFactory, RMSNorm
+from rtp_llm.models_py.modules.base.common.multimodal_embedding import (
+    MultimodalEmbedding,
+)
 from rtp_llm.ops import ParallelismConfig
 from rtp_llm.ops.compute_ops import PyAttentionInputs, PyModelInputs, PyModelOutputs
 from rtp_llm.utils.model_weight import W
@@ -39,6 +42,8 @@ class Qwen2MtpModel(GptModelBase):
         self.embed_tokens = Embedding(
             config, parallelism_config, weights.get_global_weight(W.embedding)
         )
+        if config.use_multimodal_embedding:
+            self.embed_tokens = MultimodalEmbedding(self.embed_tokens)
         self.eh_proj = LinearFactory.create_linear_from_weights(
             weights.weights[0],
             W.multi_tokens_predict_eh_proj,
@@ -71,8 +76,10 @@ class Qwen2MtpModel(GptModelBase):
         )
 
     def forward(self, inputs: PyModelInputs, fmha_impl: Any = None) -> PyModelOutputs:
-        input_ids: torch.Tensor = inputs.input_ids
-        inputs_embeds = self.embed_tokens(input_ids)
+        if self.config.use_multimodal_embedding:
+            inputs_embeds = self.embed_tokens(inputs.input_ids, model_inputs=inputs)
+        else:
+            inputs_embeds = self.embed_tokens(inputs.input_ids)
         embedding_hidden_states = inputs_embeds
         last_hidden_states = inputs.input_hiddens
 

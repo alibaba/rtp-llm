@@ -28,6 +28,9 @@ from rtp_llm.models_py.model_desc.deepseek_v4_model import (
     Dsv4SharedRuntimeBufferStore,
 )
 from rtp_llm.models_py.modules import RMSNorm
+from rtp_llm.models_py.modules.base.common.multimodal_embedding import (
+    MultimodalEmbedding,
+)
 from rtp_llm.models_py.modules.dsv4.chunk_env import (
     DEFAULT_DSV4_CHUNK_TOKENS,
     dsv4_chunk_tokens_from_env,
@@ -118,6 +121,9 @@ class DeepSeekV4MtpModel(DeepSeekV4Model):
     # ------------------------------------------------------------------
 
     def _load_extra_weights(self, weights: ModelWeights) -> None:
+        # V4 constructs its embedding during initialize, before this hook.
+        if self.config.use_multimodal_embedding:
+            self.v4.embed = MultimodalEmbedding(self.v4.embed, supports_mask=False)
         gw = weights.global_weights
         eps = float(self._v4_args.norm_eps)
         self.enorm = RMSNorm(gw[W.v4_mtp_enorm], eps)
@@ -181,7 +187,14 @@ class DeepSeekV4MtpModel(DeepSeekV4Model):
             end = min(start + chunk_tokens, T)
             input_ids_chunk = input_ids[start:end]
             positions_chunk = positions[start:end]
-            embed_chunk = self.v4.embed(input_ids_chunk)
+            if self.config.use_multimodal_embedding:
+                embed_chunk = self.v4.embed(
+                    input_ids_chunk,
+                    model_inputs=self._cur_inputs,
+                    token_offset=start,
+                )
+            else:
+                embed_chunk = self.v4.embed(input_ids_chunk)
             embed_chunk = torch.where(
                 positions_chunk.reshape(-1, 1) == 0,
                 torch.zeros_like(embed_chunk),
@@ -215,7 +228,10 @@ class DeepSeekV4MtpModel(DeepSeekV4Model):
                 input_ids.reshape(-1), pre_hc, positions[:T], chunk_tokens
             )
 
-        inputs_embeds = self.v4.embed(input_ids)  # [T, dim]
+        if self.config.use_multimodal_embedding:
+            inputs_embeds = self.v4.embed(input_ids, model_inputs=self._cur_inputs)
+        else:
+            inputs_embeds = self.v4.embed(input_ids)
         # Suppress position-0 embedding (matches main-model "step 0 of a
         # brand-new request" behavior the official MTP impl relies on).
         inputs_embeds = torch.where(

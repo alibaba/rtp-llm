@@ -269,12 +269,14 @@ void IContextParallelProcessor::handleInputs(GptModelInputs&                    
     size_t num_prefill_stream = input_lengths.size(0) - num_decode_stream;
 
     const bool has_prefix_lengths = model_input.prefix_lengths.defined() && model_input.prefix_lengths.numel() > 0;
-    RTP_LLM_CHECK_WITH_INFO(!has_prefix_lengths || !model_input.prefix_lengths.is_cuda(),
-                            "CP prefix_lengths must be a host tensor");
+    // MTP can publish device-first prefix lengths. CP reads them on the CPU;
+    // keep a ready local mirror without replacing the producer's device tensor.
+    const auto prefix_lengths_host =
+        has_prefix_lengths ? model_input.prefix_lengths.cpu().contiguous() : torch::Tensor();
     RTP_LLM_CHECK_WITH_INFO(!has_prefix_lengths
                                 || model_input.prefix_lengths.numel() == static_cast<int64_t>(num_prefill_stream),
                             "CP prefix_lengths must match the prefill stream count");
-    const int32_t* prefix_lengths_ptr = has_prefix_lengths ? model_input.prefix_lengths.data_ptr<int32_t>() : nullptr;
+    const int32_t* prefix_lengths_ptr = has_prefix_lengths ? prefix_lengths_host.data_ptr<int32_t>() : nullptr;
     bool           has_prefix_reuse   = false;
     for (size_t p = 0; p < num_prefill_stream && has_prefix_lengths; ++p) {
         RTP_LLM_CHECK_WITH_INFO(prefix_lengths_ptr[p] >= 0, "CP prefix_lengths must be non-negative");
@@ -316,8 +318,9 @@ void IContextParallelProcessor::handleInputs(GptModelInputs&                    
     const bool           need_source_map = need_token_remap || has_prefix_reuse;
     std::vector<int64_t> cp_select_indices;
     std::vector<uint8_t> cp_valid_mask;
-    RTP_LLM_CHECK_WITH_INFO(!need_source_map || num_decode_stream == 0,
-                            "Context parallel supports pure-prefill batches only when multimodal or prefix-reuse remap is required");
+    RTP_LLM_CHECK_WITH_INFO(
+        !need_source_map || num_decode_stream == 0,
+        "Context parallel supports pure-prefill batches only when multimodal or prefix-reuse remap is required");
     if (need_source_map) {
         cp_select_indices.reserve(cp_split_input_tokens.numel());
         cp_valid_mask.reserve(cp_split_input_tokens.numel());

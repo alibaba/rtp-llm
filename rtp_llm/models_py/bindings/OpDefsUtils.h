@@ -26,9 +26,8 @@ inline void getPaddingOffset(
 
 // for `FusedRopKVCache` kernel
 inline void calculatePaddingOffset(torch_ext::PyAttentionInputs& py_attn_inputs) {
-    // check input_lengths and prefix_lengths is host tensor
+    // Only query lengths determine the packed-to-padded token layout.
     RTP_LLM_CHECK_WITH_INFO(py_attn_inputs.input_lengths.device().is_cpu(), "input_lengths must be a host tensor");
-    RTP_LLM_CHECK_WITH_INFO(py_attn_inputs.prefix_lengths.device().is_cpu(), "prefix_lengths must be a host tensor");
 
     int     batch_size   = py_attn_inputs.input_lengths.size(0);
     int32_t total_tokens = py_attn_inputs.total_tokens;

@@ -2,6 +2,7 @@
 #include "rtp_llm/cpp/cuda_graph/cuda_graph_device_shims.h"
 #include "rtp_llm/models_py/bindings/core/ExecOps.h"
 #include "rtp_llm/cpp/models/logits_processor/LogitsProcessorStates.h"
+#include "rtp_llm/cpp/multimodal_processor/MultimodalInputUtils.h"
 #include "rtp_llm/cpp/utils/TensorDebugUtils.h"
 #include "rtp_llm/cpp/utils/StringUtil.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
@@ -15,6 +16,59 @@
 
 namespace rtp_llm {
 namespace {
+
+void prepareDraftPrefillMultimodalInput(GptModelInputs& input, const torch::Tensor& input_lengths) {
+    if (!input.text_tokens_mask.defined()) {
+        return;
+    }
+    auto mask = input.text_tokens_mask.cpu().contiguous();
+    RTP_LLM_CHECK_WITH_INFO(mask.numel() == input.combo_tokens.numel(), "MTP multimodal mask/token count mismatch");
+    auto         draft_text_tokens_mask = torch::ones_like(mask);
+    auto         locs = input.mm_features_locs.defined() ? input.mm_features_locs.cpu().contiguous() : torch::Tensor();
+    const size_t feature_count = input.multimodal_features ? input.multimodal_features->size() : 0;
+    RTP_LLM_CHECK_WITH_INFO(!feature_count || (locs.defined() && locs.numel() == static_cast<int64_t>(feature_count)),
+                            "MTP multimodal feature/location count mismatch");
+    const bool has_extra = input.mm_extra_input && !input.mm_extra_input->empty();
+    RTP_LLM_CHECK_WITH_INFO(!has_extra || input.mm_extra_input->size() == feature_count,
+                            "MTP multimodal extra/feature count mismatch");
+    std::vector<torch::Tensor> draft_mm_features;
+    std::vector<torch::Tensor> draft_mm_extra;
+    std::vector<int32_t>       draft_mm_features_locs;
+    size_t                     feature_index = 0;
+    int64_t                    offset        = 0;
+    // Prefix reuse is already cropped by the gatherer. Align within each request;
+    // the appended sampled token is text.
+    for (int64_t i = 0; i < input_lengths.numel(); ++i) {
+        const int64_t length = input_lengths.data_ptr<int32_t>()[i];
+        RTP_LLM_CHECK_WITH_INFO(length > 0 && offset + length <= mask.numel(), "Invalid MTP prefill length");
+        draft_text_tokens_mask.narrow(0, offset, length - 1).copy_(mask.narrow(0, offset + 1, length - 1));
+        while (feature_index < feature_count && locs.data_ptr<int32_t>()[feature_index] < offset + length) {
+            const auto&   feature = input.multimodal_features.value()[feature_index];
+            const int64_t loc     = locs.data_ptr<int32_t>()[feature_index];
+            RTP_LLM_CHECK_WITH_INFO(loc >= offset && loc + feature.size(0) <= offset + length,
+                                    "MTP multimodal feature crosses request boundary");
+            const int64_t crop = loc == offset ? 1 : 0;
+            if (feature.size(0) > crop) {
+                draft_mm_features.push_back(feature.slice(0, crop, feature.size(0)));
+                draft_mm_features_locs.push_back(static_cast<int32_t>(loc - 1 + crop));
+                if (has_extra) {
+                    draft_mm_extra.push_back(sliceMultimodalExtraInput(
+                        input.mm_extra_input.value()[feature_index], feature, crop, feature.size(0)));
+                }
+            }
+            ++feature_index;
+        }
+        offset += length;
+    }
+    RTP_LLM_CHECK_WITH_INFO(offset == mask.numel() && feature_index == feature_count,
+                            "MTP multimodal input does not match packed requests");
+    input.text_tokens_mask    = draft_text_tokens_mask.pin_memory();
+    input.mm_features_locs    = torch::tensor(draft_mm_features_locs, torch::kInt32).pin_memory();
+    input.multimodal_features = std::move(draft_mm_features);
+    if (has_extra) {
+        input.mm_extra_input = std::move(draft_mm_extra);
+    }
+}
 
 torch::Tensor cloneHiddenSlice(const torch::Tensor& hidden_states, int64_t start, int64_t length) {
     if (!hidden_states.defined() || length <= 0) {
@@ -819,6 +873,41 @@ void MtpBatchStreamProcessor::updateDecodeDraftModelInput(GptModelInputs&       
     }
 }
 
+absl::Status MtpBatchStreamProcessor::validatePrefillMultimodalInput(const GenerateInput& input) {
+    const size_t feature_count = input.multimodal_features ? input.multimodal_features->size() : 0;
+    if (!feature_count && !input.text_tokens_mask) {
+        return absl::OkStatus();
+    }
+    const auto cpu_int_vector = [](const torch::Tensor& tensor) {
+        return tensor.defined() && tensor.device().is_cpu() && tensor.scalar_type() == torch::kInt32
+               && tensor.dim() == 1 && tensor.is_contiguous();
+    };
+    if (!input.text_tokens_mask || !cpu_int_vector(*input.text_tokens_mask)
+        || input.text_tokens_mask->numel() != input.input_ids.numel()) {
+        return absl::InvalidArgumentError("MTP multimodal input requires a CPU int32 mask matching prompt length");
+    }
+    if (feature_count
+        && (!input.mm_locs || !cpu_int_vector(*input.mm_locs)
+            || input.mm_locs->numel() != static_cast<int64_t>(feature_count))) {
+        return absl::InvalidArgumentError("MTP multimodal feature/location count or layout mismatch");
+    }
+    const bool has_extra = input.mm_extra_input && !input.mm_extra_input->empty();
+    if (has_extra && input.mm_extra_input->size() != feature_count) {
+        return absl::InvalidArgumentError("MTP multimodal extra/feature count mismatch");
+    }
+    int64_t previous_end = 0;
+    for (size_t i = 0; i < feature_count; ++i) {
+        const auto&   feature = input.multimodal_features.value()[i];
+        const int64_t loc     = input.mm_locs->data_ptr<int32_t>()[i];
+        if (!feature.defined() || feature.dim() < 1 || feature.size(0) <= 0 || loc < previous_end
+            || loc > input.input_ids.numel() - feature.size(0)) {
+            return absl::InvalidArgumentError("MTP multimodal ranges must be sorted, disjoint and within the prompt");
+        }
+        previous_end = loc + feature.size(0);
+    }
+    return absl::OkStatus();
+}
+
 void MtpBatchStreamProcessor::updatePrefillPostDraftModelInput(const StreamGroups&    stream_groups,
                                                                GptModelInputs&        model_input,
                                                                const GptModelOutputs& model_output,
@@ -839,12 +928,29 @@ void MtpBatchStreamProcessor::updatePrefillPostDraftModelInput(const StreamGroup
     torch::Tensor combo_tokens_cpu =
         model_input.combo_tokens.is_cuda() ? model_input.combo_tokens.cpu().pin_memory() : model_input.combo_tokens;
 
+    if (model_input.text_tokens_mask.defined()) {
+        prepareDraftPrefillMultimodalInput(model_input, input_lengths_cpu);
+        // Keep target/request storage immutable, including explicit mRoPE IDs.
+        combo_tokens_cpu = combo_tokens_cpu.clone().pin_memory();
+        if (model_input.combo_position_ids.defined()) {
+            model_input.combo_position_ids = model_input.combo_position_ids.cpu().clone().pin_memory();
+        }
+    }
+
     int* input_lengths = input_lengths_cpu.data_ptr<int>();
     int* combo_tokens  = combo_tokens_cpu.data_ptr<int>();
 
     int  offset = 0;
     int* combo_position_ids =
         model_input.combo_position_ids.defined() ? model_input.combo_position_ids.data_ptr<int>() : nullptr;
+    torch::Tensor draft_token_type_ids;
+    int*          combo_token_type_ids = nullptr;
+    if (model_input.combo_tokens_type_ids.defined() && model_input.combo_tokens_type_ids.numel() > 0) {
+        RTP_LLM_CHECK_WITH_INFO(model_input.combo_tokens_type_ids.numel() == combo_tokens_cpu.numel(),
+                                "MTP token type IDs/token count mismatch");
+        draft_token_type_ids = model_input.combo_tokens_type_ids.cpu().contiguous().clone().pin_memory();
+        combo_token_type_ids = draft_token_type_ids.data_ptr<int>();
+    }
     const size_t position_id_len_factor = model_input_gatherer_config_.position_id_len_factor;
     auto         all_streams            = stream_groups.allStreams();
     auto         stream_it              = all_streams.begin();
@@ -857,6 +963,12 @@ void MtpBatchStreamProcessor::updatePrefillPostDraftModelInput(const StreamGroup
         // set new token id
         int new_token_id = new_all_token_ids_cpu.data_ptr<int>()[i * token_stride + token_stride - 1];
         combo_tokens[offset + input_length - 1] = new_token_id;
+
+        if (combo_token_type_ids != nullptr) {
+            memmove(combo_token_type_ids + offset, combo_token_type_ids + offset + 1, (input_length - 1) * sizeof(int));
+            // The appended sampled token has the default text token type.
+            combo_token_type_ids[offset + input_length - 1] = 0;
+        }
 
         if (combo_position_ids != nullptr) {
             int* stream_position_ids = combo_position_ids + offset * position_id_len_factor;
@@ -873,6 +985,9 @@ void MtpBatchStreamProcessor::updatePrefillPostDraftModelInput(const StreamGroup
     model_input.input_lengths  = toCudaInt32(input_lengths_cpu, host_holder);
     model_input.combo_tokens   = toCudaInt32(combo_tokens_cpu, host_holder);
     model_input.prefix_lengths = toCudaInt32(model_input.prefix_lengths, host_holder);
+    if (draft_token_type_ids.defined()) {
+        model_input.combo_tokens_type_ids = std::move(draft_token_type_ids);
+    }
 }
 
 torch::Tensor MtpBatchStreamProcessor::dsparkComboTokens(int64_t batch_size, const torch::Tensor& anchors) {

@@ -11,6 +11,8 @@ from rtp_llm.ops.compute_ops import LayerKVCache, ParamsBase, PyAttentionInputs
 class MlaImplBase(object):
     """Base class for MLA attention implementations."""
 
+    supports_per_token_fp8_kv_cache = False
+
     def __init__(
         self,
         attn_configs: AttentionConfigs,
@@ -103,6 +105,7 @@ class FMHAImplBase(ABC):
     """
 
     accepts_fmha_config = False
+    supports_per_token_fp8_kv_cache = False
 
     @abstractmethod
     def forward(

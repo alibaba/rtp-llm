@@ -1,7 +1,9 @@
-from typing import List, Sequence
+from typing import List, Optional, Sequence
 
 import torch
 from torch import nn
+
+from rtp_llm.ops.compute_ops import PyModelInputs
 
 
 # Keep this layout contract aligned with cpp/multimodal_processor/MultimodalInputUtils.h.
@@ -84,6 +86,100 @@ class MultimodalEmbeddingInjector(nn.Module):
             embeddings.narrow(0, loc, length).copy_(feature.contiguous())
 
         return embeddings
+
+
+class MultimodalEmbedding(nn.Module):
+    """Embed text tokens and insert multimodal features."""
+
+    def __init__(self, embedding: nn.Module, *, supports_mask: bool = True):
+        super().__init__()
+        self.embedding = embedding
+        self.injector = MultimodalEmbeddingInjector()
+        self._lookup = self._native_lookup if supports_mask else self._custom_lookup
+
+    @property
+    def weight(self) -> torch.Tensor:
+        return self.embedding.weight
+
+    def forward(
+        self,
+        input_ids: torch.Tensor,
+        position_ids: Optional[torch.Tensor] = None,
+        token_types: Optional[torch.Tensor] = None,
+        text_tokens_mask: Optional[torch.Tensor] = None,
+        *,
+        model_inputs: Optional[PyModelInputs] = None,
+        token_offset: int = 0,
+    ) -> torch.Tensor:
+        # Callers supplying only lookup arguments handle feature injection themselves.
+        if model_inputs is None:
+            return self._lookup(input_ids, position_ids, token_types, text_tokens_mask)
+        mm_inputs = model_inputs.multimodal_inputs
+        features = mm_inputs.multimodal_features
+        if not features:
+            return self._lookup(input_ids, position_ids, token_types, text_tokens_mask)
+
+        mask = model_inputs.embedding_inputs.text_tokens_mask
+        if mask is None or mask.numel() != model_inputs.input_ids.numel():
+            raise ValueError(
+                "multimodal embedding requires an aligned text_tokens_mask"
+            )
+        locs = mm_inputs.mm_features_locs
+        if locs is None or locs.numel() != len(features):
+            raise ValueError("multimodal feature/location count mismatch")
+
+        token_end = token_offset + input_ids.numel()
+        mask = mask.reshape(-1)[token_offset:token_end].to(input_ids.device)
+        token_types = model_inputs.embedding_inputs.combo_tokens_type_ids
+        if token_types is not None and token_types.numel():
+            token_types = token_types.reshape(-1)[token_offset:token_end].to(
+                input_ids.device
+            )
+        embeddings = self._lookup(input_ids, position_ids, token_types, mask)
+
+        # Offsets are in the current (possibly CP-local) input, not the full prompt.
+        if token_offset or input_ids.numel() != model_inputs.input_ids.numel():
+            chunk_features = []
+            chunk_locs = []
+            for feature, loc in zip(features, locs.cpu().reshape(-1).tolist()):
+                start = max(loc, token_offset)
+                end = min(loc + feature.size(0), token_end)
+                if start < end:
+                    chunk_features.append(feature[start - loc : end - loc])
+                    chunk_locs.append(start - token_offset)
+            features = chunk_features
+            locs = torch.tensor(chunk_locs, dtype=torch.int32, device="cpu")
+        return self.injector(embeddings, features, locs)
+
+    def _native_lookup(
+        self,
+        input_ids: torch.Tensor,
+        position_ids: Optional[torch.Tensor],
+        token_types: Optional[torch.Tensor],
+        mask: Optional[torch.Tensor],
+    ) -> torch.Tensor:
+        if position_ids is None and token_types is None and mask is None:
+            return self.embedding(input_ids)
+        return self.embedding(
+            input_ids,
+            position_ids=position_ids,
+            token_types=token_types,
+            text_tokens_mask=mask,
+        )
+
+    def _custom_lookup(
+        self,
+        input_ids: torch.Tensor,
+        position_ids: Optional[torch.Tensor],
+        token_types: Optional[torch.Tensor],
+        mask: Optional[torch.Tensor],
+    ) -> torch.Tensor:
+        if mask is None:
+            return self.embedding(input_ids)
+        # Mask lookup IDs without changing the cache hash IDs.
+        text_rows = mask.reshape(input_ids.shape).bool()
+        embeddings = self.embedding(input_ids.masked_fill(~text_rows, 0))
+        return embeddings.masked_fill(~text_rows.reshape(-1, 1), 0)
 
 
 class MultimodalDeepstackInjector(nn.Module):

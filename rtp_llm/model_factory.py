@@ -169,6 +169,7 @@ class ModelFactory:
             # propose model's max seq len must be equal to score model's max seq len
             propose_model_config.max_seq_len = model_config.max_seq_len
             propose_model_config.gen_num_per_cycle = model_config.gen_num_per_cycle
+            propose_model_config.target_is_multimodal = model_config.is_multimodal()
 
             alias_names = ()
             if target_model is not None:

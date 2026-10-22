@@ -1,13 +1,124 @@
 import itertools
+from types import SimpleNamespace
 from unittest import SkipTest, TestCase, main
+from unittest.mock import Mock
 
 import torch
 from torch import dtype as _dtype
 
 from rtp_llm.models_py.modules.base.common.multimodal_embedding import (
     MultimodalDeepstackInjector,
+    MultimodalEmbedding,
     MultimodalEmbeddingInjector,
 )
+
+
+class DraftMultimodalEmbeddingTest(TestCase):
+    def make_inputs(self):
+        return SimpleNamespace(
+            input_ids=torch.tensor([2, -100, 3, 100000, 1, 4], device="cpu"),
+            embedding_inputs=SimpleNamespace(
+                text_tokens_mask=torch.tensor([1, 0, 0, 0, 1, 1], device="cpu"),
+                combo_tokens_type_ids=None,
+            ),
+            multimodal_inputs=SimpleNamespace(
+                multimodal_features=[
+                    torch.tensor([[10.0, 11], [12, 13]], device="cpu"),
+                    torch.tensor([[14.0, 15]], device="cpu"),
+                ],
+                mm_features_locs=torch.tensor([1, 3], device="cpu"),
+            ),
+        )
+
+    def test_no_features_preserves_original_call(self):
+        inputs = self.make_inputs()
+        for features in ([], None):
+            inputs.multimodal_inputs.multimodal_features = features
+            embedding = Mock(return_value=object())
+            self.assertIs(
+                MultimodalEmbedding(embedding)(inputs.input_ids, model_inputs=inputs),
+                embedding.return_value,
+            )
+            embedding.assert_called_once_with(inputs.input_ids)
+
+    def test_masked_and_custom_embedding_replace_all_hash_rows(self):
+        for supports_mask in (True, False):
+            with self.subTest(supports_mask=supports_mask):
+                inputs = self.make_inputs()
+                original_ids = inputs.input_ids.clone()
+                original_mask = inputs.embedding_inputs.text_tokens_mask.clone()
+                original_features = [
+                    f.clone() for f in inputs.multimodal_inputs.multimodal_features
+                ]
+                table = torch.arange(10, dtype=torch.float32, device="cpu").reshape(
+                    5, 2
+                )
+
+                def embed(
+                    ids, position_ids=None, token_types=None, text_tokens_mask=None
+                ):
+                    if supports_mask:
+                        self.assertIsNotNone(text_tokens_mask)
+                        ids = ids.masked_fill(text_tokens_mask == 0, 0)
+                    return table[ids]
+
+                embedding = MultimodalEmbedding(
+                    Mock(side_effect=embed), supports_mask=supports_mask
+                )
+                output = embedding(inputs.input_ids, model_inputs=inputs)
+                expected = torch.tensor(
+                    [[4.0, 5], [10, 11], [12, 13], [14, 15], [2, 3], [8, 9]],
+                    device="cpu",
+                )
+                torch.testing.assert_close(output, expected, rtol=0, atol=0)
+                self.assertTrue(torch.equal(inputs.input_ids, original_ids))
+                self.assertTrue(
+                    torch.equal(inputs.embedding_inputs.text_tokens_mask, original_mask)
+                )
+                for original, feature in zip(
+                    original_features, inputs.multimodal_inputs.multimodal_features
+                ):
+                    self.assertTrue(torch.equal(original, feature))
+
+    def test_chunk_boundaries_match_full_embedding(self):
+        inputs = self.make_inputs()
+        table = torch.arange(10, dtype=torch.float32, device="cpu").reshape(5, 2)
+
+        def embed(ids):
+            return table[ids]
+
+        embedding = MultimodalEmbedding(Mock(side_effect=embed), supports_mask=False)
+        expected = embedding(inputs.input_ids, model_inputs=inputs)
+        for chunk_size in (1, 2, 3):
+            chunks = [
+                embedding(
+                    inputs.input_ids[start : start + chunk_size],
+                    model_inputs=inputs,
+                    token_offset=start,
+                )
+                for start in range(0, inputs.input_ids.numel(), chunk_size)
+            ]
+            torch.testing.assert_close(torch.cat(chunks), expected, rtol=0, atol=0)
+
+    def test_custom_embedding_zeros_cp_padding(self):
+        inputs = self.make_inputs()
+        inputs.input_ids[-1] = 0
+        inputs.embedding_inputs.text_tokens_mask[-1] = 0
+        embedding = MultimodalEmbedding(
+            Mock(side_effect=lambda ids: torch.ones((ids.numel(), 2), device="cpu")),
+            supports_mask=False,
+        )
+        output = embedding(inputs.input_ids, model_inputs=inputs)
+        self.assertTrue(torch.equal(output[-1], torch.zeros(2, device="cpu")))
+
+    def test_missing_or_misaligned_mask_fails_before_lookup(self):
+        for mask in (None, torch.ones(2, device="cpu")):
+            inputs = self.make_inputs()
+            inputs.embedding_inputs.text_tokens_mask = mask
+            embed = Mock()
+            with self.assertRaisesRegex(ValueError, "aligned text_tokens_mask"):
+                MultimodalEmbedding(embed)(inputs.input_ids, model_inputs=inputs)
+            embed.assert_not_called()
 
 
 class MultimodalEmbeddingTest(TestCase):

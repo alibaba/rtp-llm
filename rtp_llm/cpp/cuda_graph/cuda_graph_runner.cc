@@ -682,18 +682,18 @@ void CudaGraphRunner::prepareAttentionInputs(const PyModelInputs& inputs,
     // Clear graph padding before replay. Live-row copies do not cover the
     // selected graph's remaining rows.
     if (state.current_batch_size < selected_graph_batch_size) {
+        // Zero-length rows are excluded from FP8 KV cache writes.
+        py_model_inputs_.attention_inputs.input_lengths.slice(0, state.current_batch_size, selected_graph_batch_size)
+            .fill_(0);
+        py_model_inputs_.attention_inputs.input_lengths_device
+            .slice(0, state.current_batch_size, selected_graph_batch_size)
+            .fill_(0);
         // MTP/prefill uses input and prefix lengths to describe each query.
         if (is_prefill_cuda_graph_mode_ || num_tokens_per_bs_ > 1) {
             py_model_inputs_.attention_inputs.prefix_lengths
                 .slice(0, state.current_batch_size, selected_graph_batch_size)
                 .fill_(0);
-            py_model_inputs_.attention_inputs.input_lengths
-                .slice(0, state.current_batch_size, selected_graph_batch_size)
-                .fill_(0);
             py_model_inputs_.attention_inputs.prefix_lengths_device
-                .slice(0, state.current_batch_size, selected_graph_batch_size)
-                .fill_(0);
-            py_model_inputs_.attention_inputs.input_lengths_device
                 .slice(0, state.current_batch_size, selected_graph_batch_size)
                 .fill_(0);
         }
