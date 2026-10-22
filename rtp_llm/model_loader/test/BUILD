@@ -38,6 +38,12 @@ py_test(
 )
 
 py_test(
+    name = "test_fp8_direct_ue8m0_switch",
+    srcs = ["test_fp8_direct_ue8m0_switch.py"],
+    deps = py_test_deps,
+)
+
+py_test(
     name = "test_compressed_w8a8_int8_per_channel",
     srcs = ["test_compressed_w8a8_int8_per_channel.py"],
     deps = py_test_deps,
