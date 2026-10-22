@@ -167,6 +167,9 @@ class DSv4DecodeFmhaImplFP8:
         :meth:`prepare` stays a safe superset. See
         ``opt_flash_mla/design/01_cuda_graph_sched_meta_freeze.md``.
         """
+        resources = getattr(self.metadata, "_engram_decode_tables", None)
+        if resources is not None:
+            resources.validate()
         if valid_request_count is None:
             # An older C++ runner cannot infer live rows from padded tensor
             # shapes. Fail rather than silently retain capture-time validity.

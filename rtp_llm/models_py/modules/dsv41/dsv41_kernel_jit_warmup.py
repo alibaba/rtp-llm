@@ -368,7 +368,9 @@ def warmup_v41_engram_jit(model, *, max_m, device):
     sms = max(lookup_sms)
     prefetch_config = None
     prefetch_carveout = None
-    if engram_lookup_prefetch_enabled():
+    from rtp_llm.models_py.modules.dsv41 import _engram_decode_prefetch
+
+    if engram_lookup_prefetch_enabled() or _engram_decode_prefetch.enabled():
         from rtp_llm.models_py.modules.dsv41._engram_triton import (
             PREFETCH_LOOKUP_CARVEOUT,
             PREFETCH_LOOKUP_CONFIG,
@@ -397,6 +399,7 @@ def warmup_v41_engram_jit(model, *, max_m, device):
     if key in _ENGRAM_WARMED:
         for layer in layers:
             layer.prepare_lookup_prefetch()
+            _engram_decode_prefetch.prepare(layer)
         common._sync_cuda(device)
         prepare_engram_cpu_lookup(model, max_m=max_m)
         return
@@ -471,6 +474,7 @@ def warmup_v41_engram_jit(model, *, max_m, device):
                     )
     for layer in layers:
         layer.prepare_lookup_prefetch()
+        _engram_decode_prefetch.prepare(layer)
     common._sync_cuda(device)
     prepare_engram_cpu_lookup(model, max_m=max_m)
     _ENGRAM_WARMED.add(key)
