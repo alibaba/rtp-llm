@@ -33,7 +33,10 @@ def _ple_gate(
     BLOCK: tl.constexpr,
     PROJECTED_FP32: tl.constexpr = False,
 ):
-    row, branch = tl.program_id(0), tl.program_id(1)
+    # row * WIDTH exceeds int32 once a single prefill step passes ~2^31/10240
+    # rows; max_seq_len=262144 allows that, so promote before multiplying.
+    row = tl.program_id(0).to(tl.int64)
+    branch = tl.program_id(1)
     col = tl.arange(0, BLOCK)
     valid = col < H
     hc_col = branch * H + col
