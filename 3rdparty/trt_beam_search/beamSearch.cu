@@ -72,9 +72,10 @@ BeamSearchConfig configureBeamSearch(runtime::SizeType32 batchSize,
 
     TLLM_LOG_TRACE("%s start", __PRETTY_FUNCTION__);
 
-    TLLM_CHECK_WITH_INFO(beamWidthIn > 0 && beamWidthOut > 0 && beamWidthIn <= kernels::kMaxSupportedBeamWidth
-                             && beamWidthOut <= kernels::kMaxSupportedBeamWidth,
-                         "beam widths must be within the compiled kernel support range");
+    RTP_LLM_CHECK_WITH_INFO(isSupportedBeamWidth(beamWidthIn) && isSupportedBeamWidth(beamWidthOut),
+        "beam widths must be between 1 and %d, got input=%d output=%d",
+        kMaxSupportedBeamWidth, beamWidthIn, beamWidthOut);
+
     topkForcePath = topkForcePath < 0 ? kernels::beamTopkForcePath() : topkForcePath;
     BeamSearchConfig config;
 
@@ -193,8 +194,7 @@ BeamSearchConfig configureBeamSearch(runtime::SizeType32 batchSize,
         case 1024: GET_INFO_STAGE3(1024, true);
         case 2048: GET_INFO_STAGE3(2048, true);
         case 4096: GET_INFO_STAGE3(4096, true);
-        default:
-            throw std::invalid_argument("unsupported beam width in configureBeamSearch");
+        default: RTP_LLM_CHECK_WITH_INFO(false, "unsupported V2 beam width");
         }
         config.mByteSharedMemoryStage3 = attr.sharedSizeBytes; // Only static shared memory
 
