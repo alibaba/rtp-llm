@@ -266,7 +266,7 @@ class BuildPackagingContractTest(TestCase):
 
     def test_python_native_rocm_extras_pin_validated_kernel_stack(self):
         expected_urls = {
-            "aiter": "https://sinian-metrics-platform.oss-cn-hangzhou.aliyuncs.com/kis/AMD/aiter/aiter-0.1.21.dev80%2Bg987203ba5.d20260825-cp310-cp310-linux_x86_64.whl",
+            "amd-aiter": "https://sinian-metrics-platform.oss-cn-hangzhou.aliyuncs.com/kis/AMD/aiter/amd_aiter-0.1.23.dev134%2Bg8449f416b-cp310-cp310-linux_x86_64.whl#sha256=47840027132b1caf0e0985a8376d3e6d24f31c994983482378a5caf46ad6c50f",
             "triton": "https://sinian-metrics-platform.oss-cn-hangzhou.aliyuncs.com/kis/AMD/triton/triton-3.7.0%2Bamd.rocm7.2.0.gitd0d77a509-cp310-cp310-linux_x86_64.whl",
             "triton-kernels": "https://sinian-metrics-platform.oss-cn-hangzhou.aliyuncs.com/kis/AMD/triton/triton_kernels-1.0.0%2Bamd.rocm7.2.0.gitd0d77a509-py3-none-any.whl",
         }
@@ -274,6 +274,11 @@ class BuildPackagingContractTest(TestCase):
             requirement.name: requirement
             for requirement in map(Requirement, _oss_optional_extras()["rocm"])
         }
+        self.assertNotIn(
+            "aiter",
+            requirements,
+            "The fixed wheel distribution is amd-aiter; do not install both distributions",
+        )
         self.assertNotIn(
             "amdsmi",
             requirements,
@@ -286,8 +291,8 @@ class BuildPackagingContractTest(TestCase):
         )
         self.assertEqual(
             str(requirements["flydsl"].specifier),
-            "==0.3.1",
-            "FLA kernels require an explicit FlyDSL dependency",
+            "==0.3.4.1",
+            "FLA kernels and the pinned AITER wheel require FlyDSL 0.3.4.1",
         )
         self.assertEqual(
             requirements["amd-mori"].url,
@@ -1194,7 +1199,7 @@ class BuildPackagingContractTest(TestCase):
             "py_ut_l20": 86,
             "py_ut_oss_l20": 84,
             "py_ut_sm100_arm": 104,
-            "py_ut_amd": 405,
+            "py_ut_amd": 412,
             "py_ut_frontend": 71,
         }.items():
             self.assertEqual(profiles[name].get("expected_count"), expected_count)
