@@ -343,6 +343,15 @@ py_test(
 )
 
 py_test(
+    name = "ple_commit_metadata_test",
+    srcs = ["ple_commit_metadata_test.py"],
+    deps = ["//rtp_llm:testlib"],
+    env = {"GPU_COUNT": "1"},
+    tags = ["RTX_5000_PRO_CU13"],
+    exec_properties = {"gpu": "RTX_5000_PRO_CU13", "gpu_count": "1"},
+)
+
+py_test(
     name = "ple_commit_prepare_test",
     srcs = ["ple_commit_prepare_test.py"],
     deps = ["//rtp_llm:testlib"],

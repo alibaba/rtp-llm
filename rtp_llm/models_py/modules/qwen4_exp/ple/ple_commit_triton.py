@@ -88,11 +88,19 @@ def _write_pair_verdict(
     block = tl.load(
         TABLE + row.to(tl.int64) * ROW_STRIDE + safe_page * COL_STRIDE, live, other=0
     ).to(tl.int64)
-    tl.store(OUTPUT + FLAG, tl.sum((live & (position < 0)).to(tl.int32), 0) > 0)
-    tl.store(OUTPUT + FLAG + 1, tl.sum((live & (page >= COLS)).to(tl.int32), 0) > 0)
-    tl.store(OUTPUT + FLAG + 2, tl.sum((live & (block <= 0)).to(tl.int32), 0) > 0)
-    tl.store(OUTPUT + FLAG + 3, tl.sum((live & (block >= POOL)).to(tl.int32), 0) > 0)
-    tl.store(OUTPUT + IDS + row, block, live)
+    bad_position = tl.sum((live & (position < 0)).to(tl.int32), 0) > 0
+    bad_page = tl.sum((live & (page >= COLS)).to(tl.int32), 0) > 0
+    bad_unallocated = tl.sum((live & (block <= 0)).to(tl.int32), 0) > 0
+    bad_pool = tl.sum((live & (block >= POOL)).to(tl.int32), 0) > 0
+    tl.store(OUTPUT + FLAG, bad_position)
+    tl.store(OUTPUT + FLAG + 1, bad_page)
+    tl.store(OUTPUT + FLAG + 2, bad_unallocated)
+    tl.store(OUTPUT + FLAG + 3, bad_pool)
+    # Clamped storage keeps speculative pool gathers in bounds; every clamped
+    # value trips one of the verdict flags above and aborts before pool writes.
+    safe_block = tl.minimum(tl.maximum(block, 0), POOL - 1)
+    tl.store(OUTPUT + IDS + row, safe_block, live)
+    return safe_block, bad_position | bad_page | bad_unallocated | bad_pool
 
 
 @triton.jit
