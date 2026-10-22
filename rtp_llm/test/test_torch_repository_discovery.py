@@ -55,7 +55,7 @@ class _Context:
 
     def __init__(self, root, environ=None, image_python=True, result=None):
         self.os = SimpleNamespace(environ=environ or {})
-        self.attr = SimpleNamespace(build_file=PROJECT_ROOT / "BUILD.pytorch")
+        self.attr = SimpleNamespace(build_file=PROJECT_ROOT / "BUILD.pytorch.native")
         self.extra_existing = {IMAGE_PYTHON} if image_python else set()
         self.active_python = Path(root) / "system" / "bin" / "python3"
         self.result = result or SimpleNamespace(
@@ -116,7 +116,7 @@ class TorchRepositoryDiscoveryTest(TestCase):
         self.assertEqual(context.commands, [])
         self.assertEqual(
             context.files,
-            [("BUILD", (PROJECT_ROOT / "BUILD.pytorch").read_text())],
+            [("BUILD", (PROJECT_ROOT / "BUILD.pytorch.native").read_text())],
         )
         self.assertEqual(
             context.links,
@@ -219,7 +219,14 @@ class TorchRepositoryDiscoveryTest(TestCase):
             next(keyword.value for keyword in rule.keywords if keyword.arg == "environ")
         )
         self.assertEqual(
-            environ, ["TORCH_ROOT", "PYTHON_BIN_PATH", "VIRTUAL_ENV", "PATH"]
+            environ,
+            [
+                "TORCH_ROOT",
+                "PYTHON_BIN_PATH",
+                "VIRTUAL_ENV",
+                "PATH",
+                "RTP_TORCH_PROVIDER",
+            ],
         )
         arguments = [
             shlex.split(line, comments=True)

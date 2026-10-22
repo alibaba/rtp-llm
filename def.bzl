@@ -292,6 +292,13 @@ read_release_version = repository_rule(
 )
 
 def _torch_repo_impl(ctx):
+    provider = ctx.os.environ.get("RTP_TORCH_PROVIDER", "native")
+    if provider == "hermetic":
+        # Alias the real pinned archive targets without importing host Torch.
+        ctx.file("BUILD", 'load("@arch_config//:arch_select.bzl", "torch_archive_aliases")\ntorch_archive_aliases()\n')
+        return
+    if provider != "native":
+        fail("RTP_TORCH_PROVIDER must be native or hermetic, got: " + provider)
     torch_path = ctx.os.environ.get("TORCH_ROOT")
     if not torch_path:
         # Explicit environment and active Native venvs take priority over the
@@ -338,5 +345,5 @@ torch_local_repository = repository_rule(
     attrs = {
         "build_file": attr.label(mandatory = True, allow_single_file = True),
     },
-    environ = ["TORCH_ROOT", "PYTHON_BIN_PATH", "VIRTUAL_ENV", "PATH"],
+    environ = ["TORCH_ROOT", "PYTHON_BIN_PATH", "VIRTUAL_ENV", "PATH", "RTP_TORCH_PROVIDER"],
 )
