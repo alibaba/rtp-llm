@@ -1150,15 +1150,15 @@ TEST_F(CudaSamplerTest, testSplitSoftmaxFullConsumerBenchmark) {
 }
 
 TEST_F(CudaSamplerTest, testSplitPointMassRejectionMatchesOriginalForAllAcceptancePaths) {
-    const char* previous = std::getenv("RTP_LLM_SPLIT_POINT_MASS_REJECTION");
+    const char* previous = std::getenv("RTP_LLM_SPLIT_REJECTION");
     const auto  saved = previous == nullptr ? std::optional<std::string>() : std::make_optional(std::string(previous));
     struct RestoreFlag {
         std::optional<std::string> previous;
         ~RestoreFlag() {
             if (previous.has_value())
-                setenv("RTP_LLM_SPLIT_POINT_MASS_REJECTION", previous->c_str(), 1);
+                setenv("RTP_LLM_SPLIT_REJECTION", previous->c_str(), 1);
             else
-                unsetenv("RTP_LLM_SPLIT_POINT_MASS_REJECTION");
+                unsetenv("RTP_LLM_SPLIT_REJECTION");
         }
     } restore{saved};
     torch::manual_seed(20261019);
@@ -1189,7 +1189,7 @@ TEST_F(CudaSamplerTest, testSplitPointMassRejectionMatchesOriginalForAllAcceptan
                 for (int i = 0; i < pos; ++i)
                     target.select(1, stride - 1).reshape({batch, 4}).select(1, i).copy_(draft.select(1, i));
                 for (int variant = 0; variant < 2; ++variant) {
-                    setenv("RTP_LLM_SPLIT_POINT_MASS_REJECTION", variant ? "1" : "0", 1);
+                    setenv("RTP_LLM_SPLIT_REJECTION", variant ? "1" : "0", 1);
                     auto output  = variant ? actual : expected;
                     auto lengths = variant ? actual_len : expected_len;
                     output.fill_(-999);
@@ -1205,10 +1205,10 @@ TEST_F(CudaSamplerTest, testSplitPointMassRejectionMatchesOriginalForAllAcceptan
             probs.zero_();
             auto uniform    = torch::ones({batch, 4}, options);
             auto stochastic = torch::ones({batch}, options.dtype(torch::kBool));
-            setenv("RTP_LLM_SPLIT_POINT_MASS_REJECTION", "0", 1);
+            setenv("RTP_LLM_SPLIT_REJECTION", "0", 1);
             execRejectionSampling(
                 {torch::Tensor(), draft, uniform, probs, target, expected, expected_len, stochastic, true});
-            setenv("RTP_LLM_SPLIT_POINT_MASS_REJECTION", "1", 1);
+            setenv("RTP_LLM_SPLIT_REJECTION", "1", 1);
             execRejectionSampling(
                 {torch::Tensor(), draft, uniform, probs, target, actual, actual_len, stochastic, true});
             ASSERT_TRUE(torch::equal(actual, expected));
@@ -1218,15 +1218,15 @@ TEST_F(CudaSamplerTest, testSplitPointMassRejectionMatchesOriginalForAllAcceptan
 }
 
 TEST_F(CudaSamplerTest, testSplitPointMassRejectionCompleteOpBenchmark) {
-    const char* previous = std::getenv("RTP_LLM_SPLIT_POINT_MASS_REJECTION");
+    const char* previous = std::getenv("RTP_LLM_SPLIT_REJECTION");
     const auto  saved = previous == nullptr ? std::optional<std::string>() : std::make_optional(std::string(previous));
     struct RestoreFlag {
         std::optional<std::string> previous;
         ~RestoreFlag() {
             if (previous.has_value())
-                setenv("RTP_LLM_SPLIT_POINT_MASS_REJECTION", previous->c_str(), 1);
+                setenv("RTP_LLM_SPLIT_REJECTION", previous->c_str(), 1);
             else
-                unsetenv("RTP_LLM_SPLIT_POINT_MASS_REJECTION");
+                unsetenv("RTP_LLM_SPLIT_REJECTION");
         }
     } restore{saved};
     auto        options = torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA);
@@ -1247,7 +1247,7 @@ TEST_F(CudaSamplerTest, testSplitPointMassRejectionCompleteOpBenchmark) {
         torch::Tensor reference, reference_len;
         for (int variant = 0; variant < 3; ++variant) {
             const char* label = variant == 0 ? "baseline_before" : variant == 1 ? "split_rejection" : "baseline_after";
-            setenv("RTP_LLM_SPLIT_POINT_MASS_REJECTION", variant == 1 ? "1" : "0", 1);
+            setenv("RTP_LLM_SPLIT_REJECTION", variant == 1 ? "1" : "0", 1);
             std::vector<double> event_times, host_times;
             for (int iteration = 0; iteration < 130; ++iteration) {
                 flush.add_(1);

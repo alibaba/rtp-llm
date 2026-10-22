@@ -8,7 +8,6 @@ Compilation occurs during eager warmup; an unprimed CUDA graph falls back.
 
 import hashlib
 import logging
-import os
 import threading
 
 import torch
@@ -267,8 +266,7 @@ void qsa_cub_topk_draft(
 
 def is_supported(scores, lengths):
     return (
-        os.environ.get("QWEN4_QSA_CUB_TOPK", "0") == "1"
-        and scores.is_cuda
+        scores.is_cuda
         and torch.version.hip is None
         and torch.version.git_version == _TORCH_GIT
         and scores.dtype == torch.float32
@@ -346,7 +344,7 @@ def try_cub_qsa_tokens(scores, lengths, *, finite_only=True):
         output,
         256,
         finite_only,
-        os.environ.get("QWEN4_QSA_MERGE_TOPK", "0") == "1",
+        True,
     )
     return output
 
@@ -359,8 +357,6 @@ def try_cub_draft_qsa_tokens(scores, visible, row_lengths, cu):
     """
     if not (
         is_supported(scores, visible)
-        and os.environ.get("QWEN4_QSA_MERGE_TOPK", "0") == "1"
-        and os.environ.get("QWEN4_DRAFT_QSA_DIRECT", "0") == "1"
         and scores.shape[1] == 2144
         and row_lengths.ndim == cu.ndim == 1
         and 1 <= row_lengths.numel() <= 8

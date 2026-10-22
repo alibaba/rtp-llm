@@ -4,7 +4,6 @@ The C++ executor owns TP consensus. Captured stages retain their addresses in
 ``graph_registry``; releasing an active commit only releases its undo record.
 """
 
-import os
 from collections.abc import Callable, Mapping
 from typing import Optional
 
@@ -305,13 +304,11 @@ class PLETransactionCoordinator:
             raise RuntimeError(
                 "qwen4_exp PLE target commit requires device-local int32 accept_len [B]"
             )
-        resolution = None
-        if os.environ.get("QWEN4_PLE_COMMIT_METADATA_FUSED", "0") == "1":
-            from rtp_llm.models_py.modules.qwen4_exp.ple.ple_commit_metadata_triton import (
-                begin_accepted_pair_resolution,
-            )
+        from rtp_llm.models_py.modules.qwen4_exp.ple.ple_commit_metadata_triton import (
+            begin_accepted_pair_resolution,
+        )
 
-            resolution = begin_accepted_pair_resolution(transaction, accept_len)
+        resolution = begin_accepted_pair_resolution(transaction, accept_len)
         if resolution is not None:
             # The verdict read is deferred: the gather launches below run while
             # the device computes it, and verify() re-checks before publishing.

@@ -1,4 +1,3 @@
-import os
 import unittest
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
@@ -136,32 +135,29 @@ class QsaProjectionPairTest(unittest.TestCase):
             qsa_main_cache_mutation_started=Mock(return_value=False),
             set_selected_indices=Mock(side_effect=SelectionComplete),
         )
-        for enabled, rows, expected in (
-            ("0", 1, 0),
-            ("1", 1, 1),
-            ("1", 2, 0),
-            ("1", 3, 1),
+        for rows, expected in (
+            (1, 1),
+            (2, 0),
+            (3, 1),
         ):
             x = torch.randn(rows, 2560, device="cuda", dtype=torch.bfloat16)
-            with (
-                patch.dict(os.environ, {"QWEN4_QSA_SMALL_PAIR": enabled}),
-                patch(
-                    "rtp_llm.models_py.modules.base.common.fp8_linear.project_fp8_pair",
-                    wraps=project_fp8_pair,
-                ) as pair,
-                patch.object(attention, "_qsa_selected_indices", return_value=None),
+            with patch(
+                "rtp_llm.models_py.modules.base.common.fp8_linear.project_fp8_pair",
+                wraps=project_fp8_pair,
+            ) as pair, patch.object(
+                attention, "_qsa_selected_indices", return_value=None
             ):
                 with self.assertRaises(SelectionComplete):
                     attention(x, fmha, None, inputs, qsa_runtime=runtime)
                 self.assertEqual(pair.call_count, expected)
-                if rows == 1 and enabled == "1":
+                if rows == 1:
                     pair.reset_mock()
                     with patch.object(indexer, "project", wraps=indexer.project):
                         with self.assertRaises(SelectionComplete):
                             attention(x, fmha, None, inputs, qsa_runtime=runtime)
                     pair.assert_not_called()
 
-    def test_draft_owner_raw_query_is_opt_in_and_overrides_keep_normalization(self):
+    def test_draft_owner_raw_query_and_overrides_keep_normalization(self):
         _, indexer = self.fixture(heads=4)
         attention = Qwen4ExpAttention.__new__(Qwen4ExpAttention)
         torch.nn.Module.__init__(attention)
@@ -180,22 +176,18 @@ class QsaProjectionPairTest(unittest.TestCase):
                 kwargs.get("raw_query", False),
             ),
         )
-        for enabled in ("0", "1"):
-            with patch.dict(os.environ, {"QWEN4_DRAFT_QSA_METADATA": enabled}):
-                actual = attention._qsa_selected_indices(x, runtime)
-                expected = (
-                    indexer.project_raw(x) if enabled == "1" else indexer.project(x)
-                )
-                for got, ref in zip(actual[:2], expected):
-                    torch.testing.assert_close(got, ref, rtol=0, atol=0)
-                self.assertEqual(actual[2], enabled == "1")
-                with patch.object(indexer, "project", wraps=indexer.project) as project:
-                    actual = attention._qsa_selected_indices(x, runtime)
-                    project.assert_called_once()
-                self.assertFalse(actual[2])
-                expected = indexer.project(x)
-                for got, ref in zip(actual[:2], expected):
-                    torch.testing.assert_close(got, ref, rtol=0, atol=0)
+        actual = attention._qsa_selected_indices(x, runtime)
+        expected = indexer.project_raw(x)
+        for got, ref in zip(actual[:2], expected):
+            torch.testing.assert_close(got, ref, rtol=0, atol=0)
+        self.assertTrue(actual[2])
+        with patch.object(indexer, "project", wraps=indexer.project) as project:
+            actual = attention._qsa_selected_indices(x, runtime)
+            project.assert_called_once()
+        self.assertFalse(actual[2])
+        expected = indexer.project(x)
+        for got, ref in zip(actual[:2], expected):
+            torch.testing.assert_close(got, ref, rtol=0, atol=0)
 
     def test_owner_preserves_raw_target_and_normalized_decode_contracts(self):
         gate, indexer = self.fixture()

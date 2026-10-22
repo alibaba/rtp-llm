@@ -1,7 +1,5 @@
 """Fuse draft request/packed layout conversions without changing attention."""
 
-import os
-
 import torch
 import triton
 import triton.language as tl
@@ -10,8 +8,7 @@ from triton.language.extra.cuda import libdevice
 
 def _enabled(tensor):
     return (
-        os.environ.get("QWEN4_DRAFT_QSA_LAYOUT", "0") == "1"
-        and tensor.is_cuda
+        tensor.is_cuda
         and torch.version.hip is None
         and torch.cuda.get_device_capability(tensor.device) == (12, 0)
         and tensor.dtype == torch.bfloat16
@@ -188,9 +185,7 @@ def _restore_draft_selection(
 
 def try_restore_selection(selected, inverse, valid):
     if not (
-        os.environ.get("QWEN4_DRAFT_QSA_DIRECT", "0") == "1"
-        and os.environ.get("QWEN4_DRAFT_QSA_LAYOUT", "0") == "1"
-        and selected.is_cuda
+        selected.is_cuda
         and torch.version.hip is None
         and torch.cuda.get_device_capability(selected.device) == (12, 0)
         and selected.ndim == 2

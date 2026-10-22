@@ -1,7 +1,5 @@
 """Ragged draft variant of the qualified two-launch snapshot/write contract."""
 
-import os
-
 import torch
 import triton
 import triton.language as tl
@@ -165,8 +163,7 @@ def try_write_draft_window(
 ):
     # Public writer validates all original metadata/layout contracts first.
     if not (
-        os.environ.get("QWEN4_DRAFT_QSA_FUSED", "0") == "1"
-        and raw.is_cuda
+        raw.is_cuda
         and torch.version.hip is None
         and torch.cuda.get_device_capability(raw.device) == (12, 0)
         and 1 <= raw.shape[0] <= 32

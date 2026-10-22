@@ -3,8 +3,6 @@
 #include <array>
 #include <atomic>
 #include <exception>
-#include <cstdlib>
-#include <cstring>
 #include <memory>
 #include <optional>
 #include <stdexcept>
@@ -89,8 +87,6 @@ public:
         if (py::hasattr(py_instance_, "cuda_graph_engram_window_size")) {
             engram_window_size_ = py_instance_.attr("cuda_graph_engram_window_size")().cast<int>();
         }
-        const char* request_sized  = std::getenv("QWEN4_MTP_REQUEST_GRAPH_CAPACITY");
-        request_sized_mtp_prefill_ = request_sized != nullptr && std::strcmp(request_sized, "1") == 0;
         if (role_ == CudaGraphRole::AUTO) {
             role_ = is_target_verify_ ? CudaGraphRole::TARGET_VERIFY :
                     is_prefill_cuda_graph_mode_ ?
@@ -214,9 +210,6 @@ private:
         // metadata and output capacities must agree with [B * q_len, dim].
         return isMtpDraftPrefillCudaGraph() && hc_mult_ > 1;
     }
-    bool usesRequestSizedMtpDraftPrefillCudaGraph() const {
-        return usesFixedCapacityMtpDraftPrefillCudaGraph() && request_sized_mtp_prefill_;
-    }
     // Common input preparation logic for capture
     void prepareCaptureInputs(PyModelInputs& inputs, int batch_size, int seq_len_or_tokens);
     // Common memory hold creation logic
@@ -249,7 +242,6 @@ private:
     bool                    prepare_model_inputs_enabled_{false};
     bool                    enable_cuda_graph_{false};
     bool                    exact_batch_only_{false};
-    bool                    request_sized_mtp_prefill_{false};
     bool                    is_prefill_cuda_graph_mode_{false};
     bool                    is_target_verify_{false};
     CudaGraphRole           role_{CudaGraphRole::AUTO};

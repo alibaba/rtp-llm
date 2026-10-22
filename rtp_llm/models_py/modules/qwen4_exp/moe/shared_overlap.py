@@ -5,7 +5,6 @@ The routed TP reduction stays on the original stream. The unsharded shared
 branch retains its BF16 output and original fused sigmoid-scale-add boundary.
 """
 
-import os
 from functools import lru_cache
 
 import torch
@@ -25,8 +24,6 @@ class Qwen4MoeLayer(GenericMoeLayer):
 
     def prepare_shared_expert_overlap(self) -> None:
         """Allocate streams only for the explicitly qualified Qwen4 layout."""
-        if os.environ.get("QWEN4_SHARED_EXPERT_OVERLAP", "0") != "1":
-            return
         from rtp_llm.models_py.modules.base.common.fp8_linear import Fp8Linear
         from rtp_llm.models_py.modules.factory.fused_moe.defs.fused_moe import FusedMoe
         from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors.cutlass_nvfp4_executor import (
@@ -68,10 +65,9 @@ class Qwen4MoeLayer(GenericMoeLayer):
         ):
             return
         self._shared_stream = torch.cuda.Stream(device=shared.up_proj.weight.device)
-        if os.environ.get("QWEN4_SHARED_EXPERT_REUSE_STREAM", "0") == "1":
-            self._reused_shared_stream = _shared_stream_for_device(
-                shared.up_proj.weight.device.index
-            )
+        self._reused_shared_stream = _shared_stream_for_device(
+            shared.up_proj.weight.device.index
+        )
         self._shared_input_ready = torch.cuda.Event()
         self._shared_output_ready = torch.cuda.Event()
 

@@ -1265,7 +1265,7 @@ bool CudaGraphRunner::tryGetRealGraphPrefillSeqLen(const PyModelInputs& inputs,
     // HC draft graphs retain four lanes per request even when acceptance
     // leaves fewer packed tokens. Choose by both request count and token count.
     int required_capacity = state.current_seq_len;
-    if (usesRequestSizedMtpDraftPrefillCudaGraph()) {
+    if (usesFixedCapacityMtpDraftPrefillCudaGraph()) {
         const auto requests = inputs.attention_inputs.input_lengths.numel();
         if (requests <= 0 || requests > static_cast<int64_t>(max_bs_)) {
             return false;
@@ -2169,10 +2169,7 @@ void CudaGraphRunner::prepareCaptureInputs(PyModelInputs& inputs, int batch_size
     inputs.attention_inputs.is_cuda_graph    = true;
     // HC-shaped MTP draft prefill has fixed lanes per captured request,
     // while each graph key captures only its own request capacity.
-    const int token_slice_len =
-        usesFixedCapacityMtpDraftPrefillCudaGraph() && !usesRequestSizedMtpDraftPrefillCudaGraph() ?
-            max_bs_ * num_tokens_per_bs_ :
-            seq_len_or_tokens;
+    const int token_slice_len = seq_len_or_tokens;
     inputs.input_ids = capture_mem_hold_.py_model_inputs_.input_ids.slice(0, 0, token_slice_len);
     if (engram_window_size_ > 0) {
         inputs.engram_token_windows =

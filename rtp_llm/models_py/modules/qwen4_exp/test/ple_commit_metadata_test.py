@@ -1,4 +1,3 @@
-import os
 import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -48,9 +47,7 @@ class PLECommitMetadataTest(unittest.TestCase):
         return torch.tensor(values, device="cuda", dtype=torch.int32)
 
     def begin(self, transaction, accept_len):
-        with patch.dict(os.environ, {"QWEN4_PLE_COMMIT_METADATA_FUSED": "1"}), patch(
-            "torch.cuda.get_device_capability", return_value=(12, 0)
-        ):
+        with patch("torch.cuda.get_device_capability", return_value=(12, 0)):
             return begin_accepted_pair_resolution(transaction, accept_len)
 
     def test_valid_resolution_matches_reference(self):
@@ -121,16 +118,10 @@ class PLECommitMetadataTest(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "exceeds its pool"):
             resolution.verify()
 
-    def test_gates_disable_fused_path(self):
+    def test_unsupported_device_disables_fused_path(self):
         transaction, _, _, _ = self.fixture()
         accept_len = self.accept([1, 2, 3, 1])
-        with patch.dict(os.environ, {"QWEN4_PLE_COMMIT_METADATA_FUSED": "0"}), patch(
-            "torch.cuda.get_device_capability", return_value=(12, 0)
-        ):
-            self.assertIsNone(begin_accepted_pair_resolution(transaction, accept_len))
-        with patch.dict(os.environ, {"QWEN4_PLE_COMMIT_METADATA_FUSED": "1"}), patch(
-            "torch.cuda.get_device_capability", return_value=(8, 6)
-        ):
+        with patch("torch.cuda.get_device_capability", return_value=(8, 6)):
             self.assertIsNone(begin_accepted_pair_resolution(transaction, accept_len))
 
     def test_non_contiguous_accept_falls_back(self):

@@ -23,7 +23,6 @@ target verification and bounded draft prefill support CUDA Graph. Layout and
 publication preflights complete before either side or main-cache writes.
 """
 
-import os
 from typing import Optional
 
 import torch
@@ -380,7 +379,6 @@ class SparseGqaFmhaImpl(FMHAImplBase):
         if (
             norm is not None
             and self.is_target_verify
-            and os.environ.get("QWEN4_QSA_FUSED_KV_WRITER", "0") == "1"
             and not self._is_mtp_draft
             and not self.attn_configs.use_logn_attn
         ):
@@ -413,7 +411,6 @@ class SparseGqaFmhaImpl(FMHAImplBase):
                 or not self.is_prefill
                 or (
                     self._is_draft_graph()
-                    and os.environ.get("QWEN4_DRAFT_QSA_LAYOUT", "0") == "1"
                     and gate.shape == (qkv.shape[0], self.q_width)
                     and gate.device == qkv.device
                     and not gate.requires_grad

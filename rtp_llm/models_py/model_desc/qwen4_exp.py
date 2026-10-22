@@ -1,4 +1,3 @@
-import os
 import weakref
 from collections.abc import Mapping
 from typing import Any, Dict, Optional
@@ -169,8 +168,7 @@ class Qwen4ExpAttention(Qwen3NextAttention):
         """Project once, persist raw keys, then build request-local selections."""
         assert self.qsa_indexer is not None
         raw_draft = (
-            os.environ.get("QWEN4_DRAFT_QSA_METADATA", "0") == "1"
-            and bool(getattr(self, "is_mtp_draft", False))
+            bool(getattr(self, "is_mtp_draft", False))
             and bool(qsa_runtime.main_inputs.is_prefill)
             and bool(getattr(qsa_runtime.main_inputs, "is_cuda_graph", False))
             and not bool(qsa_runtime.main_inputs.is_target_verify)
@@ -390,11 +388,7 @@ class Qwen4ExpAttention(Qwen3NextAttention):
                     type(self.qsa_indexer) is Qwen4ExpQSAIndexer
                     and hidden_states.ndim == 2
                     and (
-                        3 <= hidden_states.shape[0] <= 32
-                        or (
-                            hidden_states.shape[0] == 1
-                            and os.environ.get("QWEN4_QSA_SMALL_PAIR", "0") == "1"
-                        )
+                        1 <= hidden_states.shape[0] <= 32
                         or 4093 <= hidden_states.shape[0] <= 32768
                     )
                     and not any(
@@ -525,17 +519,14 @@ class Qwen4ExpDecoderLayer(Qwen3NextDecoderLayer):
             hw_kernel_config,
         )
         if self.layer_type == HybridAttentionType.LINEAR:
-            import os
+            from rtp_llm.models_py.modules.qwen4_exp.gdn_prefill_adapter import (
+                Qwen4Sm120GdnPrefill,
+            )
 
-            if os.environ.get("QWEN4_GDN_SM120_PREFILL") == "1":
-                from rtp_llm.models_py.modules.qwen4_exp.gdn_prefill_adapter import (
-                    Qwen4Sm120GdnPrefill,
-                )
-
-                native = self.self_attn.prefill_gdn
-                self.self_attn.prefill_gdn = Qwen4Sm120GdnPrefill(
-                    native.linear_attn_config, native.parallelism_config, native.weights
-                )
+            native = self.self_attn.prefill_gdn
+            self.self_attn.prefill_gdn = Qwen4Sm120GdnPrefill(
+                native.linear_attn_config, native.parallelism_config, native.weights
+            )
             from rtp_llm.models_py.modules.qwen4_exp.gdn_prefill_norm_triton import (
                 Qwen4PrefillGatedNorm,
             )
@@ -565,14 +556,11 @@ class Qwen4ExpDecoderLayer(Qwen3NextDecoderLayer):
                 hw_kernel_config=hw_kernel_config,
                 layer_idx=layer_idx,
             )
-        import os
+        from rtp_llm.models_py.modules.qwen4_exp.tp_reduce import (
+            install_target_graph_all_reduce,
+        )
 
-        if os.environ.get("QWEN4_TP_REGISTERED_INPUTS", "0") == "1":
-            from rtp_llm.models_py.modules.qwen4_exp.tp_reduce import (
-                install_target_graph_all_reduce,
-            )
-
-            install_target_graph_all_reduce(self.self_attn, self.mlp)
+        install_target_graph_all_reduce(self.self_attn, self.mlp)
         # Full-attention layers only; linear-attention layers have no qk norm.
         # The checkpoint's q/k gamma is stored raw for this reason, so the fused
         # version would silently drop upstream's +1 -- see norm.py.
@@ -801,9 +789,7 @@ class Qwen4ExpModel(Qwen35Model):
                     W.embedding + FP8_STORAGE_SCALE_SUFFIX
                 ),
             )
-        if os.environ.get("QWEN4_VOCAB_BYTE_GATHER", "0") == "1" and getattr(
-            self.config, "_qwen4_full_fp8_nvfp4", False
-        ):
+        if getattr(self.config, "_qwen4_full_fp8_nvfp4", False):
             self.embed_tokens.prepare_byte_gather(
                 role=getattr(parallelism_config, "role_type", "PDFUSION")
             )
@@ -823,8 +809,7 @@ class Qwen4ExpModel(Qwen35Model):
         from .qwen4_exp_runtime.target_head_graph import TargetHeadGraph
 
         self._target_head_graph = TargetHeadGraph(
-            enabled=os.environ.get("QWEN4_MTP_HEAD_GRAPH") == "1"
-            and hasattr(self, "_fp8_lm_head")
+            enabled=hasattr(self, "_fp8_lm_head")
             and bool(self.ple_layers)
             and not getattr(self.config, "is_mtp", False)
         )
@@ -1097,8 +1082,7 @@ class Qwen4ExpModel(Qwen35Model):
                 weight_scale=layer_weights.get(W.qwen4_ple_ngram_scale),
                 prefetch_budget_mb=getattr(self.config, "qwen4_ple_prefetch_mb", 256),
                 inline_cpu_uva_graph=(
-                    os.environ.get("QWEN4_PLE_INLINE_UVA_GRAPH", "0") == "1"
-                    and shard_pairs[0][1].device.type == "cpu"
+                    shard_pairs[0][1].device.type == "cpu"
                     and torch.version.hip is None
                 ),
             )
@@ -1446,7 +1430,6 @@ class Qwen4ExpModel(Qwen35Model):
         if (
             type(self) is Qwen4ExpModel
             and self.ple_layers
-            and os.environ.get("QWEN4_PLE_PREFETCH_AFTER_EMBEDDING", "0") == "1"
         ):
             # Native grouped inputs are a tag mapping. Use the same PLE
             # context group as _start_eager_ple_prefetch, not the mapping

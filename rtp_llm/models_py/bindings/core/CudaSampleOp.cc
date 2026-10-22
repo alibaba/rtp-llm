@@ -597,11 +597,8 @@ void rejectionSampling(const RejectionSamplingParams& params) {
 
     // A point-mass draft distribution passes no draft_probs buffer at all; the
     // kernel substitutes q(draft_token) == 1.
-    const char* split_flag      = std::getenv("RTP_LLM_SPLIT_REJECTION");
-    const char* point_mass_flag = std::getenv("RTP_LLM_SPLIT_POINT_MASS_REJECTION");
-    const bool  split_enabled =
-        (split_flag != nullptr && std::strcmp(split_flag, "1") == 0)
-        || (params.draft_probs_point_mass && point_mass_flag != nullptr && std::strcmp(point_mass_flag, "1") == 0);
+    const char* split_flag = std::getenv("RTP_LLM_SPLIT_REJECTION");
+    const bool  split_enabled = split_flag != nullptr && std::strcmp(split_flag, "1") == 0;
     if (split_enabled && config.batch_size > 0 && config.batch_size <= 8 && config.num_speculative_tokens == 3
         && config.target_vocab_size == 248320 && at::cuda::getCurrentDeviceProperties()->major == 12
         && at::cuda::getCurrentDeviceProperties()->minor == 0) {

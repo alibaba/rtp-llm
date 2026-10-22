@@ -1411,7 +1411,7 @@ torch::Tensor PyWrappedModel::tpSyncEmbeddingOrLogits(const torch::Tensor& input
         TORCH_CHECK(input.scalar_type() == torch::kBFloat16, "FP8 TP head gather requires BF16 local logits");
         // A model-owned, preinitialized IPC workspace may serve the measured
         // local Head domain. Unsupported inputs retain the explicit NCCL path.
-        if (autil::EnvUtil::getEnv("QWEN4_HEAD_IPC_GATHER", false)) {
+        {
             py::gil_scoped_acquire gil;
             if (py::hasattr(py_model_, "try_gather_fp8_lm_head_for_tp")) {
                 auto result = py_model_.attr("try_gather_fp8_lm_head_for_tp")(input);
