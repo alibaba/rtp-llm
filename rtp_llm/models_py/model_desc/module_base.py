@@ -55,6 +55,9 @@ class GptModelBase(nn.Module):
         self.kv_cache: Optional[KVCache] = None
         self.device_type: DeviceType = get_device_type()
         self.nvfp4_lm_head = None
+        self.draft_prefill_use_decode_buckets = getattr(
+            config, "draft_prefill_use_decode_buckets", False
+        )
         quant_config = getattr(config, "quant_config", None)
         if quant_config is not None and quant_config.get_method() == "modelopt_mixed":
             from rtp_llm.models_py.modules.factory.linear import LinearFactory
@@ -72,9 +75,14 @@ class GptModelBase(nn.Module):
                 )
 
     def compute_quantized_logits(self, hidden):
+        return self._compute_quantized_logits_native(hidden).float()
+
+    def _compute_quantized_logits_native(self, hidden):
         if self.nvfp4_lm_head is None:
             raise ValueError("No quantized LM head was initialized")
-        return self.nvfp4_lm_head(hidden.to(torch.bfloat16)).float()
+        # Preserve the GEMM's BF16 output through TP communication. Promotion
+        # to FP32 belongs after gathering the vocabulary shards.
+        return self.nvfp4_lm_head(hidden.to(torch.bfloat16))
 
     def initialize(self, init_resource: PyModelInitResources) -> bool:
         self.kv_cache = init_resource.kv_cache

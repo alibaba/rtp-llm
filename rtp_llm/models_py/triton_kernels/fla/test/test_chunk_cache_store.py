@@ -87,6 +87,7 @@ class ChunkCacheStoreTest(unittest.TestCase):
                     states,
                     cache_block_size,
                     max_tokens=128,
+                    cu_seqlens_cpu=lengths.cpu(),
                 )
                 torch.testing.assert_close(actual, expected, rtol=0, atol=0)
                 self.assertTrue(

@@ -130,8 +130,6 @@ class PerGroupFp4Weight(CompositeWeight, QuantWeight):
     def support(
         cls, quant_config: QuantizationConfig, src_weight_info: WeightModule
     ) -> bool:
-        if quant_config.get_method() == "modelopt_mixed":
-            return False
         if not quant_config.is_quanted() or not isinstance(
             quant_config, ModelOptFp4Config
         ):

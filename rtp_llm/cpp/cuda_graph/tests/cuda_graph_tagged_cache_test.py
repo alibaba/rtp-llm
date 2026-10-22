@@ -433,6 +433,7 @@ class TestCudaGraphTaggedCache(unittest.TestCase):
             num_tokens_per_bs=5,
             sp_steps=4,
             decode_capture_batch_sizes=[8, 1, 4, 2, 4],
+            draft_prefill_use_decode_buckets=True,
         )
         self.assertEqual(model.captured_tokens, {5, 10, 20, 40})
         for batch_size, expected_bucket in [
@@ -462,6 +463,50 @@ class TestCudaGraphTaggedCache(unittest.TestCase):
                 )
                 expected = inputs.input_hiddens + signature
                 torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+
+    def test_spec_draft_prefill_keeps_dense_default_and_covers_max_bucket(self) -> None:
+        class BucketModel(TaggedSequenceLengthModel):
+            def __init__(self):
+                self.captured_tokens = set()
+
+            def prepare_fmha_impl(self, inputs, is_cuda_graph=False):
+                if is_cuda_graph:
+                    self.captured_tokens.add(inputs.input_ids.shape[0])
+                return None
+
+        for opt_in, expected in [
+            (False, set(range(5, 41, 5))),
+            (True, {5, 10, 20, 40}),
+        ]:
+            with self.subTest(opt_in=opt_in):
+                model = BucketModel()
+                runner = CudaGraphRunner()
+                runner.init_prefill(
+                    model,
+                    8,
+                    32,
+                    TOKENS_PER_BLOCK,
+                    TOKENS_PER_BLOCK,
+                    [],
+                    HIDDEN_SIZE,
+                    GROUP_TAGS,
+                    num_tokens_per_bs=5,
+                    sp_steps=4,
+                    decode_capture_batch_sizes=[1, 2, 4],
+                    draft_prefill_use_decode_buckets=opt_in,
+                )
+                self.assertEqual(model.captured_tokens, expected)
+                inputs = _build_target_verify_inputs(
+                    GROUP_TAGS,
+                    {"full": 1, "aux": 2},
+                    batch_size=8,
+                    query_len=5,
+                    prefix_len=11,
+                )
+                self.assertTrue(runner.canRun(inputs))
+                self.assertEqual(runner.getCurrentRealGraphSeqLen(), 40)
+                # Drop the runner before the next capture session.
+                del runner
 
     def test_spec_draft_prefill_enforces_dense_layout(self) -> None:
         runner = CudaGraphRunner()

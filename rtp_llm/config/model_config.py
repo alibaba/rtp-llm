@@ -71,6 +71,10 @@ class ModelConfig(CppModelConfig):
         "config_dtype",
         "template_type",
         "model_name",
+        "served_model_name",
+        "recurrent_cache_prefix_blocks_per_request",
+        "draft_prefill_use_decode_buckets",
+        "prefill_operator_max_tokens",
         "quant_config",
         "inter_size",
         "moe_inter_size",
@@ -563,6 +567,13 @@ class ModelConfig(CppModelConfig):
         self.model_name: str = (
             ""  # Model name (also set to engine_config.runtime_config.model_name)
         )
+        # Public API naming is opt-in; model_name also carries an internal
+        # class-name fallback and therefore cannot identify an explicit override.
+        self.served_model_name: Optional[str] = None
+        # Resource policies are opt-in and independent of weight quantization.
+        self.recurrent_cache_prefix_blocks_per_request: Optional[int] = None
+        self.draft_prefill_use_decode_buckets: bool = False
+        self.prefill_operator_max_tokens: int = 0
         self.lora_infos: Dict[str, str] = {}  # Python-only (C++ lora code removed)
 
         # Model architecture fields
@@ -592,6 +603,32 @@ class ModelConfig(CppModelConfig):
                 if not isinstance(model_name, str) or not model_name.strip():
                     raise ValueError("model_name must be a non-empty string")
                 self.model_name = model_name
+                self.served_model_name = model_name
+            if "recurrent_cache_prefix_blocks_per_request" in model_override_args:
+                prefix_blocks = model_override_args[
+                    "recurrent_cache_prefix_blocks_per_request"
+                ]
+                if prefix_blocks is not None and (
+                    type(prefix_blocks) is not int or prefix_blocks < 0
+                ):
+                    raise ValueError(
+                        "recurrent_cache_prefix_blocks_per_request must be a non-negative integer"
+                    )
+                self.recurrent_cache_prefix_blocks_per_request = prefix_blocks
+            if "draft_prefill_use_decode_buckets" in model_override_args:
+                enabled = model_override_args["draft_prefill_use_decode_buckets"]
+                if type(enabled) is not bool:
+                    raise ValueError(
+                        "draft_prefill_use_decode_buckets must be a boolean"
+                    )
+                self.draft_prefill_use_decode_buckets = enabled
+            if "prefill_operator_max_tokens" in model_override_args:
+                max_tokens = model_override_args["prefill_operator_max_tokens"]
+                if type(max_tokens) is not int or max_tokens < 0 or max_tokens % 64:
+                    raise ValueError(
+                        "prefill_operator_max_tokens must be zero or a positive multiple of 64"
+                    )
+                self.prefill_operator_max_tokens = max_tokens
             # Apply rope_scaling override via model_config
             self.apply_rope_scaling_override(model_override_args)
 

@@ -20,11 +20,9 @@ from rtp_llm.ops import HybridAttentionType, KVCacheSpecType
 
 class Qwen3NextBase(BaseModel):
     def load(self, *args, **kwargs):
-        quant_config = self.model_config.quant_config
-        if quant_config is not None and quant_config.get_method() == "modelopt_mixed":
-            configure_recurrent_cache_capacity(
-                self.model_config, self.max_generate_batch_size
-            )
+        configure_recurrent_cache_capacity(
+            self.model_config, self.max_generate_batch_size
+        )
         return super().load(*args, **kwargs)
 
     def _create_python_model(self):

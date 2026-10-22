@@ -496,6 +496,11 @@ class GenerateConfig(BaseModel):
         """Normalize fields whose Pydantic validators assignment bypasses."""
         if key in ("json_schema", "structural_tag"):
             return parse_json_grammar_value(key, value)
+        if key == "role_addrs":
+            return [
+                addr if isinstance(addr, RoleAddr) else RoleAddr.model_validate(addr)
+                for addr in value
+            ]
         if key == "response_format":
             try:
                 return parse_response_format(value)
@@ -510,7 +515,13 @@ class GenerateConfig(BaseModel):
     def from_generation_config_path(cls, config_dir: Optional[str]):
         config = cls()
         if config_dir:
-            with (Path(config_dir) / "generation_config.json").open() as stream:
+            path = Path(config_dir) / "generation_config.json"
+            try:
+                stream = path.open()
+            except FileNotFoundError:
+                logging.warning("Generation config %s is absent; using defaults", path)
+                return config
+            with stream:
                 config.update(json.load(stream))
         return config
 

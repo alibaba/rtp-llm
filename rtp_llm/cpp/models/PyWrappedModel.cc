@@ -936,17 +936,11 @@ sliceKvCacheBlockIdByBatch(const torch::Tensor& kv_cache_block_id, size_t batch_
 
 torch::Tensor PyWrappedModel::tpSyncEmbeddingOrLogits(const torch::Tensor& input) {
     RTP_LLM_PROFILE_SCOPE("py_model.tpSyncEmbeddingOrLogits");
-    const auto tp_size     = device_props_.tp_size;
-    const auto tp_rank     = device_props_.tp_rank;
-    const auto rows        = input.size(0);
-    const auto cols        = input.size(1);
-    const auto local_numel = input.numel();
-    auto       all_data    = torch::empty({rows, cols * (int64_t)tp_size}, input.options());
-    // Copy local data into the correct rank position
-    auto all_data_flat = all_data.reshape({rows * cols * (int64_t)tp_size});
-    auto input_flat    = input.reshape({local_numel});
-    all_data_flat.slice(0, local_numel * tp_rank, local_numel * (tp_rank + 1)).copy_(input_flat);
-    execAllGather({{all_data}});
+    const auto tp_size  = device_props_.tp_size;
+    const auto rows     = input.size(0);
+    const auto cols     = input.size(1);
+    auto       all_data = torch::empty({rows * (int64_t)tp_size, cols}, input.options());
+    execAllGather({{all_data}, ParallelMode::TP, {input.contiguous()}, false});
     cudaCheckLastError();
     // Transpose [tp_size, batch, hidden] -> [batch, tp_size, hidden] -> [batch, hidden * tp_size]
     auto transposed = all_data.reshape({(int64_t)tp_size, rows, cols})
@@ -1089,6 +1083,9 @@ GptModelOutputs PyWrappedModel::forwardPostLayers(torch::Tensor         hidden,
                                     logits.dim() > 1 ? logits.size(1) : -1);
             logits = logits.narrow(1, 0, description_.output_vocab_size).contiguous();
         }
+        // Quantized heads return BF16 values. Gather those exact values first
+        // to halve their TP traffic, then preserve the FP32 sampler contract.
+        logits = logits.to(torch::kFloat32);
         if (check_nan_) {
             RTP_LLM_CHECK_WITH_INFO(!torch::isnan(last_hidden).any().item<bool>(), "NAN detected in last_hidden");
             RTP_LLM_CHECK_WITH_INFO(!torch::isnan(logits).any().item<bool>(), "NAN detected in logits");
@@ -1147,6 +1144,7 @@ GptModelOutputs PyWrappedModel::forwardPostLayersLastHidden(torch::Tensor hidden
         RTP_LLM_PROFILE_SCOPE("py_model.forwardPostLayersLastHidden(tp_sync_logits)");
         logits = tpSyncEmbeddingOrLogits(logits);
     }
+    logits = logits.to(torch::kFloat32);
     if (check_nan_) {
         RTP_LLM_CHECK_WITH_INFO(!torch::isnan(last_hidden).any().item<bool>(), "NAN detected in last_hidden");
         RTP_LLM_CHECK_WITH_INFO(!torch::isnan(logits).any().item<bool>(), "NAN detected in logits");

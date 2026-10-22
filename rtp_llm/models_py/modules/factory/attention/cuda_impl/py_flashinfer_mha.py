@@ -671,7 +671,12 @@ class PyFlashinferPrefillPagedAttnOp(object):
 
         if self.enable_cuda_graph and self.prefill_wrapper._qo_indptr_buf is None:
             self.prefill_wrapper._use_cuda_graph = True
-            self.prefill_wrapper._qo_indptr_buf = qo_indptr
+            # FlashInfer consumes this fixed buffer from a CUDA kernel. The
+            # graph copy metadata may be pinned host tensors; cloning that
+            # metadata must not leave FlashInfer with a pageable host pointer.
+            self.prefill_wrapper._qo_indptr_buf = qo_indptr.to(
+                device=self.g_workspace_buffer.device
+            )
             self.prefill_wrapper._paged_kv_indptr_buf = (
                 self.fmha_params.decode_page_indptr_d
             )
@@ -687,7 +692,7 @@ class PyFlashinferPrefillPagedAttnOp(object):
                     attn_inputs.prefill_cuda_graph_copy_params
                 )
                 # input_lengths and cu_seq_lens were already set above
-                self.qo_indptr = qo_indptr
+                self.qo_indptr = self.prefill_wrapper._qo_indptr_buf
                 # Fill with cumulative sequence: [0, max_seq_len, 2*max_seq_len, ...]
                 self.qo_indptr.copy_(
                     torch.arange(

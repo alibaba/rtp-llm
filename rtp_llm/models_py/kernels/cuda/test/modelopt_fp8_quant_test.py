@@ -26,7 +26,10 @@ class ModelOptFp8QuantTest(unittest.TestCase):
 
     def test_codes_and_scales(self):
         torch.manual_seed(417)
-        with patch.dict(os.environ, {"RTP_LLM_MODELOPT_FP8_FUSED_QUANT": "1"}):
+        with patch(
+            "rtp_llm.models_py.kernels.cuda.modelopt_fp8_quant._FUSED_QUANT_ENABLED",
+            True,
+        ):
             for dtype in (torch.bfloat16, torch.float16):
                 for m in (1, 3, 17, 127):
                     for k in (3072, 5120, 6144):
@@ -55,7 +58,10 @@ class ModelOptFp8QuantTest(unittest.TestCase):
     def test_graph_reads_updated_input_and_scale(self):
         x = torch.randn(3, 5120, device="cuda", dtype=torch.bfloat16)
         scale = torch.tensor(0.2064732164144516, device="cuda")
-        with patch.dict(os.environ, {"RTP_LLM_MODELOPT_FP8_FUSED_QUANT": "1"}):
+        with patch(
+            "rtp_llm.models_py.kernels.cuda.modelopt_fp8_quant._FUSED_QUANT_ENABLED",
+            True,
+        ):
             for _ in range(3):
                 static_fp8_quant_rows(x, scale)
             graph = torch.cuda.CUDAGraph()
@@ -73,7 +79,10 @@ class ModelOptFp8QuantTest(unittest.TestCase):
         scale = torch.tensor(0.25, device="cuda")
         stream = torch.cuda.Stream()
         stream.wait_stream(torch.cuda.current_stream())
-        with patch.dict(os.environ, {"RTP_LLM_MODELOPT_FP8_FUSED_QUANT": "1"}):
+        with patch(
+            "rtp_llm.models_py.kernels.cuda.modelopt_fp8_quant._FUSED_QUANT_ENABLED",
+            True,
+        ):
             with torch.cuda.stream(stream):
                 got = static_fp8_quant_rows(x, scale)
             torch.cuda.current_stream().wait_stream(stream)
@@ -82,13 +91,32 @@ class ModelOptFp8QuantTest(unittest.TestCase):
     def test_fallback_and_empty(self):
         x = torch.empty(0, 5120, device="cuda", dtype=torch.bfloat16)
         scale = torch.tensor(0.25, device="cuda")
-        with patch.dict(os.environ, {"RTP_LLM_MODELOPT_FP8_FUSED_QUANT": "0"}):
+        with patch(
+            "rtp_llm.models_py.kernels.cuda.modelopt_fp8_quant._FUSED_QUANT_ENABLED",
+            False,
+        ):
             self.assertIsNone(static_fp8_quant_rows(x, scale))
-        with patch.dict(os.environ, {"RTP_LLM_MODELOPT_FP8_FUSED_QUANT": "1"}):
+        with patch(
+            "rtp_llm.models_py.kernels.cuda.modelopt_fp8_quant._FUSED_QUANT_ENABLED",
+            True,
+        ):
             q, s = static_fp8_quant_rows(x, scale)
             self.assertEqual(q.shape, x.shape)
             self.assertEqual(s.shape, (0, 1))
             self.assertIsNone(static_fp8_quant_rows(x[:, :128], scale))
+
+    def test_dispatch_does_not_query_environment_or_gpu_capability_each_call(self):
+        x = torch.randn(3, 5120, device="cuda", dtype=torch.bfloat16)
+        scale = torch.tensor(0.25, device="cuda")
+        static_fp8_quant_rows(x, scale)  # Resolve the existing per-device SM cache.
+        with patch(
+            "rtp_llm.models_py.kernels.cuda.modelopt_fp8_quant.os"
+        ) as module_os, patch(
+            "torch.cuda.get_device_capability",
+            side_effect=AssertionError("hot-path device query"),
+        ):
+            module_os.getenv.side_effect = AssertionError("hot-path environment lookup")
+            self.assert_same(static_fp8_quant_rows(x, scale), self.reference(x, scale))
 
     def test_default_dispatch(self):
         x = torch.randn(17, 5120, device="cuda", dtype=torch.bfloat16)

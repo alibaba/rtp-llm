@@ -107,11 +107,14 @@ std::vector<int> CudaGraphRunner::getPrefillSequenceLengthsToCapture() {
                                 num_tokens_per_bs_,
                                 sp_steps_);
         std::vector<int> result;
-        if (!decode_capture_batch_sizes_.empty()) {
+        if (draft_prefill_use_decode_buckets_ && !decode_capture_batch_sizes_.empty()) {
             // Draft prefill verifies the same active batches as decode. Reuse
             // explicit buckets so each possible batch does not retain another
             // attention workspace. Replay already rounds up and clears padding.
             auto batches = decode_capture_batch_sizes_;
+            // Explicit opt-in must still cover the full advertised concurrency;
+            // a truncated decode list must not force larger draft batches eager.
+            batches.push_back(static_cast<int>(max_bs_));
             std::sort(batches.begin(), batches.end());
             batches.erase(std::unique(batches.begin(), batches.end()), batches.end());
             for (int batch : batches) {

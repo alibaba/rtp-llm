@@ -1,3 +1,4 @@
+import asyncio
 import copy
 import json
 import os
@@ -13,7 +14,11 @@ from jinja2 import Environment
 from transformers import AutoTokenizer
 
 from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
-from rtp_llm.config.generate_config import ThinkingMode, thinking_mode_from_value
+from rtp_llm.config.generate_config import (
+    RoleAddr,
+    ThinkingMode,
+    thinking_mode_from_value,
+)
 from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.config.py_config_modules import (
     GenerateEnvConfig,
@@ -441,6 +446,108 @@ class OpenaiGenerateConfigTest(TestCase):
         return openai_endpoint._extract_generation_config(
             request, input_ids=input_ids, renderer=renderer
         )
+
+    def test_default_public_name_does_not_expose_factory_class_name(self):
+        config = self._make_default_model_config()
+        config.model_name = "Qwen3Next"  # ModelFactory's existing internal fallback.
+        config.model_type = "qwen_3_next"
+        endpoint = self._make_openai_endpoint(config)
+        self.assertEqual(endpoint.model_name, "")
+        models = asyncio.run(endpoint.list_models())
+        self.assertEqual(models.data[0].id, "qwen_3_next")
+
+    def test_explicit_public_name_overrides_models_and_response_name(self):
+        config = self._make_default_model_config()
+        config.model_type = "qwen_3_next"
+        config.apply_override_args('{"model_name":"served-preview"}')
+        endpoint = self._make_openai_endpoint(config)
+        self.assertEqual(endpoint.model_name, "served-preview")
+        self.assertEqual(
+            asyncio.run(endpoint.list_models()).data[0].id, "served-preview"
+        )
+        self.assertEqual(config.model_name, "served-preview")
+
+    def test_extra_configs_keeps_role_addr_objects_and_request_isolation(self):
+        from rtp_llm.ops import RoleType
+
+        endpoint = self._make_openai_endpoint(self._make_default_model_config())
+        extra = GenerateConfig(
+            role_addrs=[
+                RoleAddr(
+                    role=RoleType.PREFILL,
+                    ip="127.0.0.1",
+                    http_port=8080,
+                    grpc_port=8081,
+                )
+            ]
+        )
+        request = ChatCompletionRequest(messages=[], extra_configs=extra)
+        config = endpoint._extract_generation_config(request)
+        self.assertIsInstance(config.role_addrs[0], RoleAddr)
+        self.assertEqual(config.role_addrs[0].role, RoleType.PREFILL)
+        config.role_addrs[0].http_port = 9000
+        self.assertEqual(extra.role_addrs[0].http_port, 8080)
+        self.assertEqual(endpoint.default_generate_config.role_addrs, [])
+
+    def test_extra_configs_keeps_auto_downgrade_intent_for_default_merge(self):
+        endpoint = self._make_openai_endpoint(self._make_default_model_config())
+        endpoint.default_generate_config = GenerateConfig(num_return_sequences=2)
+        extra = GenerateConfig(enable_cross_sequence_ban=True, combo_token_size=2)
+        self.assertFalse(extra.enable_cross_sequence_ban)
+        self.assertTrue(extra._ban_auto_downgraded)
+        config = endpoint._extract_generation_config(
+            ChatCompletionRequest(messages=[], extra_configs=extra)
+        )
+        self.assertTrue(config.enable_cross_sequence_ban)
+        self.assertFalse(config._ban_auto_downgraded)
+        self.assertFalse(extra.enable_cross_sequence_ban)
+        self.assertTrue(extra._ban_auto_downgraded)
+
+    def test_raw_role_addr_updates_restore_the_nested_type(self):
+        from rtp_llm.ops import RoleType
+
+        config = GenerateConfig()
+        config.update(
+            {
+                "role_addrs": [
+                    {
+                        "role": "PREFILL",
+                        "ip": "127.0.0.1",
+                        "http_port": 8080,
+                        "grpc_port": 8081,
+                    }
+                ]
+            }
+        )
+        self.assertIsInstance(config.role_addrs[0], RoleAddr)
+        self.assertEqual(config.role_addrs[0].role, RoleType.PREFILL)
+
+    def test_default_auto_downgrade_intent_can_be_completed_by_extra_configs(self):
+        endpoint = self._make_openai_endpoint(self._make_default_model_config())
+        endpoint.default_generate_config = GenerateConfig(
+            enable_cross_sequence_ban=True, combo_token_size=2
+        )
+        config = endpoint._extract_generation_config(
+            ChatCompletionRequest(
+                messages=[], extra_configs=GenerateConfig(num_return_sequences=2)
+            )
+        )
+        self.assertTrue(config.enable_cross_sequence_ban)
+        self.assertFalse(config._ban_auto_downgraded)
+
+    def test_missing_generation_config_is_optional_but_invalid_json_is_not(self):
+        with tempfile.TemporaryDirectory() as directory:
+            config = self._make_default_model_config()
+            config.generate_env_config.generation_config_path = directory
+            endpoint = self._make_openai_endpoint(config)
+            self.assertEqual(endpoint.default_generate_config.max_new_tokens, 32000)
+            self.assertEqual(
+                GenerateConfig.from_generation_config_path(directory).max_new_tokens,
+                32000,
+            )
+            Path(directory, "generation_config.json").write_text("{invalid")
+            with self.assertRaises(json.JSONDecodeError):
+                GenerateConfig.from_generation_config_path(directory)
 
     def test_service_generation_defaults_and_request_precedence(self):
         with tempfile.TemporaryDirectory() as directory:

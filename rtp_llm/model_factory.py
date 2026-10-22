@@ -457,6 +457,14 @@ class ModelFactory:
             sp_config.checkpoint_path
         )
         propose_model_config.enable_w4a16_sm120_dense_ffn = False
+        # These opt-in execution/resource policies apply to the target and its
+        # included draft, independently of the draft's weight quantization.
+        for name in (
+            "recurrent_cache_prefix_blocks_per_request",
+            "draft_prefill_use_decode_buckets",
+            "prefill_operator_max_tokens",
+        ):
+            setattr(propose_model_config, name, getattr(model_config, name))
         # Ensure max_seq_len matches main model
         propose_model_config.max_seq_len = model_config.max_seq_len
         propose_model_config.quantization = sp_config.quantization

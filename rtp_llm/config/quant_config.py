@@ -332,9 +332,30 @@ class QuantizationConfig(ABC):
             if quant_config.get("quant_algo") == "MIXED_PRECISION":
                 from rtp_llm.config.modelopt_mixed import ModelOptMixedPrecisionConfig
 
+                architecture = config_json.get("text_config", config_json)
+                num_layers = architecture.get("num_hidden_layers")
+                if num_layers is None and any(
+                    ".layers." in name for name in quant_config["quantized_layers"]
+                ):
+                    raise ValueError(
+                        "ModelOpt mixed layer recipes require num_hidden_layers for coverage validation"
+                    )
+                layer_types = architecture.get("layer_types")
+                interval = architecture.get("full_attention_interval")
+                if layer_types is None and num_layers is not None and interval:
+                    layer_types = [
+                        (
+                            "full_attention"
+                            if (i + 1) % interval == 0
+                            else "linear_attention"
+                        )
+                        for i in range(num_layers)
+                    ]
                 return ModelOptMixedPrecisionConfig(
                     quantized_layers=quant_config["quantized_layers"],
                     ignore=quant_config.get("ignore", []),
+                    num_layers=num_layers,
+                    layer_types=layer_types,
                 )
             config_groups = quant_config["config_groups"]
             weights_config = config_groups["group_0"]["weights"]

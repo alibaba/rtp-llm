@@ -6,8 +6,9 @@ from types import SimpleNamespace
 
 import torch
 
+from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.config.modelopt_mixed import ModelOptMixedPrecisionConfig
-from rtp_llm.config.quant_config import QuantizationConfig
+from rtp_llm.config.quant_config import ModelOptFp4Config, QuantizationConfig
 from rtp_llm.model_loader.ffn_weight import FfnAtomicWeight, FfnConfig
 from rtp_llm.model_loader.linear_attn_weight import LinearAttnAtomicWeight
 from rtp_llm.model_loader.load_config import LoadConfig
@@ -43,13 +44,165 @@ class ModelOptMixedTest(unittest.TestCase):
             "ignore": ["mtp*"],
         }
         with tempfile.TemporaryDirectory() as d:
-            Path(d, "config.json").write_text(json.dumps({"quantization_config": q}))
+            Path(d, "config.json").write_text(
+                json.dumps({"num_hidden_layers": 1, "quantization_config": q})
+            )
             cfg = QuantizationConfig.load_from_ckpt(d)
         self.assertIsInstance(cfg, ModelOptMixedPrecisionConfig)
-        self.assertEqual(cfg.get_algo(), "modelopt_fp4")
+        self.assertEqual(cfg.get_algo(), "none")
         self.assertEqual(
             cfg.recipe_for("model.layers.{i}.proj.weight")["quant_algo"], "NVFP4"
         )
+
+    def test_mixed_is_not_a_homogeneous_fp4_config(self):
+        from rtp_llm.model_loader.mixed_fp4_quant_weight import MixedFp4Weight
+        from rtp_llm.model_loader.per_group_fp4_quant_weight import PerGroupFp4Weight
+        from rtp_llm.ops import QuantAlgo
+
+        config = self.config("NVFP4")
+        self.assertNotIsInstance(config, ModelOptFp4Config)
+        weight = AtomicWeight(
+            W.ffn_w2, [CkptWeightInfo("model.layers.{i}.proj.weight", identity)]
+        )
+        self.assertFalse(MixedFp4Weight.support(config, weight))
+        self.assertFalse(PerGroupFp4Weight.support(config, weight))
+        native = QuantAlgo()
+        native.setQuantAlgo("modelopt_fp4", 4, 16)
+        native.setQuantAlgo(config.get_algo(), config.bits, config.group_size())
+        self.assertFalse(native.isQuant())
+        self.assertFalse(native.isModelOptFP4())
+        self.assertEqual(native.getWeightBits(), 16)
+        self.assertEqual(config.get_supported_compute_dtypes(), [torch.bfloat16])
+        with self.assertRaises(ValueError):
+            config.verify_compute_dtype_and_kv_cache_dtype(
+                torch.float16, torch.bfloat16
+            )
+
+    def test_deployment_loader_uses_module_recipes_without_global_quant_algo(self):
+        from rtp_llm.model_loader.model_weight_info import (
+            ModelDeployWeightInfo,
+            ModelWeightInfo,
+        )
+        from rtp_llm.ops import QuantAlgo
+        from rtp_llm.utils.model_weight import WeightStyle
+
+        source = AtomicWeight(
+            W.attn_o_w, [CkptWeightInfo("model.layers.{i}.proj.weight", identity)]
+        )
+        owner = ModelDeployWeightInfo.__new__(ModelDeployWeightInfo)
+        owner._get_weight_info = lambda: ModelWeightInfo([], [[source]])
+        owner._quant_algo = QuantAlgo()
+        owner._quant_config = self.config()
+        owner.model_config = SimpleNamespace(enable_w4a16_sm120_dense_ffn=False)
+        owner.output_vocab_ids = ()
+        owner.weight_style = WeightStyle.NONE
+        owner.gen_dummy_reciprocal = False
+        owner.tie_word_embeddings = False
+        owner.enable_fp32_lm_head = False
+        result = owner.get_weight_info()
+        self.assertIsInstance(result.layer_weights[0][0], ModelOptMixedWeight)
+        self.assertFalse(owner._quant_algo.isQuant())
+
+    def test_mixed_fp8_forward_rejects_fp16_before_gemm(self):
+        from rtp_llm.models_py.modules.factory.linear.impl.cuda.modelopt_fp8_linear import (
+            CudaModelOptFp8Linear,
+        )
+
+        weight = torch.zeros(4, 8).to(torch.float8_e4m3fn)
+        scales = torch.ones(2, 4)
+        linear = CudaModelOptFp8Linear(weight, scales, quant_config=self.config())
+        with self.assertRaisesRegex(ValueError, "requires BF16"):
+            linear(torch.zeros(1, 8, dtype=torch.float16))
+
+    def test_missing_layer_fails_during_config_parsing(self):
+        recipe = {"quant_algo": "FP8"}
+        with self.assertRaisesRegex(ValueError, "Incomplete.*missing layers.*1"):
+            ModelOptMixedPrecisionConfig(
+                {"model.layers.0.proj": recipe, "model.layers.2.proj": recipe},
+                num_layers=3,
+            )
+
+    def test_missing_projection_is_found_without_architecture_metadata(self):
+        recipe = {"quant_algo": "FP8"}
+        with self.assertRaisesRegex(ValueError, "Incomplete.*other"):
+            ModelOptMixedPrecisionConfig(
+                {
+                    "model.layers.0.proj": recipe,
+                    "model.layers.1.proj": recipe,
+                    "model.layers.0.other": recipe,
+                }
+            )
+
+    def test_hybrid_layer_coverage_and_auxiliary_ignores(self):
+        recipe = {"quant_algo": "FP8"}
+        layers = {
+            "model.layers.0.linear_attn.out_proj": recipe,
+            "model.layers.2.linear_attn.out_proj": recipe,
+            "model.layers.1.self_attn.o_proj": recipe,
+        }
+        config = ModelOptMixedPrecisionConfig(
+            layers,
+            ignore=["mtp*", "mtp.layers.0*"],
+            num_layers=3,
+            layer_types=["linear_attention", "full_attention", "linear_attention"],
+        )
+        self.assertEqual(
+            config.recipe_for("model.layers.{i}.self_attn.o_proj.weight"), recipe
+        )
+        del layers["model.layers.2.linear_attn.out_proj"]
+        with self.assertRaisesRegex(ValueError, "Incomplete.*missing layers.*2"):
+            ModelOptMixedPrecisionConfig(
+                layers,
+                num_layers=3,
+                layer_types=["linear_attention", "full_attention", "linear_attention"],
+            )
+
+    def test_numbered_main_layer_ignore_is_rejected(self):
+        with self.assertRaisesRegex(ValueError, "Layer-specific ignore"):
+            ModelOptMixedPrecisionConfig(
+                {
+                    "model.layers.0.proj": {"quant_algo": "FP8"},
+                    "model.layers.1.proj": {"quant_algo": "FP8"},
+                },
+                ignore=["model.layers.1.*"],
+            )
+
+    def test_ignored_only_layer_cannot_leak_a_template_recipe(self):
+        for pattern in ("model.layers.0.*", "*.layers.0.*", "model.layers.[0].*"):
+            with self.subTest(pattern=pattern), self.assertRaisesRegex(
+                ValueError, "Layer-specific ignore"
+            ):
+                ModelOptMixedPrecisionConfig(
+                    {"model.layers.0.proj": {"quant_algo": "FP8"}}, ignore=[pattern]
+                )
+
+    def test_resource_policies_require_explicit_valid_overrides(self):
+        config = ModelConfig()
+        self.assertIsNone(config.recurrent_cache_prefix_blocks_per_request)
+        self.assertFalse(config.draft_prefill_use_decode_buckets)
+        self.assertEqual(config.prefill_operator_max_tokens, 0)
+        config.apply_override_args(
+            json.dumps(
+                {
+                    "recurrent_cache_prefix_blocks_per_request": 2,
+                    "draft_prefill_use_decode_buckets": True,
+                    "prefill_operator_max_tokens": 65536,
+                }
+            )
+        )
+        self.assertEqual(config.recurrent_cache_prefix_blocks_per_request, 2)
+        self.assertTrue(config.draft_prefill_use_decode_buckets)
+        self.assertEqual(config.prefill_operator_max_tokens, 65536)
+        config.apply_override_args('{"recurrent_cache_prefix_blocks_per_request":null}')
+        self.assertIsNone(config.recurrent_cache_prefix_blocks_per_request)
+        for values in (
+            {"recurrent_cache_prefix_blocks_per_request": -1},
+            {"recurrent_cache_prefix_blocks_per_request": True},
+            {"draft_prefill_use_decode_buckets": 1},
+            {"prefill_operator_max_tokens": 65},
+        ):
+            with self.subTest(values=values), self.assertRaises(ValueError):
+                config.apply_override_args(json.dumps(values))
 
     def test_excluded_mtp_is_unchanged(self):
         cfg = self.config(prefix="mtp.layers.0.proj")

@@ -55,42 +55,106 @@ def build_hybrid_kv_cache_spec_descs(
     return layer_descs
 
 
-def configure_recurrent_cache_capacity(model_config, max_active_requests: int) -> None:
-    """Bound recurrent pools by active requests instead of the paged KV count.
+# LinearKVCacheGroup.retainedTailBlockCount() retains at least two tails.
+_MIN_RETAINED_TAIL_BLOCKS = 2
+# A new tail is allocated before decode cleanup releases the old one.
+_TAIL_REPLACEMENT_BLOCKS = 1
+# BlockPool::totalBlocksNum() returns block_num - 1: block 0 is reserved.
+_RESERVED_NULL_BLOCKS = 1
 
-    Each request needs the retained state tail, speculative reserve slots and
-    room to replace a tail at a block boundary. Keep another request-sized
-    allowance for reusable prefixes. FULL pools retain their token-based budget.
+
+def configure_recurrent_cache_capacity(model_config, max_active_requests: int) -> None:
+    """Apply an opt-in active-request budget, preserving operator overrides.
+
+    None keeps token-based capacity. An integer explicitly budgets reusable
+    prefix snapshots per active request, in addition to tails and SP reserve.
     """
     from rtp_llm.ops import CacheCapacityPolicyDesc
 
     if max_active_requests <= 0:
         raise ValueError("max_active_requests must be positive")
+    prefix_blocks = model_config.recurrent_cache_prefix_blocks_per_request
+    if prefix_blocks is not None and (
+        type(prefix_blocks) is not int or prefix_blocks < 0
+    ):
+        raise ValueError("recurrent prefix allowance must be a non-negative integer")
+    # NormalEngine uses reserve_step=proposals+1. LinearKVCacheGroup reserves
+    # reserve_step-1 extra state slots, hence exactly `proposals` here.
     proposals = max(0, int(model_config.gen_num_per_cycle))
-    block_count = max_active_requests * (proposals + 5)
+    generated = getattr(model_config, "_generated_recurrent_capacities", {})
     descs = model_config.kv_cache_spec_descs
-    changed = False
+    groups = {}
     for layer_descs in descs:
         for desc in layer_descs:
-            if desc.cache_type != KVCacheSpecType.LINEAR:
-                continue
-            capacity = desc.capacity
-            if capacity is not None and capacity.explicit_block_num:
-                continue
-            if capacity is None:
-                capacity = CacheCapacityPolicyDesc()
-            capacity.explicit_block_num = block_count
-            capacity.reservable = False
-            capacity.charge_to_paged_budget = True
-            desc.capacity = capacity
-            changed = True
-    if changed:
-        # pybind vector/optional properties return copies: assign the complete
-        # descriptor tree back after updating its policy objects.
-        model_config.kv_cache_spec_descs = descs
-        logging.info(
-            "Recurrent cache capacity: %d blocks per tag, %d active requests, %d proposals",
-            block_count,
-            max_active_requests,
-            proposals,
+            if desc.cache_type == KVCacheSpecType.LINEAR:
+                groups.setdefault(desc.tag, []).append(desc)
+
+    def signature(capacity):
+        if capacity is None:
+            return None
+        return (
+            capacity.explicit_block_num,
+            capacity.reservable,
+            capacity.charge_to_paged_budget,
         )
+
+    def policy(values):
+        if values is None:
+            return None
+        result = CacheCapacityPolicyDesc()
+        result.explicit_block_num, result.reservable, result.charge_to_paged_budget = (
+            values
+        )
+        return result
+
+    changed = False
+    for tag, members in groups.items():
+        current = signature(members[0].capacity)
+        if any(signature(member.capacity) != current for member in members[1:]):
+            raise ValueError(f"Inconsistent recurrent capacities for shared tag {tag}")
+        previous = generated.get(tag)
+        ours = previous is not None and current == previous["generated"]
+        if not ours:
+            generated.pop(tag, None)
+        if prefix_blocks is None:
+            if not ours:
+                continue
+            desired = previous["original"]
+            generated.pop(tag, None)
+        else:
+            # Presence, including an explicit zero, identifies an operator
+            # setting. Our own previous value is tracked separately and updated.
+            if not ours and current is not None and current[0] is not None:
+                continue
+            tail = members[0].tail
+            active_tails = tail.active_tail_blocks if tail is not None else None
+            retained = max(_MIN_RETAINED_TAIL_BLOCKS, active_tails or 1)
+            blocks = (
+                max_active_requests
+                * (retained + proposals + _TAIL_REPLACEMENT_BLOCKS + prefix_blocks)
+                + _RESERVED_NULL_BLOCKS
+            )
+            desired = (blocks, False, True)
+            generated[tag] = {
+                "original": previous["original"] if ours else current,
+                "generated": desired,
+            }
+            logging.info(
+                "Recurrent tag %s: %d blocks (%d requests, %d tails, %d SP, "
+                "%d replacement, %d prefixes, %d reserved null)",
+                tag,
+                blocks,
+                max_active_requests,
+                retained,
+                proposals,
+                _TAIL_REPLACEMENT_BLOCKS,
+                prefix_blocks,
+                _RESERVED_NULL_BLOCKS,
+            )
+        for desc in members:
+            desc.capacity = policy(desired)
+        changed = True
+    model_config._generated_recurrent_capacities = generated
+    if changed:
+        # Optional/vector pybind properties return copies.
+        model_config.kv_cache_spec_descs = descs

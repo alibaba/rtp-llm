@@ -9,6 +9,7 @@ from torch import nn
 from rtp_llm.models_py.distributed.collective_torch import Group, all_reduce
 from rtp_llm.models_py.modules.base import FusedSiluAndMul
 from rtp_llm.models_py.modules.factory import LinearFactory
+from rtp_llm.models_py.utils.arch import get_sm
 from rtp_llm.ops import ActivationType, HWKernelConfig, ParallelismConfig
 from rtp_llm.utils.model_weight import W
 
@@ -36,14 +37,24 @@ class DenseMLP(nn.Module):
         quant_config: object,
         hw_kernel_config: Optional["HWKernelConfig"] = None,
         enable_w4a16_sm120: bool = False,
+        max_prefill_tokens: int = 0,
     ):
         super().__init__()
 
         self.activation_type = activation_type
         self.parallelism_config = parallelism_config
         self.enable_w4a16_sm120 = enable_w4a16_sm120
-        self.memory_bounded_prefill = (
-            quant_config is not None and quant_config.get_method() == "modelopt_mixed"
+        projection = weights.get(
+            W.ffn_w13, weights.get(W.ffn_w1, weights.get(W.ffn_w3))
+        )
+        # The policy is explicit and independent of quantization. Hardware
+        # eligibility is resolved once when the module is constructed.
+        self.max_prefill_tokens = (
+            max_prefill_tokens
+            if max_prefill_tokens > 0
+            and projection.is_cuda
+            and get_sm(projection.device) == (12, 0)
+            else 0
         )
         if self.activation_type not in _ACTIVATION_FUNC_MAP:
             raise ValueError(f"Unsupported activation type: {activation_type}")
@@ -124,15 +135,13 @@ class DenseMLP(nn.Module):
 
     def forward(self, x: torch.Tensor, skip_allreduce: bool = False) -> torch.Tensor:
         if (
-            self.memory_bounded_prefill
-            and x.is_cuda
+            self.max_prefill_tokens > 0
             and x.ndim == 2
-            and x.shape[0] > 65536
-            and torch.cuda.get_device_capability(x.device) == (12, 0)
+            and x.shape[0] > self.max_prefill_tokens
         ):
             output = None
-            for start in range(0, x.shape[0], 65536):
-                stop = min(start + 65536, x.shape[0])
+            for start in range(0, x.shape[0], self.max_prefill_tokens):
+                stop = min(start + self.max_prefill_tokens, x.shape[0])
                 block = self._forward_block(x[start:stop])
                 if output is None:
                     output = block.new_empty((x.shape[0], block.shape[1]))

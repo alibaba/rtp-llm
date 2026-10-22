@@ -7,6 +7,7 @@ from rtp_llm.models_py.kernels.cuda.modelopt_fp8_quant import static_fp8_quant_r
 from rtp_llm.models_py.modules.factory.linear.impl.cuda.fp8_per_tensor_linear import (
     CudaFp8PerTensorLinear,
 )
+from rtp_llm.models_py.utils.arch import get_sm
 
 
 class CudaModelOptFp8Linear(CudaFp8PerTensorLinear):
@@ -32,6 +33,8 @@ class CudaModelOptFp8Linear(CudaFp8PerTensorLinear):
         super().__init__(
             weight, weight_scales, input_scales, bias, quant_config, weight_scale_2
         )
+        if weight.is_cuda:
+            get_sm(weight.device)  # Prime device eligibility before graph/forward.
         self.weight_scale = weight_scales[:1].contiguous()
         # A fused QKV can still have distinct static activation scales. Partition
         # only at their boundaries; identical scales use one GEMM, without
@@ -55,6 +58,8 @@ class CudaModelOptFp8Linear(CudaFp8PerTensorLinear):
             )
 
     def forward(self, input):
+        if input.dtype != torch.bfloat16:
+            raise ValueError("ModelOpt mixed FP8 linear requires BF16 activations")
         x = input.reshape(-1, input.shape[-1])
         if x.shape[0] == 0:
             return x.new_empty((*input.shape[:-1], self.weight.shape[1]))

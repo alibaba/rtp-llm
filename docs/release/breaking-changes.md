@@ -70,3 +70,22 @@ exactly as much as you would trust it to execute code inside your container.
 2. Do not set `--worker_info_port_num 8` or `WORKER_INFO_PORT_NUM=8` for services with DashSc gRPC enabled; startup validation requires `worker_info_port_num >= 9`.
 
 See also: [DashSc gRPC — listen ports](../backend/DashSc-gRPC.md).
+
+
+## Service generation defaults for native and OpenAI requests
+
+**Summary:** When `generation_config_path` contains `generation_config.json`,
+its explicit values now provide defaults for both native `/generate` requests
+(and the native `/` endpoint) and OpenAI chat completions. This includes sampling
+settings such as `repetition_penalty`, `presence_penalty`, and `max_new_tokens`.
+Previously the frontend paths did not consistently inherit these values.
+
+Request-supplied fields retain priority. For OpenAI, explicit top-level request
+fields override `extra_configs`, and explicit `extra_configs` fields override
+service defaults. Typed nested values and per-request validation state are
+preserved. A missing file falls back to built-in defaults; malformed JSON still
+fails configuration loading.
+
+Without an explicit model-name override, `/v1/models` keeps the model-type id and
+response `model` keeps its legacy empty default. An explicit
+`json_model_override_args` `model_name` sets both public values.

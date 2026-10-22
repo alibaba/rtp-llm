@@ -19,6 +19,7 @@ def chunk_gated_delta_rule_with_cache_store(
     ssm_states,
     seq_size_per_block,
     max_tokens=65536,
+    cu_seqlens_cpu=None,
 ):
     """Run existing kernels in aligned tiles and store the same cache bytes.
 
@@ -34,7 +35,11 @@ def chunk_gated_delta_rule_with_cache_store(
     ):
         raise ValueError("GDN tile size must align with chunks and cache blocks")
     output = torch.empty_like(v)
-    boundaries = cu_seqlens.cpu().tolist()
+    boundaries = (
+        cu_seqlens_cpu.tolist()
+        if cu_seqlens_cpu is not None
+        else cu_seqlens.cpu().tolist()
+    )
     for batch, (begin, end) in enumerate(zip(boundaries, boundaries[1:])):
         state = initial_state[batch : batch + 1]
         for start in range(begin, end, max_tokens):

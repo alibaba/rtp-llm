@@ -26,6 +26,7 @@ class DenseMLPTilingTest(unittest.TestCase):
             SimpleNamespace(get_ffn_tp_size=lambda: 2),
             weights,
             ModelOptMixedPrecisionConfig({}),
+            max_prefill_tokens=65536,
         )
         for rows in (19, 65539):
             with self.subTest(rows=rows):
@@ -45,6 +46,36 @@ class DenseMLPTilingTest(unittest.TestCase):
                     actual = model(x, skip_allreduce=True)
                     collective.assert_not_called()
                     torch.testing.assert_close(actual, expected, rtol=0.01, atol=0.002)
+
+
+class GdnPrefillTilingPolicyTest(unittest.TestCase):
+    def test_many_short_sequences_keep_batched_gdn(self):
+        from rtp_llm.models_py.model_desc.qwen3_next import (
+            Qwen3NextGatedDeltaNetPrefill,
+        )
+
+        policy = SimpleNamespace(max_prefill_tokens=65536)
+        for lengths, expected in [
+            ([2048] * 71, False),
+            ([65536, 1], False),
+            ([65537, 1], True),
+            ([0, 262128, 0], True),
+            ([], False),
+        ]:
+            with self.subTest(lengths=lengths):
+                metadata = SimpleNamespace(
+                    input_lengths=torch.tensor(lengths, dtype=torch.int32)
+                )
+                actual = Qwen3NextGatedDeltaNetPrefill._should_tile_prefill(
+                    policy, metadata, sum(lengths)
+                )
+                self.assertEqual(actual, expected)
+        policy.max_prefill_tokens = 0
+        self.assertFalse(
+            Qwen3NextGatedDeltaNetPrefill._should_tile_prefill(
+                policy, SimpleNamespace(input_lengths=torch.tensor([262128])), 262128
+            )
+        )
 
 
 if __name__ == "__main__":

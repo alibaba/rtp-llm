@@ -156,7 +156,8 @@ class OpenaiEndpoint(object):
             else None
         )
         self.max_seq_len = model_config.max_seq_len
-        self.model_name = model_config.model_name
+        self.model_name = model_config.served_model_name or ""
+        self.model_type = model_config.model_type
         self.special_tokens = model_config.special_tokens
         template_type = model_config.template_type
         ckpt_path = model_config.ckpt_path
@@ -254,7 +255,7 @@ class OpenaiEndpoint(object):
         )
 
     async def list_models(self):
-        model_card = ModelCard(id=self.model_name)
+        model_card = ModelCard(id=self.model_name or self.model_type)
         return ModelList(data=[model_card])
 
     def _dedup_stop_words_list(
@@ -570,7 +571,16 @@ class OpenaiEndpoint(object):
         defaults = getattr(self, "default_generate_config", None) or GenerateConfig()
         config = defaults.model_copy(deep=True)
         if request.extra_configs is not None:
-            config.update(request.extra_configs.model_dump(exclude_unset=True))
+            # Start with the validated request object: model_dump recursively
+            # erases RoleAddr and drops validation state such as automatic ban
+            # downgrade intent. Fill only server defaults the request omitted.
+            extra = request.extra_configs
+            missing_defaults = defaults.model_fields_set - extra.model_fields_set
+            values = {key: getattr(config, key) for key in missing_defaults}
+            if "enable_cross_sequence_ban" in values and defaults._ban_auto_downgraded:
+                values["enable_cross_sequence_ban"] = True
+            config = extra.model_copy(deep=True)
+            config.update(values)
         if request.extra_configs is not None and (
             config.response_format is not None
             or GrammarConstraint.collect_from_config(config)
