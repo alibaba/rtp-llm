@@ -11,11 +11,11 @@ from rtp_llm.model_loader.fp8_weight import (
 from rtp_llm.model_loader.model_weight_info import ModelWeights
 from rtp_llm.model_loader.tensor_source import TensorSource
 from rtp_llm.model_loader.weight_module import AtomicWeight
-from rtp_llm.models_py.model_desc.qwen4_exp_runtime.weight_views import (
-    prepare_compute_weights as compute_weight_view,
-)
 from rtp_llm.models_py.modules.base.common.fp8_embedding import Fp8VocabEmbedding
 from rtp_llm.models_py.modules.base.common.fp8_linear import Fp8Linear
+from rtp_llm.models_py.modules.qwen4_exp.weight_views import (
+    prepare_compute_weights as compute_weight_view,
+)
 from rtp_llm.utils.model_weight import CkptWeightInfo, W
 
 
@@ -81,7 +81,7 @@ class FullFp8StorageTest(unittest.TestCase):
         from torch import nn
 
         from rtp_llm.models_py.model_desc.qwen4_exp import Qwen4ExpDecoderLayer
-        from rtp_llm.models_py.model_desc.qwen4_exp_runtime.weight_views import (
+        from rtp_llm.models_py.modules.qwen4_exp.weight_views import (
             annotate_compute_inventory,
         )
 

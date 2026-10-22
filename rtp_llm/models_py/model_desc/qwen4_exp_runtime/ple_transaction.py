@@ -13,8 +13,8 @@ from rtp_llm.models.qwen4_exp.qwen4_exp_kv_cache import PLE_NGRAM_CTX_TAG, PLE_S
 from rtp_llm.models_py.modules.qwen4_exp.ple.ple import Qwen4ExpPLELayer
 from rtp_llm.ops.compute_ops import PyAttentionInputs
 
-from .cache_views import PLECacheViews
-from .graph_state import PLEGraphRegistry
+from .ple_cache_views import PLECacheViews
+from .ple_graph_state import PLEGraphRegistry
 from .ple_state import _PLEPreparedWrite, _PLETargetLayerStage, _PLETargetTransaction
 
 

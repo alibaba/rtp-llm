@@ -3,7 +3,7 @@ from unittest.mock import patch
 
 import torch
 
-from rtp_llm.models_py.kernels.cuda import qwen4_qsa_topk as cub
+from rtp_llm.models_py.modules.qwen4_exp.qsa import cub_topk as cub
 from rtp_llm.models_py.modules.qwen4_exp.qsa.qsa_topk_triton import (
     try_select_qsa_tokens,
 )
