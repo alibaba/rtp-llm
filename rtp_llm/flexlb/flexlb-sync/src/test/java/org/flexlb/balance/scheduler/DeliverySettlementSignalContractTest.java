@@ -231,7 +231,6 @@ class DeliverySettlementSignalContractTest {
                                                 state.updateQueue(
                                                                 PrefillState.QueueChange.ENQUEUE,
                                                                 route,
-                                                                Long.MAX_VALUE,
                                                                 System.currentTimeMillis())
                                                         == route)));
                 admission.finish();

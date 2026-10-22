@@ -40,7 +40,8 @@ public class ChannelConfiguration {
                 TimeUnit.MINUTES,
                 new LinkedBlockingQueue<>(
                         config.getInternalRuntime().getGrpcClientExecutorQueueCapacity()),
-                new NamedThreadFactory("engine-grpc-client-executor"));
+                new NamedThreadFactory("engine-grpc-client-executor"),
+                new GrpcCallbackCallerRunsPolicy());
     }
 
     /**
@@ -61,7 +62,7 @@ public class ChannelConfiguration {
                 TimeUnit.MINUTES,
                 new LinkedBlockingQueue<>(2000),
                 new NamedThreadFactory("flexlb-forwarder-channel-executor"),
-                new ThreadPoolExecutor.AbortPolicy());
+                new GrpcCallbackCallerRunsPolicy());
     }
 
     @Bean

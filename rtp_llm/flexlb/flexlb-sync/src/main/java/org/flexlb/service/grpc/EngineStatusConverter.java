@@ -22,6 +22,7 @@ import java.util.Set;
  * Converter between gRPC protobuf messages and Java objects for engine status
  */
 public class EngineStatusConverter {
+
     /**
      * Convert one protobuf response into an immutable observation, retaining all
      * active task phases from {@code running_task_info}.
@@ -61,25 +62,6 @@ public class EngineStatusConverter {
                 finishedTasks);
     }
 
-    /**
-     * Convert CacheStatusPB to CacheStatus
-     */
-    public static CacheStatus convertToCacheStatus(EngineRpcService.CacheStatusPB cacheStatusPB) {
-        CacheStatus cacheStatus = new CacheStatus();
-        cacheStatus.setAvailableKvCache(cacheStatusPB.getAvailableKvCache());
-        cacheStatus.setTotalKvCache(cacheStatusPB.getTotalKvCache());
-        cacheStatus.setBlockSize(cacheStatusPB.getBlockSize());
-        cacheStatus.setVersion(cacheStatusPB.getVersion());
-
-        Map<Long, Boolean> cacheKeysMap = cacheStatusPB.getCacheKeysMap();
-        // Copy the keySet: protobuf MapField#keySet() returns a VIEW that keeps
-        // the whole WorkerStatusPB message graph reachable until the next sync.
-        Set<Long> cachedKeysSet = new HashSet<>(cacheKeysMap.keySet());
-        cacheStatus.setCachedKeys(cachedKeysSet);
-        cacheStatus.setCacheKeySize(cacheKeysMap.size());
-        return cacheStatus;
-    }
-
     private static WorkerStatus.StepMetrics convertStepMetrics(
             EngineRpcService.WorkerStatusPB status) {
         if (!status.hasLastStepMetrics()) {
@@ -103,6 +85,31 @@ public class EngineStatusConverter {
             case KV_CACHE_GROUP_MODE_WITH_MAMBA -> KvCacheGroupMode.WITH_MAMBA;
             default -> KvCacheGroupMode.UNSPECIFIED;
         };
+    }
+
+    /**
+     * Convert CacheStatusPB to CacheStatus
+     */
+    public static CacheStatus convertToCacheStatus(EngineRpcService.CacheStatusPB cacheStatusPB) {
+        return convertToCacheStatus(cacheStatusPB, null);
+    }
+
+    public static CacheStatus convertToCacheStatus(
+            EngineRpcService.CacheStatusPB cacheStatusPB, Set<Long> retainedKeys) {
+        CacheStatus cacheStatus = new CacheStatus();
+        cacheStatus.setAvailableKvCache(cacheStatusPB.getAvailableKvCache());
+        cacheStatus.setTotalKvCache(cacheStatusPB.getTotalKvCache());
+        cacheStatus.setBlockSize(cacheStatusPB.getBlockSize());
+        cacheStatus.setVersion(cacheStatusPB.getVersion());
+
+        Map<Long, Boolean> cacheKeysMap = cacheStatusPB.getCacheKeysMap();
+        // Copy the keySet: protobuf MapField#keySet() returns a VIEW that keeps
+        // the whole WorkerStatusPB message graph reachable until the next sync.
+        Set<Long> cachedKeysSet =
+                retainedKeys != null ? retainedKeys : new HashSet<>(cacheKeysMap.keySet());
+        cacheStatus.setCachedKeys(cachedKeysSet);
+        cacheStatus.setCacheKeySize(cachedKeysSet.size());
+        return cacheStatus;
     }
 
     /**

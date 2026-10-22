@@ -388,10 +388,7 @@ class PrefillStateSnapshotTest {
             assertSame(
                     request,
                     ledger.updateQueue(
-                            PrefillState.QueueChange.ENQUEUE,
-                            request,
-                            0L,
-                            System.currentTimeMillis()));
+                            PrefillState.QueueChange.ENQUEUE, request, System.currentTimeMillis()));
         } finally {
             lock.unlock();
         }
@@ -427,7 +424,6 @@ class PrefillStateSnapshotTest {
                         ledger.updateQueue(
                                 PrefillState.QueueChange.ENQUEUE,
                                 request,
-                                10L,
                                 System.currentTimeMillis()));
             } finally {
                 lock.unlock();
@@ -945,8 +941,7 @@ class PrefillStateSnapshotTest {
         enqueue(detached);
         assertSame(
                 detached,
-                state.updateQueue(
-                        PrefillState.QueueChange.STOP, null, 0L, System.currentTimeMillis()));
+                state.updateQueue(PrefillState.QueueChange.STOP, null, System.currentTimeMillis()));
 
         var retired = state.retireGenerationOwnership();
         assertNull(retired.invariantFailure());
@@ -1038,17 +1033,14 @@ class PrefillStateSnapshotTest {
             assertSame(
                     request,
                     ledger.updateQueue(
-                            PrefillState.QueueChange.ENQUEUE,
-                            request,
-                            10L,
-                            System.currentTimeMillis()));
+                            PrefillState.QueueChange.ENQUEUE, request, System.currentTimeMillis()));
         } finally {
             lock.unlock();
         }
         assertSame(
                 request,
                 ledger.updateQueue(
-                        PrefillState.QueueChange.STOP, null, 0L, System.currentTimeMillis()));
+                        PrefillState.QueueChange.STOP, null, System.currentTimeMillis()));
         assertTrue(waitingItems().isEmpty());
         assertEquals(
                 1L,
@@ -1064,7 +1056,6 @@ class PrefillStateSnapshotTest {
                     ledger.updateQueue(
                             PrefillState.QueueChange.ACK_STOP,
                             request,
-                            0L,
                             System.currentTimeMillis()));
         } finally {
             lock.unlock();
@@ -1082,10 +1073,7 @@ class PrefillStateSnapshotTest {
             assertSame(
                     request,
                     ledger.updateQueue(
-                            PrefillState.QueueChange.ENQUEUE,
-                            request,
-                            10L,
-                            System.currentTimeMillis()));
+                            PrefillState.QueueChange.ENQUEUE, request, System.currentTimeMillis()));
         } finally {
             lock.unlock();
         }
@@ -1097,10 +1085,7 @@ class PrefillStateSnapshotTest {
             assertSame(
                     request,
                     ledger.updateQueue(
-                            PrefillState.QueueChange.REMOVE,
-                            request,
-                            0L,
-                            System.currentTimeMillis()));
+                            PrefillState.QueueChange.REMOVE, request, System.currentTimeMillis()));
             assertTrue(waiting.isEmpty());
             assertEquals(0L, ledger.admissionSummary(0, 0L).occupiedRequests());
             assertEquals(1, ledger.captureQueueCounters().batchSlots());
@@ -1805,10 +1790,8 @@ class PrefillStateSnapshotTest {
             assertEquals(Long.MAX_VALUE, state.progress().outstandingRequests());
             assertEquals(Long.MAX_VALUE, state.admissionSummary(0, 1L).requestsToRelease());
             assertEquals(1L, state.admissionSummary(0, Long.MAX_VALUE).requestsToRelease());
-            assertNull(
-                    state.updateQueue(
-                            PrefillState.QueueChange.ENQUEUE, item(9L), Long.MAX_VALUE, 0L));
-            assertFalse(state.canPreemptQueuedRequest(80, Long.MAX_VALUE));
+            assertNotNull(state.updateQueue(PrefillState.QueueChange.ENQUEUE, item(9L), 0L));
+            assertFalse(state.requestCapacityAvailable(Long.MAX_VALUE, 1));
             assertEquals(Long.MAX_VALUE, state.progress().outstandingRequests());
         } finally {
             lock.unlock();
@@ -2078,10 +2061,7 @@ class PrefillStateSnapshotTest {
             assertSame(
                     item,
                     state.updateQueue(
-                            PrefillState.QueueChange.ENQUEUE,
-                            item,
-                            0L,
-                            System.currentTimeMillis()));
+                            PrefillState.QueueChange.ENQUEUE, item, System.currentTimeMillis()));
         } finally {
             lock.unlock();
         }

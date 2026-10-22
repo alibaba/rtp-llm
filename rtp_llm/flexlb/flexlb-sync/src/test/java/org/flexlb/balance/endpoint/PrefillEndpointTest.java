@@ -120,7 +120,6 @@ class PrefillEndpointTest {
                         state.updateQueue(
                                 PrefillState.QueueChange.ENQUEUE,
                                 queued,
-                                0L,
                                 System.currentTimeMillis()));
                 assertNull(
                         local.commitLocked(

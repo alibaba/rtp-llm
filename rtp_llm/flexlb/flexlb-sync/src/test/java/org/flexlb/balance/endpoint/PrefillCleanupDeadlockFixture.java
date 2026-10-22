@@ -94,10 +94,7 @@ public final class PrefillCleanupDeadlockFixture {
             assertSame(
                     item,
                     state.updateQueue(
-                            PrefillState.QueueChange.ENQUEUE,
-                            item,
-                            Long.MAX_VALUE,
-                            System.currentTimeMillis()));
+                            PrefillState.QueueChange.ENQUEUE, item, System.currentTimeMillis()));
         } finally {
             lock.unlock();
         }

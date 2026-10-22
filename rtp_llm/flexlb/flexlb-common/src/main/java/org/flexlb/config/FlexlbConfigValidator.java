@@ -10,13 +10,10 @@ import org.flexlb.config.RoutingConfig.EstimatorType;
 import org.flexlb.config.RoutingConfig.PrefillConfig;
 import org.flexlb.util.PriorityNormalizer;
 
-/**
- * Cross-field validation for the public configuration contract.
- */
+/** Cross-field validation for the public configuration contract. */
 public final class FlexlbConfigValidator {
-    private static final int MIN_STALE_TIMEOUT_TO_RPC_TIMEOUT_RATIO = 2;
 
-    private FlexlbConfigValidator() {}
+    private static final int MIN_STALE_TIMEOUT_TO_RPC_TIMEOUT_RATIO = 2;
 
     public static void validateDocumentShape(JsonNode document) {
         validateDocumentShape(document, document);
@@ -27,7 +24,7 @@ public final class FlexlbConfigValidator {
         if (scheduler.isObject()) {
             String type = effectiveDocument.path("scheduler").path("type").asText("QUEUE");
             if ("DIRECT".equals(type)) {
-                rejectFieldsExcept(scheduler, "scheduler", "type");
+                rejectFieldsExcept(scheduler, "scheduler", "type", "nettyMemoryReporter");
             } else if ("QUEUE".equals(type)) {
                 validateOrderingShape(
                         scheduler.path("ordering"),
@@ -64,47 +61,6 @@ public final class FlexlbConfigValidator {
         }
     }
 
-    public static void validate(FlexlbConfig config) {
-        require(
-                config.getSchemaVersion() == FlexlbConfig.CURRENT_SCHEMA_VERSION,
-                "schemaVersion",
-                "must equal " + FlexlbConfig.CURRENT_SCHEMA_VERSION);
-        require(config.getScheduler() != null, "scheduler", "is required");
-        require(config.getScheduler().getType() != null, "scheduler.type", "is required");
-        require(config.getDispatcher() != null, "dispatcher", "is required");
-        require(config.getRouter() != null, "router", "is required");
-        require(config.getWorkerRegistry() != null, "workerRegistry", "is required");
-        require(config.getObservability() != null, "observability", "is required");
-        require(config.getServiceDiscovery() != null, "serviceDiscovery", "is required");
-        require(config.getCacheMatching() != null, "cacheMatching", "is required");
-        require(config.getOptimizer() != null, "optimizer", "is required");
-        require(config.getConsistency() != null, "consistency", "is required");
-        positive(config.getFallbackBatchTokenCapacity(), "fallbackBatchTokenCapacity");
-
-        if (!config.isDirect()) {
-            validateQueue(config.queueScheduler());
-        }
-        config.getDispatcher().validateFor(config.getScheduler());
-        validateRequestLifecycle(config.getRequestLifecycle());
-        validateRouting(config.getRouter());
-        validateWorkerRegistry(config.getWorkerRegistry());
-        validateObservability(config.getObservability());
-        validateServiceDiscovery(config.getServiceDiscovery());
-        validateCacheMatching(config.getCacheMatching());
-        validateOptimizer(config.getOptimizer());
-        validateConsistency(config.getConsistency());
-        FlexlbConfig.GrpcServerConfig grpc = config.getGrpcServer();
-        require(grpc != null, "grpcServer", "is required");
-        nonNegative(grpc.getExecutorCoreSize(), "grpcServer.executorCoreSize");
-        positive(grpc.getExecutorMaxSize(), "grpcServer.executorMaxSize");
-        positive(grpc.getExecutorQueueSize(), "grpcServer.executorQueueSize");
-        positive(grpc.getShutdownQuietPeriodMs(), "grpcServer.shutdownQuietPeriodMs");
-        require(
-                grpc.getExecutorMaxSize() >= grpc.getExecutorCoreSize(),
-                "grpcServer.executorMaxSize",
-                "must be at least executorCoreSize");
-    }
-
     private static void validateEstimatorShape(JsonNode estimator) {
         if (!estimator.isObject()) {
             return;
@@ -116,18 +72,6 @@ public final class FlexlbConfigValidator {
         } else if ("LEARNING".equals(type)) {
             rejectFieldsExcept(estimator, "router.roles.prefill.executionTimeEstimator", "type");
         }
-    }
-
-    private static void rejectFieldsExcept(JsonNode object, String path, String... allowed) {
-        java.util.Set<String> names = java.util.Set.of(allowed);
-        object.fieldNames()
-                .forEachRemaining(
-                        field -> {
-                            if (!names.contains(field)) {
-                                throw new ConfigValidationException(
-                                        path + "." + field, "is not supported by the active mode");
-                            }
-                        });
     }
 
     private static void validateOrderingShape(JsonNode ordering, JsonNode effectiveOrdering) {
@@ -176,6 +120,82 @@ public final class FlexlbConfigValidator {
                     "maxCollectionWaitMs",
                     "maxPredictedExecutionMs");
         }
+    }
+
+    private static void rejectFieldsExcept(JsonNode object, String path, String... allowed) {
+        java.util.Set<String> names = java.util.Set.of(allowed);
+        object.fieldNames()
+                .forEachRemaining(
+                        field -> {
+                            if (!names.contains(field)) {
+                                throw new ConfigValidationException(
+                                        path + "." + field, "is not supported by the active mode");
+                            }
+                        });
+    }
+
+    public static void validate(FlexlbConfig config) {
+        require(
+                config.getSchemaVersion() == FlexlbConfig.CURRENT_SCHEMA_VERSION,
+                "schemaVersion",
+                "must equal " + FlexlbConfig.CURRENT_SCHEMA_VERSION);
+        require(config.getScheduler() != null, "scheduler", "is required");
+        require(config.getScheduler().getType() != null, "scheduler.type", "is required");
+        validateNettyMemoryReporter(config.getScheduler().getNettyMemoryReporter());
+        require(config.getDispatcher() != null, "dispatcher", "is required");
+        require(config.getRouter() != null, "router", "is required");
+        require(config.getWorkerRegistry() != null, "workerRegistry", "is required");
+        require(config.getObservability() != null, "observability", "is required");
+        require(config.getServiceDiscovery() != null, "serviceDiscovery", "is required");
+        require(config.getCacheMatching() != null, "cacheMatching", "is required");
+        require(config.getOptimizer() != null, "optimizer", "is required");
+        require(config.getConsistency() != null, "consistency", "is required");
+        positive(config.getFallbackBatchTokenCapacity(), "fallbackBatchTokenCapacity");
+
+        if (!config.isDirect()) {
+            validateQueue(config.queueScheduler());
+        }
+        config.getDispatcher().validateFor(config.getScheduler());
+        validateRequestLifecycle(config.getRequestLifecycle());
+        validateRouting(config.getRouter());
+        validateWorkerRegistry(config.getWorkerRegistry());
+        validateObservability(config.getObservability());
+        validateServiceDiscovery(config.getServiceDiscovery());
+        validateCacheMatching(config.getCacheMatching());
+        validateOptimizer(config.getOptimizer());
+        validateConsistency(config.getConsistency());
+        FlexlbConfig.GrpcServerConfig grpc = config.getGrpcServer();
+        require(grpc != null, "grpcServer", "is required");
+        nonNegative(grpc.getExecutorCoreSize(), "grpcServer.executorCoreSize");
+        positive(grpc.getExecutorMaxSize(), "grpcServer.executorMaxSize");
+        positive(grpc.getExecutorQueueSize(), "grpcServer.executorQueueSize");
+        nonNegative(grpc.getReceiveBudgetBytes(), "grpcServer.receiveBudgetBytes");
+        nonNegative(grpc.getMaxReceivingRequests(), "grpcServer.maxReceivingRequests");
+        nonNegative(
+                grpc.getMaxReceivingControlRequests(), "grpcServer.maxReceivingControlRequests");
+        positive(grpc.getReceiveTimeoutMs(), "grpcServer.receiveTimeoutMs");
+        positive(grpc.getShutdownQuietPeriodMs(), "grpcServer.shutdownQuietPeriodMs");
+        require(
+                grpc.getExecutorMaxSize() >= grpc.getExecutorCoreSize(),
+                "grpcServer.executorMaxSize",
+                "must be at least executorCoreSize");
+    }
+
+    private static void validateNettyMemoryReporter(NettyMemoryReporterConfig memory) {
+        String path = "scheduler.nettyMemoryReporter";
+        require(memory != null, path, "is required");
+        require(memory.getIntervalMs() >= 1_000L, path + ".intervalMs", "must be at least 1000 ms");
+        var capture = memory.getAutoCapture();
+        require(capture != null, path + ".autoCapture", "is required");
+        positive(capture.getThresholdBytes(), path + ".autoCapture.thresholdBytes");
+        require(
+                capture.getCooldownMs() >= 1_000L,
+                path + ".autoCapture.cooldownMs",
+                "must be at least 1000 ms");
+        require(
+                !capture.isEnabled() || memory.isEnabled(),
+                path + ".autoCapture.enabled",
+                "requires nettyMemoryReporter.enabled=true");
     }
 
     private static void validateQueue(SchedulerConfig queue) {
@@ -238,34 +258,6 @@ public final class FlexlbConfigValidator {
                     "scheduler.ordering.preemption",
                     "is supported only with PRIORITY");
         }
-    }
-
-    private static void positive(long value, String field) {
-        require(value > 0, field, "must be greater than zero");
-    }
-
-    private static void require(boolean condition, String field, String message) {
-        if (!condition) {
-            throw new ConfigValidationException(field, message);
-        }
-    }
-
-    private static void nonNegative(long value, String field) {
-        require(value >= 0, field, "must be non-negative");
-    }
-
-    private static void range(long value, long minimum, long maximum, String field) {
-        require(
-                value >= minimum && value <= maximum,
-                field,
-                "must be in [" + minimum + ", " + maximum + "]");
-    }
-
-    private static void range(double value, double minimum, double maximum, String field) {
-        require(
-                Double.isFinite(value) && value >= minimum && value <= maximum,
-                field,
-                "must be finite and in [" + minimum + ", " + maximum + "]");
     }
 
     private static void validateRouting(RoutingConfig routing) {
@@ -382,12 +374,6 @@ public final class FlexlbConfigValidator {
         positive(
                 workers.getHealth().getCleanupIntervalMs(),
                 "workerRegistry.health.cleanupIntervalMs");
-        require(
-                workers.getHealth().getStatusRpcTimeoutMs()
-                        <= workers.getHealth().getStatusStaleAfterMs()
-                                / MIN_STALE_TIMEOUT_TO_RPC_TIMEOUT_RATIO,
-                "workerRegistry.health.statusStaleAfterMs",
-                "must be at least twice statusRpcTimeoutMs");
         require(workers.getCacheStatus() != null, "workerRegistry.cacheStatus", "is required");
         positive(
                 workers.getCacheStatus().getTargetDiffSize(),
@@ -495,4 +481,34 @@ public final class FlexlbConfigValidator {
         positive(zookeeper.getConnectionTimeoutMs(), "consistency.connectionTimeoutMs");
         positive(zookeeper.getMasterRefreshIntervalMs(), "consistency.masterRefreshIntervalMs");
     }
+
+    private static void positive(long value, String field) {
+        require(value > 0, field, "must be greater than zero");
+    }
+
+    private static void nonNegative(long value, String field) {
+        require(value >= 0, field, "must be non-negative");
+    }
+
+    private static void range(long value, long minimum, long maximum, String field) {
+        require(
+                value >= minimum && value <= maximum,
+                field,
+                "must be in [" + minimum + ", " + maximum + "]");
+    }
+
+    private static void range(double value, double minimum, double maximum, String field) {
+        require(
+                Double.isFinite(value) && value >= minimum && value <= maximum,
+                field,
+                "must be finite and in [" + minimum + ", " + maximum + "]");
+    }
+
+    private static void require(boolean condition, String field, String message) {
+        if (!condition) {
+            throw new ConfigValidationException(field, message);
+        }
+    }
+
+    private FlexlbConfigValidator() {}
 }
