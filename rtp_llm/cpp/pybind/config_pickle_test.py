@@ -4,7 +4,7 @@ import unittest
 from rtp_llm.ops import DeviceResourceConfig, GrammarConfig, HWKernelConfig
 
 
-class HWKernelConfigPickleTest(unittest.TestCase):
+class DecodeHWKernelConfigPickleTest(unittest.TestCase):
     def test_decode_capacity_and_cascade_round_trip(self):
         config = HWKernelConfig()
         config.decode_cuda_graph_max_batch_size = 2048
@@ -197,7 +197,7 @@ class HWKernelConfigPickleTest(unittest.TestCase):
         )
 
     def test_unsupported_tuple_sizes_are_rejected(self):
-        for size in (15, 17, 18):
+        for size in (15, 17, 19):
             with self.subTest(size=size), self.assertRaisesRegex(
                 RuntimeError, "Invalid state"
             ):

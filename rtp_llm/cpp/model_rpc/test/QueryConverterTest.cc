@@ -11,6 +11,7 @@
 #include "rtp_llm/cpp/model_rpc/LocalRpcServer.h"
 #include "rtp_llm/cpp/model_rpc/PrefillRpcServer.h"
 #include "rtp_llm/cpp/model_rpc/QueryConverter.h"
+#include "rtp_llm/cpp/model_rpc/TensorPbConvert.h"
 #include "rtp_llm/cpp/model_rpc/RpcErrorCode.h"
 #include "rtp_llm/cpp/model_rpc/proto/model_rpc_service.grpc.pb.h"
 #include "rtp_llm/cpp/model_rpc/proto/model_rpc_service.pb.h"
@@ -570,6 +571,19 @@ TEST_F(QueryConverterTest, TransTensorRejectsMismatchedPayloadSize) {
     tensor_pb.set_fp32_data(std::string(sizeof(float), '\0'));
 
     EXPECT_THROW(QueryConverter::transTensor(tensor_pb), std::runtime_error);
+    EXPECT_THROW(TensorPbConvert::validate(tensor_pb), std::runtime_error);
+}
+
+TEST_F(QueryConverterTest, ValidatePreservesEmptyAndScalarTensorSemantics) {
+    TensorPB tensor_pb;
+    tensor_pb.set_data_type(TensorPB::FP32);
+    EXPECT_NO_THROW(TensorPbConvert::validate(tensor_pb));
+    EXPECT_EQ(TensorPbConvert::pbToTorch(tensor_pb).numel(), 0);
+    tensor_pb.set_fp32_data(std::string(sizeof(float), '\0'));
+    EXPECT_NO_THROW(TensorPbConvert::validate(tensor_pb));
+    EXPECT_EQ(TensorPbConvert::pbToTorch(tensor_pb).dim(), 0);
+    tensor_pb.set_int32_data(std::string(sizeof(int32_t), '\0'));
+    EXPECT_THROW(TensorPbConvert::validate(tensor_pb), std::runtime_error);
 }
 
 TEST_F(QueryConverterTest, TransTensorPB_NonContiguous) {

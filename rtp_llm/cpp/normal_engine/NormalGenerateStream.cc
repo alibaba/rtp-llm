@@ -126,6 +126,10 @@ GenerateOutputs NormalGenerateStream::snapshotTerminalOutput(const StreamUpdateI
         aux.remote_reuse_len         = remote_reuse_length_;
         aux.memory_reuse_len         = memory_reuse_length_;
         aux.multimodal_lengths       = generate_input_->multimodalLengths();
+        aux.speculative_draft_rounds = sp_iter_count_;
+        aux.speculative_accepted_tokens_per_pos = speculative_accepted_tokens_per_pos_;
+        aux.generation_prefill_cuda_graph_status =
+            generationPrefillCudaGraphStatusString(generation_prefill_cuda_graph_status_);
         if (update_info.cum_log_probs.defined()) {
             // Dispatcher has completed D2H before entering update(). Clone only
             // this request's final scores to detach from reusable sampler input.

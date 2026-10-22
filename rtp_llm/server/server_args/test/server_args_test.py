@@ -51,7 +51,7 @@ class DecodeGraphCapacityArgumentsTest(TestCase):
             config.hw_kernel_config.decode_capture_batch_sizes, [128, 256, 1024, 2048]
         )
         self.assertEqual(
-            config.hw_kernel_config.generation_prefill_cuda_graph_max_requests, 8
+            config.hw_kernel_config.generation_prefill_cuda_graph_max_requests, 1
         )
 
     def test_cli_overrides_env_and_allows_smaller_capture_range(self):

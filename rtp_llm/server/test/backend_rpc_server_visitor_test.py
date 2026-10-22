@@ -940,7 +940,7 @@ class BackendRPCServerVisitorTest(unittest.IsolatedAsyncioTestCase):
         stream = await visitor.enqueue(input)
         outputs = [output async for output in stream]
 
-        self.assertEqual([item async for item in output], ["stream"])
+        self.assertEqual(outputs, ["stream"])
         self.assertFalse(input.generate_config.reuse_cache)
         self.assertFalse(input.generate_config.enable_device_cache)
         self.assertFalse(input.generate_config.enable_memory_cache)

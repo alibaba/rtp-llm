@@ -361,6 +361,11 @@ class TestVipTimeout(unittest.TestCase):
                 self.assertEqual(get.call_args.kwargs, expected)
                 proxy.req_api("srvIPXT", {"dom": "example"})
                 self.assertEqual(get.call_args.kwargs, expected)
+            proxy = VIPServerProxy()
+            proxy.refresh_srv_lst()
+            self.assertEqual(get.call_args.kwargs, {"timeout": 3})
+            proxy.req_api("srvIPXT", {"dom": "example"})
+            self.assertEqual(get.call_args.kwargs, {"timeout": 3})
 
     def test_wrapper_owns_bounded_reactor(self):
         with patch("rtp_llm.vipserver.host_reactor.HostReactor") as reactor, patch(

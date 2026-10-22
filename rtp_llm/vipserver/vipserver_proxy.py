@@ -29,7 +29,7 @@ class VIPServerProxy:
     srv_hosts = []
     srv_update_lock = threading.Lock()
 
-    def __init__(self, http_timeout: float | None = None):
+    def __init__(self, http_timeout: float | None = 3):
         self._request_options = (
             {} if http_timeout is None else {"timeout": http_timeout}
         )
