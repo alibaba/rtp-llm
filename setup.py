@@ -1402,6 +1402,9 @@ def generate_pyi_stubs(project_root: Path) -> None:
                 f"  SKIP: pybind11_stubgen for {module} — host missing shared "
                 "lib (.so itself OK, but this build host can't dlopen it)"
             )
+            print(f"  --- skipped stderr (full, exit={result.returncode}) ---")
+            print(result.stderr or "<empty>")
+            print("  --- end skipped stderr ---")
         else:
             failures.append((module, result.returncode, result.stderr))
             print(
