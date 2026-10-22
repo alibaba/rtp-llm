@@ -19,6 +19,7 @@
 
 #include "autil/EnvUtil.h"
 #include "autil/legacy/jsonizable.h"
+#include "kvcm_client/HostCacheStateCompat.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/storage_backend/kvcm/ClientWrapper.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/storage_backend/kvcm/GroupPolicy.h"
 #include "rtp_llm/cpp/metrics/RtpLLMMetrics.h"
@@ -51,6 +52,18 @@ const StorageBlockHandle* findHandle(const std::vector<StorageBlockHandle>& hand
         return handle.tag == tag && !isNullBlockIdx(handle.block);
     });
     return it == handles.end() ? nullptr : &*it;
+}
+
+template<typename Match>
+void appendHostCacheMatch(const Match& host, RemoteHostCacheMatchPB& output) {
+    output.set_host_ip_port(host.host_ip_port);
+    output.set_local(host.local);
+    if constexpr (kvcm::HasGlobalHostCacheMatch<Match>::value) {
+        output.set_global(host.global);
+    } else {
+        output.set_p2p_1_fetch(host.p2p_1_fetch);
+        output.set_p2p_1_total_match(host.p2p_1_total_match);
+    }
 }
 
 }  // namespace
@@ -694,11 +707,7 @@ private:
                     "", request.trace_id(), query_type, keys, medium, query.p2p_host_count());
                 if (success) {
                     for (const auto& host : hosts) {
-                        auto* output = response.add_hosts();
-                        output->set_host_ip_port(host.host_ip_port);
-                        output->set_local(host.local);
-                        output->set_p2p_1_fetch(host.p2p_1_fetch);
-                        output->set_p2p_1_total_match(host.p2p_1_total_match);
+                        appendHostCacheMatch(host, *response.add_hosts());
                     }
                 }
                 return success;
