@@ -32,13 +32,16 @@ from rtp_llm.model_loader.weight_module import (
     QuantWeight,
     WeightModule,
 )
+from rtp_llm.models_py.kernels.cuda.quant_layouts import FP4_BLOCK as MEGA_MOE_FP4_BLOCK
+from rtp_llm.models_py.kernels.cuda.quant_layouts import (
+    convert_fp8_moe_to_fp4_ue8m0,
+    quantize_moe_weight_to_fp4_ue8m0,
+)
 from rtp_llm.utils.model_weight import W, identity
 
 FLOAT4_E2M1_MAX = 6.0
 FLOAT8_E4M3_MAX = 448.0
 NVFP4_BLOCK_SIZE = 16
-MEGA_MOE_FP4_BLOCK = 32
-FP8_PER_BLOCK = 128
 _MEGA_MOE_KERNEL_NAMES = (W.moe_w1, W.moe_w2)
 
 _E2M1_BOUNDS = torch.tensor([0.25, 0.75, 1.25, 1.75, 2.5, 3.5, 5.0])
@@ -277,116 +280,6 @@ class OnlineModelOptFp4MoeWeight(CompositeWeight, QuantWeight):
         processed[self.kernel.name] = kernel_w
         processed[self.scale.name] = scale_w
         return processed
-
-
-def quantize_moe_weight_to_fp4_ue8m0(
-    weight: torch.Tensor,
-    block_size: int = MEGA_MOE_FP4_BLOCK,
-):
-    """Quantize a stacked MoE weight ``[E, N, K]`` (BF16/FP16/FP32) to FP4
-    + UE8M0 scale at load time for ``MegaMoeExecutor.setup_weights_from_fp4``.
-
-    Returns:
-        packed: int8 ``[E, N, K // 2]``
-        sf    : float32 ``[E, N, K // block_size]``
-    """
-    from deep_gemm.utils import per_token_cast_to_fp4
-
-    assert weight.dim() == 3, f"expected 3D, got {tuple(weight.shape)}"
-    E, N, K = weight.shape
-    assert K % block_size == 0, f"K={K} not divisible by block_size={block_size}"
-    device = weight.device
-
-    packed = torch.empty((E, N, K // 2), dtype=torch.int8, device=device)
-    sf = torch.empty((E, N, K // block_size), dtype=torch.float32, device=device)
-    for i in range(E):
-        packed_i, sf_i = per_token_cast_to_fp4(
-            weight[i], use_ue8m0=True, gran_k=block_size
-        )
-        packed[i].copy_(packed_i)
-        sf[i].copy_(sf_i)
-    return packed, sf
-
-
-def convert_fp8_moe_to_fp4_ue8m0(
-    weight_fp8: torch.Tensor,
-    weight_scale: torch.Tensor,
-    block_size: int = MEGA_MOE_FP4_BLOCK,
-):
-    """Convert stacked FP8 MoE weights ``[E, N, K]`` to FP4 + UE8M0 scale.
-
-    Dequantizes FP8 per-block → BF16, then requantizes to FP4 (int8 packed)
-    with UE8M0 scale factors suitable for DeepGEMM mega_moe.
-
-    Handles two scale layouts:
-      - Per-row: [E, N, K//128] — one scale per 128 elements along K
-      - 2D-block: [E, N//128, K//128] — one scale per 128×128 block
-
-    Returns:
-        packed: int8 [E, N, K // 2]
-        sf: float32 [E, N, K // block_size]
-    """
-    from deep_gemm.utils import per_token_cast_to_fp4
-
-    assert (
-        weight_fp8.dim() == 3
-    ), f"expected 3D weight_fp8, got {tuple(weight_fp8.shape)}"
-    E, N, K = weight_fp8.shape
-    assert K % block_size == 0, f"K={K} not divisible by block_size={block_size}"
-    device = weight_fp8.device
-
-    weight_scale = (
-        weight_scale.reshape(E, -1) if weight_scale.dim() > 3 else weight_scale
-    )
-    if weight_scale.dim() == 2:
-        weight_scale = weight_scale.unsqueeze(1)
-
-    if weight_scale.shape == (E, N, K // FP8_PER_BLOCK):
-        w_float = weight_fp8.float()
-        scale_expanded = weight_scale.unsqueeze(-1).expand(
-            E, N, K // FP8_PER_BLOCK, FP8_PER_BLOCK
-        )
-        w_float = (
-            w_float.view(E, N, K // FP8_PER_BLOCK, FP8_PER_BLOCK) * scale_expanded
-        ).reshape(E, N, K)
-    elif weight_scale.shape == (E, N // FP8_PER_BLOCK, K // FP8_PER_BLOCK):
-        scale_per_row = weight_scale.repeat_interleave(FP8_PER_BLOCK, dim=1)[:, :N, :]
-        w_float = weight_fp8.float()
-        scale_expanded = scale_per_row.unsqueeze(-1).expand(
-            E, N, K // FP8_PER_BLOCK, FP8_PER_BLOCK
-        )
-        w_float = (
-            w_float.view(E, N, K // FP8_PER_BLOCK, FP8_PER_BLOCK) * scale_expanded
-        ).reshape(E, N, K)
-        del scale_per_row
-    else:
-        expected_elements = E * N * (K // FP8_PER_BLOCK)
-        if weight_scale.numel() == expected_elements:
-            weight_scale = weight_scale.reshape(E, N, K // FP8_PER_BLOCK)
-            w_float = weight_fp8.float()
-            scale_expanded = weight_scale.unsqueeze(-1).expand(
-                E, N, K // FP8_PER_BLOCK, FP8_PER_BLOCK
-            )
-            w_float = (
-                w_float.view(E, N, K // FP8_PER_BLOCK, FP8_PER_BLOCK) * scale_expanded
-            ).reshape(E, N, K)
-        else:
-            raise ValueError(
-                f"Cannot interpret scale shape {tuple(weight_scale.shape)} "
-                f"for weight shape [E={E}, N={N}, K={K}]"
-            )
-
-    w_bf16 = w_float.to(torch.bfloat16)
-    del w_float, scale_expanded
-
-    packed = torch.empty((E, N, K // 2), dtype=torch.int8, device=device)
-    sf = torch.empty((E, N, K // block_size), dtype=torch.float32, device=device)
-    for i in range(E):
-        packed[i], sf[i] = per_token_cast_to_fp4(
-            w_bf16[i], use_ue8m0=True, gran_k=block_size
-        )
-    del w_bf16
-    return packed, sf
 
 
 def _mega_moe_scale_name(name: str) -> str:

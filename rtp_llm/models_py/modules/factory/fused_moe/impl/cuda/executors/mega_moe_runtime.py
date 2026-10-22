@@ -29,8 +29,6 @@ def setup_prepared_mega_moe(executor, weights):
     if policy.w1_layout not in ("up_gate", "gate_up"):
         raise ValueError(f"unsupported W1 layout: {policy.w1_layout}")
     cfg.moe_w1_layout = policy.w1_layout
-    cfg.activation_clamp = policy.activation_clamp
-    cfg.fast_math = policy.fast_math
     executor._is_decode_role = parallelism.role_type == RoleType.DECODE
     cp_size = 1
     if not executor._is_decode_role and parallelism.prefill_cp_config.is_enabled():

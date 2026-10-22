@@ -545,32 +545,6 @@ def init(process_group, device: Any) -> None:
     warmup(process_group, device)
 
 
-def _validate_all_gather(
-    output: torch.Tensor, input: torch.Tensor, process_group
-) -> None:
-    if not input.is_cuda or not output.is_cuda:
-        raise RuntimeError("GLM5 pynccl AllGather requires CUDA tensors")
-    if input.device != output.device:
-        raise ValueError(
-            f"AllGather input/output devices differ: {input.device} vs {output.device}"
-        )
-    if input.dtype != output.dtype:
-        raise ValueError(
-            f"AllGather input/output dtypes differ: {input.dtype} vs {output.dtype}"
-        )
-    if input.dtype not in _NCCL_DT:
-        raise TypeError(f"unsupported pynccl AllGather dtype: {input.dtype}")
-    if not input.is_contiguous() or not output.is_contiguous():
-        raise ValueError("GLM5 pynccl AllGather requires contiguous tensors")
-
-    world_size = _world_size(process_group)
-    expected = world_size * input.numel()
-    if output.numel() != expected:
-        raise ValueError(
-            f"AllGather output has {output.numel()} elements, expected {expected}"
-        )
-
-
 def all_gather_into_tensor(
     output: torch.Tensor,
     input: torch.Tensor,
@@ -588,9 +562,6 @@ def all_gather_into_tensor(
         dist.all_gather_into_tensor(output, input, group=process_group)
         return
 
-    # Full Python-side validation is useful while bringing up a new shape, but
-    # costs a meaningful fraction of an 11-us pynccl launch. Production relies
-    # on the fixed GLM5 call-site contracts; opt in when diagnosing a new path.
     gather_stream = stream or torch.cuda.current_stream(input.device)
     lib, comm = _require_comm(process_group, input.device)
     lib.all_gather(

@@ -453,8 +453,8 @@ class MegaMoeLifecycleTest(unittest.TestCase):
                     self.assertIsNot(model.cfg, config)
                     self.assertEqual(config.max_tokens_per_rank, 8)
                     self.assertEqual(model.cfg.max_tokens_per_rank, 128)
-                    self.assertEqual(model.cfg.activation_clamp, 5.0)
-                    self.assertFalse(model.cfg.fast_math)
+                    self.assertEqual(model._activation_clamp, 5.0)
+                    self.assertFalse(model._fast_math)
                     gate = w13[:, 4:] if layout == "up_gate" else w13[:, :4]
                     up = w13[:, :4] if layout == "up_gate" else w13[:, 4:]
                     torch.testing.assert_close(

@@ -193,19 +193,6 @@ def _unpack_ue8m0_scale(sf_packed: torch.Tensor) -> torch.Tensor:
     return sf_fp32
 
 
-def _indexer_cache_blocks(
-    kv_cache_fp8: torch.Tensor, blocksize: int, head_dim_with_sf: int
-) -> torch.Tensor:
-    """Normalize indexer cache storage to physical pages.
-
-    LayerKVCache can expose the same contiguous cache either as physical pages
-    [num_blocks, blocksize, stride] or as kernel-block pages
-    [num_blocks * blocksize, 1, stride] when kernel_seq_size_per_block == 1.
-    Indexer kernels and DeepGEMM paged logits need physical pages.
-    """
-    return kv_cache_fp8.view(-1, blocksize, head_dim_with_sf)
-
-
 def _rotate_activation(x: torch.Tensor) -> torch.Tensor:
     """
     Hadamard transform for activation rotation.

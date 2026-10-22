@@ -7,7 +7,7 @@ import logging
 import torch
 
 from rtp_llm.models_py.kernels.cuda.quant_layouts import (
-    FP4_BLOCK,
+    convert_fp8_moe_to_fp4_ue8m0,
     prepare_fp4_weight_scale_for_deepgemm,
     prepare_fp8_weight_scale_for_deepgemm,
 )
@@ -56,112 +56,27 @@ def transform_fp8_to_fp4_mega_weights(
     w1 = gate, w2 = down, w3 = up (following DeepSeek/GLM convention).
     """
     import deep_gemm
-    from deep_gemm.utils import per_token_cast_to_fp4
 
-    E = cfg.n_local_experts
-    D = cfg.dim
-    inter = cfg.moe_inter_dim
-    device = w1_fp8.device
-    fp8_block = 128
-
-    logger.info(
-        "[GLM5 MegaMoE] Converting FP8 weights to FP4: layer=%d E=%d D=%d inter=%d",
-        cfg.layer_id,
-        E,
-        D,
-        inter,
-    )
-
-    # --- L1 (gate + up): dequant FP8 → BF16 → FP4 ---
-    # Gate: [E, inter, D] and Up: [E, inter, D] → combined [E, 2*inter, D]
-    def _dequant_fp8(w_fp8, w_scale):
-        """Dequantize FP8 per-block to BF16."""
-        shape = w_fp8.shape  # [E, N, K]
-        E_, N_, K_ = shape
-        if K_ % fp8_block != 0:
-            raise ValueError(
-                f"FP8 MoE K dimension must be divisible by {fp8_block}, "
-                f"got weight shape={tuple(shape)}"
-            )
-        if not torch.is_floating_point(w_scale):
-            raise ValueError(
-                "MegaMoE FP8 fallback requires raw floating-point FP8 "
-                "checkpoint scales. Got packed/transformed scale "
-                f"dtype={w_scale.dtype}, shape={tuple(w_scale.shape)}. "
-                "For moe_strategy=mega_moe, MoE weights should be wrapped "
-                "to FP4 at load time before executor initialization."
-            )
-        n_blocks_k = K_ // fp8_block
-        n_blocks_n = (N_ + fp8_block - 1) // fp8_block
-        if w_scale.shape == (E_, N_, n_blocks_k):
-            scale_per_row = w_scale
-        elif w_scale.shape == (E_, n_blocks_n, n_blocks_k):
-            scale_per_row = w_scale.repeat_interleave(fp8_block, dim=1)[:, :N_, :]
-        elif w_scale.numel() == E_ * N_ * n_blocks_k:
-            scale_per_row = w_scale.reshape(E_, N_, n_blocks_k)
-        elif w_scale.numel() == E_ * n_blocks_n * n_blocks_k:
-            scale_per_block = w_scale.reshape(E_, n_blocks_n, n_blocks_k)
-            scale_per_row = scale_per_block.repeat_interleave(fp8_block, dim=1)[
-                :, :N_, :
-            ]
-        else:
-            raise ValueError(
-                "Cannot interpret FP8 MoE scale shape "
-                f"{tuple(w_scale.shape)} for weight shape={tuple(shape)}"
-            )
-        w_f = w_fp8.float().view(E_, N_, n_blocks_k, fp8_block)
-        s_exp = scale_per_row.to(dtype=w_f.dtype).unsqueeze(-1).expand_as(w_f)
-        return (w_f * s_exp).reshape(E_, N_, K_).to(torch.bfloat16)
-
-    w1_bf16 = _dequant_fp8(w1_fp8, w1_scale)  # [E, inter, D]
-    w3_bf16 = _dequant_fp8(w3_fp8, w3_scale)  # [E, inter, D]
-    del w1_fp8, w1_scale, w3_fp8, w3_scale
-
-    # Combine gate + up into [E, 2*inter, D]
-    w13_bf16 = torch.cat([w1_bf16, w3_bf16], dim=1)  # [E, 2*inter, D]
-    del w1_bf16, w3_bf16
+    E, D, inter = cfg.n_local_experts, cfg.dim, cfg.moe_inter_dim
+    gate, gate_sf = convert_fp8_moe_to_fp4_ue8m0(w1_fp8, w1_scale)
+    del w1_fp8, w1_scale
+    up, up_sf = convert_fp8_moe_to_fp4_ue8m0(w3_fp8, w3_scale)
+    del w3_fp8, w3_scale
+    # Quantization groups run along K, so gate/up can be converted separately.
+    w13 = torch.cat((gate, up), dim=1)
+    s13 = torch.cat((gate_sf, up_sf), dim=1)
+    del gate, gate_sf, up, up_sf
+    s13 = prepare_fp4_weight_scale_for_deepgemm(s13, 2 * inter, D, E)
     torch.cuda.empty_cache()
 
-    # Quantize L1 to FP4: [E, 2*inter, D] → packed [E, 2*inter, D//2] + sf
-    w13_packed = torch.empty((E, 2 * inter, D // 2), dtype=torch.int8, device=device)
-    s13_raw = torch.empty(
-        (E, 2 * inter, D // FP4_BLOCK), dtype=torch.float, device=device
-    )
-    for i in range(E):
-        w13_packed[i], s13_raw[i] = per_token_cast_to_fp4(
-            w13_bf16[i], use_ue8m0=True, gran_k=FP4_BLOCK
-        )
-    del w13_bf16
-
-    s13_int = prepare_fp4_weight_scale_for_deepgemm(s13_raw, 2 * inter, D, E)
-    del s13_raw
-    torch.cuda.empty_cache()
-
-    # --- L2 (down): dequant FP8 → BF16 → FP4 ---
-    w2_bf16 = _dequant_fp8(w2_fp8, w2_scale)  # [E, D, inter]
+    w2, s2 = convert_fp8_moe_to_fp4_ue8m0(w2_fp8, w2_scale)
     del w2_fp8, w2_scale
-
-    w2_packed = torch.empty((E, D, inter // 2), dtype=torch.int8, device=device)
-    s2_raw = torch.empty((E, D, inter // FP4_BLOCK), dtype=torch.float, device=device)
-    for i in range(E):
-        w2_packed[i], s2_raw[i] = per_token_cast_to_fp4(
-            w2_bf16[i], use_ue8m0=True, gran_k=FP4_BLOCK
-        )
-    del w2_bf16
-
-    s2_int = prepare_fp4_weight_scale_for_deepgemm(s2_raw, D, inter, E)
-    del s2_raw
+    s2 = prepare_fp4_weight_scale_for_deepgemm(s2, D, inter, E)
     torch.cuda.empty_cache()
-
-    # Apply mega MoE transform
-    (l1_w, l1_sf), (l2_w, l2_sf) = deep_gemm.transform_weights_for_mega_moe(
-        (w13_packed, s13_int),
-        (w2_packed, s2_int),
-    )
-    del w13_packed, s13_int, w2_packed, s2_int
+    transformed = deep_gemm.transform_weights_for_mega_moe((w13, s13), (w2, s2))
+    del w13, s13, w2, s2
     torch.cuda.empty_cache()
-
-    return (l1_w, l1_sf), (l2_w, l2_sf)
+    return transformed
 
 
 def transform_fp8_mega_weights(

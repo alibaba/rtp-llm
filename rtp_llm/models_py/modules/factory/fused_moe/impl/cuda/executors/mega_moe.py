@@ -199,13 +199,7 @@ class MegaMoeExecutor(Fp8Fp4ExecutorBase):
         return self._prepared_policy.fast_math if self._prepared_policy else True
 
     def _new_input_packer(self):
-        if self._prepared_policy is not None:
-            from rtp_llm.models_py.modules.factory.fused_moe.utils.mega_moe.backend_input_packer import (
-                get_mega_moe_input_packer as prepared_packer,
-            )
-
-            return prepared_packer()
-        return get_mega_moe_input_packer()
+        return get_mega_moe_input_packer(prepared=self._prepared_policy is not None)
 
     def execute(
         self,

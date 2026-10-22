@@ -112,6 +112,72 @@ def prepare_fp8_weight_scale_for_deepgemm(
     )
 
 
+def quantize_moe_weight_to_fp4_ue8m0(
+    weight: torch.Tensor,
+    block_size: int = FP4_BLOCK,
+):
+    """Quantize a stacked MoE weight ``[E, N, K]`` (BF16/FP16/FP32) to FP4
+    + UE8M0 scale for load-time and runtime MegaMoE weight preparation.
+
+    Returns:
+        packed: int8 ``[E, N, K // 2]``
+        sf    : float32 ``[E, N, K // block_size]``
+    """
+    from deep_gemm.utils import per_token_cast_to_fp4
+
+    assert weight.dim() == 3, f"expected 3D, got {tuple(weight.shape)}"
+    E, N, K = weight.shape
+    assert K % block_size == 0, f"K={K} not divisible by block_size={block_size}"
+    device = weight.device
+
+    packed = torch.empty((E, N, K // 2), dtype=torch.int8, device=device)
+    sf = torch.empty((E, N, K // block_size), dtype=torch.float32, device=device)
+    for i in range(E):
+        packed_i, sf_i = per_token_cast_to_fp4(
+            weight[i], use_ue8m0=True, gran_k=block_size
+        )
+        packed[i].copy_(packed_i)
+        sf[i].copy_(sf_i)
+    return packed, sf
+
+
+def convert_fp8_moe_to_fp4_ue8m0(
+    weight_fp8: torch.Tensor,
+    weight_scale: torch.Tensor,
+    block_size: int = FP4_BLOCK,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Convert stacked FP8 weights using raw per-row or 128x128 block scales.
+
+    Accepts either layout flattened as well. Packed DeepGEMM scale tensors
+    are not raw scale values and must not enter this conversion.
+    """
+    assert weight_fp8.dim() == 3, f"expected 3D, got {tuple(weight_fp8.shape)}"
+    E, N, K = weight_fp8.shape
+    if K % FP8_BLOCK != 0:
+        raise ValueError(
+            f"FP8 MoE K dimension must be divisible by {FP8_BLOCK}, got {K}"
+        )
+    if not torch.is_floating_point(weight_scale):
+        raise ValueError(
+            "MegaMoE FP8 conversion requires raw floating-point checkpoint scales"
+        )
+    k_blocks = K // FP8_BLOCK
+    n_blocks = (N + FP8_BLOCK - 1) // FP8_BLOCK
+    if weight_scale.numel() == E * N * k_blocks:
+        scale_per_row = weight_scale.float().reshape(E, N, k_blocks)
+    elif weight_scale.numel() == E * n_blocks * k_blocks:
+        scale_per_row = weight_scale.float().reshape(E, n_blocks, k_blocks)
+        scale_per_row = scale_per_row.repeat_interleave(FP8_BLOCK, dim=1)[:, :N, :]
+    else:
+        raise ValueError(
+            f"Cannot interpret scale shape {tuple(weight_scale.shape)} "
+            f"for weight shape {tuple(weight_fp8.shape)}"
+        )
+    weight = weight_fp8.float().reshape(E, N, k_blocks, FP8_BLOCK)
+    weight = (weight * scale_per_row.unsqueeze(-1)).reshape(E, N, K).to(torch.bfloat16)
+    return quantize_moe_weight_to_fp4_ue8m0(weight, block_size)
+
+
 def dequantize_fp4_weight(
     weight_int8: torch.Tensor, scale_ue8m0: torch.Tensor
 ) -> torch.Tensor:
@@ -190,6 +256,8 @@ def per_token_cast_to_fp8_packed_ue8m0(
 __all__ = [
     "FP4_BLOCK",
     "FP8_BLOCK",
+    "convert_fp8_moe_to_fp4_ue8m0",
+    "quantize_moe_weight_to_fp4_ue8m0",
     "dequantize_fp4_weight",
     "dequantize_fp8_weight",
     "per_token_cast_to_fp8_packed_ue8m0",

@@ -445,6 +445,8 @@ def _validate_inputs(
     out_sf: torch.Tensor,
     out_indices: torch.Tensor,
     out_weights: torch.Tensor,
+    *,
+    allow_int32_indices: bool = False,
 ) -> tuple[int, int, int]:
     if triton is None:
         raise RuntimeError("triton is unavailable")
@@ -463,7 +465,16 @@ def _validate_inputs(
     specs = (
         ("x", x, (T, D), torch.bfloat16),
         ("weights", weights, (T, topk), torch.float32),
-        ("indices", indices, (T, topk), torch.int64),
+        (
+            "indices",
+            indices,
+            (T, topk),
+            (
+                torch.int32
+                if allow_int32_indices and indices.dtype == torch.int32
+                else torch.int64
+            ),
+        ),
         ("out_fp8", out_fp8, (T, D), torch.float8_e4m3fn),
         ("out_sf", out_sf, (T, D // 128), torch.int32),
         ("out_indices", out_indices, (T, topk), torch.int64),
@@ -546,15 +557,26 @@ def fused_pack_mega_moe_inputs_optimized(
     out_sf: torch.Tensor,
     out_indices: torch.Tensor,
     out_weights: torch.Tensor,
+    *,
+    sanitize_non_finite: bool = True,
+    use_block_m_env: bool = True,
+    allow_int32_indices: bool = False,
 ) -> None:
     T, D, topk = _validate_inputs(
-        x, weights, indices, out_fp8, out_sf, out_indices, out_weights
+        x,
+        weights,
+        indices,
+        out_fp8,
+        out_sf,
+        out_indices,
+        out_weights,
+        allow_int32_indices=allow_int32_indices,
     )
     if T == 0:
         return
     fp8_max = torch.finfo(torch.float8_e4m3fn).max
     block_k = triton.next_power_of_2(topk)
-    block_m_env = os.environ.get("MEGA_MOE_PACK_BLOCK_M")
+    block_m_env = os.environ.get("MEGA_MOE_PACK_BLOCK_M") if use_block_m_env else None
     block_m = int(block_m_env) if block_m_env is not None else (8 if T >= 2048 else 2)
     if block_m not in (1, 2, 4, 8):
         raise ValueError(
@@ -583,6 +605,7 @@ def fused_pack_mega_moe_inputs_optimized(
         fp8_max,
         BLOCK_M=block_m,
         BLOCK_K=block_k,
+        SANITIZE_NON_FINITE=sanitize_non_finite,
         num_warps=4,
     )
 

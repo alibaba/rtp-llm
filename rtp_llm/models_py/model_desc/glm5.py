@@ -68,9 +68,6 @@ class Glm5MoeLayer(GenericMoeLayer):
         layer_idx: int = 0,
     ):
         self.layer_idx = layer_idx
-        self.strategy_name = moe_config.moe_strategy
-        self.chunking_enabled = True
-        self._is_decode_role = parallelism_config.role_type == RoleType.DECODE
         cp_prefill_enabled = (
             parallelism_config.role_type != RoleType.DECODE
             and parallelism_config.prefill_cp_config.is_enabled()
@@ -131,9 +128,6 @@ class Glm5MoeLayer(GenericMoeLayer):
         clone.config = self.config
         clone.parallelism_config = self.parallelism_config
         clone.layer_idx = self.layer_idx
-        clone.strategy_name = self.strategy_name
-        clone.chunking_enabled = self.chunking_enabled
-        clone._is_decode_role = self._is_decode_role
         clone.hidden_dim = self.hidden_dim
         clone.ffn_dim = self.ffn_dim
         clone.num_experts = self.num_experts

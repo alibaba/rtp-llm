@@ -9,6 +9,7 @@ packers can coexist with the exact torch implementation for explicit debug use.
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from functools import partial
 
 import torch
 
@@ -46,9 +47,6 @@ class MegaMoEInputPacker(ABC):
 class TorchMegaMoEInputPacker(MegaMoEInputPacker):
     name = "torch"
 
-    def __init__(self, *, sanitize_non_finite: bool = True):
-        self.sanitize_non_finite = sanitize_non_finite
-
     def pack(
         self,
         x: torch.Tensor,
@@ -59,11 +57,7 @@ class TorchMegaMoEInputPacker(MegaMoEInputPacker):
     ) -> None:
         if strict_fused_moe_enabled():
             raise RuntimeError("MOE_STRICT_FUSED=1 forbids TorchMegaMoEInputPacker")
-        safe_x = (
-            torch.nan_to_num(x, nan=0.0, posinf=0.0, neginf=0.0)
-            if self.sanitize_non_finite
-            else x
-        ).contiguous()
+        safe_x = torch.nan_to_num(x, nan=0.0, posinf=0.0, neginf=0.0).contiguous()
         x_fp8, x_sf = per_token_cast_to_fp8_packed_ue8m0(safe_x, gran_k=32)
         buf.x[:tokens].copy_(x_fp8)
         buf.x_sf[:tokens].copy_(x_sf)
@@ -114,7 +108,21 @@ class FusedMegaMoEInputPacker(MegaMoEInputPacker):
         )
 
 
-def get_mega_moe_input_packer() -> MegaMoEInputPacker:
+def get_mega_moe_input_packer(*, prepared: bool = False) -> MegaMoEInputPacker:
+    if prepared:
+        from rtp_llm.models_py.triton_kernels.moe.mega_moe_input_pack import (
+            fused_pack_mega_moe_inputs_optimized,
+        )
+
+        # GLM checkpoints retain their fixed launch and non-finite policy.
+        return FusedMegaMoEInputPacker(
+            pack_inputs=partial(
+                fused_pack_mega_moe_inputs_optimized,
+                sanitize_non_finite=False,
+                use_block_m_env=False,
+                allow_int32_indices=True,
+            )
+        )
     mode = mega_moe_input_packer_mode()
     if mode == "torch":
         if strict_fused_moe_enabled():
