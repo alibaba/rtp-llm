@@ -357,9 +357,9 @@ SGL_DEVICE bool needs_exact_coarse_classification(uint32_t threshold_bin) {
            || threshold_bin - kFiniteInteriorBegin >= kFiniteInteriorSize;
 }
 
-// Candidate-buffer overflow fallback. It performs the same stable score then
-// index radix selection while rescanning the coarse threshold interval, or the
-// whole row for the non-monotonic canonical NaN bin.
+// Exact fallback for candidate-buffer overflow or canonical NaN bins. Select
+// by score then index while rescanning the threshold interval, or the whole row
+// when FP16 NaN canonicalization loses the ordering of the exact score keys.
 template<uint32_t kHistBits>
 SGL_DEVICE void stable_exact_boundary_scan_topk(const TopKProblem&                        problem,
                                                 typename base::TopKConfig::TieHandleSmem* smem,
@@ -371,11 +371,9 @@ SGL_DEVICE void stable_exact_boundary_scan_topk(const TopKProblem&              
     }
     const uint32_t remaining_topk = problem.topk - output_base;
     const auto     in_interval    = [threshold_bin](float value, uint32_t) {
-        // Match per-row radix: FP32->FP16 canonicalizes every NaN sign/payload
-        // into the highest coarse bin. If that bin exceeds its 2048-candidate
-        // buffer, per-row restarts radix selection from all row inputs so
-        // finite values can outrank negative NaNs by their exact score key.
-        // Restricting the rescan to the non-monotonic NaN bin would lose them.
+        // FP32->FP16 canonicalizes every NaN sign/payload into the highest
+        // coarse bin. Rescan the whole row so finite values can outrank
+        // negative NaNs according to their exact score key.
         if (threshold_bin == (1u << kHistBits) - 1u) {
             return true;
         }
@@ -520,7 +518,15 @@ struct TopKRegister: base::TopKRadixBase<12> {
         }
         __syncthreads();
 
+        // Snapshot before find_threshold's barriers: tie scratch aliases the
+        // histogram, so every warp must read this before exact selection starts.
+        constexpr uint32_t kNaNBin  = (1u << Base::kHistBits) - 1u;
+        const bool         has_nans = smem->histogram[kNaNBin] != 0;
         Base::find_threshold(problem.topk, problem.seq_len, smem);
+        if (__builtin_expect(has_nans, false)) {
+            stable_exact_boundary_scan_topk<Base::kHistBits>(problem, &smem->tie.handle, kNaNBin, 0u);
+            return;
+        }
         const uint32_t threshold_bin               = smem->threshold_bin;
         const float    v_hi                        = base::coarse_bin_lower_bound<Base::kHistBits>(threshold_bin + 1u);
         const float    v_lo                        = base::coarse_bin_lower_bound<Base::kHistBits>(threshold_bin);
@@ -622,7 +628,15 @@ struct TopKStreaming: TopKRegister<2> {
             atomicAdd(&smem->histogram[base::extract_coarse_bin<Base::kHistBits>(value)], 1u);
         });
         __syncthreads();
+        // Snapshot before find_threshold's barriers: tie scratch aliases the
+        // histogram, so every warp must read this before exact selection starts.
+        constexpr uint32_t kNaNBin  = (1u << Base::kHistBits) - 1u;
+        const bool         has_nans = smem->histogram[kNaNBin] != 0;
         Base::find_threshold(problem.topk, problem.seq_len, smem);
+        if (__builtin_expect(has_nans, false)) {
+            stable_exact_boundary_scan_topk<Base::kHistBits>(problem, &smem->tie.handle, kNaNBin, 0u);
+            return;
+        }
 
         const uint32_t threshold_bin               = smem->threshold_bin;
         const float    v_hi                        = base::coarse_bin_lower_bound<Base::kHistBits>(threshold_bin + 1u);
