@@ -1,4 +1,5 @@
 #include "ClientWrapper.h"
+#include "kvcm_client/HostCacheStateCompat.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/storage_backend/kvcm/Subscriber.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
@@ -433,7 +434,12 @@ ClientWrapper::getHostCacheState(const std::string& unique_id, const std::string
                                  kv_cache_manager::QueryType query_type, const std::vector<int64_t>& keys,
                                  const std::vector<std::string>& medium, int32_t p2p_host_count) {
     CHECK_INIT2(unique_id);
-    CALL_CLIENT2(GetHostCacheState, trace_id, query_type, keys, medium, p2p_host_count);
+    auto [ec, result] = getSdkHostCacheState(*client, trace_id, query_type, keys, medium, p2p_host_count);
+    if (!checkError(ec)) {
+        RTP_LLM_LOG_WARNING("GetHostCacheState fail, ec [%d]", ec);
+        return {false, {}};
+    }
+    return {true, std::move(result)};
 }
 
 bool ClientWrapper::finishWrite(const std::string&                 unique_id,

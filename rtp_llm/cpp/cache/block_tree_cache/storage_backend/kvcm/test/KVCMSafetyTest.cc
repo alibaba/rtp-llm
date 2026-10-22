@@ -317,7 +317,7 @@ TEST(KVCMSafetyTest, TimedOutReadAndWriteStayProtectedUntilLateWorkerFinishes) {
         if (is_write) {
             auto write_location      = singleWriteLocation();
             write_location.locations = tp2Locations();
-            EXPECT_CALL(*wrapper, getWriteLocation(_, _, _, _, _, _))
+            EXPECT_CALL(*wrapper, getWriteLocation(_, _, _, _, _, _, 0))
                 .WillOnce(Return(std::make_pair(true, write_location)));
             EXPECT_CALL(*wrapper, finishWrite(_, _, "safety_session", _, _)).WillOnce(Return(true));
             EXPECT_TRUE(backend->write(backend->prepareWrite(makeStorageRequest(environment))));
@@ -382,7 +382,7 @@ TEST(KVCMSafetyTest, UnknownWriteCompensationFailurePreservesFrozenProtection) {
         EXPECT_CALL(*wrapper, shutdown()).Times(1);
         auto backend = makeBackend(environment, singleRankConfig(), wrapper);
         ASSERT_TRUE(initSingleRank(*backend.backend, environment));
-        EXPECT_CALL(*wrapper, getWriteLocation(_, _, _, _, _, _))
+        EXPECT_CALL(*wrapper, getWriteLocation(_, _, _, _, _, _, 0))
             .WillOnce(Return(std::make_pair(true, singleWriteLocation())));
         EXPECT_CALL(*wrapper, saveKvCachesForTagWithStatus("default", _, _, _))
             .WillOnce(Return(std::make_pair(kv_cache_manager::ER_SDK_TIMEOUT, kv_cache_manager::UriStrVec{})));
@@ -445,7 +445,7 @@ TEST(KVCMSafetyTest, AttemptedNormalFinishWriteIsNeverCompensatedAfterThrow) {
     EXPECT_CALL(*wrapper, shutdown()).Times(1);
     auto backend = makeBackend(environment, singleRankConfig(), wrapper);
     ASSERT_TRUE(initSingleRank(*backend.backend, environment));
-    EXPECT_CALL(*wrapper, getWriteLocation(_, _, _, _, _, _))
+    EXPECT_CALL(*wrapper, getWriteLocation(_, _, _, _, _, _, 0))
         .WillOnce(Return(std::make_pair(true, singleWriteLocation())));
     EXPECT_CALL(*wrapper, saveKvCachesForTagWithStatus("default", _, _, _))
         .WillOnce(Return(std::make_pair(kv_cache_manager::ER_OK, kv_cache_manager::UriStrVec{})));
