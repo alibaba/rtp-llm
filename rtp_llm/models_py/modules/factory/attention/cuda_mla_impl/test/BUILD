@@ -45,3 +45,19 @@ cuda13_sm100_py_test(
     srcs = ["mla_dcp_kernel_contract_test.py"],
     deps = ["//rtp_llm/models_py/standalone:py_standalone_testlib"],
 )
+
+py_test(
+    name = "page_rr_jit_warmup_test",
+    srcs = ["page_rr_jit_warmup_test.py"],
+    deps = [
+        "//rtp_llm/models_py/standalone:py_standalone_testlib",
+        "//rtp_llm/models_py/triton_kernels:mla",
+        "//rtp_llm:triton",
+    ],
+    tags = ["L20_CU13"],
+    exec_properties = {"gpu": "L20_CU13"},
+    target_compatible_with = select({
+        "//:using_cuda": [],
+        "//conditions:default": ["@platforms//:incompatible"],
+    }),
+)

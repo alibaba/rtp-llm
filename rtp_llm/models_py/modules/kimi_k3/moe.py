@@ -1,6 +1,9 @@
 """K3 latent and shared branches composed with RTP's fused-MoE factory."""
 
 import inspect
+import logging
+import os
+import time
 
 import torch
 from torch import nn
@@ -29,6 +32,7 @@ from rtp_llm.models_py.triton_kernels.moe.activation import situ_and_mul
 
 _FUSED_SHARED_BUFFERS = {}
 _FUSED_SHARED_OUTPUTS = {}
+_FUSED_SHARED_JIT_WARMED_KEYS = set()
 
 
 class _FusedSharedExperts(nn.Module):
@@ -149,6 +153,141 @@ class _FusedSharedExperts(nn.Module):
             cfg.layer_id,
             "k3_fused_shared",
         )
+        self.cfg = cfg
+        self._max_tokens_per_rank = capacity
+        self._shared_intermediate = shared_intermediate
+        self._maybe_warmup_jit_once()
+
+    def _resolve_jit_warmup_token_counts(self, num_sms):
+        from rtp_llm.models_py.modules.factory.fused_moe.utils.mega_moe.se_jit_warmup import (
+            clamp_token_counts,
+            generate_mega_moe_se_jit_token_counts,
+            parse_mega_moe_se_jit_warmup_tokens_override,
+        )
+
+        override = parse_mega_moe_se_jit_warmup_tokens_override()
+        if override is not None:
+            return clamp_token_counts(override, self._max_tokens_per_rank)
+        cfg = self.cfg
+        tokens = generate_mega_moe_se_jit_token_counts(
+            num_ranks=cfg.ep_size,
+            num_experts=cfg.n_routed_experts,
+            num_experts_per_rank=cfg.n_local_experts,
+            num_topk=cfg.n_activated_experts,
+            intermediate_hidden=cfg.moe_inter_dim,
+            num_sms=num_sms,
+            max_tokens_per_rank=self._max_tokens_per_rank,
+            include_cap=cfg.warmup_include_capacity,
+        )
+        # The shared-input packer changes its BLOCK_M independently of the
+        # DeepGEMM bucket. Keep one representative on the reachable large side.
+        if (
+            self.packer.name == "fused"
+            and os.environ.get("MEGA_MOE_PACK_BLOCK_M") is None
+            and self._max_tokens_per_rank >= 2048
+        ):
+            tokens = sorted(set(tokens) | {2048})
+        return tokens
+
+    def _maybe_warmup_jit_once(self):
+        from rtp_llm.models_py.modules.factory.fused_moe.utils.mega_moe.se_jit_warmup import (
+            format_token_counts,
+            mega_moe_se_jit_warmup_enabled,
+        )
+
+        if not mega_moe_se_jit_warmup_enabled():
+            return
+        if torch.cuda.is_current_stream_capturing():
+            raise RuntimeError(
+                "K3 shared-expert JIT warmup cannot run during CUDA Graph capture"
+            )
+        import deep_gemm
+        import torch.distributed as dist
+
+        from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors.mega_moe import (
+            _activate_mega_moe_rank_nvcc_tmpdir,
+            _restore_tmpdir,
+        )
+
+        cfg = self.cfg
+        num_sms = int(deep_gemm.get_num_sms())
+        token_counts = self._resolve_jit_warmup_token_counts(num_sms)
+        if not token_counts:
+            return
+        key = (
+            cfg.ep_size,
+            cfg.n_routed_experts,
+            cfg.n_local_experts,
+            cfg.n_activated_experts,
+            cfg.dim,
+            cfg.moe_inter_dim,
+            self.shared_x.shape[1],
+            self._shared_intermediate,
+            self._max_tokens_per_rank,
+            int(self.buf.num_max_tokens_per_rank),
+            str(self.shared_x.device),
+            self.beta,
+            self.linear_beta,
+            self.fp4_block,
+            num_sms,
+            tuple(token_counts),
+            self.packer.name,
+            os.environ.get("MEGA_MOE_INPUT_PACKER_IMPL", "optimized"),
+            os.environ.get("MEGA_MOE_PACK_BLOCK_M"),
+            deep_gemm,
+        )
+        if key in _FUSED_SHARED_JIT_WARMED_KEYS:
+            return
+        rank = dist.get_rank() if dist.is_initialized() else 0
+        started = time.perf_counter()
+        _, previous_tmpdir = _activate_mega_moe_rank_nvcc_tmpdir(rank)
+        try:
+            self.warmup_jit(token_counts)
+        finally:
+            _restore_tmpdir(previous_tmpdir)
+        _FUSED_SHARED_JIT_WARMED_KEYS.add(key)
+        if rank == 0:
+            logging.info(
+                "K3 shared-expert JIT prepared: layer=%d tokens=[%s] shared_hidden=%d shared_intermediate=%d cost=%.3fs",
+                cfg.layer_id,
+                format_token_counts(token_counts),
+                self.shared_x.shape[1],
+                self._shared_intermediate,
+                time.perf_counter() - started,
+            )
+
+    @torch.inference_mode()
+    def warmup_jit(self, token_counts):
+        import torch.distributed as dist
+
+        cfg = self.cfg
+        maximum = max(token_counts)
+        device = self.shared_x.device
+        hidden = torch.zeros(
+            (maximum, self.shared_x.shape[1]), device=device, dtype=torch.bfloat16
+        )
+        routed = torch.zeros((maximum, cfg.dim), device=device, dtype=torch.bfloat16)
+        routing = torch.zeros(
+            (maximum, cfg.n_activated_experts), device=device, dtype=torch.float32
+        )
+        local_ids = cfg.local_expert_start + torch.arange(
+            cfg.n_activated_experts, device=device, dtype=torch.long
+        ) % max(cfg.n_local_experts, 1)
+        ids = local_ids.unsqueeze(0).expand(maximum, -1).contiguous()
+        mask = torch.ones(maximum, device=device, dtype=torch.bool)
+        for tokens in token_counts:
+            # HAS_VALID_MASK is a packer constexpr; compile both real layouts.
+            for valid_mask in (None, mask[:tokens]):
+                dist.barrier()
+                self.forward(
+                    hidden[:tokens],
+                    routed[:tokens],
+                    routing[:tokens],
+                    ids[:tokens],
+                    valid_mask,
+                )
+                torch.cuda.synchronize(device)
+        dist.barrier()
 
     def forward(self, hidden, routed_input, routing, ids, valid_mask=None):
         tokens = int(routed_input.size(0))

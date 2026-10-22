@@ -170,9 +170,30 @@ py_test(
 )
 
 py_test(
+    name = "kimi_k3_jit_warmup_test",
+    srcs = ["kimi_k3_jit_warmup_test.py"],
+    deps = ["//rtp_llm:testlib"],
+    exec_properties = {"gpu": "SM100_ARM_CU13"},
+    tags = ["SM100_ARM_CU13"],
+)
+
+py_test(
     name = "kimi_k3_rope_test",
     srcs = ["kimi_k3_rope_test.py"],
+    main = "kimi_k3_rope_test.py",
+    args = ["KimiK3RopeTest"],
     deps = ["//rtp_llm:testlib"],
+)
+
+py_test(
+    name = "kimi_k3_rope_jit_cache_test",
+    size = "large",
+    srcs = ["kimi_k3_rope_test.py"],
+    main = "kimi_k3_rope_test.py",
+    args = ["KimiK3RopeJitCacheTest"],
+    deps = ["//rtp_llm:testlib"],
+    exec_properties = {"gpu": "SM103_CU13"},
+    tags = ["SM103_CU13", "no-cache"],
 )
 
 py_test(
