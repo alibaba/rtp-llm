@@ -29,7 +29,7 @@ from uvicorn.loops.auto import auto_loop_setup
 
 from rtp_llm.config.engine_config import EngineConfig
 from rtp_llm.config.py_config_modules import PyEnvConfigs
-from rtp_llm.config.uvicorn_config import get_uvicorn_logging_config
+from rtp_llm.config.uvicorn_config import configure_uvicorn_access_logger
 from rtp_llm.distribute.distributed_server import (
     get_dp_addrs_from_world_info,
     get_world_info,
@@ -498,11 +498,12 @@ class FrontendApp(object):
         fd = sock.fileno()
         timeout_keep_alive = self.server_config.timeout_keep_alive
 
+        configure_uvicorn_access_logger()
         config = Config(
             app,
             fd=fd,
             loop=loop,
-            log_config=get_uvicorn_logging_config(),
+            log_config=None,
             timeout_keep_alive=timeout_keep_alive,
             timeout_graceful_shutdown=(
                 None

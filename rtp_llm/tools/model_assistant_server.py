@@ -11,7 +11,7 @@ from fastapi import FastAPI
 from fastapi.routing import APIRouter
 
 from rtp_llm.config.log_config import setup_logging
-from rtp_llm.config.uvicorn_config import get_uvicorn_logging_config
+from rtp_llm.config.uvicorn_config import configure_uvicorn_access_logger
 
 MAX_INCOMPLETE_EVENT_SIZE = 1024 * 1024
 
@@ -22,11 +22,12 @@ class ModelAssistantServer(object):
 
     def start(self):
         app = self.create_app()
+        configure_uvicorn_access_logger()
         uvicorn.run(
             app,
             host="0.0.0.0",
             port=self._server_port,
-            log_config=get_uvicorn_logging_config(),
+            log_config=None,
             h11_max_incomplete_event_size=MAX_INCOMPLETE_EVENT_SIZE,
         )
 
