@@ -15,7 +15,12 @@ from rtp_llm.ops.compute_ops import PyAttentionInputs
 
 from .ple_cache_views import PLECacheViews
 from .ple_graph_state import PLEGraphRegistry
-from .ple_state import _PLEPreparedWrite, _PLETargetLayerStage, _PLETargetTransaction
+from .ple_state import (
+    _PLEBoundaryWrite,
+    _PLEPreparedWrite,
+    _PLETargetLayerStage,
+    _PLETargetTransaction,
+)
 
 
 class PLETransactionCoordinator:
@@ -402,6 +407,13 @@ class PLETransactionCoordinator:
                     ctx_blocks=ctx_blocks,
                     ctx_values=context_values,
                     original_context=original_context,
+                    boundary_slots=self._prepare_boundary_slots(
+                        stage,
+                        accepted,
+                        state_blocks,
+                        ctx_blocks,
+                        int(transaction.query_len),
+                    ),
                 )
             )
         # Gather/clone launches above are part of prepare, not commit.  Complete
@@ -412,8 +424,95 @@ class PLETransactionCoordinator:
         # streams (async bookkeeping) the way a device-wide sync does.
         if resolution is not None:
             resolution.verify()
-        torch.cuda.current_stream(transaction.prefixes.device).synchronize()
+        if transaction.prefixes.is_cuda:
+            # CPU-tensor unit tests reach prepare too; host ops are already
+            # synchronous and current_stream() rejects a cpu device.
+            torch.cuda.current_stream(transaction.prefixes.device).synchronize()
         transaction.prepared_writes = prepared_writes
+
+    def _prepare_boundary_slots(
+        self,
+        stage: _PLETargetLayerStage,
+        accepted: torch.Tensor,
+        state_blocks: torch.Tensor,
+        ctx_blocks: torch.Tensor,
+        query_len: int,
+    ) -> list[_PLEBoundaryWrite]:
+        """Stage the page checkpoints an accepted window completes on the way.
+
+        A window that crosses a page boundary finishes that page, so the page
+        must end up holding the state window ending at its last token -- a
+        later prefix-cache hit on that boundary resumes from that checkpoint.
+        Without this refresh the completed page keeps the window from before
+        the window's first token. Slots whose boundary was not crossed park on
+        the final destination; the final write runs after every slot, so such
+        duplicates cannot survive. All geometry stays on the device and adds
+        no host synchronization to the commit.
+        """
+        from rtp_llm.models_py.modules.qwen4_exp.ple.ple_commit_prepare_triton import (
+            prepare_commit_values,
+        )
+
+        page_size = int(stage.page_size)
+        slots = (query_len + page_size - 1) // page_size
+        start_pages = torch.div(stage.prefixes - 1, page_size, rounding_mode="floor")
+        final_pages = torch.div(
+            stage.prefixes + accepted - 1, page_size, rounding_mode="floor"
+        )
+        prepared: list[_PLEBoundaryWrite] = []
+        for offset in range(slots):
+            boundary = (start_pages + offset + 1) * page_size
+            crossed = boundary < stage.prefixes + accepted
+            base = torch.where(crossed, boundary - stage.prefixes, accepted)
+            pages = torch.where(crossed, start_pages + offset, final_pages)
+            slot_state_blocks = PLECacheViews._physical_blocks(
+                stage.state_inputs,
+                PLE_STATE_TAG,
+                pages,
+                int(stage.state_pool.shape[0]),
+                stage.state_pool.device,
+                graph_capture=True,
+            )
+            slot_ctx_blocks = PLECacheViews._physical_blocks(
+                stage.ctx_inputs,
+                PLE_NGRAM_CTX_TAG,
+                pages,
+                int(stage.ctx_pool.shape[0]),
+                stage.ctx_pool.device,
+                graph_capture=True,
+            )
+            # A page the allocator left without a block never becomes a
+            # prefix-reuse boundary, so park such writes on the final block.
+            slot_state_blocks = torch.where(
+                slot_state_blocks > 0, slot_state_blocks, state_blocks
+            )
+            slot_ctx_blocks = torch.where(
+                slot_ctx_blocks > 0, slot_ctx_blocks, ctx_blocks
+            )
+            selected = prepare_commit_values(
+                stage, base, slot_state_blocks, slot_ctx_blocks
+            )
+            if selected is None:
+                selected = self._prepare_ple_values_reference(
+                    stage, base, slot_state_blocks, slot_ctx_blocks
+                )
+            (
+                slot_state_values,
+                slot_ctx_values,
+                slot_state_undo,
+                slot_ctx_undo,
+            ) = selected
+            prepared.append(
+                _PLEBoundaryWrite(
+                    state_blocks=slot_state_blocks,
+                    state_values=slot_state_values,
+                    original_state=slot_state_undo,
+                    ctx_blocks=slot_ctx_blocks,
+                    ctx_values=slot_ctx_values,
+                    original_context=slot_ctx_undo,
+                )
+            )
+        return prepared
 
     @staticmethod
     def _prepare_ple_values_reference(stage, accepted, state_blocks, ctx_blocks):
@@ -456,6 +555,13 @@ class PLETransactionCoordinator:
             if transaction.commit_started:
                 assert transaction.prepared_writes is not None
                 for write in transaction.prepared_writes:
+                    for slot in write.boundary_slots:
+                        write.state_pool.index_copy_(
+                            0, slot.state_blocks, slot.original_state
+                        )
+                        write.ctx_pool.index_copy_(
+                            0, slot.ctx_blocks, slot.original_context
+                        )
                     write.state_pool.index_copy_(
                         0, write.state_blocks, write.original_state
                     )
@@ -477,6 +583,11 @@ class PLETransactionCoordinator:
         # even if a later launch or synchronization reports an error.
         transaction.commit_started = True
         for write in transaction.prepared_writes:
+            # Boundary slots first: a slot parked on the final destination must
+            # not survive the final write below.
+            for slot in write.boundary_slots:
+                write.state_pool.index_copy_(0, slot.state_blocks, slot.state_values)
+                write.ctx_pool.index_copy_(0, slot.ctx_blocks, slot.ctx_values)
             write.state_pool.index_copy_(0, write.state_blocks, write.state_values)
             write.ctx_pool.index_copy_(0, write.ctx_blocks, write.ctx_values)
         self._synchronize_ple_transaction(transaction)
