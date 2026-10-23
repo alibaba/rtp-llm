@@ -2,6 +2,7 @@
 #include "rtp_llm/cpp/model_rpc/QueryConverter.h"
 #include "rtp_llm/cpp/model_rpc/PrefillRpcServer.h"
 #include "rtp_llm/cpp/model_rpc/StagePeerGroups.h"
+#include "rtp_llm/cpp/disaggregate/cache_store/PdTransferSwitches.h"
 #include "rtp_llm/cpp/model_rpc/proto/model_rpc_service.pb.h"
 #include "rtp_llm/cpp/utils/DebugUtils.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
@@ -326,16 +327,41 @@ GenerateRequestPB PrefillRpcServer::buildAllocateRequest(PrefillGenerateContext&
             new_request->add_token_ids(ids_ptr[i]);
         }
     }
-    for (const auto& address : prefill_context.prefill_worker_cache_store_addrs) {
+    // Optional single serving CP rank per stage (replicated CP KV): advertise only that rank so
+    // decode pulls each block once. peer_addrs stays stage-major, matching the stage groups.
+    std::vector<std::string> advertised   = prefill_context.prefill_worker_cache_store_addrs;
+    const auto&              pc           = maga_init_params_.parallelism_config;
+    const int64_t            cp_per_stage = std::max<int64_t>(1, pc.tp_size);
+    if (pdPublishServingRankOnly() && pc.pp_size > 1 && !pc.prefill_cp_config.kv_cache_sharded
+        && pdServingCpRank() < cp_per_stage && static_cast<int64_t>(advertised.size()) == pc.pp_size * cp_per_stage) {
+        std::vector<std::string> picked;
+        for (int64_t stage = 0; stage < pc.pp_size; ++stage) {
+            picked.push_back(advertised[static_cast<size_t>(stage * cp_per_stage + pdServingCpRank())]);
+        }
+        advertised.swap(picked);
+        static bool logged = false;
+        if (!logged) {
+            logged = true;
+            RTP_LLM_LOG_INFO("PD serving CP rank %d: advertising %zu cache-store peers (one per stage)",
+                             pdServingCpRank(),
+                             advertised.size());
+        }
+    }
+    for (const auto& address : advertised) {
         alloc_request.add_peer_addrs(address);
     }
-    fillStagePeerGroups(alloc_request, prefill_context.prefill_worker_cache_store_addrs);
+    fillStagePeerGroups(alloc_request, advertised);
     return alloc_request;
 }
 
 void PrefillRpcServer::fillStagePeerGroups(GenerateRequestPB& alloc_request, const std::vector<std::string>& workers) {
     // pp_P=1 keeps the flat peer_addrs contract; empty groups mean no stage routing.
-    const auto groups = buildStagePeerGroups(maga_init_params_.parallelism_config, workers);
+    auto pc = maga_init_params_.parallelism_config;
+    if (pdPublishServingRankOnly() && pc.pp_size > 1 && static_cast<int64_t>(workers.size()) == pc.pp_size) {
+        // One advertised peer per stage: build the groups at stage granularity.
+        pc.tp_size = 1;
+    }
+    const auto groups = buildStagePeerGroups(pc, workers);
     if (groups.empty()) {
         return;
     }

@@ -16,6 +16,7 @@
 #include "rtp_llm/cpp/cache/KVCacheResource.h"
 #include "rtp_llm/cpp/cuda_graph/cuda_graph_device_shims.h"
 #include "rtp_llm/cpp/disaggregate/cache_store/CacheStore.h"
+#include "rtp_llm/cpp/disaggregate/cache_store/PdTransferSwitches.h"
 #include "rtp_llm/cpp/disaggregate/cache_store/RequestBlockBuffer.h"
 #include "rtp_llm/cpp/engine_base/EngineInitParams.h"
 #include "rtp_llm/cpp/engine_base/ProposeModelEngineInitParams.h"
@@ -245,26 +246,32 @@ void PPExecutor::waitAll(PPTickets& tickets, const char* what, bool throw_on_tim
     tickets.clear();
 }
 
-void PPExecutor::publishPdPlanRequests(const GptModelInputs& model_input) {
+void PPExecutor::publishPdPlanRequests(const GptModelInputs& model_input, const torch::Tensor& global_input_lengths) {
     const auto& mi = model_input;
     if (!mi.pd_separation || !mi.request_id.defined() || !mi.cache_keys.defined() || !mi.prefix_lengths.defined()
         || !mi.input_lengths.defined() || !mi.kv_cache_block_id.defined()) {
+        return;
+    }
+    // With replicated CP KV every CP rank of a stage holds the same blocks; when
+    // decode reads one peer per stage, only that peer needs to publish.
+    if (pdPublishServingRankOnly() && parallelism_config_.tp_rank != pdServingCpRank()) {
         return;
     }
     auto cache_store = cache_manager_ ? cache_manager_->getCacheStore() : nullptr;
     if (!cache_store) {
         return;
     }
-    const auto& cache_config       = cache_manager_->cacheConfig();
-    const auto  model_id           = cache_manager_->modelId();
-    const auto  global_layer_begin = cache_config.global_layer_begin;
-    const bool  use_mla            = cache_config.use_mla;
-    const bool  use_hybrid         = cache_config.groupNums() > 1;
-    const bool  use_kv_key_prefix  = use_mla || cache_config.use_opaque_kv_cache_store || use_hybrid;
-    const auto& layer_group_ids    = cache_config.topology().layerGroupIdsSnapshot();
-    const int64_t seq_per_block    = mi.seq_size_per_block > 0 ? mi.seq_size_per_block : 1;
-    const int64_t local_layers     = cache_config.layer_num;
-    const int64_t context_batch    = mi.request_id.numel();
+    const auto&   lengths            = global_input_lengths.defined() ? global_input_lengths : mi.input_lengths;
+    const auto&   cache_config       = cache_manager_->cacheConfig();
+    const auto    model_id           = cache_manager_->modelId();
+    const auto    global_layer_begin = cache_config.global_layer_begin;
+    const bool    use_mla            = cache_config.use_mla;
+    const bool    use_hybrid         = cache_config.groupNums() > 1;
+    const bool    use_kv_key_prefix  = use_mla || cache_config.use_opaque_kv_cache_store || use_hybrid;
+    const auto&   layer_group_ids    = cache_config.topology().layerGroupIdsSnapshot();
+    const int64_t seq_per_block      = mi.seq_size_per_block > 0 ? mi.seq_size_per_block : 1;
+    const int64_t local_layers       = cache_config.layer_num;
+    const int64_t context_batch      = mi.request_id.numel();
 
     for (int64_t i = 0; i < context_batch; ++i) {
         if (mi.request_pd_separation.defined() && mi.request_pd_separation.numel() > i
@@ -272,7 +279,7 @@ void PPExecutor::publishPdPlanRequests(const GptModelInputs& model_input) {
             continue;
         }
         const auto keys_row = mi.cache_keys[i];
-        int64_t       nblocks = 0;
+        int64_t    nblocks  = 0;
         while (nblocks < keys_row.numel() && keys_row[nblocks].item<int64_t>() != 0) {
             ++nblocks;
         }
@@ -280,7 +287,7 @@ void PPExecutor::publishPdPlanRequests(const GptModelInputs& model_input) {
             continue;
         }
         const int64_t prefix  = mi.prefix_lengths[i].item<int>();
-        const int64_t cur_len = mi.input_lengths[i].item<int>();
+        const int64_t cur_len = lengths[i].item<int>();
         // Only the chunk that starts the final block completes this stream's context.
         if (prefix + cur_len <= (nblocks - 1) * seq_per_block) {
             continue;
@@ -289,8 +296,7 @@ void PPExecutor::publishPdPlanRequests(const GptModelInputs& model_input) {
 
         auto event = std::make_shared<torch::Event>(cuda_graph::makeGraphEvent());
         event->record(cuda_graph::graphGetCurrentStream());
-        auto request_block_buffer =
-            std::make_shared<RequestBlockBuffer>(std::to_string(request_id), std::move(event));
+        auto request_block_buffer = std::make_shared<RequestBlockBuffer>(std::to_string(request_id), std::move(event));
 
         size_t block_count = 0;
         bool   plan_failed = false;
@@ -321,8 +327,7 @@ void PPExecutor::publishPdPlanRequests(const GptModelInputs& model_input) {
                                                         std::to_string(keys_row[block_pos].item<int64_t>()),
                                                         global_layer_begin + layer_id,
                                                         tag);
-                    auto       parts =
-                        cache_manager_->convertIndexToBufferByTag(block_id, static_cast<int>(layer_id), tag);
+                    auto parts = cache_manager_->convertIndexToBufferByTag(block_id, static_cast<int>(layer_id), tag);
                     const auto add_block = [&](const std::string& key, const BlockInfo& block) {
                         if (block.addr == nullptr || block.size_bytes == 0) {
                             return;
@@ -1406,6 +1411,13 @@ absl::Status PPExecutor::process(const ScheduleOutput& schedule_output, int64_t 
                                                torch::TensorOptions(torch::kInt32).pinned_memory(true));
             saved_input_lengths.copy_(local_model_input.input_lengths);
         }
+        // The PD publish decision needs the global chunk length on every rank,
+        // but CP rewrites input_lengths in place to this rank's shard.
+        torch::Tensor pd_global_input_lengths;
+        if (!local_model_input.is_fake_stream && !plan.is_decode && role_type_ == RoleType::PREFILL
+            && local_model_input.input_lengths.defined()) {
+            pd_global_input_lengths = local_model_input.input_lengths.to(torch::kCPU).to(torch::kInt32).clone();
+        }
         auto model_output = model_->forwardPP(
             local_model_input, isFirstStage() ? nullptr : &input_tensors, isLastStage() ? nullptr : &output_tensors);
         if (saved_input_lengths.defined()) {
@@ -1418,7 +1430,7 @@ absl::Status PPExecutor::process(const ScheduleOutput& schedule_output, int64_t 
             // only runs on the first-stage root. Publish this rank's stage-local blocks
             // from the plan data (identical on every rank), so the decode side can load
             // every stage's layers.
-            publishPdPlanRequests(plan.model_input);
+            publishPdPlanRequests(plan.model_input, pd_global_input_lengths);
         }
 
         if (expert_balancer_) {

@@ -8,6 +8,7 @@
 #include "autil/LockFreeThreadPool.h"
 #include "rtp_llm/cpp/cache/CPSlotMapper.h"
 #include "rtp_llm/cpp/cache/KVCacheManager.h"
+#include "rtp_llm/cpp/disaggregate/cache_store/PdTransferSwitches.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "rtp_llm/cpp/utils/DevicePin.h"
 #include "rtp_llm/cpp/utils/Logger.h"
@@ -36,6 +37,7 @@ CacheStoreAsyncWriter::CacheStoreAsyncWriter(int                             dev
             cp_rank_ = cp_slot_mapper->cpRank();
             cp_size_ = cp_slot_mapper->cpSize();
         }
+        stage_cp_rank_ = cache_manager_->stageCpRank();
     }
 
     constexpr size_t kThreadCount = 3;
@@ -160,6 +162,11 @@ void CacheStoreAsyncWriter::waitAllDone() {
 void CacheStoreAsyncWriter::write(const torch_ext::PyCacheStoreInputs& cache_store_inputs,
                                   const torch_ext::LayerKVCache&       layer_kv) {
     if (!active_cache_store_ || !cache_config_) {
+        return;
+    }
+    // Backlog benchmark: rely on the end-of-request publish only.
+    // Serving-rank dedup: only the advertised CP rank of each stage streams blocks.
+    if (pdPublishAtEnd() || (pdPublishServingRankOnly() && stage_cp_rank_ != pdServingCpRank())) {
         return;
     }
 
