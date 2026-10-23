@@ -1205,7 +1205,23 @@ DecodeRpcServer::LoadCacheResult DecodeRpcServer::loadCache(const LoadKVCacheCon
             // into the destination offset declared by the spec.
             return groupUsesCpSlice(cfg, tag) || peer_idx == 0;
         };
+    // With a stage-aware PP prefill, every peer inside one stage is a CP
+    // replica that publishes the same blocks under the same keys (prefill
+    // stores whole, un-sliced blocks). Pulling each block from all replicas
+    // moves it peers_per_stage times; pull it from exactly one replica,
+    // spread round-robin by block position. DSV4_PD_LOAD_ALL_STAGE_REPLICAS=1
+    // restores the legacy every-replica behaviour.
+    static const bool load_all_stage_replicas = [] {
+        const char* e = getenv("DSV4_PD_LOAD_ALL_STAGE_REPLICAS");
+        return e != nullptr && std::string(e) == "1";
+    }();
+    const bool dedup_stage_replicas = stage_aware && !is_page_level_rr && peers_per_stage > 1
+                                      && !load_all_stage_replicas;
     auto shouldLoadBlockFromPeer = [&](CacheGroupType group_type, size_t block_pos, int peer_idx) {
+        if (dedup_stage_replicas) {
+            const size_t replica = static_cast<size_t>(peer_idx) % peers_per_stage;
+            return (block_pos % peers_per_stage) == replica;
+        }
         if (!is_page_level_rr || group_type != CacheGroupType::FULL) {
             return true;
         }

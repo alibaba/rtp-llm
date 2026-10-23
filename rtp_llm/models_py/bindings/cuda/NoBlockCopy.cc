@@ -16,7 +16,8 @@ namespace rtp_llm {
 namespace {
 
 at::cuda::CUDAStream& getNoBlockCopyStream() {
-    static thread_local auto stream = at::cuda::getStreamFromPool(/*isHighPriority=*/false);
+    // Dedicated stream, see getNoBlockCopyStream(int) in cuda_host_utils.cc.
+    static thread_local auto stream = rtp_llm::getNoBlockCopyStream(static_cast<int>(at::cuda::current_device()));
     return stream;
 }
 

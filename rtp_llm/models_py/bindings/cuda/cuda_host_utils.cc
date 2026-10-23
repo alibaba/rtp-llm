@@ -15,6 +15,7 @@
  */
 
 #include "rtp_llm/models_py/bindings/cuda/cuda_host_utils.h"
+#include <c10/cuda/CUDAGuard.h>
 #include "rtp_llm/cpp/utils/StackTrace.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
@@ -116,10 +117,19 @@ void syncAndCheckInDebug(const char* const file, int const line) {
 
 #if USING_CUDA
 at::cuda::CUDAStream getNoBlockCopyStream(int device_id) {
+    // Copy threads synchronize their stream after every copy, so the stream
+    // must not be shared with model work. getStreamFromPool hands out only a
+    // small round-robin set of streams that model side streams also draw from;
+    // a copy issued onto a stream that already queues model kernels would wait
+    // for all of them. Use a dedicated per-thread, per-device non-blocking
+    // stream instead.
     static thread_local std::unordered_map<int, at::cuda::CUDAStream> streams;
     auto                                                              stream = streams.find(device_id);
     if (stream == streams.end()) {
-        stream = streams.emplace(device_id, at::cuda::getStreamFromPool(/*isHighPriority=*/false, device_id)).first;
+        c10::cuda::CUDAGuard guard(static_cast<c10::DeviceIndex>(device_id));
+        cudaStream_t         raw = nullptr;
+        check_cuda_value(cudaStreamCreateWithFlags(&raw, cudaStreamNonBlocking));
+        stream = streams.emplace(device_id, at::cuda::getStreamFromExternal(raw, static_cast<c10::DeviceIndex>(device_id))).first;
     }
     return stream->second;
 }
