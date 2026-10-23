@@ -9,6 +9,7 @@
 #include <chrono>
 #include <cstdlib>
 #include <cstring>
+#include <exception>
 #include <optional>
 #include <utility>
 
@@ -55,6 +56,36 @@ std::string head8Hex(const void* data, int64_t numel) {
     }
     return out;
 }
+
+// Runs `emit` only while an exception is in flight, so a V4.1 PP round that fails after admission can
+// still hand its peer the matched traffic the ordered channels require. Under the synchronous contract
+// the WORLD-scoped agreements inside V41PPAdmission::initializeFresh were that channel: one stage's
+// failure made all eight ranks throw together. C2 narrowed those agreements to STAGE, so a
+// post-admission failure on one stage is now invisible to the other, which blocks in receiveObject
+// until the gloo watchdog fires (~180 s) and never gets to abort its own batch. Templated rather than
+// std::function so the happy path costs one integer compare and no per-round allocation.
+template<typename EmitFn>
+class V41FailureTrafficGuard {
+public:
+    explicit V41FailureTrafficGuard(EmitFn emit):
+        emit_(std::move(emit)), uncaught_on_entry_(std::uncaught_exceptions()) {}
+    ~V41FailureTrafficGuard() {
+        if (std::uncaught_exceptions() > uncaught_on_entry_) {
+            try {
+                emit_();
+            } catch (...) {
+                // The original failure is the one that matters. If this traffic cannot be sent the
+                // peer falls back to the watchdog timeout, which is the pre-existing behaviour.
+            }
+        }
+    }
+    V41FailureTrafficGuard(const V41FailureTrafficGuard&)            = delete;
+    V41FailureTrafficGuard& operator=(const V41FailureTrafficGuard&) = delete;
+
+private:
+    EmitFn emit_;
+    int    uncaught_on_entry_;
+};
 
 }  // namespace
 
@@ -166,8 +197,10 @@ void PPExecutor::asyncSendExecutionResult(const PPExecutionResult& result, PPTic
     sendObject(pp_serialization::serializeExecutionResult(result), tickets);
 }
 
-void PPExecutor::asyncSendTensors(const PPIntermediateTensors& tensors, PPTickets& tickets) {
-    sendObject(pp_serialization::serializeTensorsMetadata(tensors), tickets);
+void PPExecutor::asyncSendTensors(const PPIntermediateTensors&      tensors,
+                                  PPTickets&                        tickets,
+                                  pp_serialization::PPTensorsStatus status) {
+    sendObject(pp_serialization::serializeTensorsMetadata(tensors, status), tickets);
     int64_t nonempty_sends = 0;
     for (const auto& tensor_entry : tensors.tensors) {
         if (tensor_entry.second.numel() != 0) {
@@ -197,8 +230,8 @@ void PPExecutor::asyncSendTensors(const PPIntermediateTensors& tensors, PPTicket
     }
 }
 
-PPIntermediateTensors PPExecutor::receiveTensors(PPTickets& tickets) {
-    auto tensors = pp_serialization::deserializeTensorsMetadata(receiveObject());
+PPIntermediateTensors PPExecutor::receiveTensors(PPTickets& tickets, pp_serialization::PPTensorsStatus* status) {
+    auto tensors = pp_serialization::deserializeTensorsMetadata(receiveObject(), status);
     if (obj_log_active_) {
         RTP_LLM_LOG_INFO("[PPTENS] rank=%lld recv meta_entries=%ld",
                          static_cast<long long>(parallelism_config_.world_rank),
@@ -337,15 +370,20 @@ PPExecutor::PPExecutor(const EngineInitParams&                params,
     round_fwd_event_sync_ =
         autil::EnvUtil::getEnv<int64_t>("RTP_LLM_PP_ROUND_FWD_EVENT_SYNC", static_cast<int64_t>(1)) != 0;
     if (!warm_up_ && params.model_config_.model_type == "deepseek_v41") {
-        RTP_LLM_CHECK_WITH_INFO(!sp_enabled_ && !params.hw_kernel_config.enable_cuda_graph
-                                    && round_device_sync_ && round_fwd_event_sync_,
+        // Value-based selector: only a nonzero value enables the asynchronous
+        // contract, so an explicitly-zeroed variable stays on the synchronous path.
+        v41_pp_async_ = autil::EnvUtil::getEnv<int64_t>("RTP_LLM_V41_PP_ASYNC", 0) != 0;
+        RTP_LLM_CHECK_WITH_INFO(!sp_enabled_ && !params.hw_kernel_config.enable_cuda_graph && round_device_sync_
+                                    && round_fwd_event_sync_,
                                 "V4.1 PP requires eager gen=0 with the qualified forward/device drains");
-        v41_pp_admission_ = std::make_unique<V41PPAdmission>(cache_manager_, params.model_config_, parallelism_config_);
+        v41_pp_admission_ =
+            std::make_unique<V41PPAdmission>(cache_manager_, params.model_config_, parallelism_config_, v41_pp_async_);
     }
-    RTP_LLM_LOG_INFO("PPExecutor per-round sync: device_sync=%d fwd_event_sync=%d "
-                     "(RTP_LLM_PP_ROUND_DEVICE_SYNC / RTP_LLM_PP_ROUND_FWD_EVENT_SYNC)",
+    RTP_LLM_LOG_INFO("PPExecutor per-round sync: device_sync=%d fwd_event_sync=%d v41_async=%d "
+                     "(RTP_LLM_PP_ROUND_DEVICE_SYNC / RTP_LLM_PP_ROUND_FWD_EVENT_SYNC / RTP_LLM_V41_PP_ASYNC)",
                      static_cast<int>(round_device_sync_),
-                     static_cast<int>(round_fwd_event_sync_));
+                     static_cast<int>(round_fwd_event_sync_),
+                     static_cast<int>(v41_pp_async_));
     // Sender and receiver diagnostics must be enabled together; default off.
     pp_step_log_ = autil::EnvUtil::getEnv("RTP_LLM_PP_OBJ_LOG", false);
     if (params.profiling_debug_logging_config.enable_model_inputs_log) {
@@ -530,15 +568,21 @@ void PPExecutor::retireV41Requests(std::vector<int64_t>& finished_request_ids) {
     auto count = torch::tensor({static_cast<int64_t>(finished_request_ids.size())}, torch::kInt64);
     execBroadcastCpu({{count}, 0});
     const auto size = count.item<int64_t>();
-    auto ids = isStageRoot() ? torch::tensor(finished_request_ids, torch::kInt64) :
-                              torch::empty({size}, torch::kInt64);
+    auto ids = isStageRoot() ? torch::tensor(finished_request_ids, torch::kInt64) : torch::empty({size}, torch::kInt64);
     if (size) {
         execBroadcastCpu({{ids}, 0});
     }
-    auto counts = torch::empty({8}, torch::kInt64);
-    execAllGather({{counts}, ParallelMode::WORLD, {count}, false});
-    RTP_LLM_CHECK_WITH_INFO(torch::equal(counts, count.expand({8})),
-                            "V4.1 PP terminal request counts disagree across WORLD");
+    // Asynchronous PP: validate terminal counts/identities within this stage only. The
+    // IDs already reach this stage's root in order via the serialized plan
+    // (PPExecutionPlan::finished_request_ids) and are fanned out by the stage-local
+    // execBroadcastCpu above, so no cross-stage rendezvous is needed per chunk.
+    const int64_t peer_count = v41_pp_async_ && parallelism_config_.pp_size > 0 ?
+                                   parallelism_config_.world_size / parallelism_config_.pp_size :
+                                   8;
+    auto          counts     = torch::empty({peer_count}, torch::kInt64);
+    execAllGather({{counts}, v41_pp_async_ ? ParallelMode::STAGE : ParallelMode::WORLD, {count}, false});
+    RTP_LLM_CHECK_WITH_INFO(torch::equal(counts, count.expand({peer_count})),
+                            "V4.1 PP terminal request counts disagree across the agreement scope");
     if (!size) {
         return;
     }
@@ -546,17 +590,17 @@ void PPExecutor::retireV41Requests(std::vector<int64_t>& finished_request_ids) {
     finished_request_ids.assign(ids.data_ptr<int64_t>(), ids.data_ptr<int64_t>() + size);
     for (int64_t row = 0; row < size; ++row) {
         identities.data_ptr<int64_t>()[row * 3] = finished_request_ids[row];
-        const auto found = v41_request_identities_.find(finished_request_ids[row]);
+        const auto found                        = v41_request_identities_.find(finished_request_ids[row]);
         if (found != v41_request_identities_.end()) {
             std::copy(found->second.begin(), found->second.end(), identities.data_ptr<int64_t>() + row * 3);
         }
     }
-    auto peers = torch::empty({8 * identities.numel()}, torch::kInt64);
-    auto wire = identities.flatten();
-    execAllGather({{peers}, ParallelMode::WORLD, {wire}, false});
-    for (int peer = 0; peer < 8; ++peer) {
+    auto peers = torch::empty({peer_count * identities.numel()}, torch::kInt64);
+    auto wire  = identities.flatten();
+    execAllGather({{peers}, v41_pp_async_ ? ParallelMode::STAGE : ParallelMode::WORLD, {wire}, false});
+    for (int64_t peer = 0; peer < peer_count; ++peer) {
         RTP_LLM_CHECK_WITH_INFO(torch::equal(wire, peers.narrow(0, peer * wire.numel(), wire.numel())),
-                                "V4.1 PP terminal identities disagree across WORLD");
+                                "V4.1 PP terminal identities disagree across the agreement scope");
     }
     for (const auto id : finished_request_ids) {
         const auto found = v41_request_identities_.find(id);
@@ -569,6 +613,9 @@ void PPExecutor::retireV41Requests(std::vector<int64_t>& finished_request_ids) {
 }
 
 void PPExecutor::rejectV41Batch(InflightBatch& batch, const std::string& message) {
+    // A rejected batch otherwise surfaces only as a failed stream output on the
+    // root rank plus EOF asserts on its TP peers, with no engine-side trace.
+    RTP_LLM_LOG_ERROR("V4.1 PP batch rejected: %s", message.c_str());
     if (isFirstStage() && isStageRoot()) {
         size_t row = 0;
         for (const auto& stream : batch.stream_groups.allStreams()) {
@@ -708,9 +755,8 @@ absl::StatusOr<PPExecutionPlan> PPExecutor::buildPlan(const StreamGroups&       
     if (v41_pp_admission_ && !plan.model_input.skip_run) {
         // The gatherer sets this from the PREFILL server role. Native V4.1 PP
         // admits ordinary requests on that role; real PD remains unsupported.
-        plan.model_input.pd_separation = std::any_of(streams.begin(), streams.end(), [](const auto& stream) {
-            return stream->queryPdSep();
-        });
+        plan.model_input.pd_separation =
+            std::any_of(streams.begin(), streams.end(), [](const auto& stream) { return stream->queryPdSep(); });
     }
 
     static const bool kLogWindow = std::getenv("RTP_LLM_LOG_TPSYNC") != nullptr;
@@ -1251,12 +1297,78 @@ absl::Status PPExecutor::process(const ScheduleOutput& schedule_output, int64_t 
         asyncSendPlan(plan, !isStageRoot(), inflight.plan_sends);
     }
 
+    static const bool v41_phase_timing = autil::EnvUtil::getEnv("RTP_LLM_V41_PHASE_TIMING", false);
+    long long         v41_ph[4]        = {0, 0, 0, 0};
+    if (v41_phase_timing && isStageRoot()) {
+        v41_ph[0] = autil::TimeUtility::currentTimeInMicroSeconds();
+    }
+
+    // C1b: under the asynchronous contract the two stages no longer reject together, so a
+    // rejection has to be *delivered* on the ordered activation channel rather than merely
+    // taken locally. `v41_chunk_owed` records that the plan said this round carries a chunk,
+    // which is what tells each side that a frame is coming even if one side then rejects.
+    bool        v41_chunk_owed     = false;
+    bool        v41_local_rejected = false;
+    std::string v41_reject_message;
+    // C8: which matched traffic this round has already emitted, so a failure after admission can
+    // supply only what is still owed. Without this a post-admission failure on one stage leaves its
+    // peer blocked in receiveObject until the gloo watchdog fires (~180 s), because C2 narrowed the
+    // initializeFresh agreements from WORLD to STAGE and those were the cross-stage failure channel.
+    bool v41_frame_sent    = false;  // producer: this round's activation frame has left the stage
+    bool v41_peer_admitted = false;  // consumer: the producer's frame arrived with status ok
+    bool v41_result_sent   = false;  // last-stage root: a result for this slot is on the lane
+    // Sends the terminal error result the producer's outstanding-result accounting expects. Valid
+    // only when the producer admitted: a producer that rejected marked this slot skip_run and will
+    // never read a result, so sending one leaves an unconsumed object on the lane and desynchronizes
+    // every later result receive -- the failure mode T3 exists to prevent.
+    auto v41_send_terminal_error = [&](const std::string& message) {
+        PPExecutionResult terminal;
+        const auto        stream_count = plan.sampling_plan.request_ids.size(0);
+        terminal.request_ids           = plan.sampling_plan.request_ids.to(torch::kCPU).contiguous();
+        terminal.request_errors.assign(stream_count, ErrorInfo(ErrorCode::INVALID_PARAMS, message));
+        // validateExecutionResult (PPBatchStreamProcessor.cc:615-627) requires all three
+        // count-bearing fields to match the inflight stream count; sampleTokens sizes
+        // prompt_logits the same way at PPExecutor.cc:969.
+        terminal.prompt_logits.resize(stream_count);
+        // Failed rows are never committed (PPTypes.h:116); these only keep the shape contract.
+        terminal.new_token_ids     = torch::zeros({stream_count, 1}, torch::kInt32);
+        terminal.new_token_lengths = torch::ones({stream_count}, torch::kInt32);
+
+        v41_result_sent = true;  // set before the send; see v41_emit_owed_traffic
+        asyncSendExecutionResult(terminal, inflight.execution_result_sends);
+    };
+    // Supplies whatever this round still owes its peer. A producer that has not sent its frame sends a
+    // rejected-status empty one, which the consumer already knows how to take: drain, abort the batch,
+    // advance nothing. A consumer whose producer admitted sends the terminal result instead, so the
+    // producer's outstanding-result accounting still settles exactly once.
+    auto v41_emit_owed_traffic = [&](const std::string& message) {
+        if (!v41_pp_async_ || !v41_chunk_owed) {
+            return;
+        }
+        if (!isLastStage()) {
+            if (!v41_frame_sent) {
+                // Flag before the send: if the metadata leaves but a tensor isend then fails, the
+                // peer already has this round's status and a second metadata object would be read
+                // as the NEXT round's, desynchronizing the lane silently. A detected hang on the
+                // watchdog is strictly better, and in the total-failure case this send would fail
+                // too, so setting the flag first costs nothing.
+                v41_frame_sent = true;
+                asyncSendTensors(
+                    PPIntermediateTensors{}, inflight.activation_sends, pp_serialization::PPTensorsStatus::rejected);
+            }
+        } else if (isStageRoot() && v41_peer_admitted && !v41_result_sent) {
+            v41_send_terminal_error(message);
+        }
+    };
+    const V41FailureTrafficGuard v41_failure_traffic(
+        [&] { v41_emit_owed_traffic("V4.1 PP round failed after admission"); });
     if (v41_pp_admission_) {
         retireV41Requests(plan.finished_request_ids);
         // V4.1 fake inputs contain no request, history or physical lease.
         if (plan.model_input.is_fake_stream && !plan.model_input.combo_tokens.numel()) {
             plan.model_input.skip_run = inflight.skip_run = true;
         }
+        v41_chunk_owed = !plan.model_input.skip_run;
         if (!plan.model_input.skip_run) {
             try {
                 inflight.v41_cache_batch = v41_pp_admission_->prepareWithWorker(
@@ -1264,9 +1376,66 @@ absl::Status PPExecutor::process(const ScheduleOutput& schedule_output, int64_t 
                         inflight.v41_model_inputs = model_->prepareV41PP(inputs, batch);
                     });
             } catch (const V41InputRejected& error) {
+                v41_reject_message = error.what();
                 rejectV41Batch(inflight, error.what());
                 plan.model_input.skip_run = true;
+                v41_local_rejected        = true;
             }
+        }
+    }
+
+    // Producer side: a rejected chunk still owes its consumer matched traffic. Without it the
+    // consumer blocks in receiveObject, and waitTicket is unbounded while running (:215-227).
+    if (v41_pp_async_ && v41_chunk_owed && v41_local_rejected && !isLastStage()) {
+        v41_frame_sent = true;  // set before the send; see v41_emit_owed_traffic
+        asyncSendTensors(
+            PPIntermediateTensors{}, inflight.activation_sends, pp_serialization::PPTensorsStatus::rejected);
+    }
+
+    // Consumer side: read the producer's chunk status before deciding whether this round runs
+    // at all, so a producer rejection is handled exactly like local no-work and needs no
+    // restructuring of the run body below.
+    PPTickets             v41_early_tickets;
+    PPIntermediateTensors v41_early_tensors;
+    bool                  v41_have_early = false;
+    if (v41_pp_async_ && v41_pp_admission_ && !isFirstStage() && !plan.model_input.skip_run) {
+        auto peer_status  = pp_serialization::PPTensorsStatus::ok;
+        v41_early_tensors = receiveTensors(v41_early_tickets, &peer_status);
+        v41_have_early    = true;
+        // Records that the producer admitted, which is what entitles it to a terminal result if this
+        // stage fails later. False when the producer rejected, so no result is ever sent for a slot
+        // the producer marked skip_run and will not read.
+        v41_peer_admitted = peer_status == pp_serialization::PPTensorsStatus::ok;
+        if (peer_status == pp_serialization::PPTensorsStatus::rejected) {
+            // Abandon the chunk: no forward, no cache writes, no replica-frontier advance. The
+            // producer set skip_run for this slot, so it will not read a result either; sending
+            // one here would desynchronize the ordered result channel.
+            waitAll(v41_early_tickets, "rejected-chunk activation drain");
+            v41_have_early = false;
+            if (inflight.v41_cache_batch) {
+                v41_pp_admission_->abort(inflight.v41_cache_batch);
+            }
+            inflight.v41_model_inputs.reset();
+            inflight.v41_cache_batch.reset();
+            inflight.skip_run = plan.model_input.skip_run = true;
+        }
+    }
+
+    // Consumer that rejected on its own while the producer admitted: drain the frame so the
+    // producer's send is matched, then still emit a terminal result, because the producer will
+    // process one for this slot and its outstanding-result accounting must settle exactly once.
+    if (v41_pp_async_ && v41_chunk_owed && v41_local_rejected && !isFirstStage()) {
+        PPTickets drained;
+        auto      peer_status = pp_serialization::PPTensorsStatus::ok;
+        auto      discarded   = receiveTensors(drained, &peer_status);
+        waitAll(drained, "rejected-chunk activation drain");
+        // The producer's own decision arrives in the frame status, and it cannot be inferred
+        // from this stage's local outcome. If the producer also rejected, it marked this slot
+        // skip_run and will not read a result — sending one would leave an unconsumed object on
+        // the lane and desynchronize every later result receive. Only a producer that admitted
+        // is owed a terminal result.
+        if (isLastStage() && isStageRoot() && peer_status == pp_serialization::PPTensorsStatus::ok) {
+            v41_send_terminal_error(v41_reject_message);
         }
     }
 
@@ -1275,14 +1444,25 @@ absl::Status PPExecutor::process(const ScheduleOutput& schedule_output, int64_t 
         PPTickets             tensor_receives;
         PPIntermediateTensors input_tensors;
         PPIntermediateTensors output_tensors;
-        int64_t v41_transfer_round = -1;
+        int64_t               v41_transfer_round = -1;
         if (v41_pp_admission_) {
             v41_pp_admission_->initializeFresh(inflight.v41_cache_batch);
             v41_transfer_round = v41_pp_admission_->beginExecution(inflight.v41_cache_batch);
         }
+        if (v41_phase_timing && isStageRoot()) {
+            v41_ph[1] = autil::TimeUtility::currentTimeInMicroSeconds();
+        }
 
         if (!isFirstStage()) {
-            input_tensors = receiveTensors(tensor_receives);
+            if (v41_have_early) {
+                // Already received above so the producer's chunk status could gate this round;
+                // reuse it rather than posting a second receive on the same lane.
+                input_tensors   = std::move(v41_early_tensors);
+                tensor_receives = std::move(v41_early_tickets);
+                v41_have_early  = false;
+            } else {
+                input_tensors = receiveTensors(tensor_receives);
+            }
             waitAll(tensor_receives, "intermediate tensors from previous stage");
             if (obj_log_active_) {
                 for (const auto& tensor_entry : input_tensors.tensors) {
@@ -1336,12 +1516,16 @@ absl::Status PPExecutor::process(const ScheduleOutput& schedule_output, int64_t 
                                                torch::TensorOptions(torch::kInt32).pinned_memory(true));
             saved_input_lengths.copy_(local_model_input.input_lengths);
         }
-        auto model_output = v41_pp_admission_ ?
-            model_->forwardV41PP(inflight.v41_model_inputs, v41_transfer_round,
-                                  isFirstStage() ? nullptr : &input_tensors,
-                                  isLastStage() ? nullptr : &output_tensors) :
-            model_->forwardPP(local_model_input, isFirstStage() ? nullptr : &input_tensors,
-                                isLastStage() ? nullptr : &output_tensors);
+        auto model_output = v41_pp_admission_ ? model_->forwardV41PP(inflight.v41_model_inputs,
+                                                                     v41_transfer_round,
+                                                                     isFirstStage() ? nullptr : &input_tensors,
+                                                                     isLastStage() ? nullptr : &output_tensors) :
+                                                model_->forwardPP(local_model_input,
+                                                                  isFirstStage() ? nullptr : &input_tensors,
+                                                                  isLastStage() ? nullptr : &output_tensors);
+        if (v41_phase_timing && isStageRoot()) {
+            v41_ph[2] = autil::TimeUtility::currentTimeInMicroSeconds();
+        }
         if (saved_input_lengths.defined()) {
             local_model_input.input_lengths = std::move(saved_input_lengths);
         }
@@ -1366,8 +1550,17 @@ absl::Status PPExecutor::process(const ScheduleOutput& schedule_output, int64_t 
 
         if (v41_pp_admission_) {
             if (!isLastStage()) {
+                v41_frame_sent = true;  // this round's frame is on the lane; nothing more is owed
                 asyncSendTensors(output_tensors, inflight.activation_sends);
-                waitAll(inflight.activation_sends, "V4.1 activation consumers");
+                if (!v41_pp_async_) {
+                    // Synchronous contract: the WORLD completion below must not be declared
+                    // before the frame has actually left this stage. Asynchronous contract:
+                    // these same tickets are waited at slot reuse (:1224-1228) exactly like
+                    // the V4 path, and no frame field aliases mutable model or cache state
+                    // (all are clones or fresh gathers), so deferring the wait is safe and is
+                    // what lets stage 0 start chunk N+1 while stage 1 computes chunk N.
+                    waitAll(inflight.activation_sends, "V4.1 activation consumers");
+                }
             }
             // CUDA ticket waits establish stream ordering; drain the actual
             // hardware before WORLD completion or cursor publication.
@@ -1375,9 +1568,19 @@ absl::Status PPExecutor::process(const ScheduleOutput& schedule_output, int64_t 
             v41_pp_admission_->completeExecution(inflight.v41_cache_batch, true);
             v41_pp_admission_->commit(inflight.v41_cache_batch);
             for (const auto& binding : inflight.v41_cache_batch->bindings()) {
-                const auto& span = binding.span;
+                const auto& span                 = binding.span;
                 v41_request_identities_[span[0]] = {span[0], span[1], span[2]};
             }
+        }
+        if (v41_phase_timing && isStageRoot() && v41_ph[0]) {
+            v41_ph[3] = autil::TimeUtility::currentTimeInMicroSeconds();
+            RTP_LLM_LOG_INFO(
+                "[V41PHASE] rank=%lld admission=%lldus recv_fwd_drain=%lldus send_complete=%lldus total=%lldus",
+                static_cast<long long>(parallelism_config_.world_rank),
+                static_cast<long long>(v41_ph[1] - v41_ph[0]),
+                static_cast<long long>(v41_ph[2] - v41_ph[1]),
+                static_cast<long long>(v41_ph[3] - v41_ph[2]),
+                static_cast<long long>(v41_ph[3] - v41_ph[0]));
         }
 
         if (!isLastStage()) {
@@ -1425,6 +1628,7 @@ absl::Status PPExecutor::process(const ScheduleOutput& schedule_output, int64_t 
                 if (!plan.model_input.is_fake_stream) {
                     advanceSamplingStates(plan.sampling_plan, execution_result);
                 }
+                v41_result_sent = true;  // the slot's result is on the lane; nothing more is owed
                 asyncSendExecutionResult(execution_result, inflight.execution_result_sends);
             }
         }

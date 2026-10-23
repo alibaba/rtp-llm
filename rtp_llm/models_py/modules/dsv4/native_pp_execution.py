@@ -5,6 +5,8 @@ allocation retention and retirement. This adapter preserves the worker and
 transformer arithmetic owners; it does not schedule or admit public forwards.
 """
 
+import os
+import time
 from collections.abc import Mapping
 from contextlib import nullcontext
 
@@ -30,6 +32,13 @@ from rtp_llm.models_py.modules.dsv4.v41_pp import (
     pack_v41_pp_frame,
     validate_v41_pp_frame,
 )
+
+# Test-only adversarial consumer delay (guide §8), default off. When set, the consumer stage
+# sleeps this many milliseconds before each chunk's L20 import, so the producer runs ahead
+# until the pipeline slot ring's reuse wait blocks it -- proving the backpressure bound
+# (pp_size + 1 slots) rather than merely not hitting it. The perf and numerical harnesses
+# never set it; only the delayed-consumer scenario does.
+_CONSUMER_DELAY_MS = int(os.environ.get("DSV41_TEST_DELAY_CONSUMER_MS", "0"))
 
 
 def l20_tables(dispatch):
@@ -63,24 +72,42 @@ def _validate_execution(worker, dispatch, contract, transfer_round, receiver, te
         )
     worker._check_execution_config()
     contract.require_attention_config(worker._v4_args.v41_config)
-    current = prepare_native_pp_prefill_dispatch(worker, dispatch.native_inputs)
-    if (
-        current.schedule != dispatch.schedule
-        or current.tables.keys() != dispatch.tables.keys()
-    ):
-        raise ValueError("Native V4.1 PP execution metadata changed after preflight")
-    pairs = [(current.input_ids, dispatch.input_ids), (current.rows, dispatch.rows)]
-    pairs.extend((current.tables[tag], dispatch.tables[tag]) for tag in current.tables)
-    if current.token_windows is None or dispatch.token_windows is None:
-        if current.token_windows is not dispatch.token_windows:
-            raise ValueError("Native V4.1 PP history changed after preflight")
+    # The admitted dispatch is immutable across the request's chunks, and
+    # prepare_native_pp_prefill_dispatch is a pure function of the fixed
+    # dispatch.native_inputs (it takes no transfer_round), so re-running it on
+    # every chunk recomputes an identical dispatch. That redundant host work --
+    # dozens of GPU syncs plus _require_cp_wire's O(tokens) Python list building
+    # -- pins the host behind the GPU every chunk and is the serializer that
+    # keeps the pp_intermediates pipeline from overlapping the two stages. Reuse
+    # the admitted dispatch directly (admission already validated it). Set
+    # DSV41_PP_SKIP_REPREP=0 to restore the defensive per-chunk re-preparation.
+    if os.environ.get("DSV41_PP_SKIP_REPREP", "1") == "1":
+        current = dispatch
     else:
-        pairs.append((current.token_windows, dispatch.token_windows))
-    if any(
-        a.dtype != b.dtype or a.shape != b.shape or not torch.equal(a, b)
-        for a, b in pairs
-    ):
-        raise ValueError("Native V4.1 PP execution snapshot changed after preflight")
+        current = prepare_native_pp_prefill_dispatch(worker, dispatch.native_inputs)
+        if (
+            current.schedule != dispatch.schedule
+            or current.tables.keys() != dispatch.tables.keys()
+        ):
+            raise ValueError(
+                "Native V4.1 PP execution metadata changed after preflight"
+            )
+        pairs = [(current.input_ids, dispatch.input_ids), (current.rows, dispatch.rows)]
+        pairs.extend(
+            (current.tables[tag], dispatch.tables[tag]) for tag in current.tables
+        )
+        if current.token_windows is None or dispatch.token_windows is None:
+            if current.token_windows is not dispatch.token_windows:
+                raise ValueError("Native V4.1 PP history changed after preflight")
+        else:
+            pairs.append((current.token_windows, dispatch.token_windows))
+        if any(
+            a.dtype != b.dtype or a.shape != b.shape or not torch.equal(a, b)
+            for a, b in pairs
+        ):
+            raise ValueError(
+                "Native V4.1 PP execution snapshot changed after preflight"
+            )
     if worker._v4_args.pp_rank == 0:
         if receiver is not None or tensors is not None:
             raise ValueError("Native stage zero cannot import an upstream frame")
@@ -108,12 +135,15 @@ def execute_native_pp_prefill(
     worker, dispatch, contract, transfer_round, *, receiver=None, tensors=None
 ):
     """Serialize at the worker; STAGE validates before either import or layers."""
-    current = frame = error = None
+    from rtp_llm.models_py.modules.dsv4.fp8 import _v41_compact_cp_runtime as compact_cp
+
+    current = frame = error = compact = None
     try:
         try:
             current, frame = _validate_execution(
                 worker, dispatch, contract, transfer_round, receiver, tensors
             )
+            compact = compact_cp.prepare(worker, current, transfer_round)
         except Exception as exc:
             error = exc
         try:
@@ -123,6 +153,7 @@ def execute_native_pp_prefill(
                     "native-pp-execution",
                     transfer_round,
                     None if current is None else current.schedule,
+                    None if compact is None else compact.signature,
                 ),
                 worker._weight_device(),
                 native_dispatch=True,
@@ -153,6 +184,8 @@ def execute_native_pp_prefill(
                 source_scope = premix_scope = nullcontext()
                 worker._prepare_engram(inputs)
             else:
+                if _CONSUMER_DELAY_MS:
+                    time.sleep(_CONSUMER_DELAY_MS / 1000)
                 receiver.apply(tensors, current.spans)
                 source = prepare_native_l20_prefill_source(
                     frame, receiver, current.spans, current.rows, cp_ctx=current.cp
@@ -166,7 +199,9 @@ def execute_native_pp_prefill(
                     entry.attn_hc, residual, frame.prev_pre_mix
                 )
                 inputs.pp_intermediates = {"hidden_states": residual}
-            with source_scope, premix_scope:
+            with source_scope, premix_scope, compact_cp.execution_scope(
+                worker, compact
+            ):
                 outputs = forward_prefill(
                     worker.v4,
                     worker.kv_cache,

@@ -103,6 +103,16 @@ class DeepSeekV41Model(DeepSeekV4Model):
         self._native_pp_owner = object()
         self._native_pp_contract = None
         self._native_pp_receiver = None
+        from rtp_llm.models_py.modules.dsv4.fp8._v41_compact_cp_plan import parse_mode
+
+        self._cp_compact_mode = parse_mode(
+            os.environ.get("DSV41_CP_COMPACT_MODE", "off")
+        )
+        self._compact_cp_projection = None
+        self._fused_indexer_enabled = os.environ.get("DSV41_FUSED_INDEXER", "0") == "1"
+        self._async_prefill_checks = (
+            os.environ.get("DSV41_ATTN_ASYNC_CHECKS", "0") == "1"
+        )
 
     def _check_rotary_config(self):
         if (
@@ -166,6 +176,25 @@ class DeepSeekV41Model(DeepSeekV4Model):
                         raise ValueError("V4.1 worker and mHC prenorm modes disagree")
 
     def _check_execution_config(self):
+        from rtp_llm.models_py.modules.dsv4.fp8._v41_compact_cp_plan import parse_mode
+
+        if (
+            os.environ.get("DSV41_ATTN_ASYNC_CHECKS", "0") == "1"
+        ) != self._async_prefill_checks:
+            raise ValueError(
+                "V4.1 attention validation mode changed; replace the worker"
+            )
+
+        if (
+            os.environ.get("DSV41_FUSED_INDEXER", "0") == "1"
+        ) != self._fused_indexer_enabled:
+            raise ValueError("V4.1 prefill indexer mode changed; replace the worker")
+
+        if (
+            parse_mode(os.environ.get("DSV41_CP_COMPACT_MODE", "off"))
+            != self._cp_compact_mode
+        ):
+            raise ValueError("V4.1 compact CP mode changed; replace the worker")
         self._check_rotary_config()
         self._check_sparse_config()
         self._check_collapse_config()
@@ -264,6 +293,9 @@ class DeepSeekV41Model(DeepSeekV4Model):
             for field in fields(self._v4_args)
             if not field.name.endswith("_rank") and field.name != "moe_stage_context"
         }
+        config["cp_compact_mode"] = self._cp_compact_mode
+        config["fused_indexer_enabled"] = self._fused_indexer_enabled
+        config["async_prefill_checks"] = self._async_prefill_checks
         context = self._v4_args.moe_stage_context
         if context is not None:
             if self._stage_agreement is None or context != self._stage_agreement:
@@ -742,6 +774,12 @@ class DeepSeekV41Model(DeepSeekV4Model):
                 for identity, tables in l20_tables(dispatch).items():
                     if identity.request_id not in receiver._requests:
                         receiver.begin_request(identity, tables)
+                    else:
+                        # FastGen chunked prefill grows the admitted allocation
+                        # per continuation chunk; the replica may only append
+                        # pages (extend_request enforces that), so re-admit the
+                        # grown tables instead of leaving chunk 0's snapshot.
+                        receiver.extend_request(identity, tables)
             return self._execute_native_pp_prefill(
                 dispatch,
                 self._native_pp_contract,

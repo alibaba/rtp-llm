@@ -102,6 +102,21 @@ void GenerateStateMachine::handleWaiting() {
     if (stream_cache_resource_->resourceContext().role_type == RoleType::PREFILL
         && stream_cache_resource_->isContextStream()) {
         auto stream = stream_cache_resource_->stream();
+        // FastGen chunked prefill advances a context stream through several
+        // chunks (PPScheduler calls acquireNextChunk), and every chunk's
+        // attention reads the prefix KV, so the block table has to grow with
+        // the sequence exactly like a decode stream's. A single-pass
+        // (monolithic) context stream is fully allocated at admission and
+        // keeps skipping this.
+        if (stream != nullptr && stream->isChunkStream()) {
+            auto chunk_result = stream_cache_resource_->incrKVBlock();
+            if (!chunk_result.ok()) {
+                error_info = ErrorInfo(ErrorCode::MALLOC_FAILED, "LACK MEM");
+                status.store(StreamState::FINISHED, std::memory_order_release);
+                releaseResource();
+                return;
+            }
+        }
         if (stream != nullptr) {
             stream->recordRunningTime();
         }

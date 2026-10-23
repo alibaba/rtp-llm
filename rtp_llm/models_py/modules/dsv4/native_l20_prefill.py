@@ -5,8 +5,8 @@ adapter publishes bounded eager CP1/CP4 maintained-stage sources after native
 admission.
 """
 
-from contextlib import contextmanager
 from collections.abc import Mapping
+from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Any, Sequence
 
@@ -259,10 +259,7 @@ def prepare_native_l20_prefill_source(
         or not expected_rows.numel()
         or any(
             s.start + s.count
-            > min(
-                receiver.contract.max_sequence_length,
-                256 if s.start else V41_MAX_CP_PREFILL_TOKENS,
-            )
+            > min(receiver.contract.max_sequence_length, V41_MAX_CP_PREFILL_TOKENS)
             for s in spans
         )
     ):

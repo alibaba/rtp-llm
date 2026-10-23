@@ -44,9 +44,9 @@ def is_supported(device: torch.device, num_heads: int, head_dim: int) -> bool:
         from ._indexer_score import has_fp8_fp4_mqa_logits
     except ImportError:
         return False
-    return has_fp8_fp4_mqa_logits() and torch.cuda.get_device_capability(device)[0] in (
-        9,
-        10,
+    capability = torch.cuda.get_device_capability(device)
+    return has_fp8_fp4_mqa_logits() and (
+        capability[0] in (9, 10) or capability == (12, 0)
     )
 
 

@@ -1,10 +1,13 @@
 #include "rtp_llm/cpp/normal_engine/pipeline/V41PPAdmission.h"
 
 #include <algorithm>
+#include <cstdlib>
 #include <limits>
 #include <stdexcept>
 #include <string>
 #include <utility>
+
+#include "autil/EnvUtil.h"
 
 #include "rtp_llm/cpp/models/V41InputRejected.h"
 #include "rtp_llm/models_py/bindings/core/ExecOps.h"
@@ -13,19 +16,36 @@ namespace rtp_llm {
 
 namespace {
 
-constexpr int64_t kTokenLimit = 2 * kV41MaxInitialPPPrefillTokens;
-constexpr int64_t kSpanOffset = 4;
-constexpr int64_t kTokenOffset = kSpanOffset + 12;
-constexpr int64_t kWindowOffset = kTokenOffset + kTokenLimit;
-constexpr int64_t kPacketSize = kWindowOffset + 4 * kTokenLimit;
-
-bool worldRejected(const torch::Tensor& packet, const std::string& error) {
-    auto peers = torch::full({8 * packet.numel()}, -1, torch::kInt64);
-    execAllGather({{peers}, ParallelMode::WORLD, {packet}, false});
-    const auto* peer = peers.data_ptr<int64_t>();
-    bool rejected = false;
-    bool same = true;
-    for (int rank = 0; rank < 8; ++rank) {
+// `mode`/`peer_count` select the agreement scope: WORLD over all eight ranks for the synchronous
+// contract, STAGE over the local PP stage's ranks for the asynchronous one. Narrowing the scope is
+// what allows stage 0 to run ahead of stage 1; within a stage all four ranks still execute an
+// identical collective sequence, so invariant #1 (participation symmetry) is preserved.
+bool worldRejected(const torch::Tensor& packet, const std::string& error, ParallelMode mode, int64_t peer_count) {
+    // Optimistic-overlap diagnostic (RTP_LLM_V41_PP_OPTIMISTIC): skip the per-chunk
+    // cross-stage agreement rendezvous. Both stages drive the identical deterministic
+    // chunk sequence, so the admission state matches without an 8-rank all-gather per
+    // chunk; the L20/activation frame handoff (async isend/irecv) already synchronizes
+    // the actual data. The rendezvous is what forces the two stages into lock-step and
+    // blocks pipelining. Local validation and the state machine still run; a real
+    // divergence surfaces as a final-token parity mismatch. Default off.
+    // Value-based gate: only an explicit "1"/"true" enables the bypass. Presence of the
+    // variable set to "0" must NOT enable it — controlled measurements require the
+    // bypass to be absent unless deliberately turned on. Note this diagnostic skips only
+    // the V41PPAdmission agreements; the prepareV41PP output-signature and retirement
+    // collectives are load-bearing for cross-stage sync (skipping them desyncs/crashes).
+    static const bool optimistic = [] {
+        const char* const value = std::getenv("RTP_LLM_V41_PP_OPTIMISTIC");
+        return value != nullptr && (std::string(value) == "1" || std::string(value) == "true");
+    }();
+    if (optimistic) {
+        return false;
+    }
+    auto peers = torch::full({peer_count * packet.numel()}, -1, torch::kInt64);
+    execAllGather({{peers}, mode, {packet}, false});
+    const auto* peer     = peers.data_ptr<int64_t>();
+    bool        rejected = false;
+    bool        same     = true;
+    for (int64_t rank = 0; rank < peer_count; ++rank) {
         const auto* row = peer + rank * packet.numel();
         if (row[0] != 0 && row[0] != 1) {
             throw std::runtime_error("V4.1 global PP preflight failed at WORLD rank " + std::to_string(rank)
@@ -40,8 +60,8 @@ bool worldRejected(const torch::Tensor& packet, const std::string& error) {
 }
 
 torch::Tensor hostInt32(const torch::Tensor& tensor, int64_t count, const char* name) {
-    if (!tensor.defined() || tensor.scalar_type() != torch::kInt32 || tensor.dim() != 1
-        || tensor.numel() != count || !tensor.is_contiguous()) {
+    if (!tensor.defined() || tensor.scalar_type() != torch::kInt32 || tensor.dim() != 1 || tensor.numel() != count
+        || !tensor.is_contiguous()) {
         throw std::invalid_argument(std::string("V4.1 global PP admission requires complete int32 ") + name);
     }
     return tensor.cpu().clone();
@@ -49,8 +69,8 @@ torch::Tensor hostInt32(const torch::Tensor& tensor, int64_t count, const char* 
 
 void validateGlobal(GptModelInputs& inputs, torch::Tensor& packet, int64_t vocab_size) {
     if (inputs.skip_run || inputs.shutdown || inputs.is_fake_stream || inputs.is_idle_decode || inputs.is_target_verify
-        || inputs.decode_entrance
-        || inputs.warmup || inputs.pd_separation || inputs.dspark_call_phase != DSparkCallPhase::NONE
+        || inputs.decode_entrance || inputs.warmup || inputs.pd_separation
+        || inputs.dspark_call_phase != DSparkCallPhase::NONE
         || (inputs.attention_mask.defined() && inputs.attention_mask.numel())
         || (inputs.last_hidden_states.defined() && inputs.last_hidden_states.numel())
         || (inputs.input_embeddings && !inputs.input_embeddings->empty())
@@ -64,20 +84,27 @@ void validateGlobal(GptModelInputs& inputs, torch::Tensor& packet, int64_t vocab
     }
     const auto spans = inputs.v41_cache_spans;
     if (!spans.defined() || spans.device().type() != torch::kCPU || spans.scalar_type() != torch::kInt64
-        || spans.dim() != 2 || !spans.is_contiguous() || spans.size(1) != 6
-        || spans.size(0) < 1 || spans.size(0) > 2) {
+        || spans.dim() != 2 || !spans.is_contiguous() || spans.size(1) != 6 || spans.size(0) < 1 || spans.size(0) > 2) {
         throw std::invalid_argument("V4.1 global PP admission requires complete one/two-request native spans");
     }
-    inputs.v41_cache_spans = spans.clone();
-    const auto batch = spans.size(0);
-    inputs.input_lengths = hostInt32(inputs.input_lengths, batch, "request lengths");
-    inputs.prefix_lengths = hostInt32(inputs.prefix_lengths, batch, "prefix lengths");
+    inputs.v41_cache_spans  = spans.clone();
+    const auto batch        = spans.size(0);
+    inputs.input_lengths    = hostInt32(inputs.input_lengths, batch, "request lengths");
+    inputs.prefix_lengths   = hostInt32(inputs.prefix_lengths, batch, "prefix lengths");
     inputs.sequence_lengths = hostInt32(inputs.sequence_lengths, 0, "empty decode lengths");
-    int64_t tokens = 0;
+    int64_t tokens          = 0;
     for (int64_t row = 0; row < batch; ++row) {
         const auto* span = inputs.v41_cache_spans.data_ptr<int64_t>() + row * 6;
-        const auto limit = span[4] == 0 ? kV41MaxInitialPPPrefillTokens : 256;
+        // Chunked (fast-gen) prefill continuations carry start>0 while remaining
+        // context chunks: V41CacheDispatch already enforces gap-free chunk
+        // sequencing (next_position == start) and the 33024-token context bound,
+        // and decode never reaches this admission (empty sequence_lengths plus
+        // the decode/idle/verify/entrance rejections above). Bound every span by
+        // the initial-prefill context, and keep the chunk-0 <-> token-0
+        // invariant that replaces the old short-continuation rail.
+        const auto limit = kV41MaxInitialPPPrefillTokens;
         if (span[4] < 0 || span[5] <= 0 || span[4] >= limit || span[5] > limit - span[4]
+            || (span[4] == 0) != (span[3] == 0) || span[3] < 0
             || inputs.input_lengths.data_ptr<int32_t>()[row] != span[5]
             || inputs.prefix_lengths.data_ptr<int32_t>()[row] != span[4]) {
             throw std::invalid_argument("V4.1 global PP request geometry disagrees with bounded native spans");
@@ -98,7 +125,7 @@ void validateGlobal(GptModelInputs& inputs, torch::Tensor& packet, int64_t vocab
     inputs.engram_token_windows = windows.clone();
     if (inputs.combo_position_ids.defined() && inputs.combo_position_ids.numel()) {
         inputs.combo_position_ids = hostInt32(inputs.combo_position_ids, tokens, "positions");
-        int64_t offset = 0;
+        int64_t offset            = 0;
         for (int64_t row = 0; row < batch; ++row) {
             const auto* span = inputs.v41_cache_spans.data_ptr<int64_t>() + row * 6;
             for (int64_t index = 0; index < span[5]; ++index) {
@@ -110,19 +137,24 @@ void validateGlobal(GptModelInputs& inputs, torch::Tensor& packet, int64_t vocab
     }
     // Exact, bounded comparison; avoid process-specific or truncated hashes.
     auto* values = packet.data_ptr<int64_t>();
-    values[3] = batch;
-    std::copy_n(inputs.v41_cache_spans.data_ptr<int64_t>(), batch * 6, values + kSpanOffset);
-    std::copy_n(inputs.combo_tokens.data_ptr<int32_t>(), tokens, values + kTokenOffset);
-    std::copy_n(inputs.engram_token_windows.data_ptr<int32_t>(), tokens * 4, values + kWindowOffset);
+    values[3]    = batch;
+    std::copy_n(inputs.v41_cache_spans.data_ptr<int64_t>(), batch * 6, values + kV41AdmissionSpanOffset);
+    std::copy_n(inputs.combo_tokens.data_ptr<int32_t>(), tokens, values + kV41AdmissionTokenOffset);
+    std::copy_n(inputs.engram_token_windows.data_ptr<int32_t>(), tokens * 4, values + kV41AdmissionWindowOffset);
 }
 
 }  // namespace
 
 V41PPAdmission::V41PPAdmission(std::shared_ptr<KVCacheManager> manager,
-                               const ModelConfig&            model,
-                               const ParallelismConfig&      parallelism):
-    local_(std::move(manager), model, parallelism), vocab_size_(model.vocab_size),
-    root_(parallelism.pp_rank == 0 && parallelism.tp_rank == 0) {
+                               const ModelConfig&              model,
+                               const ParallelismConfig&        parallelism,
+                               bool                            async_overlap):
+    local_(std::move(manager), model, parallelism, async_overlap),
+    vocab_size_(model.vocab_size),
+    root_(parallelism.pp_rank == 0 && parallelism.tp_rank == 0),
+    async_overlap_(async_overlap),
+    stage_size_(parallelism.pp_size > 0 ? parallelism.world_size / parallelism.pp_size : parallelism.world_size),
+    pp_rank_(parallelism.pp_rank) {
     if (vocab_size_ < 1) {
         throw std::invalid_argument("V4.1 global PP admission requires a positive vocabulary");
     }
@@ -140,13 +172,19 @@ V41PPCacheBatchPtr V41PPAdmission::prepareImpl(GptModelInputs& inputs, const Wor
     if (failed_) {
         throw std::runtime_error("V4.1 global PP admission session failed; drain and replace it");
     }
-    GptModelInputs prepared = inputs;
+    if (async_overlap_) {
+        // Asynchronous contract: a retained dispatch must have completed locally
+        // before the next chunk prepares, so two chunks never write the same
+        // tagged pages. Synchronous admission keeps its single-pending guard.
+        local_.requireRetainedLocallyComplete();
+    }
+    GptModelInputs     prepared = inputs;
     V41PPCacheBatchPtr batch;
-    auto packet = torch::full({kPacketSize}, -1, torch::kInt64);
-    auto* values = packet.data_ptr<int64_t>();
-    values[0] = 1;
-    values[1] = preflight ? 2 : 1;  // Bind worker-ready versus source-only admission.
-    values[2] = round_;
+    auto               packet = torch::full({kV41AdmissionPacketSize}, -1, torch::kInt64);
+    auto*              values = packet.data_ptr<int64_t>();
+    values[0]                 = 1;
+    values[1]                 = preflight ? 2 : 1;  // Bind worker-ready versus source-only admission.
+    values[2]                 = round_;
     std::string error;
     try {
         if (round_ == std::numeric_limits<int64_t>::max()) {
@@ -159,32 +197,33 @@ V41PPCacheBatchPtr V41PPAdmission::prepareImpl(GptModelInputs& inputs, const Wor
         if (!root_ && !prepared.v41_cache_leases.empty()) {
             throw std::invalid_argument("V4.1 global PP admission permits scheduler-root leases only");
         }
-        batch = local_.prepare(prepared.v41_cache_spans, prepared.v41_cache_leases);
-        prepared.v41_cache_leases = batch->leases();
+        batch                             = local_.prepare(prepared.v41_cache_spans, prepared.v41_cache_leases);
+        prepared.v41_cache_leases         = batch->leases();
         prepared.kv_cache_kernel_block_id = batch->kernelBlockTable().permute({1, 0, 2}).contiguous().cuda();
-        prepared.kv_cache_block_id = prepared.kv_cache_kernel_block_id;
+        prepared.kv_cache_block_id        = prepared.kv_cache_kernel_block_id;
         // Source initialization/copy addresses cannot describe another rank's
         // independent pools. Fresh tagged initialization belongs after preflight.
         prepared.kv_cache_blocks_to_zero = torch::Tensor();
         prepared.kv_cache_update_mapping = torch::Tensor();
     } catch (const std::invalid_argument& exception) {
         values[0] = 0;
-        error = exception.what();
+        error     = exception.what();
     } catch (const V41PPAllocationFailure& exception) {
         values[0] = 0;
-        error = exception.what();
+        error     = exception.what();
     } catch (const std::exception& exception) {
         values[0] = 2;
-        error = exception.what();
+        error     = exception.what();
     }
     try {
-        const bool rejected = worldRejected(packet, error);
+        const bool rejected = worldRejected(packet, error, agreementMode(), agreementPeers());
         ++round_;
         if (rejected) {
             if (batch) {
                 local_.abort(batch);
             }
-            throw V41InputRejected(error.empty() ? "V4.1 PP peer rejected or disagreed with the global dispatch" : error);
+            throw V41InputRejected(error.empty() ? "V4.1 PP peer rejected or disagreed with the global dispatch" :
+                                                   error);
         }
     } catch (const V41InputRejected&) {
         throw;
@@ -196,23 +235,23 @@ V41PPCacheBatchPtr V41PPAdmission::prepareImpl(GptModelInputs& inputs, const Wor
         throw;
     }
     if (preflight) {
-        auto ready = torch::full({3}, 1, torch::kInt64);
+        auto  ready  = torch::full({3}, 1, torch::kInt64);
         auto* status = ready.data_ptr<int64_t>();
-        status[1] = 3;  // Worker-ready phase, distinct from global admission.
-        status[2] = round_;
+        status[1]    = 3;  // Worker-ready phase, distinct from global admission.
+        status[2]    = round_;
         error.clear();
         try {
             // Native CPP zigzag rewrites CPU request lengths in place. A
             // shallow GptModelInputs copy would mutate our agreed global
             // snapshot, even through the callback's const tensor handles.
-            GptModelInputs worker_inputs = prepared;
-            worker_inputs.combo_tokens = prepared.combo_tokens.clone();
-            worker_inputs.input_lengths = prepared.input_lengths.clone();
-            worker_inputs.prefix_lengths = prepared.prefix_lengths.clone();
-            worker_inputs.sequence_lengths = prepared.sequence_lengths.clone();
-            worker_inputs.engram_token_windows = prepared.engram_token_windows.clone();
-            worker_inputs.v41_cache_spans = prepared.v41_cache_spans.clone();
-            worker_inputs.kv_cache_block_id = prepared.kv_cache_block_id.clone();
+            GptModelInputs worker_inputs           = prepared;
+            worker_inputs.combo_tokens             = prepared.combo_tokens.clone();
+            worker_inputs.input_lengths            = prepared.input_lengths.clone();
+            worker_inputs.prefix_lengths           = prepared.prefix_lengths.clone();
+            worker_inputs.sequence_lengths         = prepared.sequence_lengths.clone();
+            worker_inputs.engram_token_windows     = prepared.engram_token_windows.clone();
+            worker_inputs.v41_cache_spans          = prepared.v41_cache_spans.clone();
+            worker_inputs.kv_cache_block_id        = prepared.kv_cache_block_id.clone();
             worker_inputs.kv_cache_kernel_block_id = prepared.kv_cache_kernel_block_id.clone();
             if (prepared.combo_position_ids.defined()) {
                 worker_inputs.combo_position_ids = prepared.combo_position_ids.clone();
@@ -220,16 +259,16 @@ V41PPCacheBatchPtr V41PPAdmission::prepareImpl(GptModelInputs& inputs, const Wor
             (*preflight)(worker_inputs, batch);
         } catch (const V41InputRejected& exception) {
             status[0] = 0;
-            error = exception.what();
+            error     = exception.what();
         } catch (const std::exception& exception) {
             status[0] = 2;
-            error = exception.what();
+            error     = exception.what();
         } catch (...) {
             status[0] = 2;
-            error = "unknown native worker preflight failure";
+            error     = "unknown native worker preflight failure";
         }
         try {
-            if (worldRejected(ready, error)) {
+            if (worldRejected(ready, error, agreementMode(), agreementPeers())) {
                 local_.abort(batch);
                 throw V41InputRejected(error.empty() ? "V4.1 PP worker peer rejected its native dispatch" : error);
             }
@@ -242,7 +281,7 @@ V41PPCacheBatchPtr V41PPAdmission::prepareImpl(GptModelInputs& inputs, const Wor
         }
     }
     batch->worker_ready_ = preflight != nullptr;
-    inputs = std::move(prepared);
+    inputs               = std::move(prepared);
     return batch;
 }
 
@@ -250,23 +289,23 @@ void V41PPAdmission::initializeFresh(const V41PPCacheBatchPtr& batch) {
     if (failed_) {
         throw std::runtime_error("V4.1 tagged initialization cannot enter a failed session");
     }
-    auto packet = torch::full({3}, 1, torch::kInt64);
+    auto  packet = torch::full({3}, 1, torch::kInt64);
     auto* status = packet.data_ptr<int64_t>();
-    status[1] = 4;  // Agree on the complete write plan before the first store.
-    status[2] = round_;
-    std::string error;
+    status[1]    = 4;  // Agree on the complete write plan before the first store.
+    status[2]    = round_;
+    std::string                        error;
     V41PPLocalCache::InitializationOps operations;
     try {
         operations = local_.prepareInitialization(batch);
     } catch (const std::invalid_argument& exception) {
         status[0] = 0;
-        error = exception.what();
+        error     = exception.what();
     } catch (const std::exception& exception) {
         status[0] = 2;
-        error = exception.what();
+        error     = exception.what();
     }
     try {
-        if (worldRejected(packet, error)) {
+        if (worldRejected(packet, error, agreementMode(), agreementPeers())) {
             throw V41InputRejected(error.empty() ? "V4.1 peer rejected tagged initialization" : error);
         }
     } catch (const V41InputRejected&) {
@@ -284,14 +323,28 @@ void V41PPAdmission::initializeFresh(const V41PPCacheBatchPtr& batch) {
         }
     } catch (const std::exception& exception) {
         status[0] = 2;
-        error = exception.what();
+        error     = exception.what();
     } catch (...) {
         status[0] = 2;
-        error = "unknown V4.1 tagged initialization failure";
+        error     = "unknown V4.1 tagged initialization failure";
     }
     try {
-        if (worldRejected(packet, error)) {
+        if (worldRejected(packet, error, agreementMode(), agreementPeers())) {
             throw std::runtime_error("V4.1 tagged initialization completion disagrees");
+        }
+        // Test-only injection, default off. T4 of the C1b matrix needs a failure AFTER the tagged
+        // writes on one stage only, and no external lever can produce one: allocation pressure
+        // fails earlier inside prepareInitialization (that is T1/T2), and under the asynchronous
+        // contract this second agreement is STAGE-scoped, so it cannot be diverged across stages.
+        // Throwing here -- after the writes and after the agreement, before initialization is
+        // published -- lands in the catch below with failed_ set and writing_batch_ plus its leases
+        // retained, which is exactly the state T4 asserts on. Names a pp_rank to poison that whole
+        // stage; -1 (the default) disables it.
+        static const int64_t fail_after_writes_stage =
+            autil::EnvUtil::getEnv<int64_t>("RTP_LLM_V41_TEST_FAIL_AFTER_TAGGED_WRITES_STAGE", -1);
+        if (fail_after_writes_stage >= 0 && pp_rank_ == fail_after_writes_stage) {
+            throw std::runtime_error("injected V4.1 tagged-initialization failure after writes on pp_rank "
+                                     + std::to_string(pp_rank_));
         }
         batch->initialized_ = true;
         writing_batch_.reset();
@@ -307,7 +360,7 @@ int64_t V41PPAdmission::beginExecution(const V41PPCacheBatchPtr& batch) {
     if (failed_) {
         throw std::runtime_error("V4.1 PP execution cannot enter a failed session");
     }
-    auto packet = torch::tensor({int64_t{1}, int64_t{6}, round_, execution_round_}, torch::kInt64);
+    auto        packet = torch::tensor({int64_t{1}, int64_t{6}, round_, execution_round_}, torch::kInt64);
     std::string error;
     try {
         local_.requirePending(batch);
@@ -319,13 +372,13 @@ int64_t V41PPAdmission::beginExecution(const V41PPCacheBatchPtr& batch) {
         }
     } catch (const std::invalid_argument& exception) {
         packet.data_ptr<int64_t>()[0] = 0;
-        error = exception.what();
+        error                         = exception.what();
     } catch (const std::exception& exception) {
         packet.data_ptr<int64_t>()[0] = 2;
-        error = exception.what();
+        error                         = exception.what();
     }
     try {
-        if (worldRejected(packet, error)) {
+        if (worldRejected(packet, error, agreementMode(), agreementPeers())) {
             throw V41InputRejected(error.empty() ? "V4.1 peer rejected execution begin" : error);
         }
     } catch (const V41InputRejected&) {
@@ -334,7 +387,7 @@ int64_t V41PPAdmission::beginExecution(const V41PPCacheBatchPtr& batch) {
         failed_ = true;
         throw;
     }
-    writing_batch_ = batch;
+    writing_batch_            = batch;
     batch->execution_started_ = true;
     return execution_round_;
 }
@@ -352,10 +405,10 @@ void V41PPAdmission::completeExecution(const V41PPCacheBatchPtr& batch, bool suc
         }
     } catch (const std::exception& exception) {
         packet.data_ptr<int64_t>()[0] = 2;
-        error = exception.what();
+        error                         = exception.what();
     }
     try {
-        if (worldRejected(packet, error)) {
+        if (worldRejected(packet, error, agreementMode(), agreementPeers())) {
             throw std::runtime_error("V4.1 PP execution completion disagrees");
         }
         batch->execution_completed_ = true;

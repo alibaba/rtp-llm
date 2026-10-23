@@ -37,8 +37,8 @@ class V41PPAllocation {
 public:
     V41PPAllocation(std::shared_ptr<KVCacheManager> manager, GenerateStreamPtr stream, int64_t generation):
         manager_(std::move(manager)), stream_(std::move(stream)), generation_(generation) {
-        lease_ = stream_->streamCacheResource().retainAllocation();
-        request_id_ = stream_->streamId();
+        lease_       = stream_->streamCacheResource().retainAllocation();
+        request_id_  = stream_->streamId();
         incarnation_ = stream_->streamCacheResource().cacheIncarnation();
     }
 
@@ -77,11 +77,11 @@ public:
 
 private:
     std::shared_ptr<KVCacheManager> manager_;
-    GenerateStreamPtr              stream_;
-    KVCacheAllocationLeasePtr      lease_;
-    int64_t                        generation_;
-    int64_t                        request_id_;
-    int64_t                        incarnation_;
+    GenerateStreamPtr               stream_;
+    KVCacheAllocationLeasePtr       lease_;
+    int64_t                         generation_;
+    int64_t                         request_id_;
+    int64_t                         incarnation_;
 };
 
 // A real caller-owned global input, retained across coordinated admission.
@@ -140,9 +140,9 @@ public:
         }
     }
 
-    GptModelInputs inputs{};
-    V41PPCacheBatchPtr batch;
-    py::object dispatch = py::none();
+    GptModelInputs           inputs{};
+    V41PPCacheBatchPtr       batch;
+    py::object               dispatch = py::none();
     PreparedPPModelInputsPtr model_dispatch;
 };
 
@@ -158,44 +158,44 @@ public:
         RTP_LLM_CHECK(parallelism.pp_size == 2 && parallelism.tp_size == 4 && parallelism.dp_size == 1
                       && parallelism.world_size == 8 && model_config_.num_layers == 40
                       && model_config_.gen_num_per_cycle == 0);
-        model_config_.model_type = "deepseek_v41";
-        model_config_.input_vocab_size = model_config_.vocab_size;
+        model_config_.model_type                  = "deepseek_v41";
+        model_config_.input_vocab_size            = model_config_.vocab_size;
         model_config_.special_tokens.eos_token_id = -1;
-        model_config_.data_type = DataType::TYPE_BF16;
+        model_config_.data_type                   = DataType::TYPE_BF16;
         RuntimeConfig runtime;
-        runtime.warm_up = false;
-        runtime.max_generate_batch_size = 4;
+        runtime.warm_up                                      = false;
+        runtime.max_generate_batch_size                      = 4;
         runtime.fifo_scheduler_config.max_context_batch_size = 4;
-        runtime.use_batch_decode_scheduler = false;
-        scheduler_runtime_ = runtime;
+        runtime.use_batch_decode_scheduler                   = false;
+        scheduler_runtime_                                   = runtime;
         KVCacheConfig cache_options;
-        cache_options.test_block_num = 12 + parallelism.world_rank;
+        cache_options.test_block_num     = 12 + parallelism.world_rank;
         cache_options.seq_size_per_block = cache_options.kernel_seq_size_per_block = 256;
-        cache_options.reuse_cache = false;
-        const auto cache = CacheConfigCreator::createConfig(
+        cache_options.reuse_cache                                                  = false;
+        const auto cache                                                           = CacheConfigCreator::createConfig(
             model_config_, parallelism, runtime, cache_options, std::nullopt, SpeculativeExecutionConfig{});
         PDSepConfig role;
         role.role_type = RoleType::PREFILL;
-        manager_ = std::make_shared<KVCacheManager>(cache,
-                                                   false,
-                                                   nullptr,
-                                                   cache_options,
-                                                   parallelism,
-                                                   runtime,
-                                                   SpeculativeExecutionConfig{},
-                                                   role,
-                                                   CacheStoreConfig{},
-                                                   false,
-                                                   std::make_shared<PPCacheCapacityNegotiator>(1.5, true));
+        manager_       = std::make_shared<KVCacheManager>(cache,
+                                                    false,
+                                                    nullptr,
+                                                    cache_options,
+                                                    parallelism,
+                                                    runtime,
+                                                    SpeculativeExecutionConfig{},
+                                                    role,
+                                                    CacheStoreConfig{},
+                                                    false,
+                                                    std::make_shared<PPCacheCapacityNegotiator>(1.5, true));
         if (!manager_->init()) {
             throw std::runtime_error("native PP test cache manager initialization failed");
         }
         EngineInitParams params;
-        params.model_config_ = model_config_;
-        params.parallelism_config = parallelism;
-        params.runtime_config = runtime;
-        params.kv_cache_config = cache_options;
-        params.pd_sep_config = role;
+        params.model_config_                      = model_config_;
+        params.parallelism_config                 = parallelism;
+        params.runtime_config                     = runtime;
+        params.kv_cache_config                    = cache_options;
+        params.pd_sep_config                      = role;
         params.hw_kernel_config.enable_cuda_graph = false;
         params.gpt_weights.layers.resize(40);
         params.py_model = params.py_eplb = params.py_sp_model = params.weight_manager = py::none();
@@ -208,14 +208,14 @@ public:
             throw std::invalid_argument("native PP test request is out of bounds");
         }
         ResourceContext context;
-        context.cache_manager = manager_;
-        context.reuse_cache = false;
-        auto input = std::make_shared<GenerateInput>();
-        input->input_ids = torch::zeros({length}, torch::kInt32);
-        input->request_id = request_id;
-        input->generate_config = std::make_shared<GenerateConfig>();
+        context.cache_manager                  = manager_;
+        context.reuse_cache                    = false;
+        auto input                             = std::make_shared<GenerateInput>();
+        input->input_ids                       = torch::zeros({length}, torch::kInt32);
+        input->request_id                      = request_id;
+        input->generate_config                 = std::make_shared<GenerateConfig>();
         input->generate_config->max_new_tokens = 1;
-        input->generate_config->top_k = 1;
+        input->generate_config->top_k          = 1;
         auto stream = std::make_shared<NormalGenerateStream>(input, model_config_, RuntimeConfig{}, context, nullptr);
         stream->generate_status_->status = StreamState::RUNNING;
         stream->setIsContextStream(true);
@@ -232,11 +232,11 @@ public:
                                   manager_->allLayerCacheBase().topologyPtr());
     }
 
-    V41PPCacheBatchPtr prepareLocal(const torch::Tensor& spans,
+    V41PPCacheBatchPtr prepareLocal(const torch::Tensor&                                 spans,
                                     const std::vector<std::shared_ptr<V41PPAllocation>>& allocations) {
         requireOpen();
         if (!local_cache_) {
-            local_cache_ = std::make_unique<V41PPLocalCache>(manager_, model_config_, parallelism_);
+            local_cache_ = std::make_unique<V41PPLocalCache>(manager_, model_config_, parallelism_, local_async_);
         }
         std::vector<KVCacheAllocationLeasePtr> leases;
         for (const auto& allocation : allocations) {
@@ -270,14 +270,26 @@ public:
         return local_cache_ ? local_cache_->activeRequests() : 0;
     }
 
+    /** Selects the asynchronous retained-dispatch contract before first local use. */
+    void enableAsyncLocal(bool enabled) {
+        requireOpen();
+        if (local_cache_ || admission_) {
+            throw std::invalid_argument("native PP fixture async mode must be set before any admission");
+        }
+        local_async_ = enabled;
+    }
+
+    size_t retainedLocal() {
+        return local_cache_ ? local_cache_->retainedLocal() : 0;
+    }
+
     void checkLocalConfig(const ModelConfig& model, const ParallelismConfig& parallelism) {
         requireOpen();
         V41PPLocalCache candidate(manager_, model, parallelism);
     }
 
-    std::shared_ptr<V41PPGlobalInputs>
-    globalInputs(const std::map<std::string, torch::Tensor>& tensors,
-                 const std::vector<std::shared_ptr<V41PPAllocation>>& allocations) {
+    std::shared_ptr<V41PPGlobalInputs> globalInputs(const std::map<std::string, torch::Tensor>&          tensors,
+                                                    const std::vector<std::shared_ptr<V41PPAllocation>>& allocations) {
         requireOpen();
         auto result = std::make_shared<V41PPGlobalInputs>();
         for (const auto& [name, value] : tensors) {
@@ -292,7 +304,7 @@ public:
     V41PPCacheBatchPtr prepareGlobal(const std::shared_ptr<V41PPGlobalInputs>& global) {
         requireOpen();
         if (!admission_) {
-            admission_ = std::make_unique<V41PPAdmission>(manager_, model_config_, parallelism_);
+            admission_ = std::make_unique<V41PPAdmission>(manager_, model_config_, parallelism_, local_async_);
         }
         global->batch = admission_->prepare(global->inputs);
         return global->batch;
@@ -301,11 +313,11 @@ public:
     V41PPCacheBatchPtr prepareGlobalWorker(const std::shared_ptr<V41PPGlobalInputs>& global, const py::object& hook) {
         requireOpen();
         if (!admission_) {
-            admission_ = std::make_unique<V41PPAdmission>(manager_, model_config_, parallelism_);
+            admission_ = std::make_unique<V41PPAdmission>(manager_, model_config_, parallelism_, local_async_);
         }
         // Keep the descriptor provisional. If another stage rejects, its
         // hidden native leases must also drop before returning to the caller.
-        py::object dispatch = py::none();
+        py::object                      dispatch = py::none();
         V41PPAdmission::WorkerPreflight preflight;
         if (!hook.is_none()) {
             preflight = [&](const GptModelInputs& inputs, const V41PPCacheBatchPtr& batch) {
@@ -321,7 +333,7 @@ public:
                 }
             };
         }
-        global->batch = admission_->prepareWithWorker(global->inputs, preflight);
+        global->batch    = admission_->prepareWithWorker(global->inputs, preflight);
         global->dispatch = std::move(dispatch);
         return global->batch;
     }
@@ -334,26 +346,25 @@ public:
         Weights weights;
         weights.layers.resize(40);
         if (pp_rank_ == 1) {
-            auto local_head = std::make_shared<DenseWeights>();
-            const int64_t width = head.size(0) / 4;
-            local_head->kernel = head.narrow(0, parallelism_.tp_rank * width, width).contiguous();
-            weights.lm_head = std::move(local_head);
+            auto          local_head = std::make_shared<DenseWeights>();
+            const int64_t width      = head.size(0) / 4;
+            local_head->kernel       = head.narrow(0, parallelism_.tp_rank * width, width).contiguous();
+            weights.lm_head          = std::move(local_head);
         }
-        GptModelInitParams params{
-            weights,
-            Executor::genModelDescription(model_config_, parallelism_, EPLBConfig{}, MoeConfig{}),
-            manager_->getMainModelGroupedCacheLayerLayout()};
+        GptModelInitParams params{weights,
+                                  Executor::genModelDescription(model_config_, parallelism_, EPLBConfig{}, MoeConfig{}),
+                                  manager_->getMainModelGroupedCacheLayerLayout()};
         params.parallelism_config = parallelism_;
-        params.max_seq_len = model_config_.max_seq_len;
-        params.hidden_size = model_config_.hidden_size;
+        params.max_seq_len        = model_config_.max_seq_len;
+        params.hidden_size        = model_config_.hidden_size;
         params.tokens_per_block = params.kernel_tokens_per_block = 256;
-        params.cache_manager = manager_;
-        params.hc_mult = 4;
-        params.hw_kernel_config.enable_cuda_graph = false;
-        executor_->model_ = std::make_unique<PyWrappedModel>(
-            params, worker, false, false, false, DSparkCallPhase::NONE, false, false);
-        foreign_model_ = std::make_unique<PyWrappedModel>(
-            params, worker, false, false, false, DSparkCallPhase::NONE, false, false);
+        params.cache_manager                                     = manager_;
+        params.hc_mult                                           = 4;
+        params.hw_kernel_config.enable_cuda_graph                = false;
+        executor_->model_ =
+            std::make_unique<PyWrappedModel>(params, worker, false, false, false, DSparkCallPhase::NONE, false, false);
+        foreign_model_ =
+            std::make_unique<PyWrappedModel>(params, worker, false, false, false, DSparkCallPhase::NONE, false, false);
     }
 
     V41PPCacheBatchPtr prepareGlobalModel(const std::shared_ptr<V41PPGlobalInputs>& global, bool full_outputs) {
@@ -362,35 +373,36 @@ public:
             throw std::invalid_argument("native PP fixture has no attached model");
         }
         if (!admission_) {
-            admission_ = std::make_unique<V41PPAdmission>(manager_, model_config_, parallelism_);
+            admission_ = std::make_unique<V41PPAdmission>(manager_, model_config_, parallelism_, local_async_);
         }
         global->inputs.need_all_logits = global->inputs.need_all_hidden_states = full_outputs;
         PreparedPPModelInputsPtr prepared;
-        auto batch = admission_->prepareWithWorker(
-            global->inputs, [&](const GptModelInputs& inputs, const V41PPCacheBatchPtr& local) {
-                prepared = executor_->model_->prepareV41PP(inputs, local);
-            });
-        global->batch = batch;
-        global->model_dispatch = std::move(prepared);
+        auto                     batch = admission_->prepareWithWorker(global->inputs,
+                                                   [&](const GptModelInputs& inputs, const V41PPCacheBatchPtr& local) {
+                                                       prepared = executor_->model_->prepareV41PP(inputs, local);
+                                                   });
+        global->batch                  = batch;
+        global->model_dispatch         = std::move(prepared);
         return batch;
     }
 
-    py::dict executeGlobalModel(const PreparedPPModelInputsPtr& prepared, int64_t round,
-                                 const py::object& incoming, bool foreign) {
+    py::dict executeGlobalModel(const PreparedPPModelInputsPtr& prepared,
+                                int64_t                         round,
+                                const py::object&               incoming,
+                                bool                            foreign) {
         PPIntermediateTensors input;
         PPIntermediateTensors output;
         if (!incoming.is_none()) {
             input.tensors = incoming.cast<std::map<std::string, torch::Tensor>>();
         }
-        auto* model = foreign ? foreign_model_.get() : executor_->model_.get();
-        auto result = model->forwardV41PP(prepared, round,
-                                                       incoming.is_none() ? nullptr : &input,
-                                                       pp_rank_ == 0 ? &output : nullptr);
+        auto* model  = foreign ? foreign_model_.get() : executor_->model_.get();
+        auto  result = model->forwardV41PP(
+            prepared, round, incoming.is_none() ? nullptr : &input, pp_rank_ == 0 ? &output : nullptr);
         py::dict values;
-        values["payload"] = output.tensors;
-        values["hidden"] = result.hidden_states;
+        values["payload"]    = output.tensors;
+        values["hidden"]     = result.hidden_states;
         values["all_hidden"] = result.all_hidden_states;
-        values["logits"] = result.logits;
+        values["logits"]     = result.logits;
         values["all_logits"] = result.all_logits;
         return values;
     }
@@ -401,7 +413,7 @@ public:
     }
 
     void releaseModelDescriptor(const std::shared_ptr<V41PPGlobalInputs>& global) {
-        auto prepared = std::move(global->model_dispatch);
+        auto                   prepared = std::move(global->model_dispatch);
         py::gil_scoped_release release;
         std::thread([owned = std::move(prepared)]() mutable { owned.reset(); }).join();
     }
@@ -468,7 +480,7 @@ public:
             throw std::invalid_argument("native PP local inputs require this owner's admitted batch");
         }
         inputs.v41_cache_spans = torch::empty({static_cast<int64_t>(batch->bindings().size()), 6}, torch::kInt64);
-        auto* rows = inputs.v41_cache_spans.data_ptr<int64_t>();
+        auto* rows             = inputs.v41_cache_spans.data_ptr<int64_t>();
         for (const auto& binding : batch->bindings()) {
             std::copy(binding.span.begin(), binding.span.end(), rows);
             rows += 6;
@@ -477,9 +489,8 @@ public:
         return inputs;
     }
 
-    torch_ext::PyModelInputs splitLocalInputs(const V41PPCacheBatchPtr& batch,
-                                               const torch::Tensor& ids,
-                                               const torch::Tensor& windows) {
+    torch_ext::PyModelInputs
+    splitLocalInputs(const V41PPCacheBatchPtr& batch, const torch::Tensor& ids, const torch::Tensor& windows) {
         requireOpen();
         if (!local_cache_ || !local_cache_->ownsBatch(batch) || ids.device().type() != torch::kCPU
             || ids.scalar_type() != torch::kInt32 || ids.dim() != 1 || !ids.is_contiguous()
@@ -488,15 +499,15 @@ public:
             throw std::invalid_argument("native PP CP fixture requires its admitted batch and complete host tokens");
         }
         GptModelInputs global;
-        global.combo_tokens = ids.clone();
-        global.input_lengths = torch::empty({static_cast<int64_t>(batch->bindings().size())}, torch::kInt32);
-        global.prefix_lengths = torch::empty_like(global.input_lengths);
-        global.sequence_lengths = torch::empty({0}, torch::kInt32);
+        global.combo_tokens         = ids.clone();
+        global.input_lengths        = torch::empty({static_cast<int64_t>(batch->bindings().size())}, torch::kInt32);
+        global.prefix_lengths       = torch::empty_like(global.input_lengths);
+        global.sequence_lengths     = torch::empty({0}, torch::kInt32);
         global.engram_token_windows = windows.clone();
-        int64_t total = 0;
+        int64_t total               = 0;
         for (size_t row = 0; row < batch->bindings().size(); ++row) {
-            const auto& span = batch->bindings()[row].span;
-            global.input_lengths.data_ptr<int32_t>()[row] = span[5];
+            const auto& span                               = batch->bindings()[row].span;
+            global.input_lengths.data_ptr<int32_t>()[row]  = span[5];
             global.prefix_lengths.data_ptr<int32_t>()[row] = span[4];
             total += span[5];
         }
@@ -509,24 +520,24 @@ public:
 
     torch_ext::PyModelInputs splitInputs(const V41PPCacheBatchPtr& batch, GptModelInputs global) {
         torch_ext::PyContextParallelParams cp;
-        ZigZagProcessor processor(parallelism_, false);
+        ZigZagProcessor                    processor(parallelism_, false);
         processor.handleInputs(global, cp);
         torch_ext::PyModelInputs local;
-        local.input_ids = global.combo_tokens;
-        local.combo_position_ids = global.combo_position_ids;
+        local.input_ids            = global.combo_tokens;
+        local.combo_position_ids   = global.combo_position_ids;
         local.engram_token_windows = global.engram_token_windows;
         for (const auto& group : manager_->allLayerCacheBase().topology().groups()) {
             torch_ext::PyAttentionInputs attention;
-            attention.is_prefill = true;
-            attention.input_lengths = global.input_lengths;
-            attention.prefix_lengths = global.prefix_lengths;
-            attention.sequence_lengths = global.sequence_lengths;
-            attention.combo_position_ids = global.combo_position_ids;
+            attention.is_prefill            = true;
+            attention.input_lengths         = global.input_lengths;
+            attention.prefix_lengths        = global.prefix_lengths;
+            attention.sequence_lengths      = global.sequence_lengths;
+            attention.combo_position_ids    = global.combo_position_ids;
             attention.context_parallel_info = cp;
-            attention.cu_seqlens = torch::cat({torch::zeros({1}, torch::kInt32),
-                                             global.input_lengths.cpu().cumsum(0).to(torch::kInt32)});
+            attention.cu_seqlens =
+                torch::cat({torch::zeros({1}, torch::kInt32), global.input_lengths.cpu().cumsum(0).to(torch::kInt32)});
             attention.kv_cache_kernel_block_id_device = global.kv_cache_kernel_block_id[group.canonical_idx];
-            attention.kv_cache_kernel_block_id = attention.kv_cache_kernel_block_id_device.cpu();
+            attention.kv_cache_kernel_block_id        = attention.kv_cache_kernel_block_id_device.cpu();
             local.attention_inputs_by_tag.emplace(group.tag, std::move(attention));
         }
         return localInputs(batch, std::move(local));
@@ -548,7 +559,7 @@ public:
         return executor_->receiveTensors(tickets_).tensors;
     }
 
-    void send(const std::map<std::string, torch::Tensor>& tensors,
+    void send(const std::map<std::string, torch::Tensor>&          tensors,
               const std::vector<std::shared_ptr<V41PPAllocation>>& allocations) {
         if (pp_rank_ != 0) {
             throw std::invalid_argument("native PP test send requires the first stage");
@@ -557,8 +568,7 @@ public:
         executor_->asyncSendTensors(PPIntermediateTensors{tensors}, tickets_);
     }
 
-    std::map<std::string, torch::Tensor>
-    receive(const std::vector<std::shared_ptr<V41PPAllocation>>& allocations) {
+    std::map<std::string, torch::Tensor> receive(const std::vector<std::shared_ptr<V41PPAllocation>>& allocations) {
         if (pp_rank_ != 1) {
             throw std::invalid_argument("native PP test receive requires the second stage");
         }
@@ -608,48 +618,53 @@ public:
             throw std::invalid_argument("native PP scheduler requires its attached model and a short chunk");
         }
         scheduler_runtime_.max_generate_batch_size = 2;
-        auto& fifo = scheduler_runtime_.fifo_scheduler_config;
-        fifo.max_context_batch_size = 2;
-        fifo.max_batch_tokens_size = 512;
-        fifo.cp_force_single_prefill = false;
-        fifo.enable_fast_gen = true;
-        fifo.fast_gen_max_context_len = chunk_size;
+        auto& fifo                                 = scheduler_runtime_.fifo_scheduler_config;
+        fifo.max_context_batch_size                = 2;
+        fifo.max_batch_tokens_size                 = 512;
+        fifo.cp_force_single_prefill               = false;
+        fifo.enable_fast_gen                       = true;
+        fifo.fast_gen_max_context_len              = chunk_size;
         if (parallelism_.world_rank == 0) {
             PDSepConfig role;
             role.role_type = RoleType::PREFILL;
-            scheduler_ = std::make_unique<PPScheduler>(scheduler_runtime_, model_config_, role,
-                                                       parallelism_, ModelSpecificConfig{},
-                                                       SpeculativeExecutionConfig{}, manager_, nullptr);
+            scheduler_     = std::make_unique<PPScheduler>(scheduler_runtime_,
+                                                       model_config_,
+                                                       role,
+                                                       parallelism_,
+                                                       ModelSpecificConfig{},
+                                                       SpeculativeExecutionConfig{},
+                                                       manager_,
+                                                       nullptr);
         }
     }
 
-    std::vector<int64_t> enqueueScheduled(const std::vector<std::vector<int32_t>>& requests,
-                                          bool full_outputs, bool pd_separation) {
+    std::vector<int64_t>
+    enqueueScheduled(const std::vector<std::vector<int32_t>>& requests, bool full_outputs, bool pd_separation) {
         requireOpen();
         if (!scheduler_) {
             throw std::invalid_argument("only the scheduler root can enqueue a test request");
         }
         ResourceContext context;
         context.cache_manager = manager_;
-        context.reuse_cache = false;
+        context.reuse_cache   = false;
         std::vector<int64_t> ids;
         for (const auto& tokens : requests) {
             if (tokens.empty() || tokens.size() > 256) {
                 throw std::invalid_argument("native PP scheduler test requires short nonempty prompts");
             }
-            auto input = std::make_shared<GenerateInput>();
-            input->input_ids = torch::tensor(tokens, torch::kInt32);
-            input->request_id = ++scheduler_request_id_;
-            input->generate_config = std::make_shared<GenerateConfig>();
-            input->generate_config->max_new_tokens = 1;
-            input->generate_config->top_k = 1;
-            input->generate_config->is_streaming = false;
-            input->generate_config->return_logits = true;
-            input->generate_config->return_hidden_states = true;
+            auto input                                       = std::make_shared<GenerateInput>();
+            input->input_ids                                 = torch::tensor(tokens, torch::kInt32);
+            input->request_id                                = ++scheduler_request_id_;
+            input->generate_config                           = std::make_shared<GenerateConfig>();
+            input->generate_config->max_new_tokens           = 1;
+            input->generate_config->top_k                    = 1;
+            input->generate_config->is_streaming             = false;
+            input->generate_config->return_logits            = true;
+            input->generate_config->return_hidden_states     = true;
             input->generate_config->return_all_hidden_states = full_outputs;
-            input->generate_config->pd_separation = pd_separation;
-            auto stream = std::make_shared<NormalGenerateStream>(
-                input, model_config_, scheduler_runtime_, context, nullptr);
+            input->generate_config->pd_separation            = pd_separation;
+            auto stream =
+                std::make_shared<NormalGenerateStream>(input, model_config_, scheduler_runtime_, context, nullptr);
             const auto status = scheduler_->enqueue(stream);
             if (!status.ok()) {
                 throw std::runtime_error(status.ToString());
@@ -667,7 +682,7 @@ public:
             // Explicit ticks model the engine's schedule trigger without a
             // second host thread competing for the qualified CUDA stream.
             scheduler_->schedule_trigger_ = true;
-            auto result = scheduler_->schedule();
+            auto result                   = scheduler_->schedule();
             if (!result.ok()) {
                 throw std::runtime_error(result.status().ToString());
             }
@@ -680,14 +695,14 @@ public:
         cudaSyncAndCheck();
         py::dict result;
         result["active_requests"] = executor_->v41_pp_admission_->activeRequests();
-        result["identity_count"] = executor_->v41_request_identities_.size();
-        size_t retained = 0;
+        result["identity_count"]  = executor_->v41_request_identities_.size();
+        size_t retained           = 0;
         for (const auto& slot : executor_->slots_) {
             retained += slot.v41_cache_batch ? 1 : 0;
         }
         result["retained_slots"] = retained;
-        result["free_blocks"] = freeBlocks();
-        result["shutdown"] = executor_->shutdownCompleted();
+        result["free_blocks"]    = freeBlocks();
+        result["shutdown"]       = executor_->shutdownCompleted();
         return result;
     }
 
@@ -700,18 +715,18 @@ public:
                 continue;
             }
             py::dict output;
-            output["request_id"] = stream->streamId();
+            output["request_id"]  = stream->streamId();
             output["outstanding"] = stream->ppOutstandingResults();
-            auto next = stream->nextOutput(1);
+            auto next             = stream->nextOutput(1);
             if (!next.ok()) {
-                output["error"] = next.status().ToString();
+                output["error"]          = next.status().ToString();
                 output["invalid_params"] = next.status().code() == ErrorCode::INVALID_PARAMS;
             } else {
                 const auto& generated = next.value().generate_outputs.front();
-                output["tokens"] = stream->completeTokenIdsVec();
-                output["hidden"] = generated.hidden_states;
-                output["logits"] = generated.logits;
-                output["all_hidden"] = generated.all_hidden_states;
+                output["tokens"]      = stream->completeTokenIdsVec();
+                output["hidden"]      = generated.hidden_states;
+                output["logits"]      = generated.logits;
+                output["all_hidden"]  = generated.all_hidden_states;
             }
             result.append(std::move(output));
             it = scheduled_streams_.erase(it);
@@ -781,21 +796,22 @@ private:
         round_leases_ = batch->leases();
     }
 
-    ModelConfig                           model_config_;
-    ParallelismConfig                    parallelism_;
-    int64_t                               pp_rank_;
-    int64_t                               generation_ = 0;
-    std::shared_ptr<KVCacheManager>         manager_;
+    ModelConfig                            model_config_;
+    ParallelismConfig                      parallelism_;
+    int64_t                                pp_rank_;
+    int64_t                                generation_ = 0;
+    std::shared_ptr<KVCacheManager>        manager_;
     std::unique_ptr<PPExecutor>            executor_;
     std::unique_ptr<PyWrappedModel>        foreign_model_;
     std::unique_ptr<V41PPLocalCache>       local_cache_;
+    bool                                   local_async_ = false;
     std::unique_ptr<V41PPAdmission>        admission_;
-    PPTickets                             tickets_;
+    PPTickets                              tickets_;
     std::vector<KVCacheAllocationLeasePtr> round_leases_;
-    RuntimeConfig scheduler_runtime_;
-    std::unique_ptr<PPScheduler> scheduler_;
-    std::vector<GenerateStreamPtr> scheduled_streams_;
-    int64_t scheduler_request_id_ = 5000;
+    RuntimeConfig                          scheduler_runtime_;
+    std::unique_ptr<PPScheduler>           scheduler_;
+    std::vector<GenerateStreamPtr>         scheduled_streams_;
+    int64_t                                scheduler_request_id_ = 5000;
 };
 
 }  // namespace test
@@ -804,6 +820,10 @@ private:
 PYBIND11_MODULE(libth_v41_native_pp_transport_test, m) {
     rtp_llm::registerExecCtxOps(m);
     py::register_exception<rtp_llm::V41InputRejected>(m, "NativeInputRejected", PyExc_RuntimeError);
+    // Protocol constants the mocked-gather tests assert against. Bound, not re-declared in
+    // Python, so the assertions follow the wire layout instead of hardcoding it (D2/D3).
+    m.attr("V41_ADMISSION_PACKET_SIZE")         = py::int_(rtp_llm::kV41AdmissionPacketSize);
+    m.attr("V41_MAX_INITIAL_PP_PREFILL_TOKENS") = py::int_(rtp_llm::kV41MaxInitialPPPrefillTokens);
     py::class_<rtp_llm::PreparedPPModelInputs, rtp_llm::PreparedPPModelInputsPtr>(m, "PreparedModelInputs");
     m.def("native_lm_logits", [](const torch::Tensor& hidden, const torch::Tensor& head) {
         return torch_ext::cublas_gemm_bf16_bf16_fp32(hidden.to(torch::kBFloat16), head);
@@ -819,27 +839,30 @@ PYBIND11_MODULE(libth_v41_native_pp_transport_test, m) {
             return global.inputs.v41_cache_leases.size();
         });
     py::class_<rtp_llm::V41PPCacheBatch, rtp_llm::V41PPCacheBatchPtr>(m, "LocalBatch")
-        .def_property_readonly("block_tables", [](const rtp_llm::V41PPCacheBatch& batch) {
-            std::vector<rtp_llm::KVCacheAllocationLease::BlockTables> tables;
-            for (const auto& binding : batch.bindings()) {
-                tables.push_back(binding.lease->blockTables());
-            }
-            return tables;
-        })
-        .def_property_readonly("local_generations", [](const rtp_llm::V41PPCacheBatch& batch) {
-            std::vector<int64_t> generations;
-            for (const auto& binding : batch.bindings()) {
-                generations.push_back(binding.local_generation);
-            }
-            return generations;
-        })
-        .def_property_readonly("new_requests", [](const rtp_llm::V41PPCacheBatch& batch) {
-            std::vector<bool> fresh;
-            for (const auto& binding : batch.bindings()) {
-                fresh.push_back(binding.newly_admitted);
-            }
-            return fresh;
-        })
+        .def_property_readonly("block_tables",
+                               [](const rtp_llm::V41PPCacheBatch& batch) {
+                                   std::vector<rtp_llm::KVCacheAllocationLease::BlockTables> tables;
+                                   for (const auto& binding : batch.bindings()) {
+                                       tables.push_back(binding.lease->blockTables());
+                                   }
+                                   return tables;
+                               })
+        .def_property_readonly("local_generations",
+                               [](const rtp_llm::V41PPCacheBatch& batch) {
+                                   std::vector<int64_t> generations;
+                                   for (const auto& binding : batch.bindings()) {
+                                       generations.push_back(binding.local_generation);
+                                   }
+                                   return generations;
+                               })
+        .def_property_readonly("new_requests",
+                               [](const rtp_llm::V41PPCacheBatch& batch) {
+                                   std::vector<bool> fresh;
+                                   for (const auto& binding : batch.bindings()) {
+                                       fresh.push_back(binding.newly_admitted);
+                                   }
+                                   return fresh;
+                               })
         .def_property_readonly("kernel_block_table", &rtp_llm::V41PPCacheBatch::kernelBlockTable)
         .def_property_readonly("initialized", &rtp_llm::V41PPCacheBatch::initialized)
         .def_property_readonly("canonical_columns", [](const rtp_llm::V41PPCacheBatch& batch) {
@@ -857,23 +880,31 @@ PYBIND11_MODULE(libth_v41_native_pp_transport_test, m) {
     py::class_<rtp_llm::test::V41NativePPTransportTest>(m, "NativePPTransport")
         .def(py::init<rtp_llm::ModelConfig, const rtp_llm::ParallelismConfig&>())
         .def("allocate", &rtp_llm::test::V41NativePPTransportTest::allocate)
-        .def("prepare_local", &rtp_llm::test::V41NativePPTransportTest::prepareLocal,
+        .def("prepare_local",
+             &rtp_llm::test::V41NativePPTransportTest::prepareLocal,
              py::arg("spans"),
              py::arg("root_allocations") = std::vector<std::shared_ptr<rtp_llm::test::V41PPAllocation>>{})
         .def("commit_local", &rtp_llm::test::V41NativePPTransportTest::commitLocal)
         .def("abort_local", &rtp_llm::test::V41NativePPTransportTest::abortLocal)
         .def("retire_local", &rtp_llm::test::V41NativePPTransportTest::retireLocal)
         .def_property_readonly("active_local", &rtp_llm::test::V41NativePPTransportTest::activeLocal)
+        .def("enable_async_local", &rtp_llm::test::V41NativePPTransportTest::enableAsyncLocal)
+        .def_property_readonly("retained_local", &rtp_llm::test::V41NativePPTransportTest::retainedLocal)
         .def("check_local_config", &rtp_llm::test::V41NativePPTransportTest::checkLocalConfig)
-        .def("global_inputs", &rtp_llm::test::V41NativePPTransportTest::globalInputs,
+        .def("global_inputs",
+             &rtp_llm::test::V41NativePPTransportTest::globalInputs,
              py::arg("tensors"),
              py::arg("root_allocations") = std::vector<std::shared_ptr<rtp_llm::test::V41PPAllocation>>{})
         .def("prepare_global", &rtp_llm::test::V41NativePPTransportTest::prepareGlobal)
         .def("prepare_global_worker", &rtp_llm::test::V41NativePPTransportTest::prepareGlobalWorker)
         .def("attach_model", &rtp_llm::test::V41NativePPTransportTest::attachModel)
         .def("prepare_global_model", &rtp_llm::test::V41NativePPTransportTest::prepareGlobalModel)
-        .def("execute_global_model", &rtp_llm::test::V41NativePPTransportTest::executeGlobalModel,
-             py::arg("prepared"), py::arg("round"), py::arg("incoming"), py::arg("foreign") = false)
+        .def("execute_global_model",
+             &rtp_llm::test::V41NativePPTransportTest::executeGlobalModel,
+             py::arg("prepared"),
+             py::arg("round"),
+             py::arg("incoming"),
+             py::arg("foreign") = false)
         .def("retire_global_model", &rtp_llm::test::V41NativePPTransportTest::retireGlobalModel)
         .def("release_model_descriptor", &rtp_llm::test::V41NativePPTransportTest::releaseModelDescriptor)
         .def("commit_global", &rtp_llm::test::V41NativePPTransportTest::commitGlobal)
@@ -895,8 +926,11 @@ PYBIND11_MODULE(libth_v41_native_pp_transport_test, m) {
         .def_property_readonly("pending_tickets", &rtp_llm::test::V41NativePPTransportTest::pendingTickets)
         .def_property_readonly("retained_leases", &rtp_llm::test::V41NativePPTransportTest::retainedLeases)
         .def("start_scheduler", &rtp_llm::test::V41NativePPTransportTest::startScheduler)
-        .def("enqueue_scheduled", &rtp_llm::test::V41NativePPTransportTest::enqueueScheduled,
-             py::arg("requests"), py::arg("full_outputs"), py::arg("pd_separation") = false)
+        .def("enqueue_scheduled",
+             &rtp_llm::test::V41NativePPTransportTest::enqueueScheduled,
+             py::arg("requests"),
+             py::arg("full_outputs"),
+             py::arg("pd_separation") = false)
         .def("scheduler_tick", &rtp_llm::test::V41NativePPTransportTest::schedulerTick)
         .def("scheduled_outputs", &rtp_llm::test::V41NativePPTransportTest::scheduledOutputs)
         .def("shutdown_scheduler", &rtp_llm::test::V41NativePPTransportTest::shutdownScheduler)

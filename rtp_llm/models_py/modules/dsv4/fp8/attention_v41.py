@@ -630,6 +630,9 @@ class AttentionV41FP8(AttentionFP8):
         self._rotary_compute_device = rotary_device
         self._rotary_ready = rotary_device is None
         self._sparse_attention_mode = sparse_mode
+        self._async_prefill_checks = (
+            os.environ.get("DSV41_ATTN_ASYNC_CHECKS", "0") == "1"
+        )
         self._short_sparse_decode = None
         if sparse_mode is not None:
             from ._v41_short_sparse_sm120 import ShortSparseDecodeAttention
@@ -773,8 +776,20 @@ class AttentionV41FP8(AttentionFP8):
             )
 
     def _check_execution_config(self):
+        if (
+            os.environ.get("DSV41_ATTN_ASYNC_CHECKS", "0") == "1"
+        ) != self._async_prefill_checks:
+            raise ValueError(
+                "V4.1 attention validation mode changed; replace the owner"
+            )
         self._check_rotary_config()
         self._check_sparse_config()
+
+    def _require_prefill_values(self, valid, message, error=ValueError):
+        if self._async_prefill_checks and valid.is_cuda:
+            torch._assert_async(valid, message)
+        elif not bool(valid):
+            raise error(message)
 
     def can_fuse_prefill_attn_norm_input_quant(self, x, norm_weight) -> bool:
         # Small eager inputs regressed in the standalone wrapper benchmark.
@@ -1387,10 +1402,15 @@ class AttentionV41FP8(AttentionFP8):
         raw_tiles=None,
         grouped_projection=False,
         batched_groups=False,
+        projected_values=None,
     ):
         """Publish global pools in sequence order, carrying pairs across tiles."""
         if projected_tiles is not None and raw_tiles is not None:
             raise ValueError("Global producer accepts either raw or projected tiles")
+        if projected_values is not None and (
+            projected_tiles is not None or raw_tiles is not None
+        ):
+            raise ValueError("Global producer accepts only one projection source")
         if batched_groups and (not grouped_projection or projected_tiles is None):
             raise ValueError("Batched producer requires complete projected groups")
         owner = self._owner()
@@ -1572,8 +1592,9 @@ class AttentionV41FP8(AttentionFP8):
         carry = None
         tiles = raw_tiles if raw_tiles is not None else projected_tiles
         if tiles is None:
+            source_rows = x_full if projected_values is None else projected_values
             tiles = (
-                (t0, x_full[t0 : t0 + tile_rows])
+                (t0, source_rows[t0 : t0 + tile_rows])
                 for t0 in range(0, max(rows, 1), tile_rows)
             )
         for t0, x_tile in tiles:
@@ -1582,14 +1603,14 @@ class AttentionV41FP8(AttentionFP8):
             req_tile = req_ids[t0:t1]
             values = (
                 x_tile[:, : self.head_dim]
-                if projected_tiles is not None
+                if projected_tiles is not None or projected_values is not None
                 else _linear_bf16_bf16_fp32(x_tile, owner.global_wkv)
             )
             scores = None
             if ratio == 2:
                 scores = (
                     x_tile[:, self.head_dim :]
-                    if projected_tiles is not None
+                    if projected_tiles is not None or projected_values is not None
                     else _linear_bf16_bf16_fp32(x_tile, owner.global_wgate)
                 )
             group_plan = None
@@ -1840,6 +1861,31 @@ class AttentionV41FP8(AttentionFP8):
             producer_meta = None
             main_slots = index_slots = state_slots = None
             boundary_idx = boundary_pos = boundary_req = None
+        self._publish_global(
+            x_full.device,
+            starts,
+            lengths,
+            ends,
+            prefill=prefill,
+            warm_keys=warm_keys,
+            producer_seq_ends=producer_seq_ends,
+        )
+
+    def _publish_global(
+        self,
+        device,
+        starts,
+        lengths,
+        ends,
+        *,
+        prefill,
+        warm_keys=None,
+        producer_seq_ends=None,
+    ):
+        owner = self._owner()
+        ratio = self.compress_ratio
+        main_pool = self._source_pool(self._global_region())
+        index_pool = self._source_pool(INDEXER_KV)
         if warm_keys:
             boundary_pos = torch.cat([tile[0] for tile in warm_keys])
             boundary_req = torch.cat([tile[1] for tile in warm_keys])
@@ -1847,7 +1893,7 @@ class AttentionV41FP8(AttentionFP8):
             index_keys = torch.cat([tile[3] for tile in warm_keys])
         result = []
         fused_indexer = prefill and prefill_indexer.is_supported(
-            x_full.device, getattr(self, "index_n_heads", 0), owner.index_wk.shape[0]
+            device, getattr(self, "index_n_heads", 0), owner.index_wk.shape[0]
         )
         if (
             fused_indexer
@@ -1876,7 +1922,7 @@ class AttentionV41FP8(AttentionFP8):
                 return
         for b, end in enumerate(ends):
             count = int(end) // ratio
-            idx = torch.arange(count, device=x_full.device, dtype=torch.long)
+            idx = torch.arange(count, device=device, dtype=torch.long)
             pos = (idx + 1) * ratio - 1
             req = torch.full_like(pos, b)
             if main_pool is None:
@@ -1898,7 +1944,7 @@ class AttentionV41FP8(AttentionFP8):
                         b,
                         ratio,
                         self._cp_ctx,
-                        self._kv_cache.seq_size_per_block,
+                        getattr(self._kv_cache, "seq_size_per_block", 256),
                     )
                 else:
                     from rtp_llm.models_py.modules.dsv4.fp8._v41_fp4_triton import (
@@ -2533,14 +2579,21 @@ class AttentionV41FP8(AttentionFP8):
             raise ValueError("V4.1 prefill requires per-request integer lengths")
         if is_decode and not cp_on:
             checked_input_lengths, checked_prefix_lengths = (
-                torch.stack((input_lengths, prefix_lengths)).detach().cpu().long().unbind(0)
+                torch.stack((input_lengths, prefix_lengths))
+                .detach()
+                .cpu()
+                .long()
+                .unbind(0)
             )
         else:
-            checked_input_lengths, checked_prefix_lengths = input_lengths, prefix_lengths
-        if bool(((checked_input_lengths <= 0) | (checked_prefix_lengths < 0)).any()):
-            raise ValueError(
-                "V4.1 prefill requires nonempty requests and valid prefixes"
+            checked_input_lengths, checked_prefix_lengths = (
+                input_lengths,
+                prefix_lengths,
             )
+        self._require_prefill_values(
+            ((checked_input_lengths > 0) & (checked_prefix_lengths >= 0)).all(),
+            "V4.1 prefill requires nonempty requests and valid prefixes",
+        )
         if self._sparse_attention_mode is not None and (
             cp_on
             or input_lengths.numel() != 1
@@ -2553,7 +2606,11 @@ class AttentionV41FP8(AttentionFP8):
                     ).any()
                 )
                 if is_decode
-                else bool(((checked_input_lengths > 128) | (checked_prefix_lengths != 0)).any())
+                else bool(
+                    (
+                        (checked_input_lengths > 128) | (checked_prefix_lengths != 0)
+                    ).any()
+                )
             )
         ):
             raise NotImplementedError(
@@ -2570,19 +2627,23 @@ class AttentionV41FP8(AttentionFP8):
         if is_decode and not cp_on:
             ends = checked_prefix_lengths + checked_input_lengths
         else:
-            ends = (prefix_lengths.long() + lengths.long()).cpu()
+            ends = prefix_lengths.long() + lengths.long()
+            if not self._async_prefill_checks:
+                ends = ends.cpu()
         context_limit = V41_MAX_CONTEXT_TOKENS
         if cp_on:
             from rtp_llm.config.dsv41_config import V41_MAX_CP_PREFILL_TOKENS
 
-            context_limit = (
-                512 if bool((prefix_lengths > 0).any()) else V41_MAX_CP_PREFILL_TOKENS
-            )
+            # Chunked (fast-gen) prefill continuations carry prefix>0 while
+            # remaining context chunks, so the CP prefill bound applies to
+            # every chunk rather than only the first.
+            context_limit = V41_MAX_CP_PREFILL_TOKENS
         limit = min(context_limit, self._rope_max_seq_len)
-        if bool((ends > limit).any()):
-            raise NotImplementedError(
-                f"V4.1 attention beyond the {limit}-token context is not integrated"
-            )
+        self._require_prefill_values(
+            (ends <= limit).all(),
+            f"V4.1 attention beyond the {limit}-token context is not integrated",
+            NotImplementedError,
+        )
         if (
             self.compress_ratio
             and self.kv_source_layer_id not in self._shared_attention["layers"]
@@ -2625,6 +2686,27 @@ class AttentionV41FP8(AttentionFP8):
                 required = (
                     torch.ones_like(ends) if single_block else (ends + 255) // 256
                 )
+                if self._async_prefill_checks and table.is_cuda:
+                    required = required.to(device=table.device)
+                    if single_block and table.shape[1] != 1:
+                        raise ValueError(f"Invalid V4.1 {region} block table coverage")
+                    self._require_prefill_values(
+                        (required <= table.shape[1]).all(),
+                        f"Invalid V4.1 {region} block table coverage",
+                    )
+                    columns = torch.arange(table.shape[1], device=table.device)
+                    live = columns[None, :] < required[:, None]
+                    self._require_prefill_values(
+                        (~live | ((table > 0) & (table < base.shape[0]))).all(),
+                        f"Invalid V4.1 {region} block table page",
+                    )
+                    # Fixed-shape sort avoids unique/nonzero host synchronization.
+                    pages = torch.where(live, table, 0).flatten().sort().values
+                    self._require_prefill_values(
+                        ((pages[1:] != pages[:-1]) | (pages[1:] == 0)).all(),
+                        f"Aliased V4.1 {region} block table pages",
+                    )
+                    continue
                 if (single_block and table.shape[1] != 1) or bool(
                     (required > table.shape[1]).any()
                 ):
@@ -2672,15 +2754,23 @@ class AttentionV41FP8(AttentionFP8):
             or lengths.dtype not in (torch.int32, torch.int64)
             or lengths.device != input_lengths.device
             or not lengths.is_contiguous()
-            or bool((lengths <= 0).any())
-            or int(lengths.sum()) != cp.seq_len_full
             or cp.padded_seq_len != 4 * cp.chunk_length
-            or tuple(input_lengths.tolist()) != cp.chunk_lengths_per_req
-            or int(input_lengths.sum()) != cp.chunk_length
             or not isinstance(cp.prefix_lengths, torch.Tensor)
-            or not torch.equal(cp.prefix_lengths, prefix_lengths)
+            or cp.prefix_lengths.shape != prefix_lengths.shape
+            or cp.prefix_lengths.device != prefix_lengths.device
+            or not isinstance(cp.chunk_lengths_per_req, (tuple, list))
+            or len(cp.chunk_lengths_per_req) != input_lengths.numel()
         ):
             raise ValueError("V4.1 CP4 requires current per-request global metadata")
+        expected = input_lengths.new_tensor(cp.chunk_lengths_per_req)
+        self._require_prefill_values(
+            (lengths > 0).all()
+            & (lengths.sum() == cp.seq_len_full)
+            & (input_lengths == expected).all()
+            & (input_lengths.sum() == cp.chunk_length)
+            & (cp.prefix_lengths == prefix_lengths).all(),
+            "V4.1 CP4 requires current per-request global metadata",
+        )
         for name, dtype in (
             ("global_positions", torch.int64),
             ("relative_positions", torch.int64),
@@ -2751,9 +2841,12 @@ class AttentionV41FP8(AttentionFP8):
             ):
                 raise ValueError(f"Invalid V4.1 decode {name}")
         starts = metadata.start_pos
-        host_starts, host_positions, host_requests = torch.stack((
-            starts, metadata.position_ids, metadata.req_id_per_token
-        )).detach().cpu().unbind(0)
+        host_starts, host_positions, host_requests = (
+            torch.stack((starts, metadata.position_ids, metadata.req_id_per_token))
+            .detach()
+            .cpu()
+            .unbind(0)
+        )
         if (
             not torch.equal(host_positions, host_starts)
             or not torch.equal(
@@ -2791,7 +2884,9 @@ class AttentionV41FP8(AttentionFP8):
         pages = host_pages[SWA_KV].long()
         write = pages * entries + host_starts.long().remainder(entries)
         first = (host_starts.long() - self.window_size + 1).clamp_min(0)
-        positions = first[:, None] + torch.arange(self.window_size, device=host_starts.device)
+        positions = first[:, None] + torch.arange(
+            self.window_size, device=host_starts.device
+        )
         read = torch.where(
             positions <= host_starts[:, None],
             pages[:, None] * entries + positions.remainder(entries),
@@ -2810,15 +2905,30 @@ class AttentionV41FP8(AttentionFP8):
                     or not actual.is_contiguous()
                 ):
                     raise ValueError("V4.1 decode SWA slots do not match native pages")
-            host_slots = torch.cat(tuple(
-                (actual if actual.stride(-1) == 1 else actual.clone(
-                    memory_format=torch.contiguous_format
-                )).view(torch.uint8).reshape(-1) for actual, _ in slot_pairs
-            )).detach().cpu()
+            host_slots = (
+                torch.cat(
+                    tuple(
+                        (
+                            actual
+                            if actual.stride(-1) == 1
+                            else actual.clone(memory_format=torch.contiguous_format)
+                        )
+                        .view(torch.uint8)
+                        .reshape(-1)
+                        for actual, _ in slot_pairs
+                    )
+                )
+                .detach()
+                .cpu()
+            )
             offset = 0
             for actual, expected in slot_pairs:
                 size = actual.numel() * actual.element_size()
-                observed = host_slots[offset:offset + size].view(actual.dtype).reshape(actual.shape)
+                observed = (
+                    host_slots[offset : offset + size]
+                    .view(actual.dtype)
+                    .reshape(actual.shape)
+                )
                 if not torch.equal(observed, expected):
                     raise ValueError("V4.1 decode SWA slots do not match native pages")
                 offset += size
@@ -2867,13 +2977,20 @@ class AttentionV41FP8(AttentionFP8):
         # Launch the first bounded hidden-state transfer after the QKV gather.
         # It overlaps SWA work; subsequent transfers overlap global projection.
         x_gather = None
+        compact = (
+            self._shared_attention.get("v41_compact_cp_forward")
+            if self.is_kv_source
+            else None
+        )
+        if compact is not None:
+            compact.start(self, x)
         small_cp = common.cp_on and _use_small_cp_x_gather(common.cp_ctx)
         x_groups = (
             _prefill_x_group_plan(x, common.cp_ctx)
-            if self.is_kv_source and common.cp_on and not small_cp
+            if self.is_kv_source and common.cp_on and not small_cp and compact is None
             else None
         )
-        if self.is_kv_source and common.cp_on and x_groups is None:
+        if self.is_kv_source and common.cp_on and x_groups is None and compact is None:
             if small_cp:
                 # One bounded all-gather avoids per-half launches on short requests.
                 first_tile = (None, 0, common.cp_ctx.padded_seq_len)
@@ -2938,8 +3055,21 @@ class AttentionV41FP8(AttentionFP8):
         if self.is_kv_source:
             rows = common.cp_ctx.seq_len_full if common.cp_on else x.shape[0]
             x_full, projected_tiles, raw_tiles = x, None, None
+            compact_values = None
             batched_groups = False
-            if small_cp:
+            if compact is not None:
+                compact_values = compact.finish(self)
+                if compact.mode == "packed":
+                    span = compact.dispatch.spans[0]
+                    self._publish_global(
+                        x.device,
+                        starts,
+                        lengths,
+                        [span.start + span.count],
+                        prefill=True,
+                    )
+                    return common, qkv, swa, swa_starts, swa_only_workspace
+            elif small_cp:
                 x_full = _cp_restore_gathered_full_2d(
                     _wait_prefill_x_gather(x_gather), common.cp_ctx
                 )
@@ -2964,7 +3094,7 @@ class AttentionV41FP8(AttentionFP8):
                     x, common.cp_ctx, x_plan, x_gather, x_buffers, weights
                 )
             x_gather = None
-            if common.cp_on and x_groups is None:
+            if common.cp_on and x_groups is None and compact is None:
                 del x_buffers
             row_metadata = None
             if (
@@ -3013,6 +3143,7 @@ class AttentionV41FP8(AttentionFP8):
                     raw_tiles=raw_tiles,
                     grouped_projection=x_groups is not None,
                     batched_groups=batched_groups,
+                    projected_values=compact_values,
                 )
             finally:
                 if raw_tiles is not None:

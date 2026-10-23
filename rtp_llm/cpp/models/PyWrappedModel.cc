@@ -219,12 +219,12 @@ torch_ext::PyAttentionInputs PyWrappedModel::buildPyAttentionInputs(const GptMod
     }
 
     // Calculate cu_seqlens
-    int    batch_size               = py_attn_inputs.input_lengths.size(0);
-    size_t context_batch_size       = py_attn_inputs.prefix_lengths.size(0);
-    size_t decode_batch_size        = py_attn_inputs.sequence_lengths.size(0);
-    py_attn_inputs.dtype            = dataTypeToTorchType(description_.data_type);
-    RTP_LLM_CHECK_WITH_INFO(!inputs.is_idle_decode || (inputs.is_fake_stream && batch_size == 0
-                                                     && inputs.combo_tokens.numel() == 0),
+    int    batch_size         = py_attn_inputs.input_lengths.size(0);
+    size_t context_batch_size = py_attn_inputs.prefix_lengths.size(0);
+    size_t decode_batch_size  = py_attn_inputs.sequence_lengths.size(0);
+    py_attn_inputs.dtype      = dataTypeToTorchType(description_.data_type);
+    RTP_LLM_CHECK_WITH_INFO(!inputs.is_idle_decode
+                                || (inputs.is_fake_stream && batch_size == 0 && inputs.combo_tokens.numel() == 0),
                             "idle decode phase requires a zero-token fake batch");
     py_attn_inputs.is_prefill       = !decode_batch_size && !inputs.is_idle_decode;
     py_attn_inputs.is_target_verify = inputs.is_target_verify;
@@ -787,7 +787,7 @@ void PyWrappedModel::updateKVCacheKernelBlockId(const GptModelInputs& inputs) {
 }
 
 PyModelInputs PyWrappedModel::buildPyModelInputs(const GptModelInputs& inputs, PyContextParallelParams& cp_params) {
-    const bool              has_context_request = inputs.input_lengths.size(0) != inputs.sequence_lengths.size(0);
+    const bool has_context_request = inputs.input_lengths.size(0) != inputs.sequence_lengths.size(0);
     if (device_props_.enable_prefill_cp && has_context_request) {
         // Build rank-local inputs and CP metadata. The processor also handles
         // MTP hidden states according to its configured global/local layout.
@@ -802,8 +802,7 @@ PyModelInputs PyWrappedModel::buildPyModelInputs(const GptModelInputs& inputs, P
         token_ids = inputs.combo_tokens.to(torch::kCUDA, /*non_blocking=*/true);
     }
 
-    torch::Tensor input_hiddens =
-        inputs.last_hidden_states.defined() ? inputs.last_hidden_states : torch::empty({0});
+    torch::Tensor input_hiddens = inputs.last_hidden_states.defined() ? inputs.last_hidden_states : torch::empty({0});
 
     torch::Tensor combo_position_ids = torch::empty({0});
     if (inputs.combo_position_ids.defined()) {
@@ -863,8 +862,8 @@ PyModelInputs PyWrappedModel::buildPyModelInputs(const GptModelInputs& inputs, P
     return py_model_inputs;
 }
 
-GptModelOutputs PyWrappedModel::finalizeModelOutputs(const PyModelOutputs& py_model_outputs,
-                                                     const GptModelInputs& inputs,
+GptModelOutputs PyWrappedModel::finalizeModelOutputs(const PyModelOutputs&          py_model_outputs,
+                                                     const GptModelInputs&          inputs,
                                                      const PyContextParallelParams& cp_params) {
     const bool has_context_request = inputs.input_lengths.size(0) != inputs.sequence_lengths.size(0);
     // In-model DSpARK proposals leave on draft_tokens; pp_intermediates ride along the same way.
@@ -883,7 +882,7 @@ GptModelOutputs PyWrappedModel::finalizeModelOutputs(const PyModelOutputs& py_mo
         // The zero-token DP participant has completed its model collectives.
         // There are no rows for the LM head or the sampler.
         GptModelOutputs outputs;
-        outputs.hidden_states = hidden_states;
+        outputs.hidden_states     = hidden_states;
         outputs.all_hidden_states = hidden_states;
         return attach_model_side_outputs(std::move(outputs));
     }
@@ -939,11 +938,11 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
         if (int(device_props_.enable_layer_micro_batch)) {
             return forwardMicroBatched(inputs);
         }
-        PyContextParallelParams cp_params;
-        auto py_model_inputs = buildPyModelInputs(inputs, cp_params);
-        const bool has_cache_store_work = !inputs.warmup && inputs.pd_separation;
+        PyContextParallelParams   cp_params;
+        auto                      py_model_inputs      = buildPyModelInputs(inputs, cp_params);
+        const bool                has_cache_store_work = !inputs.warmup && inputs.pd_separation;
         CacheStoreWriteCycleGuard cache_store_write_cycle(cache_store_async_writer_, has_cache_store_work);
-        PyModelOutputs py_model_outputs;
+        PyModelOutputs            py_model_outputs;
 
         // Obtain the model outputs before choosing stage transport or final output processing.
         // History needs persistent graph inputs and a per-replay copy before
@@ -982,7 +981,7 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
     } catch (const py::error_already_set& e) {
         if (inputs.v41_cache_spans.defined()) {
             py::gil_scoped_acquire gil;
-            const py::object rejected =
+            const py::object       rejected =
                 py::module_::import("rtp_llm.models_py.model_desc.v41_errors").attr("V41InputRejected");
             if (e.matches(rejected)) {
                 throw V41InputRejected(e.what());
@@ -1237,29 +1236,29 @@ struct PyWrappedV41PPInputs final: PreparedPPModelInputs {
     }
 
     std::shared_ptr<const char> owner;
-    V41PPCacheBatchPtr batch;
-    GptModelInputs inputs;
-    PyContextParallelParams cp_params;
-    py::object dispatch;
-    bool executed = false;
+    V41PPCacheBatchPtr          batch;
+    GptModelInputs              inputs;
+    PyContextParallelParams     cp_params;
+    py::object                  dispatch;
+    bool                        executed = false;
 };
 
 }  // namespace
 
-PreparedPPModelInputsPtr PyWrappedModel::prepareV41PP(const GptModelInputs& inputs,
-                                                       const std::shared_ptr<V41PPCacheBatch>& batch) {
+PreparedPPModelInputsPtr PyWrappedModel::prepareV41PP(const GptModelInputs&                   inputs,
+                                                      const std::shared_ptr<V41PPCacheBatch>& batch) {
     // Final CP exit collectives depend on the output mode and selected global
     // rows. Agree those across WORLD before either stage builds a descriptor.
-    auto signature = torch::full({6}, -1, torch::kInt64);
-    auto* wire = signature.data_ptr<int64_t>();
-    wire[0] = 1;
-    wire[1] = inputs.need_all_logits;
-    wire[2] = inputs.need_all_hidden_states;
+    auto  signature     = torch::full({6}, -1, torch::kInt64);
+    auto* wire          = signature.data_ptr<int64_t>();
+    wire[0]             = 1;
+    wire[1]             = inputs.need_all_logits;
+    wire[2]             = inputs.need_all_hidden_states;
     const auto& indexes = inputs.lm_output_indexes;
     if (pp_size_ != 2 || !batch || enable_cuda_graph_ || int(device_props_.enable_layer_micro_batch)
-        || !device_props_.enable_prefill_cp || inputs.pd_separation || inputs.warmup
-        || !indexes.defined() || !indexes.device().is_cpu() || indexes.scalar_type() != torch::kInt32
-        || indexes.dim() != 1 || !indexes.is_contiguous() || indexes.numel() < 1 || indexes.numel() > 2
+        || !device_props_.enable_prefill_cp || inputs.pd_separation || inputs.warmup || !indexes.defined()
+        || !indexes.device().is_cpu() || indexes.scalar_type() != torch::kInt32 || indexes.dim() != 1
+        || !indexes.is_contiguous() || indexes.numel() < 1 || indexes.numel() > 2
         || indexes.numel() != static_cast<int64_t>(batch ? batch->bindings().size() : 0)) {
         wire[0] = 0;
     } else {
@@ -1271,23 +1270,32 @@ PreparedPPModelInputsPtr PyWrappedModel::prepareV41PP(const GptModelInputs& inpu
             }
         }
     }
-    auto peers = torch::empty({8 * signature.numel()}, torch::kInt64);
-    execAllGather({{peers}, ParallelMode::WORLD, {signature}, false});
-    for (int peer = 0; peer < 8; ++peer) {
+    // Asynchronous PP contract (RTP_LLM_V41_PP_ASYNC): agree only within this PP stage.
+    // Cross-stage equality of the output mode and LM rows then follows from the ordered
+    // plan channel (both stages derive them from the same serialized plan) rather than
+    // from comparison. Value-based gate: an explicit "0" must not enable it.
+    static const bool async_pp = [] {
+        const char* const value = std::getenv("RTP_LLM_V41_PP_ASYNC");
+        return value != nullptr && std::strtoll(value, nullptr, 10) != 0;
+    }();
+    const int64_t peer_count = async_pp ? pp_stage_size_ : 8;
+    auto          peers      = torch::empty({peer_count * signature.numel()}, torch::kInt64);
+    execAllGather({{peers}, async_pp ? ParallelMode::STAGE : ParallelMode::WORLD, {signature}, false});
+    for (int64_t peer = 0; peer < peer_count; ++peer) {
         if (!torch::equal(signature, peers.narrow(0, peer * signature.numel(), signature.numel())) || wire[0] != 1) {
             throw V41InputRejected("Native V4.1 PP requires agreed eager output modes and valid global LM rows");
         }
     }
-    auto prepared = std::make_shared<PyWrappedV41PPInputs>();
-    prepared->owner = native_pp_owner_;
-    prepared->batch = batch;
+    auto prepared    = std::make_shared<PyWrappedV41PPInputs>();
+    prepared->owner  = native_pp_owner_;
+    prepared->batch  = batch;
     prepared->inputs = inputs;
     holdInputsHostBuffers(prepared->inputs);
     // This path must build its own native attention metadata once. It cannot
     // consume a previous ordinary forward's optional asynchronous preparation.
     prepared_attention_inputs_.store(false, std::memory_order_release);
     try {
-        auto local = buildPyModelInputs(prepared->inputs, prepared->cp_params);
+        auto                   local = buildPyModelInputs(prepared->inputs, prepared->cp_params);
         py::gil_scoped_acquire gil;
         prepared->dispatch = py_model_.attr("_prepare_native_pp_engine")(local);
         prepared_attention_inputs_.store(false, std::memory_order_release);
@@ -1306,9 +1314,9 @@ PreparedPPModelInputsPtr PyWrappedModel::prepareV41PP(const GptModelInputs& inpu
 }
 
 GptModelOutputs PyWrappedModel::forwardV41PP(const PreparedPPModelInputsPtr& opaque,
-                                              int64_t transfer_round,
-                                              const PPIntermediateTensors* input_tensors,
-                                              PPIntermediateTensors* output_tensors) {
+                                             int64_t                         transfer_round,
+                                             const PPIntermediateTensors*    input_tensors,
+                                             PPIntermediateTensors*          output_tensors) {
     const auto prepared = std::dynamic_pointer_cast<PyWrappedV41PPInputs>(opaque);
     if (!prepared || prepared->owner != native_pp_owner_ || !prepared->batch->initialized()
         || !prepared->batch->executing() || prepared->executed || transfer_round < 0) {
@@ -1317,7 +1325,7 @@ GptModelOutputs PyWrappedModel::forwardV41PP(const PreparedPPModelInputsPtr& opa
     PyModelOutputs py_outputs;
     try {
         py::gil_scoped_acquire gil;
-        const py::object incoming = input_tensors ? py::cast(input_tensors->tensors) : py::none();
+        const py::object       incoming = input_tensors ? py::cast(input_tensors->tensors) : py::none();
         py_outputs = py_model_.attr("_execute_native_pp_engine")(prepared->dispatch, transfer_round, incoming)
                          .cast<PyModelOutputs>();
         prepared->executed = true;
@@ -1509,7 +1517,7 @@ PyWrappedModel::splitInputsIntoMicroBatches(const GptModelInputs& inputs, const 
                 GptModelInputs micro_model_inputs = inputs;
                 sliceV41CacheInputs(
                     inputs, micro_model_inputs, sliced_batch_idx, d_micro_batch_size + p_micro_batch_size);
-                size_t         total_batch_size   = d_micro_batch_size + p_micro_batch_size;
+                size_t total_batch_size = d_micro_batch_size + p_micro_batch_size;
                 RTP_LLM_LOG_DEBUG("d and p slice from %ld %ld %ld %ld",
                                   sliced_token_idx,
                                   sliced_batch_idx,
@@ -1540,9 +1548,9 @@ PyWrappedModel::splitInputsIntoMicroBatches(const GptModelInputs& inputs, const 
                     micro_model_inputs.engram_token_windows =
                         inputs.engram_token_windows.narrow(0, sliced_token_idx, slice_token_num);
                 }
-                micro_model_inputs.request_id   = inputs.request_id.defined() ?
-                                                      inputs.request_id.narrow(0, prefill_batch_idx, p_micro_batch_size) :
-                                                      torch::Tensor();
+                micro_model_inputs.request_id = inputs.request_id.defined() ?
+                                                    inputs.request_id.narrow(0, prefill_batch_idx, p_micro_batch_size) :
+                                                    torch::Tensor();
                 micro_model_inputs.request_pd_separation =
                     inputs.request_pd_separation.defined() ?
                         inputs.request_pd_separation.narrow(0, prefill_batch_idx, p_micro_batch_size) :
@@ -1571,7 +1579,7 @@ PyWrappedModel::splitInputsIntoMicroBatches(const GptModelInputs& inputs, const 
                 GptModelInputs micro_model_inputs = inputs;
                 RTP_LLM_LOG_DEBUG("d slice from %ld %ld %ld", sliced_token_idx, sliced_batch_idx, decode_batch_idx);
                 sliceV41CacheInputs(inputs, micro_model_inputs, sliced_batch_idx, d_micro_batch_size);
-                micro_model_inputs.combo_tokens  = inputs.combo_tokens.narrow(0, sliced_token_idx, d_micro_batch_size);
+                micro_model_inputs.combo_tokens = inputs.combo_tokens.narrow(0, sliced_token_idx, d_micro_batch_size);
                 if (inputs.engram_token_windows.defined()) {
                     micro_model_inputs.engram_token_windows =
                         inputs.engram_token_windows.narrow(0, sliced_token_idx, d_micro_batch_size);
@@ -1631,9 +1639,9 @@ PyWrappedModel::splitInputsIntoMicroBatches(const GptModelInputs& inputs, const 
                     micro_model_inputs.engram_token_windows =
                         inputs.engram_token_windows.narrow(0, sliced_token_idx, slice_token_num);
                 }
-                micro_model_inputs.request_id   = inputs.request_id.defined() ?
-                                                      inputs.request_id.narrow(0, prefill_batch_idx, p_micro_batch_size) :
-                                                      torch::Tensor();
+                micro_model_inputs.request_id = inputs.request_id.defined() ?
+                                                    inputs.request_id.narrow(0, prefill_batch_idx, p_micro_batch_size) :
+                                                    torch::Tensor();
                 micro_model_inputs.request_pd_separation =
                     inputs.request_pd_separation.defined() ?
                         inputs.request_pd_separation.narrow(0, prefill_batch_idx, p_micro_batch_size) :

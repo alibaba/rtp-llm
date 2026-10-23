@@ -210,6 +210,7 @@ filegroup(
         "modules/dsv4/v41_routed.py",
         "modules/dsv4/v41_moe.py",
         "modules/dsv4/v41_dispatch.py",
+        "modules/dsv4/v41_return.py",
         "modules/dsv4/v41_collective.py",
         "modules/dsv4/v41_feed_forward.py",
         "modules/dsv4/v41_block.py",

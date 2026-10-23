@@ -27,6 +27,15 @@ _DSV4_FP8_TEST_DEPS = [
 ]
 
 py_test(
+    name = "test_v41_compact_cp_projection_sm120",
+    srcs = ["test_v41_compact_cp_projection_sm120.py"],
+    deps = _DSV4_FP8_TEST_DEPS,
+    tags = ["SM120", "manual"],
+    exec_properties = {"gpu": "SM120", "gpu_count": "1"},
+    target_compatible_with = _DSV4_SM120_ONLY,
+)
+
+py_test(
     name = "test_v41_collapse_owner_sm120",
     srcs = ["test_v41_collapse_owner_sm120.py"],
     deps = _DSV4_FP8_TEST_DEPS + [
@@ -1036,6 +1045,71 @@ py_test(
 py_test(
     name = "test_v41_routed_hardware",
     srcs = ["test_v41_routed_hardware.py"],
+    deps = _DSV4_FP8_TEST_DEPS,
+    tags = ["RTX_5000_PRO"],
+    exec_properties = {"gpu": "RTX_5000_PRO", "gpu_count": "1"},
+    target_compatible_with = _DSV4_SM120_ONLY,
+)
+
+py_test(
+    name = "test_v41_packet_fusion_sm120",
+    srcs = ["test_v41_packet_fusion_sm120.py"],
+    deps = _DSV4_FP8_TEST_DEPS,
+    tags = ["RTX_5000_PRO"],
+    exec_properties = {"gpu": "RTX_5000_PRO", "gpu_count": "1"},
+    target_compatible_with = _DSV4_SM120_ONLY,
+)
+
+py_test(
+    name = "test_v41_compact_cp_plan",
+    srcs = ["test_v41_compact_cp_plan.py"],
+    data = ["//rtp_llm/models_py:prefill_optimization_source_data"],
+    deps = [],
+)
+
+py_test(
+    name = "test_v41_compact_cp_bytes_sm120",
+    srcs = ["test_v41_compact_cp_bytes_sm120.py"],
+    deps = _DSV4_FP8_TEST_DEPS,
+    tags = ["RTX_5000_PRO"],
+    exec_properties = {"gpu": "RTX_5000_PRO", "gpu_count": "1"},
+    target_compatible_with = _DSV4_SM120_ONLY,
+)
+
+py_test(
+    name = "test_v41_compact_cp_runtime_sm120",
+    srcs = ["test_v41_compact_cp_runtime_sm120.py"],
+    deps = _DSV4_FP8_TEST_DEPS,
+    tags = ["RTX_5000_PRO", "manual"],
+    exec_properties = {"gpu": "RTX_5000_PRO", "gpu_count": "4"},
+    target_compatible_with = _DSV4_SM120_ONLY,
+)
+
+py_test(
+    name = "test_v41_async_validation_sm120",
+    srcs = [
+        "test_v41_async_validation_sm120.py",
+        "test_v41_attention_owner_sm120.py",
+        "test_v41_compact_cp_bytes_sm120.py",
+    ],
+    deps = _DSV4_FP8_TEST_DEPS,
+    tags = ["RTX_5000_PRO"],
+    exec_properties = {"gpu": "RTX_5000_PRO", "gpu_count": "1"},
+    target_compatible_with = _DSV4_SM120_ONLY,
+)
+
+py_test(
+    name = "test_v41_shared_act_quant_sm120",
+    srcs = ["test_v41_shared_act_quant_sm120.py"],
+    deps = _DSV4_FP8_TEST_DEPS,
+    tags = ["RTX_5000_PRO"],
+    exec_properties = {"gpu": "RTX_5000_PRO", "gpu_count": "1"},
+    target_compatible_with = _DSV4_SM120_ONLY,
+)
+
+py_test(
+    name = "test_v41_moe_prefill_fusion_sm120",
+    srcs = ["test_v41_moe_prefill_fusion_sm120.py", "test_v41_routed_hardware.py"],
     deps = _DSV4_FP8_TEST_DEPS,
     tags = ["RTX_5000_PRO"],
     exec_properties = {"gpu": "RTX_5000_PRO", "gpu_count": "1"},

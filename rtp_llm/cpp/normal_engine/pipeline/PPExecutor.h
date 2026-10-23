@@ -22,6 +22,7 @@
 #include "rtp_llm/cpp/model_utils/MlaConfig.h"
 #include "rtp_llm/cpp/models/SampleInfos.h"
 #include "rtp_llm/cpp/normal_engine/pipeline/PPBatchStreamProcessor.h"
+#include "rtp_llm/cpp/normal_engine/pipeline/PPSerialization.h"
 #include "rtp_llm/cpp/normal_engine/pipeline/PPTransport.h"
 #include "rtp_llm/cpp/normal_engine/pipeline/PPTypes.h"
 #include "rtp_llm/cpp/normal_engine/speculative/MtpCompute.h"
@@ -99,12 +100,12 @@ private:
         // Dispatch-time per-stream geometry, parallel to stream_groups.allStreams().
         // Consumed with the round's execution result, by which time the live
         // stream state has moved on.
-        std::vector<PPStreamRoundSnapshot> round_snapshot;
-        int64_t                            schedule_time_us = 0;
-        PPTickets                          plan_sends;
-        PPTickets                          activation_sends;
-        PPTickets                          execution_result_sends;
-        std::shared_ptr<V41PPCacheBatch>    v41_cache_batch;
+        std::vector<PPStreamRoundSnapshot>     round_snapshot;
+        int64_t                                schedule_time_us = 0;
+        PPTickets                              plan_sends;
+        PPTickets                              activation_sends;
+        PPTickets                              execution_result_sends;
+        std::shared_ptr<V41PPCacheBatch>       v41_cache_batch;
         std::shared_ptr<PreparedPPModelInputs> v41_model_inputs;
 
         void reset();
@@ -165,9 +166,11 @@ private:
 
     PPExecutionPlan receivePlan();
 
-    void asyncSendTensors(const PPIntermediateTensors& tensors, PPTickets& tickets);
+    void asyncSendTensors(const PPIntermediateTensors&      tensors,
+                          PPTickets&                        tickets,
+                          pp_serialization::PPTensorsStatus status = pp_serialization::PPTensorsStatus::ok);
 
-    PPIntermediateTensors receiveTensors(PPTickets& tickets);
+    PPIntermediateTensors receiveTensors(PPTickets& tickets, pp_serialization::PPTensorsStatus* status = nullptr);
 
     void asyncSendExecutionResult(const PPExecutionResult& result, PPTickets& tickets);
 
@@ -224,13 +227,17 @@ private:
     std::unique_ptr<ModelBase>                       draft_model_;
     std::unique_ptr<speculative::FastTopKSampler>    fast_topk_sampler_;
 
-    const ParallelismConfig      parallelism_config_;
-    const RankLayout             pp_layout_;
-    std::unique_ptr<PPTransport> transport_;
-    std::vector<InflightBatch>   slots_;
-    size_t                       current_slot_ = 0;
-    std::unique_ptr<V41PPAdmission> v41_pp_admission_;
+    const ParallelismConfig                   parallelism_config_;
+    const RankLayout                          pp_layout_;
+    std::unique_ptr<PPTransport>              transport_;
+    std::vector<InflightBatch>                slots_;
+    size_t                                    current_slot_ = 0;
+    std::unique_ptr<V41PPAdmission>           v41_pp_admission_;
     std::map<int64_t, std::array<int64_t, 3>> v41_request_identities_;
+    // Asynchronous (overlapped) V4.1 PP contract: retained-dispatch chaining in the
+    // local cache, and stage-local agreement in place of per-chunk WORLD rendezvous.
+    // Default false keeps the serialized synchronous path for A/B and regressions.
+    bool v41_pp_async_ = false;
 
     bool                               enable_detail_log_ = false;
     std::shared_ptr<ModelInputsLogger> model_inputs_logger_;

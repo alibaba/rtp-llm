@@ -111,6 +111,13 @@ def loader_signature(weights):
     return result
 
 
+# Wall-clock metadata (microseconds) can never match between the two live engine runs this
+# harness compares; a `==` on them is a pre-existing flake, not an assertion. Everything else
+# in aux_info (input_len, iter_count, output_len, prefix_len, reuse_len) is structural and is
+# still compared exactly -- only the timings are skipped, and only after keys are matched.
+_TIMING_FIELDS = frozenset({"cost_time", "first_token_cost_time", "wait_time"})
+
+
 def require_exact_tree(expected, actual):
     if isinstance(expected, torch.Tensor):
         assert isinstance(actual, torch.Tensor)
@@ -126,7 +133,9 @@ def require_exact_tree(expected, actual):
     if isinstance(expected, dict):
         assert expected.keys() == actual.keys()
         return sum(
-            require_exact_tree(value, actual[key]) for key, value in expected.items()
+            require_exact_tree(value, actual[key])
+            for key, value in expected.items()
+            if key not in _TIMING_FIELDS
         )
     if isinstance(expected, (list, tuple)):
         assert len(expected) == len(actual)

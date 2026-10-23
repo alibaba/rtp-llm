@@ -1,3 +1,4 @@
+#include <cstdlib>
 #include <mutex>
 #include <vector>
 
@@ -20,12 +21,12 @@ namespace test {
 
 class V41NativeEngineTest {
 public:
-    V41NativeEngineTest(py::object py_model,
-                       ModelConfig config,
-                       const ParallelismConfig& parallelism,
-                       torch::Tensor lm_head,
-                       bool pdfusion = false,
-                       int64_t pp_chunk_size = 0) {
+    V41NativeEngineTest(py::object               py_model,
+                        ModelConfig              config,
+                        const ParallelismConfig& parallelism,
+                        torch::Tensor            lm_head,
+                        bool                     pdfusion      = false,
+                        int64_t                  pp_chunk_size = 0) {
         static std::once_flag runtime_once;
         std::call_once(runtime_once, [&]() {
             AUTIL_ROOT_LOG_CONFIG();
@@ -36,47 +37,49 @@ public:
         RTP_LLM_CHECK(pp_chunk_size >= 0 && pp_chunk_size <= kV41MaxInitialPPPrefillTokens);
         if (pipeline_) {
             RTP_LLM_CHECK_WITH_INFO(!pdfusion && parallelism.pp_size == 2 && parallelism.tp_size == 4
-                                       && parallelism.ep_size == 4 && parallelism.dp_size == 1
-                                       && parallelism.world_size == 8 && parallelism.local_cp_enabled()
-                                       && (parallelism.pp_stage_layer_counts == std::vector<int64_t>{21, 19}),
-                                   "cold V4.1 PP fixture requires the exact CEP4PP2 PREFILL profile");
+                                        && parallelism.ep_size == 4 && parallelism.dp_size == 1
+                                        && parallelism.world_size == 8 && parallelism.local_cp_enabled()
+                                        && (parallelism.pp_stage_layer_counts == std::vector<int64_t>{21, 19}),
+                                    "cold V4.1 PP fixture requires the exact CEP4PP2 PREFILL profile");
         } else {
             RTP_LLM_CHECK(parallelism.pp_size == 1);
         }
-        max_seq_len_ = static_cast<size_t>(config.max_seq_len);
-        config.model_type = "deepseek_v41";
-        config.input_vocab_size = config.vocab_size;
+        max_seq_len_                       = static_cast<size_t>(config.max_seq_len);
+        config.model_type                  = "deepseek_v41";
+        config.input_vocab_size            = config.vocab_size;
         config.special_tokens.eos_token_id = -1;
-        config.data_type = DataType::TYPE_BF16;
+        config.data_type                   = DataType::TYPE_BF16;
         EngineInitParams params;
-        params.model_id = 0;
-        params.model_config_ = std::move(config);
-        params.parallelism_config = parallelism;
-        params.pd_sep_config.role_type = pdfusion ? RoleType::PDFUSION : RoleType::PREFILL;
-        params.runtime_config.warm_up = false;
+        params.model_id                               = 0;
+        params.model_config_                          = std::move(config);
+        params.parallelism_config                     = parallelism;
+        params.pd_sep_config.role_type                = pdfusion ? RoleType::PDFUSION : RoleType::PREFILL;
+        params.runtime_config.warm_up                 = false;
         params.runtime_config.max_generate_batch_size = 2;
         params.runtime_config.fifo_scheduler_config.max_context_batch_size = 2;
-        params.runtime_config.fifo_scheduler_config.max_batch_tokens_size = max_seq_len_;
-        params.runtime_config.use_batch_decode_scheduler = false;
+        params.runtime_config.fifo_scheduler_config.max_batch_tokens_size  = max_seq_len_;
+        params.runtime_config.use_batch_decode_scheduler                   = false;
         if (pipeline_) {
-            auto& fifo = params.runtime_config.fifo_scheduler_config;
-            fifo.cp_force_single_prefill = false;
-            fifo.enable_fast_gen = true;
+            auto& fifo                    = params.runtime_config.fifo_scheduler_config;
+            fifo.cp_force_single_prefill  = false;
+            fifo.enable_fast_gen          = true;
             fifo.fast_gen_max_context_len = pp_chunk_size;
-            fifo.max_batch_tokens_size = std::max<int64_t>(512, 2 * pp_chunk_size);
+            fifo.max_batch_tokens_size    = std::max<int64_t>(512, 2 * pp_chunk_size);
         }
-        const auto cache_blocks = max_seq_len_ <= 512 ? 8 : 2 * ((max_seq_len_ + 255) / 256) + 2;
-        params.kv_cache_config.test_block_num = cache_blocks + parallelism.world_rank;
+        const auto cache_blocks                   = max_seq_len_ <= 512 ? 8 : 2 * ((max_seq_len_ + 255) / 256) + 2;
+        params.kv_cache_config.test_block_num     = cache_blocks + parallelism.world_rank;
         params.kv_cache_config.seq_size_per_block = params.kv_cache_config.kernel_seq_size_per_block = 256;
-        params.kv_cache_config.reuse_cache = false;
+        // Warm-TTFT measurement knob: defaults off so every prior cold-prefill run
+        // stays valid; set V41_TEST_REUSE_CACHE=1 to retain prefixes across enqueues.
+        params.kv_cache_config.reuse_cache        = (std::getenv("V41_TEST_REUSE_CACHE") != nullptr);
         params.hw_kernel_config.enable_cuda_graph = false;
         params.gpt_weights.layers.resize(40);
-        auto head = std::make_shared<DenseWeights>();
-        head->kernel = std::move(lm_head);
+        auto head                  = std::make_shared<DenseWeights>();
+        head->kernel               = std::move(lm_head);
         params.gpt_weights.lm_head = std::move(head);
-        params.py_model = std::move(py_model);
+        params.py_model            = std::move(py_model);
         params.py_eplb = params.py_sp_model = params.weight_manager = py::none();
-        engine_ = std::make_unique<NormalEngine>(params, nullptr);
+        engine_                                                     = std::make_unique<NormalEngine>(params, nullptr);
         const auto status = engine_->waitStartupResult(std::chrono::seconds(30));
         if (!status.ok()) {
             throw std::runtime_error(status.ToString());
@@ -85,26 +88,28 @@ public:
     }
 
     std::vector<int64_t> enqueue(const std::vector<std::vector<int32_t>>& requests,
-                                 int new_tokens = 1, bool full_outputs = false, bool return_diagnostics = true) {
+                                 int                                      new_tokens         = 1,
+                                 bool                                     full_outputs       = false,
+                                 bool                                     return_diagnostics = true) {
         RTP_LLM_CHECK(new_tokens > 0 && new_tokens <= 16);
         RTP_LLM_CHECK(!pipeline_ || (new_tokens == 1 && engine_->parallelism_config.world_rank == 0));
         std::vector<std::shared_ptr<GenerateInput>> inputs;
-        std::vector<int64_t> ids;
+        std::vector<int64_t>                        ids;
         for (const auto& tokens : requests) {
             RTP_LLM_CHECK(!tokens.empty() && tokens.size() + new_tokens - 1 <= V41CacheDispatch::MAX_CONTEXT_TOKENS
                           && tokens.size() + new_tokens <= max_seq_len_);
             RTP_LLM_CHECK(!pipeline_ || tokens.size() <= kV41MaxInitialPPPrefillTokens);
-            auto input = std::make_shared<GenerateInput>();
-            input->begin_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
-            input->input_ids = torch::tensor(tokens, torch::kInt32);
-            input->request_id = ++request_id_;
-            input->generate_config = std::make_shared<GenerateConfig>();
+            auto input                             = std::make_shared<GenerateInput>();
+            input->begin_time_us                   = autil::TimeUtility::currentTimeInMicroSeconds();
+            input->input_ids                       = torch::tensor(tokens, torch::kInt32);
+            input->request_id                      = ++request_id_;
+            input->generate_config                 = std::make_shared<GenerateConfig>();
             input->generate_config->max_new_tokens = new_tokens;
-            input->generate_config->top_k = 1;
-            input->generate_config->is_streaming = false;
+            input->generate_config->top_k          = 1;
+            input->generate_config->is_streaming   = false;
             if ((pipeline_ && return_diagnostics) || full_outputs) {
-                input->generate_config->return_logits = true;
-                input->generate_config->return_hidden_states = true;
+                input->generate_config->return_logits            = true;
+                input->generate_config->return_hidden_states     = true;
                 input->generate_config->return_all_hidden_states = full_outputs;
             }
             ids.push_back(input->request_id);
@@ -149,36 +154,36 @@ public:
             tokens.append(stream->completeTokenIdsVec());
             steps.append(stream->iterCount());
             const auto& output = generated[i].generate_outputs.front();
-            py::dict row;
-            row["request_id"] = stream->streamId();
-            row["tokens"] = stream->completeTokenIdsVec();
+            py::dict    row;
+            row["request_id"]  = stream->streamId();
+            row["tokens"]      = stream->completeTokenIdsVec();
             row["outstanding"] = stream->ppOutstandingResults();
-            row["hidden"] = output.hidden_states;
-            row["logits"] = output.logits;
-            row["all_hidden"] = output.all_hidden_states;
-            const auto& aux = output.aux_info;
-            py::dict timing;
-            timing["input_len"] = aux.input_len;
-            timing["output_len"] = aux.output_len;
-            timing["iter_count"] = aux.iter_count;
-            timing["reuse_len"] = aux.reuse_len;
-            timing["prefix_len"] = aux.prefix_len;
-            timing["cost_time"] = aux.cost_time_us / 1000.0;
+            row["hidden"]      = output.hidden_states;
+            row["logits"]      = output.logits;
+            row["all_hidden"]  = output.all_hidden_states;
+            const auto& aux    = output.aux_info;
+            py::dict    timing;
+            timing["input_len"]             = aux.input_len;
+            timing["output_len"]            = aux.output_len;
+            timing["iter_count"]            = aux.iter_count;
+            timing["reuse_len"]             = aux.reuse_len;
+            timing["prefix_len"]            = aux.prefix_len;
+            timing["cost_time"]             = aux.cost_time_us / 1000.0;
             timing["first_token_cost_time"] = aux.first_token_cost_time_us / 1000.0;
-            timing["wait_time"] = aux.wait_time_us / 1000.0;
-            row["aux_info"] = std::move(timing);
+            timing["wait_time"]             = aux.wait_time_us / 1000.0;
+            row["aux_info"]                 = std::move(timing);
             rows.append(std::move(row));
         }
         streams_.clear();
         py::dict result;
-        result["tokens"] = std::move(tokens);
-        result["steps"] = std::move(steps);
+        result["tokens"]  = std::move(tokens);
+        result["steps"]   = std::move(steps);
         result["outputs"] = std::move(rows);
         return result;
     }
 
     std::vector<std::string> errors() {
-        py::gil_scoped_release release;
+        py::gil_scoped_release   release;
         std::vector<std::string> messages;
         for (const auto& stream : streams_) {
             auto output = stream->nextOutput(60000);
@@ -199,7 +204,7 @@ public:
     py::dict stop() {
         {
             py::gil_scoped_release release;
-            const auto status = engine_->stop();
+            const auto             status = engine_->stop();
             if (!status.ok()) {
                 throw std::runtime_error(status.ToString());
             }
@@ -208,10 +213,10 @@ public:
         if (pipeline_) {
             auto* executor = dynamic_cast<PPExecutor*>(engine_->executor_.get());
             RTP_LLM_CHECK(executor != nullptr && executor->shutdownCompleted());
-            result["shutdown"] = executor->shutdownCompleted();
+            result["shutdown"]        = executor->shutdownCompleted();
             result["active_requests"] = executor->v41_pp_admission_->activeRequests();
-            result["identity_count"] = executor->v41_request_identities_.size();
-            size_t retained = 0;
+            result["identity_count"]  = executor->v41_request_identities_.size();
+            size_t retained           = 0;
             for (auto& slot : executor->slots_) {
                 executor->waitAll(slot.plan_sends, "cold engine plan drain");
                 executor->waitAll(slot.activation_sends, "cold engine activation drain");
@@ -225,20 +230,20 @@ public:
             RTP_LLM_CHECK(executor != nullptr);
             executor->model_->releaseBuffers();
         }
-        result["free_before"] = free_before_;
-        result["free_after"] = engine_->getCacheManager()->freeBlocksNum();
+        result["free_before"]  = free_before_;
+        result["free_after"]   = engine_->getCacheManager()->freeBlocksNum();
         result["cache_blocks"] = engine_->getCacheManager()->cacheConfig().block_num;
         engine_.reset();
         return result;
     }
 
 private:
-    std::unique_ptr<NormalEngine> engine_;
+    std::unique_ptr<NormalEngine>  engine_;
     std::vector<GenerateStreamPtr> streams_;
-    int64_t request_id_{0};
-    size_t free_before_{0};
-    size_t max_seq_len_{0};
-    bool pipeline_{false};
+    int64_t                        request_id_{0};
+    size_t                         free_before_{0};
+    size_t                         max_seq_len_{0};
+    bool                           pipeline_{false};
 };
 
 }  // namespace test
@@ -250,11 +255,23 @@ PYBIND11_MODULE(libth_v41_native_engine_test, m) {
         return torch_ext::cublas_gemm_bf16_bf16_fp32(hidden.to(torch::kBFloat16), head);
     });
     py::class_<rtp_llm::test::V41NativeEngineTest>(m, "NativeEngine")
-        .def(py::init<py::object, rtp_llm::ModelConfig, const rtp_llm::ParallelismConfig&, torch::Tensor, bool, int64_t>(),
-             py::arg("model"), py::arg("config"), py::arg("parallelism"), py::arg("lm_head"),
-             py::arg("pdfusion") = false, py::arg("pp_chunk_size") = 0)
-        .def("enqueue", &rtp_llm::test::V41NativeEngineTest::enqueue,
-             py::arg("requests"), py::arg("new_tokens") = 1, py::arg("full_outputs") = false,
+        .def(py::init<py::object,
+                      rtp_llm::ModelConfig,
+                      const rtp_llm::ParallelismConfig&,
+                      torch::Tensor,
+                      bool,
+                      int64_t>(),
+             py::arg("model"),
+             py::arg("config"),
+             py::arg("parallelism"),
+             py::arg("lm_head"),
+             py::arg("pdfusion")      = false,
+             py::arg("pp_chunk_size") = 0)
+        .def("enqueue",
+             &rtp_llm::test::V41NativeEngineTest::enqueue,
+             py::arg("requests"),
+             py::arg("new_tokens")         = 1,
+             py::arg("full_outputs")       = false,
              py::arg("return_diagnostics") = true)
         .def("outputs", &rtp_llm::test::V41NativeEngineTest::outputs, py::arg("timeout_ms") = 60000)
         .def("errors", &rtp_llm::test::V41NativeEngineTest::errors)

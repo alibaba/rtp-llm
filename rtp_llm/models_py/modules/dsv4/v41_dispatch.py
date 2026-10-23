@@ -123,7 +123,7 @@ class V41DispatchLayout:
 
 
 def pack_dispatch(
-    x, weights, indices, valid_rows, layout, *, out=None, backend="triton"
+    x, weights, indices, valid_rows, layout, *, out=None, backend="triton", fused=False
 ):
     """Canonicalize and quantize rank-local rows into an admitted EP payload.
 
@@ -176,6 +176,12 @@ def pack_dispatch(
         ):
             raise ValueError("V4.1 dispatch output must not share input storage")
     active = _validate_routes(weights, indices, valid_rows, layout.experts)
+    if fused and backend == "triton" and layout.topk <= 32:
+        from ._v41_packet_triton import is_supported, write_dispatch
+
+        if is_supported(x):
+            result = layout.allocate(rows, device=x.device) if out is None else out
+            return write_dispatch(x, weights, indices, active, layout, result)
     active_rows = active.any(-1)
     safe_x = torch.where(active_rows[:, None], x, 0)
     values, scales = quantize_group32(safe_x, backend=backend)

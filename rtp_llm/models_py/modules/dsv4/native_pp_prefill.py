@@ -164,8 +164,7 @@ def prepare_native_pp_prefill_dispatch(
         or len({s.identity.generation for s in spans}) != len(spans)
         or any(
             s.count <= 0
-            or s.start + s.count
-            > min(args.max_seq_len, 256 if s.start else V41_MAX_CP_PREFILL_TOKENS)
+            or s.start + s.count > min(args.max_seq_len, V41_MAX_CP_PREFILL_TOKENS)
             for s in spans
         )
     ):
@@ -286,7 +285,13 @@ def prepare_native_pp_prefill_dispatch(
             or table.tolist() != expected
         ):
             raise ValueError(
-                f"V4.1 {tag} physical pages disagree with native ownership"
+                f"V4.1 {tag} physical pages disagree with native ownership: "
+                f"table_shape={tuple(table.shape)} want=({len(spans)},{width}) "
+                f"single_block={single_block} required={required} "
+                f"lease_lens={[len(r) for r in pages]} "
+                f"spans={[(s.start, s.count, s.chunk_id) for s in spans]} "
+                f"table_row0={table[0].tolist()[:6]} "
+                f"lease_row0={expected[0][:6] if expected else []}"
             )
     layouts = dsv41_page_layouts(0)
     bindings = dsv41_cache_bindings(args.v41_config, 2, args.pp_rank)

@@ -18,6 +18,11 @@
 namespace rtp_llm {
 
 void registerPyModuleOps(py::module& rtp_ops_m) {
+    py::class_<torch_ext::V41CompactCpProjection>(rtp_ops_m, "V41CompactCpProjection")
+        .def(py::init<int64_t>(), py::arg("device"))
+        .def_static("supported", &torch_ext::V41CompactCpProjection::supported, py::arg("device"))
+        .def("forward", &torch_ext::V41CompactCpProjection::forward, py::arg("input"), py::arg("weight"));
+
     rtp_ops_m.def("cublas_gemm_bf16_bf16_fp32",
                   &torch_ext::cublas_gemm_bf16_bf16_fp32,
                   "cuBLAS BF16 x BF16 GEMM with FP32 accumulation and FP32 output",

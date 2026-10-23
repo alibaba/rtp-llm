@@ -76,12 +76,18 @@ def controls(native, other, rank, pcfg, initial, roots):
     before = native.free_blocks
     raw = snapshot(native.cache)
     valid = wire(initial)
+    # The local admission bound is min(max_seq_len, kV41MaxInitialPPPrefillTokens), which
+    # 12cfb351c3 raised from 256 to 512 for this config (D2). The mutation must exceed the
+    # CURRENT bound rather than hardcode 257, so it is rejected on every rank again.
+    initial_limit = min(
+        cache_config().max_seq_len, ops.V41_MAX_INITIAL_PP_PREFILL_TOKENS
+    )
     for row, column, value in (
         (1, 5, 0),
         (1, 0, REQUESTS[0]),
         (1, 1, 1),
         (1, 4, 1),
-        (1, 5, 257),
+        (1, 5, initial_limit + 1),
     ):
         bad = valid.clone()
         bad[row, column] = value
@@ -92,9 +98,15 @@ def controls(native, other, rank, pcfg, initial, roots):
     if rank == 0:
         rejected(lambda: native.prepare_local(valid))
         rejected(lambda: native.prepare_local(valid, [roots[0], roots[0]]))
-        oversized = native.allocate(9001, 257)
-        rejected(lambda: native.prepare_local(valid, [roots[0], oversized]))
-        release_allocations([oversized])
+        # Page coverage. 12cfb351c3 replaced the exact-one-page rule with a range (the span's
+        # need <= pages <= ceil(limit/256)). The oversized side is unconstructable through this
+        # binding: allocate() goes through a stream whose CompleteTokenIds enforces
+        # seq_length < max_seq_len (CompleteTokenIds.cc:48), so no lease can exceed
+        # ceil((max_seq_len-1)/256) <= max_pages pages -- the rule's upper bound is enforced by
+        # construction. The insufficient side still exercises the same check.
+        bigger = valid.clone()
+        bigger[1, 5] = 300  # row 1 needs 2 pages; roots[1] has 1
+        rejected(lambda: native.prepare_local(bigger, roots))
     else:
         borrowed = native.allocate(9001, 256)
         rejected(lambda: native.prepare_local(valid, [borrowed, borrowed]))

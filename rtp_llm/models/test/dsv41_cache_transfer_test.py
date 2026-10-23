@@ -351,6 +351,89 @@ class V41L20TransferTest(unittest.TestCase):
             self.receiver.apply(self.export([span], 1), [span])
         self.assert_unchanged(before)
 
+    def test_stale_and_duplicate_frames_leave_every_live_frontier_untouched(self):
+        """A rejected replay must not consume a round or move any request's frontier.
+
+        Under the asynchronous PP contract stage 0 runs ahead of stage 1, so a stale
+        frame can arrive while a newer round is already in flight, possibly for a
+        different request. `apply` validates the whole batch before mutating anything,
+        so a rejection has to be completely inert: had it consumed the round or
+        advanced one request's cursor, the legitimate frame that still needs that round
+        would be rejected as a stale envelope and the two stages would diverge
+        silently -- a final-token comparison could not see it.
+        """
+        other = Identity(102, 2, 9)
+        other_source = {"hca_kv": [4], "indexer_kv": [2]}
+        other_target = {"hca_kv": [5], "indexer_kv": [2]}
+        self.receiver.begin_request(other, other_target)
+        tables = {self.identity: self.producer_blocks, other: other_source}
+
+        first = [Span(self.identity, 0, 0, 19), Span(other, 0, 0, 7)]
+        a_rows = self.seed(self.producer_blocks, 0, 19, 11)
+        b_rows = self.seed(other_source, 0, 7, 23)
+        round0 = self.export(first, tables=tables)
+        self.receiver.apply(round0, first)
+        self.receiver.require_ready(self.identity, 19, 0)
+        self.receiver.require_ready(other, 7, 0)
+
+        before = self.snapshots()
+        # (a) the round-0 frame replayed verbatim: its round_id is now stale.
+        with self.assertRaisesRegex(ValueError, "round"):
+            self.receiver.apply(round0, first)
+        # (b) the same chunk ids re-exported at the current round: duplicates.
+        with self.assertRaisesRegex(ValueError, "duplicate"):
+            self.receiver.apply(self.export(first, 1, tables=tables), first)
+        # (c) a frame from a round the receiver has not reached yet.
+        with self.assertRaisesRegex(ValueError, "envelope"):
+            self.receiver.apply(self.export(first, 5, tables=tables), first)
+
+        # All three were inert: no write landed, round 0's readiness survived intact
+        # for BOTH requests, and chunk 1 of neither was published by a frame that
+        # never imported.
+        self.assert_unchanged(before)
+        self.assert_rows(self.replica_blocks, 0, 19, a_rows)
+        self.assert_rows(other_target, 0, 7, b_rows)
+        self.receiver.require_ready(self.identity, 19, 0)
+        self.receiver.require_ready(other, 7, 0)
+        for identity, rows in ((self.identity, 24), (other, 10)):
+            with self.assertRaisesRegex(ValueError, "not current"):
+                self.receiver.require_ready(identity, rows, 1)
+
+        # The round the rejections refused to consume is still available, and it
+        # advances both requests -- direct proof that no frontier moved and the
+        # round counter was not burned.
+        second = [Span(self.identity, 1, 19, 5), Span(other, 1, 7, 3)]
+        a_next = self.seed(self.producer_blocks, 19, 5, 37)
+        b_next = self.seed(other_source, 7, 3, 53)
+        self.receiver.apply(self.export(second, 1, tables=tables), second)
+        self.receiver.require_ready(self.identity, 24, 1)
+        self.receiver.require_ready(other, 10, 1)
+        self.assert_rows(self.replica_blocks, 0, 19, a_rows)
+        self.assert_rows(self.replica_blocks, 19, 5, a_next)
+        self.assert_rows(other_target, 0, 7, b_rows)
+        self.assert_rows(other_target, 7, 3, b_next)
+
+    def test_release_refuses_while_replica_writes_have_not_drained(self):
+        """Pin the `_drained` guard even though no single-threaded caller can reach it.
+
+        `apply` clears `_drained` only around the two scatters and restores it on both
+        the success and the failure path, so this guard is unreachable through the
+        public API today. It exists for an asynchronous backend or a caller releasing
+        from another thread. Asserting it here makes removing it a deliberate act
+        rather than a silent regression, and confirms the refusal keeps the pages
+        owned so the allocation cannot be recycled under outstanding writes.
+        """
+        self.receiver._drained = False
+        try:
+            with self.assertRaisesRegex(RuntimeError, "not drained"):
+                self.receiver.release(self.identity)
+            with self.assertRaisesRegex(ValueError, "overlap"):
+                self.receiver.begin_request(Identity(102, 2, 12), self.replica_blocks)
+        finally:
+            self.receiver._drained = True
+        self.receiver.release(self.identity)
+        self.receiver.begin_request(Identity(102, 2, 12), self.replica_blocks)
+
     def test_wrong_identity_cannot_target_an_existing_allocation(self):
         before = self.snapshots()
         for identity in (

@@ -136,7 +136,14 @@ def swiglu_bf16(gate, up, valid_rows, *, route_weights=None, clamp_limit=10.0):
 
 
 def quantize_swiglu(
-    gate, up, valid_rows, *, route_weights=None, clamp_limit=10.0, backend="triton"
+    gate,
+    up,
+    valid_rows,
+    *,
+    route_weights=None,
+    clamp_limit=10.0,
+    backend="triton",
+    allow_contiguous=False,
 ):
     """Return group-32 E4M3/linear UE8M0; unused route scales are zero."""
     if backend not in ("eager", "triton") or (backend == "eager") != (
@@ -146,12 +153,27 @@ def quantize_swiglu(
             "V4.1 SwiGLU quantization requires explicit CPU eager or CUDA Triton"
         )
     if gate.device.type == "cuda":
-        from ._v41_expert_activation_triton import can_quantize_swiglu, quantize_swiglu_rows
+        from ._v41_expert_activation_triton import (
+            can_quantize_swiglu,
+            quantize_swiglu_rows,
+        )
 
-        if can_quantize_swiglu(gate, up, valid_rows, route_weights, clamp_limit, backend):
+        if can_quantize_swiglu(
+            gate,
+            up,
+            valid_rows,
+            route_weights,
+            clamp_limit,
+            backend,
+            allow_contiguous=allow_contiguous,
+        ):
             return quantize_swiglu_rows(
-                gate, up, valid_rows, route_weights=route_weights,
-                clamp_limit=clamp_limit, backend=backend,
+                gate,
+                up,
+                valid_rows,
+                route_weights=route_weights,
+                clamp_limit=clamp_limit,
+                backend=backend,
             )
     intermediate = swiglu_bf16(
         gate, up, valid_rows, route_weights=route_weights, clamp_limit=clamp_limit

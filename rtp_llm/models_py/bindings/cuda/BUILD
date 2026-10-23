@@ -131,6 +131,7 @@ cc_library(
     copts = cuda_copts(),
     deps = torch_deps() + [
         "@local_config_cuda//cuda:cublas",
+        "@local_config_cuda//cuda:cublasLt",
         "@local_config_cuda//cuda:cublas_headers",
     ],
     visibility = ["//visibility:public"],

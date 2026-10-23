@@ -21,6 +21,7 @@ from rtp_llm.models_py.modules.dsv4.moe.strategies.v41_nccl_ep import V41NcclEpS
 from rtp_llm.models_py.modules.dsv4.v41_dispatch import pack_dispatch
 from rtp_llm.models_py.modules.dsv4.v41_expert import V41_EXPERT_RECIPE
 from rtp_llm.models_py.modules.dsv4.v41_moe import V41LocalMoE
+from rtp_llm.models_py.modules.dsv4.v41_return import pack_return
 from rtp_llm.models_py.modules.dsv4.v41_routed import V41RoutedExperts
 from rtp_llm.utils.model_weight import W
 
@@ -101,9 +102,16 @@ def make_strategy(cfg, raw, device):
     return strategy
 
 
-def check_transport(rank, world, raw, device, context=None):
+def check_transport(rank, world, raw, device, context=None, mode="fp32"):
     cfg = config(rank, world, context)
-    strategies = [make_strategy(cfg, raw, device) for _ in range(2)]
+    with patch.dict(
+        os.environ,
+        {
+            "DSV41_COMBINE_MXFP8": str(int(mode == "mxfp8")),
+            "DSV41_COMBINE_BF16": "0",
+        },
+    ):
+        strategies = [make_strategy(cfg, raw, device) for _ in range(2)]
     cpu = V41LocalMoE(
         V41RoutedExperts(raw, swiglu_limit=7.0, backend="eager"),
         max_tokens=32,
@@ -119,6 +127,7 @@ def check_transport(rank, world, raw, device, context=None):
             [1] * world,
             [19 + (r % 3) for r in range(world)],
             [3 if r == world - 1 else 0 for r in range(world)],
+            [4, 0, 8, 4] * (world // 4) if world >= 4 else [4, 0],
         )
     ):
         strategy = strategies[phase % 2]
@@ -134,16 +143,28 @@ def check_transport(rank, world, raw, device, context=None):
             return partial
 
         def record_return(send, send_counts, recv_counts, width, group):
-            if width == DIM * 4:
+            is_return = "partial" in observed
+            if is_return:
                 torch.testing.assert_close(
-                    send,
-                    observed["partial"].contiguous().view(torch.uint8),
+                    send.cpu(),
+                    pack_return(
+                        observed["partial"].cpu(),
+                        strategy.return_layout,
+                        backend="eager",
+                    ),
                     rtol=0,
                     atol=0,
                 )
             received = all_to_all(send, send_counts, recv_counts, width, group)
-            if width == DIM * 4:
-                observed["returned"] = received.view(torch.float32).clone()
+            if is_return:
+                if mode == "fp32":
+                    observed["returned"] = received.view(torch.float32).clone()
+                else:
+                    q = received[:, :DIM].contiguous().view(torch.float8_e4m3fn).float()
+                    scale = torch.exp2(
+                        received[:, DIM:].float() - 127
+                    ).repeat_interleave(32, -1)
+                    observed["returned"] = q * scale
             return received
 
         with (
@@ -176,6 +197,10 @@ def check_transport(rank, world, raw, device, context=None):
             backend="eager",
         )
         torch.testing.assert_close(payload.cpu(), expected_payload, rtol=0, atol=0)
+        # Different M shapes and native-vs-lossy precision are separate from
+        # transport parity. Above checks exact packets and peer-order sums.
+        if mode == "mxfp8":
+            continue
         references = []
         for peer, count in enumerate(counts):
             px, pw, pi = request(count, peer, phase, device)
@@ -201,8 +226,8 @@ def check_transport(rank, world, raw, device, context=None):
     return strategy
 
 
-def check_layer(rank, raw, device):
-    cfg = config(rank, bound=4)
+def check_layer(rank, raw, device, world=8):
+    cfg = config(rank, world, bound=4)
     local = loader_weights(raw, cfg.local_expert_start, cfg.local_expert_end, device)
     rng = torch.Generator().manual_seed(41831)
     local[W.v4_router_w] = (
@@ -234,7 +259,7 @@ def check_layer(rank, raw, device):
         n_hash_layers=0,
         vocab_size=128,
         layer_weights=local,
-        ep_size=8,
+        ep_size=world,
         ep_rank=rank,
         max_tokens_per_rank=4,
         expert_recipe=V41_EXPERT_RECIPE,
@@ -242,7 +267,7 @@ def check_layer(rank, raw, device):
     cpu = V41LocalMoE(
         V41RoutedExperts(raw, swiglu_limit=7.0, backend="eager"), max_topk=TOPK
     )
-    for phase, n in enumerate((rank * 2, (7 - rank) * 2, 1)):
+    for phase, n in enumerate((rank * 2, (world - 1 - rank) * 2, 1)):
         x, _, _ = request(n, rank, phase + 10, device)
         x.nan_to_num_()
         ids = torch.arange(n, device=device)
@@ -262,10 +287,16 @@ def check_layer(rank, raw, device):
             assert actual.shape == (0, DIM)
 
 
-def check_peer_rejection(rank, raw, device):
-    for variant in ("bounds", "recipe_option", "count_fuse"):
-        cfg = config(rank, bound=31 if variant == "bounds" and rank == 0 else 32)
-        strategy = make_strategy(cfg, raw, device)
+def check_peer_rejection(rank, raw, device, world=8):
+    for variant in (
+        "bounds",
+        "recipe_option",
+        "count_fuse",
+        "return_mode",
+        "return_bf16",
+        "return_conflict",
+    ):
+        cfg = config(rank, world, bound=31 if variant == "bounds" and rank == 0 else 32)
         env = {
             "DSV4_MOE_LOCAL_REPLAY": (
                 "1" if variant == "recipe_option" and rank == 0 else "0"
@@ -273,8 +304,19 @@ def check_peer_rejection(rank, raw, device):
             "DSV4_MOE_EXTENT_COUNT_FUSE": (
                 "1" if variant == "count_fuse" and rank == 0 else "0"
             ),
+            "DSV41_COMBINE_MXFP8": (
+                "1"
+                if variant in ("return_mode", "return_conflict") and rank == 0
+                else "0"
+            ),
+            "DSV41_COMBINE_BF16": (
+                "1"
+                if variant in ("return_bf16", "return_conflict") and rank == 0
+                else "0"
+            ),
         }
         with patch.dict(os.environ, env):
+            strategy = make_strategy(cfg, raw, device)
             try:
                 strategy(*request(1, rank, 80, device))
             except RuntimeError as error:
@@ -282,7 +324,7 @@ def check_peer_rejection(rank, raw, device):
                 assert strategy._failed
             else:
                 raise AssertionError("mismatched peers were admitted")
-    strategy = make_strategy(config(rank), raw, device)
+    strategy = make_strategy(config(rank, world), raw, device)
     try:
         strategy(*request(33 if rank == 0 else 0, rank, 90, device))
     except ValueError as error:
@@ -290,7 +332,7 @@ def check_peer_rejection(rank, raw, device):
         assert strategy._failed
     else:
         raise AssertionError("oversized peer was admitted")
-    strategy = make_strategy(config(rank), raw, device)
+    strategy = make_strategy(config(rank, world), raw, device)
     strategy(*request(0, rank, 91, device))
     with patch.dict(os.environ, {"DSV4_MOE_EXTENT_COUNT_FUSE": "1"}):
         try:
@@ -322,8 +364,17 @@ def run_rank(rank, world, port):
         raw = weights()
         with torch.inference_mode():
             check_transport(rank, world, raw, device)
-            check_layer(rank, raw, device)
-            check_peer_rejection(rank, raw, device)
+            check_transport(rank, world, raw, device, mode="mxfp8")
+            check_layer(rank, raw, device, world)
+            check_peer_rejection(rank, raw, device, world)
+            if world == 2:
+                dist.barrier()
+                if rank == 0:
+                    print(
+                        "V4.1 EP2: packet, empty/uneven rows, chunked MoE and peer rejection PASS",
+                        flush=True,
+                    )
+                return
             # Two independent EP4 groups must never exchange across stages.
             groups = [dist.new_group(list(range(start, start + 4))) for start in (0, 4)]
             stage, local_rank = rank // 4, rank % 4
@@ -340,6 +391,7 @@ def run_rank(rank, world, port):
             if stage:
                 stage_raw["w2_w"].bitwise_xor_(0x88)
             check_transport(local_rank, 4, stage_raw, device, context)
+            check_transport(local_rank, 4, stage_raw, device, context, mode="mxfp8")
             for group in groups:
                 if group != dist.GroupMember.NON_GROUP_MEMBER:
                     dist.destroy_process_group(group)
@@ -371,6 +423,13 @@ class V41NcclEpSM120Test(unittest.TestCase):
             sock.bind(("127.0.0.1", 0))
             port = sock.getsockname()[1]
         mp.spawn(run_rank, args=(8, port), nprocs=8, join=True)
+
+    def test_two_rank_nccl(self):
+        self.assertGreaterEqual(torch.cuda.device_count(), 2)
+        with socket.socket() as sock:
+            sock.bind(("127.0.0.1", 0))
+            port = sock.getsockname()[1]
+        mp.spawn(run_rank, args=(2, port), nprocs=2, join=True)
 
 
 if __name__ == "__main__":

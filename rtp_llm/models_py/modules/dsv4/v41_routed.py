@@ -5,6 +5,7 @@ contiguous rows occupy aligned expert segments. Returned BF16 rows already
 include route weights and must be combined in FP32 without reweighting.
 """
 
+import os
 from contextlib import nullcontext
 
 import torch
@@ -124,6 +125,9 @@ class V41RoutedExperts(nn.Module):
         if backend not in ("eager", "deepgemm"):
             raise ValueError("Unknown V4.1 routed backend")
         self.backend, self.swiglu_limit = backend, swiglu_limit
+        self.prefill_local_fuse = os.environ.get("DSV41_MOE_LOCAL_FUSE", "0") == "1"
+        self.prefill_swiglu_fuse = os.environ.get("DSV41_SWIGLU_FUSE", "0") == "1"
+        self.prefill_mask_skip = os.environ.get("DSV41_MOE_MASK_SKIP", "0") == "1"
         self._warmed = set()
         self._packed_s13 = self._packed_s2 = None
         if backend == "eager":
@@ -208,7 +212,8 @@ class V41RoutedExperts(nn.Module):
         *,
         out,
         input_scales,
-        _mask_result=True
+        _mask_result=True,
+        _owned_padding=False,
     ):
         active = _check_rows(valid.shape, self.device, valid, route_weights)
         key = (*key, "bf16" if input_scales is None else "received_fp8")
@@ -233,11 +238,16 @@ class V41RoutedExperts(nn.Module):
             else:
                 # Preserve transported E4M3 bits, including signed zero. Only
                 # inactive rows are canonicalized before provider execution.
-                values = torch.where(active[..., None], x.view(torch.uint8), 0).view(
-                    torch.float8_e4m3fn
+                values = (
+                    x
+                    if _owned_padding
+                    else torch.where(active[..., None], x.view(torch.uint8), 0).view(
+                        torch.float8_e4m3fn
+                    )
                 )
                 scales = input_scales
-            scales = torch.where(active[..., None], scales, 0)
+            if not _owned_padding:
+                scales = torch.where(active[..., None], scales, 0)
             gate_up = gemm(values, scales, self.w13, self.s13, self._packed_s13)
             gate, up = gate_up.chunk(2, dim=-1)
             values, scales = quantize_swiglu(
@@ -247,6 +257,7 @@ class V41RoutedExperts(nn.Module):
                 route_weights=route_weights,
                 clamp_limit=self.swiglu_limit,
                 backend=quant_backend,
+                allow_contiguous=self.prefill_swiglu_fuse,
             )
             scales = scales.reshape(*valid.shape, self.inter_dim // 32)
             result = gemm(values, scales, self.w2, self.s2, self._packed_s2)
@@ -265,7 +276,7 @@ class V41RoutedExperts(nn.Module):
         expected_m=None,
         out=None,
         input_scales=None,
-        _mask_result=True
+        _mask_result=True,
     ):
         """Execute [E,M,D] with active prefixes ``counts[E]`` and route weights.
 
@@ -355,14 +366,23 @@ class V41RoutedExperts(nn.Module):
         route_weights,
         *,
         out=None,
-        input_scales=None
+        input_scales=None,
+        _owned_padding=False,
     ):
         """Execute aligned expert segments, including explicit padding masks.
 
         Segment sizes are host admission metadata, not read from device counts.
         Every segment must be 128-aligned. Zero-sized experts are valid.
         ``input_scales`` has the same byte-preserving meaning as in masked mode.
+        ``_owned_padding`` is reserved for V41LocalMoE's fresh zero-filled routed
+        input/scales, whose consumer gathers only live destinations. External
+        callers and explicit output buffers retain full canonicalization.
         """
+        if type(_owned_padding) is not bool or (
+            _owned_padding
+            and (self.backend != "deepgemm" or out is not None or input_scales is None)
+        ):
+            raise ValueError("V4.1 padding elision requires owned received rows")
         if (
             type(rows_per_expert) is not tuple
             or len(rows_per_expert) != self.experts
@@ -377,6 +397,14 @@ class V41RoutedExperts(nn.Module):
         rows = sum(rows_per_expert)
         self._validate_input(x, (rows,), route_weights, out, valid_rows, input_scales)
         _check_rows((rows,), self.device, valid_rows, route_weights)
+        owned_padding = _owned_padding and self.prefill_mask_skip
+        expert_indices = None
+        if self.backend == "deepgemm" and self.prefill_local_fuse and rows:
+            expert_indices = torch.repeat_interleave(
+                torch.arange(self.experts, dtype=torch.int32, device=self.device),
+                torch.tensor(rows_per_expert, dtype=torch.int64, device=self.device),
+                output_size=rows,
+            )
 
         def gemm(values, scales, weight, raw_scales, packed_scales):
             result = torch.empty(
@@ -393,11 +421,15 @@ class V41RoutedExperts(nn.Module):
                     )
                     start += count
             else:
-                layout = torch.cat(
-                    [
-                        torch.full((n,), e, dtype=torch.int32, device=self.device)
-                        for e, n in enumerate(rows_per_expert)
-                    ]
+                layout = (
+                    expert_indices
+                    if expert_indices is not None
+                    else torch.cat(
+                        [
+                            torch.full((n,), e, dtype=torch.int32, device=self.device)
+                            for e, n in enumerate(rows_per_expert)
+                        ]
+                    )
                 )
                 self._contiguous(
                     (values, pack_group32_scales(scales, column_major=True)),
@@ -418,4 +450,6 @@ class V41RoutedExperts(nn.Module):
             gemm,
             out=out,
             input_scales=input_scales,
+            _mask_result=not owned_padding,
+            _owned_padding=owned_padding,
         )

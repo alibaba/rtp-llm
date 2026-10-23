@@ -65,25 +65,25 @@ public:
     GptModelOutputs forward(const GptModelInputs& inputs) override;
     /* PP adapter: preserves global request inputs, passes rank-local upstream intermediates
        through forward(), and packs the model-emitted stage outputs. */
-    GptModelOutputs       forwardPP(const GptModelInputs&        inputs,
-                                    const PPIntermediateTensors* input_tensors,
-                                    PPIntermediateTensors*       output_tensors) override;
-    PPIntermediateTensors makePPWarmUpInputTensors(const GptModelInputs& inputs, bool enable_cp) override;
-    PreparedPPModelInputsPtr prepareV41PP(const GptModelInputs& inputs,
-                                           const std::shared_ptr<V41PPCacheBatch>& batch) override;
-    GptModelOutputs forwardV41PP(const PreparedPPModelInputsPtr& prepared,
-                                  int64_t transfer_round,
-                                  const PPIntermediateTensors* input_tensors,
-                                  PPIntermediateTensors* output_tensors) override;
-    void retireV41PP(const std::array<int64_t, 3>& identity) override;
-    GptModelOutputs       forwardMicroBatched(const GptModelInputs& inputs);
-    void                  releaseBuffers() override;
-    torch::Tensor         getMtpTargetHiddenStates(int64_t num_tokens) override;
-    torch::Tensor         getMtpLastHiddenStates(int64_t num_tokens) override;
-    bool                  hasMtpTargetHiddenBuffer() const override;
-    void                  prepareAttentionInputs(const GptModelInputs& inputs) override;
-    void                  prepareAttentionInputs(const GptModelInputs& inputs, bool skip_forward_event_sync);
-    void                  updateKVCacheKernelBlockId(const GptModelInputs& inputs) override;
+    GptModelOutputs          forwardPP(const GptModelInputs&        inputs,
+                                       const PPIntermediateTensors* input_tensors,
+                                       PPIntermediateTensors*       output_tensors) override;
+    PPIntermediateTensors    makePPWarmUpInputTensors(const GptModelInputs& inputs, bool enable_cp) override;
+    PreparedPPModelInputsPtr prepareV41PP(const GptModelInputs&                   inputs,
+                                          const std::shared_ptr<V41PPCacheBatch>& batch) override;
+    GptModelOutputs          forwardV41PP(const PreparedPPModelInputsPtr& prepared,
+                                          int64_t                         transfer_round,
+                                          const PPIntermediateTensors*    input_tensors,
+                                          PPIntermediateTensors*          output_tensors) override;
+    void                     retireV41PP(const std::array<int64_t, 3>& identity) override;
+    GptModelOutputs          forwardMicroBatched(const GptModelInputs& inputs);
+    void                     releaseBuffers() override;
+    torch::Tensor            getMtpTargetHiddenStates(int64_t num_tokens) override;
+    torch::Tensor            getMtpLastHiddenStates(int64_t num_tokens) override;
+    bool                     hasMtpTargetHiddenBuffer() const override;
+    void                     prepareAttentionInputs(const GptModelInputs& inputs) override;
+    void                     prepareAttentionInputs(const GptModelInputs& inputs, bool skip_forward_event_sync);
+    void                     updateKVCacheKernelBlockId(const GptModelInputs& inputs) override;
 
 private:
     std::optional<PyCacheStoreInputs> prepareWriteCacheParams(const GptModelInputs& inputs);
@@ -121,20 +121,22 @@ private:
     GptModelOutputs forwardPostLayersLastHidden(torch::Tensor hidden, const GptModelInputs& inputs);
     MicroBatchPlan  planMicroBatches(const GptModelInputs& inputs);
     std::pair<std::vector<GptModelInputs>, std::vector<TokenSliceInfo>>
-         splitInputsIntoMicroBatches(const GptModelInputs& inputs, const MicroBatchPlan& micro_batch_plan);
-    void holdInputsHostBuffers(const GptModelInputs& inputs);
-    PyModelInputs buildPyModelInputs(const GptModelInputs& inputs, PyContextParallelParams& cp_params);
-    GptModelOutputs finalizeModelOutputs(const PyModelOutputs& outputs,
-                                          const GptModelInputs& inputs,
-                                          const PyContextParallelParams& cp_params);
+                    splitInputsIntoMicroBatches(const GptModelInputs& inputs, const MicroBatchPlan& micro_batch_plan);
+    void            holdInputsHostBuffers(const GptModelInputs& inputs);
+    PyModelInputs   buildPyModelInputs(const GptModelInputs& inputs, PyContextParallelParams& cp_params);
+    GptModelOutputs finalizeModelOutputs(const PyModelOutputs&          outputs,
+                                         const GptModelInputs&          inputs,
+                                         const PyContextParallelParams& cp_params);
 
     // Member variables (formerly inherited from GptModel)
-    const rtp_llm::ExecProperties                   device_props_;
-    const bool                                      is_dspark_draft_;
-    const DSparkCallPhase                           dspark_graph_phase_;
-    const rtp_llm::MlaOpsType                       mla_ops_type_;
-    const size_t                                    layer_num_;
-    const int64_t                                   pp_size_;
+    const rtp_llm::ExecProperties device_props_;
+    const bool                    is_dspark_draft_;
+    const DSparkCallPhase         dspark_graph_phase_;
+    const rtp_llm::MlaOpsType     mla_ops_type_;
+    const size_t                  layer_num_;
+    const int64_t                 pp_size_;
+    /** Ranks in this PP stage (world_size / pp_size); the agreement scope for async PP. */
+    const int64_t                                   pp_stage_size_;
     const int64_t                                   hidden_size_;
     const GptModelDescription                       description_;
     std::optional<rtp_llm::GroupedCacheLayerLayout> kv_cache_layer_layout_;
@@ -163,10 +165,10 @@ private:
     static constexpr int kPinnedCheckForwardCount = 3;
     int                  pinned_check_remaining_{kPinnedCheckForwardCount};
 
-    std::atomic<bool>               prepared_attention_inputs_{false};
-    torch_ext::PyAttentionInputs    attention_inputs_;
-    torch_ext::AttentionInputsByTag attention_inputs_by_tag_;
-    CudaGraphState                  graph_state_;
+    std::atomic<bool>                 prepared_attention_inputs_{false};
+    torch_ext::PyAttentionInputs      attention_inputs_;
+    torch_ext::AttentionInputsByTag   attention_inputs_by_tag_;
+    CudaGraphState                    graph_state_;
     const std::shared_ptr<const char> native_pp_owner_ = std::make_shared<const char>(0);
 };
 
@@ -185,6 +187,9 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
     mla_ops_type_(params.mla_ops_type),
     layer_num_(params.weights.layers.size()),
     pp_size_(std::max<int64_t>(1, params.parallelism_config.pp_size)),
+    pp_stage_size_(std::max<int64_t>(1, params.parallelism_config.pp_size) > 1 ?
+                       params.parallelism_config.world_size / params.parallelism_config.pp_size :
+                       params.parallelism_config.world_size),
     hidden_size_(params.hidden_size),
     description_(params.description),
     cache_manager_(params.cache_manager),
@@ -240,9 +245,9 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
                                 "kernel_tokens_per_block=%zu",
                                 params.tokens_per_block,
                                 params.kernel_tokens_per_block);
-        init_resources.kv_cache.emplace(
-            params.kv_cache_layer_layout.value(),
-            params.cache_manager ? params.cache_manager->allLayerCacheBase().topologyPtr() : nullptr);
+        init_resources.kv_cache.emplace(params.kv_cache_layer_layout.value(),
+                                        params.cache_manager ? params.cache_manager->allLayerCacheBase().topologyPtr() :
+                                                               nullptr);
     }
     init_resources.is_speculative         = (params.sp_config.type != SP_TYPE_NONE);
     init_resources.is_decode_role         = (params.parallelism_config.role_type == RoleType::DECODE);

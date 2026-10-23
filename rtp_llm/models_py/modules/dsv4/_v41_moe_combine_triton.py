@@ -42,25 +42,33 @@ def _combine_kernel(
     tl.store(OUT + row * D + feature, accumulated, mask=feature < D)
 
 
-def combine_ordered_rows(down, route_map):
+def combine_ordered_rows(down, route_map, *, allow_prefill=False, _validated_map=False):
+    """Combine in route order; only the internal route builder may skip bounds checks."""
     if not (
         down.device.type == "cuda"
         and torch.cuda.get_device_capability(down.device) == (12, 0)
         and down.ndim == 2
-        and down.shape[0] > 0
+        and down.shape[0] >= 0
         and down.shape[1] > 0
         and down.dtype == torch.bfloat16
         and down.is_contiguous()
         and route_map.device == down.device
         and route_map.ndim == 2
-        and 0 < route_map.shape[0] <= 128
+        and (allow_prefill or 0 < route_map.shape[0] <= 128)
         and 0 < route_map.shape[1] <= 32
         and route_map.dtype in (torch.int32, torch.int64)
     ):
         return None
     rows, topk = route_map.shape
     dim = down.shape[1]
+    if not _validated_map:
+        torch._assert_async(
+            ((route_map >= -1) & (route_map < down.shape[0])).all(),
+            "V4.1 combine route destination is outside expert storage",
+        )
     output = torch.empty((rows, dim), device=down.device, dtype=torch.float32)
+    if not rows:
+        return output
     _combine_kernel[(rows, triton.cdiv(dim, 256))](
         down,
         route_map,

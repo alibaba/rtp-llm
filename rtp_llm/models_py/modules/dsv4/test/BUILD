@@ -487,6 +487,149 @@ py_test(
     timeout = "long",
 )
 
+# Asynchronous rejection contract (the C6 replacement contract). Kept separate so the
+# synchronous executor suite still asserts "rejection precedes all stores" unchanged.
+# RTP_LLM_V41_PP_ASYNC is fixed on here because the test asserts that contract.
+py_test(
+    name = "test_v41_native_pp_async_rejection_sm120",
+    srcs = [
+        "test_v41_native_pp_async_rejection_sm120.py",
+        "test_v41_native_pp_execution_sm120.py",
+        "test_v41_native_pp_admission_sm120.py",
+        "test_v41_native_pp_preflight_sm120.py",
+        "test_v41_native_pp_local_cache_sm120.py",
+        "test_v41_native_pp_transport_sm120.py",
+        "test_native_l20_transfer.py",
+        "test_v41_pp_delayed_state.py",
+        "test_v41_cp_stage_worker_sm120.py",
+        "test_v41_cp_stage_slices_sm120.py",
+        "test_v41_stage_slices_sm120.py",
+        "test_native_l20_prefill.py",
+    ],
+    data = [
+        "//rtp_llm/cpp/normal_engine/test:th_v41_native_pp_transport_test",
+        "//rtp_llm/config/test:testdata/deepseek_v41_flash.json",
+    ],
+    deps = _DSV4_TEST_DEPS + [
+        "//rtp_llm/models_py/modules/dsv4/fp8/test:v41_worker_testlib",
+        "//rtp_llm/models_py/modules/dsv4/fp8/test:v41_cp_owner_testlib",
+    ],
+    tags = ["RTX_5000_PRO", "manual"],
+    env = {"GPU_COUNT": "8", "RTP_LLM_V41_PP_ASYNC": "1"},
+    exec_properties = {"gpu": "RTX_5000_PRO", "gpu_count": "8"},
+    target_compatible_with = _DSV4_SM120_ONLY,
+    timeout = "long",
+)
+
+# T4 of the C1b matrix: a failure AFTER the tagged writes must reach the peer stage.
+# Under the synchronous contract the WORLD-scoped initializeFresh agreements were that
+# channel; C2 narrowed them to STAGE, so without C8 a post-admission failure on stage 0
+# leaves stage 1 blocked in receiveObject until the gloo watchdog fires. The injection is
+# fixed on by env because the target asserts the consequence of that exact failure point,
+# and no external lever can produce one: allocation pressure fails earlier inside
+# prepareInitialization (that is T1/T2), and the second agreement cannot be diverged
+# across stages. See the module docstring.
+py_test(
+    name = "test_v41_native_pp_async_failure_after_writes_sm120",
+    srcs = [
+        "test_v41_native_pp_async_failure_after_writes_sm120.py",
+        "test_v41_native_pp_execution_sm120.py",
+        "test_v41_native_pp_admission_sm120.py",
+        "test_v41_native_pp_preflight_sm120.py",
+        "test_v41_native_pp_local_cache_sm120.py",
+        "test_v41_native_pp_transport_sm120.py",
+        "test_native_l20_transfer.py",
+        "test_v41_pp_delayed_state.py",
+        "test_v41_cp_stage_worker_sm120.py",
+        "test_v41_cp_stage_slices_sm120.py",
+        "test_v41_stage_slices_sm120.py",
+        "test_native_l20_prefill.py",
+    ],
+    data = [
+        "//rtp_llm/cpp/normal_engine/test:th_v41_native_pp_transport_test",
+        "//rtp_llm/config/test:testdata/deepseek_v41_flash.json",
+    ],
+    deps = _DSV4_TEST_DEPS + [
+        "//rtp_llm/models_py/modules/dsv4/fp8/test:v41_worker_testlib",
+        "//rtp_llm/models_py/modules/dsv4/fp8/test:v41_cp_owner_testlib",
+    ],
+    tags = ["RTX_5000_PRO", "manual"],
+    env = {
+        "GPU_COUNT": "8",
+        "RTP_LLM_V41_PP_ASYNC": "1",
+        "RTP_LLM_V41_TEST_FAIL_AFTER_TAGGED_WRITES_STAGE": "0",
+    },
+    exec_properties = {"gpu": "RTX_5000_PRO", "gpu_count": "8"},
+    target_compatible_with = _DSV4_SM120_ONLY,
+    timeout = "long",
+)
+
+# T7 of the C1b matrix: retirement with a rejected chunk outstanding. Runs the
+# async_rejection scenario (stage-1-only rejection) past result rotation into the rounds
+# where retireV41Requests reclaims the finished request's identity and pages. Asserts
+# bounded ticks throughout (the run-119 root-only-broadcast hazard), exactly-once error
+# surfacing, exactly-once page release, active_global reaching 0, and no foreign pages.
+py_test(
+    name = "test_v41_native_pp_async_retirement_sm120",
+    srcs = [
+        "test_v41_native_pp_async_retirement_sm120.py",
+        "test_v41_native_pp_execution_sm120.py",
+        "test_v41_native_pp_admission_sm120.py",
+        "test_v41_native_pp_preflight_sm120.py",
+        "test_v41_native_pp_local_cache_sm120.py",
+        "test_v41_native_pp_transport_sm120.py",
+        "test_native_l20_transfer.py",
+        "test_v41_pp_delayed_state.py",
+        "test_v41_cp_stage_worker_sm120.py",
+        "test_v41_cp_stage_slices_sm120.py",
+        "test_v41_stage_slices_sm120.py",
+        "test_native_l20_prefill.py",
+    ],
+    data = [
+        "//rtp_llm/cpp/normal_engine/test:th_v41_native_pp_transport_test",
+        "//rtp_llm/config/test:testdata/deepseek_v41_flash.json",
+    ],
+    deps = _DSV4_TEST_DEPS + [
+        "//rtp_llm/models_py/modules/dsv4/fp8/test:v41_worker_testlib",
+        "//rtp_llm/models_py/modules/dsv4/fp8/test:v41_cp_owner_testlib",
+    ],
+    tags = ["RTX_5000_PRO", "manual"],
+    env = {"GPU_COUNT": "8", "RTP_LLM_V41_PP_ASYNC": "1"},
+    exec_properties = {"gpu": "RTX_5000_PRO", "gpu_count": "8"},
+    target_compatible_with = _DSV4_SM120_ONLY,
+    timeout = "long",
+)
+
+# Asynchronous retained-dispatch contract (chunked-prefill overlap, Step B).
+# Kept in its own target so the synchronous local-cache suite stays untouched and
+# the two 8-rank spawns never share a process.
+py_test(
+    name = "test_v41_native_pp_async_retention_sm120",
+    srcs = [
+        "test_v41_native_pp_async_retention_sm120.py",
+        "test_v41_native_pp_local_cache_sm120.py",
+        "test_v41_native_pp_transport_sm120.py",
+        "test_native_l20_transfer.py",
+        "test_v41_pp_delayed_state.py",
+        "test_v41_cp_stage_worker_sm120.py",
+        "test_v41_stage_slices_sm120.py",
+        "test_native_l20_prefill.py",
+    ],
+    data = [
+        "//rtp_llm/cpp/normal_engine/test:th_v41_native_pp_transport_test",
+        "//rtp_llm/config/test:testdata/deepseek_v41_flash.json",
+    ],
+    deps = _DSV4_TEST_DEPS + [
+        "//rtp_llm/models_py/modules/dsv4/fp8/test:v41_worker_testlib",
+        "//rtp_llm/models_py/modules/dsv4/fp8/test:v41_cp_owner_testlib",
+    ],
+    tags = ["RTX_5000_PRO", "manual"],
+    env = {"GPU_COUNT": "8"},
+    exec_properties = {"gpu": "RTX_5000_PRO", "gpu_count": "8"},
+    target_compatible_with = _DSV4_SM120_ONLY,
+    timeout = "long",
+)
+
 py_test(
     name = "test_v41_native_pp_preflight_sm120",
     srcs = [
@@ -761,6 +904,48 @@ py_test(
     name = "test_v41_pp_checkpoint_engine_sm120",
     srcs = [
         "test_v41_pp_checkpoint_engine_sm120.py",
+        "test_v41_pp_loader_sm120.py",
+        "test_v41_native_pp_engine_sm120.py",
+        "test_v41_native_pp_execution_sm120.py",
+        "test_v41_native_pp_admission_sm120.py",
+        "test_v41_native_pp_preflight_sm120.py",
+        "test_v41_native_pp_local_cache_sm120.py",
+        "test_v41_native_pp_transport_sm120.py",
+        "test_native_l20_transfer.py",
+        "test_v41_pp_delayed_state.py",
+        "test_v41_cp_stage_worker_sm120.py",
+        "test_v41_cp_stage_slices_sm120.py",
+        "test_v41_stage_slices_sm120.py",
+        "test_native_l20_prefill.py",
+    ],
+    data = [
+        "//rtp_llm/cpp/normal_engine/test:th_v41_native_engine_test",
+        "//rtp_llm/cpp/normal_engine/test:th_v41_native_pp_transport_test",
+        "//rtp_llm/config/test:testdata/deepseek_v41_flash.json",
+    ],
+    deps = _DSV4_TEST_DEPS + [
+        "//rtp_llm/models_py/modules/dsv4/fp8/test:v41_loader_worker_testlib",
+        "//rtp_llm/models_py/modules/dsv4/fp8/test:v41_cp_owner_testlib",
+        "//rtp_llm/tools:dsv41_pp_smoke",
+        "//rtp_llm/models_py/modules/dsv4/fp8/test:v41_mhc_precision_testlib",
+        "//rtp_llm/models_py/modules/dsv4/fp8/test:v41_mhc_collapse_reference_testlib",
+    ],
+    tags = ["RTX_5000_PRO", "manual"],
+    env = {"GPU_COUNT": "8"},
+    exec_properties = {"gpu": "RTX_5000_PRO", "gpu_count": "8"},
+    target_compatible_with = _DSV4_SM120_ONLY,
+    timeout = "eternal",
+)
+
+# Native (models_py) warm-TTFT benchmark for V4.1 CEP4PP2: the serving perf_test
+# stack cannot reach the native PP path, so this drives the in-process
+# NativeEngine directly. With reuse_cache on, run 0 is a cold 32K prefill and
+# runs 1..N hit the retained prefix cache -> warm TTFT. Parity gate: warm runs
+# must return the identical next token (11111) as cold.
+py_test(
+    name = "test_v41_pp_warm_ttft_sm120",
+    srcs = [
+        "test_v41_pp_warm_ttft_sm120.py",
         "test_v41_pp_loader_sm120.py",
         "test_v41_native_pp_engine_sm120.py",
         "test_v41_native_pp_execution_sm120.py",

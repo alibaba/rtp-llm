@@ -140,8 +140,12 @@ def run_rank(rank, port, config):
 
                 def admission_only(output, value, **kwargs):
                     if kwargs["group"] is dist.group.WORLD:
-                        if value.shape == (2576,):
-                            assert output.shape == (20608,)
+                        # The wire shape is protocol, so it is asserted from the bound constant
+                        # rather than hardcoded: 12cfb351c3 moved the packet 2576 -> 327696 and a
+                        # literal here went stale (D3).
+                        packet = ops.V41_ADMISSION_PACKET_SIZE
+                        if value.shape == (packet,):
+                            assert output.shape == (8 * packet,)
                             calls["global"] += 1
                         else:
                             assert value.shape == (3,) and output.shape == (24,)

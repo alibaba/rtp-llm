@@ -39,7 +39,7 @@ def canonical_v41_cp_routes(gate, x, cp):
         or len(lengths) != len(prefixes)
         or not lengths
         or any(
-            n <= 0 or p < 0 or n + p > (512 if p else V41_MAX_CP_PREFILL_TOKENS)
+            n <= 0 or p < 0 or n + p > V41_MAX_CP_PREFILL_TOKENS
             for n, p in zip(lengths, prefixes)
         )
         or sum(lengths) != cp.seq_len_full

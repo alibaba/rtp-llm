@@ -1,4 +1,4 @@
-"""V4.1 recipe on the base NCCL row transport, with lossless FP32 returns."""
+"""V4.1 NCCL row transport with peer-admitted FP32 or opt-in MXFP8 returns."""
 
 import hashlib
 import json
@@ -10,6 +10,7 @@ import torch
 from rtp_llm.models_py.modules.dsv4.moe._nccl_ep_combine_triton import fp32_peer_sum
 from rtp_llm.models_py.modules.dsv4.v41_dispatch import V41DispatchLayout, pack_dispatch
 from rtp_llm.models_py.modules.dsv4.v41_expert import V41_EXPERT_RECIPE
+from rtp_llm.models_py.modules.dsv4.v41_return import V41ReturnLayout, pack_return
 
 from .base import register_strategy
 from .nccl_ep_mxfp8 import NcclEpMxfp8Strategy
@@ -51,6 +52,20 @@ class V41NcclEpStrategy(NcclEpMxfp8Strategy):
         )
         self._admitted_identity = None
         self._failed = False
+        # Freeze the wire recipe for this strategy's lifetime. Invalid choices
+        # participate in peer admission so one rank cannot strand the others.
+        self._return_options = tuple(
+            os.environ.get(name, "0")
+            for name in ("DSV41_COMBINE_MXFP8", "DSV41_COMBINE_BF16")
+        )
+        self._return_options_valid = self._return_options in (("0", "0"), ("1", "0"))
+        self.return_layout = V41ReturnLayout(
+            cfg.dim, "mxfp8" if self._return_options == ("1", "0") else "fp32"
+        )
+        self._dispatch_pack_fused = (
+            os.environ.get("DSV41_DISPATCH_PACK_FUSE", "0") == "1"
+        )
+        self._return_pack_fused = os.environ.get("DSV41_RETURN_PACK_FUSE", "0") == "1"
 
     def _make_local_strategy(self, local_cfg):
         # A receiver computes all peers' rows and keeps global expert IDs.
@@ -103,6 +118,8 @@ class V41NcclEpStrategy(NcclEpMxfp8Strategy):
             self.layout,
             stage,
             options,
+            self.return_layout,
+            self._return_options,
         )
         if self._admitted_identity is not None:
             if self._admitted_identity != identity:
@@ -111,8 +128,10 @@ class V41NcclEpStrategy(NcclEpMxfp8Strategy):
                 )
             return group, world, rank
         metadata = {
-            "protocol": "v41-nccl-a2a-fp32-v1",
+            "protocol": "v41-nccl-a2a-v2",
             "dispatch": asdict(self.layout),
+            "return": self.return_layout.identity,
+            "return_options": self._return_options,
             "layer": cfg.layer_id,
             "intermediate": cfg.moe_inter_dim,
             "swiglu_limit": cfg.swiglu_limit,
@@ -130,6 +149,7 @@ class V41NcclEpStrategy(NcclEpMxfp8Strategy):
             dist.get_backend(group) == "nccl"
             and (context is None or ranks == context.world_ranks)
             and not any(options[:-1])
+            and self._return_options_valid
         )
         signature = torch.tensor(
             [*digest, int(compatible)], dtype=torch.uint8, device=device
@@ -142,7 +162,8 @@ class V41NcclEpStrategy(NcclEpMxfp8Strategy):
         ):
             self._failed = True
             raise RuntimeError(
-                "V4.1 EP peer recipe, layout, bounds or transport option mismatch"
+                "V4.1 EP peer recipe, layout, bounds or transport option mismatch "
+                "(return supports FP32 or MXFP8; BF16/conflicting flags are unsupported)"
             )
         self._admitted_identity = identity
         return group, world, rank
@@ -172,7 +193,9 @@ class V41NcclEpStrategy(NcclEpMxfp8Strategy):
                     "V4.1 EP received rows exceed the admitted per-rank bound"
                 )
             valid = torch.ones(rows, dtype=torch.bool, device=x.device)
-            payload = pack_dispatch(x, weights, indices, valid, self.layout)
+            payload = pack_dispatch(
+                x, weights, indices, valid, self.layout, fused=self._dispatch_pack_fused
+            )
             received = self._all_to_all(
                 payload.repeat(world, 1),
                 [rows] * world,
@@ -186,16 +209,26 @@ class V41NcclEpStrategy(NcclEpMxfp8Strategy):
             )
             partial = local.forward_received(received, self.layout, layout=layout)
             returned = self._all_to_all(
-                partial.contiguous().view(torch.uint8),
+                pack_return(partial, self.return_layout, fused=self._return_pack_fused),
                 counts,
                 [rows] * world,
-                self.cfg.dim * 4,
+                self.return_layout.payload_bytes,
                 group,
-            ).view(torch.float32)
+            )
+            if self.return_layout.mode == "mxfp8":
+                from .._nccl_ep_mxfp8_combine import mxfp8_dequant_peer_sum
+
+                return mxfp8_dequant_peer_sum(
+                    returned,
+                    n_rows=rows,
+                    hidden_size=self.cfg.dim,
+                    world_size=world,
+                    out_dtype=torch.float32,
+                )
             output = torch.empty(
                 (rows, self.cfg.dim), dtype=torch.float32, device=x.device
             )
-            return fp32_peer_sum(returned, world, output)
+            return fp32_peer_sum(returned.view(torch.float32), world, output)
         except BaseException:
             self._failed = True
             raise

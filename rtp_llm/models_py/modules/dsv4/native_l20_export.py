@@ -74,10 +74,7 @@ def snapshot_native_l20_frame(
         or len({span.identity.request_id for span in spans}) != len(spans)
         or any(
             span.start + span.count
-            > min(
-                attention._rope_max_seq_len,
-                256 if span.start else V41_MAX_CP_PREFILL_TOKENS,
-            )
+            > min(attention._rope_max_seq_len, V41_MAX_CP_PREFILL_TOKENS)
             for span in spans
         )
     ):

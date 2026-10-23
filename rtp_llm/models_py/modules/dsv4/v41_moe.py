@@ -230,6 +230,11 @@ class V41LocalMoE(nn.Module):
                 valid,
                 routed_weights,
                 input_scales=routed_scales,
+                _owned_padding=(
+                    self.experts.backend == "deepgemm"
+                    and routed_scales is not None
+                    and self.experts.prefill_mask_skip
+                ),
             )
         else:
             capacity = (
@@ -292,10 +297,15 @@ class V41LocalMoE(nn.Module):
         # Accumulate in expert-ID order and FP32, as the checkpoint loop does.
         route_map = route_map.reshape(rows, topk)
         route_map = route_map.gather(1, keys.argsort(dim=-1, stable=True))
-        if layout == "masked" and x.is_cuda:
+        if x.is_cuda and (layout == "masked" or self.experts.prefill_local_fuse):
             from ._v41_moe_combine_triton import combine_ordered_rows
 
-            combined = combine_ordered_rows(down, route_map)
+            combined = combine_ordered_rows(
+                down,
+                route_map,
+                allow_prefill=self.experts.prefill_local_fuse,
+                _validated_map=True,
+            )
             if combined is not None:
                 return combined
         output = torch.zeros((rows, dim), device=x.device, dtype=torch.float32)

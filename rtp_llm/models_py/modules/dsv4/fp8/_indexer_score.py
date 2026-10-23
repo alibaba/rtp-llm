@@ -64,6 +64,39 @@ except ImportError:
 # The selected provider must support this kernel on SM120; exporting the
 # Python symbol alone does not establish device support.
 _FP8_DEEPGEMM_ON_SM120 = os.environ.get("DSV4_INDEXER_FP8_DEEPGEMM", "0") == "1"
+_V41_FP4_PREFILL_ENABLED = os.environ.get("DSV41_FUSED_INDEXER", "0") == "1"
+
+
+def has_fp8_fp4_mqa_logits() -> bool:
+    """Whether the opted-in V4.1 FP4 prefill scorer is available."""
+    return _V41_FP4_PREFILL_ENABLED and callable(
+        getattr(_deep_gemm, "fp8_fp4_mqa_logits", None)
+    )
+
+
+def fp8_fp4_mqa_indexer_score(
+    q_payload,
+    q_sf,
+    k_payload,
+    k_sf,
+    weights,
+    starts,
+    ends,
+    *,
+    clean_logits=True,
+    max_seqlen_k=0,
+):
+    if not callable(getattr(_deep_gemm, "fp8_fp4_mqa_logits", None)):
+        raise RuntimeError("DeepGEMM FP4 prefill indexer is unavailable")
+    return _deep_gemm.fp8_fp4_mqa_logits(
+        (q_payload, q_sf),
+        (k_payload, k_sf),
+        weights,
+        starts,
+        ends,
+        clean_logits=clean_logits,
+        max_seqlen_k=max_seqlen_k,
+    )
 
 
 def _has_sm120_fallback(

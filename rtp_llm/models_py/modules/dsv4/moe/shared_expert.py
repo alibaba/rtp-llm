@@ -132,6 +132,13 @@ class W13SharedExpert(nn.Module):
         self.w13 = _v4_fp8_linear(w13_w, w13_s)
         self.w2 = _v4_fp8_linear(expert_weights["w2_w"], expert_weights["w2_s"])
         self.swiglu_limit = swiglu_limit
+        from rtp_llm.models_py.modules.dsv4.utils import V41MXFP8Linear
+
+        self._v41_shared_act_quant = (
+            os.environ.get("DSV41_SHARED_ACT_QUANT_FUSE", "0") == "1"
+            and isinstance(self.w13, V41MXFP8Linear)
+            and isinstance(self.w2, V41MXFP8Linear)
+        )
         # Keep the original checkpoint UE8M0 scales for the SM120 fused path:
         # the CUTLASS linear decodes its scales to fp32, while the fused path's
         # fp8_gemm_nt needs the DeepGEMM int32-packed UE8M0 layout, which is
@@ -156,7 +163,23 @@ class W13SharedExpert(nn.Module):
     ) -> torch.Tensor:
         dtype = x.dtype
         with record_function_range("dsv4.shared_expert.w13"):
-            gate_up = self._apply_layer(self.w13, x).float()
+            gate_up = self._apply_layer(self.w13, x)
+        if (
+            self._v41_shared_act_quant
+            and weights is None
+            and x.ndim == 2
+            and x.shape[0] > 128
+            and dtype == torch.bfloat16
+        ):
+            from ._v41_shared_act_quant_triton import shared_act_quant
+
+            with record_function_range("dsv41.shared_expert.act_quant"):
+                quantized = shared_act_quant(gate_up, clamp_limit=self.swiglu_limit)
+            if quantized is not None:
+                with record_function_range("dsv4.shared_expert.w2"):
+                    return self.w2.forward_quantized(*quantized)
+        with record_function_range("dsv4.shared_expert.prepare_activation"):
+            gate_up = gate_up.float()
             gate, up = gate_up.chunk(2, dim=-1)
         with record_function_range("dsv4.shared_expert.silu_mul"):
             from .expert import require_silu_mul_split

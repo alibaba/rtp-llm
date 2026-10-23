@@ -15,7 +15,7 @@ namespace {
 /* Versioned byte stream; readers bounds-check every field. The tensor
    presence flag encodes definedness so defined-but-empty tensors survive;
    host tensors are rebuilt pinned to match gatherModelInput plan tensors. */
-constexpr uint32_t kVersion = 15;
+constexpr uint32_t kVersion = 16;  // 16: activation metadata carries a per-chunk status byte
 
 struct ByteWriter {
     std::vector<uint8_t> buf;
@@ -525,9 +525,10 @@ PPExecutionResult deserializeExecutionResult(const torch::Tensor& buffer) {
     return result;
 }
 
-torch::Tensor serializeTensorsMetadata(const PPIntermediateTensors& tensors) {
+torch::Tensor serializeTensorsMetadata(const PPIntermediateTensors& tensors, PPTensorsStatus status) {
     ByteWriter w;
     w.val<uint32_t>(kVersion);
+    w.val<uint8_t>(static_cast<uint8_t>(status));
     w.val<uint64_t>(tensors.tensors.size());
     for (const auto& [name, t] : tensors.tensors) {
         w.str(name);
@@ -546,9 +547,16 @@ torch::Tensor serializeTensorsMetadata(const PPIntermediateTensors& tensors) {
     return w.finish();
 }
 
-PPIntermediateTensors deserializeTensorsMetadata(const torch::Tensor& metadata) {
+PPIntermediateTensors deserializeTensorsMetadata(const torch::Tensor& metadata, PPTensorsStatus* status) {
     ByteReader r(metadata);
     RTP_LLM_CHECK_WITH_INFO(r.val<uint32_t>() == kVersion, "PP tensors-metadata payload version mismatch");
+    const auto raw_status = r.val<uint8_t>();
+    RTP_LLM_CHECK_WITH_INFO(raw_status <= static_cast<uint8_t>(PPTensorsStatus::rejected),
+                            "PP tensors-metadata carries an unknown chunk status %u",
+                            static_cast<unsigned>(raw_status));
+    if (status != nullptr) {
+        *status = static_cast<PPTensorsStatus>(raw_status);
+    }
     PPIntermediateTensors out;
     const auto            n = r.val<uint64_t>();
     for (uint64_t i = 0; i < n; ++i) {
