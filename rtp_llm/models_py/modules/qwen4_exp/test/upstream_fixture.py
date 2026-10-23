@@ -7,6 +7,13 @@ import re
 import unittest
 from pathlib import Path
 
+# Vendored byte-identical copy of transformers' modeling_qwen4_exp.py plus its
+# content-addressed manifest, so qualification needs no external fixture path.
+# QWEN4_EXP_UPSTREAM_SRC / QWEN4_EXP_UPSTREAM_MANIFEST still override both.
+_VENDORED_UPSTREAM_DIR = Path(__file__).resolve().parent / "reference" / "upstream"
+_VENDORED_UPSTREAM_SOURCE = _VENDORED_UPSTREAM_DIR / "modeling_qwen4_exp.py"
+_VENDORED_UPSTREAM_MANIFEST = _VENDORED_UPSTREAM_DIR / "manifest.json"
+
 
 def uncovered_fixture(reason: str):
     if os.environ.get("QWEN4_EXP_REQUIRE_PARITY", "0") == "1":
@@ -16,8 +23,11 @@ def uncovered_fixture(reason: str):
 
 def upstream_source_path() -> str:
     source = os.environ.get("QWEN4_EXP_UPSTREAM_SRC", "")
-    required = os.environ.get("QWEN4_EXP_REQUIRE_PARITY", "0") == "1"
     manifest_path = os.environ.get("QWEN4_EXP_UPSTREAM_MANIFEST", "")
+    required = os.environ.get("QWEN4_EXP_REQUIRE_PARITY", "0") == "1"
+    if required:
+        source = source or str(_VENDORED_UPSTREAM_SOURCE)
+        manifest_path = manifest_path or str(_VENDORED_UPSTREAM_MANIFEST)
     if required and (not source or not Path(source).is_file() or not manifest_path):
         raise RuntimeError(
             "Qwen4 parity qualification is uncovered: fixed source/manifest missing"

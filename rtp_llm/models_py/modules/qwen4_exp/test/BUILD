@@ -4,10 +4,19 @@ py_library(
     deps = ["//rtp_llm/models_py:modules"],
 )
 
+# Byte-identical vendored copy of transformers' modeling_qwen4_exp.py plus its
+# content-addressed manifest: the self-contained truth anchor for parity
+# qualification (same convention as committed golden tensors for other models).
+VENDORED_UPSTREAM_FIXTURE = [
+    "reference/upstream/modeling_qwen4_exp.py",
+    "reference/upstream/manifest.json",
+]
+
 py_test(
     name = "upstream_fixture_test",
     srcs = ["upstream_fixture_test.py", "upstream_fixture.py"],
     deps = ["//rtp_llm:testlib"],
+    data = VENDORED_UPSTREAM_FIXTURE,
 )
 
 py_test(
@@ -64,6 +73,7 @@ py_test(
     name = "upstream_parity_test",
     srcs = ["upstream_parity_test.py", "upstream_fixture.py"],
     deps = ["//rtp_llm:testlib", ":math_references"],
+    data = VENDORED_UPSTREAM_FIXTURE,
     tags = ["L20_CU13"],
     exec_properties = {"gpu": "L20_CU13"},
 )
@@ -74,6 +84,7 @@ py_test(
     name = "gdn_upstream_parity_test",
     srcs = ["gdn_upstream_parity_test.py", "upstream_fixture.py"],
     deps = ["//rtp_llm:testlib", ":math_references"],
+    data = VENDORED_UPSTREAM_FIXTURE,
     tags = ["L20_CU13"],
     exec_properties = {"gpu": "L20_CU13"},
 )
@@ -341,6 +352,7 @@ py_test(
     srcs = ["upstream_parity_test.py", "upstream_fixture.py"],
     main = "upstream_parity_test.py",
     deps = ["//rtp_llm:testlib", ":math_references"],
+    data = VENDORED_UPSTREAM_FIXTURE,
     env = {"QWEN4_EXP_REQUIRE_PARITY": "1"},
     tags = ["manual"],
     exec_properties = select({"@//:using_cuda13_x86": {"gpu": "RTX_5000_PRO_CU13"}, "//conditions:default": {"gpu": "H20_CU13"}}),
@@ -351,6 +363,7 @@ py_test(
     srcs = ["gdn_upstream_parity_test.py", "upstream_fixture.py"],
     main = "gdn_upstream_parity_test.py",
     deps = ["//rtp_llm:testlib", ":math_references"],
+    data = VENDORED_UPSTREAM_FIXTURE,
     env = {"QWEN4_EXP_REQUIRE_PARITY": "1"},
     tags = ["manual"],
     exec_properties = select({"@//:using_cuda13_x86": {"gpu": "RTX_5000_PRO_CU13"}, "//conditions:default": {"gpu": "H20_CU13"}}),
