@@ -6,7 +6,6 @@ import org.flexlb.engine.grpc.EngineRpcService;
 import java.nio.file.Path;
 import java.util.List;
 import java.util.Map;
-import java.util.concurrent.LinkedBlockingQueue;
 import static org.junit.jupiter.api.Assertions.*;
 import static org.flexlb.mockengine.MockEngineTestSupport.*;
 
@@ -44,13 +43,12 @@ class ReviewOwnershipRegressionTest {
     @Test void housekeepingPreservesFreshQueuesAndLiveRemoteOwnerBuffers() throws Exception {
         try (var cluster = MockEngineTestCluster.create(performanceModel(directory, "1", 1), 62250, 1, 0)) {
             var service = cluster.prefill(0);
-            @SuppressWarnings("unchecked")
-            var queues = (Map<Long, LinkedBlockingQueue<EngineRpcService.GenerateOutputsPB>>) field(service, "responseQueues");
+            var requests = service.requests;
             var fresh = new MockResponseQueue();
-            queues.put(7002L, fresh);
-            service.getRequestStates().put(7002L, "received");
+            requests.output(7002L, fresh);
+            requests.state(7002L, "received");
             service.periodicCleanup();
-            assertSame(fresh, queues.get(7002L));
+            assertSame(fresh, requests.output(7002L));
             assertEquals("received", service.getRequestStates().get(7002L));
             assertTrue(fresh.offer(EngineRpcService.GenerateOutputsPB.newBuilder().setRequestId(7002).build()));
         }

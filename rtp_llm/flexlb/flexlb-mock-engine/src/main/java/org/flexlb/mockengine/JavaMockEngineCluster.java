@@ -809,15 +809,15 @@ public final class JavaMockEngineCluster {
                 EngineRpcService.GenerateOutputsPB failure = EngineRpcService.GenerateOutputsPB.newBuilder()
                         .setRequestId(id).setErrorInfo(EngineRpcService.RpcErrorPB.newBuilder()
                                 .setErrorCodeValue((int) details.getErrorCode()).setErrorMessage(details.getErrorMessage())).build();
-                LinkedBlockingQueue<EngineRpcService.GenerateOutputsPB> queue = responseQueues.get(id);
+                LinkedBlockingQueue<EngineRpcService.GenerateOutputsPB> queue = requests.output(id);
                 if (queue != null) queue.offer(failure);
                 // Keep the failure in an unattached Fetch context, so a late
                 // Fetch observes the same typed terminal rather than success.
                 session.fail(failure);
-                requestStates.put(id, "failed");
+                requests.state(id, "failed");
                 if (session.hasContinued()) {
                     prefillSessions.remove(id, session);
-                    responseQueues.remove(id, queue);
+                    requests.removeOutput(id, queue);
                     session.close();
                 } else {
                     continuePrefillSession(session);
@@ -850,12 +850,12 @@ public final class JavaMockEngineCluster {
                             beginRequest(shape.input()).remainingMs(),
                             value -> {
                                 if (remotePrefillOwners.get(id) != owner) return;
-                                LinkedBlockingQueue<EngineRpcService.GenerateOutputsPB> queue = responseQueues.get(id);
+                                LinkedBlockingQueue<EngineRpcService.GenerateOutputsPB> queue = requests.output(id);
                                 if (queue != null) queue.offer(value);
                             }, error -> responseExecutor.execute(() -> owner.failed(error)),
                             () -> responseExecutor.execute(() -> {
                                 if (remotePrefillOwners.remove(id, owner)) {
-                                    responseQueues.remove(id);
+                                    requests.removeOutput(id);
                                     finishRequest(id);
                                 }
                             }));
@@ -889,7 +889,7 @@ public final class JavaMockEngineCluster {
             long id = session.shape.input().getRequestId();
             RemotePrefillOwner owner = remotePrefillOwners.get(id);
             if (owner == null) return;
-            var queue = responseQueues.get(id);
+            var queue = requests.output(id);
             owner.stream.load().whenCompleteAsync((ignored, error) -> {
                 if (error != null) { owner.failed(error); return; }
                 synchronized (owner) {
@@ -964,7 +964,7 @@ public final class JavaMockEngineCluster {
                     runningTasks.put(id, task(shape, -1L, 0, EngineRpcService.TaskPhase.TASK_PHASE_KV_ALLOCATED));
                     pendingRequests.incrementAndGet();
                     acceptedCount.incrementAndGet();
-                    requestStates.put(id, "waiting_for_kv");
+                    requests.state(id, "waiting_for_kv");
                     recordLifecycleStart(id, -1L, "remote_allocate");
                     recordEventArrival(id);
                     lastEnqueueTime.set(System.nanoTime());
@@ -987,7 +987,7 @@ public final class JavaMockEngineCluster {
                         if (remoteDecodeLeaseOwners.get(id) != owner) {
                             return false;
                         }
-                        responseQueues.put(id, outputs);
+                        requests.output(id, outputs);
                         return scheduleDecodeCompletion(shape, -1L, outputs);
                     }
                 }
@@ -1024,7 +1024,7 @@ public final class JavaMockEngineCluster {
                 admitBlockLease(id, shape);
                 remoteDecodeStops.remove(id);
                 finishRequest(id);
-                requestStates.put(id, "completed");
+                requests.state(id, "completed");
                 recordLifecycleEnd(id, false);
                 completedCount.incrementAndGet();
                 var terminal = tracked == null ? task(shape, -1L, 0, EngineRpcService.TaskPhase.TASK_PHASE_KV_ALLOCATED) : tracked;
@@ -1359,20 +1359,18 @@ public final class JavaMockEngineCluster {
                 System.getenv().getOrDefault("MOCK_STATUS_SNAPSHOT_LOG", "false"));
         private long statusSnapshotSequence;
         private long completionRetentionDrops;
-        private final Map<Long, LinkedBlockingQueue<EngineRpcService.GenerateOutputsPB>> responseQueues = new ConcurrentHashMap<>();
-        private final Map<Long, String> requestStates = new ConcurrentHashMap<>();
-        private final Map<Long, MockRequestDeadline> requestDeadlines = new ConcurrentHashMap<>();
+        final MockRequestTable requests = new MockRequestTable();
         private final ThreadLocal<RuntimeException> allocationError = new ThreadLocal<>();
 
         private MockRequestDeadline beginRequest(EngineRpcService.GenerateInputPB input) {
             long id = input.getRequestId();
             var candidate = new MockRequestDeadline(input.getGenerateConfig().getTimeoutMs());
-            var existing = requestDeadlines.putIfAbsent(id, candidate);
+            var existing = requests.inheritDeadline(id, candidate);
             if (existing != null) return existing;
             long epoch = crashEpoch.get();
             candidate.arm(scheduler, () -> responseExecutor.execute(() -> {
-                if (crashEpoch.get() == epoch && requestDeadlines.get(id) == candidate) {
-                    if (runningTasks.containsKey(id) || responseQueues.containsKey(id) || prefillSessions.containsKey(id))
+                if (crashEpoch.get() == epoch && requests.deadline(id) == candidate) {
+                    if (runningTasks.containsKey(id) || (requests.output(id) != null) || prefillSessions.containsKey(id))
                         cancel(id, false, false);
                     else cache.capacityChanged();
                 }
@@ -1381,12 +1379,11 @@ public final class JavaMockEngineCluster {
         }
 
         private void finishRequest(long id) {
-            var deadline = requestDeadlines.remove(id);
-            if (deadline != null) deadline.close();
+            requests.finish(id);
         }
 
         private EngineRpcService.ErrorDetailsPB cancellationError(long id) {
-            var deadline = requestDeadlines.get(id);
+            var deadline = requests.deadline(id);
             boolean timeout = deadline != null && deadline.expired();
             return EngineRpcService.ErrorDetailsPB.newBuilder()
                     .setErrorCode(timeout ? 603 : EngineRpcService.ErrorCodePB.CANCELLED.getNumber())
@@ -1698,7 +1695,7 @@ public final class JavaMockEngineCluster {
                     for (EngineRpcService.EnqueueBatchDpSlotPB slot : request.getDpSlotsList()) {
                         List<MockPerformanceModel.RequestShape> shapes = new ArrayList<>(slot.getRequestsCount());
                         // Phase 1: register per-request state the completion callback
-                        // depends on (responseQueues/requestStates) BEFORE admission so
+                        // depends on request output/state BEFORE admission so
                         // an immediately-admitted batch can never complete against a
                         // missing response queue.
                         for (EngineRpcService.EnqueueBatchExternalInputPB input : slot.getRequestsList()) {
@@ -1722,7 +1719,7 @@ public final class JavaMockEngineCluster {
                             boolean claimed = prefillRegistrations.add(requestId);
                             if (!claimed || prefillSessions.containsKey(requestId)
                                     || downstreamDecodeOwners.containsKey(requestId)
-                                    || responseQueues.containsKey(requestId)
+                                    || (requests.output(requestId) != null)
                                     || runningTasks.containsKey(requestId)) {
                                 if (claimed) prefillRegistrations.remove(requestId);
                                 response.addErrorsBuilder().setRequestId(requestId)
@@ -1762,7 +1759,7 @@ public final class JavaMockEngineCluster {
                                                 .setErrorMessage("absent fence: cancel fenced this rid "
                                                         + "before it was ever admitted")
                                                 .build());
-                                requestStates.put(requestId, "rejected");
+                                requests.state(requestId, "rejected");
                                 continue;
                             }
                             if (ackFaultBudget > 0
@@ -1773,7 +1770,7 @@ public final class JavaMockEngineCluster {
                                                 .setErrorCode(ackFaultCode)
                                                 .setErrorMessage(ackFaultMessage)
                                                 .build());
-                                requestStates.put(requestId, "rejected");
+                                requests.state(requestId, "rejected");
                                 continue;
                             }
                             EngineRpcService.GenerateInputPB preparedInput = input.getInput();
@@ -1782,7 +1779,7 @@ public final class JavaMockEngineCluster {
                                     preparedInput = vitClient.prepare(preparedInput, beginRequest(preparedInput).remainingMs());
                                 } catch (RuntimeException error) {
                                     response.addErrorsBuilder().setRequestId(requestId).setErrorInfo(MockRpcErrors.downstream(error));
-                                    requestStates.put(requestId, "rejected");
+                                    requests.state(requestId, "rejected");
                                     continue;
                                 }
                             }
@@ -1813,7 +1810,7 @@ public final class JavaMockEngineCluster {
                                                 .setErrorCode(LACK_MEM_ERROR_CODE)
                                                 .setErrorMessage(message)
                                                 .build());
-                                requestStates.put(requestId, "rejected");
+                                requests.state(requestId, "rejected");
                                 continue;
                             }
                             // Prepare the selected D before ACK. Capacity waits follow
@@ -1825,14 +1822,14 @@ public final class JavaMockEngineCluster {
                                 response.addErrorsBuilder()
                                         .setRequestId(requestId)
                                         .setErrorInfo(error);
-                                requestStates.put(requestId, "rejected");
+                                requests.state(requestId, "rejected");
                                 continue;
                             }
                             shapes.add(shape);
                             if (!autoFetch || !prefillSessions.containsKey(requestId)) {
-                                responseQueues.computeIfAbsent(requestId, k -> responseQueue(k));
+                                requests.ensureOutput(requestId, () -> responseQueue(requestId));
                             }
-                            requestStates.put(requestId, "running");
+                            requests.state(requestId, "running");
                         }
                         // Phase 2: admission. false = prefill waiting-queue cap hit
                         // (batch-level backpressure, independent of the request-level
@@ -1849,8 +1846,8 @@ public final class JavaMockEngineCluster {
                                 long requestId = shape.input().getRequestId();
                                 closePrefillSession(requestId);
                                 releaseReservedDecode(requestId);
-                                responseQueues.remove(requestId);
-                                requestStates.put(requestId, "rejected");
+                                requests.removeOutput(requestId);
+                                requests.state(requestId, "rejected");
                                 response.addErrorsBuilder()
                                         .setRequestId(requestId)
                                         .setErrorInfo(EngineRpcService.ErrorDetailsPB.newBuilder()
@@ -1899,7 +1896,7 @@ public final class JavaMockEngineCluster {
                     observer.onCompleted();
                 } finally {
                     prefillRegistrations.removeAll(registrations);
-                    for (long id : registrations) if ("rejected".equals(requestStates.get(id))) finishRequest(id);
+                    for (long id : registrations) if ("rejected".equals(requests.state(id))) finishRequest(id);
                 }
             };
 
@@ -2238,20 +2235,20 @@ public final class JavaMockEngineCluster {
             cacheKeysRequested.add(shape.blockKeys().size());
             acceptedCount.incrementAndGet();
             lastEnqueueTime.set(System.nanoTime());
-            requestStates.put(requestId, "running");
+            requests.state(requestId, "running");
             recordLifecycleStart(requestId, -1, "generate_stream");
             recordEventArrival(requestId);
 
             LinkedBlockingQueue<EngineRpcService.GenerateOutputsPB> queue =
-                    responseQueues.computeIfAbsent(requestId, k -> responseQueue(k));
+                    requests.ensureOutput(requestId, () -> responseQueue(requestId));
 
             if (roleType == EngineRpcService.RoleTypePB.ROLE_TYPE_DECODE) {
                 if (!scheduleDecodeCompletion(shape, -1, queue)) {
                     // Backpressure: decode pending queue full — reject so the
                     // caller (master/client) perceives decode overload and can
                     // retry elsewhere. Clean up the per-request state set up above.
-                    responseQueues.remove(requestId);
-                    requestStates.put(requestId, "rejected");
+                    requests.removeOutput(requestId);
+                    requests.state(requestId, "rejected");
                     finishRequest(requestId);
                     observer.onError(io.grpc.Status.RESOURCE_EXHAUSTED
                             .withDescription("decode queue full (backpressure)").asRuntimeException());
@@ -2272,8 +2269,8 @@ public final class JavaMockEngineCluster {
                         || shape.inputLen() >= performance.prefillBatchPolicy().maxSeqLen());
                 if (impossible || (!fifo && acquireBlockLease(requestId, shape) == null)) {
                     prefillLackMemRejects.increment();
-                    responseQueues.remove(requestId);
-                    requestStates.put(requestId, "rejected");
+                    requests.removeOutput(requestId);
+                    requests.state(requestId, "rejected");
                     finishRequest(requestId);
                     observer.onError(capacityError(602, String.format(
                             "LACK_MEM: insufficient KV cache blocks (need=%d, avail=%d, spb=%d)",
@@ -2284,8 +2281,8 @@ public final class JavaMockEngineCluster {
                 FastRpcService decodeEngine = findDecodeEngine(request);
                 if (!prepareDecodeSession(decodeEngine, shape, -1L, 0, true)) {
                     releaseBlockLease(requestId);
-                    responseQueues.remove(requestId);
-                    requestStates.put(requestId, "rejected");
+                    requests.removeOutput(requestId);
+                    requests.state(requestId, "rejected");
                     EngineRpcService.ErrorDetailsPB error = decodePreparationError(decodeEngine, shape);
                     io.grpc.Metadata trailers = new io.grpc.Metadata();
                     trailers.put(io.grpc.Metadata.Key.of("grpc-status-details-bin", io.grpc.Metadata.BINARY_BYTE_MARSHALLER),
@@ -2303,8 +2300,8 @@ public final class JavaMockEngineCluster {
                     // reservation made just above (release loop closure).
                     closePrefillSession(requestId);
                     releaseReservedDecode(requestId);
-                    responseQueues.remove(requestId);
-                    requestStates.put(requestId, "rejected");
+                    requests.removeOutput(requestId);
+                    requests.state(requestId, "rejected");
                     finishRequest(requestId);
                     observer.onError(io.grpc.Status.RESOURCE_EXHAUSTED
                             .withDescription(String.format(
@@ -2446,9 +2443,9 @@ public final class JavaMockEngineCluster {
                             .asRuntimeException());
                     return;
                 }
-                queue = responseQueues.computeIfAbsent(requestId, k -> responseQueue(k));
+                queue = requests.ensureOutput(requestId, () -> responseQueue(requestId));
             } else {
-                queue = responseQueues.get(requestId);
+                queue = requests.output(requestId);
                 if (queue == null || downstreamDecodeOwners.containsKey(requestId)
                         || remotePrefillOwners.containsKey(requestId)) {
                     observer.onError(io.grpc.Status.NOT_FOUND
@@ -2721,10 +2718,10 @@ public final class JavaMockEngineCluster {
                 releaseBlockLease(requestId);
                 releaseReservedDecode(requestId);
             }
-            requestStates.put(requestId, "cancelled");
+            requests.state(requestId, "cancelled");
             cancelledCount.incrementAndGet();
             statusVersion.incrementAndGet();
-            LinkedBlockingQueue<EngineRpcService.GenerateOutputsPB> queue = responseQueues.get(requestId);
+            LinkedBlockingQueue<EngineRpcService.GenerateOutputsPB> queue = requests.output(requestId);
             if (queue != null) {
                 queue.offer(EngineRpcService.GenerateOutputsPB.newBuilder()
                         .setRequestId(requestId)
@@ -2735,7 +2732,7 @@ public final class JavaMockEngineCluster {
                         .build());
                 // The poller already holds a reference to the queue, so it is safe
                 // to remove it from the map after offering the cancel response.
-                responseQueues.remove(requestId);
+                requests.removeOutput(requestId);
             }
             // (A cancelled running slot's top-up ran under decodeQueueLock inside
             // the decode branch above — nothing to schedule outside the lock.)
@@ -2750,7 +2747,7 @@ public final class JavaMockEngineCluster {
                             // A cancel winning against link death must close it
                             // before removing the last propagation route.
                             LinkedBlockingQueue<EngineRpcService.GenerateOutputsPB> upstreamQueue =
-                                    prefill.responseQueues.get(requestId);
+                                    prefill.requests.output(requestId);
                             if (upstreamQueue != null) {
                                 upstreamQueue.offer(EngineRpcService.GenerateOutputsPB.newBuilder()
                                         .setRequestId(requestId)
@@ -2758,7 +2755,7 @@ public final class JavaMockEngineCluster {
                                                 .setErrorCodeValue((int) cancellationError(requestId).getErrorCode())
                                                 .setErrorMessage(cancellationError(requestId).getErrorMessage()))
                                         .build());
-                                prefill.responseQueues.remove(requestId, upstreamQueue);
+                                prefill.requests.removeOutput(requestId, upstreamQueue);
                             }
                         }
                     }
@@ -2812,7 +2809,7 @@ public final class JavaMockEngineCluster {
                 boolean priorityPreemption) {
             synchronized (completionLock) {
                 EngineRpcService.TaskInfoPB tracked = runningTasks.get(requestId);
-                if (tracked != null && "failed".equals(requestStates.get(requestId))
+                if (tracked != null && "failed".equals(requests.state(requestId))
                         && hasTerminalLifecycle(requestId)) {
                     // Zombie diagnostics can retain a task after its ledger settled.
                     runningTasks.remove(requestId, tracked);
@@ -3038,12 +3035,12 @@ public final class JavaMockEngineCluster {
                 // response queue the client's FetchResponse / GenerateStreamCall
                 // poller hangs on lives on the ORIGINAL PREFILL (startDecode passed
                 // it to this Decode). cancel() above only offers into this
-                // Decode's own responseQueues, which never contained the request,
+                // Decode's own outputs, which never contained the request,
                 // so without this delivery the cancelled request's stream hangs
                 // until the 60s poll timeout (Python mock terminates the stream
                 // from its async cancel finalizer instead).
                 LinkedBlockingQueue<EngineRpcService.GenerateOutputsPB> prefillQueue =
-                        expectedPrefill.responseQueues.get(requestId);
+                        expectedPrefill.requests.output(requestId);
                 if (prefillQueue != null) {
                     prefillQueue.offer(EngineRpcService.GenerateOutputsPB.newBuilder()
                             .setRequestId(requestId)
@@ -3052,7 +3049,7 @@ public final class JavaMockEngineCluster {
                                     .setErrorMessage("cancelled by client")
                                     .build())
                             .build());
-                    expectedPrefill.responseQueues.remove(requestId);
+                    expectedPrefill.requests.removeOutput(requestId);
                 }
                 if (priorityPreemption) {
                     // Decode retains its ordinary CANCELLED terminal for local
@@ -3243,11 +3240,11 @@ public final class JavaMockEngineCluster {
                     prefill.downstreamDecodeOwners.remove(requestId, this);
                     prefill.decodeReservationOwners.remove(requestId, this);
                     prefill.closePrefillSession(requestId);
-                    if (!prefill.responseQueues.containsKey(requestId)) prefill.finishRequest(requestId);
+                    if (prefill.requests.output(requestId) == null) prefill.finishRequest(requestId);
                     // An attached response pump owns its queue directly. No
                     // terminal request may retain a map entry indefinitely.
                     if (!cancelledRequests.containsKey(requestId)) {
-                        prefill.responseQueues.remove(requestId);
+                        prefill.requests.removeOutput(requestId);
                     }
                 }
             }
@@ -3434,19 +3431,6 @@ public final class JavaMockEngineCluster {
                 int dpRank) {
         }
 
-        /**
-         * Regroup token cost of one request: computeTokens + hitTokens —
-         * by construction exactly {@code inputLen()} (hitTokens is clamped
-         * to inputLen and computeTokens is the remainder), i.e. the FULL
-         * logical input length INCLUDING cache hits, the caliber the
-         * approved spec fixed for the budget (production's
-         * evaluateWaitingStreams prices its budget without cache; the mock
-         * divergence is deliberate and documented).
-         */
-        private static long regroupTokenCost(MockPerformanceModel.RequestShape shape) {
-            return shape.inputLen();
-        }
-
         /** Regroup is ON when at least one budget dimension is configured. */
         private boolean prefillRegroupEnabled() {
             return performance.prefillBatchPolicy() != null
@@ -3466,7 +3450,7 @@ public final class JavaMockEngineCluster {
                     synchronized (prefillQueueLock) {
                         fifoDrainScheduled.set(false);
                         if (!shuttingDown && !stopped && activePrefillBatches.get() < maxPrefillConcurrency) {
-                            selected = pollFifoBatchLocked(null, null);
+                            selected = pollRegroupBatchLocked(null, null);
                             if (!selected.isEmpty()) {
                                 activePrefillBatches.incrementAndGet();
                                 activePrefillRequests.addAndGet(selected.size());
@@ -3509,213 +3493,91 @@ public final class JavaMockEngineCluster {
             }
         }
 
-        /** Production FIFO candidate gate: do not consume a candidate that does
-         * not fit. Keep scanning, retaining skipped requests in their original
-         * queue/order. No timer delays an idle engine to manufacture a batch.
+        /** One execution-batch budget; only legacy regroup stops at a full prefix.
+         * FIFO continues scanning and reprices each candidate against current KV.
          */
-        private List<BatchMember> pollFifoBatchLocked(
-                List<BatchMember> arrivals,
-                java.util.function.Consumer<List<BatchMember>> tailSink) {
-            var budget = performance.prefillBatchPolicy().newBudget();
-            List<BatchMember> selected = new ArrayList<>();
-            var direct = directPrefillQueue.iterator();
-            while (direct.hasNext()) {
-                var shape = direct.next();
-                boolean alive = runningTasks.containsKey(shape.input().getRequestId());
-                var candidate = alive ? selectFifoCandidate(shape, budget) : null;
-                if (!alive || candidate != null) {
-                    direct.remove();
-                    waitingPrefillRequests.decrementAndGet();
-                    if (alive) {
-                        selected.add(new BatchMember(candidate, -1L, 0));
-                        budget.add(candidate.inputLen(), candidate.hitTokens(), candidate.prefillSequenceCount());
-                    }
-                }
-            }
-            List<PrefillPendingBatch> remaining = new ArrayList<>();
-            while (!prefillPendingQueue.isEmpty()) {
-                var batch = prefillPendingQueue.pollFirst();
-                List<MockPerformanceModel.RequestShape> skipped = new ArrayList<>();
-                for (var shape : batch.shapes()) {
-                    if (!runningTasks.containsKey(shape.input().getRequestId())) {
-                        waitingPrefillRequests.decrementAndGet();
-                    } else {
-                        var candidate = selectFifoCandidate(shape, budget);
-                        if (candidate == null) {
-                            skipped.add(shape);
-                        } else {
-                            selected.add(new BatchMember(candidate, batch.batchId(), batch.dpRank()));
-                            budget.add(candidate.inputLen(), candidate.hitTokens(), candidate.prefillSequenceCount());
-                            waitingPrefillRequests.decrementAndGet();
-                        }
-                    }
-                }
-                if (!skipped.isEmpty()) remaining.add(new PrefillPendingBatch(
-                        List.copyOf(skipped), batch.batchId(), batch.dpRank()));
-            }
-            prefillPendingQueue.addAll(remaining);
-            if (arrivals != null) {
-                List<BatchMember> skipped = new ArrayList<>();
-                for (var member : arrivals) {
-                    var shape = member.shape();
-                    if (!runningTasks.containsKey(shape.input().getRequestId())) continue;
-                    var candidate = selectFifoCandidate(shape, budget);
-                    if (candidate != null) {
-                        selected.add(new BatchMember(candidate, member.batchId(), member.dpRank()));
-                        budget.add(candidate.inputLen(), candidate.hitTokens(), candidate.prefillSequenceCount());
-                    } else skipped.add(member);
-                }
-                if (!skipped.isEmpty()) {
-                    waitingPrefillRequests.addAndGet(skipped.size());
-                    tailSink.accept(skipped);
-                }
-            }
-            return selected;
-        }
+        private final class PrefillSelection {
+            final List<BatchMember> members = new ArrayList<>();
+            final MockPrefillBatchPolicy.Budget fifo = performance.prefillBatchPolicy() == null
+                    ? null : performance.prefillBatchPolicy().newBudget();
+            long tokens;
 
-        /**
-         * Legacy mock budget gate (retained for existing case configurations): binds only from the SECOND
-         * admitted member on (the first member always admits — a single
-         * request larger than the whole budget still runs, matching
-         * FIFOScheduler admitting the first waiting stream whenever the
-         * budget is > 0), and the token budget is an admission STOP (once
-         * cumulative cost reaches it no further member joins this batch —
-         * the batch itself may carry the member that crossed the line).
-         */
-        private static boolean regroupBudgetReached(List<BatchMember> exec,
-                                                     long admittedTokens,
-                                                     int tokenBudget,
-                                                     int requestCap) {
-            if (exec.isEmpty()) {
-                return false;
+            boolean stopped() {
+                return fifo == null && !members.isEmpty()
+                        && ((performance.maxBatchTokens() > 0 && tokens >= performance.maxBatchTokens())
+                            || (performance.maxBatchRequests() > 0
+                                && members.size() >= performance.maxBatchRequests()));
             }
-            if (tokenBudget > 0 && admittedTokens >= tokenBudget) {
+
+            boolean take(MockPerformanceModel.RequestShape shape, long batchId, int dpRank) {
+                var candidate = fifo == null ? shape : selectFifoCandidate(shape, fifo);
+                if (candidate == null) return false;
+                members.add(new BatchMember(candidate, batchId, dpRank));
+                if (fifo == null) tokens += candidate.inputLen();
+                else fifo.add(candidate.inputLen(), candidate.hitTokens(), candidate.prefillSequenceCount());
                 return true;
             }
-            return requestCap > 0 && exec.size() >= requestCap;
         }
 
-        /**
-         * Compose ONE execution batch from the engine's waiting pools under
-         * the dual budget. Caller MUST hold {@code prefillQueueLock}.
-         *
-         * <p>Order: direct-path (generate_stream) requests drain FIRST —
-         * the pre-existing drain priority — then the master-batch queue,
-         * each pool FIFO and ACROSS master batches in arrival order (a
-         * partially consumed head batch stays at the queue head with its
-         * remainder; production scans waiting_streams_ as one FIFO list
-         * regardless of which EnqueueBatch delivered each stream). Finally
-         * {@code arrivals} — the members of a master batch meeting a free
-         * concurrency slot at enqueue time — join in logical tail order.
-         *
-         * <p>Cancelled members (no runningTasks entry) are dropped from the
-         * queues as encountered (their cancel already settled the
-         * per-request counters) and never occupy budget.
-         *
-         * <p>Unconsumed arrival tail members are handed back to the caller via
-         * {@code tailSink} (origin batchId/dpRank preserved on each member)
-         * — the caller decides WHICH pool requeues them (a master batch's
-         * overflow tail goes to prefillPendingQueue as ONE remainder batch,
-         * bypassing the waiting-batch cap: the batch already earned its
-         * execution right; a direct newcomer's tail goes back to
-         * directPrefillQueue head-first). waitingPrefillRequests is
-         * incremented INSIDE this method (the tail counts as waiting from
-         * this instant — arrivals had not queued before).
-         *
-         * @param arrivals members of a newly admitted master batch joining
-         *                 at the logical tail (may be null on drain)
-         * @param tailSink receives the unconsumed arrival tail (never
-         *                 invoked with an empty list)
-         * @return the composed execution batch (empty when nothing alive
-         *                 waited — the caller must not reserve a slot)
+        /** Drain direct, queued Master batches, then arrivals under one budget.
+         * Origin batch/rank and waiting counts belong to each request, never to
+         * its execution grouping. The caller holds prefillQueueLock.
          */
         private List<BatchMember> pollRegroupBatchLocked(
                 List<BatchMember> arrivals,
                 java.util.function.Consumer<List<BatchMember>> tailSink) {
-            if (performance.prefillBatchPolicy() != null) {
-                return pollFifoBatchLocked(arrivals, tailSink);
-            }
-            final int tokenBudget = performance.maxBatchTokens();
-            final int requestCap = performance.maxBatchRequests();
-            List<BatchMember> exec = new ArrayList<>();
-            long admittedTokens = 0L;
-            // Phase A: direct queue (FIFO, cancelled members dropped). The
-            // legacy directBatchSizeMax coalesce cap STAYS binding on this
-            // pool — regroup ADDS the token dimension to the direct path,
-            // it never loosens the direct request cap (counted on ALIVE
-            // members, matching the legacy coalesce loops).
-            final int directCap = performance.directBatchSizeMax();
-            while (!directPrefillQueue.isEmpty() && exec.size() < directCap) {
-                if (regroupBudgetReached(exec, admittedTokens, tokenBudget, requestCap)) {
-                    break;
-                }
-                MockPerformanceModel.RequestShape candidate = directPrefillQueue.pollFirst();
-                waitingPrefillRequests.decrementAndGet();
-                if (runningTasks.containsKey(candidate.input().getRequestId())) {
-                    exec.add(new BatchMember(candidate, -1L, 0));
-                    admittedTokens += regroupTokenCost(candidate);
+            var selection = new PrefillSelection();
+            var direct = directPrefillQueue.iterator();
+            while (direct.hasNext() && !selection.stopped()
+                    && (selection.fifo != null || selection.members.size() < performance.directBatchSizeMax())) {
+                var shape = direct.next();
+                if (!runningTasks.containsKey(shape.input().getRequestId())
+                        || selection.take(shape, -1L, 0)) {
+                    direct.remove();
+                    waitingPrefillRequests.decrementAndGet();
                 }
             }
-            // Phase B: master-batch queue — cross-batch FIFO with partial
-            // head consumption (a budget-stopped head keeps its remainder).
-            while (!prefillPendingQueue.isEmpty()) {
-                if (regroupBudgetReached(exec, admittedTokens, tokenBudget, requestCap)) {
-                    break;
+            // Only visit batches present on entry; skipped FIFO members rejoin
+            // the tail without being reconsidered in this execution batch.
+            int queuedBatches = prefillPendingQueue.size();
+            for (int i = 0; i < queuedBatches && !selection.stopped(); i++) {
+                var batch = prefillPendingQueue.removeFirst();
+                var remaining = new ArrayList<MockPerformanceModel.RequestShape>();
+                boolean blocked = false;
+                for (var shape : batch.shapes()) {
+                    boolean alive = runningTasks.containsKey(shape.input().getRequestId());
+                    blocked |= alive && selection.stopped();
+                    if (blocked) remaining.add(shape);
+                    else if (!alive
+                            || selection.take(shape, batch.batchId(), batch.dpRank())) {
+                        waitingPrefillRequests.decrementAndGet();
+                    } else remaining.add(shape);
                 }
-                PrefillPendingBatch head = prefillPendingQueue.peekFirst();
-                List<MockPerformanceModel.RequestShape> shapes = head.shapes();
-                int taken = 0; // members leaving the queue (admitted or dropped)
-                for (MockPerformanceModel.RequestShape shape : shapes) {
-                    if (runningTasks.containsKey(shape.input().getRequestId())) {
-                        if (regroupBudgetReached(exec, admittedTokens, tokenBudget, requestCap)) {
-                            break; // this live member stays for the NEXT batch
-                        }
-                        exec.add(new BatchMember(shape, head.batchId(), head.dpRank()));
-                        admittedTokens += regroupTokenCost(shape);
+                if (!remaining.isEmpty()) {
+                    var tail = new PrefillPendingBatch(List.copyOf(remaining), batch.batchId(), batch.dpRank());
+                    if (selection.fifo != null) prefillPendingQueue.addLast(tail);
+                    else {
+                        prefillPendingQueue.addFirst(tail);
+                        break;
                     }
-                    taken++; // cancelled members leave unconditionally
-                }
-                if (taken > 0) {
-                    prefillPendingQueue.pollFirst();
-                    waitingPrefillRequests.addAndGet(-taken);
-                    if (taken < shapes.size()) {
-                        prefillPendingQueue.addFirst(new PrefillPendingBatch(
-                                List.copyOf(shapes.subList(taken, shapes.size())),
-                                head.batchId(), head.dpRank()));
-                    }
-                }
-                if (taken == 0) {
-                    break; // defensive: head untouched (cannot happen with
-                    // a live head and a non-reached budget, but never loop)
                 }
             }
-            // Phase C: arrival tail — members of the batch that just met the
-            // free slot, joining AFTER everything already waiting (FIFO).
-            if (arrivals != null && !arrivals.isEmpty()) {
-                int taken = 0;
-                for (BatchMember member : arrivals) {
-                    if (runningTasks.containsKey(member.shape().input().getRequestId())) {
-                        if (regroupBudgetReached(exec, admittedTokens, tokenBudget, requestCap)) {
-                            break;
-                        }
-                        exec.add(member);
-                        admittedTokens += regroupTokenCost(member.shape());
-                    }
-                    taken++;
+            if (arrivals != null) {
+                List<BatchMember> tail = new ArrayList<>();
+                boolean blocked = false;
+                for (var member : arrivals) {
+                    boolean alive = runningTasks.containsKey(member.shape().input().getRequestId());
+                    blocked |= alive && selection.stopped();
+                    if (blocked) tail.add(member);
+                    else if (alive
+                            && !selection.take(member.shape(), member.batchId(), member.dpRank())) tail.add(member);
                 }
-                if (taken < arrivals.size()) {
-                    List<BatchMember> tail = new ArrayList<>(arrivals.size() - taken);
-                    for (int i = taken; i < arrivals.size(); i++) {
-                        tail.add(arrivals.get(i));
-                    }
-                    // The tail enters the waiting pool now: its members count
-                    // as waiting from this instant (they never counted before
-                    // — arrivals had not queued).
+                if (!tail.isEmpty()) {
                     waitingPrefillRequests.addAndGet(tail.size());
                     tailSink.accept(tail);
                 }
             }
-            return exec;
+            return selection.members;
         }
 
         /** Shapes view of a member list (pricing/ledger helper). */
@@ -3735,6 +3597,30 @@ public final class JavaMockEngineCluster {
                 members.add(new BatchMember(shape, batchId, dpRank));
             }
             return members;
+        }
+
+        private List<MockPerformanceModel.RequestShape> pollDirectPrefillLocked(int limit) {
+            var selected = new ArrayList<MockPerformanceModel.RequestShape>(
+                    Math.max(0, Math.min(limit, directPrefillQueue.size())));
+            while (!directPrefillQueue.isEmpty() && selected.size() < limit) {
+                var candidate = directPrefillQueue.removeFirst();
+                waitingPrefillRequests.decrementAndGet();
+                if (runningTasks.containsKey(candidate.input().getRequestId())) selected.add(candidate);
+            }
+            return selected;
+        }
+
+        /** Verbatim legacy batches retain their own grouping and accounting. */
+        private List<BatchMember> pollLegacyPrefillLocked() {
+            var direct = pollDirectPrefillLocked(performance.directBatchSizeMax());
+            if (!direct.isEmpty()) return legacyMembers(direct, -1L, 0);
+            while (!prefillPendingQueue.isEmpty()) {
+                var batch = prefillPendingQueue.removeFirst();
+                waitingPrefillRequests.addAndGet(-batch.shapes().size());
+                if (batch.shapes().stream().anyMatch(shape -> runningTasks.containsKey(shape.input().getRequestId())))
+                    return legacyMembers(batch.shapes(), batch.batchId(), batch.dpRank());
+            }
+            return List.of();
         }
 
         /**
@@ -3832,19 +3718,7 @@ public final class JavaMockEngineCluster {
                     activePrefillBatches.incrementAndGet();
                     activePrefillRequests.addAndGet(regrouped.size());
                 } else {
-                    int maxBatch = performance.directBatchSizeMax();
-                    merged = new ArrayList<>(Math.min(maxBatch, directPrefillQueue.size() + 1));
-                    // Coalesce queued requests with the newcomer: every polled entry
-                    // leaves the waiting queue (cancelled members have no
-                    // runningTasks entry and are skipped, matching the BATCH-queue
-                    // drain's anyAlive semantics).
-                    while (!directPrefillQueue.isEmpty() && merged.size() < maxBatch - 1) {
-                        MockPerformanceModel.RequestShape candidate = directPrefillQueue.pollFirst();
-                        waitingPrefillRequests.decrementAndGet();
-                        if (runningTasks.containsKey(candidate.input().getRequestId())) {
-                            merged.add(candidate);
-                        }
-                    }
+                    merged = pollDirectPrefillLocked(performance.directBatchSizeMax() - 1);
                     merged.add(shape);
                     activePrefillBatches.incrementAndGet();
                     activePrefillRequests.addAndGet(merged.size());
@@ -4075,7 +3949,7 @@ public final class JavaMockEngineCluster {
                         // after local failure, while freeing both KV pools now.
                         releaseBlockLease(requestId);
                         releaseReservedDecode(requestId);
-                        requestStates.put(requestId, "failed");
+                        requests.state(requestId, "failed");
                         if (session != null) {
                             session.fail(EngineRpcService.GenerateOutputsPB.newBuilder()
                                     .setRequestId(requestId)
@@ -4089,7 +3963,7 @@ public final class JavaMockEngineCluster {
                     } else if (session != null) {
                         // P's scheduler slot is finished; the RPC context still
                         // owns connector KV until Fetch/auto-fetch transfers it.
-                        requestStates.put(requestId, "waiting_fetch");
+                        requests.state(requestId, "waiting_fetch");
                         session.prefillDone();
                         continuePrefillSession(session);
                     } else {
@@ -4117,87 +3991,18 @@ public final class JavaMockEngineCluster {
                 pendingRequests.addAndGet(-activeCount);
                 // Drain one queued batch under the same lock that guards admission,
                 // handing this completion's freed slot to a queued batch atomically.
-                // With regroup ON (20260903 #8) the freed slot triggers ONE
-                // budget-bounded recomposition across BOTH waiting pools
-                // (direct members first — the pre-existing drain priority — then
-                // master-batch members in cross-batch FIFO order; a partially
-                // consumed head batch keeps its remainder at the queue head).
-                // With regroup OFF the legacy verbatim behavior stays: direct
-                // requests coalesce into ONE batch of up to directBatchSizeMax()
-                // alive members (production prefill continuous batching); the
-                // BATCH queue drains only when no direct batch claimed the slot.
-                List<BatchMember> nextMembers = null;
-                List<MockPerformanceModel.RequestShape> directBatch = null;
-                PrefillPendingBatch nextBatch = null;
+                List<BatchMember> next = List.of();
                 synchronized (prefillQueueLock) {
                     if (activePrefillBatches.get() < maxPrefillConcurrency) {
-                        if (prefillRegroupEnabled()) {
-                            // arrivals=null (nothing new lands here) — the
-                            // tailSink is never invoked, so null is safe.
-                            nextMembers = pollRegroupBatchLocked(null, null);
-                            if (nextMembers.isEmpty()) {
-                                nextMembers = null;
-                            } else {
-                                activePrefillBatches.incrementAndGet();
-                                activePrefillRequests.addAndGet(nextMembers.size());
-                            }
-                        } else if (!directPrefillQueue.isEmpty()) {
-                            int maxBatch = performance.directBatchSizeMax();
-                            directBatch = new ArrayList<>(
-                                    Math.min(maxBatch, directPrefillQueue.size()));
-                            while (!directPrefillQueue.isEmpty()
-                                    && directBatch.size() < maxBatch) {
-                                MockPerformanceModel.RequestShape candidate =
-                                        directPrefillQueue.pollFirst();
-                                waitingPrefillRequests.decrementAndGet();
-                                if (runningTasks.containsKey(candidate.input().getRequestId())) {
-                                    directBatch.add(candidate);
-                                }
-                            }
-                            if (directBatch.isEmpty()) {
-                                // Every member was cancelled while queued — the slot
-                                // stays free for the BATCH queue below.
-                                directBatch = null;
-                            } else {
-                                activePrefillBatches.incrementAndGet();
-                                activePrefillRequests.addAndGet(directBatch.size());
-                            }
-                        }
-                        if (directBatch == null && nextMembers == null && !prefillRegroupEnabled()) {
-                            while (!prefillPendingQueue.isEmpty()) {
-                                PrefillPendingBatch candidate = prefillPendingQueue.peekFirst();
-                                // Skip batches whose every member was cancelled while queued
-                                // (cancel removed their runningTasks entries and already
-                                // decremented pendingRequests). Drop them without reserving.
-                                boolean anyAlive = false;
-                                for (MockPerformanceModel.RequestShape s : candidate.shapes()) {
-                                    if (runningTasks.containsKey(s.input().getRequestId())) {
-                                        anyAlive = true;
-                                        break;
-                                    }
-                                }
-                                if (!anyAlive) {
-                                    prefillPendingQueue.pollFirst();
-                                    waitingPrefillRequests.addAndGet(-candidate.shapes().size());
-                                    continue;
-                                }
-                                activePrefillBatches.incrementAndGet();
-                                activePrefillRequests.addAndGet(candidate.shapes().size());
-                                waitingPrefillRequests.addAndGet(-candidate.shapes().size());
-                                nextBatch = prefillPendingQueue.pollFirst();
-                                break;
-                            }
+                        next = prefillRegroupEnabled()
+                                ? pollRegroupBatchLocked(null, null) : pollLegacyPrefillLocked();
+                        if (!next.isEmpty()) {
+                            activePrefillBatches.incrementAndGet();
+                            activePrefillRequests.addAndGet(next.size());
                         }
                     }
                 }
-                if (nextMembers != null) {
-                    runPrefillBatch(nextMembers);
-                } else if (directBatch != null) {
-                    runPrefillBatch(legacyMembers(directBatch, -1L, 0));
-                } else if (nextBatch != null) {
-                    runPrefillBatch(legacyMembers(nextBatch.shapes(),
-                            nextBatch.batchId(), nextBatch.dpRank()));
-                }
+                if (!next.isEmpty()) runPrefillBatch(next);
             }, delayNanos, TimeUnit.NANOSECONDS);
         }
 
@@ -4290,7 +4095,7 @@ public final class JavaMockEngineCluster {
                 return EngineRpcService.ErrorDetailsPB.newBuilder().setErrorCode(PRIORITY_PREEMPTED_ERROR_CODE)
                         .setErrorMessage("preempted during ALLOCATE").build();
             var details = MockRpcErrors.downstream(error);
-            var deadline = requestDeadlines.get(shape.input().getRequestId());
+            var deadline = requests.deadline(shape.input().getRequestId());
             if (details.getErrorCode() == 8207 && deadline != null && deadline.remainingMs() == 0)
                 return EngineRpcService.ErrorDetailsPB.newBuilder().setErrorCode(603)
                         .setErrorMessage("request deadline exhausted during ALLOCATE").build();
@@ -4383,11 +4188,11 @@ public final class JavaMockEngineCluster {
             long id = shape.input().getRequestId();
             // Retry without decodeQueueLock: existing completions must be able
             // to release KV while ALLOCATE waits for capacity.
-            var deadline = requestDeadlines.get(id);
-            if (deadline != null) decode.requestDeadlines.putIfAbsent(id, deadline);
+            var deadline = requests.deadline(id);
+            if (deadline != null) decode.requests.inheritDeadline(id, deadline);
             if (decode.admissionClosed || decode.stopped || decode.shuttingDown || !decode.reserveDecodeLease(id, shapeForDecode(decode, shape),
                     () -> shuttingDown || cancelledRequests.containsKey(id) || hasFencedRequestId(id))) {
-                if (deadline != null) decode.requestDeadlines.remove(id, deadline);
+                if (deadline != null) decode.requests.removeDeadline(id, deadline);
                 return false;
             }
             synchronized (decode.decodeQueueLock) {
@@ -4404,7 +4209,7 @@ public final class JavaMockEngineCluster {
                         EngineRpcService.TaskPhase.TASK_PHASE_KV_ALLOCATED));
                 decode.pendingRequests.incrementAndGet();
                 decode.acceptedCount.incrementAndGet();
-                decode.requestStates.put(id, "waiting_for_kv");
+                decode.requests.state(id, "waiting_for_kv");
                 decode.recordLifecycleStart(id, batchId, "remote_allocate");
                 synchronized (decode.requestLifecycles) {
                     decode.requestLifecycles.get(id).put("running_ms", 0L);
@@ -4453,12 +4258,12 @@ public final class JavaMockEngineCluster {
             }
             // Fetch can attach before compute ends, or after it. Both paths
             // converge here, once, after the local first token is available.
-            LinkedBlockingQueue<EngineRpcService.GenerateOutputsPB> queue = responseQueues.get(id);
+            LinkedBlockingQueue<EngineRpcService.GenerateOutputsPB> queue = requests.output(id);
             if (session.failure() != null) {
                 if (queue != null) {
                     queue.offer(session.failure());
                 }
-                responseQueues.remove(id);
+                requests.removeOutput(id);
                 prefillSessions.remove(id, session);
                 session.close();
                 releaseBlockLease(id);
@@ -4477,16 +4282,16 @@ public final class JavaMockEngineCluster {
                     decodeReservationOwners.remove(id, session.decode);
                     clearDecodeOwnership(id, session.decode);
                     if (queue != null) queue.offer(buildOutput(session.shape, true));
-                    responseQueues.remove(id, queue);
+                    requests.removeOutput(id, queue);
                 } else if (session.decode == null) {
                     completedCount.incrementAndGet();
-                    requestStates.put(id, "completed");
+                    requests.state(id, "completed");
                     if (queue != null) {
                         queue.offer(buildOutput(session.shape, true));
                     }
-                    responseQueues.remove(id);
+                    requests.removeOutput(id);
                 } else if (!startDecode(session.shape, session.batchId)) {
-                    requestStates.put(id, "failed");
+                    requests.state(id, "failed");
                     if (queue != null) {
                         queue.offer(EngineRpcService.GenerateOutputsPB.newBuilder()
                                 .setRequestId(id)
@@ -4495,7 +4300,7 @@ public final class JavaMockEngineCluster {
                                         .setErrorMessage("prepared decode became unavailable"))
                                 .build());
                     }
-                    responseQueues.remove(id, queue);
+                    requests.removeOutput(id, queue);
                 }
             }
             prefillSessions.remove(id, session);
@@ -4508,7 +4313,7 @@ public final class JavaMockEngineCluster {
         private boolean startDecode(MockPerformanceModel.RequestShape shape, long batchId) {
             EngineRpcService.GenerateInputPB input = shape.input();
             LinkedBlockingQueue<EngineRpcService.GenerateOutputsPB> queue =
-                    responseQueues.get(input.getRequestId());
+                    requests.output(input.getRequestId());
             FastRpcService decode = decodeReservationOwners.get(input.getRequestId());
             if (decode == null) {
                 // No routable decode engine — the reservation phase (if any)
@@ -5027,7 +4832,7 @@ public final class JavaMockEngineCluster {
             recordLifecycleEnd(requestId, alreadyCancelled);
             if (!alreadyCancelled) {
                 completedCount.incrementAndGet();
-                requestStates.put(requestId, "completed");
+                requests.state(requestId, "completed");
                 // Successful output totals are business completions; execution
                 // TPS comes from decodeTps, including work later cancelled.
                 lifetimeGenerateTokens.add(shape.outputLen());
@@ -5045,7 +4850,7 @@ public final class JavaMockEngineCluster {
                     stream.responseQueue.offer(buildOutput(shape, true));
                 }
             }
-            responseQueues.remove(requestId);
+            requests.removeOutput(requestId);
             cancelledRequests.remove(requestId);
             // Capacity model v2 + fix #5 (cancelled streams never admit): the
             // stream's block lease hands its key blocks to the LRU on a NORMAL
@@ -5122,7 +4927,7 @@ public final class JavaMockEngineCluster {
                 }
             }
             recordLifecycleEnd(requestId, "failed");
-            requestStates.put(requestId, "failed");
+            requests.state(requestId, "failed");
             if (responseQueue != null) {
                 responseQueue.offer(EngineRpcService.GenerateOutputsPB.newBuilder()
                         .setRequestId(requestId)
@@ -5134,7 +4939,7 @@ public final class JavaMockEngineCluster {
                                 .build())
                         .build());
             }
-            responseQueues.remove(requestId);
+            requests.removeOutput(requestId);
             cancelledRequests.remove(requestId);
             // Growth failures hold a (partial) lease — return it to the pool
             // without LRU handover (a failed request leaves no cache, same as
@@ -5542,7 +5347,7 @@ public final class JavaMockEngineCluster {
         private boolean reserveDecodeLease(long requestId, MockPerformanceModel.RequestShape shape,
                                            java.util.function.BooleanSupplier ownerCancelled) {
             allocationError.remove();
-            var lifetime = requestDeadlines.get(requestId);
+            var lifetime = requests.deadline(requestId);
             if (lifetime == null) lifetime = new MockRequestDeadline(shape.input().getGenerateConfig().getTimeoutMs());
             while (true) {
                 if (lifetime.remainingMs() == 0) {
@@ -5855,15 +5660,14 @@ public final class JavaMockEngineCluster {
         }
 
         /**
-         * Remove orphaned entries from responseQueues, requestStates, and cancelledRequests
+         * Remove orphaned request outputs, terminal states and cancelled markers
          * for requestIds that are no longer in runningTasks. This is a safety net for
          * entries that were not cleaned up by the completion or cancel callbacks.
          */
         void periodicCleanup() {
             long now = System.nanoTime();
-            responseQueues.entrySet().removeIf(entry -> {
-                long id = entry.getKey();
-                if (!(entry.getValue() instanceof MockResponseQueue queue)
+            requests.removeOutputsIf((id, output) -> {
+                if (!(output instanceof MockResponseQueue queue)
                         || !queue.expiredTerminal(now, fetchAttachTimeoutMs)) return false;
                 return !runningTasks.containsKey(id) && !prefillSessions.containsKey(id)
                         && !downstreamDecodeOwners.containsKey(id)
@@ -5872,13 +5676,13 @@ public final class JavaMockEngineCluster {
             });
             // A fresh request may register after housekeeping begins. Never prune
             // unowned nonterminal state from a time-point snapshot of active IDs.
-            requestStates.entrySet().removeIf(entry ->
-                    ("completed".equals(entry.getValue()) || "cancelled".equals(entry.getValue())
-                            || "failed".equals(entry.getValue()) || "rejected".equals(entry.getValue()))
-                    && !responseQueues.containsKey(entry.getKey())
-                    && !runningTasks.containsKey(entry.getKey())
-                    && !prefillSessions.containsKey(entry.getKey())
-                    && !remotePrefillOwners.containsKey(entry.getKey()));
+            requests.removeStatesIf((id, state) ->
+                    ("completed".equals(state) || "cancelled".equals(state)
+                            || "failed".equals(state) || "rejected".equals(state))
+                    && requests.output(id) == null
+                    && !runningTasks.containsKey(id)
+                    && !prefillSessions.containsKey(id)
+                    && !remotePrefillOwners.containsKey(id));
             // NOTE: cancelledRequests must NOT be pruned against runningTasks —
             // cancel() removes the runningTasks entry first, so retainAll would
             // drop the marker before the completion callback observes it and a
@@ -5894,9 +5698,9 @@ public final class JavaMockEngineCluster {
             // task nor has a live response queue (queued prefill/decode members
             // always hold a runningTasks entry).
             eventArrivalMs.keySet().removeIf(id ->
-                    !runningTasks.containsKey(id) && !responseQueues.containsKey(id));
+                    !runningTasks.containsKey(id) && requests.output(id) == null);
             eventStartMs.keySet().removeIf(id ->
-                    !runningTasks.containsKey(id) && !responseQueues.containsKey(id));
+                    !runningTasks.containsKey(id) && requests.output(id) == null);
             // Retention is enforced at insertion; housekeeping is idempotent.
             synchronized (completionLock) {
                 trimCompletionsLocked();
@@ -5925,7 +5729,7 @@ public final class JavaMockEngineCluster {
             memoryReads.keySet().forEach(this::releaseMemoryRead);
             memoryWrites.keySet().forEach(this::abortMemoryCopies);
             setStopped(true);
-            requestDeadlines.keySet().forEach(id -> cancel(id, false, false));
+            requests.deadlineIds().forEach(id -> cancel(id, false, false));
             for (Long requestId : List.copyOf(prefillSessions.keySet())) {
                 cancel(requestId, false, false);
             } // same rejection semantics as the control-plane /stop_engine
@@ -6038,11 +5842,10 @@ public final class JavaMockEngineCluster {
                 statusDeliveryFaults.rules.clear();
                 statusDeliveryFaultsActive = false;
             }
-            responseQueues.clear();
-            requestStates.clear();
+            requests.clearOutputs();
+            requests.clearStates();
             activeBlockLeases.clear();
-            requestDeadlines.values().forEach(MockRequestDeadline::close);
-            requestDeadlines.clear();
+            requests.closeDeadlines();
             cancelledRequests.clear();
             // Queued work dies with the process: pending prefill batches,
             // direct-stream parks, decode wait queue and running streams.
@@ -6158,8 +5961,7 @@ public final class JavaMockEngineCluster {
         void shutdown() {
             vitClient.close();
             long expires = System.nanoTime() + TimeUnit.SECONDS.toNanos(2);
-            requestDeadlines.values().forEach(MockRequestDeadline::close);
-            requestDeadlines.clear();
+            requests.closeDeadlines();
             List<Runnable> close = new ArrayList<>();
             if (rpcEngine != null) close.add(rpcEngine::stop);
             remotePrefillOwners.forEach((id, owner) -> close.add(() -> {
@@ -6235,7 +6037,7 @@ public final class JavaMockEngineCluster {
 
         private void deliverLinkBreak(long requestId, FastRpcService prefill) {
             LinkedBlockingQueue<EngineRpcService.GenerateOutputsPB> queue =
-                    prefill.responseQueues.get(requestId);
+                    prefill.requests.output(requestId);
             if (queue != null) {
                 queue.offer(EngineRpcService.GenerateOutputsPB.newBuilder()
                         .setRequestId(requestId)
@@ -6402,7 +6204,7 @@ public final class JavaMockEngineCluster {
                 return directPrefillQueue.size();
             }
         }
-        Map<Long, String> getRequestStates() { return requestStates; }
+        Map<Long, String> getRequestStates() { return requests.states(); }
 
         /**
          * Python /set_kv_pressure uses ABSOLUTE active_kv_tokens semantics
@@ -6796,7 +6598,7 @@ public final class JavaMockEngineCluster {
             snap.put("accepted", acceptedCount.get());
             snap.put("auto_fetch", autoFetch);
             snap.put("active_decode_requests", activeDecodeRequests.get());
-            snap.put("response_buffers", responseQueues.size());
+            snap.put("response_buffers", requests.outputCount());
             snap.put("prefill_contexts", prefillSessions.size());
             snap.put("decode_waiting_for_kv", decodeWaitingForKv.size());
             snap.put("fetch_attach_expirations", fetchAttachExpirations.get());

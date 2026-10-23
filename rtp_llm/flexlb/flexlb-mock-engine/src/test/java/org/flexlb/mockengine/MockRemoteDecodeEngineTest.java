@@ -173,9 +173,7 @@ class MockRemoteDecodeEngineTest {
             var failure = assertThrows(java.util.concurrent.ExecutionException.class,
                     () -> call.allocated().get(3, TimeUnit.SECONDS));
             assertEquals(602, MockRpcErrors.downstream(failure).getErrorCode());
-            var field = decode.getClass().getDeclaredField("requestDeadlines");
-            field.setAccessible(true);
-            assertTrue(((Map<?, ?>) field.get(decode)).isEmpty(), "failed admission must release its timer owner");
+            assertTrue(decode.requests.deadlineIds().isEmpty(), "failed admission must release its timer owner");
             awaitDrain();
         }
     }
