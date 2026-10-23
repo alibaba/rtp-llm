@@ -12,20 +12,34 @@ from rtp_llm.test.amd_coverage import (
     validate_amd_coverage,
 )
 
+# Keep the original broad-profile parameter identities. The new source obligation
+# is checked inside those existing cases rather than adding unrelated SM8x cases.
+_SHORT_TAIL = next(
+    target
+    for target in AMD_TARGETS
+    if target.name == "moriep_intranode_router_test_short_tail_2gpu"
+)
+_BASELINE_TARGETS = tuple(target for target in AMD_TARGETS if target != _SHORT_TAIL)
+
 
 def _baseline_nodeids():
-    return [
-        target.path + "::" + (target.case or "test_case") for target in AMD_TARGETS
-    ] + [
-        AMD_GTEST_ADAPTER + f"::test_rocm_beam_search_gtest[{case}]"
-        for case in AMD_GTEST_CASES
-    ]
+    return (
+        [target.path + "::" + (target.case or "test_case") for target in _BASELINE_TARGETS]
+        + [
+            AMD_GTEST_ADAPTER + f"::test_rocm_beam_search_gtest[{case}]"
+            for case in AMD_GTEST_CASES
+        ]
+        + [_SHORT_TAIL.path + "::" + _SHORT_TAIL.case]
+    )
 
 
 @pytest.mark.parametrize("missing", range(52))
 def test_missing_baseline_target_cannot_be_replaced_by_unrelated_cases(missing):
     nodeids = _baseline_nodeids()
-    assert len(nodeids) == 52  # 38 original identities plus 14 mainline additions.
+    assert len(nodeids) == 53  # Original 52 obligations plus the short-tail method.
+    if missing == 0:
+        with pytest.raises(ValueError, match=_SHORT_TAIL.name):
+            validate_amd_coverage(nodeids[:-1])
     validate_amd_coverage(nodeids)
     nodeids.pop(missing)
     nodeids.extend(f"other.py::test_other[{i}]" for i in range(300))
@@ -33,7 +47,7 @@ def test_missing_baseline_target_cannot_be_replaced_by_unrelated_cases(missing):
         validate_amd_coverage(nodeids)
 
 
-@pytest.mark.parametrize("target", AMD_TARGETS, ids=lambda target: target.name)
+@pytest.mark.parametrize("target", _BASELINE_TARGETS, ids=lambda target: target.name)
 def test_amd_route_preserves_multicard_requirements(target):
     markers = [pytest.mark.gpu(type="H20")]
     item = SimpleNamespace(
@@ -45,6 +59,21 @@ def test_amd_route_preserves_multicard_requirements(target):
     route_amd_items([item])
     assert markers[0].kwargs == {"type": "MI308X", "count": target.gpu_count}
     assert markers[1].kwargs == {"type": "H20"}
+
+    if target.name == "moriep_intranode_router_test_2gpu":
+        assert _SHORT_TAIL.gpu_count == 2
+        item.nodeid = _SHORT_TAIL.path + "::MoriEpIntranodeRouterTest::" + _SHORT_TAIL.case
+        markers[:] = [pytest.mark.gpu(type="MI308X_ROCM7", count=2)]
+        route_amd_items([item])
+        assert markers[0].kwargs == {"type": "MI308X", "count": 2}
+        assert markers[1].kwargs == {"type": "MI308X_ROCM7", "count": 2}
+        assert [entry.name for entry in AMD_TARGETS if entry.matches(item.nodeid)] == [
+            _SHORT_TAIL.name
+        ]
+        item.nodeid = _SHORT_TAIL.path + "::MoriEpIntranodeRouterTest::test_unregistered"
+        markers[:] = [pytest.mark.gpu(type="MI308X_ROCM7", count=2)]
+        route_amd_items([item])
+        assert len(markers) == 1
 
 
 def test_mainline_graph_replay_target_receives_four_gpus():

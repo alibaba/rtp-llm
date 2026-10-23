@@ -102,6 +102,12 @@ AMD_TARGETS = (
         4,
         "test_world_size_4",
     ),
+    AmdTarget(
+        "moriep_intranode_router_test_short_tail_2gpu",
+        _MOE + "moriep_intranode_router_test.py",
+        2,
+        "test_short_tail_multichunk",
+    ),
     AmdTarget("test_generic_moe_allreduce", _MOE + "test_generic_moe_allreduce.py", 2),
     AmdTarget("test_pure_tp_router", _MOE + "test_pure_tp_router.py"),
     AmdTarget("rocm_fp8_fused_moe_test", _MOE + "rocm_fp8_fused_moe_test.py"),
