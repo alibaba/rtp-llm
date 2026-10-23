@@ -122,11 +122,7 @@ class DraftPrefillGraphReplay(Mapping):
                 # unlike kernel tables, it has no refreshed host mirror.
                 state_geometry = (inputs.kv_cache_block_id_device, pool_size, page_size)
                 continue
-            table = (
-                inputs.kv_cache_block_id
-                if tag == INDEXER_STATE_TAG
-                else inputs.kv_cache_kernel_block_id
-            )
+            table = inputs.kv_cache_kernel_block_id
             if (
                 table.device.type != "cpu"
                 or table.dtype != torch.int32
@@ -140,10 +136,7 @@ class DraftPrefillGraphReplay(Mapping):
             for row, (length, prefix) in enumerate(zip(lengths, prefixes)):
                 if not length:
                     continue
-                if tag == INDEXER_STATE_TAG:
-                    first = (prefix - prefix % 4) // page_size
-                    end = (prefix + length - 1) // page_size + 1
-                elif compressed:
+                if compressed:
                     first = 0
                     end = ((prefix + length) // 4 + page_size - 1) // page_size
                 else:

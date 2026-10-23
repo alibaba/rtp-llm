@@ -325,5 +325,6 @@ py_test(
     data = [":test_cuda_graph_runner", "//:th_transformer"],
     deps = [":cuda_graph_test_utils", "//rtp_llm/models_py:modules", "//rtp_llm/test/model_test/test_util:test_util"],
     env = {"TEST_USING_DEVICE": "CUDA", "LOAD_METHOD": "scratch"},
-    exec_properties = {"gpu": "H20"},
+    tags = ["H20_CU13"],
+    exec_properties = {"gpu": "H20_CU13"},
 )

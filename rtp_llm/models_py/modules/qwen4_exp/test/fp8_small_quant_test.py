@@ -19,8 +19,13 @@ MODULE = "rtp_llm.models_py.triton_kernels.common.fp8_small_quant"
 
 class Fp8SmallQuantTest(unittest.TestCase):
     def setUp(self):
+        # fail-loud rather than skip: this target is pinned to RTX_5000_PRO_CU13.
         self.assertTrue(torch.cuda.is_available(), "This target requires SM120")
-        self.assertEqual(torch.cuda.get_device_capability(), (12, 0))
+        self.assertEqual(
+            torch.cuda.get_device_capability(),
+            (12, 0),
+            "target pool is RTX_5000_PRO_CU13 (SM120)",
+        )
         torch.manual_seed(20261019)
 
     def compare(self, x, padded=True):

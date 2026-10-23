@@ -25,12 +25,14 @@ py_test(
     name = "common_components_test",
     srcs = ["common_components_test.py"],
     deps = ["//rtp_llm:testlib"],
-    exec_properties = {"gpu": "A10"},
+    tags = ["L20_CU13"],
+    exec_properties = {"gpu": "L20_CU13"},
 )
 
 py_test(
     name = "zero_centered_norm_test",
     srcs = ["zero_centered_norm_test.py"],
     deps = ["//rtp_llm:testlib"],
-    exec_properties = {"gpu": "A10"},
+    tags = ["L20_CU13"],
+    exec_properties = {"gpu": "L20_CU13"},
 )

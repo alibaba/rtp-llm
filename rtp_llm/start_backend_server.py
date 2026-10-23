@@ -34,6 +34,8 @@ from rtp_llm.utils.util import copy_gemm_config
 
 setup_logging()
 
+# TODO(qwen4-bringup): env override relaxed during slow cold-load bring-up;
+# revisit per docs/design/qwen3.8_flash_next_tp8_bringup_handoff.md §2.
 RANKS_STARTUP_TIMEOUT_S_ENV = "RTP_LLM_BACKEND_RANKS_STARTUP_TIMEOUT_S"
 DEFAULT_RANKS_STARTUP_TIMEOUT_S = 3600
 

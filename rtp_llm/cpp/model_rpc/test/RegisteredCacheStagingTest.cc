@@ -79,6 +79,48 @@ TEST(RegisteredCacheStagingTest, MissingShardFailsBeforeAnyDestinationUpload) {
     EXPECT_TRUE(torch::all(destination == 127).item<bool>());
 }
 
+std::vector<PendingCacheCopy> makeTwoPartCopies(const std::shared_ptr<MemoryUtil>& memory,
+                                                const BlockInfo&                    info,
+                                                std::vector<LinearTpCacheSlice>     second_part_slices) {
+    TpCacheTransferPlan first{16, 32, 2, 0, {{0, 0, 16}}};
+    TpCacheTransferPlan second{16, 32, 2, 1, std::move(second_part_slices)};
+    return {{std::make_shared<RegisteredCacheStaging>(16, memory), info, first},
+            {std::make_shared<RegisteredCacheStaging>(16, memory), info, second}};
+}
+
+TEST(RegisteredCacheStagingTest, SliceGapFailsBeforeAnyDestinationUpload) {
+    auto memory           = std::make_shared<TestMemoryUtil>();
+    memory->rdma          = false;
+    auto      destination = torch::full({32}, 127, torch::TensorOptions().dtype(torch::kUInt8).device(torch::kCUDA));
+    BlockInfo info{true, static_cast<int32_t>(destination.device().index()), 0, destination.data_ptr(), 32};
+    // First shard covers [0, 16), second shard covers [20, 32): bytes 16..19 stay untiled.
+    auto copies = makeTwoPartCopies(memory, info, {{0, 20, 12}});
+    EXPECT_THROW(reassembleCacheTransfers(copies, info.device_index), std::invalid_argument);
+    EXPECT_TRUE(torch::all(destination == 127).item<bool>());
+}
+
+TEST(RegisteredCacheStagingTest, SliceOverlapFailsBeforeAnyDestinationUpload) {
+    auto memory           = std::make_shared<TestMemoryUtil>();
+    memory->rdma          = false;
+    auto      destination = torch::full({32}, 127, torch::TensorOptions().dtype(torch::kUInt8).device(torch::kCUDA));
+    BlockInfo info{true, static_cast<int32_t>(destination.device().index()), 0, destination.data_ptr(), 32};
+    // First shard covers [0, 16), second shard covers [8, 24): bytes 8..15 are written by both.
+    auto copies = makeTwoPartCopies(memory, info, {{0, 8, 16}});
+    EXPECT_THROW(reassembleCacheTransfers(copies, info.device_index), std::invalid_argument);
+    EXPECT_TRUE(torch::all(destination == 127).item<bool>());
+}
+
+TEST(RegisteredCacheStagingTest, ShortCoverageFailsBeforeAnyDestinationUpload) {
+    auto memory           = std::make_shared<TestMemoryUtil>();
+    memory->rdma          = false;
+    auto      destination = torch::full({32}, 127, torch::TensorOptions().dtype(torch::kUInt8).device(torch::kCUDA));
+    BlockInfo info{true, static_cast<int32_t>(destination.device().index()), 0, destination.data_ptr(), 32};
+    // Slices are consistent and ordered but only tile [0, 24) of the 32-byte destination.
+    auto copies = makeTwoPartCopies(memory, info, {{0, 16, 8}});
+    EXPECT_THROW(reassembleCacheTransfers(copies, info.device_index), std::invalid_argument);
+    EXPECT_TRUE(torch::all(destination == 127).item<bool>());
+}
+
 TEST(RegisteredCacheStagingTest, CompleteKAndVShardsUploadInHeadOrder) {
     auto memory           = std::make_shared<TestMemoryUtil>();
     memory->rdma          = false;

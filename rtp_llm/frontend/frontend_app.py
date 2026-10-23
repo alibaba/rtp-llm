@@ -59,6 +59,8 @@ from rtp_llm.utils.version_info import VersionInfo
 MAX_INCOMPLETE_EVENT_SIZE = 1024 * 1024
 
 STARTUP_WARMUP_HEALTH_GATE_FILE_ENV = "RTP_LLM_STARTUP_WARMUP_HEALTH_GATE_FILE"
+# TODO(qwen4-bringup): env override relaxed during slow cold-load bring-up;
+# revisit per docs/design/qwen3.8_flash_next_tp8_bringup_handoff.md §2.
 BACKEND_HEALTH_READY_TIMEOUT_S_ENV = "RTP_LLM_FRONTEND_BACKEND_HEALTH_TIMEOUT_S"
 DEFAULT_BACKEND_HEALTH_READY_TIMEOUT_S = 3600
 

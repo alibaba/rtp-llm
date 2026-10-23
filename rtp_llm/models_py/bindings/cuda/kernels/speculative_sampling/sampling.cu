@@ -583,10 +583,16 @@ cudaError_t invokeSplitRejectionSampling(const float* draft_probs,
     constexpr int Threads = 1024;
     const int     tiles   = (vocab + Threads * 4 - 1) / (Threads * 4);
     const int     bytes   = sizeof(SamplingTempStorage<float, Threads, SCAN_ALGO, REDUCE_ALGO>);
-    FLASHINFER_CUDA_CALL(
-        cudaFuncSetAttribute(rejectionResidualTileSums, cudaFuncAttributeMaxDynamicSharedMemorySize, bytes));
-    FLASHINFER_CUDA_CALL(
-        cudaFuncSetAttribute(rejectionSelectResidualTile, cudaFuncAttributeMaxDynamicSharedMemorySize, bytes));
+    // The dynamic shared-memory opt-in is a per-function constant; applying it
+    // once avoids repeating the driver call on every sampling step.
+    static bool attributes_applied = false;
+    if (!attributes_applied) {
+        FLASHINFER_CUDA_CALL(
+            cudaFuncSetAttribute(rejectionResidualTileSums, cudaFuncAttributeMaxDynamicSharedMemorySize, bytes));
+        FLASHINFER_CUDA_CALL(
+            cudaFuncSetAttribute(rejectionSelectResidualTile, cudaFuncAttributeMaxDynamicSharedMemorySize, bytes));
+        attributes_applied = true;
+    }
     rejectionResidualTileSums<<<dim3(batch, tiles), Threads, bytes, stream>>>(draft_probs,
                                                                               draft_ids,
                                                                               uniforms,

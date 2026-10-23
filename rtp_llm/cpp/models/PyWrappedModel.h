@@ -185,6 +185,7 @@ private:
     bool has_speculative_target_commit_hooks_{false};
     bool has_speculative_target_status_reducer_{false};
     bool requires_exact_cuda_graph_batch_{false};
+    bool warned_exact_batch_graph_miss_{false};
     bool enable_device_perf_{false};
     bool check_nan_{false};
 

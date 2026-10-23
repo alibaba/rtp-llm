@@ -1,5 +1,6 @@
 #include "rtp_llm/cpp/cuda_graph/cuda_graph_runner.h"
 #include "rtp_llm/cpp/cuda_graph/cuda_graph_device_shims.h"
+#include <string>
 
 namespace rtp_llm {
 void CudaGraphRunner::replayDecode(int bs) {
@@ -44,6 +45,38 @@ std::vector<int> CudaGraphRunner::getDecodeBatchSizesToCapture() {
     }
     std::sort(capture_bs.begin(), capture_bs.end());
     capture_bs.erase(std::unique(capture_bs.begin(), capture_bs.end()), capture_bs.end());
+    if (exact_batch_only_) {
+        // Exact-batch models cannot pad a larger graph down, so every hole in
+        // the bucket set costs a full eager decode step. Surface the holes at
+        // capture time; an explicit decode_capture_config closes them.
+        std::string holes;
+        int         expected = 1;
+        for (int size : capture_bs) {
+            if (size > expected) {
+                if (!holes.empty()) {
+                    holes += ", ";
+                }
+                holes += std::to_string(expected);
+                if (size - 1 > expected) {
+                    holes += "-" + std::to_string(size - 1);
+                }
+            }
+            expected = size + 1;
+        }
+        if (expected <= max_generate_batch_size) {
+            if (!holes.empty()) {
+                holes += ", ";
+            }
+            holes += std::to_string(expected);
+            if (max_generate_batch_size > expected) {
+                holes += "-" + std::to_string(max_generate_batch_size);
+            }
+        }
+        RTP_LLM_LOG_WARNING(
+            "exact-batch decode graphs cover %zu batch sizes; sizes [%s] have no graph and will run eager decode",
+            capture_bs.size(),
+            holes.c_str());
+    }
     return capture_bs;
 }
 
