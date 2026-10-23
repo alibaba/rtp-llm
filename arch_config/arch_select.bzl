@@ -7,6 +7,7 @@ load("@pip_gpu_cuda12_9_torch//:requirements.bzl", requirement_gpu_cuda12_9 = "r
 load("@pip_gpu_cuda12_torch//:requirements.bzl", requirement_gpu_cuda12 = "requirement")
 load("@pip_gpu_cuda13_torch//:requirements.bzl", requirement_gpu_cuda13 = "requirement")
 load("@pip_gpu_rocm_torch//:requirements.bzl", requirement_gpu_rocm = "requirement")
+load("@pip_ppu_torch//:requirements.bzl", requirement_ppu = "requirement")
 load("@rtp_llm//bazel:defs.bzl", "copy_so")
 
 def copy_all_so():
