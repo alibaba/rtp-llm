@@ -9,7 +9,7 @@ import librtp_compute_ops
 import libth_transformer_config
 import torch
 import typing
-__all__: list[str] = ['FlashInferMlaAttnParams', 'GroupTopKOp', 'SelectTopkOp', 'SparseMlaParams', 'allocate_shared_buffer', 'concat_and_cache_mla', 'cp_gather_and_upconvert_fp8_kv_cache', 'cp_gather_indexer_k_quant_cache', 'cublas_gemm_bf16_bf16_fp32', 'cuda_graph_copy_large2small', 'cuda_graph_copy_small2large', 'debug_kernel', 'dispose_communicator', 'dsv4_top_k_per_row_prefill', 'embedding', 'embedding_bert', 'fast_topk_transform_fused', 'fast_topk_transform_ragged_fused', 'fast_topk_v2', 'fast_topk_v2_variable', 'fill_mla_params', 'fused_add_layernorm', 'fused_qk_rmsnorm', 'indexer_k_quant_and_cache', 'init_communicator', 'layernorm', 'mla_k_merge', 'moe_post_reorder', 'moe_pre_reorder', 'moe_topk_softmax', 'open_ipc_handle', 'per_tensor_quant_fp8', 'per_token_group_quant_fp8', 'per_token_group_quant_fp8_v2', 'per_token_group_quant_int8', 'per_token_quant_fp8', 'prepare_sparse_mla_params', 'register_buffer_to_communicator', 'reuse_kv_cache_indexed_batched', 'scaled_fp4_experts_quant', 'silu_and_mul_scaled_fp4_experts_quant', 'trt_fp8_quantize_128', 'trt_fp8_quantize_128_inplace', 'userbuffers_recv', 'userbuffers_ring_all_gather', 'userbuffers_send']
+__all__: list[str] = ['FlashInferMlaAttnParams', 'GroupTopKOp', 'SelectTopkOp', 'SparseMlaParams', 'allocate_shared_buffer', 'concat_and_cache_mla', 'cp_gather_and_upconvert_fp8_kv_cache', 'cp_gather_indexer_k_quant_cache', 'cublas_gemm_bf16_bf16_fp32', 'cuda_graph_copy_large2small', 'cuda_graph_copy_small2large', 'debug_kernel', 'dispose_communicator', 'Dsv41DecodeReplayMetadataPlan', 'dsv41_decode_replay_metadata_plan', 'dsv4_top_k_per_row_prefill', 'embedding', 'embedding_bert', 'fast_topk_transform_fused', 'fast_topk_transform_ragged_fused', 'fast_topk_v2', 'fast_topk_v2_variable', 'fill_mla_params', 'fused_add_layernorm', 'fused_qk_rmsnorm', 'indexer_k_quant_and_cache', 'init_communicator', 'layernorm', 'mla_k_merge', 'moe_post_reorder', 'moe_pre_reorder', 'moe_topk_softmax', 'open_ipc_handle', 'per_tensor_quant_fp8', 'per_token_group_quant_fp8', 'per_token_group_quant_fp8_v2', 'per_token_group_quant_int8', 'per_token_quant_fp8', 'prepare_sparse_mla_params', 'register_buffer_to_communicator', 'reuse_kv_cache_indexed_batched', 'scaled_fp4_experts_quant', 'silu_and_mul_scaled_fp4_experts_quant', 'trt_fp8_quantize_128', 'trt_fp8_quantize_128_inplace', 'userbuffers_recv', 'userbuffers_ring_all_gather', 'userbuffers_send']
 
 
 class FlashInferMlaAttnParams(librtp_compute_ops.ParamsBase):
@@ -231,6 +231,11 @@ def dispose_communicator(comm_ptr: int) -> None:
     """
     Dispose UbCommunicator with python address and release resources
     """
+class Dsv41DecodeReplayMetadataPlan:
+    """Capture-time plan for the fused DSv4.1 decode replay metadata kernel."""
+
+def dsv41_decode_replay_metadata_plan(block_tables: list[torch.Tensor], roles: list[str], entries_per_block: list[int], tokens_per_block: list[int], valid_requests: torch.Tensor, start_pos: torch.Tensor, position_ids: torch.Tensor, position_ids_long: torch.Tensor, decode_seq_start_per_req: torch.Tensor, slot_mapping_swa: torch.Tensor, topk_window_idxs: torch.Tensor, swa_abs_idx: torch.Tensor, topk_buffer_compressed: torch.Tensor, swa_topk_length: torch.Tensor, pool_write_slots: list[torch.Tensor], pool_block_table_mirrors: list[torch.Tensor], swa_slot_outputs: list[torch.Tensor], swa_slot_pool_indices: list[int], q_len: int, batch_size: int, window: int, max_start: int) -> Dsv41DecodeReplayMetadataPlan: ...
+
 def dsv4_top_k_per_row_prefill(logits: torch.Tensor, row_starts: torch.Tensor, row_ends: torch.Tensor, indices_out: torch.Tensor, num_rows: int, stride0: int, stride1: int, top_k: int, force_radix_sort: bool = False) -> None:
     """
     Per-row TopK for DSv4 indexer prefill

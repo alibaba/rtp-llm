@@ -12,6 +12,7 @@
 #endif
 
 #include "rtp_llm/models_py/bindings/cuda/kernels/scaled_fp8_quant.h"
+#include "rtp_llm/models_py/bindings/cuda/Dsv41DecodeReplayMetadataOp.h"
 #include "rtp_llm/models_py/bindings/common/kernels/moe/ep_utils.h"
 
 namespace rtp_llm {
@@ -88,6 +89,33 @@ void registerPyModuleOps(py::module& rtp_ops_m) {
                   py::arg("topk"),
                   py::arg("hidden_states"));
 
+    rtp_ops_m.def("dsv41_decode_replay_metadata_plan",
+                  &rtp_llm::buildDsv41DecodeReplayMetadataPlan,
+                  "Build the capture-time fused DSv4.1 decode replay metadata plan",
+                  py::arg("block_tables"),
+                  py::arg("roles"),
+                  py::arg("entries_per_block"),
+                  py::arg("tokens_per_block"),
+                  py::arg("valid_requests"),
+                  py::arg("start_pos"),
+                  py::arg("position_ids"),
+                  py::arg("position_ids_long"),
+                  py::arg("decode_seq_start_per_req"),
+                  py::arg("slot_mapping_swa"),
+                  py::arg("topk_window_idxs"),
+                  py::arg("swa_abs_idx"),
+                  py::arg("topk_buffer_compressed"),
+                  py::arg("swa_topk_length"),
+                  py::arg("pool_write_slots"),
+                  py::arg("pool_block_table_mirrors"),
+                  py::arg("swa_slot_outputs"),
+                  py::arg("swa_slot_pool_indices"),
+                  py::arg("q_len"),
+                  py::arg("batch_size"),
+                  py::arg("window"),
+                  py::arg("max_start"));
+    py::class_<rtp_llm::Dsv41DecodeReplayMetadataPlan, std::shared_ptr<rtp_llm::Dsv41DecodeReplayMetadataPlan>>(
+        rtp_ops_m, "Dsv41DecodeReplayMetadataPlan");
     registerBaseCudaBindings(rtp_ops_m);
     registerAttnOpBindings(rtp_ops_m);
 }

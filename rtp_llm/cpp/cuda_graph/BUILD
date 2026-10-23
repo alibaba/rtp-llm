@@ -105,6 +105,7 @@ cc_library(
         "//:using_cuda": [
             "//rtp_llm/models_py/bindings/cuda:cuda",
             "//rtp_llm/models_py/bindings/cuda/kernels:cuda_graph_prepare",
+            "//rtp_llm/models_py/bindings/cuda/kernels:dsv41_decode_replay_metadata",
         ],
         "@//:using_rocm": [
             "//rtp_llm/models_py/bindings/cuda/kernels:cuda_graph_prepare",

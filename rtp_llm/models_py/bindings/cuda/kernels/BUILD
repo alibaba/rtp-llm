@@ -392,6 +392,18 @@ cc_library(
 )
 
 cc_library(
+    name = "dsv41_decode_replay_metadata",
+    srcs = ["dsv41_decode_replay_metadata.cu"],
+    hdrs = ["dsv41_decode_replay_metadata.h"],
+    deps = [
+        "@local_config_cuda//cuda:cuda_headers",
+        "@local_config_cuda//cuda:cudart",
+    ] + torch_deps(),
+    copts = cuda_copts(),
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
     name = "mha_paged_attn_plan",
     srcs = ["mha_paged_attn_plan.cu"],
     hdrs = ["mha_paged_attn_plan.h"],

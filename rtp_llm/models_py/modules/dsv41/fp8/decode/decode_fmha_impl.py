@@ -116,6 +116,8 @@ class DSv4DecodeFmhaImplFP8:
             at: spec[1] for at, spec in config.paged_pool_specs.items()
         }
         self.prepare(attn_inputs, forbid_realloc=True)
+        # Capture-time C++ replay plan; None keeps the Python callback path.
+        self.cuda_graph_replay_plan = self._build_cuda_graph_replay_plan(attn_inputs)
 
     def support_cuda_graph(self) -> bool:
         # Always True for this impl class — the legacy ``callable(getattr(...))``
@@ -181,4 +183,174 @@ class DSv4DecodeFmhaImplFP8:
             paged_pool_tokens_per_block=self._paged_tokens_per_block,
             require_device_metadata=True,
             valid_request_count=valid_request_count,
+        )
+
+    def _build_cuda_graph_replay_plan(self, attn_inputs: Any) -> Any:
+        """Build the capture-time C++ replay plan (one fused kernel launch).
+
+        The plan pins raw device pointers to this impl's persistent metadata
+        tensors and to the captured per-tag block-table mirrors that
+        ``CudaGraphRunner`` refreshes with its fused strided D2D copy before
+        each replay. Replay preparation then runs entirely in C++
+        (``tryRunDsv41ReplayMetadataPrep``): no GIL, no Python interpreter,
+        no per-replay aten/Triton launches.
+
+        Returns ``None`` when the fused op is unavailable (non-CUDA builds,
+        older wheels) so the runner keeps the Python callback path.
+        """
+        from rtp_llm.models_py.modules.dsv41.kv_cache_utils import (
+            as_attention_inputs_by_tag,
+        )
+        from rtp_llm.models_py.modules.dsv41.attn_type import (
+            CSA_KV,
+            CSA_STATE,
+            DECODER_SWA_KV,
+            HCA_KV,
+            HCA_STATE,
+            INDEXER_KV,
+            INDEXER_STATE,
+            SWA_KV,
+        )
+
+        try:
+            from rtp_llm.ops.compute_ops import rtp_llm_ops
+            plan_factory = getattr(rtp_llm_ops, "dsv41_decode_replay_metadata_plan", None)
+        except ImportError:
+            return None
+        if plan_factory is None:
+            return None
+
+        meta = self.metadata
+        if not meta.pool_block_tables:
+            return None
+
+        by_tag = as_attention_inputs_by_tag(attn_inputs, None)
+        block_tables = {}
+        for tag, tagged in by_tag.items():
+            table = getattr(tagged, "kv_cache_kernel_block_id_device", None)
+            if table is None or table.numel() == 0:
+                continue
+            block_tables[tag] = table
+
+        role_by_tag = {
+            SWA_KV: "swa_kv",
+            DECODER_SWA_KV: "decoder_swa_kv",
+            CSA_KV: "csa_kv",
+            HCA_KV: "hca_kv",
+            INDEXER_KV: "indexer_kv",
+            CSA_STATE: "state_ring",
+            HCA_STATE: "state_ring",
+            INDEXER_STATE: "state_ring",
+        }
+
+        pools = []           # (table, role, entries, tokens)
+        write_slots = []     # aligned with the pools that own a slot buffer
+        mirrors = []         # meta.pool_block_tables snapshots, same order
+        swa_outputs = []     # (tensor, pool_index)
+        swa_pool_index = {}
+        for at, spec in self.config.paged_pool_specs.items():
+            table = block_tables.get(str(at))
+            mirror = meta.pool_block_tables.get(at)
+            if table is None or mirror is None:
+                continue
+            role = role_by_tag.get(at)
+            if role is None:
+                continue
+            entries, tokens, _max_blocks = (int(v) for v in spec)
+            pool_index = len(pools)
+            pools.append((table, role, entries, tokens))
+            mirrors.append(mirror)
+            slots = meta.pool_write_slot_mappings.get(at)
+            if role == "decoder_swa_kv":
+                # The decoder-SWA layers read the child metadata's own slot
+                # buffer (update_decoder_swa_metadata), not the parent's
+                # duplicate entry.
+                child = meta.decoder_swa_metadata
+                if child is not None:
+                    slots = child.pool_write_slot_mappings.get(SWA_KV)
+            write_slots.append(
+                slots
+                if slots is not None
+                else torch.empty(0, dtype=torch.long, device=meta.start_pos.device)
+            )
+            if role in ("swa_kv", "decoder_swa_kv") and slots is not None:
+                swa_pool_index[role] = pool_index
+
+        if not pools:
+            return None
+
+        # SWA read-slot translation outputs: the parent uses the SWA_KV table;
+        # the bounded-replay decoder child uses DECODER_SWA_KV.
+        slot_outputs = []
+        slot_pool_indices = []
+        if meta.swa_global_slots is not None and "swa_kv" in swa_pool_index:
+            slot_outputs.append(meta.swa_global_slots)
+            slot_pool_indices.append(swa_pool_index["swa_kv"])
+        child = meta.decoder_swa_metadata
+        if (
+            child is not None
+            and child.swa_global_slots is not None
+            and "decoder_swa_kv" in swa_pool_index
+        ):
+            slot_outputs.append(child.swa_global_slots)
+            slot_pool_indices.append(swa_pool_index["decoder_swa_kv"])
+
+        q_len = int(meta.q_len_per_req)
+        batch = int(meta.start_pos.numel())
+        max_start = max(0, int(meta.max_seq_len) - q_len)
+        dev = meta.start_pos.device
+        topk_buf = (
+            meta.topk_buffer_compressed
+            if meta.topk_buffer_compressed is not None
+            else torch.empty(0, dtype=torch.int32, device=dev)
+        )
+        # The FP8 graph path always allocates these; placeholders keep the
+        # factory's tensor contract on reduced configurations.
+        empty_i64 = torch.empty(0, dtype=torch.long, device=dev)
+        position_ids_long = meta.position_ids_long if meta.position_ids_long is not None else empty_i64
+        seq_start = (
+            meta.decode_seq_start_per_req
+            if meta.decode_seq_start_per_req is not None
+            else empty_i64
+        )
+        swa_topk_length = (
+            meta.swa_topk_length
+            if meta.swa_topk_length is not None
+            else torch.zeros(batch, dtype=torch.int32, device=dev)
+        )
+        slot_mapping_swa = (
+            meta.slot_mapping_swa
+            if meta.slot_mapping_swa is not None
+            else torch.full((batch * q_len,), -1, dtype=torch.int32, device=dev)
+        )
+        topk_window_idxs = (
+            meta.topk_window_idxs
+            if meta.topk_window_idxs is not None
+            else torch.empty(0, dtype=torch.int32, device=dev)
+        )
+        swa_abs_idx = meta.swa_abs_idx if meta.swa_abs_idx is not None else topk_window_idxs
+
+        return plan_factory(
+            block_tables=[p[0] for p in pools],
+            roles=[p[1] for p in pools],
+            entries_per_block=[p[2] for p in pools],
+            tokens_per_block=[p[3] for p in pools],
+            valid_requests=meta.valid_requests,
+            start_pos=meta.start_pos,
+            position_ids=meta.position_ids,
+            position_ids_long=position_ids_long,
+            decode_seq_start_per_req=seq_start,
+            slot_mapping_swa=slot_mapping_swa,
+            topk_window_idxs=topk_window_idxs,
+            swa_abs_idx=swa_abs_idx,
+            topk_buffer_compressed=topk_buf,
+            swa_topk_length=swa_topk_length,
+            pool_write_slots=write_slots,
+            pool_block_table_mirrors=mirrors,
+            swa_slot_outputs=slot_outputs,
+            swa_slot_pool_indices=slot_pool_indices,
+            q_len=q_len,
+            batch_size=batch,
+            window=int(meta.window_size),
+            max_start=max_start,
         )

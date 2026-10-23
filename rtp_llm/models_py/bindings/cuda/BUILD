@@ -174,6 +174,7 @@ cc_library(
         "//rtp_llm/models_py/bindings/common/kernels:kernels_ep_util",
         "//rtp_llm/models_py/bindings/common/kernels:kernels_kv_cache",
         "//rtp_llm/models_py/bindings/cuda/kernels:fast_topk",
+        "//rtp_llm/models_py/bindings/cuda/kernels:dsv41_decode_replay_metadata",
         "//rtp_llm/models_py/bindings/cuda/kernels:persistent_topk",
         "//rtp_llm/models_py/bindings/cuda/kernels:dsv4_persistent_topk",
         "//rtp_llm/models_py/bindings/cuda/kernels:deepselect_bf16",

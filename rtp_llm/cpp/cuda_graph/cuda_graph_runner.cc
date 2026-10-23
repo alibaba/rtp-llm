@@ -19,6 +19,9 @@
 #if USING_CUDA || USING_ROCM
 #include "rtp_llm/models_py/bindings/cuda/kernels/cuda_graph_prepare.h"
 #endif
+#if USING_CUDA
+#include "rtp_llm/models_py/bindings/cuda/kernels/dsv41_decode_replay_metadata.h"
+#endif
 using namespace torch_ext;
 namespace rtp_llm {
 
@@ -179,6 +182,66 @@ void callPrepareCudaGraph(py::object attn_pyobj, PyModelInputs& inputs, int vali
         prepare(attn_pyobj, inputs.attention_inputs_by_tag);
     }
 }
+
+#if USING_CUDA
+// Extract the DSv4.1 fused replay-metadata plan from a backend impl once at
+// capture time (GIL held by the caller). Returns an empty pointer when the
+// backend did not opt in; replay then keeps the Python callback path.
+std::shared_ptr<rtp_llm::Dsv41DecodeReplayMetadataPlan>
+extractDsv41ReplayMetadataPlan(const py::object& attn_pyobj) {
+    if (!attn_pyobj || attn_pyobj.is_none() || py::isinstance<py::dict>(attn_pyobj)) {
+        return nullptr;
+    }
+    if (!py::hasattr(attn_pyobj, "cuda_graph_replay_plan")) {
+        return nullptr;
+    }
+    py::object plan_obj = attn_pyobj.attr("cuda_graph_replay_plan");
+    if (plan_obj.is_none()) {
+        return nullptr;
+    }
+    return plan_obj.cast<std::shared_ptr<rtp_llm::Dsv41DecodeReplayMetadataPlan>>();
+}
+
+// Fused C++-only replay prep: one kernel launch, no GIL, no Python. The plan
+// holds raw pointers into the impl's persistent metadata tensors and per-pool
+// block-table mirrors; live start positions come from the captured device
+// length mirrors that the fused D2D copies earlier in prepareAttentionInputs
+// already refreshed. Returns false when the backend did not opt in.
+bool tryRunDsv41ReplayMetadataPrep(const rtp_llm::Dsv41DecodeReplayMetadataPlan& plan,
+                                    torch_ext::PyModelInputs&                     py_model_inputs,
+                                    const CudaGraphState&                         state,
+                                    bool                                          is_target_verify) {
+    const auto& attn = py_model_inputs.attention_inputs;
+    // Mirrors _build_start_pos_from_attention_inputs: target verify / MTP
+    // draft-prefill read prefix_lengths; normal decode reads
+    // sequence_lengths_plus_1 minus one. Both mirrors are CUDA int32 and were
+    // refreshed by the fused D2D copies above.
+    const torch::Tensor* mirror;
+    int                  mirror_offset = 0;
+    if (is_target_verify || (attn.is_prefill && plan.q_len > 1)) {
+        mirror = &attn.prefix_lengths_device;
+    } else {
+        mirror        = &attn.sequence_lengths_plus_1_device;
+        mirror_offset = 1;
+    }
+    RTP_LLM_CHECK_WITH_INFO(mirror->defined() && mirror->is_cuda() && mirror->scalar_type() == torch::kInt32
+                                && mirror->dim() == 1,
+                            "DSv4.1 fused replay prep requires device length mirror %s",
+                            is_target_verify ? "prefix_lengths_device" : "sequence_lengths_plus_1_device");
+    const int live = state.current_batch_size;
+    RTP_LLM_CHECK_WITH_INFO(live >= 0 && live <= plan.batch_size,
+                            "DSv4.1 fused replay prep live batch %d exceeds capture capacity %d",
+                            live,
+                            plan.batch_size);
+
+    invokeDsv41DecodeReplayMetadata(plan,
+                                    mirror->data_ptr<int32_t>(),
+                                    mirror_offset,
+                                    live,
+                                    cuda_graph::graphGetCurrentStream().stream());
+    return true;
+}
+#endif
 
 bool usesDeviceMetadataForCudaGraph(py::handle impl) {
     if (!impl || impl.is_none()) {
@@ -1117,6 +1180,20 @@ void CudaGraphRunner::prepareAttentionInputs(const PyModelInputs& inputs,
             RTP_LLM_PROFILE_SCOPE("cuda_graph.prepareAttentionInputs(wait_host_mirror_d2h)");
             cuda_graph::graphGetCurrentStream().synchronize();
         }
+#if USING_CUDA
+        // DSv4.1 backends with a capture-time replay plan refresh all
+        // metadata with one fused kernel launch from C++ — no GIL, no
+        // Python. Backends without the plan keep the Python callback.
+        if (graph_instances_[graph_idx].mem_hold_.dsv41_replay_plan_
+            && tryRunDsv41ReplayMetadataPrep(*graph_instances_[graph_idx].mem_hold_.dsv41_replay_plan_,
+                                             py_model_inputs_,
+                                             state,
+                                             is_target_verify_)) {
+            prepared_guard.commit();
+            completion_guard.committed = true;
+            return;
+        }
+#endif
         py::gil_scoped_acquire gil;
         callPrepareCudaGraph(attn_pyobj, py_model_inputs_, state.current_batch_size);
     }
@@ -2035,6 +2112,12 @@ void CudaGraphRunner::captureOneGraphInstance(int key, const char* key_type) {
     graph_instances_[key].mem_hold_.uses_device_metadata_ =
         !isGenerationPrefillCudaGraph() && !isEmbeddingStylePrefillCudaGraph()
         && usesDeviceMetadataForCudaGraph(graph_instances_[key].mem_hold_.attn_pyobj_);
+#if USING_CUDA
+    // Cache the DSv4.1 fused replay plan once at capture so the replay path
+    // never re-enters Python for metadata preparation.
+    graph_instances_[key].mem_hold_.dsv41_replay_plan_ =
+        extractDsv41ReplayMetadataPlan(graph_instances_[key].mem_hold_.attn_pyobj_);
+#endif
 
     size_t pre_capture_reserved = cuda_graph::graphReservedBytes();
 

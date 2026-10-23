@@ -4,6 +4,11 @@
 #include "rtp_llm/cpp/cuda_graph/cuda_graph_device_shims.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/models_py/bindings/OpDefs.h"
+#if USING_CUDA
+namespace rtp_llm {
+struct Dsv41DecodeReplayMetadataPlan;
+}
+#endif
 #include <torch/version.h>
 
 #include <string>
@@ -74,6 +79,13 @@ public:
     // Opt-in backend contract: prepare/replay do not read host metadata
     // values. Cached at capture so replay does not need a Python lookup.
     bool                     uses_device_metadata_{false};
+#if USING_CUDA
+    // DSv4.1 fused replay-metadata plan, extracted once from the backend's
+    // capture-time ``cuda_graph_replay_plan`` attribute. Holds raw device
+    // pointers into the backend's persistent metadata tensors; the plan
+    // object keeps them alive for the graph instance's lifetime.
+    std::shared_ptr<rtp_llm::Dsv41DecodeReplayMetadataPlan> dsv41_replay_plan_;
+#endif
     at::Tensor               decoder_layer_hidden_states_;
     at::Tensor               mtp_target_hidden_states_;
     torch_ext::PyModelInputs py_model_inputs_;
