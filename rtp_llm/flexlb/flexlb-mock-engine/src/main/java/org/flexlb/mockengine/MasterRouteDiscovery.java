@@ -24,7 +24,7 @@ import java.util.concurrent.TimeUnit;
 /** The frontend's VIP candidate + /master/info health and role selection for HA traffic. */
 final class MasterRouteDiscovery implements AutoCloseable {
     record Host(String http, String grpc) {}
-    record Info(String realMasterHost) {}
+    record Info(String realMasterHost, boolean consistencyEnabled) {}
     record Route(String master, String slave) {}
 
     interface Candidates { List<Host> read() throws Exception; }
@@ -84,7 +84,8 @@ final class MasterRouteDiscovery implements AutoCloseable {
                 throw new IllegalStateException("master/info HTTP " + response.statusCode());
             }
             JsonNode body = mapper.readTree(response.body());
-            return new Info(body.path("real_master_host").asText(""));
+            return new Info(body.path("real_master_host").asText(""),
+                    body.path("consistency_enabled").asBoolean(false));
         };
         return new MasterRouteDiscovery(candidates, probe);
     }
@@ -113,6 +114,11 @@ final class MasterRouteDiscovery implements AutoCloseable {
             state.host = host;
             try {
                 Info info = probe.read(host);
+                if (!info.consistencyEnabled()) {
+                    state.healthy = false;
+                    state.master = false;
+                    throw new IllegalStateException("Master discovery requires ZK consistency: " + host.http());
+                }
                 state.healthy = true;
                 state.failures = 0;
                 state.master = info.realMasterHost() != null
@@ -132,16 +138,9 @@ final class MasterRouteDiscovery implements AutoCloseable {
         List<Health> healthy = health.values().stream().filter(state -> state.healthy)
                 .sorted(Comparator.comparing(state -> state.host.http())).toList();
         Health selected = healthy.stream().filter(state -> state.master).findFirst().orElse(null);
-        if (selected == null && route.master() != null) {
-            selected = healthy.stream().filter(state -> state.host.grpc().equals(route.master()))
-                    .findFirst().orElse(null);
-        }
-        if (selected == null && !healthy.isEmpty()) {
-            selected = healthy.get(0);
-        }
         String master = selected == null ? null : selected.host.grpc();
         String slave = healthy.stream()
-                .filter(state -> !state.master && !state.host.grpc().equals(master))
+                .filter(state -> master != null && !state.master && !state.host.grpc().equals(master))
                 .map(state -> state.host.grpc()).findFirst().orElse(null);
         Route next = new Route(master, slave);
         if (!next.equals(route)) {

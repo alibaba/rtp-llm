@@ -153,6 +153,7 @@ public class HttpLoadBalanceServer {
                 .flatMap((Function<Request, Mono<ServerResponse>>) req -> {
                     Response result = new Response();
                     result.setRealMasterHost(lbStatusConsistencyService.getMasterHostIpPort());
+                    result.setConsistencyEnabled(lbStatusConsistencyService.isNeedConsistency());
                     result.setQueueLength(requestScheduler.getQueuedRequestCount());
                     result.setCode(200);
                     result.setSuccess(true);

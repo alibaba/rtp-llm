@@ -144,3 +144,13 @@ A/B 检查 codec、realism、tail、arrival 与身份策略，不一致时提示
 标定结果的 `lineage_tree_top5_share` 描述父引用树中的请求集中度；fit 报告的
 `family_4k_top5_share` 描述相同前 4K 前缀的请求集中度，两者不得作为同一指标比较。
 入库旧 profile 的 `family_top5_share` 按其原有 lineage 树语义解释，不修改固定输入。
+
+## Client 的 Master 路由
+
+JavaLoadClient 使用两种互斥配置：`GRPC_TARGET` 固定连接一个 Master，适合简单功能和性能测试；`MASTER_DISCOVERY_FILE` 从文件读取一个或多个候选，不需要静态目标列表。`GRPC_TARGETS` 不受支持，设置非空值时拒绝启动。
+
+发现文件格式为 `{"hosts":[{"http":"<host>:<http-port>","grpc":"<host>:<grpc-port>"}]}`。文件是候选地址的唯一来源，Client 定期 POST `/rtp_llm/master/info`，只接受 `consistency_enabled=true` 的节点，并以 `real_master_host` 等于节点自身 HTTP 地址识别 leader。候选 Master 必须开启 ZK 选举，属于同一组选举配置；单候选也需要 ZK。测试框架负责准备 ZK 和 Master 配置，Client 不参与选举。
+
+没有健康节点声明为 leader 时，发现路由不可用，不把健康 follower 提升为主。识别 leader 后，仅在 Schedule 返回 gRPC `UNAVAILABLE` 时，才用相同请求尝试健康 follower；业务失败和 deadline 直接结束。一次 follower 重试成功不改变后续请求的 leader，角色变化由发现线程更新。此处的严格 leader 要求是测试 Client 的约束；生产 `rtp_llm/server/host_service.py` 在缺少 leader 时仍可保留健康目标。
+
+`ENABLE_FALLBACK` 独立控制失败后绕过 Master，默认关闭；发现模式只在无 Master 响应且错误属于 transport 时允许 fallback。`FETCH_OUTPUT_STREAM` 控制正常调度后的 Engine 输出读取，默认开启。正常的 `FetchResponse` 或 `GenerateStreamCall` 连接不是 fallback。

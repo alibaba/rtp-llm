@@ -15,7 +15,7 @@ class PlaybackPlanTest {
     private JavaLoadClient.Config config(Path trace,Path out,int shards,int shard,String mode) {
         return new JavaLoadClient.Config(trace.toString(),"127.0.0.1:7001","127.0.0.1:7003",
             0,16,1.0,1,out.toString(),shards,shard,0,120000L,500.0,false,true,1,1,0L,120,true,
-            "engine_service","",0,0,"",false,"",true,0,0,mode,100,0,false,List.of());
+            "engine_service","",0,0,"",false,"",true,0,0,mode,100,0,false);
     }
 
     private List<JsonNode> read(Path path) throws Exception {

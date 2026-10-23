@@ -31,6 +31,7 @@ class HttpLoadBalanceServerTest {
         EndpointRegistry endpointRegistry = mock(EndpointRegistry.class);
         MasterEngineSynchronizer synchronizer = mock(MasterEngineSynchronizer.class);
         when(consistency.getMasterHostIpPort()).thenReturn("127.0.0.1:7001");
+        when(consistency.isNeedConsistency()).thenReturn(true);
         when(scheduler.getQueuedRequestCount()).thenReturn(7);
         when(synchronizer.isReady()).thenReturn(true);
 
@@ -54,6 +55,7 @@ class HttpLoadBalanceServerTest {
                 .exchange()
                 .expectStatus().isOk()
                 .expectBody()
+                .jsonPath("$.consistency_enabled").isEqualTo(true)
                 .jsonPath("$.queue_length").isEqualTo(7)
                 .jsonPath("$.real_master_host").isEqualTo("127.0.0.1:7001")
                 .jsonPath("$.ready").isEqualTo(true);

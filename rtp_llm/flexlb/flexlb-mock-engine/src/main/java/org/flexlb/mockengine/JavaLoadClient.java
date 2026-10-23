@@ -101,8 +101,8 @@ public final class JavaLoadClient implements AutoCloseable {
     private final boolean monitoringEnabled;
     private final EventLoopGroup eventLoopGroup;
     /**
-     * HA multi-target router (GRPC_TARGETS with >= 2 addresses): per-target
-     * channel pools + sticky pointer + transport-failure same-request retry.
+     * ZK leader discovery router (MASTER_DISCOVERY_FILE): per-target
+     * channel pools + discovered leader + transport-failure same-request retry.
      * Null in the legacy single-address mode and in dry-run mode — those
      * paths keep the byte-identical legacy behavior.
      */
@@ -198,18 +198,12 @@ public final class JavaLoadClient implements AutoCloseable {
         this.eventLoopGroup = new NioEventLoopGroup(config.eventLoopThreads);
         List<ManagedChannel> opened = new ArrayList<>();
         try {
-        if (config.isMultiTarget()) {
-            // A discovery file enables the frontend-style VIP + /master/info
-            // route. GRPC_TARGETS alone retains the older transport-only mode.
-            String discoveryFile = System.getenv("MASTER_DISCOVERY_FILE");
-            this.router = discoveryFile == null || discoveryFile.isBlank()
-                    ? new MasterTargetRouter(config.grpcTargets, config.nChannels, eventLoopGroup)
-                    : new MasterTargetRouter(Path.of(discoveryFile), config.nChannels, eventLoopGroup);
+        if (!config.masterDiscoveryFile.isEmpty()) {
+            this.router = new MasterTargetRouter(Path.of(config.masterDiscoveryFile),
+                    config.nChannels, eventLoopGroup);
             this.scheduleChannels = new ManagedChannel[0];
             this.scheduleStubs = new FlexlbServiceGrpc.FlexlbServiceBlockingStub[0];
-            System.out.println("HA multi-target mode: targets=" + config.grpcTargets
-                    + ", selected=" + router.stickyTarget()
-                    + ", discovery_file=" + discoveryFile);
+            System.out.println("Master discovery mode: file=" + config.masterDiscoveryFile);
             return;
         }
         this.router = null;
@@ -1934,13 +1928,7 @@ public final class JavaLoadClient implements AutoCloseable {
         final String traceFile;
         final String targetAddr;
         final String grpcTarget;
-        /**
-         * Parsed GRPC_TARGETS addresses (comma-separated host:port list).
-         * Empty in the legacy single-target mode. >= 2 addresses activate the
-         * HA sticky+failover mode (see MasterTargetRouter); exactly 1 address
-         * degenerates to the legacy mode with that address as grpcTarget.
-         */
-        final List<String> grpcTargets;
+        final String masterDiscoveryFile;
         final int durationS;
         final int maxConcurrency;
         final double replaySpeed;
@@ -2066,12 +2054,11 @@ public final class JavaLoadClient implements AutoCloseable {
                     skipServerLatency, model, apiKey, maxInputLen, maxOutputLen,
                     pushgatewayUrl, enableFallback, endpointsFile, dryRun, priority,
                     forcePriority, sendMode, sendModeQps, 0.0, replayUniquePrefix,
-                    List.of());
+                    "");
         }
 
         /**
-         * Legacy full-signature bridge (pre-GRPC_TARGETS call sites, e.g. the
-         * uniform-mode tests): delegates with no multi-target list — the
+         * Fixed-target constructor: delegates without a discovery file — the
          * single-target behavior is unchanged.
          */
         Config(String traceFile, String targetAddr, String grpcTarget,
@@ -2093,7 +2080,7 @@ public final class JavaLoadClient implements AutoCloseable {
                     skipServerLatency, model, apiKey, maxInputLen, maxOutputLen,
                     pushgatewayUrl, enableFallback, endpointsFile, dryRun, priority,
                     forcePriority, sendMode, sendModeQps, rampUpSeconds,
-                    replayUniquePrefix, List.of());
+                    replayUniquePrefix, "");
         }
 
         Config(String traceFile, String targetAddr, String grpcTarget,
@@ -2108,11 +2095,11 @@ public final class JavaLoadClient implements AutoCloseable {
                boolean enableFallback, String endpointsFile, boolean dryRun,
                int priority, int forcePriority, String sendMode, double sendModeQps,
                double rampUpSeconds, boolean replayUniquePrefix,
-               List<String> grpcTargets) {
+               String masterDiscoveryFile) {
             this.traceFile = traceFile;
             this.targetAddr = targetAddr;
             this.grpcTarget = grpcTarget;
-            this.grpcTargets = grpcTargets;
+            this.masterDiscoveryFile = masterDiscoveryFile;
             this.durationS = durationS;
             this.maxConcurrency = maxConcurrency;
             this.replaySpeed = replaySpeed;
@@ -2162,81 +2149,20 @@ public final class JavaLoadClient implements AutoCloseable {
             return "uniform".equals(sendMode);
         }
 
-        /** True when GRPC_TARGETS carries >= 2 addresses (HA sticky+failover mode). */
-        boolean isMultiTarget() {
-            return grpcTargets.size() >= 2;
-        }
-
-        /**
-         * Parses GRPC_TARGETS (comma-separated host:port list): segments are
-         * trimmed, empty segments ignored, order-preserving dedup. Fail-fast
-         * on any malformed entry or on zero valid addresses — this is the
-         * core HA case-test wiring, and a silently-dropped target would let
-         * the whole suite pass without ever exercising failover.
-         */
-        // Package-visible for GRPC_TARGETS parsing assertions in tests.
-        static List<String> parseGrpcTargets(String raw) {
-            List<String> out = new ArrayList<>();
-            for (String part : raw.split(",")) {
-                String addr = part.trim();
-                if (addr.isEmpty()) {
-                    continue;
-                }
-                int colon = addr.lastIndexOf(':');
-                if (colon <= 0 || colon == addr.length() - 1) {
-                    throw new IllegalArgumentException(
-                            "invalid GRPC_TARGETS entry '" + addr + "' (expected host:port)");
-                }
-                try {
-                    int port = Integer.parseInt(addr.substring(colon + 1));
-                    if (port <= 0 || port > 65535) {
-                        throw new NumberFormatException("port out of range: " + port);
-                    }
-                } catch (NumberFormatException e) {
-                    throw new IllegalArgumentException(
-                            "invalid GRPC_TARGETS entry '" + addr + "' (non-numeric port)");
-                }
-                if (!out.contains(addr)) {
-                    out.add(addr);
-                }
-            }
-            if (out.isEmpty()) {
-                throw new IllegalArgumentException(
-                        "GRPC_TARGETS is set but contains no valid host:port address: '"
-                                + raw + "'");
-            }
-            return out;
-        }
-
         static Config fromEnv() { return fromEnvironment(System.getenv()); }
 
         static Config fromEnvironment(Map<String, String> values) {
             ClientEnvironment input = new ClientEnvironment(values);
             String targetAddr = input.text("TARGET_ADDR", "127.0.0.1:7001");
             String grpcTarget = input.text("GRPC_TARGET", "");
-            // GRPC_TARGETS (HA case-test mode): comma-separated flexlb gRPC
-            // addresses, e.g. "127.0.0.1:18082,127.0.0.1:18085". Takes
-            // precedence over GRPC_TARGET when both are set (logged). >= 2
-            // addresses activate the sticky+failover router; exactly 1
-            // degenerates to the legacy single-target mode on that address.
-            String grpcTargetsRaw = input.text("GRPC_TARGETS", "");
-            List<String> grpcTargets = grpcTargetsRaw.isEmpty()
-                    ? List.of() : parseGrpcTargets(grpcTargetsRaw);
-            if (!grpcTargets.isEmpty()) {
-                if (!grpcTarget.isEmpty()) {
-                    System.out.println("GRPC_TARGETS=" + grpcTargetsRaw
-                            + " takes precedence over GRPC_TARGET=" + grpcTarget
-                            + " (both set)");
-                }
-                // Cosmetic anchor for logs / server-latency: the router owns
-                // the real per-target pools; grpcTarget points at the first.
-                grpcTarget = grpcTargets.get(0);
-                if (grpcTargets.size() == 1) {
-                    System.out.println("GRPC_TARGETS has a single address '"
-                            + grpcTarget + "': legacy single-target mode (no failover)");
-                }
+            if (!input.text("GRPC_TARGETS", "").isBlank()) {
+                throw new IllegalArgumentException("GRPC_TARGETS was removed; use GRPC_TARGET or MASTER_DISCOVERY_FILE");
             }
-            if (grpcTarget.isEmpty()) {
+            String discoveryFile = input.text("MASTER_DISCOVERY_FILE", "").trim();
+            if (!discoveryFile.isEmpty() && !grpcTarget.isEmpty()) {
+                throw new IllegalArgumentException("GRPC_TARGET and MASTER_DISCOVERY_FILE are mutually exclusive");
+            }
+            if (grpcTarget.isEmpty() && discoveryFile.isEmpty()) {
                 int colon = targetAddr.lastIndexOf(':');
                 String host = targetAddr.substring(0, colon);
                 int httpPort = Integer.parseInt(targetAddr.substring(colon + 1));
@@ -2298,7 +2224,7 @@ public final class JavaLoadClient implements AutoCloseable {
                     input.number("SEND_MODE_QPS"),
                     input.number("RAMP_UP_SECONDS"),
                     input.flag("REPLAY_UNIQUE_PREFIX"),
-                    grpcTargets
+                    discoveryFile
             );
         }
 
@@ -2307,9 +2233,7 @@ public final class JavaLoadClient implements AutoCloseable {
             System.out.println("  TRACE_FILE=" + traceFile);
             System.out.println("  TARGET_ADDR=" + targetAddr);
             System.out.println("  GRPC_TARGET=" + grpcTarget);
-            System.out.println("  GRPC_TARGETS=" + (grpcTargets.isEmpty()
-                    ? "<unset>" : String.join(",", grpcTargets))
-                    + (isMultiTarget() ? " (HA sticky+failover mode)" : ""));
+            System.out.println("  MASTER_DISCOVERY_FILE=" + masterDiscoveryFile);
             System.out.println("  DURATION_S=" + durationS);
             System.out.println("  MAX_CONCURRENCY=" + maxConcurrency);
             System.out.println("  REPLAY_SPEED=" + replaySpeed);
@@ -2448,7 +2372,7 @@ public final class JavaLoadClient implements AutoCloseable {
          *  synthetic rows (collector timeout / dead-future fallbacks). */
         String masterTarget = "";
         List<MasterTargetRouter.ScheduleAttempt> scheduleAttempts = List.of();
-        /** True when the same request was retried on another GRPC_TARGETS
+        /** True when the same request was retried on another discovered Master
          *  target (transport-failure failover). Always false in the legacy
          *  single-target mode. */
         boolean failover;

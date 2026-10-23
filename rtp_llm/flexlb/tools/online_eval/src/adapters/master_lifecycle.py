@@ -419,7 +419,7 @@ class MasterLifecycle:
         return mp
 
     def master_instance_target(self, env: FlexEnv, name: str) -> str:
-        """gRPC target (bind_ip:grpc_port) — the GRPC_TARGETS entry format."""
+        """gRPC target (bind_ip:grpc_port)."""
         mspec = env.master_specs[name]
         return f"{mspec.bind_ip}:{mspec.grpc_port()}"
 

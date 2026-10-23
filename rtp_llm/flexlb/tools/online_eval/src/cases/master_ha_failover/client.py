@@ -41,6 +41,8 @@ class HaReplayClient:
         collection_profile="request",
         sampler_limits, monitor,
     ):
+        if env.spec.zk_consistency is None:
+            raise ValueError("Master discovery requires ZK consistency")
         self.name = name
         self.out_dir = case_dir / f"{name}_out"
         self.log_file = case_dir / f"{name}.log"
@@ -95,7 +97,7 @@ class HaReplayClient:
         runtime = dict(
             FLOW_CONTROL_DIR=str(self.control), FLOW_RUN_ID=self.flow_identity["run_id"],
             FLOW_GROUP_ID=name, FLOW_PHASE_ID="ha", TRACE_FILE=str(trace),
-            GRPC_TARGETS=",".join(self.targets), MASTER_DISCOVERY_FILE=str(discovery_file),
+            MASTER_DISCOVERY_FILE=str(discovery_file),
             **collection_environment(collection_profile, live_events=live_events),
         )
         runtime["ENABLE_FALLBACK"] = str(enable_fallback).lower()

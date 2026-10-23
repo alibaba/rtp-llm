@@ -62,7 +62,7 @@ class UniformRampUpTest {
                 durationS, 16, 1000.0, 1, outDir, numShards, shardIndex, limit,
                 120_000L, 500.0, false, loop, 1, 1, 0L, 120, true,
                 "engine_service", "", 0, 0, "", false, "", true, 0, 0, sendMode, sendModeQps,
-                rampUpSeconds, true, List.of());
+                rampUpSeconds, true);
     }
 
     private List<JsonNode> readPerRequest(Path outDir) throws IOException {

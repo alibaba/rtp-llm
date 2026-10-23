@@ -32,8 +32,8 @@ def _ha_validate(params, plan):
         from runtime.observation import capture_limits
         capture_limits(p["capture"], plan.path + ".capture")
     environment = getattr(plan, "environment", {})
-    if environment.get("master_layout", "single") not in ("dual_standalone", "dual_zookeeper"):
-        raise ValueError("HA traffic requires compiled dual-master environment")
+    if environment.get("master_layout", "single") != "dual_zookeeper":
+        raise ValueError("HA traffic requires a dual-master environment with ZK (dual_zookeeper)")
     for key, default, lower, upper in (
         ("duration_s", 60, 1, 3600),
         ("timeout_ms", 30000, 100, 120000),

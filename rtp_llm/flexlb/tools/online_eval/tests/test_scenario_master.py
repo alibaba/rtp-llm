@@ -24,7 +24,7 @@ from tests.ha_fixtures import client_resource, replay_source, replay_trace
 class MasterActionsTest(unittest.TestCase):
     def test_ha_client_receives_http_discovery_candidates(self):
         root = Path(self.tmp.name)
-        env = SimpleNamespace(master_specs={
+        env = SimpleNamespace(spec=SimpleNamespace(zk_consistency=object()), master_specs={
             "A": SimpleNamespace(bind_ip="127.0.0.1", http_port=18080),
             "B": SimpleNamespace(bind_ip="127.0.0.1", http_port=18083),
         })
@@ -76,7 +76,7 @@ class MasterActionsTest(unittest.TestCase):
 
     def test_ha_discovery_uses_zookeeper_bind_addresses_from_registry(self):
         root = Path(self.tmp.name)
-        env = SimpleNamespace(master_specs={
+        env = SimpleNamespace(spec=SimpleNamespace(zk_consistency=object()), master_specs={
             "A": SimpleNamespace(bind_ip="127.0.0.1", http_port=18080),
             "B": SimpleNamespace(bind_ip="127.0.0.2", http_port=18080),
         })
@@ -89,7 +89,8 @@ class MasterActionsTest(unittest.TestCase):
         ):
             runner = HaReplayClient(manager, env, root, "flow", source=replay_source(),
                 monitor=self.ctx.monitor, sampler_limits=dict(max_samples=10, max_bytes=10000))
-        self.assertEqual("127.0.0.1:18082,127.0.0.2:18082", runner._overrides["GRPC_TARGETS"])
+        self.assertNotIn("GRPC_TARGETS", runner._overrides)
+        self.assertNotIn("GRPC_TARGET", runner._overrides)
         self.assertEqual({"hosts": [
             {"http": "127.0.0.1:18080", "grpc": "127.0.0.1:18082"},
             {"http": "127.0.0.2:18080", "grpc": "127.0.0.2:18082"},
@@ -102,7 +103,7 @@ class MasterActionsTest(unittest.TestCase):
 
     def test_ha_one_pass_rejects_trace_shorter_than_client_duration(self):
         root = Path(self.tmp.name)
-        env = SimpleNamespace(master_specs={
+        env = SimpleNamespace(spec=SimpleNamespace(zk_consistency=object()), master_specs={
             "A": SimpleNamespace(bind_ip="127.0.0.1", http_port=18080),
             "B": SimpleNamespace(bind_ip="127.0.0.1", http_port=18083),
         })
@@ -123,7 +124,7 @@ class MasterActionsTest(unittest.TestCase):
 
     def test_ha_state_sampler_keeps_each_master_and_missing_inflight_distinct(self):
         root = Path(self.tmp.name)
-        env = SimpleNamespace(master_specs={
+        env = SimpleNamespace(spec=SimpleNamespace(zk_consistency=object()), master_specs={
             "A": SimpleNamespace(bind_ip="127.0.0.1", http_port=101),
             "B": SimpleNamespace(bind_ip="127.0.0.1", http_port=102),
         })
@@ -345,16 +346,20 @@ class MasterActionsTest(unittest.TestCase):
         plan = SimpleNamespace(path="stage", environment={})
         with self.assertRaisesRegex(ValueError, "dual-master"):
             ha._ha_validate(dict(source=replay_source(), capture=dict(max_samples=10, max_bytes=10000)), plan)
-        plan.environment = {
-            "master_layout": "dual_standalone",
-            "master_stable_window_s": 0,
-        }
-        for layout in ("dual_standalone", "dual_zookeeper"):
-            plan.environment["master_layout"] = layout
-            params = dict(source=replay_source(), capture=dict(max_samples=10, max_bytes=10000))
-            self.assertNotIn("targets", ha._ha_validate(params, plan))
-            with self.assertRaises(ValueError):
-                ha._ha_validate(dict(params, targets=["A", "B"]), plan)
+        plan.environment = {"master_layout": "dual_standalone"}
+        params = dict(source=replay_source(), capture=dict(max_samples=10, max_bytes=10000))
+        with self.assertRaisesRegex(ValueError, "ZK"):
+            ha._ha_validate(params, plan)
+        plan.environment = {"master_layout": "dual_zookeeper"}
+        self.assertNotIn("targets", ha._ha_validate(params, plan))
+        with self.assertRaises(ValueError):
+            ha._ha_validate(dict(params, targets=["A", "B"]), plan)
+
+    def test_discovery_client_rejects_environment_without_zookeeper(self):
+        env = SimpleNamespace(spec=SimpleNamespace(zk_consistency=None))
+        with self.assertRaisesRegex(ValueError, "ZK"):
+            HaReplayClient(Mock(), env, Path(self.tmp.name), "flow", source=replay_source(),
+                           monitor=self.ctx.monitor, sampler_limits={})
 
     def test_empty_client_rows_fail_even_zero_error_assertion(self):
         handle = self.ctx.register_resource("ha_rows", [])

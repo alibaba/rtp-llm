@@ -5,7 +5,6 @@ LOAD_CLIENT_ENV_VARS = (
     'TRACE_FILE',
     'TARGET_ADDR',
     'GRPC_TARGET',
-    'GRPC_TARGETS',
     'MASTER_DISCOVERY_FILE',
     'DURATION_S',
     'MAX_CONCURRENCY',
@@ -51,7 +50,7 @@ LOAD_CLIENT_ENV_VARS = (
 
 FRAMEWORK_CLIENT_ENV_VARS = frozenset({
     'FLOW_CONTROL_DIR', 'FLOW_RUN_ID', 'FLOW_GROUP_ID', 'FLOW_PHASE_ID',
-    'TRACE_FILE', 'OUTPUT_DIR', 'GRPC_TARGET', 'GRPC_TARGETS',
+    'TRACE_FILE', 'OUTPUT_DIR', 'GRPC_TARGET',
     'MASTER_DISCOVERY_FILE', 'LIVE_CLIENT_EVENTS', 'COLLECTION_PROFILE',
     'CLIENT_MONITORING', 'SKIP_SERVER_LATENCY',
 })
@@ -67,6 +66,8 @@ def validate_environment(environment):
            or (type(value) is float and not math.isfinite(value))
            for value in environment.values()):
         raise ValueError('Java client environment values must be finite scalars')
+    if environment.get('GRPC_TARGET') and environment.get('MASTER_DISCOVERY_FILE'):
+        raise ValueError('GRPC_TARGET and MASTER_DISCOVERY_FILE are mutually exclusive')
     return {key: str(value) for key, value in environment.items()}
 
 

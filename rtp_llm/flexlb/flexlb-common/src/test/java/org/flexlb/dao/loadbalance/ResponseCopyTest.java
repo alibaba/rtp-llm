@@ -29,7 +29,7 @@ class ResponseCopyTest {
                   }, null],
                   "success": true, "code": 202, "error_message": "detail",
                   "real_master_host": "master:9000", "queue_length": 11,
-                  "enqueued_by_master": true, "ready": false,
+                  "enqueued_by_master": true, "ready": false, "consistency_enabled": true,
                   "admission_reject_reason": "RESOURCE_EXHAUSTED",
                   "worker_summary": {
                     "PREFILL": {"discovered": 12, "alive": 13, "maxQueueTokens": 14},

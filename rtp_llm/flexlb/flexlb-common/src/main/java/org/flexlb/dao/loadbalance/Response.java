@@ -1,6 +1,7 @@
 package org.flexlb.dao.loadbalance;
 
 import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
+import com.fasterxml.jackson.annotation.JsonInclude;
 import com.fasterxml.jackson.annotation.JsonProperty;
 import lombok.Data;
 
@@ -27,6 +28,10 @@ public class Response {
 
     @JsonProperty("real_master_host")
     private String realMasterHost;
+
+    @JsonProperty("consistency_enabled")
+    @JsonInclude(JsonInclude.Include.NON_NULL)
+    private Boolean consistencyEnabled;
 
     @JsonProperty("queue_length")
     private Integer queueLength;
@@ -59,6 +64,7 @@ public class Response {
         copy.code = source.code;
         copy.errorMessage = source.errorMessage;
         copy.realMasterHost = source.realMasterHost;
+        copy.consistencyEnabled = source.consistencyEnabled;
         copy.queueLength = source.queueLength;
         copy.enqueuedByMaster = source.enqueuedByMaster;
         if (source.workerSummary != null) {

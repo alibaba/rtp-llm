@@ -28,6 +28,7 @@ class ClientOps:
     def _base_env(self, overrides: dict) -> dict:
         overrides = validate_environment(overrides)
         menv = dict(os.environ)
+        menv.pop("GRPC_TARGETS", None)
         for var in LOAD_CLIENT_ENV_VARS:
             menv[var] = ""
         for key, value in overrides.items():

@@ -95,3 +95,15 @@ def test_content_overrides_are_rejected_before_start(field):
 def test_unknown_client_settings_use_standard_validation(field):
     with pytest.raises(ValueError, match="unknown client fields"):
         client_environment(dict(settings(), **{field: "1"}))
+
+
+def test_routing_sources_are_exclusive_and_static_list_is_removed():
+    from adapters.load_client import validate_environment
+    assert validate_environment({'MASTER_DISCOVERY_FILE': '/masters.json'}) == {
+        'MASTER_DISCOVERY_FILE': '/masters.json'}
+    with pytest.raises(ValueError, match='mutually exclusive'):
+        validate_environment({'GRPC_TARGET': 'a:7003', 'MASTER_DISCOVERY_FILE': '/masters.json'})
+    with pytest.raises(ValueError, match='unknown'):
+        validate_environment({'GRPC_TARGETS': 'a:7003,b:7003'})
+    with mock.patch.dict('os.environ', {'GRPC_TARGETS': 'stale:7003'}):
+        assert 'GRPC_TARGETS' not in ClientOps(None)._base_env({'GRPC_TARGET': 'a:7003'})

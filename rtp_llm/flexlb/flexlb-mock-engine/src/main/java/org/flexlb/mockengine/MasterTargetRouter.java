@@ -18,20 +18,10 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 
 /**
- * Schedule routing for HA traffic. With a discovery file, the selected Master
- * and healthy slave come from periodic /master/info probes; without it, the
- * older GRPC_TARGETS mode retains its sticky transport-failover behavior.
- *
- * <p>In discovery mode the candidate file plays VipServer's membership role.
- * The routing policy follows the production frontend: prefer a healthy node
- * reporting itself as leader, retain the healthy previous choice when no node
- * claims leadership, and retry a healthy non-leader only after a non-deadline
- * Schedule connection failure. A Schedule response, including a business
- * error, is terminal. The mock dual_standalone topology itself has no Master
- * election or follower forwarding.
- *
- * <p>Per-request attempt targets and retry status are recorded in the request
- * ledger. Discovery snapshots are immutable across an individual request.
+ * Schedule routing from ZK leader discovery. A request uses one discovery snapshot,
+ * tries the leader first, and retries a healthy follower only on UNAVAILABLE.
+ * Business responses and deadlines are terminal. The candidate file is the sole
+ * address source; successful follower retries do not change the discovered leader.
  */
 final class MasterTargetRouter {
 
@@ -120,30 +110,10 @@ final class MasterTargetRouter {
         }
     }
 
-    private final List<TargetPool> pools;
     private final Map<String, TargetPool> discoveredPools = new ConcurrentHashMap<>();
     private final MasterRouteDiscovery discovery;
     private final EventLoopGroup eventLoopGroup;
     private final int nChannels;
-    /** Index into {@link #pools} of the current sticky target. */
-    private volatile int sticky;
-
-    /**
-     * Production constructor: builds an N_CHANNELS channel pool per target,
-     * with the same channel options as the legacy single-target path in
-     * JavaLoadClient.
-     */
-    MasterTargetRouter(List<String> targets, int nChannels, EventLoopGroup eventLoopGroup) {
-        this.discovery = null;
-        this.eventLoopGroup = eventLoopGroup;
-        this.nChannels = nChannels;
-        this.pools = new ArrayList<>(targets.size());
-        for (String target : targets) {
-            pools.add(newTargetPool(target));
-        }
-        this.sticky = 0;
-    }
-
     MasterTargetRouter(Path discoveryFile, int nChannels, EventLoopGroup eventLoopGroup) {
         this(MasterRouteDiscovery.fromFile(discoveryFile), nChannels, eventLoopGroup);
         discovery.start();
@@ -154,7 +124,6 @@ final class MasterTargetRouter {
         this.discovery = discovery;
         this.eventLoopGroup = eventLoopGroup;
         this.nChannels = nChannels;
-        this.pools = List.of();
     }
 
     MasterTargetRouter(MasterRouteDiscovery discovery,
@@ -186,88 +155,10 @@ final class MasterTargetRouter {
         return new TargetPool(target, channels, stubs);
     }
 
-    /**
-     * Test constructor: injects stub arrays directly (channels may be null —
-     * {@link #shutdown()} skips them).
-     */
-    MasterTargetRouter(List<String> targets, List<FlexlbServiceGrpc.FlexlbServiceBlockingStub[]> stubs) {
-        this.discovery = null;
-        this.eventLoopGroup = null;
-        this.nChannels = 0;
-        this.pools = new ArrayList<>(targets.size());
-        for (int i = 0; i < targets.size(); i++) {
-            pools.add(new TargetPool(targets.get(i), null, stubs.get(i)));
-        }
-        this.sticky = 0;
-    }
+    String selectedTarget() { return discovery.route().master(); }
 
-    String stickyTarget() {
-        if (discovery != null) {
-            return discovery.route().master();
-        }
-        return pools.get(sticky).target;
-    }
-
-    /**
-     * One failover-aware Schedule call. See the class javadoc for the decision
-     * flow; the method never throws — every failure is folded into the
-     * returned {@link ScheduleOutcome}.
-     */
     ScheduleOutcome schedule(FlexlbScheduleProtocol.FlexlbScheduleRequestPB request, long timeoutMs) {
-        if (discovery != null) {
-            return scheduleDiscovered(request, timeoutMs);
-        }
-        int start = sticky;
-        Exception lastFailure = null;
-        List<ScheduleAttempt> attempts = new ArrayList<>();
-        for (int attempt = 0; attempt < pools.size(); attempt++) {
-            int idx = Math.floorMod(start + attempt, pools.size());
-            TargetPool pool = pools.get(idx);
-            FlexlbServiceGrpc.FlexlbServiceBlockingStub stub = pool.nextStub()
-                    .withDeadlineAfter(timeoutMs, TimeUnit.MILLISECONDS);
-            long startedEpochMs = System.currentTimeMillis();
-            long startedNanos = System.nanoTime();
-            try {
-                FlexlbScheduleProtocol.FlexlbScheduleResponsePB response = stub.schedule(request);
-                // Any response (code 200 or business error) proves the target
-                // alive: the sticky pointer follows it. A business error from
-                // the sticky target itself leaves the pointer untouched in
-                // practice (idx == sticky) — it only moves when transport
-                // failover delivered us to another target first.
-                sticky = idx;
-                attempts.add(new ScheduleAttempt(pool.target, startedEpochMs, startedNanos,
-                        "OK", response.getCode()));
-                return new ScheduleOutcome(response, pool.target, attempt > 0, ErrorKind.NONE, null, attempts);
-            } catch (StatusRuntimeException e) {
-                Status.Code code = e.getStatus().getCode();
-                attempts.add(new ScheduleAttempt(pool.target, startedEpochMs, startedNanos,
-                        code.name(), null));
-                if (code == Status.Code.UNAVAILABLE) {
-                    // Event ① (transport-layer unreachable): same-request retry
-                    // on the next target — never wait for ZK, never probe.
-                    lastFailure = e;
-                    continue;
-                }
-                // DEADLINE_EXCEEDED and every other gRPC status: terminal for
-                // this request — no retry, no switch, no direct fallback.
-                ErrorKind kind = code == Status.Code.DEADLINE_EXCEEDED
-                        ? ErrorKind.DEADLINE : ErrorKind.BUSINESS;
-                return new ScheduleOutcome(null, pool.target, attempt > 0, kind, e, attempts);
-            } catch (RuntimeException e) {
-                attempts.add(new ScheduleAttempt(pool.target, startedEpochMs, startedNanos,
-                        "EXCEPTION", null));
-                // Non-gRPC failure: conservative — only UNAVAILABLE retries.
-                return new ScheduleOutcome(null, pool.target, attempt > 0, ErrorKind.BUSINESS, e, attempts);
-            }
-        }
-        // Every target answered UNAVAILABLE: double connection failure. The
-        // sticky pointer stays put — with no probing thread the next request
-        // simply repeats the failover chain (observable as failover=true rows
-        // while the outage lasts, matching the "fallback <= 1 per request"
-        // case-test assertions).
-        int lastIdx = Math.floorMod(start + pools.size() - 1, pools.size());
-        return new ScheduleOutcome(null, pools.get(lastIdx).target, pools.size() > 1,
-                ErrorKind.TRANSPORT, lastFailure, attempts);
+        return scheduleDiscovered(request, timeoutMs);
     }
 
     private ScheduleOutcome scheduleDiscovered(
@@ -347,12 +238,8 @@ final class MasterTargetRouter {
 
     /** Shuts down every target pool's channels (no-op for test-constructed pools). */
     void shutdown() {
-        if (discovery != null) {
-            discovery.close();
-        }
-        List<TargetPool> allPools = new ArrayList<>(pools);
-        allPools.addAll(discoveredPools.values());
-        for (TargetPool pool : allPools) {
+        discovery.close();
+        for (TargetPool pool : discoveredPools.values()) {
             if (pool.channels == null) {
                 continue;
             }

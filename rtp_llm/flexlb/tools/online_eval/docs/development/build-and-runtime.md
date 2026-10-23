@@ -121,7 +121,7 @@ python3 tools/online_eval/scripts/commands/list_cases.py \
 
 ## Master 选举配置
 
-`environment.master_layout` 支持 `single`、`dual_standalone`、`dual_zookeeper`。普通功能和性能用例使用独立调度；需要验证生产主从选举的 HA 用例使用 `dual_zookeeper`。此模式为 A/B 分配不同 loopback IP、相同 HTTP/management/gRPC 端口，选举身份与转发身份共用显式 advertised IP，启动时调用生产 `/hook/after_start` 注册选举；Linux 支持该 loopback 拓扑，本地其他系统需先准备对应地址。
+`environment.master_layout` 支持 `single`、`dual_standalone`、`dual_zookeeper`。普通功能和性能用例使用独立调度；使用自动发现 Client 的 HA 用例必须使用 `dual_zookeeper`，不接受 `dual_standalone`。此模式为 A/B 分配不同 loopback IP、相同 HTTP/management/gRPC 端口，选举身份与转发身份共用显式 advertised IP，启动时调用生产 `/hook/after_start` 注册选举；Linux 支持该 loopback 拓扑，本地其他系统需先准备对应地址。
 
 `environment.zookeeper` 仅用于 `dual_zookeeper`，可声明 `mode: helper` 和 `session_timeout_ms`，或声明 `mode: external`、`address`（host:port 列表，可带 chroot）与会话超时。helper 是测试依赖，独占启动并随环境回收；external 不启动或停止外部服务。每个运行使用独立的选举 role，避免不同实验共用外部 ZK 时互相选举。未配置 ZK 的普通用例不准备或启动 helper；CI 根据编译选择自动准备所需运行时。
 
