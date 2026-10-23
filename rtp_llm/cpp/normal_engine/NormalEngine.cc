@@ -728,7 +728,7 @@ absl::Status NormalEngine::step() try {
                          "min_decode_share_pct=%ld prefill_admit_allowed=%d last_model_us=%ld decode_debt_us=%ld "
                          "debt_before_scaled=%ld debt_after_scaled=%ld charged_plan=%ld admit_before=%ld "
                          "admit_credit_before_scaled=%ld admit_credit_after_scaled=%ld "
-                         "local_draining=%ld drain_mask=%ld",
+                         "local_draining=%ld drain_mask=%ld max_context_batch_size=%ld",
                          runtime_config.fifo_scheduler_config.pdfusion_trace_run_id.c_str(),
                          parallelism_config.dp_rank,
                          control_epoch,
@@ -785,7 +785,8 @@ absl::Status NormalEngine::step() try {
                          coordinated ? coordinated->cadenceDecision().admit_credit_before_scaled : 0L,
                          coordinated ? coordinated->cadenceDecision().admit_credit_after_scaled : 0L,
                          coordinated ? coordinated->lastPrepared().draining : 0L,
-                         coordinated ? coordinated->cadenceDecision().drain_mask : 0L);
+                         coordinated ? coordinated->cadenceDecision().drain_mask : 0L,
+                         runtime_config.fifo_scheduler_config.max_context_batch_size);
     }
 
     // Per-request timeline: if any stream requested gen_timeline and no session is

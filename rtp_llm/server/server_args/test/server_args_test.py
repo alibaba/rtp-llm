@@ -14,6 +14,69 @@ from rtp_llm.utils.backend_registry import register_backend_hook
 class ServerArgsPyEnvConfigsTest(TestCase):
     """Test that environment variables and command line arguments are correctly set to py_env_configs structure."""
 
+    def test_adaptive_token_only_prefill_configuration(self):
+        from rtp_llm.server.server_args import server_args
+
+        with patch.dict(os.environ, {"PDFUSION_CADENCE_ADAPTIVE": "1"}, clear=True):
+            args = [
+                "--pdfusion_coord_mode=cadence",
+                "--max_batch_tokens_size=65536",
+                "--concurrency_limit=8",
+            ]
+            config = server_args.setup_args(args).runtime_config.fifo_scheduler_config
+            self.assertEqual(config.max_context_batch_size, 8)
+            self.assertEqual(config.max_batch_tokens_size, 65536)
+            # Explicit count caps, including the old default of one, win.
+            for option in ("--max_context_batch_size", "--max_context_batch_siz"):
+                for limit in (1, 4):
+                    config = server_args.setup_args(
+                        args + [f"{option}={limit}"]
+                    ).runtime_config.fifo_scheduler_config
+                    self.assertEqual(config.max_context_batch_size, limit)
+            # A derived token budget must not silently opt in to larger batches.
+            config = server_args.setup_args(
+                ["--pdfusion_coord_mode=cadence"]
+            ).runtime_config.fifo_scheduler_config
+            self.assertEqual(config.max_context_batch_size, 1)
+
+    def test_adaptive_token_only_environment_and_legacy_defaults(self):
+        from rtp_llm.server.server_args import server_args
+
+        env = {
+            "PDFUSION_CADENCE_ADAPTIVE": "1",
+            "PDFUSION_COORD_MODE": "cadence",
+            "MAX_BATCH_TOKENS_SIZE": "65536",
+            "CONCURRENCY_LIMIT": "8",
+        }
+        for argv in (["server"], ["server", "--tp_size=1"]):
+            with self.subTest(argv=argv), patch.dict(
+                os.environ, env, clear=True
+            ), patch.object(sys, "argv", argv):
+                config = server_args.setup_args().runtime_config.fifo_scheduler_config
+                self.assertEqual(config.max_context_batch_size, 8)
+                restored = pickle.loads(pickle.dumps(config))
+                self.assertEqual(restored.max_context_batch_size, 8)
+                self.assertEqual(restored.max_batch_tokens_size, 65536)
+                with patch.dict(os.environ, {"MAX_CONTEXT_BATCH_SIZE": "1"}):
+                    config = (
+                        server_args.setup_args().runtime_config.fifo_scheduler_config
+                    )
+                    self.assertEqual(config.max_context_batch_size, 1)
+                    config = server_args.setup_args(
+                        ["--max_context_batch_size=4"]
+                    ).runtime_config.fifo_scheduler_config
+                    self.assertEqual(config.max_context_batch_size, 4)
+        for overrides in (
+            {"PDFUSION_CADENCE_ADAPTIVE": "0"},
+            {"PDFUSION_COORD_MODE": "off"},
+            {"MAX_BATCH_TOKENS_SIZE": "0"},
+        ):
+            with self.subTest(overrides=overrides), patch.dict(
+                os.environ, dict(env, **overrides), clear=True
+            ):
+                config = server_args.setup_args([]).runtime_config.fifo_scheduler_config
+                self.assertEqual(config.max_context_batch_size, 1)
+
     def test_qwen3_video_total_pixel_budget_args(self):
         from rtp_llm.server.server_args import server_args
 

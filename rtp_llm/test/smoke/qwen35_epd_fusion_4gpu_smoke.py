@@ -382,6 +382,23 @@ def throughput_config(
     return env, args
 
 
+def prefill_batch_config(env, args, max_context_batch_size):
+    option = r"--max_context_batch_size\s+\d+(?=\s|$)"
+    if max_context_batch_size is None:
+        if env.get("PDFUSION_CADENCE_ADAPTIVE", "0") == "1":
+            # Let the service resolve token-only admission against total
+            # concurrency; do not turn an omitted option into an explicit 1.
+            return re.sub(option + r"\s*", "", args).strip()
+        max_context_batch_size = 1
+    if max_context_batch_size < 1:
+        raise ValueError("max context batch size must be positive")
+    if max_context_batch_size != 1 and env.get("PDFUSION_CADENCE_ADAPTIVE", "0") != "1":
+        raise ValueError("multi-request prefill requires adaptive cadence")
+    replacement = f"--max_context_batch_size {max_context_batch_size}"
+    configured, count = re.subn(option, replacement, args)
+    return configured if count else f"{args} {replacement}".strip()
+
+
 def positive_sizes(value):
     values = [int(x) for x in value.split(",") if x.strip()]
     if not values or min(values) < 1 or values != sorted(set(values)):
@@ -1241,8 +1258,8 @@ def encoder_gpu_ids(value):
 def selected_gpus(pd_gpus, encoder_gpus=""):
     pd = pd_gpu_ids(pd_gpus)
     enc = encoder_gpu_ids(encoder_gpus) if encoder_gpus else []
-    if len(pd) == 2 and len(enc) != 1:
-        raise ValueError("two PD ranks require exactly one Encoder GPU")
+    if len(pd) == 2 and len(enc) > 1:
+        raise ValueError("two PD ranks support at most one Encoder GPU")
     if set(pd) & set(enc):
         raise ValueError("Encoder and PDFUSION GPUs must not overlap")
     return ",".join(map(str, enc + pd))
@@ -2638,6 +2655,7 @@ def run_worker(a):
         getattr(a, "trace_run_id", "unset"),
         getattr(a, "coord_mode", "off"),
     )
+    args = prefill_batch_config(env, args, getattr(a, "max_context_batch_size", None))
     capacity_batches = getattr(a, "capacity_batches", "")
     steady_concurrency = getattr(a, "steady_concurrency", "")
     drain_file = ""
@@ -2686,6 +2704,7 @@ def run_worker(a):
         ),
         throughput_sweep=throughput,
         rank_concurrency=getattr(a, "rank_concurrency", 4),
+        max_context_batch_size=getattr(a, "max_context_batch_size", None),
         runtime_reserve_mb=getattr(a, "runtime_reserve_mb", 24576),
         kv_cache_mb=getattr(a, "kv_cache_mb", 16384),
         capacity_batches=capacity_batches,
@@ -2837,6 +2856,13 @@ def run_worker(a):
                 getattr(a, "coord_mode", "off"),
             )
             for config in configs:
+                if not config["name"].startswith("encoder"):
+                    # Non-proxy services rebuild their own server arguments.
+                    config["args"] = prefill_batch_config(
+                        config["env"],
+                        config["args"],
+                        getattr(a, "max_context_batch_size", None),
+                    )
                 if drain_file and not config["name"].startswith("encoder"):
                     config["env"]["PDFUSION_CADENCE_DRAIN_FILE"] = drain_file
                 config["args"] = input_capacity_config(
@@ -3333,6 +3359,7 @@ def bazel_command(a):
         ("coord-fault", getattr(a, "coord_fault", "none")),
         ("throughput-sweep", getattr(a, "throughput_sweep", 0)),
         ("rank-concurrency", getattr(a, "rank_concurrency", 4)),
+        ("max-context-batch-size", getattr(a, "max_context_batch_size", None)),
         ("kv-cache-mb", getattr(a, "kv_cache_mb", 16384)),
         ("runtime-reserve-mb", getattr(a, "runtime_reserve_mb", 24576)),
         ("graph-batches", getattr(a, "graph_batches", "")),
@@ -3361,6 +3388,8 @@ def bazel_command(a):
         ("startup-timeout", getattr(a, "startup_timeout", 1600)),
         ("test-timeout-seconds", getattr(a, "test_timeout_seconds", 7200)),
     ):
+        if value is None:
+            continue
         if adaptive and name in ("scheduler-policy", "decode-prefill-ratio"):
             continue
         command.append("--test_arg=--" + name + "=" + str(value))
@@ -3370,7 +3399,7 @@ def bazel_command(a):
 def run_launcher(a):
     repo = Path(__file__).resolve().parents[3]
     # Validate experiment arguments before acquiring GPUs or starting model workers.
-    throughput_config(
+    env, args = throughput_config(
         {},
         "",
         a.scheduler_policy,
@@ -3379,6 +3408,7 @@ def run_launcher(a):
         a.trace_run_id,
         a.coord_mode,
     )
+    prefill_batch_config(env, args, getattr(a, "max_context_batch_size", None))
     command = bazel_command(a)
     public = [
         "--remote_header=<redacted>" if x.startswith("--remote_header=") else x
@@ -3640,6 +3670,12 @@ def main(argv=None, preset=None):
         help="1: warmed two-round throughput sweep; 2: correctness-only 4/8/16 request bursts",
     )
     p.add_argument("--rank-concurrency", type=int, default=4)
+    p.add_argument(
+        "--max-context-batch-size",
+        type=int,
+        default=None,
+        help="per-rank prefill request limit; omitted uses token-only admission in adaptive cadence, otherwise 1; token budget is unchanged",
+    )
     p.add_argument(
         "--kv-cache-mb",
         type=int,

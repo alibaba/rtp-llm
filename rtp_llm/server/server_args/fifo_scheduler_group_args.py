@@ -13,7 +13,11 @@ def init_fifo_scheduler_group_args(parser, fifo_scheduler_config):
         bind_to=[(fifo_scheduler_config, "max_context_batch_size")],
         type=int,
         default=1,
-        help="（设备参数）为设备参数设置的最大 context batch size，影响默认调度器的凑批决策。",
+        help=(
+            "最大 context 请求数，通常默认 1。adaptive cadence 下若省略此参数且显式设置了正的 "
+            "max_batch_tokens_size，则使用总并发上限，由 token/KV 预算决定实际 prefill 数量；"
+            "显式设置时与 token 预算同时生效。"
+        ),
     )
     fifo_scheduler_group.add_argument(
         "--max_batch_tokens_size",
@@ -21,7 +25,10 @@ def init_fifo_scheduler_group_args(parser, fifo_scheduler_config):
         bind_to=[(fifo_scheduler_config, "max_batch_tokens_size")],
         type=int,
         default=0,
-        help="最大 batch tokens 大小。",
+        help=(
+            "最大 batch tokens 大小。adaptive cadence 沿用 ratio scheduler 的 "
+            "max(contextLength) * 请求数判定及单请求特例；可以单独设置此预算。"
+        ),
     )
     fifo_scheduler_group.add_argument(
         "--enable_mixed_continuous_batching",

@@ -1,6 +1,6 @@
 # Manual Qwen3.5 EPD / PD Fusion harness
 
-This harness runs Qwen3.5-397B-A17B-FP8 with four PD Fusion ranks and optionally one or two separate Encoder GPUs. It is an opt-in experiment tool for the configured CUDA 13 / SM10x environment, not a production deployment preset.
+This harness runs Qwen3.5-397B-A17B-FP8 with two or four PD Fusion ranks and optional separate Encoder GPUs. It is an opt-in experiment tool for the configured CUDA 13 / SM10x environment, not a production deployment preset.
 
 ## Dependencies and topology
 
@@ -8,7 +8,8 @@ The complete harness requires both the scheduling-observation and global-cadence
 
 | Mode | Encoder GPUs | PD GPUs | Total GPUs | Bazel target |
 |---|---|---|---|---|
-| Text PD Fusion | none | four | 4 | `qwen35_pd_fusion_4gpu_smoke` |
+| Text PD Fusion | none | two or four | 2 or 4 | `qwen35_pd_fusion_4gpu_smoke` |
+| Video with one Encoder | one | two distinct GPUs | 3 | `qwen35_e1pd2_smoke` |
 | Video with one Encoder | one | four distinct GPUs | 5 | `qwen35_e1pd4_smoke` |
 | Video with two Encoders | two | four distinct GPUs | 6 | `qwen35_e2pd4_smoke` |
 
@@ -36,9 +37,31 @@ The Encoder profile controls concurrency, preprocessing and GPU batching. `--enc
 
 ## Scheduling and measurements
 
-Coordination defaults to `--coord-mode off`. The experimental global cadence mode requires `--coord-mode cadence`, `--scheduler-policy prefill-first`, `--schedule-trace 1` and a unique shared `--trace-run-id`. `--decode-prefill-ratio N` controls the target decode rounds after a real prefill. The coordinator supports only single-host synchronous TP1/DP4/EP4 execution, rejects unsupported modes, and terminates the group on control failure.
+Coordination defaults to `--coord-mode off`. The experimental global cadence mode requires `--coord-mode cadence`, `--scheduler-policy prefill-first`, `--schedule-trace 1` and a unique shared `--trace-run-id`. `--decode-prefill-ratio N` controls the target decode rounds after a real prefill. The coordinator supports single-host synchronous TP1/DP2/EP2 or TP1/DP4/EP4 execution, rejects unsupported modes, and terminates the group on control failure.
 
 `--coord-checks 1` runs coordination correctness checks; peer-exit fault injection is separately enabled by `--coord-fault peer-exit`. Do not mix fault injection with performance measurements.
+
+With `PDFUSION_CADENCE_ADAPTIVE=1`, `--max-context-batch-size N`
+allows up to N resource-reserved prefill requests per PD rank. The harness passes
+this as the server's existing `--max_context_batch_size`; it does not increase the
+token budget or wait to fill a batch. Ready requests can accumulate across Decode
+epochs while admission is allowed. Outstanding cache loads also occupy slots;
+they execute only after becoming ready. All ranks share the Prefill phase, but
+their real batch sizes may differ, including zero with a matching fake Prefill.
+Omitting this option in adaptive mode leaves the server request-count option
+unset. With a positive `--max_batch_tokens_size`, the server uses total
+`--concurrency_limit` as the effective count bound and chooses the actual batch
+from token and KV budgets. The existing padded-token rule is preserved:
+`max(contextLength) * request_count < max_batch_tokens_size`, including its
+single-request exception. Explicit `--max_context_batch_size 1` still forces
+one request. Without a positive explicit token budget, the server defaults to 1.
+The harness retains its existing token budget (32768, or 65536 with
+`--max-input-tokens 65536`); token-only runs omit `--max-context-batch-size`.
+Legacy cadence continues to require a limit of 1. Trace summaries include
+`prefill_batch_hist` and `multi_rank_multi_request_prefill_steps`; compare equal
+work at limits 1, 2, and 4 using throughput, TTFT, decode latency and GPU memory.
+For a text-only DP2/EP2 run, pass `--workload text --gpus 2,3` without Encoder
+GPUs; the same correctness and steady-load entry points support DP4/EP4.
 
 For steady video load, enable the Encoder proxy, set `--client-mode measured`, choose `--steady-concurrency`, and configure a sufficient `--rank-concurrency`. Warmup, window duration, window count and process count are explicit options. Use natural output when comparing equal work; input frames/tokens, output lengths, failures, queue inventory, TTFT, throughput and GPU memory all belong in the comparison. A shortened output is not evidence of equal-work improvement.
 

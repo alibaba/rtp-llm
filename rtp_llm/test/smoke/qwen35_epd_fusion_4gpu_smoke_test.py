@@ -23,6 +23,71 @@ import qwen35_epd_fusion_4gpu_smoke as smoke
 
 
 class FusionSmokeTest(unittest.TestCase):
+    def test_adaptive_token_only_prefill_does_not_inject_count_cap(self):
+        env, args = smoke.server_config("0,1,2,3")
+        self.assertEqual(smoke.prefill_batch_config(env, args, None), args)
+        env["PDFUSION_CADENCE_ADAPTIVE"] = "1"
+        configured = smoke.prefill_batch_config(env, args, None)
+        self.assertNotIn("--max_context_batch_size", configured)
+        self.assertIn("--max_batch_tokens_size 32768", configured)
+        self.assertIn("--max_batch_tokens_without_cache 32768", configured)
+        self.assertEqual(smoke.prefill_batch_config(env, configured, None), configured)
+        explicit = smoke.prefill_batch_config(env, configured, 1)
+        self.assertIn("--max_context_batch_size 1", explicit)
+        with mock.patch.dict(
+            os.environ, PDFUSION_CADENCE_ADAPTIVE="1"
+        ), mock.patch.object(smoke, "run_launcher", side_effect=smoke.bazel_command):
+            command = smoke.main(
+                [
+                    "--workload=text",
+                    "--gpus=0,1",
+                    "--schedule-trace=1",
+                    "--trace-run-id=token-only",
+                    "--output=/tmp/token-only-cli",
+                ]
+            )
+            self.assertFalse(any("--max-context-batch-size" in arg for arg in command))
+
+    def test_adaptive_context_batch_changes_only_pd_request_limit(self):
+        env, args = smoke.server_config("0,1,2,3")
+        env["PDFUSION_CADENCE_ADAPTIVE"] = "1"
+        for limit in (1, 2, 4, 16):
+            actual = smoke.prefill_batch_config(env, args, limit)
+            self.assertIn(f"--max_context_batch_size {limit}", actual)
+            self.assertIn("--max_batch_tokens_size 32768", actual)
+            self.assertIn("--max_batch_tokens_without_cache 32768", actual)
+            self.assertEqual(actual.count("--max_context_batch_size"), 1)
+            self.assertEqual(smoke.prefill_batch_config(env, actual, limit), actual)
+        for limit in (0, -1):
+            with self.assertRaisesRegex(ValueError, "positive"):
+                smoke.prefill_batch_config(env, args, limit)
+        for settings in ({}, {"PDFUSION_CADENCE_ADAPTIVE": "0"}):
+            self.assertEqual(smoke.prefill_batch_config(settings, args, 1), args)
+            with self.assertRaisesRegex(ValueError, "adaptive"):
+                smoke.prefill_batch_config(settings, args, 2)
+
+    def test_adaptive_context_batch_cli_reaches_worker(self):
+        with mock.patch.dict(
+            os.environ, PDFUSION_CADENCE_ADAPTIVE="1"
+        ), mock.patch.object(smoke, "run_launcher", side_effect=smoke.bazel_command):
+            for gpus, workload in (
+                ("0,1", ["--workload=video", "--encoder-gpus=2"]),
+                ("0,1", ["--workload=text"]),
+                ("0,1,2,3", ["--workload=text"]),
+            ):
+                command = smoke.main(
+                    workload
+                    + [
+                        f"--gpus={gpus}",
+                        "--max-context-batch-size=4",
+                        "--schedule-trace=1",
+                        "--trace-run-id=multi-prefill",
+                        "--output=/tmp/multi-prefill-cli",
+                    ]
+                )
+                self.assertIn("--test_arg=--max-context-batch-size=4", command)
+                self.assertIn("--test_env=PDFUSION_CADENCE_ADAPTIVE=1", command)
+
     def test_output_failure_continuation_preserves_strict_validation_and_protocol_failures(
         self,
     ):
@@ -449,6 +514,7 @@ class FusionSmokeTest(unittest.TestCase):
             env, args = smoke.throughput_config(
                 env, args, "prefill-first", "7", 1, "adaptive", "cadence"
             )
+            args = smoke.prefill_batch_config(env, args, 4)
             self.assertEqual({k: env[k] for k in settings}, settings)
             configs = smoke.dp2_service_configs(
                 "2,3",
@@ -462,6 +528,7 @@ class FusionSmokeTest(unittest.TestCase):
             for config in configs:
                 if config["name"] == "fusion":
                     self.assertEqual(config["env"]["PDFUSION_CADENCE_ADAPTIVE"], "1")
+                    self.assertIn("--max_context_batch_size 4", config["args"])
                 else:
                     self.assertEqual(config["env"]["PDFUSION_CADENCE_ADAPTIVE"], "0")
                     self.assertFalse(
@@ -1639,9 +1706,16 @@ class FusionSmokeTest(unittest.TestCase):
                 encoder_gpus="0,1",
                 data_dir=str(PATH.parent / "qwen35_e2p4d2_data"),
                 model_dir=d,
+                max_context_batch_size=4,
+                schedule_trace=1,
+                trace_run_id="multi-prefill-nonproxy",
             )
             with mock.patch.dict(
-                os.environ, {"CUDA_VISIBLE_DEVICES": "0,1,4,5,6,7"}
+                os.environ,
+                {
+                    "CUDA_VISIBLE_DEVICES": "0,1,4,5,6,7",
+                    "PDFUSION_CADENCE_ADAPTIVE": "1",
+                },
             ), mock.patch.dict(
                 sys.modules,
                 {module.__name__: module, config_module.__name__: config_module},
@@ -1662,6 +1736,14 @@ class FusionSmokeTest(unittest.TestCase):
                 self.assertEqual(smoke.run_worker(args), 1)
             for m in managers:
                 m.stop_server.assert_called_once()
+            calls = module.MagaServerManager.call_args_list
+            self.assertIn(
+                "--max_context_batch_size 4", calls[-1].kwargs["smoke_args_str"]
+            )
+            for call in calls[:-1]:
+                self.assertNotIn(
+                    "--max_context_batch_size", call.kwargs["smoke_args_str"]
+                )
             result = smoke.json.loads(Path(d, "result.json").read_text())
             self.assertEqual(
                 result["readiness"], dict(encoder_0=False, encoder_1=True, fusion=True)
@@ -2641,7 +2723,8 @@ class TwoPdTopologyTest(unittest.TestCase):
         for ids in ("2", "1,2,3", "2,2", "-1,2"):
             with self.subTest(ids=ids), self.assertRaises(ValueError):
                 smoke.pd_gpu_ids(ids)
-        for enc in ("", "0,1", "2"):
+        self.assertEqual(smoke.selected_gpus("2,3"), "2,3")
+        for enc in ("0,1", "2"):
             with self.subTest(enc=enc), self.assertRaises(ValueError):
                 smoke.selected_gpus("2,3", enc)
 

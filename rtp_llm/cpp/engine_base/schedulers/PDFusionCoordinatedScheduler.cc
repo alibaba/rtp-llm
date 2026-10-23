@@ -42,14 +42,17 @@ PDFusionCoordinatedScheduler::PDFusionCoordinatedScheduler(const RuntimeConfig& 
     timeout_ms_(runtime.fifo_scheduler_config.pdfusion_coord_timeout_ms),
     decode_steps_(cadence_config.decodeSteps(runtime.fifo_scheduler_config.decode_prefill_ratio)),
     cadence_config_(cadence_config),
-    cadence_(decode_steps_, rank_count_, cadence_config_) {
+    cadence_(decode_steps_, rank_count_, cadence_config_),
+    max_context_batch_size_(runtime.fifo_scheduler_config.max_context_batch_size) {
     if (runtime.fifo_scheduler_config.pdfusion_coord_timeout_ms < 1
         || runtime.fifo_scheduler_config.pdfusion_coord_timeout_ms > 600000) {
         throw std::invalid_argument("global control timeout outside [1,600000] ms");
     }
-    if (!runtime.fifo_scheduler_config.pdfusion_schedule_trace
-        || runtime.fifo_scheduler_config.max_context_batch_size != 1) {
-        throw std::invalid_argument("global cadence requires schedule trace and context batch limit 1");
+    if (!runtime.fifo_scheduler_config.pdfusion_schedule_trace) {
+        throw std::invalid_argument("global cadence requires schedule trace");
+    }
+    if (max_context_batch_size_ < 1 || (!cadence_config_.adaptive && max_context_batch_size_ != 1)) {
+        throw std::invalid_argument("adaptive cadence requires context batch limit >=1; legacy cadence requires 1");
     }
     if (cadence_config_.adaptive) {
         const auto* path = std::getenv("PDFUSION_CADENCE_DRAIN_FILE");
@@ -61,12 +64,13 @@ PDFusionCoordinatedScheduler::PDFusionCoordinatedScheduler(const RuntimeConfig& 
         }
     }
     RTP_LLM_LOG_INFO("PDFUSION_CADENCE adaptive=%ld decode_window=%ld low_water_pct=%ld prefill_max_wait_ms=%ld "
-                     "min_decode_share_pct=%ld",
+                     "min_decode_share_pct=%ld max_context_batch_size=%ld",
                      cadence_config_.adaptive,
                      cadence_config_.decode_window,
                      cadence_config_.low_water_pct,
                      cadence_config_.prefill_max_wait_ms,
-                     cadence_config_.min_decode_share_pct);
+                     cadence_config_.min_decode_share_pct,
+                     max_context_batch_size_);
 }
 bool PDFusionCoordinatedScheduler::observeDrainMarker() {
     if (draining_ || drain_file_.empty()) {
@@ -90,6 +94,30 @@ bool PDFusionCoordinatedScheduler::observeDrainMarker() {
 }
 bool PDFusionCoordinatedScheduler::evaluateRunningMemory(const std::list<GenerateStreamPtr>& streams,
                                                          const GenerateStreamPtr&            candidate) {
+    if (cadence_config_.adaptive) {
+        // Async loads returning to WAITING already own a slot and initial KV.
+        // Advance them even while admission is throttled; never count them twice.
+        if (std::find(prefill_reservations_.begin(), prefill_reservations_.end(), candidate)
+            != prefill_reservations_.end()) {
+            return true;
+        }
+        if (!prefill_admit_allowed_) {
+            return false;
+        }
+        auto batch = prefill_reservations_;
+        for (const auto& stream : streams) {
+            if (std::find(batch.begin(), batch.end(), stream) == batch.end()) {
+                batch.push_back(stream);
+            }
+        }
+        if (batch.size() >= static_cast<size_t>(max_context_batch_size_)) {
+            ++observation_.rejected_batch;
+            return false;
+        }
+        // The inherited token check sees the entire reserved prefill batch,
+        // while its KV/concurrency snapshot also includes active decode work.
+        return PDFusionRatioScheduler::evaluateRunningMemory(batch, candidate);
+    }
     if (!streams.empty()) {
         ++observation_.rejected_batch;
         return false;
@@ -113,6 +141,8 @@ void PDFusionCoordinatedScheduler::cancelExtraStreams() {
     prepared_decode_.clear();
     committed_.clear();
     decode_last_served_us_.clear();
+    prefill_ready_since_us_.clear();
+    prefill_reservations_.clear();
 }
 PDFusionPreparedState PDFusionCoordinatedScheduler::prepareLocal(int64_t epoch) {
     std::lock_guard<std::mutex> guard(lock_);
@@ -134,9 +164,6 @@ PDFusionPreparedState PDFusionCoordinatedScheduler::prepareLocal(int64_t epoch) 
     reapFinished(running_streams_);
     reapFinished(pending_decode_streams_);
     reapFinished(new_streams_);
-    if (new_streams_.empty()) {
-        reserved_since_us_ = 0;
-    }
     evaluateAndUpdateStreams(running_streams_);
     promotePendingDecodeStreams();
     observation_.waiting = waiting_streams_.size();
@@ -147,17 +174,27 @@ PDFusionPreparedState PDFusionCoordinatedScheduler::prepareLocal(int64_t epoch) 
     // already admitted async load or ready reservation. An empty local Decode
     // batch can always refill, including after cancellation and at the tail.
     prefill_admit_allowed_ = cadence_.prefillAdmissionAllowed() || running_streams_.empty();
-    // At most one actual context reservation, including an outstanding async load.
-    // evaluateWaitingStreams owns the CanRun/initKVBlock/LoadInitiated transitions.
-    if (new_streams_.empty() && loading_cache_streams_.empty()) {
+    if (cadence_config_.adaptive) {
+        // Snapshot all existing reservations before evaluating fresh candidates.
+        // evaluateWaitingStreams owns the CanRun/initKVBlock/LoadInitiated transitions.
+        prefill_reservations_.clear();
+        std::unordered_set<GenerateStream*> included;
+        for (const auto* queue : {&new_streams_, &loading_cache_streams_, &waiting_streams_}) {
+            for (const auto& stream : *queue) {
+                if (stream->isContextStream() && stream->hasEvent(StreamEvents::CanRun)
+                    && stream->hasEvent(StreamEvents::LoadInitiated) && !stream->hasError()
+                    && included.insert(stream.get()).second) {
+                    prefill_reservations_.push_back(stream);
+                }
+            }
+        }
+        admitWaitingForCoordination(new_streams_);
+        prefill_reservations_.clear();
+    } else if (new_streams_.empty() && loading_cache_streams_.empty()) {
         admitWaitingForCoordination();
     }
-    const auto now = nowUs();
-    if (new_streams_.empty()) {
-        reserved_since_us_ = 0;
-    } else if (!reserved_since_us_) {
-        reserved_since_us_ = now;
-    }
+    const auto                          now = nowUs();
+    std::unordered_set<GenerateStream*> ready_streams;
     for (const auto& stream : new_streams_) {
         if (stream->getStatus() != StreamState::RUNNING || !stream->isContextStream()
             || !stream->hasEvent(StreamEvents::LoadInitiated)) {
@@ -165,9 +202,18 @@ PDFusionPreparedState PDFusionCoordinatedScheduler::prepareLocal(int64_t epoch) 
         }
         ++state.ready_prefill;
         state.input_tokens += stream->contextLength();
+        ready_streams.insert(stream.get());
+        const auto since      = prefill_ready_since_us_.emplace(stream.get(), now).first->second;
+        state.oldest_ready_us = std::max(state.oldest_ready_us, now - since);
     }
-    state.oldest_ready_us = reserved_since_us_ ? now - reserved_since_us_ : 0;
-    prepared_decode_      = running_streams_;
+    for (auto it = prefill_ready_since_us_.begin(); it != prefill_ready_since_us_.end();) {
+        if (!ready_streams.count(it->first)) {
+            it = prefill_ready_since_us_.erase(it);
+        } else {
+            ++it;
+        }
+    }
+    prepared_decode_ = running_streams_;
     std::unordered_set<int64_t> active;
     for (const auto& stream : prepared_decode_) {
         if (stream->isContextStream() || stream->getStatus() != StreamState::RUNNING) {
@@ -211,7 +257,7 @@ std::list<GenerateStreamPtr> PDFusionCoordinatedScheduler::commitLocal(int64_t e
         // No enqueue or admission here: only the prepared, resource-owning handles.
         committed_.splice(committed_.end(), new_streams_);
         pending_decode_streams_.insert(pending_decode_streams_.end(), committed_.begin(), committed_.end());
-        reserved_since_us_ = 0;
+        prefill_ready_since_us_.clear();
     } else if (plan == PDFusionPlan::DECODE) {
         for (const auto& stream : prepared_decode_) {
             if (!stream->hasError() && !stream->hasEvent(StreamEvents::GenerateDone)

@@ -48,6 +48,48 @@ def global_fixture():
 
 
 class TraceTest(unittest.TestCase):
+    def multi_batch_fixture(self):
+        lines = global_fixture()
+        for i, line in enumerate(lines):
+            rank = int(line.split("rank=")[1].split()[0])
+            count = (3, 2, 4, 0)[rank]
+            if "event=begin" in line:
+                line = line.replace("committed_prefill=1", f"committed_prefill={count}")
+                line = line.replace(" prefill=1", f" prefill={count}")
+                line = line.replace("ready_prefill=1", f"ready_prefill={count}")
+                line = line.replace("ready_mask=15", "ready_mask=7")
+                line += " max_context_batch_size=4"
+            lines[i] = line
+        return lines
+
+    def test_multi_batch_alignment_and_distribution_with_empty_rank(self):
+        steps, _ = align(self.multi_batch_fixture(), "test")
+        summary = summarize(steps)["prefill_present"]
+        self.assertEqual(summary["prefill_batch_hist"], {3: 2, 2: 2, 4: 2})
+        self.assertEqual(summary["prefill_requests"], 18)
+        self.assertEqual(summary["multi_rank_multi_request_prefill_steps"], 2)
+        self.assertEqual(summary["global_empty_ranks"], 2)
+
+    def test_multi_batch_trace_rejects_exceeded_reservation_and_limit(self):
+        lines = self.multi_batch_fixture()
+        with self.assertRaisesRegex(ValueError, "context batch limit"):
+            align(
+                [
+                    line.replace("max_context_batch_size=4", "max_context_batch_size=2")
+                    for line in lines
+                ],
+                "test",
+            )
+        lines[0] = lines[0].replace("ready_prefill=3", "ready_prefill=2")
+        with self.assertRaisesRegex(ValueError, "exceeds reservation"):
+            align(lines, "test")
+
+    def test_adaptive_multi_batch_cost_is_per_step(self):
+        steps = self.paced_steps()
+        for row in steps[0]:
+            row.update(ready_prefill=4, prefill=4)
+        self.assertEqual(validate_cadence(steps, None)["phases"]["prefill"], 1)
+
     def test_adaptive_replay_has_no_legacy_ratio_dependency(self):
         for ratio in (None, "", "0", "7", "1/7", "invalid"):
             self.assertEqual(

@@ -84,6 +84,10 @@ uint64_t runRank(int rank, const std::string& id, const std::string& scenario, i
         if (epoch % 5 == 4) {
             state.ready_decode = 10;
         }
+        if (scenario == "adaptive_multibatch" && epoch % 5 >= 1 && epoch % 5 <= 3) {
+            const std::array<int64_t, 4> batches{{3, 2, 0, 4}};
+            state.ready_prefill = batches[rank];
+        }
         if (scenario == "adaptive_drain" && epoch >= 51) {
             state.ready_decode  = 10;
             state.ready_prefill = epoch % 5 == 1 && rank == 0;
@@ -119,6 +123,9 @@ uint64_t runRank(int rank, const std::string& id, const std::string& scenario, i
         if (epoch % 7 == 0) {
             committed = {};
         }  // cancellation after reservation
+        if (scenario == "adaptive_multibatch" && rank == 0 && committed.ready_prefill > 0 && epoch % 3 == 0) {
+            --committed.ready_prefill;  // Only part of a prepared batch is cancelled.
+        }
         if (epoch == 4 && scenario == "commit_exit" && rank == rank_count - 1) {
             _exit(23);
         }
@@ -202,6 +209,15 @@ void exercise(const std::string& scenario, bool success, int rank_count = 4, int
 }
 TEST(PDFusionScheduleCoordinatorTest, FourRankPlanAndCancellationAgreement) {
     exercise("normal", true);
+}
+TEST(PDFusionScheduleCoordinatorTest, AdaptiveUnevenBatchesAndPartialCancellationAgreement) {
+    for (int ranks : {2, 4}) {
+        for (int width = 0; width <= 4; ++width) {
+            SCOPED_TRACE(ranks);
+            SCOPED_TRACE(width);
+            exercise("adaptive_multibatch", true, ranks, width);
+        }
+    }
 }
 TEST(PDFusionScheduleCoordinatorTest, BoundedLateRank) {
     exercise("late", true);
@@ -490,6 +506,24 @@ TEST(PDFusionScheduleCoordinatorTest, AdaptiveRankAgreementMtpAndConfigurationMi
         exercise(scenario, false);
         exercise(scenario, false, 2, 1);
     }
+}
+
+TEST(PDFusionScheduleCoordinatorTest, AdaptiveMultipleRequestsChargeOneGlobalModelDuration) {
+    PDFusionGlobalCadence                cadence(1, 4, adaptiveConfig());
+    std::array<PDFusionPreparedState, 4> committed{};
+    committed[0].ready_prefill = 3;
+    committed[1].ready_prefill = 2;
+    committed[3].ready_prefill = 4;
+    EXPECT_EQ(cadence.choose(committed), PDFusionPlan::PREFILL);
+    cadence.finish(PDFusionPlan::PREFILL, committed);
+    auto states = decodeStates(16);
+    for (int rank = 0; rank < 4; ++rank) {
+        states[rank].last_model_us = 700000 - 10000 * rank;
+    }
+    EXPECT_EQ(cadence.choose(states), PDFusionPlan::DECODE);
+    EXPECT_EQ(cadence.decision().debt_after_scaled, 700000 * 25);
+    EXPECT_EQ(cadence.decision().charged_plan, static_cast<int64_t>(PDFusionPlan::PREFILL));
+    EXPECT_FALSE(cadence.prefillAdmissionAllowed());
 }
 
 TEST(PDFusionScheduleCoordinatorTest, AdaptiveAdmissionPacingRepaysActualGlobalCostBeforeNewAdmission) {

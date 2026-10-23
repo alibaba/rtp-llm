@@ -7,6 +7,7 @@
 #include <stdexcept>
 #include <string>
 #include <vector>
+#include <unordered_set>
 
 #include "rtp_llm/cpp/engine_base/stream/GenerateStream.h"
 #include "rtp_llm/cpp/utils/Logger.h"
@@ -323,11 +324,15 @@ PDFusionRatioScheduler::RoundType PDFusionRatioScheduler::chooseRound() {
     return prefill_since_decode_ < m ? RoundType::PREFILL : RoundType::DECODE;
 }
 
-void PDFusionRatioScheduler::buildAdmissionPeakState() {
+void PDFusionRatioScheduler::buildAdmissionPeakState(const std::list<GenerateStreamPtr>& ready_reservations) {
     auto state = std::make_unique<AdmissionPeakState>();
     state->streams.reserve(loading_cache_streams_.size() + running_streams_.size() + pending_decode_streams_.size()
-                           + waiting_streams_.size());
-    auto append_stream = [&](const GenerateStreamPtr& s) {
+                           + waiting_streams_.size() + ready_reservations.size());
+    std::unordered_set<GenerateStream*> included;
+    auto                                append_stream = [&](const GenerateStreamPtr& s) {
+        if (!included.insert(s.get()).second) {
+            return;
+        }
         state->streams.push_back({s, current_kv_admission_ ? 0 : remainingKVAllocationSteps(s)});
         state->initial_need_blocks += estimateInitialNeedBlocks(s);
     };
@@ -338,6 +343,9 @@ void PDFusionRatioScheduler::buildAdmissionPeakState() {
         append_stream(s);
     }
     for (const auto& s : pending_decode_streams_) {
+        append_stream(s);
+    }
+    for (const auto& s : ready_reservations) {
         append_stream(s);
     }
     for (const auto& s : waiting_streams_) {
@@ -478,8 +486,11 @@ size_t PDFusionRatioScheduler::promotePendingDecodeStreams() {
     return promoted_count;
 }
 
-void PDFusionRatioScheduler::admitWaitingForCoordination() {
+void PDFusionRatioScheduler::admitWaitingForCoordination(const std::list<GenerateStreamPtr>& ready_reservations) {
     admission_peak_state_.reset();
+    if (!ready_reservations.empty()) {
+        buildAdmissionPeakState(ready_reservations);
+    }
     evaluateWaitingStreams(waiting_streams_);
     admission_peak_state_.reset();
 }

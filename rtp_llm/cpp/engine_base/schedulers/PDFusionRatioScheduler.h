@@ -58,14 +58,14 @@ protected:
     RoundType chooseRound();
     bool      tryAdmitKVForPrefill(const GenerateStreamPtr& new_stream);
 
-    void                admitWaitingForCoordination();
+    void                admitWaitingForCoordination(const std::list<GenerateStreamPtr>& ready_reservations = {});
     void                observeCommitted(const std::list<GenerateStreamPtr>& streams, bool prefill);
     const bool          current_kv_admission_;
     const bool          trace_enabled_;
     ScheduleObservation observation_;
 
     struct AdmissionPeakState;
-    void buildAdmissionPeakState();
+    void buildAdmissionPeakState(const std::list<GenerateStreamPtr>& ready_reservations = {});
     bool tryAddToAdmissionPeakState(const GenerateStreamPtr& new_stream,
                                     int64_t                  initial_capacity,
                                     int64_t                  lifecycle_capacity);

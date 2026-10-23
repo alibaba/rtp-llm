@@ -105,6 +105,11 @@ def align(lines, run_id, ranks=4, allow_drain_tail=False):
                     or begin["decode"] > begin["ready_decode"]
                 ):
                     raise ValueError("execution exceeds reservation")
+                if "max_context_batch_size" in begin and (
+                    begin["max_context_batch_size"] < 1
+                    or begin["ready_prefill"] > begin["max_context_batch_size"]
+                ):
+                    raise ValueError("prefill reservation exceeds context batch limit")
                 real = begin["prefill"] + begin["decode"]
                 bit = 1 << begin["rank"]
                 if (
@@ -372,6 +377,18 @@ def summarize(steps, lo_us=0, hi_us=float("inf")):
             max_rank_host_executor_sum_s=sum(durations),
             mean_host_executor_ms=1000 * sum(durations) / len(durations),
             prefill_rank_hist=dict(collections.Counter(count for _, count in entries)),
+            prefill_batch_hist=dict(
+                collections.Counter(
+                    r["prefill"] for rows, _ in entries for r in rows if r["prefill"]
+                )
+            ),
+            prefill_requests=sum(r["prefill"] for rows, _ in entries for r in rows),
+            multi_request_prefill_steps=sum(
+                any(r["prefill"] > 1 for r in rows) for rows, _ in entries
+            ),
+            multi_rank_multi_request_prefill_steps=sum(
+                sum(r["prefill"] > 1 for r in rows) >= 2 for rows, _ in entries
+            ),
             output_tokens=sum(r["output_tokens"] for rows, _ in entries for r in rows),
             decode=sum(r["decode"] for rows, _ in entries for r in rows),
             fake=sum(r["fake"] for rows, _ in entries for r in rows),

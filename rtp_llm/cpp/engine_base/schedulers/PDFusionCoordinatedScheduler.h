@@ -75,18 +75,21 @@ private:
     std::unique_ptr<PDFusionScheduleCoordinator> coordinator_;
     PDFusionCadenceConfig                        cadence_config_;
     PDFusionGlobalCadence                        cadence_;
+    const int64_t                                max_context_batch_size_;
     std::array<PDFusionPreparedState, 4>         final_commits_{};
     int64_t                                      epoch_ = 0, prepared_epoch_ = 0, committed_epoch_ = 0;
     bool                                         model_completed_  = true;
     PDFusionPlan                                 plan_             = PDFusionPlan::IDLE;
     int64_t                                      final_real_count_ = 0, ready_mask_ = 0, commit_mask_ = 0;
     int64_t                                      prepare_us_ = 0, control_us_ = 0, commit_us_ = 0;
-    int64_t                                      reserved_since_us_ = 0;
     int64_t                                      last_model_us_ = 0, model_started_us_ = 0;
     bool                                         prefill_admit_allowed_ = true;
     std::string                                  drain_file_;
     bool                                         draining_ = false;
     std::unordered_map<int64_t, int64_t>         decode_last_served_us_;
-    std::list<GenerateStreamPtr>                 prepared_decode_, committed_;
+    std::unordered_map<GenerateStream*, int64_t> prefill_ready_since_us_;
+    // Resource-owning context requests at the start of the admission pass.
+    std::list<GenerateStreamPtr> prefill_reservations_;
+    std::list<GenerateStreamPtr> prepared_decode_, committed_;
 };
 }  // namespace rtp_llm
