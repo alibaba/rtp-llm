@@ -6,7 +6,7 @@ from pathlib import Path
 
 from reporting.spec import REPORT_SPEC_SCHEMA_VERSION, validate
 from reporting.report_model import ExperimentConditions
-from reporting.renderer import render
+from reporting.renderer import _render_validated
 from reporting.components import run_meta
 from reporting.evidence_archive import project, restore, verify_references
 from file_digest import sha256_file
@@ -36,7 +36,8 @@ def _json(value):
 
 def write_bundle(root, kind, identity, analysis, spec, *, meta=None, producer=None, role=None, attachments=None):
     """Publish one canonical report; manifest is written last as the commit record."""
-    for name, content in (attachments or {}).items():
+    attachments = dict((attachments or {}).items())
+    for name, content in attachments.items():
         if (not isinstance(name, str) or not name or Path(name).name != name or "\\" in name
                 or name in {".", "..", "manifest.json", "analysis.json", "report-spec.json", "report.html"}
                 or not isinstance(content, str)):
@@ -68,14 +69,13 @@ def write_bundle(root, kind, identity, analysis, spec, *, meta=None, producer=No
     # Serialize and release each output before building the next large document.
     for name, produce in (("analysis.json", lambda: _json(result)),
                           ("report-spec.json", lambda: _json(spec)),
-                          ("report.html", lambda: render(spec))):
+                          ("report.html", lambda: _render_validated(spec))):
         content = produce()
         write_text(directory / name, content)
         files[name] = dict(path=name, sha256=hashlib.sha256(content.encode()).hexdigest())
         del content
-    for name, content in (attachments or {}).items():
-        if (not isinstance(name, str) or not name or Path(name).name != name
-                or name in files or "\\" in name or name in {".", "..", "manifest.json"}):
+    for name, content in attachments.items():
+        if name in files:
             raise ValueError("invalid report attachment path")
         write_text(directory / name, content)
         files[name] = dict(path=name, sha256=hashlib.sha256(content.encode()).hexdigest())

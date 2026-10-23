@@ -21,6 +21,7 @@ from adapters.environment_config import (
     MasterSpec,
 )
 from runtime.java_runtime import resolve_java21
+from adapters.mock_launch import MockLaunchSpec
 from runtime.startup import startup_deadline, wait_ready
 from artifacts.startup import startup_phase
 from adapters.master_lifecycle import MasterLifecycle
@@ -310,62 +311,24 @@ class EnvManager:
             raise RuntimeError(
                 f"mock engine jar not found: {MOCK_JAR} (build it first)"
             )
-        java = resolve_java21()
-        argv = [
-            java,
-            f"-Xms{spec.mock_heap}",
-            f"-Xmx{spec.mock_heap}",
-            "-XX:+ExitOnOutOfMemoryError",
-            f"-Xlog:gc*,safepoint:{env.run_dir / 'mock_engine_gc.log'}:time,uptime,level,tags:filecount=3,filesize=20m",
-            "-jar",
-            str(MOCK_JAR),
-            "--n-prefill",
-            str(spec.n_prefill),
-            "--n-decode",
-            str(spec.n_decode),
-            "--base-grpc-port",
-            str(env.base_grpc_port),
-            # macOS lo0 only has 127.0.0.1 (no whole 127/8 routing like Linux),
-            # so the unique-IP advertisement (127.1.0.x) is unreachable there.
-            "--unique-engine-ips",
-            str(resolve_address_plan(
-                spec.runtime_mode, unique_loopback_supported=sys.platform != "darwin"
-            )["unique_engine_ips"]).lower(),
-            "--event-loop-threads",
-            str(spec.event_loop_threads),
-            "--completion-threads",
-            str(spec.completion_threads),
-            "--rpc-threads",
-            str(spec.rpc_threads),
-            "--rpc-max-calls",
-            str(spec.rpc_max_calls),
-            "--auto-fetch",
-            str(spec.mock_auto_fetch).lower(),
-            "--fetch-attach-timeout-ms",
-            str(spec.mock_fetch_attach_timeout_ms),
-            "--performance",
-            str(env.perf_file),
-            "--master-config",
-            str(_write_master_config(env, spec)),
-            # stdout telemetry (java_mock_stats line every statsIntervalMs):
-            # lets the archived mock_engine.log answer "which RPC counters
-            # kept moving / stalled" for hang forensics (3c-class issues)
-            # without any behavioral change to the engine itself.
-            "--stats-stdout",
-            str(spec.diagnostic_events).lower(),
-            "--events-file",
-            str(env.run_dir / "engine_events.jsonl") if spec.diagnostic_events else "",
-            "--prefill-kv-pool-blocks",
-            str(spec.prefill_cache_blocks),
-            "--decode-kv-pool-blocks",
-            str(spec.decode_cache_blocks),
-            "--endpoint-file",
-            str(env.endpoint_file),
-            "--env-file",
-            str(env.run_dir / "flexlb_env.txt"),
-        ]
-        argv += spec.mock_extra_args
-        argv += ["--discovery-file", str(env.discovery_file)]
+        argv = MockLaunchSpec(
+            java=resolve_java21(), jar=MOCK_JAR,
+            jvm_options=(f"-Xms{spec.mock_heap}", f"-Xmx{spec.mock_heap}",
+                         "-XX:+ExitOnOutOfMemoryError",
+                         f"-Xlog:gc*,safepoint:{env.run_dir / 'mock_engine_gc.log'}:time,uptime,level,tags:filecount=3,filesize=20m"),
+            n_prefill=spec.n_prefill, n_decode=spec.n_decode, base_grpc_port=env.base_grpc_port,
+            unique_engine_ips=resolve_address_plan(
+                spec.runtime_mode, unique_loopback_supported=sys.platform != "darwin")["unique_engine_ips"],
+            event_loop_threads=spec.event_loop_threads, completion_threads=spec.completion_threads,
+            rpc_threads=spec.rpc_threads, rpc_max_calls=spec.rpc_max_calls,
+            auto_fetch=spec.mock_auto_fetch, fetch_attach_timeout_ms=spec.mock_fetch_attach_timeout_ms,
+            performance=env.perf_file, master_config=_write_master_config(env, spec),
+            stats_stdout=spec.diagnostic_events,
+            events_file=env.run_dir / "engine_events.jsonl" if spec.diagnostic_events else "",
+            prefill_kv_pool_blocks=spec.prefill_cache_blocks, decode_kv_pool_blocks=spec.decode_cache_blocks,
+            endpoint_file=env.endpoint_file, env_file=env.run_dir / "flexlb_env.txt",
+            extra_args=tuple(spec.mock_extra_args), discovery_file=env.discovery_file,
+        ).argv()
         proc = ProcessOps.start(argv, dict(os.environ), env.run_dir / "mock_engine.log")
         env.mock = proc
         deadline = startup_deadline(deadline, 80)
@@ -431,16 +394,6 @@ class EnvManager:
         env.zk_connect_string = connect
         self._log(f"ZK helper up (pid={proc.pid}, connectString={connect})")
 
-    def _stop_zk_helper(self, env: FlexEnv) -> None:
-        if env.zk_helper is not None:
-            self._log(f"stopping ZK helper (pid={env.zk_helper.pid})")
-            # Contract exit path: SIGTERM (launcher also exits on stdin EOF).
-            env.zk_helper.terminate()
-            if env.zk_helper.proc.stdin is not None:
-                env.zk_helper.proc.stdin.close()
-            env.zk_helper = None
-        env.zk_connect_string = None
-
     # -- victims (engine-kill chaos) --------------------------------------
 
     def start_victim(
@@ -460,30 +413,15 @@ class EnvManager:
                 break
             time.sleep(0.5)
         endpoint_file = env.run_dir / f"victim_endpoints_{role}.json"
-        argv = [
-            resolve_java21(),
-            f"-Xms{heap}",
-            f"-Xmx{heap}",
-            "-XX:+ExitOnOutOfMemoryError",
-            "-jar",
-            str(MOCK_JAR),
-            "--n-prefill",
-            "1" if role == "prefill" else "0",
-            "--n-decode",
-            "1" if role == "decode" else "0",
-            "--base-grpc-port",
-            str(grpc_port),
-            "--performance",
-            str(perf_file or env.perf_file),
-            "--master-config",
-            str(_write_master_config(env)),
-            "--prefill-kv-pool-blocks",
-            str(env.spec.prefill_cache_blocks if role == "prefill" else 0),
-            "--decode-kv-pool-blocks",
-            str(env.spec.decode_cache_blocks if role == "decode" else 0),
-            "--endpoint-file",
-            str(endpoint_file),
-        ]
+        argv = MockLaunchSpec(
+            java=resolve_java21(), jar=MOCK_JAR,
+            jvm_options=(f"-Xms{heap}", f"-Xmx{heap}", "-XX:+ExitOnOutOfMemoryError"),
+            n_prefill=int(role == "prefill"), n_decode=int(role == "decode"), base_grpc_port=grpc_port,
+            performance=perf_file or env.perf_file, master_config=_write_master_config(env),
+            prefill_kv_pool_blocks=env.spec.prefill_cache_blocks if role == "prefill" else 0,
+            decode_kv_pool_blocks=env.spec.decode_cache_blocks if role == "decode" else 0,
+            endpoint_file=endpoint_file,
+        ).argv()
         proc = ProcessOps.start(
             argv, dict(os.environ), env.run_dir / f"victim_{role}.log"
         )

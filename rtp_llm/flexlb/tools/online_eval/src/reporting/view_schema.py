@@ -129,9 +129,3 @@ def validate_section_contract(path, data, expected, fail):
                 fail(str(path) + ".sections." + key, "detail section cannot declare columns")
         elif columns is None or len(columns) != column_count:
             fail(str(path) + ".sections." + key, f"table requires {column_count} columns")
-
-
-def validate_text(path, data, fail):
-    subtitle = data["report"]["subtitle"]
-    if type(subtitle) is not str or not subtitle.strip():
-        fail(path, "subtitle is required")

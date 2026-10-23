@@ -81,7 +81,7 @@ case YAML 通过 `program: default` 调用 Python 构建器，生成 `ProgramPla
 
 运行底座只依赖标准库和包内机制。`runtime.network` 提供通用 HTTP 传输和端口探测，Master 的 info、inflight 控制路由由 `adapters.master_control.master_url` 统一定义。具体客户端等待调用 `runtime.startup.wait_ready`，协议状态与进程退出码由 `adapters.flow_control.wait_flow_started` 解释；`artifacts.startup.startup_phase` 使用同一 deadline 保存启动耗时。`runtime.resource_plan` 检查通用端口区间，`adapters.java_mock_resources` 定义 Java mock 的保留端口、累计扩容容量、子进程环境及租约投影。
 
-集中归属不合并职责。`analysis.py` 根据显式输入计算，不访问网络、进程或报告；`actions.py` 操作现场并取证；`metrics.py` 发布声明的指标；`report.py` 展示既定结论，不能隐式重判。门禁动作先冻结独立 result 和校验 manifest，再返回共用的 `CheckResult`。数值投影在最终遥测导出后执行，报告在统一的 renderer 阶段生成一次，不重新裁决或改写冻结判定。
+集中归属不合并职责。`analysis.py` 根据显式输入计算，不访问网络、进程或报告；`actions.py` 操作现场并取证；`metrics.py` 发布声明的指标；`report.py` 展示既定结论，不能隐式重判。门禁动作先冻结独立 result 和校验 manifest，再返回共用的 `CheckResult`。数值投影在最终遥测导出后执行，报告在统一的 renderer 阶段生成一次，不重新裁决或改写冻结判定。bundle 写入器在写入任何文件前校验图表，内部渲染复用该校验结果；公开离线 renderer 仍独立校验输入，bundle 读取仍校验格式与摘要。附件名称和内容在写入前一次准入，发布时保留与归档证据文件的冲突检查。
 
 ## 执行与资源契约
 
@@ -149,6 +149,8 @@ Java 流量控制使用 `FlowState`、`FlowStatus`、`StopCommand` 和 `DrainRes
 
 case action 保留自身参数和输出的所有权。公共 core action 使用具体参数对象；扩展 action 的冻结传输由 `AdapterParameters` 承载，在进入注册适配器时转换为该适配器的参数格式。报告视图、来源信息和扩展证据作为序列化边界数据保存，不通过公共层识别某个 case 的字段名。
 
+`ClientConfiguration` 是客户端意图的类型化对象，映射输入在准入边界解析，Java flow 内部持有该对象并直接投影环境变量。子进程边界仍校验运行时字段与配置字段的冲突；优先级继续由流量来源提供。
+
 回放配置由 `PlaybackConfiguration` 表达，`PlaybackConfigurationCodec` 校验 uniform/true-ts、圈数和请求身份策略。`normalize()` 生成 Java 环境变量；Java 客户端控制发送与循环，发送端的 `PLAYBACK_V1` 快照用于离线重建和一致性验证。
 
 lineage codec 分别解码 v2 的块对齐格式与 v3 的精确长度格式，返回 `LineageModel`。`LineageEvent` 明确区分 token 长度、共享完整块和额外标签预留；`LineageExpander` 管理父路径及标签预算，`LineageProjector` 校验固定输入并生成请求文件。过滤作用于展开后的事件，保留原始索引和父路径，不改变请求身份或随机采样索引。压缩格式中的版本号描述数据语义，不表示 Python 类的代次。
@@ -156,6 +158,8 @@ lineage codec 分别解码 v2 的块对齐格式与 v3 的精确长度格式，�
 启动等待共用 stage 的 `Deadline`，不会在端口、服务、拓扑和首采样之间重置预算。单/双 Master 共用进程存活、HTTP、同步与连续拓扑稳定检查；客户端创建进程后必须收到同一 run/group/phase 的发送状态确认，才能进入后续观测。`startup.json` 记录环境、流量输入、监控及发送确认的分项成本；各 case 的固定预热、条件预热和故障稳定期仍由其 YAML 与 program 决定。
 
 严格文件读取由 `document_io` 提供，共享异常定义在 `document_io`。该模块不依赖 program 装载或编译总装；`scenario.loader` 只负责读取 case 数据、应用实验参数和调用注册程序。`scenario.references` 统一 `$ref` 语法及先前 stage 的输出类型解析，契约和冻结参数读取直接复用该规则，不回调 stage 编译实现。
+
+`adapters.mock_launch.MockLaunchSpec` 统一生成本地集群、独立 victim、Whale embedded 和独立 Pod 的 Mock JVM 参数。入口负责已有的配置校验、平台默认值、路径物化和进程监管；未声明的可选字段不下发，显式的零、false 和空事件文件名保留。发现文件参数在本地额外参数之后绑定，保持环境对该文件的所有权。Mock 控制客户端共用目标与 HTTP 发送实现，各操作继续保留布尔结果、异常和拓扑操作原始状态码的不同合同。
 
 `scenario.backend_spec` 将冻结环境计划转换为受租约约束的启动规格。`EnvManager` 通过显式的环境创建与进程变化回调交付所有权；外部有界清理负责回收时，必须同时提供两个回调。启动和重启失败也记录已产生的进程，保留部分环境供独立清理预算回收。启动负例使用单独的 mock 规格，避免无效 Master 配置阻止 mock 启动或临时修改 live environment 的规格。Master 拓扑和 owner ledger 的证据解码由 `adapters.master_evidence` 提供，readiness、残留上界及收敛判定仍由 action 决定。
 

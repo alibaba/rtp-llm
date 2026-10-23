@@ -42,7 +42,7 @@ def build(case, intervention):
         raise ValueError("mutation envelope excludes the configured input")
     flow = JavaFlowSpec.read(data.traffic)
     seconds = p["traffic_warmup_s"] + p["measurement_s"] + (p["withdraw_s"] if intervention else 0) + p["post_s"]
-    if flow.configuration.playback.duration_s < seconds:
+    if flow.client.playback.duration_s < seconds:
         raise ValueError("traffic must cover intervention and the full post window")
     case.step("setup", "setup", timeout_s=p["setup_timeout_s"])
     budget = p["warmup_timeout_s"] + p["cache_only_s"] + seconds + 360

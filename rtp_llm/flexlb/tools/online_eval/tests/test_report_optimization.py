@@ -60,3 +60,13 @@ def test_projection_accepts_absent_series_and_optional_statistics():
     result = canonical_spec(source,analysis)
     assert result["panels"][0]["series"] == []
     assert result["panels"][1]["series"][0]["statistics_points"] is None
+
+
+def test_bundle_html_matches_public_offline_rendering_of_frozen_spec(tmp_path):
+    from reporting import render
+    spec = dict(run_id="same", title="Frozen presentation", panels=[], sections=[])
+    directory = write_bundle(tmp_path, "run", "same", {"verdict": "FAIL"}, spec)
+    frozen = json.loads((directory / "report-spec.json").read_text())
+    assert (directory / "report.html").read_text() == render(frozen)
+    assert read_bundle(directory) == directory
+    assert json.loads((directory / "analysis.json").read_text())["result"]["verdict"] == "FAIL"

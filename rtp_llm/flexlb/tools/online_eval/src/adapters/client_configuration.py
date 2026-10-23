@@ -49,13 +49,17 @@ class ClientConfiguration:
 
     @classmethod
     def read(cls, value):
-        if not isinstance(value, dict) or set(value) - {'playback', 'limits', 'transport'}:
-            raise ValueError('unknown client fields; use playback, limits and transport')
-        playback = PlaybackConfigurationCodec.decode(value.get('playback', {}))
-        if playback.duration_s <= 0:
+        if isinstance(value, cls):
+            configuration = value
+        else:
+            if not isinstance(value, dict) or set(value) - {'playback', 'limits', 'transport'}:
+                raise ValueError('unknown client fields; use playback, limits and transport')
+            configuration = cls(PlaybackConfigurationCodec.decode(value.get('playback', {})),
+                                section(value.get('limits', {}), ClientLimits, 'limits'),
+                                section(value.get('transport', {}), ClientTransport, 'transport'))
+        if configuration.playback.duration_s <= 0:
             raise ValueError('scenario playback.duration_s must be positive')
-        return cls(playback, section(value.get('limits', {}), ClientLimits, 'limits'),
-                   section(value.get('transport', {}), ClientTransport, 'transport'))
+        return configuration
 
     def environment(self):
         return dict(self.playback.environment(),

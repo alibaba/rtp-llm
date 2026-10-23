@@ -32,7 +32,7 @@ def default(case):
     )
     if gate["removal_mode"] != "graceful":
         raise ValueError("step requires one graceful scale-in; different fault sequences require a separate case")
-    uniform_gate_flow(flow, duration_s=budget, trace_duration_s=budget)
+    uniform_gate_flow(flow, client, duration_s=budget, trace_duration_s=budget)
     case.step("setup", "setup", timeout_s=180)
     case.step("traffic", "java_flow_start", params=flow, timeout_s=data.procedure["startup_timeout_s"])
     case.step(

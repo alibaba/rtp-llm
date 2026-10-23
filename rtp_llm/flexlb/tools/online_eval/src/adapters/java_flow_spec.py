@@ -19,7 +19,7 @@ class JavaFlowSpec:
     phase_id: str
     poll_s: float = field(metadata={'number': NumberRule(False, 0)})
     source: dict
-    client: dict
+    client: ClientConfiguration
     jvm_xms: str
     jvm_xmx: str
     max_requests: int | None = field(default=None, metadata={'number': NumberRule(True, 1, 1000000)})
@@ -36,7 +36,9 @@ class JavaFlowSpec:
                     if item.default is MISSING and item.default_factory is MISSING}
         mapping_fields(value, definitions, 'java_flow', required=required)
         supplied = set(value)
-        spec = cls(**deepcopy(value))
+        data = deepcopy(value)
+        data['client'] = ClientConfiguration.read(data['client'])
+        spec = cls(**data)
         for item in fields(spec):
             rule = item.metadata.get('number')
             value = getattr(spec, item.name)
@@ -52,7 +54,3 @@ class JavaFlowSpec:
         SourceSpecification.read(spec.source)
         client_environment(spec.client, priority=source_priority(spec.source))
         return spec
-
-    @property
-    def configuration(self):
-        return ClientConfiguration.read(self.client)

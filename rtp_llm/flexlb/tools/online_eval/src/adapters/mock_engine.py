@@ -14,65 +14,39 @@ class MockEngineControl:
         return data
 
 
-    def inject(self, engine_name: str, config: dict) -> dict:
-        status, body = http_post_json(
-            f"http://127.0.0.1:{self.mock_http_port}/inject",
-            {"engine": engine_name, "config": config},
-        )
+    def _post(self, action, body, **options):
+        return http_post_json(f"http://127.0.0.1:{self.mock_http_port}/{action}", body, **options)
+
+    def _engine_command(self, action, engine_name, fields=None):
+        return self._post(action, {"engine": engine_name, **(fields or {})})
+
+    def _require_engine_command(self, action, engine_name, **fields):
+        status, body = self._engine_command(action, engine_name, fields)
         if status != 200:
-            raise RuntimeError(f"inject({engine_name}) failed: {status} {body}")
+            raise RuntimeError(f"{action}({engine_name}) failed: {status} {body}")
         return body or {}
+
+    def inject(self, engine_name: str, config: dict) -> dict:
+        return self._require_engine_command("inject", engine_name, config=config)
 
     def clear_inject(self, engine_name: str) -> dict:
-        status, body = http_post_json(
-            f"http://127.0.0.1:{self.mock_http_port}/clear_inject",
-            {"engine": engine_name},
-        )
-        if status != 200:
-            raise RuntimeError(f"clear_inject({engine_name}) failed: {status} {body}")
-        return body or {}
+        return self._require_engine_command("clear_inject", engine_name)
 
     def set_perf(self, engine_name: str, **kwargs) -> bool:
-        status, _ = http_post_json(
-            f"http://127.0.0.1:{self.mock_http_port}/set_perf",
-            {"engine": engine_name, **kwargs},
-        )
-        return status == 200
+        return self._engine_command("set_perf", engine_name, kwargs)[0] == 200
 
     def set_kv_pressure(self, engine_name: str, active_kv_tokens: int) -> bool:
-        status, _ = http_post_json(
-            f"http://127.0.0.1:{self.mock_http_port}/set_kv_pressure",
-            {"engine": engine_name, "active_kv_tokens": active_kv_tokens},
-        )
-        return status == 200
+        return self._engine_command("set_kv_pressure", engine_name, {"active_kv_tokens": active_kv_tokens})[0] == 200
 
     def set_queue_depth(self, engine_name: str, queue_depth: int) -> bool:
-        """Java mock: sets FaultInjectionConfig.queueDepthLimit — a *real*
-        enqueue rejection gate (``pendingRequests >= limit``), not the legacy
-        Python fake display value."""
-        status, _ = http_post_json(
-            f"http://127.0.0.1:{self.mock_http_port}/set_queue_depth",
-            {"engine": engine_name, "queue_depth": queue_depth},
-        )
-        return status == 200
+        """Set the real enqueue-rejection limit, not a diagnostic display value."""
+        return self._engine_command("set_queue_depth", engine_name, {"queue_depth": queue_depth})[0] == 200
 
     def stop_engine(self, engine_name: str) -> dict:
-        status, body = http_post_json(
-            f"http://127.0.0.1:{self.mock_http_port}/stop_engine",
-            {"engine": engine_name},
-        )
-        if status != 200:
-            raise RuntimeError(f"stop_engine({engine_name}) failed: {status} {body}")
-        return body or {}
+        return self._require_engine_command("stop_engine", engine_name)
 
     def start_engine(self, engine_name: str) -> dict:
-        status, body = http_post_json(
-            f"http://127.0.0.1:{self.mock_http_port}/start_engine",
-            {"engine": engine_name},
-        )
-        if status != 200:
-            raise RuntimeError(f"start_engine({engine_name}) failed: {status} {body}")
-        return body or {}
+        return self._require_engine_command("start_engine", engine_name)
 
     def add_engine(
         self, role: str, port: Optional[int] = None
@@ -89,9 +63,7 @@ class MockEngineControl:
         body: dict = {"role": role}
         if port is not None:
             body["port"] = port
-        return http_post_json(
-            f"http://127.0.0.1:{self.mock_http_port}/add_engine", body
-        )
+        return self._post("add_engine", body)
 
     def remove_engine(
         self,
@@ -130,8 +102,4 @@ class MockEngineControl:
         # Graceful cap is 60s + teardown margin on the Java side; keep the
         # client out of the way of a legitimately slow drain.
         timeout = 5.0 if mode == "abrupt" else 95.0
-        return http_post_json(
-            f"http://127.0.0.1:{self.mock_http_port}/remove_engine",
-            body,
-            timeout=timeout,
-        )
+        return self._post("remove_engine", body, timeout=timeout)

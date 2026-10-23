@@ -6,11 +6,14 @@ import os
 from pathlib import Path
 import shlex
 import socket
+import sys
 
 from deployment import resolve
 
 
 ROOT = Path(__file__).resolve().parent
+sys.path.insert(0, str(ROOT.parent / "online_eval" / "src"))
+from adapters.mock_launch import MockLaunchSpec
 
 
 def integer(env, key, default, minimum=1, maximum=None):
@@ -65,16 +68,11 @@ def command(env):
     if address.is_loopback or address.is_unspecified or address.version != 4:
         raise ValueError("POD_IP must be a routable IPv4 pod address")
     block_size = integer(env, "MOCK_BLOCK_SIZE", 1024)
-    numeric = {
-        "--n-prefill": prefill,
-        "--n-decode": decode,
-        "--base-grpc-port": port,
-        "--block-size": block_size,
-    }
+    numeric = dict(n_prefill=prefill, n_decode=decode, base_grpc_port=port, block_size=block_size)
     for role in ("PREFILL", "DECODE"):
         key = f"MOCK_{role}_BLOCK_SIZE"
         if key in env:
-            numeric[f"--{role.lower()}-block-size"] = integer(env, key, block_size)
+            numeric[f"{role.lower()}_block_size"] = integer(env, key, block_size)
     for flag, key, default in (
         ("--prefill-kv-pool-blocks", "MOCK_PREFILL_KV_POOL_BLOCKS", 1024),
         ("--decode-kv-pool-blocks", "MOCK_DECODE_KV_POOL_BLOCKS", 1024),
@@ -82,7 +80,7 @@ def command(env):
         ("--event-loop-threads", "MOCK_EVENT_LOOP_THREADS", 4),
         ("--completion-threads", "MOCK_COMPLETION_THREADS", 4),
     ):
-        numeric[flag] = integer(env, key, default)
+        numeric[flag.removeprefix("--").replace("-", "_")] = integer(env, key, default)
     performance = json_object(
         env.get("MOCK_PERFORMANCE_CONFIG_JSON", (ROOT / "performance.json").read_text()),
         "MOCK_PERFORMANCE_CONFIG_JSON",
@@ -97,20 +95,15 @@ def command(env):
     runtime = Path(env.get("MOCK_BUNDLE_RUN_DIR", "/home/admin/ai-whale/mock"))
     java = str(Path(env.get("JAVA_HOME", "/opt/taobao/java")) / "bin/java")
     jar = Path(env.get("MOCK_BUNDLE_JAR_DIR", str(ROOT / "jars"))) / "mock.jar"
-    args = [java, *shlex.split(env.get("MOCK_JAVA_OPTS", "-Xms512m -Xmx2g")),
-            "-jar", str(jar), "--whale", "true", "--whale-bundle", str(not remote_decode).lower(),
-            "--kmonitor", str(kmonitor).lower(), "--host", host,
-            "--unique-engine-ips", "false", "--auto-fetch", str(not fetch).lower(),
-            "--cache-status-compact-encoding", str(compact).lower()]
-    for flag, value in numeric.items():
-        args.extend([flag, str(value)])
-    for flag, name in (("--endpoint-file", "endpoints.json"),
-                       ("--discovery-file", "discovery.json"),
-                       ("--performance", "performance.json"),
-                       ("--master-config", "master-config.json")):
-        if remote_decode and flag == "--discovery-file":
-            continue
-        args.extend([flag, str(runtime / name)])
+    args = MockLaunchSpec(
+        java=java, jar=jar, jvm_options=tuple(shlex.split(env.get("MOCK_JAVA_OPTS", "-Xms512m -Xmx2g"))),
+        whale=True, whale_bundle=not remote_decode, kmonitor=kmonitor, host=host,
+        unique_engine_ips=False, auto_fetch=not fetch, cache_status_compact_encoding=compact,
+        endpoint_file=runtime / "endpoints.json",
+        discovery_file=None if remote_decode else runtime / "discovery.json",
+        performance=runtime / "performance.json", master_config=runtime / "master-config.json",
+        **numeric,
+    ).argv()
     runtime.mkdir(parents=True, exist_ok=True)
     (runtime / "performance.json").write_text(json.dumps(performance))
     (runtime / "master-config.json").write_text(json.dumps(master))

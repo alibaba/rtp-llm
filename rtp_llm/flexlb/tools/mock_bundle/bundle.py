@@ -23,6 +23,7 @@ sys.path.insert(0, str(ROOT.parent / "online_eval" / "src"))
 from flexlb_cfg import render_env, render_process_config
 from mode_profiles import load_mode_tables, resolve_address_plan, resolve_mode
 from adapters.perf_presets import resolve_performance_calibration
+from adapters.mock_launch import MockLaunchSpec
 
 
 def normalize_heap(value, name):
@@ -217,65 +218,20 @@ def run():
         # With output fetching enabled the frontend owns continuation and completion.
         mock = start(
             "mock",
-            [
-                java,
-                "-Xmx" + cfg["mock_heap"],
-                "-jar",
-                str(jars / "mock.jar"),
-                "--whale",
-                "true",
-                "--whale-bundle",
-                "true",
-                "--kmonitor",
-                str(cfg["kmonitor"]).lower(),
-                "--event-loop-threads",
-                str(cfg["event_loop_threads"]),
-                "--completion-threads",
-                str(cfg["completion_threads"]),
-                "--n-prefill",
-                str(cfg["prefill"]),
-                "--n-decode",
-                str(cfg["decode"]),
-                *(
-                    ["--decode-max-concurrency", str(cfg["decode_max_concurrency"])]
-                    if "decode_max_concurrency" in cfg
-                    else []
-                ),
-                "--base-grpc-port",
-                str(mock_port),
-                "--host",
-                pod_ip,
-                "--unique-engine-ips",
-                str(address_plan["unique_engine_ips"]).lower(),
-                "--auto-fetch",
-                str(fetch_output_stream == "0").lower(),
-                "--endpoint-file",
-                str(runtime / "endpoints.json"),
-                "--discovery-file",
-                str(runtime / "discovery.json"),
-                "--performance",
-                str(performance_path),
-                "--master-config",
-                str(runtime / "master-config.json"),
-                "--block-size",
-                str(cfg["block_size"]),
-                *(
-                    ["--prefill-block-size", str(cfg["prefill_block_size"])]
-                    if "prefill_block_size" in cfg
-                    else []
-                ),
-                *(
-                    ["--decode-block-size", str(cfg["decode_block_size"])]
-                    if "decode_block_size" in cfg
-                    else []
-                ),
-                "--prefill-kv-pool-blocks",
-                str(cfg["prefill_kv_pool_blocks"]),
-                "--decode-kv-pool-blocks",
-                str(cfg["decode_kv_pool_blocks"]),
-                *(["--events-file", str(runtime / "engine-events.jsonl")]
-                  if event_log_enabled == "1" else []),
-            ],
+            MockLaunchSpec(
+                java=java, jar=jars / "mock.jar", jvm_options=("-Xmx" + cfg["mock_heap"],),
+                whale=True, whale_bundle=True, kmonitor=cfg["kmonitor"],
+                n_prefill=cfg["prefill"], n_decode=cfg["decode"], base_grpc_port=mock_port,
+                event_loop_threads=cfg["event_loop_threads"], completion_threads=cfg["completion_threads"],
+                decode_max_concurrency=cfg.get("decode_max_concurrency"), host=pod_ip,
+                unique_engine_ips=address_plan["unique_engine_ips"], auto_fetch=fetch_output_stream == "0",
+                endpoint_file=runtime / "endpoints.json", discovery_file=runtime / "discovery.json",
+                performance=performance_path, master_config=runtime / "master-config.json",
+                block_size=cfg["block_size"], prefill_block_size=cfg.get("prefill_block_size"),
+                decode_block_size=cfg.get("decode_block_size"),
+                prefill_kv_pool_blocks=cfg["prefill_kv_pool_blocks"], decode_kv_pool_blocks=cfg["decode_kv_pool_blocks"],
+                events_file=runtime / "engine-events.jsonl" if event_log_enabled == "1" else None,
+            ).argv(),
             env,
         )
         ready(mock_port - 1, mock, pod_ip)

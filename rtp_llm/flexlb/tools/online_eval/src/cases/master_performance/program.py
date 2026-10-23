@@ -36,7 +36,7 @@ def default(case):
     bind_mock_engine_metrics(case, inputs["engine_tps"],
         {field: "tokens/s" for field in inputs["engine_tps"]["fields"]})
     budget = c["warmup_s"] + c["measure_s"]
-    uniform_gate_flow(flow, duration_s=budget + 10, trace_duration_s=client.playback.duration_s)
+    uniform_gate_flow(flow, client, duration_s=budget + 10, trace_duration_s=client.playback.duration_s)
     case.step("setup", "setup", timeout_s=180)
     case.step("traffic", "java_flow_start", params=flow, timeout_s=120)
     case.step(

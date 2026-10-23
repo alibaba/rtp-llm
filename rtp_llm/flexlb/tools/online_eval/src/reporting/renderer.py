@@ -132,6 +132,11 @@ def render(spec):
     """Return complete HTML for a validated spec."""
 
     validate(spec)
+    return _render_validated(spec)
+
+
+def _render_validated(spec):
+    """Bundle writer uses this after validating before any output is published."""
     run_id = spec.get("run_id", "")
     title = spec.get("title") or ("FlexLB 压测报告 · run " + run_id)
     subtitle = spec.get("subtitle") or ""
