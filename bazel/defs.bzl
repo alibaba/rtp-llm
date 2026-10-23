@@ -149,7 +149,10 @@ def rename_wheel(name, package_name, src):
     native.genrule(
         name = name,
         srcs = [src],
-        outs = [package_name + "-cp310-cp310-manylinux1_x86_64.whl"],
+        outs = select({
+            "@rtp_llm//:using_ppu": [package_name + "-cp312-cp312-manylinux1_x86_64.whl"],
+            "//conditions:default": [package_name + "-cp310-cp310-manylinux1_x86_64.whl"],
+        }),
         cmd = "bash -c 'set -xe;" +
             "cp $(locations %s) $(OUTS);" % (src) +
             "chmod a+w $(OUTS);" +
