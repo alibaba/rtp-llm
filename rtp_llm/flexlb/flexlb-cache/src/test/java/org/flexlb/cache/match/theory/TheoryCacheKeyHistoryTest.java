@@ -6,16 +6,19 @@ import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.master.WorkerStatusProvider;
 import org.flexlb.dao.route.RoleType;
 import org.junit.jupiter.api.Test;
+import org.mockito.ArgumentCaptor;
 
 import java.lang.reflect.Field;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.function.Consumer;
 import java.util.function.LongSupplier;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
@@ -84,6 +87,11 @@ class TheoryCacheKeyHistoryTest {
         Field window = TheoryCacheKeyHistory.class.getDeclaredField("historyWindow");
         window.setAccessible(true);
         window.set(history, new RecentCacheKeyWindow(durationMs, maxKeys, clock));
+        Field active = TheoryCacheKeyHistory.class.getDeclaredField("activeSettings");
+        active.setAccessible(true);
+        Field desired = TheoryCacheKeyHistory.class.getDeclaredField("configuredSettings");
+        desired.setAccessible(true);
+        active.set(history, desired.get(history));
         return history;
     }
 
@@ -171,4 +179,44 @@ class TheoryCacheKeyHistoryTest {
                 .getRequestHitOccurrences());
     }
 
+    @Test
+    void should_rebuild_history_only_when_window_settings_change() {
+        FlexlbConfig config = new FlexlbConfig();
+        ConfigService configService = mock(ConfigService.class);
+        when(configService.loadBalanceConfig()).thenReturn(config);
+        ArgumentCaptor<Consumer<FlexlbConfig>> listener = ArgumentCaptor.forClass(Consumer.class);
+        TheoryCacheKeyHistory history = new TheoryCacheKeyHistory(configService, prefillCapacity(100L, 100L));
+        verify(configService).addUpdateListener(listener.capture());
+
+        history.record(List.of(1L, 2L));
+        listener.getValue().accept(config);
+        assertEquals(2L, history.record(List.of(1L, 2L)).getRequestHitOccurrences());
+        assertEquals(10L, history.record(List.of(1L)).getPoolCapacityKeys());
+
+        FlexlbConfig updated = new FlexlbConfig();
+        updated.getObservability().getCacheHit().getRecentKeyWindow().setCapacityMultiplier(3L);
+        listener.getValue().accept(updated);
+        RecentCacheKeyWindow.Snapshot rebuilt = history.record(List.of(1L, 2L));
+        assertEquals(0L, rebuilt.getRequestHitOccurrences());
+        assertEquals(3L, rebuilt.getPoolCapacityKeys());
+    }
+
+    @Test
+    void should_keep_current_history_when_rebuild_capacity_is_unavailable() {
+        FlexlbConfig config = new FlexlbConfig();
+        ConfigService configService = mock(ConfigService.class);
+        when(configService.loadBalanceConfig()).thenReturn(config);
+        ArgumentCaptor<Consumer<FlexlbConfig>> listener = ArgumentCaptor.forClass(Consumer.class);
+        WorkerStatusProvider provider = prefillCapacity(100L, 100L);
+        var workers = provider.getWorkerStatuses(RoleType.PREFILL, null);
+        TheoryCacheKeyHistory history = new TheoryCacheKeyHistory(configService, provider);
+        verify(configService).addUpdateListener(listener.capture());
+        history.record(List.of(1L));
+
+        when(provider.getWorkerStatuses(RoleType.PREFILL, null)).thenReturn(List.of());
+        FlexlbConfig updated = new FlexlbConfig();
+        updated.getObservability().getCacheHit().getRecentKeyWindow().setCapacityMultiplier(3L);
+        listener.getValue().accept(updated);
+        assertEquals(1L, history.record(List.of(1L)).getRequestHitOccurrences());
+    }
 }

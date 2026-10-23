@@ -33,6 +33,7 @@ public final class ObservabilityConfig {
         private boolean writeEnabled = true;
         private long durationMs = 30L * 60L * 1000L;
         private long maxKeyOccurrences = 1_000_000L;
+        private long capacityMultiplier = 10L;
     }
 
     @Getter

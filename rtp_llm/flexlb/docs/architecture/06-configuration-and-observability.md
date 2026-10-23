@@ -214,12 +214,14 @@ UniConfig / Nacos 的 v3 部分更新示例：
   后台任务直接读取路由完成后保持不变的请求字段；日志与指标开关在执行时从配置服务读取。
   等待队列最多容纳 100,000 个任务，满时丢弃统计样本并汇总告警，不阻塞请求线程。
   `recentKeyWindow.maxKeyOccurrences` 默认 `1000000`，限制保留的唯一 key 数量；
-  `durationMs` 默认 `1800000`。实际容量取配置上限与 `10 × Prefill 数量 × (单台总 KV Token / blockSize)`
-  的较小值。Prefill 的最大 KV Cache 和 blockSize 相同，只读取第一台的容量；该台上报容量后，
-  后台线程才分配历史池；容量尚未产生时不记录样本。历史池使用固定数组，不存储 KV 内容；
+  `durationMs` 默认 `1800000`。实际容量取配置上限与 `capacityMultiplier × Prefill 数量 × (单台总 KV Token / blockSize)`
+  的较小值，`capacityMultiplier` 默认 `10`。Prefill 的最大 KV Cache 和 blockSize 相同，只读取第一台的容量；
+  该台上报容量后，后台线程才分配历史池；容量尚未产生时不记录样本。历史池使用固定数组，不存储 KV 内容；
   默认上限对应约 49 MiB JVM 堆，容量估算较小时实际占用更低。
-  配置上限和窗口时长在 Master 初始化时读取，池容量在首次分配时确定；修改 Nacos 配置或
-  Prefill 规模后重启 Master 重新计算容量。
+  `durationMs`、`maxKeyOccurrences` 与 `capacityMultiplier` 通过配置更新热生效：任一值变化后，
+  后台线程在下一次统计时按新值创建新历史池并释放旧池，累计历史清空，理论命中率随后逐步恢复；
+  三个值都不变时保持原池。重建时 Prefill 容量尚未可得则继续使用旧池。
+  池容量按创建时的 Prefill 数量确定，Prefill 扩缩容不会触发重建。
   理论命中监控使用 `app.cache.theory.hit.count`、`app.cache.theory.total.count` 与
   `app.cache.theory.hit.ratio`。前两个指标是 Counter，每个请求分别上报理论命中 Tokens 和
   输入 Tokens；命中率是该请求的理论命中 Tokens 与输入 Tokens 的比值。历史记录有效期只影响

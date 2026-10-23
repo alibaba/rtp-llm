@@ -345,6 +345,8 @@ public final class FlexlbConfigValidator {
                 "observability.cacheHit.recentKeyWindow.durationMs");
         positive(cacheHit.getRecentKeyWindow().getMaxKeyOccurrences(),
                 "observability.cacheHit.recentKeyWindow.maxKeyOccurrences");
+        positive(cacheHit.getRecentKeyWindow().getCapacityMultiplier(),
+                "observability.cacheHit.recentKeyWindow.capacityMultiplier");
         if (cacheHit.getTheoryLog() != null) {
             require(cacheHit.getTheoryLog().getPath() != null
                             && !cacheHit.getTheoryLog().getPath().isBlank(),
