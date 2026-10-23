@@ -472,6 +472,12 @@ TEST(BlockTreeLoaderTest, DiskTransferFailureInstallsNoLoadTargets) {
     load_context.reset();
     environment->reclaimAll();
     environment->expectFullyReclaimed();
+    for (const auto& group : environment->groups) {
+        EXPECT_EQ(group->diskPool()->referencedBlocksNum(BlockTreeRefType::FROZEN), 0u);
+        for (const auto& pool : group->devicePools()) {
+            EXPECT_EQ(pool->referencedBlocksNum(BlockTreeRefType::FROZEN), 0u);
+        }
+    }
 }
 
 TEST(BlockTreeLoaderTest, LoadStateMachineRejectsDuplicateTransitionAndRestoresSource) {

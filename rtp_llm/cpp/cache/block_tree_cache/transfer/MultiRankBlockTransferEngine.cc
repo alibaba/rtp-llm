@@ -36,9 +36,9 @@ public:
         try {
             broadcast_result_->waitDone();
         } catch (const std::exception& error) {
-            evaluate(ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, error.what()));
+            evaluate(ErrorInfo(ErrorCode::TRANSFER_COMPLETION_UNKNOWN, error.what()));
         } catch (...) {
-            evaluate(ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "unknown multi-rank transfer failure"));
+            evaluate(ErrorInfo(ErrorCode::TRANSFER_COMPLETION_UNKNOWN, "unknown multi-rank transfer failure"));
         }
         evaluate();
         std::unique_lock<std::mutex> lock(mutex_);
@@ -102,15 +102,16 @@ private:
                 if (StaticConfig::user_ft_core_dump_on_exception) {
                     RTP_LLM_FAIL("multi-rank transfer aborted, at least one worker RPC status is not OK");
                 }
-                result = {ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "multi-rank transfer RPC failed"),
+                result = {ErrorInfo(ErrorCode::TRANSFER_COMPLETION_UNKNOWN, "multi-rank transfer RPC failed"),
                           CacheCopyError::RPC_FAILED};
             }
         }
 
         const auto responses = broadcast_result_->responses();
         if (responses.size() != worker_count_) {
-            result.merge({ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "multi-rank transfer response count mismatch"),
-                          CacheCopyError::RPC_FAILED});
+            result.merge(
+                {ErrorInfo(ErrorCode::TRANSFER_COMPLETION_UNKNOWN, "multi-rank transfer response count mismatch"),
+                 CacheCopyError::RPC_FAILED});
         }
         result.expandBlockErrors(block_count_);
         for (size_t rank = 0; rank < responses.size(); ++rank) {
@@ -121,7 +122,8 @@ private:
             auto        rank_result =
                 response.has_mem_response() ?
                            BlockTransferRequestConverter::decodeTransferResult(response.mem_response(), block_count_) :
-                           TransferResult(ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "missing transfer response"));
+                           TransferResult(ErrorInfo(ErrorCode::TRANSFER_COMPLETION_UNKNOWN, "missing transfer response"),
+                                   CacheCopyError::RPC_FAILED);
             for (size_t index = 0; index < block_count_; ++index) {
                 result.block_errors[index] = std::max(result.block_errors[index], rank_result.blockError(index));
             }

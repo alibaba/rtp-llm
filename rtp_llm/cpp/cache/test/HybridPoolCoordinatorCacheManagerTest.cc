@@ -595,6 +595,45 @@ TEST_F(HybridPoolCoordinatorCacheManagerTest, RecomputeDetachesPerPoolAndRollsBa
     }
 }
 
+TEST_F(HybridPoolCoordinatorCacheManagerTest, RecomputeReplacesFrozenLoadTargetsAfterOrdinaryRelease) {
+    const auto config    = makeTinyMultiPoolHybridConfig();
+    auto       allocator = makeAllocator(config);
+    ASSERT_TRUE(allocator->init());
+    auto             resource = makeBatchResource(1, config);
+    const auto&      pools    = allocator->groupBlockPools();
+    BlockIndicesType old_blocks;
+    for (size_t group = 0; group < pools.size(); ++group) {
+        auto block = pools[group]->malloc();
+        ASSERT_TRUE(block.has_value());
+        old_blocks.push_back(*block);
+        pools[group]->incRef(*block);
+        resource->mutableBlockIds(0, config.groupTags()[group]).assign({*block});
+        pools[group]->incTreeRef(*block, BlockTreeRefType::LOAD);
+        pools[group]->freezeBlock(*block);
+        pools[group]->decTreeRef(*block, BlockTreeRefType::LOAD);
+    }
+    ASSERT_TRUE(allocator->detachSharedBlocksForRecompute(resource, 0));
+    for (size_t group = 0; group < pools.size(); ++group) {
+        EXPECT_NE(resource->blocks(0, config.groupTags()[group])[0], old_blocks[group]);
+        EXPECT_EQ(pools[group]->refCount(old_blocks[group]), 1u);
+        EXPECT_EQ(pools[group]->referencedBlocksNum(BlockTreeRefType::LOAD), 0u);
+        EXPECT_EQ(pools[group]->referencedBlocksNum(BlockTreeRefType::FROZEN), 1u);
+    }
+    allocator->free({resource, makeCompleteTokenIds(1, 4, 4)});
+    for (const auto& pool : pools) {
+        EXPECT_EQ(pool->freeBlocksNum(), pool->totalBlocksNum() - 1);
+        EXPECT_EQ(pool->availableBlocksNum(), pool->totalBlocksNum() - 1);
+    }
+    const auto snapshots = allocator->poolMetricsSnapshots();
+    ASSERT_EQ(snapshots.size(), pools.size());
+    for (const auto& snapshot : snapshots) {
+        SCOPED_TRACE(snapshot.pool_name);
+        EXPECT_EQ(snapshot.frozen_ref_blocks, 1u);
+        EXPECT_EQ(snapshot.load_ref_blocks, 0u);
+        EXPECT_EQ(snapshot.request_ref_blocks, 0u);
+    }
+}
+
 TEST_F(HybridPoolCoordinatorCacheManagerTest, RecomputePreservesCompactCpReadyPrefix) {
     ParallelismConfig parallelism;
     parallelism.role_type                          = RoleType::PREFILL;
@@ -1226,6 +1265,7 @@ static void expectSameFinalPoolMetrics(const CachePoolMetricsSnapshot& expected,
     EXPECT_EQ(actual.load_ref_blocks, expected.load_ref_blocks) << context;
     EXPECT_EQ(actual.eviction_target_ref_blocks, expected.eviction_target_ref_blocks) << context;
     EXPECT_EQ(actual.store_ref_blocks, expected.store_ref_blocks) << context;
+    EXPECT_EQ(actual.frozen_ref_blocks, expected.frozen_ref_blocks) << context;
     EXPECT_FLOAT_EQ(actual.used_ratio, expected.used_ratio) << context;
 }
 
@@ -1285,6 +1325,7 @@ TEST_F(HybridPoolCoordinatorCacheManagerTest, AllPrefixReuseDisabledPoolMetricsF
         EXPECT_EQ(snapshot->block_cache_ref_blocks, 0u) << source.pool_name;
         EXPECT_EQ(snapshot->eviction_target_ref_blocks, 0u) << source.pool_name;
         EXPECT_EQ(snapshot->store_ref_blocks, 0u) << source.pool_name;
+        EXPECT_EQ(snapshot->frozen_ref_blocks, 0u) << source.pool_name;
         EXPECT_FLOAT_EQ(snapshot->used_ratio, 0.0f) << source.pool_name;
         init_reserve_blocks += snapshot->reserve_blocks;
     }
@@ -1327,6 +1368,7 @@ TEST_F(HybridPoolCoordinatorCacheManagerTest, AllPrefixReuseDisabledPoolMetricsF
         EXPECT_EQ(snapshot->block_cache_ref_blocks, 0u) << source.pool_name;
         EXPECT_EQ(snapshot->eviction_target_ref_blocks, 0u) << source.pool_name;
         EXPECT_EQ(snapshot->store_ref_blocks, 0u) << source.pool_name;
+        EXPECT_EQ(snapshot->frozen_ref_blocks, 0u) << source.pool_name;
         EXPECT_FLOAT_EQ(
             snapshot->used_ratio,
             static_cast<float>(100.0 * expected_request_blocks / static_cast<double>(snapshot->total_blocks)))
@@ -1367,6 +1409,7 @@ static KVCachePoolMetricsSnapshot makeMergeAllocatorInput(
     snapshot.load_ref_blocks            = 14 + seed;
     snapshot.eviction_target_ref_blocks = 15 + seed;
     snapshot.store_ref_blocks           = 16 + seed;
+    snapshot.frozen_ref_blocks          = 17 + seed;
     snapshot.used_ratio                 = static_cast<float>(100.0 * (snapshot.total_blocks - snapshot.available_blocks)
                                              / static_cast<double>(snapshot.total_blocks));
     return snapshot;
@@ -1392,6 +1435,7 @@ static BlockTreePoolMetricsSnapshot makeMergeTreeInput(Tier               tier,
     snapshot.load_ref_blocks            = 34 + seed;
     snapshot.eviction_target_ref_blocks = 35 + seed;
     snapshot.store_ref_blocks           = 36 + seed;
+    snapshot.frozen_ref_blocks          = 37 + seed;
     if (tier == Tier::DISK) {
         snapshot.read_bytes                    = (int64_t{1} << 40) + seed;
         snapshot.write_bytes                   = (int64_t{1} << 41) + seed;
@@ -1418,6 +1462,7 @@ static void expectMergedRowFromAllocator(const KVCachePoolMetricsSnapshot& sourc
     EXPECT_EQ(actual.load_ref_blocks, source.load_ref_blocks) << context;
     EXPECT_EQ(actual.eviction_target_ref_blocks, source.eviction_target_ref_blocks) << context;
     EXPECT_EQ(actual.store_ref_blocks, source.store_ref_blocks) << context;
+    EXPECT_EQ(actual.frozen_ref_blocks, source.frozen_ref_blocks) << context;
     EXPECT_FLOAT_EQ(actual.used_ratio, source.used_ratio) << context;
     EXPECT_EQ(actual.available_blocks, expected_available) << context;
     EXPECT_FALSE(actual.read_bytes.has_value()) << context;
@@ -1444,6 +1489,7 @@ static void expectMergedRowFromTree(const BlockTreePoolMetricsSnapshot& source,
     EXPECT_EQ(actual.load_ref_blocks, source.load_ref_blocks) << context;
     EXPECT_EQ(actual.eviction_target_ref_blocks, source.eviction_target_ref_blocks) << context;
     EXPECT_EQ(actual.store_ref_blocks, source.store_ref_blocks) << context;
+    EXPECT_EQ(actual.frozen_ref_blocks, source.frozen_ref_blocks) << context;
     EXPECT_EQ(actual.available_blocks, expected_available) << context;
     EXPECT_EQ(actual.read_bytes, source.read_bytes) << context;
     EXPECT_EQ(actual.write_bytes, source.write_bytes) << context;

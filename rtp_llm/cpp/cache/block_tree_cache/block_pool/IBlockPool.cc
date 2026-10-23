@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cassert>
+#include <limits>
 #include <sstream>
 
 namespace rtp_llm {
@@ -41,7 +42,8 @@ std::string IBlockPool::debugString() const {
         << ", load_ref_blocks=" << tree_referenced_block_counts_[treeRefTypeIndex(BlockTreeRefType::LOAD)]
         << ", eviction_target_ref_blocks="
         << tree_referenced_block_counts_[treeRefTypeIndex(BlockTreeRefType::EVICTION)]
-        << ", store_ref_blocks=" << tree_referenced_block_counts_[treeRefTypeIndex(BlockTreeRefType::STORE)] << "}";
+        << ", store_ref_blocks=" << tree_referenced_block_counts_[treeRefTypeIndex(BlockTreeRefType::STORE)]
+        << ", frozen_ref_blocks=" << tree_referenced_block_counts_[treeRefTypeIndex(BlockTreeRefType::FROZEN)] << "}";
     return oss.str();
 }
 
@@ -94,26 +96,47 @@ void IBlockPool::incTreeRef(BlockIdxType block, BlockTreeRefType ref_type) {
 }
 
 void IBlockPool::incTreeRef(const BlockIdList& blocks, BlockTreeRefType ref_type) {
+    RTP_LLM_CHECK(ref_type != BlockTreeRefType::FROZEN);
     const size_t ref_type_index = treeRefTypeIndex(ref_type);
     mutateAllocatedBlocks(
         blocks,
         [](BlockIdxType) {},
-        [this, ref_type_index](BlockIdxType block) {
-            const bool was_active    = isActiveNoLock(block);
-            const bool was_available = isAvailableNoLock(block);
-            if (tree_refcounts_[block] == 0) {
-                onFirstTreeRefNoLock(block);
-            }
-            ++tree_refcounts_[block];
+        [this, ref_type_index](BlockIdxType block) { incTreeRefNoLock(block, ref_type_index); });
+}
 
-            uint32_t& typed_refcount = tree_refcounts_by_type_[ref_type_index][block];
-            if (typed_refcount == 0) {
-                ++tree_referenced_block_counts_[ref_type_index];
-            }
-            ++typed_refcount;
-            updateActiveBlocksNumNoLock(block, was_active);
-            updateAvailableBlocksNumNoLock(block, was_available);
-        });
+void IBlockPool::incTreeRefNoLock(BlockIdxType block, size_t ref_type_index) {
+    RTP_LLM_CHECK(tree_refcounts_[block] < std::numeric_limits<uint32_t>::max());
+    const bool was_active    = isActiveNoLock(block);
+    const bool was_available = isAvailableNoLock(block);
+    if (tree_refcounts_[block] == 0) {
+        onFirstTreeRefNoLock(block);
+    }
+    ++tree_refcounts_[block];
+
+    uint32_t& typed_refcount = tree_refcounts_by_type_[ref_type_index][block];
+    if (typed_refcount == 0) {
+        ++tree_referenced_block_counts_[ref_type_index];
+    }
+    ++typed_refcount;
+    updateActiveBlocksNumNoLock(block, was_active);
+    updateAvailableBlocksNumNoLock(block, was_available);
+}
+
+void IBlockPool::freezeBlock(BlockIdxType block) noexcept {
+    std::lock_guard<std::mutex> lock(mutex_);
+    checkInitializedNoLock();
+    checkAllocatedNoLock(block);
+    if (treeRefCountNoLock(block, BlockTreeRefType::FROZEN) != 0) {
+        return;
+    }
+    incTreeRefNoLock(block, treeRefTypeIndex(BlockTreeRefType::FROZEN));
+}
+
+bool IBlockPool::isFrozen(BlockIdxType block) const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    checkInitializedNoLock();
+    RTP_LLM_CHECK(validBlockNoLock(block));
+    return treeRefCountNoLock(block, BlockTreeRefType::FROZEN) != 0;
 }
 
 void IBlockPool::decTreeRef(BlockIdxType block, BlockTreeRefType ref_type) {
@@ -121,6 +144,7 @@ void IBlockPool::decTreeRef(BlockIdxType block, BlockTreeRefType ref_type) {
 }
 
 void IBlockPool::decTreeRef(const BlockIdList& blocks, BlockTreeRefType ref_type) {
+    RTP_LLM_CHECK(ref_type != BlockTreeRefType::FROZEN);
     const size_t ref_type_index = treeRefTypeIndex(ref_type);
     mutateAllocatedBlocks(
         blocks,
