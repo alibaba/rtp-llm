@@ -15,12 +15,13 @@ torch::Tensor getMultimodalFeatureHash(const torch::Tensor& embedding) {
     const int64_t rows      = embedding.size(0);
     const int64_t row_bytes = embedding.numel() / rows * embedding.element_size();
     TORCH_CHECK(row_bytes > 0, "multimodal feature row is empty");
-    auto hashes = torch::empty({rows}, torch::TensorOptions().dtype(torch::kInt32).device(torch::kCPU));
 #if USING_CUDA
     if (embedding.is_cuda()) {
         const c10::cuda::CUDAGuard guard(embedding.device());
         auto                       emb        = embedding.contiguous();
         auto                       gpu_hashes = torch::empty({rows}, emb.options().dtype(torch::kInt32));
+        auto hashes =
+            torch::empty({rows}, torch::TensorOptions().dtype(torch::kInt32).device(torch::kCPU).pinned_memory(true));
         const cudaStream_t         stream     = c10::cuda::getCurrentCUDAStream(emb.get_device());
         auto error = invokeFeatureHash(emb.data_ptr(), rows, row_bytes, gpu_hashes.data_ptr<int32_t>(), stream);
         if (error == cudaSuccess) {
@@ -37,6 +38,7 @@ torch::Tensor getMultimodalFeatureHash(const torch::Tensor& embedding) {
         return hashes;
     }
 #endif
+    auto        hashes = torch::empty({rows}, torch::TensorOptions().dtype(torch::kInt32).device(torch::kCPU));
     auto        emb    = embedding.to(torch::kCPU).contiguous();
     const auto* bytes  = static_cast<const uint8_t*>(emb.data_ptr());
     auto*       output = hashes.data_ptr<int32_t>();
