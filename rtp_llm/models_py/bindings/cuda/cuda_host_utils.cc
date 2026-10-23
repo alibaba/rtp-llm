@@ -129,7 +129,9 @@ at::cuda::CUDAStream getNoBlockCopyStream(int device_id) {
         c10::cuda::CUDAGuard guard(static_cast<c10::DeviceIndex>(device_id));
         cudaStream_t         raw = nullptr;
         check_cuda_value(cudaStreamCreateWithFlags(&raw, cudaStreamNonBlocking));
-        stream = streams.emplace(device_id, at::cuda::getStreamFromExternal(raw, static_cast<c10::DeviceIndex>(device_id))).first;
+        stream =
+            streams.emplace(device_id, at::cuda::getStreamFromExternal(raw, static_cast<c10::DeviceIndex>(device_id)))
+                .first;
     }
     return stream->second;
 }
