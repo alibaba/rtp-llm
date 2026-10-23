@@ -368,19 +368,11 @@ public final class JavaLoadClient implements AutoCloseable {
                     // ramped ideal schedule, so it is not polluted by ramp.
                     dueSeconds = uniformDueSeconds(globalIndex,
                             config.sendModeQps, config.rampUpSeconds);
-                    if (config.durationS > 0 && dueSeconds >= config.durationS) break sending;
-                    long dueNanos = replayStartedNanos + (long) (dueSeconds * 1_000_000_000L);
-                    long sleepNanos = dueNanos - System.nanoTime();
-                    if (sleepNanos > 0) {
-                        if (flowControl != null) {
-                            if (!flowControl.awaitDue(dueNanos)) break sending;
-                        } else {
-                            Thread.sleep(sleepNanos / 1_000_000, (int) (sleepNanos % 1_000_000));
-                        }
-                    }
                 } else if (currentSpeed > 0) {
                     long loopOffsetMs = (long) loopIdx * traceSpanMs;
                     dueSeconds = (record.tsMs - firstTsMs + loopOffsetMs) / 1000.0 / currentSpeed;
+                }
+                if (config.isUniform() || currentSpeed > 0) {
                     if (config.durationS > 0 && dueSeconds >= config.durationS) break sending;
                     long dueNanos = replayStartedNanos + (long) (dueSeconds * 1_000_000_000L);
                     long sleepNanos = dueNanos - System.nanoTime();

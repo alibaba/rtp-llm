@@ -1100,19 +1100,12 @@ public final class JavaMockEngineCluster {
          * like the stdout trace lines they replaced.
          */
         private volatile EngineEventLog engineEventLog;
-        /**
-         * Per-request engine-side arrival stamps (epoch ms) for
-         * engine_events.jsonl: recorded at enqueue/admission, consumed and
-         * removed by the terminal callback that writes the event row. Bounded
-         * indirectly by periodicCleanup (rids no longer tracked anywhere).
-         */
-        private final ConcurrentHashMap<Long, Long> eventArrivalMs = new ConcurrentHashMap<>();
-        /**
-         * Per-request execution-start stamps (epoch ms): prefill batch start /
-         * decode running-slot admission, consumed with {@link #eventArrivalMs}
-         * by the terminal callback.
-         */
-        private final ConcurrentHashMap<Long, Long> eventStartMs = new ConcurrentHashMap<>();
+        /** Live event/metric stamps share one identity and are consumed together.
+         * This table is separate from the bounded diagnostic lifecycle history. */
+        private record EventTiming(long arrivalMs, long startMs) {
+            private static final EventTiming EMPTY = new EventTiming(0L, 0L);
+        }
+        private final ConcurrentHashMap<Long, EventTiming> eventTimings = new ConcurrentHashMap<>();
         private final Map<Integer, FastRpcService> services;
         private final ScheduledExecutorService scheduler;
         private final MockPerformanceModel performance;
@@ -1129,7 +1122,7 @@ public final class JavaMockEngineCluster {
         private final AtomicLong rpcFetchResponse = new AtomicLong();
         private final AtomicLong rpcCancel = new AtomicLong();
         // Bounded request lifecycle map keyed by request id (Python _request_lifecycle).
-        private final LinkedHashMap<Long, Map<String, Object>> requestLifecycles = new LinkedHashMap<>();
+        private final LinkedHashMap<Long, RequestLifecycle> requestLifecycles = new LinkedHashMap<>();
         // Bounded cancelled rid history (Python _cancelled / snapshot "cancelled_rids").
         private final LinkedHashSet<Long> cancelledRidHistory = new LinkedHashSet<>();
         // Priority-Cancel terminal records mirror the C++ Prefill contract: once a
@@ -1394,6 +1387,14 @@ public final class JavaMockEngineCluster {
             return EngineRpcService.ErrorDetailsPB.newBuilder()
                     .setErrorCode(timeout ? 603 : EngineRpcService.ErrorCodePB.CANCELLED.getNumber())
                     .setErrorMessage(timeout ? "request deadline exhausted" : "cancelled by client").build();
+        }
+
+        private EngineRpcService.GenerateOutputsPB cancellationOutput(long id) {
+            EngineRpcService.ErrorDetailsPB error = cancellationError(id);
+            return EngineRpcService.GenerateOutputsPB.newBuilder().setRequestId(id)
+                    .setErrorInfo(EngineRpcService.RpcErrorPB.newBuilder()
+                            .setErrorCodeValue((int) error.getErrorCode())
+                            .setErrorMessage(error.getErrorMessage())).build();
         }
 
         private MockResponseQueue responseQueue(long id) {
@@ -2636,13 +2637,7 @@ public final class JavaMockEngineCluster {
             statusVersion.incrementAndGet();
             LinkedBlockingQueue<EngineRpcService.GenerateOutputsPB> queue = requests.output(requestId);
             if (queue != null) {
-                queue.offer(EngineRpcService.GenerateOutputsPB.newBuilder()
-                        .setRequestId(requestId)
-                        .setErrorInfo(EngineRpcService.RpcErrorPB.newBuilder()
-                                .setErrorCodeValue((int) cancellationError(requestId).getErrorCode())
-                                .setErrorMessage(cancellationError(requestId).getErrorMessage())
-                                .build())
-                        .build());
+                queue.offer(cancellationOutput(requestId));
                 // The poller already holds a reference to the queue, so it is safe
                 // to remove it from the map after offering the cancel response.
                 requests.removeOutput(requestId);
@@ -2662,12 +2657,7 @@ public final class JavaMockEngineCluster {
                             LinkedBlockingQueue<EngineRpcService.GenerateOutputsPB> upstreamQueue =
                                     prefill.requests.output(requestId);
                             if (upstreamQueue != null) {
-                                upstreamQueue.offer(EngineRpcService.GenerateOutputsPB.newBuilder()
-                                        .setRequestId(requestId)
-                                        .setErrorInfo(EngineRpcService.RpcErrorPB.newBuilder()
-                                                .setErrorCodeValue((int) cancellationError(requestId).getErrorCode())
-                                                .setErrorMessage(cancellationError(requestId).getErrorMessage()))
-                                        .build());
+                                upstreamQueue.offer(cancellationOutput(requestId));
                                 prefill.requests.removeOutput(requestId, upstreamQueue);
                             }
                         }
@@ -2682,40 +2672,19 @@ public final class JavaMockEngineCluster {
 
         private EngineRpcService.TaskInfoPB cancellationTask(long requestId,
                 EngineRpcService.TaskPhase phase, boolean priorityPreemption) {
-            EngineRpcService.TaskInfoPB.Builder taskBuilder = EngineRpcService.TaskInfoPB.newBuilder()
-                    .setRequestId(requestId)
-                    // Pass the ACTUAL phase the request was cancelled in through
-                    // to the finished entry (P2-1): a queued opt-in decode
-                    // request surfaces KV_ALLOCATED, a queued prefill RECEIVED.
-                    // RUNNING remains the fallback when no entry was found.
-                    .setPhase(phase != null
-                            ? phase : EngineRpcService.TaskPhase.TASK_PHASE_RUNNING)
-                    .setErrorInfo(EngineRpcService.ErrorDetailsPB.newBuilder()
-                            .setErrorCode(priorityPreemption
-                                    ? PRIORITY_PREEMPTED_ERROR_CODE
-                                    : cancellationError(requestId).getErrorCode())
-                            .setErrorMessage(priorityPreemption
-                                    ? "preempted by higher-priority request"
-                                    : cancellationError(requestId).getErrorMessage())
-                            .build())
-                    .setEndTimeMs(System.currentTimeMillis())
-                    .setDpRank(0);
-            // Same upstream fix as recordPriorityPreemptionCanceled: the typed
-            // CANCELLED terminal must carry the exact EnqueueBatch identity so
-            // the master's reconcile can correlate the cancel with the batch it
-            // displaced (a terminal without batch_id falls into the batch-
-            // mismatch dead branch and leaks the inflight slot).
-            long cancelLifecycleBatchId = positiveLifecycleBatchId(requestId);
-            if (cancelLifecycleBatchId > 0L) {
-                taskBuilder.setBatchId(cancelLifecycleBatchId);
-            }
+            EngineRpcService.ErrorDetailsPB error = priorityPreemption
+                    ? EngineRpcService.ErrorDetailsPB.newBuilder().setErrorCode(PRIORITY_PREEMPTED_ERROR_CODE)
+                            .setErrorMessage("preempted by higher-priority request").build()
+                    : cancellationError(requestId);
+            // Preserve the actual cancelled phase; unknown tasks retain RUNNING.
+            EngineRpcService.TaskInfoPB.Builder taskBuilder = terminalTaskBuilder(requestId,
+                    phase != null ? phase : EngineRpcService.TaskPhase.TASK_PHASE_RUNNING, error);
             if (priorityPreemption) {
                 taskBuilder.setPriorityPreemptionProgress(
                         EngineRpcService.PriorityPreemptionProgressPB
                                 .PRIORITY_PREEMPTION_CANCELED);
             }
-            EngineRpcService.TaskInfoPB task = taskBuilder.build();
-            return task;
+            return taskBuilder.build();
         }
 
         private EngineRpcService.TaskInfoPB cancelReportedTask(long requestId,
@@ -3055,7 +3024,7 @@ public final class JavaMockEngineCluster {
         private boolean hasTerminalLifecycle(long requestId) {
             synchronized (requestLifecycles) {
                 var row = requestLifecycles.get(requestId);
-                return row != null && !"running".equals(row.get("end_state"));
+                return row != null && !row.running();
             }
         }
 
@@ -3087,19 +3056,10 @@ public final class JavaMockEngineCluster {
          */
         private void recordClientGoneCanceled(long requestId,
                                               EngineRpcService.TaskPhase phase) {
-            EngineRpcService.TaskInfoPB.Builder task = EngineRpcService.TaskInfoPB.newBuilder()
-                    .setRequestId(requestId)
-                    .setPhase(phase)
-                    .setErrorInfo(EngineRpcService.ErrorDetailsPB.newBuilder()
+            EngineRpcService.TaskInfoPB.Builder task = terminalTaskBuilder(requestId, phase,
+                    EngineRpcService.ErrorDetailsPB.newBuilder()
                             .setErrorCode(EngineRpcService.ErrorCodePB.CANCELLED.getNumber())
-                            .setErrorMessage("cancelled by client (stream gone)")
-                            .build())
-                    .setEndTimeMs(System.currentTimeMillis())
-                    .setDpRank(0);
-            long batchId = positiveLifecycleBatchId(requestId);
-            if (batchId > 0L) {
-                task.setBatchId(batchId);
-            }
+                            .setErrorMessage("cancelled by client (stream gone)").build());
             publishCompletion(task.build());
             statusVersion.incrementAndGet();
         }
@@ -3107,39 +3067,31 @@ public final class JavaMockEngineCluster {
         private void recordPriorityPreemptionCanceled(long requestId,
                                                       EngineRpcService.TaskPhase phase) {
             addPriorityCancelledRequestId(requestId);
-            EngineRpcService.TaskInfoPB.Builder task = EngineRpcService.TaskInfoPB.newBuilder()
-                    .setRequestId(requestId)
-                    .setPhase(phase)
+            EngineRpcService.TaskInfoPB.Builder task = terminalTaskBuilder(requestId, phase,
+                    EngineRpcService.ErrorDetailsPB.newBuilder().setErrorCode(PRIORITY_PREEMPTED_ERROR_CODE)
+                            .setErrorMessage("preempted by higher-priority request").build())
                     .setPriorityPreemptionProgress(EngineRpcService.PriorityPreemptionProgressPB
-                            .PRIORITY_PREEMPTION_CANCELED)
-                    .setErrorInfo(EngineRpcService.ErrorDetailsPB.newBuilder()
-                            .setErrorCode(PRIORITY_PREEMPTED_ERROR_CODE)
-                            .setErrorMessage("preempted by higher-priority request")
-                            .build())
-                    .setEndTimeMs(System.currentTimeMillis())
-                    .setDpRank(0);
-            // Upstream fix preserved through the intake2 merge: typed
-            // preemption terminals must carry the exact EnqueueBatch identity
-            // so the master's ownership bookkeeping can correlate the cancel
-            // with the batch it displaced.
-            long batchId = positiveLifecycleBatchId(requestId);
-            if (batchId > 0L) {
-                task.setBatchId(batchId);
-            }
+                            .PRIORITY_PREEMPTION_CANCELED);
             publishCompletion(task.build());
             statusVersion.incrementAndGet();
+        }
+
+        /** All cancellation terminals carry the same EnqueueBatch identity. */
+        private EngineRpcService.TaskInfoPB.Builder terminalTaskBuilder(long requestId,
+                EngineRpcService.TaskPhase phase, EngineRpcService.ErrorDetailsPB error) {
+            EngineRpcService.TaskInfoPB.Builder task = EngineRpcService.TaskInfoPB.newBuilder()
+                    .setRequestId(requestId).setPhase(phase).setErrorInfo(error)
+                    .setEndTimeMs(System.currentTimeMillis()).setDpRank(0);
+            long batchId = positiveLifecycleBatchId(requestId);
+            if (batchId > 0L) task.setBatchId(batchId);
+            return task;
         }
 
         /** Preserve the exact EnqueueBatch identity on typed Prefill terminals. */
         private long positiveLifecycleBatchId(long requestId) {
             synchronized (requestLifecycles) {
-                Map<String, Object> lifecycle = requestLifecycles.get(requestId);
-                Object rawBatchId = lifecycle == null
-                        ? null : lifecycle.get("batch_id");
-                if (rawBatchId instanceof Number number
-                        && number.longValue() > 0L) {
-                    return number.longValue();
-                }
+                RequestLifecycle lifecycle = requestLifecycles.get(requestId);
+                if (lifecycle != null && lifecycle.batchId > 0L) return lifecycle.batchId;
             }
             // Direct generate/test-only ownership has no positive batch identity;
             // leave the proto field unset instead of fabricating one.
@@ -3822,7 +3774,7 @@ public final class JavaMockEngineCluster {
                                     (doneTsMs - requestStartMs) * 1000L));
                         }
                     }
-                    Long prefillArrivedMs = eventArrivalMs.get(requestId);
+                    long prefillArrivedMs = eventArrivalMs(requestId);
                     writePrefillDoneEvent(shape, requestId, member.batchId(), doneTsMs,
                             executionMs, shapes.size(), alreadyCancelled);
                     if (!alreadyCancelled) {
@@ -3836,7 +3788,7 @@ public final class JavaMockEngineCluster {
                         lifetimeContextTokens.add(inputLen);
                         lifetimeContextRequests.increment();
                         if (!asyncFail) {
-                            long residenceUs = prefillArrivedMs == null ? 0L
+                            long residenceUs = prefillArrivedMs == 0L ? 0L
                                     : Math.max(0L, doneTsMs - prefillArrivedMs) * 1000L;
                             // The P stream ends after producing its first token, not the D output length.
                             reportMetricEvent(MockStreamMetrics.completed(inputLen,
@@ -4125,7 +4077,7 @@ public final class JavaMockEngineCluster {
                 decode.requests.state(id, "waiting_for_kv");
                 decode.recordLifecycleStart(id, batchId, "remote_allocate");
                 synchronized (decode.requestLifecycles) {
-                    decode.requestLifecycles.get(id).put("running_ms", 0L);
+                    decode.requestLifecycles.get(id).runningMs = 0L;
                 }
                 decode.recordEventArrival(id);
                 decode.lastEnqueueTime.set(System.nanoTime());
@@ -4710,14 +4662,14 @@ public final class JavaMockEngineCluster {
             long requestId = shape.input().getRequestId();
             long executionMs = Math.round(stream.accumulatedExecMs);
             boolean alreadyCancelled = cancelledRequests.containsKey(requestId);
-            Long arrivedMs = eventArrivalMs.get(requestId);
+            long arrivedMs = eventArrivalMs(requestId);
             if (!alreadyCancelled) {
                 // D owns its own admission-to-first-token and terminal observations.
-                long firstUs = arrivedMs == null || stream.firstTokenTimeMs == 0 ? 0L
+                long firstUs = arrivedMs == 0L || stream.firstTokenTimeMs == 0 ? 0L
                         : Math.max(0L, stream.firstTokenTimeMs - arrivedMs) * 1000L;
                 reportMetricEvent(MockStreamMetrics.completed(shape.inputLen(), shape.outputLen(),
                         stream.initialReuseTokens, firstUs,
-                        arrivedMs == null ? 0L : Math.max(0L, System.currentTimeMillis() - arrivedMs) * 1000L));
+                        arrivedMs == 0L ? 0L : Math.max(0L, System.currentTimeMillis() - arrivedMs) * 1000L));
             }
             if (!alreadyCancelled) {
                 long doneMs = System.currentTimeMillis();
@@ -5610,9 +5562,7 @@ public final class JavaMockEngineCluster {
             // stamps behind. A rid is truly gone once it is neither a running
             // task nor has a live response queue (queued prefill/decode members
             // always hold a runningTasks entry).
-            eventArrivalMs.keySet().removeIf(id ->
-                    !runningTasks.containsKey(id) && requests.output(id) == null);
-            eventStartMs.keySet().removeIf(id ->
+            eventTimings.keySet().removeIf(id ->
                     !runningTasks.containsKey(id) && requests.output(id) == null);
             // Retention is enforced at insertion; housekeeping is idempotent.
             synchronized (completionLock) {
@@ -6192,19 +6142,43 @@ public final class JavaMockEngineCluster {
             return fencedRequestIds.contains(requestId);
         }
 
+        /** Typed internal row; only the diagnostic boundary emits the legacy JSON keys.
+         * All access is guarded by requestLifecycles. */
+        private static final class RequestLifecycle {
+            final long requestId;
+            final long batchId;
+            final String method;
+            final long arrivedMs = System.currentTimeMillis();
+            long runningMs = arrivedMs;
+            long endMs;
+            String endState = "running";
+
+            RequestLifecycle(long requestId, long batchId, String method) {
+                this.requestId = requestId;
+                this.batchId = batchId;
+                this.method = method;
+            }
+
+            boolean running() { return "running".equals(endState); }
+
+            Map<String, Object> snapshot() {
+                Map<String, Object> row = new LinkedHashMap<>();
+                row.put("rid", requestId);
+                row.put("method", method);
+                row.put("batch_id", batchId);
+                row.put("arrived_ms", arrivedMs);
+                row.put("running_ms", runningMs);
+                row.put("end_ms", endMs);
+                row.put("end_state", endState);
+                return row;
+            }
+        }
+
         private void recordLifecycleStart(long requestId, long batchId, String method) {
-            long arrivedMs = System.currentTimeMillis();
-            Map<String, Object> lifecycle = new LinkedHashMap<>();
-            lifecycle.put("rid", requestId);
-            lifecycle.put("method", method);
-            lifecycle.put("batch_id", batchId);
-            lifecycle.put("arrived_ms", arrivedMs);
-            lifecycle.put("running_ms", arrivedMs);
-            lifecycle.put("end_ms", 0L);
-            lifecycle.put("end_state", "running");
+            RequestLifecycle lifecycle = new RequestLifecycle(requestId, batchId, method);
             synchronized (requestLifecycles) {
                 requestLifecycles.compute(requestId, (id, previous) ->
-                        previous == null || !"running".equals(previous.get("end_state"))
+                        previous == null || !previous.running()
                                 ? lifecycle : previous);
                 // Bounded like Python _prune_lifecycle: evict the oldest entries once over cap.
                 while (requestLifecycles.size() > LIFECYCLE_CAP) {
@@ -6225,10 +6199,10 @@ public final class JavaMockEngineCluster {
         private void recordLifecycleEnd(long requestId, String endState) {
             recentlySeenRequests.add(requestId);
             synchronized (requestLifecycles) {
-                Map<String, Object> lifecycle = requestLifecycles.get(requestId);
-                if (lifecycle != null && "running".equals(lifecycle.get("end_state"))) {
-                    lifecycle.put("end_ms", System.currentTimeMillis());
-                    lifecycle.put("end_state", endState);
+                RequestLifecycle lifecycle = requestLifecycles.get(requestId);
+                if (lifecycle != null && lifecycle.running()) {
+                    lifecycle.endMs = System.currentTimeMillis();
+                    lifecycle.endState = endState;
                 }
             }
         }
@@ -6244,10 +6218,8 @@ public final class JavaMockEngineCluster {
          */
         private void recordLifecycleRunning(long requestId) {
             synchronized (requestLifecycles) {
-                Map<String, Object> lifecycle = requestLifecycles.get(requestId);
-                if (lifecycle != null && "running".equals(lifecycle.get("end_state"))) {
-                    lifecycle.put("running_ms", System.currentTimeMillis());
-                }
+                RequestLifecycle lifecycle = requestLifecycles.get(requestId);
+                if (lifecycle != null && lifecycle.running()) lifecycle.runningMs = System.currentTimeMillis();
             }
         }
 
@@ -6270,7 +6242,9 @@ public final class JavaMockEngineCluster {
             if (engineEventLog == null && eventMetricReporter == null) {
                 return;
             }
-            eventArrivalMs.putIfAbsent(requestId, System.currentTimeMillis());
+            long now = System.currentTimeMillis();
+            eventTimings.compute(requestId, (id, timing) -> timing == null ? new EventTiming(now, 0L)
+                    : timing.arrivalMs == 0L ? new EventTiming(now, timing.startMs) : timing);
         }
 
         /** Stamp the execution-start epoch-ms (prefill batch start / decode slot admission). */
@@ -6278,11 +6252,18 @@ public final class JavaMockEngineCluster {
             if (engineEventLog == null) {
                 return;
             }
-            eventStartMs.putIfAbsent(requestId, System.currentTimeMillis());
+            long now = System.currentTimeMillis();
+            eventTimings.compute(requestId, (id, timing) -> timing == null ? new EventTiming(0L, now)
+                    : timing.startMs == 0L ? new EventTiming(timing.arrivalMs, now) : timing);
         }
 
-        private static long orZero(Long value) {
-            return value != null ? value : 0L;
+        private EventTiming takeEventTiming(long requestId) {
+            EventTiming timing = eventTimings.remove(requestId);
+            return timing == null ? EventTiming.EMPTY : timing;
+        }
+
+        private long eventArrivalMs(long requestId) {
+            return eventTimings.getOrDefault(requestId, EventTiming.EMPTY).arrivalMs;
         }
 
         // Production trans_input uses epoch microseconds; the Java replay
@@ -6310,8 +6291,9 @@ public final class JavaMockEngineCluster {
                                            long requestId, long batchId, long doneTsMs,
                                            long executionMs, int batchSize, boolean cancelled) {
             EngineEventLog log = engineEventLog;
-            long arrivalMs = orZero(eventArrivalMs.remove(requestId));
-            long startMs = orZero(eventStartMs.remove(requestId));
+            EventTiming timing = takeEventTiming(requestId);
+            long arrivalMs = timing.arrivalMs;
+            long startMs = timing.startMs;
             if (log == null) {
                 return;
             }
@@ -6372,8 +6354,9 @@ public final class JavaMockEngineCluster {
                 int terminalBatchSize, boolean cancelled, long errorCode) {
             long requestId = shape.input().getRequestId();
             EngineEventLog log = engineEventLog;
-            long arrivalMs = orZero(eventArrivalMs.remove(requestId));
-            long startMs = orZero(eventStartMs.remove(requestId));
+            EventTiming timing = takeEventTiming(requestId);
+            long arrivalMs = timing.arrivalMs;
+            long startMs = timing.startMs;
             if (log == null) {
                 return;
             }
@@ -6407,9 +6390,7 @@ public final class JavaMockEngineCluster {
         Map<String, Map<String, Object>> getRequestLifecycleSnapshot() {
             Map<String, Map<String, Object>> result = new LinkedHashMap<>();
             synchronized (requestLifecycles) {
-                for (Map.Entry<Long, Map<String, Object>> entry : requestLifecycles.entrySet()) {
-                    result.put(String.valueOf(entry.getKey()), new LinkedHashMap<>(entry.getValue()));
-                }
+                requestLifecycles.forEach((id, lifecycle) -> result.put(String.valueOf(id), lifecycle.snapshot()));
             }
             return result;
         }
