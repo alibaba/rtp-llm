@@ -25,6 +25,8 @@ MOE_STRATEGY_CHOICES = (
     "mega_moe_se",
     "grouped_fp4",
     "local_loop",
+    "sm120_fused_moe",
+    "sm120_decode",
     "rocm_ep_normal",
     "rocm_ep_low_latency",
     "rocm_fp8_per_channel_no_dp",

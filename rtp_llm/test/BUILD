@@ -1,3 +1,5 @@
+load("//rtp_llm/models_py/modules/dsv4/test:defs.bzl", "dsv4_sm120_py_test")
+
 py_test(
     name = "kv_cache_specs_test",
     srcs = [
@@ -281,6 +283,16 @@ py_test(
     exec_properties = {"gpu": "L20_CU13"},
     tags = ["L20_CU13"],
 )
+
+[
+    dsv4_sm120_py_test(
+        name = name + "_sm120",
+        src = name + ".py",
+        deps = ["//rtp_llm:sdk", "//rtp_llm:testlib"],
+        visibility = ["//rtp_llm/models_py/modules/dsv4/test:__pkg__"],
+    )
+    for name in ["start_server_warmup_test", "auto_configure_deepep_test"]
+]
 
 py_test(
     name = "glm4_moe_detector_test",
