@@ -53,6 +53,7 @@ py_test(
         "//rtp_llm/models_py/triton_kernels:causal_conv1d",
         "//rtp_llm/models_py/triton_kernels:fla",
     ] + [
+        ":numpy",
         ":torch",
         ":triton",
     ],

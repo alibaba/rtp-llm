@@ -314,7 +314,9 @@ TEST_F(KVCacheManagerCPLayoutTest, CPShardedMallocAllowsPartialTailWithoutCacheK
     result = mgr->malloc(info);
     ASSERT_TRUE(result.success);
     EXPECT_EQ(resource->blocksNum(0, "default"), 1);
-    EXPECT_EQ(resource->cacheKeys(0).size(), 0);
+    // Partial tail now carries a runtime key for reuse matching;
+    // publication excludes it via last_block_aligned.
+    EXPECT_EQ(resource->cacheKeys(0).size(), 1);
 }
 
 // malloc() uses the immutable global request snapshot and cache-owned storage mapping.
