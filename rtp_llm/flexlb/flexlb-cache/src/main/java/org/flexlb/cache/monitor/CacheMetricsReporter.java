@@ -1,6 +1,7 @@
 package org.flexlb.cache.monitor;
 
 import lombok.extern.slf4j.Slf4j;
+import org.flexlb.cache.core.RecentCacheKeyWindow;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.enums.FlexMetricType;
 import org.flexlb.metric.FlexMetricTags;
@@ -11,6 +12,10 @@ import org.springframework.stereotype.Component;
 import javax.annotation.PostConstruct;
 
 import static org.flexlb.constant.MetricConstant.CACHE_AFFINITY_DECISION;
+import static org.flexlb.constant.MetricConstant.CACHE_CLUSTER_RECENT_HISTORY_COVERAGE_MS;
+import static org.flexlb.constant.MetricConstant.CACHE_CLUSTER_RECENT_HISTORY_READY;
+import static org.flexlb.constant.MetricConstant.CACHE_CLUSTER_RECENT_HIT_TOKENS;
+import static org.flexlb.constant.MetricConstant.CACHE_CLUSTER_RECENT_INPUT_TOKENS;
 import static org.flexlb.constant.MetricConstant.CACHE_DIFF_ADDED_BLOCKS_SIZE;
 import static org.flexlb.constant.MetricConstant.CACHE_DIFF_REMOVED_BLOCKS_SIZE;
 import static org.flexlb.constant.MetricConstant.CACHE_ENGINE_LOCAL_BYTES;
@@ -88,6 +93,10 @@ public class CacheMetricsReporter {
         monitor.register(CACHE_HIT_RATIO, FlexMetricType.GAUGE);
         monitor.register(CACHE_RECENT_KEY_HIT_COUNT, FlexMetricType.GAUGE);
         monitor.register(CACHE_RECENT_KEY_TOTAL_COUNT, FlexMetricType.GAUGE);
+        monitor.register(CACHE_CLUSTER_RECENT_HIT_TOKENS, FlexMetricType.QPS);
+        monitor.register(CACHE_CLUSTER_RECENT_INPUT_TOKENS, FlexMetricType.QPS);
+        monitor.register(CACHE_CLUSTER_RECENT_HISTORY_COVERAGE_MS, FlexMetricType.GAUGE);
+        monitor.register(CACHE_CLUSTER_RECENT_HISTORY_READY, FlexMetricType.GAUGE);
         monitor.register(CACHE_THEORY_HIT_COUNT, FlexMetricType.GAUGE);
         monitor.register(CACHE_THEORY_TOTAL_COUNT, FlexMetricType.GAUGE);
         monitor.register(CACHE_THEORY_HIT_RATIO, FlexMetricType.GAUGE);
@@ -246,6 +255,17 @@ public class CacheMetricsReporter {
 
         monitor.report(CACHE_RECENT_KEY_HIT_COUNT, tags, hitTokens);
         monitor.report(CACHE_RECENT_KEY_TOTAL_COUNT, tags, inputTokens);
+    }
+
+    public void reportClusterRecentCacheKeyHitMetrics(RecentCacheKeyWindow.Snapshot snapshot,
+                                                     long hitTokens, long inputTokens) {
+        FlexMetricTags tags = FlexMetricTags.of("timeWindowMs", String.valueOf(snapshot.getTimeWindowMs()));
+        monitor.report(CACHE_CLUSTER_RECENT_HISTORY_COVERAGE_MS, tags, snapshot.getHistoryCoverageMs());
+        monitor.report(CACHE_CLUSTER_RECENT_HISTORY_READY, tags, snapshot.isHistoryComplete() ? 1L : 0L);
+        if (snapshot.isHistoryComplete() && inputTokens > 0L) {
+            monitor.report(CACHE_CLUSTER_RECENT_HIT_TOKENS, tags, hitTokens);
+            monitor.report(CACHE_CLUSTER_RECENT_INPUT_TOKENS, tags, inputTokens);
+        }
     }
 
     /**

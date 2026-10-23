@@ -267,6 +267,11 @@ public class MetricConstant {
      */
     public static final String CACHE_RECENT_KEY_TOTAL_COUNT = "app.cache.recent.key.total.count";
 
+    public static final String CACHE_CLUSTER_RECENT_HIT_TOKENS = "app.cache.cluster.recent.hit.tokens";
+    public static final String CACHE_CLUSTER_RECENT_INPUT_TOKENS = "app.cache.cluster.recent.input.tokens";
+    public static final String CACHE_CLUSTER_RECENT_HISTORY_COVERAGE_MS = "app.cache.cluster.recent.history.coverage.ms";
+    public static final String CACHE_CLUSTER_RECENT_HISTORY_READY = "app.cache.cluster.recent.history.ready";
+
     /**
      * Aggregated theory cache-hit token count. Tagged by window=all.
      */

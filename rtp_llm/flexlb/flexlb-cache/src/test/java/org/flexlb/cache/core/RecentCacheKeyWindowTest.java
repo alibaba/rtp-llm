@@ -6,8 +6,56 @@ import java.util.List;
 import java.util.concurrent.atomic.AtomicLong;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class RecentCacheKeyWindowTest {
+
+    @Test
+    void should_require_a_complete_history_window() {
+        AtomicLong now = new AtomicLong(0L);
+        RecentCacheKeyWindow window = new RecentCacheKeyWindow(1000L, 10L, now::get);
+        assertFalse(window.record(List.of(1L)).isHistoryComplete());
+        now.set(999L);
+        assertEquals(999L, window.record(List.of(2L)).getHistoryCoverageMs());
+        now.set(1000L);
+        RecentCacheKeyWindow.Snapshot snapshot = window.record(List.of(1L, 2L));
+        assertTrue(snapshot.isHistoryComplete());
+        assertEquals(1L, snapshot.getRequestHitOccurrences());
+        window.reset();
+        snapshot = window.record(List.of(2L));
+        assertFalse(snapshot.isHistoryComplete());
+        assertEquals(0L, snapshot.getRequestHitOccurrences());
+    }
+
+    @Test
+    void should_mark_capacity_truncated_history_incomplete_until_missing_entries_expire() {
+        AtomicLong now = new AtomicLong(0L);
+        RecentCacheKeyWindow window = new RecentCacheKeyWindow(1000L, 2L, now::get);
+        window.record(List.of());
+        now.set(900L);
+        window.record(List.of(1L, 2L));
+        now.set(1000L);
+        assertTrue(window.record(List.of(3L)).isHistoryComplete());
+        assertEquals(100L, window.record(List.of()).getHistoryCoverageMs());
+        now.set(1899L);
+        assertFalse(window.record(List.of()).isHistoryComplete());
+        now.set(1900L);
+        assertTrue(window.record(List.of()).isHistoryComplete());
+    }
+
+    @Test
+    void should_track_unretained_oversized_requests_as_missing_history() {
+        AtomicLong now = new AtomicLong(0L);
+        RecentCacheKeyWindow window = new RecentCacheKeyWindow(1000L, 2L, now::get);
+        window.record(List.of());
+        now.set(1000L);
+        assertTrue(window.record(List.of(1L, 2L, 3L)).isHistoryComplete());
+        now.set(1500L);
+        assertFalse(window.record(List.of()).isHistoryComplete());
+        now.set(2000L);
+        assertTrue(window.record(List.of()).isHistoryComplete());
+    }
 
     @Test
     void should_count_request_hits_against_prior_pool() {

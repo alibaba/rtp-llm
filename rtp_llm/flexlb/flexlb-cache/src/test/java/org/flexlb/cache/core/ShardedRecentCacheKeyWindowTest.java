@@ -11,8 +11,28 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class ShardedRecentCacheKeyWindowTest {
+
+    @Test
+    void should_restart_history_coverage_on_each_leadership_term() {
+        AtomicLong now = new AtomicLong(0L);
+        ShardedRecentCacheKeyWindow window = new ShardedRecentCacheKeyWindow(1000L, 40L, now::get);
+        window.recordForLeader(1L, List.of());
+        now.set(900L);
+        window.recordForLeader(1L, List.of(11L));
+        now.set(1000L);
+        RecentCacheKeyWindow.Snapshot ready = window.recordForLeader(1L, List.of(11L));
+        assertTrue(ready.isHistoryComplete());
+        assertEquals(1L, ready.getRequestHitOccurrences());
+        now.set(1100L);
+        RecentCacheKeyWindow.Snapshot newTerm = window.recordForLeader(2L, List.of(11L));
+        assertFalse(newTerm.isHistoryComplete());
+        assertEquals(0L, newTerm.getHistoryCoverageMs());
+        assertEquals(0L, newTerm.getRequestHitOccurrences());
+    }
 
     @Test
     void should_count_hits_across_requests_with_different_request_ids() {
