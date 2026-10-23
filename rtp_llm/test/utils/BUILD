@@ -36,7 +36,7 @@ py_binary(
     name = "gpu_lock",
     deps = [":jit_sys_path_setup", ":filelock", ":torch"],
     main = "device_resource.py",
-    srcs = ["device_resource.py"],
+    srcs = ["device_resource.py", "jit_sys_path_setup.py"],
 )
 
 py_library(
