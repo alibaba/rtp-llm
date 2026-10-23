@@ -121,7 +121,8 @@ private:
     absl::Status processExecutionResult(InflightBatch& batch);
     // Publish PD-sep KV blocks for context-completed requests using plan data
     // (valid on every PP rank, whose local schedule carries no stream objects).
-    void publishPdPlanRequests(const GptModelInputs& model_input);
+    // global_input_lengths: pre-CP-shard chunk lengths; CP rewrites input_lengths in place.
+    void publishPdPlanRequests(const GptModelInputs& model_input, const torch::Tensor& global_input_lengths);
 
     void verifyDraftTokens(const PPExecutionPlan& plan, const torch::Tensor& target_logits, PPExecutionResult& result);
 

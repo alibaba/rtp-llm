@@ -168,6 +168,11 @@ public:
         return cp_slot_mapper_;
     }
 
+    // Rank within this pipeline stage's CP/TP group, independent of KV sharding.
+    int stageCpRank() const {
+        return static_cast<int>(parallelism_config_.tp_rank);
+    }
+
     // Write one KV block (optionally per-layer) from host/device tensors for test
     virtual bool
     writeKVBlockForTest(int block_index, int layer_id, const torch::Tensor& k_buffer, const torch::Tensor& v_buffer);
