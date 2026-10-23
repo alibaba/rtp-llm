@@ -1,6 +1,7 @@
 #pragma once
 
 #include "kmonitor/client/MetricsReporter.h"
+#include "rtp_llm/cpp/metrics/ServiceStatus.h"
 #include "rtp_llm/cpp/utils/TimeUtil.h"
 
 namespace rtp_llm {

@@ -71,94 +71,96 @@ bool P2PConnectorMetrics::init(kmonitor::MetricsGroupManager* manager) {
 }
 
 void P2PConnectorMetrics::report(const kmonitor::MetricsTags* tags, DecodeSchedulerMetricsCollector* collector) {
-    REPORT_MUTABLE_QPS(decode_schedule_qps_metric);
+    RTP_REPORT_MUTABLE_QPS(decode_schedule_qps_metric);
     if (!collector->success) {
-        REPORT_MUTABLE_QPS(decode_schedule_failed_qps_metric);
+        RTP_REPORT_MUTABLE_QPS(decode_schedule_failed_qps_metric);
     }
     if (collector->total_cost_time_us > 0) {
-        REPORT_MUTABLE_METRIC(decode_schedule_cost_time_us_metric, collector->total_cost_time_us);
+        RTP_REPORT_MUTABLE_METRIC(decode_schedule_cost_time_us_metric, collector->total_cost_time_us);
     }
 }
 
 void P2PConnectorMetrics::report(const kmonitor::MetricsTags* tags, DecodeWorkerMetricsCollector* collector) {
-    REPORT_MUTABLE_QPS(decode_worker_qps_metric);
+    RTP_REPORT_MUTABLE_QPS(decode_worker_qps_metric);
     if (!collector->success) {
-        REPORT_MUTABLE_QPS(decode_worker_failed_qps_metric);
+        RTP_REPORT_MUTABLE_QPS(decode_worker_failed_qps_metric);
     }
-    REPORT_MUTABLE_METRIC(decode_worker_total_block_count_metric, collector->total_block_count);
+    RTP_REPORT_MUTABLE_METRIC(decode_worker_total_block_count_metric, collector->total_block_count);
     if (collector->first_layer_wait_time_us > 0) {
-        REPORT_MUTABLE_METRIC(decode_worker_first_layer_wait_time_us_metric, collector->first_layer_wait_time_us);
+        RTP_REPORT_MUTABLE_METRIC(decode_worker_first_layer_wait_time_us_metric, collector->first_layer_wait_time_us);
     }
     if (collector->total_cost_time_us > 0) {
-        REPORT_MUTABLE_METRIC(decode_worker_total_cost_time_us_metric, collector->total_cost_time_us);
+        RTP_REPORT_MUTABLE_METRIC(decode_worker_total_cost_time_us_metric, collector->total_cost_time_us);
     }
 }
 
 void P2PConnectorMetrics::report(const kmonitor::MetricsTags* tags, DecodeSchedulerStatusMetricsCollector* collector) {
-    REPORT_MUTABLE_METRIC(decode_scheduler_check_once_cost_time_us_metric, collector->check_once_cost_time_us);
-    REPORT_MUTABLE_METRIC(decode_scheduler_inflight_context_count_metric, collector->inflight_context_count);
+    RTP_REPORT_MUTABLE_METRIC(decode_scheduler_check_once_cost_time_us_metric, collector->check_once_cost_time_us);
+    RTP_REPORT_MUTABLE_METRIC(decode_scheduler_inflight_context_count_metric, collector->inflight_context_count);
 }
 
 void P2PConnectorMetrics::report(const kmonitor::MetricsTags* tags, StreamStoreCountMetricsCollector* collector) {
-    REPORT_MUTABLE_METRIC(stream_store_stream_count_metric, collector->stream_count);
+    RTP_REPORT_MUTABLE_METRIC(stream_store_stream_count_metric, collector->stream_count);
 }
 
 void P2PConnectorMetrics::report(const kmonitor::MetricsTags* tags, StreamStoreWaitMetricsCollector* collector) {
-    REPORT_MUTABLE_QPS(stream_store_qps_metric);
+    RTP_REPORT_MUTABLE_QPS(stream_store_qps_metric);
     if (collector->timeout) {
-        REPORT_MUTABLE_QPS(stream_store_timeout_qps_metric);
+        RTP_REPORT_MUTABLE_QPS(stream_store_timeout_qps_metric);
     }
     if (collector->cancelled) {
-        REPORT_MUTABLE_QPS(stream_store_cancel_qps_metric);
+        RTP_REPORT_MUTABLE_QPS(stream_store_cancel_qps_metric);
     }
     if (collector->stream_wait_time_us > 0) {
-        REPORT_MUTABLE_METRIC(stream_store_stream_wait_time_us_metric, collector->stream_wait_time_us);
+        RTP_REPORT_MUTABLE_METRIC(stream_store_stream_wait_time_us_metric, collector->stream_wait_time_us);
     }
 }
 //
 void P2PConnectorMetrics::report(const kmonitor::MetricsTags* tags, PrefillSchedulerMetricsCollector* collector) {
-    REPORT_MUTABLE_QPS(prefill_scheduler_qps_metric);
+    RTP_REPORT_MUTABLE_QPS(prefill_scheduler_qps_metric);
     if (!collector->success) {
-        REPORT_MUTABLE_QPS(prefill_scheduler_failed_qps_metric);
+        RTP_REPORT_MUTABLE_QPS(prefill_scheduler_failed_qps_metric);
     }
     if (collector->total_cost_time_us > 0) {
-        REPORT_MUTABLE_METRIC(prefill_scheduler_total_cost_time_us_metric, collector->total_cost_time_us);
+        RTP_REPORT_MUTABLE_METRIC(prefill_scheduler_total_cost_time_us_metric, collector->total_cost_time_us);
     }
 }
 
 void P2PConnectorMetrics::report(const kmonitor::MetricsTags* tags, PrefillWorkerSendMetricsCollector* collector) {
-    REPORT_MUTABLE_QPS(prefill_worker_write_qps_metric);
+    RTP_REPORT_MUTABLE_QPS(prefill_worker_write_qps_metric);
     if (!collector->success) {
-        REPORT_MUTABLE_QPS(prefill_worker_write_failed_qps_metric);
+        RTP_REPORT_MUTABLE_QPS(prefill_worker_write_failed_qps_metric);
     }
     if (collector->first_layer_wait_time_us > 0) {
-        REPORT_MUTABLE_METRIC(prefill_worker_write_first_layer_wait_time_us_metric,
-                              collector->first_layer_wait_time_us);
+        RTP_REPORT_MUTABLE_METRIC(prefill_worker_write_first_layer_wait_time_us_metric,
+                                  collector->first_layer_wait_time_us);
     }
     if (collector->last_layer_wait_time_us > 0) {
-        REPORT_MUTABLE_METRIC(prefill_worker_write_last_layer_wait_time_us_metric, collector->last_layer_wait_time_us);
+        RTP_REPORT_MUTABLE_METRIC(prefill_worker_write_last_layer_wait_time_us_metric,
+                                  collector->last_layer_wait_time_us);
     }
     if (collector->total_cost_time_us > 0) {
-        REPORT_MUTABLE_METRIC(prefill_worker_write_total_cost_time_us_metric, collector->total_cost_time_us);
+        RTP_REPORT_MUTABLE_METRIC(prefill_worker_write_total_cost_time_us_metric, collector->total_cost_time_us);
     }
 }
 
 void P2PConnectorMetrics::report(const kmonitor::MetricsTags* tags, PrefillWorkerStatusMetricsCollector* collector) {
-    REPORT_MUTABLE_METRIC(prefill_worker_wait_store_event_count_metric, collector->wait_store_event_count);
-    REPORT_MUTABLE_METRIC(prefill_worker_task_count_metric, collector->task_count);
-    REPORT_MUTABLE_METRIC(prefill_worker_computed_request_count_metric, collector->computed_request_count);
+    RTP_REPORT_MUTABLE_METRIC(prefill_worker_wait_store_event_count_metric, collector->wait_store_event_count);
+    RTP_REPORT_MUTABLE_METRIC(prefill_worker_task_count_metric, collector->task_count);
+    RTP_REPORT_MUTABLE_METRIC(prefill_worker_computed_request_count_metric, collector->computed_request_count);
 }
 
 void P2PConnectorMetrics::report(const kmonitor::MetricsTags* tags, PrefillWorkerStoreMetricsCollector* collector) {
-    REPORT_MUTABLE_QPS(prefill_worker_store_qps_metric);
+    RTP_REPORT_MUTABLE_QPS(prefill_worker_store_qps_metric);
     if (!collector->success) {
-        REPORT_MUTABLE_QPS(prefill_worker_store_failed_qps_metric);
+        RTP_REPORT_MUTABLE_QPS(prefill_worker_store_failed_qps_metric);
     }
     if (collector->total_block_count > 0) {
-        REPORT_MUTABLE_METRIC(prefill_worker_store_total_block_count_metric, collector->total_block_count);
+        RTP_REPORT_MUTABLE_METRIC(prefill_worker_store_total_block_count_metric, collector->total_block_count);
     }
     if (collector->store_wait_done_time_us > 0) {
-        REPORT_MUTABLE_METRIC(prefill_worker_store_store_wait_done_time_us_metric, collector->store_wait_done_time_us);
+        RTP_REPORT_MUTABLE_METRIC(prefill_worker_store_store_wait_done_time_us_metric,
+                                  collector->store_wait_done_time_us);
     }
 }
 }  // namespace rtp_llm

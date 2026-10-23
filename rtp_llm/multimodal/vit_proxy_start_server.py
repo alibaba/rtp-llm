@@ -57,6 +57,7 @@ def vit_proxy_start_server(
     grpc_port: int,
     http_port: int,
     worker_http_addresses: Optional[list[str]] = None,
+    service_draining=None,
 ):
     """
     启动 VIT 代理服务器（主进程）
@@ -68,6 +69,9 @@ def vit_proxy_start_server(
         http_port: HTTP 端口号（从外部传入）
         worker_http_addresses: 工作进程 HTTP 地址列表（用于 profile 转发）
     """
+    from rtp_llm.metrics import kmonitor
+
+    kmonitor.bind_service_draining(service_draining)
     setproctitle("rtp_llm_vit_proxy_server")
 
     logging.info(
