@@ -160,3 +160,9 @@ dsv4_sm120_py_test(
     name = "test_sm120_batch_invariant_linear",
     deps = _MODEL_TEST_DEPS,
 )
+
+dsv4_sm120_py_test(
+    name = "test_sm120_ordered_reduce_scatter",
+    gpu_count = 8,
+    deps = _MODEL_TEST_DEPS,
+)

@@ -8,6 +8,7 @@ and only fuses the final add+cast when possible.
 
 from __future__ import annotations
 
+import logging
 import os
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
@@ -15,6 +16,9 @@ from dataclasses import dataclass, field
 import torch
 import torch.nn as nn
 
+from rtp_llm.models_py.kernels.cuda.sm120_fp8_blockwise import (
+    sm120_blockwise_fp8_available,
+)
 from rtp_llm.models_py.modules.factory.fused_moe.utils.config import (
     shared_expert_mode,
     strict_fused_moe_enabled,
@@ -26,6 +30,12 @@ from rtp_llm.models_py.utils.profiler import record_function_range
 
 from .expert import require_silu_mul_split
 from .quantized_linear import create_fp8_linear
+
+logger = logging.getLogger(__name__)
+
+
+def _uses_sm120_cutlass_linear(tensor: torch.Tensor) -> bool:
+    return tensor.is_cuda and sm120_blockwise_fp8_available(tensor.device)
 
 
 @dataclass(frozen=True)
@@ -207,7 +217,11 @@ class FusedSharedExpertFastPath:
     def can_run(shared_experts: nn.Module, x: torch.Tensor) -> bool:
         if not (x.is_cuda and x.dtype == torch.bfloat16 and x.dim() == 2):
             return False
-        return all(hasattr(shared_experts, name) for name in ("w13", "w2"))
+        if not all(hasattr(shared_experts, name) for name in ("w13", "w2")):
+            return False
+        if _uses_sm120_cutlass_linear(x):
+            return False
+        return True
 
     @classmethod
     def has_merged_w13(cls, shared_experts: nn.Module) -> bool:
@@ -571,7 +585,8 @@ def _run_shared_expert(
         except Exception:
             if strict_fused_moe_enabled():
                 raise
-    if strict_fused_moe_enabled():
+    # The SM120 CUTLASS linear is the intended default, not a fallback.
+    if strict_fused_moe_enabled() and not _uses_sm120_cutlass_linear(x):
         raise RuntimeError(
             "MOE_STRICT_FUSED=1 forbids the generic Expert.forward "
             "shared-expert fallback"

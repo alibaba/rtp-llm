@@ -22,6 +22,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from rtp_llm.models_py.modules.factory.fused_moe.defs.fused_moe import ExpertGatePayload
+from rtp_llm.models_py.utils.arch import is_sm120
 
 # Single-Triton-kernel router-gate epilogue for
 # score_func='sqrtsoftplus'.  Replaces ~7 elementwise/reduce/topk launches
@@ -140,6 +141,7 @@ class Gate(nn.Module):
         self.route_scale = route_scale
         self.hash = layer_id < n_hash_layers
         self.fuse_hash_gate = False
+        self.batch_invariant_scores = False
         from rtp_llm.utils.model_weight import W
 
         assert (
@@ -175,6 +177,24 @@ class Gate(nn.Module):
 
     def _bf16_scores(self, x: torch.Tensor) -> torch.Tensor:
         x_bf16 = x if x.dtype == torch.bfloat16 else x.to(torch.bfloat16)
+        if self.batch_invariant_scores:
+            from rtp_llm.models_py.triton_kernels.sm120_batch_invariant_linear import (
+                batch_invariant_linear,
+                is_supported,
+            )
+
+            if is_supported(x_bf16, self._weight_bf16()):
+                return batch_invariant_linear(
+                    x_bf16,
+                    self._weight_bf16(),
+                    out_dtype=(
+                        torch.float32
+                        if os.environ.get("DSV4_GATE_OUTPUT_FP32", "0") == "1"
+                        else torch.bfloat16
+                    ),
+                )
+        if os.environ.get("DSV4_GATE_OUTPUT_FP32", "0") == "1":
+            return torch.mm(x_bf16, self._weight_bf16().t(), out_dtype=torch.float32)
         return F.linear(x_bf16, self._weight_bf16())
 
     def can_prepare_gate_payload(
@@ -239,10 +259,18 @@ class Gate(nn.Module):
         # FP32-everywhere path that previously emitted SIMT sgemm 128x128
         # (127× × 1.15 ms = 145 ms in the 64k+CP=4 trace).  Score numerics
         # then run in FP32 through softplus/sqrt/topk, same as before.
+        rows = x.size(0)
+        # Use one GEMM shape for single-token and small speculative-verify
+        # batches: SM120 small-M algorithms otherwise round differently.
+        x_gemm = (
+            F.pad(x, (0, 0, 0, 8 - rows))
+            if rows < 8 and x.is_cuda and is_sm120(x.device)
+            else x
+        )
         if os.environ.get("MOE_GATE_FP32", "0") == "1":
-            scores = F.linear(x.float(), self.weight.float())
+            scores = F.linear(x_gemm.float(), self.weight.float())[:rows]
         else:
-            scores = self._bf16_scores(x)
+            scores = self._bf16_scores(x_gemm)[:rows]
             if (
                 self.hash
                 and self.fuse_hash_gate

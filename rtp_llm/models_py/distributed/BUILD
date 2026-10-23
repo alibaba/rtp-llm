@@ -3,6 +3,7 @@ py_library(
     srcs = [
         "collective_torch.py",
         "flashinfer_all_reduce.py",
+        "ordered_reduce_scatter.py",
         "rocm_rccl.py",
         "symm_mem.py",
     ],
