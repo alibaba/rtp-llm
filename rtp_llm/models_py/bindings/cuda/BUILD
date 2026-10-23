@@ -1,5 +1,5 @@
 load("//:def.bzl", "copts", "cuda_copts")
-load("@arch_config//:arch_select.bzl", "torch_deps")
+load("@arch_config//:arch_select.bzl", "torch_deps", "v41_front_gemm_deps")
 
 package(default_visibility=["//rtp_llm:__subpackages__"])
 
@@ -246,12 +246,7 @@ cc_library(
         ":bf16_gemm_op",
         ":cuda_bindings_base",
         ":cuda_attn_bindings_base",
-    ] + select({
-        "@//:using_cuda13_x86": [
-            ":v41_front_gemm_op",
-        ],
-        "//conditions:default": [],
-    }),
+    ] + v41_front_gemm_deps(),
     visibility = ["//visibility:public"],
     alwayslink = 1,
 )
