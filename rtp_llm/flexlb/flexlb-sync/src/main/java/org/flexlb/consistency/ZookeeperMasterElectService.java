@@ -65,6 +65,8 @@ public class ZookeeperMasterElectService implements LeaderSelectorListener {
     private LeaderSelector leaderSelector;
     @Getter
     private volatile boolean isMaster;
+    @Getter
+    private volatile long leadershipEpoch;
     private volatile boolean markOffline;
     private volatile boolean autoRejoin = true;
     private volatile String cachedMasterHostIp;
@@ -267,6 +269,7 @@ public class ZookeeperMasterElectService implements LeaderSelectorListener {
         }
 
         // Become master
+        leadershipEpoch++;
         isMaster = true;
         reportMasterEvent(ZkMasterEvent.MASTER_TAKE_LEADERSHIP);
 

@@ -5,6 +5,7 @@ import org.flexlb.cache.match.theory.TheoryCacheKeyHistory;
 import org.flexlb.cache.telemetry.CacheMetricsReporter;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
+import org.flexlb.consistency.MasterElectService;
 import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.util.Logger;
@@ -48,6 +49,9 @@ public class TheoryCacheHitReporter {
     @Autowired
     private ConfigService configService;
 
+    @Autowired(required = false)
+    private MasterElectService masterElectService;
+
     private final AtomicLong droppedReportCount = new AtomicLong();
     private final ThreadPoolExecutor theoryHitReportExecutor = new ThreadPoolExecutor(
             1, 1, 0L, TimeUnit.MILLISECONDS, new ArrayBlockingQueue<>(THEORY_HIT_REPORT_QUEUE_CAPACITY), runnable -> {
@@ -83,16 +87,23 @@ public class TheoryCacheHitReporter {
     private void reportRequest(BalanceContext balanceContext) {
         FlexlbConfig config = configService.loadBalanceConfig();
         if (!config.getObservability().getCacheHit().getRecentKeyWindow().isWriteEnabled()) {
+            if (theoryCacheKeyHistory != null) { theoryCacheKeyHistory.reset(); }
             return;
         }
         Request request = balanceContext.getRequest();
         if (request == null || theoryCacheKeyHistory == null) {
             return;
         }
-        RecentCacheKeyWindow.Snapshot snapshot = theoryCacheKeyHistory.record(request.getBlockCacheKeys());
+        boolean clusterOwner = masterElectService != null
+                && masterElectService.isNeedConsistency() && masterElectService.isMaster();
+        long epoch = clusterOwner ? masterElectService.getLeadershipEpoch() : 0L;
+        RecentCacheKeyWindow.Snapshot snapshot = clusterOwner
+                ? theoryCacheKeyHistory.recordForLeader(epoch, request.getBlockCacheKeys())
+                : theoryCacheKeyHistory.record(request.getBlockCacheKeys());
         if (snapshot == null) {
             return;
         }
+
         long inputTokens = Math.max(0L, request.getSeqLen());
         long hitTokens = theoryHitTokens(snapshot.getRequestHitOccurrences(), inputTokens, request.getCacheKeyBlockSize());
         if (config.getObservability().getCacheHit().isRequestTraceLogEnabled()) {
@@ -104,7 +115,11 @@ public class TheoryCacheHitReporter {
         }
         if (cacheMetricsReporter != null && config.getObservability().getCacheHit().isMetricsEnabled()) {
             cacheMetricsReporter.reportTheoryCacheHitMetrics(hitTokens, inputTokens);
+            if (clusterOwner && masterElectService.isMaster() && masterElectService.getLeadershipEpoch() == epoch) {
+                cacheMetricsReporter.reportClusterRecentCacheKeyHitMetrics(snapshot, hitTokens, inputTokens);
+            }
         }
+
     }
 
     private static long theoryHitTokens(long hitKeyCount, long inputTokens, long cacheKeyBlockSize) {

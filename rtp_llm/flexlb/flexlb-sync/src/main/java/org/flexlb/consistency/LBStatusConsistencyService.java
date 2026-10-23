@@ -109,6 +109,11 @@ public class LBStatusConsistencyService implements MasterElectService {
     }
 
     @Override
+    public long getLeadershipEpoch() {
+        return zookeeperMasterElectService.getLeadershipEpoch();
+    }
+
+    @Override
     public void refreshMasterHost(boolean forceSync) {
         if (isNeedConsistency() && forceSync) {
             zookeeperMasterElectService.updateLatestMaster();

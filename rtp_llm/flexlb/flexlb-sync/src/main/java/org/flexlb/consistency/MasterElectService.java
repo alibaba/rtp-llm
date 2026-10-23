@@ -14,4 +14,7 @@ public interface MasterElectService {
     boolean isMaster();
 
     default void refreshMasterHost(boolean forceSync) { }
+    default long getLeadershipEpoch() {
+        return 0L;
+    }
 }

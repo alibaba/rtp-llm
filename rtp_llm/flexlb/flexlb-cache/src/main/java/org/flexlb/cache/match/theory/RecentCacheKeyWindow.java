@@ -3,6 +3,7 @@ package org.flexlb.cache.match.theory;
 import lombok.Getter;
 import lombok.extern.slf4j.Slf4j;
 
+import java.util.Arrays;
 import java.util.List;
 import java.util.Objects;
 import java.util.function.LongSupplier;
@@ -31,6 +32,8 @@ public class RecentCacheKeyWindow {
     private final int tableMask;
 
     private int uniqueSize;
+    private boolean historyStarted;
+    private long historyStartMs;
 
     RecentCacheKeyWindow(long timeWindowMs, long maxCacheKeys, LongSupplier nowSupplier) {
         if (timeWindowMs <= 0L) {
@@ -57,7 +60,12 @@ public class RecentCacheKeyWindow {
 
     public Snapshot record(List<Long> cacheKeys) {
         long nowMs = nowSupplier.getAsLong();
+        if (!historyStarted) {
+            historyStarted = true;
+            historyStartMs = nowMs;
+        }
         evictExpired(nowMs);
+        long historyCoverageMs = Math.min(timeWindowMs, Math.max(0L, nowMs - historyStartMs));
 
         long requestOccurrences = 0L;
         long requestHitOccurrences = 0L;
@@ -84,7 +92,13 @@ public class RecentCacheKeyWindow {
         if (log.isDebugEnabled()) {
             logRequest(nowMs, requestOccurrences, requestHitOccurrences);
         }
-        return new Snapshot(timeWindowMs, requestOccurrences, requestHitOccurrences);
+        return new Snapshot(timeWindowMs, requestOccurrences, requestHitOccurrences, historyCoverageMs);
+    }
+
+    public void reset() {
+        Arrays.fill(tableStates, EMPTY);
+        uniqueSize = 0;
+        historyStarted = false;
     }
 
     private void retainCacheKey(long cacheKey, long nowMs) {
@@ -95,6 +109,7 @@ public class RecentCacheKeyWindow {
             return;
         }
         if (uniqueSize == maxCacheKeys) {
+            historyStartMs = Math.max(historyStartMs, oldestTimestampMs());
             evictOldestCacheKey();
         }
         int newSlot = findEmptySlot(cacheKey);
@@ -258,11 +273,17 @@ public class RecentCacheKeyWindow {
         private final long timeWindowMs;
         private final long requestOccurrences;
         private final long requestHitOccurrences;
+        private final long historyCoverageMs;
 
-        Snapshot(long timeWindowMs, long requestOccurrences, long requestHitOccurrences) {
+        public boolean isHistoryComplete() {
+            return historyCoverageMs >= timeWindowMs;
+        }
+
+        Snapshot(long timeWindowMs, long requestOccurrences, long requestHitOccurrences, long historyCoverageMs) {
             this.timeWindowMs = timeWindowMs;
             this.requestOccurrences = requestOccurrences;
             this.requestHitOccurrences = requestHitOccurrences;
+            this.historyCoverageMs = historyCoverageMs;
         }
     }
 }

@@ -404,6 +404,11 @@ public class MetricConstant {
     public static final String CACHE_MATCH_STANDBY_FALLBACK_QPS =
             "app.cache.match.standby.fallback.qps";
 
+    public static final String CACHE_CLUSTER_RECENT_HIT_TOKENS = "app.cache.cluster.recent.hit.tokens";
+    public static final String CACHE_CLUSTER_RECENT_INPUT_TOKENS = "app.cache.cluster.recent.input.tokens";
+    public static final String CACHE_CLUSTER_RECENT_HISTORY_COVERAGE_MS = "app.cache.cluster.recent.history.coverage.ms";
+    public static final String CACHE_CLUSTER_RECENT_HISTORY_READY = "app.cache.cluster.recent.history.ready";
+
     /**
      * Theoretical cache-hit tokens reported as a counter.
      */

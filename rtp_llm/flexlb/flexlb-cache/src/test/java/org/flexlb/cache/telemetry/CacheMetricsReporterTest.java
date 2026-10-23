@@ -1,5 +1,9 @@
 package org.flexlb.cache.telemetry;
 
+import org.flexlb.cache.match.theory.RecentCacheKeyWindow;
+import static org.flexlb.constant.MetricConstant.*;
+import static org.mockito.Mockito.*;
+
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.enums.FlexMetricType;
@@ -82,6 +86,33 @@ class CacheMetricsReporterTest {
         reporter.reportLocalStandbyBlockSize(null, 4096L);
 
         verifyNoInteractions(monitor);
+    }
+
+    @Test
+    void should_not_publish_a_cluster_ratio_from_partial_history() {
+        RecentCacheKeyWindow.Snapshot snapshot = mock(RecentCacheKeyWindow.Snapshot.class);
+        when(snapshot.getTimeWindowMs()).thenReturn(1800000L);
+        when(snapshot.getHistoryCoverageMs()).thenReturn(1000L);
+        reporter.reportClusterRecentCacheKeyHitMetrics(snapshot, 0L, 216513L);
+        FlexMetricTags tags = FlexMetricTags.of("timeWindowMs", "1800000");
+        verify(monitor).report(CACHE_CLUSTER_RECENT_HISTORY_COVERAGE_MS, tags, 1000L);
+        verify(monitor).report(CACHE_CLUSTER_RECENT_HISTORY_READY, tags, 0L);
+        verifyNoMoreInteractions(monitor);
+    }
+
+    @Test
+    void should_report_additive_cluster_token_counts_including_cold_requests() {
+        RecentCacheKeyWindow.Snapshot snapshot = mock(RecentCacheKeyWindow.Snapshot.class);
+        when(snapshot.getTimeWindowMs()).thenReturn(1800000L);
+        when(snapshot.getHistoryCoverageMs()).thenReturn(1800000L);
+        when(snapshot.isHistoryComplete()).thenReturn(true);
+        reporter.reportClusterRecentCacheKeyHitMetrics(snapshot, 0L, 300L);
+        reporter.reportClusterRecentCacheKeyHitMetrics(snapshot, 216064L, 216513L);
+        FlexMetricTags tags = FlexMetricTags.of("timeWindowMs", "1800000");
+        verify(monitor).report(CACHE_CLUSTER_RECENT_HIT_TOKENS, tags, 0L);
+        verify(monitor).report(CACHE_CLUSTER_RECENT_INPUT_TOKENS, tags, 300L);
+        verify(monitor).report(CACHE_CLUSTER_RECENT_HIT_TOKENS, tags, 216064L);
+        verify(monitor).report(CACHE_CLUSTER_RECENT_INPUT_TOKENS, tags, 216513L);
     }
 
     @Test

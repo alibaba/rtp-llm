@@ -1,5 +1,10 @@
 package org.flexlb.service;
 
+import org.flexlb.cache.match.theory.RecentCacheKeyWindow;
+import org.flexlb.consistency.MasterElectService;
+import org.mockito.InOrder;
+import static org.mockito.Mockito.*;
+
 import org.flexlb.cache.match.theory.TheoryCacheKeyHistory;
 import org.flexlb.cache.telemetry.CacheMetricsReporter;
 import org.flexlb.config.ConfigService;
@@ -70,6 +75,85 @@ class TheoryCacheHitReporterTest {
 
     @Mock
     private CacheMetricsReporter cacheMetricsReporter;
+
+    @Test
+    void should_share_cluster_history_across_requests_and_reset_after_leader_change() throws Exception {
+        TheoryCacheHitReporter reporter = newReporter();
+        inject(reporter, "theoryCacheKeyHistory", smallWindow());
+        inject(reporter, "cacheMetricsReporter", cacheMetricsReporter);
+        MasterElectService election = mock(MasterElectService.class);
+        inject(reporter, "masterElectService", election);
+        when(election.isNeedConsistency()).thenReturn(true);
+        when(election.isMaster()).thenReturn(true);
+        when(election.getLeadershipEpoch()).thenReturn(1L);
+        reportWithConfiguration(reporter, context(new FlexlbConfig(), List.of(1L, 2L), 1024L, 512L));
+        awaitReports(reporter);
+        reportWithConfiguration(reporter, context(new FlexlbConfig(), List.of(1L, 2L), 1024L, 512L));
+        awaitReports(reporter);
+        when(election.getLeadershipEpoch()).thenReturn(2L);
+        reportWithConfiguration(reporter, context(new FlexlbConfig(), List.of(1L, 2L), 1024L, 512L));
+        awaitReports(reporter);
+        InOrder order = inOrder(cacheMetricsReporter);
+        order.verify(cacheMetricsReporter).reportClusterRecentCacheKeyHitMetrics(
+                org.mockito.ArgumentMatchers.any(RecentCacheKeyWindow.Snapshot.class),
+                org.mockito.ArgumentMatchers.eq(0L), org.mockito.ArgumentMatchers.eq(1024L));
+        order.verify(cacheMetricsReporter).reportClusterRecentCacheKeyHitMetrics(
+                org.mockito.ArgumentMatchers.any(RecentCacheKeyWindow.Snapshot.class),
+                org.mockito.ArgumentMatchers.eq(1024L), org.mockito.ArgumentMatchers.eq(1024L));
+        order.verify(cacheMetricsReporter).reportClusterRecentCacheKeyHitMetrics(
+                org.mockito.ArgumentMatchers.any(RecentCacheKeyWindow.Snapshot.class),
+                org.mockito.ArgumentMatchers.eq(0L), org.mockito.ArgumentMatchers.eq(1024L));
+    }
+
+    @Test
+    void should_not_label_follower_or_standalone_history_as_cluster_history() throws Exception {
+        TheoryCacheHitReporter reporter = newReporter();
+        inject(reporter, "theoryCacheKeyHistory", smallWindow());
+        inject(reporter, "cacheMetricsReporter", cacheMetricsReporter);
+        MasterElectService election = mock(MasterElectService.class);
+        inject(reporter, "masterElectService", election);
+        reportWithConfiguration(reporter, context(new FlexlbConfig(), List.of(1L)));
+        awaitReports(reporter);
+        when(election.isNeedConsistency()).thenReturn(true);
+        when(election.isMaster()).thenReturn(false);
+        reportWithConfiguration(reporter, context(new FlexlbConfig(), List.of(1L)));
+        awaitReports(reporter);
+        verify(cacheMetricsReporter, never()).reportClusterRecentCacheKeyHitMetrics(
+                org.mockito.ArgumentMatchers.any(RecentCacheKeyWindow.Snapshot.class),
+                org.mockito.ArgumentMatchers.anyLong(), org.mockito.ArgumentMatchers.anyLong());
+    }
+
+    @Test
+    void should_suppress_cluster_publication_when_leadership_changes_during_record() throws Exception {
+        TheoryCacheHitReporter reporter = newReporter();
+        inject(reporter, "theoryCacheKeyHistory", smallWindow());
+        inject(reporter, "cacheMetricsReporter", cacheMetricsReporter);
+        MasterElectService election = mock(MasterElectService.class);
+        inject(reporter, "masterElectService", election);
+        when(election.isNeedConsistency()).thenReturn(true);
+        when(election.isMaster()).thenReturn(true, false);
+        reportWithConfiguration(reporter, context(new FlexlbConfig(), List.of(1L)));
+        awaitReports(reporter);
+        verify(cacheMetricsReporter, never()).reportClusterRecentCacheKeyHitMetrics(
+                org.mockito.ArgumentMatchers.any(RecentCacheKeyWindow.Snapshot.class),
+                org.mockito.ArgumentMatchers.anyLong(), org.mockito.ArgumentMatchers.anyLong());
+    }
+
+    @Test
+    void should_drop_history_when_recording_is_disabled() throws Exception {
+        TheoryCacheHitReporter reporter = newReporter();
+        inject(reporter, "theoryCacheKeyHistory", smallWindow());
+        inject(reporter, "cacheMetricsReporter", cacheMetricsReporter);
+        reportWithConfiguration(reporter, context(new FlexlbConfig(), List.of(1L)));
+        awaitReports(reporter);
+        FlexlbConfig disabled = new FlexlbConfig();
+        disabled.getObservability().getCacheHit().getRecentKeyWindow().setWriteEnabled(false);
+        reportWithConfiguration(reporter, contextWithConfig(disabled));
+        awaitReports(reporter);
+        reportWithConfiguration(reporter, context(new FlexlbConfig(), List.of(1L)));
+        awaitReports(reporter);
+        verify(cacheMetricsReporter, org.mockito.Mockito.times(2)).reportTheoryCacheHitMetrics(0L, 1024L);
+    }
 
     @Test
     void should_report_request_hits_against_prior_pool() throws Exception {

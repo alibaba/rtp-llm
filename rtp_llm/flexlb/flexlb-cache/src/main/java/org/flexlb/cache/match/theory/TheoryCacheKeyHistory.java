@@ -22,6 +22,7 @@ public class TheoryCacheKeyHistory {
     private final long historyDurationMs;
     private final long configuredMaxKeyOccurrences;
     private RecentCacheKeyWindow historyWindow;
+    private long leadershipEpoch = Long.MIN_VALUE;
 
     public TheoryCacheKeyHistory(ConfigService configService, WorkerStatusProvider workerStatusProvider) {
         this.workerStatusProvider = workerStatusProvider;
@@ -44,6 +45,19 @@ public class TheoryCacheKeyHistory {
                     historyDurationMs, estimatedHistoryCapacity.getAsLong(), System::currentTimeMillis);
         }
         return historyWindow.record(cacheKeys);
+    }
+
+    public RecentCacheKeyWindow.Snapshot recordForLeader(long epoch, List<Long> cacheKeys) {
+        if (leadershipEpoch != epoch) {
+            reset();
+            leadershipEpoch = epoch;
+        }
+        return record(cacheKeys);
+    }
+
+    public void reset() {
+        if (historyWindow != null) { historyWindow.reset(); }
+        leadershipEpoch = Long.MIN_VALUE;
     }
 
     private OptionalLong estimateHistoryCapacity() {

@@ -22,6 +22,16 @@ import static org.mockito.Mockito.when;
 class TheoryCacheKeyHistoryTest {
 
     @Test
+    void leaderChangeResetsSharedHistory() throws Exception {
+        TheoryCacheKeyHistory history = historyWithWindow(1000L, 10L, () -> 0L);
+        assertEquals(0L, history.recordForLeader(1L, List.of(1L)).getRequestHitOccurrences());
+        assertEquals(1L, history.recordForLeader(1L, List.of(1L)).getRequestHitOccurrences());
+        assertEquals(0L, history.recordForLeader(2L, List.of(1L)).getRequestHitOccurrences());
+        history.reset();
+        assertEquals(0L, history.recordForLeader(2L, List.of(1L)).getRequestHitOccurrences());
+    }
+
+    @Test
     void should_limit_history_to_ten_times_prefill_block_capacity() {
         FlexlbConfig config = new FlexlbConfig();
         config.getObservability().getCacheHit().getRecentKeyWindow().setMaxKeyOccurrences(100L);
