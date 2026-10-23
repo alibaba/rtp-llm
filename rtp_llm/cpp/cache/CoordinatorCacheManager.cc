@@ -541,7 +541,41 @@ MallocResult CoordinatorCacheManager::initMallocForCommonLen(const MallocInfo& m
     prepared.referenced_blocks.resize(kv_cache_groups_.size());
     std::shared_ptr<LoadAsyncContext> load_context;
 
-    if (malloc_info.enable_cache_lookup) {
+    if (malloc_info.prefix_checkpoint) {
+        const auto& lease = *malloc_info.prefix_checkpoint;
+        const size_t count = lease.boundary_tokens_ / seqSizePerBlock();
+        if (lease.owner_ != this || !validatePrefixCheckpointBoundary(lease.boundary_tokens_).ok()
+            || kv_resource->batchSize() != 1 || !malloc_info.reuse_cache
+            || malloc_info.pd_decode_linear_tail_only || seq_len <= lease.boundary_tokens_
+            || (malloc_info.cache_lookup_token_limit >= 0
+                && malloc_info.cache_lookup_token_limit < lease.boundary_tokens_)
+            || cache_keys.size() < count
+            || !std::equal(lease.resource_->cacheKeys().begin(), lease.resource_->cacheKeys().end(), cache_keys.begin())) {
+            MallocResult invalid{false, 0};
+            invalid.status = MallocStatus::INTERNAL_ERROR;
+            return invalid;
+        }
+        prepared.matched_device_blocks = count;
+        prepared.total_logical_blocks = count;
+        for (size_t i = 0; i < kv_cache_groups_.size(); ++i) {
+            const auto& tag = config_.groupTags()[i];
+            const auto& blocks = lease.resource_->blocks(tag);
+            kv_resource->mutableBlockIds(0, tag).assign(blocks);
+            for (auto block : blocks) {
+                if (!isNullBlockIdx(block) && block > 0) {
+                    prepared.referenced_blocks[i].push_back(block);
+                }
+            }
+            kv_cache_groups_[i]->reference(prepared.referenced_blocks[i]);
+            prepared.original_sizes.push_back(blocks.size());
+            // Earlier LINEAR history is deliberately absent, including when
+            // optional automatic reclaim is disabled for ordinary requests.
+            if (config_.group(tag).policy.group_type == CacheGroupType::LINEAR) {
+                kv_resource->mutableBlockIds(0, tag).setReclaimedPrefixBlocks(count - 1);
+            }
+        }
+        kv_resource->cacheResource(0).setDeviceReuseBlockNum(count);
+    } else if (malloc_info.enable_cache_lookup) {
         CacheKeysType match_keys = cpCanonicalCacheKeys(cp_mapper, cache_keys);
         match_keys.resize(std::min(
             match_keys.size(), maxReusableMatchKeys(seq_len, reuse_unit_tokens, malloc_info.cache_lookup_token_limit)));
@@ -1098,6 +1132,111 @@ void CoordinatorCacheManager::insertIntoCache(const InsertInfo& insert_info, siz
             block_tree_cache_->insert(insert_keys, resources, insert_info.target_tier);
         }
     }
+}
+
+absl::Status CoordinatorCacheManager::validatePrefixCheckpointBoundary(int boundary) const {
+    if (boundary <= 0 || seqSizePerBlock() <= 0 || boundary % seqSizePerBlock() != 0) {
+        return absl::InvalidArgumentError("checkpoint requires a positive complete-block boundary");
+    }
+    if (allocation_type_ != AllocationType::DEVICE || role_type_ != RoleType::PDFUSION
+        || (cp_slot_mapper_ && cp_slot_mapper_->isSharded())) {
+        return absl::InvalidArgumentError("checkpoint requires unsharded PDFUSION device allocation");
+    }
+    for (const auto& group : config_.topology().groups()) {
+        if (group.policy.group_type != CacheGroupType::FULL && group.policy.group_type != CacheGroupType::LINEAR) {
+            return absl::InvalidArgumentError("checkpoint supports FULL and LINEAR cache groups only");
+        }
+        if (group.seqSizePerBlock() != static_cast<size_t>(seqSizePerBlock())
+            || group.cacheKeyTokenStride() != static_cast<size_t>(seqSizePerBlock())) {
+            return absl::InvalidArgumentError("checkpoint requires uniform physical/key block strides");
+        }
+    }
+    return absl::OkStatus();
+}
+
+absl::StatusOr<PrefixCheckpointLeasePtr>
+CoordinatorCacheManager::capturePrefixCheckpoint(const KVCacheResource& resource, int boundary) {
+    std::lock_guard<std::mutex> lock(malloc_mutex_);
+    return capturePrefixCheckpointLocked(resource, boundary);
+}
+
+absl::StatusOr<PrefixCheckpointLeasePtr>
+CoordinatorCacheManager::capturePrefixCheckpointLocked(const KVCacheResource& resource, int boundary) {
+    auto status = validatePrefixCheckpointBoundary(boundary);
+    if (!status.ok()) {
+        return status;
+    }
+    const size_t count = boundary / seqSizePerBlock();
+    if (resource.cacheKeys().size() < count || resource.groupNums() != config_.groupNums()) {
+        return absl::FailedPreconditionError("incomplete checkpoint keys or cache groups");
+    }
+    KVCacheResource snapshot;
+    snapshot.initGroups(config_.topologyPtr());
+    snapshot.setCacheKeys(CacheKeysType(resource.cacheKeys().begin(), resource.cacheKeys().begin() + count));
+    snapshot.setLastBlockAligned(true);
+    const auto source_tags = resource.groupTags();
+    for (size_t i = 0; i < kv_cache_groups_.size(); ++i) {
+        const auto& group = config_.topology().groups()[i];
+        if (std::find(source_tags.begin(), source_tags.end(), group.tag) == source_tags.end()) {
+            return absl::FailedPreconditionError("checkpoint group identity mismatch");
+        }
+        const auto& source = resource.blocks(group.tag);
+        if (source.size() < count) {
+            return absl::FailedPreconditionError("checkpoint boundary has no state slot");
+        }
+        BlockIndicesType selected(count, NULL_BLOCK_IDX);
+        const size_t first = group.policy.group_type == CacheGroupType::LINEAR ? count - 1 : 0;
+        for (size_t pos = first; pos < count; ++pos) {
+            const auto block = source[pos];
+            if (isNullBlockIdx(block) || block <= 0 || static_cast<size_t>(block) > group_block_pools_[i]->totalBlocksNum()
+                || group_block_pools_[i]->refCount(block) == 0) {
+                return absl::FailedPreconditionError("checkpoint contains a missing required group block");
+            }
+            selected[pos] = block;
+        }
+        snapshot.mutableBlockIds(group.tag).assign(std::move(selected));
+    }
+    auto retained = incrKVCacheRef(snapshot, snapshot.cacheKeys(), false);
+    if (!retained) {
+        return absl::InternalError("checkpoint retain produced no resource");
+    }
+    return PrefixCheckpointLeasePtr(new PrefixCheckpointLease(boundary, this, std::move(retained)));
+}
+
+absl::StatusOr<PrefixCheckpointLeasePtr>
+CoordinatorCacheManager::tryAcquirePrefixCheckpoint(const CacheKeysType& keys, int boundary) {
+    std::lock_guard<std::mutex> lock(malloc_mutex_);
+    auto status = validatePrefixCheckpointBoundary(boundary);
+    if (!status.ok()) {
+        return status;
+    }
+    const size_t count = boundary / seqSizePerBlock();
+    if (keys.size() < count) {
+        return absl::InvalidArgumentError("checkpoint lookup has insufficient keys");
+    }
+    if (!block_tree_cache_) {
+        return PrefixCheckpointLeasePtr{};
+    }
+    BatchKVCacheResource resource;
+    resource.resetBatchSize(1);
+    resource.initGroups(config_.topologyPtr());
+    CacheKeysType prefix(keys.begin(), keys.begin() + count);
+    resource.setBatchCacheKeys(0, prefix);
+    PreparedKVCache prepared;
+    prepared.referenced_blocks.resize(kv_cache_groups_.size());
+    auto context = prepareKVCache(prefix, resource, cp_slot_mapper_, prepared, false);
+    // No lower-tier I/O in the request-owned fast path. Abort any prepared load;
+    // ordinary producer admission may use the usual asynchronous load path.
+    absl::StatusOr<PrefixCheckpointLeasePtr> result = PrefixCheckpointLeasePtr{};
+    if (!context && prepared.matched_device_blocks == count) {
+        result = capturePrefixCheckpointLocked(resource.cacheResource(0), boundary);
+    }
+    if (context) {
+        context->abortPending();
+        context.reset();
+    }
+    rollbackInitMalloc(resource, prepared.referenced_blocks, prepared.original_sizes);
+    return result;
 }
 
 std::shared_ptr<KVCacheResource> CoordinatorCacheManager::incrKVCacheRef(const KVCacheResource& kvcache_resource,

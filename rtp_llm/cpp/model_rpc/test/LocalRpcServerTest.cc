@@ -565,6 +565,49 @@ TEST(LocalRpcServerTest, GenerateStreamCallQueryConversionFailureUsesInvalidArgu
     EXPECT_THAT(error_details.error_message(), HasSubstr("max_new_tokens"));
 }
 
+TEST(LocalRpcServerTest, SharedPrefixProtocolCannotSilentlyUseLegacyBatch) {
+    TestLocalRpcServer   server;
+    BatchGenerateInputPB request;
+    request.add_inputs()->add_token_ids(1);
+    auto* options = request.mutable_shared_prefix();
+    options->set_protocol_version(1);
+    options->set_state_token_length(64);
+    options->set_parent_request_id("parent");
+    grpc::ServerContext    context;
+    BatchGenerateOutputsPB response;
+    EXPECT_EQ(server.BatchGenerateCall(&context, &request, &response).error_code(), grpc::StatusCode::INVALID_ARGUMENT);
+    options->set_protocol_version(2);
+    EXPECT_EQ(server.SharedPrefixGenerateCall(&context, &request, &response).error_code(),
+              grpc::StatusCode::INVALID_ARGUMENT);
+    options->set_protocol_version(1);
+    options->set_state_token_length(0);
+    EXPECT_EQ(server.SharedPrefixGenerateCall(&context, &request, &response).error_code(),
+              grpc::StatusCode::INVALID_ARGUMENT);
+    EXPECT_EQ(server.SharedPrefixGenerateCall(&context, nullptr, &response).error_code(),
+              grpc::StatusCode::INVALID_ARGUMENT);
+}
+
+TEST(LocalRpcServerTest, SharedPrefixAcknowledgesProtocolOnCancellationBeforeEnqueue) {
+    TestLocalRpcServer server;
+    server.cancelled.store(true);
+    BatchGenerateInputPB request;
+    for (int i = 0; i < 3; ++i) {
+        request.add_inputs()->add_token_ids(1);
+    }
+    auto* options = request.mutable_shared_prefix();
+    options->set_protocol_version(1);
+    options->set_state_token_length(64);
+    options->set_parent_request_id("parent");
+    grpc::ServerContext context;
+    BatchGenerateOutputsPB response;
+    EXPECT_TRUE(server.SharedPrefixGenerateCall(&context, &request, &response).ok());
+    EXPECT_EQ(response.shared_prefix_protocol_version(), 1);
+    ASSERT_EQ(response.results_size(), 3);
+    for (const auto& result : response.results()) {
+        EXPECT_EQ(result.error_info().error_code(), ErrorCodePB::CANCELLED);
+    }
+}
+
 TEST(LocalRpcServerTest, BatchGenerateCallSerializesUnexpectedEngineExceptions) {
     for (const auto mode : {EngineFailureMode::THROW_STD_EXCEPTION, EngineFailureMode::THROW_UNKNOWN_EXCEPTION}) {
         TestLocalRpcServer server;

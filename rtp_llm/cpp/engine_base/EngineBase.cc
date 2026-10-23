@@ -19,6 +19,12 @@ EngineBase::enqueueMultiple(const std::vector<std::shared_ptr<GenerateInput>>& i
     throw std::runtime_error("not implemeted");
 }
 
+std::pair<std::vector<bool>, std::vector<GenerateStreamPtr>> EngineBase::enqueueSharedPrefix(
+    const std::vector<std::shared_ptr<GenerateInput>>& inputs, int state_token_length,
+    const std::string& parent_request_id) {
+    throw std::invalid_argument("shared-prefix requests are unsupported by this engine");
+}
+
 std::shared_ptr<GenerateStream> EngineBase::makeStream(const std::shared_ptr<GenerateInput>& input) {
     throw std::runtime_error("not implemeted");
 }

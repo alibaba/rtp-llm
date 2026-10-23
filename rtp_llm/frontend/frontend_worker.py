@@ -132,6 +132,7 @@ class FrontendWorker:
         self.kev_config = load_kev_config(model_config.ckpt_path)
         self.kev_max_row_tokens = model_config.max_seq_len
         self.kev_reuse_cache = bool(py_env_configs.kv_cache_config.reuse_cache)
+        self.kev_shared_prefix = os.environ.get("KEV_SHARED_PREFIX", "0") == "1"
         self.kev_tokens_per_block = model_config.attn_config.tokens_per_block
 
         from rtp_llm.frontend.jev import JevExecutor, JevHeadSpec
@@ -340,34 +341,53 @@ class FrontendWorker:
             and len(rows) > 1
         )
         routing_key = uuid.uuid4().int & ((1 << 63) - 1)
+        all_inputs = [
+            GenerateInput(
+                request_id=uuid.uuid4().int & ((1 << 63) - 1),
+                token_ids=torch.tensor(row, dtype=torch.int32),
+                mm_inputs=[],
+                generate_config=GenerateConfig(max_new_tokens=0, is_streaming=False),
+                tokenizer=self.tokenizer,
+                headers=dict(headers or {}),
+            )
+            for row in rows
+        ]
+        shared_outputs = None
+        if getattr(self, "kev_shared_prefix", False) and self.kev_reuse_cache:
+            from rtp_llm.cpp.model_rpc.model_rpc_client import SharedPrefixUnsupported
+
+            try:
+                shared_outputs = (
+                    await self.backend_rpc_server_visitor.shared_prefix_batch_enqueue(
+                        all_inputs, state_tokens=state_tokens, routing_key=routing_key
+                    )
+                )
+            except SharedPrefixUnsupported:
+                # UNIMPLEMENTED is guaranteed to precede enqueue on this RPC.
+                # Never retry errors or missing acknowledgements after execution.
+                logging.warning(
+                    "Selected backend lacks shared-prefix RPC; using legacy Kev submission"
+                )
         results = []
-        # Complete the first row before its siblings so the backend can publish
-        # reusable state blocks. Every RPC still carries the complete row, and
-        # all batches use the same backend without sharing request IDs.
         start = 0
         while start < len(rows):
-            end, tokens = start, 0
-            limit = 1 if warm_prefix and start == 0 else len(rows)
-            while end < limit and (end == start or tokens + len(rows[end]) <= 16384):
-                tokens += len(rows[end])
-                end += 1
-            inputs = [
-                GenerateInput(
-                    # Each row needs a distinct int64 ID, including across
-                    # concurrently arriving multi-question requests.
-                    request_id=uuid.uuid4().int & ((1 << 63) - 1),
-                    token_ids=torch.tensor(row, dtype=torch.int32),
-                    mm_inputs=[],
-                    generate_config=GenerateConfig(
-                        max_new_tokens=0, is_streaming=False
-                    ),
-                    tokenizer=self.tokenizer,
-                    headers=dict(headers or {}),
+            if shared_outputs is not None:
+                end = len(rows)
+            else:
+                end, tokens = start, 0
+                limit = 1 if warm_prefix and start == 0 else len(rows)
+                while end < limit and (
+                    end == start or tokens + len(rows[end]) <= 16384
+                ):
+                    tokens += len(rows[end])
+                    end += 1
+            inputs = all_inputs[start:end]
+            outputs = (
+                shared_outputs
+                if shared_outputs is not None
+                else await self.backend_rpc_server_visitor.batch_enqueue(
+                    inputs, routing_key=routing_key
                 )
-                for row in rows[start:end]
-            ]
-            outputs = await self.backend_rpc_server_visitor.batch_enqueue(
-                inputs, routing_key=routing_key
             )
             if len(outputs) != len(inputs):
                 raise RuntimeError("Kev backend returned an incorrect row count")

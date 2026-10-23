@@ -52,6 +52,15 @@ public:
                                            const BatchGenerateInputPB* request,
                                            BatchGenerateOutputsPB*     response);
 
+    virtual grpc::Status SharedPrefixGenerateCall(grpc::ServerContext*        context,
+                                                  const BatchGenerateInputPB* request,
+                                                  BatchGenerateOutputsPB*     response);
+
+    grpc::Status batchGenerateImpl(grpc::ServerContext*        context,
+                                   const BatchGenerateInputPB* request,
+                                   BatchGenerateOutputsPB*     response,
+                                   bool                        shared_prefix);
+
     grpc::Status CheckHealth(grpc::ServerContext* context, const EmptyPB* request, CheckHealthResponsePB* response);
 
     grpc::Status UpdateWeights(grpc::ServerContext* context, const UpdateWeightsRequestPB* request, EmptyPB* response);

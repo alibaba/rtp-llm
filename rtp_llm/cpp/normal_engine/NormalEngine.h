@@ -29,6 +29,9 @@ public:
     std::shared_ptr<GenerateStream> enqueue(const std::shared_ptr<GenerateInput>& input) override;
     std::pair<std::vector<bool>, std::vector<GenerateStreamPtr>>
          enqueueMultiple(const std::vector<std::shared_ptr<GenerateInput>>& inputs) override;
+    std::pair<std::vector<bool>, std::vector<GenerateStreamPtr>> enqueueSharedPrefix(
+        const std::vector<std::shared_ptr<GenerateInput>>& inputs,
+        int state_token_length, const std::string& parent_request_id) override;
     void enqueue(std::shared_ptr<GenerateStream>& stream) override;
     absl::StatusOr<GenerateStreamPtr> preRun(const std::shared_ptr<GenerateInput>& generate_input,
                                              preRunMode                            mode) override;
@@ -87,6 +90,7 @@ private:
     py::object                                    custom_output_selector_;
     py::object                                    custom_output_prefix_selector_;
     bool                                          custom_output_prefill_only_ = false;
+    bool                                          shared_prefix_supported_ = false;
     ParallelismConfig                             parallelism_config;
     RuntimeConfig                                 runtime_config;
     EPLBConfig                                    eplb_config;

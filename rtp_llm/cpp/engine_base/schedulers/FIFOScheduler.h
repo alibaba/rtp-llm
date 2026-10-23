@@ -3,6 +3,7 @@
 #include <atomic>
 #include <cstddef>
 #include <list>
+#include "rtp_llm/cpp/engine_base/schedulers/SharedPrefixRequest.h"
 
 #include "rtp_llm/cpp/cache/KVCacheManager.h"
 #include "rtp_llm/cpp/engine_base/stream/GenerateTypes.h"
@@ -32,6 +33,9 @@ public:
     enqueueGroup(const std::vector<GenerateStreamPtr>& streams) override;
 
     absl::StatusOr<std::list<GenerateStreamPtr>> schedule() override;
+    std::pair<std::vector<bool>, std::vector<GenerateStreamPtr>> enqueueSharedPrefix(
+        const std::vector<GenerateStreamPtr>& streams, int boundary, const std::string& parent_id);
+
 
 public:
     // for test. Group-aware shadow of the FIFOSchedulerBase helper so that
@@ -115,6 +119,13 @@ private:
     // Explicit request groups (enqueueGroup). Each group is admitted as a whole
     // to an isolated execution boundary; a partially admitted group keeps its
     // residual members at the queue head.
+    int64_t sharedPrefixWaitingCount() const;
+    bool canStartSharedPrefix() const;
+    void scheduleSharedPrefix();
+    void pollSharedPrefixProducer();
+    std::list<std::shared_ptr<SharedPrefixRequest>> shared_prefix_queue_;
+    std::shared_ptr<SharedPrefixRequest> active_shared_prefix_;
+    bool yield_shared_prefix_lane_ = false;
     StreamGroupQueue waiting_group_queue_;
     StreamGroupQueue loading_cache_group_queue_;
 

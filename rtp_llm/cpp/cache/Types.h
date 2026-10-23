@@ -16,6 +16,25 @@
 namespace rtp_llm {
 
 class AsyncContext;
+class CoordinatorCacheManager;
+
+// A request-owned, immutable view of completed, block-aligned device state.
+// The retained resource has an allocator-owned deleter; copying this handle
+// shares ownership, never a writable branch block table.
+class PrefixCheckpointLease final {
+public:
+    int boundaryTokens() const { return boundary_tokens_; }
+
+private:
+    friend class CoordinatorCacheManager;
+    PrefixCheckpointLease(int boundary, const CoordinatorCacheManager* owner,
+                          std::shared_ptr<KVCacheResource> resource):
+        boundary_tokens_(boundary), owner_(owner), resource_(std::move(resource)) {}
+    int boundary_tokens_;
+    const CoordinatorCacheManager* owner_;
+    std::shared_ptr<KVCacheResource> resource_;
+};
+using PrefixCheckpointLeasePtr = std::shared_ptr<const PrefixCheckpointLease>;
 
 class CompleteTokenIds;
 using CompleteTokenIdsPtr = std::shared_ptr<CompleteTokenIds>;
@@ -93,6 +112,9 @@ struct MallocInfo {
     // -1 keeps the ordinary unlimited lookup policy; non-negative values cap
     // lookup to complete cache blocks without changing allocation length.
     int64_t cache_lookup_token_limit = -1;
+    // Initial allocation only. Bypasses the public cache tree; the allocator
+    // validates identity/keys and gives the branch its own physical references.
+    PrefixCheckpointLeasePtr prefix_checkpoint;
 
     int incrSeqLen() const;
 };

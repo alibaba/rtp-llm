@@ -41,6 +41,12 @@ public:
         return local_server_->BatchGenerateCall(context, request, response);
     }
 
+    grpc::Status SharedPrefixGenerateCall(grpc::ServerContext*        context,
+                                          const BatchGenerateInputPB* request,
+                                          BatchGenerateOutputsPB*     response) override {
+        return local_server_->SharedPrefixGenerateCall(context, request, response);
+    }
+
     grpc::Status EnqueueBatch(grpc::ServerContext*         context,
                               const EnqueueBatchRequestPB* request,
                               EnqueueBatchResponsePB*      response) override {

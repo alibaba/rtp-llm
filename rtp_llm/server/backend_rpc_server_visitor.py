@@ -1073,6 +1073,25 @@ class BackendRPCServerVisitor:
             inputs, routing_key=routing_key
         )
 
+    @torch.inference_mode()
+    async def shared_prefix_batch_enqueue(
+        self, inputs: list[GenerateInput], *, state_tokens: int, routing_key: int
+    ) -> list[GenerateOutputs]:
+        for input in inputs:
+            self.fill_request_info(input)
+            input.generate_config.validate()
+            self._validate_input(input)
+            self.check_sp_supported(input)
+            self.check_prefill_cp_supported(input)
+
+        if self.host_service.service_available:
+            for input in inputs:
+                await self.route_ips(input)
+
+        return await self.model_rpc_client.batch_generate(
+            inputs, routing_key=routing_key, shared_prefix_state_tokens=state_tokens
+        )
+
     def is_backend_service_ready(self, refresh: bool = False) -> bool:
         roles: List[RoleAddr] = self.host_service.get_backend_role_addrs(
             self.backend_role_list, refresh

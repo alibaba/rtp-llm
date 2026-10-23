@@ -13,6 +13,7 @@
 #include "rtp_llm/cpp/utils/TorchCudaOom.h"
 #include "rtp_llm/cpp/normal_engine/NormalEngine.h"
 #include "rtp_llm/cpp/model_rpc/LocalRpcServer.h"
+#include <climits>
 #include "rtp_llm/cpp/multimodal_processor/MMProcessorConfig.h"
 #include "rtp_llm/cpp/model_rpc/QueryConverter.h"
 #include "rtp_llm/cpp/model_rpc/proto/model_rpc_service.pb.h"
@@ -508,6 +509,33 @@ grpc::Status LocalRpcServer::GenerateStreamCall(grpc::ServerContext*            
 grpc::Status LocalRpcServer::BatchGenerateCall(grpc::ServerContext*        context,
                                                const BatchGenerateInputPB* request,
                                                BatchGenerateOutputsPB*     response) {
+    if (request && request->has_shared_prefix()) {
+        return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT,
+                            "shared-prefix options require SharedPrefixGenerateCall");
+    }
+    return batchGenerateImpl(context, request, response, false);
+}
+
+grpc::Status LocalRpcServer::SharedPrefixGenerateCall(grpc::ServerContext*        context,
+                                                      const BatchGenerateInputPB* request,
+                                                      BatchGenerateOutputsPB*     response) {
+    // Never return UNIMPLEMENTED here: only an absent method on an old server
+    // permits a client to fall back. All execution failures are terminal.
+    if (!request || !response || !request->has_shared_prefix() || request->shared_prefix().protocol_version() != 1
+        || request->shared_prefix().state_token_length() == 0 || request->shared_prefix().state_token_length() > INT_MAX
+        || request->shared_prefix().parent_request_id().empty()
+        || request->shared_prefix().parent_request_id().size() > 128 || request->inputs_size() < 1
+        || request->inputs_size() > 64) {
+        return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "invalid shared-prefix v1 request");
+    }
+    response->set_shared_prefix_protocol_version(1);
+    return batchGenerateImpl(context, request, response, true);
+}
+
+grpc::Status LocalRpcServer::batchGenerateImpl(grpc::ServerContext*        context,
+                                               const BatchGenerateInputPB* request,
+                                               BatchGenerateOutputsPB*     response,
+                                               bool                        shared_prefix) {
     std::vector<GenerateStreamPtr> streams;
     BatchStreamCleanupGuard        stream_cleanup_guard(streams);
 
@@ -521,7 +549,7 @@ grpc::Status LocalRpcServer::BatchGenerateCall(grpc::ServerContext*        conte
                 ErrorInfo(ErrorCode::INVALID_PARAMS, "batch generate request and response must not be null"));
         }
         const int batch_size = request->inputs_size();
-        RTP_LLM_LOG_INFO("receive batch generate request, batch_size=%d", batch_size);
+        RTP_LLM_LOG_INFO("receive batch generate request, batch_size=%d, shared_prefix=%d", batch_size, shared_prefix);
         if (batch_size == 0) {
             return grpc::Status::OK;
         }
@@ -593,7 +621,11 @@ grpc::Status LocalRpcServer::BatchGenerateCall(grpc::ServerContext*        conte
         if (stop_cancelled_batch()) {
             return grpc::Status::OK;
         }
-        const auto  enqueue_result    = engine_->enqueueMultiple(inputs);
+        const auto  enqueue_result    = shared_prefix ?
+                                            engine_->enqueueSharedPrefix(inputs,
+                                                                         request->shared_prefix().state_token_length(),
+                                                                         request->shared_prefix().parent_request_id()) :
+                                            engine_->enqueueMultiple(inputs);
         const auto& enqueue_successes = enqueue_result.first;
         streams                       = enqueue_result.second;
         if (enqueue_successes.size() != inputs.size() || streams.size() != inputs.size()) {
@@ -1076,9 +1108,9 @@ grpc::Status LocalRpcServer::executeAdmittedTorchAllocatorDump(const TorchAlloca
 
     std::vector<TorchAllocatorDumpRequestPB> requests(tp_broadcaster_->workerNum(), request);
     auto                                     rpc_call = [](const std::shared_ptr<RpcService::Stub>&    stub,
-                       const std::shared_ptr<grpc::ClientContext>& context,
-                       const TorchAllocatorDumpRequestPB&          internal_request,
-                       grpc::CompletionQueue*                      completion_queue) {
+                                                           const std::shared_ptr<grpc::ClientContext>& context,
+                                                           const TorchAllocatorDumpRequestPB&          internal_request,
+                                                           grpc::CompletionQueue*                      completion_queue) {
         return stub->AsyncDumpTorchAllocatorInternal(context.get(), internal_request, completion_queue);
     };
     auto broadcast_result = tp_broadcaster_->broadcast<TorchAllocatorDumpRequestPB, TorchAllocatorDumpResultPB>(

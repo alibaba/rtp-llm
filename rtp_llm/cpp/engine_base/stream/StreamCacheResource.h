@@ -36,6 +36,15 @@ public:
     bool                 hasCacheKeys() const;
     const CacheKeysType& cacheKeys(int32_t batch_id) const;
     absl::Status         initKVBlock();
+    absl::StatusOr<PrefixCheckpointLeasePtr> tryAcquirePrefixCheckpoint(int boundary);
+    void setPrefixCheckpoint(PrefixCheckpointLeasePtr checkpoint) {
+        prefix_checkpoint_ = std::move(checkpoint);
+    }
+    absl::StatusOr<PrefixCheckpointLeasePtr> capturePrefixCheckpoint(int boundary) {
+        return resource_context_.cache_manager->capturePrefixCheckpoint(
+            batch_kv_cache_resource_->cacheResource(0), boundary);
+    }
+
     absl::Status         waitForAllocatorLoad();
     // Empty while pending; a terminal status preserves retryable materialization failures.
     std::optional<absl::Status> pollAllocatorLoad();
@@ -176,6 +185,7 @@ private:
 
     // Physical block pins held for PD separation.
     std::shared_ptr<KVCacheResource> pd_kvcache_ref_;
+    PrefixCheckpointLeasePtr prefix_checkpoint_;
 };
 
 }  // namespace rtp_llm

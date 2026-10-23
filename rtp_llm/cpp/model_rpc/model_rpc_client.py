@@ -390,6 +390,10 @@ def _record_client_span_latency(
         pass
 
 
+class SharedPrefixUnsupported(Exception):
+    """The selected backend rejected the new RPC before any work was enqueued."""
+
+
 class StreamState:
     def __init__(self):
         self.cached_logits_dict = {}
@@ -1447,7 +1451,11 @@ class ModelRpcClient(object):
                 response_iterator.cancel()
 
     async def batch_generate(
-        self, inputs: list[GenerateInput], *, routing_key: Optional[int] = None
+        self,
+        inputs: list[GenerateInput],
+        *,
+        routing_key: Optional[int] = None,
+        shared_prefix_state_tokens: Optional[int] = None,
     ) -> list[GenerateOutputs]:
         """Run BatchGenerateCall with atomic batch failure semantics.
 
@@ -1495,6 +1503,15 @@ class ModelRpcClient(object):
             input_pb = trans_input(inp)
             batch_input_pb.inputs.append(input_pb)
 
+        if shared_prefix_state_tokens is not None:
+            if shared_prefix_state_tokens <= 0:
+                raise ValueError("shared prefix state length must be positive")
+            batch_input_pb.shared_prefix.protocol_version = 1
+            batch_input_pb.shared_prefix.state_token_length = shared_prefix_state_tokens
+            batch_input_pb.shared_prefix.parent_request_id = str(
+                inputs[0].request_id if routing_key is None else routing_key
+            )
+
         route_id = inputs[0].request_id if routing_key is None else routing_key
         target_address = self._addresses[route_id % len(self._addresses)]
         logging.debug(
@@ -1509,7 +1526,19 @@ class ModelRpcClient(object):
                 if grpc_timeout_seconds is not None
                 else {}
             )
-            response = await stub.BatchGenerateCall(batch_input_pb, **grpc_kwargs)
+            if shared_prefix_state_tokens is None:
+                response = await stub.BatchGenerateCall(batch_input_pb, **grpc_kwargs)
+            else:
+                # No cached capability decision: this call targets exactly the
+                # backend that will execute it, including after a restart.
+                response = await stub.SharedPrefixGenerateCall(
+                    batch_input_pb, **grpc_kwargs
+                )
+                if response.shared_prefix_protocol_version != 1:
+                    raise FtRuntimeException(
+                        ExceptionType.EXECUTION_EXCEPTION,
+                        "shared-prefix RPC did not acknowledge protocol v1; not retrying",
+                    )
 
             if len(response.results) != len(inputs):
                 raise FtRuntimeException(
@@ -1544,6 +1573,11 @@ class ModelRpcClient(object):
             return results
 
         except grpc.RpcError as e:
+            if (
+                shared_prefix_state_tokens is not None
+                and e.code() == grpc.StatusCode.UNIMPLEMENTED
+            ):
+                raise SharedPrefixUnsupported(str(e)) from e
             self._handle_grpc_error(e, f"batch request: [{len(inputs)} items]")
         except FtRuntimeException:
             raise

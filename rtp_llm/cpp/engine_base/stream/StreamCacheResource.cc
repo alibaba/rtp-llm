@@ -96,6 +96,7 @@ void StreamCacheResource::releaseResource() {
     tryReleaseKVBlock(curBlocksNum());
     batch_kv_cache_resource_->clearBlocks();
     resource_released_ = true;
+    prefix_checkpoint_.reset();
 }
 
 int StreamCacheResource::tryReleaseKVBlock(size_t nums) {
@@ -191,6 +192,11 @@ void StreamCacheResource::publishReuseLengths(int total, int host, int disk, int
 }
 
 // TODO(xinfei.sxf) 保证这个函数的原子性
+absl::StatusOr<PrefixCheckpointLeasePtr> StreamCacheResource::tryAcquirePrefixCheckpoint(int boundary) {
+    updateCacheKeys(batch_kv_cache_resource_, stream_->completeTokenIdsPtr(), seqSizePerBlock());
+    return resource_context_.cache_manager->tryAcquirePrefixCheckpoint(cacheKeys(0), boundary);
+}
+
 absl::Status StreamCacheResource::initKVBlock() {
     RTP_LLM_PROFILE_FUNCTION();
     // Decode side: first malloc should NOT use device cache, regardless of runtime config.
@@ -200,6 +206,7 @@ absl::Status StreamCacheResource::initKVBlock() {
     }
 
     MallocInfo malloc_info;
+    malloc_info.prefix_checkpoint = prefix_checkpoint_;
     malloc_info.batch_kv_cache_resource = batch_kv_cache_resource_;
     malloc_info.complete_token_ids      = stream_->completeTokenIdsPtr();
     malloc_info.request_id              = stream_->streamId();

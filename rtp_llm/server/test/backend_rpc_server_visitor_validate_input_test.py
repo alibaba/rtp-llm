@@ -1,6 +1,6 @@
 import unittest
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 import torch
 from pydantic import ValidationError
@@ -144,6 +144,23 @@ class BackendRPCServerVisitorValidateInputTest(unittest.IsolatedAsyncioTestCase)
                 self.assertIs(self.model_rpc_client.batches[-1], inputs)
                 self.assertEqual(self.model_rpc_client.routing_keys[-1], routing_key)
                 self.assertEqual([item.request_id for item in inputs], [41, 42])
+
+    async def test_shared_prefix_validates_every_row_and_forwards_parent(self):
+        self.model_rpc_client.batch_generate = AsyncMock(return_value=[])
+        inputs = [_make_input(4, 0), _make_input(5, 0)]
+        outputs = await self.visitor.shared_prefix_batch_enqueue(
+            inputs, state_tokens=2, routing_key=42
+        )
+        self.assertEqual(outputs, [])
+        self.model_rpc_client.batch_generate.assert_awaited_once_with(
+            inputs, routing_key=42, shared_prefix_state_tokens=2
+        )
+        self.model_rpc_client.batch_generate.reset_mock()
+        with self.assertRaises(FtRuntimeException):
+            await self.visitor.shared_prefix_batch_enqueue(
+                [inputs[0], _make_input(33, 0)], state_tokens=2, routing_key=42
+            )
+        self.model_rpc_client.batch_generate.assert_not_awaited()
 
     async def test_batch_enqueue_rejects_invalid_prefill_only_generate_config(self):
         input = _make_input(1, max_new_tokens=1, return_logits=True)

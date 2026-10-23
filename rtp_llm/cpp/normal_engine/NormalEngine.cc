@@ -165,6 +165,15 @@ NormalEngine::NormalEngine(const EngineInitParams&                       params,
         if (py::hasattr(params.py_model, "custom_output_handler")) {
             const auto handler      = params.py_model.attr("custom_output_handler");
             custom_output_selector_ = handler.attr("select_token_position");
+            const auto handler_type = handler.attr("__class__");
+            shared_prefix_supported_ =
+                handler_type.attr("__module__").cast<std::string>() == "rtp_llm.models.downstream_modules.kev"
+                && handler_type.attr("__name__").cast<std::string>() == "KevHandler"
+                && params.parallelism_config.tp_size == 1 && params.parallelism_config.dp_size == 1
+                && params.pd_sep_config.role_type == RoleType::PDFUSION
+                && !params.parallelism_config.prefill_cp_config.is_enabled()
+                && !params.hw_kernel_config.enable_cuda_graph && !params.hw_kernel_config.enable_native_cuda_graph
+                && !params.model_config_.mm_model_config.is_multimodal;
             custom_output_prefill_only_ =
                 py::hasattr(handler, "prefill_only") && handler.attr("prefill_only").cast<bool>();
             if (custom_output_prefill_only_ && py::hasattr(handler, "supports_prefix_cache")
@@ -861,6 +870,52 @@ NormalEngine::enqueueMultiple(const std::vector<std::shared_ptr<GenerateInput>>&
     return {std::move(enqueue_successes), std::move(streams)};
 }
 
+std::pair<std::vector<bool>, std::vector<GenerateStreamPtr>> NormalEngine::enqueueSharedPrefix(
+    const std::vector<std::shared_ptr<GenerateInput>>& inputs, int state_token_length,
+    const std::string& parent_request_id) {
+    auto* fifo = dynamic_cast<FIFOScheduler*>(scheduler_.get());
+    std::vector<GenerateStreamPtr> streams;
+    streams.reserve(inputs.size());
+    for (const auto& input : inputs) {
+        auto stream = createStream(input);
+        stream->setReserveStep(0);
+        streams.push_back(std::move(stream));
+    }
+    const auto reject = [&](const std::string& reason) {
+        for (const auto& stream : streams) {
+            if (!stream->hasError()) { stream->reportError(ErrorCode::INVALID_PARAMS, reason); }
+        }
+        return std::make_pair(std::vector<bool>(streams.size(), false), streams);
+    };
+    if (!shared_prefix_supported_ || propose_params_ || !fifo || !custom_output_prefill_only_ || !custom_output_prefix_selector_) {
+        return reject("shared-prefix v1 requires Kev, TP1/DP1 PDFUSION, FIFO and eager execution");
+    }
+    if (inputs.empty() || inputs.size() > 64 || state_token_length <= 0 || parent_request_id.empty()) {
+        return reject("invalid shared-prefix group size, state length or parent id");
+    }
+    for (size_t i = 0; i < inputs.size(); ++i) {
+        const auto& input = inputs[i];
+        if (streams[i]->hasError() || !validateStreamForScheduling(streams[i])
+            || !input->generate_config->isPrefillOnly() || streams[i]->maxBatchSize() != 1
+            || input->custom_output_prefix_length != state_token_length
+            || state_token_length >= input->inputLength() || input->multimodal_inputs
+            || input->multimodal_features || input->mm_position_ids || input->prefix_length != 0
+            || !input->generate_config->adapter_name.empty() || !input->generate_config->adapter_names.empty()
+            || !streams[i]->streamCacheResource().reuseCache()
+            || !streams[i]->streamCacheResource().enableDeviceCache()
+            || resource_context_.enable_memory_cache || resource_context_.enable_disk_cache
+            || resource_context_.enable_remote_cache) {
+            return reject("shared-prefix row is not a validated single Kev device-cache row");
+        }
+        if (!torch::equal(input->input_ids.narrow(0, 0, state_token_length),
+                          inputs.front()->input_ids.narrow(0, 0, state_token_length))) {
+            return reject("shared-prefix rows contain different state tokens");
+        }
+    }
+    const int block = resource_context_.cache_manager->cacheConfig().seq_size_per_block;
+    return fifo->enqueueSharedPrefix(streams, state_token_length / block * block, parent_request_id);
+}
+
 absl::Status NormalEngine::step() try {
     RTP_LLM_PROFILE_SCOPE("engine.normal.step_work");
     while (pause_) {
@@ -886,6 +941,20 @@ absl::Status NormalEngine::step() try {
         }
     }
 
+    // The scheduler arms the producer before execution. Keep that hold through
+    // process(), including synchronous failures; async dispatch acquires its own
+    // worker hold before process returns. Capture remains pending independently
+    // of this execution hold, so the worker can finish it after handoff.
+    std::vector<GenerateStreamPtr> shared_prefix_executing;
+    for (const auto& stream : streams) {
+        if (stream->isSharedPrefixChild()) { shared_prefix_executing.push_back(stream); }
+    }
+    std::shared_ptr<void> prefix_execution_guard;
+    if (!shared_prefix_executing.empty()) {
+        prefix_execution_guard = std::shared_ptr<void>(nullptr, [shared_prefix_executing](void*) {
+            for (const auto& stream : shared_prefix_executing) { stream->finishPrefixCheckpointCapture(); }
+        });
+    }
     RTP_LLM_LOG_DEBUG(__PRETTY_FUNCTION__);
     int64_t      step_begin_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
     absl::Status status             = absl::OkStatus();

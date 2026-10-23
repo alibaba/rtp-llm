@@ -100,6 +100,74 @@ class KevDecideTest(unittest.TestCase):
             },
         )
 
+    def test_shared_prefix_single_rpc_preserves_decide_order(self):
+        self.worker.kev_shared_prefix = True
+        self.worker.kev_reuse_cache = True
+        self.request["state"] = "s" * 63
+        shared = AsyncMock(return_value=[self.output([0.25, 0.75]), self.output([1.0])])
+        self.worker.backend_rpc_server_visitor.shared_prefix_batch_enqueue = shared
+        result = self.decide()
+        shared.assert_awaited_once()
+        self.enqueue.assert_not_awaited()
+        self.assertEqual(shared.await_args.kwargs["state_tokens"], 64)
+        self.assertEqual(len(shared.await_args.args[0]), 2)
+        self.assertEqual([x["choice"] for x in result["results"]], [1, 0])
+
+    def test_shared_prefix_unsupported_falls_back_but_runtime_failure_does_not(self):
+        from rtp_llm.cpp.model_rpc.model_rpc_client import SharedPrefixUnsupported
+
+        self.worker.kev_shared_prefix = True
+        self.worker.kev_reuse_cache = True
+        self.request["state"] = "s" * 63
+        shared = AsyncMock(side_effect=SharedPrefixUnsupported())
+        self.worker.backend_rpc_server_visitor.shared_prefix_batch_enqueue = shared
+        self.enqueue.side_effect = [[self.output([0.25, 0.75])], [self.output([1.0])]]
+        self.decide()
+        self.assertEqual([len(c.args[0]) for c in self.enqueue.await_args_list], [1, 1])
+        route = shared.await_args.kwargs["routing_key"]
+        self.assertTrue(
+            all(c.kwargs["routing_key"] == route for c in self.enqueue.await_args_list)
+        )
+        self.enqueue.reset_mock()
+        shared.side_effect = RuntimeError("execution failed")
+        with self.assertRaisesRegex(RuntimeError, "execution failed"):
+            self.decide()
+        self.enqueue.assert_not_awaited()
+
+    def test_shared_prefix_cancel_is_not_retried(self):
+        self.worker.kev_shared_prefix = True
+        self.worker.kev_reuse_cache = True
+        self.request["state"] = "s" * 63
+        self.worker.backend_rpc_server_visitor.shared_prefix_batch_enqueue = AsyncMock(
+            side_effect=asyncio.CancelledError()
+        )
+        with self.assertRaises(asyncio.CancelledError):
+            self.decide()
+        self.enqueue.assert_not_awaited()
+
+    def test_shared_prefix_systemone_http_uses_same_single_submission(self):
+        self.worker.kev_shared_prefix = True
+        self.worker.kev_reuse_cache = True
+        shared = AsyncMock(return_value=self.systemone_outputs())
+        self.worker.backend_rpc_server_visitor.shared_prefix_batch_enqueue = shared
+        owner = FrontendApp.__new__(FrontendApp)
+        owner.frontend_server = self.systemone_server()
+        owner.shutdown_manager = FrontendShutdownManager()
+        owner.separated_frontend = True
+        owner.server_config = SimpleNamespace(http_port=0)
+        owner.grpc_client = None
+        request = self.systemone_request()
+        request["state"] = "s" * 63
+        response = TestClient(owner.create_app()).post("/v1/systemone", json=request)
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(
+            list(response.json()["answers"]), ["selection", "rating", "check"]
+        )
+        shared.assert_awaited_once()
+        self.assertEqual(len(shared.await_args.args[0]), 3)
+        self.enqueue.assert_not_awaited()
+        self.assertEqual(owner.shutdown_manager.active_request_count(), 0)
+
     def test_ids_are_distinct_across_concurrent_multi_question_requests(self):
 
         async def respond(inputs, *, routing_key):

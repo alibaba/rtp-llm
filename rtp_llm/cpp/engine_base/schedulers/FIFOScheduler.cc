@@ -57,20 +57,34 @@ void FIFOScheduler::cancelGroups(StreamGroupQueue& group_queue) {
 }
 
 void FIFOScheduler::cancelExtraStreams() {
+    if (active_shared_prefix_) {
+        active_shared_prefix_->fail("shared-prefix scheduler stopped");
+        for (auto& stream : active_shared_prefix_->streams) {
+            stream->moveToNext();
+        }
+        active_shared_prefix_.reset();
+    }
+    for (auto& parent : shared_prefix_queue_) {
+        parent->fail("shared-prefix scheduler stopped");
+        for (auto& stream : parent->streams) { stream->moveToNext(); }
+    }
+    shared_prefix_queue_.clear();
     cancelGroups(waiting_group_queue_);
     cancelGroups(loading_cache_group_queue_);
 }
 
 bool FIFOScheduler::hasExtraStreams() const {
-    return !waiting_group_queue_.empty() || !loading_cache_group_queue_.empty();
+    return active_shared_prefix_ || !shared_prefix_queue_.empty()
+           || !waiting_group_queue_.empty() || !loading_cache_group_queue_.empty();
 }
 
 int64_t FIFOScheduler::extraOnflightStreams() const {
-    return groupQueueStreamsSize(waiting_group_queue_) + groupQueueStreamsSize(loading_cache_group_queue_);
+    return sharedPrefixWaitingCount() + groupQueueStreamsSize(waiting_group_queue_)
+           + groupQueueStreamsSize(loading_cache_group_queue_);
 }
 
 void FIFOScheduler::fillExtraMetrics(RtpLLMSchedulerMetricsCollector& collector) const {
-    collector.wait_stream_size += groupQueueStreamsSize(waiting_group_queue_);
+    collector.wait_stream_size += groupQueueStreamsSize(waiting_group_queue_) + sharedPrefixWaitingCount();
     collector.loading_cache_stream_size += groupQueueStreamsSize(loading_cache_group_queue_);
     collector.group_fallback_count = pending_group_fallback_count_.exchange(0, std::memory_order_relaxed);
 }
@@ -604,9 +618,173 @@ void FIFOScheduler::evaluateWaitingGroupQueue() {
     }
 }
 
+std::pair<std::vector<bool>, std::vector<GenerateStreamPtr>> FIFOScheduler::enqueueSharedPrefix(
+    const std::vector<GenerateStreamPtr>& streams, int boundary, const std::string& parent_id) {
+    auto parent = std::make_shared<SharedPrefixRequest>();
+    parent->streams = streams;
+    parent->boundary_tokens = boundary;
+    parent->parent_id = parent_id;
+    RTP_LLM_LOG_DEBUG("shared_prefix enqueue parent=%s branches=%zu boundary=%d",
+                      parent_id.c_str(), streams.size(), boundary);
+    for (const auto& stream : streams) {
+        if (!checkInputLength(stream)) {
+            parent->fail("shared-prefix member exceeds scheduler capacity");
+            return {std::vector<bool>(streams.size(), false), streams};
+        }
+        stream->recordSchedulerEnqueueTime(autil::TimeUtility::currentTimeInMicroSeconds());
+    }
+    {
+        std::lock_guard<std::mutex> lock(lock_);
+        shared_prefix_queue_.push_back(std::move(parent));
+        schedule_trigger_ = true;
+    }
+    cond_.notify_all();
+    return {std::vector<bool>(streams.size(), true), streams};
+}
+
+int64_t FIFOScheduler::sharedPrefixWaitingCount() const {
+    int64_t count = 0;
+    for (const auto& parent : shared_prefix_queue_) { count += parent->streams.size(); }
+    if (active_shared_prefix_) { count += active_shared_prefix_->streams.size() - active_shared_prefix_->next_branch; }
+    return count;
+}
+
+bool FIFOScheduler::canStartSharedPrefix() const {
+    if (!running_streams_.empty() || !new_streams_.empty() || !loading_cache_streams_.empty()
+        || !loading_cache_group_queue_.empty()) { return false; }
+    const auto owns_resources = [](const auto& streams) {
+        return std::any_of(streams.begin(), streams.end(), [](const auto& stream) {
+            return stream->curBlocksNum() > 0 || stream->hasPendingAsyncBookkeeping();
+        });
+    };
+    if (owns_resources(waiting_streams_)) { return false; }
+    for (const auto& group : waiting_group_queue_) {
+        if (owns_resources(group)) { return false; }
+    }
+    return true;
+}
+
+void FIFOScheduler::pollSharedPrefixProducer() {
+    if (!active_shared_prefix_ || !active_shared_prefix_->producer_guard) { return; }
+    auto& parent = *active_shared_prefix_;
+    const auto& producer = parent.streams.front();
+    auto checkpoint = producer->prefixCheckpointResult();
+    if (producer->checkTimeoutAndHasError() || producer->isFinished() || !absl::IsUnavailable(checkpoint.status())) {
+        if (checkpoint.ok() && !producer->hasError()) {
+            parent.checkpoint = std::move(checkpoint).value();
+            parent.phase = SharedPrefixRequest::Phase::BRANCHING;
+            RTP_LLM_LOG_DEBUG("shared_prefix checkpoint_ready parent=%s boundary=%d",
+                              parent.parent_id.c_str(), parent.boundary_tokens);
+        } else {
+            parent.fail("shared-prefix producer failed: " + checkpoint.status().ToString());
+        }
+        producer->clearCapturedPrefixCheckpoint();
+        parent.producer_guard = false;
+    }
+}
+
+void FIFOScheduler::scheduleSharedPrefix() {
+    auto& parent = *active_shared_prefix_;
+    RTP_LLM_PROFILE_SCOPE_DYNAMIC("scheduler.shared_prefix(parent=%s,boundary=%d,phase=%d)",
+                                  parent.parent_id.c_str(), parent.boundary_tokens, static_cast<int>(parent.phase));
+    for (const auto& stream : parent.streams) {
+        if (stream->checkTimeoutAndHasError()) {
+            parent.fail("shared-prefix member failed or cancelled");
+            break;
+        }
+    }
+    if (parent.phase == SharedPrefixRequest::Phase::DRAINING) {
+        parent.producer_guard = false;
+        bool drained = true;
+        for (const auto& stream : parent.streams) {
+            // Never release an in-flight worker's data. The normal async release
+            // discipline owns the final physical unpin.
+            if (stream->hasPendingAsyncBookkeeping()) { drained = false; continue; }
+            stream->moveToNext();
+        }
+        if (drained && running_streams_.empty()) {
+            active_shared_prefix_.reset();
+            yield_shared_prefix_lane_ = true;
+        }
+        return;
+    }
+    if (!running_streams_.empty()) { return; }
+    if (parent.phase == SharedPrefixRequest::Phase::QUEUED) {
+        // No other lane owns allocations. A full uncached single-row peak is
+        // conservative for lease+one suffix: prefix ownership is shared, not
+        // duplicated. Check EVERY pool before retaining a prefix.
+        for (const auto& pool : cache_manager_->poolCapacities()) {
+            for (const auto& stream : parent.streams) {
+                const int needed = stream->estimatePeakNeedBlocks(0, pool.tag);
+                if (needed < 0 || static_cast<size_t>(needed) + pool.reserve_blocks > pool.available_blocks) {
+                    parent.fail("shared-prefix cannot fit prefix plus one branch in pool " + pool.tag);
+                    return;
+                }
+            }
+        }
+        if (parent.boundary_tokens > 0) {
+            auto checkpoint = parent.streams.front()->streamCacheResource().tryAcquirePrefixCheckpoint(
+                parent.boundary_tokens);
+            if (!checkpoint.ok()) {
+                parent.fail("shared-prefix acquire failed: " + checkpoint.status().ToString());
+                return;
+            }
+            parent.checkpoint = std::move(checkpoint).value();
+        }
+        RTP_LLM_LOG_DEBUG("shared_prefix acquired parent=%s boundary=%d cache_hit=%d",
+                          parent.parent_id.c_str(), parent.boundary_tokens, bool(parent.checkpoint));
+        parent.phase = parent.checkpoint || parent.boundary_tokens == 0 ?
+                           SharedPrefixRequest::Phase::BRANCHING : SharedPrefixRequest::Phase::PRODUCING;
+    }
+    if (parent.phase == SharedPrefixRequest::Phase::PRODUCING && parent.next_branch > 0) { return; }
+    StreamGroup admitted;
+    while (parent.next_branch < parent.streams.size()) {
+        const auto& stream = parent.streams[parent.next_branch];
+        if (!evaluateRunningBatch(admitted, stream)) {
+            if (admitted.empty()) { parent.fail("shared-prefix branch exceeds per-forward token budget"); }
+            break;
+        }
+        if (parent.checkpoint && stream->curBlocksNum() == 0) {
+            stream->installPrefixCheckpoint(parent.checkpoint);
+        }
+        if (!stream->hasEvent(StreamEvents::CanRun)) { stream->reportEvent(StreamEvents::CanRun); }
+        const auto state = stream->moveToNext();
+        if (state == StreamState::FINISHED) {
+            parent.fail("shared-prefix branch allocation failed");
+            break;
+        }
+        if (state != StreamState::RUNNING) {
+            // DEVICE-only attach cannot initiate lower-tier loads. No-progress
+            // with an empty batch cannot be fixed by another parent: fail it.
+            if (admitted.empty()) { parent.fail("shared-prefix branch made no allocation progress"); }
+            break;
+        }
+        // Every child (not only the producer) needs an execution hold before
+        // leaving the scheduler: stop/cancel may run during synchronous prefill.
+        stream->armPrefixCheckpointCapture(
+            parent.phase == SharedPrefixRequest::Phase::PRODUCING ? parent.boundary_tokens : 0);
+        if (parent.phase == SharedPrefixRequest::Phase::PRODUCING) { parent.producer_guard = true; }
+        RTP_LLM_LOG_DEBUG("shared_prefix dispatch parent=%s branch=%zu stream=%ld role=%s boundary=%d",
+                          parent.parent_id.c_str(), parent.next_branch, stream->streamId(),
+                          parent.phase == SharedPrefixRequest::Phase::PRODUCING ? "producer" : "branch",
+                          parent.boundary_tokens);
+        admitted.push_back(stream);
+        ++parent.next_branch;
+        if (parent.phase == SharedPrefixRequest::Phase::PRODUCING) { break; }
+    }
+    moveGroupToNewStreams(admitted);
+    if (parent.next_branch == parent.streams.size() && new_streams_.empty()
+        && std::none_of(parent.streams.begin(), parent.streams.end(),
+                        [](const auto& stream) { return stream->hasPendingAsyncBookkeeping(); })) {
+        RTP_LLM_LOG_DEBUG("shared_prefix finished parent=%s branches=%zu", parent.parent_id.c_str(), parent.streams.size());
+        active_shared_prefix_.reset();
+        yield_shared_prefix_lane_ = true;
+    }
+}
+
 absl::StatusOr<list<GenerateStreamPtr>> FIFOScheduler::schedule() {
     unique_lock<mutex> lock(lock_);
-    if (need_fill_fake_stream_ || !loading_cache_streams_.empty() || !loading_cache_group_queue_.empty()
+    if (active_shared_prefix_ || !shared_prefix_queue_.empty() || need_fill_fake_stream_ || !loading_cache_streams_.empty() || !loading_cache_group_queue_.empty()
         || !waiting_group_queue_.empty()) {
         cond_.wait_for(lock, std::chrono::milliseconds(10), [this] { return waitPredicate(); });
     } else if (!waiting_streams_.empty()) {
@@ -622,7 +800,28 @@ absl::StatusOr<list<GenerateStreamPtr>> FIFOScheduler::schedule() {
     last_admitted_context_token_size_ = 0;
     last_waiting_oldest_age_us_       = 0;
 
+    pollSharedPrefixProducer();
+    // The producer guard is released only after capture/error is visible. Avoid
+    // moveToNext's async wait while the guard itself is the pending holder.
+    if (active_shared_prefix_ && active_shared_prefix_->producer_guard) {
+        return list<GenerateStreamPtr>{};
+    }
     evaluateAndUpdateStreams(running_streams_);
+
+    if (!active_shared_prefix_ && !shared_prefix_queue_.empty() && canStartSharedPrefix()
+        && (!yield_shared_prefix_lane_ || (waiting_streams_.empty() && waiting_group_queue_.empty()))) {
+        active_shared_prefix_ = shared_prefix_queue_.front();
+        shared_prefix_queue_.pop_front();
+    }
+    yield_shared_prefix_lane_ = false;
+    if (active_shared_prefix_) {
+        scheduleSharedPrefix();
+        running_streams_.insert(running_streams_.end(), new_streams_.begin(), new_streams_.end());
+        new_streams_.clear();
+        reportMetrics();
+        last_schedule_time_ = autil::TimeUtility::currentTimeInMilliSeconds();
+        return running_streams_;
+    }
 
     if (running_streams_.empty()) {
         active_admission_lane_ = AdmissionLane::NONE;
@@ -641,7 +840,7 @@ absl::StatusOr<list<GenerateStreamPtr>> FIFOScheduler::schedule() {
             // populated running list.
             active_admission_lane_ = AdmissionLane::NORMAL;
         }
-        const bool group_barrier = loadingGroupReady() || !waiting_group_queue_.empty();
+        const bool group_barrier = loadingGroupReady() || !waiting_group_queue_.empty() || !shared_prefix_queue_.empty();
         if (active_admission_lane_ == AdmissionLane::NORMAL) {
             // Ordinary streams already loading cache belong to the active
             // NORMAL lane. Always advance them; a group arriving later is the
@@ -724,7 +923,7 @@ absl::StatusOr<list<GenerateStreamPtr>> FIFOScheduler::schedule() {
 
 int64_t FIFOScheduler::waitingStreamsSize() {
     std::lock_guard<mutex> lock(lock_);
-    return waiting_streams_.size() + groupQueueStreamsSize(waiting_group_queue_);
+    return waiting_streams_.size() + groupQueueStreamsSize(waiting_group_queue_) + sharedPrefixWaitingCount();
 }
 
 std::vector<EngineScheduleInfo::TaskInfo> FIFOScheduler::waitingTaskList() {
@@ -749,6 +948,19 @@ std::vector<EngineScheduleInfo::TaskInfo> FIFOScheduler::waitingTaskList() {
             waiting_task_list_.push_back(task_info);
         }
     }
+    const auto append_parent = [&](const std::shared_ptr<SharedPrefixRequest>& parent) {
+        for (size_t i = parent->next_branch; i < parent->streams.size(); ++i) {
+            const auto& stream = parent->streams[i];
+            EngineScheduleInfo::TaskInfo task_info;
+            task_info.request_id = stream->streamId();
+            task_info.prefix_length = parent->boundary_tokens;
+            task_info.input_length = stream->inputLength();
+            task_info.batch_id = stream->groupId();
+            waiting_task_list_.push_back(task_info);
+        }
+    };
+    for (const auto& parent : shared_prefix_queue_) { append_parent(parent); }
+    if (active_shared_prefix_) { append_parent(active_shared_prefix_); }
     return waiting_task_list_;
 }
 

@@ -720,6 +720,16 @@ KVCacheManager::incrKVCacheRef(const KVCacheResource& resource, const CacheKeysT
     return coordinator_manager_->incrKVCacheRef(resource, cache_keys, is_connector);
 }
 
+absl::StatusOr<PrefixCheckpointLeasePtr>
+KVCacheManager::capturePrefixCheckpoint(const KVCacheResource& resource, int boundary) {
+    return coordinator_manager_->capturePrefixCheckpoint(resource, boundary);
+}
+
+absl::StatusOr<PrefixCheckpointLeasePtr>
+KVCacheManager::tryAcquirePrefixCheckpoint(const CacheKeysType& keys, int boundary) {
+    return coordinator_manager_->tryAcquirePrefixCheckpoint(keys, boundary);
+}
+
 bool KVCacheManager::executeFunction(const FunctionRequestPB& request, FunctionResponsePB& response) {
     if (request.has_remote_request()) {
 #ifdef RTP_LLM_USE_REMOTE_KV_CACHE

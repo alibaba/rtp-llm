@@ -204,6 +204,45 @@ absl::Status GenerateStream::initKVBlock() {
     return ret;
 }
 
+void GenerateStream::armPrefixCheckpointCapture(int boundary) {
+    std::lock_guard<std::mutex> lock(*mutex_);
+    RTP_LLM_CHECK(boundary >= 0 && !prefix_capture_guard_);
+    prefix_capture_boundary_ = boundary;
+    prefix_capture_guard_ = true;
+    incPendingAsyncBookkeeping();
+}
+
+void GenerateStream::finishPrefixCheckpointCapture() {
+    bool release = false;
+    {
+        std::lock_guard<std::mutex> lock(*mutex_);
+        release = prefix_capture_guard_;
+        prefix_capture_guard_ = false;
+    }
+    if (release) {
+        decPendingAsyncBookkeepingAndMaybeRelease();
+    }
+}
+
+absl::StatusOr<PrefixCheckpointLeasePtr> GenerateStream::prefixCheckpointResult() const {
+    std::lock_guard<std::mutex> lock(*mutex_);
+    if (!prefix_capture_status_.ok()) {
+        return prefix_capture_status_;
+    }
+    return captured_prefix_checkpoint_;
+}
+
+void GenerateStream::clearCapturedPrefixCheckpoint() {
+    std::lock_guard<std::mutex> lock(*mutex_);
+    captured_prefix_checkpoint_.reset();
+}
+
+void GenerateStream::installPrefixCheckpoint(PrefixCheckpointLeasePtr checkpoint) {
+    std::lock_guard<std::mutex> lock(*mutex_);
+    RTP_LLM_CHECK(stream_cache_resource_->curBlocksNum() == 0);
+    stream_cache_resource_->setPrefixCheckpoint(std::move(checkpoint));
+}
+
 void GenerateStream::fakeInitKVBlock(size_t reserved_blocks) {
     std::lock_guard<std::mutex> lock(*mutex_);
     stream_cache_resource_->fakeInitKVBlock(reserved_blocks);
@@ -1316,6 +1355,26 @@ void GenerateStream::update(const StreamUpdateInfo& update_info) {
         return;
     }
 
+    // A producer's state is still exclusively owned and the forward has completed.
+    // Capture before updateOutput/checkFinished can publish terminal release. The
+    // scheduler registered an async hold before execution, also covering cancel.
+    const bool capture_prefix = prefix_capture_boundary_ > 0 && prefill_only_update;
+    if (capture_prefix) {
+        if (!updateKvCacheBlocks(update_info.src_batch_indices)) {
+            prefix_capture_status_ = absl::InternalError("producer KV layout commit failed");
+        } else {
+            auto result = stream_cache_resource_->capturePrefixCheckpoint(prefix_capture_boundary_);
+            prefix_capture_status_ = result.status();
+            if (result.ok()) {
+                captured_prefix_checkpoint_ = std::move(result).value();
+            }
+        }
+        if (!prefix_capture_status_.ok()) {
+            reportEventWithoutLock(StreamEvents::Error, ErrorCode::MALLOC_FAILED,
+                                   prefix_capture_status_.ToString());
+            return;
+        }
+    }
     // TODO(xinfei.sxf) fix this (update_queue)
     updateOutput(update_info);
 
@@ -1323,7 +1382,7 @@ void GenerateStream::update(const StreamUpdateInfo& update_info) {
     // 即使 moveToNext() 还未被调度器轮询，这里也能拿到与事件一致的"已完成"判断。
     bool is_done = generate_status_->checkFinished();
 
-    if (!is_done || stream_cache_resource_->reuseCache()) {
+    if ((!is_done || stream_cache_resource_->reuseCache()) && !capture_prefix) {
         // kv cache blocks must be updated if REUSE_CACHE is on, even the stream is done
         auto update_res = updateKvCacheBlocks(update_info.src_batch_indices);
         if (!update_res) {

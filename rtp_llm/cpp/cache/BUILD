@@ -251,6 +251,8 @@ cc_library(
         "//rtp_llm/cpp/cache/block_tree_cache:device_block_pool",
         "//rtp_llm/cpp/metrics:metrics",
         "//rtp_llm/models_py/bindings/core:gpu_block_copy",
+        "@com_google_absl//absl/status",
+        "@com_google_absl//absl/status:statusor",
     ] + torch_deps(),
 )
 

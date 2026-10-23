@@ -166,6 +166,18 @@ public:
         return GenerationPrefillCudaGraphStatus::NOT_REQUESTED;
     }
     void update(const StreamUpdateInfo& update_info);
+    // Registered for every child before executor submission (boundary=0 for
+    // ordinary branches). NormalEngine hands this hold to the async worker or
+    // releases it after synchronous dispatch. A positive boundary requests a
+    // producer checkpoint, whose lease survives this execution hold.
+    void armPrefixCheckpointCapture(int boundary);
+    void finishPrefixCheckpointCapture();
+    // Read only by the engine execution thread after scheduler admission.
+    bool isSharedPrefixChild() const { return prefix_capture_boundary_ >= 0; }
+    absl::StatusOr<PrefixCheckpointLeasePtr> prefixCheckpointResult() const;
+    void installPrefixCheckpoint(PrefixCheckpointLeasePtr checkpoint);
+    void clearCapturedPrefixCheckpoint();
+
     void specUpdate(const StreamSpecUpdateInfo& update_info);
     bool updateKvCacheBlocks(const torch::Tensor& src_batch_indices);
 
@@ -985,6 +997,10 @@ protected:
     uint64_t                           mtp_async_epoch_counter_ = 0;
     NormalAsyncDeviceState             normal_async_state_;
     uint64_t                           normal_async_epoch_counter_       = 0;
+    int prefix_capture_boundary_ = -1;
+    bool prefix_capture_guard_ = false;
+    PrefixCheckpointLeasePtr captured_prefix_checkpoint_;
+    absl::Status prefix_capture_status_ = absl::UnavailableError("prefix capture is pending");
     std::shared_ptr<std::atomic<bool>> grpc_normal_device_state_pending_ = std::make_shared<std::atomic<bool>>(false);
 
     bool return_all_hidden_states_ = false;

@@ -3149,6 +3149,134 @@ TEST_F(HybridTypeCoordinatorCacheManagerTest, FreshReusePeakCoversThreeBoundaryD
     EXPECT_EQ(allocator->freeBlocksNum(), 1);
 }
 
+TEST_F(HybridTypeCoordinatorCacheManagerTest, PrefixLeaseSurvivesProducerFreeWithoutTreeAndIsolatesWrites) {
+    auto config = makeTinyHybridConfig();
+    auto allocator = std::make_shared<TestHybridTypeCoordinatorCacheManager>(config, AllocationType::DEVICE);
+    ASSERT_TRUE(allocator->init());
+    auto producer = makeBatchResource(1, config, {100, 101, 102});
+    auto tokens = makeCompleteTokenIds(1, 12, 4);
+    MallocInfo seed{producer, tokens};
+    seed.enable_cache_lookup = false;
+    ASSERT_TRUE(allocator->malloc(seed).success);
+    const auto full = producer->blocks(0, "full1");
+    const auto linear = producer->blocks(0, "linear");
+    auto captured = allocator->capturePrefixCheckpoint(producer->cacheResource(0), 8);
+    ASSERT_TRUE(captured.ok()) << captured.status();
+    auto lease = std::move(captured).value();
+    EXPECT_EQ(lease->boundaryTokens(), 8);
+    // Never publish to the public tree. Release the original resource first.
+    allocator->free(FreeInfo{producer, tokens});
+    EXPECT_TRUE(allocator->blockTreeCacheOwner()->tree()->findNode({100, 101}).empty());
+    auto first = makeBatchResource(1, config, {100, 101, 201});
+    auto second = makeBatchResource(1, config, {100, 101, 202});
+    MallocInfo a{first, tokens};
+    MallocInfo b{second, tokens};
+    a.prefix_checkpoint = b.prefix_checkpoint = lease;
+    auto ar = allocator->malloc(a);
+    auto br = allocator->malloc(b);
+    ASSERT_TRUE(ar.success);
+    ASSERT_TRUE(br.success);
+    EXPECT_EQ(ar.reuse_len, 8);
+    EXPECT_EQ(br.reuse_len, 8);
+    for (auto resource : {first, second}) {
+        EXPECT_EQ(resource->blocks(0, "full1")[0], full[0]);
+        EXPECT_EQ(resource->blocks(0, "full1")[1], full[1]);
+        EXPECT_TRUE(isNullBlockIdx(resource->blocks(0, "linear")[0]));
+        EXPECT_EQ(resource->blocks(0, "linear")[1], linear[1]);
+    }
+    EXPECT_NE(first->blocks(0, "linear")[2], second->blocks(0, "linear")[2]);
+    EXPECT_NE(first->blocks(0, "full1")[2], second->blocks(0, "full1")[2]);
+    allocator->free(FreeInfo{first, tokens});
+    allocator->free(FreeInfo{second, tokens});
+    a.prefix_checkpoint.reset();
+    b.prefix_checkpoint.reset();
+    lease.reset();
+    EXPECT_EQ(poolForTag(*allocator, "linear")->freeBlocksNum(), poolForTag(*allocator, "linear")->totalBlocksNum());
+    EXPECT_EQ(poolForTag(*allocator, "full1")->freeBlocksNum(), poolForTag(*allocator, "full1")->totalBlocksNum());
+}
+
+TEST_F(HybridTypeCoordinatorCacheManagerTest, PrefixLeaseRejectsMissingGroupAndUnalignedBoundary) {
+    auto config = makeTinyHybridConfig();
+    auto allocator = std::make_shared<TestHybridTypeCoordinatorCacheManager>(config, AllocationType::DEVICE);
+    ASSERT_TRUE(allocator->init());
+    auto producer = makeBatchResource(1, config, {100, 101, 102});
+    auto tokens = makeCompleteTokenIds(1, 12, 4);
+    MallocInfo seed{producer, tokens};
+    seed.enable_cache_lookup = false;
+    ASSERT_TRUE(allocator->malloc(seed).success);
+    EXPECT_FALSE(allocator->capturePrefixCheckpoint(producer->cacheResource(0), 7).ok());
+    const auto boundary = producer->blocks(0, "linear")[1];
+    const auto refs = poolForTag(*allocator, "linear")->refCount(boundary);
+    producer->mutableBlockIds(0, "linear").setAt(1, NULL_BLOCK_IDX);
+    EXPECT_FALSE(allocator->capturePrefixCheckpoint(producer->cacheResource(0), 8).ok());
+    producer->mutableBlockIds(0, "linear").setAt(1, boundary);
+    EXPECT_EQ(poolForTag(*allocator, "linear")->refCount(boundary), refs);
+    allocator->free(FreeInfo{producer, tokens});
+}
+
+TEST_F(HybridTypeCoordinatorCacheManagerTest, PrefixLeaseAttachFailureRollsBackAndCanRetry) {
+    auto config = makeTinyHybridConfig();
+    auto allocator = std::make_shared<TestHybridTypeCoordinatorCacheManager>(config, AllocationType::DEVICE);
+    ASSERT_TRUE(allocator->init());
+    auto producer = makeBatchResource(1, config, {100, 101, 102});
+    auto tokens = makeCompleteTokenIds(1, 12, 4);
+    MallocInfo seed{producer, tokens};
+    seed.enable_cache_lookup = false;
+    ASSERT_TRUE(allocator->malloc(seed).success);
+    auto captured = allocator->capturePrefixCheckpoint(producer->cacheResource(0), 8);
+    ASSERT_TRUE(captured.ok());
+    auto lease = std::move(captured).value();
+    const auto full = producer->blocks(0, "full1")[0];
+    const auto linear = producer->blocks(0, "linear")[1];
+    allocator->free(FreeInfo{producer, tokens});
+    auto pool = poolForTag(*allocator, "linear");
+    auto occupied = allocateReferencedBlocks(pool, pool->availableBlocksNum());
+    auto branch = makeBatchResource(1, config, {100, 101, 203});
+    MallocInfo attach{branch, tokens};
+    attach.prefix_checkpoint = lease;
+    EXPECT_FALSE(allocator->malloc(attach).success);
+    EXPECT_EQ(branch->curBlocksNum(), 0);
+    EXPECT_EQ(poolForTag(*allocator, "full1")->refCount(full), 1u);
+    EXPECT_EQ(pool->refCount(linear), 1u);
+    pool->decRef(occupied);
+    auto retry = allocator->malloc(attach);
+    ASSERT_TRUE(retry.success);
+    EXPECT_EQ(retry.reuse_len, 8);
+    allocator->free(FreeInfo{branch, tokens});
+}
+
+TEST_F(HybridTypeCoordinatorCacheManagerTest, PrefixLeaseHotAcquireRetainsAndRejectsOtherAllocator) {
+    auto config = makeTinyHybridConfig();
+    auto allocator = std::make_shared<TestHybridTypeCoordinatorCacheManager>(config, AllocationType::DEVICE);
+    ASSERT_TRUE(allocator->init());
+    auto missing = allocator->tryAcquirePrefixCheckpoint({100, 101}, 8);
+    ASSERT_TRUE(missing.ok());
+    EXPECT_EQ(*missing, nullptr);
+    auto producer = makeBatchResource(1, config, {100, 101, 102});
+    auto tokens = makeCompleteTokenIds(1, 12, 4);
+    MallocInfo seed{producer, tokens};
+    seed.enable_cache_lookup = false;
+    ASSERT_TRUE(allocator->malloc(seed).success);
+    InsertInfo insert{producer, tokens, false, Tier::DEVICE};
+    insert.cache_insert_token_limit = 8;
+    size_t resident = 0;
+    allocator->insertIntoCache(insert, resident);
+    allocator->free(FreeInfo{producer, tokens});
+    auto hot = allocator->tryAcquirePrefixCheckpoint({100, 101}, 8);
+    ASSERT_TRUE(hot.ok()) << hot.status();
+    ASSERT_NE(*hot, nullptr);
+    auto other = std::make_shared<TestHybridTypeCoordinatorCacheManager>(config, AllocationType::DEVICE);
+    ASSERT_TRUE(other->init());
+    auto branch = makeBatchResource(1, config, {100, 101, 203});
+    MallocInfo attach{branch, tokens};
+    attach.prefix_checkpoint = *hot;
+    EXPECT_FALSE(other->malloc(attach).success);
+    EXPECT_EQ(branch->curBlocksNum(), 0);
+    branch->setBatchCacheKeys(0, {100, 999, 203});
+    EXPECT_FALSE(allocator->malloc(attach).success);
+    EXPECT_EQ(branch->curBlocksNum(), 0);
+}
+
 }  // namespace test
 }  // namespace rtp_llm
 

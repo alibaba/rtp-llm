@@ -8,6 +8,7 @@
 #include <string>
 #include <string_view>
 #include <vector>
+#include "absl/status/statusor.h"
 
 #include "kmonitor/client/MetricsReporter.h"
 #include "rtp_llm/cpp/cache/Types.h"
@@ -86,6 +87,10 @@ public:
         int layer_id, const std::string& group_tag, int block_id, int partition_count, int partition_id) const;
     virtual std::shared_ptr<KVCacheResource>
     incrKVCacheRef(const KVCacheResource& kvcache_resource, const CacheKeysType& cache_keys, bool is_connector = false);
+    // Caller must keep the source alive and guarantee completed GPU writes.
+    absl::StatusOr<PrefixCheckpointLeasePtr> capturePrefixCheckpoint(const KVCacheResource& resource, int boundary);
+    // Device-only lookup. A null successful result means cache miss.
+    absl::StatusOr<PrefixCheckpointLeasePtr> tryAcquirePrefixCheckpoint(const CacheKeysType& keys, int boundary);
     virtual GroupedCacheLayerLayout allLayerCacheBase() const;
     virtual bool                    updateKVBlock(const BatchKVCacheResourcePtr&  batch_kv_cache_resource,
                                                   const std::vector<int>&         block_src_batch,
@@ -170,6 +175,8 @@ public:
     uint32_t convertToGlobalLayerId(size_t model_id, int local_layer_id) const;
 
 protected:
+    absl::StatusOr<PrefixCheckpointLeasePtr> capturePrefixCheckpointLocked(const KVCacheResource& resource, int boundary);
+    absl::Status validatePrefixCheckpointBoundary(int boundary) const;
     // Which capacity snapshots evaluateInitCapacity() is allowed to consult.
     // TOTAL_ONLY answers "can this request ever fit"; TOTAL_AND_AVAILABLE also
     // answers "can it fit right now".

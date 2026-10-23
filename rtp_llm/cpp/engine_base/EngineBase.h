@@ -57,6 +57,10 @@ public:
     virtual std::pair<std::vector<bool>, std::vector<GenerateStreamPtr>>
     enqueueMultiple(const std::vector<std::shared_ptr<GenerateInput>>& inputs);
 
+    virtual std::pair<std::vector<bool>, std::vector<GenerateStreamPtr>> enqueueSharedPrefix(
+        const std::vector<std::shared_ptr<GenerateInput>>& inputs,
+        int state_token_length, const std::string& parent_request_id);
+
     virtual std::shared_ptr<GenerateStream> makeStream(const std::shared_ptr<GenerateInput>& input);
 
     virtual absl::Status stop() = 0;

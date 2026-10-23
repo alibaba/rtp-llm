@@ -5930,4 +5930,147 @@ TEST_F(FIFOSchedulerTest, testDifferentGroupMetadataDoesNotIsolateWaitingStreams
     ASSERT_EQ(scheduler.runningStreamsSize(), 4);
 }
 
+
+// The shared-prefix lane owns the whole logical request, even when token or
+// memory budgets require several forwards. Ordinary work must not consume the
+// capacity needed by the next branch in between those forwards.
+TEST_F(FIFOSchedulerTest, sharedPrefixZeroBoundaryOwnsLaneUntilLastBranch) {
+    auto resources = makeSchedulerResources(makeMhaCacheConfig(1, 32, 1, 4, 8, DataType::TYPE_FP16), 8);
+    ASSERT_TRUE(resources.cache_manager->init());
+    resources.runtime_config.max_generate_batch_size = 1;
+    resources.runtime_config.fifo_scheduler_config.max_batch_tokens_size = 8192;
+    FIFOScheduler scheduler(resources.runtime_config, resources.model_config, makePDFusionPDSepConfig(),
+                            ParallelismConfig{}, ModelSpecificConfig{}, resources.cache_manager);
+    auto a = makeStream({1, 2}, resources.model_config, resources.runtime_config, resources.resource_context, 0);
+    auto b = makeStream({1, 3}, resources.model_config, resources.runtime_config, resources.resource_context, 0);
+    auto ordinary = makeStream({4, 5}, resources.model_config, resources.runtime_config, resources.resource_context, 0);
+    ASSERT_TRUE(scheduler.enqueueSharedPrefix({a, b}, 0, "parent").first.front());
+    ASSERT_TRUE(scheduler.enqueue(ordinary).ok());
+    verifyOnlyScheduledStream(scheduler, a);
+    EXPECT_EQ(b->curBlocksNum(), 0);
+    EXPECT_EQ(ordinary->curBlocksNum(), 0);
+    a->finishPrefixCheckpointCapture();
+    a->reportEvent(StreamEvents::GenerateDone);
+    verifyOnlyScheduledStream(scheduler, b);
+    EXPECT_EQ(ordinary->curBlocksNum(), 0);
+    b->finishPrefixCheckpointCapture();
+    b->reportEvent(StreamEvents::GenerateDone);
+    ASSERT_TRUE(scheduler.schedule().ok());
+    verifyOnlyScheduledStream(scheduler, ordinary);
+}
+
+TEST_F(FIFOSchedulerTest, sharedPrefixCancellationCancelsPendingMembersAndReleasesLane) {
+    auto resources = makeSchedulerResources(makeMhaCacheConfig(1, 32, 1, 4, 8, DataType::TYPE_FP16), 8);
+    ASSERT_TRUE(resources.cache_manager->init());
+    resources.runtime_config.max_generate_batch_size = 1;
+    resources.runtime_config.fifo_scheduler_config.max_batch_tokens_size = 8192;
+    FIFOScheduler scheduler(resources.runtime_config, resources.model_config, makePDFusionPDSepConfig(),
+                            ParallelismConfig{}, ModelSpecificConfig{}, resources.cache_manager);
+    auto a = makeStream({1, 2}, resources.model_config, resources.runtime_config, resources.resource_context, 0);
+    auto b = makeStream({1, 3}, resources.model_config, resources.runtime_config, resources.resource_context, 0);
+    auto ordinary = makeStream({4}, resources.model_config, resources.runtime_config, resources.resource_context, 0);
+    scheduler.enqueueSharedPrefix({a, b}, 0, "cancel-parent");
+    scheduler.enqueue(ordinary);
+    verifyOnlyScheduledStream(scheduler, a);
+    a->finishPrefixCheckpointCapture();
+    a->reportError(ErrorCode::CANCELLED, "client disconnected");
+    ASSERT_TRUE(scheduler.schedule().ok());
+    EXPECT_TRUE(b->hasError());
+    EXPECT_TRUE(b->isFinished());
+    EXPECT_EQ(b->curBlocksNum(), 0);
+    verifyOnlyScheduledStream(scheduler, ordinary);
+}
+
+TEST_F(FIFOSchedulerTest, sharedPrefixCapturesBeforeProducerReleaseAndAttachesWithoutLookup) {
+    auto resources = makeSchedulerResources(makeMhaCacheConfig(1, 32, 1, 4, 2, DataType::TYPE_FP16), 2);
+    ASSERT_TRUE(resources.cache_manager->init());
+    resources.resource_context.reuse_cache = true;
+    resources.runtime_config.max_generate_batch_size = 4;
+    resources.runtime_config.fifo_scheduler_config.max_batch_tokens_size = 8192;
+    FIFOScheduler scheduler(resources.runtime_config, resources.model_config, makePDFusionPDSepConfig(),
+                            ParallelismConfig{}, ModelSpecificConfig{}, resources.cache_manager);
+    auto a = makeStream({1, 2, 3}, resources.model_config, resources.runtime_config, resources.resource_context, 0);
+    auto b = makeStream({1, 2, 4}, resources.model_config, resources.runtime_config, resources.resource_context, 0);
+    a->generateInput()->custom_output_prefix_length = 2;
+    b->generateInput()->custom_output_prefix_length = 2;
+    scheduler.enqueueSharedPrefix({a, b}, 2, "cold-parent");
+    verifyOnlyScheduledStream(scheduler, a);
+    EXPECT_TRUE(a->hasPendingAsyncBookkeeping());
+    EXPECT_EQ(b->curBlocksNum(), 0);
+    StreamUpdateInfo update{torch::empty({1, 0}, torch::kInt32), 0};
+    a->update(update);
+    auto checkpoint = a->prefixCheckpointResult();
+    a->finishPrefixCheckpointCapture();
+    ASSERT_TRUE(checkpoint.ok()) << checkpoint.status();
+    ASSERT_NE(*checkpoint, nullptr);
+    EXPECT_EQ((*checkpoint)->boundaryTokens(), 2);
+    // Mirrors NormalEngine's executor guard handoff. The checkpoint already
+    // owns its physical references before the producer can be released.
+    a->finishPrefixCheckpointCapture();
+    verifyOnlyScheduledStream(scheduler, b);
+    EXPECT_EQ(b->reuseLength(), 2);
+    EXPECT_FALSE(a->hasPendingAsyncBookkeeping());
+    b->finishPrefixCheckpointCapture();
+    b->reportEvent(StreamEvents::GenerateDone);
+    ASSERT_TRUE(scheduler.schedule().ok());
+    auto hot_a = makeStream({1, 2, 5}, resources.model_config, resources.runtime_config, resources.resource_context, 0);
+    auto hot_b = makeStream({1, 2, 6}, resources.model_config, resources.runtime_config, resources.resource_context, 0);
+    hot_a->generateInput()->custom_output_prefix_length = 2;
+    hot_b->generateInput()->custom_output_prefix_length = 2;
+    scheduler.enqueueSharedPrefix({hot_a, hot_b}, 2, "hot-parent");
+    auto hot = scheduler.schedule();
+    // Finish fake execution holds before assertions, including test failures.
+    hot_a->finishPrefixCheckpointCapture();
+    hot_b->finishPrefixCheckpointCapture();
+    ASSERT_TRUE(hot.ok());
+    EXPECT_EQ(hot->size(), 2u);  // A cache hit has no serial producer round.
+    EXPECT_EQ(hot_a->reuseLength(), 2);
+    EXPECT_EQ(hot_b->reuseLength(), 2);
+    hot_a->reportEvent(StreamEvents::GenerateDone);
+    hot_b->reportEvent(StreamEvents::GenerateDone);
+    ASSERT_TRUE(scheduler.schedule().ok());
+}
+
+TEST_F(FIFOSchedulerTest, sharedPrefixCapacityFailureDoesNotPinOrAllocateProducer) {
+    auto resources = makeSchedulerResources(makeMhaCacheConfig(1, 4, 1, 4, 2, DataType::TYPE_FP16), 2);
+    ASSERT_TRUE(resources.cache_manager->init());
+    resources.runtime_config.max_generate_batch_size = 4;
+    resources.runtime_config.fifo_scheduler_config.max_batch_tokens_size = 8192;
+    FIFOScheduler scheduler(resources.runtime_config, resources.model_config, makePDFusionPDSepConfig(),
+                            ParallelismConfig{}, ModelSpecificConfig{}, resources.cache_manager);
+    auto a = makeStream({1, 2, 3}, resources.model_config, resources.runtime_config, resources.resource_context, 0);
+    auto b = makeStream(std::vector<int>(20, 1), resources.model_config, resources.runtime_config, resources.resource_context, 0);
+    const auto before = resources.cache_manager->freeBlocksNum();
+    const auto result = scheduler.enqueueSharedPrefix({a, b}, 2, "oversized-parent");
+    EXPECT_FALSE(result.first.front());
+    EXPECT_TRUE(a->hasError());
+    EXPECT_TRUE(b->hasError());
+    EXPECT_EQ(a->curBlocksNum(), 0);
+    EXPECT_EQ(resources.cache_manager->freeBlocksNum(), before);
+}
+
+
+TEST_F(FIFOSchedulerTest, sharedPrefixStopDoesNotReleaseSynchronousExecutionHold) {
+    auto resources = makeSchedulerResources(makeMhaCacheConfig(1, 32, 1, 4, 8, DataType::TYPE_FP16), 8);
+    ASSERT_TRUE(resources.cache_manager->init());
+    resources.runtime_config.max_generate_batch_size = 1;
+    resources.runtime_config.fifo_scheduler_config.max_batch_tokens_size = 8192;
+    FIFOScheduler scheduler(resources.runtime_config, resources.model_config, makePDFusionPDSepConfig(),
+                            ParallelismConfig{}, ModelSpecificConfig{}, resources.cache_manager);
+    auto child = makeStream({1, 2}, resources.model_config, resources.runtime_config, resources.resource_context, 0);
+    scheduler.enqueueSharedPrefix({child}, 0, "stop-during-forward");
+    verifyOnlyScheduledStream(scheduler, child);
+    const auto free_during_execution = resources.cache_manager->freeBlocksNum();
+    ASSERT_TRUE(child->hasPendingAsyncBookkeeping());
+    // Stop can publish cancellation, but cannot return the block to the pool
+    // while the executor still owns the child. No output/capture callback is
+    // required on the failure path: the execution RAII guard completes it.
+    ASSERT_TRUE(scheduler.stop().ok());
+    EXPECT_TRUE(child->hasPendingAsyncBookkeeping());
+    EXPECT_EQ(resources.cache_manager->freeBlocksNum(), free_during_execution);
+    child->finishPrefixCheckpointCapture();
+    EXPECT_FALSE(child->hasPendingAsyncBookkeeping());
+    EXPECT_GT(resources.cache_manager->freeBlocksNum(), free_during_execution);
+}
+
 }  // namespace rtp_llm

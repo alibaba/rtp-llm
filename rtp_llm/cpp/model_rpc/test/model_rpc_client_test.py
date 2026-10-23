@@ -553,13 +553,22 @@ class ModelRpcClientTest(TestCase):
 
         for python_mode, proto_mode in cases:
             with self.subTest(mode=python_mode):
-                config = GenerateConfig(thinking_mode=python_mode)
+                # Adaptive thinking requires an explicit opening marker before
+                # crossing the RPC boundary; this test checks wire encoding,
+                # not rejection of an incomplete generation configuration.
+                begin_ids = [123] if python_mode == ThinkingMode.ADAPTIVE else []
+                config = GenerateConfig(
+                    thinking_mode=python_mode, begin_think_token_ids=begin_ids
+                )
                 config_before_rpc = config.model_dump()
 
                 input_pb = trans_input(self._make_generate_input(config))
 
                 self.assertEqual(config.model_dump(), config_before_rpc)
                 self.assertEqual(input_pb.generate_config.thinking_mode, proto_mode)
+                self.assertEqual(
+                    list(input_pb.generate_config.begin_think_token_ids), begin_ids
+                )
 
     def _round_trip_generate_config(self, config: GenerateConfig):
         input_pb = trans_input(self._make_generate_input(config))
@@ -653,6 +662,106 @@ class ModelRpcClientTest(TestCase):
             _trans_rpc_error_code(ErrorCodePB.P2P_CONNECTOR_WORKER_READ_CANCELED),
             ExceptionType.P2P_CONNECTOR_WORKER_READ_CANCELLED,
         )
+
+    def test_shared_prefix_old_server_rejects_before_batch_handler_execution(self):
+        from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2 import BatchGenerateInputPB
+        from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2_grpc import (
+            RpcServiceServicer,
+            RpcServiceStub,
+            add_RpcServiceServicer_to_server,
+        )
+
+        class LegacyServer(RpcServiceServicer):
+            calls = 0
+
+            async def BatchGenerateCall(self, request, context):
+                self.calls += 1
+                return BatchGenerateOutputsPB()
+
+        async def run():
+            server = grpc.aio.server()
+            legacy = LegacyServer()
+            add_RpcServiceServicer_to_server(legacy, server)
+            port = server.add_insecure_port("127.0.0.1:0")
+            await server.start()
+            try:
+                async with grpc.aio.insecure_channel(f"127.0.0.1:{port}") as channel:
+                    stub = RpcServiceStub(channel)
+                    request = BatchGenerateInputPB()
+                    request.shared_prefix.protocol_version = 1
+                    with self.assertRaises(grpc.aio.AioRpcError) as ctx:
+                        await stub.SharedPrefixGenerateCall(request)
+                    self.assertEqual(ctx.exception.code(), StatusCode.UNIMPLEMENTED)
+                    self.assertEqual(legacy.calls, 0)
+            finally:
+                await server.stop(None)
+
+        asyncio.run(run())
+
+    def test_shared_prefix_protocol_ack_and_selected_backend(self):
+        client = self._make_batch_client()
+        client._addresses = ["worker-0:1234", "worker-1:1234"]
+        inp = self._make_generate_input(GenerateConfig())
+        for ack in (0, 1, 2):
+            response = BatchGenerateOutputsPB(shared_prefix_protocol_version=ack)
+            response.results.add().final_output.flatten_output.finished.append(True)
+            stub = MagicMock()
+            stub.SharedPrefixGenerateCall = AsyncMock(return_value=response)
+            with patch(
+                "rtp_llm.cpp.model_rpc.model_rpc_client.RpcServiceStub",
+                return_value=stub,
+            ):
+                if ack == 1:
+                    self.assertEqual(
+                        len(
+                            asyncio.run(
+                                client.batch_generate(
+                                    [inp], routing_key=7, shared_prefix_state_tokens=64
+                                )
+                            )
+                        ),
+                        1,
+                    )
+                else:
+                    with self.assertRaisesRegex(FtRuntimeException, "acknowledge"):
+                        asyncio.run(
+                            client.batch_generate(
+                                [inp], routing_key=7, shared_prefix_state_tokens=64
+                            )
+                        )
+            client._channel_pool.get.assert_awaited_with("worker-1:1234")
+            options = stub.SharedPrefixGenerateCall.await_args.args[0].shared_prefix
+            self.assertEqual(options.protocol_version, 1)
+            self.assertEqual(options.state_token_length, 64)
+            self.assertEqual(options.parent_request_id, "7")
+            stub.BatchGenerateCall.assert_not_called()
+
+    def test_shared_prefix_only_unimplemented_allows_legacy_fallback(self):
+        from rtp_llm.cpp.model_rpc.model_rpc_client import SharedPrefixUnsupported
+
+        client = self._make_batch_client()
+        inp = self._make_generate_input(GenerateConfig())
+        for code in (
+            StatusCode.UNIMPLEMENTED,
+            StatusCode.UNAVAILABLE,
+            StatusCode.INVALID_ARGUMENT,
+        ):
+            stub = MagicMock()
+            stub.SharedPrefixGenerateCall = AsyncMock(side_effect=_FakeRpcError(code))
+            with patch(
+                "rtp_llm.cpp.model_rpc.model_rpc_client.RpcServiceStub",
+                return_value=stub,
+            ):
+                expected = (
+                    SharedPrefixUnsupported
+                    if code == StatusCode.UNIMPLEMENTED
+                    else FtRuntimeException
+                )
+                with self.assertRaises(expected):
+                    asyncio.run(
+                        client.batch_generate([inp], shared_prefix_state_tokens=64)
+                    )
+            stub.BatchGenerateCall.assert_not_called()
 
     def test_batch_routing_key_pins_backend_without_reusing_request_ids(self):
         for method in ("batch_generate", "batch_enqueue"):
