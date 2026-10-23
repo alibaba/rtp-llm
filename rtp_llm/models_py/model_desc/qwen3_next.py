@@ -1719,8 +1719,6 @@ class Qwen3NextModel(GptModelBase):
         is_cuda_graph: bool = False,
         cuda_graph_selection_mode: Optional[str] = None,
     ):
-        if all(layer.layer_type == HybridAttentionType.LINEAR for layer in self.layers):
-            return {}
         impls = super().prepare_fmha_impl(
             inputs, is_cuda_graph, cuda_graph_selection_mode
         )
