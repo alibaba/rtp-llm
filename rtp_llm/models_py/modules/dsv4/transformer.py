@@ -120,6 +120,7 @@ class V4Args:
     moe_cp_enabled: bool = False
     moe_cp_size: int = 1
     is_decode_role: bool = False
+    is_mtp: bool = False
     # Dedicated DSpARK prefill workers only project target features into the
     # draft SWA pools; they do not construct proposal, FFN, or mHC modules.
     commit_only: bool = False

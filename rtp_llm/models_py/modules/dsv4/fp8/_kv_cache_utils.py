@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import threading
 from typing import Any, Optional
 
 import torch
@@ -15,6 +16,30 @@ from rtp_llm.models_py.modules.dsv4.kv_cache_utils import group_tags as _group_t
 
 _PHYSICAL_ROW_TAGS = frozenset(DSV4_PHYSICAL_ROW_TAGS)
 _KERNEL_ROW_TAGS = frozenset(DSV4_KERNEL_ROW_TAGS)
+
+# Async prefill-head prebuild (``_head_prebuild``) isolation contract. The
+# builder thread carries ``ASYNC_HEAD_BUILDER_THREAD_ATTR`` and may only rebind
+# per-forward state on private shadow copies marked with
+# ``ASYNC_HEAD_SHADOW_ATTR``; the live modules belong to the serving thread.
+ASYNC_HEAD_BUILDER_THREAD_ATTR = "_dsv4_async_head_builder"
+ASYNC_HEAD_SHADOW_ATTR = "_dsv4_async_head_shadow"
+
+
+def guard_live_module_mutation(module: Any, what: str = "state") -> None:
+    """Reject per-forward state rebinding of a live module from the builder.
+
+    Costs one thread-local lookup on the serving thread. On the async-head
+    builder thread, mutating anything except a private shadow copy would race
+    with the serving thread's forward, so fail the (optional) build instead.
+    """
+    if not getattr(threading.current_thread(), ASYNC_HEAD_BUILDER_THREAD_ATTR, False):
+        return
+    if vars(module).get(ASYNC_HEAD_SHADOW_ATTR, False):
+        return
+    raise RuntimeError(
+        f"[dsv4-async-head] builder thread attempted to mutate {what} on live "
+        f"module {type(module).__name__}; the builder must use shadow copies"
+    )
 
 
 def _positive_int(value: Any) -> Optional[int]:
@@ -160,6 +185,7 @@ class PoolBackedModule(nn.Module):
         ``pos // state_tokens_per_block`` while the in-block offset uses
         ``pos % state_eb``.
         """
+        guard_live_module_mutation(self, "pool context")
         if kv_pool_view is not None:
             assert kv_eb > 0 and kv_tokens_per_block > 0, (
                 f"KV pool bound but kv_eb={kv_eb} / "
@@ -205,6 +231,7 @@ class PoolBackedModule(nn.Module):
         self._state_tokens_per_block = state_tokens_per_block
 
     def clear_pool_context(self) -> None:
+        guard_live_module_mutation(self, "pool context")
         self._kv_pool_view = None
         self._kv_block_table = None
         self._kv_eb = 0
