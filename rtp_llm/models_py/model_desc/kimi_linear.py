@@ -117,6 +117,7 @@ class KimiLinearMetadata(object):
         self.kda_checkpoint_states: Optional[torch.Tensor] = None
         self.kda_cu_seqlens_host: Optional[torch.Tensor] = None
         self.kda_checkpoint_page_size = 0
+        self.zigzag_kcp_layout = None
         self.token_shard: Optional[TokenShardLayout] = None
         self.mla_cp_layout: Optional[ZigzagTokenLayout] = None
 
@@ -1073,6 +1074,13 @@ class KimiLinearKDA(nn.Module):
             or attn_meta.get_prefill_conv1d_meta() is not None
         ), "prefill_conv1d_meta is required for prefill"
 
+        if attn_meta.zigzag_kcp_layout is not None:
+            from rtp_llm.models_py.distributed.kcp.glm53_kda import Glm53ZigzagKDA
+
+            if not hasattr(self, "_zigzag_kcp"):
+                self._zigzag_kcp = Glm53ZigzagKDA(self)
+            return self._zigzag_kcp(hidden_states, attention_inputs, kv_cache, attn_meta)
+
         # 1. Projections. The SP caller may leave the input rank-local for AG/GEMM.
         is_context = attention_inputs.is_prefill and not attn_meta.is_target_verify
         use_packed_projection = self.packed_input_weight is not None and (
@@ -1450,6 +1458,8 @@ class KimiLinearDecoderLayer(nn.Module):
             fuse_ag = can_fuse_input(
                 self.self_attn.input_projections(), layout.logical_tokens
             )
+            if attn_meta.zigzag_kcp_layout is not None:
+                fuse_ag = True
             if not fuse_ag:
                 hidden_states = all_gather_trim(
                     hidden_states, layout.logical_tokens, Group.TP
@@ -1463,14 +1473,16 @@ class KimiLinearDecoderLayer(nn.Module):
                 input_is_sharded=fuse_ag,
             )
         elif cp_layout is not None:
-            hidden_states = cp_layout.sp_to_cp(hidden_states)
+            if attn_meta.zigzag_kcp_layout is None:
+                hidden_states = cp_layout.sp_to_cp(hidden_states)
             hidden_states = self.self_attn(
                 hidden_states=hidden_states,
                 fmha_impl=fmha_impl,
                 kv_cache=kv_cache,
                 global_kv_cache=global_kv_cache,
             )
-            hidden_states = cp_layout.cp_to_sp(hidden_states)
+            if attn_meta.zigzag_kcp_layout is None:
+                hidden_states = cp_layout.cp_to_sp(hidden_states)
         else:
             hidden_states = all_gather_trim(
                 hidden_states, layout.logical_tokens, Group.TP
@@ -1584,6 +1596,12 @@ class KimiLinearModel(GptModelBase):
         self.prefill_mla_cp = mla_cp_enabled(
             model_config.model_type, parallelism_config.role_type
         )
+        self.prefill_kcp = os.environ.get("GLM53_PREFILL_KCP", "0") == "1"
+        if self.prefill_kcp and not (
+            self.prefill_sequence_parallel and self.prefill_mla_cp
+            and model_config.hc_mult > 1
+        ):
+            raise ValueError("GLM53 KCP requires dedicated SP8/MLA CP8 prefill with mHC")
         if self.prefill_sequence_parallel and model_config.hc_mult <= 1:
             raise ValueError("GLM53 Prefill sequence parallel requires mHC")
         self.mla_parallelism = (
@@ -1853,6 +1871,16 @@ class KimiLinearModel(GptModelBase):
             if self.prefill_mla_cp:
                 attn_meta.mla_cp_layout = fmha_impl.glm53_cp_layout
             hidden_states = shard_tokens(hidden_states, attn_meta.token_shard)
+            if self.prefill_kcp:
+                from rtp_llm.models_py.distributed.kcp.token_layout import ZigzagShardLayout
+
+                lengths = attn_meta.mla_cp_layout.q_lens
+                alignment = 2 * self.parallelism_config.tp_size * 64
+                if any(length % alignment for length in lengths):
+                    raise ValueError("GLM53 KCP requires each prefill length divisible by 2*TP*64")
+                hidden_states = attn_meta.mla_cp_layout.sp_to_cp(hidden_states)
+                attn_meta.zigzag_kcp_layout = attn_meta.mla_cp_layout
+                attn_meta.token_shard = ZigzagShardLayout.from_cp(attn_meta.mla_cp_layout)
         del inputs_embeds
 
         typed_aux_cache_store = create_write_cache_store_impl(
@@ -1922,6 +1950,10 @@ class KimiLinearModel(GptModelBase):
         else:
             hidden_states, _ = self.norm(hidden_states, residual)
 
+        if attn_meta.zigzag_kcp_layout is not None:
+            # The compact router layout carries ownership metadata only; the
+            # original CP plan owns the inverse fragment copy.
+            hidden_states = attn_meta.mla_cp_layout.cp_to_sp(hidden_states)
         if attn_meta.token_shard is not None:
             hidden_states = all_gather_trim(
                 hidden_states, attn_meta.token_shard.logical_tokens, Group.TP

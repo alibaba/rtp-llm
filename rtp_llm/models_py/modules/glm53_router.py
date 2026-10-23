@@ -1,9 +1,86 @@
 """GLM-5.3 router projection in FP32, with bounded activation storage."""
 
+from functools import lru_cache
+import os
+from threading import get_ident
+
 import torch
 import torch.nn.functional as F
 from rtp_llm.models_py.distributed.sequence_parallel import TokenShardLayout
 from torch import nn
+
+
+@lru_cache(maxsize=128)
+def _zigzag_batches(fragments, chunk_rows, logical_tokens):
+    chunks = {}
+    for local, canonical, length in fragments:
+        while length:
+            begin = canonical // chunk_rows * chunk_rows
+            count = min(length, begin + chunk_rows - canonical)
+            chunks.setdefault(begin, []).append((local, canonical - begin, count))
+            local += count
+            canonical += count
+            length -= count
+    batches = []
+    for begin, pieces in sorted(chunks.items()):
+        rows = min(chunk_rows, logical_tokens - begin)
+        for batch_rows, batch in batches:
+            if rows == batch_rows and all(
+                start + count <= other or other + size <= start
+                for _, start, count in pieces for _, other, size in batch
+            ):
+                batch.extend(pieces)
+                break
+        else:
+            batches.append((rows, list(pieces)))
+    return tuple((rows, tuple(pieces)) for rows, pieces in batches)
+
+
+@lru_cache(maxsize=128)
+def _zigzag_packed_batches(fragments, chunk_rows, logical_tokens):
+    """Compact complete SIMT row tiles, retaining canonical GEMM M.
+
+    A row stays at the same position inside a 64-row tile. Only complete
+    tiles are moved between GEMMs with identical M. Unsupported fragments
+    retain the canonical placement rather than changing the reduction shape.
+    """
+    if chunk_rows % 64 or any(c % 64 or n % 64 for _, c, n in fragments):
+        return _zigzag_batches(fragments, chunk_rows, logical_tokens)
+    buckets = {}
+    for local, canonical, length in fragments:
+        while length:
+            begin = canonical // chunk_rows * chunk_rows
+            rows = min(chunk_rows, logical_tokens - begin)
+            count = min(length, begin + rows - canonical)
+            if rows % 64:
+                return _zigzag_batches(fragments, chunk_rows, logical_tokens)
+            buckets.setdefault(rows, []).append((local, count))
+            local += count
+            canonical += count
+            length -= count
+    batches = []
+    for rows, pieces in buckets.items():
+        offset, batch = 0, []
+        for local, length in pieces:
+            while length:
+                count = min(length, rows - offset)
+                batch.append((local, offset, count))
+                local += count
+                offset += count
+                length -= count
+                if offset == rows:
+                    batches.append((rows, tuple(batch)))
+                    offset, batch = 0, []
+        if batch:
+            batches.append((rows, tuple(batch)))
+    return tuple(batches)
+
+
+@lru_cache(maxsize=32)
+def _zigzag_workspace(device, stream, thread, rows, width):
+    # Shared across layers on this stream. Every consumer is enqueued before
+    # the next zero/copy producer; different streams never alias the buffer.
+    return torch.empty((rows, width), dtype=torch.float32, device=device)
 
 
 class Glm53FP32Router(nn.Module):
@@ -54,6 +131,8 @@ class Glm53FP32Router(nn.Module):
             raise RuntimeError("GLM-5.3 FP32 router requires matmul.allow_tf32=False")
         if hidden_states.ndim != 2 or hidden_states.shape[0] != layout.local_tokens:
             raise ValueError("router input must match the local token layout")
+        if hasattr(layout, "canonical_fragments"):
+            return self._forward_zigzag(hidden_states, layout)
         begin = layout.local_start
         valid = layout.local_valid_tokens
         end = begin + valid
@@ -95,4 +174,51 @@ class Glm53FP32Router(nn.Module):
             output.narrow(0, local_first, count).copy_(
                 logits.narrow(0, chunk_first, count)
             )
+        return output
+
+    def _forward_zigzag(self, hidden_states, layout):
+        """Coalesce disjoint canonical rows without changing GEMM M/offsets.
+
+        FP32 reduction/top-k behavior depends on the original GEMM shape and
+        row offsets. Distinct canonical chunks may share one GEMM only when
+        their occupied row intervals do not overlap and their M is identical.
+        """
+        if hidden_states.is_cuda and os.environ.get('GLM53_ROUTER_ZIGZAG_PACKED', '0') == '1':
+            return self._forward_zigzag_packed(hidden_states, layout)
+        batches = _zigzag_batches(tuple(layout.canonical_fragments), self.chunk_rows,
+                                 layout.logical_tokens)
+        output = hidden_states.new_empty(
+            (layout.local_tokens, self.weight.shape[0]), dtype=torch.float32
+        )
+        stream = (int(torch.cuda.current_stream(hidden_states.device).cuda_stream)
+                  if hidden_states.is_cuda else None)
+        for rows, fragments in batches:
+            chunk = _zigzag_workspace(hidden_states.device, stream, get_ident(), rows, hidden_states.shape[1])
+            chunk.zero_()
+            for local, offset, count in fragments:
+                chunk.narrow(0, offset, count).copy_(
+                    hidden_states.narrow(0, local, count)
+                )
+            logits = F.linear(chunk, self.weight)
+            for local, offset, count in fragments:
+                output.narrow(0, local, count).copy_(
+                    logits.narrow(0, offset, count)
+                )
+        return output
+
+    def _forward_zigzag_packed(self, hidden_states, layout):
+        from .glm53_router_packing import pack_rows, scatter_rows, row_maps
+
+        batches = _zigzag_packed_batches(tuple(layout.canonical_fragments),
+                                         self.chunk_rows, layout.logical_tokens)
+        output = hidden_states.new_empty(
+            (layout.local_tokens, self.weight.shape[0]), dtype=torch.float32)
+        stream = int(torch.cuda.current_stream(hidden_states.device).cuda_stream)
+        for rows, fragments in batches:
+            chunk = _zigzag_workspace(hidden_states.device, stream, get_ident(),
+                                      rows, hidden_states.shape[1])
+            mapping = row_maps(hidden_states.device, stream, get_ident(), rows, fragments)
+            pack_rows(hidden_states, mapping, chunk)
+            logits = F.linear(chunk, self.weight)
+            scatter_rows(logits, mapping, output)
         return output

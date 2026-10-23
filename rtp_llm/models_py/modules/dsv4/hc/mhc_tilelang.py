@@ -225,8 +225,20 @@ def tk_mhc_pre(
         )
         return out, post_mix, comb_mix
     except Exception as e:
+        # Keep the operand metadata in the error.  The residual shape alone is
+        # insufficient to distinguish an unsupported token geometry from a
+        # checkpoint-loaded (possibly non-contiguous) mHC weight layout.
+        fn_meta = (
+            f"fn_shape={tuple(fn.shape)}, fn_stride={tuple(fn.stride())}, "
+            f"fn_dtype={fn.dtype}, fn_contig={fn.is_contiguous()}, "
+            f"scale_shape={tuple(scale.shape)}, base_shape={tuple(base.shape)}"
+        )
         raise RuntimeError(
-            "TileLang mhc_pre failed: " + _shape_ctx(residual, hc_mult=hc_mult)
+            "TileLang mhc_pre failed: "
+            + _shape_ctx(residual, hc_mult=hc_mult)
+            + ", "
+            + fn_meta
+            + f", cause={type(e).__name__}: {e}"
         ) from e
 
 

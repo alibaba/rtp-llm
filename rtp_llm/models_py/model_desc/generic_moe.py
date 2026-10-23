@@ -440,9 +440,15 @@ class GenericMoeLayer(nn.Module):
                 self.routed_tp_size,
                 self.routed_tp_rank,
             )
+            from rtp_llm.models_py.distributed.kcp.token_layout import ZigzagShardLayout
+
+            zigzag = isinstance(sequence_parallel_layout, ZigzagShardLayout)
             if (
-                sequence_parallel_layout != expected_layout
-                or hidden_states.shape[0] != expected_layout.local_tokens
+                (not zigzag and sequence_parallel_layout != expected_layout)
+                or (zigzag and (sequence_parallel_layout.rank != self.routed_tp_rank
+                                or sequence_parallel_layout.world_size != self.routed_tp_size
+                                or not self.shared_expert_local or not local_router))
+                or hidden_states.shape[0] != sequence_parallel_layout.local_tokens
             ):
                 raise ValueError("sequence-parallel MoE token layout mismatch")
             if local_router:

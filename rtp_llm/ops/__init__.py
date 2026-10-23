@@ -294,11 +294,16 @@ def _load_engine_ops(required: bool = False) -> None:
         try:
             from libth_transformer import (
                 EmbeddingCppOutput,
-                MMRdmaEncoderOp,
                 RtpEmbeddingOp,
                 RtpLLMOp,
                 build_xgrammar_tokenizer_info_json,
             )
+            # Older prebuilt local runtimes do not expose the optional
+            # multimodal RDMA encoder. Prefill text serving does not use it.
+            try:
+                from libth_transformer import MMRdmaEncoderOp
+            except ImportError:
+                MMRdmaEncoderOp = EmptyClass
 
             globals()["EmbeddingCppOutput"] = EmbeddingCppOutput
             globals()["MMRdmaEncoderOp"] = MMRdmaEncoderOp
