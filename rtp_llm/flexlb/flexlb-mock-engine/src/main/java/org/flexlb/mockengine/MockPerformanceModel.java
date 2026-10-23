@@ -124,7 +124,6 @@ final class MockPerformanceModel {
 
     private volatile int blockSize;
     private MockEosModel eosModel;
-    private volatile MockEosModel runtimeEosModel;
     boolean nativeTokenCacheKeys;
     boolean prefillReuseCache = true;
     boolean prefillDeviceCache = true;
@@ -153,10 +152,8 @@ final class MockPerformanceModel {
     private final int maxBatchRequests;
     private final PrefillTimeFormula prefillFormula;
     private record RuntimePrefill(String expression, PrefillTimeFormula formula) {}
-    private volatile RuntimePrefill runtimePrefill;
     private record RuntimeDecode(double stepBaseMs, double stepPerRunningMs,
                                  double tokensPerStep) {}
-    private volatile RuntimeDecode runtimeDecode;
     private String configuredPrefillExpression = "";
     // Decode step-latency sources, exactly one active per model:
     //   - explicit step_ms_by_batch curve (decodePoints non-empty; legacy
@@ -236,17 +233,12 @@ final class MockPerformanceModel {
     // formula-driven. This is an explicit configuration channel, NOT the
     // removed silent fallback (a missing key never invents a duration).
     private final Double configuredFixedPrefillMs;
-    private volatile Double overrideFixedPrefillMs;
-    private volatile Double overrideDecodeStepMs;
-    // Python /set_perf compatibility: decode_scale overrides the config-file
-    // decode scale (Python-compat /set_perf -> performance.decode_scale).
-    private volatile Double overrideDecodeScale;
-    // Python /set_perf compatibility: max_waiting_batches overrides the
-    // config-file prefill waiting-queue cap (Python-compat /set_perf ->
-    // performance prefill.max_waiting_batches). Null = not overridden;
-    // the override value follows the same semantics as the JSON field
-    // (0 = unbounded, > 0 = cap on queued prefill batches).
-    private volatile Integer overrideMaxWaitingPrefillBatches;
+    /** One immutable publication for all runtime performance controls. */
+    private record RuntimeSettings(RuntimePrefill prefill, RuntimeDecode decode, MockEosModel eos,
+                                   Double fixedPrefillMs, Double decodeStepMs, Double decodeScale,
+                                   Integer maxWaitingBatches) {}
+    private volatile RuntimeSettings controls = new RuntimeSettings(null, null, null, null, null, null, null);
+
     private MockPrefillBatchPolicy prefillBatchPolicy;
 
     MockPrefillBatchPolicy prefillBatchPolicy() { return prefillBatchPolicy; }
@@ -298,7 +290,7 @@ final class MockPerformanceModel {
                 tokensPerStep, decodeReserveStep, decodeScale, reportQueuedAsKvAllocated, jitterPct);
         // Explicit overrides installed before startup are part of that engine's initial settings.
         copy.eosModel = eosModel;
-        copy.runtimeEosModel = runtimeEosModel;
+        copy.controls = controls;
         copy.decodeReuseCache = decodeReuseCache;
         copy.prefillGpuPrefixTree = prefillGpuPrefixTree;
         copy.decodeGpuPrefixTree = decodeGpuPrefixTree;
@@ -310,15 +302,9 @@ final class MockPerformanceModel {
         copy.nativeTokenCacheKeys = nativeTokenCacheKeys;
         copy.prefillReuseCache = prefillReuseCache;
         copy.prefillDeviceCache = prefillDeviceCache;
-        copy.overrideFixedPrefillMs = overrideFixedPrefillMs;
-        copy.runtimePrefill = runtimePrefill;
-        copy.runtimeDecode = runtimeDecode;
         copy.prefillNoise = prefillNoise;
         copy.decodeNoise = decodeNoise;
         copy.configuredPrefillExpression = configuredPrefillExpression;
-        copy.overrideDecodeStepMs = overrideDecodeStepMs;
-        copy.overrideDecodeScale = overrideDecodeScale;
-        copy.overrideMaxWaitingPrefillBatches = overrideMaxWaitingPrefillBatches;
         return copy;
     }
 
@@ -577,33 +563,35 @@ final class MockPerformanceModel {
         if (nativeKeys && input.hasV41Inputs()) hitBlocks = MockImageCacheKeys.validHitBlocks(input, hitBlocks, blockSize);
         long hitTokens = (long) hitBlocks * blockSize;
         hitTokens = Math.min(hitTokens, inputLen);
-        MockEosModel activeEos = runtimeEosModel;
+        MockEosModel activeEos = controls.eos();
         outputLen = (activeEos == null ? eosModel : activeEos)
                 .outputLength(input, Math.max(1, outputLen), explicitOutputLength);
         return new RequestShape(input, inputLen, outputLen, List.copyOf(blockKeys),
                 hitTokens, hitBlocks, nativeKeys);
     }
 
-    void setEosModel(MockEosModel model) {
-        runtimeEosModel = java.util.Objects.requireNonNull(model);
+    synchronized void setEosModel(MockEosModel model) {
+        RuntimeSettings settings = controls;
+        controls = new RuntimeSettings(settings.prefill(), settings.decode(), java.util.Objects.requireNonNull(model), settings.fixedPrefillMs(), settings.decodeStepMs(), settings.decodeScale(), settings.maxWaitingBatches());
     }
 
     Map<String, Object> outputLengthState() {
-        MockEosModel active = runtimeEosModel;
+        MockEosModel active = controls.eos();
         return Map.of("eos", (active == null ? eosModel : active).configuration(),
                 "runtime_override", active != null);
     }
 
     long prefillMs(List<RequestShape> requests) {
-        RuntimePrefill runtime = runtimePrefill;
+        RuntimeSettings settings = controls;
+        RuntimePrefill runtime = settings.prefill();
         if (requests.isEmpty()) {
             return 0;
         }
         double latency;
-        if (runtime == null && overrideFixedPrefillMs != null) {
+        if (runtime == null && settings.fixedPrefillMs() != null) {
             // Runtime override (Python /set_perf prefill_fixed_ms): explicit
             // test-time control, length-blind by design.
-            latency = overrideFixedPrefillMs;
+            latency = settings.fixedPrefillMs();
         } else if (runtime == null && configuredFixedPrefillMs != null) {
             // Explicit performance-JSON "prefill.fixed_ms": the declared flat
             // prefill for duration-blind suites. Declared explicitly, so it
@@ -653,28 +641,33 @@ final class MockPerformanceModel {
         return formula;
     }
 
-    void setPrefillExpression(String expression) {
-        runtimePrefill = new RuntimePrefill(expression, validatePrefillExpression(expression));
+    synchronized void setPrefillExpression(String expression) {
+        RuntimeSettings settings = controls;
+        controls = new RuntimeSettings(new RuntimePrefill(expression, validatePrefillExpression(expression)), settings.decode(), settings.eos(), settings.fixedPrefillMs(), settings.decodeStepMs(), settings.decodeScale(), settings.maxWaitingBatches());
     }
 
     Map<String, Object> prefillExpressionState() {
-        RuntimePrefill runtime = runtimePrefill;
+        RuntimeSettings settings = controls;
+        RuntimePrefill runtime = settings.prefill();
         return Map.of("runtime_override", runtime != null,
                 "expression", runtime == null ? configuredPrefillExpression : runtime.expression(),
                 "scale", runtime == null ? prefillScale : 1.0);
     }
 
-    void setOverrideFixedPrefillMs(Double ms) {
-        this.overrideFixedPrefillMs = ms;
+    synchronized void setOverrideFixedPrefillMs(Double ms) {
+        RuntimeSettings settings = controls;
+        controls = new RuntimeSettings(settings.prefill(), settings.decode(), settings.eos(), ms, settings.decodeStepMs(), settings.decodeScale(), settings.maxWaitingBatches());
     }
 
-    void setOverrideDecodeStepMs(Double ms) {
-        this.overrideDecodeStepMs = ms;
+    synchronized void setOverrideDecodeStepMs(Double ms) {
+        RuntimeSettings settings = controls;
+        controls = new RuntimeSettings(settings.prefill(), settings.decode(), settings.eos(), settings.fixedPrefillMs(), ms, settings.decodeScale(), settings.maxWaitingBatches());
     }
 
     /** Python /set_perf {@code decode_scale}: replace the decode latency scale. */
-    void setOverrideDecodeScale(Double scale) {
-        this.overrideDecodeScale = scale;
+    synchronized void setOverrideDecodeScale(Double scale) {
+        RuntimeSettings settings = controls;
+        controls = new RuntimeSettings(settings.prefill(), settings.decode(), settings.eos(), settings.fixedPrefillMs(), settings.decodeStepMs(), scale, settings.maxWaitingBatches());
     }
 
     /**
@@ -682,8 +675,9 @@ final class MockPerformanceModel {
      * waiting-queue cap (same semantics as the JSON field: 0 = unbounded,
      * > 0 = cap on queued batches). Null restores the JSON-configured value.
      */
-    void setOverrideMaxWaitingPrefillBatches(Integer cap) {
-        this.overrideMaxWaitingPrefillBatches = cap;
+    synchronized void setOverrideMaxWaitingPrefillBatches(Integer cap) {
+        RuntimeSettings settings = controls;
+        controls = new RuntimeSettings(settings.prefill(), settings.decode(), settings.eos(), settings.fixedPrefillMs(), settings.decodeStepMs(), settings.decodeScale(), cap);
     }
 
     /** Python launcher {@code --block-size}: override the block size from the perf config. */
@@ -698,8 +692,8 @@ final class MockPerformanceModel {
      * same priority chain as prefillMs (runtime > JSON).
      */
     int maxWaitingPrefillBatches() {
-        return overrideMaxWaitingPrefillBatches != null
-                ? overrideMaxWaitingPrefillBatches : maxWaitingPrefillBatches;
+        var settings = controls;
+        return settings.maxWaitingBatches() != null ? settings.maxWaitingBatches() : maxWaitingPrefillBatches;
     }
 
     /**
@@ -745,11 +739,12 @@ final class MockPerformanceModel {
      * (MTP fold), each step priced by {@link #decodeStepDelayMs}.
      */
     long decodeMs(int outputLen, int activeBatchSize) {
-        int steps = decodeSteps(outputLen);
-        if (decodeNoise.maxAbsMs() == 0)
-            return scaledMs(steps * stepMs(activeBatchSize) * effectiveDecodeScale());
+        var settings = controls;
+        int steps = (int) Math.ceil(outputLen / tokensPerStep(settings));
+        double step = stepMs(activeBatchSize, settings) * effectiveDecodeScale(settings);
+        if (decodeNoise.maxAbsMs() == 0) return scaledMs(steps * step);
         long duration = 0;
-        for (int i = 0; i < steps; i++) duration += decodeStepDelayMs(activeBatchSize);
+        for (int i = 0; i < steps; i++) duration += scaledMs(step, decodeNoise, Math.max(1, activeBatchSize));
         return duration;
     }
 
@@ -764,23 +759,39 @@ final class MockPerformanceModel {
 
     /** Tokens produced per running stream per decode step (MTP acceptance fold). */
     double tokensPerStep() {
-        RuntimeDecode current = runtimeDecode;
-        return current == null ? tokensPerStep : current.tokensPerStep();
+        return tokensPerStep(controls);
     }
 
-    void setRuntimeDecode(double baseMs, double perRunningMs, double tokensPerStep) {
+    private double tokensPerStep(RuntimeSettings settings) {
+        return settings.decode() == null ? tokensPerStep : settings.decode().tokensPerStep();
+    }
+
+    synchronized void applyOverrides(JsonNode patch) {
+        if (patch.has("max_waiting_batches") && patch.path("max_waiting_batches").asInt() < 0)
+            throw new IllegalArgumentException("max_waiting_batches must be >= 0 (0 = unbounded)");
+        var settings = controls;
+        controls = new RuntimeSettings(settings.prefill(), settings.decode(), settings.eos(),
+                patch.has("prefill_fixed_ms") ? Double.valueOf(patch.path("prefill_fixed_ms").asDouble()) : settings.fixedPrefillMs(),
+                settings.decodeStepMs(),
+                patch.has("decode_scale") ? Double.valueOf(patch.path("decode_scale").asDouble()) : settings.decodeScale(),
+                patch.has("max_waiting_batches") ? Integer.valueOf(patch.path("max_waiting_batches").asInt()) : settings.maxWaitingBatches());
+    }
+
+    synchronized void setRuntimeDecode(double baseMs, double perRunningMs, double tokensPerStep) {
         if (!Double.isFinite(baseMs) || baseMs <= 0 || !Double.isFinite(perRunningMs)
                 || perRunningMs < 0 || !Double.isFinite(tokensPerStep) || tokensPerStep <= 0)
             throw new IllegalArgumentException("decode coefficients must be finite; base/tokens positive and slope nonnegative");
-        runtimeDecode = new RuntimeDecode(baseMs, perRunningMs, tokensPerStep);
+        RuntimeSettings settings = controls;
+        controls = new RuntimeSettings(settings.prefill(), new RuntimeDecode(baseMs, perRunningMs, tokensPerStep), settings.eos(), settings.fixedPrefillMs(), settings.decodeStepMs(), settings.decodeScale(), settings.maxWaitingBatches());
     }
 
     Map<String, Object> decodeModelState() {
-        RuntimeDecode current = runtimeDecode;
+        RuntimeSettings settings = controls;
+        RuntimeDecode current = settings.decode();
         return Map.of("runtime_override", current != null,
                 "step_base_ms", current == null ? stepBaseMs : current.stepBaseMs(),
                 "step_per_running_ms", current == null ? stepPerRunningMs : current.stepPerRunningMs(),
-                "tokens_per_step", tokensPerStep(), "scale", effectiveDecodeScale());
+                "tokens_per_step", tokensPerStep(settings), "scale", effectiveDecodeScale(settings));
     }
 
     /**
@@ -795,8 +806,8 @@ final class MockPerformanceModel {
     }
 
     /** Effective decode scale (runtime /set_perf override > JSON config). */
-    private double effectiveDecodeScale() {
-        return overrideDecodeScale != null ? overrideDecodeScale : decodeScale;
+    private double effectiveDecodeScale(RuntimeSettings settings) {
+        return settings.decodeScale() != null ? settings.decodeScale() : decodeScale;
     }
 
     /**
@@ -804,13 +815,13 @@ final class MockPerformanceModel {
      * size, one source: runtime override > explicit step_ms_by_batch curve >
      * configured linear fit (stepBaseMs + stepPerRunningMs × running).
      */
-    private double stepMs(int activeBatchSize) {
-        RuntimeDecode current = runtimeDecode;
+    private double stepMs(int activeBatchSize, RuntimeSettings settings) {
+        RuntimeDecode current = settings.decode();
         if (current != null) return current.stepBaseMs() + current.stepPerRunningMs() * activeBatchSize;
-        if (overrideDecodeStepMs != null) {
+        if (settings.decodeStepMs() != null) {
             // Runtime override (Python /set_perf decode_step_ms): fixed
             // per-STEP semantics (one step emits tokens_per_step tokens).
-            return overrideDecodeStepMs;
+            return settings.decodeStepMs();
         }
         if (!decodePoints.isEmpty()) {
             return interpolateStepMs(activeBatchSize);
@@ -830,7 +841,8 @@ final class MockPerformanceModel {
      * loop needs on top of the step duration.
      */
     long decodeStepDelayMs(int activeBatchSize) {
-        return scaledMs(stepMs(activeBatchSize) * effectiveDecodeScale(),
+        var settings = controls;
+        return scaledMs(stepMs(activeBatchSize, settings) * effectiveDecodeScale(settings),
                 decodeNoise, Math.max(1, activeBatchSize));
     }
 

@@ -30,6 +30,9 @@ real 的 [KVCacheManager::getKVCacheInfo / refreshKVCacheInfoSnapshot](../../cpp
 
 性能配置由 `--performance` 指向的 JSON 提供。Prefill 可以使用固定耗时或公式，Decode 使用声明的 step 曲线或校准参数；角色 `scale` 与全局 `sleep_scale` 调整模拟时间。噪声参数必须有明确的标准差和绝对上限，不能与 `jitter_pct` 同时启用。配置字段与校验以 `MockPerformanceModel` 为准，采集档案和模型偏离规则见[数据规则](../tools/online_eval/data/README.md)。
 
+运行时性能控制使用单个不可变快照发布，单次耗时计算使用同一快照的系数。`/set_perf` 在检查字段与容量约束后一次发布性能覆盖；被拒绝的请求不改变性能参数或 cache retention。旧控制接口保持各自的优先级和生效范围。
+
+
 ## FIFO 与 Master 派发
 
 引擎内部组批和 Master 的 decision / dispatcher 是两根轴。BATCH 的 `EnqueueBatch` 和 NON_BATCH 的直接请求都进入引擎的候选池；Master 批次不等于引擎执行批次。

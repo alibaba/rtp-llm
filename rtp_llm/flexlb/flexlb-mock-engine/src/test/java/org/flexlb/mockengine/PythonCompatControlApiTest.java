@@ -654,6 +654,23 @@ class PythonCompatControlApiTest {
                 + service.getGrpcPort() + ", got " + service.getCompletedCount());
     }
 
+    @Test
+    void rejectedPerformancePatchLeavesCapacityAndTimingUnchanged() throws Exception {
+        startCluster(model("10", 1.0), 1, 1);
+        var service = prefillServices.get(0);
+        var before = service.getSnapshot();
+        var shape = service.getPerformance().shape(inputWithDecode(1, 10,
+                decodeServices.get(0).getGrpcPort()), new MockLruBlockCache(16));
+        for (String invalid : List.of("\"max_waiting_batches\":-1", "\"decode_retry_times\":3")) {
+            var response = httpPostResponse("/set_perf", "{\"engine\":\"prefill-0\","
+                    + "\"cache_retention_blocks\":0,\"prefill_fixed_ms\":999,"
+                    + "\"max_prefill_concurrency\":5," + invalid + "}");
+            assertEquals(400, response.statusCode());
+            assertEquals(before.get("cache_retention_blocks"), service.getSnapshot().get("cache_retention_blocks"));
+            assertEquals(10, service.getPerformance().prefillMs(List.of(shape)));
+        }
+    }
+
     private String httpGet(String path) throws Exception {
         return MockEngineTestSupport.httpGet(controlServer.getPort(), path);
     }

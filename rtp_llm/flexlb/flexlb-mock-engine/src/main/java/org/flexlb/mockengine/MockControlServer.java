@@ -560,35 +560,18 @@ final class MockControlServer {
                         || value.asInt() < 0 || value.asInt() > service.getCacheBlocks()) {
                     throw new ApiException(400, "cache_retention_blocks outside physical pool");
                 }
-                service.setCacheRetentionBlocks(value.asInt());
-            }
-            // Python fields (_http_set_perf):
-            if (body.has("prefill_fixed_ms")) {
-                perf.setOverrideFixedPrefillMs(body.get("prefill_fixed_ms").asDouble());
-            }
-            if (body.has("decode_scale")) {
-                perf.setOverrideDecodeScale(body.get("decode_scale").asDouble());
-            }
-            if (body.has("max_prefill_concurrency")) {
-                service.setMaxPrefillConcurrency(body.get("max_prefill_concurrency").asInt());
-            }
-            if (body.has("max_waiting_batches")) {
-                // Runtime override of the prefill waiting-queue cap
-                // (performance JSON "prefill.max_waiting_batches"), same
-                // semantics as the JSON field: 0 = unbounded, > 0 = cap on
-                // queued prefill batches. Negative values are meaningless
-                // (neither a cap nor the explicit unbounded 0) -> 400.
-                int cap = body.get("max_waiting_batches").asInt();
-                if (cap < 0) {
-                    throw new ApiException(400,
-                            "max_waiting_batches must be >= 0 (0 = unbounded), got: " + cap);
-                }
-                perf.setOverrideMaxWaitingPrefillBatches(cap);
             }
             if (body.has("decode_retry_times") || body.has("decode_retry_interval_ms")
                     || body.has("decode_retry_timeout_ms")) {
                 throw new ApiException(400, "decode_retry_* no longer controls KV capacity admission; use request timeout_ms");
             }
+            if (body.has("max_waiting_batches") && body.path("max_waiting_batches").asInt() < 0)
+                throw new ApiException(400, "max_waiting_batches must be >= 0 (0 = unbounded)");
+            if (body.has("cache_retention_blocks"))
+                service.setCacheRetentionBlocks(body.get("cache_retention_blocks").asInt());
+            if (body.has("max_prefill_concurrency"))
+                service.setMaxPrefillConcurrency(body.get("max_prefill_concurrency").asInt());
+            perf.applyOverrides(body);
             return successResponse(service);
         });
     }
