@@ -1111,6 +1111,7 @@ class AttentionV41FP8(AttentionFP8):
             self._shared_attention["topk"] = {}
             self._shared_attention["candidates"] = None
             self._shared_attention.pop("candidate_mask", None)
+            self._shared_attention.pop("decode_global_slots", None)
             self._shared_attention.pop("decode_sparse_plan", None)
             self._shared_attention.pop("decode_valid_requests", None)
             self._shared_attention.pop("decode_indexer_metadata", None)
@@ -3413,6 +3414,16 @@ class AttentionV41FP8(AttentionFP8):
             if self.compress_ratio and slots is None:
                 if self.is_kv_source and global_work is None:
                     self._produce_global_decode(x, positions, req, starts)
+                from rtp_llm.models_py.modules.dsv41.fp8 import (
+                    _v41_decode_topk as decode_topk,
+                )
+
+                req_i32 = metadata.req_id_per_token[:T]
+                slot_plan = (
+                    decode_topk.make_decode_slot_plan(self, req_i32)
+                    if self.is_index_source
+                    else None
+                )
                 selected = self._select_indices_decode(
                     x,
                     qkv.qr,
@@ -3422,12 +3433,15 @@ class AttentionV41FP8(AttentionFP8):
                     head_weights=qkv.head_weights,
                     index_prepared=qkv.index_prepared,
                     prepared_query=prepared_query,
+                    **({"slot_plan": slot_plan} if slot_plan is not None else {}),
                 )
-                slots = (
-                    self._decode_global_slots(selected, metadata.req_id_per_token[:T])
-                    .to(dtype=torch.int32)
-                    .contiguous()
-                )
+                if slot_plan is not None and slot_plan.slots is not None:
+                    slots = slot_plan.slots
+                    decode_topk.publish_decode_global_slots(
+                        self, selected, req_i32, slots
+                    )
+                else:
+                    slots = decode_topk.decode_global_slots(self, selected, req_i32)
             mega_positions = self._mega_position_chunks(metadata.position_ids, T, T)[0]
             with record_function_range("dsv41.decode.mega_attention"):
                 pair = mega.decode(
@@ -3446,6 +3460,16 @@ class AttentionV41FP8(AttentionFP8):
         else:
             if self.is_kv_source and global_work is None:
                 self._produce_global_decode(x, positions, req, starts)
+            from rtp_llm.models_py.modules.dsv41.fp8 import (
+                _v41_decode_topk as decode_topk,
+            )
+
+            req_i32 = metadata.req_id_per_token[:T]
+            slot_plan = (
+                decode_topk.make_decode_slot_plan(self, req_i32)
+                if self.is_index_source
+                else None
+            )
             selected = self._select_indices_decode(
                 x,
                 qkv.qr,
@@ -3453,6 +3477,7 @@ class AttentionV41FP8(AttentionFP8):
                 qkv.qr_quantized,
                 head_weights=qkv.head_weights,
                 prepared_query=prepared_query,
+                **({"slot_plan": slot_plan} if slot_plan is not None else {}),
             )
             from rtp_llm.models_py.modules.dsv41.fp8._v41_fp4_decode_attn import (
                 fp4_dual_decode_attention,
@@ -3461,7 +3486,11 @@ class AttentionV41FP8(AttentionFP8):
                 get_or_build_sched_meta,
             )
 
-            slots = self._decode_global_slots(selected, metadata.req_id_per_token[:T])
+            if slot_plan is not None and slot_plan.slots is not None:
+                slots = slot_plan.slots
+                decode_topk.publish_decode_global_slots(self, selected, req_i32, slots)
+            else:
+                slots = decode_topk.decode_global_slots(self, selected, req_i32)
             o = fp4_dual_decode_attention(
                 q=qkv.q,
                 swa_pool_3d=self._pool_view_3d_fp8(SWA_KV),

@@ -38,7 +38,7 @@ class DecodeSlotPlan:
 
 
 def make_slot_plan(request_ids, block_table, *, entries, logical_entries):
-    if os.environ.get("DSV41_FUSED_TOPK_SLOTS", "0") != "1":
+    if os.environ.get("DSV41_FUSED_TOPK_SLOTS", "1") != "1":
         return None
     if not (
         request_ids.is_cuda
@@ -57,6 +57,86 @@ def make_slot_plan(request_ids, block_table, *, entries, logical_entries):
     ):
         return None
     return DecodeSlotPlan(request_ids, block_table, entries, logical_entries)
+
+
+def make_decode_slot_plan(attn, request_ids):
+    """Fused top-k slot plan over this layer's global pool; None keeps the
+    separate per-layer translation.
+
+    The folded epilogue maps compressed-local indices to physical pool slots
+    with the same contract as ``_convert_req_index_to_global_index`` (newest
+    block pinned, -1 propagation, unallocated block-table entries ``<= 0``
+    rejected). CP-sharded caches and padded pools keep the legacy path.
+    """
+    if os.environ.get("DSV41_FUSED_TOPK_SLOTS", "1") != "1":
+        return None
+    region = attn._global_region()
+    pool = attn._source_pool(region)
+    tables = getattr(attn, "_block_tables_by_type", None)
+    table = None if tables is None else tables.get(region)
+    if pool is None or table is None:
+        return None
+    cp = getattr(attn, "_cp_ctx", None)
+    if cp is not None and cp.cp_size > 1 and cp.kv_cache_sharded:
+        return None
+    from rtp_llm.models_py.modules.dsv41.fp8._kv_cache_utils import (
+        require_pool_tokens_per_block,
+    )
+
+    raw_tpb = require_pool_tokens_per_block(attn._kv_cache, region=region)
+    if raw_tpb % attn.compress_ratio:
+        return None
+    return make_slot_plan(
+        request_ids,
+        table,
+        entries=pool.shape[1],
+        logical_entries=raw_tpb // attn.compress_ratio,
+    )
+
+
+def publish_decode_global_slots(attn, selected, request_ids, slots):
+    """Stash this index-source group's physical slots for the forward's
+    remaining layers; ``_begin_forward`` drops the stash with the rest of the
+    per-forward shared state."""
+    shared = getattr(attn, "_shared_attention", None)
+    if shared is None:
+        return
+    key = (getattr(attn, "index_source_layer_id", None), attn._global_region())
+    shared.setdefault("decode_global_slots", {})[key] = (
+        selected,
+        request_ids,
+        slots,
+    )
+
+
+def decode_global_slots(attn, selected, request_ids):
+    """Group-shared decode slot translation.
+
+    Every CSA layer in one index-source group consumes the identical
+    published ``selected`` tensor with the same request mapping, pool and
+    block table, so the local→physical translation is a pure function of that
+    tensor: translate once per forward, reuse afterwards. Reuse requires the
+    same tensor object and the same request-mapping storage; anything else
+    retranslates and republishes.
+    """
+    shared = getattr(attn, "_shared_attention", None)
+    key = (getattr(attn, "index_source_layer_id", None), attn._global_region())
+    cache = None if shared is None else shared.get("decode_global_slots")
+    entry = None if cache is None else cache.get(key)
+    if (
+        entry is not None
+        and entry[0] is selected
+        and entry[1].data_ptr() == request_ids.data_ptr()
+        and entry[1].numel() == request_ids.numel()
+    ):
+        return entry[2]
+    slots = (
+        attn._decode_global_slots(selected, request_ids)
+        .to(dtype=torch.int32)
+        .contiguous()
+    )
+    publish_decode_global_slots(attn, selected, request_ids, slots)
+    return slots
 
 
 def is_supported(logits: torch.Tensor, lengths: torch.Tensor, topk: int) -> bool:
