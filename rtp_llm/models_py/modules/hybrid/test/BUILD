@@ -9,6 +9,22 @@ py_test_deps = [
 ]
 
 py_test(
+    name = "glm5_cmp_mxfp8_test",
+    srcs = ["glm5_cmp_mxfp8_test.py", "glm5_cmp_mxfp8_ref.py"],
+    deps = py_test_deps + ["//rtp_llm:testlib"],
+    tags = ["SM103_CU13"],
+    exec_properties = {"gpu": "SM103_CU13", "gpu_count": "1"},
+)
+
+py_test(
+    name = "glm5_cmp_mxfp8_chain_test",
+    srcs = ["glm5_cmp_mxfp8_chain_test.py"],
+    deps = py_test_deps + ["//rtp_llm:testlib"],
+    tags = ["SM103_CU13"],
+    exec_properties = {"gpu": "SM103_CU13", "gpu_count": "1"},
+)
+
+py_test(
     name = "glm5_cmp_test",
     srcs = ["glm5_cmp_test.py"],
     deps = py_test_deps + [

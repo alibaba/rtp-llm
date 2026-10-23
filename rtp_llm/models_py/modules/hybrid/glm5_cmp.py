@@ -145,6 +145,7 @@ class Glm5Cmp:
         # are initialized only
         # after the current model call has passed the CMP capability checks.
         self.ops = None
+        self._mxfp8_ops = None
         self._qkv_projection = None
         self._q_b_proj = None
         self._output_projection = None
@@ -235,6 +236,11 @@ class Glm5Cmp:
         q_b_projection = get_weight_and_scale_from_linear(self.self_attn.q_b_proj)
         output_projection = get_weight_and_scale_from_linear(self.self_attn.o_proj)
         if self.has_indexer:
+            if self.self_attn.indexer.indexer_op.use_mxfp8:
+                from rtp_llm.models_py.modules.hybrid import glm5_cmp_mxfp8
+
+                glm5_cmp_mxfp8.prepare()
+                self._mxfp8_ops = glm5_cmp_mxfp8
             indexer_k_projection = get_weight_and_scale_from_linear(
                 self.self_attn.indexer.wk
             )
@@ -339,6 +345,7 @@ class Glm5Cmp:
         clone._moe_prepack_disabled_reason = self._moe_prepack_disabled_reason
         clone._moe_prepack_abi_validated = False
         clone.ops = self.ops
+        clone._mxfp8_ops = self._mxfp8_ops
         clone._qkv_projection = self._qkv_projection
         clone._q_b_proj = self._q_b_proj
         clone._output_projection = self._output_projection
@@ -544,8 +551,11 @@ class Glm5Cmp:
             )
             if working_entry is not None:
                 working.write(
-                    group_layer, params.slot_mapping,
-                    mla_cache.view(-1, 656)[:rows].view(working.backing[group_layer].dtype),
+                    group_layer,
+                    params.slot_mapping,
+                    mla_cache.view(-1, 656)[:rows].view(
+                        working.backing[group_layer].dtype
+                    ),
                 )
             return residual_out, q_for_sparse_mla, prev_topk_indices
 
@@ -617,8 +627,16 @@ class Glm5Cmp:
             device=hidden_states.device,
             dtype=torch.float8_e4m3fn,
         )
+        use_mxfp8 = self._mxfp8_ops is not None
+        indexer_q_sf = (
+            torch.empty((rows, 32), device=hidden_states.device, dtype=torch.int32)
+            if use_mxfp8
+            else None
+        )
         head_weights = torch.empty(
-            (rows, 32), device=hidden_states.device, dtype=torch.float32
+            (rows, 32),
+            device=hidden_states.device,
+            dtype=torch.bfloat16 if use_mxfp8 else torch.float32,
         )
 
         events.caller_to_main.record()
@@ -695,22 +713,36 @@ class Glm5Cmp:
                     indexer_q_scale,
                     out=indexer_q,
                 )
-                # Apply RoPE + Hadamard + FP8 quantization and fold the per-head
-                # Q scale into the early gate result: head_weight=gate_raw*q_scale/64.
-                indexer_q_fp8, head_weights = ops.indexer_q_rope_quant(
-                    indexer_q,
-                    implementation._cos_sin_cache,
-                    params.positions_d,
-                    gate_output,
-                    out=(indexer_q_fp8, head_weights),
-                    notify_event=events.indexer_q_to_score,
-                )
+                if use_mxfp8:
+                    indexer_q_fp8, indexer_q_sf, head_weights = (
+                        self._mxfp8_ops.indexer_q_rope_quant(
+                            indexer_q,
+                            implementation._cos_sin_cache,
+                            params.positions_d,
+                            gate_output,
+                            out=(indexer_q_fp8, indexer_q_sf, head_weights),
+                            notify_event=events.indexer_q_to_score,
+                            pdl=ops.get_pdl(),
+                        )
+                    )
+                else:
+                    # The legacy API folds its per-128 Q scale into the gate.
+                    indexer_q_fp8, head_weights = ops.indexer_q_rope_quant(
+                        indexer_q,
+                        implementation._cos_sin_cache,
+                        params.positions_d,
+                        gate_output,
+                        out=(indexer_q_fp8, head_weights),
+                        notify_event=events.indexer_q_to_score,
+                    )
 
             with torch.cuda.stream(index_stream):
                 events.norm_to_indexer_k.wait()
                 # Project Indexer-K, apply LayerNorm + RoPE + Hadamard + FP8
                 # quantization, and write K plus its scale to the paged cache.
-                ops.indexer_k_cache(
+                indexer_ops = self._mxfp8_ops if use_mxfp8 else ops
+                k_options = {"pdl": ops.get_pdl()} if use_mxfp8 else {}
+                indexer_ops.indexer_k_cache(
                     hidden_fp8,
                     hidden_scale,
                     indexer_k_weight,
@@ -722,6 +754,7 @@ class Glm5Cmp:
                     params.slot_mapping,
                     indexer_cache,
                     epsilon=float(indexer.k_norm.variance_epsilon),
+                    **k_options,
                 )
                 events.indexer_q_to_score.wait()
                 if serialize_score_after_q_path:
@@ -734,6 +767,7 @@ class Glm5Cmp:
                     kv_cache,
                     params,
                     implementation.attn_inputs,
+                    q_scale=(indexer_q_sf.unsqueeze(-1) if use_mxfp8 else None),
                 )
                 if working_entry is not None:
                     # Start pin misses on TopK completion, while the CMP query
@@ -746,7 +780,8 @@ class Glm5Cmp:
         events.side_streams_complete.wait()
         if working_entry is not None:
             working.write(
-                group_layer, params.slot_mapping,
+                group_layer,
+                params.slot_mapping,
                 mla_cache.view(-1, 656)[:rows].view(working.backing[group_layer].dtype),
             )
         return residual_out, q_for_sparse_mla, topk_indices

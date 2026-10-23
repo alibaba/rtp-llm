@@ -42,7 +42,11 @@ py_library(
         "modules/*.py",
         "modules/**/*.py",
     ]),
-    data = [":cutlass_moe_config"],
+    data = [":cutlass_moe_config"] + glob([
+        "modules/hybrid/cuda/glm5_cmp_mxfp8*.cpp",
+        "modules/hybrid/cuda/glm5_cmp_mxfp8*.cu",
+        "modules/hybrid/cuda/glm5_cmp_mxfp8*.cuh",
+    ]),
     deps = [
         ":utils",
         ":tile_kernels_mhc",

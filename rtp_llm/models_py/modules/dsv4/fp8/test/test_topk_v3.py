@@ -4,7 +4,7 @@ Adapted from the exact SGLang radix-select TopK in
 ``e7b190c165b2edaa92bbc`` for the GLM5 indexer decode hot path.
 
 Op contract (mirrors vLLM):
-  logits   : [N, T]  float32 row-contiguous; stride(0) may exceed T
+  logits   : [N, T]  float32 or bfloat16 row-contiguous; stride(0) may exceed T
   lengths  : [N]     int32     — per-row valid count, device-clamped to
                                   ``[0, max_seq_len]``; positions past the
                                   clamped length are written as -1
@@ -110,8 +110,12 @@ def _assert_value_equiv(
         pad = out_h[r, keep:]
 
         assert (pad == -1).all(), f"{tag}: row {r} pad not -1: {pad.tolist()[:8]}..."
-        assert ((valid >= 0) & (valid < L)).all(), f"{tag}: row {r} has an invalid index"
-        assert torch.unique(valid).numel() == keep, f"{tag}: row {r} has duplicate indices"
+        assert (
+            (valid >= 0) & (valid < L)
+        ).all(), f"{tag}: row {r} has an invalid index"
+        assert (
+            torch.unique(valid).numel() == keep
+        ), f"{tag}: row {r} has duplicate indices"
 
         actual = logits[r, valid.to(logits.device)].sort().values
         expected = logits[r, :L].topk(keep, sorted=False).values.sort().values
@@ -140,23 +144,20 @@ def _assert_clamped_value_equiv(
         valid = out_h[row, :keep].long()
         pad = out_h[row, keep:]
         assert (pad == -1).all(), f"{tag}: row {row} padding was modified"
-        assert ((valid >= 0) & (valid < valid_len)).all(), (
-            f"{tag}: row {row} returned an index outside the clamped prefix"
-        )
-        assert torch.unique(valid).numel() == keep, (
-            f"{tag}: row {row} returned duplicate indices"
-        )
+        assert (
+            (valid >= 0) & (valid < valid_len)
+        ).all(), f"{tag}: row {row} returned an index outside the clamped prefix"
+        assert (
+            torch.unique(valid).numel() == keep
+        ), f"{tag}: row {row} returned duplicate indices"
         if keep:
             actual = logits[row, valid.to(logits.device)].sort().values
             expected = (
-                logits[row, :valid_len]
-                .topk(keep, sorted=False)
-                .values.sort()
-                .values
+                logits[row, :valid_len].topk(keep, sorted=False).values.sort().values
             )
-            assert torch.equal(actual, expected), (
-                f"{tag}: row {row} selected values outside the clamped prefix"
-            )
+            assert torch.equal(
+                actual, expected
+            ), f"{tag}: row {row} selected values outside the clamped prefix"
     print(f"  [{tag}] clamped lengths OK")
 
 
@@ -194,19 +195,17 @@ def _assert_replay_value_equiv(
             keep = min(k, length)
             valid = out_h[r, :keep].long()
             pad = out_h[r, keep:]
-            assert (pad == -1).all(), (
-                f"{tag}: replay {replay}, row {r} pad is not -1"
-            )
-            assert ((valid >= 0) & (valid < length)).all(), (
-                f"{tag}: replay {replay}, row {r} has an invalid index"
-            )
-            assert torch.unique(valid).numel() == keep, (
-                f"{tag}: replay {replay}, row {r} has duplicate indices"
-            )
+            assert (pad == -1).all(), f"{tag}: replay {replay}, row {r} pad is not -1"
+            assert (
+                (valid >= 0) & (valid < length)
+            ).all(), f"{tag}: replay {replay}, row {r} has an invalid index"
+            assert (
+                torch.unique(valid).numel() == keep
+            ), f"{tag}: replay {replay}, row {r} has duplicate indices"
             actual = logits[r, valid.to(logits.device)].sort().values
-            assert torch.equal(actual, expected[r]), (
-                f"{tag}: replay {replay}, row {r} selected wrong values"
-            )
+            assert torch.equal(
+                actual, expected[r]
+            ), f"{tag}: replay {replay}, row {r} selected wrong values"
 
     print(f"  [{tag}] {replays}/{replays} replays OK")
 
@@ -239,9 +238,7 @@ def _make(
     return logits, lengths
 
 
-def _make_single_coarse_bin(
-    N: int, T: int
-) -> Tuple[torch.Tensor, torch.Tensor]:
+def _make_single_coarse_bin(N: int, T: int) -> Tuple[torch.Tensor, torch.Tensor]:
     """Build unique, increasing FP32 values in one FP16 coarse bin.
 
     Consecutive FP32 bit patterns starting at 1.0 remain strictly ordered.
@@ -281,9 +278,7 @@ def _make_negative_midpoint_overflow(
     # round-to-nearest-even maps this exact midpoint back to -1.0 and therefore
     # into the threshold histogram bin. The FP32 collect predicate classifies
     # equality with v_hi as strictly above.
-    v_hi = torch.tensor(
-        (-1.0 + -0.99951171875) * 0.5, dtype=torch.float32
-    ).item()
+    v_hi = torch.tensor((-1.0 + -0.99951171875) * 0.5, dtype=torch.float32).item()
     logits = torch.full((1, T), -2.0, dtype=torch.float32, device="cuda")
     logits[0, :3000] = v_hi
 
@@ -365,9 +360,7 @@ def test_unaligned_score_view_paths():
         assert logits.stride(1) == 1
         assert logits.stride(0) % 4 == 0
         assert logits.data_ptr() % 16 != 0
-        lengths = torch.full(
-            (rows,), seq_len, dtype=torch.int32, device="cuda"
-        )
+        lengths = torch.full((rows,), seq_len, dtype=torch.int32, device="cuda")
         out = _run(logits, lengths, k=k, max_seq_len=seq_len)
         _assert_equiv(
             out,
@@ -385,20 +378,11 @@ def test_fp32_subnormal_ordering_exact():
         (17, 16385, 512, "Streaming"),
         (1, 65536, 2048, "Cluster8"),
     ):
-        magnitude = torch.arange(
-            1, seq_len + 1, dtype=torch.int64, device="cuda"
-        )
+        magnitude = torch.arange(1, seq_len + 1, dtype=torch.int64, device="cuda")
         for sign, sign_bits in (("positive", 0), ("negative", 0x80000000)):
             bits = (magnitude | sign_bits).to(torch.int32)
-            logits = (
-                bits.view(torch.float32)
-                .unsqueeze(0)
-                .expand(rows, -1)
-                .contiguous()
-            )
-            lengths = torch.full(
-                (rows,), seq_len, dtype=torch.int32, device="cuda"
-            )
+            logits = bits.view(torch.float32).unsqueeze(0).expand(rows, -1).contiguous()
+            lengths = torch.full((rows,), seq_len, dtype=torch.int32, device="cuda")
             out = _run(logits, lengths, k=k, max_seq_len=seq_len)
             _assert_equiv(
                 out,
@@ -624,9 +608,7 @@ def test_cluster_nonprimary_candidate_overflow_exact():
     assert torch.unique(candidates.to(torch.float16)).numel() == 1
 
     for rows, cluster_size in ((1, 8), (17, 4), (37, 2)):
-        logits = torch.full(
-            (rows, valid), -2.0, dtype=torch.float32, device="cuda"
-        )
+        logits = torch.full((rows, valid), -2.0, dtype=torch.float32, device="cuda")
         chunk_size = valid // cluster_size
         logits[0, chunk_size : chunk_size + candidate_count] = candidates
         lengths = torch.ones(rows, dtype=torch.int32, device="cuda")
@@ -653,9 +635,7 @@ def test_exact_boundary_negative_midpoint_output_bounds():
     T, K = 8193, 2048
     sentinel = -123456789
     logits, lengths = _make_negative_midpoint_overflow(T)
-    storage = torch.full(
-        (3, K), sentinel, dtype=torch.int32, device=logits.device
-    )
+    storage = torch.full((3, K), sentinel, dtype=torch.int32, device=logits.device)
     out = storage[:1]
     ws = torch.empty(WORKSPACE_BYTES, dtype=torch.uint8, device=logits.device)
 
@@ -668,9 +648,9 @@ def test_exact_boundary_negative_midpoint_output_bounds():
     actual = logits[0, indices].sort().values
     expected = logits[0].topk(K, sorted=False).values.sort().values
     assert torch.equal(actual, expected)
-    assert (storage[1:] == sentinel).all(), (
-        "exact_boundary_scan_topk wrote beyond output[:, topk]"
-    )
+    assert (
+        storage[1:] == sentinel
+    ).all(), "exact_boundary_scan_topk wrote beyond output[:, topk]"
     print("  [exact boundary negative midpoint output bounds] OK")
 
 
@@ -781,16 +761,10 @@ def test_length_clamp_and_output_guards():
         device="cuda",
     )
     sentinel = torch.iinfo(torch.int32).min
-    storage = torch.full(
-        (rows + 2, k), sentinel, dtype=torch.int32, device="cuda"
-    )
+    storage = torch.full((rows + 2, k), sentinel, dtype=torch.int32, device="cuda")
     out = storage[:rows]
-    workspace = torch.empty(
-        WORKSPACE_BYTES, dtype=torch.uint8, device="cuda"
-    )
-    rtp_llm_ops.topk_v3(
-        logits, lengths, out, workspace, k, max_seq_len
-    )
+    workspace = torch.empty(WORKSPACE_BYTES, dtype=torch.uint8, device="cuda")
+    rtp_llm_ops.topk_v3(logits, lengths, out, workspace, k, max_seq_len)
     torch.cuda.synchronize()
     _assert_clamped_value_equiv(
         out,
@@ -802,14 +776,13 @@ def test_length_clamp_and_output_guards():
     )
     assert (storage[rows:] == sentinel).all()
 
+
 def test_empty_batch_is_a_noop():
     """A zero-row tensor must return without launching a zero-sized grid."""
     logits = torch.empty((0, 2048), dtype=torch.float32, device="cuda")
     lengths = torch.empty((0,), dtype=torch.int32, device="cuda")
     output = torch.empty((0, 512), dtype=torch.int32, device="cuda")
-    workspace = torch.empty(
-        WORKSPACE_BYTES, dtype=torch.uint8, device="cuda"
-    )
+    workspace = torch.empty(WORKSPACE_BYTES, dtype=torch.uint8, device="cuda")
     rtp_llm_ops.topk_v3(logits, lengths, output, workspace, 512, 2048)
     torch.cuda.synchronize()
     assert output.numel() == 0
@@ -837,9 +810,7 @@ def test_cuda_device_guard_and_mismatch_rejection():
             WORKSPACE_BYTES, dtype=torch.uint8, device=logits.device
         )
         try:
-            rtp_llm_ops.topk_v3(
-                logits, wrong_lengths, out, workspace, 512, 4096
-            )
+            rtp_llm_ops.topk_v3(logits, wrong_lengths, out, workspace, 512, 4096)
         except RuntimeError as error:
             assert "same CUDA device" in str(error)
         else:
@@ -853,30 +824,22 @@ def test_cuda_graph_replay_is_stable():
     logits, lengths = _make(8, 65536, seed=2026080304, lengths_mode="varied")
     lengths.clamp_(min=2048)
     output = torch.empty((8, 2048), dtype=torch.int32, device="cuda")
-    workspace = torch.empty(
-        WORKSPACE_BYTES, dtype=torch.uint8, device="cuda"
-    )
+    workspace = torch.empty(WORKSPACE_BYTES, dtype=torch.uint8, device="cuda")
     capture_stream = torch.cuda.Stream()
     capture_stream.wait_stream(torch.cuda.current_stream())
     with torch.cuda.stream(capture_stream):
         for _ in range(3):
-            rtp_llm_ops.topk_v3(
-                logits, lengths, output, workspace, 2048, 65536
-            )
+            rtp_llm_ops.topk_v3(logits, lengths, output, workspace, 2048, 65536)
     torch.cuda.current_stream().wait_stream(capture_stream)
     torch.cuda.synchronize()
 
     graph = torch.cuda.CUDAGraph()
     with torch.cuda.graph(graph, stream=capture_stream):
-        rtp_llm_ops.topk_v3(
-            logits, lengths, output, workspace, 2048, 65536
-        )
+        rtp_llm_ops.topk_v3(logits, lengths, output, workspace, 2048, 65536)
     for _ in range(20):
         graph.replay()
     torch.cuda.synchronize()
-    _assert_value_equiv(
-        output, logits, lengths, 2048, tag="CUDA Graph replay"
-    )
+    _assert_value_equiv(output, logits, lengths, 2048, tag="CUDA Graph replay")
 
 
 def test_lengths_2d_accepted():
@@ -997,14 +960,89 @@ def test_coarse_threshold_edges_preserve_exact_scores():
                 )
 
 
+def _assert_bf16_cast_equiv(logits, lengths, k, output):
+    widened = logits.float()
+    cast_output = _run(widened, lengths, k, logits.size(1))
+    for row, length in enumerate(lengths.cpu().tolist()):
+        keep = min(k, length)
+        selected = output[row, :keep].long()
+        assert ((selected >= 0) & (selected < length)).all()
+        assert selected.unique().numel() == keep
+        assert (output[row, keep:] == -1).all()
+        actual = widened[row, selected].sort().values
+        cast_values = widened[row, cast_output[row, :keep].long()].sort().values
+        expected = widened[row, :length].topk(keep).values.sort().values
+        torch.testing.assert_close(actual, cast_values, rtol=0, atol=0)
+        torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+
+
+def test_bf16_logits_register_conversion():
+    # Include histogram, radix, filtered, streaming and cluster dispatch shapes.
+    for rows, length in ((1, 4097), (9, 16385), (4, 65537), (64, 4097), (80, 65537)):
+        for k in (512, 1024, 2048):
+            for offset in (0, 1):
+                storage = torch.empty(
+                    (rows, length + 2), dtype=torch.bfloat16, device="cuda"
+                )
+                logits = storage[:, offset : offset + length]
+                logits.normal_()
+                lengths = torch.tensor(
+                    [max(0, length - row * 997) for row in range(rows)],
+                    dtype=torch.int32,
+                    device="cuda",
+                )
+                if rows > 1:
+                    lengths[:3] = torch.tensor([0, 127, k - 1], device="cuda")
+                for row, valid in enumerate(lengths.cpu().tolist()):
+                    # Many ties and a high-valued masked suffix exercise exact
+                    # boundary selection without imposing ordering on equal scores.
+                    logits[row, : min(valid, 3000)] = 0.5
+                    logits[row, valid:] = 100
+                output = _run(logits, lengths, k, length)
+                _assert_bf16_cast_equiv(logits, lengths, k, output)
+
+
+def test_bf16_logits_cuda_graph_changed_inputs():
+    rows, length, k = 4, 65537, 2048
+    logits = torch.empty((rows, length + 2), dtype=torch.bfloat16, device="cuda")[
+        :, 1 : length + 1
+    ]
+    logits.normal_()
+    lengths = torch.full((rows,), length, dtype=torch.int32, device="cuda")
+    output = torch.empty((rows, k), dtype=torch.int32, device="cuda")
+    workspace = torch.empty(WORKSPACE_BYTES, dtype=torch.uint8, device="cuda")
+    stream = torch.cuda.Stream()
+    stream.wait_stream(torch.cuda.current_stream())
+    with torch.cuda.stream(stream):
+        for _ in range(3):
+            rtp_llm_ops.topk_v3(logits, lengths, output, workspace, k, length)
+    torch.cuda.current_stream().wait_stream(stream)
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph, stream=stream):
+        rtp_llm_ops.topk_v3(logits, lengths, output, workspace, k, length)
+    for replay in range(3):
+        logits.normal_()
+        logits[:, :3000] = replay * 0.5
+        lengths.copy_(
+            torch.tensor(
+                [length - replay * 137, 16385, 127, 0],
+                dtype=torch.int32,
+                device="cuda",
+            )
+        )
+        graph.replay()
+        _assert_bf16_cast_equiv(logits, lengths, k, output)
+
+
 if __name__ == "__main__":
     if not _HAS_OP:
         print(
-            "SKIP: rtp_llm_ops.topk_v3 not built — "
-            "rebuild //rtp_llm:rtp_compute_ops"
+            "SKIP: rtp_llm_ops.topk_v3 not built — " "rebuild //rtp_llm:rtp_compute_ops"
         )
         raise SystemExit(0)
     print("== Correctness ==")
+    test_bf16_logits_register_conversion()
+    test_bf16_logits_cuda_graph_changed_inputs()
     test_decode_b1_k512_full()
     test_decode_b1_k512_varied()
     test_decode_b1_k1024_full()

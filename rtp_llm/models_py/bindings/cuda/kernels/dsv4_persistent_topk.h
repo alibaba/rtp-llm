@@ -13,7 +13,7 @@ namespace torch_ext {
 // the output buffer (fold of the previous fill_/copy_/masked_fill_ chain).
 //
 // Contract:
-//   logits   : [num_rows, stride] float32, contiguous in stride
+//   logits   : [num_rows, stride] float32 or bfloat16, contiguous in stride
 //   lengths  : [num_rows]         int32   — per-row valid count;
 //                                            entries past lengths[r]
 //                                            are written as -1 in output
