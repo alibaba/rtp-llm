@@ -8,6 +8,7 @@ public final class MockVitServer {
     public static void main(String[] args) throws Exception {
         int port = 62000;
         int httpPort = 0;
+        boolean kmonitor = false;
         java.nio.file.Path model = null;
         var defaults = MockVitService.Config.defaults();
         int hidden = defaults.hiddenSize(), concurrency = defaults.concurrency(), queue = defaults.queueCapacity();
@@ -15,6 +16,7 @@ public final class MockVitServer {
         for (int i = 0; i < args.length; i += 2) {
             if (i + 1 == args.length) throw new IllegalArgumentException("missing value for " + args[i]);
             switch (args[i]) {
+                case "--kmonitor" -> kmonitor = parseKmonitor(args[i + 1]);
                 case "--model-path" -> model = java.nio.file.Path.of(args[i + 1]);
                 case "--port" -> port = Integer.parseInt(args[i + 1]);
                 case "--http-port" -> httpPort = Integer.parseInt(args[i + 1]);
@@ -30,10 +32,20 @@ public final class MockVitServer {
         var service = new MockVitService(new MockVitService.Config(hidden, concurrency, queue, embeddings, hashes,
                 defaults.maxInputBytes(), defaults.maxOutputBytes(), delay),
                 model == null ? null : MockV41Image.Config.fromModel(model));
+        MockVitMonitor monitor = null;
+        if (kmonitor) {
+            var tags = new java.util.HashMap<>(WhaleMockMonitor.engineTags(System.getenv(),
+                    System.getenv().getOrDefault("POD_IP", java.net.InetAddress.getLocalHost().getHostAddress()), "ROLE_TYPE_VIT"));
+            tags.put("source", "mock_vit");
+            monitor = new MockVitMonitor(WhaleMockMonitor.createSink(), tags);
+            monitor.start(service);
+        }
         var server = NettyServerBuilder.forPort(port).maxInboundMessageSize(defaults.maxInputBytes() * 2)
-                .addService(service).build().start();
+                .addService(io.grpc.ServerInterceptors.intercept(service,
+                        monitor == null ? java.util.List.of() : java.util.List.of(monitor))).build().start();
         if (httpPort < 0 || httpPort > 65535 || httpPort == port) {
             server.shutdownNow();
+            if (monitor != null) monitor.close();
             service.close();
             throw new IllegalArgumentException("invalid HTTP health port");
         }
@@ -49,12 +61,20 @@ public final class MockVitServer {
             health.start();
         }
         var healthServer = health;
+        var vitMonitor = monitor;
         Runtime.getRuntime().addShutdownHook(new Thread(() -> {
             if (healthServer != null) healthServer.stop(0);
             server.shutdownNow();
+            if (vitMonitor != null) vitMonitor.close();
             service.close();
         }));
         System.out.println("Mock ViT ready port=" + server.getPort() + " protocol=main geometry=qwen2_vl/prepared_v41");
         server.awaitTermination();
+    }
+
+    static boolean parseKmonitor(String value) {
+        if (!value.equals("true") && !value.equals("false"))
+            throw new IllegalArgumentException("--kmonitor requires true or false");
+        return Boolean.parseBoolean(value);
     }
 }

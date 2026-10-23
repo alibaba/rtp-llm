@@ -11,6 +11,10 @@ def command(env):
         raise ValueError("RTP_LLM_MOCK_BUNDLE=1 is required")
     if env.get("ROLE_TYPE") != "VIT":
         raise ValueError("ROLE_TYPE=VIT is required")
+    kmonitor = env.get("MOCK_KMONITOR_ENABLED", "true").lower()
+    if kmonitor not in ("true", "false", "1", "0", "yes", "no"):
+        raise ValueError("invalid MOCK_KMONITOR_ENABLED")
+    kmonitor = "true" if kmonitor in ("true", "1", "yes") else "false"
     port = int(env.get("START_PORT", "22160"))
     if not 0 < port < 65535:
         raise ValueError("invalid ViT health port")
@@ -23,7 +27,7 @@ def command(env):
     jar = Path(env.get("MOCK_BUNDLE_JAR_DIR", str(Path(__file__).parent / "jars"))) / "mock.jar"
     return [java, *shlex.split(env.get("MOCK_VIT_JAVA_OPTS", "-Xms64m -Xmx512m")),
             "-Djava.awt.headless=true", "-cp", str(jar), "org.flexlb.mockengine.MockVitServer",
-            "--http-port", str(port), "--port", str(port + 1), "--model-path", str(model),
+            "--kmonitor", kmonitor, "--http-port", str(port), "--port", str(port + 1), "--model-path", str(model),
             "--concurrency", env.get("VIT_MAX_CONCURRENT_REQUESTS", "32"),
             "--embedding-cache-bytes", env.get("MOCK_VIT_CACHE_BYTES", "0")]
 

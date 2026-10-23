@@ -89,3 +89,34 @@ BATCH 地址和 frontend/C++ 身份编码修复与 Mock 功能分开提交和验
 它使用生成的 protobuf，对真实 Master 调度、Mock ViT、P/D 执行及排空做检查；必须分别启动 NON_BATCH/BATCH 环境。
 覆盖 URL 图片、V4.1 prepared 图片、text-only prepared metadata。此客户端不覆盖真实 frontend 的 HTTP 入口、原生扩展加载或真实图片预处理。
 当前脚本保留 prepared V4.1 的空 keys 调用，以暴露上述调用方缺口；该 case 会被 Master 拒绝，不能宣称整套协议验收通过。
+
+## Mock ViT KMonitor
+
+Whale `vit.py` reads `MOCK_KMONITOR_ENABLED` (default `true`) and passes
+`--kmonitor true|false` to `MockVitServer`; direct Java launches default to `false`.
+Enabled mode requires a JAR built with the existing internal KMonitor profile;
+missing/no-op adapters fail startup. No Python/Torch metrics runtime is needed.
+
+Filter by the exact deployment's ViT `hippo_role`, `hippo_app`, and `container_ip`.
+All series carry `source=mock_vit`; never combine frontend and ViT series as a
+single request count. Real `mm_process_engine.py:mm_embedding_impl` supplies the
+embedding request/terminal boundary; the Mock records it at the gRPC boundary:
+
+- `py_rtp_vit_qps`, `py_rtp_vit_success_qps`, `py_rtp_vit_error_qps`: embedding RPC
+  arrivals and one server terminal result, compatible with existing ViT panels.
+- `mock_vit_rpc_qps`, `mock_vit_rpc_success_qps`, `mock_vit_rpc_error_qps`: image
+  RPCs split by `method` (`RemoteMultimodalEmbedding`, `GetMultimodalHashes`,
+  `AsyncSubmitEmbedding`); terminal metrics also carry gRPC `code`.
+  Status/cache polling, verdict and lease-release RPCs are excluded.
+- `mock_vit_rpc_rt_us`: server RPC lifetime, including queue/cache waits.
+- `mock_vit_computations_total`: successful image computations since process
+  start; `mock_vit_computation_qps`: successive counter delta / elapsed seconds.
+- `mock_vit_active`, `mock_vit_queued`, `mock_vit_pending`,
+  `mock_vit_embedding_bytes`, `mock_vit_hash_bytes`: one-second gauges, including
+  idle zeros. These describe Mock executor/cache state, not GPU load.
+
+Hash RPC success can mean a directory lookup; async success means submission was
+accepted. Neither proves a new computation completed. Multiple images, cache
+hits, shared work and producer work surviving caller cancellation make RPC rate
+and computation rate different. These metrics do not classify frontend text
+versus multimodal arrivals and do not prove downstream P/D completion.

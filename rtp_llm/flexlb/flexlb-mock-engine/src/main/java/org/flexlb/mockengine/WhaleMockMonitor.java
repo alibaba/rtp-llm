@@ -38,6 +38,10 @@ final class WhaleMockMonitor implements AutoCloseable {
     }
 
     static WhaleMockMonitor create() {
+        return new WhaleMockMonitor(createSink());
+    }
+
+    static FlexMonitor createSink() {
         try {
             FlexMonitor monitor = (FlexMonitor) Class.forName("org.flexlb.monitor.FlexMonitorFactory")
                     .getMethod("createKMonitorAdapter", MasterStatusProvider.class).invoke(null, new Object[]{null});
@@ -54,7 +58,7 @@ final class WhaleMockMonitor implements AutoCloseable {
             FlexMonitor adapter = (FlexMonitor) Class.forName("org.flexlb.monitor.KMonitorAdapter")
                     .getConstructor(Class.forName("com.taobao.kmonitor.KMonitor"))
                     .newInstance(engineMonitor);
-            return new WhaleMockMonitor(adapter);
+            return adapter;
         } catch (ReflectiveOperationException | LinkageError error) {
             throw new IllegalStateException("Whale KMonitor requires the internal Maven profile", error);
         }

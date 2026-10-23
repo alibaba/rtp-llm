@@ -22,6 +22,16 @@ class PerEngineRolesTest(unittest.TestCase):
                            ("--model-path", "/model"), ("--concurrency", "3")):
             self.assertEqual(args[args.index(key) + 1], value)
 
+    def test_vit_passes_monitoring_toggle(self):
+        base = dict(RTP_LLM_MOCK_BUNDLE="1", ROLE_TYPE="VIT", TOKENIZER_PATH="/model")
+        for value, expected in ((None, "true"), ("true", "true"), ("1", "true"),
+                                ("false", "false"), ("0", "false")):
+            with self.subTest(value=value), patch.object(vit, "prepare_assets", return_value=Path("/model")):
+                args = vit.command(base if value is None else {**base, "MOCK_KMONITOR_ENABLED": value})
+                self.assertEqual(args[args.index("--kmonitor") + 1], expected)
+        with self.assertRaisesRegex(ValueError, "MOCK_KMONITOR_ENABLED"):
+            vit.command({**base, "MOCK_KMONITOR_ENABLED": "typo"})
+
     def test_vit_rejects_role_model_and_port_errors_before_start(self):
         base = dict(RTP_LLM_MOCK_BUNDLE="1", ROLE_TYPE="VIT", TOKENIZER_PATH="/model")
         for override in ({"ROLE_TYPE": "PREFILL"}, {"START_PORT": "65535"},
