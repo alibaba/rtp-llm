@@ -109,6 +109,17 @@ The following arguments have equivalent upper-case environment variables:
 
 See [KV cache event publisher](kv_cache_event_publisher.md) for HBM reporting.
 
+#### Remote cache metrics
+
+KVCM reuses the Remote KV Cache dashboard's `rtp_llm_remote_*` metrics.
+
+- **TP rank 0:** match/read/write QPS, failures, latency and counts; writes also time StartWrite, broadcast and FinishWrite.
+- **SDK:** per-rank/group call latency, failures and physical block counts, tagged `mode=read/write`.
+- Read tokens include CP via the canonical key stride. Committed write blocks count logical keys once, without TP/group duplication.
+- Write QPS includes replica-sufficient skips; these report zero blocks and broadcast time.
+- Latency is in microseconds, includes failures/timeouts and excludes executor queueing. FinishWrite includes session cleanup.
+- `remote_valid_hit_ratio` includes the local prefix and is sampled only when remote matching adds reusable blocks.
+
 ### Ignoring request cache switches
 
 Setting `RTP_LLM_IGNORE_REQUEST_CACHE_SWITCHES=1` (default off) ignores the request's
