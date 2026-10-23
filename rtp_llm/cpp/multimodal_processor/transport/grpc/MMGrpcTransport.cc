@@ -88,7 +88,7 @@ public:
         auto context = server_context ? grpc::ClientContext::FromServerContext(*server_context, options) :
                                         std::make_unique<grpc::ClientContext>();
         if (server_context) {
-            for (const auto* key : {"x-dashscope-uid", "x-dashscope-service"}) {
+            for (const auto* key : {"x-dashscope-uid", "x-dashscope-service", "x-dashscope-request-id"}) {
                 auto it = server_context->client_metadata().find(key);
                 if (it != server_context->client_metadata().end()) {
                     context->AddMetadata(key, std::string(it->second.data(), it->second.size()));

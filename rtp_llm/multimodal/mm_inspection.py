@@ -148,6 +148,7 @@ class MMInspectionCoordinator:
         service_name: str = "",
         deadline: Optional[float] = None,
         worker_sources: bool = False,
+        external_request_id: str = "",
     ) -> Tuple[
         List[MultimodalInput], Optional["concurrent.futures.Future"], Optional[Any]
     ]:
@@ -171,8 +172,9 @@ class MMInspectionCoordinator:
 
         loop = self._ensure_greennet_loop()
         req = SimpleNamespace(
-            id=str(request_id),
-            model_name=getattr(self.vit_config, "model_name", "") or "",
+            # Never replace the numeric ID used by scheduling/cancellation.
+            id=external_request_id or str(request_id),
+            model_name="",
             user_id=user_id,
             service_name=service_name,
             greennet_passed=(

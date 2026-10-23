@@ -957,6 +957,35 @@ class DashScGrpcRequestTest(TestCase):
         op = parse_request_controls(req)
         self.assertTrue(op.return_input_ids)
 
+    def test_external_request_id_aliases_and_body_fallback(self) -> None:
+        external_id = "dash-" + "x" * 200
+        for name in ("X-DashScope-RequestId", "x-dashscope-request-id"):
+            for attrs in ({name: external_id}, {"parameters": {name: external_id}}):
+                with self.subTest(attrs=attrs):
+                    req = predict_v2_pb2.ModelInferRequest(id="body-id")
+                    req.parameters["ds_header_attributes"].string_param = json.dumps(
+                        attrs
+                    )
+                    headers = parse_request_controls(req).request_headers
+                    self.assertEqual(
+                        dashscope_greennet_metadata(headers),
+                        (("x-dashscope-request-id", external_id),),
+                    )
+            self.assertEqual(
+                dashscope_greennet_metadata(
+                    {name: external_id, "authorization": "secret"}
+                ),
+                (("x-dashscope-request-id", external_id),),
+            )
+        req = predict_v2_pb2.ModelInferRequest(id="body-id")
+        self.assertEqual(
+            dashscope_greennet_metadata(parse_request_controls(req).request_headers),
+            (("x-dashscope-request-id", "body-id"),),
+        )
+        self.assertEqual(
+            dashscope_greennet_metadata({"X-DashScope-RequestId": " "}), ()
+        )
+
     def test_parse_request_controls_int32(self) -> None:
         req = predict_v2_pb2.ModelInferRequest()
         _add_tensor(req, "return_input_ids", "INT32", [1], struct.pack("<i", 0))

@@ -1352,6 +1352,7 @@ class AsyncSubmitGetEmbeddingTest(TestCase):
             request_id=0,
             user_id="",
             service_name="",
+            external_request_id="",
             *,
             deadline,
         ):
@@ -1397,6 +1398,7 @@ class AsyncSubmitGetEmbeddingTest(TestCase):
             request_id=0,
             user_id="",
             service_name="",
+            external_request_id="",
             *,
             deadline,
         ):
@@ -1504,6 +1506,7 @@ class AsyncSubmitGetEmbeddingTest(TestCase):
             request_id=0,
             user_id="",
             service_name="",
+            external_request_id="",
             *,
             deadline,
         ):
@@ -1555,6 +1558,7 @@ class AsyncSubmitGetEmbeddingTest(TestCase):
             request_id=0,
             user_id="",
             service_name="",
+            external_request_id="",
             *,
             deadline,
         ):
@@ -1611,6 +1615,7 @@ class AsyncSubmitGetEmbeddingTest(TestCase):
             request_id=0,
             user_id="",
             service_name="",
+            external_request_id="",
             *,
             deadline,
         ):
@@ -1657,6 +1662,7 @@ class AsyncSubmitGetEmbeddingTest(TestCase):
             request_id=0,
             user_id="",
             service_name="",
+            external_request_id="",
             *,
             deadline,
         ):
@@ -1723,6 +1729,7 @@ class AsyncSubmitGetEmbeddingTest(TestCase):
             request_id=0,
             user_id="",
             service_name="",
+            external_request_id="",
             *,
             deadline,
         ):
@@ -2515,6 +2522,7 @@ class MMProcessEngineGreenNetTest(TestCase):
                         ],
                         request_id=100 + i,
                         user_id=uid,
+                        external_request_id=f"dash-{i}" if uid else "",
                     )
                     for i, uid in enumerate(("alice", "bob", ""))
                 ]
@@ -2522,7 +2530,33 @@ class MMProcessEngineGreenNetTest(TestCase):
                     self.assertTrue(result.result(timeout=10))
             self.assertEqual(
                 dict(zip(provider.request_ids, provider.user_ids)),
-                {"100": "alice", "101": "bob", "102": ""},
+                {"dash-0": "alice", "dash-1": "bob", "102": ""},
+            )
+        finally:
+            engine.stop()
+
+    def test_local_external_id_does_not_replace_internal_access_log_id(self):
+        engine = self._make_engine()
+        provider = _StubGreenNetProvider(GreenNetVerdict(passed=True, code=1))
+        engine._inspection._greennet_provider = provider
+        engine._access_logger = MagicMock(spec=MMAccessLogger)
+        try:
+            engine.mm_embedding_cpp(
+                ["./rtp_llm/multimodal/test/testdata/qwen2_vl/1.jpg?external_id"],
+                [MMUrlType.IMAGE],
+                [torch.empty(0)],
+                [[-1, -1, -1, -1, -1, -1, -1, [], 30000]],
+                123,
+                "uid-local",
+                "service-local",
+                "dash-local-id",
+            )
+            self.assertEqual(provider.request_ids, ["dash-local-id"])
+            self.assertEqual(
+                engine._access_logger.log_query_access.call_args.args[1], 123
+            )
+            self.assertEqual(
+                engine._access_logger.log_success_access.call_args.args[2], 123
             )
         finally:
             engine.stop()

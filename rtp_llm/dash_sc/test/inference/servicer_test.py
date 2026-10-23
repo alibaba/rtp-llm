@@ -65,6 +65,7 @@ from rtp_llm.dash_sc.inference.servicer import (
     _dash_error_spec_for_ft_exception,
     _derive_max_token_id,
     _finish_server_trace,
+    _make_generate_input,
     _request_qos_level,
     _validate_v41_standard_input_ids,
     build_think_runtime,
@@ -4184,8 +4185,35 @@ class DashScInferenceServicerTest(unittest.IsolatedAsyncioTestCase):
         self.assertIsNotNone(visitor.last_generate_input)
         self.assertEqual(
             visitor.last_generate_input.headers,
-            {"user_id": "u2", "x-dashscope-apikeyid": "ak2"},
+            {
+                "user_id": "u2",
+                "x-dashscope-apikeyid": "ak2",
+                "x-dashscope-request-id": self._valid_infer_request().id,
+            },
         )
+
+    def test_external_request_id_metadata_overrides_body_alias(self) -> None:
+        from rtp_llm.cpp.model_rpc.model_rpc_client import trans_input
+        from rtp_llm.server.request_headers import dashscope_greennet_metadata
+
+        for name in ("x-dashscope-request-id", "x-dashscope-requestid"):
+            with self.subTest(name=name):
+                request = _make_generate_input(
+                    request_id=123,
+                    input_ids_list=[1],
+                    generate_config=GenerateConfig(),
+                    request_headers={"x-dashscope-request-id": "body-id"},
+                    invocation_metadata=((name, "metadata-id"),),
+                )
+                self.assertEqual(request.request_id, 123)
+                self.assertEqual(request.request_info.request_id, "metadata-id")
+                self.assertEqual(
+                    trans_input(request).request_info.request_id, "metadata-id"
+                )
+                self.assertIn(
+                    ("x-dashscope-request-id", "metadata-id"),
+                    dashscope_greennet_metadata(request.headers),
+                )
 
     async def test_real_mode_uses_ds_header_attributes_for_backend_controls(
         self,
@@ -4222,7 +4250,11 @@ class DashScInferenceServicerTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(generate_config.traffic_reject_priority, 10)
         self.assertEqual(
             visitor.last_generate_input.headers,
-            {"user_id": "u1", "x-dashscope-apikeyid": "ak1"},
+            {
+                "user_id": "u1",
+                "x-dashscope-apikeyid": "ak1",
+                "x-dashscope-request-id": request.id,
+            },
         )
         # qos_priority must NOT be set when x-dashscope-inner-qos-level
         # is absent from the request.

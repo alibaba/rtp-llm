@@ -55,7 +55,8 @@ private:
                     mm_preprocess_configs,
                     request_id,
                     dashScopeMetadata(server_context, "x-dashscope-uid"),
-                    dashScopeMetadata(server_context, "x-dashscope-service"));
+                    dashScopeMetadata(server_context, "x-dashscope-service"),
+                    dashScopeMetadata(server_context, "x-dashscope-request-id"));
                 auto mm_embedding_vec = convertPyObjectToVec(res.attr("embeddings"));
 
                 MultimodalOutput           mm_embedding_res;
