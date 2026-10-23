@@ -87,7 +87,11 @@ cc_library(
     deps = [
         ":linear_tp_cache_layout",
         "//rtp_llm/cpp/cache:cache_types",
-        "//rtp_llm/cpp/disaggregate/cache_store",
+        # MemoryUtil.h lives in the interface target; the full cache_store
+        # umbrella drags libcache_store_base.so (whose execNoBlockCopy /
+        # isRuntimeInitialized are resolved only at rtp_compute_ops load
+        # time) into every consumer's link closure and breaks test binaries.
+        "//rtp_llm/cpp/disaggregate/cache_store:cache_store_interface",
         "//rtp_llm/cpp/utils:core_utils",
     ] + torch_deps(),
     visibility = ["//visibility:public"],
