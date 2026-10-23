@@ -504,6 +504,11 @@ void PrefillRpcServer::pollLocalOutput(PrefillGenerateContext& prefill_context) 
         return;
     }
     RTP_LLM_LOG_DEBUG("request [%ld] poll local output end", prefill_context.request_id);
+    if (prefillTraceLogEnabled()) {
+        RTP_LLM_LOG_INFO("PD_HANDOFF_TRACE request=%ld event=first_token_written t_us=%ld",
+                         prefill_context.request_id,
+                         currentTimeUs());
+    }
 
     auto stream = prefill_context.getStream();
     if (stream->hasError()) {
@@ -520,6 +525,11 @@ void PrefillRpcServer::remoteLoadCacheEnd(PrefillGenerateContext& prefill_contex
     CLIENT_GRPC_RET_IF_ERROR(
         prefill_context, prefill_context.client_stream->Read(&load_response), ErrorCode::REMOTE_LOAD_KV_CACHE_FAILED);
     auto error_code = transRPCErrorCode(load_response.error_info().error_code());
+    if (prefillTraceLogEnabled()) {
+        RTP_LLM_LOG_INFO("PD_HANDOFF_TRACE request=%ld event=load_done_received t_us=%ld",
+                         prefill_context.request_id,
+                         currentTimeUs());
+    }
 
     // Decode has finished loading cache, now safe to release KV cache blocks.
     // This is called after cache store transfer is complete.
@@ -630,6 +640,10 @@ void PrefillRpcServer::remoteGenerate(PrefillGenerateContext& prefill_context) {
 
     CLIENT_GRPC_RET_IF_ERROR(
         prefill_context, prefill_context.client_stream->Write(generate_request), ErrorCode::REMOTE_GENERATE_FAILED);
+    if (prefillTraceLogEnabled()) {
+        RTP_LLM_LOG_INFO(
+            "PD_HANDOFF_TRACE request=%ld event=generate_sent t_us=%ld", prefill_context.request_id, currentTimeUs());
+    }
 }
 
 void PrefillRpcServer::pollRemoteOutput(PrefillGenerateContext& prefill_context) {
@@ -646,8 +660,14 @@ void PrefillRpcServer::pollRemoteOutput(PrefillGenerateContext& prefill_context)
     const auto multimodal_lengths =
         prefill_context.generate_input ? prefill_context.generate_input->multimodalLengths() : std::map<int, int>{};
 
-    auto first_token_rt_us = prefill_context.getStream()->getTimeInfo().first_token_rt_us;
+    auto first_token_rt_us   = prefill_context.getStream()->getTimeInfo().first_token_rt_us;
+    bool traced_first_remote = false;
     while (prefill_context.client_stream->Read(&response)) {
+        if (prefillTraceLogEnabled() && !traced_first_remote) {
+            traced_first_remote = true;
+            RTP_LLM_LOG_INFO(
+                "PD_HANDOFF_TRACE request=%ld event=first_remote_output t_us=%ld", request_id, currentTimeUs());
+        }
         if (prefill_context.isRequestCancelled()) {
             RTP_LLM_LOG_WARNING("request [%ld] cancel by user", request_id);
             auto status = grpc::Status(grpc::StatusCode::CANCELLED, "request cancelled");
