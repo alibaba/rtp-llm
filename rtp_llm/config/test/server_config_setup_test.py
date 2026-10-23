@@ -248,6 +248,7 @@ class GenerateConfigTest(TestCase):
     def test_kv_cache_strategy_defaults_are_rollback_safe(self):
         config = PyEnvConfigs().kv_cache_config
 
+        self.assertTrue(config.enable_crc)
         self.assertFalse(config.enable_memory_cache)
         self.assertEqual(config.disk_cache_staging_block_count, 128)
         self.assertEqual(config.device_eviction_policy, "lru")
@@ -256,6 +257,24 @@ class GenerateConfigTest(TestCase):
         self.assertEqual(config.reserve_block_ratio, 5)
         self.assertEqual(config.block_tree_full_prefix_scan_interval_ms, 0)
         self.assertFalse(hasattr(config, "write_cache_sync"))
+
+    def test_disabled_crc_survives_worker_pickle_and_engine_config(self):
+        import pickle
+
+        with patch.dict("os.environ", _jit_env(ENABLE_CRC="0"), clear=True):
+            configs = setup_args([])
+        self.assertFalse(configs.kv_cache_config.enable_crc)
+
+        with patch.dict("os.environ", _jit_env(ENABLE_CRC="1"), clear=True):
+            # Backend-manager and rank workers each receive serialized configs.
+            for _ in range(2):
+                configs = pickle.loads(pickle.dumps(configs))
+                self.assertFalse(configs.kv_cache_config.enable_crc)
+            engine_config = EngineConfig.create(configs)
+
+        self.assertIs(engine_config.kv_cache_config, configs.kv_cache_config)
+        self.assertFalse(engine_config.kv_cache_config.enable_crc)
+        self.assertIn("enable_crc: 0\n", engine_config.kv_cache_config.to_string())
 
     @patch.dict("os.environ", _jit_env(), clear=True)
     def test_kv_cache_scheduler_reserve_defaults_and_override(self):
@@ -378,8 +397,8 @@ class GenerateConfigTest(TestCase):
         config.block_tree_disk_evict_high_watermark_ratio = 0.83
 
         state = config.__getstate__()
-        self.assertEqual(len(state), 71)
-        self.assertEqual(state[:2], ("KVCacheConfig", 8))
+        self.assertEqual(len(state), 72)
+        self.assertEqual(state[:2], ("KVCacheConfig", 9))
 
         restored = pickle.loads(pickle.dumps(config))
         self.assertEqual(restored.disk_cache_staging_block_count, 8)
@@ -414,7 +433,8 @@ class GenerateConfigTest(TestCase):
             return value
 
         event_state = state
-        state = (state[0], 6, *state[2:-7])
+        state = (state[0], 6, *state[2:64])
+        self.assertEqual(restore(state).__getstate__(), event_state)
         version_five_state = (state[0], 5, *state[2:], True)
         self.assertEqual(restore(version_five_state).__getstate__(), event_state)
         version_four_state = (state[0], 4, *state[2:50], 123, *state[50:], True)
@@ -456,6 +476,14 @@ class GenerateConfigTest(TestCase):
             default_config.block_tree_transfer_worker_count,
         )
         self.assertFalse(hasattr(restored_write_sync, "write_cache_sync"))
+        for legacy_config in (
+            restored_version_four,
+            restored_legacy,
+            restored_source_extended,
+            restored_source,
+            restored_write_sync,
+        ):
+            self.assertTrue(legacy_config.enable_crc)
 
     def test_kv_cache_config_pickle_rejects_incompatible_states(self):
         from rtp_llm.ops import KVCacheConfig
@@ -479,6 +507,7 @@ class GenerateConfigTest(TestCase):
         from rtp_llm.ops import KVCacheConfig
 
         expected_fields = {
+            "enable_crc": "bool",
             "block_tree_transfer_worker_count": "int",
             "block_tree_business_queue_max_size": "int",
             "block_tree_transfer_queue_max_size": "int",

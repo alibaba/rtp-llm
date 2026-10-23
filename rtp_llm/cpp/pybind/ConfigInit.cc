@@ -477,6 +477,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("reuse_cache", &KVCacheConfig::reuse_cache)
         .def_readwrite("enable_remote_cache", &KVCacheConfig::enable_remote_cache)
         .def_readwrite("enable_device_cache", &KVCacheConfig::enable_device_cache)
+        .def_readwrite("enable_crc", &KVCacheConfig::enable_crc)
         .def_readwrite("multi_task_prompt", &KVCacheConfig::multi_task_prompt)
         .def_readwrite("multi_task_prompt_str", &KVCacheConfig::multi_task_prompt_str)
         .def_readwrite("multi_task_prompt_tokens", &KVCacheConfig::multi_task_prompt_tokens)
@@ -577,7 +578,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def(py::pickle(
             [](const KVCacheConfig& self) {
                 return py::make_tuple(std::string("KVCacheConfig"),
-                                      8,
+                                      9,
                                       self.reuse_cache,
                                       self.multi_task_prompt,
                                       self.multi_task_prompt_str,
@@ -646,9 +647,19 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       self.kv_cache_event_instance_id,
                                       self.kv_cache_event_host_ip_port,
                                       self.memory_cache_swa_block_ratio,
-                                      self.dsv41_decoder_swa_pool_blocks);
+                                      self.dsv41_decoder_swa_pool_blocks,
+                                      self.enable_crc);
             },
             [](py::tuple t) {
+                const py::tuple crc_state = t;
+                const bool      has_crc_field =
+                    (t.size() == 72 && py::isinstance<py::int_>(t[1]) && t[1].cast<int>() == 9)
+                    || (t.size() == 70 && py::isinstance<py::int_>(t[1]) && t[1].cast<int>() == 8);
+                if (has_crc_field) {
+                    const size_t field_count = t.size() - 1;
+                    t                        = t[py::slice(0, field_count, 1)].cast<py::tuple>();
+                    t[1]                     = py::int_(field_count == 71 ? 8 : 7);
+                }
                 const py::tuple pool_state = t;
                 const bool has_pool_fields = t.size() == 71 && py::isinstance<py::int_>(t[1]) && t[1].cast<int>() == 8;
                 if (has_pool_fields) {
@@ -767,6 +778,9 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                 if (has_pool_fields) {
                     c.memory_cache_swa_block_ratio  = pool_state[69].cast<double>();
                     c.dsv41_decoder_swa_pool_blocks = pool_state[70].cast<uint32_t>();
+                }
+                if (has_crc_field) {
+                    c.enable_crc = crc_state[crc_state.size() - 1].cast<bool>();
                 }
                 return c;
             }));
