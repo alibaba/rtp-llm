@@ -4,7 +4,10 @@ import os
 
 import torch
 
-from rtp_llm.models_py.modules.dsv41.utils import V41MXFP8Linear
+from rtp_llm.models_py.modules.dsv41.utils import (
+    V41MXFP8Linear,
+    quantize_fp8_weight_to_fp4,
+)
 from rtp_llm.utils.model_weight import W
 
 
@@ -43,9 +46,32 @@ class MergedQB(torch.nn.Module):
         scales = torch.cat((mega.query_scale, index.weight_scales)).T.contiguous().T
         self.register_buffer("weight", weight, persistent=False)
         self.register_buffer("weight_scales", scales, persistent=False)
+        self.register_buffer("weight_fp4", None, persistent=False)
+        self.register_buffer("weight_fp4_scales", None, persistent=False)
         mega.query_weight, index.weight = weight.split(
             (self.main_width, self.index_width), dim=0
         )
+        if getattr(mega, "query_weight_fp4", None) is not None:
+            built = quantize_fp8_weight_to_fp4(index.weight, index.weight_scales)
+            if built is not None:
+                index_codes, index_fp4_scales = built
+                fp4_weight = torch.cat(
+                    (
+                        mega.query_weight_fp4.view(torch.uint8),
+                        index_codes.view(torch.uint8),
+                    )
+                ).view(torch.int8)
+                fp4_scales = (
+                    torch.cat((mega.query_scale_fp4, index_fp4_scales)).T.contiguous().T
+                )
+                self.weight_fp4 = fp4_weight
+                self.weight_fp4_scales = fp4_scales
+                mega.query_weight_fp4, _ = fp4_weight.split(
+                    (self.main_width, self.index_width), dim=0
+                )
+                mega.query_scale_fp4, _ = fp4_scales.split(
+                    (self.main_width, self.index_width), dim=0
+                )
         # Original, unpermuted Main Q stays intact for non-Mega execution.
         # Separate linears retain their own TMA-compatible scale strides.
         self._postprocess_op = None
@@ -102,6 +128,16 @@ class MergedQB(torch.nn.Module):
         index.weight_scales.copy_(index.pack_scales(self.index_scale_source))
         self.weight_scales[: self.main_width].copy_(mega.query_scale)
         self.weight_scales[self.main_width :].copy_(index.weight_scales)
+        if self.weight_fp4 is not None:
+            rebuilt = quantize_fp8_weight_to_fp4(index.weight, index.weight_scales)
+            if rebuilt is None:
+                raise RuntimeError("merged Q-B FP4 reload is unsupported")
+            index_codes, index_fp4_scales = rebuilt
+            self.weight_fp4[self.main_width :].copy_(index_codes)
+            self.weight_fp4_scales[self.main_width :].copy_(index_fp4_scales)
+            # Mega refresh already wrote the main rows through these views.
+            self.weight_fp4[: self.main_width].copy_(mega.query_weight_fp4)
+            self.weight_fp4_scales[: self.main_width].copy_(mega.query_scale_fp4)
 
     def forward_quantized(self, data, scales, *, wait_pdl=False):
         import deep_gemm
@@ -116,9 +152,14 @@ class MergedQB(torch.nn.Module):
         output = torch.empty(
             (*data.shape[:-1], width), dtype=torch.bfloat16, device=data.device
         )
+        weight, weight_scales = (
+            (self.weight_fp4, self.weight_fp4_scales)
+            if self.weight_fp4 is not None
+            else (self.weight, self.weight_scales)
+        )
         deep_gemm.fp8_fp4_gemm_nt(
             (data.reshape(-1, self.K), scales),
-            (self.weight, self.weight_scales),
+            (weight, weight_scales),
             output.view(-1, width),
             recipe=(1, 1, 32),
         )

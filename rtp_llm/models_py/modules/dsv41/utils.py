@@ -1,6 +1,8 @@
 """Shared DSV4 utility functions used across BF16 and FP8 paths."""
 
+import os
 import weakref
+from functools import lru_cache
 
 import torch
 from deep_gemm.utils.layout import get_mn_major_tma_aligned_packed_ue8m0_tensor
@@ -11,6 +13,92 @@ from rtp_llm.models_py.modules.factory.linear import LinearFactory
 
 _V4_FP8_BLOCK_CFG = Fp8BlockWiseQuantConfig()
 _FP8_LINEAR_REGISTRY = weakref.WeakSet()
+
+
+@lru_cache(maxsize=None)
+def _dense_fp4_device_supported(device_index: int) -> bool:
+    if torch.version.hip is not None or not torch.cuda.is_available():
+        return False
+    try:
+        major, _ = torch.cuda.get_device_capability(device_index)
+    except (AssertionError, RuntimeError, ValueError):
+        return False
+    if major != 10:
+        return False
+    try:
+        from rtp_llm.models_py.kernels.cuda import deepgemm_wrapper
+    except Exception:
+        return False
+    return deepgemm_wrapper.has_deep_gemm()
+
+
+def dense_fp4_decode_supported(device: torch.device) -> bool:
+    """SM100+ packed-FP4 B operand, opt-out via ``DSV41_DENSE_FP4=0``."""
+    if os.environ.get("DSV41_DENSE_FP4", "1") != "1":
+        return False
+    if device.type != "cuda":
+        return False
+    return _dense_fp4_device_supported(
+        device.index if device.index is not None else torch.cuda.current_device()
+    )
+
+
+def _unpack_ue8m0_row_scales(packed: torch.Tensor, n: int, k: int) -> torch.Tensor:
+    """Invert the MN-major packed UE8M0 layout back to one scale per 32 K.
+
+    ``packed`` is the DeepGEMM int32 tensor with logical shape ``[N, K/128]``,
+    physically N-contiguous. Four consecutive K-block exponents share each
+    int32, so a logical row-major copy exposes them in increasing K order.
+    """
+    if (
+        packed.dtype != torch.int32
+        or packed.shape != (n, k // 128)
+        or packed.stride(0) != 1
+        or packed.stride(1) < n
+        or packed.stride(1) % 4
+    ):
+        raise ValueError(f"Invalid packed V4.1 scale layout: {packed.shape}")
+    if k % 128 or (k // 32) % 4:
+        raise ValueError(f"Invalid V4.1 FP4 scale K: {k}")
+    ue8m0 = packed.contiguous().view(torch.uint8).view(n, k // 32)
+    return (ue8m0.to(torch.int32).clamp_min(1) << 23).view(torch.float32)
+
+
+def quantize_fp8_weight_to_fp4(
+    weight: torch.Tensor, packed_scales: torch.Tensor
+) -> tuple[torch.Tensor, torch.Tensor] | None:
+    """Requantize an MXFP8 weight to DeepGEMM's packed MXFP4 B operand.
+
+    Returns ``([N, K/2] int8 K-major codes, [N, K/128] int32 MN-major packed
+    UE8M0 scales)`` or ``None`` when the geometry or device cannot use the
+    dense FP4 kernel. The source FP8 weight/scales are never modified.
+    """
+    n, k = (int(dim) for dim in weight.shape)
+    if (
+        weight.dtype != torch.float8_e4m3fn
+        or not weight.is_cuda
+        or not weight.is_contiguous()
+        or n <= 0
+        or k <= 0
+        or n % 128
+        or k % 128
+        or (k // 32) % 4
+        or not dense_fp4_decode_supported(weight.device)
+    ):
+        return None
+    if packed_scales.shape != (n, k // 128):
+        return None
+
+    scale = _unpack_ue8m0_row_scales(packed_scales, n, k)
+    # Exact dequantization of the FP8 payload before the MXFP4 rounding.
+    dequant = weight.float().view(n, k // 32, 32)
+    dequant.mul_(scale.unsqueeze(-1))
+    dequant = dequant.view(n, k)
+    from rtp_llm.models_py.kernels.cuda.deepgemm_wrapper import per_token_cast_to_fp4
+
+    codes, scales = per_token_cast_to_fp4(dequant, use_ue8m0=True, gran_k=32)
+    del dequant
+    return codes, get_mn_major_tma_aligned_packed_ue8m0_tensor(scales)
 
 
 class V41Embedding(Embedding):
@@ -29,6 +117,55 @@ class V41MXFP8Linear(torch.nn.Module):
         self.weight = weight
         self.N, self.K = weight.shape
         self.weight_scales = self.pack_scales(scales)
+        # Decode-only packed MXFP4 B operand. ``weight``/``weight_scales`` stay
+        # authoritative for prefill, reload and the fused FP8 paths.
+        self.weight_fp4: torch.Tensor | None = None
+        self.weight_fp4_scales: torch.Tensor | None = None
+        self._dense_fp4_eligible = False
+
+    def mark_dense_fp4(self) -> bool:
+        """Opt this production projection into packed-FP4 decode weights."""
+        if self._dense_fp4_eligible:
+            return True
+        if (
+            self.weight.dtype != torch.float8_e4m3fn
+            or self.weight_scales.dtype != torch.int32
+            or self.N % 128
+            or self.K % 128
+            or (self.K // 32) % 4
+        ):
+            return False
+        self._dense_fp4_eligible = True
+        return True
+
+    def enable_dense_fp4(self, force: bool = False) -> bool:
+        """Build the FP4 copy after checkout/load; refresh it in place on reload."""
+        if not self._dense_fp4_eligible and not self.mark_dense_fp4():
+            return False
+        if self.weight_fp4 is not None and not force:
+            return True
+        built = quantize_fp8_weight_to_fp4(self.weight, self.weight_scales)
+        if built is None:
+            if force and self.weight_fp4 is not None:
+                raise RuntimeError("V4.1 FP4 weight reload is unsupported")
+            return False
+        codes, scales = built
+        if self.weight_fp4 is None:
+            self.weight_fp4 = codes
+            self.weight_fp4_scales = scales
+        else:
+            if self.weight_fp4.shape != codes.shape:
+                raise RuntimeError(
+                    f"V4.1 FP4 weight geometry changed: {self.weight_fp4.shape}"
+                )
+            if self.weight_fp4_scales.shape != scales.shape:
+                raise RuntimeError(
+                    f"V4.1 FP4 scale geometry changed: {self.weight_fp4_scales.shape}"
+                )
+            # Keep the buffer address captured by existing CUDA graphs.
+            self.weight_fp4.copy_(codes)
+            self.weight_fp4_scales.copy_(scales)
+        return True
 
     def pack_scales(self, scales: torch.Tensor) -> torch.Tensor:
         if scales.shape != ((self.N + 31) // 32, (self.K + 31) // 32):
@@ -64,12 +201,20 @@ class V41MXFP8Linear(torch.nn.Module):
             else quantized.view(x.shape)
         ), scales
 
-    def forward_quantized(self, x_q: torch.Tensor, x_s: torch.Tensor, out=None):
+    def forward_quantized(
+        self,
+        x_q: torch.Tensor,
+        x_s: torch.Tensor,
+        out=None,
+        *,
+        use_fp4: bool = False,
+    ):
         """Consume group32 E4M3/packed UE8M0 without another quantization.
 
         Deliberately no quantize_input method: the V4 input-reuse gate must
         remain closed for this linear. The caller owns the BF16 norm tensor.
         Input layout and disjoint BF16 output storage are caller preconditions.
+        Decode consumers opt into the FP4 copy; prefill and fallbacks keep FP8.
         """
         m = x_q.numel() // self.K
         shape = (*x_q.shape[:-1], self.N)
@@ -81,6 +226,11 @@ class V41MXFP8Linear(torch.nn.Module):
         if m:
             import deep_gemm
 
+            weight, weight_scales = (
+                (self.weight_fp4, self.weight_fp4_scales)
+                if use_fp4 and self.weight_fp4 is not None
+                else (self.weight, self.weight_scales)
+            )
             deep_gemm.fp8_fp4_gemm_nt(
                 (
                     (
@@ -90,7 +240,7 @@ class V41MXFP8Linear(torch.nn.Module):
                     ),
                     x_s,
                 ),
-                (self.weight, self.weight_scales),
+                (weight, weight_scales),
                 (
                     output
                     if output.shape == (m, self.N) and not output.requires_grad
@@ -100,10 +250,12 @@ class V41MXFP8Linear(torch.nn.Module):
             )
         return output
 
-    def forward(self, x: torch.Tensor, out=None):
+    def forward(self, x: torch.Tensor, out=None, *, use_fp4: bool = False):
         if x.numel() == 0:
             return out if out is not None else x.new_empty((*x.shape[:-1], self.N))
-        return self.forward_quantized(*self._quantize_input(x), out=out)
+        return self.forward_quantized(
+            *self._quantize_input(x), out=out, use_fp4=use_fp4
+        )
 
 
 def _is_v41_fp8_scale(w: torch.Tensor, s: torch.Tensor) -> bool:

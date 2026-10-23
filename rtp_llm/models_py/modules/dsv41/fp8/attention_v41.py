@@ -707,6 +707,21 @@ class AttentionV41FP8(AttentionFP8):
         # Construction may run under torch.device("meta"). Prepare derived
         # weights only after the authoritative device/RoPE initialization.
         self._mega_attention = None
+        # Dense decode projections eligible for the packed-FP4 B operand. Bare
+        # unit-test linears stay FP8 because nothing marks them here.
+        self._v41_dense_fp4_linears = []
+        from rtp_llm.models_py.modules.dsv41.utils import V41MXFP8Linear
+
+        wq_b = getattr(self, "wq_b", None)
+        if type(wq_b) is V41MXFP8Linear:
+            wq_b.mark_dense_fp4()
+        wo_b = getattr(self, "wo_b", None)
+        if type(wo_b) is V41MXFP8Linear and wo_b.mark_dense_fp4():
+            self._v41_dense_fp4_linears.append(wo_b)
+
+    def _refresh_v41_dense_fp4(self, force: bool = False) -> None:
+        for linear in getattr(self, "_v41_dense_fp4_linears", ()):
+            linear.enable_dense_fp4(force=force)
 
     def init_rope_cache(self, device=None):
         super().init_rope_cache(device=device)
@@ -715,12 +730,14 @@ class AttentionV41FP8(AttentionFP8):
         if self._mega_attention is not None:
             # Reinitialization must refresh the buffers captured by existing
             # graphs, including the shared Main/Indexer Q-B weight slices.
+            self._refresh_v41_dense_fp4(force=True)
             self._mega_attention.reload_weights(self)
         else:
             self._mega_attention = prepare(self, shared=self._shared_attention)
             if self._mega_attention is not None:
                 from ._v41_merged_qb import MergedQB
 
+                self._refresh_v41_dense_fp4()
                 merged = MergedQB.create(
                     self, self._mega_attention, self._qb_weight_owner
                 )

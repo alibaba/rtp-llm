@@ -20,10 +20,13 @@ import torch
 from rtp_llm.models_py.modules.dsv41._fused_inv_rope_fp8_quant_triton import (
     _device_capability,
 )
+from rtp_llm.models_py.modules.dsv41.utils import quantize_fp8_weight_to_fp4
 
 _HEAD_DIM = 512
 _ROPE_DIM = 64
 _HEADS_PER_GROUP = 8
+# Decode Q/KV work is at most a few dozen rows; prefill chunks are larger.
+_DENSE_FP4_MAX_ROWS = 128
 
 
 @lru_cache(maxsize=1)
@@ -124,12 +127,16 @@ class MegaAttention(torch.nn.Module):
         softmax_scale,
         heads,
         groups,
+        query_weight_fp4=None,
+        query_scale_fp4=None,
     ):
         super().__init__()
         self.backend = backend
         for name, value in (
             ("query_weight", query_weight),
             ("query_scale", query_scale),
+            ("query_weight_fp4", query_weight_fp4),
+            ("query_scale_fp4", query_scale_fp4),
             ("output_weight", output_weight),
             ("output_scale", output_scale),
             ("cos_sin", cos_sin),
@@ -170,6 +177,21 @@ class MegaAttention(torch.nn.Module):
                     "mega attention weight geometry changed during reload"
                 )
             target.copy_(source)
+        if self.query_weight_fp4 is not None:
+            rebuilt = quantize_fp8_weight_to_fp4(self.query_weight, self.query_scale)
+            if rebuilt is None:
+                raise RuntimeError("mega attention FP4 query reload is unsupported")
+            codes, scales = rebuilt
+            if (
+                self.query_weight_fp4.shape != codes.shape
+                or self.query_scale_fp4.shape != scales.shape
+            ):
+                raise RuntimeError(
+                    "mega attention FP4 query geometry changed during reload"
+                )
+            # These may be views into the merged Q-B allocation.
+            self.query_weight_fp4.copy_(codes)
+            self.query_scale_fp4.copy_(scales)
         if self.merged_qb is not None:
             self.merged_qb.reload(self, attn.index_wq)
 
@@ -272,7 +294,7 @@ class MegaAttention(torch.nn.Module):
             and not qr.requires_grad
         )
 
-    def project_q(self, linear, qr, qr_quantized=None, out=None):
+    def project_q(self, linear, qr, qr_quantized=None, out=None, *, use_fp4=None):
         """Emit fused Q layout directly from Wq; no normalization or rotation."""
         import deep_gemm
 
@@ -280,13 +302,20 @@ class MegaAttention(torch.nn.Module):
             linear._quantize_input(qr) if qr_quantized is None else qr_quantized
         )
         rows = qr.numel() // self.query_weight.shape[1]
+        if use_fp4 is None:
+            use_fp4 = self.query_weight_fp4 is not None and rows <= _DENSE_FP4_MAX_ROWS
         if out is None:
             out = torch.empty(
                 (rows, self.heads * _HEAD_DIM), dtype=qr.dtype, device=qr.device
             )
+        weight, weight_scales = (
+            (self.query_weight_fp4, self.query_scale_fp4)
+            if use_fp4 and self.query_weight_fp4 is not None
+            else (self.query_weight, self.query_scale)
+        )
         deep_gemm.fp8_fp4_gemm_nt(
             (quantized.reshape(rows, -1), scales),
-            (self.query_weight, self.query_scale),
+            (weight, weight_scales),
             out.reshape(rows, self.heads * _HEAD_DIM),
             recipe=(1, 1, 32),
         )
@@ -368,7 +397,7 @@ class MegaAttention(torch.nn.Module):
         )
         return output, scales
 
-    def project_output(self, pair, wo_b, out=None):
+    def project_output(self, pair, wo_b, out=None, *, use_fp4=None):
         """Consume the kernel's interleaved FP8 result without inverse RoPE."""
         import deep_gemm
 
@@ -379,12 +408,18 @@ class MegaAttention(torch.nn.Module):
         from rtp_llm.models_py.modules.dsv41.fp8 import _v41_wo_a_quant
         from rtp_llm.models_py.modules.dsv41.utils import V41MXFP8Linear
 
+        if use_fp4 is None:
+            use_fp4 = (
+                rows <= _DENSE_FP4_MAX_ROWS
+                and type(wo_b) is V41MXFP8Linear
+                and wo_b.weight_fp4 is not None
+            )
         if type(wo_b) is V41MXFP8Linear:
             quantized = _v41_wo_a_quant.try_grouped_quant(
                 pair, (self.output_weight, self.output_scale)
             )
             if quantized is not None:
-                return wo_b.forward_quantized(*quantized, out=out)
+                return wo_b.forward_quantized(*quantized, out=out, use_fp4=use_fp4)
         rank = self.output_weight.shape[1]
         projected = torch.empty(
             (rows, self.groups, rank), dtype=torch.bfloat16, device=data.device
@@ -396,6 +431,10 @@ class MegaAttention(torch.nn.Module):
             projected,
             recipe=(1, 1, 32),
         )
+        if type(wo_b) is V41MXFP8Linear:
+            return wo_b(
+                projected.view(rows, self.groups * rank), out=out, use_fp4=use_fp4
+            )
         return wo_b(projected.view(rows, self.groups * rank), out=out)
 
 
@@ -429,6 +468,11 @@ def prepare(attn, *, shared=None):
     query_weight, query_scale, output_weight, output_scale = _permuted_weights(
         attn, backend
     )
+    query_weight_fp4 = query_scale_fp4 = None
+    if getattr(attn.wq_b, "_dense_fp4_eligible", False):
+        built = quantize_fp8_weight_to_fp4(query_weight, query_scale)
+        if built is not None:
+            query_weight_fp4, query_scale_fp4 = built
     table = attn.freqs_cis
     cache = {} if shared is None else shared.setdefault("mega_rope_tables", {})
     key = (table.data_ptr(), tuple(table.shape), table.device)
@@ -454,6 +498,8 @@ def prepare(attn, *, shared=None):
         float(attn.softmax_scale),
         attn.n_heads,
         attn.n_groups,
+        query_weight_fp4,
+        query_scale_fp4,
     )
 
 
