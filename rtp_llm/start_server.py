@@ -459,6 +459,24 @@ def _start_vit_server_impl(
         vit_server_count, py_env_configs.vit_config.vit_proxy_min_healthy_workers
     )
 
+    vit_config = py_env_configs.vit_config
+    if not vit_config.use_local_preprocess:
+        preprocess_workers = vit_config.mm_preprocess_max_workers
+        if type(preprocess_workers) is not int or preprocess_workers <= 0:
+            raise ValueError("MM_PREPROCESS_MAX_WORKERS must be a positive integer")
+        logging.info(
+            "[VIT_SERVER] CPU preprocessing processes: %d workers x %d = %d",
+            vit_server_count,
+            preprocess_workers,
+            vit_server_count * preprocess_workers,
+        )
+        if vit_server_count > 1 and preprocess_workers > 1:
+            logging.warning(
+                "Each ViT worker owns a separate CPU preprocessing pool and model/cache "
+                "allocation. Check host memory capacity; MM_PREPROCESS_MAX_WORKERS=1 "
+                "reduces CPU pool replication without changing VIT_SERVER_COUNT."
+            )
+
     # Load once before spawning workers. Each worker consumes the inherited
     # mapping with the existing process-local rank semantics.
     load_gpu_nic_affinity()

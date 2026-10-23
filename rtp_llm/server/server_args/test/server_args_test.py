@@ -2967,5 +2967,25 @@ class ResidentWeightsArgsTest(TestCase):
             bad_min_gb.store_host_reserve()
 
 
+class VitPreprocessBudgetArgumentsTest(TestCase):
+    def test_per_worker_budget_environment_and_cli_precedence(self):
+        from rtp_llm.server.server_args import server_args
+
+        with patch.dict(os.environ, {"MM_PREPROCESS_MAX_WORKERS": "1"}, clear=True):
+            configs = server_args.setup_args(["--vit_server_count", "6"])
+            overridden = server_args.setup_args(["--mm_preprocess_max_workers", "2"])
+        self.assertEqual(configs.vit_config.mm_preprocess_max_workers, 1)
+        self.assertEqual(configs.server_config.vit_server_count, 6)
+        self.assertEqual(overridden.vit_config.mm_preprocess_max_workers, 2)
+
+    def test_invalid_cpu_pool_size_is_rejected(self):
+        from rtp_llm.server.server_args import server_args
+
+        for value in ("0", "-1", "1.5"):
+            with self.subTest(value=value), patch.dict(os.environ, {}, clear=True):
+                with self.assertRaises((SystemExit, ValueError)):
+                    server_args.setup_args(["--mm_preprocess_max_workers", value])
+
+
 if __name__ == "__main__":
     main()

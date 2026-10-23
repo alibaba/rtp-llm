@@ -3,6 +3,8 @@ VIT Proxy Server - 主进程代理服务器
 负责接收外部请求并分发到工作进程，解决 SO_REUSEPORT 流量打偏问题
 """
 
+import hashlib
+import json
 import logging
 import queue
 import threading
@@ -18,6 +20,8 @@ from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2 import (
     CacheStatusPB,
     CacheVersionPB,
     EmptyPB,
+    MultimodalHashRequestPB,
+    MultimodalHashResponsePB,
     MultimodalInputsPB,
     MultimodalOutputPB,
     ReleaseLeasePB,
@@ -931,6 +935,65 @@ class VitProxyRpcServer(MultimodalRpcServiceServicer):
             # its callback immediately. Late callbacks cannot change LB state.
             probe.complete(StatusProbeResult(worker_address, None, False))
             probe.cancel()
+
+    def GetMultimodalHashes(
+        self, request: MultimodalHashRequestPB, context
+    ) -> MultimodalHashResponsePB:
+        # Return one concrete worker's metadata unchanged. A proxy does not own
+        # an aggregate cache directory, but content hashes remain valid when a
+        # later embedding request is handled by another worker.
+        timeout_s = self.default_rpc_timeout_seconds
+        if request.timeout_ms > 0:
+            timeout_s = min(timeout_s, request.timeout_ms / 1000.0)
+        deadline = _resolve_forwarding_deadline_seconds(timeout_s, context)
+        attempted_workers: set[str] = set()
+        routing_key = json.dumps(
+            sorted(set(request.keys)), separators=(",", ":")
+        ).encode()
+        while len(attempted_workers) < len(self.load_balancer.worker_addresses):
+            remaining = _resolve_forwarding_timeout_seconds(deadline)
+            if remaining is None:
+                self._abort_deadline_exceeded(context, "ViT hash forwarding timed out")
+            candidates = [
+                addr
+                for addr in self.load_balancer.get_alive_worker_addresses()
+                if addr not in attempted_workers
+            ]
+            if not candidates:
+                break
+            # Probe and missing-input submission carry the same complete key set.
+            # Rendezvous selection keeps their worker_instance stable even while
+            # unrelated requests advance the embedding load balancer.
+            address = max(
+                candidates,
+                key=lambda addr: hashlib.sha256(routing_key + addr.encode()).digest(),
+            )
+            attempted_workers.add(address)
+            self.load_balancer.increment_connections(address)
+            try:
+                stub = self.connection_pool.get_stub(address)
+                call = stub.GetMultimodalHashes.future(
+                    request,
+                    timeout=remaining,
+                    metadata=dashscope_greennet_metadata(
+                        dict(context.invocation_metadata() or ())
+                    ),
+                )
+                if not context.add_callback(call.cancel):
+                    call.cancel()
+                response = call.result()
+                self.load_balancer.set_worker_alive(address, True)
+                return response
+            except grpc.RpcError as error:
+                if _is_retryable_worker_rpc_error(error):
+                    self.load_balancer.set_worker_alive(address, False)
+                    continue
+                _forward_worker_error_metadata(context, error)
+                self._abort_with_worker_status(context, error)
+            finally:
+                self.load_balancer.decrement_connections(address)
+        self._abort_unavailable(context, "No healthy VIT worker for hash lookup")
+
 
     def WaitGreenNetVerdict(self, request: MultimodalInputsPB, context) -> EmptyPB:
         """Forward the prefill-side GreenNet gate to one VIT worker.

@@ -196,9 +196,13 @@ def init_vit_group_args(parser, vit_config):
         "--mm_preprocess_max_workers",
         env_name="MM_PREPROCESS_MAX_WORKERS",
         bind_to=(vit_config, "mm_preprocess_max_workers"),
-        type=int,
+        type=_positive_int,
         default=4,
-        help="多模态预处理时最大线程数量",
+        help=(
+            "CPU preprocessing processes per ViT worker (total processes = "
+            "VIT_SERVER_COUNT * MM_PREPROCESS_MAX_WORKERS). Use 1 for "
+            "memory-constrained multi-worker deployments."
+        ),
     )
     vit_group.add_argument(
         "--biencoder_preprocess",

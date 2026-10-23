@@ -13,6 +13,8 @@ from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2 import (
     CacheStatusPB,
     CacheVersionPB,
     MMRdmaSlotPB,
+    MultimodalHashRequestPB,
+    MultimodalHashResponsePB,
     MultimodalInputsPB,
     MultimodalOutputPB,
     ReleaseLeasePB,
@@ -1766,6 +1768,76 @@ class VitBindFailureTest(TestCase):
         with self.assertRaisesRegex(RuntimeError, "Failed to bind VIT worker"):
             worker.start(31000)
         worker.rpc_server.start.assert_not_called()
+
+
+class VitProxyHashForwardingTest(TestCase):
+    def _server(self, calls):
+        addresses = [f"localhost:{9000 + i}" for i in range(len(calls))]
+        stubs = []
+        for future in calls:
+            stub = MagicMock()
+            stub.GetMultimodalHashes.future.return_value = future
+            stubs.append(stub)
+        pool = MagicMock()
+        pool.get_stub.side_effect = stubs
+        return VitProxyRpcServer(LoadBalancer(addresses), pool), stubs
+
+    def test_unavailable_worker_fails_over_without_changing_response_identity(self):
+        response = MultimodalHashResponsePB(worker_instance="worker-1")
+        server, stubs = self._server(
+            [FakeGrpcFuture(error=RpcUnavailable()), FakeGrpcFuture(response=response)]
+        )
+        result = server.GetMultimodalHashes(
+            MultimodalHashRequestPB(keys=["image"], timeout_ms=2000), FakeContext()
+        )
+        self.assertIs(result, response)
+        selected = server.connection_pool.get_stub.call_args_list
+        self.assertEqual(
+            server.load_balancer.get_alive_worker_addresses(), [selected[1].args[0]]
+        )
+        self.assertNotEqual(selected[0].args[0], selected[1].args[0])
+        self.assertEqual(
+            dict(server.load_balancer.connection_counts),
+            {"localhost:9000": 0, "localhost:9001": 0},
+        )
+        first = stubs[0].GetMultimodalHashes.future.call_args.kwargs["timeout"]
+        second = stubs[1].GetMultimodalHashes.future.call_args.kwargs["timeout"]
+        self.assertLessEqual(second, first)
+        self.assertLessEqual(first, 2)
+
+    def test_hash_owner_is_stable_for_key_order_and_unrelated_embedding_routing(self):
+        addresses = ["localhost:9000", "localhost:9001"]
+        pool = MagicMock()
+        pool.get_stub.return_value.GetMultimodalHashes.future.return_value = (
+            FakeGrpcFuture(response=MultimodalHashResponsePB(worker_instance="stable"))
+        )
+        server = VitProxyRpcServer(LoadBalancer(addresses), pool)
+        for keys in (["a", "b"], ["b", "a"], ["a", "b", "a"]):
+            server.GetMultimodalHashes(
+                MultimodalHashRequestPB(keys=keys), FakeContext()
+            )
+            server.load_balancer.get_worker()
+        self.assertEqual(
+            len({call.args[0] for call in pool.get_stub.call_args_list}), 1
+        )
+
+    def test_overload_does_not_fail_over_or_mark_worker_dead(self):
+        server, stubs = self._server([FakeGrpcFuture(error=RpcResourceExhausted())])
+        context = FakeContext()
+        with self.assertRaises(RpcResourceExhausted):
+            server.GetMultimodalHashes(MultimodalHashRequestPB(), context)
+        self.assertEqual(context.code, grpc.StatusCode.RESOURCE_EXHAUSTED)
+        self.assertEqual(
+            server.load_balancer.get_alive_worker_addresses(), ["localhost:9000"]
+        )
+
+    def test_expired_caller_does_not_issue_worker_call(self):
+        server, stubs = self._server([FakeGrpcFuture()])
+        context = FakeContext(time_remaining_values=[0])
+        with self.assertRaises(RuntimeError):
+            server.GetMultimodalHashes(MultimodalHashRequestPB(), context)
+        self.assertEqual(context.code, grpc.StatusCode.DEADLINE_EXCEEDED)
+        stubs[0].GetMultimodalHashes.future.assert_not_called()
 
 
 if __name__ == "__main__":

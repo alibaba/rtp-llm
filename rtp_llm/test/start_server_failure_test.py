@@ -304,6 +304,30 @@ class StartVitServerLifecycleTest(unittest.TestCase):
             self._start(self._configs(), [worker0, worker1], manager)
         self.assertEqual(manager.processes, [worker0])
 
+    def test_invalid_preprocess_pool_fails_before_spawning(self):
+        for count in (1, 2):
+            for pool_size in (0, -1, True, 1.5):
+                with self.subTest(count=count, pool_size=pool_size):
+                    configs = self._configs(count)
+                    configs.vit_config.mm_preprocess_max_workers = pool_size
+                    with patch(
+                        "rtp_llm.start_server.torch.multiprocessing.Process"
+                    ) as make:
+                        with self.assertRaisesRegex(
+                            ValueError, "MM_PREPROCESS_MAX_WORKERS"
+                        ):
+                            start_vit_server_impl(configs, _VitFakeManager())
+                    make.assert_not_called()
+
+
+    def test_multiworker_preserves_explicit_preprocess_pool_budget(self):
+        configs = self._configs(2)
+        configs.vit_config.mm_preprocess_max_workers = 1
+        processes = [_VitFakeProcess(name) for name in ("w0", "w1", "proxy")]
+        self._start(configs, processes, _VitFakeManager())
+        self.assertEqual(configs.vit_config.mm_preprocess_max_workers, 1)
+
+
     def test_single_worker_is_registered_once(self):
         worker = _VitFakeProcess("vit_server")
         manager = _VitFakeManager()

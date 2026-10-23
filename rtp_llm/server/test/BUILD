@@ -107,3 +107,12 @@ py_test(
     deps = ["//rtp_llm:testlib"],
     tags = ["manual"],
 )
+
+py_test(
+    name = "qwen4_vit_separation_test",
+    srcs = ["qwen4_vit_separation_test.py"],
+    data = ["//rtp_llm/test/smoke:qwen_vl_image_fixture"],
+    deps = ["//rtp_llm:testlib"],
+    tags = ["manual"],
+    timeout = "long",
+)
