@@ -125,18 +125,15 @@ public class CostBasedPrefillStrategy {
         }
         cacheAwareService.trackRoutingPrediction(
                 requestId, roleType, group, best.getStatus(),
-                seqLen, bestCacheHit, cacheMatchResult);
+                seqLen, bestCacheHit, cacheMatchResult, balanceContext.getTheoryHitTokens());
         balanceContext.recordCacheSelection(roleType, best.getIp(), bestCacheHit);
         recordDecision(balanceContext, roleType, group, discovery.registeredCount(), survivors,
                 selectedIndex, balanceContext.selectionReason(roleType), cacheMatchResult);
-        if (selectedTtft >= 0L) { reportSelectedEstimates(
-                roleType,
-                best,
-                config,
-                selectedTtft,
-                selectedPrefillMs); }
+        if (selectedTtft >= 0L) {
+            reportSelectedEstimates(roleType, best, config, selectedTtft, selectedPrefillMs);
+        }
         return PlacementResult.success(selectedRole.onCommit(commitTelemetry(
-                roleType, best, cacheMatchResult, bestCacheHit, seqLen,
+                roleType, best, seqLen,
                 survivors.routingCacheMatchTokens(selectedIndex),
                 survivors.maximumRoutingCacheMatchTokens,
                 survivors.affinityDecision(), survivors.cacheAffinity())));
@@ -145,30 +142,15 @@ public class CostBasedPrefillStrategy {
     /**
      * Cache counters for the selected route, captured now and reported once the route commits.
      */
-    private Runnable commitTelemetry(
-            RoleType roleType,
-            PrefillEndpoint best,
-            CacheMatchResult cacheMatchResult,
-            long bestCacheHit,
-            long seqLen,
-            long selectedRoutingHitTokens,
-            long candidateMaxRoutingHitTokens,
-            String affinityDecision,
-            RoutingDecision.CacheAffinity cacheAffinity) {
+    private Runnable commitTelemetry(RoleType roleType,
+                                     PrefillEndpoint best,
+                                     long seqLen,
+                                     long selectedRoutingHitTokens,
+                                     long candidateMaxRoutingHitTokens,
+                                     String affinityDecision,
+                                     RoutingDecision.CacheAffinity cacheAffinity) {
         String metricIpPort = best.getStatus().getMetricIpPort();
-        HostCacheMatch selectedMatch = cacheMatchResult.hostMatch(best.getStatus());
-        boolean kvcmQueried = cacheMatchResult.source() == CacheMatchSource.KVCM
-                && cacheMatchResult.querySucceeded();
-        long localMatchTokens = selectedMatch == null ? 0 : CacheMatchResult.matchedTokens(
-                selectedMatch.localMatchBlocks(), cacheMatchResult.blockSize(), seqLen);
-        long globalMatchTokens = selectedMatch == null ? 0 : CacheMatchResult.matchedTokens(
-                selectedMatch.globalMatchBlocks(), cacheMatchResult.blockSize(), seqLen);
         return () -> {
-            if (kvcmQueried) {
-                engineHealthReporter.reportKvcmSelectedMatch(
-                        roleType, metricIpPort, localMatchTokens, globalMatchTokens, seqLen);
-            }
-            reportCacheHitMetrics(roleType, metricIpPort, bestCacheHit, seqLen);
             reportRoutingCacheMatchMetrics(
                     roleType, selectedRoutingHitTokens, candidateMaxRoutingHitTokens, seqLen);
             if (affinityDecision != null) {
@@ -640,12 +622,6 @@ public class CostBasedPrefillStrategy {
                 ? Math.max(0L, seqLen - blockSize)
                 : routingHit;
         return new CacheTokenMatch(effectiveHit, routingHit);
-    }
-
-    private void reportCacheHitMetrics(
-            RoleType roleType, String ipIndex, long hitCacheTokens, long seqLen) {
-        double hitRate = seqLen > 0 ? hitCacheTokens / (double) seqLen : 0.0;
-        engineHealthReporter.reportCacheHitMetrics(roleType, ipIndex, hitCacheTokens, seqLen, hitRate);
     }
 
     private void reportSelectedEstimates(

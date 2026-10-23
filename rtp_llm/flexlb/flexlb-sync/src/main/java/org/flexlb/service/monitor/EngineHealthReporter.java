@@ -7,6 +7,7 @@ import org.apache.commons.collections4.CollectionUtils;
 import org.flexlb.balance.endpoint.EncoderEndpoint;
 import org.flexlb.balance.endpoint.WorkerEndpoint;
 import org.flexlb.cache.domain.CacheHitComparisonResult;
+import org.flexlb.cache.domain.CacheMatchSource;
 import org.flexlb.cache.telemetry.CacheMetricsReporter;
 import org.flexlb.constant.MetricConstant;
 import org.flexlb.constant.ZkMasterEvent;
@@ -685,10 +686,6 @@ public class EngineHealthReporter {
                 roleType, engineIp, localMatchTokens, globalMatchTokens, inputTokens);
     }
 
-    public void reportCacheHitComparisonMetrics(CacheHitComparisonResult comparison) {
-        reportCacheHitComparisonMetrics(null, comparison);
-    }
-
     public void reportCacheHitComparisonMetrics(WorkerStatus worker, CacheHitComparisonResult comparison) {
         if (comparison == null) {
             return;
@@ -704,9 +701,45 @@ public class EngineHealthReporter {
                 "group", valueOrEmpty(comparison.group()),
                 "taskState", valueOrEmpty(comparison.state()),
                 "cacheMatchSource", valueOrEmpty(comparison.source()));
-        CacheHitComparisonResult.CachePrediction sourcePrediction = kvcmPrediction != null
-                ? kvcmPrediction
-                : localSyncPrediction != null ? localSyncPrediction : localStandbyPrediction;
+        CacheHitComparisonResult.CachePrediction sourcePrediction = switch (CacheMatchSource.valueOf(comparison.source())) {
+            case KVCM -> kvcmPrediction;
+            case LOCAL_SYNC -> localSyncPrediction;
+            case LOCAL_STANDBY -> localStandbyPrediction;
+        };
+        long inputTokens = comparison.inputTokens();
+        RoleType role = RoleType.valueOf(comparison.role());
+        if (comparison.theoryHitTokens() != null) {
+            cacheMetricsReporter.reportTheoryCacheHitMetrics(comparison.theoryHitTokens(), inputTokens);
+        }
+        if (sourcePrediction != null) {
+            long hitTokens = sourcePrediction.predictedHitTokens();
+            reportCacheHitMetrics(role, metricIp, hitTokens, inputTokens,
+                    inputTokens > 0 ? hitTokens / (double) inputTokens : 0.0);
+        }
+        if (kvcmPrediction != null) {
+            cacheMetricsReporter.reportKvcmPrediction(role, metricIp, kvcmPrediction.predictedHitTokens(), inputTokens);
+            if (kvcmPrediction.localPredictionTokens() >= 0) {
+                reportKvcmSelectedMatch(role, metricIp,
+                        kvcmPrediction.localPredictionTokens(), kvcmPrediction.globalPredictionTokens(), inputTokens);
+            }
+            if (inputTokens > 0) {
+                monitor.report(CACHE_HIT_COMPARISON_KVCM_PREDICTED_TOKENS,
+                        tags, kvcmPrediction.predictedHitTokens());
+            }
+        }
+        if (localStandbyPrediction != null) {
+            cacheMetricsReporter.reportLocalStandbyPrediction(
+                    role, metricIp, localStandbyPrediction.predictedHitTokens(), inputTokens);
+        }
+        if (comparison.actualHitTokens() < 0) {
+            return;
+        }
+        if (inputTokens > 0) {
+            monitor.report(CACHE_HIT_COMPARISON_INPUT_TOKENS, tags, inputTokens);
+            monitor.report(CACHE_HIT_COMPARISON_ACTUAL_TOKENS, tags, comparison.actualHitTokens());
+            monitor.report(CACHE_HIT_COMPARISON_ACTUAL_RATIO,
+                    tags, comparison.actualHitTokens() / (double) inputTokens);
+        }
         if (sourcePrediction != null) {
             monitor.report(CACHE_HIT_COMPARISON_DELTA_TOKENS, tags,
                     comparison.actualHitTokens() - sourcePrediction.predictedHitTokens());
@@ -716,17 +749,6 @@ public class EngineHealthReporter {
                     comparison.actualHitTokens() - kvcmPrediction.localPredictionTokens());
             monitor.report(CACHE_HIT_COMPARISON_KVCM_GLOBAL_MATCH_DELTA_TOKENS, tags,
                     comparison.actualHitTokens() - kvcmPrediction.globalPredictionTokens());
-        }
-        long inputTokens = comparison.inputTokens();
-        if (inputTokens > 0) {
-            monitor.report(CACHE_HIT_COMPARISON_INPUT_TOKENS, tags, inputTokens);
-            monitor.report(CACHE_HIT_COMPARISON_ACTUAL_TOKENS, tags, comparison.actualHitTokens());
-            if (kvcmPrediction != null) {
-                monitor.report(CACHE_HIT_COMPARISON_KVCM_PREDICTED_TOKENS,
-                        tags, kvcmPrediction.predictedHitTokens());
-            }
-            monitor.report(CACHE_HIT_COMPARISON_ACTUAL_RATIO,
-                    tags, comparison.actualHitTokens() / (double) inputTokens);
         }
         if (localStandbyPrediction != null) {
             monitor.report(CACHE_HIT_COMPARISON_LOCAL_STANDBY_DELTA_TOKENS, tags,

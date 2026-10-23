@@ -263,17 +263,17 @@ class CostBasedPrefillSelectionMetricTest {
 
     @ParameterizedTest
     @ValueSource(strings = {"10.0.0.1:8080@0", "10.0.0.1:8080"})
-    void selectedPrefillReportsInputTokensAlongsideHitTokens(String cacheWorkerKey) {
+    void selectedPrefillDefersHitMetricsUntilWorkerFeedback(String cacheWorkerKey) {
         when(cache.findMatchingEngines(any())).thenReturn(new CacheMatchResult(
                 Map.of(cacheWorkerKey, HostCacheMatch.local(2)),
                 CacheMatchSource.KVCM, 0L, 100L));
 
         try (SelectedRole selected = select()) {
             commit(selected);
-            verify(reporter).reportCacheHitMetrics(
-                    RoleType.PREFILL, "10.0.0.1:8080", 200L, 1_000L, 0.2);
-            verify(reporter).reportKvcmSelectedMatch(
-                    RoleType.PREFILL, "10.0.0.1:8080", 200L, 200L, 1_000L);
+            verify(reporter, never()).reportCacheHitMetrics(
+                    any(), anyString(), anyLong(), anyLong(), anyDouble());
+            verify(reporter, never()).reportKvcmSelectedMatch(
+                    any(), anyString(), anyLong(), anyLong(), anyLong());
             var decision = context.getRoutingTelemetry().routingDecisions().get(RoleType.PREFILL);
             assertEquals(200L, decision.kvcmMatches().selectedHitTokens());
             assertEquals(Map.of(cacheWorkerKey, 200L), decision.kvcmMatches().topHits());
@@ -300,8 +300,8 @@ class CostBasedPrefillSelectionMetricTest {
         try (SelectedRole selected = select()) {
             Runnable telemetry = selected.takeCommitTelemetry();
             telemetry.run();
-            verify(reporter, times(1)).reportCacheHitMetrics(
-                    RoleType.PREFILL, "10.0.0.1:8080", 200L, 1_000L, 0.2);
+            verify(reporter, never()).reportCacheHitMetrics(
+                    any(), anyString(), anyLong(), anyLong(), anyDouble());
             verify(reporter, times(1)).reportRoutingSelectedCacheMatchMetrics(
                     RoleType.PREFILL, 200L);
             verify(reporter, times(1)).reportRoutingCandidateMaxCacheMatchMetrics(

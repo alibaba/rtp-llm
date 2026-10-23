@@ -12,7 +12,6 @@ import org.flexlb.dao.route.RoleType;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
-import org.mockito.ArgumentCaptor;
 import org.mockito.Mock;
 import org.mockito.Mockito;
 import org.mockito.junit.jupiter.MockitoExtension;
@@ -36,6 +35,8 @@ import static org.mockito.Mockito.when;
 @ExtendWith(MockitoExtension.class)
 class TheoryCacheHitReporterTest {
 
+    private final List<long[]> samples = new ArrayList<>();
+
     private final List<TheoryCacheHitReporter> reporters = new ArrayList<>();
 
     private TheoryCacheHitReporter newReporter() {
@@ -49,12 +50,19 @@ class TheoryCacheHitReporterTest {
         reporters.forEach(TheoryCacheHitReporter::closeTheoryLog);
     }
 
-    private static void reportWithConfiguration(TheoryCacheHitReporter reporter,
+    private void reportWithConfiguration(TheoryCacheHitReporter reporter,
                                                 BalanceContext context) throws Exception {
         ConfigService configService = mock(ConfigService.class);
         FlexlbConfig config = context.getConfig();
         Mockito.lenient().when(configService.loadBalanceConfig()).thenReturn(config == null ? new FlexlbConfig() : config);
         inject(reporter, "configService", configService);
+        var theory = new java.util.concurrent.CompletableFuture<Long>();
+        when(context.getTheoryHitTokens()).thenReturn(theory);
+        theory.thenAccept(tokens -> {
+            if (tokens != null) {
+                samples.add(new long[]{tokens, context.getRequest().getSeqLen()});
+            }
+        });
         reporter.report(context);
     }
 
@@ -154,8 +162,6 @@ class TheoryCacheHitReporterTest {
         awaitReports(reporter);
 
         assertTheoryRequests(0L, 128L, 0L, 128L);
-        verify(cacheMetricsReporter, Mockito.times(2)).reportTheoryCacheHitMetrics(
-                Mockito.anyLong(), Mockito.anyLong());
     }
 
     @Test
@@ -170,12 +176,7 @@ class TheoryCacheHitReporterTest {
         reportWithConfiguration(reporter, context(config, List.of(2L, 3L, 4L), 1024L, 256L));
         awaitReports(reporter);
 
-        ArgumentCaptor<Long> hitCaptor = ArgumentCaptor.forClass(Long.class);
-        ArgumentCaptor<Long> inputCaptor = ArgumentCaptor.forClass(Long.class);
-        verify(cacheMetricsReporter, Mockito.times(2)).reportTheoryCacheHitMetrics(
-                hitCaptor.capture(), inputCaptor.capture());
-        assertEquals(List.of(0L, 512L), hitCaptor.getAllValues());
-        assertEquals(List.of(1024L, 1024L), inputCaptor.getAllValues());
+        assertTheoryRequests(0L, 1024L, 512L, 1024L);
     }
 
     @Test
@@ -261,14 +262,12 @@ class TheoryCacheHitReporterTest {
     }
 
     private void assertTheoryRequests(long... hitAndInputTokens) {
-        ArgumentCaptor<Long> hitCaptor = ArgumentCaptor.forClass(Long.class);
-        ArgumentCaptor<Long> inputCaptor = ArgumentCaptor.forClass(Long.class);
-        verify(cacheMetricsReporter, Mockito.times(hitAndInputTokens.length / 2))
-                .reportTheoryCacheHitMetrics(hitCaptor.capture(), inputCaptor.capture());
-        for (int i = 0; i < hitCaptor.getAllValues().size(); i++) {
-            assertEquals(hitAndInputTokens[i * 2], hitCaptor.getAllValues().get(i));
-            assertEquals(hitAndInputTokens[i * 2 + 1], inputCaptor.getAllValues().get(i));
+        assertEquals(hitAndInputTokens.length / 2, samples.size());
+        for (int i = 0; i < samples.size(); i++) {
+            assertEquals(hitAndInputTokens[i * 2], samples.get(i)[0]);
+            assertEquals(hitAndInputTokens[i * 2 + 1], samples.get(i)[1]);
         }
+        verify(cacheMetricsReporter, Mockito.never()).reportTheoryCacheHitMetrics(Mockito.anyLong(), Mockito.anyLong());
     }
 
     private static void inject(Object target, String fieldName, Object value) throws Exception {

@@ -649,13 +649,35 @@ class EngineHealthReporterTest {
     }
 
     @Test
+    void shouldReportTheoryAndPredictionsWithoutActualHits() {
+        CacheHitComparisonResult comparison = new CacheHitComparisonResult(
+                "cache_hit_comparison", "request-1", "KVCM", "PREFILL", "test-group",
+                new WorkerIdentity("10.0.0.1", 8080, 0), "FINISHED", 200, -1, 150L,
+                new CacheHitComparisonResult.CachePrediction(100, -1, -1), null,
+                new CacheHitComparisonResult.CachePrediction(80, -1, -1));
+
+        reporter.reportCacheHitComparisonMetrics(null, comparison);
+
+        verify(cacheMetricsReporter).reportTheoryCacheHitMetrics(150, 200);
+        verify(cacheMetricsReporter).reportCacheHitMetrics(RoleType.PREFILL, comparison.worker(), 100, 200, 0.5);
+        verify(cacheMetricsReporter).reportKvcmPrediction(RoleType.PREFILL, comparison.worker(), 100, 200);
+        verify(cacheMetricsReporter).reportLocalStandbyPrediction(RoleType.PREFILL, comparison.worker(), 80, 200);
+        verify(monitor, never()).report(eq(MetricConstant.CACHE_HIT_COMPARISON_ACTUAL_TOKENS),
+                any(FlexMetricTags.class), anyDouble());
+        verify(monitor, never()).report(eq(MetricConstant.CACHE_HIT_COMPARISON_INPUT_TOKENS),
+                any(FlexMetricTags.class), anyDouble());
+        verify(monitor, never()).report(eq(MetricConstant.CACHE_HIT_COMPARISON_DELTA_TOKENS),
+                any(FlexMetricTags.class), anyDouble());
+    }
+
+    @Test
     void shouldReportActualCacheHitsWithoutPredictions() {
         CacheHitComparisonResult comparison = new CacheHitComparisonResult(
                 "cache_hit_comparison", "request-1", "KVCM", "PREFILL", "test-group",
-                new WorkerIdentity("10.0.0.1", 8080, 0), "running", 200, 120,
+                new WorkerIdentity("10.0.0.1", 8080, 0), "running", 200, 120, null,
                 null, null, null);
 
-        reporter.reportCacheHitComparisonMetrics(comparison);
+        reporter.reportCacheHitComparisonMetrics(null, comparison);
 
         verify(monitor).report(eq(MetricConstant.CACHE_HIT_COMPARISON_INPUT_TOKENS),
                 any(FlexMetricTags.class), eq(200.0));
@@ -671,12 +693,12 @@ class EngineHealthReporterTest {
                 "cache_hit_comparison", "request-1", "KVCM", "PREFILL", "test-group",
                 new WorkerIdentity("10.0.0.1", 8080, 0),
                 "running", 200,
-                120,
+                120, null,
                 new CacheHitComparisonResult.CachePrediction(100, -1, -1),
                 null,
                 new CacheHitComparisonResult.CachePrediction(80, -1, -1));
 
-        reporter.reportCacheHitComparisonMetrics(comparison);
+        reporter.reportCacheHitComparisonMetrics(null, comparison);
 
         FlexMetricTags expectedTags = FlexMetricTags.of(
                 "engineIp", "10.0.0.1:8080@0",
@@ -713,12 +735,12 @@ class EngineHealthReporterTest {
                 "cache_hit_comparison", "request-1", "LOCAL_SYNC", "PREFILL", "test-group",
                 new WorkerIdentity("10.0.0.1", 8080, 0),
                 "running", 200,
-                120,
+                120, null,
                 null,
                 new CacheHitComparisonResult.CachePrediction(100, -1, -1),
                 null);
 
-        reporter.reportCacheHitComparisonMetrics(comparison);
+        reporter.reportCacheHitComparisonMetrics(null, comparison);
 
         FlexMetricTags expectedTags = FlexMetricTags.of(
                 "engineIp", "10.0.0.1:8080@0",
@@ -752,12 +774,12 @@ class EngineHealthReporterTest {
                 "cache_hit_comparison", "request-1", "KVCM", "PREFILL", "test-group",
                 new WorkerIdentity("10.0.0.1", 8080, 0),
                 "running", 200,
-                120,
+                120, null,
                 new CacheHitComparisonResult.CachePrediction(60, 40, 100),
                 null,
                 null);
 
-        reporter.reportCacheHitComparisonMetrics(comparison);
+        reporter.reportCacheHitComparisonMetrics(null, comparison);
 
         FlexMetricTags expectedTags = FlexMetricTags.of(
                 "engineIp", "10.0.0.1:8080@0",
@@ -776,12 +798,12 @@ class EngineHealthReporterTest {
                 "cache_hit_comparison", "request-1", "KVCM", "PREFILL", "test-group",
                 new WorkerIdentity("10.0.0.1", 8080, 0),
                 "running", inputTokens,
-                120,
+                120, null,
                 new CacheHitComparisonResult.CachePrediction(100, -1, -1),
                 null,
                 new CacheHitComparisonResult.CachePrediction(80, -1, -1));
 
-        reporter.reportCacheHitComparisonMetrics(comparison);
+        reporter.reportCacheHitComparisonMetrics(null, comparison);
 
         verify(monitor).report(eq(MetricConstant.CACHE_HIT_COMPARISON_DELTA_TOKENS),
                 any(FlexMetricTags.class), eq(20.0));
@@ -810,7 +832,7 @@ class EngineHealthReporterTest {
                 8080, 8081, "test-site", null, 0, multiEngineNum);
         CacheHitComparisonResult comparison = new CacheHitComparisonResult(
                 "cache_hit_comparison", "request-1", "KVCM", "PREFILL", "test-group",
-                worker.getWorkerIdentity(), "running", 200, 120, null, null, null);
+                worker.getWorkerIdentity(), "running", 200, 120, null, null, null, null);
 
         reporter.reportCacheHitComparisonMetrics(worker, comparison);
 
@@ -822,15 +844,15 @@ class EngineHealthReporterTest {
     }
 
     @Test
-    void comparisonWithoutMetadataKeepsMissingDimensionsAsEmptyValues() {
+    void comparisonWithoutOptionalMetadataKeepsMissingDimensionsAsEmptyValues() {
         CacheHitComparisonResult comparison = new CacheHitComparisonResult(
-                "cache_hit_comparison", "request-1", null, null, null, null, null,
-                200, 120, null, null, null);
+                "cache_hit_comparison", "request-1", "KVCM", "PREFILL", null, null, null,
+                200, 120, null, null, null, null);
 
-        reporter.reportCacheHitComparisonMetrics(comparison);
+        reporter.reportCacheHitComparisonMetrics(null, comparison);
 
         verify(monitor).report(MetricConstant.CACHE_HIT_COMPARISON_ACTUAL_TOKENS,
-                FlexMetricTags.of("engineIp", "", "role", "", "group", "", "taskState", "", "cacheMatchSource", ""), 120.0);
+                FlexMetricTags.of("engineIp", "", "role", "PREFILL", "group", "", "taskState", "", "cacheMatchSource", "KVCM"), 120.0);
     }
 
     private WorkerStatus workerStatusWithCacheStatus() {

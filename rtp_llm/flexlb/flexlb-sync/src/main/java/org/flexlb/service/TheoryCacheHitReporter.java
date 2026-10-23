@@ -70,28 +70,30 @@ public class TheoryCacheHitReporter {
         try {
             theoryHitReportExecutor.execute(() -> {
                 try {
-                    reportRequest(balanceContext);
+                    balanceContext.getTheoryHitTokens().complete(reportRequest(balanceContext));
                 } catch (RuntimeException failure) {
+                    balanceContext.getTheoryHitTokens().complete(null);
                     Logger.warn("Theory cache-hit report failed: request_id={}", balanceContext.getRequestId(), failure);
                 }
             });
         } catch (RejectedExecutionException rejected) {
+            balanceContext.getTheoryHitTokens().complete(null);
             droppedReportCount.incrementAndGet();
         }
     }
 
-    private void reportRequest(BalanceContext balanceContext) {
+    private Long reportRequest(BalanceContext balanceContext) {
         FlexlbConfig config = configService.loadBalanceConfig();
         if (!config.getObservability().getCacheHit().getRecentKeyWindow().isWriteEnabled()) {
-            return;
+            return null;
         }
         Request request = balanceContext.getRequest();
         if (request == null || theoryCacheKeyHistory == null) {
-            return;
+            return null;
         }
         RecentCacheKeyWindow.Snapshot snapshot = theoryCacheKeyHistory.record(request.getBlockCacheKeys());
         if (snapshot == null) {
-            return;
+            return null;
         }
         long inputTokens = Math.max(0L, request.getSeqLen());
         long hitTokens = theoryHitTokens(snapshot.getRequestHitOccurrences(), inputTokens, request.getCacheKeyBlockSize());
@@ -103,11 +105,11 @@ public class TheoryCacheHitReporter {
                     config.getObservability().getCacheHit().getTheoryLog().getPath());
         }
         if (cacheMetricsReporter != null && config.getObservability().getCacheHit().isMetricsEnabled()) {
-            cacheMetricsReporter.reportTheoryCacheHitMetrics(hitTokens, inputTokens);
             cacheMetricsReporter.reportTheoryPoolMetrics(snapshot.getPoolUsedKeys(), snapshot.getPoolCapacityKeys());
             cacheMetricsReporter.reportTheoryCacheEvictionMetrics(
                     snapshot.getCapacityEvictions(), snapshot.getCapacityEvictionAgeSumMs());
         }
+        return config.getObservability().getCacheHit().isMetricsEnabled() ? hitTokens : null;
     }
 
     private static long theoryHitTokens(long hitKeyCount, long inputTokens, long cacheKeyBlockSize) {

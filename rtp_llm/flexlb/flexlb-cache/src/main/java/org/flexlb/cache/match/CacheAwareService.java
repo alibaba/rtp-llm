@@ -25,7 +25,6 @@ public class CacheAwareService {
     private final CacheMetricsReporter cacheMetricsReporter;
     private final CacheMatchQueryOrchestrator queryOrchestrator;
     private final CacheHitFeedbackTracker feedbackTracker;
-    private final LocalStandbyComparisonService comparisonService;
     private final CacheMetadataUpdateOrchestrator updateOrchestrator;
 
     public CacheAwareService(CacheMetricsReporter cacheMetricsReporter,
@@ -34,7 +33,6 @@ public class CacheAwareService {
                              CacheMetadataUpdateOrchestrator updateOrchestrator) {
         this.cacheMetricsReporter = cacheMetricsReporter;
         this.queryOrchestrator = queryOrchestrator;
-        this.comparisonService = comparisonService;
         this.feedbackTracker = new CacheHitFeedbackTracker(comparisonService);
         this.updateOrchestrator = updateOrchestrator;
     }
@@ -76,29 +74,12 @@ public class CacheAwareService {
                                        WorkerStatus worker,
                                        long inputTokens,
                                        long predictedHitTokens,
-                                       CacheMatchResult result) {
-        reportSelectedPredictions(requestId, role, worker, inputTokens, predictedHitTokens, result);
+                                       CacheMatchResult result,
+                                       CompletableFuture<Long> theoryHitTokens) {
         try {
-            feedbackTracker.track(requestId, role, group, worker, inputTokens, predictedHitTokens, result);
+            feedbackTracker.track(requestId, role, group, worker, inputTokens, predictedHitTokens, result, theoryHitTokens);
         } catch (RuntimeException error) {
             log.warn("Cache prediction telemetry failed, requestId={}", requestId, error);
-        }
-    }
-
-    private void reportSelectedPredictions(String requestId, RoleType role, WorkerStatus worker,
-                                           long inputTokens, long predictedHitTokens, CacheMatchResult result) {
-        if (result.source() == CacheMatchSource.KVCM && result.querySucceeded()) {
-            try {
-                cacheMetricsReporter.reportKvcmPrediction(
-                        role, worker.getMetricIpPort(), predictedHitTokens, inputTokens);
-            } catch (RuntimeException error) {
-                log.warn("KVCM prediction metrics unavailable, requestId={}", requestId, error);
-            }
-        }
-        try {
-            comparisonService.recordSelectedWorker(requestId, role, worker, inputTokens);
-        } catch (RuntimeException error) {
-            log.warn("Local Standby selection metrics unavailable, requestId={}", requestId, error);
         }
     }
 

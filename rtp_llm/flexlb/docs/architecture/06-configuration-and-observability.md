@@ -209,7 +209,8 @@ UniConfig / Nacos 的 v3 部分更新示例：
   group selector。
 - `workerRegistry`：worker health 与 cache-status 刷新策略。
 - `observability.cacheHit`：recent-key window、指标和理论命中日志。理论命中查询、历史池更新、
-  指标与请求日志由独立单线程按入队顺序处理；请求线程仅提交任务。
+  池容量指标与请求日志由独立单线程按入队顺序处理；请求线程仅提交任务。
+  理论命中 Tokens 保存在请求的异步结果中，随 worker status 反馈统一上报。
   后台任务直接读取路由完成后保持不变的请求字段；日志与指标开关在执行时从配置服务读取。
   等待队列最多容纳 100,000 个任务，满时丢弃统计样本并汇总告警，不阻塞请求线程。
   `recentKeyWindow.maxKeyOccurrences` 默认 `1000000`，限制保留的唯一 key 数量；
@@ -361,15 +362,18 @@ Prometheus 导出为 `flexlb_app_cache_affinity_over_cap_ms_seconds` 的分布�
 
 缓存反馈以请求 ID、角色和 Worker 实例代次关联路由预测，`worker` 使用完整的
 `ip:port@engineIndex` 逻辑身份；`prefill_worker_status` 同时记录 `workerIp` 和 `engineIndex`。
-选定 Worker 时上报 `app.cache.kvcm.predicted.tokens/ratio`；Local Standby 预测结果与所选 Worker 齐备时上报
-`app.cache.local.standby.predicted.tokens/ratio`。有效的空匹配产生 0，查询失败不产生预测数据点。
-Engine 的 `prefixLengthValid`
-表示实际命中值有效；有效的 0 表示零命中，无效值不参与差异计算。每个关联记录最多生成一次
-`cache_hit_comparison` 和一次 `prefill_worker_status`。实际命中 Counter 及输入 Tokens Counter
-仅在收到有效反馈后上报，用于计算实际全局命中率。比较事件包含实际命中、路由预测、
-KVCM 本地匹配、KVCM 本地加远端的 global 总匹配，以及 Local Standby 预测；差值统一为实际值减预测值。
-预测关联最多保留 100,000 条，保存期限为一小时。Local Standby 对照异步完成，反馈等待上限
-为一秒；不可用时省略 Standby 对照，其余比较正常输出。观测回调在 Worker 状态锁外执行。
+首次有效的 RUNNING 命中反馈或 FINISHED 反馈触发统一上报：理论命中、策略所选命中、
+KVCM 预测与本地/global 匹配、Local Standby 预测，以及实际命中。
+每项独立判断是否可用；有效的空匹配产生 0，查询失败不产生预测数据点。
+Engine 的 `prefixLengthValid` 表示实际命中值有效；有效的 0 表示零命中。
+FINISHED 缺少有效实际值时仍上报可用的理论和预测数据，实际值及其输入 Tokens Counter 不上报。
+比较事件中不可用的实际命中为 `-1`，不可用的预测和理论命中为 `null`；差值要求两侧均有效。
+每个关联记录最多生成一次 `cache_hit_comparison` 和一次 `prefill_worker_status`。
+实际命中 Counter 及输入 Tokens Counter 用于计算实际全局命中率。
+比较事件包含理论命中、实际命中、路由预测、KVCM 本地匹配、KVCM 本地加远端的 global 总匹配，
+以及 Local Standby 预测；差值统一为实际值减预测值。
+预测关联最多保留 100,000 条，保存期限为一小时。理论与 Local Standby 对照异步完成，
+反馈阶段各自最多等待一秒；不可用的项省略，其余指标正常输出。观测回调在 Worker 状态锁外执行。
 
 `tools/pv_request_replay/build_workbook.py` 支持 `routingDecisions` 和
 `shortestTtftDecisions` 两种日志结构，以及包含两种结构的日志窗口。Requests 展示请求与缓存

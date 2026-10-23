@@ -112,7 +112,7 @@ class CacheHitFeedbackFlowTest {
         when(cacheConfig.isLocalStandbyEnabled()).thenReturn(true);
         when(cacheConfig.getLocalStandbyConfig()).thenReturn(new LocalStandbyConfig());
         cacheMetrics = mock(CacheMetricsReporter.class);
-        LocalStandbyComparisonService comparison = new LocalStandbyComparisonService(cacheConfig, standby, cacheMetrics);
+        LocalStandbyComparisonService comparison = new LocalStandbyComparisonService(cacheConfig, standby);
         when(standby.asyncLocalStandbyMatch(any())).thenReturn(CompletableFuture.completedFuture(
                 new CacheMatchResult(Map.of(worker.getLogicalIpPort(), HostCacheMatch.local(3)),
                         CacheMatchSource.LOCAL_STANDBY, 1, 100)));
@@ -146,8 +146,8 @@ class CacheHitFeedbackFlowTest {
     @Test
     void realSelectionAndStatusPollingEmitComparisonPvAndMetricsExactlyOnce() throws Exception {
         select("req-cache-feedback-p-001");
-        verify(cacheMetrics).reportKvcmPrediction(RoleType.PREFILL, worker.getMetricIpPort(), 400, 1000);
-        verify(cacheMetrics).reportLocalStandbyPrediction(RoleType.PREFILL, worker.getMetricIpPort(), 300, 1000);
+        verify(cacheMetrics, never()).reportKvcmPrediction(any(), anyString(), anyLong(), anyLong());
+        verify(cacheMetrics, never()).reportLocalStandbyPrediction(any(), anyString(), anyLong(), anyLong());
         poll(worker, task("req-cache-feedback-p-001", false, 0), false, 2);
         assertTrue(events("cache_hit_comparison").isEmpty(), "missing validity must not mean zero cache hit");
         poll(worker, task("req-cache-feedback-p-001", true, 500), false, 3);
@@ -157,6 +157,8 @@ class CacheHitFeedbackFlowTest {
         assertEquals(1, events("cache_hit_comparison").size());
         assertEquals("req-cache-feedback-p-001", comparison.path("requestId").asText());
         assertEquals(500, comparison.path("actualHitTokens").asLong());
+        verify(cacheMetrics).reportTheoryCacheHitMetrics(600, 1000);
+        verify(cacheMetrics).reportKvcmPrediction(RoleType.PREFILL, worker.getMetricIpPort(), 400, 1000);
         assertEquals(400, comparison.path("kvcmPrediction").path("predictedHitTokens").asLong());
         assertEquals(200, comparison.path("kvcmPrediction").path("localPredictionTokens").asLong());
         assertEquals(600, comparison.path("kvcmPrediction").path("globalPredictionTokens").asLong());
@@ -259,12 +261,14 @@ class CacheHitFeedbackFlowTest {
     }
 
     @Test
-    void unknownRequestAndInvalidPrefixNeverFabricateCacheComparison() throws Exception {
+    void finishedInvalidPrefixReportsPredictionsWithoutActualHits() throws Exception {
         poll(worker, task("1007", true, 500), true, 2);
         assertTrue(events("cache_hit_comparison").isEmpty());
         select("1008");
         poll(worker, task("1008", false, 0), true, 3);
-        assertTrue(events("cache_hit_comparison").isEmpty());
+        assertEquals(1, events("cache_hit_comparison").size());
+        verify(cacheMetrics).reportTheoryCacheHitMetrics(600, 1000);
+        verify(cacheMetrics).reportKvcmPrediction(RoleType.PREFILL, worker.getMetricIpPort(), 400, 1000);
         JsonNode status = events("prefill_worker_status").getFirst();
         assertFalse(status.hasNonNull("actualHitTokens"));
         assertFalse(status.hasNonNull("firstTokenTimeMs"));
@@ -290,7 +294,7 @@ class CacheHitFeedbackFlowTest {
         CacheMatchResult matches = new CacheMatchResult(Map.of(
                 "10.0.0.1:8080@0", HostCacheMatch.local(1),
                 "10.0.0.1:8080@1", HostCacheMatch.local(4)), CacheMatchSource.KVCM, 1, 100);
-        cache.trackRoutingPrediction("1010", RoleType.PREFILL, "group", engine, 1000, 400, matches);
+        cache.trackRoutingPrediction("1010", RoleType.PREFILL, "group", engine, 1000, 400, matches, CompletableFuture.completedFuture(null));
         var observation = org.flexlb.service.grpc.EngineStatusConverter.convertToStatusObservation(engine,
                 response(task("1010", true, 500), true, 2));
         var results = cache.observeCacheHitFeedback(engine, observation);
@@ -316,6 +320,7 @@ class CacheHitFeedbackFlowTest {
         request.setBlockCacheKeys(List.of(1L));
         BalanceContext context = new BalanceContext(config);
         context.setRequest(request);
+        context.getTheoryHitTokens().complete(600L);
         context.setSchedulingMetadata(SchedulingMetadata.explicit(50, System.currentTimeMillis() + 60_000));
         var selected = strategy.select(context, RoleType.PREFILL, "group");
         assertEquals(PlacementResult.Status.SUCCESS, selected.status());

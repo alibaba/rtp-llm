@@ -54,6 +54,11 @@ public class BalanceContext {
 
     private CompletableFuture<Response> future;
 
+    /**
+     * Theory hit tokens calculated after routing; null means no theory sample is available.
+     */
+    private final CompletableFuture<Long> theoryHitTokens = new CompletableFuture<>();
+
     //======================== Meters =======================//
 
     private long startTime = System.currentTimeMillis();

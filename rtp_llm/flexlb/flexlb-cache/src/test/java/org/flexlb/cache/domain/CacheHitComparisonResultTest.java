@@ -15,7 +15,7 @@ class CacheHitComparisonResultTest {
         CacheHitComparisonResult comparison = new CacheHitComparisonResult(
                 "cache_hit_comparison", "request-1", "KVCM", "PREFILL", "default",
                 new WorkerIdentity("127.0.0.1", 8080, 0), "running", 200,
-                120,
+                120, null,
                 new CacheHitComparisonResult.CachePrediction(100, 60, 110),
                 null,
                 new CacheHitComparisonResult.CachePrediction(70, -1, -1));
@@ -48,7 +48,7 @@ class CacheHitComparisonResultTest {
         CacheHitComparisonResult comparison = new CacheHitComparisonResult(
                 "cache_hit_comparison", "request-1", "KVCM", "PREFILL", "default",
                 new WorkerIdentity("127.0.0.1", 8080, 0), "running", 200,
-                120,
+                120, null,
                 new CacheHitComparisonResult.CachePrediction(100, -1, -1),
                 null,
                 null);
@@ -63,7 +63,7 @@ class CacheHitComparisonResultTest {
         CacheHitComparisonResult comparison = new CacheHitComparisonResult(
                 "cache_hit_comparison", "request-1", "LOCAL_SYNC", "PREFILL", "default",
                 new WorkerIdentity("127.0.0.1", 8080, 0), "running", 200,
-                120,
+                120, null,
                 null,
                 new CacheHitComparisonResult.CachePrediction(100, -1, -1),
                 null);

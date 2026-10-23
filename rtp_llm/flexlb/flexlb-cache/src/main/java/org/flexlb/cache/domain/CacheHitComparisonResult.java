@@ -7,13 +7,14 @@ import org.flexlb.dao.master.WorkerIdentity;
 
 /**
  * Cache-hit comparison result and PV log payload.
+ * Actual hit tokens are -1 when engine feedback is unavailable; theory and prediction fields are nullable.
  *
  * @param workerIdentity worker identity providing the routing/PV identity
  *                       {@code ip:port@engineIndex}; omitted from PV JSON itself
  */
 @JsonPropertyOrder({
         "event", "requestId", "source", "role", "group", "worker", "state", "inputTokens",
-        "actualHitTokens", "kvcmPrediction", "localSyncPrediction", "localStandbyPrediction"
+        "actualHitTokens", "theoryHitTokens", "kvcmPrediction", "localSyncPrediction", "localStandbyPrediction"
 })
 public record CacheHitComparisonResult(
         String event,
@@ -25,9 +26,15 @@ public record CacheHitComparisonResult(
         String state,
         long inputTokens,
         long actualHitTokens,
+        Long theoryHitTokens,
         CachePrediction kvcmPrediction,
         CachePrediction localSyncPrediction,
         CachePrediction localStandbyPrediction) {
+
+    public CacheHitComparisonResult withTheoryHitTokens(Long tokens) {
+        return new CacheHitComparisonResult(event, requestId, source, role, group, workerIdentity, state,
+                inputTokens, actualHitTokens, tokens, kvcmPrediction, localSyncPrediction, localStandbyPrediction);
+    }
 
     /** Routing/PV identity in {@code ip:port@engineIndex} format. */
     @JsonProperty("worker")
