@@ -4,6 +4,8 @@
 
   * `TF_NEED_CUDA`: Whether to enable building with CUDA.
   * `GCC_HOST_COMPILER_PATH`: The GCC host compiler path
+  * `NVCC_HOST_COMPILER_PATH`: Optional host compiler for NVCC only. Defaults
+    to GCC_HOST_COMPILER_PATH; ignored for Windows and CUDA Clang builds.
   * `TF_CUDA_CLANG`: Whether to use clang as a cuda compiler.
   * `CLANG_CUDA_COMPILER_PATH`: The clang compiler path that will be used for
     both host and device code compilation if TF_CUDA_CLANG is 1.
@@ -54,6 +56,7 @@ load(
 
 _GCC_HOST_COMPILER_PATH = "GCC_HOST_COMPILER_PATH"
 _GCC_HOST_COMPILER_PREFIX = "GCC_HOST_COMPILER_PREFIX"
+_NVCC_HOST_COMPILER_PATH = "NVCC_HOST_COMPILER_PATH"
 _CLANG_CUDA_COMPILER_PATH = "CLANG_CUDA_COMPILER_PATH"
 _TF_SYSROOT = "TF_SYSROOT"
 _CUDA_TOOLKIT_PATH = "CUDA_TOOLKIT_PATH"
@@ -235,6 +238,22 @@ def find_cc(repository_ctx):
         fail(("Cannot find {}, either correct your path or set the {}" +
               " environment variable").format(target_cc_name, cc_path_envvar))
     return cc
+
+def find_nvcc_host_cc(repository_ctx, cc):
+    """Allow NVCC to use a newer host compiler without changing CPU actions."""
+    if is_windows(repository_ctx) or _use_cuda_clang(repository_ctx):
+        return cc
+    cc_name = (get_host_environ(repository_ctx, _NVCC_HOST_COMPILER_PATH) or "").strip()
+    if not cc_name:
+        return cc
+    if cc_name.startswith("/"):
+        if not repository_ctx.path(cc_name).exists:
+            fail("Cannot find NVCC host compiler %s from %s" % (cc_name, _NVCC_HOST_COMPILER_PATH))
+        return cc_name
+    nvcc_host_cc = which(repository_ctx, cc_name)
+    if nvcc_host_cc == None:
+        fail("Cannot find %s from %s" % (cc_name, _NVCC_HOST_COMPILER_PATH))
+    return nvcc_host_cc
 
 _INC_DIR_MARKER_BEGIN = "#include <...>"
 
@@ -1197,12 +1216,17 @@ def _create_local_cuda_repository(repository_ctx):
     # Set up crosstool/
     cc = find_cc(repository_ctx)
     cc_fullpath = cc if not should_download_clang else "crosstool/" + cc
+    nvcc_host_cc = find_nvcc_host_cc(repository_ctx, cc)
 
     host_compiler_includes = get_cxx_inc_directories(
         repository_ctx,
         cc_fullpath,
         tf_sysroot,
     )
+    if str(nvcc_host_cc) != str(cc):
+        for include_dir in get_cxx_inc_directories(repository_ctx, nvcc_host_cc, tf_sysroot):
+            if include_dir not in host_compiler_includes:
+                host_compiler_includes.append(include_dir)
     cuda_defines = {}
     cuda_defines["%{builtin_sysroot}"] = tf_sysroot
     cuda_defines["%{cuda_toolkit_path}"] = ""
@@ -1277,7 +1301,7 @@ def _create_local_cuda_repository(repository_ctx):
             "%{cpu_compiler}": str(cc),
             "%{cuda_version}": cuda_config.cuda_version,
             "%{nvcc_path}": nvcc_path,
-            "%{gcc_host_compiler_path}": str(cc),
+            "%{gcc_host_compiler_path}": str(nvcc_host_cc),
             "%{nvcc_tmp_dir}": _get_nvcc_tmp_dir_for_windows(repository_ctx),
         }
         repository_ctx.template(
@@ -1417,6 +1441,7 @@ def _cuda_autoconf_impl(repository_ctx):
 _ENVIRONS = [
     _GCC_HOST_COMPILER_PATH,
     _GCC_HOST_COMPILER_PREFIX,
+    _NVCC_HOST_COMPILER_PATH,
     _CLANG_CUDA_COMPILER_PATH,
     "TF_NEED_CUDA",
     "TF_CUDA_CLANG",

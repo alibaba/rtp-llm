@@ -108,6 +108,12 @@ build:cuda13_base --repo_env=TF_CUDA_VERSION=13.2
 build:cuda13_base --copt="-D_GLIBCXX_USE_CXX11_ABI=1"
 build:cuda13_base --copt="-DENABLE_FP4=1"
 
+# CUDA13 packaging images provide this C++20-capable host compiler. Keep the
+# ordinary C++ compiler unchanged; cuda_configure also declares the selected
+# NVCC host compiler's builtin headers for Bazel dependency validation.
+# Local builds with a different toolset can set NVCC_HOST_COMPILER_PATH directly.
+build:cuda13_toolset12 --repo_env=NVCC_HOST_COMPILER_PATH=/opt/rh/gcc-toolset-12/root/usr/bin/gcc
+
 # cuda13_arm: replaces the former cuda12_9_arm config.  Build one SBSA
 # ARM image/config for GB200 (10.0) and GB300 (SM103, 10.3) instead of
 # splitting separate sm100/sm103 configs.  The ARM CUDA 13 test pools are
