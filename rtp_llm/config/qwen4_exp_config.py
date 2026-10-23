@@ -8,6 +8,7 @@ from dataclasses import dataclass
 
 from rtp_llm.config.quant_config import (
     QWEN4_FP8_NVFP4_RECIPE,
+    Fp8BlockWiseQuantConfig,
     ModelOptFp4Config,
     init_quant_config,
 )
@@ -100,7 +101,10 @@ def freeze_runtime_config(config, parallelism):
         Qwen4Options(config.qwen4_ple_prefetch_mb),
         CheckpointGeometry.from_config(config),
         "FP8" if getattr(config, "_qwen4_fp8_source", False) else "BF16",
-        getattr(config.quant_config, "model_recipe", None),
+        (
+            getattr(config.quant_config, "model_recipe", None)
+            or (config.quant_config.get_method() if config.quant_config else None)
+        ),
         int(parallelism.get_attn_tp_size()),
         bool(config.is_mtp),
         (
@@ -132,6 +136,16 @@ def freeze_runtime_config(config, parallelism):
 def build_qwen4_quant_config(quantization, source_fp8):
     requested = init_quant_config(quantization) if quantization else None
     full_fp8 = bool(source_fp8)
+    # The official checkpoint already carries routed E4M3 + block128 scales.
+    # Preserve that format by default, including on SM90 where NVFP4 is absent.
+    if full_fp8 and (
+        requested is None or isinstance(requested, Fp8BlockWiseQuantConfig)
+    ):
+        if requested is not None and (
+            requested.bits != 8 or requested.group_size() != 128
+        ):
+            raise ValueError("qwen4_exp FP8 recipe requires 8-bit 128x128 blocks")
+        return Fp8BlockWiseQuantConfig(is_quanted=True)
     if requested is not None and (
         not isinstance(requested, ModelOptFp4Config)
         or requested.model_recipe != QWEN4_FP8_NVFP4_RECIPE
@@ -144,7 +158,9 @@ def build_qwen4_quant_config(quantization, source_fp8):
         or requested.mixed_attention
         or not requested.require_contiguous_experts
     ):
-        raise ValueError("qwen4_exp supports BF16 source or the QWEN4_FP8_NVFP4 recipe")
+        raise ValueError(
+            "qwen4_exp supports BF16 source or an official FP8 recipe (FP8_PER_BLOCK/QWEN4_FP8_NVFP4)"
+        )
     if full_fp8:
         return ModelOptFp4Config(
             bits=4,
@@ -178,7 +194,16 @@ def validate_qwen4_runtime(config, parallelism):
         or quant.source_fp8_block_size != 128
     ):
         raise RuntimeError("qwen4_exp requires the complete FP8/NVFP4 precision recipe")
-    if not full_fp8 and quant is not None:
+    native_fp8 = bool(getattr(config, "_qwen4_full_fp8", False)) and not full_fp8
+    if native_fp8 and (
+        not isinstance(quant, Fp8BlockWiseQuantConfig)
+        or not quant.is_quanted()
+        or quant.bits != 8
+        or quant.group_size() != 128
+        or not getattr(config, "_qwen4_fp8_source", False)
+    ):
+        raise RuntimeError("qwen4_exp requires native official block128 FP8 weights")
+    if not (full_fp8 or native_fp8) and quant is not None:
         raise RuntimeError(
             "qwen4_exp BF16 execution requires an unquantized checkpoint"
         )

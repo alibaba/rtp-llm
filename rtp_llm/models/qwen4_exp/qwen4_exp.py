@@ -68,12 +68,19 @@ class Qwen4Exp(Qwen35Moe):
 
     @staticmethod
     def _configure_precision_recipe(config: ModelConfig) -> None:
-        config._qwen4_full_fp8_nvfp4 = bool(getattr(config, "_qwen4_fp8_source", False))
+        config._qwen4_full_fp8 = bool(getattr(config, "_qwen4_fp8_source", False))
         config.quant_config = build_qwen4_quant_config(
-            config.quantization, config._qwen4_full_fp8_nvfp4
+            config.quantization, config._qwen4_full_fp8
+        )
+        config._qwen4_full_fp8_nvfp4 = bool(
+            config.quant_config is not None
+            and config.quant_config.get_method() == "modelopt_fp4"
         )
         if config.quant_config is not None:
-            config.quant_algo.setQuantAlgo("modelopt_fp4", 4, 16)
+            quant = config.quant_config
+            config.quant_algo.setQuantAlgo(
+                quant.get_algo(), quant.bits, quant.group_size()
+            )
 
     @classmethod
     def _parse_extra_text_config(cls, config_json: dict, config: ModelConfig) -> None:
@@ -162,7 +169,7 @@ class Qwen4Exp(Qwen35Moe):
             table_params + auxiliary_bf16_params + metadata_params
         )
         table_bytes = float(
-            table_params * (1 if getattr(config, "_qwen4_full_fp8_nvfp4", False) else 2)
+            table_params * (1 if getattr(config, "_qwen4_full_fp8", False) else 2)
         )
         replicated_bytes = float(auxiliary_bf16_params * 2 + metadata_params * 8)
         config._extra_weight_bytes = table_bytes + replicated_bytes

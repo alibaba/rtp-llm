@@ -225,10 +225,8 @@ class Qwen4ExpWeight(Qwen35MoeWeight):
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        self._moe_only_fp4 = bool(
-            getattr(self.model_config, "_qwen4_full_fp8_nvfp4", False)
-        )
-        if self._moe_only_fp4:
+        self._full_fp8 = bool(getattr(self.model_config, "_qwen4_full_fp8", False))
+        if self._full_fp8:
             self._align_size = 0
 
     def _process_meta(self, meta_dict: Any, weight_keys: Collection[str]):
@@ -314,10 +312,16 @@ class Qwen4ExpWeight(Qwen35MoeWeight):
         info = super()._get_weight_info()
         self._append_indexer_weights(info.layer_weights)
         self._append_ple_weights(info.layer_weights)
-        if self._moe_only_fp4:
+        if self._full_fp8:
             from rtp_llm.models.qwen4_exp.moe_fp4 import Qwen4MoeFp4WeightInfo
+            from rtp_llm.models.qwen4_exp.native_fp8 import Qwen4NativeFp8WeightInfo
 
-            return Qwen4MoeFp4WeightInfo(info.weights, info.layer_weights)
+            recipe = (
+                Qwen4MoeFp4WeightInfo
+                if getattr(self.model_config, "_qwen4_full_fp8_nvfp4", False)
+                else Qwen4NativeFp8WeightInfo
+            )
+            return recipe(info.weights, info.layer_weights)
         return info
 
     def _append_indexer_weights(self, layer_weights: List[List[WeightModule]]) -> None:
@@ -384,7 +388,7 @@ class Qwen4ExpWeight(Qwen35MoeWeight):
                         else None
                     ),
                     preserve_fp8=bool(
-                        getattr(self.model_config, "_qwen4_full_fp8_nvfp4", False)
+                        getattr(self.model_config, "_qwen4_full_fp8", False)
                     ),
                 )
             )

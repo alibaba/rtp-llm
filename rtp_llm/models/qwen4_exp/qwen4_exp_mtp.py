@@ -157,7 +157,7 @@ class Qwen4ExpMTP(Qwen4Exp):
             "hidden_size",
             "data_type",
             "enable_fp32_lm_head",
-            "_qwen4_full_fp8_nvfp4",
+            "_qwen4_full_fp8",
         )
         mismatches = [
             name
@@ -176,10 +176,8 @@ class Qwen4ExpMTP(Qwen4Exp):
                 f"weights: {details}"
             )
         names = (W.embedding, W.lm_head)
-        if getattr(target_config, "_qwen4_full_fp8_nvfp4", False) is True:
-            from rtp_llm.model_loader.fp8_weight import (
-                FP8_STORAGE_SCALE_SUFFIX,
-            )
+        if getattr(target_config, "_qwen4_full_fp8", False) is True:
+            from rtp_llm.model_loader.fp8_weight import FP8_STORAGE_SCALE_SUFFIX
 
             return names + tuple(name + FP8_STORAGE_SCALE_SUFFIX for name in names)
         return names

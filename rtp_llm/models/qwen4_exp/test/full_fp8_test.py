@@ -4,10 +4,7 @@ from types import SimpleNamespace
 import torch
 import torch.nn.functional as F
 
-from rtp_llm.model_loader.fp8_weight import (
-    FP8_STORAGE_SCALE_SUFFIX,
-    Fp8StorageWeight,
-)
+from rtp_llm.model_loader.fp8_weight import FP8_STORAGE_SCALE_SUFFIX, Fp8StorageWeight
 from rtp_llm.model_loader.model_weight_info import ModelWeights
 from rtp_llm.model_loader.tensor_source import TensorSource
 from rtp_llm.model_loader.weight_module import AtomicWeight
@@ -36,6 +33,57 @@ def quantized(value):
 
 
 class FullFp8StorageTest(unittest.TestCase):
+    def test_inventory_summary_counts_backing_storage_and_shared_compute_once(self):
+        from rtp_llm.models_py.modules.qwen4_exp.weight_views import (
+            ComputeWeightInventory,
+            WeightView,
+            summarize_compute_inventory,
+        )
+
+        # Offset views share padded backing storage, even when data_ptr differs.
+        storage = torch.zeros(32, dtype=torch.float8_e4m3fn)
+        scale = torch.ones(1)
+        compute = torch.zeros(64, dtype=torch.bfloat16)
+        entries = (
+            WeightView(W.moe_w1, storage[:8], scale, compute[:8], True),
+            WeightView(W.moe_w2, storage[8:16], scale, compute[8:16], True),
+            WeightView("scale", scale, None, scale, False),
+        )
+        summary = summarize_compute_inventory(
+            ComputeWeightInventory("FP8", None, (entries,), (entries[0],))
+        )
+        self.assertEqual(
+            summary["source_storage"],
+            [
+                {
+                    "device": "cpu",
+                    "dtype": "torch.float32",
+                    "bytes": 4,
+                    "allocations": 1,
+                },
+                {
+                    "device": "cpu",
+                    "dtype": "torch.float8_e4m3fn",
+                    "bytes": 32,
+                    "allocations": 1,
+                },
+            ],
+        )
+        self.assertEqual(
+            summary["extra_compute_storage"],
+            [
+                {
+                    "device": "cpu",
+                    "dtype": "torch.bfloat16",
+                    "bytes": 128,
+                    "allocations": 1,
+                }
+            ],
+        )
+        self.assertEqual(summary["layouts"][0]["role"], "routed_down")
+        self.assertEqual(summary["layouts"][0]["shape"], [8])
+        self.assertEqual(summary["layouts"][1]["tensors"], 2)
+
     def test_original_descriptor_split_runs_before_quantization(self):
         source = AtomicWeight(W.embedding, [CkptWeightInfo("weight")])
         source.split_func = lambda t, **kwargs: t[:, :4]

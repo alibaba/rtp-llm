@@ -15,7 +15,7 @@ class Qwen4MoeFp4WeightInfo(ModelWeightInfo):
         {W.attn_qkv_w, W.attn_o_w, W.linear_attn_qkvz_w, W.linear_attn_out_w}
     )
 
-    def to_quant_weight_info(self, quant_config):
+    def _validate_quant_config(self, quant_config):
         if (
             not isinstance(quant_config, ModelOptFp4Config)
             or quant_config.model_recipe != QWEN4_FP8_NVFP4_RECIPE
@@ -27,6 +27,12 @@ class Qwen4MoeFp4WeightInfo(ModelWeightInfo):
             raise ValueError(
                 "Qwen4 requires the complete FP8/NVFP4 recipe from official FP8 source"
             )
+
+    def _expert_weight(self, weight, quant_config):
+        return weight.create(weight, quant_config)
+
+    def to_quant_weight_info(self, quant_config):
+        self._validate_quant_config(quant_config)
         from rtp_llm.model_loader.fp8_weight import Fp8StorageWeight
 
         layers = []
@@ -36,7 +42,7 @@ class Qwen4MoeFp4WeightInfo(ModelWeightInfo):
                 if isinstance(weight, MoeWeight):
                     children = [
                         (
-                            child.create(child, quant_config)
+                            self._expert_weight(child, quant_config)
                             if child.name in (W.moe_w1, W.moe_w2)
                             else Fp8StorageWeight(child)
                         )

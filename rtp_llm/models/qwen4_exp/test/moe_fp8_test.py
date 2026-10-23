@@ -169,5 +169,149 @@ class Qwen4MoeFp8Test(unittest.TestCase):
                         self._validate_checkpoint(tensors, keys)
 
 
+class Qwen4NativeFp8LoaderTest(unittest.TestCase):
+    def test_native_tp_shards_preserve_bytes_scales_and_moe_math(self):
+        from types import SimpleNamespace
+        from unittest import mock
+
+        from rtp_llm.config.quant_config import Fp8BlockWiseQuantConfig
+        from rtp_llm.model_loader.ffn_weight import MoeAtomicWeight, MoeConfig
+        from rtp_llm.model_loader.tensor_source import TensorSource
+        from rtp_llm.models.qwen4_exp.native_fp8 import Qwen4NativeFp8MoeWeight
+        from rtp_llm.utils.model_weight import CkptWeightInfo, W
+
+        # 5 intermediate blocks expose the real TP4/TP8 boundary bug; non-square,
+        # distinct up/gate/expert/block values expose permutations and scale loss.
+        tensors = {}
+        for expert in range(2):
+            for projection in ("up", "gate", "down"):
+                shape = (256, 640) if projection == "down" else (640, 256)
+                n, k = shape
+                values = (torch.arange(n * k).reshape(shape) % 13 - 6).float()
+                values = values + expert + (2 if projection == "gate" else 0)
+                name = f"layers.0.experts.{expert}.{projection}.weight"
+                tensors[name] = values.to(torch.float8_e4m3fn)
+                tensors[name + "_scale_inv"] = (
+                    torch.arange(n // 128 * (k // 128)).reshape(n // 128, k // 128) + 1
+                ).float() / (512 if projection == "down" else 128)
+
+        class Source(TensorSource):
+            def load_tensor(self, name, data_type=torch.float16):
+                return [tensors[name].to(data_type)]
+
+            def has_tensor(self, name):
+                return name in tensors
+
+            def get_database(self):
+                return None
+
+        def dequant(weight, scale):
+            return weight.double() * scale.double().repeat_interleave(
+                128, -2
+            ).repeat_interleave(128, -1)
+
+        def source_value(expert, projection):
+            name = f"layers.0.experts.{expert}.{projection}.weight"
+            return dequant(tensors[name], tensors[name + "_scale_inv"])
+
+        x = (torch.arange(3 * 256).reshape(3, 256) % 11 - 5).double() / 32
+        expected = []
+        for expert in range(2):
+            up = x @ source_value(expert, "up").T
+            gate = x @ source_value(expert, "gate").T
+            expected.append(
+                (up * torch.nn.functional.silu(gate)) @ source_value(expert, "down").T
+            )
+        expected = torch.stack(expected)
+
+        for tp in (1, 2, 4, 8):
+            actual = torch.zeros_like(expected)
+            shards = []
+            for rank in range(tp):
+                config = SimpleNamespace(
+                    tp_size=tp,
+                    tp_rank=rank,
+                    ep_size=1,
+                    ep_rank=0,
+                    dp_size=1,
+                    dp_rank=0,
+                    ffn_tp_size=tp,
+                    ffn_tp_rank=rank,
+                    hidden_size=256,
+                    head_num=2,
+                    head_num_kv=2,
+                    size_per_head=128,
+                    moe_pure_tp_mode=True,
+                    moe_pure_tp_preshard=True,
+                    bit=8,
+                    merge_lora=False,
+                    compute_dtype=torch.bfloat16,
+                    use_swizzleA=False,
+                    get_selected_experts=lambda layer, count: range(count),
+                    exported_device=SimpleNamespace(
+                        shuffle_moe_weight=lambda value, *args: value,
+                        maybe_rewrite_weight_by_key=lambda name, value, **kwargs: value,
+                    ),
+                )
+                local = {}
+                for name, projections in (
+                    (W.moe_w1, ("up", "gate")),
+                    (W.moe_w2, ("down",)),
+                ):
+                    raw = MoeAtomicWeight(
+                        name,
+                        [
+                            CkptWeightInfo(
+                                f"layers.{{i}}.experts.{{expert_id}}.{p}.weight"
+                            )
+                            for p in projections
+                        ],
+                        config=MoeConfig(expert_num=2),
+                    )
+                    descriptor = Qwen4NativeFp8MoeWeight(
+                        raw, Fp8BlockWiseQuantConfig(is_quanted=True)
+                    )
+                    with mock.patch(
+                        "rtp_llm.models_py.kernels.cuda.deepgemm_wrapper.is_deep_gemm_e8m0_used",
+                        return_value=False,
+                    ):
+                        local.update(descriptor.load(Source(), 0, "cpu", config))
+                self.assertEqual(local[W.moe_w1].dtype, torch.float8_e4m3fn)
+                self.assertEqual(local[W.moe_w2].dtype, torch.float8_e4m3fn)
+                upgate = dequant(local[W.moe_w1], local[W.moe_s1])
+                down = dequant(local[W.moe_w2], local[W.moe_s2])
+                up, gate = (x @ upgate.transpose(-1, -2)).chunk(2, -1)
+                actual += (up * torch.nn.functional.silu(gate)) @ down.transpose(-1, -2)
+                shards.append(local)
+            torch.testing.assert_close(actual, expected, rtol=1e-12, atol=1e-12)
+            for projection_index, projection in enumerate(("up", "gate")):
+                restored = torch.cat(
+                    [
+                        part[W.moe_w1].float().chunk(2, 1)[projection_index]
+                        for part in shards
+                    ],
+                    1,
+                )[:, :640]
+                source = torch.stack(
+                    [
+                        tensors[
+                            f"layers.0.experts.{expert}.{projection}.weight"
+                        ].float()
+                        for expert in range(2)
+                    ]
+                )
+                torch.testing.assert_close(restored, source, rtol=0, atol=0)
+            restored = torch.cat([part[W.moe_w2].float() for part in shards], 2)[
+                ..., :640
+            ]
+            source = torch.stack(
+                [
+                    tensors[f"layers.0.experts.{expert}.down.weight"].float()
+                    for expert in range(2)
+                ]
+            )
+            torch.testing.assert_close(restored, source, rtol=0, atol=0)
+
+
 if __name__ == "__main__":
     unittest.main()

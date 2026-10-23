@@ -265,6 +265,35 @@ class Qwen4ExpTest(unittest.TestCase):
         self.assertEqual(cfg.quant_config.group_size(), 16)
         self.assertTrue(cfg._qwen4_full_fp8_nvfp4)
 
+    def test_official_fp8_defaults_to_native_block_recipe(self):
+        from rtp_llm.models.qwen4_exp.native_fp8 import Qwen4NativeFp8WeightInfo
+
+        self.config._qwen4_fp8_source = True
+        for choice in ("", "FP8_PER_BLOCK"):
+            with self.subTest(choice=choice):
+                self.config.quantization = choice
+                Qwen4Exp._post_build_model_config(self.config)
+                self.assertTrue(self.config._qwen4_full_fp8)
+                self.assertFalse(self.config._qwen4_full_fp8_nvfp4)
+                self.assertIsInstance(self.config.quant_config, Fp8BlockWiseQuantConfig)
+                self.assertTrue(self.config.quant_config.is_quanted())
+                self.assertEqual(self.config.quant_config.group_size(), 128)
+                self.assertTrue(self.config.enable_qwen4_ple)
+                self.assertTrue(self.config.enable_qwen4_qsa)
+                weight = Qwen4ExpWeight(
+                    self.config, ParallelismConfig(), HWKernelConfig(), KVCacheConfig()
+                )
+                weight._process_meta({}, _CKPT_KEYS)
+                self.assertIsInstance(
+                    weight._get_weight_info(), Qwen4NativeFp8WeightInfo
+                )
+                # Exercise model-level transformation, including the composite
+                # quant weight constructor used by the actual loader.
+                info = weight._get_weight_info().to_quant_weight_info(
+                    self.config.quant_config
+                )
+                self.assertEqual(len(info.layer_weights), self.config.num_layers)
+
     def test_quantization_preset_carries_the_complete_recipe(self):
         cfg = init_quant_config("QWEN4_FP8_NVFP4")
         self.assertEqual(cfg.model_recipe, QWEN4_FP8_NVFP4_RECIPE)

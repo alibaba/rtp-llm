@@ -1,3 +1,5 @@
+import json
+import logging
 import weakref
 from collections.abc import Mapping
 from typing import Any, Dict, Optional
@@ -64,6 +66,7 @@ from rtp_llm.models_py.modules.qwen4_exp.weight_views import (
     annotate_compute_inventory,
     prepare_compute_weights,
     record_projection_consumer,
+    summarize_compute_inventory,
 )
 from rtp_llm.ops import (
     AttentionConfigs,
@@ -426,8 +429,7 @@ class Qwen4ExpAttention(Qwen3NextAttention):
                     and not bool(qsa_runtime.main_inputs.is_target_verify)
                     and not bool(qsa_runtime.main_inputs.is_cuda_graph)
                     and "_qsa_selected_indices" not in self.__dict__
-                    and "forward_causal_from_projected"
-                    not in self.qsa_indexer.__dict__
+                    and "forward_causal_from_projected" not in self.qsa_indexer.__dict__
                     and callable(trusted_setter)
                 ):
                     trusted_setter(selected)
@@ -569,7 +571,7 @@ class Qwen4ExpDecoderLayer(Qwen3NextDecoderLayer):
             self.self_attn.qk_fuse_norm = ZeroCenteredFusedQKRMSNorm.replacing(fused)
 
     def _attention_quant_config(self, config, weights):
-        if bool(getattr(config, "_qwen4_full_fp8_nvfp4", False)):
+        if bool(getattr(config, "_qwen4_full_fp8", False)):
             from rtp_llm.config.quant_config import Fp8BlockWiseQuantConfig
 
             return Fp8BlockWiseQuantConfig(is_quanted=False)
@@ -758,7 +760,7 @@ class Qwen4ExpModel(Qwen35Model):
         config = model_config
         compute_weights = (
             prepare_compute_weights(weights)
-            if getattr(config, "_qwen4_full_fp8_nvfp4", False)
+            if getattr(config, "_qwen4_full_fp8", False)
             else weights
         )
         super().__init__(
@@ -771,12 +773,12 @@ class Qwen4ExpModel(Qwen35Model):
             py_hw_kernel_config,
             device_resource_config,
         )
-        if getattr(config, "_qwen4_full_fp8_nvfp4", False):
+        if getattr(config, "_qwen4_full_fp8", False):
             self._fp8_lm_head = Fp8Linear(
                 weights.global_weights[W.lm_head],
                 weights.global_weights[W.lm_head + FP8_STORAGE_SCALE_SUFFIX],
             )
-        if getattr(self.config, "_qwen4_full_fp8_nvfp4", False):
+        if getattr(self.config, "_qwen4_full_fp8", False):
             from rtp_llm.models_py.modules.base.common.fp8_embedding import (
                 Fp8VocabEmbedding,
             )
@@ -789,7 +791,7 @@ class Qwen4ExpModel(Qwen35Model):
                     W.embedding + FP8_STORAGE_SCALE_SUFFIX
                 ),
             )
-        if getattr(self.config, "_qwen4_full_fp8_nvfp4", False):
+        if getattr(self.config, "_qwen4_full_fp8", False):
             self.embed_tokens.prepare_byte_gather(
                 role=getattr(parallelism_config, "role_type", "PDFUSION")
             )
@@ -825,7 +827,13 @@ class Qwen4ExpModel(Qwen35Model):
         )
 
         self._cpu_target_status = prepare_cpu_target_status(config, parallelism_config)
-        annotate_compute_inventory(self.weight)
+        inventory = annotate_compute_inventory(self.weight)
+        if getattr(config, "_qwen4_full_fp8", False):
+            logging.info(
+                "Qwen4 weight inventory rank=%s %s",
+                parallelism_config.world_rank,
+                json.dumps(summarize_compute_inventory(inventory), sort_keys=True),
+            )
 
     def _ple_coordinator(self) -> PLETransactionCoordinator:
         coordinator = self.__dict__.get("_ple_transaction_coordinator")
@@ -1082,8 +1090,7 @@ class Qwen4ExpModel(Qwen35Model):
                 weight_scale=layer_weights.get(W.qwen4_ple_ngram_scale),
                 prefetch_budget_mb=getattr(self.config, "qwen4_ple_prefetch_mb", 256),
                 inline_cpu_uva_graph=(
-                    shard_pairs[0][1].device.type == "cpu"
-                    and torch.version.hip is None
+                    shard_pairs[0][1].device.type == "cpu" and torch.version.hip is None
                 ),
             )
             # Retain the same pinned owners in the weight/export inventory;
@@ -1427,10 +1434,7 @@ class Qwen4ExpModel(Qwen35Model):
         # earlier pinned-host gather can occupy every SM while vocabulary
         # lookup waits for it, despite the independent CUDA streams.
         prefetch_after_embedding = False
-        if (
-            type(self) is Qwen4ExpModel
-            and self.ple_layers
-        ):
+        if type(self) is Qwen4ExpModel and self.ple_layers:
             # Native grouped inputs are a tag mapping. Use the same PLE
             # context group as _start_eager_ple_prefetch, not the mapping
             # itself or an unrelated attention group's execution mode.
