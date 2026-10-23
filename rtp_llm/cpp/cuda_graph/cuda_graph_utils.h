@@ -28,6 +28,10 @@ public:
         mtp_target_hidden_states_ = hidden_states;
     };
 
+    void setDsparkConfidenceHiddenLogits(at::Tensor hidden_logits) {
+        dspark_confidence_hidden_logits_ = hidden_logits;
+    };
+
     CaptureMemoryHold() {}
 
     CaptureMemoryHold(at::Tensor hidden_states, torch_ext::PyModelInputs& inputs, bool is_embedding):
@@ -73,9 +77,11 @@ public:
     py::object attn_pyobj_{py::none()};
     // Opt-in backend contract: prepare/replay do not read host metadata
     // values. Cached at capture so replay does not need a Python lookup.
-    bool                     uses_device_metadata_{false};
-    at::Tensor               decoder_layer_hidden_states_;
-    at::Tensor               mtp_target_hidden_states_;
+    bool       uses_device_metadata_{false};
+    at::Tensor decoder_layer_hidden_states_;
+    at::Tensor mtp_target_hidden_states_;
+    // V4.1 confidence-head hidden contributions: FP32 [tokens, 1].
+    at::Tensor               dspark_confidence_hidden_logits_;
     torch_ext::PyModelInputs py_model_inputs_;
 };
 

@@ -127,6 +127,25 @@ public:
                                              const torch::Tensor&    proposals,
                                              TensorHolder&           host_holder);
 
+    struct DSparkPackedTargetLayout {
+        // CUDA int64 [batch + total_draft_budget], in stable request order.
+        // Undefined when the full-width dense path is retained.
+        torch::Tensor packed_to_dense;
+        // Preserve the sampler/spec-logits and next-round position contracts.
+        torch::Tensor dense_tokens;  // [batch, propose_step + 1]
+        torch::Tensor dense_position_ids;
+    };
+
+    // The round-head planner guarantees 0 <= lengths <= propose_step and
+    // sum(lengths) == total_draft_budget. The host budget fixes the output shape
+    // without reading a CUDA scalar or computing a dynamic-size nonzero.
+    DSparkPackedTargetLayout prepareDSparkPackedTargetVerifyModelInput(const DSparkRoundState& round_state,
+                                                                       GptModelInputs&         model_input,
+                                                                       const torch::Tensor&    proposals,
+                                                                       const torch::Tensor&    valid_draft_lengths,
+                                                                       int64_t                 total_draft_budget,
+                                                                       TensorHolder&           host_holder);
+
     // Async target preparation runs before proposal sampling completes. Build
     // its verify-width positions locally from the TP-synchronized proposal
     // metadata; no second pre-proposal broadcast is needed.

@@ -105,6 +105,9 @@ struct GptModelInputs {
     // So, the model has different inference logic for target verify and normal inference.
     // To select correct inference mode, we need to set this flag manually.
     bool is_target_verify = false;
+    // V4.1 bounded verification uses packed query rows with ragged request
+    // lengths. Independent of is_target_verify, which also classifies proposal.
+    bool is_packed_target_verify = false;
 
     // not sync to other tp rank
     std::vector<std::string> trace_ids;
@@ -126,6 +129,11 @@ struct GptModelOutputs {
     // this separate from all_hidden_states lets the executor distinguish a
     // real graph-instance output from the ordinary decoder hidden tensor.
     torch::Tensor mtp_target_hidden_states;
+
+    // Optional V4.1 confidence-head hidden contribution, CUDA FP32 [B*gamma, 1].
+    // Owned by this forward result; the sampler adds the previous-token Markov
+    // contribution. Undefined for disabled confidence and non-proposal roles.
+    torch::Tensor dspark_confidence_hidden_logits;
 
     // A single request-visible status. `REPLAYED` means this forward actually
     // executed a captured generation-prefill CUDA Graph; every other non-default value is
@@ -419,6 +427,11 @@ struct RejectionSamplingParams {
     // only; query execRejectionSamplingSupportsFinalize() before setting —
     // ROCm/generic reject the flag loudly and keep the legacy eager chain.
     bool finalize_outputs = false;
+    // Optional contiguous CUDA int32 [batch], each in [0, num_speculative_tokens].
+    // Only this prefix participates in rejection; all accepted uses target row
+    // L as bonus (including L=0). Undefined preserves the full-width path.
+    // CUDA only: other backends must reject a defined tensor explicitly.
+    torch::Tensor valid_draft_lengths_d;
 };
 
 // One DSpARK draft step's fused distribution build:

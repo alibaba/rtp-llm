@@ -173,6 +173,23 @@ class DeepSeekV41DSparkWeight(DeepSeekV4DSparkWeight):
                         f"mtp.{self._num_layers - 1}.markov_head.head.weight", identity
                     )
                 ]
+        if (
+            getattr(self.model_config, "dspark_confidence_enabled", False)
+            and not self.prefill_commit_only
+        ):
+            info.weights.append(
+                AtomicWeight(
+                    W.dspark_confidence_head,
+                    [
+                        CkptWeightInfo(
+                            f"mtp.{self._num_layers - 1}.confidence_head.proj.weight",
+                            identity,
+                        )
+                    ],
+                    identity,
+                    data_type=torch.float32,
+                )
+            )
         return info
 
 

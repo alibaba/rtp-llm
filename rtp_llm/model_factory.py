@@ -1,6 +1,7 @@
 import copy
 import json
 import logging
+import math
 import os
 import sys
 from typing import Any, Dict, Optional, Type, Union
@@ -519,12 +520,13 @@ class ModelFactory:
     def _setup_dspark_configs(
         sp_config, model_config: ModelConfig, propose_model_config: ModelConfig
     ) -> None:
-        """Validate fixed-width DSpARK and wire target aux-state capture.
+        """Validate DSpARK proposal/verification and wire target aux-state capture.
 
         DeepSeek-V4 DSpARK uses a draft query block of exactly ``gamma`` rows
-        (one anchor plus ``gamma - 1`` noise tokens). The target verifies
-        ``gamma + 1`` rows. ``gen_num_per_cycle`` therefore remains the single
-        source of truth for the fixed proposal width in the engine.
+        (one anchor plus ``gamma - 1`` noise tokens). ``gen_num_per_cycle``
+        remains the single source of truth for this fixed proposal width.
+        Dense target verification computes ``gamma + 1`` rows per request;
+        packed verification computes only its selected prefix plus the anchor.
         """
         required = {
             "dspark_noise_token_id": propose_model_config.dspark_noise_token_id,
@@ -543,6 +545,43 @@ class ModelFactory:
             raise ValueError(
                 f"dspark requires a positive gen_num_per_cycle, got {gamma}"
             )
+
+        confidence_mode = getattr(sp_config, "sp_dspark_confidence_mode", "off")
+        if confidence_mode not in ("off", "observe", "bounded"):
+            raise ValueError(f"invalid DSpark confidence mode: {confidence_mode}")
+        verify_mode = getattr(sp_config, "sp_dspark_verify_mode", "dense")
+        if verify_mode not in ("dense", "packed"):
+            raise ValueError(f"invalid DSpark verify mode: {verify_mode}")
+        confidence_enabled = confidence_mode != "off"
+        if confidence_enabled and not (
+            getattr(model_config, "is_deepseek_v41", False)
+            and getattr(propose_model_config, "is_deepseek_v41", False)
+        ):
+            raise ValueError("DSpark confidence is supported only for DeepSeek V4.1")
+        if confidence_enabled and not getattr(
+            propose_model_config, "dspark_sample_from_anchor", True
+        ):
+            raise ValueError("DeepSeek V4.1 confidence requires sampling from anchor")
+        confidence_temperature = float(
+            getattr(sp_config, "sp_dspark_confidence_temperature", 1.0)
+        )
+        if not math.isfinite(confidence_temperature) or confidence_temperature <= 0:
+            raise ValueError(
+                "DSpark confidence temperature must be positive and finite"
+            )
+        verify_budget = int(getattr(sp_config, "sp_dspark_verify_budget", -1))
+        if verify_budget < -1 or verify_budget > gamma:
+            raise ValueError("DSpark verify budget must be -1 or between 0 and gamma")
+        if confidence_mode != "bounded" and verify_budget != -1:
+            raise ValueError("DSpark verify budget requires bounded confidence mode")
+        if verify_mode == "packed" and (
+            confidence_mode != "bounded" or verify_budget < 0
+        ):
+            raise ValueError(
+                "Packed DSpark verification requires bounded confidence mode "
+                "and an explicit nonnegative verification budget"
+            )
+        propose_model_config.dspark_confidence_enabled = confidence_enabled
 
         noise_token_id = int(propose_model_config.dspark_noise_token_id)
         # The noise token is consumed by the draft backbone embedding, not by

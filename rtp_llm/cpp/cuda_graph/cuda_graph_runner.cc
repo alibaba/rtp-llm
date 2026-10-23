@@ -1212,9 +1212,19 @@ PyModelOutputs CudaGraphRunner::forward(const PyModelInputs& inputs, CudaGraphSt
         if (mem_hold.mtp_target_hidden_states_.defined()) {
             outputs.mtp_target_hidden_states = mem_hold.mtp_target_hidden_states_.slice(0, 0, state.current_seq_len);
         }
+        if (mem_hold.dspark_confidence_hidden_logits_.defined()) {
+            outputs.dspark_confidence_hidden_logits =
+                mem_hold.dspark_confidence_hidden_logits_.slice(0, 0, state.current_seq_len);
+        }
     } else {
         {
             RTP_LLM_PROFILE_SCOPE("cuda_graph.forward(replayDecode)");
+            RTP_LLM_PROFILE_SCOPE_DYNAMIC(
+                "cuda_graph.decode_geometry(packed=%d,capture_bs=%d,query_rows=%d,real_rows=%d)",
+                is_packed_target_verify_,
+                state.current_real_graph_bs,
+                state.current_real_graph_bs * num_tokens_per_bs_,
+                state.seq_len_sum);
             replayDecode(state.current_real_graph_bs);
         }
         outputs.hidden_states =
@@ -1224,6 +1234,11 @@ PyModelOutputs CudaGraphRunner::forward(const PyModelInputs& inputs, CudaGraphSt
             graph_instances_[state.current_real_graph_bs].mem_hold_.mtp_target_hidden_states_;
         if (mtp_target_hidden_states.defined()) {
             outputs.mtp_target_hidden_states = mtp_target_hidden_states.slice(0, 0, state.seq_len_sum);
+        }
+        const auto& dspark_confidence_hidden_logits =
+            graph_instances_[state.current_real_graph_bs].mem_hold_.dspark_confidence_hidden_logits_;
+        if (dspark_confidence_hidden_logits.defined()) {
+            outputs.dspark_confidence_hidden_logits = dspark_confidence_hidden_logits.slice(0, 0, state.seq_len_sum);
         }
     }
     // record forward done event
@@ -1619,6 +1634,11 @@ bool CudaGraphRunner::canRun(const PyModelInputs& inputs, CudaGraphState& state,
         if (!inputs.attention_inputs.is_target_verify || !inputs.attention_inputs.is_prefill) {
             return false;
         }
+        // Seeded batches and fake/warmup inputs retain dense geometry and
+        // cannot replay the smaller packed graph.
+        if (inputs.attention_inputs.is_packed_target_verify != is_packed_target_verify_) {
+            return false;
+        }
         if (!tryGetRealGraphDecodeBatchSize(inputs, state, observe_fallback)) {
             return false;
         }
@@ -1682,8 +1702,9 @@ int CudaGraphRunner::getCurrentRealGraphSize(const CudaGraphState& state) const 
 }
 
 void CudaGraphRunner::initCaptureAttentionInputs(PyModelInputs& inputs, int max_bs, int num_tokens_per_bs) {
-    inputs.attention_inputs.is_target_verify = is_target_verify_;
-    inputs.attention_inputs.is_prefill       = is_prefill_cuda_graph_mode_ || is_target_verify_;
+    inputs.attention_inputs.is_target_verify        = is_target_verify_;
+    inputs.attention_inputs.is_packed_target_verify = is_packed_target_verify_;
+    inputs.attention_inputs.is_prefill              = is_prefill_cuda_graph_mode_ || is_target_verify_;
 
     // input_lengths [batch_size, int32] (decode only)
     inputs.attention_inputs.input_lengths        = torch::full({int(max_bs_)}, num_tokens_per_bs_, options_cpu_int32_);
@@ -1870,6 +1891,13 @@ void CudaGraphRunner::initCapture() {
             capture_range_ = getDecodeBatchSizesToCapture();
         }
         max_num_token_ = isGenerationPrefillCudaGraph() ? capture_range_.back() : max_bs_ * num_tokens_per_bs_;
+        if (is_target_verify_) {
+            RTP_LLM_LOG_INFO("Target verification graph: packed=%d, tokens_per_bs=%d, max_bs=%zu, max_query_rows=%d",
+                             is_packed_target_verify_,
+                             num_tokens_per_bs_,
+                             max_bs_,
+                             max_num_token_);
+        }
 
         PyModelInputs inputs;
         // Allocate top-level model inputs here. initCaptureAttentionInputs()
@@ -1972,6 +2000,20 @@ void CudaGraphRunner::initCapture() {
                                     initial_outputs.mtp_target_hidden_states.size(0),
                                     max_num_token_);
             capture_mem_hold_.setMtpTargetHiddenStates(torch::zeros_like(initial_outputs.mtp_target_hidden_states));
+        }
+        if (initial_outputs.dspark_confidence_hidden_logits.defined()) {
+            RTP_LLM_CHECK_WITH_INFO(initial_outputs.dspark_confidence_hidden_logits.is_cuda()
+                                        && initial_outputs.dspark_confidence_hidden_logits.scalar_type()
+                                               == torch::kFloat32
+                                        && initial_outputs.dspark_confidence_hidden_logits.dim() == 2
+                                        && initial_outputs.dspark_confidence_hidden_logits.size(1) == 1,
+                                    "V4.1 confidence hidden logits must be CUDA FP32 [tokens, 1]");
+            RTP_LLM_CHECK_WITH_INFO(initial_outputs.dspark_confidence_hidden_logits.size(0) == max_num_token_,
+                                    "V4.1 confidence hidden-logit rows mismatch graph capacity: %ld != %d",
+                                    initial_outputs.dspark_confidence_hidden_logits.size(0),
+                                    max_num_token_);
+            capture_mem_hold_.setDsparkConfidenceHiddenLogits(
+                torch::zeros_like(initial_outputs.dspark_confidence_hidden_logits));
         }
         initCaptureAttentionInputsPost();
         logCudaGraphPoolMemory("before_capture");
@@ -2125,6 +2167,18 @@ void CudaGraphRunner::captureOneGraphInstance(int key, const char* key_type) {
                                         "MTP target hidden output shape changed during CUDA graph capture");
                 mtp_target_hidden_states.copy_(outputs.mtp_target_hidden_states);
             }
+            auto& dspark_confidence_hidden_logits = graph_instances_[key].mem_hold_.dspark_confidence_hidden_logits_;
+            RTP_LLM_CHECK_WITH_INFO(dspark_confidence_hidden_logits.defined()
+                                        == outputs.dspark_confidence_hidden_logits.defined(),
+                                    "V4.1 confidence hidden-logit output presence changed during CUDA graph capture");
+            if (dspark_confidence_hidden_logits.defined()) {
+                RTP_LLM_CHECK_WITH_INFO(
+                    dspark_confidence_hidden_logits.sizes() == outputs.dspark_confidence_hidden_logits.sizes()
+                        && outputs.dspark_confidence_hidden_logits.scalar_type() == torch::kFloat32
+                        && outputs.dspark_confidence_hidden_logits.device() == dspark_confidence_hidden_logits.device(),
+                    "V4.1 confidence hidden-logit shape, dtype or device changed during CUDA graph capture");
+                dspark_confidence_hidden_logits.copy_(outputs.dspark_confidence_hidden_logits);
+            }
             graph.capture_end();
         }
         // Keep the dirty guard armed after capture_end(). finish_capture_session()
@@ -2158,8 +2212,9 @@ void CudaGraphRunner::replayAndSyncCheck(int key, const char* key_type) {
 
 void CudaGraphRunner::prepareCaptureInputs(PyModelInputs& inputs, int batch_size, int seq_len_or_tokens) {
     // Common slice operations for input_ids and padding_offset
-    inputs.attention_inputs.is_prefill       = is_prefill_cuda_graph_mode_ || is_target_verify_;
-    inputs.attention_inputs.is_target_verify = is_target_verify_;
+    inputs.attention_inputs.is_prefill              = is_prefill_cuda_graph_mode_ || is_target_verify_;
+    inputs.attention_inputs.is_target_verify        = is_target_verify_;
+    inputs.attention_inputs.is_packed_target_verify = is_packed_target_verify_;
     // HC-shaped MTP draft prefill executes a fixed-capacity Python path. Other
     // MTP models must slice to the current graph key so FlashInfer's batch
     // indices length remains equal to the query nnz.
@@ -2263,6 +2318,10 @@ CaptureMemoryHold CudaGraphRunner::createCaptureMemoryHold(PyModelInputs& inputs
                            is_prefill_cuda_graph_mode_ || num_tokens_per_bs_ > 1);
     if (capture_mem_hold_.mtp_target_hidden_states_.defined()) {
         hold.setMtpTargetHiddenStates(capture_mem_hold_.mtp_target_hidden_states_.slice(0, 0, tokens_count));
+    }
+    if (capture_mem_hold_.dspark_confidence_hidden_logits_.defined()) {
+        hold.setDsparkConfidenceHiddenLogits(
+            capture_mem_hold_.dspark_confidence_hidden_logits_.slice(0, 0, tokens_count));
     }
     return hold;
 }

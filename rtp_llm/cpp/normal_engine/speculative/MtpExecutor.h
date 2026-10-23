@@ -142,8 +142,9 @@ protected:
     // decodeStep helpers — extracted to keep decodeStep readable. Each helper
     // owns a single phase (prepare, forward, broadcast, dispatch) and
     // preserves the original PROFILE_SCOPE labels.
-    void            waitPreviousBookkeepingBeforeStreamPreparation(const std::list<GenerateStreamPtr>& streams);
-    void            launchTargetVerifyPrepareAsync(const GptModelInputs& model_input, size_t batch_size);
+    void waitPreviousBookkeepingBeforeStreamPreparation(const std::list<GenerateStreamPtr>& streams);
+    void
+    launchTargetVerifyPrepareAsync(const GptModelInputs& model_input, size_t batch_size, bool geometry_ready = false);
     void            launchDraftPrefillPrepareAsync(const GptModelInputs& model_input);
     GptModelOutputs runTargetVerifyForward(GptModelInputs& model_input, const StreamGroups& stream_groups);
     absl::Status    runDecodeAlignmentOnly(GptModelInputs& model_input);
@@ -151,9 +152,11 @@ protected:
                                                          const StreamGroups&   stream_groups) const;
     void            broadcastPostRejectionInputs(GptModelInputs& model_input);
     GptModelOutputs runDSparkProposeForward(GptModelInputs& model_input);
+    // Pre-norm hidden projection [B*gamma,1], FP32. Undefined in off mode.
     SamplerOutput   sampleDSparkDraft(const StreamGroups&  stream_groups,
                                       const torch::Tensor& base_logits,
-                                      const torch::Tensor& anchors);
+                                      const torch::Tensor& anchors,
+                                      const torch::Tensor& confidence_hidden_logits = torch::Tensor());
     void            runDSparkProposal(GptModelInputs&                                  proposal_input,
                                       const StreamGroups&                              stream_groups,
                                       const MtpBatchStreamProcessor::DSparkRoundState& round_state,
@@ -168,7 +171,9 @@ protected:
                                       torch::Event&                                accept_len_ready_event,
                                       const speculative::SpeculativeSamplerOutput& speculative_sampler_output,
                                       MtpMetricsCollector&                         metrics_collector,
-                                      int64_t                                      model_forward_us);
+                                      int64_t                                      model_forward_us,
+                                      const torch::Tensor&                         confidence_rates = torch::Tensor(),
+                                      const torch::Tensor&                         confidence_valid_lengths = torch::Tensor());
     absl::Status dispatchDecodeOutput(const StreamGroups&                          stream_groups,
                                       const std::list<GenerateStreamPtr>&          streams,
                                       const speculative::SpeculativeSamplerOutput& speculative_sampler_output,
@@ -192,10 +197,20 @@ protected:
     void checkModelInputsOnCuda(const GptModelInputs& model_input, const char* tag) const;
 
     AcceptLenMetricsSnapshot consumePendingAcceptLenMetrics();
-    void                     stageAcceptLenMetrics(const torch::Tensor& accept_len,
-                                                   torch::Event&        accept_len_ready_event,
-                                                   size_t               stream_count,
-                                                   std::vector<int32_t> row_priorities);
+    torch::Tensor            snapshotConfidenceValidLengths(const torch::Tensor&                        draft_lengths,
+                                                            const SpecLogitsVerifyRunner::LaunchResult& verify_result,
+                                                            const c10::Device&                          device,
+                                                            torch::Event&                               ready_event);
+    struct DSparkVerifyPlan {
+        // -1 means the original full-width path, including seeded batches.
+        int64_t              draft_budget = -1;
+        std::vector<int64_t> stable_order;
+    };
+    DSparkVerifyPlan prepareDSparkVerifyPlan(const StreamGroups& stream_groups);
+    void             stageAcceptLenMetrics(const torch::Tensor& accept_len,
+                                           torch::Event&        accept_len_ready_event,
+                                           size_t               stream_count,
+                                           std::vector<int32_t> row_priorities);
 
     void prepareStreams(const std::list<GenerateStreamPtr>& streams,
                         std::list<GenerateStreamPtr>&       prefill_streams,
@@ -292,6 +307,14 @@ private:
     size_t        draft_vocab_size_;
     torch::Tensor dspark_markov_w1_;
     torch::Tensor dspark_markov_w2_;
+    // DeepSeek V4.1 only; mode and output geometry are fixed at construction.
+    std::string   dspark_confidence_mode_ = "off";
+    torch::Tensor dspark_confidence_head_;
+    // Independent sigmoid temperature; checkpoint training temperature is unknown.
+    double  dspark_confidence_temperature_ = 1.0;
+    int64_t dspark_verify_budget_          = -1;
+    bool    dspark_packed_verify_          = false;
+    bool    dspark_seed_fallback_logged_   = false;
     // The two wrappers keep stable runtime roles. Ordinary MTP uses decode and
     // post-verify prefill roles; DSpARK supplies propose and commit construction
     // parameters to the same two slots.
@@ -316,6 +339,9 @@ private:
     torch::Stream collect_metrics_stream_;
     torch::Tensor metrics_accept_len_sum_gpu_;
     torch::Tensor metrics_accept_len_sum_cpu_;
+    torch::Tensor metrics_confidence_gpu_;
+    torch::Tensor metrics_confidence_cpu_;
+    torch::Tensor metrics_confidence_lengths_cpu_;
     // Per-stream accept_len rows staged next to the scalar sum so priority
     // buckets can be rebuilt on consume without an extra sync.
     torch::Tensor                 metrics_accept_len_rows_gpu_;

@@ -95,6 +95,16 @@ public:
     // The draft distribution is a one-hot at token_ids and need not be
     // materialized as [batch, speculative_steps, vocab].
     bool token_ids_are_point_mass = false;
+    // DSpARK per-position acceptance-rate prediction from the draft model
+    // confidence head: [batch, propose_step] FP32 in [0, 1].  Undefined when
+    // the sampler ran with confidence disabled. Enabled V4.1 requires its head.
+    // Column i is the predicted probability that draft position i survives
+    // target verification, conditioned on all earlier positions surviving.
+    torch::Tensor confidence_rates;
+    // Optional CUDA int32 [B] valid draft prefix lengths. Undefined keeps the
+    // full-width rejection path. The physical draft/target strides stay gamma
+    // and gamma+1; confidence never changes the sampled draft distribution.
+    torch::Tensor valid_draft_lengths;
 };
 
 struct MergedOutput {

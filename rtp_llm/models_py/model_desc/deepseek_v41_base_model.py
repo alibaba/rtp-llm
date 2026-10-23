@@ -1123,7 +1123,22 @@ class DeepSeekV4Model(GptModelBase):
         batch_size = (
             int(attn.input_lengths.size(0)) if attn.input_lengths.numel() > 0 else 1
         )
-        q_len = int(attn.input_lengths[0]) if attn.input_lengths.numel() > 0 else 1
+        packed_verify = bool(getattr(attn, "is_packed_target_verify", False))
+        if packed_verify:
+            if (
+                not is_target_verify
+                or not self.fp8_kv_cache
+                or not self._v4_args.v41_config
+            ):
+                raise ValueError("Packed target verification requires V4.1 FP8 decode")
+            token_count = int(inputs.input_ids.numel())
+            if token_count <= 0 or token_count % batch_size:
+                raise ValueError(
+                    "Packed capture requires an integral average query width"
+                )
+            q_len = token_count // batch_size
+        else:
+            q_len = int(attn.input_lengths[0]) if attn.input_lengths.numel() > 0 else 1
         device = self.v4.embed.weight.device
         paged_pool_specs = build_paged_pool_specs(
             self.kv_cache, self.v4, max_seq_len=int(self._v4_args.max_seq_len)
@@ -1144,6 +1159,8 @@ class DeepSeekV4Model(GptModelBase):
             paged_pool_specs=paged_pool_specs,
             group_tags=group_tags_snapshot,
         )
+        if self.fp8_kv_cache:
+            cfg_kwargs["packed_target_verify"] = packed_verify
         cfg = _DecodeFmhaImplConfig(**cfg_kwargs)
         impl = _DecodeFmhaImpl(cfg, device=device, attn_inputs=attn)
         return impl

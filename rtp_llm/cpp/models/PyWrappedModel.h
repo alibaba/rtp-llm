@@ -462,6 +462,17 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
                                              && !is_prefill_cuda_graph_mode;
         graph_params.is_target_verify =
             dspark_model_role_ != DSparkModelRole::NONE || use_spec_decoding || is_target_verify_decode;
+        graph_params.is_packed_target_verify =
+            params.parallelism_config.role_type == RoleType::DECODE
+            && params.sp_config.sp_dspark_verify_mode == "packed"
+            && params.sp_config.sp_dspark_confidence_mode == "bounded" && params.sp_config.sp_dspark_verify_budget >= 0
+            && params.sp_config.sp_dspark_verify_budget < params.sp_config.gen_num_per_cycle
+            && (dspark_model_role_ == DSparkModelRole::COMMIT || is_target_verify_decode);
+        if (graph_params.is_packed_target_verify) {
+            // Total query capacity is (k+1)*B; each request's live query
+            // length may still range from 1 to gamma+1.
+            graph_params.num_tokens_per_bs = params.sp_config.sp_dspark_verify_budget + 1;
+        }
         graph_params.role =
             graph_params.is_target_verify ? CudaGraphRole::TARGET_VERIFY :
             is_prefill_cuda_graph_mode    ? (params.sp_config.type == SP_TYPE_NONE ? CudaGraphRole::EMBEDDING_PREFILL :

@@ -125,6 +125,10 @@ class DSv4DecodeAttnMetadataFP8:
 
     # ---- Cuda graph: reserved for Phase 3 (forbid_realloc, fixed addr) ----
     is_cuda_graph: bool = False
+    # Packed target rows keep a static execution shape, but real request
+    # boundaries come from these lengths and decode_cu_seq_per_req.
+    is_packed: bool = False
+    input_lengths: Optional[torch.Tensor] = None
     # Request-major validity, shared by all S queries of a request. CUDA Graph
     # preparation rewrites every entry before every replay at a stable address.
     # This is selection-only metadata, never a replacement for KV/MTP lengths.
@@ -1105,7 +1109,9 @@ def update_decode_metadata_in_place_fp8(
     bs = int(start_pos.shape[0])
     live_requests = bs if valid_request_count is None else int(valid_request_count)
     if not 0 <= live_requests <= bs <= meta.start_pos.numel():
-        raise ValueError("Decode valid request count must fit the prepared/captured batch")
+        raise ValueError(
+            "Decode valid request count must fit the prepared/captured batch"
+        )
     position_ids_2d = _build_position_ids_2d(start_pos, q_len, device)
     position_ids_flat = position_ids_2d.reshape(-1).contiguous()
     meta.position_ids[: bs * q_len].copy_(position_ids_flat)
@@ -1120,7 +1126,10 @@ def update_decode_metadata_in_place_fp8(
     )
 
     fused_update_decode_meta_pure(
-        meta, start_pos, meta.max_seq_len, valid_request_count=live_requests,
+        meta,
+        start_pos,
+        meta.max_seq_len,
+        valid_request_count=live_requests,
     )
 
     # opt_flash_mla: derive FlashMLA topk_length / extra_topk_length from the

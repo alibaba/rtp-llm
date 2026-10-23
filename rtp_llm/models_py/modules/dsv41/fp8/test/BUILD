@@ -35,6 +35,7 @@ _TESTS = [
     "test_v41_decode_indexer",
     "test_v41_decode_topk",
     "test_v41_decode_preprocessing",
+    "test_v41_packed_verify",
     "test_v41_deepselect",
     "test_v41_fp4_codec",
     "test_v41_flash_mla_cache_format",
@@ -76,6 +77,7 @@ _TESTS = [
 
 # The selection chain supports both SM100 ARM and SM100/SM103 x86.
 _X86_TESTS = [
+    "test_v41_packed_verify",
     "test_v41_merge_contracts",
     "test_v41_attention_jit_warmup",
     "test_v41_owned_pool",

@@ -1100,7 +1100,9 @@ class AttentionV41FP8(AttentionFP8):
     def _begin_forward(self):
         if self.layer_id == min(self._shared_attention["layers"]):
             for key in (
-                "prefill_pool_ready", "prefill_state_ready", "decode_sparse_plan_ready"
+                "prefill_pool_ready",
+                "prefill_state_ready",
+                "decode_sparse_plan_ready",
             ):
                 pending = self._shared_attention.pop(key, None)
                 if pending is not None:
@@ -1113,6 +1115,8 @@ class AttentionV41FP8(AttentionFP8):
             self._shared_attention.pop("candidate_mask", None)
             self._shared_attention.pop("decode_sparse_plan", None)
             self._shared_attention.pop("decode_valid_requests", None)
+            self._shared_attention.pop("decode_packed_request_ids", None)
+            self._shared_attention.pop("decode_input_lengths", None)
             self._shared_attention.pop("decode_indexer_metadata", None)
             self._shared_attention.pop("prefill_candidate_mask", None)
             self._shared_attention.pop("prefill_sparse_candidates", None)
@@ -2791,7 +2795,11 @@ class AttentionV41FP8(AttentionFP8):
             try_produce_global,
         )
 
-        if not try_produce_global(self, x, positions, req_ids, starts):
+        input_lengths = self._shared_attention.get("decode_input_lengths")
+        ends = starts + (S if input_lengths is None else input_lengths)
+        if not try_produce_global(
+            self, x, positions, req_ids, starts, input_lengths=input_lengths
+        ):
             flat = x.reshape(B * S, -1)
             values = _linear_bf16_bf16_fp32(flat, self.global_wkv)
             if self.compress_ratio == 2:
@@ -2799,7 +2807,11 @@ class AttentionV41FP8(AttentionFP8):
                 previous = self._read_state(
                     (starts - 1).clamp_min(0), torch.arange(B, device=x.device)
                 )
-                first = (torch.arange(B * S, device=x.device) % S == 0)[:, None]
+                first = (
+                    torch.arange(B * S, device=x.device) % S == 0
+                    if input_lengths is None
+                    else positions == starts[req_ids]
+                )[:, None]
                 value_prev = torch.where(
                     first, previous[req_ids, : self.head_dim], values.roll(1, 0)
                 )
@@ -2812,7 +2824,7 @@ class AttentionV41FP8(AttentionFP8):
                     self.global_norm,
                     self.eps,
                 )
-                slots = self._slots(CSA_STATE, positions, req_ids, state_end=starts + S)
+                slots = self._slots(CSA_STATE, positions, req_ids, state_end=ends)
                 state_rows = torch.cat((values, scores), -1)
                 # Slot zero is the allocator's unallocated sentinel; invalid rows
                 # may overwrite it, but no live request ever reads that slot.
@@ -2878,9 +2890,7 @@ class AttentionV41FP8(AttentionFP8):
         slots = self._slots(
             INDEXER_KV, read_positions.reshape(-1), read_req.reshape(-1)
         ).view(B, capacity)
-        slots = torch.where(
-            ids < ((starts + S) // self.compress_ratio)[:, None], slots, -1
-        )
+        slots = torch.where(ids < (ends // self.compress_ratio)[:, None], slots, -1)
         keys = dequantize_indexer_k_fp4(index_pool, slots.reshape(-1)).view(
             B, capacity, self.index_head_dim
         )
@@ -2923,7 +2933,8 @@ class AttentionV41FP8(AttentionFP8):
             else:
                 weights = (
                     F.linear(x.reshape(T, -1), self.index_weights)
-                    if head_weights is None else head_weights
+                    if head_weights is None
+                    else head_weights
                 )
             return None, weights, index_prepared
         if index_q is None and paged and self.rope_head_dim == 64 and overlap is None:
@@ -2937,7 +2948,8 @@ class AttentionV41FP8(AttentionFP8):
             if pair is not None:
                 weights = (
                     F.linear(x.reshape(T, -1), self.index_weights)
-                    if head_weights is None else head_weights
+                    if head_weights is None
+                    else head_weights
                 )
                 scaled = torch.empty_like(weights, dtype=torch.bfloat16)
                 torch.mul(
@@ -2971,7 +2983,8 @@ class AttentionV41FP8(AttentionFP8):
         else:
             weights = (
                 F.linear(x.reshape(T, -1), self.index_weights)
-                if head_weights is None else head_weights
+                if head_weights is None
+                else head_weights
             )
         prepared = None
         if paged:
@@ -3015,8 +3028,15 @@ class AttentionV41FP8(AttentionFP8):
         capacity = keys.capacity if paged else keys.shape[1]
         if prepared_query is None:
             prepared_query = AttentionV41FP8._prepare_indexer_query_decode(
-                self, x, qr, positions, qr_quantized, index_q,
-                head_weights, index_prepared, overlap=overlap,
+                self,
+                x,
+                qr,
+                positions,
+                qr_quantized,
+                index_q,
+                head_weights,
+                index_prepared,
+                overlap=overlap,
             )
         q, weights, prepared = prepared_query
         if q is not None:
@@ -3035,6 +3055,7 @@ class AttentionV41FP8(AttentionFP8):
                 batch_size=B,
                 query_len=S,
                 compress_ratio=self.compress_ratio,
+                request_ids=shared.get("decode_packed_request_ids"),
             )
         config = self.v41_config
         candidate_source = int(config.get("candidate_source_layer_id", -1))
@@ -3075,6 +3096,7 @@ class AttentionV41FP8(AttentionFP8):
                             query_len=S,
                             candidate_mask=shared.get("candidate_mask"),
                             valid_requests=shared.get("decode_valid_requests"),
+                            request_ids=shared.get("decode_packed_request_ids"),
                         )
                     shared["decode_sparse_plan"] = plan
                 with record_function_range("dsv41.decode.sparse_mqa_select"):
@@ -3114,13 +3136,20 @@ class AttentionV41FP8(AttentionFP8):
                 pad_invisible=False,
                 metadata=indexer_metadata,
                 prepared_query=prepared,
+                request_ids=shared.get("decode_packed_request_ids"),
             )
         else:
             weights = (
                 weights.float() * (self.index_head_dim * self.index_n_heads) ** -0.5
             )
             freqs = self.freqs_cis[positions]
-            q = fp4_roundtrip(rope_only(q.view(T, self.index_n_heads, self.index_head_dim), freqs, self.rope_head_dim))
+            q = fp4_roundtrip(
+                rope_only(
+                    q.view(T, self.index_n_heads, self.index_head_dim),
+                    freqs,
+                    self.rope_head_dim,
+                )
+            )
         publish = (
             self.layer_id == candidate_source
             and candidate_blocks > 0
@@ -3165,11 +3194,16 @@ class AttentionV41FP8(AttentionFP8):
                             if overlap is None
                             else overlap.select_candidates
                         )
-                        complete_prefix = (
-                            candidate_size == 8 and candidate_blocks in (512, 1024, 2048)
+                        complete_prefix = candidate_size == 8 and candidate_blocks in (
+                            512,
+                            1024,
+                            2048,
                         )
                         candidates, flags = select_candidates(
-                            all_logits, visible_i32, candidate_size, candidate_blocks,
+                            all_logits,
+                            visible_i32,
+                            candidate_size,
+                            candidate_blocks,
                             **({"complete": True} if complete_prefix else {}),
                         )
                         shared["candidates"] = candidates
@@ -3183,8 +3217,13 @@ class AttentionV41FP8(AttentionFP8):
                         # Reuse the source's int32 lengths; plan/metadata need
                         # no data produced by the later reindex layer.
                         start_plan(
-                            self, keys, visible_i32, query_len=S,
-                            producer_stream=None if overlap is None else overlap.auxiliary,
+                            self,
+                            keys,
+                            visible_i32,
+                            query_len=S,
+                            producer_stream=(
+                                None if overlap is None else overlap.auxiliary
+                            ),
                         )
                     elif candidate_source >= 0 and self.layer_id > candidate_source:
                         decode_topk.mask_candidates(
@@ -3219,7 +3258,16 @@ class AttentionV41FP8(AttentionFP8):
                 if paged:
                     logits = all_logits[start:end]
                 else:
-                    logits = torch.einsum("thd,kd->thk", q[start:end], keys[b]).relu_()
+                    request_ids = shared.get("decode_packed_request_ids")
+                    if request_ids is None:
+                        logits = torch.einsum(
+                            "thd,kd->thk", q[start:end], keys[b]
+                        ).relu_()
+                    else:
+                        query_keys = keys.index_select(0, request_ids[start:end].long())
+                        logits = torch.einsum(
+                            "thd,tkd->thk", q[start:end], query_keys
+                        ).relu_()
                     logits = (logits * weights[start:end, :, None]).sum(1)
                 visible = visible_per_token[start:end]
                 if not paged:
@@ -3320,6 +3368,14 @@ class AttentionV41FP8(AttentionFP8):
 
         self._begin_forward()
         B, S, _ = x.shape
+        if getattr(metadata, "is_packed", False):
+            self._shared_attention["decode_packed_request_ids"] = (
+                metadata.req_id_per_token[: B * S]
+            )
+            self._shared_attention["decode_input_lengths"] = metadata.input_lengths[:B]
+        else:
+            self._shared_attention.pop("decode_packed_request_ids", None)
+            self._shared_attention.pop("decode_input_lengths", None)
         # Stable GPU contents are refreshed by prepare_cuda_graph each replay.
         # The mask affects selection only, not query/KV-write geometry.
         valid_requests = getattr(metadata, "valid_requests", None)
@@ -3401,7 +3457,11 @@ class AttentionV41FP8(AttentionFP8):
                 self._decode_write_swa_fp8(qkv.kv, B, S, metadata)
             if global_work is not None:
                 prepared_query = self._prepare_indexer_query_decode(
-                    x, qkv.qr, positions, qkv.qr_quantized, qkv.index_q,
+                    x,
+                    qkv.qr,
+                    positions,
+                    qkv.qr_quantized,
+                    qkv.index_q,
                     getattr(qkv, "head_weights", None),
                     getattr(qkv, "index_prepared", None),
                 )

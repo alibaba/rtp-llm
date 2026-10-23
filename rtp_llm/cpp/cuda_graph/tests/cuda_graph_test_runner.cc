@@ -60,9 +60,9 @@ public:
         params.hidden_size              = static_cast<size_t>(hidden_size);
         params.input_hidden_size        = static_cast<size_t>(hidden_size);
         params.model_data_type          = c10::ScalarType::BFloat16;
-        params.prefill_capture_seq_lens   = std::move(prefill_capture_seq_lens);
-        params.kv_cache_group_tags        = std::move(group_tags);
-        params.kernel_block_table_width   = kernel_block_table_width;
+        params.prefill_capture_seq_lens = std::move(prefill_capture_seq_lens);
+        params.kv_cache_group_tags      = std::move(group_tags);
+        params.kernel_block_table_width = kernel_block_table_width;
 
         if (position_encoding.has_value()) {
             params.position_encoding = std::move(*position_encoding);
@@ -118,7 +118,8 @@ public:
                      std::vector<std::string> group_tags,
                      bool                     is_target_verify,
                      int64_t                  num_tokens_per_bs,
-                     int64_t                  position_id_len_factor) {
+                     int64_t                  position_id_len_factor,
+                     bool                     is_packed_target_verify) {
         reset_runner();
         GraphParams params;
         params.enable_cuda_graph            = true;
@@ -134,6 +135,7 @@ public:
         params.decode_capture_batch_sizes = std::move(decode_capture_batch_sizes);
         params.kv_cache_group_tags        = std::move(group_tags);
         params.is_target_verify           = is_target_verify;
+        params.is_packed_target_verify    = is_packed_target_verify;
         params.position_id_len_factor     = static_cast<int>(position_id_len_factor);
         params.kernel_block_table_width   = kernel_block_table_width;
 
@@ -247,9 +249,9 @@ PYBIND11_MODULE(libtest_cuda_graph_runner, m) {
              py::arg("kernel_block_table_width"),
              py::arg("prefill_capture_seq_lens"),
              py::arg("hidden_size"),
-             py::arg("group_tags")            = std::vector<std::string>{},
-             py::arg("position_encoding")     = py::none(),
-             py::arg("token_type_embedding")  = py::none())
+             py::arg("group_tags")           = std::vector<std::string>{},
+             py::arg("position_encoding")    = py::none(),
+             py::arg("token_type_embedding") = py::none())
         .def("init_decode",
              &CudaGraphTestRunner::init_decode,
              py::arg("py_instance"),
@@ -257,10 +259,11 @@ PYBIND11_MODULE(libtest_cuda_graph_runner, m) {
              py::arg("max_seq_len"),
              py::arg("kernel_block_table_width"),
              py::arg("decode_capture_batch_sizes"),
-             py::arg("group_tags")            = std::vector<std::string>{},
-             py::arg("is_target_verify")      = false,
-             py::arg("num_tokens_per_bs")     = 1,
-             py::arg("position_id_len_factor") = 0)
+             py::arg("group_tags")              = std::vector<std::string>{},
+             py::arg("is_target_verify")        = false,
+             py::arg("num_tokens_per_bs")       = 1,
+             py::arg("position_id_len_factor")  = 0,
+             py::arg("is_packed_target_verify") = false)
         .def("init_generation_prefill",
              &CudaGraphTestRunner::init_generation_prefill,
              py::arg("py_instance"),

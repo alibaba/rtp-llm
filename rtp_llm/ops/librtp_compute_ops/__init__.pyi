@@ -238,6 +238,7 @@ class PyAttentionInputs:
     is_prefill: bool
     is_s_padded: bool
     is_target_verify: bool
+    is_packed_target_verify: bool
     padding_offset: torch.Tensor
     prefill_cuda_graph_copy_params: PyPrefillCudaGaphCopyParams | None
     prefix_lengths: torch.Tensor
@@ -411,6 +412,15 @@ class PyModelOutputs:
         Initialize with hidden states and speculative target features
         """
 
+    @typing.overload
+    def __init__(
+        self,
+        hidden_states: torch.Tensor,
+        mtp_target_hidden_states: torch.Tensor,
+        dspark_confidence_hidden_logits: torch.Tensor,
+    ) -> None:
+        """Initialize with hidden states, target features and scalar confidence contributions."""
+
     @property
     def hidden_states(self) -> torch.Tensor:
         """
@@ -428,6 +438,13 @@ class PyModelOutputs:
 
     @mtp_target_hidden_states.setter
     def mtp_target_hidden_states(self, arg0: torch.Tensor | None) -> None: ...
+
+    @property
+    def dspark_confidence_hidden_logits(self) -> torch.Tensor | None:
+        """Optional FP32 [tokens, 1] pre-norm hidden contribution to V4.1 confidence logits."""
+
+    @dspark_confidence_hidden_logits.setter
+    def dspark_confidence_hidden_logits(self, arg0: torch.Tensor | None) -> None: ...
 
 class PyMultimodalInputs:
     mm_features_spans: torch.Tensor

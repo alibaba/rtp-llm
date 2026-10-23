@@ -72,7 +72,11 @@ class FullDecodeWork:
         self.auxiliary.wait_stream(self.current)
         with torch.cuda.stream(self.auxiliary):
             result = _v41_decode_topk.select_candidates(
-                logits, lengths, block_size, count, **({"complete": True} if complete else {})
+                logits,
+                lengths,
+                block_size,
+                count,
+                **({"complete": True} if complete else {}),
             )
         self.outputs.extend(result)
         return result
@@ -148,6 +152,7 @@ def try_full_decode(
                 batch_size=batch,
                 query_len=span,
                 compress_ratio=attn.compress_ratio,
+                request_ids=attn._shared_attention.get("decode_packed_request_ids"),
             )
             if work.metadata is not None:
                 plan = work.metadata

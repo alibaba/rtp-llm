@@ -288,12 +288,13 @@ torch_ext::PyAttentionInputs PyWrappedModel::buildPyAttentionInputs(const GptMod
     }
 
     // Calculate cu_seqlens
-    int    batch_size               = py_attn_inputs.input_lengths.size(0);
-    size_t context_batch_size       = py_attn_inputs.prefix_lengths.size(0);
-    size_t decode_batch_size        = py_attn_inputs.sequence_lengths.size(0);
-    py_attn_inputs.dtype            = dataTypeToTorchType(description_.data_type);
-    py_attn_inputs.is_prefill       = !decode_batch_size;
-    py_attn_inputs.is_target_verify = inputs.is_target_verify;
+    int    batch_size                      = py_attn_inputs.input_lengths.size(0);
+    size_t context_batch_size              = py_attn_inputs.prefix_lengths.size(0);
+    size_t decode_batch_size               = py_attn_inputs.sequence_lengths.size(0);
+    py_attn_inputs.dtype                   = dataTypeToTorchType(description_.data_type);
+    py_attn_inputs.is_prefill              = !decode_batch_size;
+    py_attn_inputs.is_target_verify        = inputs.is_target_verify;
+    py_attn_inputs.is_packed_target_verify = inputs.is_packed_target_verify;
     RTP_LLM_CHECK_WITH_INFO(
         context_batch_size + decode_batch_size == batch_size,
         "batch size check failed context_batch_size[%ld] decode_batch_size[%ld] total_batch_size[%ld]",
@@ -1209,6 +1210,11 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
         auto attach_mtp_target_hidden_states = [&py_model_outputs](GptModelOutputs outputs) {
             if (py_model_outputs.mtp_target_hidden_states.defined()) {
                 outputs.mtp_target_hidden_states = py_model_outputs.mtp_target_hidden_states;
+            }
+            // Own this round's scalar output: graph buckets share capture storage
+            // that a later replay can overwrite after this forward returns.
+            if (py_model_outputs.dspark_confidence_hidden_logits.defined()) {
+                outputs.dspark_confidence_hidden_logits = py_model_outputs.dspark_confidence_hidden_logits.clone();
             }
             return outputs;
         };

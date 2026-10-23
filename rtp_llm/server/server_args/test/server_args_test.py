@@ -38,6 +38,115 @@ class CustomAllReduceArgumentsTest(TestCase):
         self.assertIs(configs.ft_disable_custom_ar_override, True)
 
 
+class DSparkConfidenceArgumentsTest(TestCase):
+    def parse_config(self, args, env):
+        from rtp_llm.config.py_config_modules import PyEnvConfigs
+        from rtp_llm.server.server_args.server_args import EnvArgumentParser
+        from rtp_llm.server.server_args.speculative_decoding_group_args import (
+            init_speculative_decoding_group_args,
+        )
+
+        configs = PyEnvConfigs()
+        parser = EnvArgumentParser()
+        parser.set_root_config(configs)
+        init_speculative_decoding_group_args(parser, configs.sp_config)
+        with patch.dict(os.environ, env, clear=True), patch.object(
+            sys, "argv", ["server"]
+        ):
+            parser.parse_args(args)
+        return configs.sp_config
+
+    def test_defaults_keep_confidence_disabled(self):
+        config = self.parse_config([], {})
+        self.assertEqual(config.sp_dspark_confidence_mode, "off")
+        self.assertEqual(config.sp_dspark_confidence_temperature, 1.0)
+        self.assertEqual(config.sp_dspark_verify_budget, -1)
+        self.assertEqual(config.sp_dspark_verify_mode, "dense")
+
+    def test_cli_overrides_environment_and_survives_pickle(self):
+        config = self.parse_config(
+            [
+                "--sp_dspark_confidence_mode",
+                "bounded",
+                "--sp_dspark_confidence_temperature",
+                "0.75",
+                "--sp_dspark_verify_budget",
+                "2",
+                "--sp_dspark_verify_mode",
+                "packed",
+                "--gen_num_per_cycle",
+                "5",
+            ],
+            {
+                "SP_DSPARK_CONFIDENCE_MODE": "observe",
+                "SP_DSPARK_CONFIDENCE_TEMPERATURE": "1.5",
+                "SP_DSPARK_VERIFY_BUDGET": "-1",
+                "SP_DSPARK_VERIFY_MODE": "dense",
+            },
+        )
+        for value in (config, pickle.loads(pickle.dumps(config))):
+            self.assertEqual(value.sp_dspark_confidence_mode, "bounded")
+            self.assertEqual(value.sp_dspark_confidence_temperature, 0.75)
+            self.assertEqual(value.sp_dspark_verify_budget, 2)
+            self.assertEqual(value.sp_dspark_verify_mode, "packed")
+            self.assertEqual(value.gen_num_per_cycle, 5)
+
+    def test_environment_binds_explicit_and_implicit_argument_lists(self):
+        for args in ([], None):
+            with self.subTest(args=args):
+                config = self.parse_config(
+                    args,
+                    {
+                        "SP_DSPARK_CONFIDENCE_MODE": "observe",
+                        "SP_DSPARK_CONFIDENCE_TEMPERATURE": "1.25",
+                        "SP_DSPARK_VERIFY_BUDGET": "-1",
+                    },
+                )
+                self.assertEqual(config.sp_dspark_confidence_mode, "observe")
+                self.assertEqual(config.sp_dspark_confidence_temperature, 1.25)
+                self.assertEqual(config.sp_dspark_verify_budget, -1)
+
+    def test_legacy_pickle_keeps_dense_verification(self):
+        config = self.parse_config(
+            [
+                "--sp_dspark_confidence_mode",
+                "bounded",
+                "--sp_dspark_verify_budget",
+                "2",
+            ],
+            {},
+        )
+        state = config.__getstate__()
+        for size in (10, 11, 12, 15):
+            with self.subTest(size=size):
+                restored = type(config).__new__(type(config))
+                restored.__setstate__(state[:size])
+                self.assertEqual(restored.sp_dspark_verify_mode, "dense")
+                self.assertEqual(
+                    restored.sp_dspark_confidence_mode,
+                    "bounded" if size == 15 else "off",
+                )
+
+    def test_cli_and_environment_reject_invalid_mode_or_numeric_syntax(self):
+        for name, value in (
+            ("sp_dspark_confidence_mode", "adaptive"),
+            ("sp_dspark_verify_mode", "ragged"),
+            ("sp_dspark_confidence_temperature", "invalid"),
+            ("sp_dspark_confidence_temperature", "0"),
+            ("sp_dspark_confidence_temperature", "nan"),
+            ("sp_dspark_confidence_temperature", "inf"),
+            ("sp_dspark_verify_budget", "1.5"),
+            ("sp_dspark_verify_budget", "-2"),
+        ):
+            with self.subTest(source="cli", name=name), self.assertRaises(SystemExit):
+                self.parse_config(["--" + name, value], {})
+            for args in ([], None):
+                with self.subTest(
+                    source="env", name=name, args=args
+                ), self.assertRaises(SystemExit):
+                    self.parse_config(args, {name.upper(): value})
+
+
 class CacheConfigArgumentsTest(TestCase):
     # Keep the supported startup fields explicit, independently of parser registration.
     samples = {

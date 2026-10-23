@@ -1097,6 +1097,11 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("checkpoint_path", &SpeculativeExecutionConfig::checkpoint_path)
         .def_readwrite("sp_dspark_mask_token_id", &SpeculativeExecutionConfig::sp_dspark_mask_token_id)
         .def_readwrite("sp_dspark_sample_from_anchor", &SpeculativeExecutionConfig::sp_dspark_sample_from_anchor)
+        .def_readwrite("sp_dspark_confidence_mode", &SpeculativeExecutionConfig::sp_dspark_confidence_mode)
+        .def_readwrite("sp_dspark_confidence_temperature",
+                       &SpeculativeExecutionConfig::sp_dspark_confidence_temperature)
+        .def_readwrite("sp_dspark_verify_budget", &SpeculativeExecutionConfig::sp_dspark_verify_budget)
+        .def_readwrite("sp_dspark_verify_mode", &SpeculativeExecutionConfig::sp_dspark_verify_mode)
         .def("to_string", [](const SpeculativeExecutionConfig& self) { return self.to_string(); })
         .def(py::pickle(
             [](const SpeculativeExecutionConfig& self) {
@@ -1111,10 +1116,14 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       self.quantization,
                                       self.checkpoint_path,
                                       self.sp_dspark_mask_token_id,
-                                      self.sp_dspark_sample_from_anchor);
+                                      self.sp_dspark_sample_from_anchor,
+                                      self.sp_dspark_confidence_mode,
+                                      self.sp_dspark_confidence_temperature,
+                                      self.sp_dspark_verify_budget,
+                                      self.sp_dspark_verify_mode);
             },
             [](py::tuple t) {
-                if (t.size() != 10 && t.size() != 11 && t.size() != 12)
+                if (t.size() != 10 && t.size() != 11 && t.size() != 12 && t.size() != 15 && t.size() != 16)
                     throw std::runtime_error("Invalid state!");
                 SpeculativeExecutionConfig c;
                 try {
@@ -1131,9 +1140,17 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                     if (t.size() == 11) {
                         c.sp_dspark_mask_token_id = t[10].cast<int64_t>();
                     }
-                    if (t.size() == 12) {
+                    if (t.size() >= 12) {
                         c.sp_dspark_mask_token_id      = t[10].cast<int64_t>();
                         c.sp_dspark_sample_from_anchor = t[11].cast<bool>();
+                    }
+                    if (t.size() >= 15) {
+                        c.sp_dspark_confidence_mode        = t[12].cast<std::string>();
+                        c.sp_dspark_confidence_temperature = t[13].cast<double>();
+                        c.sp_dspark_verify_budget          = t[14].cast<int64_t>();
+                    }
+                    if (t.size() == 16) {
+                        c.sp_dspark_verify_mode = t[15].cast<std::string>();
                     }
                 } catch (const std::exception& e) {
                     throw std::runtime_error(std::string("SpeculativeExecutionConfig unpickle error: ") + e.what());

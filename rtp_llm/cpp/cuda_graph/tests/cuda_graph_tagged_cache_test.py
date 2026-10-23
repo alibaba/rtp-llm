@@ -134,6 +134,21 @@ class AuxiliaryOutputModel:
         return PyModelOutputs(hidden_states, target_features)
 
 
+class ConfidenceOutputModel(AuxiliaryOutputModel):
+    """Expose a scalar output with a different width and dtype from hidden."""
+
+    def __init__(self, enabled=True):
+        self.enabled = enabled
+
+    def forward(self, inputs: PyModelInputs, fmha_impl=None) -> PyModelOutputs:
+        outputs = super().forward(inputs, fmha_impl)
+        if self.enabled:
+            outputs.dspark_confidence_hidden_logits = (
+                inputs.input_hiddens.float().sum(dim=1, keepdim=True) - 11.0
+            )
+        return outputs
+
+
 class FailOnceGraphPrepare:
     def __init__(self) -> None:
         self.call_count = 0
@@ -197,6 +212,61 @@ class DictMetadataPrepareModel(TaggedBlockTableModel):
             )
             for tag, flag in zip(GROUP_TAGS, self.flags)
         }
+
+
+class _PackedMetadataPrepareImpl:
+    cuda_graph_uses_device_metadata = True
+    cuda_graph_uses_valid_request_count = True
+
+    def __init__(self, inputs):
+        rows = inputs.input_ids.numel()
+        self.rows = torch.arange(rows, device="cuda", dtype=torch.int64)
+        self.signature = torch.empty((rows, 4), device="cuda", dtype=torch.bfloat16)
+        self.features = torch.empty((rows, 8), device="cuda", dtype=torch.bfloat16)
+        self.prepare_cuda_graph(inputs.attention_inputs)
+
+    def prepare_cuda_graph(self, inputs, valid_request_count=None):
+        full, aux = inputs["full"], inputs["aux"]
+        lengths = full.input_lengths_device
+        prefixes = full.prefix_lengths_device
+        cu = full.cu_seqlens_device
+        owners = torch.searchsorted(cu[1:].long().contiguous(), self.rows, right=True)
+        positions = prefixes[owners] + self.rows - cu[owners]
+        self.signature.copy_(
+            torch.stack(
+                (owners, positions, lengths[owners], cu[-1].expand_as(owners)), dim=1
+            )
+        )
+        full_table = full.kv_cache_kernel_block_id_device
+        aux_table = aux.kv_cache_kernel_block_id_device
+        live = lengths.numel() if valid_request_count is None else valid_request_count
+        self.features.copy_(
+            torch.stack(
+                (
+                    full_table[owners, 0],
+                    aux_table[owners, 0],
+                    full_table.sum().expand_as(owners),
+                    aux_table.sum().expand_as(owners),
+                    full.cu_kv_seqlens_device[-1].expand_as(owners),
+                    torch.full_like(owners, live),
+                    lengths[-1].expand_as(owners),
+                    prefixes[-1].expand_as(owners),
+                ),
+                dim=1,
+            )
+        )
+
+
+class PackedMetadataPrepareModel:
+    """Expose actual captured request boundaries, padding, and device metadata."""
+
+    def prepare_fmha_impl(self, inputs, is_cuda_graph=False):
+        return _PackedMetadataPrepareImpl(inputs)
+
+    def forward(self, inputs, fmha_impl=None):
+        return PyModelOutputs(
+            inputs.input_hiddens + fmha_impl.signature, fmha_impl.features
+        )
 
 
 class RetryableGraphPrepareModel(TaggedBlockTableModel):
@@ -560,7 +630,181 @@ def _build_target_verify_inputs(
     )
 
 
+def _build_packed_verify_inputs(lengths, prefixes, block_ids):
+    batch = len(lengths)
+    token_count = sum(lengths)
+    cu_q, cu_kv = [0], [0]
+    for length, prefix in zip(lengths, prefixes):
+        cu_q.append(cu_q[-1] + length)
+        cu_kv.append(cu_kv[-1] + prefix + length)
+    attn = PyAttentionInputs()
+    attn.is_prefill = True
+    attn.is_target_verify = True
+    attn.is_packed_target_verify = True
+    attn.input_lengths = torch.tensor(lengths, dtype=torch.int32, device="cuda")
+    attn.prefix_lengths = torch.tensor(prefixes, dtype=torch.int32, device="cuda")
+    attn.sequence_lengths = torch.empty(0, dtype=torch.int32).pin_memory()
+    attn.sequence_lengths_plus_1_device = attn.prefix_lengths + 1
+    attn.cu_seqlens = torch.empty(0, dtype=torch.int32).pin_memory()
+    attn.cu_seqlens_device = torch.tensor(cu_q, dtype=torch.int32, device="cuda")
+    attn.cu_kv_seqlens_device = torch.tensor(cu_kv, dtype=torch.int32, device="cuda")
+    attn.decode_cu_seqlens = torch.arange(batch + 1, dtype=torch.int32).pin_memory()
+    attn.decode_cu_seqlens_device = attn.decode_cu_seqlens.cuda()
+    attn.context_total_kv_length = -1
+    block_count = (
+        max(p + n for p, n in zip(prefixes, lengths)) + TOKENS_PER_BLOCK - 1
+    ) // TOKENS_PER_BLOCK
+    inputs = _build_common_inputs(
+        attn, GROUP_TAGS, {"full": 0, "aux": 0}, batch, token_count, block_count
+    )
+    tagged = inputs.attention_inputs
+    for tag, multiplier in (("full", 1), ("aux", 2)):
+        table = (
+            torch.tensor(block_ids, dtype=torch.int32, device="cuda")[:, None]
+            .expand(batch, block_count)
+            .contiguous()
+            * multiplier
+        )
+        tagged[tag].kv_cache_kernel_block_id = table
+        tagged[tag].kv_cache_kernel_block_id_device = table
+        tagged[tag].kv_cache_block_id = table
+        tagged[tag].kv_cache_block_id_device = table
+    inputs.attention_inputs = tagged
+    return inputs, block_count
+
+
 class TestCudaGraphTaggedCache(unittest.TestCase):
+    def test_packed_target_device_lengths_reorder_shrink_and_zero_budget(self):
+        for average_width, cases in (
+            (
+                3,
+                (
+                    ([1, 6, 2, 3], [3, 57, 17, 25], [1, 2, 3, 4]),
+                    ([3, 2, 6, 1], [25, 17, 57, 3], [4, 3, 2, 1]),
+                    ([6, 2, 1], [55, 15, 7], [2, 3, 1]),
+                    ([1, 5], [8, 54], [4, 2]),
+                    ([3], [29], [3]),
+                    ([2, 1, 3, 6], [16, 4, 26, 56], [3, 1, 4, 2]),
+                ),
+            ),
+            (
+                1,
+                (
+                    ([1, 1, 1, 1], [7, 19, 31, 55], [1, 2, 3, 4]),
+                    ([1, 1], [55, 7], [4, 1]),
+                    ([1], [32], [3]),
+                    ([1, 1, 1, 1], [55, 31, 19, 7], [4, 3, 2, 1]),
+                ),
+            ),
+        ):
+            with self.subTest(average_width=average_width):
+                runner = CudaGraphRunner()
+                runner.init_decode(
+                    PackedMetadataPrepareModel(),
+                    HIDDEN_SIZE,
+                    64,
+                    KERNEL_BLOCK_TABLE_WIDTH,
+                    [4],
+                    GROUP_TAGS,
+                    True,
+                    average_width,
+                    0,
+                    True,
+                )
+                snapshots = []
+                for lengths, prefixes, block_ids in cases:
+                    self.assertEqual(sum(lengths), len(lengths) * average_width)
+                    inputs, block_count = _build_packed_verify_inputs(
+                        lengths, prefixes, block_ids
+                    )
+                    self.assertTrue(runner.canRun(inputs))
+                    self.assertEqual(runner.getCurrentRealGraphSize(), 4)
+                    with torch.profiler.profile(
+                        activities=[torch.profiler.ProfilerActivity.CPU]
+                    ) as prof:
+                        self.assertTrue(
+                            runner.prepare(inputs, skip_forward_event_sync=True)
+                        )
+                    scopes = {event.key for event in prof.key_averages()}
+                    self.assertNotIn(
+                        "cuda_graph.prepareAttentionInputs(host_mirror_copy)", scopes
+                    )
+                    self.assertNotIn(
+                        "cuda_graph.prepareAttentionInputs(wait_host_mirror_d2h)",
+                        scopes,
+                    )
+                    output = runner.forward(inputs)
+                    batch = len(lengths)
+                    hidden_expected, features_expected = [], []
+                    # Independent request-major oracle; no GPU prefix search is
+                    # reused to construct the expected request/position values.
+                    total_kv = (
+                        sum(p + n for p, n in zip(prefixes, lengths))
+                        + (4 - batch) * average_width
+                    )
+                    tail_length = lengths[-1] if batch == 4 else average_width
+                    tail_prefix = prefixes[-1] if batch == 4 else 0
+                    table_sum = sum(block_ids) * block_count
+                    for request, (length, prefix, block_id) in enumerate(
+                        zip(lengths, prefixes, block_ids)
+                    ):
+                        for position in range(length):
+                            hidden_expected.append(
+                                [request, prefix + position, length, 4 * average_width]
+                            )
+                            features_expected.append(
+                                [
+                                    block_id,
+                                    2 * block_id,
+                                    table_sum,
+                                    2 * table_sum,
+                                    total_kv,
+                                    batch,
+                                    tail_length,
+                                    tail_prefix,
+                                ]
+                            )
+                    snapshots.append(
+                        (
+                            output.hidden_states.clone(),
+                            output.mtp_target_hidden_states.clone(),
+                            hidden_expected,
+                            features_expected,
+                        )
+                    )
+                # Keep multiple replay results alive without a host wait between
+                # iterations; both output buffers must carry this round's values.
+                for hidden, features, hidden_expected, features_expected in snapshots:
+                    self.assertEqual(hidden.shape[0], len(hidden_expected))
+                    torch.testing.assert_close(
+                        hidden,
+                        torch.tensor(
+                            hidden_expected, dtype=hidden.dtype, device=hidden.device
+                        ),
+                        rtol=0,
+                        atol=0,
+                    )
+                    torch.testing.assert_close(
+                        features,
+                        torch.tensor(
+                            features_expected,
+                            dtype=features.dtype,
+                            device=features.device,
+                        ),
+                        rtol=0,
+                        atol=0,
+                    )
+                dense = _build_target_verify_inputs(
+                    GROUP_TAGS,
+                    {"full": 1, "aux": 2},
+                    batch_size=1,
+                    query_len=average_width,
+                    prefix_len=3,
+                )
+                # Even an identical token count cannot replay the packed graph
+                # when explicit-seed/fake fallback declares dense geometry.
+                self.assertFalse(runner.canRun(dense))
+
     def test_device_metadata_prepare_updates_and_padding(self):
         prefix = "cuda_graph.prepareAttentionInputs("
         for device_only in (False, True):
@@ -1884,6 +2128,47 @@ class TestCudaGraphTaggedCache(unittest.TestCase):
                     tuple(output.mtp_target_hidden_states.shape),
                 )
                 torch.testing.assert_close(output.mtp_target_hidden_states, expected)
+
+    def test_scalar_confidence_output_changes_on_replay_and_batch_shrink(self) -> None:
+        for enabled in (False, True):
+            runner = CudaGraphRunner()
+            runner.init_decode(
+                ConfidenceOutputModel(enabled),
+                HIDDEN_SIZE,
+                64,
+                KERNEL_BLOCK_TABLE_WIDTH,
+                [1, 4],
+                GROUP_TAGS,
+            )
+            for round_id, batch_size in enumerate((4, 1, 3, 1, 4)):
+                with self.subTest(
+                    enabled=enabled, round_id=round_id, batch_size=batch_size
+                ):
+                    inputs = _build_decode_inputs(
+                        GROUP_TAGS, {"full": 2, "aux": 1}, batch_size=batch_size
+                    )
+                    inputs.input_hiddens.copy_(
+                        torch.arange(
+                            batch_size * HIDDEN_SIZE,
+                            dtype=inputs.input_hiddens.dtype,
+                            device=inputs.input_hiddens.device,
+                        ).reshape(batch_size, HIDDEN_SIZE)
+                        + round_id * 5
+                    )
+                    self.assertTrue(runner.canRun(inputs))
+                    output = runner.forward(inputs)
+                    torch.cuda.synchronize()
+                    partial = output.dspark_confidence_hidden_logits
+                    if enabled:
+                        self.assertEqual(tuple(partial.shape), (batch_size, 1))
+                        self.assertEqual(partial.dtype, torch.float32)
+                        torch.testing.assert_close(
+                            partial,
+                            inputs.input_hiddens.float().sum(dim=1, keepdim=True)
+                            - 11.0,
+                        )
+                    else:
+                        self.assertIsNone(partial)
 
 
 if __name__ == "__main__":
