@@ -1,5 +1,6 @@
+import os
 from unittest import TestCase, main
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 from rtp_llm.aios.kmonitor.python_client.kmonitor.kmonitor import KMonitor
 from rtp_llm.aios.kmonitor.python_client.kmonitor.metrics.gauge_metric import (
@@ -16,6 +17,12 @@ from rtp_llm.metrics.kmonitor_metric_reporter import (
 
 
 class MetricReporterTest(TestCase):
+    def setUp(self):
+        self.env = patch.dict(os.environ)
+        self.env.start()
+        self.addCleanup(self.env.stop)
+        os.environ.pop("RTP_LLM_LATENCY_HISTOGRAM_ENABLED", None)
+
     def make_reporter(self):
         monitor = Mock(spec=KMonitor)
         monitor.register_gauge_metric.side_effect = lambda name: GaugeMetric(name, {})
@@ -58,6 +65,31 @@ class MetricReporterTest(TestCase):
         self.assertEqual(monitor.register_histogram_metric.call_count, 3)
         self.assertTrue(
             all(not h.fetch_reported_data() for h in reporter._histogram_map.values())
+        )
+
+    def test_explicit_enablement(self):
+        os.environ["RTP_LLM_LATENCY_HISTOGRAM_ENABLED"] = "1"
+        self.test_same_samples_and_tags_are_written_to_both_metrics()
+
+    def test_disabled_histograms_preserve_existing_metrics(self):
+        os.environ["RTP_LLM_LATENCY_HISTOGRAM_ENABLED"] = "0"
+        reporter, monitor = self.make_reporter()
+        reporter.init()
+        monitor.register_histogram_metric.assert_not_called()
+        self.assertEqual(reporter._histogram_map, {})
+        tags = {"protocol": "http"}
+        for gauge in (
+            GaugeMetrics.LANTENCY_METRIC,
+            GaugeMetrics.RESPONSE_FIRST_TOKEN_RT_METRIC,
+            GaugeMetrics.RESPONSE_ITER_RT_METRIC,
+        ):
+            reporter.report(gauge, 125, tags)
+            points = reporter._matic_map[gauge.value].fetch_reported_data()
+            self.assertEqual([p.value for p in points], [125])
+            self.assertEqual([p.tags for p in points], [tags])
+        reporter.report(AccMetrics.QPS_METRIC, 1, tags)
+        reporter._matic_map[AccMetrics.QPS_METRIC.value].report.assert_called_once_with(
+            1, tags
         )
 
     def test_unrelated_metrics_and_repeated_init(self):
