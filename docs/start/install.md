@@ -23,7 +23,6 @@ pip install "rtp_llm>=0.2.0"
 
 Note: the default `--config=cuda13` build targets SM80+; V100/T4 (SM70/SM75) need the retained `cuda12_*` compat configs.
 
-
 ```bash
 # Use the last release branch
 git clone git@github.com:alibaba/rtp-llm.git
@@ -38,6 +37,37 @@ ln  -sf `pwd`/bazel-out/k8-opt/bin/rtp_llm/cpp/model_rpc/proto/model_rpc_service
 ln  -sf `pwd`/bazel-out/k8-opt/bin/rtp_llm/cpp/model_rpc/proto/model_rpc_service_pb2.py  `pwd`/rtp_llm/cpp/model_rpc/proto/model_rpc_service_pb2.py
 
 ```
+
+### SM120 with CUDA 13
+
+Linux x86-64 SM120 builds use `--config=cuda13_sm120` instead of
+`--config=cuda13`. This configuration selects the SM120 native operators and
+a separate Python dependency set for DeepSeek-V4 FP8 attention and MXFP4 MoE.
+The supported device capability is exactly 12.0; this configuration does not
+qualify other SM12x devices, including capability 12.1.
+Pipeline parallelism is not supported; use `--pp_size=1`.
+
+From the source checkout, build with:
+
+```bash
+bazelisk build //rtp_llm:rtp_llm --config=cuda13_sm120 --jobs=64
+```
+
+The dependency inputs are
+[`requirements_torch_gpu_cuda13_sm120.txt`](https://github.com/alibaba/rtp-llm/blob/main/deps/requirements_torch_gpu_cuda13_sm120.txt)
+and the generated
+[`requirements_lock_torch_gpu_cuda13_sm120.txt`](https://github.com/alibaba/rtp-llm/blob/main/deps/requirements_lock_torch_gpu_cuda13_sm120.txt).
+Keep the Python packages and native operators from the same build configuration.
+Generic CUDA13 dependencies or an arbitrary FlashInfer version are not
+interchangeable with this set: the sparse-attention and grouped-MoE interfaces
+require the pinned providers. Check access to the referenced artifacts before
+building; the build configuration alone does not establish their availability
+from every network.
+
+See [server arguments](../backend/server_arguments.md#deepseek-v4-on-sm120)
+and [environment variables](../references/environment_variables.md) for
+runtime selection and tuning. Optional kernel switches are not a general
+deployment preset.
 
 
 ## Method 3: Using docker
