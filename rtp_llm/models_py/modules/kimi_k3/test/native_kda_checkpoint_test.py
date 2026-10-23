@@ -63,27 +63,47 @@ class NativeKdaCheckpointTest(unittest.TestCase):
                 initial = torch.randn(heads, 128, 128, device="cuda") * 0.02
                 blocks = (prefix + length + 63) // 64
                 table = list(range(1, blocks + 1))
+                if length == 401:
+                    # Retain prefix history and make continuation reads observable.
+                    gate = (gate.float() * 0.1 - 4.0).to(gate.dtype)
+                    for boundary in (128, 256, 384):
+                        q[boundary].copy_(k[boundary - 1])
+                    table.reverse()
                 pool = torch.full((blocks + 3, heads, 128, 128), -77.0, device="cuda")
                 if prefix:
                     pool[table[(prefix - 1) // 64]].copy_(initial)
                 else:
                     initial.zero_()
-                before = pool.clone()
+                initial_pool = pool.clone()
                 expected, states = recurrent_reference(q, k, v, gate, beta, initial, alog, bias)
-                with patch("torch.empty", side_effect=empty_with_poison), patch("cula.kda.chunk_kda", side_effect=checked_chunk):
-                    actual = cula_kda_paged_prefill(
-                        q, k, v, gate, beta, alog, bias, -5.0, pool,
-                        [0, length], [prefix], [table], 64,
-                    )
-                # Preserve the existing bounded-KDA operator tolerances.
-                torch.testing.assert_close(actual.float(), expected, rtol=0.03, atol=0.003)
-                written = set()
-                for segment in plan_state_sequences([0, length], [prefix], [table], 64)[0].segments:
-                    torch.testing.assert_close(pool[segment.cache_block], states[segment.end - 1], rtol=0.03, atol=0.003)
-                    self.assertTrue(torch.isfinite(pool[segment.cache_block]).all().item())
-                    written.add(segment.cache_block)
-                untouched = [i for i in range(pool.shape[0]) if i not in written]
-                torch.testing.assert_close(pool[untouched], before[untouched], rtol=0, atol=0)
+                chunk_sizes = (length, 128) if length == 401 else (length,)
+                for chunk_size in chunk_sizes:
+                    pool.copy_(initial_pool)
+                    for start in range(0, length, chunk_size):
+                        end = min(start + chunk_size, length)
+                        with self.subTest(chunk_size=chunk_size, start=start):
+                            before = pool.clone()
+                            if start:
+                                reset, _ = recurrent_reference(
+                                    q[start:start + 1], k[start:start + 1], v[start:start + 1],
+                                    gate[start:start + 1], beta[start:start + 1], initial, alog, bias,
+                                )
+                                self.assertGreater((expected[start] - reset[0]).abs().max().item(), 0.01)
+                            with patch("torch.empty", side_effect=empty_with_poison), patch("cula.kda.chunk_kda", side_effect=checked_chunk):
+                                actual = cula_kda_paged_prefill(
+                                    q[start:end], k[start:end], v[start:end], gate[start:end],
+                                    beta[start:end], alog, bias, -5.0, pool,
+                                    [0, end - start], [prefix + start], [table], 64,
+                                )
+                            # Preserve the existing bounded-KDA operator tolerances.
+                            torch.testing.assert_close(actual.float(), expected[start:end], rtol=0.03, atol=0.003)
+                            written = set()
+                            for segment in plan_state_sequences([0, end - start], [prefix + start], [table], 64)[0].segments:
+                                torch.testing.assert_close(pool[segment.cache_block], states[start + segment.end - 1], rtol=0.03, atol=0.003)
+                                self.assertTrue(torch.isfinite(pool[segment.cache_block]).all().item())
+                                written.add(segment.cache_block)
+                            untouched = [i for i in range(pool.shape[0]) if i not in written]
+                            torch.testing.assert_close(pool[untouched], before[untouched], rtol=0, atol=0)
         self.assertTrue(poisoned)
 
 
