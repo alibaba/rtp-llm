@@ -10,6 +10,7 @@ This page lists server arguments used to configure the behavior and performance 
 | `--tp-size` | Specifies the tensor parallelism degree. | None |
 | `--ep-size` | Defines the number of model instances for expert parallelism. | None |
 | `--dp-size` | Sets the number of replicas or group size for data parallelism. | None |
+| `--pp_size` | Pipeline-parallel size (`PP_SIZE`). Only `1` is supported; other values are rejected during startup. | 1 |
 | `--world-size` | Total number of GPUs used in distributed setup (WORLD_SIZE = TP_SIZE * DP_SIZE). | None |
 | `--world-rank` | Global unique ID of the current process/GPU in the distributed system. | None |
 | `--local-world-size` | Number of GPU devices used on the current node. | None |
@@ -21,6 +22,38 @@ This page lists server arguments used to configure the behavior and performance 
 |-----------|-------------|----------|
 | `--concurrency-with-block` | Controls blocking behavior for concurrent requests. | False |
 | `--concurrency-limit` | Maximum number of concurrent requests allowed by the system. | 32 |
+
+## DeepSeek-V4 on SM120
+
+| Argument | Environment variable | Default | Behavior |
+| --- | --- | --- | --- |
+| `--moe_strategy` | `MOE_STRATEGY` | `auto` | Selects a strategy subject to model, topology and backend capability checks. |
+| `--dsv4_startup_real_warmup` | `DSV4_STARTUP_REAL_WARMUP` | `true` | Runs real-request startup warmup for DeepSeek-V4 PREFILL when both `warm_up` and `model_warm_up` are enabled. Readiness remains gated until warmup completes. |
+
+Explicit command-line values take precedence over the corresponding environment
+defaults. Real-request warmup runs only on applicable DeepSeek-V4 PREFILL
+entry ranks; it does not enable warmup on other models or roles. The gated
+HTTP health endpoints return 503 until warmup completes; `/liveness` and
+`/frontend_health` are not held by this gate. Use
+`--dsv4_startup_real_warmup=false` to disable this additional warmup.
+
+On SM120, `grouped_fp4` provides rank-local MXFP4 experts for EP1, while
+`sm120_fused_moe` supports expert-parallel execution with EP greater than one.
+`sm120_decode` must be selected explicitly. For engine-managed DP CUDA-graph
+decode on a separate DECODE role, use TP1, DP greater than one, EP equal to DP,
+world size equal to DP, PP1 and CUDA graphs enabled, without local context
+parallelism or FFN disaggregation. The executor also has other execution
+routes; these conditions describe this DP decode topology, not every use of
+the executor. Speculative DP requires separate PREFILL and DECODE roles.
+Selecting `auto` does not select this decode specialization.
+Capability checks also depend on the model and the pinned kernel providers;
+the strategy name alone does not make an unsupported topology valid.
+
+For DeepSeek-V4, `DSV4_MOE_STRATEGY` is a compatibility alias for the two
+SM120 strategies only when the public strategy remains `auto`. Prefer
+`--moe_strategy` for explicit startup configuration. Numerical and optional
+kernel controls are listed in the
+[environment reference](../references/environment_variables.md).
 
 ## [Attention Optimization](./attention_backend.md)
 
