@@ -230,7 +230,11 @@ class KimiK3MlaWarmupContractTest(unittest.TestCase):
         adapter, scratch, table, descriptor = pack.call_args.args
         self.assertEqual(scratch.stride(), live.stride())
         self.assertNotEqual(scratch.data_ptr(), live.data_ptr())
-        self.assertEqual(adapter.table_layout, "compact")
+        self.assertEqual(adapter.page_tokens, spec.physical_page_tokens)
+        self.assertEqual(adapter.kernel_page_tokens, spec.page_tokens)
+        self.assertEqual(
+            (adapter.shard_size, adapter.shard_rank), (spec.shards, spec.rank)
+        )
         self.assertEqual(descriptor.prefix_starts, (spec.rank * 256,))
         self.assertEqual(descriptor.prefix_lens, (1,))
         self.assertEqual(table.tolist(), [[1, 2, 3, 4]])
