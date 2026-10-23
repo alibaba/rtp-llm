@@ -1708,6 +1708,10 @@ class Qwen3NextModel(GptModelBase):
 
 class Qwen35Model(Qwen3NextModel):
 
+    def forward(self, inputs: PyModelInputs, fmha_impl: Any = None) -> PyModelOutputs:
+        get_primary_attention_inputs(inputs, self.kv_cache)
+        return super().forward(inputs, fmha_impl)
+
     def __init__(
         self,
         model_config: ModelConfig,
