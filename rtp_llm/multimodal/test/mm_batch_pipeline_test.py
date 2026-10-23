@@ -39,6 +39,8 @@ class Item:
         self.mm_timeout_ms = timeout_ms
         self.embedding_result = None
         self.completed = False
+        self.defer_feature_hashes = True
+        self.feature_hashes = None
 
     def complete_cache(self, result):
         self.completed = True

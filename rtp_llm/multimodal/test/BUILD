@@ -109,6 +109,15 @@ py_test(
 )
 
 py_test(
+    name = "mm_feature_hash_batch_test",
+    srcs = ["mm_feature_hash_batch_test.py"],
+    data = ["//:rtp_compute_ops", "//:th_transformer"],
+    deps = ["//rtp_llm:testlib"],
+    env = {"GPU_COUNT": "1", "WORLD_SIZE": "1"},
+    tags = ["manual", "local", "L20_CU13"],
+)
+
+py_test(
     name = "mm_output_transport_test",
     srcs = [
         "mm_output_transport_test.py",

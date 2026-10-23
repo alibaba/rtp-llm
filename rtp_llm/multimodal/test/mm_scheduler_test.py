@@ -146,6 +146,8 @@ class _FakeWorkItem:
         self.mm_timeout_ms = timeout_ms
         self.embedding_result: Optional[Any] = None
         self.need_check_cache = False
+        self.defer_feature_hashes = True
+        self.feature_hashes = None
         self.cache_key = None
         self.work_estimate = (
             MMWorkEstimate(input_patches=input_patches)
