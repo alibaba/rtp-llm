@@ -20,8 +20,11 @@
 #include "rtp_llm/cpp/cache/CPSlotMapper.h"
 #include "rtp_llm/cpp/cache/FullCacheManager.h"
 #include "rtp_llm/cpp/cache/CoordinatorCacheManager.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/block_pool/AlignedHostMemory.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/group_set/SWAGroupSet.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/test/BlockTreeCacheTestUtils.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/transfer/BlockTransferDispatcher.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/transfer/PerRankBlockTransferEngine.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/test/PerRankBlockTransferEngineTestUtils.h"
 #include "rtp_llm/cpp/cache/test/CacheConfigTestUtils.h"
 #include "rtp_llm/cpp/config/StaticConfig.h"
@@ -44,6 +47,36 @@ public:
 
 private:
     bool old_;
+};
+
+// value == nullptr removes the variable for the guard's lifetime.
+class ScopedEnvVar {
+public:
+    ScopedEnvVar(const char* name, const char* value): name_(name) {
+        const char* old_value = std::getenv(name_);
+        if (old_value != nullptr) {
+            old_value_ = old_value;
+            had_value_ = true;
+        }
+        if (value == nullptr) {
+            unsetenv(name_);
+        } else {
+            setenv(name_, value, 1);
+        }
+    }
+
+    ~ScopedEnvVar() {
+        if (had_value_) {
+            setenv(name_, old_value_.c_str(), 1);
+        } else {
+            unsetenv(name_);
+        }
+    }
+
+private:
+    const char* name_;
+    std::string old_value_;
+    bool        had_value_ = false;
 };
 
 CacheConfig makeSingleConfig() {
@@ -398,7 +431,9 @@ void expectFactoryRejects(const CacheConfig&                              config
     CoreDumpGuard guard;
     try {
         EXPECT_EQ(createBlockTreeCache(config, kv_cache_config, allocator), nullptr);
-    } catch (const std::exception&) { SUCCEED(); }
+    } catch (const std::exception&) {
+        SUCCEED();
+    }
     EXPECT_EQ(allocator->blockTreeCache(), nullptr);
 }
 
@@ -490,7 +525,7 @@ void writeDevicePattern(void* address, size_t bytes, uint8_t pattern) {
 void expectDevicePattern(const void* address, size_t bytes, uint8_t pattern) {
     ASSERT_NE(address, nullptr);
     auto        device = torch::from_blob(const_cast<void*>(address),
-                                   {static_cast<int64_t>(bytes)},
+                                          {static_cast<int64_t>(bytes)},
                                    torch::TensorOptions(torch::kUInt8).device(torch::kCUDA));
     auto        host   = device.cpu();
     const auto* data   = host.data_ptr<uint8_t>();
@@ -780,14 +815,18 @@ TEST_F(BlockTreeCacheFactoryTest, HeterogeneousMtpPreservesExactGeometryAcrossCo
     const auto host_block = group_set->hostPool()->malloc();
     ASSERT_TRUE(host_block.has_value());
     group_set->hostPool()->incTreeRef(*host_block, BlockTreeRefType::STORE);
-    EXPECT_TRUE(cache->executeTransfer(block_transfer_engine_test::makeTransferTask(
-        {TransferDescriptor::deviceToHost(group_set->groupSetId(), {src}, *host_block)})).ok());
+    EXPECT_TRUE(cache
+                    ->executeTransfer(block_transfer_engine_test::makeTransferTask(
+                        {TransferDescriptor::deviceToHost(group_set->groupSetId(), {src}, *host_block)}))
+                    .ok());
     for (int layer = 0; layer < 3; ++layer) {
         writeDevicePattern(
             allocator->convertIndexToAddr(layer, "default", src).kv_addr, bytes[static_cast<size_t>(layer)], 0);
     }
-    EXPECT_TRUE(cache->executeTransfer(block_transfer_engine_test::makeTransferTask(
-        {TransferDescriptor::hostToDevice(group_set->groupSetId(), *host_block, {src})})).ok());
+    EXPECT_TRUE(cache
+                    ->executeTransfer(block_transfer_engine_test::makeTransferTask(
+                        {TransferDescriptor::hostToDevice(group_set->groupSetId(), *host_block, {src})}))
+                    .ok());
     for (int layer = 0; layer < 3; ++layer) {
         expectDevicePattern(allocator->convertIndexToAddr(layer, "default", src).kv_addr,
                             bytes[static_cast<size_t>(layer)],
@@ -796,7 +835,7 @@ TEST_F(BlockTreeCacheFactoryTest, HeterogeneousMtpPreservesExactGeometryAcrossCo
 
     if (CrcBlockCopyBatch::available()) {
         // This byte lies beyond the logical 32-byte stride of the target tag.
-        // Its corruption must reject the entire MTP backing before any scatter.
+        // Its corruption must reject the entire MTP backing, even though scatter may already have completed.
         auto* host_data = static_cast<uint8_t*>(group_set->hostPool()->blockBuffer(*host_block).addr);
         host_data[159] ^= 1;
         for (int layer = 0; layer < 3; ++layer) {
@@ -806,9 +845,16 @@ TEST_F(BlockTreeCacheFactoryTest, HeterogeneousMtpPreservesExactGeometryAcrossCo
         const auto status = cache->executeTransfer(block_transfer_engine_test::makeTransferTask(
             {TransferDescriptor::hostToDevice(group_set->groupSetId(), *host_block, {src})}));
         EXPECT_FALSE(status.ok());
+        EXPECT_EQ(status.copy_error, CacheCopyError::CRC_MISMATCH);
+        host_data[159] ^= 1;
+        ASSERT_TRUE(cache
+                        ->executeTransfer(block_transfer_engine_test::makeTransferTask(
+                            {TransferDescriptor::hostToDevice(group_set->groupSetId(), *host_block, {src})}))
+                        .ok());
         for (int layer = 0; layer < 3; ++layer) {
-            expectDevicePattern(
-                allocator->convertIndexToAddr(layer, "default", src).kv_addr, bytes[static_cast<size_t>(layer)], 0xa5);
+            expectDevicePattern(allocator->convertIndexToAddr(layer, "default", src).kv_addr,
+                                bytes[static_cast<size_t>(layer)],
+                                patterns[static_cast<size_t>(layer)]);
         }
     }
 
@@ -1078,12 +1124,16 @@ TEST_F(BlockTreeCacheFactoryTest, PerRankBlockTransferEnginePreservesNonContiguo
     writeDevicePattern(full_group->convertIndexToAddr(/*global_layer=*/0, device_block).kv_addr, layer_bytes, 0x31);
     writeDevicePattern(full_group->convertIndexToAddr(/*global_layer=*/2, device_block).kv_addr, layer_bytes, 0x72);
 
-    EXPECT_TRUE(cache->executeTransfer(block_transfer_engine_test::makeTransferTask(
-        {TransferDescriptor::deviceToHost(group_set->groupSetId(), {device_block}, host_block)})).ok());
+    EXPECT_TRUE(cache
+                    ->executeTransfer(block_transfer_engine_test::makeTransferTask(
+                        {TransferDescriptor::deviceToHost(group_set->groupSetId(), {device_block}, host_block)}))
+                    .ok());
     writeDevicePattern(full_group->convertIndexToAddr(/*global_layer=*/0, device_block).kv_addr, layer_bytes, 0x00);
     writeDevicePattern(full_group->convertIndexToAddr(/*global_layer=*/2, device_block).kv_addr, layer_bytes, 0x00);
-    EXPECT_TRUE(cache->executeTransfer(block_transfer_engine_test::makeTransferTask(
-        {TransferDescriptor::hostToDevice(group_set->groupSetId(), host_block, {device_block})})).ok());
+    EXPECT_TRUE(cache
+                    ->executeTransfer(block_transfer_engine_test::makeTransferTask(
+                        {TransferDescriptor::hostToDevice(group_set->groupSetId(), host_block, {device_block})}))
+                    .ok());
 
     expectDevicePattern(full_group->convertIndexToAddr(/*global_layer=*/0, device_block).kv_addr, layer_bytes, 0x31);
     expectDevicePattern(full_group->convertIndexToAddr(/*global_layer=*/2, device_block).kv_addr, layer_bytes, 0x72);
@@ -1280,8 +1330,10 @@ TEST_F(BlockTreeCacheFactoryTest, SparseMlaIndexerPoolsShareAtomicReuseAndPacked
                 cache_group->convertIndexToAddr(global_layer, device_blocks[0][member]).kv_addr, layer_bytes, pattern);
         }
     }
-    EXPECT_TRUE(cache->executeTransfer(block_transfer_engine_test::makeTransferTask(
-        {TransferDescriptor::deviceToHost(group_set->groupSetId(), device_blocks[0], *host_block)})).ok());
+    EXPECT_TRUE(cache
+                    ->executeTransfer(block_transfer_engine_test::makeTransferTask(
+                        {TransferDescriptor::deviceToHost(group_set->groupSetId(), device_blocks[0], *host_block)}))
+                    .ok());
     for (size_t member = 0; member < cache_groups.size(); ++member) {
         const auto&  cache_group = cache_groups[member];
         const size_t layer_bytes =
@@ -1291,8 +1343,10 @@ TEST_F(BlockTreeCacheFactoryTest, SparseMlaIndexerPoolsShareAtomicReuseAndPacked
                 cache_group->convertIndexToAddr(global_layer, device_blocks[0][member]).kv_addr, layer_bytes, 0);
         }
     }
-    EXPECT_TRUE(cache->executeTransfer(block_transfer_engine_test::makeTransferTask(
-        {TransferDescriptor::hostToDevice(group_set->groupSetId(), *host_block, device_blocks[0])})).ok());
+    EXPECT_TRUE(cache
+                    ->executeTransfer(block_transfer_engine_test::makeTransferTask(
+                        {TransferDescriptor::hostToDevice(group_set->groupSetId(), *host_block, device_blocks[0])}))
+                    .ok());
     for (size_t member = 0; member < cache_groups.size(); ++member) {
         const auto&  cache_group = cache_groups[member];
         const size_t layer_bytes =
@@ -2474,7 +2528,18 @@ TEST_P(BlockTreeCacheFactoryRatioTest, IndependentHostCapacitiesPreserveTransfer
 
 INSTANTIATE_TEST_SUITE_P(HostBlockRatios, BlockTreeCacheFactoryRatioTest, ::testing::Values(0.5, 1.0, 2.0));
 
-void verifyCrcResidencyRoundTrip(CacheConfig config, const std::vector<bool>& expected_crc, bool with_disk = false) {
+void expectCrcServiceCreated(const BlockTreeCachePtr& cache, bool expected) {
+    ASSERT_NE(cache->transfer_dispatcher_, nullptr);
+    const auto& engine = cache->transfer_dispatcher_->per_rank_engine_;
+    ASSERT_NE(engine, nullptr);
+    ASSERT_NE(engine->device_host_executor_, nullptr);
+    EXPECT_EQ(engine->device_host_executor_->crc_service_ != nullptr, expected);
+}
+
+void verifyCrcResidencyRoundTrip(CacheConfig              config,
+                                 const std::vector<bool>& expected_crc,
+                                 bool                     with_disk  = false,
+                                 bool                     enable_crc = true) {
     auto groups                                  = config.groups();
     groups.front().policy.memory_placement       = CacheMemoryPlacement::HOST_PINNED;
     groups.front().policy.charge_to_paged_budget = false;
@@ -2482,6 +2547,7 @@ void verifyCrcResidencyRoundTrip(CacheConfig config, const std::vector<bool>& ex
     auto                                     allocator = initAllocator<CoordinatorCacheManager>(config);
     block_transfer_engine_test::TempDirGuard disk_dir("block_tree_residency");
     KVCacheConfig                            options;
+    options.enable_crc             = enable_crc;
     options.enable_memory_cache    = true;
     options.memory_cache_size_mb   = 1;
     options.enable_disk_cache      = with_disk;
@@ -2491,6 +2557,8 @@ void verifyCrcResidencyRoundTrip(CacheConfig config, const std::vector<bool>& ex
     auto cache                     = createBlockTreeCache(config, options, allocator);
     ASSERT_NE(cache, nullptr);
     ASSERT_EQ(cache->groupSets().size(), expected_crc.size());
+    ASSERT_NO_FATAL_FAILURE(expectCrcServiceCreated(
+        cache, std::find(expected_crc.begin(), expected_crc.end(), true) != expected_crc.end()));
     std::vector<block_tree_cache_test::MultiNodeBlocks> blocks;
     std::vector<BlockIdxType>                           host_blocks;
     std::vector<TransferDescriptor>                     stores, loads;
@@ -2556,13 +2624,17 @@ void verifyCrcResidencyRoundTrip(CacheConfig config, const std::vector<bool>& ex
             const auto& group = cache->groupSets()[index];
             disk_blocks.push_back(group->allocateSingleBlock(Tier::DISK, BlockTreeRefType::STORE));
             ASSERT_NE(disk_blocks.back(), NULL_BLOCK_IDX);
-            ASSERT_TRUE(cache->executeTransfer(block_transfer_engine_test::makeTransferTask(
-                {TransferDescriptor::hostToDisk(index, host_blocks[index], disk_blocks.back())})).ok());
+            ASSERT_TRUE(cache
+                            ->executeTransfer(block_transfer_engine_test::makeTransferTask(
+                                {TransferDescriptor::hostToDisk(index, host_blocks[index], disk_blocks.back())}))
+                            .ok());
         }
         ASSERT_NO_FATAL_FAILURE(visit(fill, 0));
         for (size_t index = 0; index < cache->groupSets().size(); ++index) {
-            ASSERT_TRUE(cache->executeTransfer(block_transfer_engine_test::makeTransferTask(
-                {TransferDescriptor::diskToDevice(index, disk_blocks[index], blocks[index].front())})).ok());
+            ASSERT_TRUE(cache
+                            ->executeTransfer(block_transfer_engine_test::makeTransferTask(
+                                {TransferDescriptor::diskToDevice(index, disk_blocks[index], blocks[index].front())}))
+                            .ok());
             cache->groupSets()[index]->releaseSingleBlock(Tier::DISK, disk_blocks[index], BlockTreeRefType::STORE);
         }
         ASSERT_NO_FATAL_FAILURE(visit(expect, -1));
@@ -2577,8 +2649,13 @@ void verifyCrcResidencyRoundTrip(CacheConfig config, const std::vector<bool>& ex
         ASSERT_NO_FATAL_FAILURE(visit(fill, 0xa5));
         const auto error = cache->executeTransfer(block_transfer_engine_test::makeTransferTask({loads[index]}));
         EXPECT_FALSE(error.ok());
-        // The failed CRC load must leave its target unchanged.
-        ASSERT_NO_FATAL_FAILURE(visit(expect, 0xa5));
+        EXPECT_EQ(error.copy_error, CacheCopyError::CRC_MISMATCH);
+        // Failed loads can scatter before reporting CRC failure; restoring the source must allow reuse.
+        record[0] ^= 1;
+        for (const auto& load : loads) {
+            ASSERT_TRUE(cache->executeTransfer(block_transfer_engine_test::makeTransferTask({load})).ok());
+        }
+        ASSERT_NO_FATAL_FAILURE(visit(expect, -1));
     }
     for (size_t index = 0; index < cache->groupSets().size(); ++index) {
         const auto& group = cache->groupSets()[index];
@@ -2588,20 +2665,42 @@ void verifyCrcResidencyRoundTrip(CacheConfig config, const std::vector<bool>& ex
 }
 
 TEST_F(BlockTreeCacheFactoryTest, HostResidentBackingUsesOrdinaryCopiesWithCrcBackendAvailable) {
-    ASSERT_NO_FATAL_FAILURE(verifyCrcResidencyRoundTrip(makeSingleConfig(), {false}, true));
+    for (bool enable_crc : {false, true}) {
+        SCOPED_TRACE(enable_crc);
+        ASSERT_NO_FATAL_FAILURE(verifyCrcResidencyRoundTrip(makeSingleConfig(), {false}, true, enable_crc));
+    }
 }
 
 TEST_F(BlockTreeCacheFactoryTest, MixedResidencyBackingKeepsOneOrdinaryRecord) {
-    ASSERT_NO_FATAL_FAILURE(verifyCrcResidencyRoundTrip(makeCompatibleFullGroupsConfig(), {false}, true));
+    for (bool enable_crc : {false, true}) {
+        SCOPED_TRACE(enable_crc);
+        ASSERT_NO_FATAL_FAILURE(
+            verifyCrcResidencyRoundTrip(makeCompatibleFullGroupsConfig(), {false}, true, enable_crc));
+    }
 }
 
 TEST_F(BlockTreeCacheFactoryTest, HostResidentGroupDoesNotDisableAnotherGroupsGpuCrc) {
-    ASSERT_NO_FATAL_FAILURE(verifyCrcResidencyRoundTrip(makeHybridConfig(), {false, CrcBlockCopyBatch::available()}));
+    for (bool enable_crc : {false, true}) {
+        SCOPED_TRACE(enable_crc);
+        ASSERT_NO_FATAL_FAILURE(verifyCrcResidencyRoundTrip(
+            makeHybridConfig(), {false, enable_crc && CrcBlockCopyBatch::available()}, false, enable_crc));
+    }
 }
 
-TEST_F(BlockTreeCacheFactoryTest, DefaultCrcAtPageBoundaryUsesEncodedStrideInLocalTierBudgets) {
-    const auto config        = test::makeSimpleMhaCacheConfig(2, 8, 64, DataType::TYPE_FP16, 1, 8);
-    const bool crc_available = CrcBlockCopyBatch::available();
+TEST_F(BlockTreeCacheFactoryTest, ExplicitCrcConfigOverridesEnvironment) {
+    for (bool enable_crc : {false, true}) {
+        SCOPED_TRACE(enable_crc);
+        ScopedEnvVar env("ENABLE_CRC", enable_crc ? "0" : "1");
+        ASSERT_NO_FATAL_FAILURE(verifyCrcResidencyRoundTrip(
+            makeHybridConfig(), {false, enable_crc && CrcBlockCopyBatch::available()}, false, enable_crc));
+    }
+}
+
+void verifyCrcLocalTierBudgets(bool enable_crc, int tokens_per_block = 64) {
+    const auto   config        = test::makeSimpleMhaCacheConfig(2, 8, tokens_per_block, DataType::TYPE_FP16, 1, 8);
+    const bool   crc_available = enable_crc && CrcBlockCopyBatch::available();
+    const size_t payload_bytes = static_cast<size_t>(tokens_per_block) * 64;
+    const size_t storage_bytes = payload_bytes + (crc_available ? 16 : 0);
     for (const auto& [host_on, disk_on, buffered_io] : {std::array<bool, 3>{true, false, true},
                                                         {true, false, false},
                                                         {false, true, true},
@@ -2613,6 +2712,7 @@ TEST_F(BlockTreeCacheFactoryTest, DefaultCrcAtPageBoundaryUsesEncodedStrideInLoc
         auto                                     allocator = initAllocator<CoordinatorCacheManager>(config);
         block_transfer_engine_test::TempDirGuard disk_dir("block_tree_cache_default_crc_budget");
         KVCacheConfig                            options;
+        options.enable_crc             = enable_crc;
         options.enable_memory_cache    = host_on;
         options.memory_cache_size_mb   = 1;
         options.enable_disk_cache      = disk_on;
@@ -2622,33 +2722,43 @@ TEST_F(BlockTreeCacheFactoryTest, DefaultCrcAtPageBoundaryUsesEncodedStrideInLoc
         auto cache                     = createBlockTreeCache(config, options, allocator);
         ASSERT_NE(cache, nullptr);
         ASSERT_EQ(cache->groupSets().size(), 1u);
+        ASSERT_NO_FATAL_FAILURE(expectCrcServiceCreated(cache, crc_available));
         const auto& group = cache->groupSets().front();
-        ASSERT_EQ(group->payloadBytes(), 4096u);
+        ASSERT_EQ(group->payloadBytes(), payload_bytes);
         EXPECT_EQ(group->crcEnabled(), crc_available);
-        EXPECT_EQ(group->storageBytes(), crc_available ? 4112u : 4096u);
+        EXPECT_EQ(group->storageBytes(), storage_bytes);
         const bool   direct_io       = disk_on && !buffered_io;
-        const size_t expected_stride = crc_available ? (direct_io ? 8192u : 4112u) : 4096u;
+        const size_t expected_stride = direct_io ? ((storage_bytes + 4095) / 4096) * 4096 : storage_bytes;
         // Each lower tier has its own 1 MiB budget, including one reserved block.
         const size_t expected_usable = (1024u * 1024u) / expected_stride - 1;
         ASSERT_EQ(group->hostPool() != nullptr, host_on);
         ASSERT_EQ(group->diskPool() != nullptr, disk_on);
         if (host_on) {
-            EXPECT_EQ(group->hostPool()->payloadBytes(), 4096u);
+            EXPECT_EQ(group->hostPool()->payloadBytes(), payload_bytes);
             EXPECT_EQ(group->hostPool()->strideBytes(), expected_stride);
             EXPECT_EQ(group->hostPool()->totalBlocksNum(), expected_usable);
             EXPECT_EQ(group->hostPool()->freeBlocksNum(), expected_usable);
         }
         if (disk_on) {
-            EXPECT_EQ(group->diskPool()->payloadBytes(), 4096u);
+            EXPECT_EQ(group->diskPool()->payloadBytes(), payload_bytes);
             EXPECT_EQ(group->diskPool()->strideBytes(), expected_stride);
             EXPECT_EQ(group->diskPool()->totalBlocksNum(), expected_usable);
             EXPECT_EQ(group->diskPool()->freeBlocksNum(), expected_usable);
+            const auto& executor = cache->transfer_dispatcher_->per_rank_engine_->device_disk_executor_;
+            ASSERT_NE(executor, nullptr);
+            const size_t staging_stride = ((storage_bytes + 4095) / 4096) * 4096;
+            EXPECT_EQ(executor->full_staging_pool_->stride_bytes_, staging_stride);
+            EXPECT_EQ(executor->swa_staging_pool_->stride_bytes_, staging_stride);
+            if (!host_on) {
+                auto& staging = *executor->full_staging_pool_;
+                std::memset(staging.backing_.data(), 0xa5, staging.block_count_ * staging.stride_bytes_);
+            }
         }
 
         // Two adjacent records catch footer writes that overlap the next compact slot.
         const auto device_blocks = block_tree_cache_test::allocateDeviceBlocksForTest(*group, 2);
         ASSERT_EQ(device_blocks.size(), 2u);
-        std::vector<BlockIdxType> host_blocks, disk_blocks;
+        std::vector<BlockIdxType>       host_blocks, disk_blocks;
         std::vector<TransferDescriptor> stores, loads, disk_stores, disk_loads;
         for (const auto& blocks : device_blocks) {
             ASSERT_EQ(blocks.size(), 1u);
@@ -2657,6 +2767,7 @@ TEST_F(BlockTreeCacheFactoryTest, DefaultCrcAtPageBoundaryUsesEncodedStrideInLoc
                 ASSERT_NE(host_blocks.back(), NULL_BLOCK_IDX);
                 const auto buffer = group->hostPool()->blockBuffer(host_blocks.back());
                 EXPECT_EQ(reinterpret_cast<uintptr_t>(buffer.addr) % (direct_io ? 4096u : 16u), 0u);
+                std::memset(buffer.addr, 0xa5, buffer.stride_bytes);
                 stores.push_back(TransferDescriptor::deviceToHost(0, blocks, host_blocks.back()));
                 loads.push_back(TransferDescriptor::hostToDevice(0, host_blocks.back(), blocks));
             }
@@ -2673,16 +2784,16 @@ TEST_F(BlockTreeCacheFactoryTest, DefaultCrcAtPageBoundaryUsesEncodedStrideInLoc
             }
         }
         if (host_on) {
-            const auto first = reinterpret_cast<uintptr_t>(group->hostPool()->blockBuffer(host_blocks[0]).addr);
+            const auto first  = reinterpret_cast<uintptr_t>(group->hostPool()->blockBuffer(host_blocks[0]).addr);
             const auto second = reinterpret_cast<uintptr_t>(group->hostPool()->blockBuffer(host_blocks[1]).addr);
             EXPECT_EQ(std::max(first, second) - std::min(first, second), expected_stride);
         }
         const auto target_group = allocator->cacheGroups().front();
-        const auto visit = [&](bool verify, bool clear = false) {
+        const auto visit        = [&](bool verify, bool clear = false) {
             for (size_t index = 0; index < device_blocks.size(); ++index) {
                 for (int layer = 0; layer < 2; ++layer) {
-                    auto* addr = target_group->convertIndexToAddr(layer, device_blocks[index].front()).kv_addr;
-                    const size_t bytes = target_group->config().kvBlockStrideBytes();
+                    auto*         addr  = target_group->convertIndexToAddr(layer, device_blocks[index].front()).kv_addr;
+                    const size_t  bytes = target_group->config().kvBlockStrideBytes();
                     const uint8_t pattern = clear ? 0 : 0x31 + index * 0x20 + layer * 7;
                     if (verify) {
                         expectDevicePattern(addr, bytes, pattern);
@@ -2710,6 +2821,15 @@ TEST_F(BlockTreeCacheFactoryTest, DefaultCrcAtPageBoundaryUsesEncodedStrideInLoc
         if (disk_on) {
             EXPECT_EQ(group->diskPool()->writeBytes(), 2 * expected_stride);
             EXPECT_EQ(group->diskPool()->readBytes(), 2 * expected_stride);
+            if (expected_stride > storage_bytes) {
+                AlignedHostMemory record(expected_stride, 4096, "crc_config_disk_padding_test");
+                for (const auto block : disk_blocks) {
+                    ASSERT_EQ(group->diskPool()->read(block, record.data(), expected_stride), BlockIOStatus::OK);
+                    EXPECT_TRUE(std::all_of(record.data() + storage_bytes,
+                                            record.data() + expected_stride,
+                                            [](uint8_t byte) { return byte == 0; }));
+                }
+            }
         }
         for (const auto block : host_blocks) {
             group->releaseSingleBlock(Tier::HOST, block, BlockTreeRefType::STORE);
@@ -2721,14 +2841,28 @@ TEST_F(BlockTreeCacheFactoryTest, DefaultCrcAtPageBoundaryUsesEncodedStrideInLoc
     }
 }
 
-TEST_F(BlockTreeCacheFactoryTest, DefaultLocalTierTransfersUseAvailableIntegrityProtection) {
+TEST_F(BlockTreeCacheFactoryTest, DefaultCrcAtPageBoundaryUsesEncodedStrideInLocalTierBudgets) {
+    ASSERT_TRUE(KVCacheConfig{}.enable_crc);
+    ASSERT_NO_FATAL_FAILURE(verifyCrcLocalTierBudgets(true));
+}
+
+TEST_F(BlockTreeCacheFactoryTest, DisabledCrcUsesOrdinaryStrideAndNoCrcWorkspace) {
+    ASSERT_NO_FATAL_FAILURE(verifyCrcLocalTierBudgets(false));
+}
+
+TEST_F(BlockTreeCacheFactoryTest, DisabledCrcPreservesDirectIoAlignmentAndClearsPadding) {
+    ASSERT_NO_FATAL_FAILURE(verifyCrcLocalTierBudgets(false, 4));
+}
+
+void verifyLocalTierIntegrityProtection(bool enable_crc) {
     const auto config        = makeSingleConfig();
-    const bool crc_available = CrcBlockCopyBatch::available();
+    const bool crc_available = enable_crc && CrcBlockCopyBatch::available();
     for (const Tier tier : {Tier::HOST, Tier::DISK}) {
         SCOPED_TRACE(tier == Tier::HOST ? "host-only" : "disk-only");
         auto                                     allocator = initAllocator<CoordinatorCacheManager>(config);
         block_transfer_engine_test::TempDirGuard disk_dir("block_tree_cache_default_crc_transfer");
         KVCacheConfig                            options;
+        options.enable_crc             = enable_crc;
         options.enable_memory_cache    = tier == Tier::HOST;
         options.memory_cache_size_mb   = 1;
         options.enable_disk_cache      = tier == Tier::DISK;
@@ -2783,10 +2917,9 @@ TEST_F(BlockTreeCacheFactoryTest, DefaultLocalTierTransfersUseAvailableIntegrity
         const auto result = cache->executeTransfer(block_transfer_engine_test::makeTransferTask({load}));
         if (crc_available) {
             EXPECT_FALSE(result.ok());
-            expectDevicePattern(first_layer, layer_bytes, 0);
-            expectDevicePattern(second_layer, layer_bytes, 0);
+            EXPECT_EQ(result.copy_error, CacheCopyError::CRC_MISMATCH);
         } else {
-            // Unsupported builds retain the ordinary copy path and do not interpret a footer.
+            // Disabled CRC and unsupported builds copy the payload without interpreting a footer.
             EXPECT_TRUE(result.ok());
             expectDevicePattern(first_layer, 1, 0xca);
             expectDevicePattern(first_layer + 1, layer_bytes - 1, 0x35);
@@ -2802,19 +2935,32 @@ TEST_F(BlockTreeCacheFactoryTest, DefaultLocalTierTransfersUseAvailableIntegrity
     }
 }
 
+TEST_F(BlockTreeCacheFactoryTest, DefaultLocalTierTransfersUseAvailableIntegrityProtection) {
+    ASSERT_NO_FATAL_FAILURE(verifyLocalTierIntegrityProtection(true));
+}
+
+TEST_F(BlockTreeCacheFactoryTest, DisabledCrcCopiesCorruptedLocalTierPayloadWithoutIntegrityError) {
+    ASSERT_NO_FATAL_FAILURE(verifyLocalTierIntegrityProtection(false));
+}
+
 TEST_F(BlockTreeCacheFactoryTest, DeviceOnlyDoesNotCreateEncodedStorage) {
-    const auto    config    = makeSingleConfig();
-    auto          allocator = initAllocator<CoordinatorCacheManager>(config);
-    KVCacheConfig options;
-    options.enable_memory_cache = false;
-    options.enable_disk_cache   = false;
-    auto cache                  = createBlockTreeCache(config, options, allocator);
-    ASSERT_NE(cache, nullptr);
-    for (const auto& group : cache->groupSets()) {
-        EXPECT_FALSE(group->crcEnabled());
-        EXPECT_EQ(group->storageBytes(), group->payloadBytes());
-        EXPECT_EQ(group->hostPool(), nullptr);
-        EXPECT_EQ(group->diskPool(), nullptr);
+    const auto config    = makeSingleConfig();
+    auto       allocator = initAllocator<CoordinatorCacheManager>(config);
+    for (bool enable_crc : {false, true}) {
+        SCOPED_TRACE(enable_crc);
+        KVCacheConfig options;
+        options.enable_crc          = enable_crc;
+        options.enable_memory_cache = false;
+        options.enable_disk_cache   = false;
+        auto cache                  = createBlockTreeCache(config, options, allocator);
+        ASSERT_NE(cache, nullptr);
+        ASSERT_NO_FATAL_FAILURE(expectCrcServiceCreated(cache, false));
+        for (const auto& group : cache->groupSets()) {
+            EXPECT_FALSE(group->crcEnabled());
+            EXPECT_EQ(group->storageBytes(), group->payloadBytes());
+            EXPECT_EQ(group->hostPool(), nullptr);
+            EXPECT_EQ(group->diskPool(), nullptr);
+        }
     }
 }
 

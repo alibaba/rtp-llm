@@ -38,6 +38,14 @@ def init_kv_cache_group_args(parser, kv_cache_config):
     ##############################################################################################################
     kv_cache_group = parser.add_argument_group("KVCache")
     kv_cache_group.add_argument(
+        "--enable_crc",
+        env_name="ENABLE_CRC",
+        bind_to=(kv_cache_config, "enable_crc"),
+        type=str2bool,
+        default=True,
+        help="启用本地 HOST/DISK KV cache 传输的 CRC 校验，默认开启；仅在支持 CRC 的构建中生效。启动时配置。",
+    )
+    kv_cache_group.add_argument(
         "--reuse_cache",
         env_name="REUSE_CACHE",
         bind_to=(kv_cache_config, "reuse_cache"),

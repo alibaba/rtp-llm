@@ -1,3 +1,4 @@
+import argparse
 import importlib
 import io
 import json
@@ -148,6 +149,41 @@ class CacheConfigArgumentsTest(TestCase):
                         name=name, value=value, args=args
                     ), self.assertRaises(SystemExit):
                         self.parse_cache_config(args, {name.upper(): value})
+
+    def test_crc_default_and_environment(self):
+        for args in (None, []):
+            for env, expected in (
+                ({}, True),
+                ({"ENABLE_CRC": "0"}, False),
+                ({"ENABLE_CRC": "1"}, True),
+            ):
+                with self.subTest(args=args, env=env):
+                    config = self.parse_cache_config(args, env)
+                    self.assertIs(config.enable_crc, expected)
+
+    def test_crc_cli_overrides_environment(self):
+        for value, expected, env_value in (("0", False, "1"), ("1", True, "0")):
+            for args in (["--enable_crc", value], [f"--enable_crc={value}"]):
+                for use_sys_argv in (False, True):
+                    with self.subTest(args=args, use_sys_argv=use_sys_argv):
+                        config = self.parse_cache_config(
+                            args, {"ENABLE_CRC": env_value}, use_sys_argv
+                        )
+                        self.assertIs(config.enable_crc, expected)
+
+    def test_crc_rejects_invalid_boolean(self):
+        for args, env in (
+            (None, {"ENABLE_CRC": "invalid"}),
+            ([], {"ENABLE_CRC": "invalid"}),
+            (["--enable_crc", "invalid"], {}),
+        ):
+            with self.subTest(args=args, env=env), patch(
+                "sys.stderr", new_callable=io.StringIO
+            ) as stderr:
+                with self.assertRaises(SystemExit) as raised:
+                    self.parse_cache_config(args, env)
+                self.assertEqual(raised.exception.code, 2)
+                self.assertIn("Boolean value expected", stderr.getvalue())
 
     def test_canonical_env_and_cli_bind_all_fields(self):
         samples = self.startup_samples()
@@ -1798,6 +1834,32 @@ class ServerArgsGrammarConfigTest(TestCase):
                 sys.argv = ["prog", flag, "0"]
                 with self.assertRaises(SystemExit):
                     self._setup()
+
+
+class GenerateArgsFromEnvTest(TestCase):
+    def test_str2bool_environment_value_is_not_dropped(self):
+        from rtp_llm.server.server_args.generate_args_from_env_clean import (
+            format_argument_pair,
+            read_env_value,
+        )
+        from rtp_llm.server.server_args.util import str2bool
+
+        with patch.dict(os.environ, {"ENABLE_CRC": "0"}, clear=True):
+            value = read_env_value("ENABLE_CRC", True, str2bool)
+        self.assertIs(value, False)
+        self.assertEqual(
+            format_argument_pair("--enable_crc", value), ["--enable_crc", "0"]
+        )
+
+    def test_invalid_str2bool_environment_value_is_rejected(self):
+        from rtp_llm.server.server_args.generate_args_from_env_clean import (
+            read_env_value,
+        )
+        from rtp_llm.server.server_args.util import str2bool
+
+        with patch.dict(os.environ, {"ENABLE_CRC": "not-a-bool"}, clear=True):
+            with self.assertRaises(argparse.ArgumentTypeError):
+                read_env_value("ENABLE_CRC", True, str2bool)
 
 
 if __name__ == "__main__":
