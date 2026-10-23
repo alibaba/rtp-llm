@@ -92,6 +92,8 @@ class DeepEPStrategy(RoutedExpertsStrategy):
         buf = wrapper.buffer
         cfg = self.cfg
 
+        self.apply_fake_balance(indices, weights)
+
         # Pad topk to nearest supported value (V4's 6 → 8).
         indices_p, weights_p = self._pad_topk_for_deepep(indices, weights)
 

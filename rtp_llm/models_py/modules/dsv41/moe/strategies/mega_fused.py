@@ -214,6 +214,8 @@ class MegaMoEFusedStrategy(MegaMoEStrategy):
         T = x.size(0)
         buf = self._mega_buf
         self._input_packer.pack(x, weights, indices, buf, T)
+        if self.fake_balance_expert is not None:
+            self.apply_fake_balance(buf.topk_idx[:T], buf.topk_weights[:T])
         self._maybe_pre_kernel_barrier(T)
         sync_cuda_graph_warmup_ranks(
             f"dsv4.mega_moe_fused.layer{self.cfg.layer_id}.before_deepgemm", x.device
@@ -278,6 +280,8 @@ class MegaMoEFusedStrategy(MegaMoEStrategy):
                     route_scale=float(gate.route_scale),
                     norm_eps=1e-12,
                 )
+        if self.fake_balance_expert is not None:
+            self.apply_fake_balance(buf.topk_idx[:T], buf.topk_weights[:T])
         self._maybe_pre_kernel_barrier(T)
         sync_cuda_graph_warmup_ranks(
             f"dsv4.mega_moe_fused.layer{self.cfg.layer_id}.before_deepgemm", x.device

@@ -157,6 +157,7 @@ class GroupedFP4Strategy(RoutedExpertsStrategy):
              ``weight * expert[idx](x)``.
         """
         cfg = self.cfg
+        self.apply_fake_balance(indices, weights)
         N, D = x.shape
         E = cfg.n_routed_experts
         inter = cfg.moe_inter_dim

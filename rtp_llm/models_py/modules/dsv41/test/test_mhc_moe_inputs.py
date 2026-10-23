@@ -22,6 +22,7 @@ def make_strategy(capacity=256, device="cpu", block_m=32):
     """Real strategy with small local buffers; no distributed allocation."""
     strategy = MegaMoEStrategySE.__new__(MegaMoEStrategySE)
     torch.nn.Module.__init__(strategy)
+    strategy.fake_balance_expert = None
     strategy.cfg = SimpleNamespace(
         dim=_DIM,
         shared_fp8_block_size=32,
@@ -358,6 +359,11 @@ class MHCPreparedMoECudaTest(unittest.TestCase):
                     shared_fp8_block_size=32,
                     is_decode_role=True,
                 )
+                from rtp_llm.models_py.modules.dsv41.moe.strategies.base import (
+                    RoutedExpertsStrategy,
+                )
+
+                RoutedExpertsStrategy.__init__(strategy, strategy.cfg)
                 strategy._mega_group = dist.group.WORLD
                 strategy._mega_buf = deep_gemm.get_symm_buffer_for_mega_moe(
                     group=dist.group.WORLD,
@@ -423,7 +429,18 @@ class MHCPreparedMoECudaTest(unittest.TestCase):
                 )
                 buf = strategy._mega_buf
                 # Different token counts reuse one symmetric allocation.
-                for rows in (192, 6, 160):
+                from rtp_llm.models_py.modules.base.cuda.select_topk import (
+                    FakeBalanceExpert,
+                )
+
+                for enabled, rows in (
+                    (enabled, rows)
+                    for enabled in (False, True)
+                    for rows in (192, 6, 160)
+                ):
+                    strategy.fake_balance_expert = (
+                        FakeBalanceExpert(experts, topk, 0, 1, 1) if enabled else None
+                    )
                     case = make_case((1, rows))
                     ids = torch.arange(rows, device="cuda")
 
@@ -442,6 +459,15 @@ class MHCPreparedMoECudaTest(unittest.TestCase):
                     expected = packed().clone()
                     expected_ids = buf.topk_idx[:rows].clone()
                     expected_weights = buf.topk_weights[:rows].clone()
+                    if enabled:
+                        balanced = (
+                            torch.arange(rows * topk, device="cuda").reshape(rows, topk)
+                            % experts
+                        )
+                        torch.testing.assert_close(
+                            expected_ids, balanced, rtol=0, atol=0
+                        )
+                        self.assertTrue(torch.all(expected_weights == 1).item())
                     # Simulate arbitrary old scales in padding rows; only
                     # token scales may affect the native shared expert.
                     block_m = strategy._block_m(rows)
