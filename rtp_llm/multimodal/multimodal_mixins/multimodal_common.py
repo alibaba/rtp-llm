@@ -150,6 +150,10 @@ class MultiModalEmbeddingInterface:
     # Embeddings may be shared even when inspection must be repeated per caller.
     # Existing mixins retain their cache-owned inspection contract by default.
     inspection_verdict_is_request_scoped = False
+    # Opt in only when preprocess_input accepts capture_inspection_sources and
+    # returns MMPreprocessResult with one original encoded payload per input.
+    # This is an internal CPU-worker contract, not an RPC/schema extension.
+    supports_inspection_sources = False
     strict_work_budget = False
 
     @property

@@ -146,6 +146,9 @@ class _EmbeddingRequest:
         "next_chunk_index",
         "remaining_chunks",
         "cancelled",
+        "submit_ms",
+        "completed_ms",
+        "deadline",
     )
 
     def __init__(self, work_items: List[MMWorkItem]):
@@ -156,6 +159,7 @@ class _EmbeddingRequest:
         self.next_chunk_index = 0
         self.remaining_chunks = 0
         self.cancelled = threading.Event()
+        self.completed_ms = 0
 
 
 class _EmbeddingChunk:
@@ -552,6 +556,13 @@ class MMScheduler:
     def submit_and_wait(
         self, work_items: List[MMWorkItem], deadline: Optional[float] = None
     ) -> None:
+        request = self.submit(work_items, deadline=deadline)
+        # A re-raised worker failure must not retain tensors via this wrapper.
+        work_items = None
+        self.wait(request)
+
+    def submit(self, work_items, deadline=None):
+        """Enqueue already-preprocessed work; caller retains cancellation ownership."""
         req = _EmbeddingRequest(work_items)
         self._build_chunks(req)
 
@@ -572,6 +583,8 @@ class MMScheduler:
                 raise MMSchedulerTimeoutError("ViT request deadline exceeded")
 
         submit_ms = current_time_ms()
+        req.submit_ms = submit_ms
+        req.deadline = time.monotonic() + timeout_s
 
         # Lock only the stopped-check + enqueue so it is atomic w.r.t. close();
         # the blocking wait below stays outside the lock.
@@ -584,6 +597,16 @@ class MMScheduler:
                     f"MMScheduler queue full (max_queue_size={self._max_queue_size}), request rejected"
                 )
             self._enqueue_chunk(req.chunks[0])
+        return req
+
+    @staticmethod
+    def cancel(req):
+        req.cancelled.set()
+        req.future.cancel()
+
+    def wait(self, req):
+        timeout_s = max(0.0, req.deadline - time.monotonic())
+        submit_ms = req.submit_ms
 
         try:
             # Blocks until the executor resolves the future; re-raises the
@@ -595,7 +618,6 @@ class MMScheduler:
             # the failed request's preprocessed tensors through this frame/Future.
             req.work_items = []
             req.chunks = []
-            work_items = []
             raise
         except FutureTimeoutError:
             # PENDING -> CANCELLED so the executor skips it; if it is already
@@ -615,12 +637,11 @@ class MMScheduler:
                 f"MMScheduler: embedding wait timeout after {timeout_s * 1000:.0f}ms"
             ) from None
 
-        # Per-request latency = wait + forward (queue wait + batch-collect wait +
-        # forward), preserving VIT_EMBEDDING_RT_METRIC's historical per-request
-        # meaning and sampling. Reported only on success; failures are tracked by
-        # VIT_ERROR_QPS_METRIC.
+        # Queue + batch collection + forward, ending at actual completion.
+        # A caller collecting other CPU results may enter wait() much later.
+        # That caller-side delay is not GPU scheduler latency.
         kmonitor.report(
-            GaugeMetrics.VIT_EMBEDDING_RT_METRIC, current_time_ms() - submit_ms
+            GaugeMetrics.VIT_EMBEDDING_RT_METRIC, req.completed_ms - submit_ms
         )
 
     @staticmethod
@@ -1096,6 +1117,7 @@ class MMScheduler:
             return
         req.remaining_chunks -= 1
         if req.remaining_chunks == 0 or req.cancelled.is_set():
+            req.completed_ms = current_time_ms()
             req.future.set_result(None)
             req.chunks = []
             return

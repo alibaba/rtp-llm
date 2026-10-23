@@ -1,17 +1,28 @@
-import asyncio
 import concurrent.futures
 import gc
 import logging
 import multiprocessing.pool
-import os
-import signal
 import threading
 import time
-from types import SimpleNamespace
-from typing import Any, Callable, Dict, List, Optional, Set, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 import torch
 import torch.profiler
+from rtp_llm.multimodal import mm_work_item as work_item_ops
+from rtp_llm.multimodal.mm_async_result import continue_after
+from rtp_llm.multimodal.mm_inspection import MMInspectionCoordinator, SourceInspection
+from rtp_llm.multimodal.mm_preprocess import (
+    LocalPreprocessExecutor,
+    MultiprocessPreprocessExecutor,
+    PreprocessExecutor,
+)
+from rtp_llm.multimodal.mm_work_item import (
+    MMEmbeddingRes,
+    MMWorkItem,
+    _acquire_input_cache,
+    _input_has_url,
+    _feature_hashes_from_result,
+)
 
 from rtp_llm.access_logger.access_logger import MMAccessLogger
 from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
@@ -26,7 +37,6 @@ from rtp_llm.multimodal.mm_embedding_cache import (
     MMEmbeddingCache,
     MMEmbeddingCacheEntry,
     MMHashKeyCache,
-    _current_cuda_streams,
 )
 from rtp_llm.multimodal.mm_profiler import MMProfiler
 from rtp_llm.multimodal.mm_scheduler import (
@@ -39,66 +49,17 @@ from rtp_llm.multimodal.multimodal_mixins.multimodal_common import (
     MultiModalEmbeddingInterface,
 )
 from rtp_llm.multimodal.multimodal_util import (
-    collect_download_timing,
     maybe_tensor_to_list,
     url_data_cache_,
     vit_emb_cache_,
-)
-from rtp_llm.multimodal.source_download_executor import SourceDownloadExecutor
-from rtp_llm.multimodal.vit_metrics import (
-    VitMetricSample,
-    collect_vit_preprocess_metrics,
 )
 from rtp_llm.ops import (
     MMPreprocessConfig,
     MultimodalInput,
     VitSeparation,
-    get_multimodal_feature_hash,
 )
 from rtp_llm.utils.base_model_datatypes import MMUrlType
 from rtp_llm.utils.cuda_graph_gate import cuda_graph_gate
-from rtp_llm.utils.time_util import Timer, timer_wrapper
-
-_worker_vit_config: Optional[VitConfig] = None
-_worker_preprocess_params: Optional[dict] = None
-_worker_preprocess_func: Optional[Callable] = None
-
-
-def _input_has_url(mm_input: MultimodalInput) -> bool:
-    native_check = getattr(mm_input, "has_url", None)
-    if callable(native_check):
-        return bool(native_check())
-    # Keep compatibility with Python-only input fixtures/providers.
-    return mm_input.url != ""
-
-
-def _acquire_input_cache(
-    cache: MMEmbeddingCache, mm_input: MultimodalInput, *, require_key: bool = False
-):
-    if not require_key:
-        return cache.try_acquire_lazy(mm_input.cache_key)
-    key = mm_input.cache_key()
-    state, entry = cache.try_acquire(key)
-    return key, state, entry
-
-
-def _run_preprocess_task(
-    preprocess_func: Callable,
-    mm_inputs: List[MultimodalInput],
-    vit_config: VitConfig,
-    preprocess_params: dict,
-) -> Tuple[Any, float, float, List[VitMetricSample]]:
-    """Run preprocessing and return total and media-load durations in ms."""
-    with collect_vit_preprocess_metrics() as preprocess_metrics:
-        with collect_download_timing() as download_timing:
-            with Timer() as route_timer:
-                result = preprocess_func(mm_inputs, vit_config, **preprocess_params)
-    return (
-        result,
-        route_timer.cost_ms(),
-        download_timing.elapsed_ms,
-        preprocess_metrics.samples,
-    )
 
 
 def _embedding_token_length(embeddings: List[Any]) -> int:
@@ -120,112 +81,11 @@ def _embedding_token_length(embeddings: List[Any]) -> int:
     return total
 
 
-def _validate_embedding_result(result: Any) -> None:
-    """Reject tensors that cannot represent visual tokens before caching."""
-    embeddings = result[0]
-    if isinstance(embeddings, torch.Tensor):
-        # Check stacked tensors before splitting: a zero leading dimension
-        # would otherwise become an empty list and bypass per-tensor validation.
-        embeddings = [embeddings]
-    for index, embedding in enumerate(embeddings or []):
-        if isinstance(embedding, torch.Tensor) and embedding.ndim == 0:
-            raise ValueError(
-                f"ViT returned scalar embedding at index {index}; "
-                "expected a visual-token tensor"
-            )
-        if isinstance(embedding, torch.Tensor) and embedding.numel() == 0:
-            raise ValueError(
-                f"ViT returned empty embedding at index {index}: "
-                f"shape={tuple(embedding.shape)}; expected non-empty visual tokens"
-            )
-
-
-@cuda_graph_gate.operation()
-def _feature_hashes_from_result(result: Any) -> List[torch.Tensor]:
-    """Build one sidecar hash tensor for every validated embedding tensor."""
-    _validate_embedding_result(result)
-    embeddings = maybe_tensor_to_list(result[0], ndim_threshold=2)
-    return [get_multimodal_feature_hash(embedding) for embedding in embeddings]
-
-
-def _worker_initializer(
-    vit_config: VitConfig,
-    preprocess_params: dict,
-    preprocess_func: Callable,
-) -> None:
-    """
-    每个工作进程启动时调用的初始化函数。
-    接收一次不变的参数，并将其存储在进程的全局变量中。
-    """
-    global _worker_vit_config, _worker_preprocess_params, _worker_preprocess_func
-    # 让工作进程忽略 SIGINT 信号，这样主进程的 Ctrl+C 不会杀死它们
-    signal.signal(signal.SIGINT, signal.SIG_IGN)
-    _worker_vit_config = vit_config
-    _worker_preprocess_params = preprocess_params
-    _worker_preprocess_func = preprocess_func
-    # Spawned workers import fresh module-level caches; parent-only resizing
-    # does not propagate. Apply the operator's capacities once per worker.
-    url_data_cache_.resize_cache(vit_config.url_cache_item_num)
-    vit_emb_cache_.resize_cache(vit_config.mm_cache_item_num)
-    logging.info(f"Worker process {os.getpid()} initialized.")
-
-
-def _worker_process_task(
-    mm_inputs: List[MultimodalInput],
-) -> Tuple[Any, float, float, List[VitMetricSample]]:
-    """
-    只接收变化的 `mm_inputs` 参数。
-    """
-    if _worker_preprocess_func is None:
-        raise RuntimeError("Worker process has not been initialized correctly.")
-
-    return _run_preprocess_task(
-        _worker_preprocess_func,
-        mm_inputs,
-        _worker_vit_config,
-        _worker_preprocess_params,
-    )
-
-
-def _unpack_preprocess_result(payload: Any) -> Tuple[Any, float, float]:
-    """Read the four-field result returned by both preprocess executors."""
-    result, total_ms, download_ms, samples = payload
-    total_ms, download_ms = float(total_ms), float(download_ms)
-    _report_vit_preprocess_samples(samples)
-    # Clock/context overhead must never make the derived remainder negative.
-    download_ms = max(0.0, min(download_ms, total_ms))
-    return result, total_ms, download_ms
-
-
-def _report_preprocess_timing(total_ms: float, download_ms: float) -> None:
-    """Report the two non-overlapping preprocessing components in milliseconds."""
-    for metric, value in (
-        (GaugeMetrics.VIT_PREPROCESS_RT_METRIC, total_ms),
-        (GaugeMetrics.VIT_DOWNLOAD_RT_METRIC, download_ms),
-        (GaugeMetrics.VIT_PREPROCESS_OTHER_RT_METRIC, max(0.0, total_ms - download_ms)),
-    ):
-        try:
-            kmonitor.report(metric, value)
-        except Exception:
-            logging.exception("Failed to report ViT preprocessing timing")
-
-
 def _report_vit_metric(metric, value, tags=None) -> None:
     try:
         kmonitor.report(metric, value, tags or {})
     except Exception:
         logging.exception("Failed to report ViT metric")
-
-
-def _report_preprocess_queue_size(queue_size: int) -> None:
-    """Report the number of preprocessing work items not yet completed."""
-    try:
-        kmonitor.report(
-            GaugeMetrics.VIT_PREPROCESS_QUEUE_SIZE_METRIC, max(0, int(queue_size))
-        )
-    except Exception:
-        # Telemetry must never change the preprocessing result.
-        logging.exception("Failed to report ViT preprocess queue size")
 
 
 def _count_images(mm_inputs: List[MultimodalInput]) -> int:
@@ -248,471 +108,12 @@ def _report_image_count(mm_inputs: List[MultimodalInput]) -> None:
         logging.exception("Failed to report ViT image count")
 
 
-def _report_vit_preprocess_samples(samples: List[VitMetricSample]) -> None:
-    for sample in samples:
-        try:
-            kmonitor.report(sample.metric, sample.value, sample.tags)
-        except Exception:
-            # Parent-side telemetry must not discard a successful worker result.
-            logging.exception("Failed to report ViT preprocessing sample")
-
-
-class PreprocessExecutor:
-    """预处理执行器抽象基类，封装预处理逻辑"""
-
-    def submit(self, work_item: "MMWorkItem") -> None:
-        raise NotImplementedError
-
-    def get_result(self, work_item: "MMWorkItem") -> None:
-        raise NotImplementedError
-
-    def shutdown(self) -> None:
-        pass
-
-
-class LocalPreprocessExecutor(PreprocessExecutor):
-    """本地预处理执行器（同步执行）"""
-
-    def __init__(
-        self,
-        preprocess_func: Callable,
-        vit_config: VitConfig,
-        preprocess_params: dict,
-    ):
-        self.preprocess_func = preprocess_func
-        self.vit_config = vit_config
-        self.preprocess_params = preprocess_params
-        _report_preprocess_queue_size(0)
-
-    def submit(self, work_item: "MMWorkItem") -> None:
-        if not work_item.should_preprocess:
-            return
-
-        try:
-            result, preprocess_time, download_time, samples = _run_preprocess_task(
-                self.preprocess_func,
-                work_item.mm_inputs,
-                self.vit_config,
-                self.preprocess_params,
-            )
-            work_item.preprocess_result = result
-            # 使用简单的对象模拟 future 行为
-            work_item.future = _LocalResult(
-                result, preprocess_time, download_time, samples
-            )
-        except Exception as e:
-            logging.error(f"Error in local preprocessing: {e}", exc_info=True)
-            raise
-
-    def get_result(self, work_item: "MMWorkItem") -> None:
-        if work_item.future is None:
-            if work_item.embedding_result is None:
-                raise ValueError("Embedding result and future cannot both be None")
-            return
-
-        try:
-            _, preprocess_time, download_time = _unpack_preprocess_result(
-                work_item.future.get()
-            )
-            _report_preprocess_timing(preprocess_time, download_time)
-        except Exception as e:
-            logging.error(f"Error getting local preprocess result: {e}", exc_info=True)
-            raise
-
-
-class MultiprocessPreprocessExecutor(PreprocessExecutor):
-    """多进程预处理执行器
-
-    Crash recovery: when a worker process dies or becomes unresponsive, the pool
-    is automatically torn down and recreated via ``_rebuild_pool()``.  This is
-    triggered in two paths:
-      1. submit() — catches BrokenPipeError/OSError/EOFError, rebuilds, retries once.
-      2. get_result() — catches the same errors or consecutive timeouts exceeding
-         ``_max_consecutive_timeouts``, then rebuilds for subsequent requests.
-    """
-
-    def __init__(
-        self,
-        mp_context: multiprocessing.context.BaseContext,
-        vit_config: VitConfig,
-        preprocess_params: dict,
-        preprocess_func: Callable,
-    ):
-        self.mp_context = mp_context
-        self.vit_config = vit_config
-        self.preprocess_params = preprocess_params
-        self.preprocess_func = preprocess_func
-        self.pool: Optional[multiprocessing.pool.Pool] = None
-        self._consecutive_timeouts = 0
-        self._max_consecutive_timeouts = vit_config.mm_preprocess_max_workers
-        # Track accepted work items independently of multiprocessing.Pool's
-        # private task queue. The gauge includes both running and waiting tasks.
-        self._preprocess_queue_lock = threading.Lock()
-        self._pending_preprocess_tasks: Set[int] = set()
-        self._next_preprocess_task_id = 0
-        # Serializes timeout-counter updates and pool rebuilds — without it
-        # concurrent get_result/submit callers can race to _rebuild_pool, double
-        # tear down the pool, or miscount consecutive timeouts.
-        self._pool_lock = threading.Lock()
-        _report_preprocess_queue_size(0)
-        self._create_pool()
-
-    def _create_pool(self) -> None:
-        """创建进程池"""
-        logging.info(
-            f"Creating multiprocessing pool for preprocessing with {self.vit_config.mm_preprocess_max_workers} workers"
-        )
-        self.pool = self.mp_context.Pool(
-            processes=self.vit_config.mm_preprocess_max_workers,
-            initializer=_worker_initializer,
-            initargs=(
-                self.vit_config,
-                self.preprocess_params,
-                self.preprocess_func,
-            ),
-        )
-
-    def _track_preprocess_task(self) -> int:
-        with self._preprocess_queue_lock:
-            self._next_preprocess_task_id += 1
-            task_id = self._next_preprocess_task_id
-            self._pending_preprocess_tasks.add(task_id)
-            queue_size = len(self._pending_preprocess_tasks)
-        _report_preprocess_queue_size(queue_size)
-        return task_id
-
-    def _finish_preprocess_task(self, task_id: int) -> None:
-        with self._preprocess_queue_lock:
-            if task_id not in self._pending_preprocess_tasks:
-                return
-            self._pending_preprocess_tasks.remove(task_id)
-            queue_size = len(self._pending_preprocess_tasks)
-        _report_preprocess_queue_size(queue_size)
-
-    def _clear_preprocess_tasks(self) -> None:
-        with self._preprocess_queue_lock:
-            if not self._pending_preprocess_tasks:
-                return
-            self._pending_preprocess_tasks.clear()
-        _report_preprocess_queue_size(0)
-
-    def _apply_async(self, work_item: "MMWorkItem", task_id: int) -> Any:
-        return self.pool.apply_async(
-            _worker_process_task,
-            args=(work_item.mm_inputs,),
-            callback=lambda _result: self._finish_preprocess_task(task_id),
-            error_callback=lambda _error: self._finish_preprocess_task(task_id),
-        )
-
-    def _rebuild_pool(self) -> None:
-        """Tear down the current pool and create a fresh one.
-
-        Called when a worker dies / the pool's manager pipes are broken — without this
-        the pool stays in a permanently-unusable state and every subsequent submit fails.
-        """
-        old = self.pool
-        self.pool = None
-        self._clear_preprocess_tasks()
-        try:
-            if old is not None:
-                old.terminate()
-                old.join()
-        except Exception as e:
-            logging.warning(f"terminate broken pool failed: {e}")
-        self._create_pool()
-
-    def submit(self, work_item: "MMWorkItem") -> None:
-        if not work_item.should_preprocess:
-            return
-
-        task_id: Optional[int] = None
-        try:
-            # Serialize submission with pool rebuilds. This keeps a task from
-            # being submitted to an old pool while its queue accounting resets.
-            with self._pool_lock:
-                # Track only after taking the rebuild lock. Otherwise a pool
-                # rebuild can clear the task between accounting and submit.
-                task_id = self._track_preprocess_task()
-                try:
-                    work_item.future = self._apply_async(work_item, task_id)
-                except (BrokenPipeError, OSError, EOFError) as e:
-                    # multiprocessing.Pool surfaces broken state via these —
-                    # rebuild and retry once.
-                    logging.error(
-                        f"Pool broken on submit, rebuilding: {e}", exc_info=True
-                    )
-                    self._finish_preprocess_task(task_id)
-                    self._rebuild_pool()
-                    task_id = self._track_preprocess_task()
-                    work_item.future = self._apply_async(work_item, task_id)
-            return
-        except (BrokenPipeError, OSError, EOFError) as e:
-            if task_id is not None:
-                self._finish_preprocess_task(task_id)
-            raise
-        except Exception as e:
-            if task_id is not None:
-                self._finish_preprocess_task(task_id)
-            logging.error(f"Unexpected error during submission: {e}", exc_info=True)
-            raise
-
-    def get_result(self, work_item: "MMWorkItem") -> None:
-        if work_item.future is None:
-            if work_item.embedding_result is None:
-                raise ValueError("Embedding result and future cannot both be None")
-            return
-
-        try:
-            payload = work_item.future.get(timeout=work_item.remaining_timeout_s())
-            (
-                work_item.preprocess_result,
-                preprocess_time,
-                download_time,
-            ) = _unpack_preprocess_result(payload)
-            with self._pool_lock:
-                self._consecutive_timeouts = 0
-            _report_preprocess_timing(preprocess_time, download_time)
-        except multiprocessing.pool.TimeoutError:
-            with self._pool_lock:
-                self._consecutive_timeouts += 1
-                if self._consecutive_timeouts >= self._max_consecutive_timeouts:
-                    logging.warning(
-                        f"Hit {self._consecutive_timeouts} consecutive timeouts, "
-                        f"rebuilding pool (workers may be stuck)"
-                    )
-                    self._rebuild_pool()
-                    self._consecutive_timeouts = 0
-            raise TimeoutError(
-                f"Preprocessing timeout after {work_item.mm_timeout_ms}ms"
-            )
-        except (BrokenPipeError, OSError, EOFError) as e:
-            # worker died mid-task → pool is broken; rebuild so subsequent submits work
-            logging.error(f"Pool broken on get_result, rebuilding: {e}", exc_info=True)
-            with self._pool_lock:
-                try:
-                    self._rebuild_pool()
-                except Exception as rb:
-                    logging.error(f"pool rebuild failed: {rb}", exc_info=True)
-            raise
-        except Exception as e:
-            logging.error(f"Error getting preprocess result: {e}", exc_info=True)
-            raise
-
-    @staticmethod
-    def _get_child_pids_from_pool(pool: multiprocessing.pool.Pool) -> List[int]:
-        try:
-            return [p.pid for p in pool._pool if p.is_alive()]
-        except Exception:
-            return []
-
-    def shutdown(self) -> None:
-        if self.pool is None:
-            return
-        logging.info("Shutting down the preprocessing pool...")
-        pool = self.pool
-        pool.close()
-        # Bounded join: if any worker is stuck running a long task, fall back
-        # to terminate() so shutdown can't hang indefinitely.
-        join_thread = threading.Thread(target=pool.join, daemon=True)
-        join_thread.start()
-        join_thread.join(timeout=10)
-        if join_thread.is_alive():
-            logging.warning("Preprocessing pool join exceeded 10s, terminating workers")
-            pool.terminate()
-            pool.join()
-        self._clear_preprocess_tasks()
-        logging.info("Preprocessing pool shut down.")
-
-
-class _LocalResult:
-    """本地预处理结果的简单包装类"""
-
-    def __init__(
-        self, result: Any, preprocess_time: float, download_time: float, samples=None
-    ):
-        self.result = result
-        self.preprocess_time = preprocess_time
-        self.download_time = download_time
-        self.samples = samples or []
-
-    def get(
-        self, timeout: Optional[float] = None
-    ) -> Tuple[Any, float, float, List[VitMetricSample]]:
-        return (self.result, self.preprocess_time, self.download_time, self.samples)
-
-
-class MMEmbeddingRes:
-    """Result container for multimodal embedding operations."""
-
-    def __init__(
-        self,
-        embeddings: List[torch.Tensor],
-        position_ids: Optional[List[torch.Tensor]] = None,
-        extra_input: Optional[List[torch.Tensor]] = None,
-        feature_hashes: Optional[List[torch.Tensor]] = None,
-    ):
-        self.embeddings = embeddings
-        self.position_ids = position_ids if position_ids is not None else []
-        # Model-specific extra input, one opaque flat 1-D tensor per image (e.g. deepstack).
-        self.extra_input = extra_input if extra_input is not None else []
-        self.feature_hashes = feature_hashes
-
-    def __str__(self) -> str:
-        return f"MMEmbeddingRes(length={len(self.embeddings)}, embeddings_shape={[e.shape for e in self.embeddings]}, position_ids_shape={[p.shape for p in self.position_ids] if self.position_ids is not None else []}, extra_input_shape={[d.shape for d in self.extra_input] if self.extra_input is not None else []})"
-
-
 class _AsyncComputeTask:
     def __init__(self, cache_key: str, entry: MMEmbeddingCacheEntry):
         self.cache_key = cache_key
         self.entry = entry
         self.request_ids: Set[int] = set()
         self.future: Optional[concurrent.futures.Future] = None
-
-
-class MMWorkItem:
-    """Represents a work item for processing multimodal inputs."""
-
-    def __init__(
-        self,
-        mm_inputs: List[MultimodalInput],
-        mm_timeout_ms: Optional[int] = VitConfig.DEFAULT_MM_TIMEOUT_MS,
-        embedding_cache: Optional[MMEmbeddingCache] = None,
-        cache_claim: Optional[Tuple[str, MMEmbeddingCacheEntry, str]] = None,
-        defer_cache_complete: bool = False,
-        hash_key_cache: Optional[MMHashKeyCache] = None,
-        defer_feature_hashes: bool = False,
-        deadline: Optional[float] = None,
-        require_cache_key: bool = False,
-    ):
-        self.deadline = deadline
-        if not mm_inputs:
-            raise ValueError("No mm_input for work item")
-
-        self.mm_inputs = mm_inputs
-        # Resolve each input independently, then use the largest budget for the
-        # shared batch so the worker matches the proxy deadline calculation.
-        default_timeout_ms = (
-            mm_timeout_ms
-            if mm_timeout_ms is not None and mm_timeout_ms > 0
-            else VitConfig.DEFAULT_MM_TIMEOUT_MS
-        )
-        self.mm_timeout_ms = max(
-            (
-                input.mm_preprocess_config.mm_timeout_ms
-                if input.mm_preprocess_config.mm_timeout_ms > 0
-                else default_timeout_ms
-            )
-            for input in self.mm_inputs
-        )
-        self.mm_type = self.mm_inputs[0].mm_type
-
-        self.preprocess_result: Optional[Any] = None
-        self.embedding_result: Optional[Any] = None
-        self.feature_hashes: Optional[List[torch.Tensor]] = None
-        self.work_estimate: Optional[MMWorkEstimate] = None
-        self.need_check_cache = len(mm_inputs) == 1 and _input_has_url(mm_inputs[0])
-        self.embedding_cache = embedding_cache
-        self.hash_key_cache = hash_key_cache
-        self.cache_key: Optional[str] = None
-        self.cache_entry: Optional[MMEmbeddingCacheEntry] = None
-        self.cache_state: Optional[str] = None
-        self.defer_cache_complete = defer_cache_complete
-        # Only cache-free async producers defer hashes to get_embedding_result.
-        # None distinguishes uncaptured producing streams from CPU-only output.
-        self.defer_feature_hashes = defer_feature_hashes
-        self.embedding_producer_streams: Optional[List[Any]] = None
-
-        if cache_claim is not None:
-            if not self.need_check_cache:
-                raise ValueError("cache_claim requires one non-empty multimodal input")
-            self.cache_key, self.cache_entry, self.cache_state = cache_claim
-            if self.cache_state == "complete":
-                self.embedding_result = self.cache_entry.wait()
-                if (
-                    self.hash_key_cache is not None
-                    and self.embedding_cache is not None
-                    and self.embedding_cache.peek(self.cache_key) is self.cache_entry
-                ):
-                    self.feature_hashes = self.hash_key_cache.get(
-                        self.cache_key, self.cache_entry.generation
-                    )
-        elif self.need_check_cache and self.embedding_cache is not None:
-            self.cache_key, self.cache_state, self.cache_entry = _acquire_input_cache(
-                self.embedding_cache, self.mm_inputs[0], require_key=require_cache_key
-            )
-            if self.cache_state == "complete":
-                self.embedding_result = self.cache_entry.wait()
-                if (
-                    self.hash_key_cache is not None
-                    and self.embedding_cache.peek(self.cache_key) is self.cache_entry
-                ):
-                    self.feature_hashes = self.hash_key_cache.get(
-                        self.cache_key, self.cache_entry.generation
-                    )
-
-        # future 可以是 ApplyResult (multiprocess) 或 _LocalResult (local)
-        self.future: Optional[Any] = None
-
-    def remaining_timeout_s(self) -> float:
-        timeout_s = self.mm_timeout_ms / 1000.0
-        if self.deadline is not None:
-            timeout_s = min(timeout_s, self.deadline - time.monotonic())
-            if timeout_s <= 0:
-                raise FtRuntimeException(
-                    ExceptionType.GENERATE_TIMEOUT, "ViT request deadline exceeded"
-                )
-        return timeout_s
-
-    @property
-    def waiting_for_cache(self) -> bool:
-        return self.cache_state == "in_progress" and self.embedding_result is None
-
-    @property
-    def should_preprocess(self) -> bool:
-        return self.embedding_result is None and not self.waiting_for_cache
-
-    def complete_cache(self, result: Any, force: bool = False) -> None:
-        # Async cache-free producers defer hashing, but must fail empty output
-        # immediately rather than publish it for a later result consumer.
-        _validate_embedding_result(result)
-        if self.defer_feature_hashes:
-            if self.embedding_producer_streams is None:
-                # Capture on the scheduler thread without synchronizing it.
-                # Consumers using the same streams need no extra CUDA events.
-                self.embedding_producer_streams = _current_cuda_streams(result)
-        elif self.feature_hashes is None:
-            self.feature_hashes = _feature_hashes_from_result(result)
-        if (
-            (self.defer_cache_complete and not force)
-            or self.embedding_cache is None
-            or self.cache_key is None
-            or self.cache_entry is None
-        ):
-            return
-        if self.defer_feature_hashes:
-            self.cache_entry.producer_streams = self.embedding_producer_streams or []
-        self.embedding_cache.complete(self.cache_key, self.cache_entry, result)
-        if (
-            self.feature_hashes is not None
-            and self.hash_key_cache is not None
-            and self.embedding_cache.peek(self.cache_key) is self.cache_entry
-        ):
-            self.hash_key_cache.put(
-                self.cache_key,
-                self.feature_hashes or [],
-                self.cache_entry.generation,
-                greennet_passed=self.cache_entry.greennet_passed,
-            )
-
-    def fail_cache(self, error: Exception) -> None:
-        if (
-            self.embedding_cache is None
-            or self.cache_key is None
-            or self.cache_entry is None
-            or self.cache_state != "miss"
-        ):
-            return
-        self.embedding_cache.fail(self.cache_key, self.cache_entry, error)
 
 
 class MMProcessEngine:
@@ -742,7 +143,7 @@ class MMProcessEngine:
                           - False: standalone 模式，需要在此处记录 QPS
         """
         # Resolve the provider before allocating pools or starting worker threads.
-        self._greennet_provider = get_greennet_provider()
+        inspection_provider = get_greennet_provider()
         self.server_id = server_id
         self.vit_config = vit_config
         self.is_proxy_mode = is_proxy_mode
@@ -925,26 +326,21 @@ class MMProcessEngine:
             self.vit_config.mm_hash_key_cache_max_bytes,
         )
 
-        # GreenNet (content safety) integration. The provider is a no-op when
-        # internal_source is absent or ENABLE_SAFETY_INSPECTION is off, so this
-        # is zero-cost for open-source / disabled deployments. The dedicated
-        # asyncio loop (lazily started on first real use) hosts the background
-        # inspect tasks, which must outlive any single preprocess_and_submit
-        # call — so we cannot use a transient asyncio.run() per worker thread.
-        self._greennet_loop: Optional[asyncio.AbstractEventLoop] = None
-        self._greennet_loop_closed = False
-        self._greennet_loop_thread: Optional[threading.Thread] = None
-        self._greennet_loop_lock = threading.Lock()
-        self._greennet_timeout_s = (
-            float(getattr(self.vit_config, "mm_timeout_ms", 120000) or 120000) / 1000.0
+        self._inspection = MMInspectionCoordinator(
+            self.mm_part,
+            self.vit_config,
+            self._hash_key_cache,
+            inspection_provider,
+            self.report_vit_error,
         )
-        self._source_download_executor = SourceDownloadExecutor(
-            vit_config.vit_source_download_concurrency
-        )
-        logging.info(
-            "MMProcessEngine: source download concurrency=%d (0=shared I/O pool)",
-            vit_config.vit_source_download_concurrency,
-        )
+
+    @property
+    def _greennet_timeout_s(self):
+        return self._inspection._greennet_timeout_s
+
+    @_greennet_timeout_s.setter
+    def _greennet_timeout_s(self, timeout_s):
+        self._inspection._greennet_timeout_s = timeout_s
 
     def inc_query_num(self) -> None:
         """Increment the query counter."""
@@ -1011,193 +407,17 @@ class MMProcessEngine:
     # GreenNet (content safety) plumbing
     # ------------------------------------------------------------------
 
-    def _greennet_enabled(self) -> bool:
-        # Effective enablement (internal source present AND runtime flag on).
-        # When off, every greennet path is skipped so behavior is identical to
-        # the pre-greennet engine — no asyncio loop, no rewrite, no inspect.
-        return self._greennet_provider.is_enabled()
+    def _greennet_enabled(self):
+        return self._inspection._greennet_enabled()
 
-    def _request_scoped_inspection(self) -> bool:
-        return self._greennet_enabled() and getattr(
-            self.mm_part, "inspection_verdict_is_request_scoped", False
-        )
+    def _request_scoped_inspection(self):
+        return self._inspection._request_scoped_inspection()
 
-    def _ensure_greennet_loop(self) -> asyncio.AbstractEventLoop:
-        """Lazily start the dedicated asyncio loop that hosts greennet inspect
-        tasks. The loop runs in a daemon thread so background uploads / POSTs
-        survive across worker-thread calls."""
-        with self._greennet_loop_lock:
-            if self._greennet_loop_closed:
-                raise RuntimeError("GreenNet loop is closed")
-            if self._greennet_loop is None:
-                loop = asyncio.new_event_loop()
+    def _begin_greennet(self, *args, **kwargs):
+        return self._inspection._begin_greennet(*args, **kwargs)
 
-                def run_loop():
-                    asyncio.set_event_loop(loop)
-                    try:
-                        loop.run_forever()
-                    finally:
-                        try:
-                            pending = asyncio.all_tasks(loop)
-                            for task in pending:
-                                task.cancel()
-                            if pending:
-                                loop.run_until_complete(
-                                    asyncio.gather(*pending, return_exceptions=True)
-                                )
-                            loop.run_until_complete(loop.shutdown_asyncgens())
-                        finally:
-                            loop.close()
-                            asyncio.set_event_loop(None)
-
-                thread = threading.Thread(
-                    target=run_loop, daemon=True, name="greennet-loop"
-                )
-                thread.start()
-                self._greennet_loop = loop
-                self._greennet_loop_thread = thread
-        return self._greennet_loop
-
-    def _begin_greennet(
-        self,
-        mm_inputs: List[MultimodalInput],
-        entry: Optional[MMEmbeddingCacheEntry] = None,
-        request_id: int = 0,
-        user_id: str = "",
-        service_name: str = "",
-        deadline: Optional[float] = None,
-    ) -> Tuple[
-        List[MultimodalInput], Optional["concurrent.futures.Future"], Optional[Any]
-    ]:
-        """Run greennet preprocess (download + frame extraction + URL rewrite),
-        kick the async inspect task, and return:
-          (rewritten_inputs, verdict_future, handle)
-
-        Preprocess is the hard dependency for ViT (it rewrites mm_input.url to a
-        base64 / frames-pack form the mixin consumes). Inspect runs concurrently
-        on the greennet loop; ``verdict_future`` resolves to a GreenNetVerdict.
-
-        If ``entry`` is given, a done-callback stamps the verdict onto it the
-        moment inspection finishes — so ``WaitGreenNetVerdict`` unblocks without
-        waiting for ViT. Caller is responsible for cancelling ``handle``.
-
-        On a no-op provider, returns the inputs unchanged with no future/handle
-        (and stamps a passing verdict on ``entry`` if provided)."""
-        if not self._greennet_enabled():
-            if entry is not None:
-                entry.set_greennet_verdict(GreenNetVerdict(passed=True), checked=False)
-            return mm_inputs, None, None
-
-        loop = self._ensure_greennet_loop()
-        req = SimpleNamespace(
-            id=str(request_id),
-            model_name=getattr(self.vit_config, "model_name", "") or "",
-            user_id=user_id,
-            service_name=service_name,
-            greennet_passed=(
-                not self._request_scoped_inspection()
-                and len(mm_inputs) == 1
-                and _input_has_url(mm_inputs[0])
-                and self._hash_key_cache.greennet_passed(mm_inputs[0].cache_key())
-            ),
-        )
-        if deadline is None:
-            deadline = time.monotonic() + self._greennet_timeout_s
-        ownership_lock = threading.Lock()
-        abandoned = threading.Event()
-        unclaimed = {}
-
-        async def prepare():
-            source_inputs = None
-            prepare_sources = getattr(self.mm_part, "prepare_inspection_inputs", None)
-            if callable(prepare_sources):
-                source_inputs = await self._source_download_executor.run(
-                    prepare_sources,
-                    mm_inputs,
-                    self.vit_config,
-                    deadline=deadline,
-                    cancellation_event=abandoned,
-                )
-                if source_inputs is not None and len(source_inputs) != len(mm_inputs):
-                    raise ValueError(
-                        "inspection source preparation changed input count"
-                    )
-            if abandoned.is_set():
-                raise asyncio.CancelledError()
-            handle = await self._greennet_provider.preprocess_and_submit(
-                req, source_inputs if source_inputs is not None else mm_inputs
-            )
-            # A provider may finish concurrently with timeout, or even suppress
-            # cancellation. Keep ownership until the waiting thread takes it.
-            with ownership_lock:
-                if not abandoned.is_set():
-                    unclaimed["handle"] = handle
-                    return handle, source_inputs
-            handle.cancel()
-            raise asyncio.CancelledError()
-
-        preprocess_future = asyncio.run_coroutine_threadsafe(prepare(), loop)
-        try:
-            handle, source_inputs = preprocess_future.result(
-                timeout=max(0.0, deadline - time.monotonic())
-            )
-            with ownership_lock:
-                unclaimed.pop("handle", None)
-        except BaseException:
-            with ownership_lock:
-                abandoned.set()
-                late_handle = unclaimed.pop("handle", None)
-            preprocess_future.cancel()
-            self._cancel_greennet(late_handle)
-            raise
-
-        try:
-            # A model can pin lossless source bytes while the safety provider
-            # builds its own preview. Its verdict still gates cache publication
-            # and every result; only the inference input is preserved here.
-            rewritten = list(
-                source_inputs if source_inputs is not None else handle.rewritten_inputs
-            )
-
-            async def wait_verdict():
-                return await asyncio.wait_for(
-                    handle.wait_result(), timeout=max(0.0, deadline - time.monotonic())
-                )
-
-            verdict_future = asyncio.run_coroutine_threadsafe(wait_verdict(), loop)
-        except BaseException:
-            self._cancel_greennet(handle)
-            raise
-        if entry is not None:
-
-            def _stamp(fut: "concurrent.futures.Future") -> None:
-                try:
-                    verdict = fut.result()
-                except Exception as error:  # noqa: BLE001 - convert to process error
-                    inspect_error = RuntimeError(f"greennet inspect failed: {error}")
-                    self.report_vit_error(inspect_error, entry)
-                    verdict = GreenNetVerdict(
-                        passed=False, code=11, message=str(inspect_error)
-                    )
-                    try:
-                        setattr(verdict, "_vit_error_qps_reported", True)
-                    except Exception:
-                        pass
-                try:
-                    entry.set_greennet_verdict(verdict)
-                except Exception as error:
-                    self.report_vit_error(error, entry)
-
-            verdict_future.add_done_callback(_stamp)
-        return rewritten, verdict_future, handle
-
-    def _cancel_greennet(self, handle: Optional[Any]) -> None:
-        if handle is None or self._greennet_loop is None:
-            return
-        try:
-            self._greennet_loop.call_soon_threadsafe(handle.cancel)
-        except Exception as e:  # noqa: BLE001
-            logging.warning(f"greennet handle cancel failed: {e}")
+    def _cancel_greennet(self, handle):
+        self._inspection._cancel_greennet(handle)
 
     def _inspect_cached_inputs(
         self,
@@ -1241,21 +461,8 @@ class MMProcessEngine:
         finally:
             self._cancel_greennet(handle)
 
-    def _shutdown_greennet_loop(self) -> None:
-        with self._greennet_loop_lock:
-            self._greennet_loop_closed = True
-            loop = self._greennet_loop
-            thread = self._greennet_loop_thread
-            if loop is None:
-                return
-            if not loop.is_closed():
-                loop.call_soon_threadsafe(loop.stop)
-        thread.join(timeout=2.0)
-        if thread.is_alive():
-            logging.warning("GreenNet loop is still draining cancelled tasks")
-            return
-        self._greennet_loop = None
-        self._greennet_loop_thread = None
+    def _shutdown_greennet_loop(self):
+        self._inspection.close()
 
     def _embed_with_greennet_sync(
         self,
@@ -1305,11 +512,14 @@ class MMProcessEngine:
                 user_id=user_id,
                 service_name=service_name,
                 deadline=deadline,
+                worker_sources=True,
             )
             work_items: List[MMWorkItem] = []
             try:
                 result, work_items = self._mm_embedding_impl(
                     rewritten,
+                    inspection_handle=handle,
+                    deadline=deadline,
                     defer_cache_complete=True,
                     request_id=request_id,
                     report_vit_error=False,
@@ -1366,6 +576,7 @@ class MMProcessEngine:
                     user_id=user_id,
                     service_name=service_name,
                     deadline=deadline,
+                    worker_sources=True,
                 )
             elif self._request_scoped_inspection():
                 # Reuse the tensor, never another caller's content verdict.
@@ -1375,6 +586,7 @@ class MMProcessEngine:
                     user_id=user_id,
                     service_name=service_name,
                     deadline=deadline,
+                    worker_sources=True,
                 )
             else:
                 # The owner already ran GreenNet and owns any URL rewrite. A
@@ -1383,6 +595,8 @@ class MMProcessEngine:
 
             result, work_items = self._mm_embedding_impl(
                 rewritten,
+                inspection_handle=handle,
+                deadline=deadline,
                 cache_claim=(cache_key, entry, state),
                 defer_cache_complete=state == "miss",
                 request_id=request_id,
@@ -1579,6 +793,7 @@ class MMProcessEngine:
         report_request_metrics: bool = True,
         defer_feature_hashes: bool = False,
         deadline: Optional[float] = None,
+        inspection_handle: Optional[SourceInspection] = None,
     ) -> Tuple[MMEmbeddingRes, List[MMWorkItem]]:
         """Internal implementation that also exposes canonical work-item values.
 
@@ -1589,6 +804,7 @@ class MMProcessEngine:
         """
         logging.debug(f"{self.server_id} request [{request_id}] received")
         work_items: List[MMWorkItem] = []
+        scheduled = []
         query_started = False
         try:
             self.mm_part.validate_inputs(mm_inputs)
@@ -1612,12 +828,17 @@ class MMProcessEngine:
                         defer_cache_complete=defer_cache_complete,
                         defer_feature_hashes=defer_feature_hashes,
                         deadline=deadline,
+                        capture_inspection_sources=isinstance(
+                            inspection_handle, SourceInspection
+                        ),
                     )
-                    self._wait_for_preprocessing(work_items)
+                    self._wait_for_preprocessing(work_items, scheduled, deadline)
+                    if isinstance(inspection_handle, SourceInspection):
+                        inspection_handle.supply_work_items(work_items)
 
                 with torch.profiler.record_function("compute_embeddings"):
                     emb_res, pos_res, extra_input_res = self._compute_embeddings(
-                        work_items, deadline=deadline
+                        work_items, deadline=deadline, scheduled=scheduled
                     )
                     if report_embedding_length:
                         _report_vit_metric(
@@ -1643,6 +864,8 @@ class MMProcessEngine:
 
             return result, work_items
         except Exception as e:
+            for receipt in scheduled:
+                self._scheduler.cancel(receipt)
             if report_vit_error:
                 self.report_vit_error(e)
             for work_item in work_items:
@@ -1666,6 +889,7 @@ class MMProcessEngine:
         defer_cache_complete: bool = False,
         defer_feature_hashes: bool = False,
         deadline: Optional[float] = None,
+        capture_inspection_sources: bool = False,
     ) -> List[MMWorkItem]:
         """Create work items and submit preprocessing tasks."""
         # Request-level image-count cap BEFORE any preprocessing: a request whose
@@ -1688,6 +912,7 @@ class MMProcessEngine:
         )
 
         work_items = []
+        ready_event = threading.Event()
         try:
             for index in range(0, len(mm_inputs), batch_size):
                 batch = mm_inputs[index : index + batch_size]
@@ -1703,9 +928,13 @@ class MMProcessEngine:
                     require_cache_key=self._remote_embedding_cache is not None,
                 )
                 work_items.append(work_item)
+                work_item.capture_inspection_sources = capture_inspection_sources
+                work_item.preprocess_ready_event = ready_event
                 remote_cache = self._remote_embedding_cache
                 if (
                     remote_cache is not None
+                    # Remote tensors do not carry matching source bytes/verdicts.
+                    and not capture_inspection_sources
                     and work_item.cache_state == "miss"
                     and work_item.should_preprocess
                 ):
@@ -1724,42 +953,33 @@ class MMProcessEngine:
 
         return work_items
 
-    def _wait_for_preprocessing(
-        self,
-        work_items: List[MMWorkItem],
-    ) -> None:
-        """Wait for all preprocessing tasks to complete."""
-        local_producers = {
-            item.cache_entry
-            for item in work_items
-            if item.cache_state == "miss" and item.cache_entry is not None
-        }
-        for work_item in work_items:
-            if work_item.waiting_for_cache:
-                # Same-request producers are submitted in _compute_embeddings.
-                # Their followers wait there, after producer computation completes.
-                if work_item.cache_entry in local_producers:
-                    continue
-                timeout_s = work_item.remaining_timeout_s()
-                work_item.embedding_result = work_item.cache_entry.wait(
-                    timeout=timeout_s
-                )
+    def _wait_for_preprocessing(self, work_items, scheduled=None, deadline=None):
+        """Feed independent completed CPU work to the existing GPU owner."""
+        for work_item in self.preprocess_executor.iter_ready(work_items):
+            if work_item.waiting_for_cache and work_item.future is None:
+                # Resolve followers in final assembly, after local producers
+                # have been submitted. Never block ready CPU work on a cache.
+                continue
             work_item.remaining_timeout_s()
             self.preprocess_executor.get_result(work_item)
             work_item.remaining_timeout_s()
-            if work_item.embedding_result is None:
+            if work_item.embedding_result is None and not work_item.waiting_for_cache:
                 estimate = self.mm_part.estimate_work(
                     work_item.preprocess_result, work_item.mm_type
                 )
                 if estimate is not None and not isinstance(estimate, MMWorkEstimate):
-                    raise TypeError(
-                        "estimate_work must return MMWorkEstimate or None, got "
-                        f"{type(estimate).__name__}"
-                    )
+                    raise TypeError("estimate_work must return MMWorkEstimate or None")
                 work_item.work_estimate = estimate
+                if scheduled is not None:
+                    scheduled.append(
+                        self._scheduler.submit([work_item], deadline=deadline)
+                    )
 
     def _compute_embeddings(
-        self, work_items: List[MMWorkItem], deadline: Optional[float] = None
+        self,
+        work_items: List[MMWorkItem],
+        deadline: Optional[float] = None,
+        scheduled=None,
     ) -> Tuple[List[Any], List[Any], List[Any]]:
         """Compute embeddings for all work items."""
         pending_items = [
@@ -1768,7 +988,10 @@ class MMProcessEngine:
             if wi.embedding_result is None and not wi.waiting_for_cache
         ]
 
-        if pending_items:
+        if scheduled is not None:
+            for receipt in scheduled:
+                self._scheduler.wait(receipt)
+        elif pending_items:
             self._scheduler.submit_and_wait(pending_items, deadline=deadline)
 
         emb_res, pos_res, tensor_res = [], [], []
@@ -1804,6 +1027,9 @@ class MMProcessEngine:
             pos_res.extend(maybe_tensor_to_list(result[1], ndim_threshold=2))
             if len(result) > 2:
                 tensor_res.extend(maybe_tensor_to_list(result[2], ndim_threshold=1))
+            # Forward completion owns the H2D/consumer lifetime. The request
+            # awaiting its verdict only needs the resulting embedding now.
+            wi.preprocess_result = None
         return emb_res, pos_res, tensor_res
 
     @staticmethod
@@ -1926,7 +1152,9 @@ class MMProcessEngine:
                         cancellation_event=cancellation_event,
                     )
                 if feature_hashes is None:
-                    feature_hashes = _feature_hashes_from_result(raw_result)
+                    feature_hashes = work_item_ops._feature_hashes_from_result(
+                        raw_result
+                    )
                     # Hashing waits for primary embeddings. Also finish any
                     # opaque outputs produced on other devices before export.
                     hashed_devices = {
@@ -2215,6 +1443,24 @@ class MMProcessEngine:
         entry: MMEmbeddingCacheEntry,
         future: concurrent.futures.Future,
     ) -> None:
+        # CPU/GPU work may have handed off to a verdict continuation. Keep its
+        # ownership and admission slot until publication, without keeping an
+        # async-compute thread blocked on network inspection.
+        try:
+            continuation = None if future.cancelled() else future.result()
+        except Exception:
+            continuation = None  # normal error accounting below
+        if isinstance(continuation, concurrent.futures.Future):
+            with self._async_task_lock:
+                task = self._async_tasks.get(entry)
+                if task is not None:
+                    task.future = continuation
+                continuation.add_done_callback(
+                    lambda completed: self._on_async_compute_done(
+                        cache_key, entry, completed
+                    )
+                )
+            return
         with self._async_task_lock:
             try:
                 if future.cancelled():
@@ -2253,7 +1499,7 @@ class MMProcessEngine:
         deadline: float,
         user_id: str = "",
         service_name: str = "",
-    ) -> None:
+    ) -> Optional[concurrent.futures.Future]:
         if time.monotonic() >= deadline:
             error = FtRuntimeException(
                 ExceptionType.GENERATE_TIMEOUT,
@@ -2261,7 +1507,7 @@ class MMProcessEngine:
             )
             self._fail_async_compute(cache_key, entry, error)
             return
-        self._async_compute(
+        return self._async_compute(
             mm_inputs,
             cache_key,
             entry,
@@ -2353,14 +1599,14 @@ class MMProcessEngine:
         service_name: str = "",
         *,
         deadline: float,
-    ) -> None:
+    ) -> Optional[concurrent.futures.Future]:
         handle = None
         if not self.is_proxy_mode:
             _report_vit_metric(AccMetrics.VIT_QPS_METRIC, 1, {"source": "mm_embedding"})
         try:
-            # GreenNet preprocess (rewrites URL) + async inspect. The inspect
-            # done-callback stamps entry.greennet_verdict the moment inspection
-            # finishes, so WaitGreenNetVerdict unblocks independently of ViT.
+            # Worker-source adapters preserve inference URLs; legacy adapters
+            # retain their rewrite contract. The verdict callback stamps the
+            # entry independently of GPU completion.
             rewritten, verdict_future, handle = self._begin_greennet(
                 mm_inputs,
                 entry,
@@ -2368,10 +1614,12 @@ class MMProcessEngine:
                 user_id=user_id,
                 service_name=service_name,
                 deadline=deadline,
+                worker_sources=True,
             )
             # ViT embedding runs concurrently with inspection.
             _, work_items = self._mm_embedding_impl(
                 rewritten,
+                inspection_handle=handle,
                 cache_claim=(cache_key, entry, "miss"),
                 defer_cache_complete=True,
                 request_id=request_id,
@@ -2391,11 +1639,8 @@ class MMProcessEngine:
                     and not entry.has_read_callback
                 ),
             )
-            verdict = GreenNetVerdict(passed=True)
-            if verdict_future is not None:
-                verdict = verdict_future.result(
-                    timeout=max(0.0, deadline - time.monotonic())
-                )
+
+            def publish(verdict):
                 if verdict is None:
                     raise RuntimeError("async GreenNet returned no verdict")
                 if not verdict.passed:
@@ -2407,15 +1652,26 @@ class MMProcessEngine:
                         ),
                         verdict.message or "data inspection failed",
                     )
-            # Future.result() can wake before its done callback stamps the
-            # entry. Publish approval synchronously before publishing hashes.
-            entry.set_greennet_verdict(verdict, checked=self._greennet_enabled())
-            raw_result = work_items[0].embedding_result
-            if raw_result is None:
-                raise RuntimeError("async embedding did not produce a cache value")
-            work_items[0].complete_cache(raw_result, force=True)
-            if not self.is_proxy_mode:
-                _report_vit_metric(AccMetrics.VIT_SUCCESS_QPS_METRIC, 1)
+                entry.set_greennet_verdict(verdict, checked=self._greennet_enabled())
+                raw_result = work_items[0].embedding_result
+                if raw_result is None:
+                    raise RuntimeError("async embedding did not produce a cache value")
+                work_items[0].complete_cache(raw_result, force=True)
+                if not self.is_proxy_mode:
+                    _report_vit_metric(AccMetrics.VIT_SUCCESS_QPS_METRIC, 1)
+
+            if verdict_future is not None:
+                owned_handle = handle
+                completion = continue_after(
+                    verdict_future,
+                    self._async_compute_executor,
+                    publish,
+                    lambda: self._cancel_greennet(owned_handle),
+                    lambda error: self._fail_async_compute(cache_key, entry, error),
+                )
+                handle = None  # continuation owns cancellation and publication
+                return completion
+            publish(GreenNetVerdict(passed=True))
         except Exception as e:
             # If greennet never decided (preprocess crash etc.), surface a
             # process-error verdict so WaitGreenNetVerdict doesn't hang.
@@ -2433,7 +1689,6 @@ class MMProcessEngine:
         self.preprocess_executor.shutdown()
         self._scheduler.close()
         self._shutdown_greennet_loop()
-        self._source_download_executor.shutdown()
         self._embedding_cache.clear(RuntimeError("MMProcessEngine stopped"))
         self._hash_key_cache.clear()
         if self._remote_embedding_cache is not None:

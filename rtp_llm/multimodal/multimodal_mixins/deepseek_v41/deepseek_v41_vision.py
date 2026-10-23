@@ -1,6 +1,5 @@
 """V4.1 ViT/aligner adapter with row-major image spans and three delimiters."""
 
-import base64
 import json
 import logging
 import os
@@ -46,6 +45,7 @@ from rtp_llm.multimodal.multimodal_mixins.multimodal_common import (
     MultiModalEmbeddingInterface,
 )
 from rtp_llm.multimodal.vit_metrics import vit_preprocess_timer
+from rtp_llm.multimodal.mm_preprocess_result import MMPreprocessResult
 from rtp_llm.utils.base_model_datatypes import MMUrlType
 
 
@@ -103,6 +103,7 @@ class V41VisionAttention(Attention):
 
 class DeepSeekV41VisionEmbedding(nn.Module, MultiModalEmbeddingInterface):
     strict_work_budget = True
+    supports_inspection_sources = True
 
     def __init__(
         self,
@@ -549,7 +550,13 @@ class DeepSeekV41VisionEmbedding(nn.Module, MultiModalEmbeddingInterface):
 
     @staticmethod
     def preprocess_input(
-        mm_inputs, vit_config, *, processor_config, gpu_preprocess=True
+        mm_inputs,
+        vit_config,
+        *,
+        processor_config,
+        gpu_preprocess=True,
+        capture_inspection_sources=False,
+        deadline=None,
     ):
         """Decode one bounded work item in MMProcessEngine's CPU executor.
 
@@ -564,7 +571,12 @@ class DeepSeekV41VisionEmbedding(nn.Module, MultiModalEmbeddingInterface):
             raise ValueError("V4.1 preprocessing requires non-empty IMAGE inputs")
         # Legacy image hints are ignored; the model config owns preprocessing.
         results = []
-        deadline = time.monotonic() + 60
+        inspection_sources = []
+        deadline = (
+            min(deadline, time.monotonic() + 60)
+            if deadline is not None
+            else time.monotonic() + 60
+        )
         for media in mm_inputs:
             with vit_preprocess_timer(
                 GaugeMetrics.VIT_IMAGE_FETCH_RT_US_METRIC, _METRIC_TAGS
@@ -575,6 +587,8 @@ class DeepSeekV41VisionEmbedding(nn.Module, MultiModalEmbeddingInterface):
                     max_file_size_kb=vit_config.mm_image_max_file_size_kb,
                     deadline=deadline,
                 )
+            if capture_inspection_sources:
+                inspection_sources.append(payload.getvalue())
             try:
                 with Image.open(payload) as image:
                     if gpu_preprocess:
@@ -599,38 +613,12 @@ class DeepSeekV41VisionEmbedding(nn.Module, MultiModalEmbeddingInterface):
                 raise ValueError(MMErr.IMG_OPEN) from error
         # Preserve the original scalar contract; existing embedding interfaces
         # already accept ordered image groups for multi-media work items.
-        return results[0] if len(results) == 1 else results
-
-    def prepare_inspection_inputs(
-        self, mm_inputs, vit_config, *, deadline, cancellation_event
-    ):
-        from rtp_llm.ops import MultimodalInput
-
-        self.validate_inputs(mm_inputs)
-        sources = {}
-        result = []
-        for media in mm_inputs:
-            if media.url not in sources:
-                payload = load_image_source(
-                    media.url,
-                    vit_config.download_headers,
-                    max_file_size_kb=vit_config.mm_image_max_file_size_kb,
-                    deadline=deadline,
-                    cancellation_event=cancellation_event,
-                )
-                sources[media.url] = (
-                    "data:application/octet-stream;base64,"
-                    + base64.b64encode(payload.getvalue()).decode("ascii")
-                )
-            result.append(
-                MultimodalInput(
-                    sources[media.url],
-                    media.mm_type,
-                    torch.empty(0),
-                    media.mm_preprocess_config,
-                )
-            )
-        return result
+        data = results[0] if len(results) == 1 else results
+        return (
+            MMPreprocessResult(data, inspection_sources)
+            if capture_inspection_sources
+            else data
+        )
 
     def get_preprocess_params(self):
         # Picklable CPU-only values: do not pass self or CUDA state to workers.

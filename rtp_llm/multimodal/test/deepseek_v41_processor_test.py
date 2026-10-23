@@ -20,7 +20,7 @@ from PIL import Image
 from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
 from rtp_llm.metrics.kmonitor_metric_reporter import GaugeMetrics
 from rtp_llm.multimodal.mm_error_messages import MMErr
-from rtp_llm.multimodal.mm_process_engine import (
+from rtp_llm.multimodal.mm_preprocess import (
     _report_preprocess_timing,
     _run_preprocess_task,
     _unpack_preprocess_result,
@@ -227,6 +227,9 @@ class V41BackendPreprocessContractTest(unittest.TestCase):
         )
 
     def prepare(self, data, **kwargs):
+        # This helper tests the CPU patch contract; production defaults to RGB
+        # decoding for GPU preprocessing. Tests below cover that mode explicitly.
+        kwargs.setdefault("gpu_preprocess", False)
         return vision_module.DeepSeekV41VisionEmbedding.preprocess_input(
             [self.media(data)], self.vit_config, processor_config=self.config, **kwargs
         )
@@ -236,7 +239,7 @@ class V41BackendPreprocessContractTest(unittest.TestCase):
             vision_module.DeepSeekV41VisionEmbedding.preprocess_input,
             [self.media(data)],
             self.vit_config,
-            {"processor_config": self.config},
+            {"processor_config": self.config, "gpu_preprocess": False},
         )
         result, total_ms, download_ms = _unpack_preprocess_result(payload)
         _report_preprocess_timing(total_ms, download_ms)
@@ -348,21 +351,19 @@ class V41BackendPreprocessContractTest(unittest.TestCase):
         adapter = object.__new__(vision_module.DeepSeekV41VisionEmbedding)
         torch.nn.Module.__init__(adapter)
         media = self.media(data)
-        inspected = adapter.prepare_inspection_inputs(
+        inspected = adapter.preprocess_input(
             [media, media],
             self.vit_config,
+            processor_config=self.config,
+            gpu_preprocess=False,
+            capture_inspection_sources=True,
             deadline=time.monotonic() + 30,
-            cancellation_event=threading.Event(),
         )
-        self.assertEqual(len(inspected), 2)
-        for item in inspected:
-            self.assertEqual(base64.b64decode(item.url.split(",", 1)[1]), data)
+        self.assertEqual(inspected.inspection_sources, [data, data])
         original = self.prepare(data)
-        result = adapter.preprocess_input(
-            inspected, self.vit_config, processor_config=self.config
-        )
-        for item in result:
+        for item in inspected.data:
             torch.testing.assert_close(item.patches, original.patches, rtol=0, atol=0)
+        self.assertFalse(hasattr(original, "inspection_sources"))
 
     def test_media_hints_leave_model_preprocessing_unchanged(self):
         data = [image_data(3, 5), image_data(5, 3)]
