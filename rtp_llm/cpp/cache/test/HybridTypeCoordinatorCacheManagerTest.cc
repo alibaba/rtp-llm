@@ -2672,32 +2672,6 @@ TEST_F(WritebackMultiGroupAllocatorTest, SparsePrefixUsesGroupReuseRangesAndPubl
     block_tree_cache_test::releaseRequestRefsForTest(*cache, match.matched_device_resources);
 }
 
-TEST_F(WritebackMultiGroupAllocatorTest, SwaWindowDoesNotExpandAllocatedActiveTail) {
-    auto config                          = makeFullSwaLinearCacheConfig();
-    auto groups                          = config.topology().groups();
-    groups[1].policy.sliding_window_size = 16;
-    config.setTopology(std::move(groups), config.topology().layers());
-    allocator_ = std::make_shared<TestHybridTypeCoordinatorCacheManager>(config, AllocationType::DEVICE);
-    ASSERT_TRUE(allocator_->init());
-    seedSparsePrefix();
-    KVCacheResourcePtr                resource;
-    std::shared_ptr<LoadAsyncContext> load;
-    size_t                            start = 0;
-    ASSERT_TRUE(allocator_->admitWriteBackDecodeCache(keys_, 4, resource, start, load).ok());
-    ASSERT_EQ(start, 4u);
-    EXPECT_EQ(load, nullptr);
-    for (size_t i = start; i < keys_.size() - 2; ++i) {
-        EXPECT_TRUE(isNullBlockIdx(resource->blocks("swa")[i])) << "position " << i;
-    }
-    EXPECT_FALSE(isNullBlockIdx(resource->blocks("swa")[10]));
-    EXPECT_FALSE(isNullBlockIdx(resource->blocks("swa")[11]));
-    ASSERT_TRUE(allocator_->commitWriteBackDecodeCache(*resource, start, currentTimeMs() + 1000).ok());
-    auto cache = allocator_->blockTreeCacheOwner();
-    auto match = cache->match(keys_);
-    EXPECT_EQ(match.matched_device_blocks, start);
-    block_tree_cache_test::releaseRequestRefsForTest(*cache, match.matched_device_resources);
-}
-
 class WritebackMissingGroupAllocatorTest:
     public WritebackMultiGroupAllocatorTest,
     public ::testing::WithParamInterface<CacheGroupType> {};

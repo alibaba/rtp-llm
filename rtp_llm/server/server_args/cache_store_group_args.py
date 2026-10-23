@@ -32,6 +32,15 @@ def init_cache_store_group_args(parser, cache_store_config):
         help="Timeout for a decode KV cache writeback request in milliseconds.",
     )
     cache_store_group.add_argument(
+        "--p2p_writeback_kv_reserve_ratio",
+        env_name="P2P_WRITEBACK_KV_RESERVE_RATIO",
+        bind_to=(cache_store_config, "p2p_writeback_kv_reserve_ratio"),
+        type=float,
+        default=0.1,
+        help="Fraction of KV cache blocks that decode KV cache writeback leaves available for serving; "
+        "writeback is skipped on decode and rejected on prefill when it would go below it.",
+    )
+    cache_store_group.add_argument(
         "--cache_store_rdma_mode",
         env_name="CACHE_STORE_RDMA_MODE",
         bind_to=(cache_store_config, "cache_store_rdma_mode"),

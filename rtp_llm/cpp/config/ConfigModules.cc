@@ -391,7 +391,8 @@ std::string CacheStoreConfig::to_string() const {
         << "p2p_prefill_sender_thread_count: " << p2p_prefill_sender_thread_count << "\n"
         << "p2p_prefill_sender_queue_size: " << p2p_prefill_sender_queue_size << "\n"
         << "p2p_writeback_enable: " << p2p_writeback_enable << "\n"
-        << "p2p_writeback_timeout_ms: " << p2p_writeback_timeout_ms << "\n";
+        << "p2p_writeback_timeout_ms: " << p2p_writeback_timeout_ms << "\n"
+        << "p2p_writeback_kv_reserve_ratio: " << p2p_writeback_kv_reserve_ratio << "\n";
     return oss.str();
 }
 
