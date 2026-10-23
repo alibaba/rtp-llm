@@ -150,6 +150,23 @@ def split_sm120_combined_tables(
     return swa_indices, swa_lens, extra_indices, extra_lens, extra_page_size
 
 
+def zero_extra_sentinel_row(workspace: torch.Tensor, N: int) -> None:
+    """Zero request 0's first compressed row in the prefill workspace.
+
+    ``split_sm120_combined_tables`` masks invalid extra-table tail columns to
+    index 0 (and consumers clamp -1 entries to 0 as well), so the SM120
+    sparse kernel's value loader gathers extra row 0 with probability 0 for
+    every masked entry — ``0 * V`` must stay finite. The workspace is
+    ``torch.empty``; when request 0 owns no compressed rows (e.g. HCA ratio
+    128 with fewer than 128 tokens) nothing ever writes ``workspace[0, 0]``,
+    so uninitialized garbage there leaks NaN into every masked row's output.
+    Zero the single sentinel row before the compressed-K gather; that gather
+    overwrites it whenever request 0 does own compressed rows.
+    """
+    if N > 0:
+        workspace[0, 0].zero_()
+
+
 def _ready_chunk(
     indices: torch.Tensor,
     lens: torch.Tensor,

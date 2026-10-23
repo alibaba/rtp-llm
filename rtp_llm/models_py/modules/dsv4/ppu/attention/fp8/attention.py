@@ -1597,6 +1597,9 @@ class AttentionFP8(_BaseAttentionFP8):
         req_id_per_token: Optional[torch.Tensor] = None,
         max_seqlen_q: int = 0,
         has_prefix: bool,
+        # Parity with the shared builder; both feed SM120-only paths absent on PPU.
+        swa_slot_mapping: Optional[torch.Tensor] = None,
+        shared: Optional[dict] = None,
     ) -> CsaPrefillMeta:
         """Build CSA-layer per-call metadata: indexer prepare + main CSA
         compressor prepare_metadata.
@@ -1777,6 +1780,11 @@ class AttentionFP8(_BaseAttentionFP8):
         prefill_workspace: Optional[PrefillWorkspace],
         profile_name: str,
         out: Optional[torch.Tensor] = None,
+        # ``_attn_fp8_swa_via_concat`` (inherited) always passes these; its
+        # packed-prefix path is SM120-only, so they are None here and ignored.
+        sm120_prefix_cache=None,
+        sm120_prefix_slots=None,
+        sm120_prefix_lens=None,
     ) -> torch.Tensor:
         """Run sparse prefill attention in Q chunks and project immediately.
 

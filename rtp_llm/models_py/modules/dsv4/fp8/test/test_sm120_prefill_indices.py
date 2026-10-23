@@ -11,6 +11,9 @@ differ — that discrimination is what makes the equivalence claim falsifiable.
 The CUDA producer matrix covers ranks, chunk prefixes and compression ratios.
 This CPU oracle covers width, length, layout and input ownership, including
 HCA early widths 64->128 / 192->512 / 256->512, CSA 2048 and window 128.
+It also pins the masked-tail sentinel contract: every masked extra-table
+tail reads extra row 0, so that row must stay finite in the repacked extra
+cache (P1c NaN leak).
 """
 
 import os
@@ -24,6 +27,8 @@ from rtp_llm.models_py.modules.dsv4.fp8._sm120_prefill_indices import (
     Sm120PrefillIndices,
     _ready_chunk,
     index_adapter_mode,
+    split_sm120_combined_tables,
+    zero_extra_sentinel_row,
 )
 from rtp_llm.models_py.modules.dsv4.fp8.sm120_sparse_mla import (
     SM120_EXTRA_TOPK_WIDTHS,
@@ -229,6 +234,148 @@ class ReadyChunkContractGateTest(unittest.TestCase):
                 torch.ones(4, dtype=torch.int32),
                 SM120_EXTRA_TOPK_WIDTHS,
             )
+
+
+def build_producer_combined_tables(seq_lens, M, N, window, ratio, topk):
+    """Synthesize ``combine_topk_swa_indices``-style combined tables on CPU.
+
+    Per token at absolute position ``pos``: ``min((pos + 1) // ratio, topk)``
+    compressed entries (local workspace rows ``[0, N_b)``) followed by the
+    last ``min(pos + 1, window)`` SWA rows, then a -1 tail. The SWA buffer
+    offsets are simplified (full-window gather); only the extra/compressed
+    geometry matters for the sentinel test below.
+    """
+    width = topk + window
+    rows = []
+    lens = []
+    for b, seq in enumerate(seq_lens):
+        for pos in range(seq):
+            topk_len = min((pos + 1) // ratio, topk)
+            swa_len = min(pos + 1, window)
+            row = torch.full((width,), -1, dtype=torch.int64)
+            row[:topk_len] = b * M + torch.arange(topk_len)
+            row[topk_len : topk_len + swa_len] = (
+                b * M + N + window - swa_len + torch.arange(swa_len)
+            )
+            rows.append(row)
+            lens.append(topk_len + swa_len)
+    return (
+        torch.stack(rows).to(torch.int32),
+        torch.tensor(lens, dtype=torch.int32),
+    )
+
+
+def sm120_extra_value_load(extra_kv, extra_indices, extra_lens):
+    """Emulate the SM120 sparse kernel's extra-cache value loader.
+
+    Gathers rows by index, zero-fills only entries with index < 0, and weights
+    each entry by the masked probability (1 inside the length, 0 in the tail),
+    so ``0 * V`` must be finite for every tail entry.
+    """
+    idx = extra_indices.to(torch.int64)
+    values = extra_kv[idx].to(torch.float32)
+    values = torch.where((idx < 0).unsqueeze(-1), torch.zeros_like(values), values)
+    cols = torch.arange(idx.shape[1]).unsqueeze(0)
+    probs = (cols < extra_lens.to(torch.int64).unsqueeze(1)).to(torch.float32)
+    return (probs.unsqueeze(-1) * values).sum(dim=1)
+
+
+class ExtraSentinelFiniteTest(unittest.TestCase):
+    """P1c: masked extra tails all read extra row 0, so it must be finite."""
+
+    def run_pipeline(self, seq_lens, ratio, window, topk, apply_sentinel):
+        """NaN-poisoned workspace -> gathers -> repack + split -> emulated
+        kernel value load. Mirrors the production order in
+        ``_attn_via_workspace``: sentinel zero first, gathers may overwrite."""
+        per_req_rows = [seq // ratio for seq in seq_lens]
+        N = max(per_req_rows)
+        B = len(seq_lens)
+        M = N + window + 64
+        D = 8
+        workspace = torch.full((B, M, D), float("nan"), dtype=torch.bfloat16)
+        if apply_sentinel:
+            zero_extra_sentinel_row(workspace, N)
+        # Simulated cmp gather: finite rows [0, N_b) per request.
+        for b, n_b in enumerate(per_req_rows):
+            if n_b:
+                workspace[b, :n_b, :] = torch.full(
+                    (n_b, D), float(b + 1), dtype=torch.bfloat16
+                )
+        # Simulated SWA-prefix gather + fresh-K overlay: the SWA stride slice
+        # is finite; only [0, N) is repacked as the extra cache.
+        workspace[:, N:, :] = 0.5
+
+        extra_kv = workspace[:, :N, :].contiguous().view(-1, D)
+        combined, lens = build_producer_combined_tables(
+            seq_lens, M, N, window, ratio, topk
+        )
+        _, _, extra_indices, extra_lens, _ = split_sm120_combined_tables(
+            combined,
+            lens,
+            M=M,
+            N=N,
+            window_size=window,
+            extra_width=max(topk, 1),
+            ratio=ratio,
+            device=torch.device("cpu"),
+        )
+        return sm120_extra_value_load(extra_kv, extra_indices, extra_lens)
+
+    def test_hca_leading_request_without_compressed_rows_is_finite(self):
+        # HCA ratio 128: request 0 (64 tokens) owns 0 compressed rows while
+        # request 1 (128 tokens) owns 1, so N == 1 > 0 and extra row 0 is
+        # never written by the gather — the P1c precondition.
+        out = self.run_pipeline(
+            seq_lens=[64, 128],
+            ratio=128,
+            window=128,
+            topk=1,
+            apply_sentinel=True,
+        )
+        self.assertTrue(torch.isfinite(out).all())
+
+    def test_csa_short_leading_request_is_finite(self):
+        # CSA ratio 4: request 0 (3 tokens) owns 0 rows, request 1 (8 tokens)
+        # owns 2; extra_width comes from the indexer topk (>= N). Unaddressed
+        # rows of request 0 stay NaN but are never indexed.
+        out = self.run_pipeline(
+            seq_lens=[3, 8],
+            ratio=4,
+            window=128,
+            topk=4,
+            apply_sentinel=True,
+        )
+        self.assertTrue(torch.isfinite(out).all())
+
+    def test_without_sentinel_nan_leaks_through_masked_tails(self):
+        # Falsifiability: the identical poisoned pipeline without the sentinel
+        # zero must leak NaN (0 * NaN), proving the finite assertions above
+        # test the fix rather than an unpoisoned input.
+        out = self.run_pipeline(
+            seq_lens=[64, 128],
+            ratio=128,
+            window=128,
+            topk=1,
+            apply_sentinel=False,
+        )
+        self.assertTrue(torch.isnan(out).any())
+
+    def test_sentinel_zero_is_overwritten_by_real_compressed_row(self):
+        # When request 0 owns a compressed row the gather overwrites the
+        # zeroed sentinel — the fix must never clobber live values.
+        workspace = torch.full((2, 1 + 128 + 64, 8), float("nan"), dtype=torch.bfloat16)
+        zero_extra_sentinel_row(workspace, 1)
+        self.assertTrue(
+            torch.equal(workspace[0, 0], torch.zeros(8, dtype=torch.bfloat16))
+        )
+        workspace[0, 0, :] = 3.0
+        extra_kv = workspace[:, :1, :].contiguous().view(-1, 8)
+        self.assertEqual(extra_kv[0].tolist(), [3.0] * 8)
+
+    def test_no_sentinel_when_extra_region_empty(self):
+        workspace = torch.full((2, 128, 8), float("nan"), dtype=torch.bfloat16)
+        zero_extra_sentinel_row(workspace, 0)
+        self.assertTrue(torch.isnan(workspace[0, 0]).all())
 
 
 class ModeParsingTest(unittest.TestCase):

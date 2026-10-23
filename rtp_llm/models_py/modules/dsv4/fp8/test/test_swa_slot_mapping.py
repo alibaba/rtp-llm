@@ -40,6 +40,9 @@ from rtp_llm.models_py.modules.dsv4.fp8._swa_ops_triton import (
     compute_swa_slot_mapping,
     compute_swa_slot_mapping_from_positions,
 )
+from rtp_llm.models_py.modules.dsv4.fp8.attention import (
+    _swa_paged_slots_fully_covered,
+)
 
 
 def _ref_compute_swa_slot_mapping(
