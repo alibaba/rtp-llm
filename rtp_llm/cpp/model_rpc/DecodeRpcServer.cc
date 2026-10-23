@@ -1215,8 +1215,8 @@ DecodeRpcServer::LoadCacheResult DecodeRpcServer::loadCache(const LoadKVCacheCon
         const char* e = getenv("DSV4_PD_LOAD_ALL_STAGE_REPLICAS");
         return e != nullptr && std::string(e) == "1";
     }();
-    const bool dedup_stage_replicas = stage_aware && !is_page_level_rr && peers_per_stage > 1
-                                      && !load_all_stage_replicas;
+    const bool dedup_stage_replicas =
+        stage_aware && !is_page_level_rr && peers_per_stage > 1 && !load_all_stage_replicas;
     auto shouldLoadBlockFromPeer = [&](CacheGroupType group_type, size_t block_pos, int peer_idx) {
         if (dedup_stage_replicas) {
             const size_t replica = static_cast<size_t>(peer_idx) % peers_per_stage;
