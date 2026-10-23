@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <cstdlib>
 #include <cstdint>
 #include <limits>
@@ -20,6 +21,7 @@
 #include "autil/EnvUtil.h"
 #include "autil/legacy/jsonizable.h"
 #include "kvcm_client/HostCacheStateCompat.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/ScopeRollback.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/storage_backend/kvcm/ClientWrapper.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/storage_backend/kvcm/GroupPolicy.h"
 #include "rtp_llm/cpp/metrics/RtpLLMMetrics.h"
@@ -33,6 +35,12 @@
 
 namespace rtp_llm {
 namespace {
+
+using Clock = std::chrono::steady_clock;
+
+int64_t elapsedTimeUs(Clock::time_point start) {
+    return std::chrono::duration_cast<std::chrono::microseconds>(Clock::now() - start).count();
+}
 
 size_t hashString(const std::string& value) {
     return std::hash<std::string>{}(value);
@@ -301,6 +309,12 @@ public:
         if (request.local_matched_blocks_num >= keys.size()) {
             return {request.local_matched_blocks_num, nullptr};
         }
+        RtpLLMRemoteCacheMatchMetricsCollector collector;
+        const auto                            start = Clock::now();
+        block_tree_cache_detail::ScopeRollback report([&] {
+            collector.remote_match_time_us = elapsedTimeUs(start);
+            reportRemoteMetrics<RtpLLMRemoteCacheMatchMetrics>(collector);
+        });
         const auto trace_id       = nextTraceId("match", match_trace_sequence_);
         auto query_type = static_cast<kv_cache_manager::QueryType>(default_query_type_);
         if (has_swa_) {
@@ -333,6 +347,12 @@ public:
             auto meta = std::make_shared<KVCMMatchMeta>();
             meta->locations = reusableLocations(request, std::move(locations));
             meta->filtered = true;
+            collector.remote_match_fail_qps        = false;
+            collector.remote_match_reuse_block_num = static_cast<int64_t>(meta->locations.size());
+            if (!meta->locations.empty()) {
+                collector.remote_valid_hit_ratio =
+                    static_cast<double>(request.local_matched_blocks_num + meta->locations.size()) / keys.size();
+            }
             return {request.local_matched_blocks_num + meta->locations.size(), std::move(meta)};
         }
         kvcm::LocationsView locations_view;
@@ -344,6 +364,12 @@ public:
         }
         auto meta       = std::make_shared<KVCMMatchMeta>();
         meta->locations = std::move(locations);
+        collector.remote_match_fail_qps        = false;
+        collector.remote_match_reuse_block_num = static_cast<int64_t>(locations_view.size());
+        if (!locations_view.empty()) {
+            collector.remote_valid_hit_ratio =
+                static_cast<double>(request.local_matched_blocks_num + locations_view.size()) / keys.size();
+        }
         return {request.local_matched_blocks_num + locations_view.size(), std::move(meta)};
     }
 
@@ -351,6 +377,12 @@ public:
         RTP_LLM_CHECK_WITH_INFO(parallelism_config_.tp_rank == 0,
                                 "KVCM metadata read must run on tp rank 0, got %ld",
                                 parallelism_config_.tp_rank);
+        RtpLLMRemoteCacheReadMetricsCollector collector;
+        const auto                           start = Clock::now();
+        block_tree_cache_detail::ScopeRollback report([&] {
+            collector.remote_read_task_cost_time_us = elapsedTimeUs(start);
+            reportRemoteMetrics<RtpLLMRemoteCacheReadMetrics>(collector);
+        });
         const auto meta = std::dynamic_pointer_cast<KVCMMatchMeta>(match_meta);
         RTP_LLM_CHECK_WITH_INFO(meta != nullptr, "KVCM read received invalid match metadata");
         kvcm::LocationsView locations_view;
@@ -394,6 +426,11 @@ public:
             }
         }
         (void)dispatchRequests(requests, kv_cache_config_.kvcm_get_broadcast_timeout);
+        // A canonical CP key already covers every shard. Do not multiply this
+        // logical token count by the number of TP ranks or payload groups.
+        collector.remote_read_token_num =
+            static_cast<int64_t>(remote_blocks * topology_->groups().front().cacheKeyTokenStride());
+        collector.remote_read_fail_qps = false;
     }
 
     void write(const StorageRequest& request) {
@@ -405,14 +442,26 @@ public:
         if (valid_keys_size == 0) {
             return;
         }
+        RtpLLMRemoteCacheWriteMetricsCollector collector;
+        const auto                            start = Clock::now();
+        block_tree_cache_detail::ScopeRollback report([&] {
+            collector.remote_write_task_cost_time_us = elapsedTimeUs(start);
+            reportRemoteMetrics<RtpLLMRemoteCacheWriteMetrics>(collector);
+        });
         CacheKeysType            keys(request.keys->begin(), request.keys->begin() + valid_keys_size);
         std::vector<std::string> location_spec_group_names;
         RTP_LLM_CHECK_WITH_INFO(group_policy_->getNeedWriteGroups(request, valid_keys_size, location_spec_group_names),
                                 "KVCM write group selection failed");
         const std::string trace_id     = nextTraceId("write", write_trace_sequence_);
-        auto [success, write_location] = client_wrapper_->getWriteLocation(
-            "", trace_id, keys, /*tokens=*/{}, location_spec_group_names, /*write_timeout_seconds=*/600,
-            kv_cache_config_.kvcm_min_replica_count);
+        auto [success, write_location] = [&] {
+            const auto stage_start = Clock::now();
+            block_tree_cache_detail::ScopeRollback timer([&] {
+                collector.remote_get_write_location_time_us = elapsedTimeUs(stage_start);
+            });
+            return client_wrapper_->getWriteLocation(
+                "", trace_id, keys, /*tokens=*/{}, location_spec_group_names, /*write_timeout_seconds=*/600,
+                kv_cache_config_.kvcm_min_replica_count);
+        }();
         RTP_LLM_CHECK_WITH_INFO(success, "KVCM StartWrite failed");
         static const kv_cache_manager::Locations empty_locations;
         bool                                     finish_attempted = false;
@@ -430,6 +479,10 @@ public:
                     // The server can create an empty, short-lived session when
                     // every key already has enough replicas. Close it normally.
                     finish_attempted = true;
+                    const auto stage_start = Clock::now();
+                    block_tree_cache_detail::ScopeRollback timer([&] {
+                        collector.remote_finish_write_time_us += elapsedTimeUs(stage_start);
+                    });
                     try {
                         if (!client_wrapper_->finishWrite(
                             "", nextTraceId("finish_write", finish_write_trace_sequence_),
@@ -442,6 +495,9 @@ public:
                                             write_location.write_session_id.c_str());
                     }
                 }
+                // Keep the legacy task QPS, but report no payload blocks or
+                // transfer time when all keys already have enough replicas.
+                collector.remote_write_fail_qps = false;
                 return;
             }
             const auto& spec_info = group_policy_->spec_info_map();
@@ -465,7 +521,13 @@ public:
                 }
             }
 
-            const auto responses      = dispatchRequests(requests, kv_cache_config_.kvcm_put_broadcast_timeout);
+            const auto responses = [&] {
+                const auto stage_start = Clock::now();
+                block_tree_cache_detail::ScopeRollback timer([&] {
+                    collector.remote_write_broadcast_time_us = elapsedTimeUs(stage_start);
+                });
+                return dispatchRequests(requests, kv_cache_config_.kvcm_put_broadcast_timeout);
+            }();
             bool       has_actual_uri = false;
             for (size_t rank = 0; rank < responses.size(); ++rank) {
                 const auto& actual_uris = responses[rank].remote_response().actual_uris();
@@ -482,15 +544,27 @@ public:
             }
             const auto& actual_locations = has_actual_uri ? write_location.locations : empty_locations;
             finish_attempted             = true;
-            RTP_LLM_CHECK_WITH_INFO(
-                client_wrapper_->finishWrite("",
-                                             nextTraceId("finish_write", finish_write_trace_sequence_),
-                                             write_location.write_session_id,
-                                             write_location.locations.size(),
-                                             actual_locations),
-                "KVCM FinishWrite failed");
+            {
+                const auto stage_start = Clock::now();
+                block_tree_cache_detail::ScopeRollback timer([&] {
+                    collector.remote_finish_write_time_us += elapsedTimeUs(stage_start);
+                });
+                RTP_LLM_CHECK_WITH_INFO(
+                    client_wrapper_->finishWrite("",
+                                                 nextTraceId("finish_write", finish_write_trace_sequence_),
+                                                 write_location.write_session_id,
+                                                 write_location.locations.size(),
+                                                 actual_locations),
+                    "KVCM FinishWrite failed");
+            }
+            collector.remote_write_cache_block_num = static_cast<int64_t>(write_location.locations.size());
+            collector.remote_write_fail_qps        = false;
         } catch (...) {
             if (!finish_attempted) {
+                const auto stage_start = Clock::now();
+                block_tree_cache_detail::ScopeRollback timer([&] {
+                    collector.remote_finish_write_time_us += elapsedTimeUs(stage_start);
+                });
                 try {
                     if (!client_wrapper_->finishWrite("",
                                                       nextTraceId("abort_write", finish_write_trace_sequence_),
@@ -921,6 +995,14 @@ private:
                 batch_blocks.push_back(blocks[index]);
             }
             const auto trace_info = makeTransferTraceInfo(batch_blocks);
+            RtpLLMRemoteCacheSDKMetricsCollector collector;
+            collector.remote_sdk_block_num = static_cast<int64_t>(batch_blocks.size());
+            const auto start = Clock::now();
+            block_tree_cache_detail::ScopeRollback report([&] {
+                collector.remote_sdk_cost_time_us = elapsedTimeUs(start);
+                reportRemoteMetrics<RtpLLMRemoteCacheSDKMetrics>(
+                    collector, operation == REMOTE_OPERATION_READ ? "read" : "write");
+            });
             if (operation == REMOTE_OPERATION_READ) {
                 const auto ec =
                     client_wrapper_->loadKvCachesForTagWithStatus(tag, batch_uris, batch_buffers, trace_info);
@@ -944,6 +1026,7 @@ private:
                     actual_uris[indices[index]] = std::move(result[index]);
                 }
             }
+            collector.remote_sdk_fail_qps = false;
             indices_by_tag.erase(found);
         }
         RTP_LLM_CHECK(indices_by_tag.empty());
@@ -953,6 +1036,28 @@ private:
             }
         }
         return TransferResult::SUCCESS;
+    }
+
+    template<typename Metrics, typename Collector>
+    void reportRemoteMetrics(Collector& collector, std::string_view mode = {}) const noexcept {
+        if (!metrics_reporter_) {
+            return;
+        }
+        try {
+            // Only the SDK metrics have this dimension. Cache the two tag sets
+            // instead of allocating tags for every transfer batch.
+            const kmonitor::MetricsTags* tags = nullptr;
+            if (!mode.empty()) {
+                static const kmonitor::MetricsTags read_tags("mode", "read");
+                static const kmonitor::MetricsTags write_tags("mode", "write");
+                tags = mode == "read" ? &read_tags : &write_tags;
+            }
+            metrics_reporter_->report<Metrics, Collector>(tags, &collector);
+        } catch (...) {
+            // Telemetry must not change the transfer outcome or mask an I/O
+            // exception while a scope guard is unwinding.
+            RTP_LLM_LOG_ERROR("failed to report KVCM remote cache metrics");
+        }
     }
 
     void reportQuarantineMetrics(uint64_t generation, size_t lease_count, size_t block_count) const noexcept {
