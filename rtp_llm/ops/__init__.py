@@ -410,3 +410,11 @@ def get_multimodal_feature_hash(embedding: torch.Tensor) -> torch.Tensor:
     return importlib.import_module("libth_transformer").get_multimodal_feature_hash(
         embedding
     )
+
+
+def get_multimodal_feature_hashes(embeddings: List[torch.Tensor]) -> List[torch.Tensor]:
+    """Return CPU-ready row hashes, coalescing same-device CUDA transfers."""
+    _load_engine_ops(required=True)
+    return importlib.import_module("libth_transformer").get_multimodal_feature_hashes(
+        embeddings
+    )

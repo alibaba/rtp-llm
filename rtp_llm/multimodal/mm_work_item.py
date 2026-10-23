@@ -18,7 +18,11 @@ from rtp_llm.multimodal.mm_embedding_cache import (
 )
 from rtp_llm.multimodal.multimodal_mixins.multimodal_common import MMWorkEstimate
 from rtp_llm.multimodal.multimodal_util import maybe_tensor_to_list
-from rtp_llm.ops import MultimodalInput, get_multimodal_feature_hash
+from rtp_llm.ops import (
+    MultimodalInput,
+    get_multimodal_feature_hash,
+    get_multimodal_feature_hashes,
+)
 from rtp_llm.utils.cuda_graph_gate import cuda_graph_gate
 
 
@@ -66,6 +70,35 @@ def _feature_hashes_from_result(result: Any) -> List[torch.Tensor]:
     _validate_embedding_result(result)
     embeddings = maybe_tensor_to_list(result[0], ndim_threshold=2)
     return [get_multimodal_feature_hash(embedding) for embedding in embeddings]
+
+
+@cuda_graph_gate.operation()
+def prepare_batch_feature_hashes(work_items, results) -> None:
+    """Coalesce eager CUDA hashes before publishing any work-item cache entry.
+
+    Deferred async hashes and already computed hashes retain their old path.
+    CPU results keep the single-result implementation. No embedding is copied
+    or concatenated, and cache/inspection publication still belongs to each item.
+    """
+    pending, embeddings = [], []
+    for item, result in zip(work_items, results):
+        if item.defer_feature_hashes or item.feature_hashes is not None:
+            continue
+        _validate_embedding_result(result)
+        values = maybe_tensor_to_list(result[0], ndim_threshold=2)
+        if not values or not all(value.is_cuda for value in values):
+            continue
+        pending.append((item, len(values)))
+        embeddings.extend(values)
+    if len(embeddings) < 2:
+        return
+    hashes = get_multimodal_feature_hashes(embeddings)
+    if len(hashes) != len(embeddings):
+        raise RuntimeError("Batched feature hash output count mismatch")
+    offset = 0
+    for item, count in pending:
+        item.feature_hashes = hashes[offset : offset + count]
+        offset += count
 
 
 class MMEmbeddingRes:

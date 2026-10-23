@@ -20,6 +20,7 @@ from rtp_llm.config.py_config_modules import VitConfig
 from rtp_llm.metrics import kmonitor
 from rtp_llm.metrics.kmonitor_metric_reporter import AccMetrics, GaugeMetrics
 from rtp_llm.multimodal.mm_batch_pipeline import PrefetchedMMBatch
+from rtp_llm.multimodal.mm_work_item import prepare_batch_feature_hashes
 from rtp_llm.multimodal.multimodal_mixins.multimodal_common import (
     MMWorkEstimate,
     MultiModalEmbeddingInterface,
@@ -110,6 +111,7 @@ def _run_embedding(
             f"for {len(items)} work items"
         )
 
+    prepare_batch_feature_hashes(items, batch_outputs)
     for wi, result in zip(items, batch_outputs):
         wi.embedding_result = result
         wi.complete_cache(result)
