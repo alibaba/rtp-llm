@@ -160,6 +160,38 @@ class K3FusedSharedJitWarmupTest(unittest.TestCase):
             tokens = experts._resolve_jit_warmup_token_counts(148)
         self.assertIn(2048, tokens)
 
+    def test_k3_padding_routes_match_shared_packer_fallback(self):
+        experts = self._k3_experts(capacity=3)
+        hidden = torch.randn(3, 256, dtype=torch.bfloat16)
+        routed_input = torch.randn(3, 128, dtype=torch.bfloat16)
+        routing = torch.tensor([[0, 0.25], [0.75, 0.25], [0.75, 0.25]])
+        ids = torch.tensor([[0, 3], [2, 4], [0, 5]])
+        for valid in ([True, False, True], [False] * 3, [True] * 3):
+            with self.subTest(valid=valid):
+                valid_mask = torch.tensor(valid)
+                expected_ids = torch.where(valid_mask[:, None], ids, -1)
+                expected_weights = torch.where(valid_mask[:, None], routing, 0)
+                expected_shared = torch.where(valid_mask[:, None], hidden, 0)
+                with mock.patch.object(self.k3_dg, "fp8_fp4_mega_moe_k3") as launch:
+                    experts(hidden, routed_input, routing, ids, valid_mask)
+                launch.assert_called_once()
+                torch.testing.assert_close(
+                    experts.buf.topk_idx, expected_ids, rtol=0, atol=0
+                )
+                torch.testing.assert_close(
+                    experts.buf.topk_weights, expected_weights, rtol=0, atol=0
+                )
+                torch.testing.assert_close(
+                    experts.shared_x, expected_shared, rtol=0, atol=0
+                )
+                masked_weights, masked_ids = self.k3_moe.KimiK3LatentMoE._mask_routes(
+                    routing, ids, valid_mask
+                )
+                torch.testing.assert_close(masked_ids, expected_ids, rtol=0, atol=0)
+                torch.testing.assert_close(
+                    masked_weights, expected_weights, rtol=0, atol=0
+                )
+
     def test_k3_failed_compile_restores_tmpdir_without_marking_prepared(self):
         with mock.patch.object(
             self.k3_dg,
