@@ -32,9 +32,10 @@ class Sources:
         if self.env is None:
             raise DebugUnavailable("snapshot requires setup")
         self.mock_port = self.env.mock_http_port if {"engine_snapshot", "engine_requests"} & set(params["sources"]) else None
-        self.custom = {name: ctx.services.snapshot(name, params) for name in params["sources"] if name not in SOURCES}
+        if set(params["sources"]) - SOURCES:
+            raise DebugUnavailable("unsupported observation source")
         self.records = None
-        for kind in ("requests", "flow", "client"):
+        for kind in ("requests", "flow"):
             if kind in params:
                 self.records = ctx.resource(params[kind], kind)
                 if not callable(getattr(self.records, "snapshot_records", None)):
@@ -63,10 +64,7 @@ class Sources:
                     raise DebugUnavailable(
                         "environment changed; old cohort is not sampled from the new environment"
                     )
-                if name in self.custom:
-                    sample["data"] = self.custom[name].read(deadline)
-                    json.dumps(sample["data"], allow_nan=False)
-                elif name == "client_records":
+                if name == "client_records":
                     from case_api.client_records import read_records
                     records = read_records(self.records, deadline, self.epoch)
                     sample["data"] = records  # Includes every nonterminal attempt.

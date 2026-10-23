@@ -309,7 +309,7 @@ INPUTS = InputContract.from_fields(
 # data = case.bind(INPUTS)
 ```
 
-自定义客户端或采样器在 case 的实现文件编写协议，并在 program 的 `CASE` 注册；不修改公共 source 白名单或执行器分支。注册与实现可以同处一个小型 program，也可以拆成两个文件。调用客户端必须保存返回的真实资源句柄，采样器必须使用传入 deadline 限制 I/O；不要自建脱离 scope 的后台线程。接口职责与签名只在[case 插件结构](../architecture/case-plugins.md)维护。
+客户端或采样器在 case action 中调用具体 adapter，不增加公共 source 白名单或执行器分支。后台资源立即通过 `ctx.register_resource()` 或 `ctx.add_cleanup()` 登记清理；客户端必须保存真实资源句柄，采样器使用传入 deadline 限制 I/O。接口职责见[case 插件结构](../architecture/case-plugins.md)。
 
 扩展验证应记录实际 diff 涉及的作者文件、重复合同声明与公共层修改数，测试文件单列。至少验证正向执行、错签名、未声明能力、缺失与非法输入、过期 epoch、超时与清理，以及冻结检查的投影不重新判定。新增能力不能改变原 case 的窗口、阈值、cohort、缺采处理或运行判定。
 

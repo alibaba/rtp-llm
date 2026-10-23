@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-from case_api.extension_contracts import SnapshotFactory, RuntimeClientFactory, EvidenceExporter
-
 from dataclasses import dataclass, field
 from case_api.execution_contract import ExecutionRequirements
 from enum import Enum
@@ -64,17 +62,6 @@ class EvidenceSource:
 
 
 @dataclass(frozen=True)
-class SnapshotSource:
-    factory: SnapshotFactory
-
-
-@dataclass(frozen=True)
-class ClientFactory:
-    factory: RuntimeClientFactory
-    evidence: EvidenceExporter | None = None
-
-
-@dataclass(frozen=True)
 class CaseDefinition:
     builders: Mapping[str, ProgramBuilder]
     numeric_parameters: Mapping = field(default_factory=dict)
@@ -85,8 +72,6 @@ class CaseDefinition:
 
     execution_requirements: ExecutionRequirements = field(default_factory=ExecutionRequirements)
     input_contract: object = None
-    snapshot_sources: Mapping = field(default_factory=dict)
-    clients: Mapping = field(default_factory=dict)
     gates: Mapping = field(default_factory=dict)
 
     def __post_init__(self):
@@ -102,7 +87,7 @@ class CaseDefinition:
                     raise ValueError("conflicting numeric input: " + path)
                 merged[path] = rule
             object.__setattr__(self, "numeric_parameters", merged)
-        for name in ('builders', 'numeric_parameters', 'report_views', 'producers', 'sources', 'snapshot_sources', 'clients', 'gates'):
+        for name in ('builders', 'numeric_parameters', 'report_views', 'producers', 'sources', 'gates'):
             value = getattr(self, name)
             if not isinstance(value, Mapping):
                 raise ValueError('case ' + name + ' must be a mapping')
@@ -127,7 +112,7 @@ class CaseRegistry:
 
     def capability(self, kind, name, *, case):
         """A case may consume only capabilities it explicitly declares, including shared ones."""
-        fields = {'view': 'report_views', 'producer': 'producers', 'source': 'sources', 'snapshot': 'snapshot_sources', 'client': 'clients', 'gate': 'gates'}
+        fields = {'view': 'report_views', 'producer': 'producers', 'source': 'sources', 'gate': 'gates'}
         if kind not in fields:
             raise ValueError('unknown capability kind: ' + kind)
         if case not in self.cases:
@@ -164,14 +149,6 @@ class CaseRegistry:
                     raise ValueError(case.module + ': actions must contain StageHandler capabilities')
                 validate_call(action.validate, 2, case.module + '.actions.' + action.name + '.validate')
                 validate_call(action.execute, 3, case.module + '.actions.' + action.name + '.execute')
-            for collection, expected, count in (("snapshot_sources", SnapshotSource, 2), ("clients", ClientFactory, 3)):
-                for name, capability in getattr(definition, collection).items():
-                    if not re.fullmatch(r'[a-z][a-z0-9_]*', name) or not isinstance(capability, expected):
-                        raise ValueError("invalid " + collection + " capability: " + name)
-                    validate_call(capability.factory, count, case.module + "." + collection + "." + name)
-            for name, capability in definition.clients.items():
-                if capability.evidence is not None:
-                    validate_call(capability.evidence, 3, case.module + ".clients." + name + ".evidence")
             from case_api.gate_plugin import GatePlugin
             for name, capability in definition.gates.items():
                 if not re.fullmatch(r'[a-z][a-z0-9_]*', name) or not isinstance(capability, GatePlugin):

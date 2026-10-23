@@ -2,7 +2,7 @@
 
 `CaseDefinition.execution_requirements` 和 `StageHandler.execution_requirements` 用 `ExecutionRequirements` 声明逐请求证据与监控依赖。编译和冻结计划读取都会拒绝与消费者要求冲突的 `collection: aggregate`、`capture_metrics: false`；该声明不修改检查算法、窗口或阈值。
 
-公共 snapshot 源提供 engine_snapshot、engine_requests、client_records。Master 只读观测优先使用[公共诊断契约](master-diagnostics.md)及其 v2 adapter。Master 调试端点由实际工件决定，case 必须通过 `snapshot_sources` 注册工厂并声明字段；公共层不会假设任意 Master 都提供 `/rtp_llm/debug/snapshot`。底层环境的 `master_profile='none'` 关闭 Master 时，仍须提供 `raw_config` 供 mock 读取调度参数。
+公共 snapshot 源提供 engine_snapshot、engine_requests、client_records。Master 只读观测优先使用[公共诊断契约](master-diagnostics.md)及其 v2 adapter。Master 调试端点由实际工件决定，case 的 action 直接使用对应 adapter 并保存结构化证据；公共层不会假设任意 Master 都提供 `/rtp_llm/debug/snapshot`。底层环境的 `master_profile='none'` 关闭 Master 时，仍须提供 `raw_config` 供 mock 读取调度参数。
 
 新增 case 是组合已有能力并补充业务差异，不是重新实现采集、归档、判定发布和 HTML 系统。YAML 表达运行输入、指标与窗口选择、检查门槛和视图；Python 声明流程和业务算法。唯一必需的代码入口是 `program.py` 导出的 `CASE: CaseDefinition`。
 
@@ -61,7 +61,7 @@ GATE = GatePlugin(
 
 报告回调收到已校验的 `ViewDefinition`，通过属性访问配置；声明校验器也收到同一对象，区块列数通过 `validate_section_contract` 验证。报告的共用时间轴、运行信息补充和 bundle 写入由 `reporting.gate_report` 承担。case 提供业务 spec 与已有来源信息，明确选择在线 `write_gate_report(..., run=...)` 或离线 `write_archived_gate_report`；装配逻辑保留在公共发布函数中。报告时间轴与门禁窗口的职责见[报告契约](reporting.md)。
 
-分阶段检查直接使用 `StageHandler` 和 `analysis.checks` 的测量/比较接口，不必额外构造一个整体 `GatePlugin`。数值采样来源通过 `CASE.sources` 注册，结构化快照通过 `CASE.snapshot_sources` 注册；数据来源与指标合同见[指标契约](metrics.md)。
+分阶段检查直接使用 `StageHandler` 和 `analysis.checks` 的测量/比较接口，不必额外构造一个整体 `GatePlugin`。数值采样来源通过 `CASE.sources` 注册，结构化快照由 action 使用具体 adapter 读取并归档；数据来源与指标合同见[指标契约](metrics.md)。
 
 ## 新作者的接入路径
 
@@ -114,11 +114,9 @@ FINALIZE producer 接收 `FinalizationContext(directory, run)`，而非可写的
 
 | 扩展 | 注册 | 调用与资源边界 |
 |---|---|---|
-| 自定义客户端 | `CASE.clients[name] = ClientFactory(factory, evidence=...)` | factory 接收 `(services, params, deadline)`；返回实现 `cleanup(deadline)` 的客户端。`ctx.services.client()` 登记 epoch 句柄与清理；证据 exporter 接收 `(client, profile, deadline)` |
-| 结构化采样 | `CASE.snapshot_sources[name] = SnapshotSource(factory)` | factory 接收 `(services, params)`，只构造 reader；`read(deadline)` 执行 I/O，可选 `close(deadline)` 自动登记清理。snapshot/observe 负责 epoch、样本和字节预算及错误记录 |
 | 门禁 | `CASE.gates[name] = GatePlugin(...)` | `ctx.services.gate(name)` 只解析当前 case 声明的能力 |
 
-这些名称在 case 内解析，同名扩展可以属于不同 case。foundation action 的名字以及数值 producer/source/view 的显式共享身份继续执行既有冲突检查。factory 在构造失败时负责回收未返回的资源；返回后的资源由 scope 管理。扩展的回调签名在注册时校验，返回协议在使用时校验。
+这些名称在 case 内解析，同名扩展可以属于不同 case。foundation action 的名字以及数值 producer/source/view 的显式共享身份继续执行既有冲突检查。客户端与采样器在 action 中使用具体 adapter；后台资源立即通过 `ctx.register_resource()` 或 `ctx.add_cleanup()` 登记清理。公共 snapshot/observe 只接受内置来源。
 
 `ctx.services.environment` 提供当前环境、Master 地址与客户端进程操作。`ClientRecordAdapter(read, decode)` 将特殊记录明确转换为 client-record v1；公共读取器检查 schema 与 epoch，不替原始 Java 记录伪造身份。`FinalizationContext.deadline` 将收尾预算传给 producer。`ReportView.deadline_renderer` 可接收第四个 deadline 参数；整窗插件提供 `render_with_deadline`，离线 renderer 仍可独立调用。
 

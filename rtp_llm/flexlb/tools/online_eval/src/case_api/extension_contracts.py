@@ -70,26 +70,3 @@ class FinalizeProducer(Protocol):
 
 class SourceFactory(Protocol):
     def __call__(self, environment: object, fields: set[str]) -> dict: ...
-
-
-
-class SnapshotReader(Protocol):
-    def read(self, deadline: Deadline) -> object: ...
-
-
-class SnapshotFactory(Protocol):
-    def __call__(self, services: object, params: dict) -> SnapshotReader: ...
-
-
-class RuntimeClient(Protocol):
-    def start(self, deadline: Deadline) -> None: ...
-    def cleanup(self, deadline: Deadline) -> None: ...
-
-
-class RuntimeClientFactory(Protocol):
-    """Construct an unstarted owner; acquisition happens only in start()."""
-    def __call__(self, services: object, params: dict, deadline: Deadline) -> RuntimeClient: ...
-
-
-class EvidenceExporter(Protocol):
-    def __call__(self, client: object, profile: str, deadline: Deadline) -> ResourceEvidence: ...

@@ -98,6 +98,7 @@ class ObservationTest(unittest.TestCase):
             {"sources": [[]]},
             {"sources": ["missing"]},
             {"sources": ["client_records"]},
+            {"sources": ["client_records"], "client": {"$ref": "stages.start.output.client"}},
             {"sources": ["engine_snapshot"], "limit": True},
         ):
             with self.subTest(raw=raw), self.assertRaises(ValueError):
@@ -121,7 +122,7 @@ class ObservationTest(unittest.TestCase):
             )
 
     def test_missing_master_source_is_rejected_before_execution(self):
-        with self.assertRaisesRegex(ValueError, 'case-owned snapshot source'):
+        with self.assertRaisesRegex(ValueError, 'not a supported source'):
             validate_snapshot({"sources": ["master_debug"]}, Plan())
 
     def test_epoch_change_performs_no_new_environment_io(self):

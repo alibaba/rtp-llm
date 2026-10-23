@@ -32,7 +32,6 @@ def validate_snapshot(params, plan):
         "sources",
         "required",
         "flow",
-        "client",
         "requests",
         "targets",
         "master_include",
@@ -44,11 +43,8 @@ def validate_snapshot(params, plan):
         _error(plan, "unknown snapshot parameters")
     sources = params.get("sources")
     available = set(SOURCES)
-    if plan.case:
-        from case_api.registry import registry
-        available.update(registry().cases[plan.case].definition.snapshot_sources)
     if isinstance(sources, list) and 'master_debug' in sources and 'master_debug' not in available:
-        _error(plan, 'master_debug requires a case-owned snapshot source; bundled Master has no debug snapshot endpoint')
+        _error(plan, 'master_debug is not a supported source; bundled Master has no debug snapshot endpoint')
     if (
         not isinstance(sources, list)
         or not sources
@@ -61,13 +57,13 @@ def validate_snapshot(params, plan):
     if type(params.get("required", True)) is not bool:
         _error(plan, "required must be boolean")
     result["required"] = params.get("required", True)
-    if len({"requests", "flow", "client"} & params.keys()) > 1:
-        _error(plan, "choose one requests, flow or client reference")
-    for kind in ("requests", "flow", "client"):
+    if len({"requests", "flow"} & params.keys()) > 1:
+        _error(plan, "choose one requests or flow reference")
+    for kind in ("requests", "flow"):
         if kind in params:
             plan.reference(params[kind], kind)
-    if "client_records" in sources and not ({"requests", "flow", "client"} & params.keys()):
-        _error(plan, "client_records requires a requests, flow or client reference")
+    if "client_records" in sources and not ({"requests", "flow"} & params.keys()):
+        _error(plan, "client_records requires a requests or flow reference")
     targets = params.get("targets", [])
     if not isinstance(targets, list) or any(
         not isinstance(x, str) or not x for x in targets
