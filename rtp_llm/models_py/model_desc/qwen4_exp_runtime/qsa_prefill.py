@@ -16,6 +16,7 @@ from rtp_llm.models_py.modules.qwen4_exp.qsa.indexer import (
     build_qsa_rope,
     build_qsa_rope_from_logical_positions,
     is_qsa_rope_style,
+    validate_mrope_decode_tail,
 )
 
 from .qsa_cache_views import _block_table, _same_tensor_metadata, _typed_2d_pool
@@ -156,6 +157,8 @@ def write_prefill_indexer_cache(
                 seq_len, dtype=torch.int64, device=raw_keys.device
             )
         try:
+            if not self.is_mtp_draft and is_qsa_rope_style(rope_config, "Mrope"):
+                validate_mrope_decode_tail(positions[offset:end], ratio)
             cos, sin = build_qsa_rope(
                 positions[offset:end].reshape(-1),
                 rope_config,

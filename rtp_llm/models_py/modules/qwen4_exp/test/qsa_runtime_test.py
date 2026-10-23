@@ -1575,6 +1575,419 @@ class Qwen4ExpQSARuntimeTest(TestCase):
             ),
         )
 
+    def test_multimodal_decode_uses_rope_offset_and_logical_group_boundary(self):
+        # Image axes are nonlinear. The following text positions have either
+        # a positive or a negative offset from cache rows, not divisible by 4.
+        for offset in (-2, 9):
+            for remainder in range(4):
+                with self.subTest(offset=offset, remainder=remainder):
+                    self.kv_base.zero_()
+                    self.state_base.zero_()
+                    count = 4 + remainder
+                    image_start = offset + 2
+                    positions = [
+                        [image_start, image_start, image_start],
+                        [image_start, image_start + 1, image_start],
+                        [image_start, image_start, image_start + 1],
+                        [image_start, image_start + 1, image_start + 1],
+                    ]
+                    # The engine continues at max(image axes) + 1, even
+                    # when prefill ends exactly on the compression boundary.
+                    positions += [[i + offset] * 3 for i in range(4, 8)]
+                    raw = torch.randn(8, self.D, dtype=torch.bfloat16)
+                    queries = torch.randn(8, 2, self.D, dtype=torch.bfloat16)
+                    indexer = self._decode_indexer()
+                    prefill = self._single_request_context(
+                        self.kv_base,
+                        self.state_base,
+                        is_prefill=True,
+                        input_length=count,
+                        sequence_length=0,
+                        position_ids=positions[:count],
+                    )
+                    prefill.write_prefill_indexer_cache(
+                        raw[:count], indexer=indexer, rope_config=self.rope_config
+                    )
+                    prefill.finalize_side_cache()
+                    cos, sin = build_interleaved_mrope(
+                        torch.tensor(positions).reshape(-1),
+                        self.rope_config,
+                        token_count=8,
+                        dtype=torch.bfloat16,
+                        device=raw.device,
+                    )
+                    for row in range(count, 8):
+                        decode = self._single_request_context(
+                            self.kv_base,
+                            self.state_base,
+                            is_prefill=False,
+                            input_length=count,
+                            sequence_length=row,
+                            position_ids=[positions[row]],
+                        )
+
+                        def score(
+                            q, weight, pool, table, lengths, *, max_ctx_len, **kwargs
+                        ):
+                            expected_q = apply_partial_rope(
+                                queries[row : row + 1],
+                                cos[row].view(1, 1, -1),
+                                sin[row].view(1, 1, -1),
+                            )
+                            torch.testing.assert_close(
+                                q[:, 0], expected_q, rtol=0, atol=0
+                            )
+                            self.assertEqual(lengths.item(), (row + 1) // 4)
+                            return torch.zeros(1, max_ctx_len)
+
+                        with patch(
+                            "rtp_llm.models_py.modules.qwen4_exp.qsa.indexer_paged_score."
+                            "qsa_paged_indexer_score",
+                            side_effect=score,
+                        ):
+                            decode.select_decode_tokens(
+                                queries[row : row + 1],
+                                raw[row : row + 1],
+                                indexer=indexer,
+                                rope_config=self.rope_config,
+                            )
+                        decode.finalize_side_cache()
+                    pool = self.kv_base.view(torch.bfloat16).view(7, 2, self.D)
+                    for group in range(2):
+                        begin = group * 4
+                        torch.testing.assert_close(
+                            pool[3, group],
+                            self._expected(
+                                raw[begin : begin + 4], cos[begin], sin[begin], begin
+                            ),
+                            rtol=0,
+                            atol=0,
+                        )
+                    torch.testing.assert_close(
+                        self.state_base.view(8, 8, self.D)[6],
+                        raw.float(),
+                        rtol=0,
+                        atol=0,
+                    )
+
+    def test_multimodal_prefill_rejects_unrecoverable_tail_before_writes(self):
+        # Unequal image axes, an equal-axis discontinuity, and a final text
+        # row below an earlier image maximum all defeat decode extrapolation.
+        for tail in (
+            [[2, 2, 2], [2, 3, 2], [4, 4, 4]],
+            [[2, 2, 2], [4, 4, 4], [5, 5, 5]],
+            [[0, 0, 0], [1, 1, 1], [2, 2, 2]],
+        ):
+            positions = [[0, 0, 0], [0, 3, 0], [0, 0, 1], [0, 1, 1]] + tail
+            for prefix in (0, 8):
+                with self.subTest(tail=tail, prefix=prefix):
+                    context = self._draft_incremental_context(
+                        self.kv_base,
+                        self.state_base,
+                        prefixes=[prefix],
+                        lengths=[7],
+                        is_mtp_draft=False,
+                    )
+                    self._set_position_ids(context, positions)
+                    before_kv, before_state = (
+                        self.kv_base.clone(),
+                        self.state_base.clone(),
+                    )
+                    with self.assertRaisesRegex(
+                        RuntimeError, "unfinished MRoPE compression group"
+                    ):
+                        if prefix:
+                            context._draft_incremental_prefill_geometry(
+                                indexer=self._decode_indexer(),
+                                token_count=7,
+                                device=self.kv_base.device,
+                                rope_config=self.rope_config,
+                                draft=False,
+                            )
+                        else:
+                            context.write_prefill_indexer_cache(
+                                torch.randn(7, self.D, dtype=torch.bfloat16),
+                                indexer=self.indexer,
+                                rope_config=self.rope_config,
+                            )
+                    torch.testing.assert_close(self.kv_base, before_kv, rtol=0, atol=0)
+                    torch.testing.assert_close(
+                        self.state_base, before_state, rtol=0, atol=0
+                    )
+
+    @skipUnless(torch.cuda.is_available(), "CUDA is required for paged scoring")
+    def test_cuda_multimodal_prefix_writes_real_image_group_rope(self):
+        device = torch.device("cuda")
+        self.indexer.k_norm_gamma = self.indexer.k_norm_gamma.to(device)
+        indexer = self._decode_indexer()
+        for page_size in (64, 128):
+            with self.subTest(page_size=page_size):
+                self.KV_TOKENS_PER_BLOCK = self.STATE_TOKENS_PER_BLOCK = page_size
+                kv = torch.zeros(
+                    16, (page_size // 4) * self.D * 2, dtype=torch.uint8, device=device
+                )
+                state = torch.zeros(16, 8 * self.D, device=device)
+                kv[4].random_(0, 256)
+                reused_page = kv[4].clone()
+                positions = [
+                    [0, 0, 0],
+                    [0, 1, 0],
+                    [0, 0, 1],
+                    [0, 1, 1],
+                    [2, 2, 2],
+                    [3, 3, 3],
+                    [4, 4, 4],
+                    [21, 20, 23],
+                    [21, 21, 23],
+                    [21, 22, 23],
+                    [21, 23, 23],
+                    [24, 24, 24],
+                ]
+                context = self._draft_incremental_context(
+                    kv,
+                    state,
+                    prefixes=[0, page_size],
+                    lengths=[7, 5],
+                    is_mtp_draft=False,
+                )
+                self._set_position_ids(context, positions)
+                raw = torch.randn(12, self.D, dtype=torch.bfloat16, device=device)
+                queries = torch.randn(
+                    12, 2, self.D, dtype=torch.bfloat16, device=device
+                )
+                cos, sin = build_interleaved_mrope(
+                    torch.tensor(positions, device=device).reshape(-1),
+                    self.rope_config,
+                    token_count=12,
+                    dtype=torch.bfloat16,
+                    device=device,
+                )
+
+                def score(q, weight, pool, table, lengths, *, max_ctx_len, **kwargs):
+                    expected_q = apply_partial_rope(queries, cos[:, None], sin[:, None])
+                    torch.testing.assert_close(q[0], expected_q[:7], rtol=0, atol=0)
+                    torch.testing.assert_close(q[1, :5], expected_q[7:], rtol=0, atol=0)
+                    return torch.zeros(
+                        q.shape[0] * q.shape[1], max_ctx_len, device=device
+                    )
+
+                with patch(
+                    "rtp_llm.models_py.modules.qwen4_exp.qsa.indexer_paged_score.qsa_paged_indexer_score",
+                    side_effect=score,
+                ):
+                    selected = context.select_prefix_reuse_prefill_tokens(
+                        queries,
+                        raw,
+                        indexer=indexer,
+                        rope_config=self.rope_config,
+                    )
+                pool = kv.view(torch.bfloat16).view(16, page_size // 4, self.D)
+                for block, start in ((1, 0), (5, 7)):
+                    torch.testing.assert_close(
+                        pool[block, 0],
+                        self._expected(
+                            raw[start : start + 4], cos[start], sin[start], start
+                        ),
+                        rtol=0,
+                        atol=0,
+                    )
+                torch.testing.assert_close(kv[4], reused_page, rtol=0, atol=0)
+                for row, visible in enumerate(
+                    list(range(1, 8)) + list(range(page_size + 1, page_size + 6))
+                ):
+                    self.assertTrue(
+                        torch.all(selected[row][selected[row] >= 0] < visible).item()
+                    )
+                # A rejected paired attention restores all newly written side rows.
+                context.rollback_side_cache()
+                torch.testing.assert_close(kv[4], reused_page, rtol=0, atol=0)
+                self.assertEqual(torch.count_nonzero(kv[[1, 5]]).item(), 0)
+                self.assertEqual(torch.count_nonzero(state).item(), 0)
+
+    @skipUnless(torch.cuda.is_available(), "CUDA is required for prefill writers")
+    def test_image_internal_prefix_rebuild_matches_full_prefill_and_position_oracle(
+        self,
+    ):
+        # A 43x64 image begins after nine text tokens. A 2752-token prefix
+        # cuts nine patches before the image ends, on a 64 but not 128 edge.
+        # The 28-token suffix includes an image/text-crossing compression
+        # group whose first token still has unequal T/H/W coordinates.
+        device = torch.device("cuda")
+        self.D = 128
+        page_size, prefix, total = 64, 2752, 2780
+        self.KV_TOKENS_PER_BLOCK = self.STATE_TOKENS_PER_BLOCK = page_size
+        pages = (total + page_size - 1) // page_size
+        kv_table = torch.arange(1, pages + 1, device=device, dtype=torch.int32)[None]
+        state_table = kv_table.flip(1).contiguous()
+        self.indexer.k_norm_gamma = (
+            ((torch.arange(128, device=device) * 7) % 11 - 5).float() / 32
+        ).bfloat16()
+        indexer = self._decode_indexer()
+        rope = SimpleNamespace(
+            style=RopeStyle.Mrope,
+            index_factor=3,
+            dim=64,
+            mrope_dim1=11,
+            mrope_dim2=11,
+            mrope_dim3=10,
+            mrope_interleaved=True,
+            base=10000,
+            scale=1.0,
+        )
+        positions = [[i] * 3 for i in range(9)]
+        positions += [[9, 9 + h, 9 + w] for h in range(43) for w in range(64)]
+        positions += [[i] * 3 for i in range(73, 92)]
+        positions = torch.tensor(positions, dtype=torch.int32, device=device)
+        self.assertEqual(tuple(positions.shape), (total, 3))
+        self.assertEqual(positions[prefix].tolist(), [9, 51, 64])
+        self.assertEqual(positions[2760].tolist(), [9, 51, 72])
+        self.assertEqual(prefix % 128, 64)
+        # Dyadic inputs make mean/square reductions exact in FP32, so this
+        # fixture isolates position/state mistakes from reduction-order noise.
+        row = torch.arange(total, device=device)[:, None]
+        col = torch.arange(128, device=device)[None, :]
+        raw = ((((row * 3 + col * 5) % 17) - 8).float() / 8).bfloat16()
+        cold_kv = torch.zeros(pages + 1, 16 * 128 * 2, dtype=torch.uint8, device=device)
+        cold_state = torch.zeros(pages + 1, 8 * 128, device=device)
+        cold = self._draft_incremental_context(
+            cold_kv,
+            cold_state,
+            prefixes=[0],
+            lengths=[total],
+            kv_table=kv_table,
+            state_table=state_table,
+            is_mtp_draft=False,
+        )
+        self._set_position_ids(cold, positions)
+        cold.write_prefill_indexer_cache(raw, indexer=indexer, rope_config=rope)
+        cold.finalize_side_cache()
+
+        reused_pages = prefix // page_size
+        hot_kv, hot_state = torch.zeros_like(cold_kv), torch.zeros_like(cold_state)
+        hot_kv[kv_table[0, :reused_pages].long()] = cold_kv[
+            kv_table[0, :reused_pages].long()
+        ]
+        hot_state[state_table[0, :reused_pages].long()] = cold_state[
+            state_table[0, :reused_pages].long()
+        ]
+        before_kv, before_state = hot_kv.clone(), hot_state.clone()
+        hot = self._draft_incremental_context(
+            hot_kv,
+            hot_state,
+            prefixes=[prefix],
+            lengths=[total - prefix],
+            kv_table=kv_table,
+            state_table=state_table,
+            is_mtp_draft=False,
+        )
+        self._set_position_ids(hot, positions[prefix:])
+
+        # Independent MRoPE formula, not the runtime's RoPE builder.
+        axes = torch.zeros(32, device=device, dtype=torch.long)
+        axes[1:33:3], axes[2:30:3] = 1, 2
+        inv_freq = 10000.0 ** (-2.0 * torch.arange(32, device=device).float() / 64)
+        angle = positions[:, axes].float() * inv_freq[None]
+        cosine = torch.cat([angle.cos(), angle.cos()], dim=-1).bfloat16()
+        sine = torch.cat([angle.sin(), angle.sin()], dim=-1).bfloat16()
+
+        def rotate(value, cos, sin):
+            first = value[..., :64]
+            paired = torch.cat([-first[..., 32:], first[..., :32]], dim=-1)
+            result = value.clone()
+            result[..., :64] = first * cos + paired * sin
+            return result
+
+        queries = torch.randn(
+            total - prefix, 2, 128, dtype=torch.bfloat16, device=device
+        )
+        expected_q = rotate(queries, cosine[prefix:, None], sine[prefix:, None])
+
+        def score(q, weight, pool, table, lengths, *, max_ctx_len, **kwargs):
+            torch.testing.assert_close(q[0], expected_q, rtol=0, atol=0)
+            return torch.zeros(q.shape[1], max_ctx_len, device=device)
+
+        with patch(
+            "rtp_llm.models_py.modules.qwen4_exp.qsa.indexer_paged_score.qsa_paged_indexer_score",
+            side_effect=score,
+        ):
+            hot.select_prefix_reuse_prefill_tokens(
+                queries,
+                raw[prefix:],
+                indexer=indexer,
+                rope_config=rope,
+            )
+        # Every cache byte and raw-state ring slot, including retained pages.
+        torch.testing.assert_close(hot_kv, cold_kv, rtol=0, atol=0)
+        torch.testing.assert_close(hot_state, cold_state, rtol=0, atol=0)
+        pooled = raw.float().reshape(-1, 4, 128).mean(1).bfloat16().float()
+        normalized = (
+            pooled
+            * torch.rsqrt(pooled.square().mean(-1, keepdim=True) + indexer.norm_eps)
+            * (1.0 + indexer.k_norm_gamma.float())
+        ).bfloat16()
+        expected_k = rotate(normalized, cosine[::4], sine[::4])
+        actual_k = hot_kv.view(torch.bfloat16).view(pages + 1, 16, 128)
+        actual_k = actual_k[kv_table[0].long()].reshape(-1, 128)[: total // 4]
+        torch.testing.assert_close(actual_k, expected_k, rtol=0, atol=0)
+        # Prefix state and all suffix writes remain transactionally reversible.
+        hot.rollback_side_cache()
+        torch.testing.assert_close(hot_kv, before_kv, rtol=0, atol=0)
+        torch.testing.assert_close(hot_state, before_state, rtol=0, atol=0)
+
+    def test_multimodal_prefix_plan_gathers_real_group_starts(self):
+        # Mixed cold/hot rows and ragged suffixes: group-start source indices
+        # are token-major indices, not logical cache rows or RoPE positions.
+        for page_size in (64, 128):
+            with self.subTest(page_size=page_size):
+                self.KV_TOKENS_PER_BLOCK = self.STATE_TOKENS_PER_BLOCK = page_size
+                kv = torch.zeros(16, (page_size // 4) * self.D * 2, dtype=torch.uint8)
+                state = torch.zeros(16, 8 * self.D)
+                positions = [
+                    [0, 0, 0],
+                    [0, 1, 0],
+                    [0, 0, 1],
+                    [0, 1, 1],
+                    [2, 2, 2],
+                    [3, 3, 3],
+                    [4, 4, 4],
+                    [21, 20, 23],
+                    [21, 21, 23],
+                    [21, 22, 23],
+                    [21, 23, 23],
+                    [24, 24, 24],
+                ]
+                context = self._draft_incremental_context(
+                    kv,
+                    state,
+                    prefixes=[0, page_size],
+                    lengths=[7, 5],
+                    is_mtp_draft=False,
+                )
+                self._set_position_ids(context, positions)
+                plan = context._draft_incremental_prefill_geometry(
+                    indexer=self._decode_indexer(),
+                    token_count=12,
+                    device=kv.device,
+                    rope_config=self.rope_config,
+                    draft=False,
+                )
+                cos, sin = build_interleaved_mrope(
+                    torch.tensor(positions).reshape(-1),
+                    self.rope_config,
+                    token_count=12,
+                    dtype=torch.bfloat16,
+                    device=kv.device,
+                )
+                sources = torch.tensor([0, 0, 0, 0, 4, 4, 4, 7, 7, 7, 7, 11])
+                torch.testing.assert_close(plan.current_cos, cos, rtol=0, atol=0)
+                torch.testing.assert_close(plan.current_sin, sin, rtol=0, atol=0)
+                torch.testing.assert_close(plan.rope_cos, cos[sources], rtol=0, atol=0)
+                torch.testing.assert_close(plan.rope_sin, sin[sources], rtol=0, atol=0)
+                self.assertEqual(
+                    plan.logical_positions.tolist(),
+                    list(range(7)) + list(range(page_size, page_size + 5)),
+                )
+
     def test_paged_score_failure_can_rollback_the_side_cache(self):
         self.kv_base.random_(0, 256)
         self.state_base.normal_()

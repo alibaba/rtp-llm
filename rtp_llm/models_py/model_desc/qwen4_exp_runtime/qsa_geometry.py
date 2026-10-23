@@ -14,6 +14,7 @@ from rtp_llm.models_py.modules.qwen4_exp.qsa.indexer import (
     build_qsa_rope,
     build_qsa_rope_from_logical_positions,
     is_qsa_rope_style,
+    validate_mrope_decode_tail,
 )
 
 from .qsa_cache_views import _block_table, _typed_2d_pool, _validate_required_blocks
@@ -181,14 +182,25 @@ def _draft_incremental_prefill_geometry(
             f"match index_factor={index_factor}: got {actual} values for "
             f"{token_count} tokens"
         )
+    target_mrope = (
+        not draft and not self.is_mtp_draft and is_qsa_rope_style(rope_config, "Mrope")
+    )
     try:
+        if target_mrope:
+            offset = 0
+            position_rows = position_ids.reshape(token_count, index_factor)
+            for length in lengths:
+                validate_mrope_decode_tail(
+                    position_rows[offset : offset + length], ratio
+                )
+                offset += length
         current_cos, current_sin = build_qsa_rope(
             position_ids,
             rope_config,
             token_count=token_count,
             dtype=torch.bfloat16,
             device=device,
-            logical_positions=logical_positions,
+            logical_positions=None if target_mrope else logical_positions,
         )
     except ValueError as error:
         raise RuntimeError(
@@ -298,13 +310,31 @@ def _draft_incremental_prefill_geometry(
 
     block_starts = logical_positions - logical_positions.remainder(ratio)
     try:
-        rope_cos, rope_sin = build_qsa_rope_from_logical_positions(
-            block_starts,
-            rope_config,
-            token_count=token_count,
-            dtype=torch.bfloat16,
-            device=device,
-        )
+        if target_mrope:
+            # Each page-aligned suffix contains the first row of every new
+            # group, including image groups with unequal/nonlinear axes.
+            sources = torch.arange(token_count, device=device)
+            sources = sources - logical_positions.remainder(ratio)
+            block_positions = (
+                position_ids.to(device=device)
+                .reshape(token_count, index_factor)
+                .index_select(0, sources)
+            )
+            rope_cos, rope_sin = build_qsa_rope(
+                block_positions.reshape(-1),
+                rope_config,
+                token_count=token_count,
+                dtype=torch.bfloat16,
+                device=device,
+            )
+        else:
+            rope_cos, rope_sin = build_qsa_rope_from_logical_positions(
+                block_starts,
+                rope_config,
+                token_count=token_count,
+                dtype=torch.bfloat16,
+                device=device,
+            )
     except ValueError as error:
         raise RuntimeError(
             f"qwen4_exp QSA draft incremental prefill {error}"

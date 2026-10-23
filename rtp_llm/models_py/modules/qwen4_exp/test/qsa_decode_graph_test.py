@@ -1,5 +1,6 @@
 from types import SimpleNamespace
 from unittest import TestCase, main, skipUnless
+from unittest.mock import patch
 
 import torch
 
@@ -193,6 +194,94 @@ class Qwen4ExpQSADecodeGraphTest(TestCase):
         torch.testing.assert_close(selected, expected)
         torch.testing.assert_close(self.kv, reference_kv)
         torch.testing.assert_close(self.state, reference_state)
+
+    def test_multimodal_graph_replay_refreshes_rope_offset_at_page_end(self):
+        from rtp_llm.models_py.modules.base.common.zero_centered_rms_norm import (
+            exact_head_rms_norm,
+        )
+        from rtp_llm.models_py.modules.qwen4_exp.qsa.indexer import (
+            apply_partial_rope,
+            build_interleaved_mrope,
+        )
+        from rtp_llm.models_py.modules.qwen4_exp.qsa.indexer_paged_score import (
+            qsa_paged_indexer_score,
+        )
+
+        # The last cache row of a page closes a group. Its real text position
+        # after images need not have the same residue modulo compress_ratio.
+        logical = self.PAGE_SIZE - 1
+        self.lengths[0] = logical
+        self.positions.fill_(logical - 17)
+        initial_kv, initial_state = self.kv.clone(), self.state.clone()
+        context = self._context(True)
+        context.select_decode_tokens(
+            self.q, self.raw, indexer=self.indexer, rope_config=self.rope
+        )
+        context.finalize_side_cache()
+        self.kv.copy_(initial_kv)
+        self.state.copy_(initial_state)
+        observed = {}
+
+        def score(q, *args, **kwargs):
+            observed["q"] = q
+            return qsa_paged_indexer_score(q, *args, **kwargs)
+
+        graph = torch.cuda.CUDAGraph()
+        with patch(
+            "rtp_llm.models_py.modules.qwen4_exp.qsa.indexer_paged_score.qsa_paged_indexer_score",
+            side_effect=score,
+        ):
+            with torch.cuda.graph(graph):
+                selected = context.select_decode_tokens(
+                    self.q, self.raw, indexer=self.indexer, rope_config=self.rope
+                )
+        context.finalize_side_cache()
+        captured_q = observed["q"]
+        for offset in (-17, 9):
+            with self.subTest(offset=offset):
+                self.kv.copy_(initial_kv)
+                self.state.copy_(initial_state)
+                self.q.normal_()
+                self.raw.normal_()
+                self.positions.fill_(logical + offset)
+                graph.replay()
+                eager_kv, eager_state = initial_kv.clone(), initial_state.clone()
+                eager = self._context(False, eager_kv, eager_state)
+                expected = eager.select_decode_tokens(
+                    self.q, self.raw, indexer=self.indexer, rope_config=self.rope
+                )
+                torch.testing.assert_close(selected, expected, rtol=0, atol=0)
+                torch.testing.assert_close(self.kv, eager_kv, rtol=0, atol=0)
+                torch.testing.assert_close(self.state, eager_state, rtol=0, atol=0)
+                # Independent Q and compressed-K math: same logical group,
+                # two different replayed RoPE offsets, including a page edge.
+                positions = torch.tensor(
+                    [logical + offset, logical + offset - 3], device="cuda"
+                ).repeat_interleave(3)
+                cos, sin = build_interleaved_mrope(
+                    positions,
+                    self.rope,
+                    token_count=2,
+                    dtype=torch.bfloat16,
+                    device=self.device,
+                )
+                expected_q = apply_partial_rope(
+                    self.q, cos[0].view(1, 1, -1), sin[0].view(1, 1, -1)
+                )
+                torch.testing.assert_close(captured_q[:, 0], expected_q, rtol=0, atol=0)
+                raw_group = torch.cat(
+                    [initial_state.view(3, 8, 128)[1, 4:7], self.raw.float()]
+                )
+                normalized = exact_head_rms_norm(
+                    raw_group.mean(0).bfloat16(),
+                    self.indexer.k_norm_gamma,
+                    self.indexer.norm_eps,
+                )
+                expected_k = apply_partial_rope(normalized, cos[1], sin[1])
+                actual_k = self.kv.view(torch.bfloat16).view(
+                    3, self.PAGE_SIZE // 4, 128
+                )[1, -1]
+                torch.testing.assert_close(actual_k, expected_k, rtol=0.01, atol=0.016)
 
     def test_target_graph_replays_updated_prefix_and_side_cache(self):
         prefix = torch.tensor([11], dtype=torch.int32).pin_memory()

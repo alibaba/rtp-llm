@@ -2,11 +2,12 @@
 
 This module wires pure prefill, page-aligned prefix reuse, MTP-draft incremental prefill,
 ordinary single-token decode and bounded speculative target verification into
-the independent ``indexer_kv`` and ``indexer_state`` pools. Decode is
-deliberately limited to text-only MRoPE, whose three current position axes all
-equal ``sequence_lengths``.  The side state stores raw keys but no historical
-MRoPE positions, so accepting a multimodal/non-linear position stream would
-make a compressed block that crosses the prefill/decode boundary incorrect.
+the independent ``indexer_kv`` and ``indexer_state`` pools. Ordinary target
+decode keeps MRoPE positions separate from logical cache rows after images.
+The side state stores raw keys but no historical MRoPE positions, so prefill
+requires any unfinished compression group to be a consecutive equal-axis text
+tail. Decode can then recover its first position from the transported current
+position and logical group offset. MTP retains its text-only restrictions.
 
 Target verification may overwrite the uncommitted physical tail without an
 accepted-length callback only when its width is at most one compression group.

@@ -36,7 +36,7 @@ def select_decode_tokens(
     indexer: Any,
     rope_config: Any,
 ) -> torch.Tensor:
-    """Write/score one ordinary text decode token per request.
+    """Write/score one generated text token per request, including after images.
 
     ``q`` and ``raw_keys`` are the two outputs of one indexer projection.
     The raw key is first committed to the state ring (and, when it closes a
@@ -105,10 +105,19 @@ def select_decode_tokens(
             f"configured index_factor={index_factor}: got {actual} values "
             f"for batch={batch_size}"
         )
-    # The MTP draft transports the engine's absolute positions, whose
-    # bookkeeping intentionally differs from the logical cache rows, so
-    # only non-draft decodes can be validated against sequence_lengths.
-    decode_logical_positions = None if self.is_mtp_draft else sequence_lengths
+    target_mrope = not self.is_mtp_draft and is_qsa_rope_style(rope_config, "Mrope")
+    # Cache rows advance over image patches; text MRoPE resumes at max(T,H,W)
+    # instead. They are separate coordinates even when all three axes agree.
+    decode_logical_positions = (
+        None if self.is_mtp_draft or target_mrope else sequence_lengths
+    )
+    if target_mrope and not graph_decode:
+        positions = position_ids.reshape(batch_size, index_factor)
+        if not torch.equal(positions, positions[:, :1].expand_as(positions)):
+            raise RuntimeError(
+                "qwen4_exp QSA decode requires text-only MRoPE continuation "
+                "with three equal axes (which may differ from cache positions)"
+            )
     get_frequency = getattr(indexer, "rope_inv_freq", None)
     frequency = get_frequency(rope_config) if callable(get_frequency) else None
     prepared = None
@@ -144,7 +153,7 @@ def select_decode_tokens(
                 validate_position_axes=False,
                 inv_freq=frequency,
             )
-        elif graph_decode:
+        elif graph_decode and not target_mrope:
             # Exact-batch Graph capture uses the engine's canonical text
             # positions. The C++ graph owner refreshes lengths before replay.
             current_cos, current_sin = build_qsa_rope_from_logical_positions(
@@ -237,16 +246,34 @@ def select_decode_tokens(
     # Only rows that close a compression group consume these values. Build
     # one block-start RoPE row per request instead of [0, context_len).
     if prepared is None:
-        block_starts = sequence_lengths.to(torch.int64)
-        block_starts = block_starts - block_starts.remainder(ratio)
-        rope_cos, rope_sin = build_qsa_rope_from_logical_positions(
-            block_starts,
-            rope_config,
-            token_count=batch_size,
-            dtype=raw_keys.dtype,
-            device=raw_keys.device,
-            inv_freq=frequency,
-        )
+        if target_mrope:
+            # Prefill validates the unfinished group is a linear text tail.
+            # Its first MRoPE position is current MRoPE minus the *cache*
+            # offset in that group, not MRoPE rounded to a multiple of ratio.
+            block_positions = (
+                position_ids.to(device=raw_keys.device, dtype=torch.int64).reshape(
+                    batch_size, index_factor
+                )
+                - sequence_lengths.remainder(ratio)[:, None]
+            )
+            rope_cos, rope_sin = build_qsa_rope(
+                block_positions.reshape(-1),
+                rope_config,
+                token_count=batch_size,
+                dtype=raw_keys.dtype,
+                device=raw_keys.device,
+            )
+        else:
+            block_starts = sequence_lengths.to(torch.int64)
+            block_starts = block_starts - block_starts.remainder(ratio)
+            rope_cos, rope_sin = build_qsa_rope_from_logical_positions(
+                block_starts,
+                rope_config,
+                token_count=batch_size,
+                dtype=raw_keys.dtype,
+                device=raw_keys.device,
+                inv_freq=frequency,
+            )
     fused_writer = True
     if fused_writer:
         from rtp_llm.models_py.modules.qwen4_exp.qsa.indexer_decode_triton import (
