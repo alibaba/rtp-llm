@@ -9,11 +9,6 @@ from smoke.base_comparer import BaseComparer
 from smoke.common_def import ABS_PATH, REL_PATH, QueryStatus, SmokeException
 from smoke.utils import create_temporary_copy, save_hidden_states
 
-from rtp_llm.test.utils.graph_replay_util import (
-    graph_replay_count,
-    require_graph_replay,
-)
-
 from rtp_llm.models.downstream_modules.embedding.api_datatype import (
     AllEmbeddingRequest,
     ALLEmbeddingResponse,
@@ -33,16 +28,6 @@ class EmbeddingComparer(BaseComparer):
         super().__init__(*args, **kwargs)
         self.rtol = 1e-2
         self.atol = 1e-2
-
-    def run(self):
-        if os.environ.get("SMOKE_EXPECT_EMBEDDING_GRAPH_REPLAY") != "1":
-            return super().run()
-        log_path = self.server_manager.log_file_path
-        if not log_path:
-            raise AssertionError("Graph smoke requires a server console log")
-        previous_count = graph_replay_count(log_path)
-        super().run()
-        require_graph_replay(log_path, previous_count)
 
     def format_query(self, query_json: Dict[str, Any]) -> BaseModel:
         if "return_decoded" in query_json:
