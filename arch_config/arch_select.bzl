@@ -277,6 +277,9 @@ def select_py_bindings():
         "@rtp_llm//:using_rocm": [
             "@rtp_llm//rtp_llm/models_py/bindings/rocm:rocm_bindings_register",
         ],
+        "@rtp_llm//:using_ppu": [
+            "@rtp_llm//rtp_llm/models_py/bindings/ppu:ppu_bindings_register",
+        ],
         "//conditions:default": [
             "@rtp_llm//rtp_llm/models_py/bindings:dummy_register",
         ],
@@ -287,6 +290,9 @@ def no_block_copy_link_deps():
     return select({
         "@rtp_llm//:using_cuda12": [
             "@rtp_llm//rtp_llm/models_py/bindings/cuda:no_block_copy",
+        ],
+        "@rtp_llm//:using_ppu": [
+            "@rtp_llm//rtp_llm/models_py/bindings/ppu:no_block_copy",
         ],
         "@rtp_llm//:using_rocm": [
             "@rtp_llm//rtp_llm/models_py/bindings:no_block_copy_default",

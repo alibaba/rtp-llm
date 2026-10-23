@@ -1,0 +1,12 @@
+Apache-2.0 third-party source notice
+
+This AOT PPU kernel is adapted from SGLang v0.5.14_release:
+  python/sglang/jit_kernel/csrc/elementwise/silu_and_mul_post_quant_mxfp4.cuh
+
+Frozen source SHA256:
+  131bd3ff990cfbf544f954cc7364110058e5e611ece5454842df4eaa176a2c1a
+
+Upstream project: https://github.com/sgl-project/sglang
+Upstream license: Apache License 2.0
+Local modifications: removed the TVM/JIT wrapper, retained the PPU device
+algorithm, and exposed an RTP-LLM AOT launcher using the caller's current stream.
