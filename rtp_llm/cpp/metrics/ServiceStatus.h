@@ -31,6 +31,18 @@ inline void reportKmonMetric(kmonitor::MutableMetric* metric, const kmonitor::Me
     metric->Report(&service_tags, value);
 }
 
+inline void reportKmonMetric(const kmonitor::MetricsReporterPtr& reporter,
+                             double                              value,
+                             const std::string&                  name,
+                             kmonitor::MetricType                type,
+                             const kmonitor::MetricsTags*        tags = nullptr) {
+    if (!reporter || !isKmonMetricReportingEnabled()) {
+        return;
+    }
+    auto service_tags = kmonTagsWithServiceStatus(tags);
+    reporter->report(value, name, type, &service_tags, true);
+}
+
 class ScopedKmonMetricsSuppression {
 public:
     ScopedKmonMetricsSuppression();

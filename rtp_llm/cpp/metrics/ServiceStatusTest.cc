@@ -187,6 +187,8 @@ TEST_F(ServiceStatusTest, DirectSdkMetricPathsHonorReadinessSuppressionAndDraini
         eplb.update_layer_id    = 0;
         eplb.update_weights_qps = true;
         reporter->report<RtpLLmEplbMetrics, RtpLLmEplbMetricsCollector>(&tags, &eplb);
+        reportKmonMetric(reporter, 41, "rtp_llm_model_inputs_log_us", kmonitor::GAUGE, &tags);
+        reportKmonMetric(reporter, 1, "rtp_llm_cuda_graph_replay_oom_retry_qps", kmonitor::QPS);
 
         kmonitor::MetricsCollector snapshot;
         monitor->GetMetrics(&snapshot, {kmonitor::NORMAL}, 10000);
@@ -234,7 +236,9 @@ TEST_F(ServiceStatusTest, DirectSdkMetricPathsHonorReadinessSuppressionAndDraini
                                      "rtp_llm_kv_cache_load_join_wait_latency_us",
                                      "rtp_llm_kv_cache_match_to_ready_latency_us",
                                      "rtp_llm_gpu_loads",
-                                     "rtp_llm_update_layer_weights_qps"}) {
+                                     "rtp_llm_update_layer_weights_qps",
+                                     "rtp_llm_model_inputs_log_us",
+                                     "rtp_llm_cuda_graph_replay_oom_retry_qps"}) {
                 EXPECT_EQ(names.count(name), 1) << name;
             }
         }

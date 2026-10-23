@@ -5,10 +5,12 @@ from typing import Any
 from unittest import TestCase, main
 from unittest.mock import AsyncMock, MagicMock, PropertyMock, patch
 
+import anyio
 import torch
 from fastapi.responses import ORJSONResponse
 from pydantic import BaseModel
 
+from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
 from rtp_llm.config.generate_config import GenerateConfig, RoleAddr
 from rtp_llm.config.py_config_modules import PyEnvConfigs
 from rtp_llm.cpp.model_rpc.model_rpc_client import (
@@ -19,6 +21,7 @@ from rtp_llm.frontend.frontend_server import FrontendServer
 from rtp_llm.metrics import AccMetrics, GaugeMetrics
 from rtp_llm.openai.api_datatype import ChatCompletionRequest, FinisheReason
 from rtp_llm.ops import RoleType
+from rtp_llm.server.misc import format_client_exception, format_exception
 from rtp_llm.structure.request_constants import request_id_field_name
 from rtp_llm.utils.base_model_datatypes import GenerateInput
 from rtp_llm.utils.complete_response_async_generator import (
@@ -504,6 +507,94 @@ class FrontendServerTest(TestCase):
         asyncio.run(run())
         self.assertEqual(closed, [True])
 
+    def test_streaming_asgi_lifecycle_finishes_metrics_once(self):
+        # Exercise the actual response, including disconnect before the first
+        # body iteration and failure while sending an already yielded chunk.
+        for mode in ("disconnect_headers", "cancel_headers", "send_failure", "success"):
+            with self.subTest(mode=mode):
+                metrics = self.frontend_server._request_metrics
+
+                async def run():
+                    header_started = asyncio.Event()
+                    hold_headers = asyncio.Event()
+                    closed = []
+
+                    async def backend():
+                        try:
+                            yield FakePipelinResponse(res="first")
+                            yield FakePipelinResponse(res="second")
+                        finally:
+                            # Cleanup must survive an enclosing cancellation scope.
+                            await asyncio.sleep(0)
+                            closed.append(True)
+
+                    def generate(_):
+                        return CompleteResponseAsyncGenerator(
+                            backend(), CompleteResponseAsyncGenerator.get_last_value
+                        )
+
+                    self.frontend_server._global_controller.increment()
+                    response = await self.frontend_server._infer_impl(
+                        {"prompt": "test", request_id_field_name: 1},
+                        FakeRawRequest(),
+                        generate,
+                    )
+                    self.assertEqual(metrics._active_requests, 1)
+
+                    async def receive():
+                        await header_started.wait()
+                        if mode == "disconnect_headers":
+                            return {"type": "http.disconnect"}
+                        await asyncio.Event().wait()
+
+                    async def send(message):
+                        if message["type"] == "http.response.start":
+                            header_started.set()
+                            if mode == "cancel_headers":
+                                cancel_scope.cancel()
+                            if mode in ("disconnect_headers", "cancel_headers"):
+                                await hold_headers.wait()
+                        elif mode == "send_failure":
+                            raise OSError("client disconnected")
+
+                    with anyio.CancelScope() as cancel_scope:
+                        try:
+                            await response(
+                                {"type": "http", "asgi": {"spec_version": "2.3"}},
+                                receive,
+                                send,
+                            )
+                        except Exception:
+                            if mode != "send_failure":
+                                raise
+                    self.assertEqual(metrics._active_requests, 0)
+                    self.assertEqual(
+                        self.frontend_server._global_controller.current_concurrency.value,
+                        0,
+                    )
+                    self.assertEqual(
+                        closed, [True] if mode in ("success", "send_failure") else []
+                    )
+
+                with patch.object(
+                    self.frontend_server._frontend_worker,
+                    "is_streaming",
+                    return_value=True,
+                ), patch(
+                    "rtp_llm.metrics.kmonitor_metric_reporter.MetricReporter.is_reporting_enabled",
+                    new_callable=PropertyMock,
+                    return_value=True,
+                ), patch(
+                    "rtp_llm.frontend.frontend_server.kmonitor.report"
+                ) as report:
+                    asyncio.run(run())
+                rt_calls = [
+                    c
+                    for c in report.call_args_list
+                    if c.args[0] == GaugeMetrics.FRONTEND_REQUEST_RT_MS_METRIC
+                ]
+                self.assertEqual(len(rt_calls), 1)
+
     def test_response_chunk_event_is_streaming_only(self):
         try:
             from opentelemetry.sdk.trace.export.in_memory_span_exporter import (
@@ -909,17 +1000,42 @@ class FrontendServerTest(TestCase):
         self.assertEqual(len(chunks), 1)
         payload = json.loads(chunks[0].removeprefix("data: ").strip())
         self.assertEqual(payload["aux_info"], {"input_len": 10})
+        self.assertEqual(payload["message"], "UNKNOWN_ERROR")
+        self.assertNotIn("stream backend failed", chunks[0])
 
-    def test_client_exception_payload_strips_traceback_locations(self):
-        payload = FrontendServer._client_exception_payload(
-            {"aux_info": False},
-            {
-                "message": "ErrorMsg: failed\n Traceback: /secret/path.py:42",
-                "aux_info": {"input_len": 10},
-            },
-        )
-        self.assertEqual(payload["message"], "ErrorMsg: failed")
-        self.assertEqual(payload["aux_info"], {"input_len": 10})
+    def test_client_exception_payload_never_reuses_internal_error_text(self):
+        for error in (
+            RuntimeError("secret/path.py:42"),
+            FtRuntimeException(
+                ExceptionType.EXECUTION_EXCEPTION, "Traceback: secret/path.py:42"
+            ),
+            FtRuntimeException(ExceptionType.INVALID_PARAMS, "secret/path.py:42"),
+            asyncio.CancelledError("secret/path.py:42"),
+        ):
+            with self.subTest(error=type(error).__name__):
+                error.aux_info = {"input_len": 10}
+                payload = format_client_exception(error)
+                detailed = format_exception(error)
+                self.assertEqual(payload["error_code"], detailed["error_code"])
+                self.assertEqual(payload["error_code_str"], detailed["error_code_str"])
+                self.assertEqual(payload["aux_info"], {"input_len": 10})
+                self.assertNotIn("secret", json.dumps(payload))
+                self.assertIn("secret", detailed["message"])
+
+    def test_http_error_keeps_traceback_only_in_access_log(self):
+        try:
+            raise RuntimeError("secret exception detail")
+        except RuntimeError as error:
+            with patch.object(
+                self.frontend_server._access_logger, "log_exception_access"
+            ) as log:
+                response = self.frontend_server._handle_exception(
+                    {request_id_field_name: 1}, error
+                )
+        self.assertNotIn("secret", response.body.decode())
+        self.assertNotIn("Traceback", response.body.decode())
+        self.assertIn("Traceback", log.call_args.args[2]["message"])
+        self.assertIn("secret", log.call_args.args[2]["message"])
 
     def test_aux_info_intent_matches_pydantic_boolean_coercion(self):
         for value in (False, 0, "false", "0", None):

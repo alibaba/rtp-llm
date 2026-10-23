@@ -88,6 +88,8 @@ Context TPS 的分母是 engine 执行时间，因此不按 frontend heartbeat �
 
 RT 覆盖 frontend 的请求观测生命周期，成功、错误、取消均执行一次收尾；不是 engine `rtp_llm_latency_us` 的同边界指标。并发在 begin/finish 时增减，异常与关闭生成器不会重复递减。
 
+HTTP 流式响应在发送响应头时断连、尚未开始迭代响应体，也会收尾请求指标并释放并发槽。客户端错误响应保留 `error_code`、`error_code_str` 和既有 `aux_info`；`message` 使用错误枚举名称，具体异常文本及堆栈仅写入服务端日志，避免透出内部路径与实现细节。
+
 对每个逻辑 batch 单元，请求长度、缓存和接受率汇总采用**已经观察到的最新 backend attempt**，避免把失败尝试的输出长度叠进最终响应。吞吐保留**所有已观察到的 attempts** 的 engine 累计正向差分；失败重试已经消耗的计算不能从吞吐中删除。各 attempt 的 SP 样本序号也独立去重。
 
 非流式请求可以通过私有 metric-only 帧报告进度。这些帧在公开响应链路被过滤，不改变 HTTP、OpenAI、DashScope 的响应帧数、usage、AuxInfo、output IDs 或 beam 输出优化路径，也不推进业务帧的首输出状态。
