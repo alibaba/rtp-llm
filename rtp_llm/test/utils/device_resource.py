@@ -507,7 +507,10 @@ def main():
         logging.info("no gpu, continue")
         return _run_test_command()
 
-    from jit_sys_path_setup import setup_jit_cache
+    try:
+        from jit_sys_path_setup import setup_jit_cache
+    except ModuleNotFoundError:
+        from rtp_llm.test.utils.jit_sys_path_setup import setup_jit_cache
 
     setup_jit_cache()
 
