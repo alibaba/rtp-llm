@@ -167,6 +167,9 @@ class MoE(nn.Module):
         max_tokens_per_rank: int = 8192,
         is_decode_role: bool = False,
         strategy: Optional[str] = None,
+        dp_size: int = 1,
+        dp_rank: int = 0,
+        fake_balance_expert: bool = False,
     ):
         """``layer_weights`` is the framework's per-layer dict
         (``ModelWeights.weights[layer_id]``) keyed by ``W.v4_*`` enum.
@@ -228,6 +231,9 @@ class MoE(nn.Module):
             max_tokens_per_rank=max_tokens_per_rank,
             shared_fp8_block_size=shared_fp8_block_size,
             is_decode_role=self._is_decode_role,
+            dp_size=dp_size,
+            dp_rank=dp_rank,
+            fake_balance_expert=fake_balance_expert,
         )
         forced, strict = _resolve_forced(strategy)
         strategy_cls = select_strategy(cfg, forced=forced, strict=strict)

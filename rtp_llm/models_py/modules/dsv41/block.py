@@ -80,6 +80,9 @@ class Block(nn.Module):
         commit_only: bool = False,
         v41_config: Optional[Dict] = None,
         shared_attention: Optional[Dict] = None,
+        dp_size: int = 1,
+        dp_rank: int = 0,
+        fake_balance_expert: bool = False,
     ):
         super().__init__()
         self.layer_id = layer_id
@@ -163,6 +166,9 @@ class Block(nn.Module):
             ep_rank=ep_rank,
             max_tokens_per_rank=max_tokens_per_rank,
             is_decode_role=is_decode_role,
+            dp_size=dp_size,
+            dp_rank=dp_rank,
+            fake_balance_expert=fake_balance_expert,
         )
         if v41_config is not None and not is_decode_role:
             self.ffn.gate._prefill_gate_chunk_rows = 32768

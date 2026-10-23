@@ -91,6 +91,7 @@ class V4Args:
     dp_rank: int = 0
     world_size: int = 1
     world_rank: int = 0
+    fake_balance_expert: bool = False
     is_decode_role: bool = False
     # Dedicated DSpARK prefill workers execute only the commit side: target
     # features are projected into the draft SWA pools and no query/FFN/mHC
@@ -160,6 +161,9 @@ def _block_kwargs(
         tp_rank=args.tp_rank,
         ep_size=args.ep_size,
         ep_rank=args.ep_rank,
+        dp_size=args.dp_size,
+        dp_rank=args.dp_rank,
+        fake_balance_expert=args.fake_balance_expert,
         max_tokens_per_rank=args.max_tokens_per_rank,
         is_decode_role=args.is_decode_role,
         fp8_kv_cache=args.fp8_kv_cache,

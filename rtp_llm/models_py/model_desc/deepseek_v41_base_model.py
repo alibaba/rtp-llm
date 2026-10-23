@@ -306,6 +306,7 @@ class DeepSeekV4Model(GptModelBase):
             device_resource_config=device_resource_config,
         )
         args = _args_from_model_config(model_config, max_generate_batch_size)
+        args.fake_balance_expert = bool(moe_config and moe_config.fake_balance_expert)
         self._max_generate_batch_size = int(max_generate_batch_size)
         self._gen_num_per_cycle = int(model_config.gen_num_per_cycle)
         self._capture_aux_hidden_layer_ids = tuple(

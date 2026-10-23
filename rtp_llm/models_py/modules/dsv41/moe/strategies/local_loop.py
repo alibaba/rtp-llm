@@ -172,6 +172,7 @@ class LocalLoopStrategy(RoutedExpertsStrategy):
             avoids data-dependent ``torch.where``)
           - eager: ``_forward_eager`` (only iterates routed tokens per expert)
         """
+        self.apply_fake_balance(indices, weights)
         return self._forward_into_buf(
             x,
             weights,
