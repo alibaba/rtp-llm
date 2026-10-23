@@ -7,6 +7,8 @@
 
 #include <cuda.h>
 #include <cuda_fp16.h>
+#include <c10/util/BFloat16.h>
+#include <type_traits>
 #include <cuda_runtime.h>
 #include <cub/cub.cuh>
 #include <cstdint>
@@ -68,6 +70,23 @@ __device__ __forceinline__ void load_float4(const float* ptr, float& v0, float& 
     v3 = __uint_as_float(r3);
 }
 
+template<typename DType>
+__device__ __forceinline__ void load_float4(const DType* ptr, float& v0, float& v1, float& v2, float& v3) {
+    v0 = static_cast<float>(ptr[0]);
+    v1 = static_cast<float>(ptr[1]);
+    v2 = static_cast<float>(ptr[2]);
+    v3 = static_cast<float>(ptr[3]);
+}
+
+template<typename DType>
+__device__ __forceinline__ void
+load_float4_predicated(const DType* ptr, int base, int seq_len, float& v0, float& v1, float& v2, float& v3) {
+    v0 = base < seq_len ? static_cast<float>(ptr[0]) : __uint_as_float(0xff800000u);
+    v1 = base + 1 < seq_len ? static_cast<float>(ptr[1]) : __uint_as_float(0xff800000u);
+    v2 = base + 2 < seq_len ? static_cast<float>(ptr[2]) : __uint_as_float(0xff800000u);
+    v3 = base + 3 < seq_len ? static_cast<float>(ptr[3]) : __uint_as_float(0xff800000u);
+}
+
 // Per-element predicated scalar loads with -inf default.
 __device__ __forceinline__ void
 load_float4_predicated(const float* ptr, int base, int seq_len, float& v0, float& v1, float& v2, float& v3) {
@@ -115,8 +134,9 @@ struct RadixRowState {
 // Kernel parameters
 // ============================================================================
 
+template<typename DType>
 struct PersistentTopKParams {
-    const float* __restrict__ input;  // [num_rows, stride]
+    const DType* __restrict__ input;  // [num_rows, stride]
     int32_t* __restrict__ output;     // [num_rows, top_k]
     int32_t* __restrict__ lengths;    // [num_rows]
     RadixRowState* row_states;        // large path: per-group state
@@ -143,9 +163,9 @@ __device__ __forceinline__ uint32_t decode_bin(float x) {
     return key >> 5;
 }
 
-template<int TopK>
+template<int TopK, typename DType>
 __device__ __noinline__ void
-histogram_2048_topk(const float* __restrict__ logits, int32_t* __restrict__ output_indices, int32_t seq_len) {
+histogram_2048_topk(const DType* __restrict__ logits, int32_t* __restrict__ output_indices, int32_t seq_len) {
     extern __shared__ int decode_smem[];
     const int             tx   = threadIdx.x;
     const int             lane = tx & 31;
@@ -416,9 +436,9 @@ histogram_2048_topk(const float* __restrict__ logits, int32_t* __restrict__ outp
 // by: DarkSharpness
 // which at the same time is an optimized topk kernel copied from tilelang
 // kernel
-template<int TopK>
+template<int TopK, typename DType>
 __device__ __noinline__ void
-histogram_256_topk(const float* __restrict__ logits, int* __restrict__ output_indices, int logits_offset, int seq_len) {
+histogram_256_topk(const DType* __restrict__ logits, int* __restrict__ output_indices, int logits_offset, int seq_len) {
     // All shared state lives in dynamic shared memory to avoid static
     extern __shared__ char medium_smem[];
 
@@ -636,8 +656,8 @@ __device__ __forceinline__ void wait_ge(int* ptr, int target_val, int thread_idx
 // Adapted from https://github.com/flashinfer-ai/flashinfer/pull/2215
 // ============================================================================
 
-template<int TopK, uint32_t VEC_SIZE>
-__device__ void radix_topk(const float* __restrict__ row_input,
+template<int TopK, uint32_t VEC_SIZE, typename DType>
+__device__ void radix_topk(const DType* __restrict__ row_input,
                            int32_t* __restrict__ row_output,
                            uint32_t       seq_len,
                            uint32_t       my_chunk_start,
@@ -660,19 +680,22 @@ __device__ void radix_topk(const float* __restrict__ row_input,
         const uint32_t aligned_size = (actual_chunk_size / VEC_SIZE) * VEC_SIZE;
 
         for (uint32_t i = tx * VEC_SIZE; i < aligned_size; i += kThreadsPerBlock * VEC_SIZE) {
-            const float* src = row_input + my_chunk_start + i;
-            if constexpr (VEC_SIZE == 4) {
+            const DType* src = row_input + my_chunk_start + i;
+            if constexpr (VEC_SIZE == 4 && std::is_same_v<DType, float>) {
                 float4 v              = *reinterpret_cast<const float4*>(src);
                 shared_ordered[i]     = convert_to_uint32_v2(v.x);
                 shared_ordered[i + 1] = convert_to_uint32_v2(v.y);
                 shared_ordered[i + 2] = convert_to_uint32_v2(v.z);
                 shared_ordered[i + 3] = convert_to_uint32_v2(v.w);
-            } else if constexpr (VEC_SIZE == 2) {
+            } else if constexpr (VEC_SIZE == 2 && std::is_same_v<DType, float>) {
                 float2 v              = *reinterpret_cast<const float2*>(src);
                 shared_ordered[i]     = convert_to_uint32_v2(v.x);
                 shared_ordered[i + 1] = convert_to_uint32_v2(v.y);
             } else {
-                shared_ordered[i] = convert_to_uint32_v2(*src);
+#pragma unroll
+                for (uint32_t j = 0; j < VEC_SIZE; ++j) {
+                    shared_ordered[i + j] = convert_to_uint32_v2(static_cast<float>(src[j]));
+                }
             }
         }
         for (uint32_t i = aligned_size + tx; i < actual_chunk_size; i += kThreadsPerBlock) {
@@ -846,8 +869,8 @@ __device__ void radix_topk(const float* __restrict__ row_input,
 // see filtered_topk.cuh)
 // ============================================================================
 
-template<int TopK = 2048, uint32_t VEC_SIZE = 1>
-__global__ void __launch_bounds__(kThreadsPerBlock, 2) persistent_topk_kernel(PersistentTopKParams params) {
+template<int TopK = 2048, uint32_t VEC_SIZE = 1, typename DType = float>
+__global__ void __launch_bounds__(kThreadsPerBlock, 2) persistent_topk_kernel(PersistentTopKParams<DType> params) {
     const uint32_t            tx = threadIdx.x;
     extern __shared__ uint8_t smem_raw[];
 
@@ -891,7 +914,7 @@ __global__ void __launch_bounds__(kThreadsPerBlock, 2) persistent_topk_kernel(Pe
 
         const uint32_t seq_len    = params.lengths[row_idx];
         int32_t*       row_output = params.output + row_idx * params.top_k;
-        const float*   row_input  = params.input + row_idx * params.stride;
+        const DType*   row_input  = params.input + row_idx * params.stride;
 
         if (seq_len <= RADIX_THRESHOLD) {
             if (cta_in_group == 0) {
@@ -998,6 +1021,10 @@ struct FilteredTopKTraits<float> {
         return (bits & 0x80000000u) ? ~bits : (bits | 0x80000000u);
     }
 };
+
+// Preserve the FP32 coarse bins and refinement keys after a register conversion.
+template<>
+struct FilteredTopKTraits<c10::BFloat16>: FilteredTopKTraits<float> {};
 
 constexpr uint32_t FILTERED_TOPK_BLOCK_THREADS   = 1024;
 constexpr uint32_t FILTERED_TOPK_SMEM_INPUT_SIZE = 16 * 1024;  // 16K indices per buffer
@@ -1259,7 +1286,7 @@ constexpr uint32_t gcd(uint32_t a, uint32_t b) {
 // Returns 1, 2, 4, or 8
 template<typename DType>
 constexpr int ComputeFilteredTopKVecSize(uint32_t max_len) {
-    constexpr int MAX_VEC = 16 / sizeof(DType);  // 4 for float32, 8 for fp16/bf16
+    constexpr int MAX_VEC = 4;  // Keep the same per-thread elements as the FP32 path.
     // Use GCD to find largest power-of-2 divisor
     const uint32_t g = gcd(max_len, static_cast<uint32_t>(MAX_VEC));
     return static_cast<int>(g);

@@ -4,7 +4,7 @@ Vendored from vLLM (csrc/persistent_topk.cuh + csrc/topk.cu @ b55d830).
 Replaces ``torch.topk`` on the DSv4 indexer decode hot path.
 
 Op contract (mirrors vLLM):
-  logits   : [N, T]  float32 row-contiguous; stride(0) may exceed T
+  logits   : [N, T]  float32 or bfloat16 row-contiguous; stride(0) may exceed T
   lengths  : [N]     int32     — per-row valid count; positions past
                                   ``lengths[r]`` are written as -1 in output
   output   : [N, K]  int32     — written; ordering of valid indices is NOT
@@ -292,6 +292,82 @@ def bench_decode_sweep():
     assert not fail, f"dsv4_persistent_topk slower than torch.topk at: {fail}"
 
 
+def _assert_bf16_cast_equiv(logits, lengths, k, output):
+    widened = logits.float()
+    cast_output = _run(widened, lengths, k, logits.size(1))
+    for row, length in enumerate(lengths.cpu().tolist()):
+        keep = min(k, length)
+        selected = output[row, :keep].long()
+        assert ((selected >= 0) & (selected < length)).all()
+        assert selected.unique().numel() == keep
+        assert (output[row, keep:] == -1).all()
+        actual = widened[row, selected].sort().values
+        cast_values = widened[row, cast_output[row, :keep].long()].sort().values
+        expected = widened[row, :length].topk(keep).values.sort().values
+        torch.testing.assert_close(actual, cast_values, rtol=0, atol=0)
+        torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+
+
+def test_bf16_logits_register_conversion():
+    # Include histogram, radix, filtered, streaming and cluster dispatch shapes.
+    for rows, length in ((1, 4097), (9, 16385), (4, 65537), (64, 4097), (80, 65537)):
+        for k in (512, 1024, 2048):
+            for offset in (0, 1):
+                storage = torch.empty(
+                    (rows, length + 2), dtype=torch.bfloat16, device="cuda"
+                )
+                logits = storage[:, offset : offset + length]
+                logits.normal_()
+                lengths = torch.tensor(
+                    [max(0, length - row * 997) for row in range(rows)],
+                    dtype=torch.int32,
+                    device="cuda",
+                )
+                if rows > 1:
+                    lengths[:3] = torch.tensor([0, 127, k - 1], device="cuda")
+                for row, valid in enumerate(lengths.cpu().tolist()):
+                    # Many ties and a high-valued masked suffix exercise exact
+                    # boundary selection without imposing ordering on equal scores.
+                    logits[row, : min(valid, 3000)] = 0.5
+                    logits[row, valid:] = 100
+                output = _run(logits, lengths, k, length)
+                _assert_bf16_cast_equiv(logits, lengths, k, output)
+
+
+def test_bf16_logits_cuda_graph_changed_inputs():
+    rows, length, k = 4, 65537, 2048
+    logits = torch.empty((rows, length + 2), dtype=torch.bfloat16, device="cuda")[
+        :, 1 : length + 1
+    ]
+    logits.normal_()
+    lengths = torch.full((rows,), length, dtype=torch.int32, device="cuda")
+    output = torch.empty((rows, k), dtype=torch.int32, device="cuda")
+    workspace = torch.empty(WORKSPACE_BYTES, dtype=torch.uint8, device="cuda")
+    stream = torch.cuda.Stream()
+    stream.wait_stream(torch.cuda.current_stream())
+    with torch.cuda.stream(stream):
+        for _ in range(3):
+            rtp_llm_ops.dsv4_persistent_topk(
+                logits, lengths, output, workspace, k, length
+            )
+    torch.cuda.current_stream().wait_stream(stream)
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph, stream=stream):
+        rtp_llm_ops.dsv4_persistent_topk(logits, lengths, output, workspace, k, length)
+    for replay in range(3):
+        logits.normal_()
+        logits[:, :3000] = replay * 0.5
+        lengths.copy_(
+            torch.tensor(
+                [length - replay * 137, 16385, 127, 0],
+                dtype=torch.int32,
+                device="cuda",
+            )
+        )
+        graph.replay()
+        _assert_bf16_cast_equiv(logits, lengths, k, output)
+
+
 if __name__ == "__main__":
     if not _HAS_OP:
         print(
@@ -300,6 +376,8 @@ if __name__ == "__main__":
         )
         raise SystemExit(0)
     print("== Correctness ==")
+    test_bf16_logits_register_conversion()
+    test_bf16_logits_cuda_graph_changed_inputs()
     test_decode_b1_k512_full()
     test_decode_b1_k512_varied()
     test_decode_b1_k1024_full()

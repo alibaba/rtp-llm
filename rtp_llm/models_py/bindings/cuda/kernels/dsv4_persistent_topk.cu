@@ -19,7 +19,7 @@ namespace torch_ext {
 namespace {
 
 #ifndef USE_ROCM
-template<int TopK>
+template<int TopK, typename DType>
 void launch_persistent_topk(const torch::Tensor& logits,
                             const torch::Tensor& lengths,
                             torch::Tensor&       output,
@@ -41,7 +41,7 @@ void launch_persistent_topk(const torch::Tensor& logits,
     }
 
     if (num_rows > 32 && max_smem_per_block >= 128 * 1024) {
-        cudaError_t status = vllm::FilteredTopKRaggedTransform<float, int32_t, TopK>(logits.data_ptr<float>(),
+        cudaError_t status = vllm::FilteredTopKRaggedTransform<DType, int32_t, TopK>(logits.data_ptr<DType>(),
                                                                                      output.data_ptr<int32_t>(),
                                                                                      lengths.data_ptr<int32_t>(),
                                                                                      static_cast<uint32_t>(num_rows),
@@ -67,9 +67,9 @@ void launch_persistent_topk(const torch::Tensor& logits,
         uint32_t max_chunk_elements    = static_cast<uint32_t>(available_for_ordered / sizeof(uint32_t));
 
         uint32_t vec_size = 1;
-        if (stride % 4 == 0)
+        if (stride % 4 == 0 && reinterpret_cast<uintptr_t>(logits.data_ptr()) % (4 * sizeof(DType)) == 0)
             vec_size = 4;
-        else if (stride % 2 == 0)
+        else if (stride % 2 == 0 && reinterpret_cast<uintptr_t>(logits.data_ptr()) % (2 * sizeof(DType)) == 0)
             vec_size = 2;
 
         max_chunk_elements = (max_chunk_elements / vec_size) * vec_size;
@@ -91,13 +91,13 @@ void launch_persistent_topk(const torch::Tensor& logits,
         cudaError_t occ_err   = cudaSuccess;
         if (vec_size == 4) {
             occ_err = cudaOccupancyMaxActiveBlocksPerMultiprocessor(
-                &occupancy, P::persistent_topk_kernel<TopK, 4>, P::kThreadsPerBlock, smem_size);
+                &occupancy, P::persistent_topk_kernel<TopK, 4, DType>, P::kThreadsPerBlock, smem_size);
         } else if (vec_size == 2) {
             occ_err = cudaOccupancyMaxActiveBlocksPerMultiprocessor(
-                &occupancy, P::persistent_topk_kernel<TopK, 2>, P::kThreadsPerBlock, smem_size);
+                &occupancy, P::persistent_topk_kernel<TopK, 2, DType>, P::kThreadsPerBlock, smem_size);
         } else {
             occ_err = cudaOccupancyMaxActiveBlocksPerMultiprocessor(
-                &occupancy, P::persistent_topk_kernel<TopK, 1>, P::kThreadsPerBlock, smem_size);
+                &occupancy, P::persistent_topk_kernel<TopK, 1, DType>, P::kThreadsPerBlock, smem_size);
         }
         TORCH_CHECK(occ_err == cudaSuccess, "persistent_topk occupancy query failed: ", cudaGetErrorString(occ_err));
         if (occupancy < 1)
@@ -137,7 +137,7 @@ void launch_persistent_topk(const torch::Tensor& logits,
                         smem_size,
                         ").");
             cudaError_t status =
-                vllm::FilteredTopKRaggedTransform<float, int32_t, TopK>(logits.data_ptr<float>(),
+                vllm::FilteredTopKRaggedTransform<DType, int32_t, TopK>(logits.data_ptr<DType>(),
                                                                         output.data_ptr<int32_t>(),
                                                                         lengths.data_ptr<int32_t>(),
                                                                         static_cast<uint32_t>(num_rows),
@@ -156,13 +156,11 @@ void launch_persistent_topk(const torch::Tensor& logits,
 
         {
             cudaError_t mz_err = cudaMemsetAsync(workspace.data_ptr<uint8_t>(), 0, state_bytes, stream);
-            TORCH_CHECK(mz_err == cudaSuccess,
-                        "row_states memset failed: ",
-                        cudaGetErrorString(mz_err));
+            TORCH_CHECK(mz_err == cudaSuccess, "row_states memset failed: ", cudaGetErrorString(mz_err));
         }
 
-        P::PersistentTopKParams params;
-        params.input          = logits.data_ptr<float>();
+        P::PersistentTopKParams<DType> params;
+        params.input          = logits.data_ptr<DType>();
         params.output         = output.data_ptr<int32_t>();
         params.lengths        = lengths.data_ptr<int32_t>();
         params.num_rows       = static_cast<uint32_t>(num_rows);
@@ -175,7 +173,7 @@ void launch_persistent_topk(const torch::Tensor& logits,
 
 #define LAUNCH_PERSISTENT(TOPK_VAL, VS)                                                                                \
     do {                                                                                                               \
-        auto        kernel = &P::persistent_topk_kernel<TOPK_VAL, VS>;                                                 \
+        auto        kernel = &P::persistent_topk_kernel<TOPK_VAL, VS, DType>;                                          \
         cudaError_t err    = cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, smem_size);     \
         TORCH_CHECK(err == cudaSuccess, "Failed to set smem: ", cudaGetErrorString(err));                              \
         kernel<<<total_ctas, P::kThreadsPerBlock, smem_size, stream>>>(params);                                        \
@@ -208,7 +206,8 @@ void dsv4_persistent_topk(const torch::Tensor& logits,
     TORCH_CHECK(logits.is_cuda(), "logits must be CUDA tensor");
     TORCH_CHECK(lengths.is_cuda(), "lengths must be CUDA tensor");
     TORCH_CHECK(output.is_cuda(), "output must be CUDA tensor");
-    TORCH_CHECK(logits.dtype() == torch::kFloat32, "Only float32 supported");
+    TORCH_CHECK(logits.dtype() == torch::kFloat32 || logits.dtype() == torch::kBFloat16,
+                "logits must be float32 or bfloat16");
     TORCH_CHECK(lengths.dtype() == torch::kInt32, "lengths must be int32");
     TORCH_CHECK(output.dtype() == torch::kInt32, "output must be int32");
     TORCH_CHECK(logits.dim() == 2, "logits must be 2D");
@@ -224,13 +223,22 @@ void dsv4_persistent_topk(const torch::Tensor& logits,
     TORCH_CHECK(
         k == 512 || k == 1024 || k == 2048, "dsv4_persistent_topk supports k=512, k=1024, or k=2048, got k=", k);
 
-    if (k == 512) {
-        launch_persistent_topk<512>(logits, lengths, output, workspace, max_seq_len);
-    } else if (k == 1024) {
-        launch_persistent_topk<1024>(logits, lengths, output, workspace, max_seq_len);
+    if (logits.scalar_type() == at::ScalarType::Float) {
+        if (k == 512)
+            launch_persistent_topk<512, float>(logits, lengths, output, workspace, max_seq_len);
+        else if (k == 1024)
+            launch_persistent_topk<1024, float>(logits, lengths, output, workspace, max_seq_len);
+        else
+            launch_persistent_topk<2048, float>(logits, lengths, output, workspace, max_seq_len);
     } else {
-        launch_persistent_topk<2048>(logits, lengths, output, workspace, max_seq_len);
+        if (k == 512)
+            launch_persistent_topk<512, c10::BFloat16>(logits, lengths, output, workspace, max_seq_len);
+        else if (k == 1024)
+            launch_persistent_topk<1024, c10::BFloat16>(logits, lengths, output, workspace, max_seq_len);
+        else
+            launch_persistent_topk<2048, c10::BFloat16>(logits, lengths, output, workspace, max_seq_len);
     }
+
 #else
     TORCH_CHECK(false, "dsv4_persistent_topk is not supported on ROCm");
 #endif

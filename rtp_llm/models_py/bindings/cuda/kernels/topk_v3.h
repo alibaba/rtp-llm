@@ -11,7 +11,7 @@ namespace torch_ext {
 // the coarse threshold bin overflows the fixed candidate buffer.
 //
 // Contract:
-//   logits   : [num_rows, stride] float32, contiguous in stride
+//   logits   : [num_rows, stride] float32 or bfloat16, contiguous in stride
 //   lengths  : [num_rows]         int32   — per-row valid count, clamped on
 //                                            device to [0, max_seq_len]; entries
 //                                            past the clamped length are -1
@@ -27,10 +27,10 @@ namespace torch_ext {
 //   * ``num_rows`` corresponds to ``B * S`` after flattening the leading
 //     dims of the indexer ``score [B, S, T_max]`` tensor.
 void topk_v3(const torch::Tensor& logits,
-                       const torch::Tensor& lengths,
-                       torch::Tensor& output,
-                       torch::Tensor& workspace,
-                       int64_t k,
-                       int64_t max_seq_len);
+             const torch::Tensor& lengths,
+             torch::Tensor&       output,
+             torch::Tensor&       workspace,
+             int64_t              k,
+             int64_t              max_seq_len);
 
 }  // namespace torch_ext

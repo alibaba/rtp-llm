@@ -181,6 +181,13 @@ class Indexer(nn.Module):
         # ``self._fuse_logits_head_gate`` is resolved at __init__ from
         # ``HWKernelConfig.enable_fuse_kernels``.
         scale = self.softmax_scale * self.weights_scale
+        if self.indexer_op.use_mxfp8:
+            # Packed per-32 Q scales are consumed by DeepGEMM, not folded into gates.
+            return (
+                (self.weights_proj(x.float()).float() * scale)
+                .to(torch.bfloat16)
+                .unsqueeze(-1)
+            )
         if self._fuse_logits_head_gate and x.is_contiguous():
             return fused_logits_head_gate(
                 x,
@@ -361,11 +368,12 @@ class Indexer(nn.Module):
         attention_inputs: Any,
         cp_params: Optional[Any],
         prepared_k=None,
+        q_scale: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         is_multi_token_decode = self._is_multi_token_decode(attention_inputs)
         if not attention_inputs.is_prefill or is_multi_token_decode:
             return self.indexer_op._get_topk_paged(
-                q_fp8, weights, kv_cache, fmha_params, attention_inputs
+                q_fp8, weights, kv_cache, fmha_params, attention_inputs, q_scale=q_scale
             )
         if self._prefill_cp_enabled():
             assert cp_params is not None
@@ -396,9 +404,10 @@ class Indexer(nn.Module):
                 total_local_ids_is_identity=bool(
                     getattr(cp_params, "total_local_ids_is_identity", False)
                 ),
+                q_scale=q_scale,
             )
         return self.indexer_op._get_topk_ragged(
-            q_fp8, weights, kv_cache, fmha_params, attention_inputs
+            q_fp8, weights, kv_cache, fmha_params, attention_inputs, q_scale=q_scale
         )
 
     def _fused_forward_prefill_cp_early_k(
@@ -462,6 +471,7 @@ class Indexer(nn.Module):
             and bool(getattr(cp_params, "kv_cache_sharded", False))
             and int(getattr(cp_params, "cp_size", 1)) > 1
             and self.use_hadamard
+            and not self.indexer_op.use_mxfp8
             and self._prefill_cp_fused_quant_enabled()
             and cp_params.full_rope_pos_ids is not None
             and not torch.cuda.is_current_stream_capturing()
@@ -764,6 +774,7 @@ class Indexer(nn.Module):
 
         if (
             _DEVICE_TYPE == DeviceType.Cuda
+            and not self.indexer_op.use_mxfp8
             and self._is_sparse_prefill_cp(attention_inputs)
             and bool(getattr(cp_params, "kv_cache_sharded", False))
             and int(getattr(cp_params, "cp_size", 1)) > 1
@@ -794,6 +805,7 @@ class Indexer(nn.Module):
         if (
             self.use_hadamard
             and self._is_sparse_prefill_cp(attention_inputs)
+            and not self.indexer_op.use_mxfp8
             and self._prefill_cp_fused_quant_enabled()
             and cp_params.full_rope_pos_ids is not None
         ):
@@ -811,6 +823,7 @@ class Indexer(nn.Module):
         elif (
             self.use_hadamard
             and self._fuse_logits_head_gate
+            and not self.indexer_op.use_mxfp8
             and not attention_inputs.is_prefill
             and cp_params is None
         ):
@@ -842,7 +855,13 @@ class Indexer(nn.Module):
 
         weights = self._get_logits_head_gate(hidden_states, q_scale)
         return self._compute_topk(
-            q_fp8, weights, kv_cache, fmha_params, attention_inputs, cp_params
+            q_fp8,
+            weights,
+            kv_cache,
+            fmha_params,
+            attention_inputs,
+            cp_params,
+            q_scale=q_scale if self.indexer_op.use_mxfp8 else None,
         )
 
     # Compatibility implementation from 70f1ecde04. Selected once at import.
@@ -892,6 +911,8 @@ class Indexer(nn.Module):
 
         _fused_forward_prefill_cp = _baseline__fused_forward_prefill_cp
 
+        _dg282__compute_topk = _compute_topk
+
         def _baseline__compute_topk(
             self,
             q_fp8: torch.Tensor,
@@ -900,7 +921,10 @@ class Indexer(nn.Module):
             fmha_params: Any,
             attention_inputs: Any,
             cp_params: Optional[Any],
+            q_scale: Optional[torch.Tensor] = None,
         ) -> torch.Tensor:
+            if self.indexer_op._new_mqa_api:
+                return self._dg282__compute_topk(q_fp8, weights, kv_cache, fmha_params, attention_inputs, cp_params, q_scale=q_scale)
             is_multi_token_decode = bool(
                 getattr(attention_inputs, "is_target_verify", False)
             ) or bool(getattr(attention_inputs, "is_draft_extend", False))
@@ -945,6 +969,8 @@ class Indexer(nn.Module):
 
         _compute_topk = _baseline__compute_topk
 
+        _dg282_forward = forward
+
         def _baseline_forward(
             self,
             hidden_states: torch.Tensor,
@@ -959,6 +985,8 @@ class Indexer(nn.Module):
             q_c_fp8: Optional[torch.Tensor] = None,
             q_c_scale: Optional[torch.Tensor] = None,
         ) -> torch.Tensor:
+            if self.indexer_op._new_mqa_api:
+                return self._dg282_forward(hidden_states, q_lora, kv_cache, fmha_params, attention_inputs, use_fast_path, cp_params, x_fp8, x_scale, q_c_fp8, q_c_scale)
             if use_fast_path:
                 key = self._get_k_bf16(hidden_states, fmha_params)
                 self.indexer_op.quant_k_only(key, kv_cache, fmha_params.slot_mapping)

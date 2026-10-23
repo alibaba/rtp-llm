@@ -55,7 +55,11 @@ py_library(
         "modules/*.py",
         "modules/**/*.py",
     ]),
-    data = [":cutlass_moe_config", "kernels/cuda/prefill_cpu_ops.cc", "kernels/cuda/mtp_frontend.cu"],
+    data = [":cutlass_moe_config", "kernels/cuda/prefill_cpu_ops.cc", "kernels/cuda/mtp_frontend.cu"] + glob([
+        "modules/hybrid/cuda/glm5_cmp_mxfp8*.cpp",
+        "modules/hybrid/cuda/glm5_cmp_mxfp8*.cu",
+        "modules/hybrid/cuda/glm5_cmp_mxfp8*.cuh",
+    ]),
     deps = [
         ":utils",
         ":optimization_settings",
