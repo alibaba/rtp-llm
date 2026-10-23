@@ -166,3 +166,20 @@ dsv4_sm120_py_test(
     gpu_count = 8,
     deps = _MODEL_TEST_DEPS,
 )
+
+dsv4_sm120_py_test(
+    name = "test_indexer_topk_backend_sm120",
+    src = "test_indexer_topk_backend.py",
+    deps = _MODEL_TEST_DEPS,
+)
+
+dsv4_sm120_py_test(
+    name = "test_fp4_indexer_contract",
+    deps = _MODEL_TEST_DEPS,
+)
+
+dsv4_sm120_py_test(
+    name = "test_dsv4_kernel_jit_warmup_sm120",
+    src = "test_dsv4_kernel_jit_warmup.py",
+    deps = _MODEL_TEST_DEPS,
+)

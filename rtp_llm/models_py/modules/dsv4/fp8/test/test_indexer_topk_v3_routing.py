@@ -12,6 +12,23 @@ class IndexerTopkV3RoutingTest(unittest.TestCase):
     def setUp(self) -> None:
         indexer._topk_v3_workspace_cache.clear()
 
+    def test_prefill_fallback_preserves_other_architectures(self) -> None:
+        logits = SimpleNamespace(is_cuda=True, device=torch.device("cuda:0"))
+        for backend in ("persistent", "hisa", "torch"):
+            for sm120 in (False, True):
+                with (
+                    self.subTest(backend=backend, sm120=sm120),
+                    mock.patch.dict(os.environ, {"DSV4_INDEXER_TOPK_BACKEND": backend}),
+                    mock.patch.object(indexer, "is_sm120", return_value=sm120),
+                ):
+                    self.assertEqual(
+                        indexer._fp8_prefill_topk_use_torch(logits),
+                        backend == "torch" or sm120,
+                    )
+                    self.assertEqual(
+                        indexer._fp8_prefill_topk_use_torch(), backend == "torch"
+                    )
+
     def test_flash_and_pro_shared_indexer_routes_to_topk_v3(self) -> None:
         logits = torch.empty((3, 2048), dtype=torch.float32)
         lengths = torch.tensor([2048, 1024, 512], dtype=torch.int32)
@@ -26,13 +43,9 @@ class IndexerTopkV3RoutingTest(unittest.TestCase):
             mock.patch.dict(os.environ, {}, clear=False),
         ):
             os.environ.pop("DSV4_TOPK_V3", None)
-            self.assertTrue(
-                indexer._run_topk_v3(logits, lengths, output, 512, 2048)
-            )
+            self.assertTrue(indexer._run_topk_v3(logits, lengths, output, 512, 2048))
 
-        topk_v3.assert_called_once_with(
-            logits, lengths, output, workspace, 512, 2048
-        )
+        topk_v3.assert_called_once_with(logits, lengths, output, workspace, 512, 2048)
 
     def test_env_can_disable_topk_v3_for_debugging(self) -> None:
         topk_v3 = mock.Mock()
@@ -46,11 +59,43 @@ class IndexerTopkV3RoutingTest(unittest.TestCase):
             mock.patch.object(indexer, "_TOPK_V3_OK", True),
             mock.patch.dict(os.environ, {"DSV4_TOPK_V3": "0"}),
         ):
-            self.assertFalse(
-                indexer._run_topk_v3(tensor, lengths, output, 512, 512)
-            )
+            self.assertFalse(indexer._run_topk_v3(tensor, lengths, output, 512, 512))
 
         topk_v3.assert_not_called()
+
+    def test_canonicalization_preserves_selection_and_trailing_padding(self) -> None:
+        logits = torch.empty((1, 1024), dtype=torch.float32)
+        lengths = torch.tensor([3], dtype=torch.int32)
+        output = torch.empty((1, 512), dtype=torch.int32)
+        selected = torch.full_like(output, -1)
+        selected[0, :4] = torch.tensor([2, -1, 0, 1], dtype=torch.int32)
+        workspace = torch.empty(indexer._TOPK_V3_WORKSPACE_SIZE, dtype=torch.uint8)
+
+        for enabled in ("0", "1"):
+            with (
+                self.subTest(canonicalize=enabled),
+                mock.patch.object(
+                    indexer,
+                    "rtp_llm_ops",
+                    SimpleNamespace(topk_v3=lambda *args: output.copy_(selected)),
+                ),
+                mock.patch.object(indexer, "_TOPK_V3_OK", True),
+                mock.patch.object(
+                    indexer, "_get_topk_workspace", return_value=workspace
+                ),
+                mock.patch.dict(
+                    os.environ,
+                    {"DSV4_TOPK_V3": "1", "DSV4_INDEXER_TOPK_CANONICALIZE": enabled},
+                ),
+            ):
+                self.assertTrue(
+                    indexer._run_topk_v3(logits, lengths, output, 512, 1024)
+                )
+                expected = selected.clone()
+                if enabled == "1":
+                    expected.fill_(-1)
+                    expected[0, :3] = torch.tensor([0, 1, 2], dtype=torch.int32)
+                torch.testing.assert_close(output, expected, rtol=0, atol=0)
 
     def test_unsupported_k_uses_existing_fallback(self) -> None:
         topk_v3 = mock.Mock()
@@ -63,9 +108,7 @@ class IndexerTopkV3RoutingTest(unittest.TestCase):
             mock.patch.object(indexer, "rtp_llm_ops", fake_ops),
             mock.patch.object(indexer, "_TOPK_V3_OK", True),
         ):
-            self.assertFalse(
-                indexer._run_topk_v3(tensor, lengths, output, 256, 256)
-            )
+            self.assertFalse(indexer._run_topk_v3(tensor, lengths, output, 256, 256))
 
         topk_v3.assert_not_called()
 

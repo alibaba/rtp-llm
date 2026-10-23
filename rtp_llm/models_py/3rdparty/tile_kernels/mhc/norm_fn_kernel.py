@@ -137,6 +137,53 @@ def _mhc_pre_norm_fn_fwd_mul(
 
 
 @tilelang.jit(pass_configs=_PASS_CONFIGS)
+def _mhc_pre_norm_fn_sm120_columns() -> tilelang.JITKernel:
+    """Tile independent columns while preserving the single-GEMM K order."""
+    num_tokens = T.dynamic("num_tokens")
+    token_block, column_block, hidden_block = 16, 8, 256
+
+    @T.prim_func
+    def _mhc_pre_norm_fn_sm120_columns_kernel(
+        x: T.Tensor[(num_tokens, 16384), T.bfloat16],
+        fn: T.Tensor[(24, 16384), T.float32],
+        out: T.Tensor[(num_tokens, 1, 24), T.float32],
+        sqrsum: T.Tensor[(num_tokens, 1), T.float32],
+    ) -> None:
+        with T.Kernel(T.ceildiv(num_tokens, token_block), 3, threads=32) as (
+            pid,
+            pid_n,
+        ):
+            acc = T.alloc_fragment((token_block, column_block), T.float32)
+            part = T.alloc_fragment((token_block, 4), T.float32)
+            T.clear(acc)
+            T.clear(part)
+            for pz in T.Pipelined(16384 // hidden_block, num_stages=1):
+                xs = T.alloc_shared((token_block, hidden_block), T.bfloat16)
+                fs = T.alloc_shared((column_block, hidden_block), T.float32)
+                T.annotate_layout({xs: tilelang.layout.make_swizzled_layout(xs)})
+                T.copy(x[pid * token_block, pz * hidden_block], xs)
+                T.copy(fn[pid_n * column_block, pz * hidden_block], fs)
+                x16 = T.alloc_fragment((token_block, hidden_block), T.bfloat16)
+                xf = T.alloc_fragment((token_block, hidden_block), T.float32)
+                T.copy(xs, x16)
+                T.copy(x16, xf)
+                for jj in T.serial(hidden_block // 4):
+                    for i, j in T.Parallel(token_block, 4):
+                        part[i, j] += xf[i, jj * 4 + j] * xf[i, jj * 4 + j]
+                T.gemm(xf, fs, acc, transpose_B=True, clear_accum=False)
+            # All column tiles use the same reduction; only one owns its store.
+            if pid_n == 0:
+                reduced = T.alloc_fragment(token_block, T.float32)
+                T.reduce_sum(part, reduced)
+                for i in T.Parallel(token_block):
+                    sqrsum[pid * token_block + i, 0] = reduced[i]
+            for i, j in T.Parallel(token_block, column_block):
+                out[pid * token_block + i, 0, pid_n * column_block + j] = acc[i, j]
+
+    return _mhc_pre_norm_fn_sm120_columns_kernel
+
+
+@tilelang.jit(pass_configs=_PASS_CONFIGS)
 def _mhc_pre_norm_fn_fwd_norm(
     mhc_mult3: int,
     n_rms_group: int,

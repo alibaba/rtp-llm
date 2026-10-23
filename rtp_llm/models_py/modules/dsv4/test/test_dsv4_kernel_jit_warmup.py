@@ -1,4 +1,4 @@
-import inspect
+import builtins
 import json
 import os
 import subprocess
@@ -831,10 +831,10 @@ class Dsv4KernelJitWarmupTest(unittest.TestCase):
                 "_get_deep_gemm_num_sms", lambda device: 148
             )
             old_values["_mhc_prenorm_deepgemm_backend_name"] = with_patch(
-                "_mhc_prenorm_deepgemm_backend_name", lambda: "deepgemm"
+                "_mhc_prenorm_deepgemm_backend_name", lambda device=None: "deepgemm"
             )
             old_values["_mhc_prenorm_deepgemm_backend_enabled"] = with_patch(
-                "_mhc_prenorm_deepgemm_backend_enabled", lambda: True
+                "_mhc_prenorm_deepgemm_backend_enabled", lambda device=None: True
             )
             old_values["_generate_mhc_prenorm_warmup_specs"] = with_patch(
                 "_generate_mhc_prenorm_warmup_specs",
@@ -918,10 +918,11 @@ class Dsv4KernelJitWarmupTest(unittest.TestCase):
                 "_get_deep_gemm_num_sms", lambda device: 148
             )
             old_values["_mhc_prenorm_deepgemm_backend_name"] = with_patch(
-                "_mhc_prenorm_deepgemm_backend_name", lambda: "tilelang_single"
+                "_mhc_prenorm_deepgemm_backend_name",
+                lambda device=None: "tilelang_single",
             )
             old_values["_mhc_prenorm_deepgemm_backend_enabled"] = with_patch(
-                "_mhc_prenorm_deepgemm_backend_enabled", lambda: False
+                "_mhc_prenorm_deepgemm_backend_enabled", lambda device=None: False
             )
             old_values["_dist_rank"] = with_patch("_dist_rank", lambda: 0)
             old_values["_sync_cuda"] = with_patch("_sync_cuda", lambda device: None)
@@ -1247,15 +1248,67 @@ class Dsv4KernelJitWarmupTest(unittest.TestCase):
         self.assertEqual(restore_batches, [1, 2, 4, 8, 16, 32, 64])
 
     def test_mhc_pre_big_fuse_warmup_initializes_tilelang_env_first(self):
-        source = inspect.getsource(warmup_module._launch_dummy_mhc_pre_big_fuse)
-        self.assertIn("tilelang_kernels", source)
-        self.assertIn("pre_big_fuse_kernel", source)
-        self.assertLess(
-            source.find("tilelang_kernels"),
-            source.find("pre_big_fuse_kernel"),
+        initialized = []
+        original_import = builtins.__import__
+        launch = mock.Mock()
+        factory = mock.Mock(return_value=launch)
+
+        def import_environment(name, globals=None, locals=None, fromlist=(), level=0):
+            if (
+                name == "rtp_llm.models_py.modules.dsv4"
+                and "tilelang_kernels" in fromlist
+            ):
+                initialized.append(True)
+                return SimpleNamespace(tilelang_kernels=object())
+            return original_import(name, globals, locals, fromlist, level)
+
+        def import_kernel(name):
+            self.assertEqual(initialized, [True])
+            self.assertEqual(
+                name, "rtp_llm.models_py.3rdparty.tile_kernels.mhc.pre_big_fuse_kernel"
+            )
+            return SimpleNamespace(_mhc_pre_big_fuse=factory)
+
+        with mock.patch.object(
+            builtins, "__import__", side_effect=import_environment
+        ), mock.patch.object(warmup_module, "import_module", side_effect=import_kernel):
+            warmup_module._launch_dummy_mhc_pre_big_fuse(
+                key=(24, 512),
+                info={"hc_mult": 4},
+                m_value=3,
+                num_splits=2,
+                device=torch.device("cpu"),
+            )
+        factory.assert_called_once_with(
+            128, 1e-6, 1e-6, 1e-6, 2.0, 20, n_splits=2, mhc_mult=4
+        )
+        launch.assert_called_once()
+        self.assertEqual(
+            [tuple(t.shape) for t in launch.call_args.args],
+            [(2, 3, 24), (2, 3), (3,), (24,), (3, 4, 128), (3, 4), (3, 16), (3, 128)],
         )
 
+    def test_mhc_prenorm_warmup_uses_backend_resolver(self):
+        device = torch.device("cpu")
+        for backend in ("deepgemm", "torch", "cublas"):
+            with self.subTest(backend=backend), mock.patch.object(
+                warmup_module, "mhc_pre_gemm_backend", return_value=backend
+            ) as resolve:
+                self.assertEqual(
+                    warmup_module._mhc_prenorm_deepgemm_backend_enabled(device),
+                    backend == "deepgemm",
+                )
+                self.assertEqual(
+                    warmup_module._mhc_prenorm_deepgemm_backend_name(device), backend
+                )
+                self.assertEqual(
+                    resolve.call_args_list, [mock.call(device), mock.call(device)]
+                )
+
+    @unittest.skipUnless(torch.cuda.is_available(), "CUDA compilation required")
     def test_jit_kernel_specialization_contracts(self):
+        from triton.runtime.jit import MockTensor
+
         from rtp_llm.models_py.modules.dsv4.fp8 import (
             _compressor_vllm_triton,
             _swa_dequant_triton,
@@ -1263,60 +1316,179 @@ class Dsv4KernelJitWarmupTest(unittest.TestCase):
             _swa_ops_triton,
         )
 
-        compress_src = inspect.getsource(
-            _compressor_vllm_triton._fused_kv_compress_norm_rope_insert_sparse_attn.fn
+        fp32, bf16, byte, index = (
+            MockTensor(dtype)
+            for dtype in (torch.float32, torch.bfloat16, torch.uint8, torch.int64)
         )
-        self.assertIn('"KV_BLOCK_STRIDE"', compress_src)
-        self.assertIn("KV_BLOCK_STRIDE,", compress_src)
-        self.assertNotIn("KV_BLOCK_STRIDE: tl.constexpr", compress_src)
-        self.assertIn('"NUM_STATE_BLOCKS"', compress_src)
-        self.assertIn('"NUM_KV_BLOCKS"', compress_src)
-        self.assertNotIn("NUM_STATE_BLOCKS: tl.constexpr", compress_src)
-        self.assertNotIn("NUM_KV_BLOCKS: tl.constexpr", compress_src)
-        indexer_src = inspect.getsource(
-            _compressor_vllm_triton._fused_kv_compress_norm_rope_insert_indexer_attn.fn
+        cases = []
+        for kernel, width in (
+            (
+                _compressor_vllm_triton._fused_kv_compress_norm_rope_insert_sparse_attn,
+                512,
+            ),
+            (
+                _compressor_vllm_triton._fused_kv_compress_norm_rope_insert_indexer_attn,
+                128,
+            ),
+        ):
+            cfg = _compressor_vllm_triton._FUSED_CONSTEXPR_BY_HEAD_DIM[width]
+            args = dict(
+                state_cache_ptr=fp32,
+                state_cache_stride0=32768,
+                state_cache_stride1=width * 4,
+                token_to_req_indices_ptr=index,
+                positions_ptr=index,
+                slot_mapping_ptr=index,
+                block_table_ptr=index,
+                block_table_stride=16,
+                block_size=256,
+                kv_raw_ptr=bf16,
+                kv_raw_stride=width * 2,
+                score_raw_ptr=fp32,
+                score_raw_stride=width * 2,
+                ape_ptr=fp32,
+                ape_stride=width * 2,
+                seq_start=0,
+                n_raw=16,
+                seq_start_per_req_ptr=index,
+                cu_seq_per_req_ptr=index,
+                rms_norm_weight_ptr=fp32,
+                rms_norm_eps=1e-6,
+                cos_sin_cache_ptr=fp32,
+                cos_sin_stride=64,
+                k_cache_ptr=byte,
+                kv_slot_mapping_ptr=index,
+                kv_cache_block_size=64,
+                HEAD_SIZE=width,
+                TRITON_BLOCK_SIZE=width,
+                STATE_WIDTH=width * 2,
+                COMPRESS_RATIO=4,
+                OVERLAP=True,
+                ROPE_HEAD_DIM=64,
+                FP8_MAX=448.0,
+                QUANT_BLOCK=cfg["quant_block"],
+                TOKEN_STRIDE=cfg["token_stride"],
+                SCALE_DIM=cfg["scale_dim"],
+                KV_BLOCK_STRIDE=16,
+                NUM_STATE_BLOCKS=16,
+                NUM_KV_BLOCKS=16,
+                BATCHED=True,
+                TRAP_INVALID_KV_ACCESS=False,
+                STATE_RING_ENTRIES=8,
+                num_warps=cfg["num_warps"],
+            )
+            cases.append(
+                (kernel, args, ("KV_BLOCK_STRIDE", "NUM_STATE_BLOCKS", "NUM_KV_BLOCKS"))
+            )
+        cases.extend(
+            [
+                (
+                    _swa_kv_insert_triton._quantize_and_insert_k_kernel,
+                    dict(
+                        k_ptr=bf16,
+                        slot_mapping_ptr=index,
+                        k_cache_ptr=byte,
+                        prefix_cache_ptr=byte,
+                        prefix_slots_ptr=index,
+                        prefix_lens_ptr=index,
+                        prefix_block_stride=16,
+                        prefix_num_blocks=16,
+                        num_tokens=16,
+                        input_dim=512,
+                        fp8_dim=448,
+                        bf16_dim=64,
+                        scale_dim=8,
+                        quant_block=64,
+                        cache_block_size=256,
+                        token_data_size=576,
+                        block_stride=16,
+                        num_cache_blocks=16,
+                        fp8_max=448.0,
+                        n_quant_blocks=8,
+                        TRAP_INVALID_KV_ACCESS=False,
+                        COPY_PREFIX=False,
+                        prefix_block_size=256,
+                        prefix_width=64,
+                        tokens_per_request=16,
+                    ),
+                    ("block_stride", "num_cache_blocks"),
+                ),
+                (
+                    _swa_dequant_triton._dequantize_slots_kernel,
+                    dict(
+                        out_ptr=bf16,
+                        out_stride0=512,
+                        pool_ptr=byte,
+                        pool_block_stride=16,
+                        slot_indices_ptr=index,
+                        block_size=256,
+                        fp8_dim=448,
+                        bf16_dim=64,
+                        scale_dim=8,
+                        quant_block=64,
+                        token_data_size=576,
+                        num_cache_blocks=16,
+                        n_quant_blocks=7,
+                        TRAP_INVALID_KV_ACCESS=False,
+                    ),
+                    ("pool_block_stride", "num_cache_blocks"),
+                ),
+                (
+                    _swa_dequant_triton._gather_k_cache_packed_kernel,
+                    dict(
+                        out_ptr=byte,
+                        out_stride0=16,
+                        out_stride1=16,
+                        k_cache_ptr=byte,
+                        seq_lens_ptr=index,
+                        block_table_ptr=index,
+                        offset=16,
+                        gather_lens_ptr=index,
+                        max_blocks_per_seq=16,
+                        cache_block_size=256,
+                        token_data_size=576,
+                        scale_dim=8,
+                        block_stride=16,
+                    ),
+                    (
+                        "out_stride0",
+                        "out_stride1",
+                        "offset",
+                        "max_blocks_per_seq",
+                        "block_stride",
+                    ),
+                ),
+                (
+                    _swa_ops_triton._compute_swa_slot_in_flat_from_cu_kernel,
+                    dict(
+                        out_ptr=index,
+                        cu_seqlens_ptr=index,
+                        prefix_lengths_ptr=index,
+                        num_tokens=16,
+                        M=4096,
+                        base_offset=0,
+                        window_size=16,
+                        num_reqs=16,
+                        BLOCK_B=32,
+                        BLOCK_M=32,
+                    ),
+                    ("window_size", "num_reqs"),
+                ),
+            ]
         )
-        self.assertIn('"KV_BLOCK_STRIDE"', indexer_src)
-        self.assertIn('"NUM_STATE_BLOCKS"', indexer_src)
-        self.assertIn('"NUM_KV_BLOCKS"', indexer_src)
-        self.assertNotIn("KV_BLOCK_STRIDE: tl.constexpr", indexer_src)
-        self.assertNotIn("NUM_STATE_BLOCKS: tl.constexpr", indexer_src)
-        self.assertNotIn("NUM_KV_BLOCKS: tl.constexpr", indexer_src)
-
-        quant_src = inspect.getsource(
-            _swa_kv_insert_triton._quantize_and_insert_k_kernel.fn
-        )
-        self.assertIn('"block_stride"', quant_src)
-        self.assertIn('"num_cache_blocks"', quant_src)
-        self.assertNotIn("block_stride: tl.constexpr", quant_src)
-        self.assertNotIn("num_cache_blocks: tl.constexpr", quant_src)
-
-        dequant_src = inspect.getsource(_swa_dequant_triton._dequantize_slots_kernel.fn)
-        self.assertIn('"pool_block_stride"', dequant_src)
-        self.assertIn('"num_cache_blocks"', dequant_src)
-        self.assertNotIn("pool_block_stride: tl.constexpr", dequant_src)
-        self.assertNotIn("num_cache_blocks: tl.constexpr", dequant_src)
-
-        gather_src = inspect.getsource(
-            _swa_dequant_triton._gather_k_cache_packed_kernel.fn
-        )
-        self.assertIn('"out_stride0"', gather_src)
-        self.assertIn('"out_stride1"', gather_src)
-        self.assertIn('"offset"', gather_src)
-        self.assertIn('"max_blocks_per_seq"', gather_src)
-        self.assertIn('"block_stride"', gather_src)
-        self.assertNotIn("out_stride0: tl.constexpr", gather_src)
-        self.assertNotIn("out_stride1: tl.constexpr", gather_src)
-        self.assertNotIn("offset: tl.constexpr", gather_src)
-        self.assertNotIn("max_blocks_per_seq: tl.constexpr", gather_src)
-        self.assertNotIn("block_stride: tl.constexpr", gather_src)
-
-        slot_src = inspect.getsource(
-            _swa_ops_triton._compute_swa_slot_in_flat_from_cu_kernel.fn
-        )
-        for runtime_scalar in ("window_size", "num_reqs"):
-            self.assertIn(f'"{runtime_scalar}"', slot_src)
-            self.assertNotIn(f"{runtime_scalar}: tl.constexpr", slot_src)
+        # Compile the real kernels without launching or accessing mock pointers.
+        # Both alignment and value==1 specialization must remain disabled.
+        for kernel, args, runtime_scalars in cases:
+            with self.subTest(kernel=kernel.__name__):
+                compiled = kernel.warmup(**args, grid=(1, 1))
+                self.assertIsNotNone(compiled)
+                for scalar in runtime_scalars:
+                    for value in (1, 17, 32):
+                        with self.subTest(scalar=scalar, value=value):
+                            variant = kernel.warmup(
+                                **dict(args, **{scalar: value}), grid=(1, 1)
+                            )
+                            self.assertIs(variant, compiled)
 
     def test_deepgemm_warmup_retry_handles_nvcc_compile_failure(self):
         calls = []

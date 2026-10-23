@@ -1,17 +1,21 @@
 import os
 import unittest
 from contextlib import contextmanager
+from unittest.mock import patch
 
 import torch
 
 from rtp_llm.models_py.modules.dsv4.indexer_topk import (
     AutoIndexerTopKBackend,
     FastIndexerTopKBackend,
+    IndexerTopKBackendName,
     PersistentIndexerTopKBackend,
     TorchIndexerTopKBackend,
     get_indexer_topk_backend,
+    parse_indexer_topk_backend_name,
     select_indexer_topk,
 )
+from rtp_llm.models_py.utils.arch import is_sm120
 
 
 @contextmanager
@@ -132,7 +136,20 @@ class TestIndexerTopKBackend(unittest.TestCase):
         with _env("DSV4_INDEXER_TOPK_BACKEND", "fast"):
             self.assertIsInstance(get_indexer_topk_backend(), FastIndexerTopKBackend)
         with _env("DSV4_INDEXER_TOPK_BACKEND", "persistent"):
-            self.assertIsInstance(get_indexer_topk_backend(), PersistentIndexerTopKBackend)
+            self.assertIsInstance(
+                get_indexer_topk_backend(), PersistentIndexerTopKBackend
+            )
+
+    def test_backend_parser_is_shared_and_preserves_cuda_alias(self):
+        self.assertIs(
+            parse_indexer_topk_backend_name("cuda"),
+            IndexerTopKBackendName.AUTO,
+        )
+        for name in IndexerTopKBackendName:
+            with self.subTest(name=name.value):
+                self.assertIs(parse_indexer_topk_backend_name(name.value), name)
+        with self.assertRaisesRegex(ValueError, "expected auto\\|torch\\|fast"):
+            parse_indexer_topk_backend_name("unknown")
 
     @unittest.skipIf(not torch.cuda.is_available(), "CUDA required")
     def test_auto_backend_topk_512_matches_torch_sets(self):
@@ -149,9 +166,7 @@ class TestIndexerTopKBackend(unittest.TestCase):
     def test_persistent_backend_topk_512_matches_torch_sets(self):
         torch.manual_seed(2)
         score = torch.randn(4, 16384, device="cuda", dtype=torch.float32)
-        lengths = torch.tensor(
-            [16384, 9000, 512, 17], device="cuda", dtype=torch.int32
-        )
+        lengths = torch.tensor([16384, 9000, 512, 17], device="cuda", dtype=torch.int32)
         persistent = PersistentIndexerTopKBackend().select(score, 512, lengths=lengths)
         ref = TorchIndexerTopKBackend().select(score, 512, lengths=lengths)
         _assert_topk_sets(self, persistent.cpu(), ref.cpu())
@@ -204,15 +219,37 @@ class TestIndexerTopKBackend(unittest.TestCase):
         _assert_valid_indices_compact(self, persistent, lengths)
 
     @unittest.skipIf(not torch.cuda.is_available(), "CUDA required")
-    def test_fast_backend_topk_2048_matches_torch_sets(self):
+    def test_fast_backend_topk_2048_architecture_contract(self):
         torch.manual_seed(3)
         score = torch.randn(4, 4096, device="cuda", dtype=torch.float32)
-        lengths = torch.tensor(
-            [4096, 3000, 2048, 17], device="cuda", dtype=torch.int32
-        )
+        lengths = torch.tensor([4096, 3000, 2048, 17], device="cuda", dtype=torch.int32)
+        if is_sm120(score.device):
+            with patch(
+                "rtp_llm.models_py.kernels.cuda.fast_topk.fast_topk_v2"
+            ) as kernel, self.assertRaisesRegex(RuntimeError, "SM120 shared memory"):
+                FastIndexerTopKBackend().select(score, 2048, lengths=lengths)
+            kernel.assert_not_called()
+            return
         fast = FastIndexerTopKBackend().select(score, 2048, lengths=lengths)
         ref = TorchIndexerTopKBackend().select(score, 2048, lengths=lengths)
         _assert_topk_sets(self, fast.cpu(), ref.cpu())
+
+    @unittest.skipIf(not torch.cuda.is_available(), "CUDA required")
+    def test_auto_sm120_missing_persistent_provider_avoids_fast(self):
+        score = torch.randn(2, 4096, device="cuda", dtype=torch.float32)
+        backend = AutoIndexerTopKBackend()
+        with patch(
+            "rtp_llm.models_py.modules.dsv4.indexer_topk.is_sm120", return_value=True
+        ), patch.object(
+            backend._persistent,
+            "select",
+            side_effect=AttributeError("provider missing"),
+        ), patch.object(
+            backend._fast, "select", side_effect=AssertionError("unsupported kernel")
+        ):
+            result = backend.select(score, 2048)
+        reference = TorchIndexerTopKBackend().select(score, 2048)
+        _assert_topk_sets(self, result, reference)
 
     def test_fast_backend_rejects_unsupported_without_fallback(self):
         score = torch.randn(2, 16, dtype=torch.float32)
@@ -231,6 +268,29 @@ class TestIndexerTopKBackend(unittest.TestCase):
         lengths = torch.tensor([1024, 33], dtype=torch.int32)
         with self.assertRaisesRegex(RuntimeError, "requires CUDA float32"):
             PersistentIndexerTopKBackend().select(score, 512, lengths=lengths)
+
+    @unittest.skipIf(not torch.cuda.is_available(), "CUDA required")
+    def test_persistent_provider_is_scoped_to_sm120(self):
+        from rtp_llm.ops.compute_ops import rtp_llm_ops
+
+        score = torch.randn(2, 1024, device="cuda", dtype=torch.float32)
+        for sm120 in (False, True):
+            with self.subTest(sm120=sm120), patch(
+                "rtp_llm.models_py.modules.dsv4.indexer_topk.is_sm120",
+                return_value=sm120,
+            ), patch.object(rtp_llm_ops, "persistent_topk") as legacy, patch.object(
+                rtp_llm_ops, "dsv4_persistent_topk"
+            ) as specialized:
+
+                def fill_output(_score, _lengths, out, *_args):
+                    out.fill_(7)
+
+                selected = specialized if sm120 else legacy
+                selected.side_effect = fill_output
+                result = PersistentIndexerTopKBackend().select(score, 512)
+                selected.assert_called_once()
+                (legacy if sm120 else specialized).assert_not_called()
+                torch.testing.assert_close(result, torch.full_like(result, 7))
 
 
 if __name__ == "__main__":

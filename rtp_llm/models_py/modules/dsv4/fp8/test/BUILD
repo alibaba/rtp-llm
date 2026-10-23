@@ -1,7 +1,12 @@
-load("//rtp_llm/models_py/modules/dsv4/test:defs.bzl", "dsv4_py_test", "dsv4_sm100_py_test")
+load("//rtp_llm/models_py/modules/dsv4/test:defs.bzl", "dsv4_py_test", "dsv4_sm100_py_test", "dsv4_sm120_py_test")
 load("//rtp_llm/test/utils:cuda13_sm100_test.bzl", "cuda13_sm100_py_test")
 
 package(default_visibility = ["//visibility:public"])
+_DSV4_SM120_ONLY = select({
+    "@//:using_cuda13_sm120": [],
+    "//conditions:default": ["@platforms//:incompatible"],
+})
+
 
 _DSV4_FP8_TEST_DEPS = [
     "//rtp_llm/models_py/standalone:py_standalone_testlib",
@@ -31,10 +36,12 @@ _GPU_TESTS = [
     "test_indexer_fp8_prefill_chain",
     "test_indexer_fp8_prefill_meta",
     "test_indexer_fp8_quant_triton",
+    "test_indexer_shape_specialization",
     "test_indexer_fp8_score",
     "test_indexer_q_fp8_quant",
     "test_swa_combine_topk",
     "test_swa_cp_packed_gather_triton",
+    "test_pack_slots_to_paged",
     "test_swa_dequant_large_stride",
     "test_swa_fp8_kv_roundtrip",
     "test_swa_prefill_gather_lens",
@@ -67,6 +74,7 @@ _CONTRACT_TESTS = [
     "test_prefill_mixed_layer_cache_store",
     "test_fp8_sparse_attn_decode_op",
     "test_compressor_cp_merged_gather",
+    "test_sm120_prefill_indices",
 ]
 
 [
@@ -83,6 +91,21 @@ _CONTRACT_TESTS = [
         deps = _DSV4_FP8_TEST_DEPS,
     )
     for name in _GPU_TESTS + _CONTRACT_TESTS
+]
+
+[
+    dsv4_sm120_py_test(
+        name = name + "_sm120",
+        src = name + ".py",
+        deps = _DSV4_FP8_TEST_DEPS,
+    )
+    for name in [
+        "test_sm120_prefill_indices",
+        "test_swa_fp8_kv_roundtrip",
+        "test_fp8_sparse_attn_decode_op",
+        "test_pack_slots_to_paged",
+        "test_indexer_shape_specialization",
+    ]
 ]
 
 dsv4_py_test(
@@ -108,6 +131,38 @@ dsv4_py_test(
         "test_varlen_prefill_oracle",
     ]
 ]
+
+
+
+
+dsv4_sm120_py_test(
+    name = "test_sm120_prefill_indices_hardware",
+    deps = _DSV4_FP8_TEST_DEPS,
+)
+
+dsv4_sm120_py_test(
+    name = "test_sm120_fused_indexer_gather",
+    deps = _DSV4_FP8_TEST_DEPS,
+)
+
+dsv4_sm120_py_test(
+    name = "test_sm120_prefill_indices_producer_matrix",
+    deps = _DSV4_FP8_TEST_DEPS,
+)
+
+# Keep the broad H20 target above, and run the same architecture-agnostic
+# kernel contract on real SM120 hardware as part of the positive-tag gate.
+dsv4_sm120_py_test(
+    name = "test_dsv4_persistent_topk_sm120",
+    src = "test_dsv4_persistent_topk.py",
+    deps = _DSV4_FP8_TEST_DEPS,
+)
+
+dsv4_sm120_py_test(
+    name = "test_indexer_topk_v3_routing_sm120",
+    src = "test_indexer_topk_v3_routing.py",
+    deps = _DSV4_FP8_TEST_DEPS,
+)
 
 # Compares locally constructed F.linear/cat expressions, not CompressorFP8.
 dsv4_py_test(
@@ -203,3 +258,10 @@ dsv4_sm100_py_test(
     )
     for name in ["test_mega_csa_adapter", "test_mega_hca_adapter"]
 ]
+
+
+
+dsv4_sm120_py_test(
+    name = "test_sm120_prefill_split",
+    deps = _DSV4_FP8_TEST_DEPS,
+)

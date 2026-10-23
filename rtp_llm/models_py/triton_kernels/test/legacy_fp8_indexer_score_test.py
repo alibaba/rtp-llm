@@ -64,20 +64,27 @@ class LegacyFP8IndexerScoreTest(unittest.TestCase):
             [[0, 3], [31, 42], [63, 64]], device="cuda", dtype=torch.int32
         )
         weights = torch.randn(batch * next_n, heads, device="cuda")
-        actual = legacy_fp8_paged_mqa_logits(q, packed, weights, lens, table, 64)
-        for b in range(batch):
-            physical = table[b].long()
-            k = keys[physical].reshape(-1, 128)
-            scale = scales[physical].reshape(-1)
-            expected = self.reference(
-                q[b], k, scale, weights[b * next_n : (b + 1) * next_n]
+        for clean in (False, True):
+            actual = legacy_fp8_paged_mqa_logits(
+                q, packed, weights, lens, table, 64, clean_logits=clean
             )
-            expected.masked_fill_(
-                torch.arange(64, device="cuda") >= lens[b, :, None], 0.0
-            )
-            torch.testing.assert_close(
-                actual[b * next_n : (b + 1) * next_n], expected, rtol=2e-5, atol=2e-5
-            )
+            for b in range(batch):
+                physical = table[b].long()
+                k = keys[physical].reshape(-1, 128)
+                scale = scales[physical].reshape(-1)
+                expected = self.reference(
+                    q[b], k, scale, weights[b * next_n : (b + 1) * next_n]
+                )
+                expected.masked_fill_(
+                    torch.arange(64, device="cuda") >= lens[b, :, None],
+                    -float("inf") if clean else 0.0,
+                )
+                torch.testing.assert_close(
+                    actual[b * next_n : (b + 1) * next_n],
+                    expected,
+                    rtol=2e-5,
+                    atol=2e-5,
+                )
 
 
 if __name__ == "__main__":
