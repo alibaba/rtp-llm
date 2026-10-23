@@ -209,3 +209,23 @@ custom_smoke_test(
     tags = ["dsv41_cuda13", "model_contract", "dspark_contract"],
     data = ["//rtp_llm:sdk", "deepseek_v41_contract_test.py"],
 )
+
+# Reserve five GPUs; the custom lifecycle splits them into TP4 plus one ViT GPU.
+custom_smoke_test(
+    name = "qwen4_native_fp8_cache64_vit2_tp4_sm90",
+    main = "qwen4_serving_contract_test.py",
+    smoke_args = "--world_size 5",
+    gpu_type = ["H20_CU13"],
+    tags = ["qwen4_serving_contract"],
+    data = ["//rtp_llm:sdk", "data/model/qwen_vl/1.jpeg"],
+)
+
+custom_smoke_test(
+    name = "qwen4_native_fp8_cache64_vit2_tp4_sm90_functional",
+    main = "qwen4_serving_contract_test.py",
+    args = ["--image-question=animal"],
+    smoke_args = "--world_size 5",
+    gpu_type = ["H20_CU13"],
+    tags = ["qwen4_serving_contract"],
+    data = ["//rtp_llm:sdk", "data/model/qwen_vl/1.jpeg"],
+)
