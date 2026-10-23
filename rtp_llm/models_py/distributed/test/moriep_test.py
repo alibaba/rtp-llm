@@ -299,7 +299,7 @@ def _run_moriep_correctness(
         combine_output, _ = wrapper.combine(
             combine_source,
             None,
-            dispatch_indices,
+            all_rank_indices[rank],
             block_num=64,
             warp_per_block=16,
         )

@@ -799,9 +799,10 @@ description = "Python UT on AMD MI308X (py-ut-amd)"
 gpu_type = "MI308X"
 minimum_count = 1
 # Original 382 cases plus 30 complete tagged-cache cases (formerly 23).
+# Plus one real MORI short-tail multichunk case (20 tokens, capacity 8).
 # The wider-row case retains its bounded-intersection replacement; synthetic
 # report-integrity errors remain failed reports, not executed test instances.
-expected_count = 412
+expected_count = 413
 forbid_skips = true
 remote_env = { RTP_LLM_REQUIRE_ACCELERATOR = "1" }
 paths = [

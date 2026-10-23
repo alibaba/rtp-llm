@@ -67,9 +67,8 @@ rocm = [
     # FLA kernels import FlyDSL directly, so do not rely on AITER to install it
     # transitively.
     "flydsl==0.3.4.1",
-    # PyPI's cp310 wheel requires manylinux_2_35 while the MI308X worker is
-    # manylinux_2_32. Build the same v1.2.2 source on the worker instead.
-    "amd-mori @ git+https://github.com/ROCm/mori.git@dafdcfcf1e27b0c981b90903ab198b90d29e6867",
+    # Build the pinned official MORI v1.2.4 source on the worker.
+    "amd-mori @ git+https://github.com/ROCm/mori.git@f39fa765e897c95995957d0518908cc982a88fc2",
 ]
 
 cuda12_arm = [

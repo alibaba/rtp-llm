@@ -509,7 +509,13 @@ def worker_function(
         _cleanup_dist()
 
 
-def test_single(world_size: int, dist_port: int):
+def test_single(
+    world_size: int,
+    dist_port: int,
+    *,
+    token_num_aligned: Optional[int] = None,
+    max_tokens_on_rank: Optional[int] = None,
+):
     _moriep_log(
         None,
         f"[parent] test_single world_size={world_size} dist_port={dist_port} pid={os.getpid()}",
@@ -517,9 +523,11 @@ def test_single(world_size: int, dist_port: int):
     # 各 rank 必须使用相同 token 数：Ep dispatch/combine 为全体 rank 集体通信，
     # 若部分 rank assert 失败先进入 cleanup barrier，其余 rank 仍卡在下一轮 collective → 死锁。
     # 且 ref_a2=a1*world_size 的恒等检查仅在各 rank 对称 token 时成立。
-    token_num_aligned = random.randint(4, 12) // 4 * 4
+    if token_num_aligned is None:
+        token_num_aligned = random.randint(4, 12) // 4 * 4
     token_num_per_rank = [token_num_aligned] * world_size
-    max_tokens_on_rank = token_num_aligned
+    if max_tokens_on_rank is None:
+        max_tokens_on_rank = token_num_aligned
     _moriep_log(
         None,
         f"[parent] token_num_per_rank={token_num_per_rank} (same per rank) max_tokens_on_rank={max_tokens_on_rank}",
@@ -600,6 +608,18 @@ class MoriEpIntranodeRouterTest(unittest.TestCase):
             self.skipTest("Need at least 4 GPUs")
         mp.set_start_method("spawn", force=True)
         test_single(world_size=4, dist_port=_get_free_port())
+
+    @pytest.mark.gpu(type="MI308X_ROCM7", count=2)
+    def test_short_tail_multichunk(self):
+        self._check_skip()
+        mp.set_start_method("spawn", force=True)
+        # Distinct random data in 8+8+4 tokens exposes routing and shared-view reuse.
+        test_single(
+            world_size=2,
+            dist_port=_get_free_port(),
+            token_num_aligned=20,
+            max_tokens_on_rank=8,
+        )
 
 
 if __name__ == "__main__":

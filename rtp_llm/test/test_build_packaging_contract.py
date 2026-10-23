@@ -296,8 +296,8 @@ class BuildPackagingContractTest(TestCase):
         )
         self.assertEqual(
             requirements["amd-mori"].url,
-            "git+https://github.com/ROCm/mori.git@dafdcfcf1e27b0c981b90903ab198b90d29e6867",
-            "MoriEP must build from the pinned v1.2.2 source on older workers",
+            "git+https://github.com/ROCm/mori.git@f39fa765e897c95995957d0518908cc982a88fc2",
+            "MoriEP must build from the pinned official v1.2.4 source",
         )
         for package, expected_url in expected_urls.items():
             self.assertEqual(
@@ -1270,7 +1270,7 @@ class BuildPackagingContractTest(TestCase):
             "py_ut_l20": 86,
             "py_ut_oss_l20": 84,
             "py_ut_sm100_arm": 104,
-            "py_ut_amd": 412,
+            "py_ut_amd": 413,
             "py_ut_frontend": 71,
         }.items():
             self.assertEqual(profiles[name].get("expected_count"), expected_count)
