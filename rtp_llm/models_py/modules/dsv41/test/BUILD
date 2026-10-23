@@ -113,5 +113,5 @@ py_test(
         tags = ["dsv41_cuda13"],
         legacy_create_init = 0,
     )
-    for name in ["test_v41_mega_mhc", "test_mhc_moe_inputs"]
+    for name in ["test_v41_mega_mhc", "test_mhc_moe_inputs", "test_fake_balance_expert"]
 ]

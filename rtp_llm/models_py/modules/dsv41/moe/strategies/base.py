@@ -57,6 +57,9 @@ class MoeCfg:
     max_tokens_per_rank: int
     shared_fp8_block_size: int = 128
     is_decode_role: bool = False
+    dp_size: int = 1
+    dp_rank: int = 0
+    fake_balance_expert: bool = False
 
 
 class RoutedExpertsStrategy(nn.Module):
@@ -103,6 +106,28 @@ class RoutedExpertsStrategy(nn.Module):
     def __init__(self, cfg: MoeCfg):
         super().__init__()
         self.cfg = cfg
+        self.fake_balance_expert = None
+        if cfg.fake_balance_expert:
+            from rtp_llm.models_py.modules.base.cuda.select_topk import (
+                FakeBalanceExpert,
+            )
+
+            self.fake_balance_expert = FakeBalanceExpert(
+                cfg.n_routed_experts,
+                cfg.n_activated_experts,
+                cfg.dp_rank,
+                cfg.dp_size,
+                cfg.ep_size,
+            )
+
+    def apply_fake_balance(self, indices: torch.Tensor, weights: torch.Tensor) -> None:
+        """Performance-only override, matching GenericMoeLayer (weights become 1).
+
+        Call after routing/packing and before dispatch consumes these tensors.
+        Empty ranks must still enter collectives, but cannot launch a zero grid.
+        """
+        if self.fake_balance_expert is not None and indices.shape[0] > 0:
+            self.fake_balance_expert(indices, weights)
 
     def setup_weights(self, layer_weights: Dict) -> None:
         """Pop the strategy's own routed-expert stacks from ``layer_weights``

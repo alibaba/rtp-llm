@@ -433,6 +433,10 @@ class MegaMoEStrategySE(MegaMoEStrategy):
     def _launch(self, y: torch.Tensor, tokens: int, device: torch.device) -> None:
         import deep_gemm
 
+        if self.fake_balance_expert is not None:
+            self.apply_fake_balance(
+                self._mega_buf.topk_idx[:tokens], self._mega_buf.topk_weights[:tokens]
+            )
         self._maybe_pre_kernel_barrier(tokens)
         sync_cuda_graph_warmup_ranks(
             f"dsv4.mega_moe_se.layer{self.cfg.layer_id}.before_deepgemm", device
