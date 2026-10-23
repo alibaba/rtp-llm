@@ -261,17 +261,22 @@ void PPExecutor::publishPdPlanRequests(const GptModelInputs& model_input, const 
     if (!cache_store) {
         return;
     }
-    const auto&   lengths            = global_input_lengths.defined() ? global_input_lengths : mi.input_lengths;
-    const auto&   cache_config       = cache_manager_->cacheConfig();
-    const auto    model_id           = cache_manager_->modelId();
-    const auto    global_layer_begin = cache_config.global_layer_begin;
-    const bool    use_mla            = cache_config.use_mla;
-    const bool    use_hybrid         = cache_config.groupNums() > 1;
-    const bool    use_kv_key_prefix  = use_mla || cache_config.use_opaque_kv_cache_store || use_hybrid;
-    const auto&   layer_group_ids    = cache_config.topology().layerGroupIdsSnapshot();
-    const int64_t seq_per_block      = mi.seq_size_per_block > 0 ? mi.seq_size_per_block : 1;
-    const int64_t local_layers       = cache_config.layer_num;
-    const int64_t context_batch      = mi.request_id.numel();
+    const auto& lengths            = global_input_lengths.defined() ? global_input_lengths : mi.input_lengths;
+    const auto& cache_config       = cache_manager_->cacheConfig();
+    const auto  model_id           = cache_manager_->modelId();
+    const auto  global_layer_begin = cache_config.global_layer_begin;
+    const bool  use_mla            = cache_config.use_mla;
+    const bool  use_hybrid         = cache_config.groupNums() > 1;
+    const bool  use_kv_key_prefix  = use_mla || cache_config.use_opaque_kv_cache_store || use_hybrid;
+    const auto& layer_group_ids    = cache_config.topology().layerGroupIdsSnapshot();
+    // The plan's seq_size_per_block is not carried to every PP worker (it arrives as 1 on
+    // non-root ranks of later stages), which made every chunk look final there. Use the
+    // local cache config, which is identical on every rank.
+    const int64_t seq_per_block = cache_config.seq_size_per_block > 0 ?
+                                      static_cast<int64_t>(cache_config.seq_size_per_block) :
+                                      (mi.seq_size_per_block > 0 ? mi.seq_size_per_block : 1);
+    const int64_t local_layers  = cache_config.layer_num;
+    const int64_t context_batch = mi.request_id.numel();
 
     for (int64_t i = 0; i < context_batch; ++i) {
         if (mi.request_pd_separation.defined() && mi.request_pd_separation.numel() > i
@@ -288,6 +293,19 @@ void PPExecutor::publishPdPlanRequests(const GptModelInputs& model_input, const 
         }
         const int64_t prefix  = mi.prefix_lengths[i].item<int>();
         const int64_t cur_len = lengths[i].item<int>();
+        if (std::getenv("RTP_LLM_PD_PUBLISH_DEBUG") != nullptr) {
+            RTP_LLM_LOG_INFO("PD_PUBLISH_CHECK rank=%ld tp_rank=%ld request=%ld prefix=%ld cur_len=%ld "
+                             "mi_input_len=%d nblocks=%ld seq_per_block=%ld global_defined=%d",
+                             (long)parallelism_config_.world_rank,
+                             (long)parallelism_config_.tp_rank,
+                             (long)mi.request_id[i].item<int64_t>(),
+                             (long)prefix,
+                             (long)cur_len,
+                             mi.input_lengths[i].item<int>(),
+                             (long)nblocks,
+                             (long)seq_per_block,
+                             global_input_lengths.defined() ? 1 : 0);
+        }
         // Only the chunk that starts the final block completes this stream's context.
         if (prefix + cur_len <= (nblocks - 1) * seq_per_block) {
             continue;
