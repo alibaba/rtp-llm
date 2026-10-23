@@ -1,5 +1,4 @@
 import logging
-import os
 from enum import Enum
 from typing import Any, Dict, Union
 
@@ -255,8 +254,7 @@ class MetricReporter(object):
                     metric.value
                 )
 
-            if os.environ.get("RTP_LLM_METRICS_ENABLED", "0") == "1":
-                for metric, (name, buckets) in _LATENCY_HISTOGRAMS.items():
-                    self._histogram_map[metric.value] = (
-                        self._kmon.register_histogram_metric(name, buckets)
-                    )
+            for metric, (name, buckets) in _LATENCY_HISTOGRAMS.items():
+                self._histogram_map[metric.value] = (
+                    self._kmon.register_histogram_metric(name, buckets)
+                )

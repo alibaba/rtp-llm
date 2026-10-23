@@ -1,6 +1,5 @@
-import os
 from unittest import TestCase, main
-from unittest.mock import Mock, patch
+from unittest.mock import Mock
 
 from rtp_llm.aios.kmonitor.python_client.kmonitor.kmonitor import KMonitor
 from rtp_llm.aios.kmonitor.python_client.kmonitor.metrics.gauge_metric import (
@@ -17,19 +16,18 @@ from rtp_llm.metrics.kmonitor_metric_reporter import (
 
 
 class MetricReporterTest(TestCase):
-    def make_reporter(self, enabled):
+    def make_reporter(self):
         monitor = Mock(spec=KMonitor)
         monitor.register_gauge_metric.side_effect = lambda name: GaugeMetric(name, {})
         monitor.register_histogram_metric.side_effect = (
             lambda name, buckets: HistogramMetric(name, {}, buckets)
         )
         reporter = MetricReporter(monitor)
-        with patch.dict(os.environ, {"RTP_LLM_METRICS_ENABLED": str(int(enabled))}):
-            reporter.init()
+        reporter.init()
         return reporter, monitor
 
     def test_same_samples_and_tags_are_written_to_both_metrics(self):
-        reporter, monitor = self.make_reporter(True)
+        reporter, monitor = self.make_reporter()
         pairs = {
             GaugeMetrics.LANTENCY_METRIC: "py_rtp_framework_rt_seconds",
             GaugeMetrics.RESPONSE_FIRST_TOKEN_RT_METRIC: "py_rtp_response_first_token_rt_seconds",
@@ -55,17 +53,15 @@ class MetricReporterTest(TestCase):
         self.assertEqual(tags, {"protocol": "grpc", "rank_id": "1"})
         self.assertEqual(monitor.register_histogram_metric.call_count, 3)
 
-    def test_disabled_preserves_gauge_only_reporting(self):
-        reporter, monitor = self.make_reporter(False)
-        reporter.report(GaugeMetrics.LANTENCY_METRIC, 125)
-        points = reporter._matic_map[
-            GaugeMetrics.LANTENCY_METRIC.value
-        ].fetch_reported_data()
-        self.assertEqual([p.value for p in points], [125])
-        monitor.register_histogram_metric.assert_not_called()
+    def test_default_registration_does_not_invent_observations(self):
+        reporter, monitor = self.make_reporter()
+        self.assertEqual(monitor.register_histogram_metric.call_count, 3)
+        self.assertTrue(
+            all(not h.fetch_reported_data() for h in reporter._histogram_map.values())
+        )
 
     def test_unrelated_metrics_and_repeated_init(self):
-        reporter, monitor = self.make_reporter(True)
+        reporter, monitor = self.make_reporter()
         reporter.init()
         self.assertEqual(monitor.register_histogram_metric.call_count, 3)
         reporter.report(GaugeMetrics.INPUT_TOKEN_SIZE_METRIC, 42)
@@ -84,7 +80,7 @@ class MetricReporterTest(TestCase):
         )
 
     def test_histogram_failure_does_not_change_existing_gauge(self):
-        reporter, _ = self.make_reporter(True)
+        reporter, _ = self.make_reporter()
         with self.assertLogs(level="ERROR"):
             reporter.report(GaugeMetrics.LANTENCY_METRIC, -5)
         self.assertEqual(
