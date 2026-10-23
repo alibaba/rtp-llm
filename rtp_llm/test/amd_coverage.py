@@ -42,7 +42,8 @@ AMD_TARGETS = (
         case="test_dirty_capture_failure_is_fail_closed",
     ),
     AmdTarget(
-        "test_aiter_flydsl_gdn_decode_rocm", _FLA + "test_aiter_flydsl_gdn_decode.py",
+        "test_aiter_flydsl_gdn_decode_rocm",
+        _FLA + "test_aiter_flydsl_gdn_decode.py",
         excluded_cases=("test_real_nvidia_device_rejects_aiter_dispatch",),
     ),
     AmdTarget(

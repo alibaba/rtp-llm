@@ -24,7 +24,10 @@ _BASELINE_TARGETS = tuple(target for target in AMD_TARGETS if target != _SHORT_T
 
 def _baseline_nodeids():
     return (
-        [target.path + "::" + (target.case or "test_case") for target in _BASELINE_TARGETS]
+        [
+            target.path + "::" + (target.case or "test_case")
+            for target in _BASELINE_TARGETS
+        ]
         + [
             AMD_GTEST_ADAPTER + f"::test_rocm_beam_search_gtest[{case}]"
             for case in AMD_GTEST_CASES
@@ -62,7 +65,9 @@ def test_amd_route_preserves_multicard_requirements(target):
 
     if target.name == "moriep_intranode_router_test_2gpu":
         assert _SHORT_TAIL.gpu_count == 2
-        item.nodeid = _SHORT_TAIL.path + "::MoriEpIntranodeRouterTest::" + _SHORT_TAIL.case
+        item.nodeid = (
+            _SHORT_TAIL.path + "::MoriEpIntranodeRouterTest::" + _SHORT_TAIL.case
+        )
         markers[:] = [pytest.mark.gpu(type="MI308X_ROCM7", count=2)]
         route_amd_items([item])
         assert markers[0].kwargs == {"type": "MI308X", "count": 2}
@@ -70,7 +75,9 @@ def test_amd_route_preserves_multicard_requirements(target):
         assert [entry.name for entry in AMD_TARGETS if entry.matches(item.nodeid)] == [
             _SHORT_TAIL.name
         ]
-        item.nodeid = _SHORT_TAIL.path + "::MoriEpIntranodeRouterTest::test_unregistered"
+        item.nodeid = (
+            _SHORT_TAIL.path + "::MoriEpIntranodeRouterTest::test_unregistered"
+        )
         markers[:] = [pytest.mark.gpu(type="MI308X_ROCM7", count=2)]
         route_amd_items([item])
         assert len(markers) == 1
@@ -101,7 +108,8 @@ def test_isolated_native_binding_inherits_torch_and_existing_library_paths(monke
     root = Path(__file__).resolve().parents[2]
     spec = importlib.util.spec_from_file_location(
         "pywrapped_adapter",
-        root / "rtp_llm/cpp/models/test/pywrapped_model_cache_store_integration_test.py",
+        root
+        / "rtp_llm/cpp/models/test/pywrapped_model_cache_store_integration_test.py",
     )
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
