@@ -105,6 +105,24 @@ torch::Tensor reshapeMtpTargetAllProbs(const torch::Tensor& all_probs,
                                        int64_t              positions_per_batch,
                                        int64_t              logits_width);
 
+// Per-round, owned batch storage shared by device-state publication and CPU
+// bookkeeping. Never resolve these tensors through a stream's mutable state:
+// an overlapped forward may already be publishing a newer generation.
+struct MtpDecodeDispatchSnapshot {
+    torch::Tensor all_probs;
+    torch::Tensor last_hidden_states;
+    torch::Tensor target_tokens;
+    std::shared_ptr<torch::Event> ready;
+};
+
+// all_probs and last_hidden_states must already own storage independent of
+// graph outputs. accepted_indices is the batch INT64 (accept_len - 1) vector.
+// Records readiness AFTER the batch token gather and all prior producer work.
+MtpDecodeDispatchSnapshot makeMtpDecodeDispatchSnapshot(const torch::Tensor& all_probs,
+                                                       const torch::Tensor& last_hidden_states,
+                                                       const torch::Tensor& accept_tokens,
+                                                       const torch::Tensor& accepted_indices);
+
 class MtpBatchStreamProcessor: public NormalBatchStreamProcessor {
 public:
     MtpBatchStreamProcessor(const ModelConfig&                 model_config,
@@ -138,7 +156,8 @@ public:
     absl::Status dispatchDecode(const StreamGroups&                          stream_groups,
                                 const speculative::SpeculativeSamplerOutput& spec_decode_output,
                                 const MergedOutput&                          draft_prefill_output,
-                                MtpTargetLogprobs                            target_logprobs) const;
+                                MtpTargetLogprobs                            target_logprobs,
+                                const MtpDecodeDispatchSnapshot*            snapshot = nullptr) const;
 
     // Wait for accepted lengths/tokens and reduce only accepted target rows.
     // Idempotent for an already-finalized payload so an early async finalize
@@ -223,7 +242,8 @@ protected:
                                      const speculative::SpeculativeSamplerOutput& spec_decode_output,
                                      const MergedOutput&                          draft_prefill_output,
                                      MtpTargetLogprobs&                           target_logprobs,
-                                     std::vector<StreamSpecUpdateInfo>&           spec_update_infos) const;
+                                     std::vector<StreamSpecUpdateInfo>&           spec_update_infos,
+                                     const MtpDecodeDispatchSnapshot*            snapshot = nullptr) const;
 
     void gatherHiddenStates(const StreamGroups& stream_groups, GptModelInputs& model_input) const;
 

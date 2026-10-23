@@ -582,6 +582,24 @@ absl::Status MtpBatchStreamProcessor::dispatchPrefill(const StreamGroups&      s
     return absl::OkStatus();
 }
 
+MtpDecodeDispatchSnapshot makeMtpDecodeDispatchSnapshot(const torch::Tensor& all_probs,
+                                                       const torch::Tensor& last_hidden_states,
+                                                       const torch::Tensor& accept_tokens,
+                                                       const torch::Tensor& accepted_indices) {
+    RTP_LLM_CHECK(accept_tokens.defined() && accept_tokens.is_cuda() && accept_tokens.dim() == 2);
+    RTP_LLM_CHECK(accepted_indices.defined() && accepted_indices.dim() == 1
+                  && accepted_indices.scalar_type() == torch::kInt64
+                  && accepted_indices.device() == accept_tokens.device()
+                  && accepted_indices.numel() == accept_tokens.size(0));
+    MtpDecodeDispatchSnapshot snapshot;
+    snapshot.all_probs = all_probs;
+    snapshot.last_hidden_states = last_hidden_states;
+    snapshot.target_tokens = accept_tokens.gather(1, accepted_indices.unsqueeze(1)).squeeze(1).to(torch::kInt32);
+    snapshot.ready = std::make_shared<torch::Event>(cuda_graph::makeGraphEvent());
+    snapshot.ready->record(cuda_graph::graphGetCurrentStream());
+    return snapshot;
+}
+
 absl::Status MtpBatchStreamProcessor::dispatchDecode(const StreamGroups&                          stream_groups,
                                                      const speculative::SpeculativeSamplerOutput& spec_decode_output,
                                                      const MergedOutput& draft_prefill_output) const {
@@ -591,13 +609,14 @@ absl::Status MtpBatchStreamProcessor::dispatchDecode(const StreamGroups&        
 absl::Status MtpBatchStreamProcessor::dispatchDecode(const StreamGroups&                          stream_groups,
                                                      const speculative::SpeculativeSamplerOutput& spec_decode_output,
                                                      const MergedOutput&                          draft_prefill_output,
-                                                     MtpTargetLogprobs target_logprobs) const {
+                                                     MtpTargetLogprobs target_logprobs,
+                                                     const MtpDecodeDispatchSnapshot* snapshot) const {
     RTP_LLM_LOG_DEBUG(__PRETTY_FUNCTION__);
 
     std::vector<StreamSpecUpdateInfo> spec_update_infos;
 
     prepareDecodeSpecUpdateInfo(
-        stream_groups, spec_decode_output, draft_prefill_output, target_logprobs, spec_update_infos);
+        stream_groups, spec_decode_output, draft_prefill_output, target_logprobs, spec_update_infos, snapshot);
 
     if (target_logprobs.defined()) {
         stageMtpLogprobsToCpu(spec_update_infos);
@@ -1318,7 +1337,25 @@ void MtpBatchStreamProcessor::prepareDecodeSpecUpdateInfo(
     const speculative::SpeculativeSamplerOutput& spec_decode_output,
     const MergedOutput&                          draft_prefill_output,
     MtpTargetLogprobs&                           target_logprobs,
-    std::vector<StreamSpecUpdateInfo>&           spec_update_infos) const {
+    std::vector<StreamSpecUpdateInfo>&           spec_update_infos,
+    const MtpDecodeDispatchSnapshot*            snapshot) const {
+    if (snapshot) {
+        const auto batch_size = static_cast<int64_t>(stream_groups.allStreams().size());
+        RTP_LLM_CHECK(snapshot->ready != nullptr);
+        RTP_LLM_CHECK(snapshot->all_probs.defined() && snapshot->all_probs.is_cuda()
+                      && snapshot->all_probs.dim() == 2 && snapshot->all_probs.size(0) == batch_size);
+        RTP_LLM_CHECK(snapshot->target_tokens.defined() && snapshot->target_tokens.is_cuda()
+                      && snapshot->target_tokens.dim() == 1 && snapshot->target_tokens.size(0) == batch_size
+                      && snapshot->target_tokens.scalar_type() == torch::kInt32);
+        if (propose_step_ > 1) {
+            RTP_LLM_CHECK(snapshot->last_hidden_states.defined() && snapshot->last_hidden_states.is_cuda()
+                          && snapshot->last_hidden_states.dim() == 2
+                          && snapshot->last_hidden_states.size(0) == batch_size);
+        }
+        // draft_event precedes snapshot creation. Join the snapshot's own event
+        // on this worker's CUDA stream; no host/device-wide synchronization.
+        snapshot->ready->block(cuda_graph::graphGetCurrentStream());
+    }
     if (target_logprobs.defined() && !target_logprobs.finalized()) {
         finalizeDecodeTargetLogprobs(stream_groups, spec_decode_output, target_logprobs);
     } else {
@@ -1345,7 +1382,11 @@ void MtpBatchStreamProcessor::prepareDecodeSpecUpdateInfo(
         auto next_batch_size = stream->nextBatchSize();
 
         // speculative decoding info
-        torch::Tensor propose_all_probs =
+        if (snapshot) {
+            RTP_LLM_CHECK_WITH_INFO(next_batch_size == 1, "Async MTP snapshot requires one row per stream");
+        }
+        torch::Tensor propose_all_probs = snapshot ?
+            snapshot->all_probs.narrow(0, batch_idx_out, next_batch_size) :
             draft_sampler_output.all_probs.narrow(0, batch_idx_out, next_batch_size).to(torch::kCUDA).clone();
 
         // This scalar read runs on the bookkeeping worker after accept_len is
@@ -1355,7 +1396,7 @@ void MtpBatchStreamProcessor::prepareDecodeSpecUpdateInfo(
 
         torch::Tensor last_hidden_states;
         if (propose_step_ > 1) {
-            last_hidden_states =
+            last_hidden_states = snapshot ? snapshot->last_hidden_states.narrow(0, batch_idx_out, 1) :
                 cloneHiddenSlice(draft_model_output.all_hidden_states, token_offset + cur_accept_len - 1, 1);
         }
 
@@ -1370,7 +1411,9 @@ void MtpBatchStreamProcessor::prepareDecodeSpecUpdateInfo(
         auto          compact_target_logprobs = gatherMtpTargetLogprobs(
             stream, target_logprobs, target_row_offset, next_batch_size, logprobs_count, content_tokens);
         torch::Tensor target_token_gpu;
-        if (spec_decode_output.accept_tokens.defined() && spec_decode_output.accept_tokens.is_cuda()) {
+        if (snapshot) {
+            target_token_gpu = snapshot->target_tokens.narrow(0, batch_idx_out, next_batch_size);
+        } else if (spec_decode_output.accept_tokens.defined() && spec_decode_output.accept_tokens.is_cuda()) {
             target_token_gpu = spec_decode_output.accept_tokens.narrow(0, batch_idx_out, next_batch_size)
                                    .narrow(1, cur_accept_len - 1, 1)
                                    .reshape({static_cast<int64_t>(next_batch_size)})
