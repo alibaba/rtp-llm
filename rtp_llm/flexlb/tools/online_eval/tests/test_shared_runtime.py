@@ -71,7 +71,13 @@ class SharedRuntimeTests(unittest.TestCase):
             names.update(re.findall(r'System\.getenv\(\)\.getOrDefault\("([A-Z_]+)"', source))
             names.update(re.findall(r'text\(env,\s*"([A-Z_]+)"', source))
         self.assertTrue(names)
-        self.assertFalse(names - set(LOAD_CLIENT_ENV_VARS))
+        # Read-only rejection guards (e.g. removed GRPC_TARGETS) are not
+        # supported overrides, but their ambient values must also be isolated.
+        with patch.dict(os.environ, dict.fromkeys(names, "ambient")):
+            isolated = ClientOps(None)._base_env({})
+        self.assertFalse({name for name in names if isolated.get(name)})
+        with self.assertRaisesRegex(ValueError, "unknown"):
+            ClientOps(None)._base_env({"GRPC_TARGETS": "127.0.0.1:7003"})
         self.assertEqual(len(LOAD_CLIENT_ENV_VARS), len(set(LOAD_CLIENT_ENV_VARS)))
         self.assertTrue(all(re.fullmatch(r"[A-Z][A-Z0-9_]*", name) for name in LOAD_CLIENT_ENV_VARS))
 

@@ -17,7 +17,6 @@ import org.flexlb.engine.grpc.EngineRpcService;
 import org.flexlb.engine.grpc.RoleTypeProtoConverter;
 import org.flexlb.engine.grpc.RpcServiceGrpc;
 import org.flexlb.schedule.grpc.FlexlbScheduleProtocol;
-import org.flexlb.schedule.grpc.FlexlbServiceGrpc;
 import org.flexlb.util.PriorityNormalizer;
 
 import java.io.BufferedWriter;
@@ -100,16 +99,8 @@ public final class JavaLoadClient implements AutoCloseable {
     private final Config config;
     private final boolean monitoringEnabled;
     private final EventLoopGroup eventLoopGroup;
-    /**
-     * ZK leader discovery router (MASTER_DISCOVERY_FILE): per-target
-     * channel pools + discovered leader + transport-failure same-request retry.
-     * Null in the legacy single-address mode and in dry-run mode — those
-     * paths keep the byte-identical legacy behavior.
-     */
+    /** Shared Schedule transport; null only in channel-free dry runs. */
     private final MasterTargetRouter router;
-    private final ManagedChannel[] scheduleChannels;
-    private final FlexlbServiceGrpc.FlexlbServiceBlockingStub[] scheduleStubs;
-    private final AtomicInteger scheduleStubRR = new AtomicInteger();
     private final Map<String, ManagedChannel[]> engineChannelPools = new ConcurrentHashMap<>();
     private final Map<String, AtomicInteger> engineChannelRR = new ConcurrentHashMap<>();
     private final HttpClient httpClient = HttpClient.newBuilder()
@@ -191,43 +182,25 @@ public final class JavaLoadClient implements AutoCloseable {
             // Test-only mode: no gRPC channels are created.
             this.eventLoopGroup = null;
             this.router = null;
-            this.scheduleChannels = new ManagedChannel[0];
-            this.scheduleStubs = new FlexlbServiceGrpc.FlexlbServiceBlockingStub[0];
             return;
         }
         this.eventLoopGroup = new NioEventLoopGroup(config.eventLoopThreads);
-        List<ManagedChannel> opened = new ArrayList<>();
         try {
-        if (!config.masterDiscoveryFile.isEmpty()) {
-            this.router = new MasterTargetRouter(Path.of(config.masterDiscoveryFile),
-                    config.nChannels, eventLoopGroup);
-            this.scheduleChannels = new ManagedChannel[0];
-            this.scheduleStubs = new FlexlbServiceGrpc.FlexlbServiceBlockingStub[0];
-            System.out.println("Master discovery mode: file=" + config.masterDiscoveryFile);
-            return;
-        }
-        this.router = null;
-        this.scheduleChannels = new ManagedChannel[config.nChannels];
-        this.scheduleStubs = new FlexlbServiceGrpc.FlexlbServiceBlockingStub[config.nChannels];
-        for (int i = 0; i < config.nChannels; i++) {
-            ManagedChannel channel = NettyChannelBuilder.forTarget(config.grpcTarget)
-                    .eventLoopGroup(eventLoopGroup)
-                    .channelType(NioSocketChannel.class)
-                    .maxInboundMessageSize(16 * 1024 * 1024)
-                    .flowControlWindow(1024 * 1024)
-                    .keepAliveTime(KEEPALIVE_TIME_MINUTES, TimeUnit.MINUTES)
-                    .keepAliveTimeout(10, TimeUnit.SECONDS)
-                    .usePlaintext()
-                    .build();
-            opened.add(channel);
-            scheduleChannels[i] = channel;
-            scheduleStubs[i] = FlexlbServiceGrpc.newBlockingStub(channel);
-        }
+            if (usesMasterDiscovery()) {
+                this.router = new MasterTargetRouter(Path.of(config.masterDiscoveryFile),
+                        config.nChannels, eventLoopGroup);
+                System.out.println("Master discovery mode: file=" + config.masterDiscoveryFile);
+            } else {
+                this.router = new MasterTargetRouter(config.grpcTarget, config.nChannels, eventLoopGroup);
+            }
         } catch (RuntimeException | Error failure) {
-            opened.forEach(ManagedChannel::shutdownNow);
             eventLoopGroup.shutdownGracefully(0, 2, TimeUnit.SECONDS).syncUninterruptibly();
             throw failure;
         }
+    }
+
+    private boolean usesMasterDiscovery() {
+        return !config.masterDiscoveryFile.isEmpty();
     }
 
     public static void main(String[] args) throws Exception {
@@ -688,8 +661,7 @@ public final class JavaLoadClient implements AutoCloseable {
         result.outputLen = record.outputLen;
         result.status = "unknown";
         result.routePath = "master";
-        // Single-target default; the HA router path overwrites this with the
-        // actually-served (or last-attempted) target from the ScheduleOutcome.
+        // Updated from the Schedule outcome when an attempt is made.
         result.masterTarget = config.grpcTarget;
         result.sendDueEpochMs = sendDueEpochMs;
         result.priority = record.priority;
@@ -729,75 +701,37 @@ public final class JavaLoadClient implements AutoCloseable {
                 FlexlbScheduleProtocol.FlexlbScheduleRequestPB scheduleReq = buildScheduleRequest(record, inputPb);
 
                 long scheduleStartNanos = System.nanoTime();
-                if (router != null) {
-                    // HA mode: MasterTargetRouter owns discovery and any
-                    // same-request retry; the attempt ledger records both.
-                    // schedule_ms spans the whole attempt chain, so
-                    // send_start_epoch_ms + schedule_ms stays one wall clock.
-                    MasterTargetRouter.ScheduleOutcome outcome =
-                            router.schedule(scheduleReq, config.timeoutMs);
-                    scheduleResponse = outcome.response;
-                    result.masterTarget = outcome.lastTarget;
-                    result.failover = outcome.failover;
-                    result.scheduleAttempts = outcome.attempts;
-                    result.errorKind = outcome.errorKind.label;
+                MasterTargetRouter.ScheduleOutcome outcome = router.schedule(scheduleReq, config.timeoutMs);
+                scheduleResponse = outcome.response;
+                result.masterTarget = outcome.lastTarget;
+                result.failover = outcome.failover;
+                result.scheduleAttempts = outcome.attempts;
+                result.errorKind = outcome.errorKind.label;
+                // Fixed-target failures historically leave Schedule timing unset.
+                if (usesMasterDiscovery() || scheduleResponse != null) {
                     result.scheduleMs = (System.nanoTime() - scheduleStartNanos) / 1_000_000.0;
                     result.schedDoneEpochMs = sendStartEpochMs + result.scheduleMs;
-                    if (scheduleResponse == null) {
-                        // No target produced a response: all-targets transport
-                        // failure, DEADLINE_EXCEEDED, or a gRPC-layer master
-                        // error. Route/fallback semantics are decided after the
-                        // try block (terminating-failure boundary lives there).
-                        scheduleExc = outcome.failure;
-                        result.status = "exception";
-                        result.error = outcome.failure == null
-                                ? "no master response" : outcome.failure.toString();
-                        result.totalMs = (System.nanoTime() - startedNanos) / 1_000_000.0;
-                    } else {
-                        result.enqueuedByMaster = scheduleResponse.getEnqueuedByMaster();
-                    }
+                }
+                if (scheduleResponse == null) {
+                    scheduleExc = outcome.failure;
+                    result.status = "exception";
+                    result.error = outcome.failure == null
+                            ? "no master response" : outcome.failure.toString();
+                    result.totalMs = (System.nanoTime() - startedNanos) / 1_000_000.0;
                 } else {
-                    FlexlbServiceGrpc.FlexlbServiceBlockingStub stub = nextScheduleStub()
-                            .withDeadlineAfter(config.timeoutMs, TimeUnit.MILLISECONDS);
-                    long attemptEpochMs = System.currentTimeMillis();
-                    long attemptNanos = System.nanoTime();
-                    String attemptStatus = "OK";
-                    Integer attemptCode = null;
-                    try {
-                        scheduleResponse = stub.schedule(scheduleReq);
-                        attemptCode = scheduleResponse.getCode();
-                    } catch (RuntimeException e) {
-                        attemptStatus = Status.fromThrowable(e).getCode().name();
-                        throw e;
-                    } finally {
-                        result.scheduleAttempts = List.of(new MasterTargetRouter.ScheduleAttempt(
-                                config.grpcTarget, attemptEpochMs, attemptNanos, attemptStatus, attemptCode));
-                    }
-
-                    result.scheduleMs = (System.nanoTime() - scheduleStartNanos) / 1_000_000.0;
-                    // sched_done epoch-ms (client_events.jsonl): the absolute moment the
-                    // schedule RPC returned — send_start_epoch_ms + scheduleMs keeps the
-                    // same wall clock as the engine-side engine_arrival_ms stamps.
-                    result.schedDoneEpochMs = sendStartEpochMs + result.scheduleMs;
                     result.enqueuedByMaster = scheduleResponse.getEnqueuedByMaster();
                 }
 
                 if (scheduleResponse == null) {
-                    // HA mode only (the legacy path throws into the catch below):
-                    // no target answered — status/error/total_ms were already
-                    // stamped by the router branch above; the terminating-failure
-                    // handling right after the try block takes it from here.
+                    // The failure is settled below under the configured fallback policy.
                 } else if (scheduleResponse.getCode() != 200 || !scheduleResponse.getSuccess()) {
                     result.status = "schedule_error";
                     result.error = scheduleResponse.getErrorMessage().isEmpty()
                             ? "code=" + scheduleResponse.getCode()
                             : scheduleResponse.getErrorMessage();
                     result.totalMs = (System.nanoTime() - startedNanos) / 1_000_000.0;
-                    // Master answered (8431 admission rejection, 8511 forwarding
-                    // terminal code, ...): business-error boundary — never
-                    // retried, never switched, never sent direct-to-engine.
-                    // 8511 is additionally a no-retry terminal code; the harness
-                    // asserts it via status=schedule_error + the code in error.
+                    // A business response never retries another Master. Discovery
+                    // also forbids direct fallback; fixed-target opt-in is settled below.
                     result.errorKind = "business";
                 } else {
                     result.prefill = roleAddr(scheduleResponse, "PREFILL");
@@ -837,43 +771,22 @@ public final class JavaLoadClient implements AutoCloseable {
                 result.status = "exception";
                 result.error = e.toString();
                 result.totalMs = (System.nanoTime() - startedNanos) / 1_000_000.0;
-                // Same taxonomy as the HA router path (the legacy single-target
-                // mode also stamps error_kind; its routing/fallback behavior is
-                // untouched).
                 result.errorKind = MasterTargetRouter.classifyThrowable(e);
             } finally {
                 scheduleInflightCount.decrementAndGet();
             }
 
-            // Escape hatch (default OFF — see enableFallback javadoc): on schedule
-            // failure, try fallback direct to engines under the same request permit. Only
-            // reachable when the operator explicitly opted in; standard load tests
-            // keep it off so every failure surfaces as an error row instead of
-            // bypassing the master.
-            //
-            // Trigger semantics are mode-dependent (HA case-test brief p7,
-            // defect-8 fix — scoped to the HA mode only):
-            //  - Legacy single-target mode: ANY schedule failure (exception or
-            //    schedule_error) may trigger the fallback attempt — byte-identical
-            //    to the historical behavior the existing pressure-test line
-            //    relies on.
-            //  - HA multi-target mode: only connection failure after all
-            //    eligible targets were attempted (error_kind="transport")
-            //    may bypass the master. Business responses and deadlines do not.
+            // Direct fallback is opt-in. Fixed-target mode retains its historical
+            // any-failure policy; discovery permits it only when no Master answered
+            // and all eligible targets failed with UNAVAILABLE.
             boolean legacyScheduleFailure = scheduleResponse == null
                     || "schedule_error".equals(result.status)
                     || "exception".equals(result.status);
-            boolean terminating = router == null
+            boolean terminating = !usesMasterDiscovery()
                     ? legacyScheduleFailure
                     : (scheduleResponse == null || "schedule_error".equals(result.status));
             if (terminating) {
-                // Fallback eligibility is mode-dependent (same contract as the
-                // trigger-semantics comment above): the legacy single-target
-                // mode restores the historical ANY-schedule-failure trigger
-                // (exception OR schedule_error); the HA mode only bypasses the
-                // master on the double-connection failure (error_kind=transport
-                // AND no master answer anywhere in the target chain).
-                boolean fallbackEligible = (router == null)
+                boolean fallbackEligible = !usesMasterDiscovery()
                         ? legacyScheduleFailure
                         : ("transport".equals(result.errorKind)
                             && scheduleResponse == null);
@@ -883,12 +796,8 @@ public final class JavaLoadClient implements AutoCloseable {
                             ? "master=" + scheduleExc
                             : "master=" + result.error;
                     attemptFallback(record, result, startedNanos, prefix);
-                } else if (router != null && scheduleResponse == null) {
-                    // HA mode, no master answer, no (or disabled) direct fallback:
-                    // nobody served this request — route_path="failed" separates
-                    // these rows from master-answered rows (route_path="master",
-                    // including schedule_error business failures) and from
-                    // direct-to-engine rows (route_path="fallback").
+                } else if (usesMasterDiscovery() && scheduleResponse == null) {
+                    // Discovery distinguishes unserved requests from Master responses.
                     result.routePath = "failed";
                 }
                 tallyResult(result);
@@ -925,14 +834,9 @@ public final class JavaLoadClient implements AutoCloseable {
                     consumeStream(stream, result, startedNanos);
                     result.wallClockTs = System.currentTimeMillis() / 1000.0;
                 } catch (Exception e) {
-                    // Escape hatch (default OFF): on fetch/stream failure, try
-                    // fallback — only when the operator explicitly opted in;
-                    // otherwise the failure is recorded as an error row.
-                    // HA mode: a stream-read failure is an ENGINE-side problem,
-                    // not a master connection failure — never falls back (brief
-                    // p7 defect-8: the legacy any-failure parity behavior is
-                    // retired for the HA mode only).
-                    if (router == null
+                    // Fetch failures retain fixed-target opt-in; discovery never
+                    // bypasses the Master for engine-side failures.
+                    if (!usesMasterDiscovery()
                             && config.enableFallback && !fallbackPrefillAddrs.isEmpty()) {
                         attemptFallback(record, result, startedNanos, "fetch=" + e);
                     } else {
@@ -1220,11 +1124,6 @@ public final class JavaLoadClient implements AutoCloseable {
             }
         }
         return "";
-    }
-
-    private FlexlbServiceGrpc.FlexlbServiceBlockingStub nextScheduleStub() {
-        int idx = scheduleStubRR.getAndIncrement() % config.nChannels;
-        return scheduleStubs[Math.floorMod(idx, config.nChannels)];
     }
 
     private ManagedChannel getEngineChannel(String target) {
@@ -1908,9 +1807,6 @@ public final class JavaLoadClient implements AutoCloseable {
         }
         if (router != null) {
             router.shutdown();
-        }
-        for (ManagedChannel channel : scheduleChannels) {
-            channel.shutdown();
         }
         for (ManagedChannel[] pool : engineChannelPools.values()) {
             for (ManagedChannel channel : pool) {

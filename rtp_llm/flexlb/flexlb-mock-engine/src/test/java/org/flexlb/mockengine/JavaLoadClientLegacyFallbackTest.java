@@ -1,14 +1,18 @@
 package org.flexlb.mockengine;
 
 import io.grpc.Status;
-import io.grpc.StatusRuntimeException;
 import org.flexlb.schedule.grpc.FlexlbScheduleProtocol;
 import org.flexlb.schedule.grpc.FlexlbServiceGrpc;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
+import io.grpc.Server;
+import io.grpc.netty.NettyServerBuilder;
+import io.grpc.stub.StreamObserver;
+import java.util.concurrent.TimeUnit;
 import org.junit.jupiter.api.io.TempDir;
 
-import java.lang.reflect.Field;
 import java.lang.reflect.Method;
 import java.nio.file.Path;
 import java.util.ArrayList;
@@ -18,47 +22,18 @@ import java.util.concurrent.Semaphore;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
-import static org.mockito.ArgumentMatchers.any;
-import static org.mockito.Mockito.doThrow;
-import static org.mockito.Mockito.mock;
-import static org.mockito.Mockito.withSettings;
 
-/**
- * Locks the legacy single-target (router == null) schedule-stage fallback
- * trigger of JavaLoadClient.handleRequest: ANY schedule failure (here a gRPC
- * UNAVAILABLE from the schedule stub) with ENABLE_FALLBACK + a non-empty
- * fallback prefill list must attempt the direct-to-engine fallback
- * (route_path="fallback"), while the escape hatch stays off unless explicitly
- * opted in.
- *
- * <p>Regression lock for the code-review finding where the mode-dependent
- * trigger {@code router != null && "transport".equals(...)} silently
- * disabled the legacy fallback: in the legacy mode router is null, so the
- * trigger was constantly false and attemptFallback was unreachable — the
- * opposite of the documented "legacy ANY-failure, byte-identical" contract.
- *
- * <p>The schedule leg is a Mockito RETURNS_SELF stub injected through the
- * package field (deterministic immediate UNAVAILABLE, no network); the
- * fallback engine leg points at a loopback port with no listener, so
- * runFallbackStream also fails fast and attemptFallback stamps its
- * route_path="fallback" catch contract.
- */
+/** Fixed-target fallback and request ownership through the shared Schedule transport. */
 class JavaLoadClientLegacyFallbackTest {
 
     @TempDir
     Path tempDir;
 
-    /** Loopback ports with no listener: connects fail fast (RST). */
-    private static final String UNREACHABLE_MASTER = "127.0.0.1:1";
     private static final String UNREACHABLE_ENGINE = "127.0.0.1:2";
 
-    private JavaLoadClient legacyClient(boolean enableFallback) {
-        return legacyClient(enableFallback, false);
-    }
-
-    private JavaLoadClient legacyClient(boolean enableFallback, boolean fetch) {
+    private JavaLoadClient client(Server master, boolean enableFallback, boolean fetch) {
         JavaLoadClient.Config config = new JavaLoadClient.Config(
-                "trace.jsonl", "127.0.0.1:7001", UNREACHABLE_MASTER,
+                "trace.jsonl", "127.0.0.1:7001", "127.0.0.1:" + master.getPort(),
                 0, 4, 10.0, 1, tempDir.resolve("out").toString(), 1, 0, 0,
                 2_000L, 500.0, fetch, false, 1, 1, 0L, 120, true,
                 "engine_service", "", 0, 0, "",
@@ -66,22 +41,15 @@ class JavaLoadClientLegacyFallbackTest {
         return new JavaLoadClient(config);
     }
 
-    /**
-     * Replaces scheduleStubs[0] (a real channel-backed stub to the
-     * unreachable master) with a mock that throws UNAVAILABLE on schedule(),
-     * so the legacy schedule leg fails deterministically and instantly.
-     */
-    private static void injectFailingScheduleStub(JavaLoadClient client) throws Exception {
-        Field stubsField = JavaLoadClient.class.getDeclaredField("scheduleStubs");
-        stubsField.setAccessible(true);
-        FlexlbServiceGrpc.FlexlbServiceBlockingStub[] stubs =
-                (FlexlbServiceGrpc.FlexlbServiceBlockingStub[]) stubsField.get(client);
-        FlexlbServiceGrpc.FlexlbServiceBlockingStub failing =
-                mock(FlexlbServiceGrpc.FlexlbServiceBlockingStub.class,
-                        withSettings().defaultAnswer(org.mockito.Answers.RETURNS_SELF));
-        doThrow(new StatusRuntimeException(Status.UNAVAILABLE))
-                .when(failing).schedule(any(FlexlbScheduleProtocol.FlexlbScheduleRequestPB.class));
-        stubs[0] = failing;
+    private static Server master(Status failure, FlexlbScheduleProtocol.FlexlbScheduleResponsePB response)
+            throws Exception {
+        return NettyServerBuilder.forPort(0).addService(new FlexlbServiceGrpc.FlexlbServiceImplBase() {
+            @Override public void schedule(FlexlbScheduleProtocol.FlexlbScheduleRequestPB request,
+                    StreamObserver<FlexlbScheduleProtocol.FlexlbScheduleResponsePB> observer) {
+                if (failure != null) observer.onError(failure.asRuntimeException());
+                else { observer.onNext(response); observer.onCompleted(); }
+            }
+        }).build().start();
     }
 
     private static JavaLoadClient.RequestResult handle(
@@ -108,54 +76,120 @@ class JavaLoadClientLegacyFallbackTest {
                 64, 8, List.of(), tokens);
     }
 
-    @Test
+    @ParameterizedTest
+    @ValueSource(strings = {"UNAVAILABLE", "DEADLINE_EXCEEDED", "INTERNAL", "REJECTED"})
     @Timeout(30)
-    void legacyScheduleFailureTriggersFallbackWhenEnabled() throws Exception {
-        JavaLoadClient client = legacyClient(true);
-        try {
-            injectFailingScheduleStub(client);
-            client.fallbackPrefillAddrs.add(UNREACHABLE_ENGINE);
+    void singleTargetRetainsAnyScheduleFailureFallback(String failure) throws Exception {
+        verifyScheduleFailure(failure, true);
+    }
 
+    @ParameterizedTest
+    @ValueSource(strings = {"UNAVAILABLE", "DEADLINE_EXCEEDED", "INTERNAL", "REJECTED"})
+    @Timeout(30)
+    void singleTargetKeepsErrorOnMasterPathWithoutOptIn(String failure) throws Exception {
+        verifyScheduleFailure(failure, false);
+    }
+
+    private void verifyScheduleFailure(String failure, boolean fallback) throws Exception {
+        boolean rejected = failure.equals("REJECTED");
+        var response = FlexlbScheduleProtocol.FlexlbScheduleResponsePB.newBuilder()
+                .setCode(8431).setSuccess(false).setErrorMessage("admission rejected").build();
+        Server master = master(rejected ? null : Status.fromCode(Status.Code.valueOf(failure)), response);
+        try (JavaLoadClient client = client(master, fallback, false)) {
+            client.fallbackPrefillAddrs.add(UNREACHABLE_ENGINE);
             JavaLoadClient.RequestResult result = handle(client, rec(0));
-
-            // attemptFallback ran: the direct-to-engine row is stamped
-            // route_path="fallback" even when the engine leg also fails
-            // (both errors are preserved on the row).
-            assertEquals("fallback", result.routePath);
-            assertEquals("exception", result.status);
-            assertTrue(result.error.startsWith("master="), result.error);
-            assertTrue(result.error.contains("; fallback="), result.error);
-            assertEquals("transport", result.errorKind);
+            assertEquals(fallback ? "fallback" : "master", result.routePath);
+            assertEquals(!fallback && rejected ? "schedule_error" : "exception", result.status);
+            assertEquals(fallback, result.error.contains("; fallback="));
+            assertEquals(failure.equals("UNAVAILABLE") ? "transport"
+                    : failure.equals("DEADLINE_EXCEEDED") ? "deadline" : "business", result.errorKind);
+            assertFalse(result.failover);
             assertEquals(1, result.scheduleAttempts.size());
-            assertEquals(UNREACHABLE_MASTER, result.scheduleAttempts.get(0).target);
-            assertEquals("UNAVAILABLE", result.scheduleAttempts.get(0).status);
-            assertTrue(result.scheduleAttempts.get(0).endedEpochMs >= result.scheduleAttempts.get(0).startedEpochMs);
+            var attempt = result.scheduleAttempts.get(0);
+            assertEquals("127.0.0.1:" + master.getPort(), attempt.target);
+            assertEquals(rejected ? "OK" : failure, attempt.status);
+            assertEquals(rejected ? Integer.valueOf(8431) : null, attempt.responseCode);
+            assertTrue(attempt.endedEpochMs >= attempt.startedEpochMs);
+            if (!rejected) {
+                assertEquals(0.0, result.scheduleMs);
+                assertEquals(0.0, result.schedDoneEpochMs);
+            }
         } finally {
-            closeClient(client);
+            master.shutdownNow().awaitTermination(5, TimeUnit.SECONDS);
         }
     }
 
-    @Test
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
     @Timeout(30)
-    void legacyScheduleFailureStaysOnErrorRowWhenFallbackDisabled() throws Exception {
-        JavaLoadClient client = legacyClient(false);
-        try {
-            injectFailingScheduleStub(client);
+    void singleTargetFetchFailureRetainsFallbackPolicy(boolean fallback) throws Exception {
+        var response = FlexlbScheduleProtocol.FlexlbScheduleResponsePB.newBuilder()
+                .setCode(200).setSuccess(true).setEnqueuedByMaster(true)
+                .addServerStatus(FlexlbScheduleProtocol.FlexlbServerStatusPB.newBuilder()
+                        .setRole("PREFILL").setServerIp("127.0.0.1").setGrpcPort(2)).build();
+        Server master = master(null, response);
+        try (JavaLoadClient client = client(master, fallback, true)) {
             client.fallbackPrefillAddrs.add(UNREACHABLE_ENGINE);
-
-            JavaLoadClient.RequestResult result = handle(client, rec(1));
-
-            // Opt-in semantics: without ENABLE_FALLBACK the schedule failure
-            // surfaces as a plain master-path error row — the fallback list
-            // being non-empty must not be enough to bypass the master.
-            assertEquals("master", result.routePath);
+            var result = handle(client, rec(0));
+            assertEquals(fallback ? "fallback" : "master", result.routePath);
             assertEquals("exception", result.status);
-            assertFalse(result.error.contains("fallback="), result.error);
-            assertEquals("transport", result.errorKind);
+            assertEquals(fallback, result.error.contains("; fallback="));
+            assertEquals("none", result.errorKind);
+            assertEquals(1, result.scheduleAttempts.size());
         } finally {
-            closeClient(client);
+            master.shutdownNow().awaitTermination(5, TimeUnit.SECONDS);
         }
     }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"UNAVAILABLE", "DEADLINE_EXCEEDED", "INTERNAL", "REJECTED", "FETCH"})
+    @Timeout(30)
+    void discoveryRetainsTransportOnlyFallbackEvenWithOneCandidate(String failure) throws Exception {
+        boolean fetch = failure.equals("FETCH");
+        boolean rejected = failure.equals("REJECTED");
+        var response = FlexlbScheduleProtocol.FlexlbScheduleResponsePB.newBuilder()
+                .setCode(rejected ? 8431 : 200).setSuccess(!rejected).setEnqueuedByMaster(true)
+                .addServerStatus(FlexlbScheduleProtocol.FlexlbServerStatusPB.newBuilder()
+                        .setRole("PREFILL").setServerIp("127.0.0.1").setGrpcPort(2)).build();
+        Server master = master(fetch || rejected ? null : Status.fromCode(Status.Code.valueOf(failure)), response);
+        var http = com.sun.net.httpserver.HttpServer.create(new java.net.InetSocketAddress("127.0.0.1", 0), 0);
+        String httpTarget = "127.0.0.1:" + http.getAddress().getPort();
+        http.createContext("/rtp_llm/master/info", exchange -> {
+            byte[] body = ("{\"consistency_enabled\":true,\"real_master_host\":\"" + httpTarget + "\"}")
+                    .getBytes(java.nio.charset.StandardCharsets.UTF_8);
+            exchange.sendResponseHeaders(200, body.length);
+            try (var output = exchange.getResponseBody()) { output.write(body); }
+        });
+        http.start();
+        try {
+            Path discovery = tempDir.resolve("masters.json");
+            java.nio.file.Files.writeString(discovery, "{\"hosts\":[{\"http\":\"" + httpTarget
+                    + "\",\"grpc\":\"127.0.0.1:" + master.getPort() + "\"}]}");
+            var config = JavaLoadClient.Config.fromEnvironment(java.util.Map.of(
+                    "MASTER_DISCOVERY_FILE", discovery.toString(), "TIMEOUT_MS", "2000",
+                    "FETCH_OUTPUT_STREAM", Boolean.toString(fetch), "ENABLE_FALLBACK", "true",
+                    "N_CHANNELS", "1", "EVENT_LOOP_THREADS", "1"));
+            try (JavaLoadClient client = new JavaLoadClient(config, false)) {
+                client.fallbackPrefillAddrs.add(UNREACHABLE_ENGINE);
+                var result = handle(client, rec(0));
+                assertEquals(failure.equals("UNAVAILABLE") ? "fallback"
+                        : rejected || fetch ? "master" : "failed", result.routePath);
+                assertEquals(rejected ? "schedule_error" : "exception", result.status);
+                assertEquals(failure.equals("UNAVAILABLE"), result.error.contains("; fallback="));
+                assertEquals(failure.equals("UNAVAILABLE") ? "transport"
+                        : failure.equals("DEADLINE_EXCEEDED") ? "deadline"
+                        : fetch ? "none" : "business", result.errorKind);
+                assertEquals(1, result.scheduleAttempts.size());
+                assertFalse(result.failover);
+                if (failure.equals("UNAVAILABLE")) assertEquals(0.0, result.scheduleMs);
+                else assertTrue(result.scheduleMs > 0);
+            }
+        } finally {
+            http.stop(0);
+            master.shutdownNow().awaitTermination(5, TimeUnit.SECONDS);
+        }
+    }
+
     @Test
     @Timeout(30)
     void permitAndInflightRemainHeldUntilFetchCompletes() throws Exception {
@@ -171,22 +205,15 @@ class JavaLoadClientLegacyFallbackTest {
                         opened.countDown();
                     }
                 }).build().start();
-        JavaLoadClient client = legacyClient(false, true);
+        Server master = master(null, FlexlbScheduleProtocol.FlexlbScheduleResponsePB.newBuilder()
+                .setCode(200).setSuccess(true).setEnqueuedByMaster(true)
+                .addServerStatus(FlexlbScheduleProtocol.FlexlbServerStatusPB.newBuilder()
+                        .setRole("PREFILL").setServerIp("127.0.0.1").setGrpcPort(engine.getPort()))
+                .build());
+        JavaLoadClient client = client(master, false, true);
         var executor = java.util.concurrent.Executors.newSingleThreadExecutor();
         Semaphore permit = new Semaphore(1);
         try {
-            Field field = JavaLoadClient.class.getDeclaredField("scheduleStubs");
-            field.setAccessible(true);
-            var stubs = (FlexlbServiceGrpc.FlexlbServiceBlockingStub[]) field.get(client);
-            var stub = mock(FlexlbServiceGrpc.FlexlbServiceBlockingStub.class,
-                    withSettings().defaultAnswer(org.mockito.Answers.RETURNS_SELF));
-            org.mockito.Mockito.when(stub.schedule(any())).thenReturn(
-                    FlexlbScheduleProtocol.FlexlbScheduleResponsePB.newBuilder()
-                            .setCode(200).setSuccess(true).setEnqueuedByMaster(true)
-                            .addServerStatus(FlexlbScheduleProtocol.FlexlbServerStatusPB.newBuilder()
-                                    .setRole("PREFILL").setServerIp("127.0.0.1").setGrpcPort(engine.getPort()))
-                            .build());
-            stubs[0] = stub;
             Method method = JavaLoadClient.class.getDeclaredMethod("handleRequest",
                     JavaLoadClient.TraceRecord.class, Semaphore.class, double.class);
             method.setAccessible(true);
@@ -206,7 +233,8 @@ class JavaLoadClientLegacyFallbackTest {
         } finally {
             executor.shutdownNow();
             closeClient(client);
-            engine.shutdownNow().awaitTermination(5, java.util.concurrent.TimeUnit.SECONDS);
+            master.shutdownNow().awaitTermination(5, TimeUnit.SECONDS);
+            engine.shutdownNow().awaitTermination(5, TimeUnit.SECONDS);
         }
     }
 

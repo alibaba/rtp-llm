@@ -18,10 +18,10 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 
 /**
- * Schedule routing from ZK leader discovery. A request uses one discovery snapshot,
+ * Schedule routing for a fixed target or ZK leader discovery. A request uses one route snapshot,
  * tries the leader first, and retries a healthy follower only on UNAVAILABLE.
- * Business responses and deadlines are terminal. The candidate file is the sole
- * address source; successful follower retries do not change the discovered leader.
+ * Business responses and deadlines are terminal. Discovery uses only the candidate
+ * file; successful follower retries do not change the discovered leader.
  */
 final class MasterTargetRouter {
 
@@ -110,27 +110,34 @@ final class MasterTargetRouter {
         }
     }
 
-    private final Map<String, TargetPool> discoveredPools = new ConcurrentHashMap<>();
+    private final Map<String, TargetPool> targetPools = new ConcurrentHashMap<>();
     private final MasterRouteDiscovery discovery;
+    private final String fixedTarget;
     private final EventLoopGroup eventLoopGroup;
     private final int nChannels;
     MasterTargetRouter(Path discoveryFile, int nChannels, EventLoopGroup eventLoopGroup) {
-        this(MasterRouteDiscovery.fromFile(discoveryFile), nChannels, eventLoopGroup);
+        this(MasterRouteDiscovery.fromFile(discoveryFile), null, nChannels, eventLoopGroup);
         discovery.start();
     }
 
-    private MasterTargetRouter(MasterRouteDiscovery discovery, int nChannels,
+    MasterTargetRouter(String target, int nChannels, EventLoopGroup eventLoopGroup) {
+        this(null, target, nChannels, eventLoopGroup);
+        targetPools.put(target, newTargetPool(target));
+    }
+
+    private MasterTargetRouter(MasterRouteDiscovery discovery, String fixedTarget, int nChannels,
             EventLoopGroup eventLoopGroup) {
         this.discovery = discovery;
+        this.fixedTarget = fixedTarget;
         this.eventLoopGroup = eventLoopGroup;
         this.nChannels = nChannels;
     }
 
     MasterTargetRouter(MasterRouteDiscovery discovery,
             Map<String, FlexlbServiceGrpc.FlexlbServiceBlockingStub[]> stubs) {
-        this(discovery, 0, null);
+        this(discovery, null, 0, null);
         for (Map.Entry<String, FlexlbServiceGrpc.FlexlbServiceBlockingStub[]> entry : stubs.entrySet()) {
-            discoveredPools.put(entry.getKey(), new TargetPool(entry.getKey(), null, entry.getValue()));
+            targetPools.put(entry.getKey(), new TargetPool(entry.getKey(), null, entry.getValue()));
         }
     }
 
@@ -139,31 +146,38 @@ final class MasterTargetRouter {
         ManagedChannel[] channels = new ManagedChannel[nChannels];
         FlexlbServiceGrpc.FlexlbServiceBlockingStub[] stubs =
                 new FlexlbServiceGrpc.FlexlbServiceBlockingStub[nChannels];
-        for (int i = 0; i < nChannels; i++) {
-            ManagedChannel channel = NettyChannelBuilder.forTarget(target)
-                    .eventLoopGroup(eventLoopGroup)
-                    .channelType(NioSocketChannel.class)
-                    .maxInboundMessageSize(16 * 1024 * 1024)
-                    .flowControlWindow(1024 * 1024)
-                    .keepAliveTime(30, TimeUnit.SECONDS)
-                    .keepAliveTimeout(10, TimeUnit.SECONDS)
-                    .usePlaintext()
-                    .build();
-            channels[i] = channel;
-            stubs[i] = FlexlbServiceGrpc.newBlockingStub(channel);
+        try {
+            for (int i = 0; i < nChannels; i++) {
+                ManagedChannel channel = NettyChannelBuilder.forTarget(target)
+                        .eventLoopGroup(eventLoopGroup)
+                        .channelType(NioSocketChannel.class)
+                        .maxInboundMessageSize(16 * 1024 * 1024)
+                        .flowControlWindow(1024 * 1024)
+                        // Preserve fixed-target (6 min) and discovery (30 s) transport settings.
+                        .keepAliveTime(discovery == null ? 360 : 30, TimeUnit.SECONDS)
+                        .keepAliveTimeout(10, TimeUnit.SECONDS)
+                        .usePlaintext()
+                        .build();
+                channels[i] = channel;
+                stubs[i] = FlexlbServiceGrpc.newBlockingStub(channel);
+            }
+            return new TargetPool(target, channels, stubs);
+        } catch (RuntimeException | Error failure) {
+            for (ManagedChannel channel : channels) {
+                if (channel != null) channel.shutdownNow();
+            }
+            throw failure;
         }
-        return new TargetPool(target, channels, stubs);
     }
 
-    String selectedTarget() { return discovery.route().master(); }
+    String selectedTarget() { return route().master(); }
+
+    private MasterRouteDiscovery.Route route() {
+        return discovery == null ? new MasterRouteDiscovery.Route(fixedTarget, null) : discovery.route();
+    }
 
     ScheduleOutcome schedule(FlexlbScheduleProtocol.FlexlbScheduleRequestPB request, long timeoutMs) {
-        return scheduleDiscovered(request, timeoutMs);
-    }
-
-    private ScheduleOutcome scheduleDiscovered(
-            FlexlbScheduleProtocol.FlexlbScheduleRequestPB request, long timeoutMs) {
-        MasterRouteDiscovery.Route route = discovery.route();
+        MasterRouteDiscovery.Route route = route();
         List<String> targets = new ArrayList<>();
         if (route.master() != null) {
             targets.add(route.master());
@@ -175,9 +189,9 @@ final class MasterTargetRouter {
         // channel's reconnect backoff when it becomes healthy again. The
         // frontend closes a target channel on RPC failure and creates a fresh
         // one for the next call; retire our pooled channels at the same edge.
-        for (Map.Entry<String, TargetPool> entry : discoveredPools.entrySet()) {
+        for (Map.Entry<String, TargetPool> entry : targetPools.entrySet()) {
             if (!targets.contains(entry.getKey())) {
-                retireDiscoveredPool(entry.getKey(), entry.getValue());
+                retireTargetPool(entry.getKey(), entry.getValue());
             }
         }
         if (route.master() == null) {
@@ -189,7 +203,7 @@ final class MasterTargetRouter {
             TargetPool pool;
             FlexlbServiceGrpc.FlexlbServiceBlockingStub stub;
             try {
-                pool = discoveredPools.computeIfAbsent(target, this::newTargetPool);
+                pool = targetPools.computeIfAbsent(target, this::newTargetPool);
                 stub = pool.nextStub().withDeadlineAfter(timeoutMs, TimeUnit.MILLISECONDS);
             } catch (RuntimeException failure) {
                 return new ScheduleOutcome(null, target, attempts.size() > 1,
@@ -216,7 +230,7 @@ final class MasterTargetRouter {
                 lastFailure = e;
             } catch (RuntimeException e) {
                 attempts.add(new ScheduleAttempt(target, startedEpochMs, startedNanos,
-                        "EXCEPTION", null));
+                        discovery == null ? Status.fromThrowable(e).getCode().name() : "EXCEPTION", null));
                 return new ScheduleOutcome(null, target, attempts.size() > 1,
                         ErrorKind.BUSINESS, e, attempts);
             }
@@ -225,11 +239,11 @@ final class MasterTargetRouter {
                 ErrorKind.TRANSPORT, lastFailure, attempts);
     }
 
-    private void retireDiscoveredPool(String target, TargetPool pool) {
+    private void retireTargetPool(String target, TargetPool pool) {
         // Injected stubs have no channels. Keep them available across test
         // calls; production pools are removed atomically and closed gently so
         // already-running calls can finish.
-        if (pool.channels != null && discoveredPools.remove(target, pool)) {
+        if (pool.channels != null && targetPools.remove(target, pool)) {
             for (ManagedChannel channel : pool.channels) {
                 channel.shutdown();
             }
@@ -238,8 +252,8 @@ final class MasterTargetRouter {
 
     /** Shuts down every target pool's channels (no-op for test-constructed pools). */
     void shutdown() {
-        discovery.close();
-        for (TargetPool pool : discoveredPools.values()) {
+        if (discovery != null) discovery.close();
+        for (TargetPool pool : targetPools.values()) {
             if (pool.channels == null) {
                 continue;
             }
@@ -251,7 +265,7 @@ final class MasterTargetRouter {
 
     /**
      * Maps a Schedule-call exception to the per-request {@code error_kind}
-     * label. Used by the legacy single-target path too, so both modes stamp
+     * label. The load client uses the same taxonomy for errors outside the router, so both modes stamp
      * the same taxonomy: UNAVAILABLE → transport, DEADLINE_EXCEEDED →
      * deadline, anything else → business (master-answered-at-gRPC-layer or
      * unknown — never retried either way).

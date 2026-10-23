@@ -8,10 +8,8 @@ import org.junit.jupiter.api.io.TempDir;
 import java.nio.file.*;
 import java.util.*;
 import static org.junit.jupiter.api.Assertions.*;
-import static org.mockito.Mockito.*;
-import static org.mockito.ArgumentMatchers.any;
 
-/** Real sender loop and per-request evidence; Schedule is stubbed, no GPU claim. */
+/** Real sender loop and per-request evidence; Schedule uses a loopback gRPC server, no GPU claim. */
 class PlaybackIntegrationTest {
     @TempDir Path root;
     private static final ObjectMapper JSON = new ObjectMapper();
@@ -21,17 +19,22 @@ class PlaybackIntegrationTest {
         StringBuilder rows=new StringBuilder();
         for(int i=0;i<times.length;i++) rows.append("{\"rid\":\"r"+i+"\",\"ts\":"+times[i]+",\"il\":512,\"ol\":1,\"priority\":50,\"cache_key_block_size\":512,\"input_token_blocks\":[1]}\n");
         Files.writeString(trace,rows);
+        var master=io.grpc.netty.NettyServerBuilder.forPort(0)
+            .addService(new FlexlbServiceGrpc.FlexlbServiceImplBase() {
+                @Override public void schedule(FlexlbScheduleProtocol.FlexlbScheduleRequestPB request,
+                        io.grpc.stub.StreamObserver<FlexlbScheduleProtocol.FlexlbScheduleResponsePB> observer) {
+                    observer.onNext(FlexlbScheduleProtocol.FlexlbScheduleResponsePB.newBuilder()
+                        .setCode(200).setSuccess(true).setEnqueuedByMaster(true).build());
+                    observer.onCompleted();
+                }
+            }).build().start();
         JavaLoadClient.Config config=new JavaLoadClient.Config(
-            trace.toString(),"127.0.0.1:1","127.0.0.1:1",2,64,4.0,1,out.toString(),1,0,0,
+            trace.toString(),"127.0.0.1:1","127.0.0.1:"+master.getPort(),2,64,4.0,1,out.toString(),1,0,0,
             1000L,500.0,false,false,1,1,0L,2,true,"engine_service","",0,0,"",false,"",false,0,0,mode,240.0,false);
         try(JavaLoadClient client=new JavaLoadClient(config)) {
-            var field=JavaLoadClient.class.getDeclaredField("scheduleStubs");field.setAccessible(true);
-            var stubs=(FlexlbServiceGrpc.FlexlbServiceBlockingStub[])field.get(client);
-            var stub=mock(FlexlbServiceGrpc.FlexlbServiceBlockingStub.class,withSettings().defaultAnswer(RETURNS_SELF));
-            when(stub.schedule(any())).thenReturn(FlexlbScheduleProtocol.FlexlbScheduleResponsePB.newBuilder()
-                .setCode(200).setSuccess(true).setEnqueuedByMaster(true).build());
-            stubs[0]=stub;
             client.run(new Playback(policy,false,2));
+        } finally {
+            master.shutdownNow().awaitTermination(5,java.util.concurrent.TimeUnit.SECONDS);
         }
         List<com.fasterxml.jackson.databind.JsonNode> result=new ArrayList<>();
         for(String line:Files.readAllLines(out.resolve("client_events.jsonl"))) result.add(JSON.readTree(line));
