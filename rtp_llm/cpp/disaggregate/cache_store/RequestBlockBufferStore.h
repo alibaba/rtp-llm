@@ -40,8 +40,8 @@ private:
     std::shared_ptr<RequestBlockBuffer> getRequestBlockBuffer(const std::string& requestid) const;
     std::shared_ptr<RequestBlockBuffer> getOrInsertRequestBlockBuffer(const std::string& requestid);
     bool                                isValidBlock(const std::shared_ptr<BlockBuffer>& block);
-    std::shared_ptr<BlockBuffer>        makeValidBlock(const std::shared_ptr<BlockBuffer>& block);
-    bool copyBlock(const std::shared_ptr<BlockBuffer>& dst, const std::shared_ptr<BlockBuffer>& src);
+    // Stages every block into one pinned host allocation with a single batched copy.
+    std::vector<std::shared_ptr<BlockBuffer>> makeValidBlocks(const std::vector<std::shared_ptr<BlockBuffer>>& blocks);
 
 private:
     std::shared_ptr<MemoryUtil> memory_util_;

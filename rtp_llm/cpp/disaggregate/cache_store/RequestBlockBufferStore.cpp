@@ -1,5 +1,6 @@
 #include "rtp_llm/cpp/disaggregate/cache_store/RequestBlockBufferStore.h"
 #include "rtp_llm/models_py/bindings/core/ExecOps.h"
+#include "rtp_llm/models_py/bindings/NoBlockCopy.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/cpp/utils/TimeUtil.h"
 #include <torch/torch.h>
@@ -30,25 +31,38 @@ bool RequestBlockBufferStore::setRequestBlockBuffer(const std::shared_ptr<Reques
 
     auto                                      blocks = request_block_buffer->getBlocks();
     std::vector<std::shared_ptr<BlockBuffer>> valid_blocks;
+    std::vector<std::shared_ptr<BlockBuffer>> staging_blocks;
+    valid_blocks.reserve(blocks.size());
     for (auto iter : blocks) {
         auto& block = iter.second;
         if (isValidBlock(block)) {
             valid_blocks.push_back(block);
             continue;
         }
+        // A later publication of a key that is already staged for this request
+        // (the per-layer writer and the end-of-prefill publisher both cover the
+        // same blocks) must not pay a second device copy.
+        if (auto staged = store_request_block_buffer->getBlock(block->key);
+            staged != nullptr && staged->len == block->len && isValidBlock(staged)) {
+            continue;
+        }
+        staging_blocks.push_back(block);
+    }
 
-        auto valid_block = makeValidBlock(block);
-        if (!valid_block) {
-            RTP_LLM_LOG_WARNING("set request block buffer failed to make valid block, request id %s",
-                                request_block_buffer->getRequestId().c_str());
+    if (!staging_blocks.empty()) {
+        auto staged = makeValidBlocks(staging_blocks);
+        if (staged.size() != staging_blocks.size()) {
+            RTP_LLM_LOG_WARNING("set request block buffer failed to make valid blocks, request id %s, block count %zu",
+                                request_block_buffer->getRequestId().c_str(),
+                                staging_blocks.size());
             return false;
         }
-        valid_blocks.push_back(valid_block);
-        RTP_LLM_LOG_DEBUG("set request block buffer success to make valid block, request id %s, block id is %s",
-                          request_block_buffer->getRequestId().c_str(),
-                          block->key.c_str());
+        valid_blocks.insert(valid_blocks.end(), staged.begin(), staged.end());
     }
-    store_request_block_buffer->addBlocks(valid_blocks);
+
+    if (!valid_blocks.empty()) {
+        store_request_block_buffer->addBlocks(valid_blocks);
+    }
     return true;
 }
 
@@ -141,56 +155,65 @@ bool RequestBlockBufferStore::isValidBlock(const std::shared_ptr<BlockBuffer>& b
     return block->gpu_mem == false;
 }
 
-std::shared_ptr<BlockBuffer> RequestBlockBufferStore::makeValidBlock(const std::shared_ptr<BlockBuffer>& block) {
+std::vector<std::shared_ptr<BlockBuffer>>
+RequestBlockBufferStore::makeValidBlocks(const std::vector<std::shared_ptr<BlockBuffer>>& blocks) {
     if (!isRuntimeInitialized()) {
-        RTP_LLM_LOG_WARNING("make valid block failed, device is null, block %s", block->key.c_str());
-        return nullptr;
+        RTP_LLM_LOG_WARNING("make valid blocks failed, device is null, block count %zu", blocks.size());
+        return {};
     }
 
-    auto tensor = torch::empty({(int64_t)block->len}, torch::TensorOptions().dtype(torch::kUInt8).pinned_memory(true));
+    // One pinned allocation for the whole submission: page-locking host memory is a
+    // device-synchronizing driver call, so a per-block allocation turns a multi-GB
+    // publication into hundreds of thousands of them.
+    constexpr size_t    alignment = 256;
+    std::vector<size_t> offsets;
+    offsets.reserve(blocks.size());
+    size_t total_len = 0;
+    for (const auto& block : blocks) {
+        offsets.push_back(total_len);
+        total_len += (block->len + alignment - 1) / alignment * alignment;
+    }
+
+    auto tensor = torch::empty({(int64_t)total_len}, torch::TensorOptions().dtype(torch::kUInt8)).pin_memory();
     if (!tensor.defined()) {
-        RTP_LLM_LOG_WARNING("make valid block failed, alloc buffer failed, block %s", block->key.c_str());
-        return nullptr;
+        RTP_LLM_LOG_WARNING(
+            "make valid blocks failed, alloc %zu bytes failed, block count %zu", total_len, blocks.size());
+        return {};
+    }
+    auto* base = static_cast<char*>(tensor.data_ptr());
+
+    if (!memory_util_->isMemoryMr(base, total_len, false, false) && !memory_util_->regUserMr(base, total_len, false)) {
+        RTP_LLM_LOG_WARNING("make valid blocks failed to reg mr, size %zu, block count %zu", total_len, blocks.size());
+        return {};
     }
 
-    auto malloc_ptr = tensor.data_ptr();
-    auto addr       = std::shared_ptr<void>(malloc_ptr, [tensor](void* p) { /* tensor destructor handles cleanup */ });
+    std::vector<std::shared_ptr<BlockBuffer>> staged_blocks;
+    staged_blocks.reserve(blocks.size());
+    MultiCopyParams copy_params;
+    copy_params.multi_dst.reserve(blocks.size());
+    copy_params.multi_src.reserve(blocks.size());
+    for (size_t i = 0; i < blocks.size(); ++i) {
+        const auto& block = blocks[i];
+        auto*       dst   = base + offsets[i];
+        // Every alias keeps the backing pinned tensor alive.
+        auto addr = std::shared_ptr<void>(dst, [tensor](void*) {});
+        staged_blocks.push_back(std::make_shared<BlockBuffer>(block->key, addr, block->len, false, true));
 
-    if (!memory_util_->isMemoryMr(addr.get(), block->len, false, false)) {
-        const auto reg_success = memory_util_->regUserMr(addr.get(), block->len, false);
-        if (!reg_success) {
-            RTP_LLM_LOG_WARNING("malloc valid block mr failed, block %s", block->key.c_str());
-            return nullptr;
-        }
+        const auto options = torch::TensorOptions().dtype(torch::kUInt8);
+        copy_params.multi_dst.push_back(torch::from_blob(dst, {(int64_t)block->len}, options.device(torch::kCPU)));
+        copy_params.multi_src.push_back(torch::from_blob(
+            block->addr.get(), {(int64_t)block->len}, options.device(block->gpu_mem ? torch::kCUDA : torch::kCPU)));
     }
 
-    auto new_block = std::make_shared<BlockBuffer>(block->key, addr, block->len, false, true);
-
-    if (!copyBlock(new_block, block)) {
-        return nullptr;
-    }
-    return new_block;
-}
-
-bool RequestBlockBufferStore::copyBlock(const std::shared_ptr<BlockBuffer>& dst_block,
-                                        const std::shared_ptr<BlockBuffer>& src_block) {
-    // same block, no need copy
-    if (dst_block == src_block) {
-        return true;
-    }
-
-    RTP_LLM_INTERVAL_LOG(120, INFO, "copy block cache once, may affect performance");
-
-    execNoBlockCopy(
-        {torch::from_blob(
-             dst_block->addr.get(),
-             {(int64_t)dst_block->len},
-             torch::TensorOptions().dtype(torch::kUInt8).device(dst_block->gpu_mem ? torch::kCUDA : torch::kCPU)),
-         torch::from_blob(
-             src_block->addr.get(),
-             {(int64_t)src_block->len},
-             torch::TensorOptions().dtype(torch::kUInt8).device(src_block->gpu_mem ? torch::kCUDA : torch::kCPU))});
-    return true;
+    const auto copy_begin_us = currentTimeUs();
+    execNoBlockCopy(copy_params);
+    RTP_LLM_INTERVAL_LOG(120,
+                         INFO,
+                         "stage block cache once, block count %zu, size %zu bytes, cost %ldus",
+                         blocks.size(),
+                         total_len,
+                         currentTimeUs() - copy_begin_us);
+    return staged_blocks;
 }
 
 void RequestBlockBufferStore::delRequestBlockBuffer(const std::string& requestid) {
