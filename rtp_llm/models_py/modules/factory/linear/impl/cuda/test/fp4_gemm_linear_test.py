@@ -1,6 +1,7 @@
 import logging
 import os
 import unittest
+from unittest.mock import patch
 
 import torch
 import torch.nn.functional as F
@@ -8,8 +9,10 @@ from flashinfer import fp4_quantize
 
 from rtp_llm.config.quant_config import init_quant_config
 from rtp_llm.device.device_impl import CudaImpl
+from rtp_llm.models_py.modules.factory.linear import LinearFactory
 from rtp_llm.models_py.modules.factory.linear.impl.cuda.fp4_linear import (
     CudaFp4GEMMLinear,
+    fp4_backend_available,
 )
 from rtp_llm.test.utils.numeric_util import calc_diff
 
@@ -98,6 +101,48 @@ class CudaFp4GEMMLinearTest(unittest.TestCase):
         """Test dependency availability check"""
         # Test that we can at least import the module
         self.assertIsNotNone(CudaFp4GEMMLinear)
+
+    def test_modelopt_fp4_strategy_is_registered_on_cuda(self):
+        self.assertIn(CudaFp4GEMMLinear, LinearFactory._strategies)
+
+    def test_modelopt_fp4_rejects_non_blackwell_device(self):
+        with patch(
+            "rtp_llm.models_py.modules.factory.linear.impl.cuda.fp4_linear."
+            "is_blackwell",
+            return_value=False,
+        ):
+            self.assertFalse(
+                CudaFp4GEMMLinear.can_handle(
+                    init_quant_config("modelopt_fp4"),
+                    self.weight,
+                    self.weight_scales,
+                    weight_scale_2=self.weight_scale_2,
+                    input_scale=self.input_scale,
+                )
+            )
+
+    def test_modelopt_fp4_rejects_missing_flashinfer_api(self):
+        with patch(
+            "rtp_llm.models_py.modules.factory.linear.impl.cuda.fp4_linear.mm_fp4",
+            None,
+        ), patch(
+            "rtp_llm.models_py.modules.factory.linear.impl.cuda.fp4_linear."
+            "is_blackwell",
+            return_value=True,
+        ):
+            self.assertFalse(fp4_backend_available(self.weight.device))
+
+    def test_explicit_legacy_backend_fails_during_construction_when_unavailable(self):
+        with patch.dict(
+            os.environ,
+            {"RTP_LLM_FP4_GEMM_BACKEND": "sgl_cutlass"},
+        ), patch(
+            "rtp_llm.models_py.modules.factory.linear.impl.cuda.fp4_linear."
+            "is_legacy_cutlass_fp4_available",
+            return_value=False,
+        ):
+            with self.assertRaisesRegex(RuntimeError, "rtp_kernel.nvfp4 CUDA provider"):
+                self._create_fp4_linear(with_bias=False)
 
     def test_input_dtype_validation(self):
         """Test input dtype validation - bfloat16 and float16 are accepted"""

@@ -18,6 +18,9 @@ from rtp_llm.models_py.kernels.cuda.fp8_kernel import (
     requant_weight_ue8m0,
 )
 from rtp_llm.models_py.kernels.cuda.fp8_kernel.fp8_kernel import block_quant_dequant
+from rtp_llm.models_py.kernels.cuda.sm120_fp8_blockwise import (
+    sm120_blockwise_fp8_available,
+)
 from rtp_llm.models_py.modules.factory.linear.impl.cuda.fp8_deepgemm_linear import (
     CudaFp8DeepGEMMLinear,
 )
@@ -39,6 +42,17 @@ from rtp_llm.utils.model_weight import (
     sp_head_s_gemm_a8_block,
     sp_neg1,
 )
+
+
+def _built_linear(weight, scale):
+    """Use the selected SM120 backend without skipping loader/GEMM coverage."""
+    if torch.cuda.is_available() and sm120_blockwise_fp8_available(weight.device):
+        from rtp_llm.models_py.modules.factory.linear.impl.cuda.fp8_vllm_blockwise_sm120_linear import (
+            CudaFp8VllmBlockwiseLinear,
+        )
+
+        return CudaFp8VllmBlockwiseLinear(weight, scale)
+    return CudaFp8DeepGEMMLinear(weight, scale)
 
 
 class OnlineFp8LoaderTestBase(CudaFp8GEMMLinearTestBase):
@@ -298,7 +312,7 @@ class OnlineFp8LoaderTestBase(CudaFp8GEMMLinearTestBase):
         weight = torch.randn((768, 768), device="cuda", dtype=torch.bfloat16)
         inputs = torch.randn((93, 768), device="cuda", dtype=torch.bfloat16)
         weight_fp8, weight_scale = quant_weight_ue8m0_packed(weight)
-        linear = CudaFp8DeepGEMMLinear(weight_fp8, weight_scale)
+        linear = _built_linear(weight_fp8, weight_scale)
         actual = linear(inputs)
         expected = (inputs.float() @ weight.float().T).bfloat16()
         relative_l2 = (
@@ -367,7 +381,7 @@ class OnlineFp8LoaderTestBase(CudaFp8GEMMLinearTestBase):
                     inputs = torch.randn(
                         (7, hidden), device="cuda", dtype=torch.bfloat16
                     )
-                    output = CudaFp8DeepGEMMLinear(
+                    output = _built_linear(
                         actual[W.attn_qkv_w], actual[W.attn_qkv_s]
                     )(inputs)
                     expected = inputs.float() @ reference.float().T
@@ -377,6 +391,9 @@ class OnlineFp8LoaderTestBase(CudaFp8GEMMLinearTestBase):
 
 
 class CudaFp8DeepGEMMLinearSM120Test(OnlineFp8LoaderTestBase, unittest.TestCase):
+    def setUp(self):
+        super().setUp()
+
     def test_sm120(self):
         self.assertTrue(is_sm12x())
         self.assertTrue(has_deep_gemm())
@@ -445,7 +462,7 @@ class OnlineLinearAttentionTPTest(unittest.TestCase):
                     inputs = torch.randn(
                         (7, shard.shape[0]), device="cuda", dtype=torch.bfloat16
                     )
-                    output = CudaFp8DeepGEMMLinear(actual[name], scale)(inputs)
+                    output = _built_linear(actual[name], scale)(inputs)
                     reference = inputs.float() @ shard.float()
                     relative_l2 = (output.float() - reference).norm() / reference.norm()
                     self.assertLess(relative_l2, 0.06)
