@@ -24,16 +24,21 @@ namespace {
 namespace memory_exporter = opentelemetry::exporter::memory;
 namespace nostd           = opentelemetry::nostd;
 
-class RejectingWriter: public grpc::internal::WriterInterface<GenerateOutputsPB> {
+class RecordingWriter: public grpc::internal::WriterInterface<GenerateOutputsPB> {
 public:
+    explicit RecordingWriter(bool accept_writes = false): accept_writes_(accept_writes) {}
+
     bool Write(const GenerateOutputsPB& response, grpc::WriteOptions) override {
         ++write_calls;
         last_response.CopyFrom(response);
-        return false;
+        return accept_writes_;
     }
 
     int               write_calls = 0;
     GenerateOutputsPB last_response;
+
+private:
+    bool accept_writes_;
 };
 
 class SingleOutputStream: public GenerateStream {
@@ -78,16 +83,24 @@ private:
 
 class SingleResponseClientStream: public grpc::ClientReaderWriterInterface<GenerateRequestPB, GenerateOutputsPB> {
 public:
-    explicit SingleResponseClientStream(grpc::Status finish_status = grpc::Status(grpc::StatusCode::CANCELLED,
-                                                                                  "cancelled by client")):
-        finish_status_(std::move(finish_status)) {}
+    explicit SingleResponseClientStream(grpc::Status finish_status     = grpc::Status(grpc::StatusCode::CANCELLED,
+                                                                                  "cancelled by client"),
+                                        int          output_finished   = 0,
+                                        int          trailing_finished = -2):
+        finish_status_(std::move(finish_status)),
+        output_finished_(output_finished),
+        trailing_finished_(trailing_finished) {}
 
     bool Read(GenerateOutputsPB* response) override {
         ++read_calls;
-        if (read_calls != 1) {
+        if (read_calls > 2 || (read_calls == 2 && trailing_finished_ == -2)) {
             return false;
         }
-        response->mutable_flatten_output()->add_finished(false);
+        response->Clear();
+        const int finished = read_calls == 1 ? output_finished_ : trailing_finished_;
+        if (finished >= 0) {
+            response->mutable_flatten_output()->add_finished(finished != 0);
+        }
         response->mutable_flatten_output()->add_aux_info();
         return true;
     }
@@ -118,6 +131,8 @@ public:
 
 private:
     grpc::Status finish_status_;
+    int          output_finished_;
+    int          trailing_finished_;
 };
 
 class DecodeFirstReadService final: public RpcService::Service {
@@ -167,6 +182,8 @@ std::shared_ptr<memory_exporter::InMemorySpanData> startTelemetryForCloseTest() 
     config.enabled = true;
     config.role    = "test";
     config.tp_rank = 0;
+    // Span assertions should not race the production five-second batch timer.
+    config.schedule_delay_ms = 1;
     EXPECT_TRUE(telemetry::TelemetryRuntime::initWithExporter(std::move(exporter), config));
     return span_data;
 }
@@ -197,7 +214,7 @@ void expectClientSpanOk(const std::shared_ptr<memory_exporter::InMemorySpanData>
 
 TEST(RpcWriterCancellationTest, LocalWriteFailureCancelsStreamAndReturnsCancelled) {
     LocalRpcServer                  server;
-    RejectingWriter                 writer;
+    RecordingWriter                 writer;
     std::shared_ptr<GenerateStream> stream = std::make_shared<SingleOutputStream>();
 
     const auto status = server.pollStreamOutput(nullptr, "41", &writer, stream);
@@ -277,7 +294,7 @@ TEST(RpcWriterCancellationTest, DecodeFirstReadCancellationReturnsCancelled) {
 
 TEST(RpcWriterCancellationTest, RemoteWriteFailureCancelsGrpcStreamClosure) {
     PrefillRpcServer server;
-    RejectingWriter  writer;
+    RecordingWriter  writer;
     GenerateInputPB  request;
     request.set_request_id(42);
     RPCContext                   rpc_context{&request, &writer};
@@ -304,6 +321,78 @@ TEST(RpcWriterCancellationTest, RemoteWriteFailureCancelsGrpcStreamClosure) {
     EXPECT_EQ(client_stream->finish_calls, 1);
 
     context.stream_.reset();
+}
+
+TEST(RpcWriterCancellationTest, RemoteCancellationPreservesOutputCompletionBoundary) {
+    for (const int output_finished : {-1, 0, 1}) {
+        SCOPED_TRACE(output_finished);
+        PrefillRpcServer server;
+        RecordingWriter  writer(true);
+        GenerateInputPB  request;
+        request.set_request_id(49);
+        RPCContext                   rpc_context{&request, &writer};
+        RemoteServerResource         resource;
+        kmonitor::MetricsReporterPtr metrics_reporter;
+        PrefillGenerateContext       context(&resource, rpc_context, 0, nullptr, metrics_reporter, nullptr);
+        context.stream_        = std::make_shared<SingleOutputStream>();
+        context.client_context = std::make_shared<grpc::ClientContext>();
+        auto client_stream     = std::make_shared<SingleResponseClientStream>(
+            grpc::Status(grpc::StatusCode::CANCELLED, "decode stopping"), output_finished);
+        context.client_stream = client_stream;
+
+        server.pollRemoteOutput(context);
+
+        if (output_finished < 0) {
+            EXPECT_EQ(writer.write_calls, 0);
+            EXPECT_EQ(client_stream->read_calls, 1);
+            EXPECT_EQ(writer.last_response.flatten_output().finished_size(), 0);
+        } else {
+            EXPECT_EQ(writer.write_calls, 1);
+            EXPECT_EQ(client_stream->read_calls, 2);
+            ASSERT_EQ(writer.last_response.flatten_output().finished_size(), 1);
+            EXPECT_EQ(writer.last_response.flatten_output().finished(0), output_finished != 0);
+        }
+        EXPECT_EQ(client_stream->finish_calls, 1);
+        EXPECT_EQ(context.error_status.ok(), output_finished == 1);
+        if (output_finished != 1) {
+            EXPECT_EQ(context.error_status.error_code(), grpc::StatusCode::CANCELLED);
+            EXPECT_TRUE(context.cancelled());
+        }
+        context.stream_.reset();
+    }
+}
+
+TEST(RpcWriterCancellationTest, TrailingFramesDoNotEraseCompletion) {
+    for (int first_finished : {0, 1}) {
+        for (int trailing_finished : {-1, 0, 1}) {
+            SCOPED_TRACE(first_finished);
+            SCOPED_TRACE(trailing_finished);
+            PrefillRpcServer server;
+            RecordingWriter  writer(true);
+            GenerateInputPB  request;
+            request.set_request_id(50);
+            RPCContext                   rpc_context{&request, &writer};
+            RemoteServerResource         resource;
+            kmonitor::MetricsReporterPtr metrics_reporter;
+            PrefillGenerateContext       context(&resource, rpc_context, 0, nullptr, metrics_reporter, nullptr);
+            context.stream_        = std::make_shared<SingleOutputStream>();
+            context.client_context = std::make_shared<grpc::ClientContext>();
+            auto client_stream     = std::make_shared<SingleResponseClientStream>(
+                grpc::Status(grpc::StatusCode::CANCELLED, "decode stopping"), first_finished, trailing_finished);
+            context.client_stream = client_stream;
+
+            server.pollRemoteOutput(context);
+
+            EXPECT_EQ(writer.write_calls, trailing_finished < 0 ? 1 : 2);
+            EXPECT_EQ(client_stream->finish_calls, 1);
+            const bool completed = first_finished == 1 || trailing_finished == 1;
+            EXPECT_EQ(context.error_status.ok(), completed);
+            if (!completed) {
+                EXPECT_EQ(context.error_status.error_code(), grpc::StatusCode::CANCELLED);
+            }
+            context.stream_.reset();
+        }
+    }
 }
 
 TEST(RpcWriterCancellationTest, CloseGrpcStreamIgnoresLateOverrideAndDoesNotRefinish) {

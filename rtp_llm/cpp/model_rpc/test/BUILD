@@ -205,21 +205,25 @@ cc_test(
     tags = ["L20_CU13"],
 )
 
-cc_test(
-    name = "rpc_writer_cancellation_test",
-    srcs = [
-        "RpcWriterCancellationTest.cc",
-    ],
-    copts = test_copts,
-    deps = test_deps + [
-        "@io_opentelemetry_cpp//exporters/memory:in_memory_span_exporter",
-    ],
-    env = {
-        "TEST_USING_DEVICE": "CUDA",
-    },
-    exec_properties = {"gpu": "L20_CU13"},
-    tags = ["L20_CU13"],
-)
+[
+    cc_test(
+        name = "rpc_writer_cancellation{}_test".format(suffix),
+        visibility = ["//rtp_llm/models_py/modules/dsv4/test:__pkg__"],
+        srcs = ["RpcWriterCancellationTest.cc"],
+        copts = test_copts,
+        deps = test_deps + [
+            "@io_opentelemetry_cpp//exporters/memory:in_memory_span_exporter",
+        ],
+        env = {"TEST_USING_DEVICE": "CUDA"},
+        exec_properties = {"gpu": gpu},
+        tags = [gpu],
+        target_compatible_with = select({
+            "@//:using_cuda13_sm120": [],
+            "//conditions:default": ["@platforms//:incompatible"],
+        }) if suffix else [],
+    )
+    for suffix, gpu in [("", "L20_CU13"), ("_sm120", "RTX_5000_PRO_CU13")]
+]
 
 cc_test(
     name = "rpc_server_runtime_meta_test",
