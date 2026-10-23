@@ -14,16 +14,32 @@ asserted to be ``AttentionFP8``.
 
 from __future__ import annotations
 
+import logging
 from typing import TYPE_CHECKING, Any, Dict, Optional
 
 import torch
 
 from rtp_llm.models_py.modules.dsv4._profiler import record_function_range
+from rtp_llm.models_py.utils.arch import is_sm120
+
+logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from rtp_llm.models_py.modules.dsv4.fp8.attention import PrefillMeta
     from rtp_llm.models_py.modules.dsv4.prefill_workspace import PrefillWorkspace
     from rtp_llm.models_py.modules.dsv4.transformer import V4Transformer
+
+
+# Per-forward cross-bucket shared metadata build.  The 3 ratio buckets
+# (SWA/CSA/HCA) are built from IDENTICAL arguments (same tensors, same
+# scalars; only the rep attention module differs), so the bucket-invariant
+# pieces — freqs/topk gather, SWA Group-1 write meta, ``row_seqlens_full``,
+# the workspace-meta SWA half, and the CP full-positions build — are computed
+# once and shared instead of 2-3x per chunk.  Values are byte-identical
+# (same expressions over the same inputs, proven by identity probes);
+# ``shared=None`` reproduces today's per-bucket builds exactly.
+def _meta_shared_build_enabled() -> bool:
+    return torch.cuda.is_available() and is_sm120()
 
 
 def _flat_optional(t: Optional[torch.Tensor]) -> Optional[torch.Tensor]:
@@ -120,15 +136,22 @@ def build_and_propagate_prefill_meta_fp8(
             reusable_freqs_by_rope_kind.setdefault(compressed_rope, meta_by_ratio[r])
 
     with record_function_range("dsv4.fp8.prefill_meta.propagate"):
-        for layer in v4.layers:
-            attn = getattr(layer, "attn", None)
-            if attn is None:
-                continue
-            # Each layer owns its own compressor / indexer; freqs_cis must
-            # be bound per-layer (not just on the rep). Cheap idempotent
-            # is-None set.
-            attn._ensure_freqs_cis_bound()
-            attn._set_prefill_meta_shared(meta_by_ratio.get(int(attn.compress_ratio)))
+        _propagate_meta_map(v4, meta_by_ratio)
+
+
+def _propagate_meta_map(
+    v4: "V4Transformer", meta_by_ratio: Dict[int, "PrefillMeta"]
+) -> None:
+    """Bind each layer's bucket meta + freqs (the shared propagate loop)."""
+    for layer in v4.layers:
+        attn = getattr(layer, "attn", None)
+        if attn is None:
+            continue
+        # Each layer owns its own compressor / indexer; freqs_cis must
+        # be bound per-layer (not just on the rep). Cheap idempotent
+        # is-None set.
+        attn._ensure_freqs_cis_bound()
+        attn._set_prefill_meta_shared(meta_by_ratio.get(int(attn.compress_ratio)))
 
 
 def clear_prefill_meta_shared_fp8(v4: "V4Transformer") -> None:

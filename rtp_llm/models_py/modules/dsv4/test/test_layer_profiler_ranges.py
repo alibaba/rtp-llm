@@ -162,6 +162,7 @@ class LayerProfilerRangeTest(unittest.TestCase):
         )
         v4 = SimpleNamespace(
             embed=lambda ids: torch.zeros((ids.numel(), 2)),
+            embed_full=lambda ids: torch.zeros((ids.numel(), 2)),
             hc_mult=1,
             layers=[_DecodeLayer(0, events), _DecodeLayer(1, events)],
             capture_aux_hidden_layer_ids=(),
@@ -198,6 +199,7 @@ class LayerProfilerRangeTest(unittest.TestCase):
         decode_events = []
         decode_model = SimpleNamespace(
             embed=lambda ids: torch.zeros((*ids.shape, 2)),
+            embed_full=lambda ids: torch.zeros((*ids.shape, 2)),
             hc_mult=1,
             layers=[
                 _DecodeLayer(0, decode_events),
@@ -224,6 +226,7 @@ class LayerProfilerRangeTest(unittest.TestCase):
         prefill_model = SimpleNamespace(
             args=SimpleNamespace(ep_size=1, dim=2),
             embed=lambda ids: torch.zeros((*ids.shape, 2)),
+            embed_full=lambda ids: torch.zeros((*ids.shape, 2)),
             hc_mult=1,
             layers=[
                 _PrefillLayer(0, prefill_events),
@@ -264,6 +267,7 @@ class LayerProfilerRangeTest(unittest.TestCase):
         model = DeepSeekV4DSparkModel.__new__(DeepSeekV4DSparkModel)
         model.v4 = SimpleNamespace(
             embed=lambda ids: torch.zeros((*ids.shape, 2)),
+            embed_full=lambda ids: torch.zeros((*ids.shape, 2)),
             hc_mult=1,
             layers=[
                 _DecodeLayer(0, proposal_events),

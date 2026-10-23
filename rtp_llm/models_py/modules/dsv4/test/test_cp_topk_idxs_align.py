@@ -16,8 +16,10 @@ The contract under verification:
 
 import ast
 from pathlib import Path
+from typing import Optional, Tuple
 
 import torch
+import torch.nn.functional as F
 
 
 def _load_attention_helper():
@@ -31,7 +33,7 @@ def _load_attention_helper():
     ]
     if {node.name for node in helpers} != required:
         raise RuntimeError("attention source is missing the CP top-k helpers")
-    namespace = {"torch": torch}
+    namespace = {"torch": torch, "F": F, "Optional": Optional, "Tuple": Tuple}
     exec(
         compile(ast.Module(body=helpers, type_ignores=[]), str(src_path), "exec"),
         namespace,

@@ -383,24 +383,29 @@ def forward_layers(
         )
         ws = PrefillWorkspace(
             input_ids.device,
-            q_rows=v4._prefill_ws_q_rows,
+            q_rows=int(v4._prefill_ws_q_rows),
             q_dim=v4._prefill_ws_q_dim,
             reserve_cp=reserve_cp,
-            cp_rows=v4._prefill_ws_full_rows,
+            cp_rows=int(v4._prefill_ws_full_rows),
             main_w=v4._prefill_ws_main_w,
             idx_w=v4._prefill_ws_idx_w,
         )
-
     # Build + propagate CP context once per prefill step. Under CP the
     # caller hands us a per-rank chunk slice (T_local = chunk_length),
     # and each attn / compressor / indexer reads ``cp_ctx`` off the
     # module to compute its own per-token positions. Without CP we pass
     # None to clear any stale context from a prior forward (warmup).
+    if v4.args.moe_strategy == "sm120_decode" and int(input_ids.size(0)) > 8192:
+        # Big prefills start from a clean arena: the previous request's freed
+        # transients sit in the allocator cache as fragmented blocks and made
+        # even 128 MiB contiguous allocations fail at layer-0 attention while
+        # 600+ MiB sat reserved-but-unallocated. One unmap pass, ~ms cost.
+        torch.cuda.empty_cache()
     cp_info = getattr(v4, "_cp_info", None)
     cp_size = getattr(v4, "_cp_size", 1)
     cp_rank = getattr(v4, "_cp_rank", 0)
     cp_ctx = None
-    if cp_info is not None and cp_size > 1:
+    if cp_ctx is None and cp_info is not None and cp_size > 1:
         cp_ctx = build_cp_context_for_forward(
             cp_info,
             cp_size,
@@ -455,7 +460,7 @@ def forward_layers(
             )
 
     if prepare_hidden_fn is None:
-        h = v4.embed(input_ids)  # [T_total, dim]
+        h = v4.embed_full(input_ids)  # [T_total, dim]
         if _rt_on:
             _rt.record("prefill_embed_out", h)
         h = h.unsqueeze(-2).repeat(1, v4.hc_mult, 1)  # [T_total, hc, dim]
@@ -484,11 +489,11 @@ def forward_layers(
     # own forward.
     with record_range_ctx():
         if v4.fp8_kv_cache and h.size(0) > 0:
+            any_cont_for_meta: Optional[bool] = None
             input_lengths: Optional[torch.Tensor] = None
             prefix_lengths: Optional[torch.Tensor] = None
             host_input_lengths: Optional[torch.Tensor] = None
             host_prefix_lengths: Optional[torch.Tensor] = None
-            any_cont_for_meta: Optional[bool] = None
             if attn_inputs is not None:
                 host_input_lengths = attn_inputs.input_lengths
                 host_prefix_lengths = attn_inputs.prefix_lengths
@@ -566,7 +571,9 @@ def forward_layers(
                         torch.int64
                     )
                     sp_per_req = torch.where(
-                        valid_starts, selected_starts, torch.zeros_like(selected_starts)
+                        valid_starts,
+                        selected_starts,
+                        torch.zeros_like(selected_starts),
                     ).contiguous()
                 req_id_per_token = (
                     torch.searchsorted(

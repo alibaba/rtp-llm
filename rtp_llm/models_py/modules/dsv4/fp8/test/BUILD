@@ -75,6 +75,7 @@ _CONTRACT_TESTS = [
     "test_fp8_sparse_attn_decode_op",
     "test_compressor_cp_merged_gather",
     "test_sm120_prefill_indices",
+    "test_sm120_sparse_mla",
 ]
 
 [
@@ -100,7 +101,9 @@ _CONTRACT_TESTS = [
         deps = _DSV4_FP8_TEST_DEPS,
     )
     for name in [
+        "test_indexer_forward_with_pending_nested",
         "test_sm120_prefill_indices",
+        "test_sm120_sparse_mla",
         "test_swa_fp8_kv_roundtrip",
         "test_fp8_sparse_attn_decode_op",
         "test_pack_slots_to_paged",
@@ -132,8 +135,34 @@ dsv4_py_test(
     ]
 ]
 
+dsv4_sm120_py_test(
+    name = "test_sm120_cp_compressor_projection",
+    deps = _DSV4_FP8_TEST_DEPS,
+)
 
+py_test(
+    name = "test_sm120_sparse_mla_hardware",
+    srcs = ["test_sm120_sparse_mla_hardware.py"],
+    deps = _DSV4_FP8_TEST_DEPS,
+    tags = ["RTX_5000_PRO_CU13"],
+    exec_properties = {
+        "gpu": "RTX_5000_PRO_CU13",
+        "gpu_count": "1",
+    },
+    target_compatible_with = _DSV4_SM120_ONLY,
+)
 
+py_test(
+    name = "test_sm120_indexer_hardware",
+    srcs = ["test_sm120_indexer_hardware.py"],
+    deps = _DSV4_FP8_TEST_DEPS,
+    tags = ["RTX_5000_PRO_CU13"],
+    exec_properties = {
+        "gpu": "RTX_5000_PRO_CU13",
+        "gpu_count": "1",
+    },
+    target_compatible_with = _DSV4_SM120_ONLY,
+)
 
 dsv4_sm120_py_test(
     name = "test_sm120_prefill_indices_hardware",
@@ -259,6 +288,20 @@ dsv4_sm100_py_test(
     for name in ["test_mega_csa_adapter", "test_mega_hca_adapter"]
 ]
 
+[
+    py_test(
+        name = name,
+        srcs = [name + ".py"],
+        data = [
+            "//rtp_llm:dsv4_kv_cache_source",
+            "//rtp_llm/models_py:prefill_optimization_source_data",
+            "//rtp_llm/models_py/modules/dsv4/test:cpu_test_support",
+        ],
+        deps = ["//rtp_llm:torch"],
+        env = {"CUDA_VISIBLE_DEVICES": ""},
+    )
+    for name in ["test_compact_cp_runtime_cpu", "test_compact_cp_assert_fusion_cpu", "test_attention_prefix_host_mirror_cpu", "test_attention_packed_prefix_cpu", "test_compact_cp_plan_cache_cpu", "test_indexer_tail_stream_cpu"]
+]
 
 
 dsv4_sm120_py_test(
