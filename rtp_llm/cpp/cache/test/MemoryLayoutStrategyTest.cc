@@ -279,19 +279,15 @@ TEST_F(MemoryLayoutStrategyTest, SparseMhaFp8UsesFp32UnitScaleLayout) {
             createTestKvCacheSpec(1, DataType::TYPE_FP8_E4M3, heads, tokens, k_bytes, k_bytes));
         spec->k_scale_bytes = heads * tokens * sizeof(float);
         spec->v_scale_bytes = spec->k_scale_bytes;
-        CacheConfig cache_config;
-        cache_config.block_num = 3;
-        cache_config.is_sparse = sparse;
-        auto cfg               = DeviceBlockPoolConfigHelper::createMemoryLayoutConfig(false,
-                                                                                       1,
-                                                                                       spec->block_size_bytes(),
-                                                                                       spec->scale_block_size_bytes(),
-                                                                                       spec,
-                                                                                       cache_config,
-                                                                                       cache_config.block_num,
-                                                                                       heads,
-                                                                                       tokens,
-                                                                                       1);
+        rtp_llm::CacheConfig cache_config;
+        cache_config.layer_num          = 1;
+        cache_config.dtype              = DataType::TYPE_FP8_E4M3;
+        cache_config.seq_size_per_block = tokens;
+        cache_config.is_sparse          = sparse;
+        initializeSingleGroup(cache_config, spec, /*candidate_block_num=*/3);
+        auto pool_cfg =
+            DeviceBlockPoolConfigHelper::createConfigForGroup(cache_config, cache_config.topology().groups().front());
+        auto cfg     = pool_cfg.memory_layouts[0];
         EXPECT_FALSE(cfg.is_mla);
         EXPECT_TRUE(cfg.hasScale());
         auto                 kv    = torch::empty({static_cast<int64_t>(cfg.kv_block_pool_size_bytes)}, torch::kUInt8);
@@ -314,19 +310,15 @@ TEST_F(MemoryLayoutStrategyTest, SparseMlaAndIndexerKeepByteScaleLayout) {
         spec->type          = type;
         spec->k_scale_bytes = 1024;
         spec->v_scale_bytes = 0;
-        CacheConfig cache_config;
-        cache_config.block_num = 3;
-        cache_config.is_sparse = true;
-        auto cfg               = DeviceBlockPoolConfigHelper::createMemoryLayoutConfig(false,
-                                                                                       1,
-                                                                                       spec->block_size_bytes(),
-                                                                                       spec->scale_block_size_bytes(),
-                                                                                       spec,
-                                                                                       cache_config,
-                                                                                       cache_config.block_num,
-                                                                                       1,
-                                                                                       128,
-                                                                                       1);
+        rtp_llm::CacheConfig cache_config;
+        cache_config.layer_num          = 1;
+        cache_config.dtype              = DataType::TYPE_FP8_E4M3;
+        cache_config.seq_size_per_block = 128;
+        cache_config.is_sparse          = true;
+        initializeSingleGroup(cache_config, spec, /*candidate_block_num=*/3);
+        auto pool_cfg =
+            DeviceBlockPoolConfigHelper::createConfigForGroup(cache_config, cache_config.topology().groups().front());
+        auto cfg     = pool_cfg.memory_layouts[0];
         EXPECT_TRUE(cfg.is_mla);
         auto                 kv    = torch::empty({static_cast<int64_t>(cfg.kv_block_pool_size_bytes)}, torch::kUInt8);
         auto                 scale = torch::empty({static_cast<int64_t>(cfg.kv_scale_pool_size_bytes)}, torch::kUInt8);
