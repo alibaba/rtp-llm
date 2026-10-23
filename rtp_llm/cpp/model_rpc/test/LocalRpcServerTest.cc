@@ -50,6 +50,10 @@ public:
         return collectStreamOutput(nullptr, stream, nullptr, last_outputs);
     }
 
+    ErrorInfo collect(std::shared_ptr<GenerateStream>& stream, GenerateOutputs& last_outputs) {
+        return collectStreamOutput(nullptr, stream, nullptr, last_outputs);
+    }
+
     void configureAllocatorDump(bool enabled, std::string auth_token, double cooldown_seconds = 0.0) {
         torch_allocator_dump_enabled_                = enabled;
         torch_allocator_dump_auth_token_             = std::move(auth_token);
@@ -813,6 +817,56 @@ TEST(LocalRpcServerTest, PollChecksCancellationBeforeHandlingEveryWakeReason) {
         EXPECT_EQ(status.error_code(), grpc::StatusCode::CANCELLED);
         EXPECT_EQ(stream->statusInfo().code(), expectedStreamError(reason));
     }
+}
+
+TEST(LocalRpcServerTest, PollDrainsPrefillTokenAfterMetricOnlyHandoffMarker) {
+    TestLocalRpcServer server;
+    auto               mock_stream = createMockStream();
+    mock_stream->reportEvent(StreamEvents::NeedRemoteGenerate);
+    GenerateOutputs metric;
+    metric.request_id           = 1;
+    metric.frontend_metric_only = true;
+    GenerateOutputs token;
+    token.request_id = 1;
+    token.generate_outputs.emplace_back();
+    token.generate_outputs.back().output_ids = torch::tensor({{7}}, torch::kInt32);
+    EXPECT_CALL(*mock_stream, nextOutput(_))
+        .WillOnce(Return(ErrorResult<GenerateOutputs>(std::move(metric))))
+        .WillOnce(Return(ErrorResult<GenerateOutputs>(std::move(token))));
+    std::shared_ptr<GenerateStream> stream = mock_stream;
+    RecordingWriter                 writer;
+    EXPECT_TRUE(server.poll(&writer, stream).ok());
+    ASSERT_EQ(writer.outputs_.size(), 2);
+    EXPECT_TRUE(writer.outputs_[0].frontend_metric_only());
+    EXPECT_FALSE(writer.outputs_[1].frontend_metric_only());
+    EXPECT_TRUE(writer.outputs_[1].flatten_output().has_output_ids());
+}
+
+TEST(LocalRpcServerTest, CollectPreservesMetricOnlySamplesInBatchTerminalResponse) {
+    TestLocalRpcServer server;
+    auto               mock_stream = createMockStream();
+    GenerateOutputs    metric;
+    metric.frontend_metric_only     = true;
+    metric.frontend_sp_tpot_samples = {{1, 50.0}};
+    GenerateOutputs terminal;
+    terminal.generate_outputs.emplace_back();
+    terminal.generate_outputs.back().finished = true;
+    terminal.frontend_generate_token_num      = 9;
+    terminal.frontend_sp_tpot_samples         = {{2, 75.0}};
+    EXPECT_CALL(*mock_stream, nextOutput(_))
+        .WillOnce(Return(ErrorResult<GenerateOutputs>(std::move(metric))))
+        .WillOnce(Return(ErrorResult<GenerateOutputs>(std::move(terminal))))
+        .WillOnce(Return(ErrorResult<GenerateOutputs>(ErrorCode::FINISHED, "finished")));
+    std::shared_ptr<GenerateStream> stream = mock_stream;
+    GenerateOutputs                 result;
+    EXPECT_TRUE(server.collect(stream, result).ok());
+    ASSERT_EQ(result.generate_outputs.size(), 1);
+    EXPECT_TRUE(result.generate_outputs[0].finished);
+    EXPECT_FALSE(result.frontend_metric_only);
+    EXPECT_EQ(result.frontend_generate_token_num, 9);
+    ASSERT_EQ(result.frontend_sp_tpot_samples.size(), 2);
+    EXPECT_EQ(result.frontend_sp_tpot_samples[0].first, 1);
+    EXPECT_EQ(result.frontend_sp_tpot_samples[1].first, 2);
 }
 
 TEST(LocalRpcServerTest, CollectChecksCancellationBeforeHandlingEveryWakeReason) {

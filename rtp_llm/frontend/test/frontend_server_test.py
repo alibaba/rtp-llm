@@ -1,10 +1,12 @@
 import asyncio
 import json
+from types import SimpleNamespace
 from typing import Any
 from unittest import TestCase, main
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, PropertyMock, patch
 
 import torch
+from fastapi.responses import ORJSONResponse
 from pydantic import BaseModel
 
 from rtp_llm.config.generate_config import GenerateConfig, RoleAddr
@@ -14,8 +16,10 @@ from rtp_llm.cpp.model_rpc.model_rpc_client import (
     _selected_pd_separation,
 )
 from rtp_llm.frontend.frontend_server import FrontendServer
+from rtp_llm.metrics import AccMetrics, GaugeMetrics
 from rtp_llm.openai.api_datatype import ChatCompletionRequest, FinisheReason
 from rtp_llm.ops import RoleType
+from rtp_llm.structure.request_constants import request_id_field_name
 from rtp_llm.utils.base_model_datatypes import GenerateInput
 from rtp_llm.utils.complete_response_async_generator import (
     CompleteResponseAsyncGenerator,
@@ -25,6 +29,10 @@ from rtp_llm.utils.concurrency_controller import init_controller, set_global_con
 
 class FakePipelinResponse(BaseModel):
     res: str
+
+
+class FakeAuxResponse(BaseModel):
+    aux_info: dict[str, Any]
 
 
 class FakeFrontendWorker(object):
@@ -39,11 +47,13 @@ class FakeFrontendWorker(object):
     def __init__(self):
         self.backend_rpc_server_visitor = self.FakeBackendRpcServerVisitor()
         self.close_called = False
+        self.last_inference_kwargs = {}
 
     async def close(self):
         self.close_called = True
 
     def inference(self, prompt: str, *args: Any, **kwargs: Any):
+        self.last_inference_kwargs = kwargs
         response_generator = self._inference(prompt, *args, **kwargs)
         return CompleteResponseAsyncGenerator(
             response_generator, CompleteResponseAsyncGenerator.get_last_value
@@ -77,11 +87,12 @@ class FrontendServerTest(TestCase):
         set_global_controller(init_controller(py_env_configs.concurrency_config))
         py_env_configs.server_config.start_port = 0
         py_env_configs.server_config.rank_id = 0
-        self.frontend_server = FrontendServer(
-            rank_id=0,
-            server_id=0,
-            py_env_configs=py_env_configs,
-        )
+        with patch.dict("os.environ", {"RTP_LLM_FRONTEND_METRICS_ENABLE": "1"}):
+            self.frontend_server = FrontendServer(
+                rank_id=0,
+                server_id=0,
+                py_env_configs=py_env_configs,
+            )
         self.frontend_server._frontend_worker = FakeFrontendWorker()
 
     def setUp(self):
@@ -90,6 +101,9 @@ class FrontendServerTest(TestCase):
 
         self.addCleanup(tracing.reset_telemetry_for_test)
         self.assertTrue(tracing.reset_telemetry_for_test())
+
+    def tearDown(self):
+        self.frontend_server._request_metrics.close()
 
     async def _async_run(self, *args: Any, **kwargs: Any):
         res = await self.frontend_server.inference(*args, **kwargs)
@@ -103,12 +117,392 @@ class FrontendServerTest(TestCase):
         self.assertEqual(
             res.body.decode("utf-8"), '{"res":"hello"}', res.body.decode("utf-8")
         )
+        self.assertTrue(
+            callable(
+                self.frontend_server._frontend_worker.last_inference_kwargs[
+                    "frontend_metric_observer"
+                ]
+            )
+        )
         res = loop.run_until_complete(
             self._async_run(req='{"prompt": "hello"}', raw_request=FakeRawRequest())
         )
         self.assertEqual(
             res.body.decode("utf-8"), '{"res":"hello"}', res.body.decode("utf-8")
         )
+
+    def test_qos_priority_reaches_frontend_metrics_and_backend(self):
+        with patch(
+            "rtp_llm.metrics.kmonitor_metric_reporter.MetricReporter.is_reporting_enabled",
+            new_callable=PropertyMock,
+            return_value=True,
+        ), patch("rtp_llm.frontend.frontend_server.kmonitor.report") as report:
+            asyncio.run(
+                self._async_run(
+                    req={"prompt": "hello", "source": "test"},
+                    raw_request=FakeRawRequest({"X-DashScope-Inner-Qos-Level": "70"}),
+                )
+            )
+        backend_tags = self.frontend_server._frontend_worker.last_inference_kwargs[
+            "frontend_metric_tags"
+        ]
+        self.assertEqual(backend_tags["priority"], "70")
+        for metric in (
+            AccMetrics.QPS_METRIC,
+            AccMetrics.SUCCESS_QPS_METRIC,
+            GaugeMetrics.FRONTEND_REQUEST_RT_MS_METRIC,
+        ):
+            calls = [call for call in report.call_args_list if call.args[0] == metric]
+            self.assertEqual(len(calls), 1)
+            self.assertEqual(calls[0].args[2]["priority"], "70")
+            self.assertEqual(calls[0].args[2]["source"], "test")
+
+    def _native_batch_fixture(self, api):
+        from rtp_llm.frontend.frontend_request_metrics import FrontendRequestMetrics
+        from rtp_llm.frontend.frontend_worker import FrontendWorker
+        from rtp_llm.openai.api_datatype import BatchChatCompletionRequest
+        from rtp_llm.openai.openai_endpoint import OpenaiEndpoint
+        from rtp_llm.ops import SpecialTokens
+        from rtp_llm.pipeline.pipeline import Pipeline
+        from rtp_llm.server.backend_rpc_server_visitor import BackendRPCServerVisitor
+        from rtp_llm.utils.base_model_datatypes import (
+            BatchedTerminalOutputs,
+            GenerateOutputs,
+        )
+
+        server = self.frontend_server
+        server._request_metrics.close()
+        clock = [10.0]
+        sink = SimpleNamespace(report=MagicMock())
+        server._request_metrics = FrontendRequestMetrics(
+            metric_reporter=sink, clock=lambda: clock[0], enabled=True
+        )
+        visitor = BackendRPCServerVisitor.__new__(BackendRPCServerVisitor)
+        visitor.max_seq_len = 1024
+        visitor.host_service = SimpleNamespace(service_available=False)
+        visitor.fill_request_info = MagicMock()
+        visitor.check_sp_supported = MagicMock()
+        visitor.check_prefill_cp_supported = MagicMock()
+        visitor._frontend_route_cache_keys = MagicMock(return_value=[[101]])
+        visitor._report_frontend_cache_key_metrics = MagicMock()
+        outputs = [
+            GenerateOutputs(
+                generate_outputs=BatchedTerminalOutputs(
+                    torch.ones((2, 1, i + 2), dtype=torch.int32),
+                    torch.tensor([[1, 2, 3]]),
+                ),
+                frontend_input_len=(i + 1) * 10,
+                frontend_output_len=(i + 2) * 2,
+                frontend_generate_token_num=8 if i == 0 else None,
+                frontend_context_token_num=30 if i == 0 else None,
+                frontend_context_token_num_with_cache=30 if i == 0 else None,
+                frontend_context_execute_time_us=2_000_000 if i == 0 else None,
+                frontend_context_execute_time_with_cache_us=(
+                    2_000_000 if i == 0 else None
+                ),
+            )
+            for i in range(2)
+        ]
+
+        async def rpc(inputs):
+            self.assertEqual(server._global_controller.current_concurrency.value, 1)
+            self.assertEqual(server._request_metrics._active_requests, 1)
+            self.assertEqual(len(inputs), 2)
+            for inp in inputs:
+                self.assertTrue(inp.generate_config.frontend_metric_streaming)
+                self.assertFalse(inp.generate_config.aux_info)
+                self.assertEqual(inp.frontend_metric_tags["priority"], "70")
+            clock[0] = 11.0
+            return outputs
+
+        visitor.model_rpc_client = SimpleNamespace(
+            batch_enqueue=AsyncMock(side_effect=rpc)
+        )
+        raw_request = FakeRawRequest({"X-DashScope-Inner-Qos-Level": "70"})
+        config = {"aux_info": False, "num_beams": 2, "num_return_sequences": 2}
+        if api == "pipeline":
+            pipeline = Pipeline.__new__(Pipeline)
+            pipeline._special_tokens = SpecialTokens()
+            pipeline.tokenizer = MagicMock()
+            pipeline.tokenizer.__len__.return_value = 100
+            pipeline.tokenizer.encode.return_value = [1, 2, 3]
+            pipeline.tokenizer.batch_decode.side_effect = lambda ids, **_: [
+                "answer"
+            ] * len(ids)
+            pipeline.create_generate_config = (
+                lambda config, *args, **kwargs: GenerateConfig(**config)
+            )
+            pipeline.backend_rpc_server_visitor = visitor
+            worker = FrontendWorker.__new__(FrontendWorker)
+            worker.pipeline = pipeline
+            worker.generate_env_config = None
+            server._frontend_worker = worker
+            request = {"prompt_batch": ["first", "second"], "generate_config": config}
+            call = lambda: server.batch_infer(request, raw_request)
+        else:
+            endpoint = OpenaiEndpoint.__new__(OpenaiEndpoint)
+            endpoint.backend_rpc_server_visitor = visitor
+
+            def prepare(request_id, _request):
+                gc = GenerateConfig(**config)
+                return (
+                    GenerateInput(
+                        request_id=request_id,
+                        token_ids=torch.tensor([1, 2, 3]),
+                        mm_inputs=[],
+                        generate_config=gc,
+                    ),
+                    gc,
+                )
+
+            endpoint._prepare_chat_input = prepare
+            endpoint._render_single_output = AsyncMock(
+                return_value=FakeAuxResponse(aux_info={})
+            )
+            server._openai_endpoint = endpoint
+            request = BatchChatCompletionRequest(
+                requests=[
+                    ChatCompletionRequest(messages=[], aux_info=False),
+                    ChatCompletionRequest(messages=[], aux_info=False),
+                ]
+            )
+            call = lambda: server.batch_chat_completion(request, raw_request)
+        return call, visitor, sink, clock, outputs
+
+    def test_native_batch_metrics_use_private_terminal_snapshots(self):
+        from rtp_llm.utils.base_model_datatypes import BatchedTerminalOutputs
+
+        for api in ("pipeline", "openai"):
+            with self.subTest(api=api):
+                call, visitor, sink, _, outputs = self._native_batch_fixture(api)
+                original_getitem = BatchedTerminalOutputs.__getitem__
+                rows = []
+
+                def getitem(storage, index):
+                    rows.append(index)
+                    return original_getitem(storage, index)
+
+                with patch.object(BatchedTerminalOutputs, "__getitem__", getitem):
+                    response = asyncio.run(call())
+                self.assertEqual(response.status_code, 200)
+                self.assertNotIn("frontend_", response.body.decode())
+                # Worker serialization already reads one row per item; private
+                # projection and batch decoding must not materialize any rows.
+                self.assertEqual(rows, [0, 0] if api == "pipeline" else [])
+                visitor.model_rpc_client.batch_enqueue.assert_awaited_once()
+                self.assertEqual(
+                    visitor._report_frontend_cache_key_metrics.call_count, 2
+                )
+                values = {}
+                for metric_call in sink.report.call_args_list:
+                    values.setdefault(metric_call.args[0], []).append(
+                        metric_call.args[1]
+                    )
+                self.assertEqual(
+                    values[GaugeMetrics.FRONTEND_CONCURRENCY_METRIC], [1, 0]
+                )
+                self.assertEqual(
+                    values[GaugeMetrics.FRONTEND_REQUEST_RT_MS_METRIC], [1000.0]
+                )
+                self.assertEqual(values[GaugeMetrics.FRONTEND_TTFT_MS_METRIC], [1000.0])
+                self.assertEqual(
+                    values[GaugeMetrics.FRONTEND_INPUT_LENGTH_METRIC], [30]
+                )
+                self.assertEqual(
+                    values[GaugeMetrics.FRONTEND_OUTPUT_LENGTH_METRIC], [10]
+                )
+                self.assertEqual(
+                    values[GaugeMetrics.FRONTEND_OUTPUT_TOKEN_TPS_METRIC], [8.0]
+                )
+                self.assertEqual(
+                    values[GaugeMetrics.FRONTEND_INPUT_TOKEN_TPS_METRIC], [15.0]
+                )
+                self.assertEqual(
+                    self.frontend_server._request_metrics._active_requests, 0
+                )
+                self.assertEqual(
+                    self.frontend_server._global_controller.current_concurrency.value, 0
+                )
+                self.assertEqual(
+                    [output.frontend_output_len for output in outputs], [4, 6]
+                )
+
+    def test_native_batch_failure_and_cancellation_finish_once(self):
+        for api in ("pipeline", "openai"):
+            for failure in ("partial", "cancel", "render", "disconnect"):
+                with self.subTest(api=api, failure=failure):
+                    call, visitor, sink, _, _ = self._native_batch_fixture(api)
+                    closed = []
+
+                    async def run():
+                        entered = asyncio.Event()
+                        original_rpc = (
+                            visitor.model_rpc_client.batch_enqueue.side_effect
+                        )
+
+                        async def rpc(inputs):
+                            try:
+                                await original_rpc(inputs)
+                                if failure == "partial":
+                                    raise RuntimeError("batch item 1 failed")
+                                entered.set()
+                                await asyncio.Event().wait()
+                            finally:
+                                closed.append(True)
+
+                        if failure == "render":
+                            if api == "pipeline":
+                                self.frontend_server._frontend_worker.pipeline.tokenizer.batch_decode.side_effect = ValueError(
+                                    "decode failed"
+                                )
+                            else:
+                                self.frontend_server._openai_endpoint._render_single_output.side_effect = ValueError(
+                                    "render failed"
+                                )
+                            with self.assertRaises(ValueError):
+                                await call()
+                        elif failure == "partial":
+                            visitor.model_rpc_client.batch_enqueue.side_effect = rpc
+                            with self.assertRaisesRegex(RuntimeError, "batch item"):
+                                await call()
+                        else:
+                            visitor.model_rpc_client.batch_enqueue.side_effect = rpc
+                            if failure == "disconnect":
+                                with patch.object(
+                                    FakeRawRequest,
+                                    "is_disconnected",
+                                    new=AsyncMock(side_effect=[False, True]),
+                                ):
+                                    with self.assertRaises(asyncio.CancelledError):
+                                        await call()
+                            else:
+                                task = asyncio.create_task(call())
+                                await asyncio.wait_for(entered.wait(), timeout=5)
+                                task.cancel()
+                                with self.assertRaises(asyncio.CancelledError):
+                                    await task
+
+                    asyncio.run(run())
+                    self.assertEqual(closed, [] if failure == "render" else [True])
+                    values = [
+                        c.args[1]
+                        for c in sink.report.call_args_list
+                        if c.args[0] == GaugeMetrics.FRONTEND_CONCURRENCY_METRIC
+                    ]
+                    self.assertEqual(values, [1, 0])
+                    self.assertEqual(
+                        sum(
+                            c.args[0] == GaugeMetrics.FRONTEND_REQUEST_RT_MS_METRIC
+                            for c in sink.report.call_args_list
+                        ),
+                        1,
+                    )
+                    self.assertEqual(
+                        self.frontend_server._request_metrics._active_requests, 0
+                    )
+                    self.assertEqual(
+                        self.frontend_server._global_controller.current_concurrency.value,
+                        0,
+                    )
+
+    def test_native_batch_atomic_rpc_errors_do_not_count_partial_success(self):
+        from rtp_llm.config.exceptions import FtRuntimeException
+        from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2 import (
+            BatchGenerateOutputsPB,
+            ErrorCodePB,
+        )
+
+        for api in ("pipeline", "openai"):
+            for failure in ("cardinality", "partial"):
+                with self.subTest(api=api, failure=failure):
+                    call, visitor, sink, _, _ = self._native_batch_fixture(api)
+                    client = ModelRpcClient.__new__(ModelRpcClient)
+                    client._addresses = ["backend:1234"]
+                    client._max_rpc_timeout_ms = 1000
+                    client._channel_pool = SimpleNamespace(get=AsyncMock())
+                    visitor.model_rpc_client = client
+                    response = BatchGenerateOutputsPB()
+                    if failure == "partial":
+                        output = response.results.add().final_output
+                        output.frontend_input_len.value = 10
+                        output.frontend_output_len.value = 4
+                        output.frontend_generate_token_num.value = 8
+                        failed = response.results.add().error_info
+                        failed.error_code = ErrorCodePB.INVALID_PARAMS
+                        failed.error_message = "invalid batch item"
+                    stub = SimpleNamespace(
+                        BatchGenerateCall=AsyncMock(return_value=response)
+                    )
+                    with patch(
+                        "rtp_llm.cpp.model_rpc.model_rpc_client.RpcServiceStub",
+                        return_value=stub,
+                    ), self.assertRaises(FtRuntimeException):
+                        asyncio.run(call())
+                    stub.BatchGenerateCall.assert_awaited_once()
+                    reported = [c.args[0] for c in sink.report.call_args_list]
+                    self.assertEqual(
+                        reported.count(GaugeMetrics.FRONTEND_REQUEST_RT_MS_METRIC), 1
+                    )
+                    self.assertNotIn(
+                        GaugeMetrics.FRONTEND_INPUT_LENGTH_METRIC, reported
+                    )
+                    self.assertNotIn(
+                        GaugeMetrics.FRONTEND_OUTPUT_LENGTH_METRIC, reported
+                    )
+                    self.assertEqual(
+                        self.frontend_server._request_metrics._active_requests, 0
+                    )
+                    self.assertEqual(
+                        self.frontend_server._global_controller.current_concurrency.value,
+                        0,
+                    )
+
+    def test_malformed_request_preserves_error_metric_priority(self):
+        with patch("rtp_llm.frontend.frontend_server.kmonitor.report") as report:
+            response = asyncio.run(
+                self._async_run(
+                    req="not json",
+                    raw_request=FakeRawRequest({"x-dashscope-inner-qos-level": "80"}),
+                )
+            )
+        self.assertEqual(response.status_code, 500)
+        calls = [
+            call
+            for call in report.call_args_list
+            if call.args[0] == AccMetrics.ERROR_QPS_METRIC
+        ]
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0].args[2]["priority"], "80")
+
+    def test_closing_report_wrapper_closes_backend_and_finishes_metrics_once(self):
+        closed = []
+
+        async def backend():
+            try:
+                yield FakePipelinResponse(res="first")
+                yield FakePipelinResponse(res="second")
+            finally:
+                closed.append(True)
+
+        async def run():
+            response = CompleteResponseAsyncGenerator(
+                backend(), CompleteResponseAsyncGenerator.get_last_value
+            )
+            metrics = self.frontend_server._request_metrics.begin(
+                rank_id="0", server_id="0", source="test", streaming=True
+            )
+            wrapped = await self.frontend_server._call_generate_with_report(
+                lambda _: response,
+                True,
+                request_metrics=metrics,
+            )
+            await wrapped.__anext__()
+            await wrapped.aclose()
+            await wrapped.aclose()
+            self.assertEqual(self.frontend_server._request_metrics._active_requests, 0)
+
+        asyncio.run(run())
+        self.assertEqual(closed, [True])
 
     def test_response_chunk_event_is_streaming_only(self):
         try:
@@ -440,9 +834,211 @@ class FrontendServerTest(TestCase):
         self.assertEqual(visitor.refresh_calls, [False])
 
     def test_close_uses_production_frontend_server_contract(self):
+        close_order = []
+        original_worker_close = self.frontend_server._frontend_worker.close
+        original_metrics_close = self.frontend_server._request_metrics.close
+
+        async def worker_close():
+            close_order.append("worker")
+            await original_worker_close()
+
+        def metrics_close():
+            close_order.append("metrics")
+            original_metrics_close()
+
+        self.frontend_server._frontend_worker.close = worker_close
+        self.frontend_server._request_metrics.close = metrics_close
         asyncio.run(self.frontend_server.close())
 
         self.assertTrue(self.frontend_server._frontend_worker.close_called)
+        self.assertEqual(close_order, ["worker", "metrics"])
+
+    def test_internal_aux_info_is_forced_but_can_be_hidden_from_response(self):
+        request = {"generate_config": {"aux_info": False}}
+        self.assertFalse(FrontendServer._request_aux_info_enabled(request))
+
+        FrontendServer._force_internal_aux_info(request)
+        self.assertTrue(request["generate_config"]["aux_info"])
+
+        response = FakeAuxResponse(aux_info={"input_len": 10})
+        FrontendServer._hide_aux_info(response)
+        self.assertEqual(response.aux_info, {})
+
+    def test_error_response_preserves_existing_aux_info_contract(self):
+        error = RuntimeError("backend failed")
+        error.aux_info = {"input_len": 10}
+
+        response = self.frontend_server._handle_exception(
+            {
+                "aux_info": False,
+                "source": "test",
+                request_id_field_name: 1,
+            },
+            error,
+        )
+
+        payload = json.loads(response.body)
+        self.assertEqual(payload["aux_info"], {"input_len": 10})
+
+    def test_stream_error_response_preserves_existing_aux_info_contract(self):
+        async def failing_stream():
+            error = RuntimeError("stream backend failed")
+            error.aux_info = {"input_len": 10}
+            raise error
+            yield FakePipelinResponse(res="unreachable")
+
+        async def collect_error_chunks():
+            self.frontend_server._global_controller.increment()
+            response = CompleteResponseAsyncGenerator(
+                failing_stream(), CompleteResponseAsyncGenerator.get_last_value
+            )
+            return [
+                chunk
+                async for chunk in self.frontend_server.stream_response(
+                    {
+                        "stream": True,
+                        "aux_info": False,
+                        "source": "test",
+                        request_id_field_name: 1,
+                    },
+                    response,
+                )
+            ]
+
+        chunks = asyncio.run(collect_error_chunks())
+        self.assertEqual(len(chunks), 1)
+        payload = json.loads(chunks[0].removeprefix("data: ").strip())
+        self.assertEqual(payload["aux_info"], {"input_len": 10})
+
+    def test_client_exception_payload_strips_traceback_locations(self):
+        payload = FrontendServer._client_exception_payload(
+            {"aux_info": False},
+            {
+                "message": "ErrorMsg: failed\n Traceback: /secret/path.py:42",
+                "aux_info": {"input_len": 10},
+            },
+        )
+        self.assertEqual(payload["message"], "ErrorMsg: failed")
+        self.assertEqual(payload["aux_info"], {"input_len": 10})
+
+    def test_aux_info_intent_matches_pydantic_boolean_coercion(self):
+        for value in (False, 0, "false", "0", None):
+            with self.subTest(value=value):
+                self.assertFalse(
+                    FrontendServer._request_aux_info_enabled({"aux_info": value})
+                )
+        for value in (True, 1, "true", "1"):
+            with self.subTest(value=value):
+                self.assertTrue(
+                    FrontendServer._request_aux_info_enabled({"aux_info": value})
+                )
+
+    def test_internal_aux_info_copy_does_not_deepcopy_payload(self):
+        images = [object()]
+        request = {
+            "images": images,
+            "generate_config": {"aux_info": False, "top_k": 1},
+        }
+
+        copied = FrontendServer._copy_for_internal_aux_info(request)
+
+        self.assertIs(copied["images"], images)
+        self.assertIsNot(copied["generate_config"], request["generate_config"])
+        self.assertFalse(request["generate_config"]["aux_info"])
+        self.assertTrue(copied["generate_config"]["aux_info"])
+
+    def test_request_can_disable_speculative_metrics(self):
+        self.assertTrue(
+            FrontendServer._request_disables_speculative(
+                {"generate_config": {"force_disable_sp_run": True}}
+            )
+        )
+
+    def test_prompt_outputs_force_internal_request_nonstreaming(self):
+        captured = {}
+
+        class FakeOpenaiEndpoint:
+            model_name = "test-model"
+
+            async def chat_completion_async(
+                self, request_id, request, raw_request, **kwargs
+            ):
+                captured["internal_request"] = request
+                captured["metric_tags"] = kwargs["frontend_metric_tags"]
+
+                async def response_generator():
+                    if False:
+                        yield None
+
+                return CompleteResponseAsyncGenerator(
+                    response_generator(),
+                    CompleteResponseAsyncGenerator.get_last_value,
+                )
+
+        async def fake_infer_wrap(request_dict, raw_request, generate_call):
+            captured["request_dict"] = request_dict
+            captured["response"] = await generate_call(
+                SimpleNamespace(observe_tps=lambda response: None)
+            )
+            return ORJSONResponse({"ok": True})
+
+        self.frontend_server._openai_endpoint = FakeOpenaiEndpoint()
+        self.frontend_server._infer_wrap = fake_infer_wrap
+        for request in (
+            ChatCompletionRequest(messages=[], stream=True, prompt_logprobs=5),
+            ChatCompletionRequest(
+                messages=[],
+                stream=True,
+                extra_configs={"return_prompt_logits": True},
+            ),
+        ):
+            with self.subTest(request=request):
+                asyncio.run(
+                    self.frontend_server.chat_completion(
+                        request,
+                        FakeRawRequest({"X-DashScope-Inner-Qos-Level": "70"}),
+                    )
+                )
+
+                self.assertFalse(request.stream)
+                self.assertFalse(captured["internal_request"].stream)
+                self.assertFalse(captured["request_dict"]["stream"])
+                self.assertEqual(captured["metric_tags"]["priority"], "70")
+
+    def test_hidden_internal_aux_info_does_not_change_iter_latency_metric(self):
+        async def response_generator():
+            yield FakeAuxResponse(aux_info={"step_output_len": 1})
+            yield FakeAuxResponse(aux_info={"step_output_len": 4})
+
+        response = CompleteResponseAsyncGenerator(
+            response_generator(),
+            CompleteResponseAsyncGenerator.get_last_value,
+        )
+        request_metrics = MagicMock()
+
+        async def collect():
+            wrapped = await self.frontend_server._call_generate_with_report(
+                lambda _: response,
+                True,
+                request_metrics=request_metrics,
+                expose_aux_info=False,
+            )
+            return [item async for item in wrapped]
+
+        with patch(
+            "rtp_llm.frontend.frontend_server.current_time_ms",
+            side_effect=[0, 0, 10, 30, 30],
+        ), patch("rtp_llm.frontend.frontend_server.kmonitor.report") as report:
+            outputs = asyncio.run(collect())
+
+        iter_values = [
+            call.args[1]
+            for call in report.call_args_list
+            if call.args and call.args[0] == GaugeMetrics.RESPONSE_ITER_RT_METRIC
+        ]
+        self.assertEqual(iter_values, [20])
+        self.assertEqual([output.aux_info for output in outputs], [{}, {}])
+        request_metrics.finish.assert_called_once_with()
 
     def test_infer_wrap_swallowed_error_marks_span_error(self):
         # Regression: _infer_wrap swallows exceptions into ORJSONResponse(500);
