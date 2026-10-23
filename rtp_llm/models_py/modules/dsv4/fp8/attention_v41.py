@@ -2105,26 +2105,6 @@ class AttentionV41FP8(AttentionFP8):
                     q_fp4, q_sf = prefill_indexer.quantize_indexer_q(q)
                 else:
                     q = fp4_roundtrip(q)
-            if fused_indexer and len(globals_by_req) > 1:
-                from ._v41_batched_prefill_select import try_select_batched
-
-                if try_select_batched(
-                    self,
-                    q_fp4,
-                    q_sf,
-                    weights,
-                    globals_by_req,
-                    request_row_slices,
-                    positions,
-                    out,
-                    candidate_source=candidate_source,
-                    publish_candidates=publish_candidates,
-                    candidate_size=candidate_size,
-                    candidate_blocks=candidate_blocks,
-                    req_ids=req_ids,
-                ):
-                    shared["topk"] = {self.layer_id: out}
-                    return out
             single_request = len(globals_by_req) == 1
             for b, (_, keys) in enumerate(globals_by_req):
                 # Production queries are packed in request order. Host slices

@@ -42,13 +42,17 @@ _CONSUMER_DELAY_MS = int(os.environ.get("DSV41_TEST_DELAY_CONSUMER_MS", "0"))
 
 
 def l20_tables(dispatch):
-    return {
-        span.identity: {
-            tag: tuple(dispatch.tables[tag][row].tolist())
-            for tag in ("hca_kv", "indexer_kv")
-        }
-        for row, span in enumerate(dispatch.spans)
-    }
+    tables = {}
+    for row, span in enumerate(dispatch.spans):
+        tables[span.identity] = {}
+        for tag in ("hca_kv", "indexer_kv"):
+            pages = dispatch.tables[tag][row].tolist()
+            # Preflight checks these rectangular tables against native leases.
+            # Only the trailing zeros are padding, never allocated pages.
+            while pages and pages[-1] == 0:
+                pages.pop()
+            tables[span.identity][tag] = tuple(pages)
+    return tables
 
 
 def _validate_execution(worker, dispatch, contract, transfer_round, receiver, tensors):
