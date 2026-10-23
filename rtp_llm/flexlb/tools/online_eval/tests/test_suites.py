@@ -19,10 +19,10 @@ class SuiteOwnershipTest(unittest.TestCase):
         original = copy.deepcopy(docs)
         functional = preselect_documents(docs, kind='functional')
         workload = preselect_documents(docs, kind='workload')
-        self.assertEqual(['default'], [v['id'] for v in functional[0][1]['variants']])
+        self.assertEqual(['default'], [v.id for v in functional[0][1].variants])
         self.assertEqual([], workload)
         self.assertEqual(docs, original)
-        self.assertEqual(functional[0][1]["implementation"], docs[0][1]["implementation"])
+        self.assertEqual(functional[0][1].implementation, docs[0][1].implementation)
 
     def test_ci_can_select_one_workload_independent_of_directory_or_kind(self):
         with tempfile.TemporaryDirectory() as directory:

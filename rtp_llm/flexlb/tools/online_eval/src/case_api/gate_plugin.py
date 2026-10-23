@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from pathlib import Path
 import re
 from inspect import signature
-from typing import Callable
+from typing import Callable, Optional
 
 from case_api.extension_contracts import validate_call
 from artifacts.gate import freeze_gate, load_gate
@@ -30,9 +30,27 @@ class GatePlugin:
     project_metrics: Callable
     write_report: Callable
 
+    producer: Optional[str] = None
+    describe: Optional[Callable] = None
+    view: Optional[str] = None
+    validate_view: Optional[Callable] = None
+    subtitle_fields: frozenset[str] = frozenset()
+
     def __post_init__(self):
         if type(self.name) is not str or not re.fullmatch(r'[a-z][a-z0-9_]*', self.name):
             raise ValueError('invalid gate name')
+        if (self.producer is None) != (self.describe is None):
+            raise ValueError('gate producer requires both name and description')
+        if self.producer is not None:
+            if type(self.producer) is not str or not re.fullmatch(r'[a-z][a-z0-9_]*', self.producer):
+                raise ValueError('invalid gate producer name')
+            validate_call(self.describe, 3, 'gate.' + self.name + '.describe')
+        if (self.view is None) != (self.validate_view is None):
+            raise ValueError('gate view requires both name and validator')
+        if self.view is not None:
+            if type(self.view) is not str or not re.fullmatch(r'[a-z][a-z0-9_]*\.yaml', self.view) or self.view == 'default.yaml':
+                raise ValueError('invalid gate view name')
+            validate_call(self.validate_view, 3, 'gate.' + self.name + '.validate_view')
         for name, count in (('analyze', 1), ('project_metrics', 3), ('write_report', 3)):
             validate_call(getattr(self, name), count, 'gate.' + self.name + '.' + name)
         try:

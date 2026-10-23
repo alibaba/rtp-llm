@@ -1,6 +1,5 @@
 """Single-run absolute gate; profiles are separate runs, never an A/B dependency."""
 
-from case_api.registry import ReportView
 from cases.master_performance.report import validate_view, write_report
 
 from cases.master_performance.actions import HANDLERS as ACTION_HANDLERS
@@ -63,16 +62,14 @@ def default(case):
 
 from case_api.gate_plugin import GatePlugin
 from cases.master_performance.analysis import analyze
-from cases.master_performance.metrics import produce
+from cases.master_performance.metrics import produce, metric_contract
 
-GATE = GatePlugin('performance', analyze, produce, write_report)
-REPORT_VIEWS = {'master_performance.yaml': ReportView(validate_view, GATE.render, deadline_renderer=GATE.render_with_deadline)}
+GATE = GatePlugin('performance', analyze, produce, write_report,
+                  producer='performance_requests', describe=metric_contract,
+                  view='master_performance.yaml', validate_view=validate_view)
 
 
 from case_api.registry import CaseDefinition
-from case_api.registry import MetricProducer
-from case_api.registry import ProducerPhase
-from cases.master_performance.metrics import metric_contract
 
 from case_api.execution_contract import ExecutionRequirements
 
@@ -82,8 +79,4 @@ CASE = CaseDefinition(
     input_contract=INPUTS,
     gates={'performance': GATE},
     actions=tuple(ACTION_HANDLERS),
-    report_views=REPORT_VIEWS,
-    producers={
-        "performance_requests": MetricProducer(metric_contract, GATE.project, ProducerPhase.GATE),
-    },
 )

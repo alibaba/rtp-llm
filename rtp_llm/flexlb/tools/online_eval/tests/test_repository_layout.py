@@ -65,7 +65,8 @@ class RepositoryLayoutTest(unittest.TestCase):
                     self.assertTrue(result.stdout.strip())
 
     def test_inventory_stays_complete_without_retired_modules(self):
-        from scenario import compile_scenarios, load_scenarios
+        from scenario import load_scenarios
+        from program_fixtures import compile_scenarios
         from scenario.catalog import handlers
 
         with mock.patch("scenario.compiler.VICTIM_OFFSETS", (700, 701, 702)), \

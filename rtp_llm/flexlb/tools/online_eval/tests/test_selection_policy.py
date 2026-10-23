@@ -9,7 +9,8 @@ import pytest
 from scenario.selection_cli import add_selection_arguments, resolve_selection, selection_arguments
 from scripts.commands import run_ci
 from scenario.suites import SuiteCatalog, preselect_documents, classify
-from scenario import load_scenarios, compile_scenarios
+from scenario import load_scenarios
+from program_fixtures import compile_scenarios
 from scenario.catalog import handlers
 from document_io import DocumentError as ScenarioError
 from scenario.ci_plan import CiPlan, CiInstance

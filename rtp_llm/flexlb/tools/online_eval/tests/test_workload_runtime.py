@@ -6,7 +6,8 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from scenario import compile_scenarios, load_scenarios
+from scenario import load_scenarios
+from program_fixtures import compile_scenarios
 from scenario.catalog import handlers
 from scenario.runtime import execute_instance
 from scenario.suites import classify, preselect_documents
@@ -19,7 +20,7 @@ ROOT = Path(__file__).resolve().parents[1]
 class WorkloadRuntimeTests(unittest.TestCase):
     def test_core_inventory_does_not_compile_large_workload(self):
         documents = preselect_documents(load_scenarios(ROOT / "config/scenarios"), "quick")
-        self.assertNotIn("cache_scale_in", {doc["id"] for _, doc in documents})
+        self.assertNotIn("cache_scale_in", {doc.id for _, doc in documents})
         self.assertEqual(len(classify(compile_scenarios(documents, "single-nonbatch", handlers=handlers()), "quick")), 1)
 
     def run_plan(

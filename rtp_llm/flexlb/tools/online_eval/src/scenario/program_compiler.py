@@ -2,6 +2,7 @@
 
 import copy
 from dataclasses import asdict
+from scenario.program import ProgramPlan, VariantPlan
 import hashlib
 import json
 from monitoring.identity import NAME
@@ -25,14 +26,19 @@ def program_module(name, source):
     return registry().cases[name]
 
 
-def configure_program(config, source):
-    """Build an internal plan using an allowlisted Python entry point, without starting services."""
+def configure_program(config, source) -> ProgramPlan:
+    """Build a typed program using a registered Python entry point, without starting services."""
     config = CaseDeclaration.read(config, source)
     name = config.case
     module = program_module(name, source)
     if config.program != "default":
         raise ScenarioError(f"{source}: every case must declare program: default")
-    document = _program_document(config, name, source)
+    from scenario.validation import identifier
+    from scenario.environment_config import environment as validate_environment
+    identifier(config.identity, source + ".id")
+    for profile in config.profiles:
+        validate_environment(config.environment, source + ".environment", profile)
+    variants = []
     seen = set()
     numeric_contracts = {}
     default = VariantDeclaration.read({"id": config.default_variant}, source)
@@ -45,45 +51,27 @@ def configure_program(config, source):
         seen.add(identity)
         if archive is not None:
             axes[identity] = dict(data_archive=archive, variant=behavior)
-        document["variants"].append(_build_variant(
+        variants.append(_build_variant(
             config, row, identity, module, config.profiles, source, numeric_contracts,
         ))
-    document["implementation"] = _implementation(config, module, name)
-    document["implementation"]["numeric_parameters"] = numeric_contracts
+    implementation = _implementation(config, module, name)
+    implementation["numeric_parameters"] = numeric_contracts
     if axes:
-        document["implementation"]["variant_axes"] = axes
-    return document
-
-
-def _program_document(config, name, source):
-    environment = config.environment
-    metadata = config.metadata
-    if not isinstance(metadata, dict):
-        raise ScenarioError(f"{source}.metadata: expected mapping")
-    document = dict({
-        key: copy.deepcopy(value) for key, value in metadata.items() if key != "kind"
-    })
-    document.update(
-        program_schema_version=1, environment=copy.deepcopy(environment), variants=[]
-    )
-    document["id"] = config.identity
+        implementation["variant_axes"] = axes
     from scenario.execution_policy import EXECUTION_BUDGETS
-
-    document["profiles"] = list(config.profiles)
-    document["execution"] = {
-        key: copy.deepcopy(value) for key, value in config.execution.to_dict().items()
-        if key in EXECUTION_BUDGETS
-    }
-    selected_profiles = document.get("profiles")
-    from scenario.validation import identifier, names
-    from scenario.environment_config import environment as validate_environment
-    from flexlb_cfg import PROFILES
-    identifier(document["id"], source + ".id")
-    if isinstance(selected_profiles, list):
-        names(selected_profiles, source + ".profiles", PROFILES)
-        for profile in selected_profiles:
-            validate_environment(environment, source + ".environment", profile)
-    return document
+    metadata = {key: copy.deepcopy(value) for key, value in config.metadata.items() if key != "kind"}
+    metadata.setdefault("category", "")
+    for key in ("tags", "requires", "findings"):
+        if key in metadata:
+            if not isinstance(metadata[key], list):
+                raise ScenarioError(source + ".metadata." + key + ": expected string list")
+            metadata[key] = tuple(metadata[key])
+    return ProgramPlan(
+        id=config.identity, environment=copy.deepcopy(config.environment),
+        variants=tuple(variants), profiles=config.profiles, implementation=implementation,
+        execution={key: value for key, value in config.execution.to_dict().items() if key in EXECUTION_BUDGETS},
+        **metadata,
+    )
 
 
 def _select_program(module, program, source):
@@ -131,12 +119,10 @@ def _build_variant(config, row, identity, module, selected_profiles, source, num
         if not path_in_scope(field, builder.read_parameters):
             raise ScenarioError(f"{source}: unused YAML parameter {field!r}")
     variant = _variant_contract(config, builder, source)
-    variant.update(
-        id=identity, profiles=copy.deepcopy(profiles), stages=builder.finish()
-    )
-    if patch:
-        variant["environment_overrides"] = copy.deepcopy(patch)
-    return variant
+    if "reports" in variant:
+        variant["reports"] = tuple(variant["reports"])
+    return VariantPlan(id=identity, profiles=tuple(profiles), stages=builder.finish(),
+                       environment_overrides=copy.deepcopy(patch), **variant)
 
 
 def _variant_contract(config, builder, source):
@@ -157,7 +143,7 @@ def _variant_contract(config, builder, source):
             raise ScenarioError("reporting.time_axis requires a workload case")
         from reporting.timeline import validate_configuration
         try:
-            variant["reporting"] = validate_configuration(config.reporting, {stage["id"] for stage in builder.steps})
+            variant["reporting"] = validate_configuration(config.reporting, {stage.id for stage in builder.steps})
         except ValueError as exc:
             raise ScenarioError(f"{source}.reporting: {exc}") from exc
     if metadata["kind"] == "workload":
@@ -213,7 +199,7 @@ def _bind_reports(config, variant, source, stages):
                 registry().capability("view", report_name, case=config.case)
             presentation = view(report_name)
             from reporting.events import validate_stage_sources
-            validate_stage_sources(presentation, {stage["id"] for stage in stages}, source + ".reports")
+            validate_stage_sources(presentation, {stage.id for stage in stages}, source + ".reports")
             required_plan = presentation.metrics.query_plan if presentation.metrics else None
             if required_plan and required_plan != variant["execution"]["monitoring"].get("query_plan"):
                 raise ScenarioError(

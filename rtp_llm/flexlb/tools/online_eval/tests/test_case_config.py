@@ -12,11 +12,8 @@ from unittest import mock
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 from scenario.program_compiler import configure_program
-from scenario import (
-    ScenarioError,
-    compile_scenarios,
-    load_scenarios,
-)
+from scenario import ScenarioError, load_scenarios
+from program_fixtures import compile_scenarios
 from scenario.catalog import handlers
 from document_io import load_document
 
@@ -27,9 +24,9 @@ class CaseConfigTest(unittest.TestCase):
         original = copy.deepcopy(config["parameters"]["checks"])
         config["parameters"]["procedure"]["analysis_timeout_s"] = 400
         plan = configure_program(config, "cache_scale_in.yaml")
-        stages = plan["variants"][0]["stages"]
-        gate = next(stage for stage in stages if stage["id"] == "gate")
-        self.assertEqual(gate["timeout_s"], 400)
+        stages = plan.variants[0].stages
+        gate = next(stage for stage in stages if stage.id == "gate")
+        self.assertEqual(gate.timeout_s, 400)
         self.assertEqual(config["parameters"]["checks"], original)
         del config["parameters"]["procedure"]["analysis_timeout_s"]
         with self.assertRaisesRegex(ScenarioError, "missing YAML parameter"):
@@ -43,8 +40,8 @@ class CaseConfigTest(unittest.TestCase):
             config = load_document(ROOT / f"config/scenarios/{name}.yaml")
             expected = config["parameters"]["observation"]["inputs"][input_name]
             plan = configure_program(config, name + ".yaml")
-            action = next(s for s in plan["variants"][0]["stages"] if s["action"] == stage)
-            self.assertEqual(action["params"]["gate_input"], expected)
+            action = next(s for s in plan.variants[0].stages if s.action == stage)
+            self.assertEqual(action.params["gate_input"], expected)
 
         config = load_document(ROOT / "config/scenarios/cache_scale_in.yaml")
         del config["parameters"]["observation"]["inputs"]["engine_counters"]["fields"]["hit_tokens_total"]

@@ -67,7 +67,7 @@ def test_delivery_failure_never_changes_gate(gate):
 def test_plan_executes_compiled_values_after_scene_changes_and_rejects_code_drift(tmp_path):
     scene = tmp_path / "scene.yaml"
     scene.write_text("count: 1")
-    from scenario import compile_scenarios
+    from program_fixtures import compile_scenarios
     from test_scenario_runtime import source
     compiled = compile_scenarios([("fixture", source())])
     path = tmp_path / "plan.json"
@@ -104,7 +104,7 @@ def test_report_structure_uses_ids_and_expands_checks_without_window_payloads():
 def test_child_uses_frozen_steps_without_loading_yaml(tmp_path, monkeypatch):
     import importlib.util
     from pathlib import Path
-    from scenario import compile_scenarios
+    from program_fixtures import compile_scenarios
     from test_scenario_runtime import Backend, Clock, source
     from test_scenario_backend import lease_manifest
     module_path = Path(__file__).resolve().parents[1] / "scripts/commands/list_cases.py"

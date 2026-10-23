@@ -15,7 +15,7 @@ from monitoring.metric_store import MetricStore
 from reporting import write_bundle, render
 from scenario.runtime import execute_instance
 from test_scenario_runtime import source, Backend, Clock
-from scenario import compile_scenarios
+from program_fixtures import compile_scenarios
 
 
 def definition():

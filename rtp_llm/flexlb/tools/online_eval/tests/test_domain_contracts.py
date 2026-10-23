@@ -6,7 +6,7 @@ from unittest.mock import patch
 
 import pytest
 
-from scenario.compiler import ScenarioCompiler
+from program_fixtures import ScenarioCompiler
 from scenario.execution_plan import ExecutionPlanCodec, _sha
 from document_io import DocumentError as ScenarioError
 from scenario.plan import ExecutionPlan, CompiledInstance

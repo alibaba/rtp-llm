@@ -89,9 +89,27 @@ class CaseDefinition:
                 merged[path] = rule
             object.__setattr__(self, "numeric_parameters", merged)
         for name in ('builders', 'numeric_parameters', 'report_views', 'producers', 'sources', 'gates'):
-            value = getattr(self, name)
-            if not isinstance(value, Mapping):
+            if not isinstance(getattr(self, name), Mapping):
                 raise ValueError('case ' + name + ' must be a mapping')
+        from case_api.gate_plugin import GatePlugin
+        producers, views = dict(self.producers), dict(self.report_views)
+        for name, gate in self.gates.items():
+            if not isinstance(gate, GatePlugin):
+                raise ValueError("invalid gate capability: " + name)
+            if gate.producer is not None:
+                producer = MetricProducer(gate.describe, gate.project, ProducerPhase.GATE)
+                if gate.producer in producers and producers[gate.producer] != producer:
+                    raise ValueError('conflicting gate producer registration: ' + gate.producer)
+                producers[gate.producer] = producer
+            if gate.view is not None:
+                view = ReportView(gate.validate_view, gate.render, gate.subtitle_fields, gate.render_with_deadline)
+                if gate.view in views and views[gate.view] != view:
+                    raise ValueError('conflicting gate view registration: ' + gate.view)
+                views[gate.view] = view
+        object.__setattr__(self, 'producers', producers)
+        object.__setattr__(self, 'report_views', views)
+        for name in ('builders', 'numeric_parameters', 'report_views', 'producers', 'sources', 'gates'):
+            value = getattr(self, name)
             object.__setattr__(self, name, MappingProxyType(dict(value)))
         object.__setattr__(self, 'actions', tuple(self.actions))
 

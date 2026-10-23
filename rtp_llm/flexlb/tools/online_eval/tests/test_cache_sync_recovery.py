@@ -1,3 +1,4 @@
+from dataclasses import asdict
 """Reject invalid workloads and distinguish healthy survivors from planned victims."""
 
 import copy
@@ -27,12 +28,12 @@ def row(generation=1, age=20):
 
 def test_registered_workload_compiles_with_shared_monitoring_and_automatic_reports():
     plan = configure_program(config(), "cache_sync_recovery.yaml")
-    assert [v["id"] for v in plan["variants"]] == ["steady", "recovery"]
-    a, b = plan["variants"]
-    assert all(v["metadata"]["kind"] == "workload" and v["reports"] == ["cache_sync_recovery.yaml"] for v in (a,b))
-    assert [s["action"] for s in a["stages"]] == ["setup", "cache_recovery_cycle", "teardown"]
-    assert a["environment"] == b["environment"] if "environment" in a else True
-    left, right = copy.deepcopy(a["stages"][1]), copy.deepcopy(b["stages"][1])
+    assert [v.id for v in plan.variants] == ["steady", "recovery"]
+    a, b = plan.variants
+    assert all(v.metadata["kind"] == "workload" and v.reports == ("cache_sync_recovery.yaml",) for v in (a,b))
+    assert [s.action for s in a.stages] == ["setup", "cache_recovery_cycle", "teardown"]
+    assert a.environment_overrides == b.environment_overrides
+    left, right = asdict(a.stages[1]), asdict(b.stages[1])
     assert left["params"].pop("intervention") is False
     assert right["params"].pop("intervention") is True
     assert right.pop("timeout_s")-left.pop("timeout_s") == 20

@@ -27,7 +27,6 @@ case analysis/report     明确判定后装配 HTML bundle
 | 报告视图 YAML | `report_view_schema_version` | 1 |
 | Suite 与 CI 策略 | `suite_schema_version` | 3 |
 | mode profile | `mode_profiles_schema_version` | 1 |
-| Python 内部 program document | `program_schema_version` | 1 |
 | 冻结执行计划 | `execution_plan_schema_version` | 1 |
 | 编译 / 列举的实例清单 | `instance_catalog_schema_version` | 1 |
 | 子执行器结果 / 父 runner 汇总 | `scenario_results_schema_version` / `run_summary_schema_version` | 1 |
@@ -45,7 +44,7 @@ case analysis/report     明确判定后装配 HTML bundle
 | 实验归档 manifest / 请求计划 manifest | `archive_manifest_schema_version` / `request_plan_manifest_schema_version` | 1 |
 | Master 模板 / 流量保真度分析 | `master_template_schema_version` / `traffic_fidelity_schema_version` | 1 |
 
-case YAML 通过 `program: default` 生成内部 program document；后者包含 stages 和 typed reference，不是旧用户 YAML 的兼容入口。读取方校验本格式的版本字段及整数类型，拒绝其他格式或旧通用版本字段，不能根据文件名或版本数字猜测格式。报告生产器组装的内存图表可以暂不带版本字段，由 bundle 写入器明确标记；落盘文件和离线读取必须带有相应字段。
+case YAML 通过 `program: default` 调用 Python 构建器，生成 `ProgramPlan`、`VariantPlan` 和 `StageDefinition`。编译器校验引用与资源约束，直接生成 `CompiledInstance` 和 `StagePlan`；内存程序对象不定义文件格式或版本。落盘读取方校验本格式的版本字段及整数类型，拒绝其他格式或旧通用版本字段，不能根据文件名或版本数字猜测格式。报告生产器组装的内存图表可以暂不带版本字段，由 bundle 写入器明确标记；落盘文件和离线读取必须带有相应字段。
 
 真实采集输入、固定合成流量 profile 及 Java 共享性能 / 流控协议保留它们原有的 `schema_version`，由相应协议读取器校验，不进入 case、执行计划、指标和报告的读取边界。它们的语义与准入见[数据目录](../../data/README.md)。调整这类字段需要同步固定输入及协议双方。
 
@@ -55,7 +54,7 @@ case YAML 通过 `program: default` 生成内部 program document；后者包含
 
 编译按 document、variant、profile 三层展开，读取声明、preset 和实现源码，但不启动服务。环境声明与标量合同由 `environment_declaration` 维护，Master patch 由 `master_patch` 校验，preset、profile 渲染、偏离检查和快照冻结由 `environment_resolver` 负责。
 
-内部 program document 使用显式 `implementation` 字段携带实现与配置来源；普通 mapping 复制和 JSON 序列化必须保留该字段。编译后的 `metadata.kind` 与 `execution` 是执行策略的来源，`test_kind`、`collection_profile`、`workload_runtime` 是 plan 生成并复核的一致性投影。suite 只选择实例，不补齐执行策略。
+`ProgramPlan.implementation` 携带实现与配置来源，实例编译和冻结计划序列化保留该信息。编译后的 `metadata.kind` 与 `execution` 是执行策略的来源，`test_kind`、`collection_profile`、`workload_runtime` 是 plan 生成并复核的一致性投影。suite 只选择实例，不补齐执行策略。
 
 端口窗口准入、探测与锁由 `adapters.port_windows` 提供。`admit_port_window()` 返回包含选定端口、来源、逐 lane 状态、诊断及锁所有权的 `PortAdmission`，不改写参数或进程环境，不打印或退出。父编排器在上下文作用域内持有窗口锁与输出锁，规划失败、执行失败和正常返回都释放所有权；子进程端口环境从选定租约生成。命令入口负责准入错误的退出码和诊断。子结果的身份和嵌套证据由 `scenario.result_validation` 复核，耗时缓存由 `scenario.timing_store` 维护。编译、冻结计划读取、lease 校验与父进程结果接收各自保留边界校验，共享字段和参数规则。
 
@@ -136,7 +135,7 @@ Java 流量控制使用 `FlowState`、`FlowStatus`、`StopCommand` 和 `DrainRes
 
 ## 声明与解析结果
 
-数据型 case YAML 在入口解码为 `CaseDeclaration`、`VariantDeclaration`、`ExecutionPolicy` 和 `MonitoringPolicy`。case 的业务参数由所属程序校验，公共构建层不通过任意模块属性寻找入口。`CaseDefinition` 声明全部能力，注册器按目录发现并校验冲突。
+数据型 case YAML 在入口解码为 `CaseDeclaration`、`VariantDeclaration`、`ExecutionPolicy` 和 `MonitoringPolicy`。case 的业务参数由所属程序校验，公共构建层不通过任意模块属性寻找入口。`CaseDefinition` 声明全部能力，注册器按目录发现并校验冲突。冻结门禁的 `GatePlugin` 同时声明 producer 名称与指标描述函数、报告视图名称与校验函数；`CaseDefinition` 从该声明生成指标投影和报告注册，不需要在 case 中分别重复登记。独立的指标生产器、分阶段检查投影和报告仍可直接注册。
 
 环境覆盖通过统一规则合并：配置字段整体替换，profile 按名称及字段继承，列表与完整模型整体替换。编译阶段将最终 Master JSON、preset 性能数据及运行选项冻结为带 SHA 的 `EnvironmentSnapshot`。运行时使用冻结数据投影进程参数，不重新读取 preset 或应用配置默认值。
 

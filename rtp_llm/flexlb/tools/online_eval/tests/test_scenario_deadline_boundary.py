@@ -37,7 +37,7 @@ if __name__ == "__main__":
 
 def test_policy_hook_cannot_consume_budget_and_still_start_operation(tmp_path):
     from types import SimpleNamespace
-    from scenario import compile_scenarios
+    from program_fixtures import compile_scenarios
     from scenario.plan import CompiledInstance
     from scenario.context import RuntimeContext
     from scenario.stage_execution import StageExecutor

@@ -44,7 +44,7 @@ def test_impossible_offered_load_requires_an_explicit_threshold_review():
     checks['requests']['expected'] = int(checks['requests']['expected'])
     checks['goodput']['expected'] /= 2
     plan = configure_program(data, 'case.yaml')
-    criteria = next(s for s in plan['variants'][0]['stages'] if s['id'] == 'measure')['params']['criteria']
+    criteria = next(s for s in plan.variants[0].stages if s.id == 'measure').params['criteria']
     assert criteria['min_input_tps'] == checks['input_tps']['expected']
     assert criteria['qps'] == 768
 
@@ -64,12 +64,12 @@ def test_source_priority_is_the_client_priority_authority(name):
     traffic = data['parameters']['traffic']
     traffic['source']['parameters']['priority'] = 60
     plan = configure_program(data, 'case.yaml')
-    stage = next(s for s in plan['variants'][0]['stages'] if s['action'] in ('java_flow_start', 'master_client_start'))
-    assert stage['params']['source']['parameters']['priority'] == 60
+    stage = next(s for s in plan.variants[0].stages if s.action in ('java_flow_start', 'master_client_start'))
+    assert stage.params['source']['parameters']['priority'] == 60
     if name != 'master_ha_failover':
         from adapters.load_client import client_environment
         from traffic.contracts import source_priority
-        environment, _ = client_environment(stage['params']['client'], priority=source_priority(stage['params']['source']))
+        environment, _ = client_environment(stage.params['client'], priority=source_priority(stage.params['source']))
         assert environment['PRIORITY'] == '60'
         traffic['client']['PRIORITY'] = '50'
         with pytest.raises(ValueError, match='unknown client fields'):
@@ -172,10 +172,10 @@ def test_check_windows_reject_ambiguous_or_invalid_references(name, criterion, w
 
 def test_composite_check_requires_both_declared_windows_and_has_no_order_semantics():
     data = config('cache_scale_in')
-    expected = configure_program(data, 'case.yaml')['variants']
+    expected = configure_program(data, 'case.yaml').variants
     check = data['parameters']['checks']['offered_load']
     check['windows'] = ['post', 'baseline']
-    assert configure_program(data, 'case.yaml')['variants'] == expected
+    assert configure_program(data, 'case.yaml').variants == expected
     check['windows'] = ['baseline']
     with pytest.raises(ValueError, match='measurement contract'):
         configure_program(data, 'case.yaml')

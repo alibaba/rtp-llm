@@ -57,7 +57,7 @@ def test_shipped_scenarios_need_no_numeric_schema(name):
     data = config(name)
     assert 'parameter_schema' not in data
     document = configure_program(data, name)
-    rules = document["implementation"]['numeric_parameters']['default']
+    rules = document.implementation['numeric_parameters']['default']
     assert rules
     if 'procedure.setup_timeout_s' in rules:
         assert rules['procedure.setup_timeout_s'] == asdict(NONNEGATIVE)
@@ -98,8 +98,8 @@ def test_case_and_variant_constraints_intersect_and_are_frozen():
     data['variants'] = [dict(id='small', parameters=dict(traffic=dict(count=2)),
                              parameter_schema={'traffic.count': {'maximum': 2}})]
     document = configure_program(data, 'case.yaml')
-    assert document["implementation"]['numeric_parameters']['default']['traffic.count']['maximum'] == 10000
-    assert document["implementation"]['numeric_parameters']['small']['traffic.count']['maximum'] == 2
+    assert document.implementation['numeric_parameters']['default']['traffic.count']['maximum'] == 10000
+    assert document.implementation['numeric_parameters']['small']['traffic.count']['maximum'] == 2
     data['variants'][0]['parameters']['traffic']['count'] = 3
     with pytest.raises(ScenarioError, match='traffic.count'):
         configure_program(data, 'case.yaml')
@@ -145,7 +145,7 @@ def test_variant_can_narrow_another_declared_parameter():
     data['variants'] = [dict(id='small', parameters={'traffic': {'input_len': 64}},
                             parameter_schema={'traffic.input_len': {'maximum': 100}})]
     document = configure_program(data, 'case.yaml')
-    assert document['variants'][1]['stages'][1]['params']['input_len'] == 64
+    assert document.variants[1].stages[1].params['input_len'] == 64
 
 
 def test_nonrepresentable_numbers_are_rejected_without_overflow():

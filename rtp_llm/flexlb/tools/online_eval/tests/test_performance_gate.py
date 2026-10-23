@@ -19,7 +19,8 @@ def report(directory, evidence, result):
     freeze_metrics(directory, "master_performance")
     return publish_performance(directory, evidence, result)
 from artifacts.gate_inputs import trace_workload_sha
-from scenario import compile_scenarios, load_scenarios
+from scenario import load_scenarios
+from program_fixtures import compile_scenarios
 from scenario.catalog import handlers
 
 ROOT = Path(__file__).resolve().parents[1]

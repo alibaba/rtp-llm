@@ -4,7 +4,7 @@ import json
 import time
 from unittest import mock
 import pytest
-from scenario import compile_scenarios
+from program_fixtures import compile_scenarios
 from scenario.runtime import RuntimeContext, Deadline
 from workload.policy import execute_workload, WorkloadPolicy
 from case_api.extension_contracts import ResourceEvidence

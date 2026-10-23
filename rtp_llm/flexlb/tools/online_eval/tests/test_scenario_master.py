@@ -485,7 +485,8 @@ class MasterActionsTest(unittest.TestCase):
         self.assertEqual([rows[0]], self.ctx.resource(out.output["rows"], "ha_rows"))
 
     def test_master_programs_compile_with_explicit_registered_actions(self):
-        from scenario import compile_scenarios, load_scenarios
+        from scenario import load_scenarios
+        from program_fixtures import compile_scenarios
         from scenario.actions.engine_control import (
             HANDLERS as controls,
         )
@@ -547,7 +548,7 @@ class MasterActionsTest(unittest.TestCase):
         path = Path(__file__).resolve().parents[1] / "config/scenarios/master_ha_failover.yaml"
         config = load_document(path)
         document = configure_program(config, str(path))
-        ids = [stage["id"] for stage in next(v for v in document["variants"] if v["id"] == "non_rolling")["stages"]]
+        ids = [stage.id for stage in next(v for v in document.variants if v.id == "non_rolling").stages]
         self.assertLess(ids.index("kill_b"), ids.index("outage_start"))
         self.assertLess(ids.index("outage_end"), ids.index("restart_a"))
         self.assertIn("outage_failures", ids)

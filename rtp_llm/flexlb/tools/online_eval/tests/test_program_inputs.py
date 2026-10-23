@@ -1,3 +1,4 @@
+from dataclasses import asdict
 """Public program input groups, inactive criteria and window bindings are strict."""
 
 from pathlib import Path
@@ -6,7 +7,7 @@ from unittest.mock import patch
 import pytest
 
 from scenario.program_compiler import configure_program
-from scenario import compile_scenarios
+from program_fixtures import compile_scenarios
 from scenario.catalog import handlers
 from document_io import DocumentError as ScenarioError
 from document_io import load_document
@@ -43,7 +44,7 @@ def test_numeric_constraints_apply_to_nested_traffic_paths():
     data["parameters"]["traffic"]["count"] = 10000
     del data["parameter_schema"]
     plan = configure_program(data, "case.yaml")
-    assert plan["variants"][0]["stages"][1]["params"]["count"] == 10000
+    assert plan.variants[0].stages[1].params["count"] == 10000
 
 
 @pytest.mark.parametrize("name,stage", [
@@ -56,7 +57,7 @@ def test_qps_has_one_yaml_source_and_is_frozen_into_observation(name, stage):
     if name == "cache_scale_in":
         data["parameters"]["traffic"]["max_requests"] = data["parameters"]["traffic"]["source"]["parameters"]["count"]
     plan = configure_program(data, "case.yaml")
-    params = next(s for s in plan["variants"][0]["stages"] if s["id"] == stage)["params"]
+    params = next(s for s in plan.variants[0].stages if s.id == stage).params
     assert params["criteria"]["qps"] == qps
     data["parameters"]["checks"]["qps"] = qps
     with pytest.raises(ScenarioError, match="unknown configuration fields"):
@@ -78,9 +79,9 @@ def test_ha_windows_and_check_binding_are_yaml_data_and_compile_to_typed_outputs
     data["parameters"]["observation"]["windows"]["baseline"]["until"]["offset_s"] = -3
     data["parameters"]["checks"]["b_success"]["windows"] = ["both"]
     document = configure_program(data, "ha.yaml")
-    stages = {s["id"]: s for s in document["variants"][0]["stages"]}
-    assert stages["baseline"]["params"]["until_offset_s"] == -3
-    assert stages["b_success"]["params"]["rows"] == {"$ref": "stages.both.output.rows"}
+    stages = {s.id: s for s in document.variants[0].stages}
+    assert stages["baseline"].params["until_offset_s"] == -3
+    assert stages["b_success"].params["rows"] == {"$ref": "stages.both.output.rows"}
     with patch("scenario.compiler.VICTIM_OFFSETS", (700, 701, 702)), \
          patch("adapters.java_mock_resources.VICTIM_OFFSETS", (700, 701, 702)):
         assert len(compile_scenarios([("ha.yaml", document)], handlers=handlers())) == 4
@@ -116,23 +117,23 @@ def test_ha_flow_waits_and_evidence_offsets_have_separate_effects():
     changed["parameters"]["procedure"]["settle"]["wait_s"] = 7
     baseline = configure_program(original, "ha.yaml")
     compiled = configure_program(changed, "ha.yaml")
-    for before, after in zip(baseline["variants"], compiled["variants"]):
-        expected = [s.copy() for s in before["stages"]]
+    for before, after in zip(baseline.variants, compiled.variants):
+        expected = [asdict(s) for s in before.stages]
         for stage in expected:
             if stage["action"] == "master_mark" and stage["id"] in {
                 "b_start", "a_start", "both_start", "outage_start",
             }:
                 stage["params"] = {**stage["params"], "wait_s": 7}
-        assert expected == after["stages"]
+        assert expected == [asdict(s) for s in after.stages]
     changed = config("master_ha_failover")
     changed["parameters"]["observation"]["windows"]["baseline"]["until"]["offset_s"] = -3
     compiled = configure_program(changed, "ha.yaml")
-    for before, after in zip(baseline["variants"], compiled["variants"]):
-        expected = [s.copy() for s in before["stages"]]
+    for before, after in zip(baseline.variants, compiled.variants):
+        expected = [asdict(s) for s in before.stages]
         for stage in expected:
             if stage["id"] == "baseline":
                 stage["params"] = {**stage["params"], "until_offset_s": -3}
-        assert expected == after["stages"]
+        assert expected == [asdict(s) for s in after.stages]
 
 
 def test_ha_waits_cannot_be_redeclared_as_observation_inputs():

@@ -1,11 +1,11 @@
-import copy
 import sys
 import unittest
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
-from scenario import compile_scenarios, load_scenarios
+from scenario import load_scenarios
+from program_fixtures import compile_scenarios
 
 
 class RequestShapeTests(unittest.TestCase):
@@ -17,8 +17,8 @@ class RequestShapeTests(unittest.TestCase):
             compile_scenarios(docs, grade="invented")
 
     def source(self):
-        source = copy.deepcopy(load_scenarios(ROOT / "config/scenarios/request_completion.yaml")[0][1])
-        source["stages"] = source.pop("variants")[0]["stages"]
+        from program_fixtures import mutable_program
+        source = mutable_program(load_scenarios(ROOT / "config/scenarios/request_completion.yaml")[0][1])
         return source
 
     def test_unset_is_not_materialized_and_protocol_values_preserved(self):

@@ -12,7 +12,7 @@ from adapters.java_mock_resources import (
     ResourcePlanError,
     plan_lane_leases,
 )
-from scenario import compile_scenarios
+from program_fixtures import compile_scenarios
 from scenario.backend import BoundedOps, JavaMockBackend
 from scenario.catalog import handlers
 from scenario.contracts import StageHandler

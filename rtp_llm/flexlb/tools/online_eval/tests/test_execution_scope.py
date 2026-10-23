@@ -4,7 +4,7 @@ import json
 import pytest
 
 from case_api.registry import discover, registry, using_cases
-from scenario.compiler import ScenarioCompiler
+from program_fixtures import ScenarioCompiler
 from scenario.execution_plan import freeze_plan, load_plan
 from test_scenario_runtime import source
 

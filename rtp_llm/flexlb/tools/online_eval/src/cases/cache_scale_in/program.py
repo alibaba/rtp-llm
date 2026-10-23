@@ -1,6 +1,5 @@
 """Warm once, shrink in one step, keep the Java sender running, adjudicate offline."""
 
-from case_api.registry import ReportView
 from cases.cache_scale_in.report import validate_view, write_report
 
 from cases.cache_scale_in.actions import HANDLERS as ACTION_HANDLERS
@@ -64,16 +63,15 @@ def default(case):
 
 from case_api.gate_plugin import GatePlugin
 from cases.cache_scale_in.analysis import analyze
-from cases.cache_scale_in.metrics import produce
+from cases.cache_scale_in.metrics import produce, metric_contract
 
-GATE = GatePlugin('cache', analyze, produce, write_report)
-REPORT_VIEWS = {'cache_scale_in.yaml': ReportView(validate_view, GATE.render, frozenset({"expected_behavior", "observed_behavior"}), deadline_renderer=GATE.render_with_deadline)}
+GATE = GatePlugin('cache', analyze, produce, write_report,
+                  producer='cache_windows', describe=metric_contract,
+                  view='cache_scale_in.yaml', validate_view=validate_view,
+                  subtitle_fields=frozenset({"expected_behavior", "observed_behavior"}))
 
 
 from case_api.registry import CaseDefinition
-from case_api.registry import MetricProducer
-from case_api.registry import ProducerPhase
-from cases.cache_scale_in.metrics import metric_contract
 
 from case_api.execution_contract import ExecutionRequirements
 
@@ -83,8 +81,4 @@ CASE = CaseDefinition(
     input_contract=INPUTS,
     gates={'cache': GATE},
     actions=tuple(ACTION_HANDLERS),
-    report_views=REPORT_VIEWS,
-    producers={
-        "cache_windows": MetricProducer(metric_contract, GATE.project, ProducerPhase.GATE),
-    },
 )

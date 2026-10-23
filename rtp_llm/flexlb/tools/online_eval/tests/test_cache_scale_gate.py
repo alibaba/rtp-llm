@@ -19,7 +19,8 @@ def write_report(directory, evidence, result, prepared=None):
     bundle = publish_cache(directory, evidence, result, report_options={"prepared": prepared})
     return json.loads((bundle / "report-spec.json").read_text())
 from reporting.view_config import view
-from scenario import compile_scenarios, load_scenarios
+from scenario import load_scenarios
+from program_fixtures import compile_scenarios
 from scenario.catalog import handlers
 
 ROOT = Path(__file__).resolve().parents[1]

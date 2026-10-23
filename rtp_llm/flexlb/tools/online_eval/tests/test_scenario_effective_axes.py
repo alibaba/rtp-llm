@@ -7,14 +7,20 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 from flexlb_cfg import render_env
-from scenario import compile_scenarios, load_scenarios
+from scenario import load_scenarios
+from program_fixtures import compile_scenarios
 from scenario.backend_spec import make_env_spec
 
 
 class EffectiveAxesTests(unittest.TestCase):
     def source(self, overrides):
-        source = copy.deepcopy(load_scenarios(ROOT / "config/scenarios/request_completion.yaml")[0][1])
-        source["stages"] = source.pop("variants")[0]["stages"]
+        from dataclasses import asdict
+        typed = load_scenarios(ROOT / "config/scenarios/request_completion.yaml")[0][1]
+        source = dict(id=typed.id, description=typed.description, category=typed.category,
+                      environment=copy.deepcopy(typed.environment), implementation=typed.implementation,
+                      profiles=list(typed.profiles),
+                      stages=[{k: v for k, v in asdict(step).items() if v is not None}
+                              for step in typed.variants[0].stages])
         source["environment"]["config_overrides"] = overrides
         return source
 

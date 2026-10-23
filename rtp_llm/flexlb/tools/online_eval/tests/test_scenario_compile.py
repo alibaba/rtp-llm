@@ -12,17 +12,13 @@ TOOLS = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(TOOLS))
 
 from flexlb_cfg import render_env
-from scenario import (
-    ScenarioError,
-    compile_scenarios,
-    load_scenarios,
-)
+from scenario import ScenarioError, load_scenarios
+from program_fixtures import compile_scenarios
 from document_io import load_document
 
 
 def scenario():
     return {
-        "program_schema_version": 1,
         "implementation": {},
         "id": "completion",
         "description": "A submitted request reaches terminal state",
@@ -109,17 +105,11 @@ class CompileTest(unittest.TestCase):
             "NON_BATCH",
         )
 
-    def test_unknown_field_and_version_are_errors_with_source(self):
-        for patch in (
-            {"program_schema_version": True},
-            {"program_schema_version": 2},
-            {"python": "exec()"},
-            {1: "bad"},
-        ):
-            with self.subTest(patch=patch), self.assertRaisesRegex(
-                ScenarioError, "test.yaml"
-            ):
-                self.compile({**scenario(), **patch})
+    def test_raw_program_dictionaries_are_rejected_with_source(self):
+        from scenario.compiler import compile_scenarios
+        for document in (scenario(), {"program_schema_version": 1}, {"python": "exec()"}, {1: "bad"}):
+            with self.subTest(document=document), self.assertRaisesRegex(ScenarioError, "test.yaml.*ProgramPlan"):
+                compile_scenarios([("test.yaml", document)])
 
     def test_setup_order_and_references_are_checked_before_runtime(self):
         for ref in (

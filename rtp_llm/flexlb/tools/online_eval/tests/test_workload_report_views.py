@@ -154,11 +154,11 @@ class WorkloadReportViewsTest(unittest.TestCase):
             if doc.get("metadata", {}).get("kind") != "workload":
                 continue
             configured = configure_program(doc, str(path))
-            for variant in configured["variants"]:
-                if variant["metadata"]["kind"] != "workload":
-                    self.assertNotIn("reports", variant)
+            for variant in configured.variants:
+                if variant.metadata["kind"] != "workload":
+                    self.assertIsNone(variant.reports)
                     continue
-                names = variant["reports"]
+                names = variant.reports
                 self.assertTrue(names)
                 self.assertEqual(len(names), len(set(names)))
                 self.assertTrue(any(name != DEFAULT_VIEW for name in names))
@@ -208,11 +208,8 @@ class WorkloadReportViewsTest(unittest.TestCase):
             render = mock.Mock(wraps=GATE.write_report)
             gate = replace(GATE, write_report=render)
             registered = registry.registry().cases['cache_scale_in']
-            definition = replace(registered.definition, report_views={
-                'cache_scale_in.yaml': registry.ReportView(
-                    registered.definition.report_views['cache_scale_in.yaml'].validator, gate.render,
-                    registered.definition.report_views['cache_scale_in.yaml'].subtitle_fields),
-            })
+            definition = replace(registered.definition, gates={'cache': gate},
+                                 producers={}, report_views={})
             with mock.patch.object(registry, '_snapshot', snapshot(
                 entry(registered.name, definition, registered.module, registered.path), include_existing=True)):
                 links = write_views(d, payload(), ["default.yaml", "cache_scale_in.yaml"])

@@ -10,7 +10,7 @@ from monitoring.collection_plan import select_plan, instance_plan, physical_metr
 from monitoring.query_plan import load_plan, plan_hash
 from reporting.view_config import view
 from scenario.catalog import handlers
-from scenario.compiler import compile_scenarios
+from program_fixtures import compile_scenarios
 from document_io import load_document
 
 ROOT = Path(__file__).resolve().parents[1]

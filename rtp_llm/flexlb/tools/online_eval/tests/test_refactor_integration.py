@@ -4,7 +4,8 @@ from unittest.mock import patch
 import pytest
 from document_io import load_document
 from scenario.program_compiler import configure_program
-from scenario import compile_scenarios, load_scenarios
+from scenario import load_scenarios
+from program_fixtures import compile_scenarios
 from scenario.catalog import handlers
 from scenario.suites import preselect_documents
 

@@ -21,6 +21,11 @@ def json_document(value):
     return json.dumps(value, separators=(",", ":"), allow_nan=False)
 
 
+def attachment_document(value):
+    # Stable envelope order without reordering case-owned nested definitions.
+    return json_document({key: value[key] for key in sorted(value)})
+
+
 @dataclass(frozen=True)
 class ExecutionBudgets:
     timeout_s: float
@@ -253,7 +258,7 @@ class CompiledInstance:
         return cls(**scalar, environment=environment, execution=ExecutionBudgets.read(policy),
                    stages=stages, findings=tuple(value["findings"]), requires=tuple(value["requires"]),
                    tags=tuple(value["tags"]), resource_budget=resource_budget,
-                   attachments_json=json_document(attachment_data))
+                   attachments_json=attachment_document(attachment_data))
 
     def to_dict(self):
         result = {key: getattr(self, key) for key in ("id", "scenario_id", "variant_id", "profile", "category",

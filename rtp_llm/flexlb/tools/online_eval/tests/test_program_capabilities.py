@@ -14,7 +14,8 @@ from scenario.program_compiler import configure_program
 from case_api import registry
 from case_registry_fixtures import entry, snapshot
 from reporting import discover_reports, write_bundle
-from scenario import ScenarioError, compile_scenarios
+from scenario import ScenarioError
+from program_fixtures import compile_scenarios
 from scenario.catalog import handlers
 from reporting.comparison import compare
 from workload.validity import analyze_report
@@ -40,7 +41,7 @@ class ProgramCapabilitiesTest(unittest.TestCase):
             path = root / 'scenario.yaml'
             path.write_text(yaml.safe_dump(config))
             shared = registry.registry().cases['cache_scale_in'].definition
-            definition = replace(module.CASE, producers=shared.producers, report_views=shared.report_views)
+            definition = replace(module.CASE, gates=shared.gates, producers=shared.producers, report_views=shared.report_views)
             with mock.patch.object(registry, '_snapshot', snapshot(entry('second_cache', definition, 'second_cache', module_path), include_existing=True)):
                 with mock.patch('scenario.compiler.VICTIM_OFFSETS', (700, 701, 702)), \
                      mock.patch('adapters.java_mock_resources.VICTIM_OFFSETS', (700, 701, 702)):

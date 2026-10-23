@@ -6,7 +6,7 @@ import pytest
 
 from document_io import load_document, DocumentError
 from scenario.program_compiler import configure_program
-from scenario.compiler import compile_scenarios
+from program_fixtures import compile_scenarios
 from scenario.catalog import handlers
 from cases.cache_scale_in.report import request_outcomes
 
@@ -24,7 +24,7 @@ def test_both_archives_cross_both_behaviors_and_modes(monkeypatch):
     before = copy.deepcopy(data)
     document = configure_program(data, 'cache_scale_in.yaml')
     assert data == before
-    variants = {v['id']: v for v in document['variants']}
+    variants = {v.id: v for v in document.variants}
     assert set(variants) == {'default', 'affinity_disabled', 'glm', 'glm__affinity_disabled'}
     plans = compile_scenarios([('cache.yaml', document)], handlers=handlers())
     assert len(plans) == 8

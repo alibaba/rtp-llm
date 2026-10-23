@@ -1,7 +1,7 @@
 """Explicit suite membership and typed execution policies for CI jobs."""
 import copy
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Optional
 
@@ -136,11 +136,10 @@ def preselect_documents(documents, suite=None, catalog=CATALOG, *, kind=None):
     selection = Selection.read(suite, kind, SuiteCatalog.read(catalog))
     selected = []
     for path, document in documents:
-        variants = [v for v in document['variants']
-                    if selection.matches(document['id'] + '::' + v['id'], normalize_metadata(v['metadata'])['kind'])]
+        variants = [v for v in document.variants
+                    if selection.matches(document.id + '::' + v.id, normalize_metadata(v.metadata)['kind'])]
         if variants:
-            doc = copy.deepcopy(document)
-            doc['variants'] = copy.deepcopy(variants)
+            doc = copy.deepcopy(replace(document, variants=tuple(variants)))
             selected.append((path, doc))
     return selected
 
@@ -168,4 +167,4 @@ def exact_documents(documents, identities):
         raise ScenarioError('instances requires unique complete case::variant::profile IDs')
     cases = {value.split('::')[0] for value in ids}
     return [(source, document) for source, document in documents
-            if document.get('id', document.get('case')) in cases]
+            if document.id in cases]

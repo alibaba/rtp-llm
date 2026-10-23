@@ -1,6 +1,8 @@
 """Case 作者使用的步骤构建器与输出引用。"""
 
 import copy
+from dataclasses import replace
+from scenario.program import StageDefinition
 from monitoring.identity import METRIC_ID
 from document_io import DocumentError as ScenarioError
 from scenario.config_data import merge_data
@@ -20,7 +22,7 @@ class CaseBuilder:
         self.optional_numbers = frozenset(optional_numbers)
         from case_api.environment import EnvironmentView
         self.env = EnvironmentView(environment, self.profiles)
-        self.steps = []
+        self.steps: list[StageDefinition] = []
         self.read_parameters = set()
         self.metric_dependencies = {}
 
@@ -82,12 +84,7 @@ class CaseBuilder:
             self.read_parameters = reads
 
     def step(self, name, action, *, params=None, timeout_s=None):
-        step = {"id": name, "action": action}
-        if params is not None:
-            step["params"] = copy.deepcopy(params)
-        if timeout_s is not None:
-            step["timeout_s"] = timeout_s
-        self.steps.append(step)
+        self.steps.append(StageDefinition(name, action, copy.deepcopy(params) if params is not None else {}, timeout_s))
 
     def observe(self, name, action, *, params=None, timeout_s=None):
         """Independent observation: a FAIL may continue in the workload executor.
@@ -96,7 +93,7 @@ class CaseBuilder:
         ERROR/TIMEOUT still abort dependent execution in either test class.
         """
         self.step(name, action, params=params, timeout_s=timeout_s)
-        self.steps[-1]["purpose"] = "observation"
+        self.steps[-1] = replace(self.steps[-1], purpose="observation")
 
-    def finish(self):
-        return copy.deepcopy(self.steps)
+    def finish(self) -> tuple[StageDefinition, ...]:
+        return tuple(copy.deepcopy(self.steps))

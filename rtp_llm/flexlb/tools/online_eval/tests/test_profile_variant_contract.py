@@ -1,3 +1,4 @@
+from dataclasses import replace
 """Public schema regressions: profile identity, semantic variants and isolated inputs."""
 import copy
 import json
@@ -11,7 +12,8 @@ from flexlb_cfg import (
     PreemptionPolicy, PriorityOrdering, ProfileIdentityError, PROFILES,
     SingleDecision, render_env,
 )
-from scenario import ScenarioError, compile_scenarios, load_scenarios
+from scenario import ScenarioError, load_scenarios
+from program_fixtures import compile_scenarios
 from scenario.environment_config import environment
 from scenario.environment_declaration import (
     OPTIONAL_SCALARS, environment_fields, optional_scalars,
@@ -35,8 +37,7 @@ def test_no_variants_matches_internal_default_without_inheritance():
     original = copy.deepcopy(data)
     document = configure_program(data, 'case.yaml')
     explicit = compile_scenarios([('case.yaml', document)])
-    default = copy.deepcopy(document)
-    default['stages'] = default.pop('variants')[0]['stages']
+    default = replace(document, variants=(document.variants[0],))
     # Test annotations are not compiler defaults; compare executable content.
     implicit = compile_scenarios([('case.yaml', default)])
     assert len(explicit) == len(implicit)
@@ -83,8 +84,8 @@ def test_ha_default_can_run_without_extra_flows():
     data = load_document(ROOT / 'config/scenarios/master_ha_failover.yaml')
     del data['variants']
     document = configure_program(data, 'ha.yaml')
-    assert [v['id'] for v in document['variants']] == ['default']
-    ids = [s['id'] for s in document['variants'][0]['stages']]
+    assert [v.id for v in document.variants] == ['default']
+    ids = [s.id for s in document.variants[0].stages]
     assert 'outage_failures' not in ids
     assert ids.index('restart_a') < ids.index('kill_b')
 
@@ -158,15 +159,15 @@ def test_variant_combines_flow_topology_and_parameters_without_an_axis():
 def test_variant_identity_is_independent_of_program_and_restart_mode_is_program_owned():
     data = load_document(ROOT / 'config/scenarios/master_ha_failover.yaml')
     document = configure_program(data, 'ha.yaml')
-    assert [v['id'] for v in document['variants']] == ['default', 'non_rolling']
-    for variant in document['variants']:
-        ids = [s['id'] for s in variant['stages']]
-        assert ('outage_failures' in ids) == (variant['id'] == 'non_rolling')
+    assert [v.id for v in document.variants] == ['default', 'non_rolling']
+    for variant in document.variants:
+        ids = [s.id for s in variant.stages]
+        assert ('outage_failures' in ids) == (variant.id == 'non_rolling')
     wrong = copy.deepcopy(data)
     wrong['variants'][0]['id'] = 'full_restart'
     renamed = configure_program(wrong, 'ha.yaml')
-    assert renamed['variants'][1]['id'] == 'full_restart'
-    assert 'outage_failures' in [step['id'] for step in renamed['variants'][1]['stages']]
+    assert renamed.variants[1].id == 'full_restart'
+    assert 'outage_failures' in [step.id for step in renamed.variants[1].stages]
     for mode in ('rolling', 'non_rolling'):
         wrong = copy.deepcopy(data)
         wrong['parameters']['procedure']['restart_mode'] = mode
@@ -225,10 +226,10 @@ def test_environment_vocabulary_is_shared_with_an_explicit_backend_boundary(monk
         'config_overrides', 'profile_overrides'}
     assert environment({'debug_enabled': True}, 'env', 'batch-window')['debug_enabled'] is True
     document = load_scenarios(ROOT / 'config/scenarios/request_completion.yaml')[0][1]
-    document['variants'][0]['environment_overrides'] = {'debug_enabled': True}
+    document = replace(document, variants=(replace(document.variants[0], environment_overrides={'debug_enabled': True}),))
     plans = compile_scenarios([('case.yaml', document)], handlers=handlers())
     assert all(plan['environment']['debug_enabled'] is True for plan in plans)
-    document['variants'][0]['environment_overrides'] = {'backend': 'java_mock'}
+    document = replace(document, variants=(replace(document.variants[0], environment_overrides={'backend': 'java_mock'}),))
     with pytest.raises(ScenarioError, match='backend'):
         compile_scenarios([('case.yaml', document)], handlers=handlers())
     with pytest.raises(ScenarioError, match='unknown fields'):

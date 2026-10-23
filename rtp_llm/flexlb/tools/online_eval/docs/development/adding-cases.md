@@ -54,6 +54,20 @@ CASE = CaseDefinition(
 )
 ```
 
+使用冻结门禁的 case 在 `GatePlugin` 中一次声明分析、指标投影和报告绑定，再通过 `CaseDefinition.gates` 注册：
+
+```python
+GATE = GatePlugin(
+    "quality", analyze, project_metrics, write_report,
+    producer="quality_metrics", describe=metric_contract,
+    view="quality.yaml", validate_view=validate_view,
+)
+# CaseDefinition(..., gates={"quality": GATE})
+```
+
+不再为该门禁手动重复注册 `GATE.project` 和 `GATE.render`。独立 producer 或报告视图继续使用各自注册入口；名称冲突会报错。构建器的 `finish()` 返回类型化步骤序列，程序和变体直接传给编译器，只有冻结执行计划使用 JSON 文件协议。
+
+
 ```yaml
 case_schema_version: 2
 case: protocol_terminal

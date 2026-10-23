@@ -5,7 +5,8 @@ import unittest
 from pathlib import Path
 
 from flexlb_cfg import render_env
-from scenario import compile_scenarios, load_scenarios
+from scenario import load_scenarios
+from program_fixtures import compile_scenarios
 from scenario.catalog import handlers
 
 

@@ -132,5 +132,5 @@ def test_existing_case_adds_a_registered_diagnostic_metric_in_one_binding():
     fields = data['parameters']['observation']['inputs']['engine_counters']['fields']
     fields['worker_status_qps'] = dict(metric='mock/worker_status_qps', labels={'role': 'prefill'})
     program = configure_program(data, str(path))
-    assert all(v['stages'][2]['params']['gate_input']['fields']['worker_status_qps']['metric']
-               == 'mock/worker_status_qps' for v in program['variants'])
+    assert all(v.stages[2].params['gate_input']['fields']['worker_status_qps']['metric']
+               == 'mock/worker_status_qps' for v in program.variants)

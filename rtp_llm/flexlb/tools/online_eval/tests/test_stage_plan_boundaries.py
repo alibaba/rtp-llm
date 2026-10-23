@@ -9,7 +9,7 @@ from scenario.program_compiler import configure_program
 from scenario.contracts import StageHandler
 from document_io import DocumentError as ScenarioError
 from document_io import load_document
-from scenario.stage_compiler import stages
+from program_fixtures import stages
 
 
 @pytest.mark.parametrize('suffix, message', [
@@ -29,7 +29,7 @@ def test_compilation_has_fresh_outputs_and_lifecycle_state_after_failure():
     with pytest.raises(ScenarioError, match='unknown or forward reference'):
         stages([setup, wait], 'plan.stages', 5, {})
     assert stages([setup, request, wait], 'plan.stages', 5, {}) == first
-    assert 'params' not in request
+    assert request == dict(id="send", action="request")
 
 
 def test_handler_replacement_environment_reaches_only_later_stages():

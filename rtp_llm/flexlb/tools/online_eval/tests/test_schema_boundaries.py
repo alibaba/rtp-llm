@@ -15,7 +15,7 @@ from monitoring.query_plan import load_plan
 from reporting import load_analysis, read_bundle, write_bundle
 from reporting.spec import validate
 from scenario.instance_plan import InstancePlanError, parse_catalog
-from scenario import ScenarioError, compile_scenarios
+from scenario import ScenarioError
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -34,14 +34,16 @@ def test_case_reader_rejects_foreign_legacy_mixed_and_invalid_versions(header):
         configure_program(document, 'input.yaml')
 
 
-def test_external_case_and_internal_program_have_different_contracts():
+def test_compiler_accepts_typed_programs_and_rejects_external_or_internal_documents():
+    from scenario.compiler import compile_scenarios as compile_program
+    from scenario.program import ProgramPlan
     document = yaml.safe_load((ROOT / 'config/scenarios/request_completion.yaml').read_text())
     program = configure_program(document, 'input.yaml')
-    assert program['program_schema_version'] == 1
-    assert 'case_schema_version' not in program
-    program['case_schema_version'] = program.pop('program_schema_version')
-    with pytest.raises(ScenarioError, match='program_schema_version'):
-        compile_scenarios([('input.yaml', program)])
+    assert isinstance(program, ProgramPlan)
+    assert not hasattr(program, 'program_schema_version')
+    for raw in (document, {'program_schema_version': 1, 'id': program.id}):
+        with pytest.raises(ScenarioError, match='expected ProgramPlan'):
+            compile_program([('input.yaml', raw)])
 
 
 @pytest.mark.parametrize('header', [

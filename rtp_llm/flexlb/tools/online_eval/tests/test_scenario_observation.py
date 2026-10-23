@@ -259,7 +259,7 @@ class ObservationTest(unittest.TestCase):
 
     def test_core_optional_source_and_required_finding_semantics(self):
         from scenario.actions.observation import HANDLERS
-        from scenario.compiler import compile_scenarios
+        from program_fixtures import compile_scenarios
         from scenario.runtime import execute_instance
 
         class Backend:
@@ -272,7 +272,7 @@ class ObservationTest(unittest.TestCase):
         handlers = {h.name: h for h in HANDLERS}
         for required in (True, False):
             doc = dict(
-                program_schema_version=1, implementation={},
+                implementation={},
                 id="coverage",
                 description="Source availability",
                 category="status",

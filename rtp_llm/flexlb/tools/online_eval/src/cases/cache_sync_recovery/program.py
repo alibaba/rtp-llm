@@ -10,7 +10,6 @@ from cases.cache_sync_recovery.report import write_report, validate_view
 from cases.cache_sync_recovery.metrics import produce, metric_contract
 from case_api.gate_plugin import GatePlugin
 from case_api.execution_contract import ExecutionRequirements
-from case_api.registry import ReportView, MetricProducer, ProducerPhase
 
 INPUTS = InputContract.from_fields({
     "procedure": dict.fromkeys(("setup_timeout_s", "warmup_timeout_s", "cache_only_s",
@@ -61,12 +60,12 @@ def recovery(case):
     build(case, True)
 
 
-GATE = GatePlugin("cache_stability", analyze, produce, write_report)
-REPORT_VIEWS = {"cache_sync_recovery.yaml": ReportView(validate_view, GATE.render,
-                deadline_renderer=GATE.render_with_deadline)}
+
+GATE = GatePlugin('cache_stability', analyze, produce, write_report,
+                  producer='cache_stability', describe=metric_contract,
+                  view='cache_sync_recovery.yaml', validate_view=validate_view)
 
 CASE = CaseDefinition(execution_requirements=ExecutionRequirements(monitoring=True),
-                      gates={"cache_stability": GATE}, report_views=REPORT_VIEWS,
-                      producers={"cache_stability": MetricProducer(metric_contract, GATE.project, ProducerPhase.GATE)},
+                      gates={"cache_stability": GATE},
                       builders={"default": default, "recovery": recovery},
                       input_contract=INPUTS, actions=tuple(HANDLERS))

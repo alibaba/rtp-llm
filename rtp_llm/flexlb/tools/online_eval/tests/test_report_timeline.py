@@ -102,10 +102,10 @@ def test_yaml_time_axis_is_frozen_into_every_variant_and_does_not_change_stages(
     plain = copy.deepcopy(config)
     del plain['reporting']
     baseline = configure_program(plain, name)
-    for variant, original in zip(document['variants'], baseline['variants']):
-        assert variant['reporting']['time_axis']['origin'] == {'event': 'traffic_started'}
-        assert variant['reporting']['time_axis']['range']['until'] == {'stage': end, 'boundary': 'end'}
-        assert variant['stages'] == original['stages']
+    for variant, original in zip(document.variants, baseline.variants):
+        assert variant.reporting['time_axis']['origin'] == {'event': 'traffic_started'}
+        assert variant.reporting['time_axis']['range']['until'] == {'stage': end, 'boundary': 'end'}
+        assert variant.stages == original.stages
     config['reporting']['time_axis']['origin'] = {'stage': 'missing', 'boundary': 'start'}
     with pytest.raises(ScenarioError, match='unknown stage'):
         configure_program(config, name)

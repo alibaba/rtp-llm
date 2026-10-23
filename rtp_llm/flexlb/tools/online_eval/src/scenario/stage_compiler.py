@@ -3,6 +3,9 @@
 import copy
 import math
 from dataclasses import dataclass
+from scenario.program import StageDefinition
+from scenario.plan import StagePlan
+from scenario.stage_parameters import decode_parameters
 from typing import Callable
 
 from document_io import DocumentError as ScenarioError
@@ -83,10 +86,10 @@ class _StageCompiler:
         self.torn_down = False
 
     def compile(self, values, path):
-        if not isinstance(values, list) or not values:
-            fail(path, "expected nonempty stage list")
-        return [self._stage(value, index, f"{path}[{index}]")
-                for index, value in enumerate(values)]
+        if not isinstance(values, tuple) or not values:
+            fail(path, "expected nonempty typed stage sequence")
+        return tuple(self._stage(value, index, f"{path}[{index}]")
+                     for index, value in enumerate(values))
 
     def _enter(self, action, index, loc):
         if self.torn_down:
@@ -115,19 +118,31 @@ class _StageCompiler:
             fail(loc, "adapter validate must return a mapping")
         return params
 
+    def _references(self, value, path):
+        if isinstance(value, dict):
+            if "$ref" in value:
+                reference(value, path, self.outputs)
+            else:
+                for key, child in value.items():
+                    self._references(child, path + "." + str(key))
+        elif isinstance(value, list):
+            for index, child in enumerate(value):
+                self._references(child, f"{path}[{index}]")
+
     def _stage(self, value, index, loc):
-        mapping(value, loc, {"id", "action", "timeout_s", "params", "purpose"}, {"id", "action"})
-        if value.get("purpose", "operation") not in {"operation", "observation"}:
+        if not isinstance(value, StageDefinition):
+            fail(loc, "expected StageDefinition")
+        if (value.purpose if value.purpose is not None else "operation") not in {"operation", "observation"}:
             fail(loc + ".purpose", "expected operation or observation")
-        sid = identifier(value["id"], loc + ".id")
+        sid = identifier(value.id, loc + ".id")
         if sid in self.outputs:
             fail(loc, f"duplicate stage id {sid}")
-        action = value["action"]
+        action = value.action
         if not isinstance(action, str) or action not in (set(OUTPUTS) | set(self.handlers)):
             fail(loc + ".action", f"unsupported action {action!r}")
         self._enter(action, index, loc)
-        timeout = number(value.get("timeout_s", self.default_timeout), loc + ".timeout_s", minimum=0.001)
-        params = copy.deepcopy(value.get("params", {}))
+        timeout = number(value.timeout_s if value.timeout_s is not None else self.default_timeout, loc + ".timeout_s", minimum=0.001)
+        params = copy.deepcopy(value.params)
         descriptor = self.handlers.get(action)
         if descriptor is not None:
             params = self._handler_params(descriptor, params, loc, action)
@@ -135,13 +150,12 @@ class _StageCompiler:
             _CORE_ACTIONS[action].validate(params, loc, self.outputs)
             if action == "teardown":
                 self.torn_down = True
-        result = dict(id=sid, action=action, timeout_s=timeout, params=params)
-        if "purpose" in value:
-            result["purpose"] = value["purpose"]
+        self._references(params, loc + ".params")
         self.outputs[sid] = descriptor.outputs if descriptor is not None else OUTPUTS[action]
         if descriptor is not None and descriptor.next_environment is not None:
             self.environment = copy.deepcopy(descriptor.next_environment(params))
-        return result
+        checks = descriptor.checks if descriptor else ({"comparison"} if action == "check" else set())
+        return StagePlan(sid, action, timeout, decode_parameters(action, params), tuple(sorted(checks)), value.purpose)
 
 
 def stages(values, path, default_timeout, handlers, env=None, profiles=(), case=None):

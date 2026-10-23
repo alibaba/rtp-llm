@@ -48,7 +48,7 @@ def catalog():
     }
 
     for row in document["instances"]:
-        from scenario import compile_scenarios
+        from program_fixtures import compile_scenarios
         from test_scenario_runtime import source
         declaration = source()
         declaration.update(id=row["scenario_id"], category=row["category"], description=row["metadata"]["description"])

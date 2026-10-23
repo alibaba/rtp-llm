@@ -32,9 +32,9 @@ def test_yaml_window_is_the_only_duration_authority(name, window, side, offset, 
     data = configuration(name)
     observation = data["parameters"]["observation"]
     observation["windows"][window][side]["offset_s"] = offset
-    stages = configure_program(data, name + ".yaml")["variants"][0]["stages"]
-    stage = next(row for row in stages if row["action"].endswith("observe"))
-    assert stage["params"]["criteria"][field] == expected
+    stages = configure_program(data, name + ".yaml").variants[0].stages
+    stage = next(row for row in stages if row.action.endswith("observe"))
+    assert stage.params["criteria"][field] == expected
     observation[field] = expected
     with pytest.raises(ScenarioError, match="unknown configuration fields"):
         configure_program(data, name + ".yaml")
@@ -49,8 +49,8 @@ def test_admission_dependency_is_required_before_any_live_poll():
 
 def test_cache_action_cannot_supply_a_hidden_removal_mode():
     from cases.cache_scale_in.actions import validate
-    stages = configure_program(configuration("cache_scale_in"), "cache.yaml")["variants"][0]["stages"]
-    params = next(row["params"] for row in stages if row["id"] == "scale_in")
+    stages = configure_program(configuration("cache_scale_in"), "cache.yaml").variants[0].stages
+    params = next(row.params for row in stages if row.id == "scale_in")
     del params["criteria"]["removal_mode"]
     with pytest.raises(ValueError, match="removal_mode"):
         validate(params, NS(path="scale_in"))
@@ -122,8 +122,8 @@ def test_oversize_sample_is_not_appended_or_silently_truncated():
 def test_performance_sampling_uses_framework_clock_and_freezes_failure(tmp_path):
     from cases.master_performance.actions import observe
     data = configuration("master_performance")
-    params = next(stage for stage in configure_program(data, "performance.yaml")["variants"][0]["stages"]
-                  if stage["id"] == "measure")["params"]
+    params = next(stage for stage in configure_program(data, "performance.yaml").variants[0].stages
+                  if stage.id == "measure").params
     params["observation"]["capture"]["max_samples"] = 1
     value = [0]
     ctx = RuntimeContext(dict(id="master_performance::default::batch-window", profile="batch-window"),
@@ -157,8 +157,8 @@ def test_new_clock_is_authoritative_and_missing_historical_anchor_is_rejected():
 
 
 def test_performance_stop_and_drain_are_explicit_program_stages():
-    stages = configure_program(configuration("master_performance"), "performance.yaml")["variants"][0]["stages"]
-    assert [row["action"] for row in stages] == ["setup", "java_flow_start", "performance_observe",
+    stages = configure_program(configuration("master_performance"), "performance.yaml").variants[0].stages
+    assert [row.action for row in stages] == ["setup", "java_flow_start", "performance_observe",
                                                "java_flow_stop", "java_flow_drain", "performance_finish", "teardown"]
 
 
@@ -194,7 +194,7 @@ def test_semantic_program_errors_share_a_configuration_boundary(name, check):
 def test_action_field_error_has_one_location_and_preserves_the_cause():
     from scenario.contracts import StageHandler
     from scenario.parameters import validate_fields
-    from scenario.stage_compiler import stages
+    from program_fixtures import stages
 
     handler = StageHandler(name='custom', outputs={}, checks=frozenset(),
         validate=lambda params, plan: validate_fields(params, plan, {'allowed'}),

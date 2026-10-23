@@ -3,7 +3,8 @@
 import tempfile
 import unittest
 
-from scenario import ScenarioError, compile_scenarios
+from scenario import ScenarioError
+from program_fixtures import compile_scenarios
 from scenario.runtime import execute_instance
 from test_scenario_runtime import Backend, Clock, source
 

@@ -2,7 +2,7 @@
 
 import unittest
 
-from scenario import compile_scenarios
+from program_fixtures import compile_scenarios
 from scenario.backend_spec import make_env_spec
 from scenario.catalog import handlers
 from scenario.environment_config import environment

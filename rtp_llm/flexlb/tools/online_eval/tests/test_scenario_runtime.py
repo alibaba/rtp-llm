@@ -7,7 +7,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from scenario import compile_scenarios
+from program_fixtures import compile_scenarios
 from scenario.contracts import (
     CheckResult,
     StageHandler,
@@ -21,7 +21,6 @@ from scenario.runtime import (
 
 def source():
     return {
-        "program_schema_version": 1,
         "implementation": {},
         "id": "lifecycle",
         "description": "Request lifecycle",

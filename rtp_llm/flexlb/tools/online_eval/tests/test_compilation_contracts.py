@@ -7,7 +7,7 @@ import pytest
 
 from input_contract import mapping_fields
 from scenario.catalog import handlers
-from scenario.compiler import compile_scenarios
+from program_fixtures import compile_scenarios
 from document_io import DocumentError as ScenarioError
 from scenario.loader import load_scenarios
 from scenario.plan import CompiledInstance
@@ -23,12 +23,14 @@ def plans(documents=None):
     return compile_scenarios(documents, 'single-nonbatch', handlers())
 
 
-def test_program_provenance_survives_plain_dict_and_json_transport():
+def test_program_provenance_survives_compilation_and_frozen_json_transport():
     documents = load_scenarios(ROOT / 'config/scenarios/request_completion.yaml')
     source, document = documents[0]
-    plain = json.loads(json.dumps(dict(document)))
-    assert plain['implementation']['case_sources_sha256']
-    assert plans([(source, plain)]) == plans(documents)
+    assert document.implementation['case_sources_sha256']
+    compiled = plans(documents)
+    plain = json.loads(json.dumps(compiled))
+    assert [CompiledInstance.read(row).to_dict() for row in plain] == compiled
+    assert plain[0]['implementation']['case_sources_sha256'] == document.implementation['case_sources_sha256']
 
 
 def test_selection_preserves_the_complete_execution_contract():
@@ -61,8 +63,11 @@ def test_shared_mapping_rule_rejects_non_string_keys_at_both_boundaries():
         mapping(value, 'input', set())
 
 
-def test_program_document_requires_explicit_provenance():
+def test_dictionary_without_provenance_is_not_a_program_input():
     source, document = load_scenarios(ROOT / 'config/scenarios/request_completion.yaml')[0]
-    del document['implementation']
-    with pytest.raises(ScenarioError, match='implementation'):
-        plans([(source, document)])
+    from scenario.compiler import compile_scenarios
+    from dataclasses import asdict
+    raw = asdict(document)
+    del raw['implementation']
+    with pytest.raises(ScenarioError, match='expected ProgramPlan'):
+        compile_scenarios([(source, raw)])

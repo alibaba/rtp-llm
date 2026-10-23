@@ -94,7 +94,8 @@ def test_experiment_parameters_reach_compilation_and_execution(tmp_path):
     assert plan.to_dict()['experiment_params'] == json.loads(raw)
     command = list(run_ci.commands(plan, tmp_path))[0][1]
     assert json.loads(command[command.index('--experiment-params') + 1]) == json.loads(raw)
-    from scenario import load_scenarios, compile_scenarios
+    from scenario import load_scenarios
+    from program_fixtures import compile_scenarios
     from scenario.catalog import handlers
     docs = load_scenarios(ROOT / 'config/scenarios', experiment_params=raw)
     baseline = compile_scenarios(load_scenarios(ROOT / 'config/scenarios/master_performance.yaml'), 'batch-window', handlers())[0]

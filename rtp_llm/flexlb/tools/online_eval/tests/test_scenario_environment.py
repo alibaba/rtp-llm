@@ -11,7 +11,7 @@ from unittest.mock import patch
 
 from environment_expectations import configuration
 from flexlb_cfg import render_env
-from scenario import compile_scenarios
+from program_fixtures import compile_scenarios
 from scenario.actions.environment import (
     _validate,
     mutate_config,

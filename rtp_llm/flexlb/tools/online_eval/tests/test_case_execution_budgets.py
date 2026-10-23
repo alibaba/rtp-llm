@@ -19,7 +19,7 @@ def build(parameters):
     case = CaseBuilder({}, parameters, number_rules=INPUTS.numeric_parameters, profiles=("single-nonbatch", "batch-window"))
     case.validate_numbers()
     default(case)
-    return {step['id']: step for step in case.steps}
+    return {step.id: step for step in case.steps}
 
 
 def parameters():
@@ -33,12 +33,12 @@ def test_analysis_budget_is_not_derived_from_request_timeout():
     changed['traffic']['client']['limits']['request_timeout_s'] = 10
     changed['traffic']['client']['limits']['drain_timeout_s'] = 90
     after = build(changed)
-    assert before['gate']['timeout_s'] == after['gate']['timeout_s'] == 165
-    assert before['drain']['timeout_s'] != after['drain']['timeout_s']
+    assert before['gate'].timeout_s == after['gate'].timeout_s == 165
+    assert before['drain'].timeout_s != after['drain'].timeout_s
     changed['procedure']['analysis_timeout_s'] = 240
     extended = build(changed)
-    assert extended['gate']['timeout_s'] == 240
-    assert before['measure']['params']['criteria'] == extended['measure']['params']['criteria']
+    assert extended['gate'].timeout_s == 240
+    assert before['measure'].params['criteria'] == extended['measure'].params['criteria']
 
 
 @pytest.mark.parametrize('value', [0, -1, True, float('inf'), float('nan'), '165'])

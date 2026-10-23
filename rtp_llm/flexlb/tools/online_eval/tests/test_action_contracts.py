@@ -12,7 +12,8 @@ from cases.master_ha_failover import actions as master_ha
 from case_api import registry
 from case_registry_fixtures import entry, snapshot
 from cases.master_performance import program as master_performance
-from scenario import ScenarioError, compile_scenarios
+from scenario import ScenarioError
+from program_fixtures import compile_scenarios
 from scenario.catalog import FOUNDATION_HANDLERS, handlers
 from document_io import load_document
 from scenario.parameters import validate_fields
@@ -34,8 +35,10 @@ class ActionContractsTest(unittest.TestCase):
     def test_another_case_cannot_use_owned_action_even_with_spoofed_id(self):
         path = ROOT / "config/scenarios/request_completion.yaml"
         document = configure_program(load_document(path), str(path))
-        document["id"] = "master_performance"
-        document["variants"][0]["stages"][1]["action"] = "performance_finish"
+        document = replace(document, id="master_performance")
+        variant = document.variants[0]
+        variant = replace(variant, stages=(variant.stages[0], replace(variant.stages[1], action="performance_finish"), *variant.stages[2:]))
+        document = replace(document, variants=(variant,))
         with self.assertRaisesRegex(ScenarioError, "belongs to cases.*master_performance"):
             compile_scenarios([(str(path), document)], handlers=handlers())
 
