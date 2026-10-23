@@ -47,6 +47,9 @@ protected:
     }
     bool      evaluateRunningMemory(const std::list<GenerateStreamPtr>& streams,
                                     const GenerateStreamPtr&            new_stream) override;
+    bool      evaluatePrefillMemory(const std::list<GenerateStreamPtr>& streams,
+                                    const GenerateStreamPtr&            new_stream,
+                                    bool                                packed_tokens);
     bool      waitPredicate() override;
     void      cancelExtraStreams() override;
     bool      hasExtraStreams() const override;

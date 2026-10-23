@@ -184,6 +184,12 @@ PDFusionRatioScheduler::~PDFusionRatioScheduler() {
 
 bool PDFusionRatioScheduler::evaluateRunningMemory(const list<GenerateStreamPtr>& streams,
                                                    const GenerateStreamPtr&       new_stream) {
+    return evaluatePrefillMemory(streams, new_stream, false);
+}
+
+bool PDFusionRatioScheduler::evaluatePrefillMemory(const list<GenerateStreamPtr>& streams,
+                                                   const GenerateStreamPtr&       new_stream,
+                                                   bool                           packed_tokens) {
     RTP_LLM_PROFILE_FUNCTION();
     if (!new_stream->isContextStream()) {
         return false;
@@ -203,6 +209,35 @@ bool PDFusionRatioScheduler::evaluateRunningMemory(const list<GenerateStreamPtr>
 
     size_t max_token_size = static_cast<size_t>(new_stream->contextLength());
     if (streams.empty() && max_token_size < max_seq_len_) {
+        return tryAdmitKVForPrefill(new_stream);
+    }
+    if (packed_tokens) {
+        // Match StreamGroups::modelExecuteTokenSize without materializing token vectors.
+        // Already loaded/loading reservations are supplied by the coordinated scheduler.
+        // Preserve the legacy exclusive boundary and standalone-request exception.
+        size_t used = 0;
+        auto fits = [&](const GenerateStreamPtr& stream) {
+            const auto tokens = static_cast<size_t>(std::max(stream->contextLength(), 0))
+                                * static_cast<size_t>(std::max(stream->currentBatchSize(), 1));
+            if (used >= max_batch_tokens_size_ || tokens >= max_batch_tokens_size_ - used) {
+                return false;
+            }
+            used += tokens;
+            return true;
+        };
+        bool within_budget = fits(new_stream);
+        for (const auto& stream : streams) {
+            if (!within_budget) {
+                break;
+            }
+            within_budget = fits(stream);
+        }
+        if (!within_budget) {
+            if (trace_enabled_) {
+                ++observation_.rejected_tokens;
+            }
+            return false;
+        }
         return tryAdmitKVForPrefill(new_stream);
     }
     for (auto& stream : streams) {

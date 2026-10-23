@@ -4935,10 +4935,11 @@ TEST_F(FIFOSchedulerTest, testCoordAdaptiveContextBatchConfiguration) {
     EXPECT_NO_THROW(CoordTestState(4, 2, true));
 }
 
-TEST_F(FIFOSchedulerTest, testCoordAdaptiveBatchLimitAndPartialBatch) {
+TEST_F(FIFOSchedulerTest, testCoordAdaptiveTokenBudgetAndPartialBatch) {
     for (int limit : {1, 2, 4}) {
         SCOPED_TRACE(limit);
-        CoordTestState f(8, limit, true);
+        // Leave the legacy count setting at one; only the token budget varies.
+        CoordTestState f(8, 1, true, 2 * limit + 1);
         for (int i = 0; i < limit + 1; ++i) {
             ASSERT_TRUE(f.scheduler->enqueue(f.stream()).ok());
         }
@@ -5014,11 +5015,11 @@ TEST_F(FIFOSchedulerTest, testCoordAdaptiveTopUpPreservesTokenBudgetAndSingleReq
     single.scheduler->completeModelStep();
 }
 
-TEST_F(FIFOSchedulerTest, testCoordAdaptiveTokenOnlyUsesPaddedLengthsAcrossReservations) {
+TEST_F(FIFOSchedulerTest, testCoordAdaptiveTokenOnlyUsesPackedLengthsAcrossReservations) {
     for (int token_budget : {9, 10}) {
         SCOPED_TRACE(token_budget);
-        // Service configuration resolves an omitted count cap to total concurrency.
-        CoordTestState f(8, 8, true, token_budget);
+        // Even an explicit legacy count of one must not cap the packed batch.
+        CoordTestState f(8, 1, true, token_budget);
         auto           first = f.stream();
         ASSERT_TRUE(f.scheduler->enqueue(first).ok());
         ASSERT_EQ(f.scheduler->prepareLocal(1).ready_prefill, 1);
@@ -5030,18 +5031,56 @@ TEST_F(FIFOSchedulerTest, testCoordAdaptiveTokenOnlyUsesPaddedLengthsAcrossReser
             ASSERT_TRUE(f.scheduler->enqueue(stream).ok());
         }
         auto      state    = f.scheduler->prepareLocal(2);
-        const int expected = token_budget == 9 ? 2 : 3;
+        const int expected = token_budget == 9 ? 3 : 4;
         EXPECT_EQ(state.ready_prefill, expected);
         EXPECT_EQ(state.waiting, 4 - expected);
         EXPECT_EQ(first->curBlocksNum(), first_blocks);
-        // Padded cost, not sum(lengths): [2,3,3,1] costs 3*4=12, not 9.
-        EXPECT_GT(f.scheduler->lastScheduleObservation().rejected_tokens, 0);
+        // [2,3,3,1] costs 9 packed tokens. Equality retains the legacy strict boundary.
+        EXPECT_EQ(f.scheduler->lastScheduleObservation().rejected_tokens > 0, token_budget == 9);
         EXPECT_EQ(f.scheduler->lastScheduleObservation().rejected_batch, 0);
         auto batch = f.scheduler->commitLocal(2, PDFusionPlan::PREFILL);
         ASSERT_EQ(batch.size(), expected);
         EXPECT_EQ(batch.front(), first);
         f.scheduler->completeModelStep();
     }
+}
+
+TEST_F(FIFOSchedulerTest, testCoordAdaptivePackedBudgetSkipsUnfitRequest) {
+    CoordTestState f(8, 1, true, 8);
+    auto long_request = makeStream(std::vector<int>(6, 1), f.model, f.runtime, f.resource, 16);
+    auto unfit = makeStream(std::vector<int>(3, 1), f.model, f.runtime, f.resource, 16);
+    auto short_request = makeStream({1}, f.model, f.runtime, f.resource, 16);
+    for (const auto& stream : {long_request, unfit, short_request}) {
+        ASSERT_TRUE(f.scheduler->enqueue(stream).ok());
+    }
+    auto state = f.scheduler->prepareLocal(1);
+    EXPECT_EQ(state.ready_prefill, 2);
+    EXPECT_EQ(state.input_tokens, 7);
+    EXPECT_EQ(state.waiting, 1);
+    EXPECT_EQ(unfit->curBlocksNum(), 0);
+    auto batch = f.scheduler->commitLocal(1, PDFusionPlan::PREFILL);
+    ASSERT_EQ(batch.size(), 2);
+    EXPECT_EQ(batch.front(), long_request);
+    EXPECT_EQ(batch.back(), short_request);
+    f.scheduler->completeModelStep();
+}
+
+TEST_F(FIFOSchedulerTest, testCoordAdaptivePackedBudgetIncludesExpandedSequences) {
+    CoordTestState f(8, 1, true, 7);
+    std::vector<GenerateStreamPtr> streams;
+    for (int i = 0; i < 2; ++i) {
+        auto stream = makeStream({1, 2}, f.model, f.runtime, f.resource, 16, 2);
+        ASSERT_EQ(stream->currentBatchSize(), 2);
+        streams.push_back(stream);
+        ASSERT_TRUE(f.scheduler->enqueue(stream).ok());
+    }
+    auto state = f.scheduler->prepareLocal(1);
+    EXPECT_EQ(state.ready_prefill, 1);  // 2 * 2 rows each: the second would cost 8 >= 7.
+    EXPECT_EQ(state.waiting, 1);
+    EXPECT_EQ(streams.back()->curBlocksNum(), 0);
+    EXPECT_GT(f.scheduler->lastScheduleObservation().rejected_tokens, 0);
+    EXPECT_EQ(f.scheduler->commitLocal(1, PDFusionPlan::PREFILL).size(), 1);
+    f.scheduler->completeModelStep();
 }
 
 TEST_F(FIFOSchedulerTest, testCoordAdaptiveTopUpIncludesReadyReservationInKVPeak) {
@@ -5066,7 +5105,8 @@ TEST_F(FIFOSchedulerTest, testCoordAdaptiveTopUpIncludesReadyReservationInKVPeak
 }
 
 TEST_F(FIFOSchedulerTest, testCoordAdaptiveAsyncReservationsOccupySlotsAndFinishWhileThrottled) {
-    CoordTestState f(8, 3, true);
+    // Two loading requests plus one ready request consume 6 of the strict 7-token budget.
+    CoordTestState f(8, 1, true, 7);
     auto           active = f.stream();
     ASSERT_TRUE(f.scheduler->enqueue(active).ok());
     f.scheduler->prepareLocal(1);

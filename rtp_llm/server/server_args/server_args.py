@@ -541,24 +541,19 @@ def setup_args(args: Optional[Sequence[str]] = None) -> PyEnvConfigs:
     # 解析参数（会自动应用所有配置绑定）
     parser.parse_args(args)
     fifo = py_env_configs.runtime_config.fifo_scheduler_config
-    context_batch_explicit = (
-        "max_context_batch_size" in getattr(parser, "_cli_provided_args", set())
-        or "MAX_CONTEXT_BATCH_SIZE" in os.environ
-    )
     if (
-        not context_batch_explicit
-        and fifo.pdfusion_coord_mode == "cadence"
-        and os.environ.get("PDFUSION_CADENCE_ADAPTIVE", "0") == "1"
+        os.environ.get("PDFUSION_CADENCE_ADAPTIVE", "0") == "1"
         and fifo.max_batch_tokens_size > 0
     ):
-        # Token-only adaptive admission has no independent request-count cap.
-        # Retain a finite bound for warmup/workspace/KV sizing: the scheduler
-        # cannot exceed this same total concurrency limit in any case.
+        # Adaptive selects the coordinator even when coord_mode is omitted.
+        # MAX_CONTEXT_BATCH_SIZE is sizing metadata here, never an admission cap.
+        # Normalize explicit legacy values as well as the default before spawn.
         fifo.max_context_batch_size = max(
             1, py_env_configs.concurrency_config.concurrency_limit
         )
         logging.info(
-            "Adaptive prefill uses token budget %s and total concurrency %s",
+            "Adaptive prefill uses packed token budget %s and total concurrency %s; "
+            "MAX_CONTEXT_BATCH_SIZE does not limit admission",
             fifo.max_batch_tokens_size,
             fifo.max_context_batch_size,
         )

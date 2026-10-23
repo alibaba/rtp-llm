@@ -41,25 +41,28 @@ Coordination defaults to `--coord-mode off`. The experimental global cadence mod
 
 `--coord-checks 1` runs coordination correctness checks; peer-exit fault injection is separately enabled by `--coord-fault peer-exit`. Do not mix fault injection with performance measurements.
 
-With `PDFUSION_CADENCE_ADAPTIVE=1`, `--max-context-batch-size N`
-allows up to N resource-reserved prefill requests per PD rank. The harness passes
-this as the server's existing `--max_context_batch_size`; it does not increase the
-token budget or wait to fill a batch. Ready requests can accumulate across Decode
-epochs while admission is allowed. Outstanding cache loads also occupy slots;
-they execute only after becoming ready. All ranks share the Prefill phase, but
-their real batch sizes may differ, including zero with a matching fake Prefill.
-Omitting this option in adaptive mode leaves the server request-count option
-unset. With a positive `--max_batch_tokens_size`, the server uses total
-`--concurrency_limit` as the effective count bound and chooses the actual batch
-from token and KV budgets. The existing padded-token rule is preserved:
-`max(contextLength) * request_count < max_batch_tokens_size`, including its
-single-request exception. Explicit `--max_context_batch_size 1` still forces
-one request. Without a positive explicit token budget, the server defaults to 1.
-The harness retains its existing token budget (32768, or 65536 with
-`--max-input-tokens 65536`); token-only runs omit `--max-context-batch-size`.
-Legacy cadence continues to require a limit of 1. Trace summaries include
-`prefill_batch_hist` and `multi_rank_multi_request_prefill_steps`; compare equal
-work at limits 1, 2, and 4 using throughput, TTFT, decode latency and GPU memory.
+With `PDFUSION_CADENCE_ADAPTIVE=1`, each PD rank packs Prefill requests by
+`sum(contextLength * currentBatchSize) < max_batch_tokens_size`, subject to total
+in-flight concurrency and KV admission. `MAX_CONTEXT_BATCH_SIZE` is not an
+independent request-count cap in this mode, even when explicitly set to 1 or 4.
+It is normalized to total concurrency for capacity sizing. The original strict
+token boundary and standalone long-request exception remain unchanged. Unknown
+prefix hits are charged conservatively until the allocator determines reuse.
+
+Ready requests can accumulate across Decode epochs while admission is allowed.
+The packed budget includes already reserved and loading Prefill requests exactly
+once. Loading requests execute only after becoming ready. An oversized candidate
+can be skipped so a later short request fits; there is no wait to fill either a
+request count or the token budget. All ranks share the Prefill phase, but their
+real batch sizes may differ, including zero with a matching fake Prefill.
+
+Set the token budget and omit `--max-context-batch-size`. The harness retains
+32768 tokens by default, or 65536 with `--max-input-tokens 65536`. Without an
+explicit token budget, adaptive model construction uses one maximum sequence's
+capacity. Legacy cadence still requires a request limit of 1 and keeps padded
+token accounting. Trace summaries include `prefill_batch_hist` and
+`multi_rank_multi_request_prefill_steps`; compare equal work at fixed token
+budgets using throughput, TTFT, decode latency and GPU memory.
 For a text-only DP2/EP2 run, pass `--workload text --gpus 2,3` without Encoder
 GPUs; the same correctness and steady-load entry points support DP4/EP4.
 

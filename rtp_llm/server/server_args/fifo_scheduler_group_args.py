@@ -14,9 +14,8 @@ def init_fifo_scheduler_group_args(parser, fifo_scheduler_config):
         type=int,
         default=1,
         help=(
-            "最大 context 请求数，通常默认 1。adaptive cadence 下若省略此参数且显式设置了正的 "
-            "max_batch_tokens_size，则使用总并发上限，由 token/KV 预算决定实际 prefill 数量；"
-            "显式设置时与 token 预算同时生效。"
+            "最大 context 请求数，通常默认 1。adaptive cadence 不使用此参数限制请求数；"
+            "该模式按实际 packed token、总并发及 KV 预算准入，并从总并发推导容量配置。"
         ),
     )
     fifo_scheduler_group.add_argument(
@@ -26,8 +25,9 @@ def init_fifo_scheduler_group_args(parser, fifo_scheduler_config):
         type=int,
         default=0,
         help=(
-            "最大 batch tokens 大小。adaptive cadence 沿用 ratio scheduler 的 "
-            "max(contextLength) * 请求数判定及单请求特例；可以单独设置此预算。"
+            "最大 batch tokens 大小。adaptive cadence 累加 "
+            "contextLength * currentBatchSize，包含已保留/加载中的 Prefill；"
+            "保留原有严格小于边界和单请求特例。legacy ratio 仍使用最长长度估算。"
         ),
     )
     fifo_scheduler_group.add_argument(

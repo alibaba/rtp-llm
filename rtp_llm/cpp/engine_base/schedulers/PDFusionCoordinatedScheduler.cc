@@ -110,13 +110,10 @@ bool PDFusionCoordinatedScheduler::evaluateRunningMemory(const std::list<Generat
                 batch.push_back(stream);
             }
         }
-        if (batch.size() >= static_cast<size_t>(max_context_batch_size_)) {
-            ++observation_.rejected_batch;
-            return false;
-        }
-        // The inherited token check sees the entire reserved prefill batch,
-        // while its KV/concurrency snapshot also includes active decode work.
-        return PDFusionRatioScheduler::evaluateRunningMemory(batch, candidate);
+        // Adaptive Prefill has no independent request-count cap. Charge the
+        // packed work of every reservation; the inherited concurrency and KV
+        // checks still cover active Decode and all in-flight Prefill requests.
+        return evaluatePrefillMemory(batch, candidate, true);
     }
     if (!streams.empty()) {
         ++observation_.rejected_batch;

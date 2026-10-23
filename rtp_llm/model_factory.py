@@ -25,6 +25,7 @@ from rtp_llm.config.py_config_modules import (
 from rtp_llm.model_factory_register import _model_factory, ensure_model_registered
 from rtp_llm.ops import (
     ProfilingDebugLoggingConfig,
+    RoleType,
     SpeculativeType,
     TaskType,
     VitSeparation,
@@ -392,6 +393,19 @@ class ModelFactory:
             engine_config: EngineConfig to update
             model_config: ModelConfig containing model information
         """
+        scheduler_config = engine_config.runtime_config.fifo_scheduler_config
+        if (
+            os.environ.get("PDFUSION_CADENCE_ADAPTIVE", "0") == "1"
+            and engine_config.pd_sep_config.role_type == RoleType.PDFUSION
+        ):
+            # A legacy request-count setting must not resize the adaptive token
+            # budget. Without an explicit budget retain one sequence's capacity.
+            if scheduler_config.max_batch_tokens_size == 0:
+                scheduler_config.max_batch_tokens_size = model_config.max_seq_len
+            # Keep warmup/workspace metadata large enough for token-packed batches.
+            scheduler_config.max_context_batch_size = max(
+                1, engine_config.runtime_config.max_generate_batch_size
+            )
         # Finalize scheduler config based on ModelConfig (only once, for main model)
         finalize_scheduler_config(
             fifo_scheduler_config=engine_config.runtime_config.fifo_scheduler_config,

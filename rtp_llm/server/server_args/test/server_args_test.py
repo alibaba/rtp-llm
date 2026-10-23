@@ -26,13 +26,18 @@ class ServerArgsPyEnvConfigsTest(TestCase):
             config = server_args.setup_args(args).runtime_config.fifo_scheduler_config
             self.assertEqual(config.max_context_batch_size, 8)
             self.assertEqual(config.max_batch_tokens_size, 65536)
-            # Explicit count caps, including the old default of one, win.
+            # Legacy count settings do not cap adaptive token packing.
             for option in ("--max_context_batch_size", "--max_context_batch_siz"):
                 for limit in (1, 4):
                     config = server_args.setup_args(
                         args + [f"{option}={limit}"]
                     ).runtime_config.fifo_scheduler_config
-                    self.assertEqual(config.max_context_batch_size, limit)
+                    self.assertEqual(config.max_context_batch_size, 8)
+            # Adaptive selects coordination automatically, without a mode flag.
+            config = server_args.setup_args(
+                ["--max_batch_tokens_size=65536", "--concurrency_limit=8"]
+            ).runtime_config.fifo_scheduler_config
+            self.assertEqual(config.max_context_batch_size, 8)
             # A derived token budget must not silently opt in to larger batches.
             config = server_args.setup_args(
                 ["--pdfusion_coord_mode=cadence"]
@@ -61,14 +66,13 @@ class ServerArgsPyEnvConfigsTest(TestCase):
                     config = (
                         server_args.setup_args().runtime_config.fifo_scheduler_config
                     )
-                    self.assertEqual(config.max_context_batch_size, 1)
+                    self.assertEqual(config.max_context_batch_size, 8)
                     config = server_args.setup_args(
                         ["--max_context_batch_size=4"]
                     ).runtime_config.fifo_scheduler_config
-                    self.assertEqual(config.max_context_batch_size, 4)
+                    self.assertEqual(config.max_context_batch_size, 8)
         for overrides in (
             {"PDFUSION_CADENCE_ADAPTIVE": "0"},
-            {"PDFUSION_COORD_MODE": "off"},
             {"MAX_BATCH_TOKENS_SIZE": "0"},
         ):
             with self.subTest(overrides=overrides), patch.dict(

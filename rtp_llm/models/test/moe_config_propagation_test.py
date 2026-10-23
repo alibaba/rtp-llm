@@ -3,6 +3,7 @@ import os
 import tempfile
 import unittest
 from types import SimpleNamespace
+from unittest.mock import patch
 
 import torch
 from safetensors.torch import save_file
@@ -75,6 +76,31 @@ class _RoutedOnlyTensorSource(TensorSource):
 
 
 class MoeConfigPropagationTest(unittest.TestCase):
+    def test_adaptive_prefill_capacity_ignores_legacy_count(self):
+        for count in (1, 4):
+            for budget, expected in ((0, 4096), (7000, 7000)):
+                with self.subTest(count=count, budget=budget), patch.dict(
+                    os.environ, {"PDFUSION_CADENCE_ADAPTIVE": "1"}
+                ):
+                    model = ModelConfig()
+                    model.max_seq_len = 4096
+                    model.model_name = "adaptive-test"
+                    scheduler = SimpleNamespace(
+                        max_context_batch_size=count, max_batch_tokens_size=budget
+                    )
+                    engine = SimpleNamespace(
+                        runtime_config=SimpleNamespace(
+                            fifo_scheduler_config=scheduler,
+                            max_generate_batch_size=8,
+                            model_name="",
+                        ),
+                        pd_sep_config=SimpleNamespace(role_type=RoleType.PDFUSION),
+                    )
+                    ModelFactory.update_engine_config_from_model_config(engine, model)
+                    self.assertEqual(scheduler.max_context_batch_size, 8)
+                    self.assertEqual(scheduler.max_batch_tokens_size, expected)
+                    self.assertEqual(model.moe_prefill_max_tokens_per_rank, expected)
+
     def test_scheduler_prefill_batch_capacity_reaches_generic_moe(self):
         for configured_cap, expected_cap in ((0, 12288), (7000, 7000)):
             with self.subTest(configured_cap=configured_cap):

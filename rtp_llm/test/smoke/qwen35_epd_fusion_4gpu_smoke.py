@@ -3674,7 +3674,10 @@ def main(argv=None, preset=None):
         "--max-context-batch-size",
         type=int,
         default=None,
-        help="per-rank prefill request limit; omitted uses token-only admission in adaptive cadence, otherwise 1; token budget is unchanged",
+        help=(
+            "legacy request-count option; adaptive cadence ignores it and packs "
+            "actual tokens up to the token/KV budget; otherwise only 1 is supported"
+        ),
     )
     p.add_argument(
         "--kv-cache-mb",
