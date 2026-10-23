@@ -3,6 +3,12 @@ py_test_deps = [
 ]
 
 py_test(
+    name = "test_modelopt_mixed",
+    srcs = ["test_modelopt_mixed.py"],
+    deps = py_test_deps,
+)
+
+py_test(
     name = "test_stacked_moe_weight",
     srcs = ["test_stacked_moe_weight.py"],
     deps = py_test_deps,

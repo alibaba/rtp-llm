@@ -407,7 +407,11 @@ class QwenRenderer(CustomChatRenderer):
         return super().in_think_mode(request)
 
     @override
-    def should_process_think(self, request: ChatCompletionRequest):
+    def should_process_think(
+        self,
+        request: ChatCompletionRequest,
+        thinking_mode=None,
+    ):
         # 留出方法给子类重写, 避免重复的think处理
         return False
 

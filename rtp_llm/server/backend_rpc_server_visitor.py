@@ -307,7 +307,14 @@ class BackendRPCServerVisitor:
         # Keep hash generation at the physical KV block granularity. Page-RR
         # routing samples canonical keys from this full logical-block key list;
         # it must not recompute request hashes with the virtual block size.
-        full_block_cache_keys = get_block_cache_keys(token_ids, self.seq_size_per_block)
+        full_block_cache_keys = get_block_cache_keys(
+            token_ids,
+            self.seq_size_per_block,
+            mtp_lookahead=(
+                self.sp_config is not None
+                and self.sp_config.type == SpeculativeType.MTP
+            ),
+        )
         block_cache_keys = self._route_cache_keys(full_block_cache_keys)
         self._report_recent_cache_key_metrics(block_cache_keys)
         input_pb = trans_input(input)

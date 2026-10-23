@@ -291,6 +291,7 @@ MallocResult KVCacheManager::malloc(const MallocInfo& malloc_info) {
     RTP_LLM_CHECK(malloc_info.batch_kv_cache_resource && malloc_info.complete_token_ids);
 
     const int  seq_size_per_block = config_.seq_size_per_block;
+    const bool mtp_lookahead      = sp_config_.type == SP_TYPE_MTP;
     const bool is_first_malloc    = !malloc_info.batch_kv_cache_resource->curBlocksNum();
     // A first malloc that failed with MallocStatus::RETRYABLE_RESOURCE_EXHAUSTED leaves the stream
     // WAITING and re-enters here having allocated nothing, so curBlocksNum() is still zero and
@@ -304,11 +305,13 @@ MallocResult KVCacheManager::malloc(const MallocInfo& malloc_info) {
     bool       keys_initialized_now     = false;
     if (is_first_malloc) {
         if (!keys_already_initialized) {
-            initCacheKeys(malloc_info.batch_kv_cache_resource, malloc_info.complete_token_ids, seq_size_per_block);
+            initCacheKeys(
+                malloc_info.batch_kv_cache_resource, malloc_info.complete_token_ids, seq_size_per_block, mtp_lookahead);
             keys_initialized_now = true;
         }
     } else {
-        updateCacheKeys(malloc_info.batch_kv_cache_resource, malloc_info.complete_token_ids, seq_size_per_block);
+        updateCacheKeys(
+            malloc_info.batch_kv_cache_resource, malloc_info.complete_token_ids, seq_size_per_block, mtp_lookahead);
     }
     reportPrefillCacheHitMetrics(malloc_info, keys_initialized_now);
 

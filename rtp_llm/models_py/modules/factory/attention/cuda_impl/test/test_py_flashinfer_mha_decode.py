@@ -36,6 +36,230 @@ class PageMetadata(NamedTuple):
 
 
 @unittest.skipUnless(torch.cuda.is_available(), "CUDA required")
+class TestFlashinferParamsActiveTransfer(unittest.TestCase):
+    fields = (
+        "batch_indice",
+        "page_indice",
+        "reuse_cache_page_indice",
+        "decode_page_indptr",
+        "prefill_ragged_kv_len_indptr",
+        "paged_kv_last_page_len",
+        "qo_indptr",
+        "kvlen",
+        "positions",
+        "batch_reuse_info_vec",
+    )
+
+    def _expected_metadata(self, input_lengths, prefix_lengths, block_table):
+        expected = {name: [] for name in self.fields}
+        for name in (
+            "decode_page_indptr",
+            "prefill_ragged_kv_len_indptr",
+            "qo_indptr",
+        ):
+            expected[name] = [0]
+        slots = []
+        for row, (query_len, prefix_len) in enumerate(
+            zip(input_lengths, prefix_lengths)
+        ):
+            kv_len = query_len + prefix_len
+            page_count = math.ceil(kv_len / 16)
+            reuse_count = math.ceil(prefix_len / 16)
+            reuse_start = len(expected["reuse_cache_page_indice"])
+            expected["page_indice"].extend(block_table[row, :page_count].tolist())
+            expected["reuse_cache_page_indice"].extend(
+                block_table[row, :reuse_count].tolist()
+            )
+            expected["batch_indice"].extend([row] * query_len)
+            expected["positions"].extend(range(prefix_len, kv_len))
+            expected["kvlen"].append(kv_len)
+            expected["paged_kv_last_page_len"].append(
+                (kv_len - 1) % 16 + 1 if kv_len else 0
+            )
+            expected["decode_page_indptr"].append(len(expected["page_indice"]))
+            expected["prefill_ragged_kv_len_indptr"].append(
+                expected["prefill_ragged_kv_len_indptr"][-1] + kv_len
+            )
+            expected["qo_indptr"].append(len(expected["positions"]))
+            expected["batch_reuse_info_vec"].append(
+                [row, prefix_len, reuse_start, reuse_count]
+                if prefix_len
+                else [row, 0, 0, 0]
+            )
+            slots.extend(
+                int(block_table[row, position // 16]) * 16 + position % 16
+                for position in range(prefix_len, kv_len)
+            )
+        result = {
+            name: torch.tensor(values, dtype=torch.int32)
+            for name, values in expected.items()
+        }
+        result["slot_mapping"] = torch.tensor(slots, dtype=torch.int64)
+        return result
+
+    def _assert_metadata(self, params, expected):
+        torch.cuda.synchronize()
+        for name in self.fields:
+            with self.subTest(field=name):
+                host = getattr(params, name + "_h")
+                device = getattr(params, name + "_d")
+                torch.testing.assert_close(host, expected[name], rtol=0, atol=0)
+                torch.testing.assert_close(device.cpu(), expected[name], rtol=0, atol=0)
+        torch.testing.assert_close(
+            params.slot_mapping.cpu(), expected["slot_mapping"], rtol=0, atol=0
+        )
+
+    def _buffer_identities(self, params):
+        tensors = [
+            getattr(params, name + suffix)
+            for name in self.fields
+            for suffix in ("_h", "_d")
+        ] + [params.slot_mapping]
+        # Empty reuse views have no element data_ptr(), but keep their storage
+        # and offset. A later nonempty replay must use the same captured buffer.
+        return [
+            (
+                tensor._cdata,
+                tensor.untyped_storage().data_ptr(),
+                tensor.storage_offset(),
+                tensor.stride(),
+            )
+            for tensor in tensors
+        ]
+
+    def _capture_signature(self, params):
+        variable_fields = {
+            "batch_indice": "qo_indptr",
+            "positions": "qo_indptr",
+            "page_indice": "decode_page_indptr",
+            "reuse_cache_page_indice": None,
+            "slot_mapping": "qo_indptr",
+        }
+        views = {name: getattr(params, name + "_d") for name in self.fields}
+        views["slot_mapping"] = params.slot_mapping
+        # These fixed views model captured consumers. Their logical read range
+        # comes from current indptr/reuse metadata, never the old capacity.
+        for name in variable_fields:
+            views[name] = views[name].narrow(0, 0, 32)
+        offsets = torch.arange(32, device="cuda")
+
+        def signature():
+            sums = []
+            for name in self.fields + ("slot_mapping",):
+                values = views[name]
+                if name in variable_fields:
+                    count_field = variable_fields[name]
+                    count = (
+                        views[count_field][-1]
+                        if count_field is not None
+                        else views["batch_reuse_info_vec"][:, 3].sum()
+                    )
+                    values = torch.where(offsets < count, values, 0)
+                sums.append(values.sum())
+            return torch.stack(sums)
+
+        for _ in range(3):
+            signature()
+        torch.cuda.synchronize()
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            output = signature()
+        return graph, output
+
+    def test_preallocated_tag_local_metadata_grows_and_shrinks_with_graph_replay(self):
+        params_by_tag = {}
+        tables = {}
+        graphs = {}
+        identities = {}
+        for tag, block_offset in (("full", 101), ("aux", 100101)):
+            params = rtp_llm_ops.FlashInferMlaAttnParams()
+            table = (
+                torch.arange(4 * 16384, dtype=torch.int32).reshape(4, 16384)
+                + block_offset
+            ).pin_memory()
+
+            # Exercise an initially zero-capacity reuse view before reserving
+            # 262K context. No real KV cache allocation is needed for metadata.
+            initial_query = [1, 2, 0, 0]
+            initial_prefix = [0, 0, 0, 0]
+            params.fill_params(
+                torch.tensor(initial_prefix, dtype=torch.int32).pin_memory(),
+                torch.empty(0, dtype=torch.int32).pin_memory(),
+                torch.tensor(initial_query, dtype=torch.int32).pin_memory(),
+                table,
+                16,
+            )
+            self._assert_metadata(
+                params,
+                self._expected_metadata(initial_query, initial_prefix, table),
+            )
+            params.fill_params(
+                torch.full((4,), 262144 - 8, dtype=torch.int32).pin_memory(),
+                torch.empty(0, dtype=torch.int32).pin_memory(),
+                torch.full((4,), 8, dtype=torch.int32).pin_memory(),
+                table,
+                16,
+            )
+            torch.cuda.synchronize()
+            page_capacity = (
+                params.reuse_cache_page_indice_d.storage_offset()
+                - params.page_indice_d.storage_offset()
+            )
+            self.assertGreaterEqual(page_capacity, 1024 * 1024)
+            identities[tag] = self._buffer_identities(params)
+            graphs[tag] = self._capture_signature(params)
+            params_by_tag[tag] = params
+            tables[tag] = table
+
+        cases = (
+            ([2, 1, 0, 0], [17, 0, 0, 0]),
+            ([1, 2, 0, 0], [0, 0, 0, 0]),
+            ([2, 3, 1, 0], [63, 32, 16, 0]),
+            ([1, 0, 0, 0], [0, 0, 0, 0]),
+            ([2, 3, 1, 0], [63, 32, 16, 0]),
+        )
+        for query_lengths, prefix_lengths in cases:
+            expected_by_tag = {}
+            for tag, params in params_by_tag.items():
+                with self.subTest(tag=tag, query=query_lengths, prefix=prefix_lengths):
+                    table = tables[tag].clone().pin_memory()
+                    for row, (query_len, prefix_len) in enumerate(
+                        zip(query_lengths, prefix_lengths)
+                    ):
+                        if query_len == 0 and prefix_len == 0:
+                            table[row].zero_()
+                    params.fill_params(
+                        torch.tensor(prefix_lengths, dtype=torch.int32).pin_memory(),
+                        torch.empty(0, dtype=torch.int32).pin_memory(),
+                        torch.tensor(query_lengths, dtype=torch.int32).pin_memory(),
+                        table,
+                        16,
+                        forbid_realloc=True,
+                    )
+                    expected = self._expected_metadata(
+                        query_lengths, prefix_lengths, table
+                    )
+                    self._assert_metadata(params, expected)
+                    self.assertEqual(self._buffer_identities(params), identities[tag])
+                    expected_by_tag[tag] = expected
+            for tag, (graph, output) in graphs.items():
+                with self.subTest(tag=tag, phase="captured metadata consumer"):
+                    graph.replay()
+                    expected = expected_by_tag[tag]
+                    torch.testing.assert_close(
+                        output.cpu(),
+                        torch.stack(
+                            [
+                                expected[name].sum()
+                                for name in self.fields + ("slot_mapping",)
+                            ]
+                        ),
+                        rtol=0,
+                        atol=0,
+                    )
+
+
+@unittest.skipUnless(torch.cuda.is_available(), "CUDA required")
 class TestDynamicFp8DirectScaleNumerics(unittest.TestCase):
     def test_large_negative_logits_preserve_constant_values(self):
         for dtype in (torch.float16, torch.bfloat16):

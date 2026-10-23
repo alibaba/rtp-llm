@@ -5,6 +5,9 @@ from typing import Any, Optional, Tuple
 import flashinfer.page as page
 import torch
 
+from rtp_llm.models_py.triton_kernels.common.paged_kv_cache_write import (
+    append_paged_kv_cache_with_token_bound,
+)
 from rtp_llm.ops.compute_ops import LayerKVCache, rtp_llm_ops
 
 
@@ -57,6 +60,7 @@ class KVCacheWriteOp:
         key: torch.Tensor,
         value: torch.Tensor,
         kv_cache: Optional[LayerKVCache],
+        token_indptr: Optional[torch.Tensor] = None,
     ) -> None:
         """
         Write key and value tensors to paged KV cache.
@@ -119,6 +123,19 @@ class KVCacheWriteOp:
                 raise ValueError(
                     f"value dtype {value.dtype} must match V cache dtype {v_cache.dtype}"
                 )
+
+            if token_indptr is not None:
+                append_paged_kv_cache_with_token_bound(
+                    key,
+                    value,
+                    kv_cache.kv_cache_base,
+                    batch_indices,
+                    positions,
+                    self.params.page_indice_d,
+                    self.params.decode_page_indptr_d,
+                    token_indptr,
+                )
+                return
 
             # Append K and V to paged cache using HND layout.
             page.append_paged_kv_cache(  # type: ignore

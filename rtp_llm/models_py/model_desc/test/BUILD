@@ -3,6 +3,14 @@ py_test_deps = [
 ]
 
 py_test(
+    name = "quantized_lm_head_test",
+    srcs = ["quantized_lm_head_test.py"],
+    deps = py_test_deps,
+    tags = ["H20"],
+    exec_properties = {"gpu": "H20", "gpu_count": "1"},
+)
+
+py_test(
     name = "generic_moe_allreduce_test",
     srcs = ["generic_moe_allreduce_test.py"],
     deps = py_test_deps + [

@@ -348,24 +348,185 @@ class TestMhaRotaryEmbeddingOp(unittest.TestCase):
                 )
 
     def test_text_mrope_cuda_graph_refreshes_positions(self):
-        attn_config = create_test_attn_config()
+        query_len, position_factor = 5, 3
+        head_num, kv_head_num, head_dim, rope_dim = 8, 2, 256, 64
+        attn_config = create_test_attn_config(
+            head_num=head_num,
+            kv_head_num=kv_head_num,
+            size_per_head=head_dim,
+            max_seq_len=512,
+            dtype=torch.bfloat16,
+        )
         attn_config.rope_config.style = RopeStyle.Mrope
-        attn_config.rope_config.index_factor = 3
-        capture_positions = torch.tensor([3, 4, 5], dtype=torch.int32, device="cuda")
-        replay_positions = torch.tensor([13, 14, 15], dtype=torch.int32, device="cuda")
-        capture_inputs = self._create_text_mrope_inputs(
-            capture_positions, target_verify=True, draft_prefill=False
+        attn_config.rope_config.dim = rope_dim
+        attn_config.rope_config.base = 10_000_000
+        attn_config.rope_config.index_factor = position_factor
+        attn_config.gen_num_per_cycle = query_len - 1
+        cos_sin_cache = create_cos_sin_cache(
+            rope_dim, max_seq_len=512, base=attn_config.rope_config.base
         )
-        replay_inputs = self._create_text_mrope_inputs(
-            replay_positions, target_verify=True, draft_prefill=False
+        base_config = create_test_attn_config(
+            head_num=head_num,
+            kv_head_num=kv_head_num,
+            size_per_head=head_dim,
+            max_seq_len=512,
+            dtype=torch.bfloat16,
         )
-        text_mrope_op = TextMropeEmbeddingOp(attn_config, capture_inputs)
-        position_buffer = text_mrope_op.position_ids
+        base_config.rope_config.dim = rope_dim
+        base_config.rope_config.base = attn_config.rope_config.base
+        base_op = MhaRotaryEmbeddingOp(base_config, cos_sin_cache)
 
-        text_mrope_op.prepare_cuda_graph(replay_inputs)
+        def make_text_op(inputs):
+            # Isolate this component from the process-global RopeCache while
+            # keeping the real TextMrope class and FlashInfer RoPE kernel.
+            with mock.patch(
+                "rtp_llm.models_py.modules.factory.attention.cuda_impl."
+                "flashinfer_rotary_emb.get_rope_cache_once",
+                return_value=SimpleNamespace(data=cos_sin_cache),
+            ):
+                return TextMropeEmbeddingOp(attn_config, inputs)
 
-        self.assertIs(text_mrope_op.position_ids, position_buffer)
-        torch.testing.assert_close(text_mrope_op.position_ids, replay_positions)
+        for batch_size, capacity in ((2, 2), (3, 4)):
+            with self.subTest(batch_size=batch_size, capacity=capacity):
+                token_count = capacity * query_len
+                valid_tokens = batch_size * query_len
+
+                def assert_bits(actual, expected):
+                    self.assertEqual(actual.dtype, torch.bfloat16)
+                    self.assertEqual(expected.dtype, torch.bfloat16)
+                    self.assertEqual(actual.shape, expected.shape)
+                    self.assertTrue(
+                        torch.equal(
+                            actual[:valid_tokens].contiguous().view(torch.int16),
+                            expected[:valid_tokens].contiguous().view(torch.int16),
+                        ),
+                        "BF16 bits differ in the active token range",
+                    )
+
+                positions = {}
+                inputs = {}
+                for label, bases in (
+                    ("A", [7, 101, 211, 307]),
+                    ("B", [41, 149, 263, 359]),
+                ):
+                    positions[label] = (
+                        torch.tensor(
+                            bases[:capacity], dtype=torch.int32, device="cuda"
+                        )[:, None]
+                        + torch.arange(query_len, dtype=torch.int32, device="cuda")
+                    ).reshape(-1)
+                    # Padded rows also have complete, legal T/H/W positions;
+                    # numerical comparisons below use only active tokens.
+                    self.assertEqual(positions[label].numel(), token_count)
+                    self.assertTrue(
+                        bool(
+                            (
+                                (positions[label] >= 0)
+                                & (positions[label] < cos_sin_cache.size(0))
+                            )
+                            .all()
+                            .item()
+                        )
+                    )
+                    inputs[label] = self._create_text_mrope_inputs(
+                        positions[label], target_verify=True, draft_prefill=False
+                    )
+                    self.assertEqual(
+                        inputs[label].combo_position_ids.numel(),
+                        token_count * position_factor,
+                    )
+
+                generator = torch.Generator(device="cuda").manual_seed(1729 + capacity)
+                qkv = {
+                    label: torch.randn(
+                        token_count,
+                        (head_num + 2 * kv_head_num) * head_dim,
+                        dtype=torch.bfloat16,
+                        device="cuda",
+                        generator=generator,
+                    )
+                    for label in ("A", "B")
+                }
+                self.assertFalse(torch.equal(qkv["A"], qkv["B"]))
+                text_op = make_text_op(inputs["A"])
+                position_buffer = text_op.position_ids
+                position_pointer = position_buffer.data_ptr()
+                graph_qkv = torch.empty_like(qkv["A"])
+                capture_stream = torch.cuda.Stream()
+                capture_stream.wait_stream(torch.cuda.current_stream())
+                graph = torch.cuda.CUDAGraph()
+                try:
+                    # Materialize lazy kernels before capture. RoPE mutates Q/K,
+                    # so every warmup and replay starts from fresh QKV bytes.
+                    with torch.cuda.stream(capture_stream):
+                        for _ in range(3):
+                            graph_qkv.copy_(qkv["A"])
+                            text_op.prepare_cuda_graph(inputs["A"])
+                            text_op.forward(graph_qkv)
+                    torch.cuda.current_stream().wait_stream(capture_stream)
+                    graph_qkv.copy_(qkv["A"])
+                    text_op.prepare_cuda_graph(inputs["A"])
+                    torch.cuda.synchronize()
+                    with torch.cuda.graph(graph, stream=capture_stream):
+                        graph_outputs = text_op.forward(graph_qkv)
+                    torch.cuda.synchronize()
+
+                    first_a = None
+                    base_outputs_b = None
+                    # Refresh happens outside capture, as in attention prepare;
+                    # all three states replay this same captured graph.
+                    for label in ("A", "B", "A"):
+                        graph_qkv.copy_(qkv[label])
+                        text_op.prepare_cuda_graph(inputs[label])
+                        graph.replay()
+                        actual = tuple(output.clone() for output in graph_outputs)
+                        self.assertIs(text_op.position_ids, position_buffer)
+                        self.assertEqual(
+                            text_op.position_ids.data_ptr(), position_pointer
+                        )
+                        self.assertTrue(
+                            torch.equal(
+                                position_buffer[:valid_tokens],
+                                positions[label][:valid_tokens],
+                            )
+                        )
+                        eager_op = make_text_op(inputs[label])
+                        eager_outputs = eager_op.forward(qkv[label].clone())
+                        base_op.set_params(
+                            SimpleNamespace(positions_d=positions[label])
+                        )
+                        base_outputs = base_op.forward(qkv[label].clone())
+                        for replay, eager, base in zip(
+                            actual, eager_outputs, base_outputs
+                        ):
+                            assert_bits(replay, eager)
+                            assert_bits(replay, base)
+                            assert_bits(eager, base)
+                        if label == "B":
+                            base_outputs_b = tuple(
+                                output.clone() for output in base_outputs
+                            )
+                        elif first_a is None:
+                            first_a = actual
+                        else:
+                            for replay, original in zip(actual, first_a):
+                                assert_bits(replay, original)
+
+                    # Component-only negative control: B's QKV with A's stale
+                    # private positions must fail the same exact-bit oracle.
+                    # Both sides use identical B QKV, isolating position refresh.
+                    self.assertIsNotNone(base_outputs_b)
+                    graph_qkv.copy_(qkv["B"])
+                    graph.replay()
+                    stale = tuple(output.clone() for output in graph_outputs)
+                    self.assertEqual(position_buffer.data_ptr(), position_pointer)
+                    for index in (0, 1):
+                        with self.assertRaises(AssertionError):
+                            assert_bits(stale[index], base_outputs_b[index])
+                    assert_bits(stale[2], base_outputs_b[2])
+                finally:
+                    torch.cuda.synchronize()
+                    graph.reset()
 
     def test_fused_rope_vs_mha_rope(self):
         """Compare FusedRopeKVCachePrefillOpQOut (C++) vs MhaRotaryEmbeddingOp (Python)"""

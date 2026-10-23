@@ -18,6 +18,16 @@ py_test(
     deps = ["//rtp_llm:ops"],
 )
 
+py_test(
+    name = "block_cache_key_test",
+    srcs = ["block_cache_key_test.py"],
+    data = [
+        "//:rtp_compute_ops",
+        "//:th_transformer_config",
+    ],
+    deps = ["//rtp_llm:ops"],
+)
+
 cc_library(
     name = "py_utils",
     hdrs = [

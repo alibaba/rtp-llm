@@ -1,15 +1,26 @@
 """CPU contract tests for GenericMoeLayer's unified TP all-reduce path."""
 
 from types import SimpleNamespace
-from unittest import TestCase, main
+from unittest import TestCase, main, skipUnless
 from unittest.mock import MagicMock, Mock, patch
 
 import torch
 
+from rtp_llm.config.model_config import ModelConfig
+from rtp_llm.config.modelopt_mixed import ModelOptMixedPrecisionConfig
+from rtp_llm.config.quant_config import ModelOptFp4Config
 from rtp_llm.models_py.distributed.collective_torch import Group
-from rtp_llm.models_py.model_desc.generic_moe import GenericMoeLayer
+from rtp_llm.models_py.model_desc.generic_moe import (
+    GenericMoeLayer,
+    _MoeModelConfigView,
+)
+from rtp_llm.models_py.modules.factory.fused_moe import FusedMoeFactory
+from rtp_llm.models_py.modules.factory.fused_moe.defs.config_adapter import (
+    MoEConfigAdapter,
+)
 from rtp_llm.models_py.modules.factory.fused_moe.defs.fused_moe import FusedMoe
 from rtp_llm.models_py.modules.hybrid.dense_mlp import DenseMLP
+from rtp_llm.ops import MoeConfig, ParallelismConfig
 from rtp_llm.utils.model_weight import W
 
 
@@ -21,13 +32,16 @@ def _make_layer(
     ep_size=1,
     moe_style=2,
     with_shared_expert_gate=False,
+    quant_config=None,
+    expert_dtype=torch.float32,
+    capture_adapter=False,
 ):
     config = SimpleNamespace(
         hidden_size=8,
         inter_size=16,
         expert_num=4,
         moe_k=2,
-        quant_config=None,
+        quant_config=quant_config,
         activation_type="SiGLU",
         moe_style=moe_style,
         eplb_config=SimpleNamespace(phy_exp_num=lambda count: count),
@@ -41,8 +55,8 @@ def _make_layer(
     )
     moe_config = SimpleNamespace(fake_balance_expert=False)
     weights = {
-        W.moe_w1: torch.empty(4, 2, 8),
-        W.moe_w2: torch.empty(4, 8, 2),
+        W.moe_w1: torch.empty(4, 2, 8, dtype=expert_dtype),
+        W.moe_w2: torch.empty(4, 8, 2, dtype=expert_dtype),
     }
     if with_shared_expert_gate:
         weights[W.shared_expert_gate] = torch.empty(8, 1)
@@ -67,13 +81,14 @@ def _make_layer(
             "rtp_llm.models_py.model_desc.generic_moe.DenseMLP",
             return_value=Mock(),
         ),
-        patch("rtp_llm.models_py.model_desc.generic_moe.MoEConfigAdapter"),
+        patch("rtp_llm.models_py.model_desc.generic_moe.MoEConfigAdapter") as adapter,
         patch(
             "rtp_llm.models_py.model_desc.generic_moe.FusedMoeFactory"
         ) as fused_moe_factory,
     ):
         fused_moe_factory.return_value.create_fused_moe.return_value = fused_moe
-        return GenericMoeLayer(config, parallelism_config, weights, moe_config)
+        layer = GenericMoeLayer(config, parallelism_config, weights, moe_config)
+        return (layer, adapter.call_args.kwargs) if capture_adapter else layer
 
 
 def _configure_forward(layer, *, gate_enabled=False):
@@ -108,6 +123,62 @@ def _configure_forward(layer, *, gate_enabled=False):
 
 
 class GenericMoeInitializationTest(TestCase):
+    def test_expert_config_view_preserves_pybind_model_config(self):
+        original = ModelConfig()
+        original.quant_config = ModelOptMixedPrecisionConfig({})
+        selected = ModelOptFp4Config(bits=4, group_size=16, is_quanted=True)
+        view = _MoeModelConfigView(original, selected)
+        self.assertIs(view.quant_config, selected)
+        self.assertEqual(view.attn_config.head_num, original.attn_config.head_num)
+        self.assertIsInstance(original.quant_config, ModelOptMixedPrecisionConfig)
+
+    @skipUnless(
+        torch.cuda.is_available() and torch.cuda.get_device_capability()[0] >= 10,
+        "requires Blackwell FP4 support",
+    )
+    def test_mixed_expert_backends_have_registered_strategies(self):
+        model = ModelConfig()
+        model.data_type = "bf16"
+        parallelism = ParallelismConfig()
+        moe = MoeConfig()
+        moe.use_all_gather = True
+        moe.use_deepep_moe = False
+        moe.use_deepep_low_latency = False
+        for dtype, quant, expected in (
+            ("BF16", None, "CudaNoQuantCppStrategy"),
+            (
+                "NVFP4",
+                ModelOptFp4Config(bits=4, group_size=16, is_quanted=True),
+                "CudaFp4NoDPStrategy",
+            ),
+        ):
+            with self.subTest(dtype=dtype):
+                model.quant_config = quant
+                adapter = MoEConfigAdapter(model, parallelism, moe, quant_config=quant)
+                strategy = FusedMoeFactory._registry.get_strategy(adapter)
+                self.assertEqual(type(strategy).__name__, expected)
+
+    def test_mixed_experts_choose_backend_from_loaded_dtype(self):
+        mixed = ModelOptMixedPrecisionConfig({})
+        for dtype, method in (
+            (torch.bfloat16, None),
+            (torch.uint8, "modelopt_fp4"),
+        ):
+            with self.subTest(dtype=dtype):
+                layer, adapter = _make_layer(
+                    quant_config=mixed,
+                    expert_dtype=dtype,
+                    capture_adapter=True,
+                )
+                selected = adapter["model_config"].quant_config
+                self.assertEqual(
+                    selected.get_method() if selected else None, method
+                )
+                self.assertIs(layer.config.quant_config, mixed)
+
+        with self.assertRaisesRegex(ValueError, "Unsupported mixed ModelOpt MoE"):
+            _make_layer(quant_config=mixed, expert_dtype=torch.float8_e4m3fn)
+
     def test_unified_decision_covers_all_predicate_terms(self):
         cases = (
             ("pure_tp_shared_supported", True, 2, 1, 2, True),

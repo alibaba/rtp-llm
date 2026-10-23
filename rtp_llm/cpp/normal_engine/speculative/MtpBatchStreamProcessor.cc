@@ -13,6 +13,7 @@
 #include <string>
 #include <vector>
 #include <cstring>
+#include <limits>
 
 namespace rtp_llm {
 namespace {
@@ -85,6 +86,39 @@ torch::Tensor cloneHiddenSlice(const torch::Tensor& hidden_states, int64_t start
 }
 
 }  // namespace
+
+bool MtpBatchStreamProcessor::expandTargetVerifyPositionIdsForPrepare(GptModelInputs& model_input,
+                                                                      size_t          batch_size) const {
+    const auto&  bases  = model_input.combo_position_ids;
+    const size_t factor = model_input_gatherer_config_.position_id_len_factor;
+    if (!bases.defined() || !bases.device().is_cpu() || bases.scalar_type() != torch::kInt32 || !bases.is_contiguous()
+        || batch_size == 0 || factor == 0 || propose_step_ < 0 || static_cast<size_t>(bases.numel()) % factor != 0
+        || static_cast<size_t>(bases.numel()) / factor != batch_size) {
+        return false;
+    }
+
+    const auto* src = bases.data_ptr<int32_t>();
+    for (int64_t i = 0; i < bases.numel(); ++i) {
+        if (src[i] > std::numeric_limits<int32_t>::max() - propose_step_) {
+            return false;
+        }
+    }
+    const int64_t width = static_cast<int64_t>(propose_step_) + 1;
+    if (bases.numel() > std::numeric_limits<int64_t>::max() / width) {
+        return false;
+    }
+    auto  expanded = torch::empty({bases.numel() * width}, bases.options().pinned_memory(true));
+    auto* dst      = expanded.data_ptr<int32_t>();
+    for (size_t batch = 0; batch < batch_size; ++batch) {
+        for (int64_t step = 0; step < width; ++step) {
+            for (size_t dim = 0; dim < factor; ++dim) {
+                dst[(batch * width + step) * factor + dim] = static_cast<int32_t>(src[batch * factor + dim] + step);
+            }
+        }
+    }
+    model_input.combo_position_ids = std::move(expanded);
+    return true;
+}
 
 void MtpBatchStreamProcessor::expandTargetVerifyPositionIds(const StreamGroups& stream_groups,
                                                             GptModelInputs&     model_input) const {

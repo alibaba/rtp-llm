@@ -359,7 +359,7 @@ class ModelFactory:
             model_config.lora_infos = lora_infos if lora_infos else {}
 
         # Set model_name (default to model class name)
-        model_config.model_name = model_cls.__name__
+        model_config.model_name = model_config.model_name or model_cls.__name__
 
         # Set renderer configuration fields
         model_config.generate_env_config = (
@@ -461,6 +461,14 @@ class ModelFactory:
         propose_model_config.enable_int8_allreduce_fp16_scale = getattr(
             model_config, "enable_int8_allreduce_fp16_scale", False
         )
+        # These opt-in execution/resource policies apply to the target and its
+        # included draft, independently of the draft's weight quantization.
+        for name in (
+            "recurrent_cache_prefix_blocks_per_request",
+            "draft_prefill_use_decode_buckets",
+            "prefill_operator_max_tokens",
+        ):
+            setattr(propose_model_config, name, getattr(model_config, name))
         # Ensure max_seq_len matches main model
         propose_model_config.max_seq_len = model_config.max_seq_len
         propose_model_config.quantization = sp_config.quantization

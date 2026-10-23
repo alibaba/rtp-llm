@@ -362,7 +362,11 @@ class ModelDeployWeightInfo:
                 weight_info
             )
 
-        if self._quant_algo is not None and self._quant_algo.isQuant():
+        if (self._quant_algo is not None and self._quant_algo.isQuant()) or (
+            self._quant_config is not None and self._quant_config.is_quanted()
+        ):
+            # Per-module recipes have no homogeneous C++ algorithm, but their
+            # checkpoint tensors still require the Python descriptor conversion.
             weight_info = weight_info.to_quant_weight_info(self._quant_config)
 
         if self.output_vocab_ids:

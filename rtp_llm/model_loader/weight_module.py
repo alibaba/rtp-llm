@@ -76,6 +76,11 @@ class WeightModule(ABC):
                 if c.support(quant_config, weight_info)
             ]
             if not valid_classes:
+                # Keep unmatched mixed descriptors in BF16, but reject packed
+                # checkpoint tensors before a dtype conversion loses codes.
+                weight_info.reject_quantized_raw = (
+                    quant_config.get_method() == "modelopt_mixed"
+                )
                 return weight_info
             if len(valid_classes) > 1:
                 raise ValueError(
@@ -385,6 +390,18 @@ class AtomicWeight(WeightModule):
                         raise ValueError(
                             f"W4A16 requires unquantized float checkpoint weights, "
                             f"got {source_tensors[0].dtype} tensor {name}"
+                        )
+                    source_tensors = [t.to(convert_type) for t in source_tensors]
+                elif getattr(self, "reject_quantized_raw", False):
+                    source_tensors = tensor_source.load_tensor(name, None)
+                    if any(
+                        t.dtype in (torch.uint8, torch.int8)
+                        or str(t.dtype).startswith("torch.float8")
+                        for t in source_tensors
+                    ):
+                        raise ValueError(
+                            f"Missing mixed ModelOpt recipe for quantized tensor {name} "
+                            f"({source_tensors[0].dtype})"
                         )
                     source_tensors = [t.to(convert_type) for t in source_tensors]
                 else:

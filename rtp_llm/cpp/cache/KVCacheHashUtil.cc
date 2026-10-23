@@ -8,7 +8,8 @@ namespace rtp_llm {
 
 void initCacheKeys(BatchKVCacheResourcePtr batch_kv_cache_resource,
                    CompleteTokenIdsPtr     complete_token_ids,
-                   int                     seq_size_per_block) {
+                   int                     seq_size_per_block,
+                   bool                    mtp_lookahead) {
     const int batch_size = batch_kv_cache_resource->batchSize();
     const int seq_len    = complete_token_ids->seqLength();
 
@@ -18,17 +19,25 @@ void initCacheKeys(BatchKVCacheResourcePtr batch_kv_cache_resource,
     for (int i = 0; i < batch_size; ++i) {
         batch_kv_cache_resource->clearCacheKeys(i);
 
-        int64_t rolling_hash = 0;
+        int64_t rolling_hash = mtp_lookahead ? kMtpCacheKeySeed : 0;
         auto*   token_ids    = complete_token_ids->data(i);
         for (int index = 0; index < desired_blocks; ++index) {
-            const int pos       = index * seq_size_per_block;
-            const int block_len = std::min(seq_size_per_block, seq_len - pos);
-            rolling_hash        = rtp_llm::hashInt64Array(rolling_hash, token_ids + pos, token_ids + pos + block_len);
+            // The previous MTP key already includes this block's first token.
+            const int begin = index * seq_size_per_block + (mtp_lookahead && index > 0 ? 1 : 0);
+            const int end   = std::min((index + 1) * seq_size_per_block + (mtp_lookahead ? 1 : 0), seq_len);
+            rolling_hash    = rtp_llm::hashInt64Array(rolling_hash, token_ids + begin, token_ids + end);
+            if (mtp_lookahead && (index + 1) * seq_size_per_block >= seq_len) {
+                // In particular, L=B+1 leaves no unhashed tokens for the tail.
+                // It must not alias the preceding stable key in PD maps or the
+                // prefix tree. This key is never published for prefix reuse.
+                int32_t provisional_domain[] = {0x4d545050, seq_len};  // MTPP
+                rolling_hash = rtp_llm::hashInt64Array(rolling_hash, provisional_domain, provisional_domain + 2);
+            }
             batch_kv_cache_resource->pushBackCacheKey(i, rolling_hash);
         }
     }
 
-    batch_kv_cache_resource->setLastBlockAligned(seq_len % seq_size_per_block == 0);
+    batch_kv_cache_resource->setLastBlockAligned(seq_len == 0 || (!mtp_lookahead && seq_len % seq_size_per_block == 0));
     for (int i = 0; i < batch_size; ++i) {
         batch_kv_cache_resource->cacheResource(i).ensureLinearBlockDependencies();
     }
@@ -37,32 +46,33 @@ void initCacheKeys(BatchKVCacheResourcePtr batch_kv_cache_resource,
 
 void updateCacheKeys(BatchKVCacheResourcePtr batch_kv_cache_resource,
                      CompleteTokenIdsPtr     complete_token_ids,
-                     int                     seq_size_per_block) {
+                     int                     seq_size_per_block,
+                     bool                    mtp_lookahead) {
     const int batch_size = batch_kv_cache_resource->batchSize();
     const int seq_len    = complete_token_ids->seqLength();
 
     for (int i = 0; i < batch_size; ++i) {
         const auto& keys         = batch_kv_cache_resource->cacheKeys(i);
-        const int   total_blocks = seq_len / seq_size_per_block;  // floor, only full blocks
+        const int   total_blocks = std::max(0, seq_len - (mtp_lookahead ? 1 : 0)) / seq_size_per_block;
 
-        // If last_block_aligned was false previously, the last cache key corresponds to a partial block.
-        // Drop it before we append new full-block cache keys.
+        // Remove the partial/provisional key before extending the stable chain.
         if (!batch_kv_cache_resource->lastBlockAligned() && !keys.empty()) {
             batch_kv_cache_resource->popBackCacheKey(i);
         }
 
         auto*   token_ids = complete_token_ids->data(i);
-        int64_t hash      = keys.empty() ? 0 : keys.back();
+        int64_t hash      = keys.empty() ? (mtp_lookahead ? kMtpCacheKeySeed : 0) : keys.back();
         int     start_idx = static_cast<int>(keys.size());
 
         for (int index = start_idx; index < total_blocks; ++index) {
-            const int pos = index * seq_size_per_block;
-            hash          = rtp_llm::hashInt64Array(hash, token_ids + pos, token_ids + pos + (int)seq_size_per_block);
+            const int begin = index * seq_size_per_block + (mtp_lookahead && index > 0 ? 1 : 0);
+            const int end   = (index + 1) * seq_size_per_block + (mtp_lookahead ? 1 : 0);
+            hash            = rtp_llm::hashInt64Array(hash, token_ids + begin, token_ids + end);
             batch_kv_cache_resource->pushBackCacheKey(i, hash);
         }
     }
 
-    // After incremental update we guarantee all existing keys are for full blocks.
+    // Every retained key has all dependencies needed for prefix reuse.
     batch_kv_cache_resource->setLastBlockAligned(true);
     for (int i = 0; i < batch_size; ++i) {
         batch_kv_cache_resource->cacheResource(i).ensureLinearBlockDependencies();

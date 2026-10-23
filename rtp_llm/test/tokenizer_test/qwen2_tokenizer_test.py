@@ -21,6 +21,26 @@ class AllFakeModelTest(TestCase):
         res = tokenizer.encode("<|im_start|>hello<|im_end|>")
         self.assertEqual(res, [151644, 14990, 151645])
 
+    def test_qwen35_unknown_tokenizer_name_preserves_json_and_template(self):
+        from tokenizers import Tokenizer
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = self._create_qwen35_tokenizer(Path(temp_dir))
+            config_path = path / "tokenizer_config.json"
+            config = json.loads(config_path.read_text())
+            config["tokenizer_class"] = "Qwen3_5Tokenizer"
+            config_path.write_text(json.dumps(config))
+            reference = Tokenizer.from_file(str(path / "tokenizer.json"))
+            tokenizer = TokenizerFactory.create(str(path), str(path), "qwen35_dense")
+            for text in ["hello", "  hello\n", "<|im_start|>hello<|im_end|>"]:
+                self.assertEqual(
+                    tokenizer.encode(text, add_special_tokens=False),
+                    reference.encode(text, add_special_tokens=False).ids,
+                )
+            self.assertEqual(tokenizer.chat_template, config["chat_template"])
+            self.assertEqual(tokenizer.eos_token_id, 248046)
+            self.assertEqual(tokenizer.stop_words_id_list, [[248046], [248045]])
+
     def test_qwen35_loads_tokenizers_backend_tokenizer_config(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             tokenizer_path = self._create_qwen35_tokenizer(Path(temp_dir))
