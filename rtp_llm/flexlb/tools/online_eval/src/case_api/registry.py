@@ -6,6 +6,7 @@ from dataclasses import dataclass, field
 from case_api.execution_contract import ExecutionRequirements
 from enum import Enum
 from importlib import import_module
+from contextlib import contextmanager
 from pathlib import Path
 import re
 from types import MappingProxyType
@@ -184,11 +185,14 @@ class CaseRegistry:
         return cls(*(MappingProxyType(v) for v in (entries, views, producers, sources)))
 
 
-def discover(root=None, *, package='cases'):
+def discover(root=None, *, package='cases', names=None):
     """Only immediate, owned package directories containing program.py are cases."""
     root = Path(root) if root is not None else Path(__file__).resolve().parent.parent / "cases"
+    selected = None if names is None else frozenset(names)
     entries = []
     for path in sorted(root.iterdir()):
+        if selected is not None and path.name not in selected:
+            continue
         if path.is_dir() and (path / 'program.py').is_file():
             if not re.fullmatch(r'[a-z][a-z0-9_]*', path.name):
                 raise ValueError('invalid case directory: ' + path.name)
@@ -199,6 +203,8 @@ def discover(root=None, *, package='cases'):
                 raise ValueError(f'{module_name}: case import failed: {exc}') from exc
             entries.append(RegisteredCase(path.name, module_name, Path(module.__file__),
                                           getattr(module, 'CASE', None)))
+    if selected is not None and selected != {entry.name for entry in entries}:
+        raise ValueError("unknown selected cases: " + str(sorted(selected - {entry.name for entry in entries})))
     return CaseRegistry.build(entries)
 
 
@@ -216,3 +222,22 @@ def registry():
 
 def view_capabilities():
     return registry().views
+
+
+@contextmanager
+def using_cases(names):
+    """A frozen child imports only the cases admitted by its execution plan."""
+    if names is None:
+        yield
+        return
+    global _snapshot
+    names = frozenset(names)
+    available = _snapshot
+    selected = (CaseRegistry.build([available.cases[name] for name in sorted(names)])
+                if available is not None and names <= available.cases.keys()
+                else discover(names=names))
+    _snapshot = selected
+    try:
+        yield
+    finally:
+        _snapshot = available

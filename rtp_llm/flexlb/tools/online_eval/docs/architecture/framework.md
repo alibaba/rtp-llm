@@ -88,7 +88,7 @@ case YAML 通过 `program: default` 生成内部 program document；后者包含
 
 每个 case 有 `default` program，变体只追加测试点。YAML 保存数据，不能写 action、通用 `$ref` 或任意表达式；具名观测窗口只能选择 program 声明的时间输出，不能编排步骤。配置层次和 action 边界见[新增 case](../development/adding-cases.md)。
 
-资源句柄绑定环境代次。重建环境前清理旧消费者及进程，旧句柄只能显式作为历史证据读取。动态 worker 添加保留尝试预算；移除不返还容量预算。端口租约由父 runner 拥有，子执行器启动前核对范围与最大拓扑。父 runner 将完整 compiled instances 写入 `execution-plan.json`，记录规范化内容摘要与代码、运行配置的文件摘要。子执行器使用父进程提供的摘要验证计划，再验证当前依赖与租约，直接执行冻结步骤，不重新编译场景 YAML。规划后改变场景文件不改变已经冻结的参数；代码或运行配置变化使启动失败，必须重新规划。
+资源句柄绑定环境代次。重建环境前清理旧消费者及进程，旧句柄只能显式作为历史证据读取。动态 worker 添加保留尝试预算；移除不返还容量预算。端口租约由父 runner 拥有，子执行器启动前核对范围与最大拓扑。父 runner 将完整 compiled instances 写入 `execution-plan.json`，记录规范化内容摘要、所选 case 源码及公共底座和运行配置的文件摘要。子执行器使用父进程提供的摘要验证计划，再验证当前依赖与租约，直接执行冻结步骤，不重新编译场景 YAML。规划后改变场景文件不改变已经冻结的参数；所选 case、公共底座或运行配置变化使启动失败，必须重新规划；未选中 case 的源码和未选择的报告视图不进入该计划的依赖集合；功能用例不依赖报告展示资源。子执行器在验证计划信封和摘要后，只注册、导入计划选择的 case，执行结束后恢复调用方的注册作用域。
 
 `ResourceScope` 持有句柄、环境代次、取证适配器和清理栈；`RuntimeContext` 绑定输出引用及实际事件；`StageExecutor` 负责阶段分发与输出检查；`RunFinalizer` 负责证据和报告预算、检查点与结果提交。取证 exporter 返回 `case_api.extension_contracts.ResourceEvidence`，客户端的具体转换位于 `adapters.resource_evidence`，公共资源作用域只校验合同。deadline 位于运行底座。gRPC 客户端持有 channel，stream 持有消费线程，Mock 控制能力只使用所属环境的 HTTP 地址，不另建资源所有者。
 

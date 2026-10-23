@@ -22,7 +22,7 @@ class ScenarioRunner:
         from scenario.execution_plan import dependency_files
         from reporting.view_config import view, DEFAULT_VIEW
         ctx.experiment_definition = dict(experiment_definition_schema_version=1,
-            plan=plan.to_dict(), dependencies=dependency_files(),
+            plan=plan.to_dict(), dependencies=dependency_files([plan]),
             views={name: view(name).to_dict() for name in dict.fromkeys(
                 [DEFAULT_VIEW, *ctx.instance.get('reports', [])])}
             if ctx.instance['metadata']['kind'] == 'workload' else {})

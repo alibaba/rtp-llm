@@ -116,15 +116,30 @@ def main(argv=None):
     parser.add_argument("--experiment-params", help="JSON: case -> dotted YAML field -> scalar value")
     args = parser.parse_args(argv)
     resolve_selection(args, parser)
+    from contextlib import nullcontext
+    from case_api.registry import using_cases
+    from scenario.execution_plan import ExecutionPlanCodec, selected_cases
     try:
-        from scenario.execution_plan import dependency_files
-        dependencies = dependency_files()
-        registry = handlers()
         if args.plan:
             if args.experiment_params:
                 raise ScenarioError("frozen plans already contain effective experiment parameters")
             if args.list_json or not args.plan_sha256:
                 raise ScenarioError("frozen execution requires --plan-sha256 and cannot list")
+        scope = (using_cases(selected_cases(ExecutionPlanCodec().read_document(
+            args.plan, args.plan_sha256)["instances"])) if args.plan else nullcontext())
+        with scope:
+            return run_selected(args)
+    except (ScenarioError, OSError, ValueError) as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
+
+
+def run_selected(args):
+    try:
+        from scenario.execution_plan import dependency_files
+        dependencies = dependency_files() if not args.plan else {}
+        registry = handlers()
+        if args.plan:
             from scenario.execution_plan import load_plan
             plans = select(load_plan(args.plan, args.plan_sha256), args.instances)
             if any(plan["profile"] != args.profile or plan["grade"] != args.grade for plan in plans):
