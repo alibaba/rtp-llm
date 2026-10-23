@@ -21,6 +21,32 @@ from rtp_llm.utils.fuser import fetch_remote_file_to_local
 RUN_AFFINITY_TIMEOUT_SEC = 10
 
 
+def _auto_deepep_supported_on_visible_devices(local_world_size: int = 0) -> bool:
+    """Whether automatic DeepEP selection is valid for participating devices.
+
+    Consumer Blackwell SM120 uses the generic SM120 collective strategy;
+    DeepEP does not ship compatible kernels there. Models on other SM12x
+    architectures retain main's startup behavior and validate their concrete
+    backends later.
+    Devices outside the local world do not participate and must not affect
+    selection.
+    """
+    if not torch.cuda.is_available():
+        # Preserve CPU-only config parsing and unit-test behavior.  Runtime
+        # hardware validation occurs later when CUDA is initialized.
+        return True
+    device_count = torch.cuda.device_count()
+    participating_device_count = min(
+        device_count,
+        local_world_size if local_world_size > 0 else device_count,
+    )
+    capabilities = [
+        torch.cuda.get_device_capability(device_index)
+        for device_index in range(participating_device_count)
+    ]
+    return all(capability != (12, 0) for capability in capabilities)
+
+
 def auto_configure_deepep(
     moe_config,
     deep_ep_config,
@@ -128,12 +154,31 @@ def auto_configure_deepep(
         and deep_ep_config.use_mori_ep is None
     ):
         # All are None, use auto configuration
-        _apply_auto_deepep_config(
-            moe_config=moe_config,
-            world_size=parallelism_config.world_size,
-            local_world_size=parallelism_config.local_world_size,
-            role_type=role_type,
-        )
+        is_model_worker = role_type in {
+            RoleType.PREFILL,
+            RoleType.DECODE,
+            RoleType.PDFUSION,
+        }
+        if (
+            is_model_worker
+            and parallelism_config.ep_size > 1
+            and not _auto_deepep_supported_on_visible_devices(parallelism_config.local_world_size)
+        ):
+            moe_config.use_deepep_moe = False
+            moe_config.use_deepep_low_latency = False
+            moe_config.use_deepep_internode = False
+            logging.info(
+                "Automatic DeepEP selection is disabled on the participating "
+                "GPU architecture; a concrete MoE backend will validate any "
+                "required fallback after the model configuration is loaded"
+            )
+        else:
+            _apply_auto_deepep_config(
+                moe_config=moe_config,
+                world_size=parallelism_config.world_size,
+                local_world_size=parallelism_config.local_world_size,
+                role_type=role_type,
+            )
     else:
         # User has set at least one value, copy them to moe_config
         if deep_ep_config.use_deepep_moe is not None:
@@ -683,3 +728,27 @@ def setup_and_configure_server(py_env_configs: PyEnvConfigs):
     # Set local ip if not already set (e.g. for world_info / distributed_server)
     if not py_env_configs.server_config.ip:
         py_env_configs.server_config.ip = socket.gethostbyname(socket.gethostname())
+
+    # Frontend wheels omit model implementations. Model-specific settings must
+    # also leave unrelated models unaffected when launch environments are shared.
+    if (
+        py_env_configs.role_config.role_type == RoleType.FRONTEND
+        or py_env_configs.model_args.model_type != "deepseek_v4"
+    ):
+        return
+
+    # Validate after all defaults resolve, before spawning model processes.
+    from rtp_llm.models.dsv4_indexer_cache import validate_fp4_indexer_config
+
+    validate_fp4_indexer_config(
+        model_type=py_env_configs.model_args.model_type,
+        speculative_type=py_env_configs.sp_config.type,
+        generation_slots=(
+            0
+            if sp_type == SpeculativeType.NONE
+            else py_env_configs.sp_config.gen_num_per_cycle
+        ),
+        reuse_cache=py_env_configs.kv_cache_config.reuse_cache,
+        tokens_per_block=py_env_configs.kv_cache_config.seq_size_per_block,
+        kernel_tokens_per_block=py_env_configs.kv_cache_config.kernel_seq_size_per_block,
+    )
