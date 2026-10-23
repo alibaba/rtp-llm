@@ -142,5 +142,6 @@ py_test(
     name = "gated_residual_test",
     srcs = ["gated_residual_test.py"],
     deps = ["//rtp_llm:testlib"],
-    exec_properties = {"gpu": "A10"},
+    tags = ["L20_CU13"],
+    exec_properties = {"gpu": "L20_CU13"},
 )

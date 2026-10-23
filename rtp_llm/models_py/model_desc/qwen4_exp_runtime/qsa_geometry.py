@@ -492,6 +492,22 @@ def _target_verify_geometry(
                 "qwen4_exp QSA target-verify only supports contiguous text-only "
                 "MRoPE whose three axes equal prefix+j"
             )
+    elif positions.device.type == "cpu":
+        # Graph replay cannot re-read device capture buffers per step without a
+        # host sync, so validate host-resident positions for free here. Device
+        # positions rely on the position generator's uniform-axis contract;
+        # see docs/design/qwen3.8_flash_next_tp8_bringup_handoff.md §3.
+        host_offsets = torch.arange(query_len, dtype=torch.int32)
+        host_positions = positions.to(dtype=torch.int32).reshape(batch_size, query_len, 3)
+        expected_positions = (
+            prefixes.to(dtype=torch.int32).reshape(batch_size, 1, 1)
+            + host_offsets.reshape(1, query_len, 1)
+        )
+        if not bool(torch.equal(host_positions, expected_positions.expand(-1, -1, 3))):
+            raise RuntimeError(
+                "qwen4_exp QSA target-verify only supports contiguous text-only "
+                "MRoPE whose three axes equal prefix+j"
+            )
 
     kv_tokens_per_block = int(self.indexer_kv_cache.seq_size_per_block)
     state_tokens_per_block = int(self.indexer_state_cache.seq_size_per_block)

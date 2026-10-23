@@ -9,8 +9,13 @@ from rtp_llm.models_py.modules.qwen4_exp.test import ple_gate_test
 
 class PLEOuterResidualTest(unittest.TestCase):
     def setUp(self):
+        # fail-loud rather than skip: this target is pinned to RTX_5000_PRO_CU13.
         self.assertTrue(torch.cuda.is_available(), "GPU test must run on SM120")
-        self.assertEqual(torch.cuda.get_device_capability(), (12, 0))
+        self.assertEqual(
+            torch.cuda.get_device_capability(),
+            (12, 0),
+            "target pool is RTX_5000_PRO_CU13 (SM120)",
+        )
         torch.manual_seed(20261019)
 
     def test_conv_preserves_bf16_output_boundary_and_input(self):

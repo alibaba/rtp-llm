@@ -1254,6 +1254,21 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
             }
             RTP_LLM_LOG_DEBUG("[PyWrappedModel] CUDA graph forward completed");
         } else {
+            if (!warned_exact_batch_graph_miss_ && !is_prefill_cuda_graph_mode_ && !capture_hidden_states
+                && requires_exact_cuda_graph_batch_ && enable_cuda_graph_ && graph_runner != nullptr
+                && graph_runner->canRun(py_model_inputs, graph_state)) {
+                // The batch was graph-eligible except for the exact-batch key:
+                // exact-batch models have no padded replay, so this batch size
+                // has no captured graph and silently runs the much slower
+                // eager path every step. Surface it once; the fix is an
+                // explicit decode_capture_config that covers this size.
+                warned_exact_batch_graph_miss_ = true;
+                RTP_LLM_LOG_WARNING(
+                    "[PyWrappedModel] exact-batch CUDA graph miss: batch=%d runs eager decode (nearest captured "
+                    "graph_bs=%d); add it to decode_capture_config or it will keep paying eager-step cost",
+                    graph_state.current_batch_size,
+                    graph_state.current_real_graph_bs);
+            }
             py::gil_scoped_acquire gil;
             RTP_LLM_PROFILE_SCOPE("py_model.forward(normal)");
             DevicePerfWrapper wrapper(enable_device_perf_, "normal forward");

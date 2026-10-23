@@ -156,7 +156,8 @@ py_test(
         "//rtp_llm:config",
     ],
     env = {"GPU_COUNT": "1"},
-    exec_properties = {"gpu": "A10", "gpu_count": "1"},
+    tags = ["L20_CU13"],
+    exec_properties = {"gpu": "L20_CU13", "gpu_count": "1"},
 )
 
 py_test(
@@ -168,5 +169,6 @@ py_test(
         "//rtp_llm:config",
     ],
     env = {"GPU_COUNT": "1"},
-    exec_properties = {"gpu": "A10", "gpu_count": "1"},
+    tags = ["L20_CU13"],
+    exec_properties = {"gpu": "L20_CU13", "gpu_count": "1"},
 )
