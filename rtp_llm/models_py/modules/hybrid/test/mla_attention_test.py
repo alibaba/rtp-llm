@@ -123,6 +123,7 @@ def make_sparse_routing_attention():
     attention.q_lora_rank = 0
     attention.num_heads = 1
     attention.attn_config = SimpleNamespace(size_per_head=2)
+    attention.cache_base_tokens = 64
     attention.q_head_dim = 2
     attention.kv_lora_rank = 1
     attention.qk_rope_head_dim = 1

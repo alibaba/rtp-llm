@@ -46,6 +46,7 @@ class MlaAttention(nn.Module):
         self.softmax_scale = self.q_head_dim ** (-0.5)
         self.layer_idx = layer_idx
         self.token_per_block = attn_config.kernel_tokens_per_block
+        self.cache_base_tokens = attn_config.tokens_per_block
 
         if attn_config.is_sparse:
             self.indexer = Indexer(
@@ -231,7 +232,7 @@ class MlaAttention(nn.Module):
         save_full_checkpoints(
             default_kv_cache,
             default_fmha_impl.attn_inputs,
-            self.attn_config.tokens_per_block,
+            self.cache_base_tokens,
         )
 
         if attn_output is not None:

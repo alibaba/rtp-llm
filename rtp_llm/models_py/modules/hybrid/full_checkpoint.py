@@ -14,11 +14,11 @@ def save_full_checkpoints(cache, inputs, base_tokens):
     if (
         cache is None
         or not inputs.is_prefill
-        or inputs.context_parallel_info is not None
+        or getattr(inputs, "context_parallel_info", None) is not None
     ):
         return
-    positions = inputs.cache_save_positions
-    destinations = inputs.cache_save_block_ids
+    positions = getattr(inputs, "cache_save_positions", None)
+    destinations = getattr(inputs, "cache_save_block_ids", None)
     if positions is None or destinations is None or not positions.numel():
         return
     if get_device_type() != DeviceType.Cuda:
