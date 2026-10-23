@@ -1,5 +1,5 @@
 import itertools
-from unittest import SkipTest, TestCase, main
+from unittest import TestCase, main
 
 import torch
 from torch import dtype as _dtype
@@ -14,7 +14,7 @@ class RMSLayerNormTest(TestCase):
 
     def setUp(self) -> None:
         if not torch.cuda.is_available():
-            raise SkipTest("CUDA is not available")
+            raise RuntimeError("A real CUDA or ROCm GPU is required")
         torch.set_default_device("cuda")
 
     def _run_res_layernorm_test(self, num_tokens: int, hidden_size: int, dtype: _dtype):

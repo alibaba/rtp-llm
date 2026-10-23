@@ -1,6 +1,6 @@
 import os
 from types import SimpleNamespace
-from unittest import SkipTest, TestCase, main, mock
+from unittest import TestCase, main, mock
 
 import torch
 from bert_embedding_test_utils import (
@@ -41,7 +41,7 @@ class BertMultimodalEmbeddingTest(TestCase):
 
     def setUp(self) -> None:
         if not torch.cuda.is_available():
-            raise SkipTest("CUDA is not available")
+            raise RuntimeError("A real CUDA or ROCm GPU is required")
 
     def test_split_forward_preserves_visual_injection(self):
         model = self._build_one_layer_model()
@@ -388,8 +388,6 @@ class BertMultimodalEmbeddingTest(TestCase):
         self.assertFalse(torch.allclose(actual[1:2], doubly_normalized))
 
     def test_post_layernorm_features_flow_through_real_decoder_and_fmha(self):
-        if torch.version.hip is not None:
-            self.skipTest("real Bert FMHA coverage is CUDA-only")
         model = self._build_one_layer_model()
         baseline_inputs = self._build_one_layer_inputs()
         multimodal_inputs = self._build_one_layer_inputs()

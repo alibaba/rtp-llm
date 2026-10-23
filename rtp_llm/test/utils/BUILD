@@ -89,5 +89,16 @@ py_test(
 
 py_test(
     name = "graph_replay_util_test",
+    main = "graph_replay_util_test.py",
     srcs = ["graph_replay_util_test.py", "graph_replay_util.py"],
+    tags = ["L20_CU13"],
+    exec_properties = {"gpu": "L20_CU13", "gpu_count": "1"},
+)
+
+py_test(
+    name = "graph_replay_util_test_rocm",
+    main = "graph_replay_util_test.py",
+    srcs = ["graph_replay_util_test.py", "graph_replay_util.py"],
+    tags = ["rocm"],
+    exec_properties = {"gpu": "MI308X-ROCM7", "gpu_count": "1"},
 )
