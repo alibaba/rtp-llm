@@ -32,6 +32,11 @@ from rtp_llm.ops import MMPreprocessConfig, MultimodalInput, PDSepConfig, VitSep
 from rtp_llm.server.backend_rpc_server_visitor import BackendRPCServerVisitor
 from rtp_llm.server.master_client import FlexlbResponse, MasterClient
 from rtp_llm.server.mm_cache_metadata import metadata_from_proto
+from rtp_llm.server.vit_proxy_server import (
+    LoadBalancer,
+    VitProxyRpcServer,
+    WorkerConnectionPool,
+)
 from rtp_llm.server.vit_rpc_server import MultimodalRpcServer
 from rtp_llm.utils.base_model_datatypes import GenerateInput
 
@@ -105,6 +110,69 @@ class MMHashRpcTest(unittest.IsolatedAsyncioTestCase):
         return MultimodalHashRequestPB(
             keys=keys or self.keys, inputs=inputs, timeout_ms=2000
         )
+
+    async def test_master_client_acquires_hashes_through_proxy_worker(self):
+        self.engine.is_proxy_mode = True
+        worker_address = f"127.0.0.1:{self.address.grpc_port}"
+        second_engine = SimpleNamespace(**vars(self.engine))
+        second_engine._hash_key_cache = MMHashKeyCache(max_bytes=65536)
+
+        def compute_second(inputs, **kwargs):
+            for item in inputs:
+                second_engine._hash_key_cache.put(item.cache_key(), self.hashes)
+            return [MMEmbeddingRes([], feature_hashes=self.hashes) for _ in inputs]
+
+        second_engine.get_embedding_result = Mock(side_effect=compute_second)
+        second_server = grpc.server(futures.ThreadPoolExecutor(max_workers=2))
+        add_MultimodalRpcServiceServicer_to_server(
+            MultimodalRpcServer(second_engine), second_server
+        )
+        second_port = second_server.add_insecure_port("127.0.0.1:0")
+        second_server.start()
+        addresses = [worker_address, f"127.0.0.1:{second_port}"]
+        pool = WorkerConnectionPool(addresses)
+        proxy = grpc.server(futures.ThreadPoolExecutor(max_workers=2))
+        servicer = VitProxyRpcServer(LoadBalancer(addresses), pool)
+        add_MultimodalRpcServiceServicer_to_server(servicer, proxy)
+        port = proxy.add_insecure_port("127.0.0.1:0")
+        proxy.start()
+        try:
+            address = self.address.model_copy(update={"grpc_port": port})
+            # An unsupported hash RPC would return None and trigger legacy routing.
+            cold = await self.client.get_vit_cache_metadata(
+                address, self.keys, self.request
+            )
+            self.assertIsNotNone(cold)
+            self.assertIn(
+                cold["worker_instance"],
+                {
+                    self.engine._hash_key_cache.instance_id,
+                    second_engine._hash_key_cache.instance_id,
+                },
+            )
+            self.assertEqual(
+                list(cold["entries"][0]["feature_hashes"]), self.hashes[0].tolist()
+            )
+            self.assertTrue(cold["entries"][0]["hash_hit"])
+            self.assertEqual(
+                self.engine.get_embedding_result.call_count
+                + second_engine.get_embedding_result.call_count,
+                1,
+            )
+            hot = await self.client.get_vit_cache_metadata(
+                address, self.keys, self.request
+            )
+            self.assertEqual(hot["entries"], cold["entries"])
+            self.assertEqual(
+                self.engine.get_embedding_result.call_count
+                + second_engine.get_embedding_result.call_count,
+                1,
+            )
+        finally:
+            servicer.cancel_status_probes()
+            proxy.stop(0).wait()
+            second_server.stop(0).wait()
+            pool.close_all()
 
     async def test_status_poll_does_not_snapshot_keys(self):
         with patch.object(self.engine._hash_key_cache, "keys") as hashes, patch.object(

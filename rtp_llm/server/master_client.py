@@ -628,7 +628,10 @@ class MasterClient:
         filled = await self._get_vit_metadata(
             address,
             MultimodalHashRequestPB(
-                keys=[key for key in unique_keys if key in missing],
+                # Keep the probe's complete key set so a multi-worker proxy
+                # can route both phases to the same concrete cache owner. Only
+                # missing media are transmitted and computed.
+                keys=unique_keys,
                 inputs=inputs,
                 timeout_ms=max(1, int(remaining * 1000)),
             ),

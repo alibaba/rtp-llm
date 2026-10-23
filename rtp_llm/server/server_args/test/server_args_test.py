@@ -15,6 +15,26 @@ from rtp_llm.utils import backend_registry
 from rtp_llm.utils.backend_registry import register_backend_hook
 
 
+class VitPreprocessBudgetArgumentsTest(TestCase):
+    def test_per_worker_budget_environment_and_cli_precedence(self):
+        from rtp_llm.server.server_args import server_args
+
+        with patch.dict(os.environ, {"MM_PREPROCESS_MAX_WORKERS": "1"}, clear=True):
+            configs = server_args.setup_args(["--vit_server_count", "6"])
+            overridden = server_args.setup_args(["--mm_preprocess_max_workers", "2"])
+        self.assertEqual(configs.vit_config.mm_preprocess_max_workers, 1)
+        self.assertEqual(configs.server_config.vit_server_count, 6)
+        self.assertEqual(overridden.vit_config.mm_preprocess_max_workers, 2)
+
+    def test_invalid_cpu_pool_size_is_rejected(self):
+        from rtp_llm.server.server_args import server_args
+
+        for value in ("0", "-1", "1.5"):
+            with self.subTest(value=value), patch.dict(os.environ, {}, clear=True):
+                with self.assertRaises((SystemExit, ValueError)):
+                    server_args.setup_args(["--mm_preprocess_max_workers", value])
+
+
 class CustomAllReduceArgumentsTest(TestCase):
     def test_explicit_cli_value_is_preserved_for_python_collectives(self):
         from rtp_llm.server.server_args import server_args
@@ -329,6 +349,38 @@ class CacheConfigArgumentsTest(TestCase):
 
 class ServerArgsPyEnvConfigsTest(TestCase):
     """Test that environment variables and command line arguments are correctly set to py_env_configs structure."""
+
+    def test_vit_proxy_health_threshold_default_environment_and_cli(self):
+        from rtp_llm.server.server_args import server_args
+
+        with patch.dict(os.environ, {}, clear=True):
+            self.assertEqual(
+                server_args.setup_args([]).vit_config.vit_proxy_min_healthy_workers, 0
+            )
+        with patch.dict(os.environ, {"VIT_PROXY_MIN_HEALTHY_WORKERS": "3"}, clear=True):
+            self.assertEqual(
+                server_args.setup_args([]).vit_config.vit_proxy_min_healthy_workers, 3
+            )
+            config = server_args.setup_args(["--vit_proxy_min_healthy_workers", "4"])
+            self.assertEqual(config.vit_config.vit_proxy_min_healthy_workers, 4)
+            self.assertIn(
+                "vit_proxy_min_healthy_workers: 4", config.vit_config.to_string()
+            )
+
+    def test_vit_proxy_health_threshold_rejects_invalid_cli_and_environment(self):
+        from rtp_llm.server.server_args import server_args
+
+        for value in ("-1", "1.5", "nan", "abc"):
+            with self.subTest(value=value), patch.dict(
+                os.environ, {}, clear=True
+            ), patch("sys.stderr", new_callable=io.StringIO):
+                with self.assertRaises(SystemExit):
+                    server_args.setup_args(["--vit_proxy_min_healthy_workers", value])
+            with self.subTest(env=value), patch.dict(
+                os.environ, {"VIT_PROXY_MIN_HEALTHY_WORKERS": value}, clear=True
+            ), patch("sys.stderr", new_callable=io.StringIO):
+                with self.assertRaises(SystemExit):
+                    server_args.setup_args([])
 
     def test_dsv4_mega_moe_public_choices(self):
         from rtp_llm.server.server_args import server_args

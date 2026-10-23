@@ -337,10 +337,21 @@ class MMCacheRoutingIntegrationTest(unittest.IsolatedAsyncioTestCase):
             calls = self.visitor.master_client.get_backend_role_addrs.call_args_list
             self.assertEqual(len(calls), 1)
 
-    async def test_frontend_falls_back_through_vit_proxy_to_worker(self):
+    async def test_frontend_falls_back_through_vit_proxy_to_legacy_worker(self):
+        await self._frontend_through_proxy(hashes_supported=False)
+
+    async def test_frontend_expands_hashes_through_vit_proxy_to_worker(self):
+        await self._frontend_through_proxy(hashes_supported=True)
+
+    async def _frontend_through_proxy(self, hashes_supported):
         received = []
 
         class Worker(MultimodalRpcServiceServicer):
+            def GetMultimodalHashes(self, request, context):
+                if not hashes_supported:
+                    context.abort(grpc.StatusCode.UNIMPLEMENTED, "legacy worker")
+                return hash_response(request.keys, [[-10, 11]])
+
             def RemoteMultimodalEmbedding(self, request, context):
                 received.append(request)
                 return MultimodalOutputPB(split_size=[1])
@@ -373,12 +384,20 @@ class MMCacheRoutingIntegrationTest(unittest.IsolatedAsyncioTestCase):
             route_calls = client.get_backend_role_addrs.call_args_list
             self.assertEqual(len(route_calls), 2)
             self.assertTrue(route_calls[0].kwargs["vit_only"])
-            self.assertNotIn("selected_vit", route_calls[1].kwargs)
-            self.assertNotIn("seq_len", route_calls[1].kwargs)
-            self.assertEqual(
-                list(route_calls[1].kwargs["input_pb"].token_ids), [1, 99, 2]
-            )
-            self.assertIsNone(self.request.mm_token_expansion)
+            if hashes_supported:
+                self.assertEqual(route_calls[1].kwargs["selected_vit"], status)
+                self.assertEqual(route_calls[1].kwargs["seq_len"], 4)
+                self.assertEqual(
+                    list(route_calls[1].kwargs["input_pb"].token_ids), [1, -10, 11, 2]
+                )
+                self.assertIsNotNone(self.request.mm_token_expansion)
+            else:
+                self.assertNotIn("selected_vit", route_calls[1].kwargs)
+                self.assertNotIn("seq_len", route_calls[1].kwargs)
+                self.assertEqual(
+                    list(route_calls[1].kwargs["input_pb"].token_ids), [1, 99, 2]
+                )
+                self.assertIsNone(self.request.mm_token_expansion)
 
             wire = MultimodalInputsPB(request_id=self.request.request_id)
             wire.multimodal_inputs.add().CopyFrom(
@@ -429,7 +448,7 @@ class MMCacheRoutingIntegrationTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(list(calls[0].args[1].keys), keys[:2])
         self.assertFalse(calls[0].args[1].HasField("inputs"))
         payload = calls[1].args[1]
-        self.assertEqual(list(payload.keys), keys[1:2])
+        self.assertEqual(list(payload.keys), keys[:2])
         self.assertEqual(payload.inputs.request_id, self.request.request_id)
         self.assertEqual(len(payload.inputs.multimodal_inputs), 1)
         resolved = trans_mm_input(payload.inputs)

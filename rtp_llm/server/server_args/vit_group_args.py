@@ -220,9 +220,13 @@ def init_vit_group_args(parser, vit_config):
         "--mm_preprocess_max_workers",
         env_name="MM_PREPROCESS_MAX_WORKERS",
         bind_to=(vit_config, "mm_preprocess_max_workers"),
-        type=int,
+        type=_positive_int,
         default=4,
-        help="多模态预处理时最大线程数量",
+        help=(
+            "CPU preprocessing processes per ViT worker (total processes = "
+            "VIT_SERVER_COUNT * MM_PREPROCESS_MAX_WORKERS). Use 1 for "
+            "memory-constrained multi-worker deployments."
+        ),
     )
     vit_group.add_argument(
         "--biencoder_preprocess",
@@ -279,6 +283,14 @@ def init_vit_group_args(parser, vit_config):
         type=str,
         default="round_robin",
         help="VIT代理服务器的负载均衡策略，可选值: 'round_robin' 或 'least_connections'",
+    )
+    vit_group.add_argument(
+        "--vit_proxy_min_healthy_workers",
+        env_name="VIT_PROXY_MIN_HEALTHY_WORKERS",
+        bind_to=(vit_config, "vit_proxy_min_healthy_workers"),
+        type=_non_negative_int,
+        default=0,
+        help="VIT proxy 最少健康 worker 数：0 自动取 ceil(N/2)，显式值必须在 1..N",
     )
     transport_config = vit_config.output_transport
     control_config = transport_config.control

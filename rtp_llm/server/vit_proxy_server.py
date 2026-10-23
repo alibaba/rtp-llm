@@ -3,6 +3,8 @@ VIT Proxy Server - 主进程代理服务器
 负责接收外部请求并分发到工作进程，解决 SO_REUSEPORT 流量打偏问题
 """
 
+import hashlib
+import json
 import logging
 import queue
 import threading
@@ -18,6 +20,8 @@ from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2 import (
     CacheStatusPB,
     CacheVersionPB,
     EmptyPB,
+    MultimodalHashRequestPB,
+    MultimodalHashResponsePB,
     MultimodalInputsPB,
     MultimodalOutputPB,
     ReleaseLeasePB,
@@ -49,6 +53,7 @@ DEFAULT_PROXY_RPC_TIMEOUT_SECONDS = (
 # transient proxy status timeout until its VIT expiration window elapses.
 # These two layers therefore use different health deadlines by design.
 STATUS_CHECK_TIMEOUT_SEC = 1.0
+WORKER_RECOVERY_INTERVAL_SEC = 1.0
 # Only UNAVAILABLE triggers worker failover (and marking the worker unhealthy).
 # RESOURCE_EXHAUSTED (scheduler queue backpressure) is deliberately NOT here: by
 # design it is returned directly to the client (no failover to another worker),
@@ -58,6 +63,19 @@ STATUS_CHECK_TIMEOUT_SEC = 1.0
 RETRYABLE_WORKER_RPC_CODES = {
     grpc.StatusCode.UNAVAILABLE,
 }
+
+
+def resolve_min_healthy_workers(worker_count: int, configured_min: int = 0) -> int:
+    if type(worker_count) is not int or worker_count <= 0:
+        raise ValueError(
+            f"VIT worker count must be a positive integer, got {worker_count!r}"
+        )
+    if type(configured_min) is not int or not 0 <= configured_min <= worker_count:
+        raise ValueError(
+            "VIT_PROXY_MIN_HEALTHY_WORKERS must be 0 (auto) or in "
+            f"1..{worker_count}, got {configured_min!r}"
+        )
+    return (worker_count + 1) // 2 if configured_min == 0 else configured_min
 
 
 def resolve_default_rpc_timeout_seconds(
@@ -195,8 +213,9 @@ class StatusProbeResult(NamedTuple):
 class _WorkerStatusProbe:
     """One in-flight worker probe shared by concurrent proxy status requests."""
 
-    def __init__(self, future: grpc.Future):
+    def __init__(self, future: grpc.Future, health_version: int):
         self.future = future
+        self.health_version = health_version
         self._lock = threading.Lock()
         self._completed = False
         self._result: Optional[StatusProbeResult] = None
@@ -269,7 +288,12 @@ def _report_vit_error_qps(error: Optional[BaseException] = None) -> None:
 class LoadBalancer:
     """负载均衡器，支持轮询和最少连接算法"""
 
-    def __init__(self, worker_addresses: list[str], strategy: str = "round_robin"):
+    def __init__(
+        self,
+        worker_addresses: list[str],
+        strategy: str = "round_robin",
+        initially_alive: bool = True,
+    ):
         """
         Args:
             worker_addresses: 工作进程地址列表，格式如 ['localhost:9202', 'localhost:9203']
@@ -279,17 +303,34 @@ class LoadBalancer:
         self.strategy = strategy
         self.current_index = 0
         self.connection_counts = defaultdict(int)  # 记录每个工作进程的连接数
-        self.worker_alive = {addr: True for addr in worker_addresses}
+        self.worker_alive = {addr: initially_alive for addr in worker_addresses}
+        self._health_versions = {addr: 0 for addr in worker_addresses}
         self.lock = threading.Lock()
 
     def get_worker_address(self) -> str:
         """获取工作进程地址"""
         return self.worker_addresses
 
-    def set_worker_alive(self, worker_address: str, alive: bool):
+    def get_health_version(self, worker_address: str) -> int:
         with self.lock:
-            if worker_address in self.worker_alive:
-                self.worker_alive[worker_address] = alive
+            return self._health_versions.get(worker_address, 0)
+
+    def set_worker_alive(
+        self,
+        worker_address: str,
+        alive: bool,
+        expected_version: Optional[int] = None,
+    ) -> bool:
+        """Apply a current observation and return the resulting alive state."""
+        with self.lock:
+            if worker_address not in self.worker_alive:
+                return False
+            version = self._health_versions.get(worker_address, 0)
+            if expected_version is not None and version != expected_version:
+                return self.worker_alive[worker_address]
+            self.worker_alive[worker_address] = alive
+            self._health_versions[worker_address] = version + 1
+            return alive
 
     def get_alive_worker_addresses(self) -> list[str]:
         with self.lock:
@@ -400,7 +441,11 @@ class VitProxyRpcServer(MultimodalRpcServiceServicer):
         connection_pool: WorkerConnectionPool,
         default_rpc_timeout_seconds: float = DEFAULT_PROXY_RPC_TIMEOUT_SECONDS,
         transport_config=None,
+        min_healthy_workers: int = 0,
     ):
+        self.min_healthy_workers = resolve_min_healthy_workers(
+            len(load_balancer.worker_addresses), min_healthy_workers
+        )
         self.load_balancer = load_balancer
         self.connection_pool = connection_pool
         self.default_rpc_timeout_seconds = default_rpc_timeout_seconds
@@ -409,6 +454,7 @@ class VitProxyRpcServer(MultimodalRpcServiceServicer):
         kmonitor.init()
         self._status_probes: dict[str, _WorkerStatusProbe] = {}
         self._status_probes_lock = threading.Lock()
+        self._status_probes_stopped = False
         self._worker_count_metric_lock = threading.Lock()
 
     @staticmethod
@@ -656,10 +702,21 @@ class VitProxyRpcServer(MultimodalRpcServiceServicer):
         worker_status, worker_timed_out = _get_status_call_result(
             worker_address, status_call
         )
-        self.load_balancer.set_worker_alive(worker_address, worker_status is not None)
         with self._status_probes_lock:
-            if self._status_probes.get(worker_address) is probe:
+            active = (
+                not self._status_probes_stopped
+                and self._status_probes.get(worker_address) is probe
+            )
+            current_alive = False
+            if active:
+                current_alive = self.load_balancer.set_worker_alive(
+                    worker_address,
+                    worker_status is not None,
+                    expected_version=probe.health_version,
+                )
                 self._status_probes.pop(worker_address, None)
+        if not current_alive:
+            worker_status = None
         probe.complete(
             StatusProbeResult(worker_address, worker_status, worker_timed_out)
         )
@@ -702,19 +759,28 @@ class VitProxyRpcServer(MultimodalRpcServiceServicer):
         probe: Optional[_WorkerStatusProbe] = None
         new_probe = False
         subscribed = False
+        health_version = self.load_balancer.get_health_version(worker_address)
         try:
             with self._status_probes_lock:
+                if self._status_probes_stopped:
+                    completed_status_calls.put(
+                        StatusProbeResult(worker_address, None, False)
+                    )
+                    return
                 # GetWorkerStatus currently ignores StatusVersionPB fields, so an
                 # in-flight probe is reusable across callers and cache versions.
                 # If worker responses become request-dependent, include a request
                 # fingerprint in this key instead of reusing by address alone.
                 probe = self._status_probes.get(worker_address)
                 if probe is None:
+                    health_version = self.load_balancer.get_health_version(
+                        worker_address
+                    )
                     stub = self.connection_pool.get_stub(worker_address)
                     status_call = stub.GetWorkerStatus.future(
                         request, timeout=timeout_s
                     )
-                    probe = _WorkerStatusProbe(status_call)
+                    probe = _WorkerStatusProbe(status_call, health_version)
                     self._status_probes[worker_address] = probe
                     new_probe = True
                 probe.subscribe(completed_status_calls)
@@ -727,7 +793,11 @@ class VitProxyRpcServer(MultimodalRpcServiceServicer):
                     )
                 )
         except grpc.RpcError as e:
-            self.load_balancer.set_worker_alive(worker_address, False)
+            with self._status_probes_lock:
+                if not self._status_probes_stopped:
+                    self.load_balancer.set_worker_alive(
+                        worker_address, False, expected_version=health_version
+                    )
             _log_worker_status_rpc_error(worker_address, e)
             try:
                 worker_timed_out = e.code() == grpc.StatusCode.DEADLINE_EXCEEDED
@@ -743,7 +813,11 @@ class VitProxyRpcServer(MultimodalRpcServiceServicer):
             )
             self._report_worker_counts()
         except Exception as e:
-            self.load_balancer.set_worker_alive(worker_address, False)
+            with self._status_probes_lock:
+                if not self._status_probes_stopped:
+                    self.load_balancer.set_worker_alive(
+                        worker_address, False, expected_version=health_version
+                    )
             _log_worker_status_error(worker_address, e)
             self._fail_status_probe_subscription(
                 worker_address,
@@ -755,12 +829,108 @@ class VitProxyRpcServer(MultimodalRpcServiceServicer):
             )
             self._report_worker_counts()
 
+    def refresh_worker_health(
+        self,
+        *,
+        only_unhealthy: bool = False,
+        timeout_s: float = STATUS_CHECK_TIMEOUT_SEC,
+    ) -> dict[str, bool]:
+        workers = list(self.load_balancer.worker_addresses)
+        if only_unhealthy:
+            alive = set(self.load_balancer.get_alive_worker_addresses())
+            workers = [addr for addr in workers if addr not in alive]
+        results = dict.fromkeys(workers, False)
+        completed = queue.Queue()
+        deadline = time.monotonic() + timeout_s
+        request = StatusVersionPB()
+        pending = 0
+        for addr in workers:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            self._subscribe_status_probe(addr, request, remaining, completed)
+            pending += 1
+        while pending:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            try:
+                result = completed.get(timeout=remaining)
+            except queue.Empty:
+                break
+            results[result.worker_address] = result.worker_status is not None
+            pending -= 1
+        alive = set(self.load_balancer.get_alive_worker_addresses())
+        return {addr: ok and addr in alive for addr, ok in results.items()}
+
     def cancel_status_probes(self):
         with self._status_probes_lock:
-            probes = list(self._status_probes.values())
+            self._status_probes_stopped = True
+            probes = list(self._status_probes.items())
             self._status_probes.clear()
-        for probe in probes:
+        for worker_address, probe in probes:
+            # Wake subscribers even if transport cancellation does not invoke
+            # its callback immediately. Late callbacks cannot change LB state.
+            probe.complete(StatusProbeResult(worker_address, None, False))
             probe.cancel()
+
+    def GetMultimodalHashes(
+        self, request: MultimodalHashRequestPB, context
+    ) -> MultimodalHashResponsePB:
+        # Return one concrete worker's metadata unchanged. A proxy does not own
+        # an aggregate cache directory, but content hashes remain valid when a
+        # later embedding request is handled by another worker.
+        timeout_s = self.default_rpc_timeout_seconds
+        if request.timeout_ms > 0:
+            timeout_s = min(timeout_s, request.timeout_ms / 1000.0)
+        deadline = _resolve_forwarding_deadline_seconds(timeout_s, context)
+        attempted_workers: set[str] = set()
+        routing_key = json.dumps(
+            sorted(set(request.keys)), separators=(",", ":")
+        ).encode()
+        while len(attempted_workers) < len(self.load_balancer.worker_addresses):
+            remaining = _resolve_forwarding_timeout_seconds(deadline)
+            if remaining is None:
+                self._abort_deadline_exceeded(context, "ViT hash forwarding timed out")
+            candidates = [
+                addr
+                for addr in self.load_balancer.get_alive_worker_addresses()
+                if addr not in attempted_workers
+            ]
+            if not candidates:
+                break
+            # Probe and missing-input submission carry the same complete key set.
+            # Rendezvous selection keeps their worker_instance stable even while
+            # unrelated requests advance the embedding load balancer.
+            address = max(
+                candidates,
+                key=lambda addr: hashlib.sha256(routing_key + addr.encode()).digest(),
+            )
+            attempted_workers.add(address)
+            self.load_balancer.increment_connections(address)
+            try:
+                stub = self.connection_pool.get_stub(address)
+                call = stub.GetMultimodalHashes.future(
+                    request,
+                    timeout=remaining,
+                    metadata=dashscope_greennet_metadata(
+                        dict(context.invocation_metadata() or ())
+                    ),
+                )
+                if not context.add_callback(call.cancel):
+                    call.cancel()
+                response = call.result()
+                self.load_balancer.set_worker_alive(address, True)
+                return response
+            except grpc.RpcError as error:
+                if _is_retryable_worker_rpc_error(error):
+                    self.load_balancer.set_worker_alive(address, False)
+                    continue
+                _forward_worker_error_metadata(context, error)
+                self._abort_with_worker_status(context, error)
+            finally:
+                self.load_balancer.decrement_connections(address)
+        self._abort_unavailable(context, "No healthy VIT worker for hash lookup")
 
     def WaitGreenNetVerdict(self, request: MultimodalInputsPB, context) -> EmptyPB:
         """Forward the prefill-side GreenNet gate to one VIT worker.
@@ -873,6 +1043,7 @@ class VitProxyRpcServer(MultimodalRpcServiceServicer):
             subscribed_status_call_count += 1
 
         pending_status_call_count = subscribed_status_call_count
+        healthy_statuses: dict[str, WorkerStatusPB] = {}
         while pending_status_call_count > 0:
             timeout_s = _resolve_status_check_timeout_seconds(deadline_s)
             if timeout_s is None:
@@ -889,7 +1060,15 @@ class VitProxyRpcServer(MultimodalRpcServiceServicer):
             pending_status_call_count -= 1
             status_check_timed_out |= worker_timed_out
             if worker_status:
-                return worker_status, status_check_timed_out
+                healthy_statuses[worker_address] = worker_status
+            alive = set(self.load_balancer.get_alive_worker_addresses())
+            healthy_statuses = {
+                addr: status
+                for addr, status in healthy_statuses.items()
+                if addr in alive
+            }
+            if len(healthy_statuses) >= self.min_healthy_workers:
+                return next(iter(healthy_statuses.values())), status_check_timed_out
 
         if pending_status_call_count > 0:
             logging.warning(
@@ -901,10 +1080,12 @@ class VitProxyRpcServer(MultimodalRpcServiceServicer):
             status_check_timed_out = True
         return None, status_check_timed_out
 
-    @staticmethod
-    def _set_no_alive_worker_status(context):
+    def _set_insufficient_worker_status(self, context):
         context.set_code(grpc.StatusCode.UNAVAILABLE)
-        context.set_details("No alive VIT worker behind proxy")
+        context.set_details(
+            "Insufficient healthy VIT workers behind proxy: "
+            f"required={self.min_healthy_workers}/{len(self.load_balancer.worker_addresses)}"
+        )
 
     @staticmethod
     def _set_status_check_timeout(context):
@@ -920,7 +1101,7 @@ class VitProxyRpcServer(MultimodalRpcServiceServicer):
         if status_check_timed_out:
             self._set_status_check_timeout(context)
         else:
-            self._set_no_alive_worker_status(context)
+            self._set_insufficient_worker_status(context)
         return WorkerStatusPB(role="VIT", alive=False)
 
     def GetCacheStatus(self, request: CacheVersionPB, context) -> CacheStatusPB:
@@ -935,7 +1116,7 @@ class VitProxyRpcServer(MultimodalRpcServiceServicer):
         if status_check_timed_out:
             self._set_status_check_timeout(context)
         else:
-            self._set_no_alive_worker_status(context)
+            self._set_insufficient_worker_status(context)
         return CacheStatusPB()
 
 
@@ -949,6 +1130,7 @@ class VitProxyServer:
         load_balance_strategy: str = "round_robin",
         default_rpc_timeout_seconds: float = DEFAULT_PROXY_RPC_TIMEOUT_SECONDS,
         transport_config=None,
+        min_healthy_workers: int = 0,
     ):
         """
         Args:
@@ -960,12 +1142,19 @@ class VitProxyServer:
         """
         self.worker_addresses = worker_addresses
         self.external_grpc_port = external_grpc_port
-        self.load_balancer = LoadBalancer(worker_addresses, load_balance_strategy)
+        self.min_healthy_workers = resolve_min_healthy_workers(
+            len(worker_addresses), min_healthy_workers
+        )
+        self.load_balancer = LoadBalancer(
+            worker_addresses, load_balance_strategy, initially_alive=False
+        )
         self.connection_pool = WorkerConnectionPool(worker_addresses)
         self.default_rpc_timeout_seconds = default_rpc_timeout_seconds
         self.transport_config = transport_config
         self.rpc_server = None
         self.proxy_servicer: Optional[VitProxyRpcServer] = None
+        self._recovery_stop = threading.Event()
+        self._recovery_thread: Optional[threading.Thread] = None
 
     def start(self):
         """启动代理服务器"""
@@ -985,24 +1174,46 @@ class VitProxyServer:
             self.connection_pool,
             self.default_rpc_timeout_seconds,
             self.transport_config,
+            min_healthy_workers=self.min_healthy_workers,
         )
         add_MultimodalRpcServiceServicer_to_server(self.proxy_servicer, self.rpc_server)
 
-        self.rpc_server.add_insecure_port(f"0.0.0.0:{self.external_grpc_port}")
+        address = f"0.0.0.0:{self.external_grpc_port}"
+        if self.rpc_server.add_insecure_port(address) == 0:
+            raise RuntimeError(f"Failed to bind VIT proxy gRPC server: {address}")
         self.rpc_server.start()
+        self._recovery_stop.clear()
+        self._recovery_thread = threading.Thread(
+            target=self._recover_unhealthy_workers,
+            name="vit-worker-recovery",
+            daemon=True,
+        )
+        self._recovery_thread.start()
 
         logging.info(
             f"VIT Proxy Server started on gRPC port {self.external_grpc_port}, "
             f"forwarding to {len(self.worker_addresses)} workers: {self.worker_addresses}"
         )
 
+    def _recover_unhealthy_workers(self):
+        while not self._recovery_stop.is_set():
+            try:
+                self.proxy_servicer.refresh_worker_health(only_unhealthy=True)
+            except Exception:
+                logging.exception("VIT worker recovery probe failed")
+            if self._recovery_stop.wait(WORKER_RECOVERY_INTERVAL_SEC):
+                break
+
     def stop(self):
         """停止代理服务器"""
+        self._recovery_stop.set()
+        if self.proxy_servicer:
+            self.proxy_servicer.cancel_status_probes()
+        if self._recovery_thread and self._recovery_thread.ident is not None:
+            self._recovery_thread.join(timeout=STATUS_CHECK_TIMEOUT_SEC + 1.0)
         if self.rpc_server:
             self.rpc_server.stop(grace=None)
             logging.info("VIT Proxy Server stopped")
-        if self.proxy_servicer:
-            self.proxy_servicer.cancel_status_probes()
         self.connection_pool.close_all()
 
     def wait_for_termination(self):

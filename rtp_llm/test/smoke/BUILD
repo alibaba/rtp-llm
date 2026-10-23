@@ -60,6 +60,11 @@ exports_files([
 ])
 
 filegroup(
+    name = "qwen_vl_image_fixture",
+    srcs = ["data/model/qwen_vl/1.jpeg"],
+)
+
+filegroup(
     name = "smoke_model_configs",
     srcs = glob(["data/model/**/*.json"]),
 )
