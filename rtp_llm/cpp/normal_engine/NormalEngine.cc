@@ -10,6 +10,10 @@
 #include "rtp_llm/cpp/engine_base/schedulers/SchedulerUtils.h"
 #include "rtp_llm/cpp/cache/CacheConfigCreator.h"
 #include "rtp_llm/cpp/engine_base/system_prompt/SystemPromptConstructor.h"
+#include <sys/stat.h>
+#include <ctime>
+#include <cstdio>
+#include <string>
 #include "rtp_llm/cpp/models/GenerationPrefillCudaGraphEligibility.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
@@ -1075,6 +1079,73 @@ absl::Status NormalEngine::step() try {
             RTP_LLM_PROFILE_SCOPE_DYNAMIC("engine.normal.schedule(reserve_step=%d)", reserve_step_);
             CHECK_AND_ASSIGN(streams, scheduler_->schedule());
         }
+        // DSV4_DECODE_BARRIER_BATCH (int, default 0=off): perf-measurement hold
+        // gate. While armed, decode execution is held until the node-wide number
+        // of decode-ready streams reaches N, then all streams are released at
+        // once (clean batch-N decode from step 1). Cross-DP-rank coordination
+        // uses per-rank count files (mtime must be newer than this process's
+        // first step, so files from a previous engine instance are ignored).
+        {
+            static const int barrier_n = []() {
+                const char* s = getenv("DSV4_DECODE_BARRIER_BATCH");
+                return s ? atoi(s) : 0;
+            }();
+            static bool barrier_released = false;
+            if (barrier_n > 0 && !barrier_released) {
+                static const time_t     barrier_boot = time(nullptr);
+                static int64_t          last_io_us   = 0;
+                static int64_t          last_log_us  = 0;
+                static int              last_sum     = -1;
+                static const std::string barrier_dir = []() {
+                    const char* s = getenv("DSV4_DECODE_BARRIER_DIR");
+                    return s && s[0] ? std::string(s) : std::string("/tmp/dsv4_decode_barrier");
+                }();
+                const int64_t now_us = autil::TimeUtility::currentTimeInMicroSeconds();
+                if (now_us - last_io_us > 100000) {
+                    last_io_us = now_us;
+                    mkdir(barrier_dir.c_str(), 0777);
+                    const std::string my_file =
+                        barrier_dir + "/rank" + std::to_string(parallelism_config.dp_rank);
+                    FILE* wf = fopen(my_file.c_str(), "w");
+                    if (wf) {
+                        fprintf(wf, "%zu\n", streams.size());
+                        fclose(wf);
+                    }
+                }
+                int sum = 0;
+                for (int r = 0; r < parallelism_config.dp_size; ++r) {
+                    const std::string f = barrier_dir + "/rank" + std::to_string(r);
+                    struct stat st;
+                    if (stat(f.c_str(), &st) != 0)
+                        continue;
+                    if (st.st_mtime < barrier_boot - 5)
+                        continue;  // stale file from a previous engine instance
+                    FILE* rf = fopen(f.c_str(), "r");
+                    if (rf) {
+                        int v = 0;
+                        if (fscanf(rf, "%d", &v) == 1)
+                            sum += v;
+                        fclose(rf);
+                    }
+                }
+                if (sum >= barrier_n) {
+                    barrier_released = true;
+                    RTP_LLM_LOG_WARNING(
+                        "DSV4_DECODE_BARRIER_BATCH: RELEASE node_ready=%d >= N=%d (rank%d streams=%zu) [perf measurement]",
+                        sum, barrier_n, parallelism_config.dp_rank, streams.size());
+                } else {
+                    if (sum != last_sum || now_us - last_log_us > 5000000) {
+                        RTP_LLM_LOG_WARNING(
+                            "DSV4_DECODE_BARRIER_BATCH: hold node_ready=%d < N=%d (rank%d streams=%zu)",
+                            sum, barrier_n, parallelism_config.dp_rank, streams.size());
+                        last_sum    = sum;
+                        last_log_us = now_us;
+                    }
+                    return absl::OkStatus();
+                }
+            }
+        }
+
         if (parallelism_config.dp_size > 1) {
             RTP_LLM_PROFILE_SCOPE("engine.normal.may_add_fake_stream_work");
             mayAddFakeStream(streams);
