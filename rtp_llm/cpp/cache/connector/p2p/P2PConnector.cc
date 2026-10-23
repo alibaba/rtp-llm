@@ -224,6 +224,14 @@ bool P2PConnector::executeFunction(const FunctionRequestPB& request, FunctionRes
     }
 }
 
+ErrorInfo P2PConnector::selectWriteSource(KVCacheResource&               resource,
+                                          int                            input_length,
+                                          size_t                         kv_ready_token_count,
+                                          const Meta::P2PRoutingContext& routing) {
+    return decode_ ? decode_->selectWriteSource(resource, input_length, kv_ready_token_count, routing) :
+                     ErrorInfo(ErrorCode::INVALID_PARAMS, "decode connector unavailable");
+}
+
 std::shared_ptr<AsyncContext> P2PConnector::asyncWrite(KVCacheResourcePtr      resource,
                                                        std::vector<int>        token_ids,
                                                        int                     input_length,

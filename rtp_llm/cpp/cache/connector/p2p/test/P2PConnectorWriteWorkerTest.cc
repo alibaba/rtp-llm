@@ -771,6 +771,7 @@ TEST_F(P2PConnectorWriteWorkerTest, InvalidMetadataCannotPartiallyRegisterOrSend
         [](Request& req) { req.mutable_routes(1)->set_slice_count(2); },
         [](Request& req) { req.mutable_routes(1)->set_partition_count(0); },
         [](Request& req) { req.mutable_routes(1)->set_slice_mode(99); },
+        [](Request& req) { req.mutable_routes(1)->clear_layer_blocks(); },
         [](Request& req) {
             req.mutable_routes(1)->mutable_layer_blocks(0)->set_block_ids(0, std::numeric_limits<uint32_t>::max());
         },
@@ -781,14 +782,53 @@ TEST_F(P2PConnectorWriteWorkerTest, InvalidMetadataCannotPartiallyRegisterOrSend
     for (size_t i = 0; i < corruptions.size(); ++i) {
         SCOPED_TRACE(i);
         auto req = request();
+        req.set_unique_key("invalid_metadata_" + std::to_string(i));
         corruptions[i](req);
         FunctionResponsePB response;
         EXPECT_FALSE(executeWrite(*prefill_connector_, req, response));
-        EXPECT_TRUE(executeWrite(*decode_connector_, req, response));
-    EXPECT_NE(response.p2p_response().error_code(), ErrorCodePB::NONE_ERROR);
+        EXPECT_FALSE(executeWrite(*decode_connector_, req, response));
+        EXPECT_NE(response.p2p_response().error_code(), ErrorCodePB::NONE_ERROR);
     }
     EXPECT_EQ(receiver_->registrations, 0);
     EXPECT_EQ(sender_->pendingCount(), 0);
+}
+
+TEST_F(P2PConnectorWriteWorkerTest, InvalidSenderPeerIsRejectedBeforeSending) {
+    using Request                                                = P2PConnectorBroadcastTpRequestPB;
+    const std::vector<std::function<void(Request&)>> corruptions = {
+        [](Request& req) { req.mutable_routes(1)->set_peer_index(1); },
+        [](Request& req) { req.mutable_peer_workers(0)->clear_ip(); },
+        [](Request& req) { req.mutable_peer_workers(0)->set_cache_store_port(65536); },
+    };
+    for (size_t index = 0; index < corruptions.size(); ++index) {
+        SCOPED_TRACE(index);
+        auto req = request();
+        req.set_unique_key("invalid_sender_peer_" + std::to_string(index));
+        corruptions[index](req);
+        FunctionResponsePB response;
+        EXPECT_FALSE(executeWrite(*decode_connector_, req, response));
+        EXPECT_NE(response.p2p_response().error_code(), ErrorCodePB::NONE_ERROR);
+        LeaseSnapshot status;
+        ASSERT_TRUE(queryLease(*decode_, req.unique_key(), status));
+        EXPECT_TRUE(status.stopped);
+    }
+    EXPECT_EQ(sender_->pendingCount(), 0u);
+}
+
+TEST_F(P2PConnectorWriteWorkerTest, RejectedWriteFencesLateValidRetry) {
+    auto invalid = request();
+    invalid.mutable_routes(1)->set_peer_index(1);
+    FunctionResponsePB response;
+    EXPECT_FALSE(executeWrite(*decode_connector_, invalid, response));
+    EXPECT_NE(response.p2p_response().error_code(), ErrorCodePB::NONE_ERROR);
+    EXPECT_NE(response.p2p_response().error_message().find("peer index"), std::string::npos);
+    LeaseSnapshot status;
+    ASSERT_TRUE(queryLease(*decode_, invalid.unique_key(), status));
+    EXPECT_TRUE(status.stopped);
+    EXPECT_FALSE(executeWrite(*decode_connector_, request(), response));
+    EXPECT_NE(response.p2p_response().error_code(), ErrorCodePB::NONE_ERROR);
+    EXPECT_NE(response.p2p_response().error_message().find("cancelled"), std::string::npos);
+    EXPECT_EQ(sender_->pendingCount(), 0u);
 }
 
 TEST_F(P2PConnectorWriteWorkerTest, InvalidLastRouteHasNoTransferSideEffects) {
@@ -796,7 +836,7 @@ TEST_F(P2PConnectorWriteWorkerTest, InvalidLastRouteHasNoTransferSideEffects) {
     req.mutable_routes(1)->mutable_layer_blocks(0)->set_block_ids(0, 0);
     FunctionResponsePB response;
     EXPECT_FALSE(executeWrite(*prefill_connector_, req, response));
-    EXPECT_TRUE(executeWrite(*decode_connector_, req, response));
+    EXPECT_FALSE(executeWrite(*decode_connector_, req, response));
     EXPECT_NE(response.p2p_response().error_code(), ErrorCodePB::NONE_ERROR);
     EXPECT_EQ(receiver_->registrations, 0);
     EXPECT_EQ(sender_->pendingCount(), 0);
@@ -808,12 +848,12 @@ TEST_F(P2PConnectorWriteWorkerTest, RejectsInvalidPartitionsAndExpiredRequests) 
     req.mutable_routes(0)->set_partition_id(2);
     FunctionResponsePB response;
     EXPECT_FALSE(executeWrite(*prefill_connector_, req, response));
-    EXPECT_TRUE(executeWrite(*decode_connector_, req, response));
+    EXPECT_FALSE(executeWrite(*decode_connector_, req, response));
     EXPECT_NE(response.p2p_response().error_code(), ErrorCodePB::NONE_ERROR);
     req = request();
     req.set_deadline_ms(currentTimeMs() - 1);
     EXPECT_FALSE(executeWrite(*prefill_connector_, req, response));
-    EXPECT_TRUE(executeWrite(*decode_connector_, req, response));
+    EXPECT_FALSE(executeWrite(*decode_connector_, req, response));
     EXPECT_NE(response.p2p_response().error_code(), ErrorCodePB::NONE_ERROR);
     EXPECT_EQ(receiver_->registrations, 0);
 }
@@ -850,7 +890,7 @@ TEST_F(P2PConnectorWriteWorkerTest, LinearPartitionsAreRejectedBeforeTransfer) {
     FunctionResponsePB response;
     EXPECT_FALSE(executeWrite(*target, request_pb, response));
     EXPECT_NE(response.p2p_response().error_message().find("LINEAR asymmetric TP"), std::string::npos);
-    EXPECT_TRUE(executeWrite(*source, request_pb, response));
+    EXPECT_FALSE(executeWrite(*source, request_pb, response));
     EXPECT_NE(response.p2p_response().error_code(), ErrorCodePB::NONE_ERROR);
     EXPECT_EQ(receiver_->registrations, 0);
     EXPECT_EQ(sender_->pendingCount(), 0u);
@@ -1042,7 +1082,7 @@ TEST_F(P2PConnectorWriteWorkerTest, CancellationBeforeStartRejectsDelayedBroadca
     EXPECT_FALSE(response.p2p_response().has_lease_status());
     req.set_type(WRITE);
     EXPECT_FALSE(executeWrite(*prefill_connector_, req, response));
-    EXPECT_TRUE(executeWrite(*decode_connector_, req, response));
+    EXPECT_FALSE(executeWrite(*decode_connector_, req, response));
     EXPECT_NE(response.p2p_response().error_code(), ErrorCodePB::NONE_ERROR);
     EXPECT_EQ(receiver_->registrations, 0);
     EXPECT_EQ(sender_->pendingCount(), 0);
@@ -1190,9 +1230,12 @@ TEST_F(P2PConnectorWriteRpcTest, SenderWriteAndCancelResponsesWaitForEveryPhysic
     EXPECT_EQ(sending.wait_for(std::chrono::milliseconds(30)), std::future_status::timeout);
     EXPECT_EQ(cancelling.wait_for(std::chrono::milliseconds(30)), std::future_status::timeout);
     sender_->finish(false);
-    EXPECT_TRUE(sending.get().ok());
+    const auto send_status = sending.get();
+    EXPECT_EQ(send_status.error_code(), grpc::StatusCode::INTERNAL);
+    EXPECT_FALSE(send_status.error_details().empty());
+    EXPECT_NE(send_status.error_message().find(req.unique_key()), std::string::npos);
+    EXPECT_FALSE(send_response.has_p2p_response());
     EXPECT_TRUE(cancelling.get().ok());
-    EXPECT_NE(send_response.p2p_response().error_code(), ErrorCodePB::NONE_ERROR);
     EXPECT_EQ(cancel_response.p2p_response().error_code(), ErrorCodePB::NONE_ERROR);
     EXPECT_FALSE(cancel_response.p2p_response().has_lease_status());
     EXPECT_FALSE(receiving.get().ok());
