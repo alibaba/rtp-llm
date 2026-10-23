@@ -243,8 +243,13 @@ class Qwen4ExpAttention(Qwen3NextAttention):
                     getattr(qsa_runtime.main_inputs, "cache_store_inputs", None)
                     is not None
                 )
-                if pd_prefill or max_input_length > int(
-                    self.qsa_indexer.compress_ratio
+                # A first prefill may mix cold requests with short prefix hits.
+                # Post-rejection commits always have a nonzero prefix per row.
+                has_cold_request = bool(torch.any(prefixes == 0).item())
+                if (
+                    pd_prefill
+                    or has_cold_request
+                    or max_input_length > int(self.qsa_indexer.compress_ratio)
                 ):
                     return qsa_runtime.select_draft_prefix_reuse_prefill_tokens(
                         q,

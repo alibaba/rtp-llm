@@ -764,6 +764,27 @@ class Qwen4ExpQSAConstructionTest(TestCase):
         self.assertFalse(hasattr(runtime, "draft_q"))
         self.assertEqual(fmha.selected.shape, (5, 11))
 
+    def test_mtp_short_mixed_prefix_batch_uses_prefill_not_rejection_commit(self):
+        attention = self._attention(is_mtp=True)
+        for prefixes in ([0, 128], [128, 0]):
+            for length in (1, 2, 4):
+                with self.subTest(prefixes=prefixes, length=length):
+                    inputs = self._prefill_inputs()
+                    inputs.input_lengths = torch.tensor(
+                        [length, length], dtype=torch.int32
+                    )
+                    inputs.prefix_lengths = torch.tensor(prefixes, dtype=torch.int32)
+                    inputs.sequence_lengths = torch.empty(0, dtype=torch.int32)
+                    runtime = self._runtime(attention, inputs)
+                    selected = attention._qsa_selected_indices(
+                        torch.randn(2 * length, 16), runtime
+                    )
+                    self.assertEqual(selected.shape, (2 * length, 11))
+                    self.assertEqual(
+                        runtime.draft_prefix_reuse_q.shape, (2 * length, 4, 8)
+                    )
+                    self.assertFalse(hasattr(runtime, "draft_q"))
+
     def test_mtp_pd_short_prefix_hit_uses_prefill_not_rejection_commit(self):
         attention = self._attention(is_mtp=True)
         for length in (1, 3, 4):
