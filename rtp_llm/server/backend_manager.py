@@ -118,16 +118,18 @@ class BackendManager(object):
             # MegaMoE runs on DeepGEMM symmetric buffers and never uses the
             # DeepEP/NVSHMEM wrapper. Initializing it anyway poisons the CUDA
             # context when unused NVSHMEM device state cannot start, so the
-            # wrapper is skipped for those strategies.
-            skip_deepep = engine_config.moe_config.moe_strategy in (
-                "mega_moe",
-                "mega_moe_se",
+            # wrapper is skipped for those strategies. V4.1's private stack
+            # also requires Mega for EP; it does not use moe_strategy.
+            skip_deepep = (
+                model_config.is_deepseek_v41
+                or engine_config.moe_config.moe_strategy in ("mega_moe", "mega_moe_se")
             )
             if skip_deepep and engine_config.moe_config.use_deepep_moe:
                 logging.info(
-                    "moe_strategy=%s does not use DeepEP; skipping DeepEP wrapper "
-                    "initialization",
+                    "moe_strategy=%s, is_deepseek_v41=%s do not use DeepEP; "
+                    "skipping DeepEP wrapper initialization",
                     engine_config.moe_config.moe_strategy,
+                    model_config.is_deepseek_v41,
                 )
 
             # Initialize DeepEP if enabled
