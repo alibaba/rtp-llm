@@ -1,6 +1,8 @@
 // Unit tests for GrammarLogitsProcessor over a 128-char ASCII vocab.
 
 #include "rtp_llm/cpp/models/logits_processor/GrammarLogitsProcessor.h"
+#include "rtp_llm/cpp/models/logits_processor/LogitsProcessorFactory.h"
+#include "rtp_llm/cpp/config/ModelConfig.h"
 #include "rtp_llm/cpp/engine_base/grammar/RtpGrammarMatcher.h"
 #include "rtp_llm/cpp/engine_base/grammar/XGrammarBackend.h"
 #include "rtp_llm/cpp/models/logits_processor/BitmaskUtils.h"
@@ -9,8 +11,10 @@
 
 #include <gtest/gtest.h>
 
+#include <atomic>
 #include <memory>
 #include <string>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -147,6 +151,45 @@ int expectCapOk(ErrorResult<int>&& result) {
 }
 
 }  // namespace
+
+TEST(GrammarLogitsProcessorTest, FactoryShutdownReleasesMetricsBeforeProcessExit) {
+    auto config                = grammarConfig();
+    config.tokenizer_info_json = makeAsciiTokenizerInfo().SerializeJSON();
+    auto reporter              = std::make_shared<kmonitor::MetricsReporter>("", "", kmonitor::MetricsTags{});
+    std::weak_ptr<kmonitor::MetricsReporter> retained_reporter = reporter;
+    LogitsProcessorFactory::init(ModelConfig{}, config, "", std::move(reporter));
+    EXPECT_FALSE(retained_reporter.expired());
+    LogitsProcessorFactory::shutdown();
+    EXPECT_TRUE(retained_reporter.expired());
+    LogitsProcessorFactory::shutdown();
+}
+
+TEST(GrammarLogitsProcessorTest, FactoryShutdownRacesWithRequestCreation) {
+    auto config                = grammarConfig();
+    config.tokenizer_info_json = makeAsciiTokenizerInfo().SerializeJSON();
+    LogitsProcessorFactory::init(ModelConfig{}, config, "");
+    auto input                    = std::make_shared<GenerateInput>();
+    input->generate_config        = std::make_shared<GenerateConfig>();
+    input->generate_config->regex = "ab";
+    ASSERT_TRUE(LogitsProcessorFactory::createLogitsProcessors(input, 1, 1, kEos).ok());
+
+    std::atomic<bool> started{false};
+    std::thread       reader([&] {
+        started = true;
+        for (int i = 0; i < 100; ++i) {
+            auto result = LogitsProcessorFactory::createLogitsProcessors(input, 1, 1, kEos);
+            if (!result.ok()) {
+                EXPECT_NE(result.status().ToString().find("backend is disabled"), std::string::npos);
+            }
+        }
+    });
+    while (!started.load()) {
+        std::this_thread::yield();
+    }
+    LogitsProcessorFactory::shutdown();
+    reader.join();
+    EXPECT_FALSE(LogitsProcessorFactory::createLogitsProcessors(input, 1, 1, kEos).ok());
+}
 
 TEST(GrammarLogitsProcessorTest, ProcessMasksInitialDecodeState) {
     auto backend = makeBackend();
@@ -369,8 +412,7 @@ TEST(GrammarLogitsProcessorTest, UpdateStatusRollsBackEntireRejectedBatch) {
 TEST(GrammarLogitsProcessorTest, DegenerateSelfReferenceMasksEverythingAndRejectsCommit) {
     auto backend = makeBackend(/*terminate_without_stop_token=*/false);
     ASSERT_TRUE(backend);
-    auto proc = makeProcessorFromKey(backend,
-                                     {"json", R"json({
+    auto proc = makeProcessorFromKey(backend, {"json", R"json({
   "$ref": "#/definitions/Self",
   "definitions": {
     "Self": {"$ref": "#/definitions/Self"}

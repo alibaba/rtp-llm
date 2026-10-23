@@ -137,7 +137,7 @@ cc_test(
         "@local_config_cuda//cuda:cuda_headers",
         "@local_config_cuda//cuda:cudart",
         "@xgrammar",
-    ] + torch_deps(),
+    ] + torch_deps() + cuda13_torch_link_deps,
     env = {
         "TEST_USING_DEVICE": "CUDA",
     },

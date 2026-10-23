@@ -77,9 +77,14 @@ void LogitsProcessorFactory::init(const ModelConfig&           model_config,
                                   const GrammarConfig&         grammar_config,
                                   const std::string&           tree_decode_config,
                                   kmonitor::MetricsReporterPtr metrics_reporter) {
-    grammarBackend() =
-        XGrammarBackend::create(grammar_config.tokenizer_info_json, grammar_config, std::move(metrics_reporter));
+    std::atomic_store(
+        &grammarBackend(),
+        XGrammarBackend::create(grammar_config.tokenizer_info_json, grammar_config, std::move(metrics_reporter)));
     PrefixToCandidateTokens::instance()->reloadPrefixDictWithPrefix(model_config.ckpt_path, tree_decode_config);
+}
+
+void LogitsProcessorFactory::shutdown() {
+    std::atomic_store(&grammarBackend(), std::shared_ptr<XGrammarBackend>{});
 }
 
 ErrorResult<std::vector<BaseLogitsProcessorPtr>>
@@ -105,7 +110,7 @@ LogitsProcessorFactory::createLogitsProcessors(std::shared_ptr<GenerateInput> ge
                              "grammar-constrained decoding does not support beam search or "
                              "num_return_sequences > 1");
         }
-        auto& backend = grammarBackend();
+        auto backend = std::atomic_load(&grammarBackend());
         if (!backend) {
             return ErrorInfo(ErrorCode::INVALID_PARAMS,
                              "structured output requested but constraint backend is disabled "
