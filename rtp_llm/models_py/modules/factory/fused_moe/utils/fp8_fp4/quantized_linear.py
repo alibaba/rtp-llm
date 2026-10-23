@@ -52,23 +52,35 @@ def is_mxfp8_scale(weight: torch.Tensor, scale: torch.Tensor) -> bool:
     )
 
 
+def pack_ue8m0_block_scale_for_deepgemm(scale: torch.Tensor) -> torch.Tensor:
+    """Checkpoint UE8M0 ``[N/128, K/128]`` to DeepGEMM int32-packed scale."""
+    from deep_gemm.utils.layout import get_mn_major_tma_aligned_packed_ue8m0_tensor
+
+    if scale.dim() != 2:
+        raise ValueError(f"FP8 scale must be 2D, got {scale.dim()}D")
+    row_count = scale.shape[0] * FP8_BLOCK
+    row_index = torch.arange(row_count, device=scale.device) // FP8_BLOCK
+    return get_mn_major_tma_aligned_packed_ue8m0_tensor(
+        scale.float().index_select(-2, row_index)
+    )
+
+
 def create_fp8_linear(weight: torch.Tensor, scale: torch.Tensor):
     """Build the CUDA FP8 linear used by FP8 shared experts."""
+    from rtp_llm.models_py.kernels.cuda.sm120_fp8_blockwise import (
+        sm120_blockwise_fp8_available,
+    )
     from rtp_llm.models_py.modules.factory.linear import LinearFactory
 
     if is_mxfp8_scale(weight, scale):
         return Mxfp8Linear(weight, scale)
 
-    if scale.dtype == torch.float8_e8m0fnu:
-        from deep_gemm.utils.layout import get_mn_major_tma_aligned_packed_ue8m0_tensor
-
-        if scale.dim() != 2:
-            raise ValueError(f"FP8 scale must be 2D, got {scale.dim()}D")
-        row_count = scale.shape[0] * FP8_BLOCK
-        row_index = torch.arange(row_count, device=scale.device) // FP8_BLOCK
-        scale = get_mn_major_tma_aligned_packed_ue8m0_tensor(
-            scale.float().index_select(-2, row_index)
-        )
+    # The SM120 CUTLASS backend consumes the compact checkpoint scale; only
+    # DeepGEMM needs the TMA-aligned packed representation.
+    if scale.dtype == torch.float8_e8m0fnu and not (
+        scale.is_cuda and sm120_blockwise_fp8_available(scale.device)
+    ):
+        scale = pack_ue8m0_block_scale_for_deepgemm(scale)
     local_weights = {"weight": weight, "scale": scale}
     return LinearFactory.create_linear_from_weights(
         local_weights,

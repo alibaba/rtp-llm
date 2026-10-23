@@ -15,6 +15,8 @@ import unittest
 import torch
 
 from rtp_llm.models_py.triton_kernels.moe.ep_kernels import (
+    ep_gather,
+    ep_scatter,
     recompute_topk_ids_sum_expert_count,
 )
 
@@ -41,6 +43,48 @@ class TestRecomputeTopkIdsSentinel(unittest.TestCase):
             )
         return out
 
+    def test_scatter_gather_strided_topk_views(self):
+        rows, hidden, experts = 3, 128, 2
+        ids = torch.tensor(
+            [[0, 1], [1, -1], [0, 1]], device=self.device, dtype=torch.int32
+        )
+        weights = torch.tensor(
+            [[0.25, 0.75], [1.0, 0.0], [0.6, 0.4]], device=self.device
+        )
+        x = torch.randn(rows, hidden, device=self.device)
+
+        def strided(tensor):
+            storage = torch.full((rows, 6), -99, device=self.device, dtype=tensor.dtype)
+            storage[:, 1::3] = tensor
+            return storage[:, 1::3]
+
+        counts = torch.tensor([2, 3], device=self.device, dtype=torch.int32)
+        for use_strides in (False, True):
+            topk = strided(ids) if use_strides else ids
+            topk_weights = strided(weights) if use_strides else weights
+            output_index = torch.full_like(ids, -1)
+            if use_strides:
+                output_index = strided(output_index)
+            scattered = torch.empty((256, hidden), device=self.device)
+            scale = torch.ones((rows, 1), device=self.device)
+            scattered_scale = torch.empty((256, 1), device=self.device)
+            starts = torch.zeros(experts, device=self.device, dtype=torch.int32)
+            m_indices = torch.empty(256, device=self.device, dtype=torch.int32)
+            ep_scatter(
+                x,
+                scale,
+                topk,
+                counts,
+                starts,
+                scattered,
+                scattered_scale,
+                m_indices,
+                output_index,
+            )
+            output = torch.empty_like(x)
+            ep_gather(scattered, topk, topk_weights, output_index, output)
+            torch.testing.assert_close(output, x, rtol=1e-6, atol=1e-6)
+
     def test_sentinel_rows_not_counted(self) -> None:
         """A row of all -1 contributes nothing to expert_count."""
         # 4 tokens, topk=2; rank 0 owns experts [0, 4)
@@ -65,7 +109,9 @@ class TestRecomputeTopkIdsSentinel(unittest.TestCase):
         self.assertTrue(torch.equal(adjusted, expected_adj))
 
         # count: each of experts [0,1,2,3] gets exactly 1, padded rows ignored
-        expected_count = torch.tensor([1, 1, 1, 1], dtype=torch.int32, device=self.device)
+        expected_count = torch.tensor(
+            [1, 1, 1, 1], dtype=torch.int32, device=self.device
+        )
         self.assertTrue(torch.equal(count, expected_count))
 
     def test_mixed_sentinel_and_out_of_range(self) -> None:
@@ -74,10 +120,10 @@ class TestRecomputeTopkIdsSentinel(unittest.TestCase):
         start, num_local = 4, 4
         topk_ids = torch.tensor(
             [
-                [4, 5],   # both local → adjusted (0, 1)
-                [0, 6],   # 0 is remote (out of range) → -1; 6 → adjusted 2
+                [4, 5],  # both local → adjusted (0, 1)
+                [0, 6],  # 0 is remote (out of range) → -1; 6 → adjusted 2
                 [-1, 7],  # sentinel + adjusted 3
-                [-1, -1], # padded row
+                [-1, -1],  # padded row
             ],
             dtype=torch.int32,
             device=self.device,
@@ -104,7 +150,9 @@ class TestRecomputeTopkIdsSentinel(unittest.TestCase):
         )
 
         # count: experts 0,1,2,3 each get exactly 1; out-of-range and -1 contribute 0
-        expected_count = torch.tensor([1, 1, 1, 1], dtype=torch.int32, device=self.device)
+        expected_count = torch.tensor(
+            [1, 1, 1, 1], dtype=torch.int32, device=self.device
+        )
         self.assertTrue(
             torch.equal(count, expected_count),
             f"count mismatch:\n  got={count}\n  want={expected_count}",
@@ -113,9 +161,7 @@ class TestRecomputeTopkIdsSentinel(unittest.TestCase):
     def test_all_sentinel_input(self) -> None:
         """All-sentinel input → adjusted preserves -1, count is all zero."""
         start, num_local = 0, 8
-        topk_ids = torch.full(
-            (5, 4), -1, dtype=torch.int32, device=self.device
-        )
+        topk_ids = torch.full((5, 4), -1, dtype=torch.int32, device=self.device)
 
         adjusted, count = recompute_topk_ids_sum_expert_count(
             topk_ids, start, num_local
@@ -137,7 +183,11 @@ class TestRecomputeTopkIdsSentinel(unittest.TestCase):
         start = 16  # rank 2 owns [16, 24)
 
         topk_ids = torch.randint(
-            0, num_total_experts, (num_tokens, topk), dtype=torch.int32, device=self.device
+            0,
+            num_total_experts,
+            (num_tokens, topk),
+            dtype=torch.int32,
+            device=self.device,
         )
         # Inject -1 sentinels into random positions
         sentinel_mask = torch.rand(num_tokens, topk, device=self.device) < 0.2
@@ -158,6 +208,46 @@ class TestRecomputeTopkIdsSentinel(unittest.TestCase):
             torch.equal(count, ref_count),
             f"count mismatch:\n  got={count}\n  want={ref_count}",
         )
+
+    def test_ep_gather_masks_partial_hidden_tail(self) -> None:
+        """Hidden widths below/above 512 must not read or write past the row."""
+        for hidden_size in (128, 513):
+            with self.subTest(hidden_size=hidden_size):
+                source = torch.arange(
+                    5 * hidden_size,
+                    dtype=torch.float32,
+                    device=self.device,
+                ).reshape(5, hidden_size)
+                source = (source.remainder(31) / 16).to(torch.bfloat16)
+                expert_ids = torch.tensor(
+                    [[0, 1], [2, -1], [3, 4]],
+                    dtype=torch.int32,
+                    device=self.device,
+                )
+                source_rows = torch.tensor(
+                    [[0, 1], [2, -1], [4, 3]],
+                    dtype=torch.int32,
+                    device=self.device,
+                )
+                weights = torch.tensor(
+                    [[0.25, 0.75], [1.0, 9.0], [0.4, 0.6]],
+                    dtype=torch.float32,
+                    device=self.device,
+                )
+                output = torch.empty(
+                    (3, hidden_size), dtype=torch.float32, device=self.device
+                )
+
+                ep_gather(source, expert_ids, weights, source_rows, output)
+
+                expected = torch.stack(
+                    (
+                        source[0].float() * 0.25 + source[1].float() * 0.75,
+                        source[2].float(),
+                        source[4].float() * 0.4 + source[3].float() * 0.6,
+                    )
+                )
+                torch.testing.assert_close(output, expected, rtol=1e-5, atol=1e-5)
 
 
 if __name__ == "__main__":

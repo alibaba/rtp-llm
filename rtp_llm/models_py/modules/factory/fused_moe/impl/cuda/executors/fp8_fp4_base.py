@@ -112,8 +112,12 @@ class Fp8Fp4ExecutorBase(FusedMoeExpertExecutor, torch.nn.Module):
 
     @staticmethod
     def _restore_output_dtype(
-        payload: ExpertForwardPayload, output: torch.Tensor
+        payload: ExpertForwardPayload,
+        output: torch.Tensor,
+        extra_expert_args: Optional[dict[str, Any]],
     ) -> torch.Tensor:
+        if extra_expert_args and extra_expert_args.get("preserve_output_dtype", False):
+            return output
         output_dtype = payload.expert_x_origin_dtype or payload.expert_x.dtype
         if output.dtype == output_dtype:
             return output
@@ -146,7 +150,9 @@ class Fp8Fp4ExecutorBase(FusedMoeExpertExecutor, torch.nn.Module):
             payload.expert_topk_weights = topk_weights
             payload.expert_topk_ids = topk_ids
             return CombineForwardPayload(
-                fused_expert_output=self._restore_output_dtype(payload, output)
+                fused_expert_output=self._restore_output_dtype(
+                    payload, output, extra_expert_args
+                )
             )
         topk_weights = payload.expert_topk_weights
         topk_ids = payload.expert_topk_ids
@@ -156,5 +162,6 @@ class Fp8Fp4ExecutorBase(FusedMoeExpertExecutor, torch.nn.Module):
             fused_expert_output=self._restore_output_dtype(
                 payload,
                 self.forward(payload.expert_x, topk_weights, topk_ids),
+                extra_expert_args,
             )
         )
