@@ -78,6 +78,9 @@ struct GptModelInitParams {
     // Explicit MTP input_hiddens row width. Zero preserves the legacy fallback
     // to hidden_size * hc_mult for direct/test construction sites.
     int64_t mtp_input_hidden_size = 0;
+
+    // Warmup wrappers borrow the Python model later used by the real executor.
+    bool owns_py_model = true;
 };
 
 enum GptModelInputIndex : size_t {

@@ -548,6 +548,30 @@ class CacheStoreForwardModel:
         return [self._forward_one(model_inputs) for model_inputs in inputs]
 
 
+class CloseAwareCacheStoreForwardModel(CacheStoreForwardModel):
+    def __init__(self) -> None:
+        super().__init__()
+        self.closed = False
+        self.close_calls = 0
+        self.initialize_calls = 0
+        self.fail_initialize = False
+
+    def initialize(self, resources) -> bool:
+        self.initialize_calls += 1
+        if self.fail_initialize:
+            raise RuntimeError("injected model initialize failure")
+        return super().initialize(resources)
+
+    def forward(self, inputs: PyModelInputs, fmha_impl=None) -> PyModelOutputs:
+        if self.closed:
+            raise RuntimeError("model is closed")
+        return super().forward(inputs, fmha_impl)
+
+    def close(self) -> None:
+        self.close_calls += 1
+        self.closed = True
+
+
 class MixedDeviceMetadataModel(CacheStoreForwardModel):
     def __init__(self):
         super().__init__()
@@ -1036,6 +1060,40 @@ class TpSyncModelInputsIntegrationTest(unittest.TestCase):
 
 
 class PyWrappedModelCacheStoreIntegrationTest(unittest.TestCase):
+    def test_borrowed_warmup_model_survives_until_owning_wrapper_is_destroyed(self):
+        model = CloseAwareCacheStoreForwardModel()
+        run_scenario(model, "multi_tag", owns_py_model=False)
+        self.assertFalse(model.closed)
+        self.assertEqual(model.close_calls, 0)
+
+        run_scenario(model, "multi_tag")
+        self.assertEqual(model.initialize_calls, 2)
+        self.assertEqual(model.forward_calls, 2)
+        self.assertTrue(model.closed)
+        self.assertEqual(model.close_calls, 1)
+
+    def test_failed_borrowed_wrapper_does_not_close_shared_model(self):
+        model = CloseAwareCacheStoreForwardModel()
+        model.fail_initialize = True
+        with self.assertRaisesRegex(Exception, "injected model initialize failure"):
+            run_scenario(model, "multi_tag", owns_py_model=False)
+        self.assertFalse(model.closed)
+        self.assertEqual(model.close_calls, 0)
+
+        model.fail_initialize = False
+        run_scenario(model, "multi_tag")
+        self.assertEqual(model.forward_calls, 1)
+        self.assertTrue(model.closed)
+        self.assertEqual(model.close_calls, 1)
+
+    def test_failed_owning_wrapper_closes_model(self):
+        model = CloseAwareCacheStoreForwardModel()
+        model.fail_initialize = True
+        with self.assertRaisesRegex(Exception, "injected model initialize failure"):
+            run_scenario(model, "multi_tag")
+        self.assertTrue(model.closed)
+        self.assertEqual(model.close_calls, 1)
+
     @unittest.skipIf(
         os.environ.get("TEST_USING_DEVICE") == "ROCM",
         "ROCm normalizes these lengths to the host metadata path",

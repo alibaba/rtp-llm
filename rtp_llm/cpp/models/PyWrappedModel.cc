@@ -133,7 +133,9 @@ void PyWrappedModel::cleanupAfterConstructionFailure() noexcept {
         generation_prefill_graph_runner_.reset();
         graph_runner_.reset();
         if (py_model_ && py::hasattr(py_model_, "close")) {
-            py_model_.attr("close")();
+            if (owns_py_model_) {
+                py_model_.attr("close")();
+            }
             py_model_ = py::object();
         } else {
             py_model_.release();
@@ -275,7 +277,9 @@ PyWrappedModel::~PyWrappedModel() {
         // Runners retain Python methods and graph-owned tensors. Drain and
         // destroy them before releasing the model object they reference.
         if (py_model_ && py::hasattr(py_model_, "close")) {
-            py_model_.attr("close")();
+            if (owns_py_model_) {
+                py_model_.attr("close")();
+            }
             py_model_ = py::object();
         } else {
             py_model_.release();
