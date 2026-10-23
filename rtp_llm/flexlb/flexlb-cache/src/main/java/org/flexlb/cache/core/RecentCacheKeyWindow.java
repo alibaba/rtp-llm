@@ -4,6 +4,7 @@ import lombok.Getter;
 import lombok.extern.slf4j.Slf4j;
 import org.flexlb.config.ConfigService;
 
+import java.util.Arrays;
 import java.util.List;
 import java.util.function.LongSupplier;
 
@@ -39,6 +40,8 @@ public class RecentCacheKeyWindow {
     private int keyTail;
     private int keySize;
     private int uniqueSize;
+    private boolean historyStarted;
+    private long historyStartMs;
 
     RecentCacheKeyWindow(long timeWindowMs, long maxCacheKeys, LongSupplier nowSupplier) {
         this.timeWindowMs = normalizeTimeWindowMs(timeWindowMs);
@@ -68,10 +71,16 @@ public class RecentCacheKeyWindow {
     Snapshot record(List<Long> cacheKeys, long nowMs) {
         long requestOccurrences;
         long requestHitOccurrences;
+        long historyCoverageMs;
         synchronized (this) {
+            if (!historyStarted) {
+                historyStarted = true;
+                historyStartMs = nowMs;
+            }
             evictExpired(nowMs);
             requestOccurrences = countNonNull(cacheKeys);
             requestHitOccurrences = countHits(cacheKeys);
+            historyCoverageMs = Math.min(timeWindowMs, Math.max(0L, nowMs - historyStartMs));
 
             if (requestOccurrences > 0L) {
                 retainRequest(cacheKeys, requestOccurrences, nowMs);
@@ -82,7 +91,20 @@ public class RecentCacheKeyWindow {
         if (log.isDebugEnabled()) {
             logRequest(nowMs, requestOccurrences, requestHitOccurrences);
         }
-        return new Snapshot(timeWindowMs, requestOccurrences, requestHitOccurrences);
+        return new Snapshot(timeWindowMs, requestOccurrences, requestHitOccurrences, historyCoverageMs);
+    }
+
+    public synchronized void reset() {
+        if (!historyStarted) {
+            return;
+        }
+        Arrays.fill(tableStates, EMPTY);
+        entryHead = 0;
+        entrySize = 0;
+        keyTail = 0;
+        keySize = 0;
+        uniqueSize = 0;
+        historyStarted = false;
     }
 
     private long countNonNull(List<Long> cacheKeys) {
@@ -117,6 +139,7 @@ public class RecentCacheKeyWindow {
 
     private void retainRequest(List<Long> cacheKeys, long requestOccurrences, long nowMs) {
         if (requestOccurrences > maxCacheKeys) {
+            historyStartMs = Math.max(historyStartMs, nowMs);
             log.debug("Recent cache-key request exceeds pool capacity; skip retaining request: "
                             + "requestCacheKeys={}, maxCacheKeys={}",
                     requestOccurrences,
@@ -124,11 +147,13 @@ public class RecentCacheKeyWindow {
             return;
         }
 
-        while (keySize + requestOccurrences > maxCacheKeys && evictOldestEntry()) {
-            // Make enough room for the current request.
+        while (keySize + requestOccurrences > maxCacheKeys && entrySize > 0) {
+            historyStartMs = Math.max(historyStartMs, entryTimestampMs[entryHead]);
+            evictOldestEntry();
         }
-        while (entrySize >= maxCacheKeys && evictOldestEntry()) {
-            // Keep one entry slot for the current request.
+        while (entrySize >= maxCacheKeys) {
+            historyStartMs = Math.max(historyStartMs, entryTimestampMs[entryHead]);
+            evictOldestEntry();
         }
 
         int start = keyTail;
@@ -332,11 +357,17 @@ public class RecentCacheKeyWindow {
         private final long timeWindowMs;
         private final long requestOccurrences;
         private final long requestHitOccurrences;
+        private final long historyCoverageMs;
 
-        Snapshot(long timeWindowMs, long requestOccurrences, long requestHitOccurrences) {
+        Snapshot(long timeWindowMs, long requestOccurrences, long requestHitOccurrences, long historyCoverageMs) {
             this.timeWindowMs = timeWindowMs;
             this.requestOccurrences = requestOccurrences;
             this.requestHitOccurrences = requestHitOccurrences;
+            this.historyCoverageMs = historyCoverageMs;
+        }
+
+        public boolean isHistoryComplete() {
+            return historyCoverageMs >= timeWindowMs;
         }
     }
 }

@@ -6,6 +6,7 @@ import org.flexlb.cache.monitor.CacheHitTheoryStats;
 import org.flexlb.cache.monitor.CacheMetricsReporter;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
+import org.flexlb.consistency.MasterElectService;
 import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.loadbalance.Response;
@@ -46,6 +47,9 @@ public class RecentCacheKeyTraceReporter {
     @Autowired(required = false)
     private ConfigService configService;
 
+    @Autowired(required = false)
+    private MasterElectService masterElectService;
+
     private final CacheHitTheoryStats theoryStats = new CacheHitTheoryStats();
 
     private static volatile BufferedWriter theoryLogWriter;
@@ -63,6 +67,9 @@ public class RecentCacheKeyTraceReporter {
         FlexlbConfig config = balanceContext.getConfig();
         if (config != null && !config.getObservability().getCacheHit()
                 .getRecentKeyWindow().isWriteEnabled()) {
+            if (shardedRecentCacheKeyWindow != null) {
+                shardedRecentCacheKeyWindow.reset();
+            }
             return;
         }
 
@@ -72,8 +79,12 @@ public class RecentCacheKeyTraceReporter {
         }
 
         List<Long> cacheKeys = request.getBlockCacheKeys();
-        RecentCacheKeyWindow.Snapshot snapshot =
-                shardedRecentCacheKeyWindow.record(balanceContext.getRequestId(), cacheKeys);
+        boolean clusterOwner = masterElectService != null
+                && masterElectService.isNeedConsistency() && masterElectService.isMaster();
+        long epoch = clusterOwner ? masterElectService.getLeadershipEpoch() : 0L;
+        RecentCacheKeyWindow.Snapshot snapshot = clusterOwner
+                ? shardedRecentCacheKeyWindow.recordForLeader(epoch, cacheKeys)
+                : shardedRecentCacheKeyWindow.record(balanceContext.getRequestId(), cacheKeys);
         long inputTokens = Math.max(0L, request.getSeqLen());
         long hitTokens = theoryHitTokens(
                 snapshot.getRequestHitOccurrences(),
@@ -94,6 +105,9 @@ public class RecentCacheKeyTraceReporter {
                 hitTokens,
                 inputTokens);
         cacheMetricsReporter.reportTheoryCacheHitMetrics(theorySnapshot);
+        if (clusterOwner && masterElectService.isMaster() && masterElectService.getLeadershipEpoch() == epoch) {
+            cacheMetricsReporter.reportClusterRecentCacheKeyHitMetrics(snapshot, hitTokens, inputTokens);
+        }
     }
 
     private static long theoryHitTokens(long hitKeyCount, long inputTokens, long cacheKeyBlockSize) {
