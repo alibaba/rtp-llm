@@ -25,8 +25,6 @@ from rtp_llm.models_py.modules.dsv41.utils import quantize_fp8_weight_to_fp4
 _HEAD_DIM = 512
 _ROPE_DIM = 64
 _HEADS_PER_GROUP = 8
-# Decode Q/KV work is at most a few dozen rows; prefill chunks are larger.
-_DENSE_FP4_MAX_ROWS = 128
 
 
 @lru_cache(maxsize=1)
@@ -303,7 +301,9 @@ class MegaAttention(torch.nn.Module):
         )
         rows = qr.numel() // self.query_weight.shape[1]
         if use_fp4 is None:
-            use_fp4 = self.query_weight_fp4 is not None and rows <= _DENSE_FP4_MAX_ROWS
+            # Decode projects Q into a private view; prefill supplies chunk
+            # storage and must keep the authoritative FP8 weights.
+            use_fp4 = out is None and self.query_weight_fp4 is not None
         if out is None:
             out = torch.empty(
                 (rows, self.heads * _HEAD_DIM), dtype=qr.dtype, device=qr.device
@@ -409,8 +409,9 @@ class MegaAttention(torch.nn.Module):
         from rtp_llm.models_py.modules.dsv41.utils import V41MXFP8Linear
 
         if use_fp4 is None:
+            # Prefill writes into the caller's chunk buffer and keeps FP8.
             use_fp4 = (
-                rows <= _DENSE_FP4_MAX_ROWS
+                out is None
                 and type(wo_b) is V41MXFP8Linear
                 and wo_b.weight_fp4 is not None
             )
@@ -520,7 +521,7 @@ def warmup(attn, *, rows, decode, swa_entries=32, global_entries=128):
         q, _ = state.merged_qb.forward_quantized(*attn.wq_b._quantize_input(qr))
         q = q.unflatten(-1, (state.heads, _HEAD_DIM))
     else:
-        q = state.project_q(attn.wq_b, qr)
+        q = state.project_q(attn.wq_b, qr, use_fp4=decode)
     width = attn.window_size + (attn.index_topk if attn.compress_ratio else 0)
     if not decode:
         kv = torch.zeros(128, 1, 512, dtype=torch.bfloat16, device=device)
@@ -578,5 +579,5 @@ def warmup(attn, *, rows, decode, swa_entries=32, global_entries=128):
             extra_pool=extra_pool,
             extra_indices=extra_indices,
         )
-    state.project_output(pair, attn.wo_b)
+    state.project_output(pair, attn.wo_b, use_fp4=decode)
     return True
