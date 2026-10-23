@@ -1,4 +1,4 @@
-#include "rtp_llm/models_py/bindings/FusedRopeKVCacheOp.h"
+#include "rtp_llm/models_py/bindings/ppu/FusedRopeKVCacheOp.h"
 #include "rtp_llm/models_py/bindings/ppu/kernels/fused_rope_kvcache_kernel.h"
 #include "rtp_llm/models_py/bindings/core/Dispatch.h"
 #include "rtp_llm/models_py/bindings/core/torch_utils/TypeConvert.h"
