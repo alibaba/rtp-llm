@@ -2,6 +2,7 @@
 #include "torch/all.h"
 
 #include <cstring>
+#include <limits>
 
 #include "rtp_llm/cpp/normal_engine/pipeline/PPSerialization.h"
 #include "rtp_llm/cpp/testing/TestBase.h"
@@ -11,10 +12,42 @@ namespace rtp_llm {
 
 namespace {
 
+constexpr uint32_t kTestWireVersion = 1;
+constexpr uint8_t  kWireBool        = 1;
+constexpr uint8_t  kWireInt32       = 2;
+constexpr uint8_t  kWireInt64       = 3;
+constexpr uint8_t  kWireFloat16     = 4;
+constexpr uint8_t  kWireBFloat16    = 5;
+constexpr uint8_t  kWireFloat32     = 6;
+
 template<typename T>
 void appendWireValue(std::vector<uint8_t>& bytes, T value) {
     const auto* data = reinterpret_cast<const uint8_t*>(&value);
     bytes.insert(bytes.end(), data, data + sizeof(T));
+}
+
+void appendWireString(std::vector<uint8_t>& bytes, const std::string& value) {
+    appendWireValue<uint64_t>(bytes, value.size());
+    bytes.insert(bytes.end(), value.begin(), value.end());
+}
+
+torch::Tensor makeWireTensor(const std::vector<uint8_t>& bytes) {
+    return torch::tensor(bytes, torch::kUInt8);
+}
+
+torch::Tensor makeIntermediateMetadata(const std::vector<int64_t>& sizes, uint8_t wire_dtype = kWireInt32) {
+    std::vector<uint8_t> bytes;
+    appendWireValue<uint32_t>(bytes, kTestWireVersion);
+    appendWireValue<uint64_t>(bytes, 1);
+    appendWireString(bytes, "hidden_states");
+    appendWireValue<uint8_t>(bytes, 1);
+    appendWireValue<uint64_t>(bytes, sizes.size());
+    for (const auto size : sizes) {
+        appendWireValue<int64_t>(bytes, size);
+    }
+    appendWireValue<uint8_t>(bytes, wire_dtype);
+    appendWireValue<uint8_t>(bytes, 0);
+    return makeWireTensor(bytes);
 }
 
 }
@@ -202,12 +235,12 @@ TEST_F(PPSerializationTest, ResultWireLayoutIsDeviceIndependent) {
 
     /** Round trips can hide symmetric codec errors; compare against independently specified wire bytes. */
     std::vector<uint8_t> expected;
-    appendWireValue<uint32_t>(expected, 26);
+    appendWireValue<uint32_t>(expected, kTestWireVersion);
     appendWireValue<int64_t>(expected, 1234567890123);
     appendWireValue<uint8_t>(expected, 1);
-    appendWireValue<uint8_t>(expected, 1);
+    appendWireValue<uint64_t>(expected, 1);
     appendWireValue<int64_t>(expected, 2);
-    appendWireValue<int32_t>(expected, static_cast<int32_t>(torch::kInt64));
+    appendWireValue<uint8_t>(expected, kWireInt64);
     appendWireValue<uint64_t>(expected, 16);
     appendWireValue<int64_t>(expected, 101);
     appendWireValue<int64_t>(expected, 202);
@@ -241,7 +274,7 @@ TEST_F(PPSerializationTest, MetadataOnlyPlanWireLayoutKeepsShutdownInHeader) {
     plan.finished_request_ids = {101};
 
     std::vector<uint8_t> expected;
-    appendWireValue<uint32_t>(expected, 26);
+    appendWireValue<uint32_t>(expected, kTestWireVersion);
     appendWireValue<uint8_t>(expected, 1);
     appendWireValue<uint8_t>(expected, 1);
     appendWireValue<uint64_t>(expected, 2);
@@ -280,6 +313,57 @@ TEST_F(PPSerializationTest, MismatchedProtocolVersionIsRejectedForEveryMessageTy
     change_version(metadata);
     PPIntermediateTensors backing_buffers;
     EXPECT_THROW(pp_serialization::deserializeTensorsMetadata(metadata, backing_buffers), RTPException);
+}
+
+TEST_F(PPSerializationTest, MalformedContainerCountIsRejected) {
+    std::vector<uint8_t> plan_bytes;
+    appendWireValue<uint32_t>(plan_bytes, kTestWireVersion);
+    appendWireValue<uint8_t>(plan_bytes, 1);
+    appendWireValue<uint8_t>(plan_bytes, 0);
+    appendWireValue<uint64_t>(plan_bytes, std::numeric_limits<uint64_t>::max());
+    EXPECT_THROW(pp_serialization::deserializePlan(makeWireTensor(plan_bytes)), RTPException);
+}
+
+TEST_F(PPSerializationTest, MalformedIntermediateMetadataIsRejectedBeforeAllocation) {
+    PPIntermediateTensors backing_buffers;
+
+    EXPECT_THROW(pp_serialization::deserializeTensorsMetadata(
+                     makeIntermediateMetadata({1}, /*wire_dtype=*/255), backing_buffers),
+                 RTPException);
+    EXPECT_TRUE(backing_buffers.tensors.empty());
+
+    EXPECT_THROW(pp_serialization::deserializeTensorsMetadata(
+                     makeIntermediateMetadata({std::numeric_limits<int64_t>::max(), 3}), backing_buffers),
+                 RTPException);
+    EXPECT_TRUE(backing_buffers.tensors.empty());
+}
+
+TEST_F(PPSerializationTest, TensorDTypesHaveStableWireValues) {
+    const std::vector<std::pair<torch::ScalarType, uint8_t>> cases = {{torch::kBool, kWireBool},
+                                                                      {torch::kInt32, kWireInt32},
+                                                                      {torch::kInt64, kWireInt64},
+                                                                      {torch::kFloat16, kWireFloat16},
+                                                                      {torch::kBFloat16, kWireBFloat16},
+                                                                      {torch::kFloat32, kWireFloat32}};
+    for (const auto& [dtype, wire_dtype] : cases) {
+        SCOPED_TRACE(dtype);
+        PPIntermediateTensors tensors;
+        tensors.tensors.emplace("hidden_states", torch::empty({1}, torch::TensorOptions().dtype(dtype)));
+        const auto metadata = pp_serialization::serializeTensorsMetadata(tensors);
+        ASSERT_GE(metadata.numel(), 2);
+        const auto* bytes = metadata.data_ptr<uint8_t>();
+        EXPECT_EQ(bytes[metadata.numel() - 2], wire_dtype);
+
+        PPIntermediateTensors backing_buffers;
+        const auto received = pp_serialization::deserializeTensorsMetadata(metadata, backing_buffers);
+        EXPECT_EQ(received.tensors.at("hidden_states").scalar_type(), dtype);
+    }
+}
+
+TEST_F(PPSerializationTest, WriterRejectsTensorDTypeOutsidePPProtocol) {
+    PPIntermediateTensors tensors;
+    tensors.tensors.emplace("hidden_states", torch::empty({1}, torch::kFloat64));
+    EXPECT_THROW(pp_serialization::serializeTensorsMetadata(tensors), RTPException);
 }
 
 TEST_F(PPSerializationTest, PlanPreservesScalarEmptyAndOptionalTensorStates) {

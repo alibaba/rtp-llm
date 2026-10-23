@@ -1,6 +1,7 @@
 #include "rtp_llm/cpp/normal_engine/pipeline/PPSerialization.h"
 
 #include <cstring>
+#include <limits>
 #include <utility>
 
 #include "rtp_llm/cpp/utils/AssertUtils.h"
@@ -10,14 +11,103 @@ namespace rtp_llm::pp_serialization {
 namespace {
 
 /** Payload fields have a fixed positional layout, so PP peers must use the same wire version. */
-constexpr uint32_t kVersion = 26;
+constexpr uint32_t kVersion = 1;
 
-struct ByteWriter {
-    std::vector<uint8_t> buf;
+/** Stable wire values decouple PP messages from libtorch's internal ScalarType numbering. */
+enum class WireDType : uint8_t {
+    BOOL     = 1,
+    INT32    = 2,
+    INT64    = 3,
+    FLOAT16  = 4,
+    BFLOAT16 = 5,
+    FLOAT32  = 6,
+};
+
+WireDType toWireDType(torch::ScalarType dtype) {
+    switch (dtype) {
+        case torch::kBool:
+            return WireDType::BOOL;
+        case torch::kInt32:
+            return WireDType::INT32;
+        case torch::kInt64:
+            return WireDType::INT64;
+        case torch::kFloat16:
+            return WireDType::FLOAT16;
+        case torch::kBFloat16:
+            return WireDType::BFLOAT16;
+        case torch::kFloat32:
+            return WireDType::FLOAT32;
+        default:
+            RTP_LLM_FAIL("PP serialization does not support torch dtype=%d", static_cast<int>(dtype));
+    }
+}
+
+torch::ScalarType fromWireDType(uint8_t raw_dtype) {
+    switch (static_cast<WireDType>(raw_dtype)) {
+        case WireDType::BOOL:
+            return torch::kBool;
+        case WireDType::INT32:
+            return torch::kInt32;
+        case WireDType::INT64:
+            return torch::kInt64;
+        case WireDType::FLOAT16:
+            return torch::kFloat16;
+        case WireDType::BFLOAT16:
+            return torch::kBFloat16;
+        case WireDType::FLOAT32:
+            return torch::kFloat32;
+        default:
+            RTP_LLM_FAIL("PP serialization wire dtype=%u is invalid", static_cast<unsigned>(raw_dtype));
+    }
+}
+
+size_t checkedTensorNumel(const std::vector<int64_t>& sizes) {
+    size_t numel = 1;
+    for (const auto dim : sizes) {
+        RTP_LLM_CHECK_WITH_INFO(dim >= 0, "PP serialization tensor has negative dim=%ld", dim);
+        const auto size = static_cast<size_t>(dim);
+        RTP_LLM_CHECK_WITH_INFO(size == 0 || numel <= std::numeric_limits<size_t>::max() / size,
+                                "PP serialization tensor numel overflow");
+        numel *= size;
+    }
+    return numel;
+}
+
+size_t checkedTensorBytes(size_t numel, torch::ScalarType dtype) {
+    const auto element_size = torch::elementSize(dtype);
+    RTP_LLM_CHECK_WITH_INFO(numel <= std::numeric_limits<size_t>::max() / element_size,
+                            "PP serialization tensor byte size overflow");
+    return numel * element_size;
+}
+
+struct ByteEncoder {
+    enum class Mode {
+        CALCULATE_SIZE,
+        WRITE,
+    };
+
+    explicit ByteEncoder(Mode mode, size_t size = 0): mode_(mode), capacity_(size) {
+        if (mode_ == Mode::CALCULATE_SIZE) {
+            return;
+        }
+        RTP_LLM_CHECK_WITH_INFO(size <= static_cast<size_t>(std::numeric_limits<int64_t>::max()),
+                                "PP serialization payload size=%zu exceeds torch int64 range",
+                                size);
+        output_ = torch::empty({static_cast<int64_t>(size)}, torch::TensorOptions().dtype(torch::kUInt8));
+        data_   = static_cast<uint8_t*>(output_.data_ptr());
+    }
 
     void raw(const void* p, size_t n) {
-        const auto* b = static_cast<const uint8_t*>(p);
-        buf.insert(buf.end(), b, b + n);
+        RTP_LLM_CHECK_WITH_INFO(n <= std::numeric_limits<size_t>::max() - offset_,
+                                "PP serialization payload size overflow");
+        if (mode_ == Mode::WRITE) {
+            RTP_LLM_CHECK_WITH_INFO(offset_ <= capacity_ && n <= capacity_ - offset_,
+                                    "PP serialization size changed between sizing and writing");
+            if (n > 0) {
+                std::memcpy(data_ + offset_, p, n);
+            }
+        }
+        offset_ += n;
     }
 
     template<typename T>
@@ -75,42 +165,67 @@ struct ByteWriter {
         if (!t.defined()) {
             return;
         }
-        const auto cpu = t.contiguous().cpu();
-        val<uint8_t>(static_cast<uint8_t>(cpu.dim()));
-        for (int64_t d = 0; d < cpu.dim(); ++d) {
-            val<int64_t>(cpu.size(d));
+        const auto wire_dtype = toWireDType(t.scalar_type());
+        val<uint64_t>(static_cast<uint64_t>(t.dim()));
+        for (int64_t d = 0; d < t.dim(); ++d) {
+            val<int64_t>(t.size(d));
         }
-        val<int32_t>(static_cast<int32_t>(t.scalar_type()));
-        val<uint64_t>(static_cast<uint64_t>(cpu.nbytes()));
-        if (cpu.nbytes() > 0) {
-            raw(cpu.data_ptr(), cpu.nbytes());
+        val<uint8_t>(static_cast<uint8_t>(wire_dtype));
+        const auto nbytes = t.nbytes();
+        val<uint64_t>(static_cast<uint64_t>(nbytes));
+        if (nbytes > 0) {
+            if (mode_ == Mode::WRITE) {
+                const auto cpu = t.contiguous().cpu();
+                raw(cpu.data_ptr(), cpu.nbytes());
+            } else {
+                raw(nullptr, nbytes);
+            }
         }
     }
 
-    torch::Tensor finish() const {
-        auto out = torch::empty({static_cast<int64_t>(buf.size())}, torch::TensorOptions().dtype(torch::kUInt8));
-        if (!buf.empty()) {
-            std::memcpy(out.data_ptr(), buf.data(), buf.size());
-        }
-        return out;
+    size_t size() const {
+        return offset_;
     }
+
+    torch::Tensor finish() {
+        RTP_LLM_CHECK_WITH_INFO(output_.defined() && offset_ == capacity_,
+                                "PP serialization wrote size=%zu, expected=%zu",
+                                offset_,
+                                capacity_);
+        return std::move(output_);
+    }
+
+private:
+    Mode          mode_;
+    torch::Tensor output_;
+    uint8_t*      data_     = nullptr;
+    size_t        capacity_ = 0;
+    size_t        offset_   = 0;
 };
 
-struct ByteReader {
-    const uint8_t* p   = nullptr;
-    const uint8_t* end = nullptr;
+template<typename Fields>
+torch::Tensor encodeToTensor(Fields fields) {
+    ByteEncoder sizer(ByteEncoder::Mode::CALCULATE_SIZE);
+    fields(sizer);
+    ByteEncoder writer(ByteEncoder::Mode::WRITE, sizer.size());
+    fields(writer);
+    return writer.finish();
+}
 
-    explicit ByteReader(const torch::Tensor& buffer):
-        p(static_cast<const uint8_t*>(buffer.data_ptr())),
-        end(p + static_cast<size_t>(buffer.numel()) * buffer.element_size()) {
-        RTP_LLM_CHECK_WITH_INFO(buffer.dtype() == torch::kUInt8 && buffer.dim() == 1,
-                                "PP serialization payload must be a 1-D uint8 tensor");
+struct ByteReader {
+    explicit ByteReader(const torch::Tensor& buffer) {
+        RTP_LLM_CHECK_WITH_INFO(buffer.defined() && buffer.device().is_cpu() && buffer.dtype() == torch::kUInt8
+                                    && buffer.is_contiguous(),
+                                "PP serialization payload must be a contiguous CPU uint8 tensor");
+        cursor_     = static_cast<const uint8_t*>(buffer.data_ptr());
+        buffer_end_ = cursor_ + static_cast<size_t>(buffer.numel());
     }
 
     void raw(void* out, size_t n) {
-        RTP_LLM_CHECK_WITH_INFO(static_cast<size_t>(end - p) >= n, "PP serialization payload truncated");
-        std::memcpy(out, p, n);
-        p += n;
+        RTP_LLM_CHECK_WITH_INFO(static_cast<size_t>(buffer_end_ - cursor_) >= n,
+                                "PP serialization payload truncated");
+        std::memcpy(out, cursor_, n);
+        cursor_ += n;
     }
 
     template<typename T>
@@ -127,7 +242,7 @@ struct ByteReader {
 
     template<typename T, typename Fields>
     void sequence(std::vector<T>& values, Fields fields) {
-        values.resize(val<uint64_t>());
+        values.resize(count());
         for (auto& value : values) {
             fields(*this, value);
         }
@@ -144,7 +259,11 @@ struct ByteReader {
     }
 
     bool flag() {
-        return val<uint8_t>() != 0;
+        const auto value = val<uint8_t>();
+        RTP_LLM_CHECK_WITH_INFO(value <= 1,
+                                "PP serialization boolean=%u is invalid",
+                                static_cast<unsigned>(value));
+        return value != 0;
     }
 
     void flag(bool& value) {
@@ -153,9 +272,9 @@ struct ByteReader {
 
     std::string str() {
         const auto n = val<uint64_t>();
-        RTP_LLM_CHECK_WITH_INFO(static_cast<size_t>(end - p) >= n, "PP serialization string truncated");
-        std::string s(reinterpret_cast<const char*>(p), n);
-        p += n;
+        RTP_LLM_CHECK_WITH_INFO(remaining() >= n, "PP serialization string truncated");
+        std::string s(reinterpret_cast<const char*>(cursor_), static_cast<size_t>(n));
+        cursor_ += static_cast<size_t>(n);
         return s;
     }
 
@@ -164,13 +283,17 @@ struct ByteReader {
     }
 
     void strings(std::vector<std::string>& values) {
-        sequence(values, [](auto& io, auto& value) { io.str(value); });
+        values.resize(count());
+        for (auto& value : values) {
+            str(value);
+        }
     }
 
     void errors(std::vector<ErrorInfo>& errors) {
-        errors.resize(val<uint64_t>());
+        errors.resize(count());
         for (auto& error : errors) {
-            const auto code = static_cast<ErrorCode>(val<int32_t>());
+            const auto raw_code = val<int32_t>();
+            const auto code = static_cast<ErrorCode>(raw_code);
             if (code != ErrorCode::NONE_ERROR) {
                 error = ErrorInfo(code, str());
             }
@@ -182,27 +305,48 @@ struct ByteReader {
             out = torch::Tensor();
             return;
         }
-        const auto ndim = val<uint8_t>();
-        RTP_LLM_CHECK_WITH_INFO(ndim <= 8, "PP serialization tensor ndim=%u out of range", ndim);
+        const auto ndim = count();
         std::vector<int64_t> sizes(ndim);
         for (size_t d = 0; d < ndim; ++d) {
             sizes[d] = val<int64_t>();
-            RTP_LLM_CHECK_WITH_INFO(sizes[d] >= 0, "PP serialization tensor has negative dim");
         }
-        const auto dtype  = static_cast<torch::ScalarType>(val<int32_t>());
-        const auto nbytes = val<uint64_t>();
+        const auto dtype           = fromWireDType(val<uint8_t>());
+        const auto wire_nbytes     = val<uint64_t>();
+        const auto expected_nbytes = checkedTensorBytes(checkedTensorNumel(sizes), dtype);
+        RTP_LLM_CHECK_WITH_INFO(wire_nbytes == expected_nbytes,
+                                "PP serialization tensor byte count mismatch: wire=%llu expected=%zu",
+                                static_cast<unsigned long long>(wire_nbytes),
+                                expected_nbytes);
+        RTP_LLM_CHECK_WITH_INFO(remaining() >= expected_nbytes, "PP serialization tensor payload truncated");
         /** Plan execution uses fused H2D copies that require pinned source memory. */
         out = torch::empty(sizes, torch::TensorOptions().dtype(dtype).device(torch::kCPU).pinned_memory(true));
-        RTP_LLM_CHECK_WITH_INFO(static_cast<uint64_t>(out.nbytes()) == nbytes,
-                                "PP serialization tensor byte count mismatch");
-        if (nbytes > 0) {
-            raw(out.data_ptr(), nbytes);
+        if (expected_nbytes > 0) {
+            raw(out.data_ptr(), expected_nbytes);
         }
     }
 
-    void expectEnd() const {
-        RTP_LLM_CHECK_WITH_INFO(p == end, "PP serialization payload has %zu trailing bytes", end - p);
+    size_t remaining() const {
+        return static_cast<size_t>(buffer_end_ - cursor_);
     }
+
+    size_t count() {
+        const auto value = val<uint64_t>();
+        RTP_LLM_CHECK_WITH_INFO(value <= remaining(),
+                                "PP serialization count=%llu exceeds remaining payload=%zu",
+                                static_cast<unsigned long long>(value),
+                                remaining());
+        return static_cast<size_t>(value);
+    }
+
+    void expectEnd() const {
+        RTP_LLM_CHECK_WITH_INFO(cursor_ == buffer_end_,
+                                "PP serialization payload has %zu trailing bytes",
+                                remaining());
+    }
+
+private:
+    const uint8_t* cursor_     = nullptr;
+    const uint8_t* buffer_end_ = nullptr;
 };
 
 template<typename IO, typename List>
@@ -371,25 +515,25 @@ void executionResultFields(IO& io, Result& result) {
 }  // namespace
 
 torch::Tensor serializePlan(const PPExecutionPlan& plan, bool metadata_only) {
-    ByteWriter w;
-    w.val<uint32_t>(kVersion);
-    w.flag(metadata_only);
-    w.flag(plan.model_input.shutdown);
-    if (metadata_only) {
-        /** TP peers need the upstream tag identities before synchronizing numeric cache rows. */
-        w.strings(plan.model_input.kv_cache_group_tags);
-    } else {
-        modelInputFields(w, plan.model_input);
-        samplingPlanFields(w, plan.sampling_plan);
-        outputConfigFields(w, plan.output_config);
-        w.flag(plan.is_decode);
-        w.tensor(plan.draft_next_position_ids);
-        w.val<uint64_t>(plan.finished_request_ids.size());
-        for (const auto request_id : plan.finished_request_ids) {
-            w.val<RequestId>(request_id);
+    return encodeToTensor([&](ByteEncoder& w) {
+        w.val<uint32_t>(kVersion);
+        w.flag(metadata_only);
+        w.flag(plan.model_input.shutdown);
+        if (metadata_only) {
+            /** TP peers need the upstream tag identities before synchronizing numeric cache rows. */
+            w.strings(plan.model_input.kv_cache_group_tags);
+        } else {
+            modelInputFields(w, plan.model_input);
+            samplingPlanFields(w, plan.sampling_plan);
+            outputConfigFields(w, plan.output_config);
+            w.flag(plan.is_decode);
+            w.tensor(plan.draft_next_position_ids);
+            w.val<uint64_t>(plan.finished_request_ids.size());
+            for (const auto request_id : plan.finished_request_ids) {
+                w.val<RequestId>(request_id);
+            }
         }
-    }
-    return w.finish();
+    });
 }
 
 PPExecutionPlan deserializePlan(const torch::Tensor& buffer) {
@@ -408,20 +552,19 @@ PPExecutionPlan deserializePlan(const torch::Tensor& buffer) {
     outputConfigFields(r, plan.output_config);
     plan.is_decode = r.flag();
     r.tensor(plan.draft_next_position_ids);
-    const auto finished_request_num = r.val<uint64_t>();
-    plan.finished_request_ids.resize(finished_request_num);
-    for (uint64_t index = 0; index < finished_request_num; ++index) {
-        plan.finished_request_ids[index] = r.val<RequestId>();
+    plan.finished_request_ids.resize(r.count());
+    for (auto& request_id : plan.finished_request_ids) {
+        request_id = r.val<RequestId>();
     }
     r.expectEnd();
     return plan;
 }
 
 torch::Tensor serializeExecutionResult(const PPExecutionResult& result) {
-    ByteWriter w;
-    w.val<uint32_t>(kVersion);
-    executionResultFields(w, result);
-    return w.finish();
+    return encodeToTensor([&](ByteEncoder& w) {
+        w.val<uint32_t>(kVersion);
+        executionResultFields(w, result);
+    });
 }
 
 PPExecutionResult deserializeExecutionResult(const torch::Tensor& buffer) {
@@ -435,55 +578,57 @@ PPExecutionResult deserializeExecutionResult(const torch::Tensor& buffer) {
 }
 
 torch::Tensor serializeTensorsMetadata(const PPIntermediateTensors& tensors) {
-    ByteWriter w;
-    w.val<uint32_t>(kVersion);
-    w.val<uint64_t>(tensors.tensors.size());
-    for (const auto& [name, t] : tensors.tensors) {
-        w.str(name);
-        const bool present = t.defined() && t.numel() > 0;
-        w.flag(present);
-        if (!present) {
-            continue;
+    return encodeToTensor([&](ByteEncoder& w) {
+        w.val<uint32_t>(kVersion);
+        w.val<uint64_t>(tensors.tensors.size());
+        for (const auto& [name, t] : tensors.tensors) {
+            w.str(name);
+            const bool present = t.defined() && t.numel() > 0;
+            w.flag(present);
+            if (!present) {
+                continue;
+            }
+            w.val<uint64_t>(static_cast<uint64_t>(t.dim()));
+            for (int64_t d = 0; d < t.dim(); ++d) {
+                w.val<int64_t>(t.size(d));
+            }
+            w.val<uint8_t>(static_cast<uint8_t>(toWireDType(t.scalar_type())));
+            w.flag(t.is_cuda());
         }
-        w.val<uint8_t>(static_cast<uint8_t>(t.dim()));
-        for (int64_t d = 0; d < t.dim(); ++d) {
-            w.val<int64_t>(t.size(d));
-        }
-        w.val<int32_t>(static_cast<int32_t>(t.scalar_type()));
-        w.flag(t.is_cuda());
-    }
-    return w.finish();
+    });
 }
 
 PPIntermediateTensors deserializeTensorsMetadata(const torch::Tensor& metadata, PPIntermediateTensors& backing_buffers) {
     ByteReader r(metadata);
     RTP_LLM_CHECK_WITH_INFO(r.val<uint32_t>() == kVersion, "PP tensors-metadata payload version mismatch");
     PPIntermediateTensors out;
-    const auto            n = r.val<uint64_t>();
-    for (uint64_t i = 0; i < n; ++i) {
+    const auto            n = r.count();
+    for (size_t i = 0; i < n; ++i) {
         auto name = r.str();
         if (!r.flag()) {
             out.tensors.emplace(std::move(name), torch::Tensor{});
             continue;
         }
-        const auto ndim = r.val<uint8_t>();
-        RTP_LLM_CHECK_WITH_INFO(ndim <= 8, "PP intermediate tensor ndim=%u out of range", ndim);
+        const auto ndim = r.count();
         std::vector<int64_t> sizes(ndim);
-        int64_t             numel = 1;
         for (size_t d = 0; d < ndim; ++d) {
             sizes[d] = r.val<int64_t>();
-            RTP_LLM_CHECK_WITH_INFO(sizes[d] >= 0, "PP intermediate tensor has negative dim");
-            numel *= sizes[d];
         }
-        const auto dtype   = static_cast<torch::ScalarType>(r.val<int32_t>());
+        const auto dtype   = fromWireDType(r.val<uint8_t>());
         const bool is_cuda = r.flag();
+        const auto numel   = checkedTensorNumel(sizes);
+        RTP_LLM_CHECK_WITH_INFO(numel <= static_cast<size_t>(std::numeric_limits<int64_t>::max()),
+                                "PP intermediate tensor numel=%zu exceeds torch int64 range",
+                                numel);
+        const auto tensor_numel = static_cast<int64_t>(numel);
         /** Batch token counts vary while tensor fields and types stay fixed for a stage boundary.
          * Reusable capacity avoids per-batch allocations; views retain the received shapes. */
         auto& buffer = backing_buffers.tensors[name];
-        if (!buffer.defined() || buffer.numel() < numel) {
-            buffer = torch::empty({numel}, torch::TensorOptions().dtype(dtype).device(is_cuda ? torch::kCUDA : torch::kCPU));
+        if (!buffer.defined() || buffer.numel() < tensor_numel) {
+            buffer = torch::empty(
+                {tensor_numel}, torch::TensorOptions().dtype(dtype).device(is_cuda ? torch::kCUDA : torch::kCPU));
         }
-        out.tensors.emplace(std::move(name), buffer.narrow(0, 0, numel).view(sizes));
+        out.tensors.emplace(std::move(name), buffer.narrow(0, 0, tensor_numel).view(sizes));
     }
     r.expectEnd();
     return out;
