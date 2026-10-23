@@ -28,6 +28,7 @@
 #include "rtp_llm/cpp/cache/connector/KVCacheConnectorReadWriteContext.h"
 #include "rtp_llm/cpp/cache/connector/p2p/LayerBlockConverterImpl.h"
 #include "rtp_llm/cpp/cache/connector/p2p/P2PConnector.h"
+#include "rtp_llm/cpp/cache/connector/p2p/P2PWritebackResourceUtil.h"
 #include "rtp_llm/cpp/cache/KVCacheHashUtil.h"
 #include "rtp_llm/cpp/cache/KVCacheMetrics.h"
 #include "rtp_llm/cpp/metrics/RtpLLMMetrics.h"
@@ -1310,9 +1311,24 @@ std::shared_ptr<AsyncContext> KVCacheManager::asyncWriteBack(const BatchKVCacheR
         if (blocks <= static_cast<size_t>(input_length / config_.seq_size_per_block)) {
             return skip("no_complete_suffix");
         }
-        auto keys = calculateCacheKeys(tokens->data(0), blocks * config_.seq_size_per_block, config_.seq_size_per_block);
+        const size_t    ready_tokens = blocks * config_.seq_size_per_block;
+        const auto      groups       = coordinator_manager_->cacheGroups();
+        KVCacheResource selected;
+        selected.initGroups(config_.topologyPtr());
+        selected.setCacheKeys(calculateCacheKeys(tokens->data(0), ready_tokens, config_.seq_size_per_block));
+        for (const auto& group : groups) {
+            selected.mutableBlockIds(group->tag()).assign(source.blocks(group->tag()));
+        }
+        const auto selected_error = p2p_connector_->selectWriteSource(selected, input_length, ready_tokens, *routing);
+        if (selected_error.hasError()) {
+            RTP_LLM_LOG_WARNING("writeback source selection failed: %s", selected_error.ToString().c_str());
+            return skip("invalid_source_routes");
+        }
+        if (!writebackKeepsKvReserveAfterRelease(
+                groups, source, selected, cache_store_config_.p2p_writeback_kv_reserve_ratio)) {
+            return skip("kv_reserve");
+        }
         // Preserve logical positions, including sparse holes, while holding only physical blocks.
-        const auto         groups = coordinator_manager_->cacheGroups();
         KVCacheResourcePtr hold(new KVCacheResource, [groups](KVCacheResource* resource) {
             for (const auto& group : groups) {
                 group->unreference(resource->blocks(group->tag()));
@@ -1320,17 +1336,13 @@ std::shared_ptr<AsyncContext> KVCacheManager::asyncWriteBack(const BatchKVCacheR
             delete resource;
         });
         hold->initGroups(config_.topologyPtr());
-        hold->setCacheKeys(keys);
+        hold->setCacheKeys(selected.cacheKeys());
         for (const auto& group : groups) {
-            auto block_ids = source.blocks(group->tag());
-            const size_t group_blocks = blocks * config_.seq_size_per_block / group->seqSizePerBlock();
-            block_ids.resize(group_blocks, NULL_BLOCK_IDX);
-            group->reference(hold->mutableBlockIds(group->tag()), block_ids);
+            group->reference(hold->mutableBlockIds(group->tag()), selected.blocks(group->tag()));
         }
         hold->setLastBlockAligned(true);
         std::vector<int> token_ids(tokens->data(0), tokens->data(0) + tokens->seqLength());
-        return p2p_connector_->asyncWrite(std::move(hold), std::move(token_ids), input_length,
-                                          blocks * config_.seq_size_per_block, *routing);
+        return p2p_connector_->asyncWrite(std::move(hold), std::move(token_ids), input_length, ready_tokens, *routing);
     } catch (const std::exception& error) {
         RTP_LLM_LOG_WARNING("writeback submission failed: %s", error.what());
     } catch (...) {

@@ -143,6 +143,9 @@ protected:
     uint32_t treeRefCountNoLock(BlockIdxType block, BlockTreeRefType ref_type) const;
     bool     isActiveNoLock(BlockIdxType block) const;
     bool     isAvailableNoLock(BlockIdxType block) const;
+    size_t   availableBlocksNumNoLock() const {
+        return available_blocks_num_;
+    }
     void     updateActiveBlocksNumNoLock(BlockIdxType block, bool was_active);
     void     updateAvailableBlocksNumNoLock(BlockIdxType block, bool was_available);
     void     freeAllocatedBlockNoLock(BlockIdxType block);

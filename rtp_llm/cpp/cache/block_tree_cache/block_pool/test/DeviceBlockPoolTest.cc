@@ -349,6 +349,54 @@ TEST(DeviceBlockPoolTest, ReclaimCacheBlockRequiresOneCacheRefAndNoOtherHolders)
     EXPECT_FALSE(pool.isAllocated(*block));
 }
 
+TEST(DeviceBlockPoolTest, AvailableAfterReleaseExcludesSharedAndActiveTreeReferences) {
+    DeviceBlockPool pool(makeConfig());
+    ASSERT_TRUE(pool.init());
+    const auto blocks = pool.malloc(6);
+    ASSERT_TRUE(blocks.has_value());
+    pool.incRef(*blocks);
+    for (size_t index = 1; index < blocks->size(); ++index) {
+        pool.incTreeRef((*blocks)[index], BlockTreeRefType::CACHE);
+    }
+    pool.incRef((*blocks)[2]);
+    pool.incTreeRef((*blocks)[3], BlockTreeRefType::LOAD);
+    pool.incTreeRef((*blocks)[4], BlockTreeRefType::STORE);
+    pool.incTreeRef((*blocks)[5], BlockTreeRefType::EVICTION);
+
+    const auto available = pool.availableBlocksNum();
+    const auto predicted = pool.availableBlocksAfterRelease(*blocks);
+    EXPECT_EQ(predicted, available + 2);
+    EXPECT_EQ(pool.availableBlocksAfterRelease({}), available);
+    EXPECT_EQ(pool.availableBlocksNum(), available);
+    EXPECT_EQ(pool.refCount((*blocks)[0]), 1u);
+    EXPECT_EQ(pool.refCount((*blocks)[2]), 3u);
+
+    pool.decRef(*blocks);
+    EXPECT_EQ(pool.availableBlocksNum(), predicted);
+    pool.decRef((*blocks)[2]);
+    pool.decTreeRef((*blocks)[3], BlockTreeRefType::LOAD);
+    pool.decTreeRef((*blocks)[4], BlockTreeRefType::STORE);
+    pool.decTreeRef((*blocks)[5], BlockTreeRefType::EVICTION);
+    EXPECT_EQ(pool.availableBlocksNum(), pool.totalBlocksNum());
+}
+
+TEST(DeviceBlockPoolTest, AvailableAfterReleaseCountsRepeatedReferencesOnce) {
+    DeviceBlockPool pool(makeConfig());
+    ASSERT_TRUE(pool.init());
+    const auto block = pool.malloc();
+    ASSERT_TRUE(block.has_value());
+    pool.incRef(*block);
+    pool.incRef(*block);
+
+    const auto available = pool.availableBlocksNum();
+    EXPECT_EQ(pool.availableBlocksAfterRelease({*block}), available);
+    EXPECT_EQ(pool.availableBlocksAfterRelease({*block, *block}), available + 1);
+    EXPECT_EQ(pool.refCount(*block), 2u);
+    pool.decRef(*block);
+    pool.decRef(*block);
+    EXPECT_EQ(pool.availableBlocksNum(), available + 1);
+}
+
 TEST(DeviceBlockPoolTest, ActiveBlocksIncludeRequestAndTreeOperationRefs) {
     std::shared_ptr<const DeviceBlockPoolConfig> config = makeConfig();
     DeviceBlockPool                              pool(config);

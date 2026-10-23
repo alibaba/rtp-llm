@@ -1127,6 +1127,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("p2p_prefill_sender_queue_size", &CacheStoreConfig::p2p_prefill_sender_queue_size)
         .def_readwrite("p2p_writeback_enable", &CacheStoreConfig::p2p_writeback_enable)
         .def_readwrite("p2p_writeback_timeout_ms", &CacheStoreConfig::p2p_writeback_timeout_ms)
+        .def_readwrite("p2p_writeback_kv_reserve_ratio", &CacheStoreConfig::p2p_writeback_kv_reserve_ratio)
         .def("to_string", &CacheStoreConfig::to_string)
         .def(py::pickle(
             [](const CacheStoreConfig& self) {
@@ -1156,10 +1157,11 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       self.p2p_prefill_sender_queue_size,
                                       self.p2p_kv_leak_exit_threshold_percent,
                                       self.p2p_writeback_enable,
-                                      self.p2p_writeback_timeout_ms);
+                                      self.p2p_writeback_timeout_ms,
+                                      self.p2p_writeback_kv_reserve_ratio);
             },
             [](py::tuple t) {
-                if (t.size() != 27) {
+                if (t.size() != 28) {
                     throw std::runtime_error("Invalid CacheStoreConfig state");
                 }
                 CacheStoreConfig c;
@@ -1190,6 +1192,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                 c.p2p_kv_leak_exit_threshold_percent = t[24].cast<int>();
                 c.p2p_writeback_enable = t[25].cast<bool>();
                 c.p2p_writeback_timeout_ms = t[26].cast<int64_t>();
+                c.p2p_writeback_kv_reserve_ratio = t[27].cast<double>();
                 return c;
             }));
 

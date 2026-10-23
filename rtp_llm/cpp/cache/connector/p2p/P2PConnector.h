@@ -70,6 +70,11 @@ public:
     void cancelRead(const std::shared_ptr<AsyncContext>& context);
 
 public:
+    ErrorInfo selectWriteSource(KVCacheResource&               resource,
+                                int                            input_length,
+                                size_t                         kv_ready_token_count,
+                                const Meta::P2PRoutingContext& routing);
+
     std::shared_ptr<AsyncContext> asyncWrite(KVCacheResourcePtr      resource,
                                              std::vector<int>        token_ids,
                                              int                     input_length,

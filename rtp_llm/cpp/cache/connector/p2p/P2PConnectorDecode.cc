@@ -293,6 +293,15 @@ void P2PConnectorDecode::stopWriteback() {
     }
 }
 
+ErrorInfo P2PConnectorDecode::selectWriteSource(KVCacheResource&               resource,
+                                                int                            input_length,
+                                                size_t                         kv_ready_token_count,
+                                                const Meta::P2PRoutingContext& routing) {
+    return write_scheduler_ ?
+               write_scheduler_->selectSourceBlocks(resource, input_length, kv_ready_token_count, routing) :
+               ErrorInfo(ErrorCode::INVALID_PARAMS, "decode writeback scheduler unavailable");
+}
+
 std::shared_ptr<AsyncContext> P2PConnectorDecode::write(KVCacheResourcePtr      resource,
                                                        std::vector<int>        token_ids,
                                                        int                     input_length,
@@ -314,7 +323,10 @@ bool P2PConnectorDecode::writePerRank(const P2PConnectorBroadcastTpRequestPB& re
     response.mutable_p2p_response()->Clear();
     const auto reject = [&](const std::string& message) {
         P2PConnector::setP2PResponse(response, ErrorInfo(ErrorCode::P2P_CONNECTOR_SCHEDULER_CALL_WORKER_FAILED, message));
-        return write_worker_ && write_worker_->cancelWrite(request.unique_key(), request.deadline_ms(), true);
+        if (write_worker_) {
+            write_worker_->cancelWrite(request.unique_key(), request.deadline_ms(), true);
+        }
+        return false;
     };
     if (!write_worker_) {
         return reject("decode writeback disabled");
@@ -362,7 +374,7 @@ bool P2PConnectorDecode::writePerRank(const P2PConnectorBroadcastTpRequestPB& re
         write_worker_->cancelWrite(request.unique_key(), request.deadline_ms(), true);
     }
     P2PConnector::setP2PResponse(response, error);
-    return true;
+    return error.ok();
 }
 
 bool P2PConnectorDecode::cancelWritePerRank(const std::string& unique_key,
