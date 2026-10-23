@@ -10,7 +10,7 @@ import torch
 from rtp_llm.models_py.kernels.cuda.fp8_kernel.get_best_config import (
     get_cutlass_groupgemm_best_config,
 )
-from rtp_llm.models_py.utils.arch import is_cuda
+from rtp_llm.models_py.utils.arch import is_cuda, is_sm120
 from rtp_llm.models_py.utils.math import align
 
 if is_cuda():
@@ -146,6 +146,13 @@ def sgl_per_token_group_quant_fp8(
             if not can_use_v2():
                 return False
             if masked_m is not None or fuse_silu_and_mul:
+                return True
+            # The v2 native kernel only accepts half-precision input types.
+            if x.dtype not in (torch.float16, torch.bfloat16):
+                return False
+            # Legacy and v2 round scales differently. Keep SM120 prefill,
+            # decode, and cached continuation on the same quantization path.
+            if is_sm120(x.device):
                 return True
             # Microbench on the target 16..64K token sweep shows v2 wins
             # consistently once the quantized matrix has at least ~4M elements.
