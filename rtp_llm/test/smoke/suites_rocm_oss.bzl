@@ -197,7 +197,7 @@ def rocm_oss_suites():
                 name="rocm_embedding_bert_st_cudagraph",
                 envs=["LOG_LEVEL=DEBUG", "FT_SERVER_TEST=1"],
                 test_envs={
-                    "SMOKE_REQUIRE_EMBEDDING_GRAPH_REPLAY": "1",
+                    "SMOKE_REQUIRE_GRAPH_REPLAY": "1",
                     "VISIT_RETRY_TIME": "1",
                 },
                 task_info="data/model/bert/q_r.json",

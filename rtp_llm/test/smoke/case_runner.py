@@ -113,7 +113,7 @@ class CaseRunner(object):
 
     @staticmethod
     def _run_comparer(comparer):
-        require_replay = os.environ.get("SMOKE_REQUIRE_EMBEDDING_GRAPH_REPLAY") == "1"
+        require_replay = os.environ.get("SMOKE_REQUIRE_GRAPH_REPLAY") == "1"
         if not require_replay:
             return comparer.run()
         log_path = comparer.server_manager.log_file_path
