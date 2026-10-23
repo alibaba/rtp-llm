@@ -3915,6 +3915,21 @@ absl::Status MtpExecutor::dispatchDecodeAsync(const StreamGroups&               
         draft_probs_all = draft_all_probs_full.clone();
     }
 
+    // Reuse this round's owned batch storage in bookkeeping. In particular,
+    // do not re-read mutable per-stream state from the worker or retain views
+    // into graph output buffers that the next forward can overwrite.
+    auto dispatch_snapshot = makeMtpDecodeDispatchSnapshot(
+        draft_probs_all, last_hidden_all, accept_tokens_gpu_all.narrow(0, 0, batch_size), hidden_idx_all);
+    // The batch device-state layout has one row per request. Preserve the
+    // legacy worker for nonstandard/multi-output callers instead of imposing
+    // a new restriction on those dispatch paths.
+    const bool reuse_dispatch_snapshot = draft_probs_all.defined() && draft_probs_all.is_cuda()
+        && draft_probs_all.dim() == 2 && draft_probs_all.size(0) == batch_size
+        && (propose_step_ <= 1 || (last_hidden_all.defined() && last_hidden_all.is_cuda()))
+        && std::all_of(all_streams.begin(), all_streams.end(), [](const auto& stream) {
+            return stream->nextBatchSize() == 1;
+        });
+
     // 4. Assign per-stream views (narrow is metadata-only, no kernel launch)
     int64_t probs_batch_off = 0;
     int64_t idx             = 0;
@@ -3935,15 +3950,11 @@ absl::Status MtpExecutor::dispatchDecodeAsync(const StreamGroups&               
 
         state.last_real_seq_len = stream->seqLength();
         state.next_real_seq_len = state.last_real_seq_len + static_cast<int>(propose_step_ + 1);
-        // REBASE CONFLICT CONTEXT(b08feda05): source branch published
-        // `target_token_gpu` and `propose_tokens_gpu` before launching the
-        // async bookkeeping worker. Keep the new base's batch state preparation
-        // and publish equivalent per-stream views here.
+        // The accepted token is gathered once for the batch, not with three
+        // tiny GPU operations (subtract/cast/index_select) per request.
         auto sp_output_buffer = stream->getSPOutputBuffer();
         if (sp_output_buffer) {
-            auto target_idx = (state.accept_len_gpu - 1).to(torch::kLong);
-            sp_output_buffer->target_token_gpu =
-                state.accept_tokens_gpu.squeeze(0).index_select(/*dim=*/0, target_idx).to(torch::kInt32);
+            sp_output_buffer->target_token_gpu = dispatch_snapshot.target_tokens.narrow(0, idx, 1);
             sp_output_buffer->propose_tokens_gpu = state.propose_tokens_gpu;
         }
         stream->setMtpAsyncDeviceState(std::move(state));
@@ -3971,6 +3982,8 @@ absl::Status MtpExecutor::dispatchDecodeAsync(const StreamGroups&               
                                      draft_prefill_copy   = std::move(draft_prefill_copy),
                                      rejection_event,
                                      draft_event,
+                                     dispatch_snapshot = std::move(dispatch_snapshot),
+                                     reuse_dispatch_snapshot,
                                      forward_claims = std::move(forward_claims)]() mutable {
         // Release before AsyncRunner reports this task complete, including when
         // dispatch throws. Waiting happens on this worker, never the launch path.
@@ -3995,7 +4008,8 @@ absl::Status MtpExecutor::dispatchDecodeAsync(const StreamGroups&               
         // Move into dispatch so the worker closure itself does not retain the
         // full target tensor after selected-row statistics have been produced.
         auto status = processor->dispatchDecode(
-            stream_groups_copy, spec_decode_copy, draft_prefill_copy, std::move(target_logprobs_copy));
+            stream_groups_copy, spec_decode_copy, draft_prefill_copy, std::move(target_logprobs_copy),
+            reuse_dispatch_snapshot ? &dispatch_snapshot : nullptr);
         if (!status.ok()) {
             RTP_LLM_LOG_ERROR("[stream-async] dispatchDecode (worker) failed: %s", status.ToString().c_str());
         }
