@@ -1528,7 +1528,7 @@ TEST(CacheConfigTest, DSV4HybridPoolRuntimeConfigAllowsDecoupledPhysicalAndKerne
 // Absorbs DEV's CacheConfigTest.DSV4KernelSeqSizeRejectsInvalidPhysicalKernelShape.  DEV enforced
 // the 128 kernel-token floor imperatively in validateDsv4KernelSeqSize(); MAIN enforces it
 // declaratively in CacheConfigCreator's descriptor validation via
-// kCompressedKernelSeqSizeAlignment for every KERNEL_BLOCK_COMPRESSED pool, plus the
+// 128-token alignment by default for KERNEL_BLOCK_COMPRESSED pools, plus the
 // physical >= kernel / divisible-by-kernel check.  Both halves are pinned below.
 TEST(CacheConfigTest, DSV4HybridPoolRuntimeConfigRejectsInvalidKernelShape) {
     auto              mc = makeProModelConfig();

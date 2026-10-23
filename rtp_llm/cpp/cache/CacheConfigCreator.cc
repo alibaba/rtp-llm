@@ -22,12 +22,6 @@ namespace rtp_llm {
 
 namespace {
 
-// Kernel blocks feeding a compressed (OpaqueKV) pool must be a whole number of
-// 128-token units: 128 is the HCA compression unit and also FlashMLA's block
-// quantum. Divisibility alone (the generic check) is not enough -- a 64-token
-// kernel block passes it and then produces a partial compression unit.
-constexpr uint32_t kCompressedKernelSeqSizeAlignment = 128;
-
 bool blockNumFitsBudget(uint32_t block_num, size_t total_budget_bytes, const KVCacheBlockBudget& budget) {
     if (budget.explicit_pool_reserve_bytes > total_budget_bytes) {
         return false;
@@ -247,12 +241,13 @@ void validateDescs(const ModelConfig& model_config, uint32_t kernel_tokens_per_b
                                         kernel_tokens_per_block);
                 if (desc.compression_ratio > 1) {
                     RTP_LLM_CHECK_WITH_INFO(
-                        kernel_tokens_per_block >= kCompressedKernelSeqSizeAlignment
-                            && kernel_tokens_per_block % kCompressedKernelSeqSizeAlignment == 0,
+                        desc.kernel_block_token_alignment > 0
+                            && kernel_tokens_per_block >= desc.kernel_block_token_alignment
+                            && kernel_tokens_per_block % desc.kernel_block_token_alignment == 0,
                         "desc tag=%s kernel_seq_size_per_block=%u must be a positive multiple of alignment=%u",
                         desc.tag.c_str(),
                         kernel_tokens_per_block,
-                        kCompressedKernelSeqSizeAlignment);
+                        desc.kernel_block_token_alignment);
                 }
             }
             if (desc.entry_count_mode == OpaqueBlockEntryCountMode::STATE_RING) {

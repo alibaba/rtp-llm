@@ -71,6 +71,8 @@ struct KVCacheSpecDesc {
     size_t   block_stride_bytes_override        = 0;
     size_t   block_stride_bytes_alignment       = 0;
     uint32_t block_stride_alignment_min_entries = 0;
+    // Default to the HCA/FlashMLA compression unit. Other compressed layouts can declare their own.
+    uint32_t kernel_block_token_alignment       = 128;
 
     std::optional<CacheGroupType>          group_type;
     std::optional<CacheReusePolicyDesc>    reuse;

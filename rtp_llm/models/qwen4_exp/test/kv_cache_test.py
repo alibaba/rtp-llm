@@ -70,11 +70,22 @@ class FixedLinearCapacityTest(unittest.TestCase):
         )
         desc = layers[0][0]
         state = desc.__getstate__()
-        self.assertEqual(len(state), 21)
+        self.assertEqual(len(state), 22)
         restored = type(desc).__new__(type(desc))
         restored.__setstate__(state[:20])
         self.assertEqual(restored.tag, desc.tag)
         self.assertEqual(restored.tp_transfer_mode, TpCacheTransferMode.LEGACY)
+        self.assertEqual(restored.kernel_block_token_alignment, 128)
+
+        main_state = type(desc).__new__(type(desc))
+        main_state.__setstate__(state[:21])
+        self.assertEqual(main_state.tp_transfer_mode, desc.tp_transfer_mode)
+        self.assertEqual(main_state.kernel_block_token_alignment, 128)
+
+        feature_state = type(desc).__new__(type(desc))
+        feature_state.__setstate__((*state[:20], 64))
+        self.assertEqual(feature_state.tp_transfer_mode, TpCacheTransferMode.LEGACY)
+        self.assertEqual(feature_state.kernel_block_token_alignment, 64)
 
     def test_common_planner_owns_linear_capacity_and_native_pickle_preserves_budget(
         self,
@@ -184,6 +195,10 @@ class IndexerDescTest(unittest.TestCase):
             OpaqueBlockEntryCountMode.KERNEL_BLOCK_COMPRESSED,
         )
         self.assertEqual(desc.compression_ratio, self.RATIO)
+        self.assertEqual(desc.kernel_block_token_alignment, 64)
+        restored = pickle.loads(pickle.dumps(desc))
+        self.assertEqual(restored.kernel_block_token_alignment, 64)
+        self.assertEqual(restored.tp_transfer_mode, desc.tp_transfer_mode)
         self.assertTrue(desc.reuse.enable_prefix_reuse)
 
     def test_kv_desc_rejects_invalid_geometry(self):

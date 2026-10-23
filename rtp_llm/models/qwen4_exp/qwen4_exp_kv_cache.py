@@ -148,6 +148,7 @@ def indexer_kv_desc(indexer_head_dim: int, compress_ratio: int) -> KVCacheSpecDe
     desc.entry_dtype = DataType.TYPE_UINT8
     desc.entry_elems = indexer_head_dim * 2
     desc.entry_count_mode = OpaqueBlockEntryCountMode.KERNEL_BLOCK_COMPRESSED
+    desc.kernel_block_token_alignment = 64
     desc.compression_ratio = compress_ratio
     reuse = CacheReusePolicyDesc()
     # Complete compressed-block chain: a page-aligned prefix leaves whole

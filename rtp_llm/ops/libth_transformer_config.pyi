@@ -1060,6 +1060,7 @@ class KVCacheSpecDesc:
     block_stride_bytes_override: int
     block_stride_bytes_alignment: int
     block_stride_alignment_min_entries: int
+    kernel_block_token_alignment: int
     group_type: typing.Any
     reuse: typing.Any
     capacity: typing.Any

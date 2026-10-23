@@ -2154,6 +2154,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("block_stride_bytes_override", &KVCacheSpecDesc::block_stride_bytes_override)
         .def_readwrite("block_stride_bytes_alignment", &KVCacheSpecDesc::block_stride_bytes_alignment)
         .def_readwrite("block_stride_alignment_min_entries", &KVCacheSpecDesc::block_stride_alignment_min_entries)
+        .def_readwrite("kernel_block_token_alignment", &KVCacheSpecDesc::kernel_block_token_alignment)
         .def_readwrite("group_type", &KVCacheSpecDesc::group_type)
         .def_readwrite("reuse", &KVCacheSpecDesc::reuse)
         .def_readwrite("capacity", &KVCacheSpecDesc::capacity)
@@ -2182,11 +2183,12 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       self.memory,
                                       self.tail,
                                       self.cp,
-                                      self.tp_transfer_mode);
+                                      self.tp_transfer_mode,
+                                      self.kernel_block_token_alignment);
             },
             [](py::tuple t) {
                 KVCacheSpecDesc c;
-                if (t.size() != 20 && t.size() != 21)
+                if (t.size() != 20 && t.size() != 21 && t.size() != 22)
                     throw std::runtime_error("Invalid KVCacheSpecDesc state!");
                 c.tag                                  = t[0].cast<std::string>();
                 c.cache_type                           = t[1].cast<KVCacheSpecType>();
@@ -2208,8 +2210,14 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                 c.memory                               = t[17].cast<std::optional<CacheMemoryPolicyDesc>>();
                 c.tail                                 = t[18].cast<std::optional<CacheTailPolicyDesc>>();
                 c.cp                                   = t[19].cast<std::optional<CacheCpPolicyDesc>>();
-                if (t.size() == 21) {
+                if (t.size() == 21 && py::isinstance<py::int_>(t[20])) {
+                    // The feature branch serialized alignment before main added TP transfer mode.
+                    c.kernel_block_token_alignment = t[20].cast<uint32_t>();
+                } else if (t.size() >= 21) {
                     c.tp_transfer_mode = t[20].cast<TpCacheTransferMode>();
+                }
+                if (t.size() == 22) {
+                    c.kernel_block_token_alignment = t[21].cast<uint32_t>();
                 }
                 return c;
             }));
