@@ -209,9 +209,9 @@ Start prefill with `RTP_LLM_PP_OBJ_LOG=1` for `kv_bw.py`'s round count and `kv_r
 ## 5. Reproducing
 
 1. Check out this branch and add the internal Barex RDMA cache-store overlay as `internal_source`
-   (branch `dev/hetero-pd-cache-store`; the repo's `.bazelrc` picks it up automatically). The overlay's
-   `deps/git.bzl` references `patches/rules_python/0003-package-wheel-patches.patch`, which is not on this
-   branch; take it from the internal build tree.
+   (branch `dev/hetero-pd-cache-store`; the repo's `.bazelrc` picks it up automatically). The overlay
+   replaces this repo's `deps/` with its own and applies
+   `patches/rules_python/0003-package-wheel-patches.patch` from this repo, which this branch includes.
 2. Build for SM120 with CUDA 13:
 
    ```bash
