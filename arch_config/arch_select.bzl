@@ -24,6 +24,26 @@ _CUDA13_ARM_DEFERRED = ["flash_attn", "flash-attn-3"]
 # gracefully, so the other platforms resolve it to nothing.
 _DSV4_PLATFORM_ONLY = ["xgrammar"]
 
+# Names with no PPU wheel in the vendor lock (CUDA/ROCm-only deps, or no
+# cp312 wheel). requirement() resolves them to an empty library on PPU.
+_PPU_LOCK_SKIPPED = [
+    "aiter",
+    "amdsmi",
+    "decord",
+    "fast-safetensors",
+    "fastsafetensors",
+    "flashinfer-cubin",
+    "flashinfer-jit-cache",
+    "nvidia-cutlass-dsl",
+    "pyrsmi",
+    "rtp-kernel",
+    "tilelang",
+    "triton-kernels",
+    "xfastertransformer_devel",
+    "xfastertransformer_devel_icx",
+    "xgrammar",
+]
+
 def requirement(names):
     for name in names:
         if name == "flash-mla-legacy":
@@ -38,6 +58,7 @@ def requirement(names):
             continue
         cuda13_x86_deps = [] if name in _CUDA13_X86_DEFERRED else [requirement_gpu_cuda13(name)]
         cuda13_arm_deps = [] if name in _CUDA13_ARM_DEFERRED else [requirement_cuda13_arm(name)]
+        ppu_deps = [] if name in _PPU_LOCK_SKIPPED else [requirement_ppu(name)]
         if name in _DSV4_PLATFORM_ONLY:
             native.py_library(
                 name = name,
@@ -136,6 +157,28 @@ def whl_deps():
             "triton-kernels@https://sinian-metrics-platform.oss-cn-hangzhou.aliyuncs.com/kis/AMD/triton/triton_kernels-1.0.0%2Bamd.rocm7.2.0.git111ff227-py3-none-any.whl",
         ],
         "//conditions:default": ["torch==2.1.2"],
+    })
+
+def ml_pin_reqs():
+    """Wheel pins that diverge between the PPU vendor lock and the CUDA locks.
+
+    The PPU lock (deps/requirements_lock_torch_ppu.txt) pins the transformers
+    4.57.1 family and carries no xgrammar (its wheel chain is CUDA-only; the
+    PPU bazel deps exclude it the same way). Keep wheel metadata aligned with
+    the lock of the environment the wheel is installed into.
+    """
+    return select({
+        "@rtp_llm//:using_ppu": [
+            "transformers==4.57.1",
+            "sentence-transformers==2.7.0",
+            "pyarrow==17.0.0",
+        ],
+        "//conditions:default": [
+            "transformers==5.2.0",
+            "sentence-transformers==5.2.0",
+            "pyarrow==14.0.0",
+            "xgrammar==0.2.5",
+        ],
     })
 
 def platform_deps():
