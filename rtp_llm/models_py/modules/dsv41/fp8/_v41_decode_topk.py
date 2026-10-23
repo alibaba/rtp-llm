@@ -37,8 +37,14 @@ class DecodeSlotPlan:
     slots: torch.Tensor | None = None
 
 
+def _slot_fusion_enabled() -> bool:
+    """Default-on slot publication; ``DSV41_FUSED_DECODE_TOPK=0`` keeps the
+    separate per-layer translator launch for reference checks."""
+    return os.environ.get("DSV41_FUSED_DECODE_TOPK", "1") == "1"
+
+
 def make_slot_plan(request_ids, block_table, *, entries, logical_entries):
-    if os.environ.get("DSV41_FUSED_TOPK_SLOTS", "0") != "1":
+    if not _slot_fusion_enabled():
         return None
     if not (
         request_ids.is_cuda

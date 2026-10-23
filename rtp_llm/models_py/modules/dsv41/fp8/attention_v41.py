@@ -1113,6 +1113,7 @@ class AttentionV41FP8(AttentionFP8):
             self._shared_attention.pop("candidate_mask", None)
             self._shared_attention.pop("decode_sparse_plan", None)
             self._shared_attention.pop("decode_valid_requests", None)
+            self._shared_attention.pop("decode_topk_slots", None)
             self._shared_attention.pop("decode_indexer_metadata", None)
             self._shared_attention.pop("prefill_candidate_mask", None)
             self._shared_attention.pop("prefill_sparse_candidates", None)
@@ -3197,6 +3198,8 @@ class AttentionV41FP8(AttentionFP8):
                     **({"slot_plan": slot_plan} if slot_plan is not None else {}),
                 )
                 shared["topk"] = {self.layer_id: output}
+                if slot_plan is not None and slot_plan.slots is not None:
+                    shared["decode_topk_slots"] = (self.layer_id, slot_plan.slots)
                 return output
             # The batched chain above reads only length-bounded columns, so
             # scoring elided the -inf padding. The per-request fallback below
@@ -3272,8 +3275,52 @@ class AttentionV41FP8(AttentionFP8):
         shared["topk"] = {self.layer_id: output}
         return output
 
+    def _decode_slot_plan(self, metadata, rows):
+        """Fused-slot plan for this forward's global TopK selection.
+
+        Mirrors the FULL-overlap builder: the selection kernel emits global
+        pool slot ids alongside the local TopK, and ``decode_topk_slots``
+        publishes them for every later reindex consumer in this forward.
+        Unsupported geometries (padded pools, CP-sharded caches) return
+        ``None`` and keep the per-layer translator.
+        """
+        from rtp_llm.models_py.modules.dsv41.fp8 import _v41_decode_topk
+
+        region = self._global_region()
+        global_pool = self._source_pool(region)
+        if global_pool is None:
+            return None
+        raw_tpb = require_pool_tokens_per_block(self._kv_cache, region=region)
+        cp = self._cp_ctx
+        sharded = cp is not None and cp.cp_size > 1 and cp.kv_cache_sharded
+        if sharded or raw_tpb % self.compress_ratio:
+            return None
+        return _v41_decode_topk.make_slot_plan(
+            metadata.req_id_per_token[:rows],
+            self._block_tables_by_type[region],
+            entries=global_pool.shape[1],
+            logical_entries=raw_tpb // self.compress_ratio,
+        )
+
+
     def _decode_global_slots(self, selected, req):
-        """Translate compressed indices without materializing token positions."""
+        """Translate compressed indices without materializing token positions.
+
+        A fused slot publication from this forward's selection (see
+        ``_select_indices_decode`` / ``try_full_decode``) is consumed
+        directly: the selection kernel already emitted global pool slot
+        ids alongside the local TopK, so per-layer translator launches
+        disappear for every reindex consumer.
+        """
+        published = self._shared_attention.get("decode_topk_slots")
+        if published is not None:
+            source_layer, slots = published
+            if (
+                source_layer == self.index_source_layer_id
+                and slots.shape == selected.shape
+                and slots.dtype == torch.int32
+            ):
+                return slots
         region = self._global_region()
         pool = self._source_pool(region)
         table = self._block_tables_by_type[region]
@@ -3413,6 +3460,7 @@ class AttentionV41FP8(AttentionFP8):
             if self.compress_ratio and slots is None:
                 if self.is_kv_source and global_work is None:
                     self._produce_global_decode(x, positions, req, starts)
+                slot_plan = self._decode_slot_plan(metadata, T)
                 selected = self._select_indices_decode(
                     x,
                     qkv.qr,
@@ -3422,6 +3470,7 @@ class AttentionV41FP8(AttentionFP8):
                     head_weights=qkv.head_weights,
                     index_prepared=qkv.index_prepared,
                     prepared_query=prepared_query,
+                    **({"slot_plan": slot_plan} if slot_plan is not None else {}),
                 )
                 slots = (
                     self._decode_global_slots(selected, metadata.req_id_per_token[:T])
@@ -3446,6 +3495,7 @@ class AttentionV41FP8(AttentionFP8):
         else:
             if self.is_kv_source and global_work is None:
                 self._produce_global_decode(x, positions, req, starts)
+            slot_plan = self._decode_slot_plan(metadata, T)
             selected = self._select_indices_decode(
                 x,
                 qkv.qr,
@@ -3453,6 +3503,7 @@ class AttentionV41FP8(AttentionFP8):
                 qkv.qr_quantized,
                 head_weights=qkv.head_weights,
                 prepared_query=prepared_query,
+                **({"slot_plan": slot_plan} if slot_plan is not None else {}),
             )
             from rtp_llm.models_py.modules.dsv41.fp8._v41_fp4_decode_attn import (
                 fp4_dual_decode_attention,

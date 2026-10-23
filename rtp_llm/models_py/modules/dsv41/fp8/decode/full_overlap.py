@@ -11,6 +11,9 @@ import torch.nn.functional as F
 
 from rtp_llm.models_py.modules.dsv41._profiler import record_function_range
 from rtp_llm.models_py.modules.dsv41.attn_type import SWA_KV
+from rtp_llm.models_py.modules.dsv41.fp8._kv_cache_utils import (
+    require_pool_tokens_per_block,
+)
 from rtp_llm.models_py.modules.dsv41.fp8 import _v41_decode_indexer, _v41_decode_topk
 from rtp_llm.models_py.modules.dsv41.fp8.decode.compute_qkv import decode_compute_qkv
 from rtp_llm.models_py.modules.dsv41.fp8.decode.global_overlap import (
@@ -176,13 +179,11 @@ def try_full_decode(
         if not qkv.swa_written:
             attn._decode_write_swa_fp8(qkv.kv, batch, span, metadata)
         slot_plan = None
-        if os.environ.get("DSV41_FUSED_TOPK_SLOTS", "0") == "1":
-            from rtp_llm.models_py.modules.dsv41.fp8._kv_cache_utils import (
-                require_pool_tokens_per_block,
-            )
-
-            region = attn._global_region()
-            global_pool = attn._source_pool(region)
+        region = attn._global_region()
+        global_pool = attn._source_pool(region)
+        if global_pool is None:
+            slot_plan = None
+        else:
             raw_tpb = require_pool_tokens_per_block(attn._kv_cache, region=region)
             cp = attn._cp_ctx
             sharded = cp is not None and cp.cp_size > 1 and cp.kv_cache_sharded
@@ -202,6 +203,11 @@ def try_full_decode(
             overlap=work,
             **({"slot_plan": slot_plan} if slot_plan is not None else {}),
         )
+        if slot_plan is not None and slot_plan.slots is not None:
+            attn._shared_attention["decode_topk_slots"] = (
+                attn.index_source_layer_id,
+                slot_plan.slots,
+            )
         slots = None if slot_plan is None else slot_plan.slots
         if slots is None:
             slots = (
