@@ -8,6 +8,8 @@
 #include "rtp_llm/cpp/cache/CacheGroupType.h"
 
 #include <utility>
+#include <mutex>
+#include "rtp_llm/cpp/model_rpc/ShutdownCoordinator.h"
 
 namespace rtp_llm {
 
@@ -20,10 +22,21 @@ public:
                       py::object                                             mm_process_engine);
 
     grpc::Status RemoteGenerate(grpc::ServerContext* server_context, ServerStream* stream);
+    grpc::Status BatchGenerateCall(grpc::ServerContext*        context,
+                                   const BatchGenerateInputPB* request,
+                                   BatchGenerateOutputsPB*     response);
 
     grpc::Status RemoteLoad(grpc::ServerContext*          server_context,
                             const BroadcastLoadRequestPB* request,
                             BroadcastLoadResponsePB*      response);
+
+    void setExternalDrainCallbacks(std::function<void()> begin, std::function<size_t()> count) {
+        external_begin_shutdown_ = std::move(begin);
+        external_onflight_       = std::move(count);
+    }
+    void         beginShutdown();
+    bool         waitForDrain(ShutdownCoordinator::Deadline deadline);
+    grpc::Status shutdownStatus(const ShutdownRequestPB& request, ShutdownResponsePB* response);
 
     class LoadKVCacheContext {
     public:
@@ -161,6 +174,12 @@ private:
                                        const std::vector<std::string>& buffer_debug_infos);
 
 private:
+    std::function<void()>                external_begin_shutdown_ = [] {};
+    std::function<size_t()>              external_onflight_       = [] { return size_t(0); };
+    std::mutex                           admission_mutex_;
+    bool                                 draining_ = false;
+    std::unique_ptr<ShutdownCoordinator> shutdown_coordinator_;
+    bool                                 requires_group_drain_ = false;
     autil::ThreadPoolBasePtr thread_pool_;
     std::atomic<size_t>      onflight_load_cache_requests_{0};
     size_t                   model_id;

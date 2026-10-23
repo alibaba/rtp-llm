@@ -841,11 +841,29 @@ message RemoteBlockMaskPB {
     }
 }
 
+// The ordered incarnation list certifies that every member closed admission
+// and drained. It prevents an idle rank from exiting while a busy DP rank runs.
+message ShutdownRequestPB {
+    string group_id = 1;
+    repeated string drained_instances = 2;
+    bool begin_shutdown = 3;
+    int64 deadline_unix_ms = 4;
+}
+
+message ShutdownResponsePB {
+    bool draining = 1;
+    uint64 onflight = 2;
+    string instance_id = 3;
+    repeated string drained_instances = 4;
+    int64 deadline_unix_ms = 5;
+}
+
 message FunctionRequestPB {
     oneof request {
         MemoryOperationRequestPB mem_request = 1;
         RemoteOperationRequestPB remote_request = 2;
         P2PConnectorBroadcastTpRequestPB p2p_request = 3;
+        ShutdownRequestPB shutdown_request = 4;
     }
 }
 
@@ -872,6 +890,7 @@ message FunctionResponsePB {
         MemoryOperationResponsePB mem_response = 1;
         RemoteOperationResponsePB remote_response = 2;
         P2PConnectorBroadcastTpResponsePB p2p_response = 3;
+        ShutdownResponsePB shutdown_response = 4;
     }
 }
 

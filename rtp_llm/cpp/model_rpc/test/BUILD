@@ -263,3 +263,14 @@ cc_test(
         "@com_google_googletest//:gtest_main",
     ],
 )
+
+cc_test(
+    name = "shutdown_coordinator_test",
+    srcs = ["ShutdownCoordinatorTest.cc"],
+    copts = copts(),
+    deps = [
+        "//rtp_llm/cpp/model_rpc:shutdown_coordinator",
+        "@com_google_googletest//:gtest_main",
+    ],
+    timeout = "short",
+)

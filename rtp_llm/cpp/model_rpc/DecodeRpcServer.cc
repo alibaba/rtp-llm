@@ -165,7 +165,52 @@ grpc::Status DecodeRpcServer::init(const EngineInitParams&                      
     if (!ret.ok()) {
         return ret;
     }
+    requires_group_drain_ = maga_init_params.parallelism_config.world_size > 1;
+    const auto& peers     = maga_init_params.runtime_config.shutdown_worker_grpc_addrs;
+    if (peers.size() == size_t(maga_init_params.parallelism_config.world_size)) {
+        shutdown_coordinator_ = std::make_unique<ShutdownCoordinator>(
+            peers,
+            maga_init_params.parallelism_config.world_rank,
+            [this] {
+                std::lock_guard<std::mutex> lock(admission_mutex_);
+                return ShutdownCoordinator::State{
+                    draining_, onflight_requests_.load() + onflight_load_cache_requests_.load() + external_onflight_()};
+            },
+            [this] { beginShutdown(); });
+    } else if (requires_group_drain_) {
+        RTP_LLM_LOG_WARNING("missing complete shutdown group; graceful shutdown will wait until its deadline");
+    }
     return grpc::Status::OK;
+}
+
+void DecodeRpcServer::beginShutdown() {
+    std::lock_guard<std::mutex> lock(admission_mutex_);
+    external_begin_shutdown_();
+    draining_ = true;
+}
+
+bool DecodeRpcServer::waitForDrain(ShutdownCoordinator::Deadline deadline) {
+    if (shutdown_coordinator_) {
+        return shutdown_coordinator_->wait(deadline);
+    }
+    // Old/standalone configs have no group address list. Never mistake an idle
+    // local rank for a drained distributed engine in that case.
+    while (requires_group_drain_ || onflight_requests_.load() || onflight_load_cache_requests_.load()
+           || external_onflight_()) {
+        if (std::chrono::system_clock::now() >= deadline) {
+            return false;
+        }
+        std::this_thread::sleep_until(
+            std::min(deadline, std::chrono::system_clock::now() + std::chrono::milliseconds(20)));
+    }
+    return true;
+}
+
+grpc::Status DecodeRpcServer::shutdownStatus(const ShutdownRequestPB& request, ShutdownResponsePB* response) {
+    if (!shutdown_coordinator_) {
+        return {grpc::StatusCode::FAILED_PRECONDITION, "shutdown group is unavailable"};
+    }
+    return shutdown_coordinator_->handle(request, response);
 }
 
 std::string
@@ -1611,10 +1656,29 @@ void DecodeRpcServer::reportEarlyFinishTask(DecodeGenerateContext& decode_contex
                       error_code);
 }
 
+grpc::Status DecodeRpcServer::BatchGenerateCall(grpc::ServerContext*        context,
+                                                const BatchGenerateInputPB* request,
+                                                BatchGenerateOutputsPB*     response) {
+    std::unique_lock<std::mutex> admission_lock(admission_mutex_);
+    if (draining_) {
+        return {grpc::StatusCode::UNAVAILABLE, "decode server is draining"};
+    }
+    AtomicGuard request_guard(onflight_requests_);
+    admission_lock.unlock();
+    return LocalRpcServer::BatchGenerateCall(context, request, response);
+}
+
 grpc::Status DecodeRpcServer::RemoteGenerate(grpc::ServerContext* server_context, ServerStream* grpc_stream) {
     RTP_LLM_PROFILE_FUNCTION();
     c10::InferenceMode inference_guard(true);
-    AtomicGuard        request_guard(onflight_requests_);
+    // Closing admission and incrementing the handler count must be atomic with
+    // respect to shutdown snapshots. RemoteLoad remains available to admitted requests.
+    std::unique_lock<std::mutex> admission_lock(admission_mutex_);
+    if (draining_) {
+        return {grpc::StatusCode::UNAVAILABLE, "decode server is draining"};
+    }
+    AtomicGuard request_guard(onflight_requests_);
+    admission_lock.unlock();
     DecodeRpcContext   rpc_context{grpc_stream};
     // TODO(xinfei.sxf) request id is 0 here
     auto decode_context              = DecodeGenerateContext(rpc_context, 0, server_context, metrics_reporter_, meta_);
