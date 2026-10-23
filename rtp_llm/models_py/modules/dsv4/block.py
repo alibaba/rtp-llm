@@ -537,23 +537,32 @@ class Block(nn.Module):
         else:
             # Attention path
             residual = x
-            x_pre, post, comb = self.attn_hc.pre_norm(
-                x,
-                self.attn_norm,
-                tp_size=self.tp_size,
-                tp_rank=self.tp_rank,
-                dbg_tag=f"L{self.layer_id:02d}_decode_attn_hc_pre" if _dbg_layer else None,
-            )
-            if _dbg_layer:
-                _rt.record_if_level(2, f"L{self.layer_id:02d}_decode_attn_in", x_pre)
-            if attn_fn is not None:
-                attn_out = attn_fn(x_pre)
-            else:
-                attn_out = self.attn.forward_decode(
-                    x_pre,
-                    attn_metadata,
-                    kv_cache=kv_cache,
+            prepared = None
+            fused_attn_pre = getattr(self.attn, "forward_decode_with_hc_pre", None)
+            if not _dbg_layer and attn_fn is None and callable(fused_attn_pre):
+                prepared = fused_attn_pre(
+                    x, attn_metadata, self.attn_hc, self.attn_norm, kv_cache=kv_cache
                 )
+            if prepared is not None:
+                attn_out, post, comb = prepared
+            else:
+                x_pre, post, comb = self.attn_hc.pre_norm(
+                    x,
+                    self.attn_norm,
+                    tp_size=self.tp_size,
+                    tp_rank=self.tp_rank,
+                    dbg_tag=f"L{self.layer_id:02d}_decode_attn_hc_pre" if _dbg_layer else None,
+                )
+                if _dbg_layer:
+                    _rt.record_if_level(2, f"L{self.layer_id:02d}_decode_attn_in", x_pre)
+                if attn_fn is not None:
+                    attn_out = attn_fn(x_pre)
+                else:
+                    attn_out = self.attn.forward_decode(
+                        x_pre,
+                        attn_metadata,
+                        kv_cache=kv_cache,
+                    )
             if _dbg_layer:
                 _rt.record_if_level(2, f"L{self.layer_id:02d}_decode_attn_out", attn_out)
             x = self.attn_hc.post(attn_out, residual, post, comb)
@@ -562,6 +571,14 @@ class Block(nn.Module):
 
         # FFN path — MoE has no per-step state, reuse existing forward
         residual = x
+        fused_ffn_pre = getattr(self.ffn, "forward_with_hc_pre", None)
+        if not _dbg_layer and callable(fused_ffn_pre):
+            fused = fused_ffn_pre(
+                x, input_ids, self.ffn_hc, self.ffn_norm,
+                active_token_mask=getattr(attn_metadata, "active_token_mask", None),
+            )
+            if fused is not None:
+                return fused
         x_pre, post, comb = self.ffn_hc.pre_norm(
             x,
             self.ffn_norm,
@@ -576,6 +593,13 @@ class Block(nn.Module):
             {"active_token_mask": active_token_mask}
             if active_token_mask is not None else {}
         )
+        fused_ffn_hc = getattr(self.ffn, "forward_with_hc", None)
+        if not _dbg_layer and callable(fused_ffn_hc):
+            fused = fused_ffn_hc(
+                x_pre, input_ids, self.ffn_hc, residual, post, comb, **ffn_kwargs
+            )
+            if fused is not None:
+                return fused
         ffn_out = self.ffn(x_pre, input_ids, is_decode_forward=True, **ffn_kwargs)
         if _dbg_layer:
             _rt.record_if_level(2, f"L{self.layer_id:02d}_decode_ffn_out", ffn_out)

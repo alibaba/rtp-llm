@@ -623,6 +623,34 @@ SGL_DEVICE void radix_topk(const float* __restrict__ input, int32_t* __restrict_
   }
 }
 
+#ifdef RTP_CANONICAL_TOPK
+// Order logical indices before the final store; preserve the selected set.
+SGL_DEVICE void canonical_sort(int32_t* shared) {
+  const int tx = threadIdx.x;
+  int value = tx < kTopK ? shared[tx] : 2147483647;
+#pragma unroll
+  for (int size = 2; size <= kTopK; size <<= 1) {
+#pragma unroll
+    for (int stride = size >> 1; stride > 0; stride >>= 1) {
+      int other;
+      if (stride < 32) {
+        other = __shfl_xor_sync(0xFFFFFFFF, value, stride);
+      } else {
+        if (tx < kTopK) shared[tx] = value;
+        __syncthreads();
+        other = tx < kTopK ? shared[tx ^ stride] : 2147483647;
+        __syncthreads();
+      }
+      const bool take_min = ((tx & size) == 0) == ((tx & stride) == 0);
+      value = take_min ? min(value, other) : max(value, other);
+    }
+  }
+  if (tx < kTopK) shared[tx] = value;
+  __syncthreads();
+}
+
+#endif
+
 template <bool kUsePDL>
 __global__ __launch_bounds__(v3::kBlockSize, 2) void topk_512_transform_v3(const __grid_constant__ TopKParams params) {
   alignas(128) extern __shared__ uint8_t _smem[];
@@ -656,6 +684,9 @@ __global__ __launch_bounds__(v3::kBlockSize, 2) void topk_512_transform_v3(const
   } else if (seq_len <= v3::kMax1PassLength) {
     register_topk<false>(score_ptr, s_topk_indices, seq_len, _smem);
     __syncthreads();
+#ifdef RTP_CANONICAL_TOPK
+    canonical_sort(s_topk_indices);
+#endif
     const auto tx = threadIdx.x;
     if (tx < kTopK) {
       indices_ptr[tx] = page_to_indices(page_ptr, s_topk_indices[tx], page_bits);
@@ -667,6 +698,9 @@ __global__ __launch_bounds__(v3::kBlockSize, 2) void topk_512_transform_v3(const
     [[likely]];
     register_topk<true>(score_ptr, s_topk_indices, seq_len, _smem);
     __syncthreads();
+#ifdef RTP_CANONICAL_TOPK
+    canonical_sort(s_topk_indices);
+#endif
     const auto tx = threadIdx.x;
     if (tx < kTopK) {
       indices_ptr[tx] = page_to_indices(page_ptr, s_topk_indices[tx], page_bits);
@@ -678,6 +712,9 @@ __global__ __launch_bounds__(v3::kBlockSize, 2) void topk_512_transform_v3(const
     // Fallback to radix_topk for sequences exceeding 32K
     radix_topk(score_ptr, s_topk_indices, seq_len);
     __syncthreads();
+#ifdef RTP_CANONICAL_TOPK
+    canonical_sort(s_topk_indices);
+#endif
     const auto tx = threadIdx.x;
     if (tx < kTopK) {
       indices_ptr[tx] = page_to_indices(page_ptr, s_topk_indices[tx], page_bits);

@@ -100,6 +100,19 @@ py_test(
 )
 
 py_test(
+    name = "decode_fusions_test",
+    srcs = ["ppu/test/test_decode_fusions.py"],
+    main = "ppu/test/test_decode_fusions.py",
+    data = [":platform_sources", ":ppu_sources"],
+    deps = ["//rtp_llm/models_py:models", "//rtp_llm:testlib"],
+    tags = ["manual", "gpu", "ppu"],
+    target_compatible_with = select({
+        "@//:using_ppu": [],
+        "//conditions:default": ["@platforms//:incompatible"],
+    }),
+)
+
+py_test(
     name = "decode_shared_expert_test",
     srcs = ["ppu/test/test_decode_shared_expert.py"],
     main = "ppu/test/test_decode_shared_expert.py",

@@ -1,7 +1,6 @@
 """Decode preparation on model-owned streams with unchanged math and pools."""
 
 import torch
-
 from rtp_llm.models_py.modules.dsv4.fp8.decode.compute_qkv import (
     decode_compute_kv,
     decode_compute_q_a,
@@ -9,10 +8,10 @@ from rtp_llm.models_py.modules.dsv4.fp8.decode.compute_qkv import (
     decode_select_freqs,
 )
 from rtp_llm.models_py.modules.dsv4.fp8.decode.output_proj import decode_output_proj
-from rtp_llm.models_py.modules.dsv4.kv_cache_utils import CSA_KV, HCA_KV
+from rtp_llm.models_py.modules.dsv4.kv_cache_utils import CSA_KV, HCA_KV, SWA_KV
 
 
-def decode_attention_overlap(attn, x, metadata, streams):
+def decode_attention_overlap(attn, x, metadata, streams, *, input_quantized=None):
     """Fork independent preparation, joining before any attention pool read.
 
     The caller retains the native cache binding and its try/finally lifecycle.
@@ -47,22 +46,55 @@ def decode_attention_overlap(attn, x, metadata, streams):
             for tensor in (x, freqs, start_pos, position_ids):
                 tensor.record_stream(stream)
     try:
-        qr, kv = None, None
+        qr, kv, q_quantized = None, None, None
+        swa_written = False
         # The fused norm indexes every B*Q row and uses its own rotary phase.
         if attn._decode_qkv_projection is not None:
             from rtp_llm.platforms.ppu.kernels.ppu_qkv_norm import normalize_decode_qkv
 
-            raw = attn._decode_qkv_projection(x)
-            qr, kv = normalize_decode_qkv(
-                raw, attn.q_norm, attn.kv_norm, freqs, attn.eps
+            raw = (
+                attn._decode_qkv_projection(x)
+                if input_quantized is None
+                else attn._decode_qkv_projection.forward_quantized(
+                    *input_quantized
+                ).view(bsz, q_len, 1536)
             )
+            from rtp_llm.platforms.ppu.modules.linear.fp8_linear import PpuFp8Linear
+
+            if (
+                getattr(attn, "_fuse_qkv_quant", False)
+                and type(attn.wq_b) is PpuFp8Linear
+                and attn.wq_b.quantization == "v2_column"
+            ):
+                swa_cache = attn._pool_view_3d_fp8(SWA_KV)
+                swa_slots = metadata.pool_write_slot_mappings.get(SWA_KV)
+                swa_written = (
+                    swa_cache is not None
+                    and swa_slots is not None
+                    and swa_slots.numel() > 0
+                )
+                qr, kv, q_quantized = normalize_decode_qkv(
+                    raw,
+                    attn.q_norm,
+                    attn.kv_norm,
+                    freqs,
+                    attn.eps,
+                    quantize_q=True,
+                    swa_cache=swa_cache,
+                    slot_mapping=swa_slots,
+                )
+            else:
+                qr, kv = normalize_decode_qkv(
+                    raw, attn.q_norm, attn.kv_norm, freqs, attn.eps
+                )
             streams["kv"].wait_stream(current)
             if not capturing:
                 kv.record_stream(streams["kv"])
         with torch.cuda.stream(streams["kv"]):
             if kv is None:
                 kv = decode_compute_kv(attn, x, freqs)
-            attn._decode_write_swa_fp8(kv, bsz, q_len, metadata)
+            if not swa_written:
+                attn._decode_write_swa_fp8(kv, bsz, q_len, metadata)
         if attn.compress_ratio:
             with torch.cuda.stream(streams["compressor"]):
                 attn._decode_update_compressor(
@@ -91,7 +123,17 @@ def decode_attention_overlap(attn, x, metadata, streams):
                     metadata,
                     **indexer_options,
                 )
-        q = decode_compute_q_b(attn, qr, freqs)
+        if q_quantized is None:
+            q = decode_compute_q_b(attn, qr, freqs)
+        else:
+            from rtp_llm.models_py.modules.dsv4.fp8.decode.compute_qkv import (
+                fused_rmsnorm_rope,
+            )
+
+            q = attn.wq_b.forward_quantized(*q_quantized).view(
+                bsz, q_len, attn.n_heads, attn.head_dim
+            )
+            q = fused_rmsnorm_rope(q, None, freqs, attn.rope_head_dim, eps=attn.eps)
     finally:
         # Also join partially submitted work before the caller unbinds pools
         # or releases intermediates after an exception.

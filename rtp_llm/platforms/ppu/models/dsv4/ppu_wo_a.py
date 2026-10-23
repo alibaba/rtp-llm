@@ -101,6 +101,34 @@ class PpuWoAFp8Linear(nn.Module):
         )
         self._einsum = _resolve_deep_gemm_symbol("fp8_einsum")
 
+    def forward_permuted(self, payload, scales):
+        """Consume the fused producer's group-major FP8/FP32 pair."""
+        if (
+            not self.sglang_layout
+            or self.quantization != "v2_row"
+            or payload.ndim != 3
+            or payload.shape[0] != self.groups
+            or payload.shape[2] != self.k_local
+            or payload.dtype != torch.float8_e4m3fn
+            or payload.device != self.weight.device
+            or not payload.is_contiguous()
+            or scales.shape != (self.groups, payload.shape[1], self.k_local // 128)
+            or scales.dtype != torch.float32
+            or scales.device != payload.device
+            or not scales.is_contiguous()
+        ):
+            raise ValueError("Invalid PPU group-major FP8 projection inputs")
+        out = torch.empty(
+            (payload.shape[1], self.groups, self.rank),
+            device=payload.device,
+            dtype=torch.bfloat16,
+        )
+        if payload.shape[1]:
+            from deep_gemm.jit_kernels.einsum import fp8_bmm
+
+            fp8_bmm(payload, scales, self.weight, self.weight_scale, out)
+        return out
+
     def forward(
         self,
         x: torch.Tensor,

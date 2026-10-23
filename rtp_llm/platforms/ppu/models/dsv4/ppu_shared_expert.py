@@ -1,7 +1,6 @@
 """PPU shared expert; the loader's merged FP8 weights remain unchanged."""
 
 import torch
-
 from rtp_llm.models_py.modules.dsv4._profiler import record_function_range
 from rtp_llm.models_py.modules.factory.fused_moe.utils.fp8_fp4.shared_expert import (
     SharedExpertExecutor,
@@ -12,6 +11,7 @@ from rtp_llm.models_py.modules.factory.fused_moe.utils.fp8_fp4.shared_expert imp
 class PpuSharedExpert(W13SharedExpert):
     def __init__(self, *args, sglang_moe=False, platform_provider, **kwargs):
         from functools import partial
+
         from rtp_llm.models_py.modules.dsv4.utils import _v4_fp8_linear
 
         super().__init__(
@@ -21,13 +21,40 @@ class PpuSharedExpert(W13SharedExpert):
         )
         self.preserve_output_dtype = bool(sglang_moe)
 
-    def forward(self, x, weights=None):
+    def forward(self, x, weights=None, *, input_quantized=None):
+        if input_quantized is not None and (
+            not self.preserve_output_dtype or weights is not None
+        ):
+            raise ValueError("Quantized shared inputs require the PPU BF16 contract")
         if not self.preserve_output_dtype or weights is not None:
             return super().forward(x, weights)
         from rtp_llm.platforms.ppu.kernels.ppu_shared_swiglu import silu_mul_merged_bf16
 
         with record_function_range("dsv4.shared_expert.w13"):
-            gate_up = self._apply_layer(self.w13, x)
+            gate_up = (
+                self._apply_layer(self.w13, x)
+                if input_quantized is None
+                else self.w13.forward_quantized(*input_quantized).view(
+                    *x.shape[:-1], self.w13.n
+                )
+            )
+        if getattr(self, "fuse_activation_quant", False):
+            from rtp_llm.platforms.ppu.kernels.ppu_decode_fused_quant import (
+                supports_swiglu_fp8,
+                swiglu_fp8,
+            )
+            from rtp_llm.platforms.ppu.modules.linear.fp8_linear import PpuFp8Linear
+
+            if type(self.w2) is PpuFp8Linear and supports_swiglu_fp8(
+                gate_up, self.w2.quantization
+            ):
+                with record_function_range("dsv4.shared_expert.silu_mul_quant"):
+                    payload, scale = swiglu_fp8(
+                        gate_up, self.swiglu_limit, quantization=self.w2.quantization
+                    )
+                with record_function_range("dsv4.shared_expert.w2"):
+                    result = self.w2.forward_quantized(payload, scale)
+                    return result.view(*gate_up.shape[:-1], self.w2.n)
         with record_function_range("dsv4.shared_expert.silu_mul"):
             hidden = silu_mul_merged_bf16(gate_up, self.swiglu_limit)
         with record_function_range("dsv4.shared_expert.w2"):
@@ -73,25 +100,36 @@ class PpuSharedExpertExecutor(SharedExpertExecutor):
             )
         self._shared = shared_experts
 
-    def start(self, shared_experts, x):
+    def start(self, shared_experts, x, *, input_quantized=None):
         if self._shared is None or shared_experts is not self._shared:
             raise RuntimeError("PPU shared executor must use its prepared module")
         if self._out is not None:
             raise RuntimeError("PPU shared executor still has a pending output")
         if self._stream is None:
             with record_function_range("dsv4.moe.shared_expert"):
-                self._out = shared_experts(x)
+                self._out = (
+                    shared_experts(x)
+                    if input_quantized is None
+                    else shared_experts(x, input_quantized=input_quantized)
+                )
             return
         if x.device != self._stream.device:
             raise ValueError("PPU shared input must use the prepared stream device")
         current = torch.cuda.current_stream(x.device)
         if not torch.cuda.is_current_stream_capturing():
             x.record_stream(self._stream)
+            if input_quantized is not None:
+                for tensor in input_quantized:
+                    tensor.record_stream(self._stream)
         self._stream.wait_stream(current)
         try:
             with torch.cuda.stream(self._stream):
                 with record_function_range("dsv4.moe.shared_expert"):
-                    self._out = shared_experts(x)
+                    self._out = (
+                        shared_experts(x)
+                        if input_quantized is None
+                        else shared_experts(x, input_quantized=input_quantized)
+                    )
         except Exception:
             current.wait_stream(self._stream)
             raise

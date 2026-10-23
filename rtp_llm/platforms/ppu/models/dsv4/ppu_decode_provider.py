@@ -52,6 +52,8 @@ class PpuDecodeProvider(PpuModuleProvider):
         if batch_indexer not in ("0", "1"):
             raise ValueError("DSV4_PPU_MTP_BATCH_INDEXER must be 0 or 1")
         self._mtp_batch_indexer = batch_indexer == "1"
+        # Opt-in is captured in the model's execution-options snapshot.
+        self._decode_fusions = self._bool("DSV4_PPU_DECODE_FUSIONS", False)
         self._decode_attention_refs = []
         self.stream_pool = PpuStreamPool()
 
@@ -94,9 +96,16 @@ class PpuDecodeProvider(PpuModuleProvider):
         )
 
     def build_wo_a_fp8_linear(self, default_factory, *args, **kwargs):
-        return super().build_wo_a_fp8_linear(
+        linear = super().build_wo_a_fp8_linear(
             default_factory, *args, quantization="v2_row", **kwargs
         )
+        linear.fuse_inverse_rope_quant = self._decode_fusions
+        return linear
+
+    def build_shared_expert(self, *args, **kwargs):
+        shared = super().build_shared_expert(*args, **kwargs)
+        shared.fuse_activation_quant = self._decode_fusions
+        return shared
 
     def build_attention(self, default_factory, *args, **kwargs):
         attention = super().build_attention(
@@ -112,6 +121,11 @@ class PpuDecodeProvider(PpuModuleProvider):
         # Materialization can replace the RoPE table. Resolve it when binding
         # metadata, without a provider <-> attention ownership cycle.
         self._decode_attention_refs.append(weakref.ref(attention))
+        attention._fuse_qkv_quant = self._decode_fusions
+        if attention.indexer is not None:
+            attention.indexer._fuse_query_slices = self._decode_fusions
+            attention.indexer._fuse_topk_order = self._decode_fusions
+            attention.indexer.compressor._fuse_decode_store = self._decode_fusions
         return attention
 
     def build_shared_expert_executor(self, **kwargs):
@@ -130,5 +144,17 @@ class PpuDecodeProvider(PpuModuleProvider):
             allow_graph=True,
             fuse_prenorm=True,
             fuse_norm=True,
+            fuse_moe_sum=self._decode_fusions,
+            fuse_pre_quant=self._decode_fusions,
             **kwargs,
         )
+
+    def build_hc_head(self, *args, **kwargs):
+        if not self._decode_fusions:
+            return super().build_hc_head(*args, **kwargs)
+        from .ppu_hc_head import PpuDecodeHCHead
+
+        tp_size, tp_rank = kwargs.pop("tp_size"), kwargs.pop("tp_rank")
+        head = PpuDecodeHCHead(*args, options=self.execution_options, **kwargs)
+        head.tp_size, head.tp_rank = tp_size, tp_rank
+        return head

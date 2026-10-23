@@ -2,7 +2,6 @@
 
 import torch
 import torch.nn.functional as F
-
 from rtp_llm.models_py.modules.dsv4 import _record_tensor as _rt
 from rtp_llm.models_py.modules.dsv4._profiler import record_function_range
 from rtp_llm.models_py.modules.dsv4.fp8.compressor import (
@@ -94,6 +93,22 @@ class PpuFP4Compressor(CompressorFP8):
         plan, slots = build_decode_plan(
             meta, self._state_block_table, self._state_eb, self._state_tokens_per_block
         )
+        if getattr(self, "_fuse_decode_store", False):
+            from ...kernels.cuda.ppu_fp4_indexer import compress4_decode_store
+
+            if compress4_decode_store(
+                self._state_pool_3d,
+                fused,
+                self.ape,
+                plan,
+                self.norm.weight,
+                self.norm_eps,
+                torch.view_as_real(self.freqs_cis).flatten(-2),
+                slots,
+                self._kv_pool_view,
+                self._kv_eb,
+            ):
+                return
         compressed = compress4_decode(self._state_pool_3d, fused, self.ape, plan)
         norm_rope_store(
             compressed,
@@ -192,9 +207,7 @@ class PpuFP4Indexer(IndexerFP8):
             # tensor for B long contexts (SGLang uses the same request-bounded
             # sparse-indexer chunking strategy). Graph capture keeps the legacy
             # fixed-shape global path through request_score_slices=None.
-            request_slices = meta.request_score_slices or (
-                (0, meta.M, 0, meta.T),
-            )
+            request_slices = meta.request_score_slices or ((0, meta.M, 0, meta.T),)
             for q_begin, q_end, k_begin, k_end in request_slices:
                 request_k = k[k_begin:k_end]
                 request_k_scale = ks[k_begin:k_end]
@@ -254,7 +267,9 @@ class PpuFP4Indexer(IndexerFP8):
         decode_streams=None,
     ):
         if x.ndim != 3 or x.shape[1] not in (1, 2, 3, 4):
-            raise ValueError("FP4 Indexer requires Decode or MTP1/MTP2/MTP3 verify queries")
+            raise ValueError(
+                "FP4 Indexer requires Decode or MTP1/MTP2/MTP3 verify queries"
+            )
         if x.shape[1] == 1:
             return self._forward_decode_step(
                 x,
@@ -293,11 +308,27 @@ class PpuFP4Indexer(IndexerFP8):
         # positions in order, batching independent requests at each position.
         # This also preserves the pre-rollback state in the speculative ring.
         for index in range(query_length):
-            meta = slice_compressor_query(compressor_meta, batch, query_length, index)
+            prepared = None
+            # For B=1 the original slices are already contiguous views.
+            if batch > 1 and getattr(self, "_fuse_query_slices", False):
+                from ...kernels.ppu_query_slice import prepare_indexer_query
+
+                prepared = prepare_indexer_query(
+                    x, queries, start_pos, compressor_meta, index
+                )
+            if prepared is None:
+                meta = slice_compressor_query(
+                    compressor_meta, batch, query_length, index
+                )
+                step_x = x[:, index : index + 1].contiguous()
+                step_q = queries[:, index : index + 1].contiguous()
+                step_start = start_pos + index
+            else:
+                step_x, step_q, step_start, meta = prepared
             self._forward_decode_step(
-                x[:, index : index + 1].contiguous(),
-                queries[:, index : index + 1].contiguous(),
-                start_pos + index,
+                step_x,
+                step_q,
+                step_start,
                 step_output,
                 meta.positions.reshape(batch, 1),
                 meta,
@@ -315,7 +346,9 @@ class PpuFP4Indexer(IndexerFP8):
         if self._kv_pool_view is None or self._kv_block_table is None:
             raise RuntimeError("FP4 Indexer Decode pools were not bound")
         if meta.positions.numel() != tokens or not out_topk_buffer.is_contiguous():
-            raise ValueError("Batched Indexer requires request-major metadata and contiguous output")
+            raise ValueError(
+                "Batched Indexer requires request-major metadata and contiguous output"
+            )
         self.compressor.freqs_cis = self.freqs_cis
         self._propagate_pool_to_nested()
         try:
@@ -323,14 +356,29 @@ class PpuFP4Indexer(IndexerFP8):
             q = q.reshape(tokens, self.n_heads, 128).contiguous()
             weights = F.linear(x.reshape(tokens, -1), self.weights_proj)
             q, qs, weights = quantize_q(
-                q, weights, self.weight_scale,
-                torch.view_as_real(self.freqs_cis).flatten(-2), meta.positions,
+                q,
+                weights,
+                self.weight_scale,
+                torch.view_as_real(self.freqs_cis).flatten(-2),
+                meta.positions,
             )
             for index in range(width):
-                step = slice_compressor_query(meta, batch, width, index)
+                prepared = None
+                if batch > 1 and getattr(self, "_fuse_query_slices", False):
+                    from ...kernels.ppu_query_slice import prepare_indexer_query
+
+                    prepared = prepare_indexer_query(x, None, start_pos, meta, index)
+                if prepared is None:
+                    step = slice_compressor_query(meta, batch, width, index)
+                    step_x = x[:, index : index + 1].contiguous()
+                    step_start = start_pos + index
+                else:
+                    step_x, _, step_start, step = prepared
                 self.compressor.forward_decode_vectorized(
-                    x[:, index : index + 1].contiguous(), start_pos + index,
-                    meta=step, position_ids=step.positions.reshape(batch, 1),
+                    step_x,
+                    step_start,
+                    meta=step,
+                    position_ids=step.positions.reshape(batch, 1),
                 )
             # C4 writes only newly completed compressed entries. Each query's
             # own length excludes later appended entries; state writes above
@@ -345,12 +393,18 @@ class PpuFP4Indexer(IndexerFP8):
             score_width = max(32, min(capacity, self._kv_cache_t or capacity))
             logits = paged_score(
                 q.reshape(tokens, 1, self.n_heads, 64),
-                qs.reshape(tokens, 1, self.n_heads), weights,
-                self._kv_pool_view, table, lengths, score_width,
+                qs.reshape(tokens, 1, self.n_heads),
+                weights,
+                self._kv_pool_view,
+                table,
+                lengths,
+                score_width,
             )
             topk_decode(
-                logits.reshape(tokens, score_width), lengths.reshape(tokens),
+                logits.reshape(tokens, score_width),
+                lengths.reshape(tokens),
                 out_topk_buffer.reshape(tokens, self.index_topk),
+                canonical_in_kernel=getattr(self, "_fuse_topk_order", False),
             )
             return out_topk_buffer
         finally:
@@ -438,6 +492,7 @@ class PpuFP4Indexer(IndexerFP8):
                 logits.reshape(bsz, width),
                 lengths.reshape(bsz),
                 out_topk_buffer.reshape(bsz, self.index_topk),
+                canonical_in_kernel=getattr(self, "_fuse_topk_order", False),
             )
             return out_topk_buffer
         finally:
@@ -538,8 +593,43 @@ class PpuFP4Attention(PpuRopeAttention):
             decode_streams=self._decode_indexer_streams,
         )
 
+    def forward_decode_with_hc_pre(self, x, metadata, hc, norm, *, kv_cache=None):
+        from ...modules.linear.fp8_linear import PpuFp8Linear
+
+        if (
+            not getattr(self, "_fuse_qkv_quant", False)
+            or x.ndim != 4
+            or self._decode_streams is None
+            or (x.shape[1] != 1 and not self._decode_mtp_overlap)
+            or type(self._decode_qkv_projection) is not PpuFp8Linear
+            or self._decode_qkv_projection.quantization != "v2_column"
+            or not callable(getattr(hc, "can_fuse_pre_quant", None))
+            or not hc.can_fuse_pre_quant(x, norm)
+        ):
+            return None
+        from rtp_llm.models_py.modules.dsv4.fp8.attention import bind_attn_cache
+
+        from .ppu_decode_attention import decode_attention_overlap
+
+        y, post, comb, quantized = hc.pre_norm_quantized(x, norm)
+        with bind_attn_cache(self, kv_cache, metadata.pool_block_tables):
+            self._set_compressor_pool_context()
+            try:
+                output = decode_attention_overlap(
+                    self,
+                    y,
+                    metadata,
+                    self._decode_streams,
+                    input_quantized=quantized,
+                )
+            finally:
+                self._clear_compressor_pool_context()
+        return output, post, comb
+
     def _forward_decode_body(self, x, attn_metadata):
-        if self._decode_streams is None or (x.shape[1] != 1 and not self._decode_mtp_overlap):
+        if self._decode_streams is None or (
+            x.shape[1] != 1 and not self._decode_mtp_overlap
+        ):
             return super()._forward_decode_body(x, attn_metadata)
         from .ppu_decode_attention import decode_attention_overlap
 
