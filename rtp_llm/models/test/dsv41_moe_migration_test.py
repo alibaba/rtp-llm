@@ -69,6 +69,7 @@ class V41PrefillIntegrationTest(unittest.TestCase):
                 "DSV41_MOE_LOCAL_FUSE": "1",
                 "DSV41_MOE_MASK_SKIP": "1",
                 "DSV41_SWIGLU_FUSE": "1",
+                "DSV41_ROUTED_ACT_QUANT_LUT": "1",
             },
         ):
             op = routed.V41RoutedExperts(
@@ -153,11 +154,23 @@ class V41PrefillIntegrationTest(unittest.TestCase):
                 "DSV41_MOE_LOCAL_FUSE": "0",
                 "DSV41_SWIGLU_FUSE": "0",
                 "DSV41_MOE_MASK_SKIP": "0",
+                "DSV41_ROUTED_ACT_QUANT_LUT": "0",
             },
         ):
             self.assertTrue(op.prefill_local_fuse)
             self.assertTrue(op.prefill_swiglu_fuse)
             self.assertTrue(op.prefill_mask_skip)
+            self.assertTrue(op.routed_lut_enabled)
+            self.assertIsNone(op._silu_table)
+
+    def test_routed_lut_is_disabled_by_default(self):
+        with patch.dict(os.environ):
+            os.environ.pop("DSV41_ROUTED_ACT_QUANT_LUT", None)
+            op = routed.V41RoutedExperts(
+                routed_weights(dim=128, inter=128), backend="eager"
+            )
+        self.assertFalse(op.routed_lut_enabled)
+        self.assertIsNone(op._silu_table)
 
 
 if __name__ == "__main__":

@@ -128,6 +128,10 @@ class V41RoutedExperts(nn.Module):
         self.prefill_local_fuse = os.environ.get("DSV41_MOE_LOCAL_FUSE", "0") == "1"
         self.prefill_swiglu_fuse = os.environ.get("DSV41_SWIGLU_FUSE", "0") == "1"
         self.prefill_mask_skip = os.environ.get("DSV41_MOE_MASK_SKIP", "0") == "1"
+        self.routed_lut_enabled = (
+            os.environ.get("DSV41_ROUTED_ACT_QUANT_LUT", "0") == "1"
+        )
+        self._silu_table = None
         self._warmed = set()
         self._packed_s13 = self._packed_s2 = None
         if backend == "eager":
@@ -155,6 +159,10 @@ class V41RoutedExperts(nn.Module):
             self._masked = m_grouped_fp8_fp4_gemm_nt_masked
             self._packed_s13 = pack_group32_scales(self.s13, column_major=True)
             self._packed_s2 = pack_group32_scales(self.s2, column_major=True)
+            if self.routed_lut_enabled and self.swiglu_limit <= 1000000.0:
+                from ._v41_routed_lut_triton import prepare_silu_table
+
+                self._silu_table = prepare_silu_table(self.device, self.swiglu_limit)
 
     def _validate_input(self, x, row_shape, route_weights, out, metadata, input_scales):
         dtype = torch.bfloat16 if input_scales is None else torch.float8_e4m3fn
@@ -192,6 +200,7 @@ class V41RoutedExperts(nn.Module):
                 self.s2,
                 self._packed_s13,
                 self._packed_s2,
+                None if self._silu_table is None else self._silu_table.values,
             )
             if out.numel() and any(
                 t is not None
@@ -258,6 +267,7 @@ class V41RoutedExperts(nn.Module):
                 clamp_limit=self.swiglu_limit,
                 backend=quant_backend,
                 allow_contiguous=self.prefill_swiglu_fuse,
+                silu_table=self._silu_table,
             )
             scales = scales.reshape(*valid.shape, self.inter_dim // 32)
             result = gemm(values, scales, self.w2, self.s2, self._packed_s2)
