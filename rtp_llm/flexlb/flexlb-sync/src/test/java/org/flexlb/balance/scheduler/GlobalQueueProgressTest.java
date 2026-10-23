@@ -60,6 +60,23 @@ import static org.mockito.Mockito.when;
 class GlobalQueueProgressTest {
 
     @Test
+    void invalidMigrationPredictionDoesNotCloseTheGlobalScheduler() throws Exception {
+        try (Fixture f = new Fixture(RoleType.PREFILL, false, null, true)) {
+            var evaluator = mock(org.flexlb.balance.prediction.PrefillTimePredictor.Evaluator.class);
+            when(evaluator.estimateMs(anyLong(), anyLong())).thenReturn(-1L);
+            var attempted = new CountDownLatch(1);
+            when(f.router.hotspotMigrationCandidates()).thenAnswer(call -> {
+                attempted.countDown();
+                org.flexlb.balance.strategy.PrefillAdaptiveBudget.tokensFor(evaluator, 200);
+                return List.of();
+            });
+            assertTrue(attempted.await(5, TimeUnit.SECONDS));
+            f.submit(9001L, "b");
+            awaitCondition(() -> f.admitted.contains(9001L));
+        }
+    }
+
+    @Test
     void cacheSheddingRemovesLowBenefitOnlyAndDoesNotCrossPools() throws Exception {
         var policy = new org.flexlb.config.PrefillQueueSheddingConfig();
         policy.setExpectedWaitThresholdMs(1_000L);
@@ -752,6 +769,13 @@ class GlobalQueueProgressTest {
         }
 
         private Fixture(RoleType role, boolean preempt, org.flexlb.config.PrefillQueueSheddingConfig shedding) {
+            this(role, preempt, shedding, false);
+        }
+
+        private Fixture(RoleType role, boolean preempt, org.flexlb.config.PrefillQueueSheddingConfig shedding, boolean tokenBalance) {
+            if (tokenBalance) {
+                config.getRouter().getRoles().getPrefill().setTokenBalance(new org.flexlb.config.RoutingConfig.TokenBalanceConfig());
+            }
             config.queueScheduler().setPrefillQueueShedding(shedding);
             this.role = role;
             SchedulingTestConfig.useFifoQueue(config);
@@ -766,6 +790,9 @@ class GlobalQueueProgressTest {
 
             PrefillRoutingEntry a = endpoint("a");
             lifecycle = RequestProtocolTestSupport.schedulerMock();
+            if (tokenBalance) {
+                ReflectionTestUtils.setField(lifecycle, "hotspotRescue", config.getRouter().getRoles().getPrefill().getTokenBalance().getHotspotRescue());
+            }
             when(lifecycle.register(any(), org.mockito.ArgumentMatchers.any(Runnable.class), org.mockito.ArgumentMatchers.any())).thenAnswer(i -> {
                 RequestContext context = i.getArgument(0);
                 CompletableFuture<Response> future = new CompletableFuture<>();

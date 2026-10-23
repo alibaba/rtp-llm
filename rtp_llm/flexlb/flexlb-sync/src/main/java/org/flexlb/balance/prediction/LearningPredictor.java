@@ -144,8 +144,10 @@ public class LearningPredictor implements PrefillTimePredictor {
         double p7 = weights[LINEAR_PARAM_COUNT + 1] / COFF2;
         double p8 = weights[LINEAR_PARAM_COUNT + 2] + 1.0;
         double linearAddP8 = linearOutput + p8;
-        double sqrt_value = Math.sqrt(linearAddP8 * linearAddP8 + 4.0);
-        double non_linear_value = linearAddP8 + sqrt_value;
+        double sqrt_value = Math.hypot(linearAddP8, 2.0);
+        // Equivalent positive root, without cancellation for a negative linear input.
+        double non_linear_value = linearAddP8 < 0.0
+                ? 4.0 / (sqrt_value - linearAddP8) : linearAddP8 + sqrt_value;
         double predict = p6 + p7 * non_linear_value;
         double grad = p7 * (1.0 + linearAddP8 / sqrt_value);
         double p6_grad = 1.0 / COFF1;
@@ -217,6 +219,13 @@ public class LearningPredictor implements PrefillTimePredictor {
                     * this.adamMoment1[i] / (Math.sqrt(this.adamMoment2[i] + this.epsilon));
         }
 
+        // Non-negative feature coefficients, output bias and output scale keep service
+        // non-negative and monotone in added work. The intercept and shift may be negative.
+        // Unconstrained Adam can learn a negative zero-token prediction from fast cached
+        // requests; adaptive capacity queries that value on the global decision thread.
+        for (int i = 1; i <= LINEAR_PARAM_COUNT + 1; i++) {
+            newWeights[i] = Math.max(0.0, newWeights[i]);
+        }
         this.modelRef.set(new ModelEvaluator(newWeights));
         this.t = this.t + 1;
         this.itemBatch.clear();

@@ -40,6 +40,7 @@ public final class RequestRoute implements GroupPlanner.Input, AutoCloseable {
     private long prefillWorkMs;
     private org.flexlb.balance.strategy.PrefillTokenWorkload.Reservation tokenPlan;
     private Runnable sessionCommit;
+    private Runnable tokenPlanReleased;
 
     public void onPrefillCommit(Runnable callback) {
         checkState(constructionState == BUILDING, "session callback requires route construction");
@@ -52,16 +53,21 @@ public final class RequestRoute implements GroupPlanner.Input, AutoCloseable {
     }
 
     public void reserveTokenPlan(org.flexlb.balance.strategy.PrefillTokenWorkload.Reservation plan) {
+        reserveTokenPlan(plan, null);
+    }
+
+    public void reserveTokenPlan(org.flexlb.balance.strategy.PrefillTokenWorkload.Reservation plan, Runnable onAbandon) {
         if (constructionState != BUILDING || tokenPlan != null) {
             if (plan != null) { plan.close(); }
             throw new IllegalStateException("token plan requires a new route selection");
         }
         tokenPlan = plan;
+        tokenPlanReleased = onAbandon;
     }
 
     /** Idempotent across selected/canonical route copies and failed admission cleanup. */
-    public void releaseTokenPlan() {
-        if (tokenPlan != null) { tokenPlan.close(); }
+    public boolean releaseTokenPlan() {
+        return tokenPlan != null && tokenPlan.release();
     }
     private long prefillVersion;
     private long decodeVersion;
@@ -86,6 +92,7 @@ public final class RequestRoute implements GroupPlanner.Input, AutoCloseable {
             decode = selected.decode;
             prefillWorkMs = selected.prefillWorkMs;
             tokenPlan = selected.tokenPlan;
+            tokenPlanReleased = selected.tokenPlanReleased;
             sessionCommit = selected.sessionCommit;
             prefillVersion = selected.prefillVersion;
             decodeVersion = selected.decodeVersion;
@@ -255,11 +262,14 @@ public final class RequestRoute implements GroupPlanner.Input, AutoCloseable {
 
     @Override
     public void close() {
-        releaseTokenPlan();
-        if (constructionState == BUILDING) { constructionState = ABORTED; }
-        if (pins == null) { return; }
         Throwable failure = null;
-        for (int i = pins.length - 1; i >= 0; i--) {
+        // Admission transfers the plan under the endpoint lock and releases it silently.
+        // Only an abandoned plan creates capacity; notify after releasing its ledger monitor.
+        if (releaseTokenPlan() && tokenPlanReleased != null) {
+            failure = Failures.run(failure, tokenPlanReleased);
+        }
+        if (constructionState == BUILDING) { constructionState = ABORTED; }
+        for (int i = pins == null ? -1 : pins.length - 1; i >= 0; i--) {
             var pin = pins[i];
             if (pin != null && pin.isOpen()) { failure = Failures.append(failure, Failures.close(pin)); }
         }

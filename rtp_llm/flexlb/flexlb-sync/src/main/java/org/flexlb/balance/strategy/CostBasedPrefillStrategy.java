@@ -235,8 +235,10 @@ public class CostBasedPrefillStrategy {
                     selectedIndex = selectBestCandidate(survivors, survivors.minimumTtftRank, roleType, group, seqLen);
                 }
                 if (selectedIndex >= 0) {
-                    route.reserveTokenPlan(survivors.endpoint(selectedIndex).ownership.planTokenWork(
-                            Math.max(0L, seqLen - survivors.cacheHit(selectedIndex))));
+                    PrefillEndpoint selected = survivors.endpoint(selectedIndex);
+                    long tokens = Math.max(0L, seqLen - survivors.cacheHit(selectedIndex));
+                    route.reserveTokenPlan(selected.ownership.planTokenWork(tokens),
+                            tokens > 0 ? () -> selected.signal(PrefillEndpoint.Signal.PLACEMENT) : null);
                 }
             }
         }

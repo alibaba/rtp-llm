@@ -888,8 +888,15 @@ public final class QueuedRequestScheduler extends AbstractRequestScheduler imple
     private void migrateHotspotQueues() {
         if (hotspotRescue == null || closed.get() || System.nanoTime() < nextLocalMigrationNanos) { return; }
         nextLocalMigrationNanos = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(100L);
+        List<RequestRoute> candidates;
+        try { candidates = router.hotspotMigrationCandidates(); }
+        catch (org.flexlb.balance.prediction.InvalidPrefillPredictionException invalid) {
+            // Migration is advisory: a bad estimate must not close all request admission.
+            Logger.warn("Skipping hotspot migration with invalid Prefill prediction", invalid);
+            return;
+        }
         int migrated = 0;
-        for (var route : router.hotspotMigrationCandidates()) {
+        for (var route : candidates) {
             if (migrated >= plannerCount) { break; }
             if (migrateQueuedRoute(route)) { migrated++; }
         }

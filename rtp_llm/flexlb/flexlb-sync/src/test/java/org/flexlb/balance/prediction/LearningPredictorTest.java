@@ -27,6 +27,55 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 
 class LearningPredictorTest {
 
+    @org.junit.jupiter.params.ParameterizedTest
+    @org.junit.jupiter.params.provider.ValueSource(longs = {1, 5, 20, 50, 100})
+    void lowLatencyLearningCannotInvalidateAdaptiveCapacity(long actualMs) {
+        var model = new LearningPredictor();
+        var features = batchFeatures(item(32768, 30000));
+        for (int i = 0; i < 8000; i++) {
+            model.learn(features, 300, actualMs + (i % 3 - 1) * actualMs / 10);
+            int sample = i;
+            assertDoesNotThrow(() -> org.flexlb.balance.strategy.PrefillAdaptiveBudget.tokensFor(model.evaluator(), 200),
+                    "sample=" + sample + " actualMs=" + actualMs);
+        }
+        double fitted = model.evaluator().predictBatchMs(features);
+        assertTrue(Math.abs(fitted - actualMs) <= Math.max(2.0, actualMs * 0.25),
+                "constrained learning must still fit the observed service: actual=" + actualMs + " predicted=" + fitted);
+    }
+
+    @Test
+    void learningAcrossChangingWorkloadsKeepsAddedBatchWorkMonotone() {
+        var model = new LearningPredictor();
+        var random = new java.util.Random(511);
+        for (int round = 0; round < 2000; round++) {
+            var examples = new ArrayList<PrefillBatchFeatures.Item>();
+            long actual = 2;
+            for (int j = 0; j < 1 + round % 16; j++) {
+                long input = 64L << random.nextInt(11);
+                long hit = input * random.nextInt(101) / 100;
+                examples.add(item(input, hit));
+                actual += (input - hit) / (round < 1000 ? 70 : 35);
+            }
+            model.learn(new PrefillBatchFeatures(examples), 0, Math.max(1, actual * (90 + random.nextInt(21)) / 100));
+            var evaluator = model.evaluator();
+            var batch = evaluator.newBatchPrediction();
+            double previous = 0;
+            for (var example : examples) {
+                double current = batch.append(example.seqLen(), example.hitCache());
+                assertTrue(Double.isFinite(current) && current >= previous,
+                        "adding work must not decrease service time: " + previous + " -> " + current);
+                previous = current;
+            }
+            long last = evaluator.estimateMs(0, 0);
+            assertTrue(last >= 0);
+            for (long input = 1; input <= 1L << 30; input *= 2) {
+                long current = evaluator.estimateMs(input, 0);
+                assertTrue(current >= last, "adaptive token search requires a monotone predictor");
+                last = current;
+            }
+        }
+    }
+
     @Test
     void emptyLearningBatchStillTrainsTheBias() throws Exception {
         var model = new LearningPredictor();

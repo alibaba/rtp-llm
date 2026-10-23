@@ -19,9 +19,10 @@ class PrefillTokenWorkloadTest {
         var w = new PrefillTokenWorkload(100);
         w.accept(1000); w.accept(250);
         w.release(1000); w.complete(1000, 10);
-        assertEquals(1250, w.snapshot(109).score());
+        assertEquals(250, w.snapshot(109).score());
+        assertEquals(1000, w.snapshot(109).completedTokens());
         w.release(250);
-        assertEquals(1000, w.snapshot(109).score());
+        assertEquals(0, w.snapshot(109).score());
         assertEquals(0, w.snapshot(110).score());
         assertThrows(IllegalArgumentException.class, () -> w.release(1));
     }

@@ -103,6 +103,20 @@ class SessionPrefillRoutingTest {
         }
     }
 
+    @Test void recentlyCompletedWorkMustNotKeepAnIdleWorkerBehindABusyWorker() {
+        when(cache.findMatchingEngines(any(), any(), any())).thenReturn(Map.of());
+        var ledger = (PrefillTokenWorkload) org.springframework.test.util.ReflectionTestUtils
+                .getField(a.ownership, "tokenWorkload");
+        ledger.complete(100_000L, System.nanoTime() / 1_000_000L);
+        var busy = mock(RequestRoute.class);
+        when(busy.requestId()).thenReturn(100_001L);
+        when(busy.seqLen()).thenReturn(1_000L);
+        var lease = b.ownership.reserveUnqueuedRoute(busy, 1, 0).reservation();
+        try (var route = select(request(null, 1_000), 0).value()) {
+            assertSame(a, route.prefillEp(), "completed work is not an outstanding queue; use the idle worker");
+        } finally { b.ownership.release(lease, null); }
+    }
+
     @Test void speculativeSelectionDoesNotRecordSessionAndBlankSessionsUseCache() {
         try (var ignored = select(request("session", 1_000), 0).value()) { assertSame(a, ignored.prefillEp()); }
         when(cache.findMatchingEngines(any(), any(), any())).thenReturn(Map.of(b.ipPort(), 9));

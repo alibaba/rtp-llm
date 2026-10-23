@@ -10,7 +10,9 @@ public final class PrefillTokenWorkload {
     private record Completion(long atMs, long tokens) { }
     public record Snapshot(long completedTokens, long pendingTokens, long plannedTokens) {
         public Snapshot(long completedTokens, long pendingTokens) { this(completedTokens, pendingTokens, 0L); }
-        public double score() { return (double) completedTokens + pendingTokens + plannedTokens; }
+        /** Only outstanding compute competes for current service. Completed-window
+         * expiry must not move new traffic between otherwise identical workers. */
+        public double score() { return (double) pendingTokens + plannedTokens; }
     }
     private final long windowMs;
     private final ArrayDeque<Completion> completions = new ArrayDeque<>();
@@ -18,16 +20,24 @@ public final class PrefillTokenWorkload {
     private long pendingTokens;
     private long plannedTokens;
 
-    /** Soft scoring reservation shared by a selection and its canonical route copy.
-     * It never consumes admission capacity and closes exactly once on commit or abandoned planning.
+    /** Planned work shared by a selection and its canonical route copy.
+     * It blocks competing selections and transfers exactly once to committed ownership or releases.
      */
     public final class Reservation implements AutoCloseable {
         private final long tokens;
         private boolean open = true;
         private Reservation(long tokens) { this.tokens = tokens; }
-        @Override public void close() {
+        @Override public void close() { release(); }
+
+        /** True only for the caller that releases this shared reservation. */
+        public boolean release() {
             synchronized (PrefillTokenWorkload.this) {
-                if (open) { plannedTokens -= tokens; open = false; }
+                if (open) {
+                    plannedTokens -= tokens;
+                    open = false;
+                    return true;
+                }
+                return false;
             }
         }
     }
