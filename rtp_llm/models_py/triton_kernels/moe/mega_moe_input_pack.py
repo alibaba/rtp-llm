@@ -195,7 +195,8 @@ if triton is not None:
             if HAS_VALID_MASK:
                 valid = tl.load(valid_mask_ptr + offs_m, mask=row_mask, other=0)
                 w = tl.where(valid[:, None], w, 0)
-                idx = tl.where(valid[:, None], idx, 0)
+                # MegaMoE dispatch skips negative IDs, not zero-weight routes.
+                idx = tl.where(valid[:, None], idx, -1)
             tl.store(
                 out_weights_ptr
                 + offs_m[:, None] * out_weights_stride_m
