@@ -1,3 +1,5 @@
+import json
+import logging
 import weakref
 from collections.abc import Mapping
 from typing import Any, Dict, Optional
@@ -70,6 +72,8 @@ from rtp_llm.models_py.modules.qwen4_exp.weight_views import (
     Qwen4LinearFactory,
     mark_projection_for_restart,
     prepare_compute_weights,
+    annotate_compute_inventory,
+    summarize_compute_inventory,
 )
 from rtp_llm.ops import (
     AttentionConfigs,
@@ -568,7 +572,9 @@ class Qwen4ExpDecoderLayer(Qwen3NextDecoderLayer):
     def _attention_quant_config(self, config, weights):
         if getattr(config, "_qwen4_nvfp4_source", False):
             return None
-        if bool(getattr(config, "_qwen4_full_fp8_nvfp4", False)):
+        if getattr(config, "_qwen4_full_fp8", False) or getattr(
+            config, "_qwen4_full_fp8_nvfp4", False
+        ):
             from rtp_llm.config.quant_config import Fp8BlockWiseQuantConfig
 
             return Fp8BlockWiseQuantConfig(is_quanted=False)
@@ -774,7 +780,8 @@ class Qwen4ExpModel(Qwen35Model):
         config = model_config
         compute_weights = (
             prepare_compute_weights(weights)
-            if getattr(config, "_qwen4_full_fp8_nvfp4", False)
+            if getattr(config, "_qwen4_full_fp8", False)
+            or getattr(config, "_qwen4_full_fp8_nvfp4", False)
             else weights
         )
         super().__init__(
@@ -787,7 +794,7 @@ class Qwen4ExpModel(Qwen35Model):
             py_hw_kernel_config,
         )
         fp8_embedding = (
-            getattr(self.config, "_qwen4_full_fp8_nvfp4", False)
+            compute_weights is not weights
             and self.embed_tokens.weight.dtype == torch.float8_e4m3fn
         )
         if fp8_embedding:
@@ -828,6 +835,14 @@ class Qwen4ExpModel(Qwen35Model):
         if dispatch is not None:
             for layer in self.layers:
                 install_target_graph_all_reduce(layer.self_attn, layer.mlp, dispatch)
+
+        if compute_weights is not weights:
+            inventory = annotate_compute_inventory(self.weight)
+            logging.info(
+                "Qwen4 weight inventory rank=%s %s",
+                parallelism_config.world_rank,
+                json.dumps(summarize_compute_inventory(inventory), sort_keys=True),
+            )
 
     def _ple_coordinator(self) -> PLETransactionCoordinator:
         coordinator = self.__dict__.get("_ple_transaction_coordinator")

@@ -63,7 +63,18 @@ class CudaFp8PerBlockNoDPMaskedStrategy(MoeStrategy):
         resolver = MoeConfigResolver()
         quant_method = resolver.get_quant_method(config)
         checker.check(quant_method == "FP8_PER_BLOCK")
-        checker.check(config.moe_strategy == "fp8_per_block_no_dp_masked")
+        from rtp_llm.models_py.utils.arch import get_sm
+
+        qwen4_sm90_graph = (
+            config.moe_strategy == "auto"
+            and config.enable_cuda_graph
+            and get_sm()[0] == 9
+            and getattr(config.model_config, "_qwen4_full_fp8", False)
+            and not getattr(config.model_config, "_qwen4_full_fp8_nvfp4", False)
+        )
+        checker.check(
+            config.moe_strategy == "fp8_per_block_no_dp_masked" or qwen4_sm90_graph
+        )
 
     def get_attributes(self) -> StrategyAttributes:
         from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors.deepgemm_masked_executor_v2 import (

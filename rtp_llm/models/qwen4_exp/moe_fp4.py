@@ -19,11 +19,17 @@ class Qwen4MoeFp4WeightInfo(ModelWeightInfo):
         self._dense_storage = dense_storage
         self._vocab_storage = vocab_storage
 
-    def to_quant_weight_info(self, quant_config):
+    def _validate_quant_config(self, quant_config):
         if not is_qwen4_precision_recipe(quant_config):
             raise ValueError(
                 "Qwen4 requires the complete FP8/NVFP4 recipe from official FP8 source"
             )
+
+    def _expert_weight(self, weight, quant_config):
+        return weight.create(weight, quant_config)
+
+    def to_quant_weight_info(self, quant_config):
+        self._validate_quant_config(quant_config)
         from rtp_llm.model_loader.fp8_weight import Fp8StorageWeight
 
         storage = (
@@ -46,7 +52,7 @@ class Qwen4MoeFp4WeightInfo(ModelWeightInfo):
                 if isinstance(weight, MoeWeight):
                     children = [
                         (
-                            child.create(child, quant_config)
+                            self._expert_weight(child, quant_config)
                             if child.name in (W.moe_w1, W.moe_w2)
                             else (child if source_bf16 else Fp8StorageWeight(child))
                         )

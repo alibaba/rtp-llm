@@ -225,7 +225,10 @@ class Qwen4ExpWeight(Qwen35MoeWeight):
         self._moe_only_fp4 = bool(
             getattr(self.model_config, "_qwen4_full_fp8_nvfp4", False)
         )
-        if self._moe_only_fp4 or getattr(
+        self._full_fp8 = self._moe_only_fp4 or bool(
+            getattr(self.model_config, "_qwen4_full_fp8", False)
+        )
+        if self._full_fp8 or getattr(
             self.model_config, "_qwen4_nvfp4_source", False
         ):
             self._align_size = 0
@@ -317,10 +320,14 @@ class Qwen4ExpWeight(Qwen35MoeWeight):
             from rtp_llm.models.qwen4_exp.moe_nvfp4 import Qwen4Nvfp4WeightInfo
 
             return Qwen4Nvfp4WeightInfo(info.weights, info.layer_weights)
-        if self._moe_only_fp4:
+        if self._full_fp8:
             from rtp_llm.models.qwen4_exp.moe_fp4 import Qwen4MoeFp4WeightInfo
+            from rtp_llm.models.qwen4_exp.native_fp8 import Qwen4NativeFp8WeightInfo
 
-            return Qwen4MoeFp4WeightInfo(
+            weight_info = (
+                Qwen4MoeFp4WeightInfo if self._moe_only_fp4 else Qwen4NativeFp8WeightInfo
+            )
+            return weight_info(
                 info.weights,
                 info.layer_weights,
                 dense_storage=getattr(self.model_config, "_qwen4_dense_storage", None),
@@ -392,7 +399,7 @@ class Qwen4ExpWeight(Qwen35MoeWeight):
                         else None
                     ),
                     preserve_fp8=bool(
-                        getattr(self.model_config, "_qwen4_full_fp8_nvfp4", False)
+                        getattr(self.model_config, "_qwen4_full_fp8", False)
                     ),
                 )
             )

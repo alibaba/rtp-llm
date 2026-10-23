@@ -117,6 +117,7 @@ class Qwen4Exp(Qwen35Moe):
 
     @staticmethod
     def _configure_precision_recipe(config: ModelConfig) -> None:
+        config._qwen4_full_fp8 = bool(getattr(config, "_qwen4_fp8_source", False))
         if getattr(config, "_qwen4_nvfp4_source", False):
             from rtp_llm.config.quant_config import ModelOptFp4Config
 
@@ -140,9 +141,12 @@ class Qwen4Exp(Qwen35Moe):
             config.dense_weight_dtype = "bf16"
             config.expert_weight_dtype = "fp4"
             return
-        config._qwen4_full_fp8_nvfp4 = bool(getattr(config, "_qwen4_fp8_source", False))
         config.quant_config = build_qwen4_quant_config(
-            config.quantization, config._qwen4_full_fp8_nvfp4
+            config.quantization, config._qwen4_full_fp8
+        )
+        config._qwen4_full_fp8_nvfp4 = bool(
+            config.quant_config is not None
+            and config.quant_config.get_method() == "modelopt_fp4"
         )
         config._qwen4_dense_storage = getattr(
             config.quant_config, "dense_storage", "fp8"
@@ -152,12 +156,15 @@ class Qwen4Exp(Qwen35Moe):
                 import logging
 
                 logging.warning(
-                    "QWEN4_FP8_NVFP4 uses its configured vocabulary storage; "
+                    "Qwen4 FP8 uses its configured vocabulary storage; "
                     "disabling enable_fp32_lm_head"
                 )
                 config.enable_fp32_lm_head = False
-            config.quant_algo.setQuantAlgo("modelopt_fp4", 4, 16)
-            apply_quant_scope_to_pricing(config, config.quant_config)
+            quant = config.quant_config
+            config.quant_algo.setQuantAlgo(
+                quant.get_algo(), quant.bits, quant.group_size()
+            )
+            apply_quant_scope_to_pricing(config, quant)
             config.dense_weight_dtype = (
                 "bf16" if config._qwen4_dense_storage == "source_bf16" else "fp8"
             )
@@ -249,7 +256,7 @@ class Qwen4Exp(Qwen35Moe):
             table_params + auxiliary_bf16_params + metadata_params
         )
         table_bytes = float(
-            table_params * (1 if getattr(config, "_qwen4_full_fp8_nvfp4", False) else 2)
+            table_params * (1 if getattr(config, "_qwen4_full_fp8", False) else 2)
         )
         replicated_bytes = float(auxiliary_bf16_params * 2 + metadata_params * 8)
         config._extra_weight_bytes = table_bytes + replicated_bytes

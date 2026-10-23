@@ -1,11 +1,15 @@
+import builtins
 import copy
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
+from unittest import mock
 
 import torch
 from safetensors.torch import save_file
 
+from rtp_llm.config.quant_config import Fp8BlockWiseQuantConfig
 from rtp_llm.models.qwen4_exp.moe_fp8 import (
     validate_moe_fp8_checkpoint,
     validate_moe_fp8_manifest,
@@ -13,6 +17,71 @@ from rtp_llm.models.qwen4_exp.moe_fp8 import (
 
 
 class Qwen4MoeFp8Test(unittest.TestCase):
+    def test_native_fp8_does_not_import_nvfp4_shared_overlap(self):
+        from rtp_llm.models_py.modules.qwen4_exp.moe.shared_overlap import Qwen4MoeLayer
+
+        real_import = builtins.__import__
+
+        def reject_nvfp4(name, *args, **kwargs):
+            if "cutlass_nvfp4_executor" in name:
+                raise AssertionError("native FP8 imported an NVFP4 executor")
+            return real_import(name, *args, **kwargs)
+
+        with mock.patch.object(builtins, "__import__", reject_nvfp4):
+            Qwen4MoeLayer.prepare_shared_expert_overlap(
+                SimpleNamespace(config=SimpleNamespace(_qwen4_full_fp8=True))
+            )
+
+    def test_native_sm90_graph_selects_masked_fp8_without_relaxing_hybrid(self):
+        from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.strategy.fp8_per_block import (
+            CudaFp8PerBlockNoDPMaskedStrategy,
+            CudaFp8PerBlockNoDPStrategy,
+        )
+        from rtp_llm.models_py.modules.factory.fused_moe.strategy_registry import (
+            StrategyRegistry,
+        )
+
+        config = SimpleNamespace(
+            model_config=SimpleNamespace(
+                quant_config=Fp8BlockWiseQuantConfig(is_quanted=True),
+                data_type="bf16",
+                _qwen4_full_fp8=True,
+                _qwen4_full_fp8_nvfp4=False,
+            ),
+            ep_size=1,
+            tp_size=4,
+            moe_strategy="auto",
+            moe_config=SimpleNamespace(use_all_gather=True),
+            moe_quant_method="FP8_PER_BLOCK",
+            enable_cuda_graph=True,
+        )
+        registry = StrategyRegistry()
+        registry.register(CudaFp8PerBlockNoDPStrategy())
+        registry.register(CudaFp8PerBlockNoDPMaskedStrategy())
+        root = "rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors."
+        with (
+            mock.patch("rtp_llm.models_py.utils.arch.get_sm", return_value=(9, 0)),
+            mock.patch(root + "deepgemm_hybrid_executor.get_sm", return_value=(9, 0)),
+            mock.patch(
+                root + "deepgemm_masked_executor_v2.get_sm", return_value=(9, 0)
+            ),
+            mock.patch(
+                "rtp_llm.models_py.kernels.cuda.deepgemm_wrapper.has_deep_gemm",
+                return_value=True,
+            ),
+        ):
+            self.assertIsInstance(
+                registry.get_strategy(config), CudaFp8PerBlockNoDPMaskedStrategy
+            )
+            config.enable_cuda_graph = False
+            self.assertIsInstance(
+                registry.get_strategy(config), CudaFp8PerBlockNoDPStrategy
+            )
+            config.enable_cuda_graph = True
+            config.model_config._qwen4_full_fp8 = False
+            with self.assertRaises(ValueError):
+                registry.get_strategy(config)
+
     def test_missing_or_null_quantization_metadata_rejects_with_value_error(self):
         for config in ({}, {"quantization_config": None}):
             with self.subTest(config=config):
@@ -176,6 +245,150 @@ class Qwen4MoeFp8Test(unittest.TestCase):
                 else:
                     with self.assertRaisesRegex(ValueError, "finite and positive"):
                         self._validate_checkpoint(tensors, keys)
+
+
+class Qwen4NativeFp8LoaderTest(unittest.TestCase):
+    def test_native_tp_shards_preserve_bytes_scales_and_moe_math(self):
+        from types import SimpleNamespace
+        from unittest import mock
+
+        from rtp_llm.config.quant_config import Fp8BlockWiseQuantConfig
+        from rtp_llm.model_loader.ffn_weight import MoeAtomicWeight, MoeConfig
+        from rtp_llm.model_loader.tensor_source import TensorSource
+        from rtp_llm.models.qwen4_exp.native_fp8 import Qwen4NativeFp8MoeWeight
+        from rtp_llm.utils.model_weight import CkptWeightInfo, W
+
+        # 5 intermediate blocks expose the real TP4/TP8 boundary bug; non-square,
+        # distinct up/gate/expert/block values expose permutations and scale loss.
+        tensors = {}
+        for expert in range(2):
+            for projection in ("up", "gate", "down"):
+                shape = (256, 640) if projection == "down" else (640, 256)
+                n, k = shape
+                values = (torch.arange(n * k).reshape(shape) % 13 - 6).float()
+                values = values + expert + (2 if projection == "gate" else 0)
+                name = f"layers.0.experts.{expert}.{projection}.weight"
+                tensors[name] = values.to(torch.float8_e4m3fn)
+                tensors[name + "_scale_inv"] = (
+                    torch.arange(n // 128 * (k // 128)).reshape(n // 128, k // 128) + 1
+                ).float() / (512 if projection == "down" else 128)
+
+        class Source(TensorSource):
+            def load_tensor(self, name, data_type=torch.float16):
+                return [tensors[name].to(data_type)]
+
+            def has_tensor(self, name):
+                return name in tensors
+
+            def get_database(self):
+                return None
+
+        def dequant(weight, scale):
+            return weight.double() * scale.double().repeat_interleave(
+                128, -2
+            ).repeat_interleave(128, -1)
+
+        def source_value(expert, projection):
+            name = f"layers.0.experts.{expert}.{projection}.weight"
+            return dequant(tensors[name], tensors[name + "_scale_inv"])
+
+        x = (torch.arange(3 * 256).reshape(3, 256) % 11 - 5).double() / 32
+        expected = []
+        for expert in range(2):
+            up = x @ source_value(expert, "up").T
+            gate = x @ source_value(expert, "gate").T
+            expected.append(
+                (up * torch.nn.functional.silu(gate)) @ source_value(expert, "down").T
+            )
+        expected = torch.stack(expected)
+
+        for tp in (1, 2, 4, 8):
+            actual = torch.zeros_like(expected)
+            shards = []
+            for rank in range(tp):
+                config = SimpleNamespace(
+                    tp_size=tp,
+                    tp_rank=rank,
+                    ep_size=1,
+                    ep_rank=0,
+                    dp_size=1,
+                    dp_rank=0,
+                    ffn_tp_size=tp,
+                    ffn_tp_rank=rank,
+                    hidden_size=256,
+                    head_num=2,
+                    head_num_kv=2,
+                    size_per_head=128,
+                    moe_pure_tp_mode=True,
+                    moe_pure_tp_preshard=True,
+                    bit=8,
+                    merge_lora=False,
+                    compute_dtype=torch.bfloat16,
+                    use_swizzleA=False,
+                    get_selected_experts=lambda layer, count: range(count),
+                    exported_device=SimpleNamespace(
+                        shuffle_moe_weight=lambda value, *args: value,
+                        maybe_rewrite_weight_by_key=lambda name, value, **kwargs: value,
+                    ),
+                )
+                local = {}
+                for name, projections in (
+                    (W.moe_w1, ("up", "gate")),
+                    (W.moe_w2, ("down",)),
+                ):
+                    raw = MoeAtomicWeight(
+                        name,
+                        [
+                            CkptWeightInfo(
+                                f"layers.{{i}}.experts.{{expert_id}}.{p}.weight"
+                            )
+                            for p in projections
+                        ],
+                        config=MoeConfig(expert_num=2),
+                    )
+                    descriptor = Qwen4NativeFp8MoeWeight(
+                        raw, Fp8BlockWiseQuantConfig(is_quanted=True)
+                    )
+                    with mock.patch(
+                        "rtp_llm.models_py.kernels.cuda.deepgemm_wrapper.is_deep_gemm_e8m0_used",
+                        return_value=False,
+                    ):
+                        local.update(descriptor.load(Source(), 0, "cpu", config))
+                self.assertEqual(local[W.moe_w1].dtype, torch.float8_e4m3fn)
+                self.assertEqual(local[W.moe_w2].dtype, torch.float8_e4m3fn)
+                upgate = dequant(local[W.moe_w1], local[W.moe_s1])
+                down = dequant(local[W.moe_w2], local[W.moe_s2])
+                up, gate = (x @ upgate.transpose(-1, -2)).chunk(2, -1)
+                actual += (up * torch.nn.functional.silu(gate)) @ down.transpose(-1, -2)
+                shards.append(local)
+            torch.testing.assert_close(actual, expected, rtol=1e-12, atol=1e-12)
+            for projection_index, projection in enumerate(("up", "gate")):
+                restored = torch.cat(
+                    [
+                        part[W.moe_w1].float().chunk(2, 1)[projection_index]
+                        for part in shards
+                    ],
+                    1,
+                )[:, :640]
+                source = torch.stack(
+                    [
+                        tensors[
+                            f"layers.0.experts.{expert}.{projection}.weight"
+                        ].float()
+                        for expert in range(2)
+                    ]
+                )
+                torch.testing.assert_close(restored, source, rtol=0, atol=0)
+            restored = torch.cat([part[W.moe_w2].float() for part in shards], 2)[
+                ..., :640
+            ]
+            source = torch.stack(
+                [
+                    tensors[f"layers.0.experts.{expert}.down.weight"].float()
+                    for expert in range(2)
+                ]
+            )
+            torch.testing.assert_close(restored, source, rtol=0, atol=0)
 
 
 if __name__ == "__main__":

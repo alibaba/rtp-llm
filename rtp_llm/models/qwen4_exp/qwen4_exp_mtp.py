@@ -170,7 +170,7 @@ class Qwen4ExpMTP(Qwen4Exp):
             "hidden_size",
             "data_type",
             "enable_fp32_lm_head",
-            "_qwen4_full_fp8_nvfp4",
+            "_qwen4_full_fp8",
         )
         mismatches = [
             name
@@ -213,7 +213,10 @@ class Qwen4ExpMTP(Qwen4Exp):
             raise ValueError("qwen4_exp MTP vocabulary storage is incompatible")
         names = (W.embedding, W.lm_head)
         if (
-            getattr(target_config, "_qwen4_full_fp8_nvfp4", False) is True
+            (
+                getattr(target_config, "_qwen4_full_fp8", False)
+                or getattr(target_config, "_qwen4_full_fp8_nvfp4", False)
+            )
             and target_vocab != "source_bf16"
         ):
             from rtp_llm.model_loader.fp8_weight import FP8_STORAGE_SCALE_SUFFIX
