@@ -60,7 +60,7 @@ std::vector<std::string> GroupBlockIds::orderedTags() const {
 void KVCacheResource::initGroups(std::shared_ptr<const CacheTopology> topology, bool materialize_layer_views) {
     RTP_LLM_CHECK_WITH_INFO(topology != nullptr, "KVCacheResource::initGroups requires a topology");
     GroupBlockIds candidate;
-    const auto& groups = topology->groups();
+    const auto&   groups = topology->groups();
     candidate.rows_.reserve(groups.size());
     candidate.tag_to_index_.reserve(groups.size());
     for (const auto& group : groups) {
@@ -115,6 +115,7 @@ BlockIdxType BlockIds::popBack() {
     RTP_LLM_CHECK(!block_indices.empty());
     const BlockIdxType val = block_indices.back();
     block_indices.pop_back();
+    reclaimed_prefix_blocks_ = std::min(reclaimed_prefix_blocks_, block_indices.size());
     kernel_block_indices_.resize(block_indices.size() * kernel_blocks_per_kv_block_);
     return val;
 }
@@ -158,12 +159,14 @@ void BlockIds::swap(size_t pos_a, size_t pos_b) {
 }
 
 void BlockIds::assign(const BlockIndicesType& new_block_indices) {
-    block_indices = new_block_indices;
+    reclaimed_prefix_blocks_ = 0;
+    block_indices            = new_block_indices;
     syncKernelBlocks();
 }
 
 void BlockIds::assign(BlockIndicesType&& new_block_indices) {
-    block_indices = std::move(new_block_indices);
+    reclaimed_prefix_blocks_ = 0;
+    block_indices            = std::move(new_block_indices);
     syncKernelBlocks();
 }
 
@@ -176,10 +179,19 @@ void BlockIds::setAt(size_t pos, BlockIdxType val) {
 void BlockIds::resize(size_t new_size, BlockIdxType value) {
     const size_t old_size = block_indices.size();
     block_indices.resize(new_size, value);
+    reclaimed_prefix_blocks_ = std::min(reclaimed_prefix_blocks_, new_size);
     kernel_block_indices_.resize(new_size * kernel_blocks_per_kv_block_);
     for (size_t i = old_size; i < new_size; ++i) {
         updateKernelSlotAt(i, value);
     }
+}
+
+void BlockIds::setReclaimedPrefixBlocks(size_t end) {
+    RTP_LLM_CHECK(end <= block_indices.size());
+    for (size_t pos = reclaimed_prefix_blocks_; pos < end; ++pos) {
+        RTP_LLM_CHECK(isNullBlockIdx(block_indices[pos]));
+    }
+    reclaimed_prefix_blocks_ = std::max(reclaimed_prefix_blocks_, end);
 }
 
 void BlockIds::updateKernelSlotAt(size_t pos, BlockIdxType val) {

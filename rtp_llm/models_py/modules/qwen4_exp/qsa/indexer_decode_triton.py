@@ -157,9 +157,10 @@ def is_supported(
         and gamma.shape == (128,)
         and gamma.dtype == torch.bfloat16
         and ratio == 4
-        and kv_tokens_per_block == state_tokens_per_block == 128
+        and kv_tokens_per_block == state_tokens_per_block
+        and kv_tokens_per_block in (64, 128)
         and kv_pool.dim() == 3
-        and kv_pool.shape[1:] == (32, 128)
+        and kv_pool.shape[1:] == (kv_tokens_per_block // ratio, 128)
         and kv_pool.dtype == torch.bfloat16
         and state_pool.dim() == 3
         and state_pool.shape[1:] == (8, 128)
@@ -185,6 +186,8 @@ def write_decode_key_(
     valid: torch.Tensor | None = None,
 ) -> None:
     """Write one raw key/request and any completed compressed group."""
+    page_size = int(kv_pool.shape[1]) * 4 if kv_pool.dim() == 3 else 0
+    entries_per_page = page_size // 4
     if not is_supported(
         raw_keys,
         positions,
@@ -195,8 +198,8 @@ def write_decode_key_(
         kv_table,
         state_pool,
         state_table,
-        kv_tokens_per_block=128,
-        state_tokens_per_block=128,
+        kv_tokens_per_block=page_size,
+        state_tokens_per_block=page_size,
         ratio=4,
     ):
         raise ValueError("unsupported Qwen4 QSA decode writer layout")
@@ -222,9 +225,9 @@ def write_decode_key_(
         STATE_TABLE_WIDTH=state_table.shape[1],
         KV_POOL_BLOCKS=kv_pool.shape[0],
         STATE_POOL_BLOCKS=state_pool.shape[0],
-        KV_TOKENS_PER_BLOCK=128,
-        STATE_TOKENS_PER_BLOCK=128,
-        KV_ENTRIES_PER_BLOCK=32,
+        KV_TOKENS_PER_BLOCK=page_size,
+        STATE_TOKENS_PER_BLOCK=page_size,
+        KV_ENTRIES_PER_BLOCK=entries_per_page,
         D=128,
         ROTARY=64,
         EPS=norm_eps,
@@ -252,6 +255,8 @@ def write_decode_key_with_undo_(
     requests capture the same original sentinel row, so rollback stays safe
     even when no request completes a compression group.
     """
+    page_size = int(kv_pool.shape[1]) * 4 if kv_pool.dim() == 3 else 0
+    entries_per_page = page_size // 4
     if not is_supported(
         raw_keys,
         positions,
@@ -262,8 +267,8 @@ def write_decode_key_with_undo_(
         kv_table,
         state_pool,
         state_table,
-        kv_tokens_per_block=128,
-        state_tokens_per_block=128,
+        kv_tokens_per_block=page_size,
+        state_tokens_per_block=page_size,
         ratio=4,
     ):
         raise ValueError("unsupported Qwen4 QSA decode writer layout")
@@ -286,17 +291,17 @@ def write_decode_key_with_undo_(
         return undo
     pos = positions.to(torch.long)
     batch_rows = torch.arange(raw_keys.shape[0], device=raw_keys.device)
-    state_columns = (pos // 128).clamp(0, state_table.shape[1] - 1)
-    kv_columns = (pos // 128).clamp(0, kv_table.shape[1] - 1)
+    state_columns = (pos // page_size).clamp(0, state_table.shape[1] - 1)
+    kv_columns = (pos // page_size).clamp(0, kv_table.shape[1] - 1)
     state_ids = state_table[batch_rows, state_columns].to(torch.long)
     kv_ids = kv_table[batch_rows, kv_columns].to(torch.long)
     state_slots = (state_ids * 8 + pos.remainder(8)).clamp(
         0, state_pool.shape[0] * 8 - 1
     )
     completed = (pos + 1).remainder(4) == 0
-    kv_slots = torch.where(completed, kv_ids * 32 + (pos // 4).remainder(32), 0).clamp(
-        0, kv_pool.shape[0] * 32 - 1
-    )
+    kv_slots = torch.where(
+        completed, kv_ids * entries_per_page + (pos // 4).remainder(entries_per_page), 0
+    ).clamp(0, kv_pool.shape[0] * entries_per_page - 1)
     original_state = state_pool.flatten(0, 1).index_select(0, state_slots).clone()
     original_kv = kv_pool.flatten(0, 1).index_select(0, kv_slots).clone()
     undo = IndexerCacheUndo(
@@ -361,6 +366,8 @@ def write_target_window_with_undo_(
         raise ValueError("QSA target writer has invalid position or RoPE geometry")
     if rope_cos.shape != (batch * query_len, 64) or rope_sin.shape != rope_cos.shape:
         raise ValueError("QSA target writer requires one RoPE row per packed token")
+    page_size = int(kv_pool.shape[1]) * 4 if kv_pool.dim() == 3 else 0
+    entries_per_page = page_size // 4
     if not is_supported(
         raw_keys[:batch].contiguous(),
         prefixes,
@@ -371,8 +378,8 @@ def write_target_window_with_undo_(
         kv_table,
         state_pool,
         state_table,
-        kv_tokens_per_block=128,
-        state_tokens_per_block=128,
+        kv_tokens_per_block=page_size,
+        state_tokens_per_block=page_size,
         ratio=4,
     ):
         raise ValueError("unsupported Qwen4 QSA target writer layout")
@@ -396,7 +403,7 @@ def write_target_window_with_undo_(
 
     offsets = torch.arange(query_len, dtype=torch.int32, device=prefixes.device)
     positions = prefixes[:, None] + offsets[None, :]
-    state_columns = (positions // 128).clamp(0, state_table.shape[1] - 1)
+    state_columns = (positions // page_size).clamp(0, state_table.shape[1] - 1)
     state_ids = state_table.gather(1, state_columns).to(torch.long)
     state_slots = (
         (state_ids * 8 + positions.remainder(8))
@@ -404,13 +411,13 @@ def write_target_window_with_undo_(
         .clamp(0, state_pool.shape[0] * 8 - 1)
     )
     completion = prefixes + 3 - prefixes.remainder(4)
-    kv_columns = (completion // 128).clamp(0, kv_table.shape[1] - 1)
+    kv_columns = (completion // page_size).clamp(0, kv_table.shape[1] - 1)
     kv_ids = kv_table.gather(1, kv_columns.unsqueeze(1)).reshape(-1).to(torch.long)
     kv_slots = torch.where(
         completion < prefixes + query_len,
-        kv_ids * 32 + (completion // 4).remainder(32),
+        kv_ids * entries_per_page + (completion // 4).remainder(entries_per_page),
         0,
-    ).clamp(0, kv_pool.shape[0] * 32 - 1)
+    ).clamp(0, kv_pool.shape[0] * entries_per_page - 1)
     undo = IndexerCacheUndo(
         state_pool=state_pool,
         state_slots=state_slots,
@@ -478,6 +485,8 @@ def write_draft_window_with_undo_(
         or rope_sin.shape != rope_cos.shape
     ):
         raise ValueError("QSA draft writer requires packed one-to-four-row geometry")
+    page_size = int(kv_pool.shape[1]) * 4 if kv_pool.dim() == 3 else 0
+    entries_per_page = page_size // 4
     if not is_supported(
         raw_keys[:batch].contiguous(),
         prefixes,
@@ -488,8 +497,8 @@ def write_draft_window_with_undo_(
         kv_table,
         state_pool,
         state_table,
-        kv_tokens_per_block=128,
-        state_tokens_per_block=128,
+        kv_tokens_per_block=page_size,
+        state_tokens_per_block=page_size,
         ratio=4,
     ):
         raise ValueError("unsupported Qwen4 QSA draft writer layout")
@@ -518,7 +527,7 @@ def write_draft_window_with_undo_(
     source = cu_seqlens[:-1, None] + offsets[None, :]
     source = torch.where(active, source, 0).reshape(-1).to(torch.long)
     positions = prefixes[:, None] + offsets[None, :]
-    state_columns = (positions // 128).clamp(0, state_table.shape[1] - 1)
+    state_columns = (positions // page_size).clamp(0, state_table.shape[1] - 1)
     state_ids = state_table.gather(1, state_columns).to(torch.long)
     state_slots = (
         torch.where(
@@ -531,13 +540,13 @@ def write_draft_window_with_undo_(
     )
     completion_offset = 3 - prefixes.remainder(4)
     completion = prefixes + completion_offset
-    kv_columns = (completion // 128).clamp(0, kv_table.shape[1] - 1)
+    kv_columns = (completion // page_size).clamp(0, kv_table.shape[1] - 1)
     kv_ids = kv_table.gather(1, kv_columns.unsqueeze(1)).reshape(-1).to(torch.long)
     kv_slots = torch.where(
         lengths > completion_offset,
-        kv_ids * 32 + (completion // 4).remainder(32),
+        kv_ids * entries_per_page + (completion // 4).remainder(entries_per_page),
         0,
-    ).clamp(0, kv_pool.shape[0] * 32 - 1)
+    ).clamp(0, kv_pool.shape[0] * entries_per_page - 1)
     undo = IndexerCacheUndo(
         state_pool=state_pool,
         state_slots=state_slots,

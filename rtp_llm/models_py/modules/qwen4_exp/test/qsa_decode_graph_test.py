@@ -15,6 +15,8 @@ from rtp_llm.ops import RopeStyle
 
 @skipUnless(torch.cuda.is_available(), "CUDA is required for graph replay")
 class Qwen4ExpQSADecodeGraphTest(TestCase):
+    PAGE_SIZE = 128
+
     def setUp(self):
         torch.manual_seed(13)
         self.device = torch.device("cuda")
@@ -24,12 +26,14 @@ class Qwen4ExpQSADecodeGraphTest(TestCase):
         self.positions = torch.tensor([7, 7, 7], dtype=torch.int32, device="cuda")
         self.kv_table = torch.tensor([[1, 2]], dtype=torch.int32, device="cuda")
         self.state_table = self.kv_table.clone()
-        self.kv = torch.zeros(3, 32 * 128 * 2, dtype=torch.uint8, device="cuda")
+        self.kv = torch.zeros(
+            3, (self.PAGE_SIZE // 4) * 128 * 2, dtype=torch.uint8, device="cuda"
+        )
         self.state = torch.zeros(3, 8 * 128, dtype=torch.float32, device="cuda")
         self.state.view(3, 8, 128)[1, 4:7] = torch.randn(3, 128, device="cuda")
-        self.kv.view(torch.bfloat16).view(3, 32, 128)[1, 0] = torch.randn(
-            128, device="cuda"
-        ).bfloat16()
+        self.kv.view(torch.bfloat16).view(3, self.PAGE_SIZE // 4, 128)[1, 0] = (
+            torch.randn(128, device="cuda").bfloat16()
+        )
         self.indexer = SimpleNamespace(
             head_dim=128,
             n_heads=4,
@@ -78,13 +82,13 @@ class Qwen4ExpQSADecodeGraphTest(TestCase):
             indexer_kv_cache=SimpleNamespace(
                 tag=INDEXER_KV_TAG,
                 kv_cache_base=self.kv if kv is None else kv,
-                seq_size_per_block=128,
+                seq_size_per_block=self.PAGE_SIZE,
             ),
             indexer_kv_inputs=inputs(kv_map=self.kv_table),
             indexer_state_cache=SimpleNamespace(
                 tag=INDEXER_STATE_TAG,
                 kv_cache_base=self.state if state is None else state,
-                seq_size_per_block=128,
+                seq_size_per_block=self.PAGE_SIZE,
             ),
             indexer_state_inputs=inputs(state_map=self.state_table),
             is_mtp_draft=draft,
@@ -228,13 +232,15 @@ class Qwen4ExpQSADecodeGraphTest(TestCase):
                 main_cache=SimpleNamespace(tag="full"),
                 main_inputs=inputs(),
                 indexer_kv_cache=SimpleNamespace(
-                    tag=INDEXER_KV_TAG, kv_cache_base=kv_base, seq_size_per_block=128
+                    tag=INDEXER_KV_TAG,
+                    kv_cache_base=kv_base,
+                    seq_size_per_block=self.PAGE_SIZE,
                 ),
                 indexer_kv_inputs=inputs(kv_map=self.kv_table),
                 indexer_state_cache=SimpleNamespace(
                     tag=INDEXER_STATE_TAG,
                     kv_cache_base=state_base,
-                    seq_size_per_block=128,
+                    seq_size_per_block=self.PAGE_SIZE,
                 ),
                 indexer_state_inputs=inputs(state_map=self.state_table),
             )
@@ -274,6 +280,10 @@ class Qwen4ExpQSADecodeGraphTest(TestCase):
         torch.testing.assert_close(selected, expected)
         torch.testing.assert_close(self.kv, eager_kv)
         torch.testing.assert_close(self.state, eager_state)
+
+
+class Qwen4ExpQSA64TokenDecodeGraphTest(Qwen4ExpQSADecodeGraphTest):
+    PAGE_SIZE = 64
 
 
 if __name__ == "__main__":

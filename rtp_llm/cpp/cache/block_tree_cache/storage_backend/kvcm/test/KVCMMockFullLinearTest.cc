@@ -181,6 +181,88 @@ TEST(KVCMMockFullLinearTest, ReadsOnlyThroughNewestCompleteLinearStateAfterLocal
     EXPECT_TRUE(read(*backend.backend, std::move(request), std::move(result.match_meta)));
 }
 
+TEST(KVCMMockFullLinearTest, FullOnlyRequestReadsPastLinearCheckpointAndReadsFullOnlyWrites) {
+    for (const bool include_linear_checkpoint : {false, true}) {
+        SCOPED_TRACE(include_linear_checkpoint);
+        auto environment = makeMultiGroupBackendEnvironment(
+            "kvcm_storage_backend_pd_full_only", /*full_group_count=*/2, /*linear_group_count=*/2);
+        auto client_wrapper = std::make_shared<MockClientWrapper>();
+        EXPECT_CALL(*client_wrapper, initForPools(_, _, _, _)).WillOnce(Return(true));
+        EXPECT_CALL(*client_wrapper, shutdown()).Times(1);
+        EXPECT_CALL(*client_wrapper, loadKvCachesForTag("linear0", _, _, _)).Times(0);
+        EXPECT_CALL(*client_wrapper, loadKvCachesForTag("linear1", _, _, _)).Times(0);
+        auto backend = makeBackend(environment, singleRankConfig(), client_wrapper);
+        ASSERT_TRUE(initSingleRank(*backend.backend, environment));
+
+        ScopedReferencedBlocks                      source_blocks(environment, 4);
+        const auto&                                 block_ids = source_blocks.get();
+        const std::vector<std::vector<std::string>> groups_by_key(4, {"full0", "full1"});
+        const kv_cache_manager::Locations           locations{
+            makeFullLinearLocation(2, 2, 102, false),
+            makeFullLinearLocation(2, 2, 103, include_linear_checkpoint),
+            makeFullLinearLocation(2, 2, 104, false),
+        };
+        EXPECT_CALL(
+            *client_wrapper,
+            match(_, _, kv_cache_manager::QueryType::QT_PREFIX_MATCH, std::vector<int64_t>({101, 102, 103, 104}), _, _))
+            .WillOnce(Return(std::make_pair(true, locations)));
+        auto request = makeGroupedStorageRequest(
+            environment, {101, 102, 103, 104}, /*local_matched_blocks=*/1, block_ids, groups_by_key);
+        auto result = match(*backend.backend, request);
+        ASSERT_TRUE(result.success);
+        ASSERT_EQ(result.matched_blocks_num, 4u);
+        ASSERT_NE(result.match_meta, nullptr);
+
+        // As in LoadAsyncContext, locally matched blocks have no backend read.
+        request.handles.front().clear();
+        const kv_cache_manager::Locations selected_locations{
+            makeFullLinearLocation(2, 2, 102, false),
+            makeFullLinearLocation(2, 2, 103, false),
+            makeFullLinearLocation(2, 2, 104, false),
+        };
+        const auto bases = expectedBases(environment,
+                                         {block_ids[1], block_ids[2], block_ids[3]},
+                                         {{"full0", "full1"}, {"full0", "full1"}, {"full0", "full1"}});
+        expectTaggedTransfers(*client_wrapper, selected_locations, bases, false);
+        EXPECT_TRUE(read(*backend.backend, std::move(request), std::move(result.match_meta)));
+        for (const auto& [tag, pool] : environment.pools_by_tag) {
+            for (const auto block_id : block_ids) {
+                EXPECT_EQ(pool->refCount(block_id), 1u) << tag;
+            }
+        }
+    }
+}
+
+TEST(KVCMMockFullLinearTest, FailedFullOnlyReadReleasesDestinationPins) {
+    auto environment = makeMultiGroupBackendEnvironment(
+        "kvcm_storage_backend_pd_full_only_read_failure", /*full_group_count=*/1, /*linear_group_count=*/2);
+    auto client_wrapper = std::make_shared<MockClientWrapper>();
+    EXPECT_CALL(*client_wrapper, initForPools(_, _, _, _)).WillOnce(Return(true));
+    EXPECT_CALL(*client_wrapper, shutdown()).Times(1);
+    EXPECT_CALL(*client_wrapper, loadKvCachesForTag("linear0", _, _, _)).Times(0);
+    EXPECT_CALL(*client_wrapper, loadKvCachesForTag("linear1", _, _, _)).Times(0);
+    auto backend = makeBackend(environment, singleRankConfig(), client_wrapper);
+    ASSERT_TRUE(initSingleRank(*backend.backend, environment));
+
+    ScopedReferencedBlocks            source_blocks(environment, 1);
+    const auto&                       block_ids = source_blocks.get();
+    const kv_cache_manager::Locations locations{makeFullLinearLocation(1, 2, 101, true)};
+    EXPECT_CALL(*client_wrapper,
+                match(_, _, kv_cache_manager::QueryType::QT_PREFIX_MATCH, std::vector<int64_t>{101}, _, _))
+        .WillOnce(Return(std::make_pair(true, locations)));
+    auto request = makeGroupedStorageRequest(
+        environment, {101}, /*local_matched_blocks=*/0, block_ids, /*groups_by_key=*/{{"full0"}});
+    auto result = match(*backend.backend, request);
+    ASSERT_TRUE(result.success);
+    ASSERT_EQ(result.matched_blocks_num, 1u);
+
+    EXPECT_CALL(*client_wrapper, loadKvCachesForTag("full0", _, _, _)).WillOnce(Return(false));
+    EXPECT_FALSE(read(*backend.backend, std::move(request), std::move(result.match_meta)));
+    for (const auto& [tag, pool] : environment.pools_by_tag) {
+        EXPECT_EQ(pool->refCount(block_ids.front()), 1u) << tag;
+    }
+}
+
 TEST(KVCMMockFullLinearTest, FullLinearWriteRoutesEachGroupToItsOwnLayerBuffers) {
     auto environment    = makeHybridBackendEnvironment("kvcm_storage_backend_full_linear_write");
     auto client_wrapper = std::make_shared<MockClientWrapper>();

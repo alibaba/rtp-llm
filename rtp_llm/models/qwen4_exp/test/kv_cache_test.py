@@ -17,6 +17,7 @@ from rtp_llm.ops import (
     CacheGroupType,
     DataType,
     HybridAttentionType,
+    KVCacheSpecDesc,
     KVCacheSpecType,
     OpaqueBlockEntryCountMode,
 )
@@ -149,6 +150,16 @@ class BuildDescsTest(unittest.TestCase):
             )
 
 
+def _new_kv_cache_spec_desc():
+    return KVCacheSpecDesc.__new__(KVCacheSpecDesc)
+
+
+class _LegacyKVCacheSpecDesc:
+    def __reduce__(self):
+        state = KVCacheSpecDesc().__getstate__()[:20]
+        return _new_kv_cache_spec_desc, (), state
+
+
 class IndexerDescTest(unittest.TestCase):
     HEAD_DIM = 128
     RATIO = 4
@@ -168,6 +179,15 @@ class IndexerDescTest(unittest.TestCase):
         )
         self.assertEqual(desc.compression_ratio, self.RATIO)
         self.assertTrue(desc.reuse.enable_prefix_reuse)
+
+    def test_page_alignment_survives_pickle_and_preserves_legacy_default(self):
+        desc = indexer_kv_desc(self.HEAD_DIM, self.RATIO)
+        self.assertEqual(desc.kernel_block_token_alignment, 64)
+        restored = pickle.loads(pickle.dumps(desc))
+        self.assertEqual(restored.kernel_block_token_alignment, 64)
+        self.assertEqual(restored.compression_ratio, self.RATIO)
+        legacy = pickle.loads(pickle.dumps(_LegacyKVCacheSpecDesc()))
+        self.assertEqual(legacy.kernel_block_token_alignment, 128)
 
     def test_kv_desc_is_fixed_to_the_bf16_production_abi(self):
         """The 128-wide key is 256 B and never carries an inline FP8 scale."""

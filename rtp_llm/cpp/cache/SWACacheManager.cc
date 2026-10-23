@@ -80,7 +80,8 @@ int SWACacheManager::estimatePeakNeedBlocks(int                     seq_len,
                                             const BlockIndicesType& current_block_indices,
                                             int                     remaining_tokens,
                                             int                     reserve_step,
-                                            bool                    enable_reuse_cache) const {
+                                            bool                    enable_reuse_cache,
+                                            bool /*reclaim_history*/) const {
     (void)enable_reuse_cache;
     int allocated_blocks = 0;
     for (const auto block_index : current_block_indices) {
@@ -94,7 +95,8 @@ int SWACacheManager::estimateInitialBatchPeakNeedBlocks(int  seq_len,
                                                         int  remaining_tokens,
                                                         int  reserve_step,
                                                         bool enable_reuse_cache,
-                                                        int  target_batch_size) const {
+                                                        int  target_batch_size,
+                                                        bool /*reclaim_history*/) const {
     (void)enable_reuse_cache;
     const int batch_size    = std::max(target_batch_size, 1);
     const int common_blocks = needBlocksNum(common_seq_len, 0);
@@ -107,7 +109,8 @@ NeedBlocksInfo SWACacheManager::getNeedBlocks(int                      common_se
                                               int                      reserve_step,
                                               int                      reuse_blocks_len,
                                               bool                     reuse_enabled,
-                                              const RequiredPositions& required_positions) const {
+                                              const RequiredPositions& required_positions,
+                                              size_t /*reclaimed_prefix_blocks*/) const {
     (void)common_seq_len;
     const int      step                    = std::max(1, linear_step_);
     const bool     effective_reuse_enabled = effectiveReuseCacheForAllocation(reuse_enabled);

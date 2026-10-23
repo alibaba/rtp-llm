@@ -78,6 +78,10 @@ struct KVCacheSpecDesc {
     std::optional<CacheMemoryPolicyDesc>   memory;
     std::optional<CacheTailPolicyDesc>     tail;
     std::optional<CacheCpPolicyDesc>       cp;
+
+    // Token alignment required by the compressed-pool consumer kernel.
+    // Keep the historical FlashMLA/HCA contract unless a model declares another layout.
+    uint32_t kernel_block_token_alignment = 128;
 };
 
 struct SpecBuildContext {

@@ -37,7 +37,71 @@ class CustomAllReduceArgumentsTest(TestCase):
         self.assertIs(configs.ft_disable_custom_ar_override, True)
 
 
+class PDLinearTailArgumentsTest(TestCase):
+    def test_default_env_cli_and_pickle(self):
+        from rtp_llm.server.server_args import server_args
+
+        with patch.dict(os.environ, {}, clear=True):
+            default = server_args.setup_args([]).pd_separation_config
+            self.assertFalse(default.decode_linear_tail_only)
+            enabled = server_args.setup_args(
+                ["--decode_linear_tail_only", "true"]
+            ).pd_separation_config
+            self.assertTrue(enabled.decode_linear_tail_only)
+            self.assertTrue(pickle.loads(pickle.dumps(enabled)).decode_linear_tail_only)
+            config_type = type(enabled)
+            legacy = config_type.__new__(config_type)
+            legacy.__setstate__(enabled.__getstate__()[:22])
+            self.assertFalse(legacy.decode_linear_tail_only)
+            self.assertEqual(legacy.role_type, enabled.role_type)
+
+        with patch.dict(os.environ, {"DECODE_LINEAR_TAIL_ONLY": "1"}, clear=True):
+            from_env = server_args.setup_args([]).pd_separation_config
+            overridden = server_args.setup_args(
+                ["--decode_linear_tail_only", "false"]
+            ).pd_separation_config
+            self.assertTrue(from_env.decode_linear_tail_only)
+            self.assertFalse(overridden.decode_linear_tail_only)
+
+
 class CacheConfigArgumentsTest(TestCase):
+    def test_pool_block_weights_default_env_and_cli_precedence(self):
+        from_env = '{"full":8,"linear":1}'
+        from_cli = '{"full": 5, "linear": 2, "draft-linear": 1}'
+        for args, env, expected in (
+            ([], {}, ""),
+            (["--kv_cache_pool_block_weights", from_cli], {}, from_cli),
+            ([], {"KV_CACHE_POOL_BLOCK_WEIGHTS": from_env}, from_env),
+            (
+                ["--kv_cache_pool_block_weights", from_cli],
+                {"KV_CACHE_POOL_BLOCK_WEIGHTS": from_env},
+                from_cli,
+            ),
+            (
+                ["--kv_cache_pool_block_weights", ""],
+                {"KV_CACHE_POOL_BLOCK_WEIGHTS": from_env},
+                "",
+            ),
+        ):
+            with self.subTest(args=args, env=env):
+                config = self.parse_cache_config(args, env)
+                self.assertEqual(config.kv_cache_pool_block_weights, expected)
+
+    def test_linear_cache_reclaim_is_opt_in_and_cli_overrides_environment(self):
+        for args, env, expected in (
+            ([], {}, False),
+            (["--enable_linear_cache_reclaim", "1"], {}, True),
+            ([], {"ENABLE_LINEAR_CACHE_RECLAIM": "1"}, True),
+            (
+                ["--enable_linear_cache_reclaim", "0"],
+                {"ENABLE_LINEAR_CACHE_RECLAIM": "1"},
+                False,
+            ),
+        ):
+            with self.subTest(args=args, env=env):
+                config = self.parse_cache_config(args, env)
+                self.assertEqual(config.enable_linear_cache_reclaim, expected)
+
     # Keep the supported startup fields explicit, independently of parser registration.
     samples = {
         "enable_vipserver": True,

@@ -192,6 +192,11 @@ struct KVCacheConfig {
     double block_tree_disk_evict_low_watermark_ratio    = kDefaultDiskLowWatermarkRatio;
     double block_tree_disk_evict_high_watermark_ratio   = kDefaultDiskHighWatermarkRatio;
     int    linear_step                                  = 1;  // for linear attention cache reuse
+    // Opt-in request policy; only models declaring history-state reclaim support may enable it.
+    bool enable_linear_cache_reclaim = false;
+    // Optional JSON map from cache-group tags to positive pool block-count weights.
+    // Empty preserves the existing pool sizing policy.
+    std::string kv_cache_pool_block_weights = "";
     // Fields merged from PyKvCacheConfig
     int fp8_kv_cache = 0;
     // "auto" preserves a model-declared recurrent-state dtype. Models
@@ -406,18 +411,18 @@ struct VitConfig {
 };
 
 struct CacheStoreConfig {
-    bool    cache_store_rdma_mode         = false;
-    int     wrr_available_ratio           = 80;
-    int     rank_factor                   = 0;
-    int     thread_count                  = 32;
-    int     rdma_connect_timeout_ms       = 250;
-    int     rdma_qp_count_per_connection  = 2;
-    int     rdma_io_thread_count          = 4;
-    int     rdma_worker_thread_count      = 2;
-    int     messager_io_thread_count      = 2;
-    int     messager_worker_thread_count  = 32;
-    int64_t rdma_transfer_wait_timeout_ms = 180 * 1000;  // RDMA 传输完成最大等待超时时间，默认 180 秒
-    int rdma_max_block_pairs_per_connection = 0;  // 每条 RDMA 连接可处理的最大 block_pair 数量，0 表示不限制
+    bool    cache_store_rdma_mode               = false;
+    int     wrr_available_ratio                 = 80;
+    int     rank_factor                         = 0;
+    int     thread_count                        = 32;
+    int     rdma_connect_timeout_ms             = 250;
+    int     rdma_qp_count_per_connection        = 2;
+    int     rdma_io_thread_count                = 4;
+    int     rdma_worker_thread_count            = 2;
+    int     messager_io_thread_count            = 2;
+    int     messager_worker_thread_count        = 32;
+    int64_t rdma_transfer_wait_timeout_ms       = 180 * 1000;  // RDMA 传输完成最大等待超时时间，默认 180 秒
+    int     rdma_max_block_pairs_per_connection = 0;  // 每条 RDMA 连接可处理的最大 block_pair 数量，0 表示不限制
     int64_t p2p_read_steal_before_deadline_ms =
         250;  // Decode read：在此距 deadline 时从 recv store steal，阻止新 transfer 匹配
     int64_t p2p_read_return_before_deadline_ms = 100;  // Decode read 与 Prefill send：transfer 层 deadline / worker
@@ -534,6 +539,8 @@ struct PDSepConfig {
     int64_t  max_rpc_timeout_ms              = 2 * 3600 * 1000;  // 2h default
     int64_t  worker_port_offset              = 0;
     bool     decode_entrance                 = false;
+    // Only PD handoff streams may omit historical linear states; ordinary prefill still needs them.
+    bool decode_linear_tail_only = false;
     // ========== Prefill Thread Pool Configuration ==========
     // prepare-resource pool size. 0 = concurrency_limit * 2; effective minimum is 128.
     int64_t prefill_prepare_resource_pool_size = 0;
@@ -679,7 +686,7 @@ struct GrpcMapsConfig {
 struct GrpcConfig: GrpcMapsConfig {
     /// If > 0, passed to gRPC sync server as ``MAX_POLLERS`` (per completion queue).
     int max_server_pollers = 0;
-    GrpcConfig(){};
+    GrpcConfig() {};
     GrpcConfig(const std::string& json_str);
     std::string to_string() const;
     void        from_json(const std::string& json_str);
@@ -688,20 +695,23 @@ struct GrpcConfig: GrpcMapsConfig {
 /// DashSc gRPC (predict_v2.proto) Python client/server channel options.
 struct DashScGrpcConfig: GrpcMapsConfig {
     int max_server_workers = 4;
-    DashScGrpcConfig(){};
+    DashScGrpcConfig() {};
     DashScGrpcConfig(const std::string& json_str);
     std::string to_string() const;
     void        from_json(const std::string& json_str);
 };
 
 struct LinearAttentionConfig {
-    int         linear_conv_kernel_dim = 0;
-    int         linear_key_head_dim    = 0;
-    int         linear_num_key_heads   = 0;
-    int         linear_num_value_heads = 0;
-    int         linear_value_head_dim  = 0;
-    DataType    ssm_state_dtype        = DataType::TYPE_BF16;
-    DataType    conv_state_dtype       = DataType::TYPE_BF16;
+    int      linear_conv_kernel_dim = 0;
+    int      linear_key_head_dim    = 0;
+    int      linear_num_key_heads   = 0;
+    int      linear_num_value_heads = 0;
+    int      linear_value_head_dim  = 0;
+    DataType ssm_state_dtype        = DataType::TYPE_BF16;
+    DataType conv_state_dtype       = DataType::TYPE_BF16;
+    // Execution accepts null historical checkpoint slots. Active and speculative
+    // rollback state slots must still be retained by the cache manager.
+    bool        supports_history_state_reclaim = false;
     std::string to_string() const;
 };
 

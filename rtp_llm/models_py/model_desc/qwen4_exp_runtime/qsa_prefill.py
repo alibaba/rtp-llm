@@ -317,17 +317,18 @@ def select_draft_graph_tokens(
         ):
             if not _same_tensor_metadata(getattr(inputs, name), getattr(tagged, name)):
                 raise RuntimeError("QSA draft graph cache-region metadata disagree")
+    page_size = int(self.indexer_kv_cache.seq_size_per_block)
     if (
-        self.indexer_kv_cache.seq_size_per_block != 128
-        or self.indexer_state_cache.seq_size_per_block != 128
+        page_size not in (64, 128)
+        or self.indexer_state_cache.seq_size_per_block != page_size
     ):
-        raise RuntimeError("QSA draft graph requires 128-token side pages")
+        raise RuntimeError("QSA draft graph requires matching 64/128-token side pages")
     kv_pool = _typed_2d_pool(
         self.indexer_kv_cache,
         tag=INDEXER_KV_TAG,
         storage_dtype=torch.uint8,
         payload_dtype=torch.bfloat16,
-        entries=32,
+        entries=page_size // 4,
         width=128,
     )
     state_pool = _typed_2d_pool(
@@ -437,8 +438,8 @@ def select_draft_graph_tokens(
         kv_pool.flatten(0, 1),
         kv_table,
         compressed_lengths,
-        block_size=32,
-        max_ctx_len=int(kv_table.shape[1]) * 32,
+        block_size=page_size // 4,
+        max_ctx_len=int(kv_table.shape[1]) * (page_size // 4),
         validate_block_table=False,
     )
     from rtp_llm.models_py.modules.qwen4_exp.qsa.cub_topk import (
@@ -584,8 +585,8 @@ def _incremental_prefill_selection(
         and max(plan.lengths) <= 4
         and int(plan.ratio) == 4
         and int(plan.head_dim) == 128
-        and int(plan.kv_tokens_per_block) == 128
-        and int(plan.state_tokens_per_block) == 128
+        and int(plan.kv_tokens_per_block) in (64, 128)
+        and int(plan.state_tokens_per_block) == int(plan.kv_tokens_per_block)
     )
     if triton_draft_window:
         from rtp_llm.models_py.modules.qwen4_exp.qsa.indexer_decode_triton import (

@@ -280,7 +280,8 @@ bool DefaultLayerGroupPolicy::init() {
 
 bool DefaultLayerGroupPolicy::filterNeedLoadLocations(const kv_cache_manager::Locations& locations,
                                                       LocationsView&                     locations_view,
-                                                      kv_cache_manager::BlockMaskOffset  block_mask) const {
+                                                      kv_cache_manager::BlockMaskOffset  block_mask,
+                                                      bool /*full_only*/) const {
     LocationsView filtered_locations(locations.size());
     for (size_t i = block_mask; i < locations.size(); i++) {
         if (!setLocationView(locations[i], all_spec_names_, all_spec_names_, "full", filtered_locations[i])) {
@@ -580,7 +581,23 @@ std::string FullOtherGroupPolicy::debugString() const {
 
 bool FullLinearLayerGroupPolicy::filterNeedLoadLocations(const kv_cache_manager::Locations& locations,
                                                          LocationsView&                     locations_view,
-                                                         kv_cache_manager::BlockMaskOffset  block_mask) const {
+                                                         kv_cache_manager::BlockMaskOffset  block_mask,
+                                                         bool                               full_only) const {
+    if (full_only) {
+        // PD decode gets its recurrent state from the prefill peer. Its remote
+        // FULL prefix can extend past the last published LINEAR checkpoint, and
+        // reading a mixed location must not require a LINEAR destination block.
+        LocationsView filtered_locations(locations.size());
+        for (size_t i = block_mask; i < locations.size(); ++i) {
+            const auto& expected =
+                locations[i].size() == full_spec_names_.size() ? full_spec_names_ : full_other_spec_names_;
+            if (!setLocationView(locations[i], expected, full_spec_names_, "full-only", filtered_locations[i])) {
+                return false;
+            }
+        }
+        locations_view = std::move(filtered_locations);
+        return true;
+    }
     LocationsView filtered_locations;
     bool          exist_linear_location = false;
     for (size_t i = locations.size(); i-- > block_mask;) {

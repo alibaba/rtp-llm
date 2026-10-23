@@ -387,6 +387,7 @@ class Qwen4ExpTest(unittest.TestCase):
         self.assertEqual(linear_config.linear_key_head_dim, 128)
         self.assertEqual(linear_config.linear_value_head_dim, 128)
         self.assertEqual(linear_config.linear_conv_kernel_dim, 4)
+        self.assertTrue(linear_config.supports_history_state_reclaim)
 
     def test_multimodal_config(self):
         mm_config = self.config.mm_model_config

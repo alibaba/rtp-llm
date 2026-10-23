@@ -77,8 +77,8 @@ def select_target_verify_tokens(
     target_writer = target_writer and (
         1 <= query_len <= ratio == 4
         and head_dim == 128
-        and int(plan.kv_tokens_per_block) == 128
-        and int(plan.state_tokens_per_block) == 128
+        and int(plan.kv_tokens_per_block) in (64, 128)
+        and int(plan.state_tokens_per_block) == int(plan.kv_tokens_per_block)
     )
     if bool(self.main_inputs.is_cuda_graph) and not target_writer:
         raise RuntimeError("qwen4_exp QSA target Graph requires Triton writer")

@@ -16,8 +16,12 @@ from rtp_llm.models_py.modules.qwen4_exp.qsa.indexer_decode_triton import (
 
 @unittest.skipUnless(torch.cuda.is_available(), "requires CUDA")
 class IndexerDecodeTritonTest(unittest.TestCase):
+    PAGE_SIZE = 128
+
     def test_ragged_draft_window_graph_replay_and_rollback(self):
-        raw, prefixes, cos, sin, gamma, kv, kt, state, st = self._target_case([7, 127])
+        raw, prefixes, cos, sin, gamma, kv, kt, state, st = self._target_case(
+            [7, self.PAGE_SIZE - 1]
+        )
         raw, cos, sin = raw[:5].contiguous(), cos[:5].contiguous(), sin[:5].contiguous()
         lengths = torch.tensor([1, 4], dtype=torch.int32, device=raw.device)
         cu = torch.tensor([0, 1, 5], dtype=torch.int32, device=raw.device)
@@ -53,8 +57,8 @@ class IndexerDecodeTritonTest(unittest.TestCase):
             reference_state,
             st,
             ratio=4,
-            kv_tokens_per_block=128,
-            state_tokens_per_block=128,
+            kv_tokens_per_block=self.PAGE_SIZE,
+            state_tokens_per_block=self.PAGE_SIZE,
             norm_eps=1e-6,
             rope_is_token_aligned=True,
         )
@@ -71,7 +75,9 @@ class IndexerDecodeTritonTest(unittest.TestCase):
         state.copy_(original_state)
         lengths.copy_(torch.tensor([3, 2], dtype=torch.int32, device=raw.device))
         cu.copy_(torch.tensor([0, 3, 5], dtype=torch.int32, device=raw.device))
-        prefixes.copy_(torch.tensor([5, 125], dtype=torch.int32, device=raw.device))
+        prefixes.copy_(
+            torch.tensor([5, self.PAGE_SIZE - 3], dtype=torch.int32, device=raw.device)
+        )
         raw.copy_(torch.randn_like(raw.float()).bfloat16())
         kt[:, 0], kt[:, 1] = kt[:, 1].clone(), kt[:, 0].clone()
         st[:, 0], st[:, 1] = st[:, 1].clone(), st[:, 0].clone()
@@ -90,8 +96,8 @@ class IndexerDecodeTritonTest(unittest.TestCase):
             reference_state,
             st,
             ratio=4,
-            kv_tokens_per_block=128,
-            state_tokens_per_block=128,
+            kv_tokens_per_block=self.PAGE_SIZE,
+            state_tokens_per_block=self.PAGE_SIZE,
             norm_eps=1e-6,
             rope_is_token_aligned=True,
         )
@@ -115,9 +121,9 @@ class IndexerDecodeTritonTest(unittest.TestCase):
             device=device,
         )
         pool_blocks = 2 * batch + 1
-        kv = torch.randn(pool_blocks, 32, 128, device=device, dtype=torch.float32).to(
-            torch.bfloat16
-        )
+        kv = torch.randn(
+            pool_blocks, self.PAGE_SIZE // 4, 128, device=device, dtype=torch.float32
+        ).to(torch.bfloat16)
         state = (
             torch.randn(pool_blocks, 8, 128, device=device, dtype=torch.float32)
             .to(torch.bfloat16)
@@ -127,7 +133,14 @@ class IndexerDecodeTritonTest(unittest.TestCase):
 
     def test_target_window_parity_and_rollback(self):
         for query_len in (1, 2, 3, 4):
-            for prefixes in ([4], [5], [7], [127], [128], [5, 127]):
+            for prefixes in (
+                [4],
+                [5],
+                [7],
+                [self.PAGE_SIZE - 1],
+                [self.PAGE_SIZE],
+                [5, self.PAGE_SIZE - 1],
+            ):
                 with self.subTest(query_len=query_len, prefixes=prefixes):
                     raw, starts, cos, sin, gamma, kv, kt, state, st = self._target_case(
                         prefixes
@@ -171,8 +184,8 @@ class IndexerDecodeTritonTest(unittest.TestCase):
                         reference_state,
                         st,
                         ratio=4,
-                        kv_tokens_per_block=128,
-                        state_tokens_per_block=128,
+                        kv_tokens_per_block=self.PAGE_SIZE,
+                        state_tokens_per_block=self.PAGE_SIZE,
                         norm_eps=1e-6,
                         rope_is_token_aligned=True,
                     )
@@ -198,7 +211,7 @@ class IndexerDecodeTritonTest(unittest.TestCase):
         for query_len in (1, 2, 3, 4):
             with self.subTest(query_len=query_len):
                 raw, starts, cos, sin, gamma, kv, kt, state, st = self._target_case(
-                    [5, 126]
+                    [5, self.PAGE_SIZE - 2]
                 )
                 raw = raw.view(2, 4, 128)[:, :query_len].reshape(-1, 128).contiguous()
                 cos = cos.view(2, 4, 64)[:, :query_len].reshape(-1, 64).contiguous()
@@ -215,7 +228,11 @@ class IndexerDecodeTritonTest(unittest.TestCase):
                     undo = write_target_window_with_undo_(
                         raw, starts, cos, sin, gamma, kv, kt, state, st, norm_eps=1e-6
                     )
-                for prefixes in ([127, 5], [128, 4], [125, 127]):
+                for prefixes in (
+                    [self.PAGE_SIZE - 1, 5],
+                    [self.PAGE_SIZE, 4],
+                    [self.PAGE_SIZE - 3, self.PAGE_SIZE - 1],
+                ):
                     kv.copy_(initial_kv)
                     state.copy_(initial_state)
                     starts.copy_(
@@ -246,8 +263,8 @@ class IndexerDecodeTritonTest(unittest.TestCase):
                         reference_state,
                         st,
                         ratio=4,
-                        kv_tokens_per_block=128,
-                        state_tokens_per_block=128,
+                        kv_tokens_per_block=self.PAGE_SIZE,
+                        state_tokens_per_block=self.PAGE_SIZE,
                         norm_eps=1e-6,
                         rope_is_token_aligned=True,
                     )
@@ -276,14 +293,16 @@ class IndexerDecodeTritonTest(unittest.TestCase):
             device=device,
         )
         pool_blocks = 2 * batch + 1
-        kv_pool = torch.zeros(pool_blocks, 32, 128, device=device, dtype=torch.bfloat16)
+        kv_pool = torch.zeros(
+            pool_blocks, self.PAGE_SIZE // 4, 128, device=device, dtype=torch.bfloat16
+        )
         state_pool = torch.zeros(
             pool_blocks, 8, 128, device=device, dtype=torch.float32
         )
         for b, position in enumerate(positions):
             if (position + 1) % 4 == 0:
                 for previous in range(position - 3, position):
-                    block = int(state_table[b, previous // 128])
+                    block = int(state_table[b, previous // self.PAGE_SIZE])
                     key = torch.randn(128, device=device).to(torch.bfloat16)
                     state_pool[block, previous % 8] = key.float()
         return (
@@ -315,8 +334,8 @@ class IndexerDecodeTritonTest(unittest.TestCase):
             reference_state,
             state_table,
             ratio=4,
-            kv_tokens_per_block=128,
-            state_tokens_per_block=128,
+            kv_tokens_per_block=self.PAGE_SIZE,
+            state_tokens_per_block=self.PAGE_SIZE,
             norm_eps=1e-6,
             rope_is_token_aligned=True,
         )
@@ -336,7 +355,14 @@ class IndexerDecodeTritonTest(unittest.TestCase):
         torch.testing.assert_close(kv, reference_kv, rtol=0.01, atol=0.016)
 
     def test_parity_across_partial_group_and_page_boundary(self):
-        for positions in ([5], [7], [127], [128], [131], [7, 131]):
+        for positions in (
+            [5],
+            [7],
+            [self.PAGE_SIZE - 1],
+            [self.PAGE_SIZE],
+            [self.PAGE_SIZE + 3],
+            [7, self.PAGE_SIZE + 3],
+        ):
             with self.subTest(positions=positions):
                 self._compare(self._case(positions))
 
@@ -397,8 +423,8 @@ class IndexerDecodeTritonTest(unittest.TestCase):
             reference_state,
             state_table,
             ratio=4,
-            kv_tokens_per_block=128,
-            state_tokens_per_block=128,
+            kv_tokens_per_block=self.PAGE_SIZE,
+            state_tokens_per_block=self.PAGE_SIZE,
             norm_eps=1e-6,
             rope_is_token_aligned=True,
         )
@@ -444,6 +470,10 @@ class IndexerDecodeTritonTest(unittest.TestCase):
         restore_indexer_cache(undo)
         torch.testing.assert_close(state, initial_state, rtol=0, atol=0)
         torch.testing.assert_close(kv, initial_kv, rtol=0, atol=0)
+
+
+class IndexerDecode64TokenTritonTest(IndexerDecodeTritonTest):
+    PAGE_SIZE = 64
 
 
 if __name__ == "__main__":

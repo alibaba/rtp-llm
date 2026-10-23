@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <memory>
 #include <numeric>
+#include <future>
 #include "torch/all.h"
 #include "gmock/gmock-actions.h"
 #include "gmock/gmock-function-mocker.h"
@@ -90,9 +91,9 @@ protected:
         EXPECT_FALSE(expected->hasError());
     }
 
-    void verifySchedulersPartitionMixedExecutionModes(int first_max_new_tokens,
-                                                       int second_max_new_tokens,
-                                                       bool with_group_metadata = false);
+    void verifySchedulersPartitionMixedExecutionModes(int  first_max_new_tokens,
+                                                      int  second_max_new_tokens,
+                                                      bool with_group_metadata = false);
     void verifyBatchDecodeSchedulerDrainsMixedModeTail(const std::vector<int>& max_new_tokens);
 
     std::shared_ptr<LoadAsyncContext> setupPendingCacheLoad(const std::shared_ptr<KVCacheManager>& cache_manager) {
@@ -149,26 +150,34 @@ protected:
                 [real_allocator](const BatchKVCacheResourcePtr& resource, int seq_len, int reserve_step) {
                     return real_allocator->singleBatchNeedBlocks(resource, seq_len, reserve_step);
                 }));
-        ON_CALL(*allocator, estimatePeakNeedBlocks(testing::_, testing::_, testing::_, testing::_, testing::_))
+        ON_CALL(*allocator,
+                estimatePeakNeedBlocks(testing::_, testing::_, testing::_, testing::_, testing::_, testing::_))
             .WillByDefault(testing::Invoke([real_allocator](const KVCacheResource& resource,
                                                             int                    seq_len,
                                                             int                    remaining_tokens,
                                                             int                    reserve_step,
-                                                            bool                   reuse_cache) {
+                                                            bool                   reuse_cache,
+                                                            LinearCachePolicy      linear_cache_policy) {
                 return real_allocator->estimatePeakNeedBlocks(
-                    resource, seq_len, remaining_tokens, reserve_step, reuse_cache);
+                    resource, seq_len, remaining_tokens, reserve_step, reuse_cache, linear_cache_policy);
             }));
-        ON_CALL(
-            *allocator,
-            estimateInitialBatchPeakNeedBlocks(testing::_, testing::_, testing::_, testing::_, testing::_, testing::_))
-            .WillByDefault(testing::Invoke([real_allocator](int  seq_len,
-                                                            int  common_seq_len,
-                                                            int  remaining_tokens,
-                                                            int  reserve_step,
-                                                            bool reuse_cache,
-                                                            int  target_batch_size) {
-                return real_allocator->estimateInitialBatchPeakNeedBlocks(
-                    seq_len, common_seq_len, remaining_tokens, reserve_step, reuse_cache, target_batch_size);
+        ON_CALL(*allocator,
+                estimateInitialBatchPeakNeedBlocks(
+                    testing::_, testing::_, testing::_, testing::_, testing::_, testing::_, testing::_))
+            .WillByDefault(testing::Invoke([real_allocator](int               seq_len,
+                                                            int               common_seq_len,
+                                                            int               remaining_tokens,
+                                                            int               reserve_step,
+                                                            bool              reuse_cache,
+                                                            int               target_batch_size,
+                                                            LinearCachePolicy linear_cache_policy) {
+                return real_allocator->estimateInitialBatchPeakNeedBlocks(seq_len,
+                                                                          common_seq_len,
+                                                                          remaining_tokens,
+                                                                          reserve_step,
+                                                                          reuse_cache,
+                                                                          target_batch_size,
+                                                                          linear_cache_policy);
             }));
         cache_manager->coordinator_manager_ = allocator;
         return context;
@@ -895,8 +904,530 @@ static std::shared_ptr<GenerateStream> makeForceBatchStream(const std::vector<in
     return std::make_shared<NormalGenerateStream>(query, model_config, runtime_config, resource_context, nullptr);
 }
 
-void FIFOSchedulerTest::verifySchedulersPartitionMixedExecutionModes(int first_max_new_tokens,
-                                                                     int second_max_new_tokens,
+TEST_F(FIFOSchedulerTest, LinearHistoryAdmissionAllowsLongGenerationWithinPhysicalHybridCapacity) {
+    for (const auto& flags :
+         std::vector<std::pair<bool, bool>>{{false, false}, {false, true}, {true, false}, {true, true}}) {
+        const auto [reclaim, tail_only] = flags;
+        SCOPED_TRACE(testing::Message() << "reclaim=" << reclaim << " tail=" << tail_only);
+        auto config                        = test::makeSimpleHybridMhaCacheConfig(4, 45, 2, DataType::TYPE_FP16);
+        config.linear_step                 = 1;
+        config.enable_linear_cache_reclaim = reclaim;
+        config.pool_block_weights          = {{"full1", 7}, {"linear", 2}};
+        config.finalizeBlockNums(7, RuntimeConfig{});
+        auto resources = makeSchedulerResources(config, 2);
+        ASSERT_TRUE(resources.cache_manager->init());
+        resources.resource_context.reuse_cache                               = true;
+        resources.model_config.vocab_size                                    = 1024;
+        resources.runtime_config.max_generate_batch_size                     = 8;
+        resources.runtime_config.fifo_scheduler_config.max_batch_tokens_size = 8192;
+        resources.runtime_config.fifo_scheduler_config.decode_prefill_ratio  = "0";
+        auto pd_config                                                       = makePDFusionPDSepConfig();
+        pd_config.decode_linear_tail_only                                    = tail_only;
+        PDFusionRatioScheduler scheduler(resources.runtime_config,
+                                         resources.model_config,
+                                         pd_config,
+                                         ParallelismConfig{},
+                                         ModelSpecificConfig{},
+                                         resources.cache_manager);
+        auto                   running =
+            makeStream({1, 2}, resources.model_config, resources.runtime_config, resources.resource_context, 41);
+        auto candidate =
+            makeStream({3, 4}, resources.model_config, resources.runtime_config, resources.resource_context, 41);
+        running->generateConfig()->reuse_cache   = true;
+        candidate->generateConfig()->reuse_cache = true;
+        running->generateConfig()->ignore_eos    = true;
+        candidate->generateConfig()->ignore_eos  = true;
+        const auto commit_token                  = [](const GenerateStreamPtr& stream) {
+            stream->update({torch::tensor({{100 + stream->seqLength()}}, torch::kInt32),
+                            1,
+                            torch::Tensor(),
+                            torch::Tensor(),
+                            torch::Tensor(),
+                            torch::Tensor(),
+                            torch::Tensor(),
+                            torch::Tensor(),
+                            torch::Tensor(),
+                            torch::Tensor()});
+        };
+        ASSERT_TRUE(scheduler.enqueue(running).ok());
+        verifyOnlyScheduledStream(scheduler, running);
+        commit_token(running);
+        ASSERT_FALSE(running->hasError());
+        ASSERT_TRUE(scheduler.enqueue(candidate).ok());
+        // Two completed streams need 42 full-attention blocks (48 available)
+        // and at most a short rolling linear tail (13 available). Keeping all
+        // historical linear checkpoints would incorrectly reject the second.
+        verifyOnlyScheduledStream(scheduler, reclaim ? candidate : running);
+        EXPECT_EQ(scheduler.waiting_streams_.size(), reclaim ? 0u : 1u);
+        if (reclaim) {
+            commit_token(candidate);
+            // Exercise the real stream state machine and allocator to the
+            // output limit; passing only the admission gate is insufficient.
+            int rounds = 0;
+            while ((!running->isFinished() || !candidate->isFinished()) && rounds++ < 42) {
+                auto batch = scheduler.schedule();
+                ASSERT_TRUE(batch.ok());
+                ASSERT_FALSE(batch->empty() && (!running->isFinished() || !candidate->isFinished()));
+                for (const auto& stream : *batch) {
+                    ASSERT_FALSE(stream->isContextStream());
+                    commit_token(stream);
+                    ASSERT_FALSE(stream->hasError());
+                    EXPECT_EQ(stream->streamCacheResource().mallocFailedTimes(), 0);
+                }
+                const auto& pools = resources.cache_manager->coordinator_manager_->groupBlockPools();
+                for (size_t group_id = 0; group_id < config.topology().groups().size(); ++group_id) {
+                    if (config.topology().groups()[group_id].policy.group_type == CacheGroupType::LINEAR) {
+                        // Two completed checkpoints plus the current block per
+                        // stream. CACHE-only historical blocks remain evictable.
+                        EXPECT_LE(pools[group_id]->referencedBlocksNum(), 6u);
+                    }
+                }
+                EXPECT_EQ(scheduler.waiting_streams_.size(), 0u);
+            }
+            EXPECT_TRUE(running->isFinished());
+            EXPECT_TRUE(candidate->isFinished());
+            EXPECT_EQ(running->seqLength(), 43);
+            EXPECT_EQ(candidate->seqLength(), 43);
+        }
+        scheduler.stop();
+    }
+}
+
+TEST_F(FIFOSchedulerTest, PDLinearTailSwitchCombinationsFinishLongRequestsWithinSmallLinearPool) {
+    for (int reserve_step : {0, 21}) {
+        for (const auto& flags :
+             std::vector<std::pair<bool, bool>>{{false, false}, {false, true}, {true, false}, {true, true}}) {
+            const auto [reclaim, tail_only] = flags;
+            SCOPED_TRACE(testing::Message()
+                         << "reclaim=" << reclaim << " tail=" << tail_only << " reserve_step=" << reserve_step);
+            auto config                        = test::makeSimpleHybridMhaCacheConfig(4, 67, 2, DataType::TYPE_FP16);
+            config.linear_step                 = 1;
+            config.enable_linear_cache_reclaim = reclaim;
+            config.pool_block_weights          = {{"full1", 10}, {"linear", 1}};
+            // Each MTP stream retains 23 blocks; incremental allocation needs
+            // one shared spare before removing the old tail (24 + 23 = 47).
+            config.finalizeBlockNums(reserve_step == 0 ? 7 : 48, RuntimeConfig{});
+            auto resources = makeSchedulerResources(config, 2);
+            ASSERT_TRUE(resources.cache_manager->init());
+            resources.resource_context.role_type                                 = RoleType::DECODE;
+            resources.resource_context.reuse_cache                               = true;
+            resources.resource_context.enable_device_cache                       = true;
+            resources.model_config.vocab_size                                    = 1024;
+            resources.runtime_config.max_generate_batch_size                     = 2;
+            resources.runtime_config.fifo_scheduler_config.max_batch_tokens_size = 8192;
+            PDSepConfig pd_config;
+            pd_config.role_type               = RoleType::DECODE;
+            pd_config.decode_linear_tail_only = tail_only;
+            FIFOScheduler                  scheduler(resources.runtime_config,
+                                    resources.model_config,
+                                    pd_config,
+                                    ParallelismConfig{},
+                                    ModelSpecificConfig{},
+                                    resources.cache_manager);
+            std::vector<GenerateStreamPtr> streams;
+            const auto                     commit_token = [](const GenerateStreamPtr& stream) {
+                stream->update({torch::tensor({{100 + stream->seqLength()}}, torch::kInt32),
+                                1,
+                                torch::Tensor(),
+                                torch::Tensor(),
+                                torch::Tensor(),
+                                torch::Tensor(),
+                                torch::Tensor(),
+                                torch::Tensor(),
+                                torch::Tensor(),
+                                torch::Tensor()});
+            };
+            const int prompt_length = reserve_step == 0 ? 32 : 64;
+            for (int request = 0; request < 2; ++request) {
+                std::vector<int> prompt(prompt_length);
+                std::iota(prompt.begin(), prompt.end(), 1 + request * prompt_length);
+                auto stream = makeStream(
+                    prompt, resources.model_config, resources.runtime_config, resources.resource_context, 33);
+                stream->setReserveStep(reserve_step);
+                stream->generateConfig()->reuse_cache = true;
+                stream->generateConfig()->ignore_eos  = true;
+                auto& resource                        = stream->streamCacheResource();
+                resource.setPDDecodeLinearTailOnly(pd_config.decode_linear_tail_only);
+                const int        predicted         = stream->estimatePeakNeedBlocks(/*remaining_tokens=*/0);
+                const size_t     free_before       = resources.cache_manager->freeBlocksNum();
+                const auto       capacities_before = resources.cache_manager->poolCapacities();
+                std::vector<int> predicted_by_pool;
+                for (const auto& capacity : capacities_before) {
+                    predicted_by_pool.push_back(stream->estimateInitialNeedBlocks(capacity.tag));
+                }
+                const auto status = resource.initKVBlock();
+                if (!tail_only) {
+                    // Fusion reclamation cannot help D materialize the entire
+                    // prompt plus speculative reserve in the smaller Linear pool.
+                    EXPECT_FALSE(status.ok());
+                    stream->releaseResource();
+                    break;
+                }
+                ASSERT_TRUE(status.ok());
+                EXPECT_EQ(predicted, static_cast<int>(free_before - resources.cache_manager->freeBlocksNum()));
+                const auto capacities_after = resources.cache_manager->poolCapacities();
+                ASSERT_EQ(capacities_after.size(), capacities_before.size());
+                for (size_t pool = 0; pool < capacities_before.size(); ++pool) {
+                    ASSERT_EQ(capacities_after[pool].tag, capacities_before[pool].tag);
+                    EXPECT_EQ(predicted_by_pool[pool],
+                              static_cast<int>(capacities_before[pool].available_blocks
+                                               - capacities_after[pool].available_blocks))
+                        << "tag=" << capacities_before[pool].tag << " reserve_step=" << reserve_step;
+                    EXPECT_EQ(stream->estimateInitialNeedBlocks(capacities_after[pool].tag), 0)
+                        << "already allocated ownership must not be charged twice";
+                }
+                stream->reportEvent(StreamEvents::LoadInitiated);
+                stream->setIsContextStream(false);
+                commit_token(stream);  // First token received from P before FIFO enqueue.
+                ASSERT_FALSE(stream->hasError());
+                ASSERT_TRUE(scheduler.enqueue(stream).ok());
+                streams.push_back(stream);
+            }
+            if (tail_only) {
+                ASSERT_EQ(streams.size(), 2u);
+                int rounds = 0;
+                while ((!streams[0]->isFinished() || !streams[1]->isFinished()) && rounds++ < 34) {
+                    auto batch = scheduler.schedule();
+                    ASSERT_TRUE(batch.ok());
+                    // The final schedule applies GenerateDone and releases both
+                    // streams; it legitimately returns no work once both are done.
+                    ASSERT_FALSE(batch->empty() && (!streams[0]->isFinished() || !streams[1]->isFinished()))
+                        << "round=" << rounds << " seq_lengths=" << streams[0]->seqLength() << ","
+                        << streams[1]->seqLength();
+                    for (const auto& stream : *batch) {
+                        EXPECT_FALSE(stream->isContextStream());
+                        commit_token(stream);
+                        ASSERT_FALSE(stream->hasError());
+                        EXPECT_EQ(stream->streamCacheResource().mallocFailedTimes(), 0);
+                    }
+                    const auto& pools = resources.cache_manager->coordinator_manager_->groupBlockPools();
+                    for (size_t group_id = 0; group_id < config.topology().groups().size(); ++group_id) {
+                        if (config.topology().groups()[group_id].policy.group_type == CacheGroupType::LINEAR) {
+                            EXPECT_LE(pools[group_id]->referencedBlocksNum(), reserve_step == 0 ? 6u : 46u);
+                        }
+                    }
+                    EXPECT_EQ(scheduler.waitingStreamsSize(), 0);
+                }
+                for (const auto& stream : streams) {
+                    ASSERT_FALSE(stream->hasError()) << stream->stopReason();
+                    EXPECT_TRUE(stream->isFinished());
+                    EXPECT_EQ(stream->seqLength(), prompt_length + 33);
+                }
+            }
+            scheduler.stop();
+            for (const auto& pool : resources.cache_manager->coordinator_manager_->groupBlockPools()) {
+                EXPECT_EQ(pool->referencedBlocksNum(), 0u);
+            }
+        }
+    }
+}
+
+TEST_F(FIFOSchedulerTest, WeightedPoolsWaitForExhaustedPoolAndReadmitAfterCancellation) {
+    for (const std::string limiting_tag : {"full1", "linear"}) {
+        SCOPED_TRACE(limiting_tag);
+        auto config                             = test::makeSimpleHybridMhaCacheConfig(4, 5, 1, DataType::TYPE_FP16);
+        config.linear_step                      = 1;
+        config.pool_block_weights               = {{"full1", 3}, {"linear", 3}};
+        config.pool_block_weights[limiting_tag] = 1;
+        config.finalizeBlockNums(5, RuntimeConfig{});
+        auto resources = makeSchedulerResources(config, 1);
+        ASSERT_TRUE(resources.cache_manager->init());
+        resources.resource_context.reuse_cache                               = true;
+        resources.runtime_config.max_generate_batch_size                     = 4;
+        resources.runtime_config.fifo_scheduler_config.max_batch_tokens_size = 8192;
+        resources.runtime_config.fifo_scheduler_config.decode_prefill_ratio  = "0";
+        PDFusionRatioScheduler scheduler(resources.runtime_config,
+                                         resources.model_config,
+                                         makePDFusionPDSepConfig(),
+                                         ParallelismConfig{},
+                                         ModelSpecificConfig{},
+                                         resources.cache_manager);
+        auto                   running =
+            makeStream({1, 2, 3, 4}, resources.model_config, resources.runtime_config, resources.resource_context, 1);
+        auto waiting = makeStream(
+            {11, 12, 13, 14}, resources.model_config, resources.runtime_config, resources.resource_context, 1);
+        running->generateConfig()->reuse_cache = true;
+        waiting->generateConfig()->reuse_cache = true;
+        ASSERT_TRUE(scheduler.enqueue(running).ok());
+        verifyOnlyScheduledStream(scheduler, running);
+        const auto& pools = resources.cache_manager->coordinator_manager_->groupBlockPools();
+        for (size_t gid = 0; gid < config.groups().size(); ++gid) {
+            const bool limited = config.groups()[gid].tag == limiting_tag;
+            EXPECT_EQ(pools[gid]->availableBlocksNum(), limited ? 0u : 10u);
+        }
+        ASSERT_TRUE(scheduler.enqueue(waiting).ok());
+        verifyOnlyScheduledStream(scheduler, running);
+        EXPECT_EQ(scheduler.waitingStreamsSize(), 1);
+        EXPECT_EQ(waiting->curBlocksNum(), 0);
+        EXPECT_FALSE(waiting->hasError());
+        // Ten idle blocks in the other pool cannot satisfy this request. Once
+        // its owner is cancelled, the same waiting stream must be admitted.
+        running->reportError(ErrorCode::CANCELLED, "release limiting weighted pool");
+        verifyOnlyScheduledStream(scheduler, waiting);
+        EXPECT_EQ(running->curBlocksNum(), 0);
+        EXPECT_EQ(waiting->curBlocksNum(), 4);
+        waiting->reportError(ErrorCode::CANCELLED, "finish weighted pool test");
+        auto drained = scheduler.schedule();
+        ASSERT_TRUE(drained.ok());
+        EXPECT_TRUE(drained->empty());
+        for (const auto& pool : pools) {
+            EXPECT_EQ(pool->referencedBlocksNum(), 0u);
+        }
+        scheduler.stop();
+    }
+}
+
+TEST_F(FIFOSchedulerTest, WeightedPoolLifecycleAdmissionCannotBorrowAnotherPoolsFutureCapacity) {
+    // The two asymmetric cases have 8 blocks in one pool and 26 in the other.
+    // Each request needs six blocks per pool at its last forward: aggregate
+    // capacity fits, but both requests cannot coexist in the smaller pool.
+    // The balanced control proves that the test does not just forbid overlap.
+    for (const std::string limiting_tag : {"full1", "linear", ""}) {
+        SCOPED_TRACE(limiting_tag.empty() ? "balanced" : limiting_tag);
+        auto config               = test::makeSimpleHybridMhaCacheConfig(4, 9, 1, DataType::TYPE_FP16);
+        config.linear_step        = 1;
+        config.pool_block_weights = {{"full1", 3}, {"linear", 3}};
+        if (!limiting_tag.empty()) {
+            config.pool_block_weights[limiting_tag] = 1;
+        }
+        config.finalizeBlockNums(9, RuntimeConfig{});
+        auto resources = makeSchedulerResources(config, 1);
+        ASSERT_TRUE(resources.cache_manager->init());
+        resources.resource_context.reuse_cache                               = true;
+        resources.runtime_config.max_generate_batch_size                     = 4;
+        resources.runtime_config.fifo_scheduler_config.max_batch_tokens_size = 8192;
+        resources.runtime_config.fifo_scheduler_config.decode_prefill_ratio  = "0";
+        PDFusionRatioScheduler scheduler(resources.runtime_config,
+                                         resources.model_config,
+                                         makePDFusionPDSepConfig(),
+                                         ParallelismConfig{},
+                                         ModelSpecificConfig{},
+                                         resources.cache_manager);
+        auto running = makeStream({1}, resources.model_config, resources.runtime_config, resources.resource_context, 6);
+        auto waiting =
+            makeStream({11}, resources.model_config, resources.runtime_config, resources.resource_context, 6);
+        running->generateConfig()->reuse_cache = true;
+        waiting->generateConfig()->reuse_cache = true;
+        ASSERT_TRUE(scheduler.enqueue(running).ok());
+        verifyOnlyScheduledStream(scheduler, running);
+        ASSERT_EQ(running->estimatePeakNeedBlocks(5) + waiting->estimatePeakNeedBlocks(5), 22);
+        ASSERT_LE(22u, resources.cache_manager->availableBlocksNum());
+        ASSERT_TRUE(scheduler.enqueue(waiting).ok());
+        const bool fits = limiting_tag.empty();
+        verifyOnlyScheduledStream(scheduler, fits ? waiting : running);
+        EXPECT_EQ(scheduler.waitingStreamsSize(), fits ? 0 : 1);
+        EXPECT_EQ(waiting->curBlocksNum(), fits ? 1 : 0);
+        EXPECT_FALSE(waiting->hasError());
+        if (!fits) {
+            running->reportError(ErrorCode::CANCELLED, "release future weighted pool capacity");
+            verifyOnlyScheduledStream(scheduler, waiting);
+            EXPECT_EQ(waiting->curBlocksNum(), 1);
+        }
+        scheduler.stop();
+    }
+}
+
+TEST_F(FIFOSchedulerTest, WeightedPoolsRemainSubjectToPerPoolReserveOnAdmission) {
+    for (const std::string limiting_tag : {"full1", "linear"}) {
+        SCOPED_TRACE(limiting_tag);
+        auto config                             = test::makeSimpleHybridMhaCacheConfig(4, 9, 1, DataType::TYPE_FP16);
+        config.linear_step                      = 1;
+        config.pool_block_weights               = {{"full1", 3}, {"linear", 3}};
+        config.pool_block_weights[limiting_tag] = 1;
+        config.finalizeBlockNums(9, RuntimeConfig{});
+        KVCacheConfig options;
+        options.reserve_block_ratio              = 50;
+        auto resources                           = makeSchedulerResources(config, 1);
+        resources.cache_manager                  = std::make_shared<KVCacheManager>(config, false, nullptr, options);
+        resources.resource_context.cache_manager = resources.cache_manager;
+        resources.resource_context.reuse_cache   = true;
+        ASSERT_TRUE(resources.cache_manager->init());
+        ASSERT_EQ(resources.cache_manager->reserveBlocksNum(), 17u);
+        resources.runtime_config.max_generate_batch_size                     = 4;
+        resources.runtime_config.fifo_scheduler_config.max_batch_tokens_size = 8192;
+        resources.runtime_config.fifo_scheduler_config.decode_prefill_ratio  = "0";
+        PDFusionRatioScheduler scheduler(resources.runtime_config,
+                                         resources.model_config,
+                                         makePDFusionPDSepConfig(),
+                                         ParallelismConfig{},
+                                         ModelSpecificConfig{},
+                                         resources.cache_manager);
+        auto running = makeStream({1}, resources.model_config, resources.runtime_config, resources.resource_context, 1);
+        auto waiting = makeStream(
+            {11, 12, 13, 14}, resources.model_config, resources.runtime_config, resources.resource_context, 1);
+        running->generateConfig()->reuse_cache = true;
+        waiting->generateConfig()->reuse_cache = true;
+        ASSERT_TRUE(scheduler.enqueue(running).ok());
+        verifyOnlyScheduledStream(scheduler, running);
+        ASSERT_TRUE(scheduler.enqueue(waiting).ok());
+        verifyOnlyScheduledStream(scheduler, running);
+        // The small pool has seven free blocks, but four are reserved. The
+        // larger pool's spare capacity must not bypass this pool's watermark.
+        EXPECT_EQ(scheduler.waitingStreamsSize(), 1);
+        EXPECT_EQ(waiting->curBlocksNum(), 0);
+        EXPECT_FALSE(waiting->hasError());
+        running->reportError(ErrorCode::CANCELLED, "restore weighted pool reserve margin");
+        verifyOnlyScheduledStream(scheduler, waiting);
+        EXPECT_EQ(waiting->curBlocksNum(), 4);
+        scheduler.stop();
+    }
+}
+
+TEST_F(FIFOSchedulerTest, LinearHistoryAdmissionStillChargesEntirePrefill) {
+    auto config                        = test::makeSimpleLinearCacheConfig(1, 9, 2, DataType::TYPE_FP16);
+    config.linear_step                 = 1;
+    config.enable_linear_cache_reclaim = true;
+    auto resources                     = makeSchedulerResources(config, 2);
+    ASSERT_TRUE(resources.cache_manager->init());
+    resources.resource_context.reuse_cache                               = true;
+    resources.runtime_config.max_generate_batch_size                     = 8;
+    resources.runtime_config.fifo_scheduler_config.max_batch_tokens_size = 8192;
+    resources.runtime_config.fifo_scheduler_config.decode_prefill_ratio  = "0";
+    PDFusionRatioScheduler scheduler(resources.runtime_config,
+                                     resources.model_config,
+                                     makePDFusionPDSepConfig(),
+                                     ParallelismConfig{},
+                                     ModelSpecificConfig{},
+                                     resources.cache_manager);
+    auto running = makeStream({1, 2}, resources.model_config, resources.runtime_config, resources.resource_context, 3);
+    std::vector<int> prompt(16);
+    std::iota(prompt.begin(), prompt.end(), 20);
+    auto candidate =
+        makeStream(prompt, resources.model_config, resources.runtime_config, resources.resource_context, 1);
+    running->generateConfig()->reuse_cache   = true;
+    candidate->generateConfig()->reuse_cache = true;
+    ASSERT_TRUE(scheduler.enqueue(running).ok());
+    verifyOnlyScheduledStream(scheduler, running);
+    ASSERT_EQ(resources.cache_manager->availableBlocksNum(), 7);
+    ASSERT_EQ(candidate->estimateInitialNeedBlocks(), 8);
+    ASSERT_TRUE(scheduler.enqueue(candidate).ok());
+    verifyOnlyScheduledStream(scheduler, running);
+    EXPECT_EQ(scheduler.waiting_streams_.size(), 1u);
+    EXPECT_EQ(candidate->streamCacheResource().curBlocksNum(), 0);
+    scheduler.stop();
+}
+
+TEST_F(FIFOSchedulerTest, LinearHistoryAdmissionDrainsCommittedReferencesBeforeCheckingAvailable) {
+    for (bool reclaim : {false, true}) {
+        SCOPED_TRACE(reclaim);
+        auto config                        = test::makeSimpleLinearCacheConfig(1, 9, 2, DataType::TYPE_FP16);
+        config.linear_step                 = 1;
+        config.enable_linear_cache_reclaim = reclaim;
+        auto resources                     = makeSchedulerResources(config, 2);
+        ASSERT_TRUE(resources.cache_manager->init());
+        resources.resource_context.reuse_cache                               = true;
+        resources.model_config.vocab_size                                    = 1024;
+        resources.runtime_config.max_generate_batch_size                     = 8;
+        resources.runtime_config.fifo_scheduler_config.max_batch_tokens_size = 8192;
+        resources.runtime_config.fifo_scheduler_config.decode_prefill_ratio  = "0";
+        PDFusionRatioScheduler scheduler(resources.runtime_config,
+                                         resources.model_config,
+                                         makePDFusionPDSepConfig(),
+                                         ParallelismConfig{},
+                                         ModelSpecificConfig{},
+                                         resources.cache_manager);
+        auto                   running   = makeStream({1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12},
+                                  resources.model_config,
+                                  resources.runtime_config,
+                                  resources.resource_context,
+                                  3);
+        auto                   candidate = makeStream(
+            {20, 21, 22, 23, 24, 25}, resources.model_config, resources.runtime_config, resources.resource_context, 1);
+        running->generateConfig()->reuse_cache   = true;
+        candidate->generateConfig()->reuse_cache = true;
+        ASSERT_TRUE(scheduler.enqueue(running).ok());
+        verifyOnlyScheduledStream(scheduler, running);
+        running->update({torch::tensor({{13}}, torch::kInt32),
+                         1,
+                         torch::Tensor(),
+                         torch::Tensor(),
+                         torch::Tensor(),
+                         torch::Tensor(),
+                         torch::Tensor(),
+                         torch::Tensor(),
+                         torch::Tensor(),
+                         torch::Tensor()});
+        ASSERT_FALSE(running->hasError());
+        ASSERT_EQ(resources.cache_manager->availableBlocksNum(), 2);
+        ASSERT_EQ(candidate->estimateInitialNeedBlocks(), 3);
+        ASSERT_TRUE(scheduler.enqueue(candidate).ok());
+        // Admission must observe the allocator's actual available count after
+        // draining the committed watermark, never an estimated reclaim credit.
+        verifyOnlyScheduledStream(scheduler, reclaim ? candidate : running);
+        EXPECT_EQ(scheduler.waiting_streams_.size(), reclaim ? 0u : 1u);
+        if (reclaim) {
+            const auto& blocks = running->streamCacheResource().kvCache().blocks(0, "linear");
+            ASSERT_EQ(blocks.size(), 6u);
+            for (int i = 0; i < 4; ++i) {
+                EXPECT_EQ(blocks[i], NULL_BLOCK_IDX);
+            }
+        }
+        scheduler.stop();
+    }
+}
+
+TEST_F(FIFOSchedulerTest, LinearHistoryAdmissionJoinsPendingWorkerWithoutHoldingStreamMutex) {
+    auto config                        = test::makeSimpleLinearCacheConfig(1, 9, 2, DataType::TYPE_FP16);
+    config.linear_step                 = 1;
+    config.enable_linear_cache_reclaim = true;
+    auto resources                     = makeSchedulerResources(config, 2);
+    ASSERT_TRUE(resources.cache_manager->init());
+    resources.resource_context.reuse_cache                               = true;
+    resources.model_config.vocab_size                                    = 1024;
+    resources.runtime_config.max_generate_batch_size                     = 8;
+    resources.runtime_config.fifo_scheduler_config.max_batch_tokens_size = 8192;
+    resources.runtime_config.fifo_scheduler_config.decode_prefill_ratio  = "0";
+    PDFusionRatioScheduler scheduler(resources.runtime_config,
+                                     resources.model_config,
+                                     makePDFusionPDSepConfig(),
+                                     ParallelismConfig{},
+                                     ModelSpecificConfig{},
+                                     resources.cache_manager);
+    auto                   running   = makeStream({1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12},
+                              resources.model_config,
+                              resources.runtime_config,
+                              resources.resource_context,
+                              3);
+    auto                   candidate = makeStream(
+        {20, 21, 22, 23, 24, 25}, resources.model_config, resources.runtime_config, resources.resource_context, 1);
+    running->generateConfig()->reuse_cache   = true;
+    candidate->generateConfig()->reuse_cache = true;
+    ASSERT_TRUE(scheduler.enqueue(running).ok());
+    verifyOnlyScheduledStream(scheduler, running);
+    running->update({torch::tensor({{13}}, torch::kInt32),
+                     1,
+                     torch::Tensor(),
+                     torch::Tensor(),
+                     torch::Tensor(),
+                     torch::Tensor(),
+                     torch::Tensor(),
+                     torch::Tensor(),
+                     torch::Tensor(),
+                     torch::Tensor()});
+    ASSERT_FALSE(running->hasError());
+    running->incPendingAsyncBookkeeping();
+    ASSERT_TRUE(scheduler.enqueue(candidate).ok());
+    auto next_round = std::async(std::launch::async, [&] { return scheduler.schedule(); });
+    EXPECT_EQ(next_round.wait_for(std::chrono::milliseconds(50)), std::future_status::timeout);
+    // specUpdate/update must be able to acquire this mutex before the worker
+    // decrements pending. Even a broken implementation can finish this test:
+    // decrement below wakes a join that incorrectly holds the stream mutex.
+    const bool stream_mutex_available = running->mutex_->try_lock();
+    EXPECT_TRUE(stream_mutex_available);
+    if (stream_mutex_available) {
+        running->mutex_->unlock();
+    }
+    running->decPendingAsyncBookkeepingAndMaybeRelease();
+    auto result = next_round.get();
+    ASSERT_TRUE(result.ok());
+    ASSERT_EQ(result->size(), 1u);
+    EXPECT_EQ(result->front(), candidate);
+    EXPECT_EQ(scheduler.waiting_streams_.size(), 0u);
+    scheduler.stop();
+}
+
+void FIFOSchedulerTest::verifySchedulersPartitionMixedExecutionModes(int  first_max_new_tokens,
+                                                                     int  second_max_new_tokens,
                                                                      bool with_group_metadata) {
     ModelConfig model_config;
     model_config.max_seq_len                  = 8192;
@@ -910,8 +1441,8 @@ void FIFOSchedulerTest::verifySchedulersPartitionMixedExecutionModes(int first_m
     ModelSpecificConfig model_specific_config;
 
     const auto make_stream = [&](const std::vector<int>& ids,
-                                  const ResourceContext& resource_context,
-                                  int max_new_tokens) {
+                                 const ResourceContext&  resource_context,
+                                 int                     max_new_tokens) {
         if (with_group_metadata) {
             return makeForceBatchStream(ids, 800, 2, model_config, runtime_config, resource_context, max_new_tokens);
         }
@@ -972,8 +1503,8 @@ void FIFOSchedulerTest::verifySchedulersPartitionMixedExecutionModes(int first_m
         ResourceContext resource_context;
         resource_context.cache_manager = cache_manager;
         BatchDecodeScheduler scheduler(runtime_config, cache_manager, nullptr);
-        auto first  = make_stream({1, 2}, resource_context, first_max_new_tokens);
-        auto second = make_stream({3, 4}, resource_context, second_max_new_tokens);
+        auto                 first  = make_stream({1, 2}, resource_context, first_max_new_tokens);
+        auto                 second = make_stream({3, 4}, resource_context, second_max_new_tokens);
         ASSERT_TRUE(enqueueIndividually(scheduler, {first, second}));
 
         ASSERT_NO_FATAL_FAILURE(verifyOnlyScheduledStream(scheduler, first));
@@ -3860,16 +4391,16 @@ std::shared_ptr<GenerateStream> makeSingleStream(const ModelConfig&     model_co
 }  // namespace
 
 TEST_F(FIFOSchedulerTest, prefillOnlySingletonCanFillTokenBudget) {
-    auto [cache_manager, resource_context, model_config, runtime_config] = makeSchedulerResources(
-        test::makeSimpleMhaCacheConfig(1, 512, 32, rtp_llm::DataType::TYPE_FP16, 1, 4), 32);
+    auto [cache_manager, resource_context, model_config, runtime_config] =
+        makeSchedulerResources(test::makeSimpleMhaCacheConfig(1, 512, 32, rtp_llm::DataType::TYPE_FP16, 1, 4), 32);
     ASSERT_TRUE(cache_manager->init());
     model_config.max_seq_len               = 4096;
     runtime_config.max_generate_batch_size = 4;
     for (bool grouped : {false, true}) {
         for (int prompt_length : {4095, 4096}) {
             for (int budget : {0, 4094, 4095, 4096, 4097}) {
-                SCOPED_TRACE(::testing::Message() << "grouped=" << grouped << " length=" << prompt_length
-                                                 << " budget=" << budget);
+                SCOPED_TRACE(::testing::Message()
+                             << "grouped=" << grouped << " length=" << prompt_length << " budget=" << budget);
                 runtime_config.fifo_scheduler_config.max_batch_tokens_size = budget;
                 FIFOScheduler scheduler(runtime_config,
                                         model_config,
@@ -3877,8 +4408,8 @@ TEST_F(FIFOSchedulerTest, prefillOnlySingletonCanFillTokenBudget) {
                                         ParallelismConfig{},
                                         ModelSpecificConfig{},
                                         cache_manager);
-                auto stream = makeStream(std::vector<int>(prompt_length, 1),
-                                         model_config, runtime_config, resource_context, 0);
+                auto          stream =
+                    makeStream(std::vector<int>(prompt_length, 1), model_config, runtime_config, resource_context, 0);
                 ASSERT_EQ(stream->currentBatchSize(), 1);
                 if (grouped) {
                     ASSERT_EQ(scheduler.enqueueGroup({stream}).first, std::vector<bool>({true}));
@@ -3904,8 +4435,8 @@ TEST_F(FIFOSchedulerTest, prefillOnlySingletonCanFillTokenBudget) {
 }
 
 TEST_F(FIFOSchedulerTest, prefillTokenBudgetBoundaryIncludesPaddedWidthAndPrefix) {
-    auto [cache_manager, resource_context, model_config, runtime_config] = makeSchedulerResources(
-        test::makeSimpleMhaCacheConfig(1, 256, 1, rtp_llm::DataType::TYPE_FP16, 1, 4), 1);
+    auto [cache_manager, resource_context, model_config, runtime_config] =
+        makeSchedulerResources(test::makeSimpleMhaCacheConfig(1, 256, 1, rtp_llm::DataType::TYPE_FP16, 1, 4), 1);
     ASSERT_TRUE(cache_manager->init());
     runtime_config.max_generate_batch_size = 4;
     // Equal lengths reach the logical sum and rectangle together. Unequal lengths
@@ -3917,9 +4448,9 @@ TEST_F(FIFOSchedulerTest, prefillTokenBudgetBoundaryIncludesPaddedWidthAndPrefix
             for (int width : {1, 3}) {
                 for (bool reuse_prefix : {false, true}) {
                     for (int delta : {-1, 0, 1}) {
-                        SCOPED_TRACE(::testing::Message() << "grouped=" << grouped << " max_new_tokens=" << max_new_tokens
-                                                         << " width=" << width << " reuse=" << reuse_prefix
-                                                         << " delta=" << delta);
+                        SCOPED_TRACE(::testing::Message()
+                                     << "grouped=" << grouped << " max_new_tokens=" << max_new_tokens
+                                     << " width=" << width << " reuse=" << reuse_prefix << " delta=" << delta);
                         runtime_config.fifo_scheduler_config.max_batch_tokens_size = 32 * (1 + width) + delta;
                         FIFOScheduler scheduler(runtime_config,
                                                 model_config,
@@ -3927,16 +4458,19 @@ TEST_F(FIFOSchedulerTest, prefillTokenBudgetBoundaryIncludesPaddedWidthAndPrefix
                                                 ParallelismConfig{},
                                                 ModelSpecificConfig{},
                                                 cache_manager);
-                        auto first = makeStream(std::vector<int>(32, 1),
-                                                model_config, runtime_config, resource_context, max_new_tokens);
-                        auto second = makeStream(std::vector<int>(width == 1 ? 32 : 16, 2),
-                                                 model_config, runtime_config, resource_context, max_new_tokens,
+                        auto          first = makeStream(
+                            std::vector<int>(32, 1), model_config, runtime_config, resource_context, max_new_tokens);
+                        auto                      second  = makeStream(std::vector<int>(width == 1 ? 32 : 16, 2),
+                                                 model_config,
+                                                 runtime_config,
+                                                 resource_context,
+                                                 max_new_tokens,
                                                  max_new_tokens == 0 ? 1 : width);
                         vector<GenerateStreamPtr> streams = {first, second};
                         if (max_new_tokens == 0) {
                             for (int i = 1; i < width; ++i) {
-                                streams.push_back(makeStream(std::vector<int>(16, 2),
-                                                             model_config, runtime_config, resource_context, 0));
+                                streams.push_back(makeStream(
+                                    std::vector<int>(16, 2), model_config, runtime_config, resource_context, 0));
                             }
                         }
                         if (reuse_prefix) {
@@ -3952,13 +4486,14 @@ TEST_F(FIFOSchedulerTest, prefillTokenBudgetBoundaryIncludesPaddedWidthAndPrefix
                         }
                         auto result = scheduler.schedule();
                         ASSERT_TRUE(result.ok());
-                        const size_t admitted = max_new_tokens == 0 ? 1 + width - (delta < 0 ? 1 : 0) :
-                                                                     (delta > 0 ? 2 : 1);
+                        const size_t admitted =
+                            max_new_tokens == 0 ? 1 + width - (delta < 0 ? 1 : 0) : (delta > 0 ? 2 : 1);
                         ASSERT_EQ(result->size(), admitted);
                         EXPECT_EQ(result->front().get(), first.get());
                         EXPECT_EQ(scheduler.waitingStreamsSize(), streams.size() - admitted);
                         for (size_t i = 0; i < streams.size(); ++i) {
-                            EXPECT_EQ(streams[i]->getStatus(), i < admitted ? StreamState::RUNNING : StreamState::WAITING);
+                            EXPECT_EQ(streams[i]->getStatus(),
+                                      i < admitted ? StreamState::RUNNING : StreamState::WAITING);
                             EXPECT_FALSE(streams[i]->hasError());
                         }
                     }
@@ -3969,19 +4504,15 @@ TEST_F(FIFOSchedulerTest, prefillTokenBudgetBoundaryIncludesPaddedWidthAndPrefix
 }
 
 TEST_F(FIFOSchedulerTest, prefillTokenLimitsPreserveReserveAndAvoidOverflow) {
-    auto [cache_manager, resource_context, model_config, runtime_config] = makeSchedulerResources(
-        test::makeSimpleMhaCacheConfig(1, 32, 1, rtp_llm::DataType::TYPE_FP16, 1, 4), 1);
+    auto [cache_manager, resource_context, model_config, runtime_config] =
+        makeSchedulerResources(test::makeSimpleMhaCacheConfig(1, 32, 1, rtp_llm::DataType::TYPE_FP16, 1, 4), 1);
     ASSERT_TRUE(cache_manager->init());
-    model_config.max_seq_len                                    = 8;
-    runtime_config.max_generate_batch_size                      = 4;
-    runtime_config.fifo_scheduler_config.max_batch_tokens_size   = 8;
-    FIFOScheduler scheduler(runtime_config,
-                            model_config,
-                            PDSepConfig{},
-                            ParallelismConfig{},
-                            ModelSpecificConfig{},
-                            cache_manager);
-    auto prefill = makeStream({1, 2, 3, 4}, model_config, runtime_config, resource_context, 0);
+    model_config.max_seq_len                                   = 8;
+    runtime_config.max_generate_batch_size                     = 4;
+    runtime_config.fifo_scheduler_config.max_batch_tokens_size = 8;
+    FIFOScheduler scheduler(
+        runtime_config, model_config, PDSepConfig{}, ParallelismConfig{}, ModelSpecificConfig{}, cache_manager);
+    auto prefill    = makeStream({1, 2, 3, 4}, model_config, runtime_config, resource_context, 0);
     auto generation = makeStream({1, 2, 3, 4}, model_config, runtime_config, resource_context, 2);
     for (size_t admitted_tokens : {size_t(3), size_t(4), size_t(5)}) {
         // Two rows of length four: the rectangle itself exactly fills the cap.
@@ -4010,31 +4541,27 @@ TEST_F(FIFOSchedulerTest, prefillTokenLimitsPreserveReserveAndAvoidOverflow) {
         EXPECT_FALSE(scheduler.fitsPrefillTokenLimits(1, 0, 0, 0, prefill));
     }
     scheduler.max_batch_tokens_size_ = 8;
-    const auto max_size = std::numeric_limits<size_t>::max();
+    const auto max_size              = std::numeric_limits<size_t>::max();
     EXPECT_FALSE(scheduler.fitsPrefillTokenLimits(1, max_size, 4, 1, prefill));
     EXPECT_FALSE(scheduler.fitsPrefillTokenLimits(1, 0, 4, max_size, prefill));
     EXPECT_FALSE(scheduler.fitsPrefillTokenLimits(1, 0, max_size, 1, prefill));
 }
 
 TEST_F(FIFOSchedulerTest, fullBudgetPrefillOnlyDoesNotMixWithGeneration) {
-    auto [cache_manager, resource_context, model_config, runtime_config] = makeSchedulerResources(
-        test::makeSimpleMhaCacheConfig(1, 32, 1, rtp_llm::DataType::TYPE_FP16, 1, 4), 1);
+    auto [cache_manager, resource_context, model_config, runtime_config] =
+        makeSchedulerResources(test::makeSimpleMhaCacheConfig(1, 32, 1, rtp_llm::DataType::TYPE_FP16, 1, 4), 1);
     ASSERT_TRUE(cache_manager->init());
-    model_config.max_seq_len                                  = 8;
-    runtime_config.max_generate_batch_size                    = 2;
+    model_config.max_seq_len                                   = 8;
+    runtime_config.max_generate_batch_size                     = 2;
     runtime_config.fifo_scheduler_config.max_batch_tokens_size = 8;
     for (bool prefill_first : {false, true}) {
         SCOPED_TRACE(prefill_first);
-        FIFOScheduler scheduler(runtime_config,
-                                model_config,
-                                PDSepConfig{},
-                                ParallelismConfig{},
-                                ModelSpecificConfig{},
-                                cache_manager);
-        auto prefill = makeStream(std::vector<int>(8, 1), model_config, runtime_config, resource_context, 0);
+        FIFOScheduler scheduler(
+            runtime_config, model_config, PDSepConfig{}, ParallelismConfig{}, ModelSpecificConfig{}, cache_manager);
+        auto prefill    = makeStream(std::vector<int>(8, 1), model_config, runtime_config, resource_context, 0);
         auto generation = makeStream({1, 2}, model_config, runtime_config, resource_context, 2);
-        auto first = prefill_first ? prefill : generation;
-        auto second = prefill_first ? generation : prefill;
+        auto first      = prefill_first ? prefill : generation;
+        auto second     = prefill_first ? generation : prefill;
         ASSERT_TRUE(enqueueIndividually(scheduler, {first, second}));
         ASSERT_NO_FATAL_FAILURE(verifyOnlyScheduledStream(scheduler, first));
         EXPECT_EQ(scheduler.waitingStreamsSize(), 1);

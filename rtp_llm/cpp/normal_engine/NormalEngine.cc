@@ -93,7 +93,7 @@ public:
         resource_context_.cache_manager = std::move(previous_cache_manager_);
     }
 
-    ScopedWarmUpCacheManagerBinding(const ScopedWarmUpCacheManagerBinding&) = delete;
+    ScopedWarmUpCacheManagerBinding(const ScopedWarmUpCacheManagerBinding&)            = delete;
     ScopedWarmUpCacheManagerBinding& operator=(const ScopedWarmUpCacheManagerBinding&) = delete;
 
 private:
@@ -336,7 +336,7 @@ absl::StatusOr<GenerateStreamPtr> NormalEngine::preRun(const std::shared_ptr<Gen
                                                        preRunMode                            mode) {
     c10::InferenceMode inference_guard(true);
 
-    auto stream = std::make_shared<NormalGenerateStream>(generate_input,
+    auto       stream       = std::make_shared<NormalGenerateStream>(generate_input,
                                                          model_config_,
                                                          runtime_config,
                                                          resource_context_,
@@ -535,7 +535,7 @@ WarmUpResult NormalEngine::decodeWarmUp(const EngineInitParams& params) {
         ScopedWarmUpCacheManagerBinding cache_binding(resource_context_, cache_manager);
         THROW_IF_STATUSOR_ERROR(preRun(fake_input, preRunMode::decode_warm_up));
     }
-    const auto max_consumed         = getGpuExecStatus().device_memory_status.max_consumed_bytes;
+    const auto max_consumed = getGpuExecStatus().device_memory_status.max_consumed_bytes;
     rtp_llm::setTraceMemory(false);
     (void)executor_.reset(nullptr);
     cudaDeviceSynchronize();
@@ -622,7 +622,8 @@ void NormalEngine::initCacheManager(std::optional<WarmUpResult> warm_up_result) 
         model_config_, parallelism_config, kv_cache_config, sp_config, draft_model_config, isMTPEagle(), isEagle());
     const auto local_block_num = CacheConfigCreator::computeLocalBlockNum(
         config, model_config_, runtime_config, kv_cache_config, parallelism_config, warm_up_result, sp_config);
-    const auto confirmed_block_num = CacheConfigCreator::synchronizeBlockNum(local_block_num, parallelism_config);
+    const auto confirmed_block_num =
+        CacheConfigCreator::synchronizeBlockNum(local_block_num, parallelism_config, config);
     config.finalizeBlockNums(confirmed_block_num, runtime_config);
     auto cache_manager = make_shared<KVCacheManager>(config,
                                                      false,

@@ -166,6 +166,7 @@ def try_write_draft_window(
         raw.is_cuda
         and torch.version.hip is None
         and torch.cuda.get_device_capability(raw.device) == (12, 0)
+        and kv.shape[1:] == (32, 128)
         and 1 <= raw.shape[0] <= 32
         and 1 <= prefixes.numel() <= 8
         and raw.stride(1) == 1

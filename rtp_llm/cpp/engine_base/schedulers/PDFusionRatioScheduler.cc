@@ -80,7 +80,8 @@ bool longerLifetimeFirst(const AdmissionStreamInfo& lhs, const AdmissionStreamIn
     return lhs.remaining_kv_steps > rhs.remaining_kv_steps;
 }
 
-AdmissionPeak estimateApproximatePeak(const std::vector<AdmissionStreamInfo>& streams) {
+AdmissionPeak estimateApproximatePeak(const std::vector<AdmissionStreamInfo>& streams,
+                                      const std::string&                      pool_tag = {}) {
     AdmissionPeak peak;
     int64_t       peak_tokens        = -1;
     int64_t       active_base_tokens = 0;
@@ -121,7 +122,9 @@ AdmissionPeak estimateApproximatePeak(const std::vector<AdmissionStreamInfo>& st
         if (stream.remaining_kv_steps < peak.decode_step) {
             break;
         }
-        peak.need_blocks += estimateNeedBlocks(stream.stream, peak.decode_step);
+        peak.need_blocks += pool_tag.empty() ?
+                                estimateNeedBlocks(stream.stream, peak.decode_step) :
+                                std::max(stream.stream->estimatePeakNeedBlocks(peak.decode_step, pool_tag), 0);
     }
     return peak;
 }
@@ -220,6 +223,14 @@ absl::StatusOr<list<GenerateStreamPtr>> PDFusionRatioScheduler::schedule() {
     const RoundType round = chooseRound();
 
     if (round == RoundType::PREFILL) {
+        // Make committed history genuinely available before building the
+        // forecast and reading capacity; never admit against estimated credit.
+        for (const auto& stream : running_streams_) {
+            stream->drainLinearHistoryForAdmission();
+        }
+        for (const auto& stream : pending_decode_streams_) {
+            stream->drainLinearHistoryForAdmission();
+        }
         const size_t prev_waiting_size = waiting_streams_.size();
         // Build once for this in-flight snapshot, then update for accepted candidates.
         admission_peak_state_.reset();
@@ -312,10 +323,10 @@ bool PDFusionRatioScheduler::tryAddToAdmissionPeakState(const GenerateStreamPtr&
     auto&     state              = *admission_peak_state_;
     const int remaining_kv_steps = remainingKVAllocationSteps(new_stream);
     // Preserve the idle fast path, where the allocator reports an impossible standalone request.
-    const bool    enforce_capacity = !state.streams.empty();
+    const bool enforce_capacity = !state.streams.empty();
     // Device KV-cache matching happens later in the allocator. At scheduler admission time the actual prefix hit is
     // unknown, so use the conservative no-hit estimate here.
-    const int64_t initial_delta    = estimateInitialNeedBlocks(new_stream);
+    const int64_t initial_delta = estimateInitialNeedBlocks(new_stream);
 
     if (enforce_capacity
         && (state.initial_need_blocks + initial_delta > initial_capacity
@@ -323,7 +334,7 @@ bool PDFusionRatioScheduler::tryAddToAdmissionPeakState(const GenerateStreamPtr&
         return false;
     }
 
-    const auto insert_it = std::lower_bound(state.streams.begin(),
+    const auto insert_it      = std::lower_bound(state.streams.begin(),
                                             state.streams.end(),
                                             AdmissionStreamInfo{new_stream, remaining_kv_steps},
                                             longerLifetimeFirst);
@@ -341,6 +352,44 @@ bool PDFusionRatioScheduler::tryAddToAdmissionPeakState(const GenerateStreamPtr&
     return true;
 }
 
+bool PDFusionRatioScheduler::tryAddToWeightedAdmissionPeakState(const GenerateStreamPtr& new_stream) {
+    auto&                state            = *admission_peak_state_;
+    const bool           enforce_capacity = !state.streams.empty();
+    const auto           capacities       = cache_manager_->poolCapacities();
+    std::vector<int64_t> previous_peaks;
+    previous_peaks.reserve(capacities.size());
+    for (const auto& capacity : capacities) {
+        // Re-read current ownership: earlier admissions in this round may
+        // already own blocks, which have also left available_blocks.
+        int64_t initial = std::max(new_stream->estimateInitialNeedBlocks(capacity.tag), 0);
+        for (const auto& stream : state.streams) {
+            initial += std::max(stream.stream->estimateInitialNeedBlocks(capacity.tag), 0);
+        }
+        const size_t initial_capacity = capacity.available_blocks > capacity.reserve_blocks ?
+                                            capacity.available_blocks - capacity.reserve_blocks :
+                                            0;
+        const auto   previous         = estimateApproximatePeak(state.streams, capacity.tag).need_blocks;
+        if (enforce_capacity
+            && (initial > static_cast<int64_t>(initial_capacity)
+                || previous > static_cast<int64_t>(capacity.available_blocks))) {
+            return false;
+        }
+        previous_peaks.push_back(previous);
+    }
+    const AdmissionStreamInfo candidate{new_stream, remainingKVAllocationSteps(new_stream)};
+    const auto                it = state.streams.insert(
+        std::lower_bound(state.streams.begin(), state.streams.end(), candidate, longerLifetimeFirst), candidate);
+    for (size_t id = 0; id < capacities.size(); ++id) {
+        const auto peak = estimateApproximatePeak(state.streams, capacities[id].tag).need_blocks;
+        if (enforce_capacity
+            && std::max(previous_peaks[id], peak) > static_cast<int64_t>(capacities[id].available_blocks)) {
+            state.streams.erase(it);
+            return false;
+        }
+    }
+    return true;
+}
+
 bool PDFusionRatioScheduler::tryAdmitKVForPrefill(const GenerateStreamPtr& new_stream) {
     if (!cache_manager_) {
         return false;
@@ -348,6 +397,11 @@ bool PDFusionRatioScheduler::tryAdmitKVForPrefill(const GenerateStreamPtr& new_s
 
     if (!admission_peak_state_) {
         buildAdmissionPeakState();
+    }
+
+    const auto& weights = cache_manager_->cacheConfig().pool_block_weights;
+    if (std::any_of(weights.begin(), weights.end(), [](const auto& item) { return item.second != 1; })) {
+        return tryAddToWeightedAdmissionPeakState(new_stream);
     }
 
     const size_t available        = cache_manager_->availableBlocksNum();

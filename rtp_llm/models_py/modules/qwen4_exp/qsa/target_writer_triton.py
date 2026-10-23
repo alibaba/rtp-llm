@@ -157,6 +157,7 @@ def try_write_target_window(
     """Called only after the existing writer's full layout validation."""
     if (
         torch.cuda.get_device_capability(raw.device) != (12, 0)
+        or kv.shape[1:] != (32, 128)
         or min(kt.shape[1], st.shape[1], kv.shape[0], state.shape[0]) <= 0
         or raw.stride(1) != 1
         or raw.stride(0) <= 0

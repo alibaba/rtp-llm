@@ -122,7 +122,9 @@ public:
     // Reject pending loads and wait for allocator callbacks before its members are destroyed.
     void shutdownLoads();
 
-    BlockTreeMatchResult match(const CacheKeysType& cache_keys, const std::function<bool(size_t)>& valid_prefix = {});
+    BlockTreeMatchResult match(const CacheKeysType&               cache_keys,
+                               const std::function<bool(size_t)>& valid_prefix = {},
+                               bool                               skip_linear  = false);
     void                 insert(const CacheKeysType&                              cache_keys,
                                 const std::vector<std::vector<GroupSetResource>>& resources,
                                 Tier                                              target_tier);
@@ -194,9 +196,9 @@ private:
     mutable std::mutex                             mutex_;
     BlockTreeEvictor                               evictor_;
     bool                                           initialized_{false};
-    BlockTreeLoader                             loader_;
-    BlockTreeStorer                             storer_;
-    std::unique_ptr<FullPrefixInvariantScanner> full_prefix_scanner_;
+    BlockTreeLoader                                loader_;
+    BlockTreeStorer                                storer_;
+    std::unique_ptr<FullPrefixInvariantScanner>    full_prefix_scanner_;
 };
 
 using BlockTreeCachePtr = std::shared_ptr<BlockTreeCache>;

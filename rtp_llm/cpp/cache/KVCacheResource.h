@@ -64,6 +64,12 @@ public:
 
     void resize(size_t new_size, BlockIdxType value = NULL_BLOCK_IDX);
 
+    // A null slot below this watermark is retired, not an unallocated checkpoint.
+    size_t reclaimedPrefixBlocks() const {
+        return reclaimed_prefix_blocks_;
+    }
+    void setReclaimedPrefixBlocks(size_t end);
+
 private:
     // Update the kernel slots that correspond to physical block position `pos`.
     void updateKernelSlotAt(size_t pos, BlockIdxType val);
@@ -76,6 +82,7 @@ private:
     // When kernel_blocks_per_kv_block_ == 1, kernel_block_indices_ mirrors block_indices.
     BlockIndicesType kernel_block_indices_;
     size_t           kernel_blocks_per_kv_block_ = 1;
+    size_t           reclaimed_prefix_blocks_    = 0;
 };
 
 // Build the complete identity/row pair before publishing it through a const owner view.
@@ -128,7 +135,7 @@ public:
     int                      maxBlocksNum() const;
     size_t                   firstNonEmptyBlocksNum() const;
 
-    LayerBlockIds            layerBlocks() const;
+    LayerBlockIds layerBlocks() const;
 
     CacheKeysType&       cacheKeys();
     const CacheKeysType& cacheKeys() const;
@@ -187,10 +194,10 @@ private:
     // Beam forks share immutable layer membership; default resources keep owning views.
     std::shared_ptr<const CacheTopology>  topology_;
     std::vector<std::vector<std::string>> layer_group_tags_;
-    GroupBlockIds         group_block_ids;
-    CacheKeysType         cache_keys;
-    BlockDependenciesType block_dependencies;
-    bool                  cache_keys_are_cp_canonical_{false};
+    GroupBlockIds                         group_block_ids;
+    CacheKeysType                         cache_keys;
+    BlockDependenciesType                 block_dependencies;
+    bool                                  cache_keys_are_cp_canonical_{false};
 
     size_t device_reuse_block_num_{0};
     size_t memory_reuse_block_num_{0};

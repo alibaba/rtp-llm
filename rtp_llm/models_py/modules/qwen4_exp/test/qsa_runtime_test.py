@@ -998,19 +998,21 @@ class Qwen4ExpQSARuntimeTest(TestCase):
 
     @skipUnless(torch.cuda.is_available(), "CUDA is required for draft graph replay")
     def test_draft_graph_replays_ragged_lengths_and_new_pages(self):
-        for lanes in (1, 2, 3, 4):
-            with self.subTest(lanes=lanes):
-                self._check_draft_graph_replay(lanes)
+        for page_size in (64, 128):
+            for lanes in (1, 2, 3, 4):
+                with self.subTest(page_size=page_size, lanes=lanes):
+                    self._check_draft_graph_replay(lanes, page_size)
 
-    def _check_draft_graph_replay(self, lanes):
+    def _check_draft_graph_replay(self, lanes, page_size):
         device = torch.device("cuda")
-        self.D = self.KV_TOKENS_PER_BLOCK = self.STATE_TOKENS_PER_BLOCK = 128
+        self.D = 128
+        self.KV_TOKENS_PER_BLOCK = self.STATE_TOKENS_PER_BLOCK = page_size
         self.indexer.k_norm_gamma = torch.randn(128, device=device).bfloat16()
         indexer = self._decode_indexer()
         rope = self._base_rope_config(3)
         rope.dim = 64
         kv_initial = torch.randn(
-            12, 32 * 128, device=device, dtype=torch.bfloat16
+            12, (page_size // 4) * 128, device=device, dtype=torch.bfloat16
         ).view(torch.uint8)
         state_initial = torch.randn(12, 8 * 128, device=device)
         kv = kv_initial.clone()
@@ -1020,7 +1022,7 @@ class Qwen4ExpQSARuntimeTest(TestCase):
         ctx = self._draft_incremental_context(
             kv,
             state,
-            prefixes=[5, 127],
+            prefixes=[5, page_size - 1],
             lengths=[lanes, lanes],
             kv_table=kv_table,
             state_table=state_table,
@@ -1054,9 +1056,9 @@ class Qwen4ExpQSARuntimeTest(TestCase):
         with torch.cuda.graph(graph):
             selected = forward()
         for prefixes, lengths, swap in (
-            ([7, 127], [1, lanes], False),
-            ([125, 5], [min(3, lanes), min(2, lanes)], True),
-            ([127, 127], [lanes, lanes], False),
+            ([7, page_size - 1], [1, lanes], False),
+            ([page_size - 3, 5], [min(3, lanes), min(2, lanes)], True),
+            ([page_size - 1, page_size - 1], [lanes, lanes], False),
         ):
             with self.subTest(prefixes=prefixes, lengths=lengths):
                 kv.copy_(kv_initial)
