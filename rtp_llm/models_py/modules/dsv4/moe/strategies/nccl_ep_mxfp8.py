@@ -360,6 +360,16 @@ class NcclEpMxfp8Strategy(RoutedExpertsStrategy):
             or hidden % 256
         ):
             self._ring_fallbacks += 1
+            if self._ring_fallbacks == 1:
+                logging.info(
+                    "[DSV4 MoE] %s ring transport fallback to NCCL: layer=%d "
+                    "counts=%s local_rows=%d max_rows=%d",
+                    BACKEND_NAME,
+                    self.cfg.layer_id,
+                    list(counts),
+                    n_local,
+                    self._ring_max_rows,
+                )
             return None
         from .._ring_ep_transport import get_ring_transport
 
