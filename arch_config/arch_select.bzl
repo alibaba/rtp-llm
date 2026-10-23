@@ -228,6 +228,11 @@ def torch_deps():
             "@torch_2.3_py310_cpu_aarch64//:torch",
             "@torch_2.3_py310_cpu_aarch64//:torch_libs",
         ],
+        "@rtp_llm//:using_cuda13_arm": [
+            "@torch_2.11_py310_cuda-aarch64//:torch_api",
+            "@torch_2.11_py310_cuda-aarch64//:torch",
+            "@torch_2.11_py310_cuda-aarch64//:torch_libs",
+        ],
         "@rtp_llm//:cuda_pre_12_9": [
             "@torch_2.6_py310_cuda//:torch_api",
             "@torch_2.6_py310_cuda//:torch",
@@ -256,6 +261,7 @@ def flashinfer_deps():
         name = "flashinfer",
         actual = select({
             "@rtp_llm//:using_cuda13_x86": "@flashinfer_cpp_cu13//:flashinfer",
+            "@rtp_llm//:using_cuda13_arm": "@flashinfer_cpp_cu13//:flashinfer",
             "//conditions:default": "@flashinfer_cpp//:flashinfer",
         })
     )

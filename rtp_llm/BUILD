@@ -170,7 +170,37 @@ _JIT_CACHE_SRCS = [
 ]
 
 py_library(
+    name = "rl_rpc_client",
+    srcs = [
+        "RL/token_rpc_client.py",
+        "RL/replica_rpc_client.py",
+    ],
+    deps = [
+        ":grpcio-tools",
+        ":protobuf",
+        "//rtp_llm/cpp/model_rpc/proto:model_rpc_service_py_proto",
+    ],
+)
+
+py_test(
+    name = "rl_token_rpc_client_test",
+    srcs = ["RL/test/token_rpc_client_test.py"],
+    main = "RL/test/token_rpc_client_test.py",
+    deps = [":rl_rpc_client"],
+    env = {"CUDA_VISIBLE_DEVICES": ""},
+)
+
+py_test(
+    name = "rl_replica_rpc_client_test",
+    srcs = ["RL/test/replica_rpc_client_test.py"],
+    main = "RL/test/replica_rpc_client_test.py",
+    deps = [":rl_rpc_client"],
+    env = {"CUDA_VISIBLE_DEVICES": ""},
+)
+
+py_library(
     name = "utils",
+    data = glob(["model_loader/tipc/csrc/*"]),
     srcs = glob([
         "utils/**/*.py",
     ], exclude = _JIT_CACHE_SRCS + [
@@ -574,6 +604,7 @@ py_library(
 py_library(
     name = "rtp_llm_frontend_lib",
     deps = [
+        ":rl_rpc_client",
         ":utils",
         ":eplb",
         ":ops",

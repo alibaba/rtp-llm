@@ -804,6 +804,86 @@ TEST_F(GenerateStreamTest, testDynamicBeamSoftmaxHistoryFollowsParentRows) {
     EXPECT_FLOAT_EQ(probabilities[2][3].item<float>(), 0.8f);
 }
 
+TEST_F(GenerateStreamTest, testSoftmaxHistoryCopiesOnlyRequestedRowsAndColumns) {
+    ModelConfig model_config;
+    model_config.max_seq_len = 8;
+    model_config.vocab_size  = 10;
+    RuntimeConfig   runtime_config;
+    ResourceContext resource_context;
+    auto            input                        = std::make_shared<GenerateInput>();
+    input->input_ids                             = torch::tensor({2}, torch::kInt32);
+    input->generate_config                       = std::make_shared<GenerateConfig>();
+    input->generate_config->variable_num_beams   = {2, 3};
+    input->generate_config->max_new_tokens       = 3;
+    input->generate_config->return_softmax_probs = true;
+    auto stream =
+        std::make_shared<NormalGenerateStream>(input, model_config, runtime_config, resource_context, nullptr);
+    int error_token_id = 0;
+    ASSERT_TRUE(stream->complete_token_ids_->update(torch::tensor({2, 4, 2, 7}, torch::kInt32).reshape({2, 2}),
+                                                    0,
+                                                    1,
+                                                    1,
+                                                    8,
+                                                    10,
+                                                    true,
+                                                    stream->streamId(),
+                                                    error_token_id));
+    ASSERT_EQ(stream->currentBatchSize(), 2);
+    auto history = stream->getSoftmaxProbs();
+    ASSERT_EQ(history.size(0), 3);
+    ASSERT_EQ(history.size(1), 4);
+
+    for (int mode = 0; mode < 4; ++mode) {
+        history.fill_(-1.f);
+        auto values = torch::tensor({0.125f, 0.25f, 0.5f, 0.75f}).reshape({2, 2});
+        if (mode == 1)
+            values = values.transpose(0, 1);
+        if (mode == 2)
+            values = values.to(torch::kBFloat16);
+        if (mode == 3)
+            values = values.to(torch::kCUDA, torch::kBFloat16);
+        auto expected = torch::full({3, 4}, -1.f);
+        expected.narrow(0, 0, 2).narrow(1, 1, 2).copy_(values.to(torch::kCPU, torch::kFloat32));
+        stream->setSoftmaxProbs(values, 1, torch::Tensor());
+        EXPECT_TRUE(torch::equal(history, expected)) << "input mode " << mode;
+    }
+
+    auto before = history.clone();
+    stream->setSoftmaxProbs(torch::empty({2, 0}), 4, torch::Tensor());
+    EXPECT_TRUE(torch::equal(history, before));
+    EXPECT_THROW(stream->setSoftmaxProbs(torch::ones({2, 1}), -1, torch::Tensor()), RTPException);
+    EXPECT_THROW(stream->setSoftmaxProbs(torch::ones({2, 2}), 3, torch::Tensor()), RTPException);
+    EXPECT_THROW(stream->setSoftmaxProbs(torch::ones({1, 1}), 1, torch::Tensor()), RTPException);
+    EXPECT_TRUE(torch::equal(history, before));
+}
+
+TEST_F(GenerateStreamTest, testSoftmaxHistoryRetainsGeneralCopyForAliasesAndStridedStorage) {
+    ModelConfig model_config;
+    model_config.max_seq_len = 8;
+    model_config.vocab_size  = 10;
+    RuntimeConfig   runtime_config;
+    ResourceContext resource_context;
+    auto            input                        = std::make_shared<GenerateInput>();
+    input->input_ids                             = torch::tensor({2}, torch::kInt32);
+    input->generate_config                       = std::make_shared<GenerateConfig>();
+    input->generate_config->max_new_tokens       = 3;
+    input->generate_config->return_softmax_probs = true;
+    auto stream =
+        std::make_shared<NormalGenerateStream>(input, model_config, runtime_config, resource_context, nullptr);
+    auto history = stream->getSoftmaxProbs();
+    history.copy_(torch::tensor({0.125f, 0.25f, 0.5f, 0.75f}).reshape({1, 4}));
+    auto before = history.clone();
+    stream->setSoftmaxProbs(history, 0, torch::Tensor());
+    EXPECT_TRUE(torch::equal(history, before));
+
+    auto backing           = torch::full({1, 8}, -1.f);
+    stream->softmax_probs_ = backing.slice(1, 0, 8, 2);
+    ASSERT_FALSE(stream->softmax_probs_.is_contiguous());
+    stream->setSoftmaxProbs(torch::tensor({0.25f, 0.5f}).reshape({1, 2}), 1, torch::Tensor());
+    EXPECT_TRUE(
+        torch::equal(backing, torch::tensor({-1.f, -1.f, 0.25f, -1.f, 0.5f, -1.f, -1.f, -1.f}).reshape({1, 8})));
+}
+
 TEST_F(GenerateStreamTest, timeInfoSeparatesLegacyWaitFromRunningMilestone) {
     auto builder = GenerateStreamBuilder();
 

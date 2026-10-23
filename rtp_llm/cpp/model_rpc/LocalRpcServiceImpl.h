@@ -132,6 +132,12 @@ public:
         return local_server_->SetPause(context, request, response);
     }
 
+    ::grpc::Status RlControl(::grpc::ServerContext*    context,
+                             const RlControlRequestPB* request,
+                             RlControlResponsePB*      response) override {
+        return local_server_->RlControl(context, request, response);
+    }
+
     ::grpc::Status SetRestart(::grpc::ServerContext* context, const EmptyPB* request, EmptyPB* response) override {
         return local_server_->SetRestart(context, request, response);
     }

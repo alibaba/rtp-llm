@@ -224,6 +224,8 @@ grpc::Status LocalRpcServer::pollStreamOutput(grpc::ServerContext*             c
                                       stream->generateConfig()->aux_info,
                                       maga_init_params_.misc_config.aux_string,
                                       stream->specialTokens().eos_token_id);
+        outputs_pb.set_model_version(stream->generateInput()->rl_model_version);
+        outputs_pb.set_global_step(stream->generateInput()->rl_global_step);
         if (!writer->Write(outputs_pb)) {
             stream->reportError(ErrorCode::CANCELLED, "write outputs pb failed");
             RTP_LLM_LOG_WARNING("request [%s] write outputs pb failed", request_key.c_str());
@@ -977,6 +979,9 @@ void LocalRpcServer::reportCacheStatusTime(int64_t request_begin_time_us) {
         return grpc::Status(grpc::StatusCode::INTERNAL, "engine is null");
     }
 
+    if (engine_->rlEnabled()) {
+        return {grpc::StatusCode::FAILED_PRECONDITION, "external cache operations are disabled in RL mode"};
+    }
     auto cache_manager = engine_->getCacheManager();
     if (!cache_manager) {
         RTP_LLM_LOG_WARNING("execute function failed, cache manager is null");
@@ -991,12 +996,18 @@ void LocalRpcServer::reportCacheStatusTime(int64_t request_begin_time_us) {
 }
 
 grpc::Status LocalRpcServer::SetPause(grpc::ServerContext* context, const EmptyPB* request, EmptyPB* response) {
+    if (engine_->rlEnabled()) {
+        return {grpc::StatusCode::FAILED_PRECONDITION, "use RlControl in RL mode"};
+    }
     RTP_LLM_LOG_DEBUG("receive cacheStatus rpc request from client: %s", context->peer().c_str());
     engine_->pause();
     return grpc::Status::OK;
 }
 
 grpc::Status LocalRpcServer::SetRestart(grpc::ServerContext* context, const EmptyPB* request, EmptyPB* response) {
+    if (engine_->rlEnabled()) {
+        return {grpc::StatusCode::FAILED_PRECONDITION, "use RlControl in RL mode"};
+    }
     RTP_LLM_LOG_DEBUG("receive cacheStatus rpc request from client: %s,", context->peer().c_str());
     engine_->restart();
     return grpc::Status::OK;
@@ -1004,6 +1015,9 @@ grpc::Status LocalRpcServer::SetRestart(grpc::ServerContext* context, const Empt
 
 grpc::Status
 LocalRpcServer::UpdateWeights(grpc::ServerContext* context, const UpdateWeightsRequestPB* request, EmptyPB* response) {
+    if (engine_->rlEnabled()) {
+        return {grpc::StatusCode::FAILED_PRECONDITION, "use RlControl in RL mode"};
+    }
     RTP_LLM_LOG_DEBUG("Receive update weights request from: %s", context->peer().c_str());
     try {
         if (request->name().empty() || request->desc().empty() || request->method().empty()) {

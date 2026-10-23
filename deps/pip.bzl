@@ -71,7 +71,8 @@ def pip_deps():
         name = "pip_cuda13_arm_torch",
         requirements_lock = "@rtp_deps//:requirements_lock_cuda13_arm.txt",
         python_interpreter = "/opt/conda310/bin/python3",
-        extra_pip_args = PIP_EXTRA_ARGS,
+        # Use the public index in this lock; keep direct custom wheel URLs.
+        extra_pip_args = [arg for arg in PIP_EXTRA_ARGS if not arg.startswith("--extra-index-url=")],
         timeout = 3600,
         quiet = False,
     )

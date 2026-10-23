@@ -14,7 +14,7 @@ from pathlib import Path
 from unittest import mock
 
 from rtp_llm import start_backend_server as backend
-from rtp_llm.model_loader.tipc import ffi as tipc_ffi
+from rtp_llm.utils import cuda_ipc as tipc_ffi
 from rtp_llm.utils import jit_cache_manager as jit
 from rtp_llm.utils import jit_cache_store as store
 from rtp_llm.utils.util import COMPILE_FLAG_ENVS, torch_abi_fingerprint
@@ -966,7 +966,9 @@ class BackendTest(JitCacheTestBase):
             backend,
             "_prewarm_flashinfer_trtllm_gen",
             side_effect=RuntimeError("launcher build failed"),
-        ), mock.patch.object(backend, "multi_rank_start") as ranks:
+        ), mock.patch.object(
+            backend, "multi_rank_start"
+        ) as ranks:
             with self.assertRaisesRegex(RuntimeError, "launcher build failed"):
                 backend.start_backend_server(None, configs)
         ranks.assert_not_called()
@@ -1000,7 +1002,9 @@ class BackendTest(JitCacheTestBase):
             jit, "_ensure_python_scripts_on_path"
         ) as ensure_path, mock.patch.object(
             jit, "setup_jit_cache_env"
-        ) as setup, mock.patch.object(jit, "JitCacheManager") as manager:
+        ) as setup, mock.patch.object(
+            jit, "JitCacheManager"
+        ) as manager:
             self.assertIsNone(jit.start_from_config(config))
         ensure_path.assert_called_once_with()
         setup.assert_not_called()
@@ -1295,7 +1299,7 @@ class TipcTest(JitCacheTestBase):
             load.assert_called_once()
             self.assertTrue(open_file.call_args.args[1] & os.O_NOFOLLOW)
             source_root, build_args = signature.call_args.args
-            self.assertEqual(source_root, Path(tipc_ffi.__file__).with_name("csrc"))
+            self.assertEqual(source_root, tipc_ffi.SOURCE_DIR)
             self.assertTrue(
                 {
                     "sm_80",

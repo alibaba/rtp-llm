@@ -177,6 +177,33 @@ NormalExecutor::NormalExecutor(const EngineInitParams&                params,
     cudaProfilerBegin();
 }
 
+absl::Status NormalExecutor::rlReleaseKVCache() {
+    auto* model = dynamic_cast<PyWrappedModel*>(model_.get());
+    RTP_LLM_CHECK_WITH_INFO(model && cache_manager_, "RL KV release requires a Python model and cache manager");
+    model->setRLKVCache(std::nullopt);
+    RETURN_IF_STATUS_ERROR(cache_manager_->releaseForRL());
+    return absl::OkStatus();
+}
+
+absl::Status NormalExecutor::rlRestoreKVCache() {
+    auto* model = dynamic_cast<PyWrappedModel*>(model_.get());
+    RTP_LLM_CHECK_WITH_INFO(model && cache_manager_, "RL KV restore requires a Python model and cache manager");
+    RETURN_IF_STATUS_ERROR(cache_manager_->restoreForRL());
+    model->setRLKVCache(cache_manager_->getMainModelGroupedCacheLayerLayout());
+    return absl::OkStatus();
+}
+
+absl::Status NormalExecutor::quiesce() {
+    dispatch_runner_.sync(cuda_graph::graphGetCurrentStream());
+    cuda_graph::graphDeviceSynchronize();
+    // Drop staging references after the last asynchronous dispatcher has joined.
+    buffer_holder_.release();
+    buffer_holder_.release();
+    model_->releaseBuffers();
+    model_->releaseBuffers();
+    return absl::OkStatus();
+}
+
 absl::Status NormalExecutor::process(const std::list<GenerateStreamPtr>& streams, int64_t schedule_time_us) {
     const int64_t process_start_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
     if (schedule_time_us <= 0) {
@@ -342,7 +369,7 @@ absl::Status NormalExecutor::process(const std::list<GenerateStreamPtr>& streams
         // Metrics and KV release stay on the main thread; dispatch_output_us
         // now measures launch cost, while worker time is in async_runner.thread.
         executor_collector.dispatch_output_us = autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
-        int64_t tps_execute_time_us = autil::TimeUtility::currentTimeInMicroSeconds() - schedule_time_us;
+        int64_t tps_execute_time_us           = autil::TimeUtility::currentTimeInMicroSeconds() - schedule_time_us;
         if (tps_execute_time_us <= 0) {
             tps_execute_time_us = autil::TimeUtility::currentTimeInMicroSeconds() - process_start_time_us;
         }
@@ -364,7 +391,7 @@ absl::Status NormalExecutor::process(const std::list<GenerateStreamPtr>& streams
         }
         auto result                           = batch_stream_processor_->dispatch(stream_groups, merge_outputs);
         executor_collector.dispatch_output_us = autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
-        int64_t tps_execute_time_us = autil::TimeUtility::currentTimeInMicroSeconds() - schedule_time_us;
+        int64_t tps_execute_time_us           = autil::TimeUtility::currentTimeInMicroSeconds() - schedule_time_us;
         if (tps_execute_time_us <= 0) {
             tps_execute_time_us = autil::TimeUtility::currentTimeInMicroSeconds() - process_start_time_us;
         }

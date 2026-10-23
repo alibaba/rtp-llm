@@ -61,3 +61,17 @@ py_test(
         'gpu': 'MI308X-ROCM7',
     },
 )
+
+py_test(
+    name = "test_tensor_weight_stream",
+    srcs = ["test_tensor_weight_stream.py"],
+    deps = py_test_deps,
+    env = {"CUDA_VISIBLE_DEVICES": ""},
+)
+
+py_test(
+    name = "test_rl_weight_update",
+    srcs = ["test_rl_weight_update.py", "test_tensor_weight_stream.py"],
+    deps = py_test_deps,
+    env = {"CUDA_VISIBLE_DEVICES": ""},
+)

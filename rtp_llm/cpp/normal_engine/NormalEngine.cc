@@ -5,6 +5,7 @@
 #include "rtp_llm/cpp/normal_engine/NormalGenerateStream.h"
 #include "rtp_llm/cpp/utils/StatusUtil.h"
 #include "rtp_llm/cpp/engine_base/schedulers/FIFOScheduler.h"
+#include "rtp_llm/cpp/engine_base/schedulers/FIFOSchedulerBase.h"
 #include "rtp_llm/cpp/engine_base/schedulers/PDFusionRatioScheduler.h"
 #include "rtp_llm/cpp/engine_base/schedulers/PDFusionCoordinatedScheduler.h"
 #include "rtp_llm/cpp/engine_base/schedulers/BatchDecodeScheduler.h"
@@ -108,6 +109,35 @@ NormalEngine::NormalEngine(const EngineInitParams&                       params,
                    params.parallelism_config.dp_rank * params.parallelism_config.tp_size
                        + params.parallelism_config.tp_rank) {
     RTP_LLM_LOG_INFO(__PRETTY_FUNCTION__);
+    const char* rl_mode = std::getenv("RTP_LLM_RL_MODE");
+    rl_enabled_         = rl_mode && std::strcmp(rl_mode, "1") == 0;
+    if (rl_enabled_) {
+        const char* run_id = std::getenv("RTP_LLM_RL_RUN_ID");
+        RTP_LLM_CHECK_WITH_INFO(run_id && std::strlen(run_id) > 0, "RL mode requires an incarnation ID");
+        RTP_LLM_CHECK_WITH_INFO(model_config_.model_type == "qwen_3" && model_config_.data_type == DataType::TYPE_BF16
+                                    && !model_config_.quant_algo.isQuant() && !model_config_.moe_style,
+                                "RL mode currently supports unquantized Qwen3 dense BF16 only");
+        RTP_LLM_CHECK_WITH_INFO(parallelism_config.dp_size == 1 && parallelism_config.ep_size == 1
+                                    && parallelism_config.pp_size == 1
+                                    && parallelism_config.world_size == parallelism_config.tp_size,
+                                "RL mode currently supports single-node pure TP only");
+        RTP_LLM_CHECK_WITH_INFO(
+            !propose_params_ && sp_config.type == SP_TYPE_NONE && !ffn_disaggregate_config.enable_ffn_disaggregate
+                && pd_sep_config.role_type == RoleType::PDFUSION && !runtime_config.use_batch_decode_scheduler
+                && (runtime_config.fifo_scheduler_config.pdfusion_scheduler_mode.empty()
+                    || runtime_config.fifo_scheduler_config.pdfusion_scheduler_mode == "ratio"),
+            "RL mode requires the normal dense engine with FIFO or PDFusion ratio scheduling");
+        RTP_LLM_CHECK_WITH_INFO(!params.hw_kernel_config.enable_native_cuda_graph,
+                                "RL supports eager or decode CUDA Graph execution only");
+        // Decode graphs may retain KV pointers. Keep that allocation resident
+        // across training phases; weight updates preserve parameter storage.
+        rl_uses_cuda_graph_ = params.hw_kernel_config.enable_cuda_graph;
+        RTP_LLM_CHECK_WITH_INFO(!kv_cache_config.reuse_cache && kv_cache_config.multi_task_prompt_tokens.empty()
+                                    && !kv_cache_config.enable_memory_cache && !kv_cache_config.enable_memory_cache_disk
+                                    && !kv_cache_config.enable_remote_cache,
+                                "RL mode currently requires prefix and system-prompt caches to be disabled");
+        rl_model_version_ = std::string(run_id) + ":0";
+    }
     if (!model_config_.output_vocab_ids.empty()) {
         RTP_LLM_CHECK_WITH_INFO(sp_config.type == SP_TYPE_NONE && !propose_params_,
                                 "output vocabulary pruning does not support speculative, MTP, or EAGLE engines");
@@ -567,6 +597,12 @@ absl::Status NormalEngine::initSystemPrompt() {
 }
 
 KVCacheInfo NormalEngine::getCacheStatusInfo(int64_t latest_version, bool need_cache_keys) {
+    std::unique_lock<std::mutex> lock(rl_mutex_, std::defer_lock);
+    if (rl_enabled_) {
+        lock.lock();
+        if (!rl_kv_ready_ || rl_failed_)
+            return KVCacheInfo{};
+    }
     return resource_context_.cache_manager->getKVCacheInfo(latest_version, need_cache_keys);
 }
 
@@ -585,6 +621,7 @@ absl::Status NormalEngine::startLoop() {
 absl::Status NormalEngine::stop() {
     RTP_LLM_LOG_INFO("stop normal engine");
     running_ = false;
+    rl_cv_.notify_all();
     RETURN_IF_STATUS_ERROR(scheduler_->stop());
     loop_thread_->join();
     if (auto* coordinated = dynamic_cast<PDFusionCoordinatedScheduler*>(scheduler_.get())) {
@@ -618,33 +655,80 @@ std::shared_ptr<GenerateStream> NormalEngine::makeStream(const std::shared_ptr<G
 }
 
 void NormalEngine::enqueue(std::shared_ptr<GenerateStream>& stream) {
+    std::unique_lock<std::mutex> admission(rl_mutex_, std::defer_lock);
+    if (rl_enabled_) {
+        admission.lock();
+        if (!rlAdmitStream(stream)) {
+            return;
+        }
+    }
     stream->setReserveStep(reserve_step_);
     (void)scheduler_->enqueue(stream);
 }
 
 std::shared_ptr<GenerateStream> NormalEngine::enqueue(const std::shared_ptr<GenerateInput>& input) {
-    std::shared_ptr<GenerateStream> stream = std::make_shared<NormalGenerateStream>(
-        input, model_config_, runtime_config, resource_context_, metrics_reporter_);
-    stream->setReserveStep(reserve_step_);
-    (void)scheduler_->enqueue(stream);
+    auto stream = makeStream(input);
+    enqueue(stream);
     return stream;
 }
 
 std::pair<std::vector<bool>, std::vector<GenerateStreamPtr>>
 NormalEngine::enqueueMultiple(const std::vector<std::shared_ptr<GenerateInput>>& inputs) {
+    std::unique_lock<std::mutex> admission(rl_mutex_, std::defer_lock);
+    if (rl_enabled_) {
+        admission.lock();
+    }
     std::vector<GenerateStreamPtr> streams;
+    std::vector<GenerateStreamPtr> schedulable_streams;
+    std::vector<size_t>            schedulable_indexes;
     streams.reserve(inputs.size());
     for (auto& inp : inputs) {
         auto stream = std::make_shared<NormalGenerateStream>(
             inp, model_config_, runtime_config, resource_context_, metrics_reporter_);
         stream->setReserveStep(reserve_step_);
         streams.push_back(stream);
+        if (rl_enabled_ && rlAdmitStream(stream)) {
+            schedulable_indexes.push_back(streams.size() - 1);
+            schedulable_streams.push_back(stream);
+        }
     }
-    return scheduler_->enqueueGroup(streams);
+    if (!rl_enabled_) {
+        return scheduler_->enqueueGroup(streams);
+    }
+    std::vector<bool> accepted(inputs.size(), false);
+    if (!schedulable_streams.empty()) {
+        auto result = scheduler_->enqueueGroup(schedulable_streams);
+        for (size_t i = 0; i < schedulable_indexes.size(); ++i) {
+            accepted[schedulable_indexes[i]] = result.first[i];
+        }
+    }
+    return {std::move(accepted), std::move(streams)};
+}
+
+bool NormalEngine::rlAdmitStream(const GenerateStreamPtr& stream) {
+    if (rl_pause_requested_ || rl_failed_) {
+        stream->reportError(ErrorCode::EXECUTION_EXCEPTION, "RL engine admission is closed");
+        return false;
+    }
+    const auto& config = stream->generateConfig();
+    if (config->reuse_cache || config->enable_device_cache || config->enable_memory_cache
+        || config->enable_remote_cache) {
+        stream->reportError(ErrorCode::INVALID_PARAMS, "RL requests must disable all prefix cache reuse");
+        return false;
+    }
+    stream->generateInput()->rl_model_version = rl_model_version_;
+    stream->generateInput()->rl_global_step   = rl_global_step_;
+    return true;
 }
 
 absl::Status NormalEngine::step() try {
     RTP_LLM_PROFILE_SCOPE("engine.normal.step_work");
+    if (rl_enabled_) {
+        RETURN_IF_STATUS_ERROR(rlCheckpoint());
+        if (!running_) {
+            return absl::OkStatus();
+        }
+    }
     while (pause_) {
         // wait 50ms if system paused.
         std::this_thread::sleep_for(std::chrono::milliseconds(50));
@@ -884,6 +968,149 @@ bool NormalEngine::updateEplbConfig(const EPLBConfig& config) {
         return executor_->updateEplbConfig(config);
     }
     return true;
+}
+
+bool NormalEngine::rlPaused() const {
+    std::lock_guard<std::mutex> lock(rl_mutex_);
+    return rl_paused_ && !rl_failed_;
+}
+
+std::string NormalEngine::rlModelVersion() const {
+    std::lock_guard<std::mutex> lock(rl_mutex_);
+    return rl_model_version_;
+}
+
+absl::Status NormalEngine::rlPause(int64_t timeout_ms) {
+    if (!rl_enabled_ || timeout_ms <= 0) {
+        return absl::FailedPreconditionError("RL mode and a positive timeout are required");
+    }
+    std::unique_lock<std::mutex> lock(rl_mutex_);
+    if (rl_failed_) {
+        return absl::FailedPreconditionError("RL engine failed; restart the entire replica");
+    }
+    rl_pause_requested_ = true;
+    auto* fifo          = dynamic_cast<FIFOSchedulerBase*>(scheduler_.get());
+    RTP_LLM_CHECK_WITH_INFO(fifo, "RL mode requires a FIFO-family scheduler");
+    fifo->wakeForControl();
+    if (!rl_cv_.wait_for(lock, std::chrono::milliseconds(timeout_ms), [this] { return rl_paused_ || !running_; })
+        || !rl_paused_) {
+        rl_failed_ = true;
+        return absl::DeadlineExceededError("RL drain timed out; restart the entire replica");
+    }
+    return absl::OkStatus();
+}
+
+absl::Status NormalEngine::rlResume(int64_t timeout_ms) {
+    std::unique_lock<std::mutex> lock(rl_mutex_);
+    if (!rl_enabled_ || !rl_paused_ || rl_failed_ || !rl_kv_ready_) {
+        return absl::FailedPreconditionError("RL engine is not safely paused with resident KV cache");
+    }
+    rl_pause_requested_ = false;
+    rl_cv_.notify_all();
+    // The loop must observe resume before a following pause is allowed to
+    // re-arm the flag. Otherwise a rapid resume/pause can lose the wakeup.
+    if (!rl_cv_.wait_for(lock, std::chrono::milliseconds(timeout_ms), [this] { return !rl_paused_ || !running_; })
+        || !running_) {
+        rl_failed_          = true;
+        rl_pause_requested_ = true;
+        return absl::DeadlineExceededError("RL resume timed out; restart the entire replica");
+    }
+    return absl::OkStatus();
+}
+
+bool NormalEngine::rlKVCacheReady() const {
+    std::lock_guard<std::mutex> lock(rl_mutex_);
+    return rl_kv_ready_ && !rl_failed_;
+}
+
+size_t NormalEngine::rlKVCacheBytes() const {
+    std::lock_guard<std::mutex> lock(rl_mutex_);
+    return rl_kv_ready_ ? resource_context_.cache_manager->backingBytes() : 0;
+}
+
+absl::Status NormalEngine::rlReleaseKVCache() {
+    std::lock_guard<std::mutex> lock(rl_mutex_);
+    if (!rl_enabled_ || !rl_paused_ || rl_failed_) {
+        return absl::FailedPreconditionError("KV release requires a safely paused RL engine");
+    }
+    if (rl_uses_cuda_graph_) {
+        return absl::FailedPreconditionError("RL decode CUDA Graph requires resident KV storage");
+    }
+    if (!rl_kv_ready_)
+        return absl::OkStatus();
+    try {
+        const auto status = executor_->rlReleaseKVCache();
+        if (!status.ok()) {
+            rl_failed_ = true;
+            return status;
+        }
+#if USING_CUDA
+        // All Tensor owners were checked above. Return caching-allocator slabs
+        // to CUDA so the separate trainer process can allocate this memory.
+        c10::cuda::CUDACachingAllocator::emptyCache();
+#endif
+        rl_kv_ready_ = false;
+    } catch (...) {
+        rl_failed_ = true;
+        throw;
+    }
+    return absl::OkStatus();
+}
+
+absl::Status NormalEngine::rlRestoreKVCache() {
+    std::lock_guard<std::mutex> lock(rl_mutex_);
+    if (!rl_enabled_ || !rl_paused_ || rl_failed_) {
+        return absl::FailedPreconditionError("KV restore requires a safely paused RL engine");
+    }
+    if (rl_kv_ready_)
+        return absl::OkStatus();
+    try {
+        const auto status = executor_->rlRestoreKVCache();
+        if (!status.ok()) {
+            rl_failed_ = true;
+            return status;
+        }
+        rl_kv_ready_ = true;
+    } catch (...) {
+        rl_failed_ = true;
+        throw;
+    }
+    return absl::OkStatus();
+}
+
+absl::Status NormalEngine::rlSetModelVersion(const std::string& version, int64_t global_step) {
+    std::lock_guard<std::mutex> lock(rl_mutex_);
+    if (!rl_enabled_ || !rl_paused_ || rl_failed_ || version.empty() || global_step < rl_global_step_) {
+        return absl::FailedPreconditionError("model version may only advance while safely paused");
+    }
+    rl_model_version_ = version;
+    rl_global_step_   = global_step;
+    return absl::OkStatus();
+}
+
+absl::Status NormalEngine::rlCheckpoint() {
+    auto decision = torch::zeros({1}, torch::TensorOptions().dtype(torch::kInt64).device(torch::kCPU));
+    if (parallelism_config.tp_rank == 0) {
+        std::lock_guard<std::mutex> lock(rl_mutex_);
+        decision.data_ptr<int64_t>()[0] = rl_pause_requested_ && scheduler_->empty();
+    }
+    // All ranks enter this broadcast at the same point between process() calls.
+    // Independent rank pause flags must never interrupt matching TP collectives.
+    if (parallelism_config.tp_size > 1) {
+        execBroadcastCpu({{decision}, 0});
+    }
+    if (!decision.item<int64_t>()) {
+        return absl::OkStatus();
+    }
+    RETURN_IF_STATUS_ERROR(executor_->quiesce());
+    std::unique_lock<std::mutex> lock(rl_mutex_);
+    rl_pause_requested_ = true;
+    rl_paused_          = true;
+    rl_cv_.notify_all();
+    rl_cv_.wait(lock, [this] { return (!rl_pause_requested_ && !rl_failed_) || !running_; });
+    rl_paused_ = false;
+    rl_cv_.notify_all();
+    return absl::OkStatus();
 }
 
 void NormalEngine::startTimelineProfiling(const std::string& trace_name, int start_step, int num_steps) {

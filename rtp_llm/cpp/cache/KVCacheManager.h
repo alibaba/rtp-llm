@@ -7,6 +7,7 @@
 #include <string>
 #include <thread>
 #include <vector>
+#include "absl/status/status.h"
 
 #include "rtp_llm/cpp/cache/Types.h"
 #include "rtp_llm/cpp/cache/BufferTypes.h"
@@ -46,6 +47,11 @@ public:
         return allocator_ != nullptr;
     }
 
+    // Called only after the RL engine is drained and model KV views are detached.
+    absl::Status releaseForRL();
+    absl::Status restoreForRL();
+    size_t       backingBytes() const;
+
     const CacheConfig& cacheConfig() const;
     const CacheConfig& getMTPModuleCacheConfig(int mtp_module_id) const;
 
@@ -66,9 +72,12 @@ public:
                                int                            target_batch_size) const;
 
     // Per-pool additional peak demand for one sequence. An empty result means unsupported.
-    std::vector<int> estimateSingleSequencePeakNeedBlocksByPool(
-        const BatchKVCacheResourcePtr& batch_kv_cache_resource,
-        int seq_len, int common_seq_len, int remaining_tokens, int reserve_step, bool enable_reuse_cache) const;
+    std::vector<int> estimateSingleSequencePeakNeedBlocksByPool(const BatchKVCacheResourcePtr& batch_kv_cache_resource,
+                                                                int                            seq_len,
+                                                                int                            common_seq_len,
+                                                                int                            remaining_tokens,
+                                                                int                            reserve_step,
+                                                                bool enable_reuse_cache) const;
 
     std::vector<KVCachePoolMetricsSnapshot> poolMetricsSnapshots() const;
 
@@ -200,6 +209,7 @@ private:
 
     std::atomic<bool> stop_{false};
     std::thread       metrics_reporter_thread_;
+    bool              rl_released_ = false;
 
     std::shared_ptr<KVCacheConnectorCoordinator> coordinator_;
 

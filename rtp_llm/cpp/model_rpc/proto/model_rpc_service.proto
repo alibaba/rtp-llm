@@ -324,6 +324,47 @@ message GenerateOutputsPB {
     int64 begin_compute_time = 7;
     int64 compute_done_time = 8;
     RpcErrorPB error_info = 9;
+    // Actual version captured by the engine at admission in opt-in RL mode.
+    string model_version = 11;
+    int64 global_step = 12;
+}
+
+message RlControlRequestPB {
+    enum Operation {
+        STATUS = 0;
+        PAUSE = 1;
+        RESUME = 2;
+        BEGIN_UPDATE = 3;
+        WRITE_WEIGHT = 4;
+        COMMIT_UPDATE = 5;
+        RELEASE_KV_CACHE = 6;
+        RESTORE_KV_CACHE = 7;
+    }
+    Operation operation = 1;
+    int64 timeout_ms = 2;
+    string expected_version = 3;
+    string update_id = 4;
+    string weight_name = 5;
+    bytes cuda_ipc_metadata = 6;
+    uint64 max_buffer_bytes = 7;
+    int64 global_step = 8;
+}
+
+message RlControlResponsePB {
+    uint32 protocol_version = 1;
+    string phase = 2;
+    string model_version = 3;
+    string update_id = 4;
+    int64 global_step = 5;
+    int32 tp_rank = 6;
+    int32 tp_size = 7;
+    uint64 received_weights = 8;
+    uint64 applied_weights = 9;
+    bool quiescent = 10;
+    bool kv_cache_ready = 11;
+    uint64 kv_cache_bytes = 12;
+    uint64 torch_allocated_bytes = 13;
+    uint64 torch_reserved_bytes = 14;
 }
 
 // return to python client
@@ -904,6 +945,7 @@ service RpcService {
     rpc CheckHealth(EmptyPB) returns (CheckHealthResponsePB);
     rpc UpdateEplbConfig(UpdateEplbConfigRequestPB) returns (EmptyPB);
     rpc SetPause(EmptyPB) returns (EmptyPB);
+    rpc RlControl(RlControlRequestPB) returns (RlControlResponsePB);
     rpc SetRestart(EmptyPB) returns (EmptyPB);
     rpc SetLogLevel(SetLogLevelRequestPB) returns (EmptyPB);
     rpc StartProfile(StartProfileRequestPB) returns (EmptyPB);

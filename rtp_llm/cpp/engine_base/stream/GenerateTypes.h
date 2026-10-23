@@ -73,8 +73,11 @@ public:
     }
 
 public:
-    int64_t                         request_id = 0;
-    RequestInfo                     request_info;
+    int64_t     request_id = 0;
+    RequestInfo request_info;
+    // Set by the engine under its admission lock, never taken from a request.
+    std::string                     rl_model_version;
+    int64_t                         rl_global_step = 0;
     std::shared_ptr<GenerateConfig> generate_config;
     torch::Tensor                   input_ids;
     bool                            need_release_resource = true;

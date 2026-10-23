@@ -118,6 +118,13 @@ void PyWrappedModel::releaseBuffers() {
     buffer_holder_.release();
 }
 
+void PyWrappedModel::setRLKVCache(std::optional<GroupedCacheLayerLayout> layout) {
+    RTP_LLM_CHECK_WITH_INFO(!graph_runner_, "RL KV rebinding requires eager execution");
+    py::gil_scoped_acquire gil;
+    py_model_.attr("kv_cache") = layout ? py::cast(torch_ext::KVCache(*layout)) : py::none();
+    kv_cache_layer_layout_     = std::move(layout);
+}
+
 torch::Tensor PyWrappedModel::getMtpTargetHiddenStates(int64_t num_tokens) {
     if (!py_model_) {
         return torch::Tensor();

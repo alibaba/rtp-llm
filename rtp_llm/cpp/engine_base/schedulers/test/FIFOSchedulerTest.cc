@@ -2,6 +2,7 @@
 #include <fstream>
 #include <unistd.h>
 #include <chrono>
+#include <future>
 #include <iostream>
 #include <limits>
 #include <stdexcept>
@@ -5047,9 +5048,9 @@ TEST_F(FIFOSchedulerTest, testCoordAdaptiveTokenOnlyUsesPackedLengthsAcrossReser
 
 TEST_F(FIFOSchedulerTest, testCoordAdaptivePackedBudgetSkipsUnfitRequest) {
     CoordTestState f(8, 1, true, 8);
-    auto long_request = makeStream(std::vector<int>(6, 1), f.model, f.runtime, f.resource, 16);
-    auto unfit = makeStream(std::vector<int>(3, 1), f.model, f.runtime, f.resource, 16);
-    auto short_request = makeStream({1}, f.model, f.runtime, f.resource, 16);
+    auto           long_request  = makeStream(std::vector<int>(6, 1), f.model, f.runtime, f.resource, 16);
+    auto           unfit         = makeStream(std::vector<int>(3, 1), f.model, f.runtime, f.resource, 16);
+    auto           short_request = makeStream({1}, f.model, f.runtime, f.resource, 16);
     for (const auto& stream : {long_request, unfit, short_request}) {
         ASSERT_TRUE(f.scheduler->enqueue(stream).ok());
     }
@@ -5066,7 +5067,7 @@ TEST_F(FIFOSchedulerTest, testCoordAdaptivePackedBudgetSkipsUnfitRequest) {
 }
 
 TEST_F(FIFOSchedulerTest, testCoordAdaptivePackedBudgetIncludesExpandedSequences) {
-    CoordTestState f(8, 1, true, 7);
+    CoordTestState                 f(8, 1, true, 7);
     std::vector<GenerateStreamPtr> streams;
     for (int i = 0; i < 2; ++i) {
         auto stream = makeStream({1, 2}, f.model, f.runtime, f.resource, 16, 2);
@@ -5619,6 +5620,101 @@ TEST_F(FIFOSchedulerTest, testDisabledCoordinatedConstructorRetainsLegacyRatioVa
                                                                     PDFusionCadenceConfig{}),
                      std::invalid_argument);
     }
+}
+
+TEST_F(FIFOSchedulerTest, testRLControlWakesIdleFifoAndRatioSchedulers) {
+    for (bool use_ratio : {false, true}) {
+        SCOPED_TRACE(use_ratio);
+        auto            config        = makeMhaCacheConfig(1, 16, 1, 4, 1, DataType::TYPE_FP16);
+        auto            cache_manager = std::make_shared<KVCacheManager>(config);
+        ResourceContext resource_context;
+        resource_context.cache_manager = cache_manager;
+        resource_context.role_type     = RoleType::PDFUSION;
+        ModelConfig model_config;
+        model_config.max_seq_len                  = 8192;
+        model_config.attn_config.tokens_per_block = 1;
+        RuntimeConfig runtime_config;
+        runtime_config.max_generate_batch_size                     = 2;
+        runtime_config.fifo_scheduler_config.max_batch_tokens_size = 8192;
+        runtime_config.fifo_scheduler_config.decode_prefill_ratio  = "0";
+        ASSERT_TRUE(cache_manager->init());
+        PDSepConfig                        pd_sep_config = makePDFusionPDSepConfig();
+        ParallelismConfig                  parallelism_config;
+        ModelSpecificConfig                model_specific_config;
+        std::unique_ptr<FIFOSchedulerBase> scheduler;
+        if (use_ratio) {
+            scheduler = std::make_unique<PDFusionRatioScheduler>(
+                runtime_config, model_config, pd_sep_config, parallelism_config, model_specific_config, cache_manager);
+        } else {
+            scheduler = std::make_unique<FIFOScheduler>(
+                runtime_config, model_config, pd_sep_config, parallelism_config, model_specific_config, cache_manager);
+        }
+        std::promise<void> entered;
+        auto               waiting = std::async(std::launch::async, [&] {
+            entered.set_value();
+            return scheduler->schedule();
+        });
+        entered.get_future().wait();
+        EXPECT_EQ(waiting.wait_for(std::chrono::milliseconds(20)), std::future_status::timeout);
+        scheduler->wakeForControl();
+        const auto wake_status = waiting.wait_for(std::chrono::seconds(2));
+        if (wake_status != std::future_status::ready) {
+            // Unblock the test thread even when the wakeup implementation is broken.
+            EXPECT_TRUE(scheduler->stop().ok());
+        }
+        EXPECT_EQ(wake_status, std::future_status::ready);
+        auto result = waiting.get();
+        ASSERT_TRUE(result.ok());
+        EXPECT_TRUE(result->empty());
+        EXPECT_TRUE(scheduler->empty());
+    }
+}
+
+TEST_F(FIFOSchedulerTest, testRLControlIncludesPendingRatioDecodeInDrain) {
+    auto            config        = makeMhaCacheConfig(1, 64, 1, 4, 1, DataType::TYPE_FP16);
+    auto            cache_manager = std::make_shared<KVCacheManager>(config);
+    ResourceContext resource_context;
+    resource_context.cache_manager = cache_manager;
+    resource_context.role_type     = RoleType::PDFUSION;
+    ModelConfig model_config;
+    model_config.max_seq_len                  = 8192;
+    model_config.attn_config.tokens_per_block = 1;
+    RuntimeConfig runtime_config;
+    runtime_config.max_generate_batch_size                     = 2;
+    runtime_config.fifo_scheduler_config.max_batch_tokens_size = 8192;
+    runtime_config.fifo_scheduler_config.decode_prefill_ratio  = "0";
+    resource_context.reuse_cache                               = false;
+    resource_context.enable_memory_cache                       = false;
+    ASSERT_TRUE(cache_manager->init());
+    PDSepConfig            pd_sep_config = makePDFusionPDSepConfig();
+    ParallelismConfig      parallelism_config;
+    ModelSpecificConfig    model_specific_config;
+    PDFusionRatioScheduler scheduler(
+        runtime_config, model_config, pd_sep_config, parallelism_config, model_specific_config, cache_manager);
+    auto stream = makeStream({1, 2}, model_config, runtime_config, resource_context, /*max_new_tokens=*/4);
+    ASSERT_TRUE(scheduler.enqueue(stream).ok());
+    auto prefill = scheduler.schedule();
+    ASSERT_TRUE(prefill.ok());
+    ASSERT_EQ(prefill->size(), 1);
+    EXPECT_EQ(scheduler.pendingDecodeStreamsSize(), 1);
+    EXPECT_FALSE(scheduler.empty());
+    stream->setSeqLength(stream->seqLength() + 1);  // the prefill executor produced one token
+
+    scheduler.wakeForControl();
+    auto decode = scheduler.schedule();
+    ASSERT_TRUE(decode.ok());
+    ASSERT_EQ(decode->size(), 1);
+    EXPECT_EQ(decode->front(), stream);
+    EXPECT_EQ(scheduler.pendingDecodeStreamsSize(), 0);
+    EXPECT_FALSE(scheduler.empty());
+
+    stream->reportEvent(StreamEvents::GenerateDone);
+    scheduler.wakeForControl();
+    auto drained = scheduler.schedule();
+    ASSERT_TRUE(drained.ok());
+    EXPECT_TRUE(drained->empty());
+    EXPECT_TRUE(scheduler.empty());
+    EXPECT_EQ(scheduler.onflightStreams(), 0);
 }
 
 }  // namespace rtp_llm

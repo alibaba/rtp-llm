@@ -16,6 +16,16 @@ class Executor {
 public:
     Executor() {};
     virtual absl::Status process(const std::list<GenerateStreamPtr>& streams, int64_t schedule_time_us = 0) = 0;
+    virtual absl::Status quiesce() {
+        return absl::UnimplementedError("executor does not support RL quiescence");
+    }
+
+    virtual absl::Status rlReleaseKVCache() {
+        return absl::UnimplementedError("executor does not support RL KV release");
+    }
+    virtual absl::Status rlRestoreKVCache() {
+        return absl::UnimplementedError("executor does not support RL KV restore");
+    }
 
     static GptModelDescription genModelDescription(const ModelConfig&       model_config,
                                                    const ParallelismConfig& parallelism_config,

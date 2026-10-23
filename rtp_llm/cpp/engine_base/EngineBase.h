@@ -50,6 +50,37 @@ public:
         pause_ = false;
     }
 
+    virtual bool rlEnabled() const {
+        return false;
+    }
+    virtual bool rlPaused() const {
+        return false;
+    }
+    virtual absl::Status rlPause(int64_t timeout_ms) {
+        return absl::UnimplementedError("RL lifecycle is not enabled");
+    }
+    virtual absl::Status rlResume(int64_t timeout_ms) {
+        return absl::UnimplementedError("RL lifecycle is not enabled");
+    }
+    virtual absl::Status rlSetModelVersion(const std::string& version, int64_t global_step) {
+        return absl::UnimplementedError("RL lifecycle is not enabled");
+    }
+    virtual std::string rlModelVersion() const {
+        return "";
+    }
+    virtual absl::Status rlReleaseKVCache() {
+        return absl::UnimplementedError("RL KV release is not enabled");
+    }
+    virtual absl::Status rlRestoreKVCache() {
+        return absl::UnimplementedError("RL KV restore is not enabled");
+    }
+    virtual bool rlKVCacheReady() const {
+        return false;
+    }
+    virtual size_t rlKVCacheBytes() const {
+        return 0;
+    }
+
     virtual std::shared_ptr<GenerateStream> enqueue(const std::shared_ptr<GenerateInput>& input) = 0;
 
     virtual void enqueue(std::shared_ptr<GenerateStream>& stream) = 0;

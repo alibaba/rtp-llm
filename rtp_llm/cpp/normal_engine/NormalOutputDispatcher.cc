@@ -141,6 +141,42 @@ absl::Status NormalOutputDispatcher::dispatch(const StreamGroups& stream_groups,
     bool                need_d2h_sync = false;
     const torch::Tensor token_ids_cpu = copyToPinnedCpuAsync(token_ids_for_copy, need_d2h_sync);
     const torch::Tensor success_cpu   = copyToPinnedCpuAsync(sampler_output.success, need_d2h_sync);
+    // In the ordinary non-beam case, sampler input and output rows have the
+    // same ownership. Normalize once on device and copy only the selected
+    // probabilities, rather than a full vocabulary for every stream.
+    bool any_softmax_probs = false;
+    bool direct_rows       = stream_groups.totalSamplerBatchSizeIn() == total_batch_size_out;
+    for (const auto& stream : stream_groups.allStreams()) {
+        any_softmax_probs |= stream->calculateSoftmaxProbs();
+        direct_rows &=
+            !stream->usesBeamSearchTokenLayoutForCurrentStep() && stream->currentBatchSize() == stream->nextBatchSize();
+    }
+    torch::Tensor selected_probs_cpu;
+    if (any_softmax_probs && direct_rows) {
+        const auto& logits = merge_outputs.model_output.logits;
+        RTP_LLM_CHECK(logits.defined() && logits.dim() == 2
+                      && logits.size(0) >= static_cast<int64_t>(total_batch_size_out) && logits.size(1) > 0);
+        // The in-place normalization must not overwrite logits returned to
+        // another stream, or logits retained by the model/sampler.
+        auto probabilities = logits.narrow(0, 0, total_batch_size_out)
+                                 .to(torch::kFloat32, /*non_blocking=*/false, /*copy=*/true)
+                                 .contiguous();
+#if USING_CUDA
+        if (probabilities.is_cuda()) {
+            cudaSoftmaxInplace(probabilities, at::cuda::getCurrentCUDAStream().stream());
+        } else {
+            probabilities = torch::softmax(probabilities, -1);
+        }
+#else
+        probabilities = torch::softmax(probabilities, -1);
+#endif
+        // A failed sampler can leave an invalid token. Its stream still gets
+        // the original failure below; avoid a device-side gather assertion
+        // while collecting successful peers' probabilities.
+        auto selected_ids =
+            token_ids_for_copy.to(probabilities.device(), torch::kLong).clamp(0, probabilities.size(1) - 1);
+        selected_probs_cpu = copyToPinnedCpuAsync(probabilities.gather(1, selected_ids), need_d2h_sync);
+    }
     syncPinnedCpuCopies(need_d2h_sync);
     RTP_LLM_LOG_DEBUG("new_all_token_ids = [%s]", tensorDebugStringWithData<int32_t>(token_ids_cpu).c_str());
     int  batch_idx_in     = 0;
@@ -162,7 +198,8 @@ absl::Status NormalOutputDispatcher::dispatch(const StreamGroups& stream_groups,
                              return_all_probs,
                              new_tokens_all,
                              token_ids_cpu,
-                             success_cpu);
+                             success_cpu,
+                             selected_probs_cpu);
 
         batch_idx_in += cur_batch_size;
         batch_idx_out += next_batch_size;
@@ -181,7 +218,8 @@ void NormalOutputDispatcher::dispatchSingleStream(GenerateStreamPtr    stream,
                                                   bool                 return_all_probs,
                                                   const torch::Tensor& new_tokens_all,
                                                   const torch::Tensor& token_ids_cpu,
-                                                  const torch::Tensor& success_cpu) const {
+                                                  const torch::Tensor& success_cpu,
+                                                  const torch::Tensor& selected_probs_cpu) const {
 
     const auto&  model_output      = merge_outputs.model_output;
     const auto&  sampler_output    = merge_outputs.sampler_output;
@@ -192,10 +230,12 @@ void NormalOutputDispatcher::dispatchSingleStream(GenerateStreamPtr    stream,
     auto next_batch_size = stream->nextBatchSize();
     auto token_size      = stream->currentExecuteTokenSize();
 
-    auto batch_new_all_token_ids = new_all_token_ids.narrow(0, batch_idx_out, next_batch_size);
-
-    bool has_beam_search = stream->usesBeamSearchTokenLayoutForCurrentStep();
-    bool has_var_batch   = stream->currentBatchSize() != stream->nextBatchSize();
+    bool          has_beam_search = stream->usesBeamSearchTokenLayoutForCurrentStep();
+    bool          has_var_batch   = stream->currentBatchSize() != stream->nextBatchSize();
+    torch::Tensor batch_new_all_token_ids;
+    if (has_beam_search || !output_vocab_ids_.empty()) {
+        batch_new_all_token_ids = new_all_token_ids.narrow(0, batch_idx_out, next_batch_size);
+    }
 
     // construct mapping from output batches to input batches
     torch::Tensor src_batch_indices;
@@ -245,7 +285,7 @@ void NormalOutputDispatcher::dispatchSingleStream(GenerateStreamPtr    stream,
 
     torch::Tensor raw_logits;
     torch::Tensor batch_logits;
-    if (stream->returnLogits() || stream->calculateSoftmaxProbs()) {
+    if (stream->returnLogits() || (stream->calculateSoftmaxProbs() && !selected_probs_cpu.defined())) {
         raw_logits = model_output.logits.narrow(0, batch_idx_in, cur_batch_size);
         if (stream->returnLogits()) {
             if (has_beam_search && src_batch_indices.defined()) {
@@ -365,8 +405,11 @@ void NormalOutputDispatcher::dispatchSingleStream(GenerateStreamPtr    stream,
     }
 
     torch::Tensor current_softmax_result;
-    if (stream->calculateSoftmaxProbs()) {
-        auto batch_softmax_input = raw_logits.to(torch::kFloat32).contiguous();
+    if (stream->calculateSoftmaxProbs() && selected_probs_cpu.defined()) {
+        current_softmax_result = selected_probs_cpu.narrow(0, batch_idx_out, next_batch_size);
+    } else if (stream->calculateSoftmaxProbs()) {
+        // Keep returned logits intact when normalizing fallback beam/variable-batch rows.
+        auto batch_softmax_input = raw_logits.to(torch::kFloat32, /*non_blocking=*/false, /*copy=*/true).contiguous();
 #if USING_CUDA
         cudaSoftmaxInplace(batch_softmax_input, at::cuda::getCurrentCUDAStream().stream());
 #else
@@ -380,6 +423,16 @@ void NormalOutputDispatcher::dispatchSingleStream(GenerateStreamPtr    stream,
     }
 
     auto error_info = collectStreamSamplerError(sampler_output, success_cpu, batch_idx_in, cur_batch_size);
+    if (selected_probs_cpu.defined() && stream->calculateSoftmaxProbs() && !error_info.has_value()) {
+        for (int i = 0; i < next_batch_size; ++i) {
+            const auto token = new_tokens.data_ptr<int32_t>()[i];
+            if (token < 0 || token >= model_output.logits.size(1)) {
+                error_info =
+                    ErrorInfo(ErrorCode::OUT_OF_VOCAB_RANGE, "selected output token is outside the logits vocabulary");
+                break;
+            }
+        }
+    }
     if (asyncDebugEnabled() && success_cpu.defined()) {
         for (int i = 0; i < cur_batch_size; ++i) {
             if (!(success_cpu.data_ptr<bool>()[batch_idx_in + i])) {

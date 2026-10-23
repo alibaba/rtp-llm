@@ -10,6 +10,13 @@ google_test_deps = [
     "@com_google_googletest//:gtest_main",
 ]
 
+cc_test(
+    name = "exception_test",
+    srcs = ["ExceptionTest.cc"],
+    copts = copts(),
+    deps = google_test_deps + ["//rtp_llm/cpp/utils:core_utils"],
+)
+
 test_deps = [
     "//rtp_llm/cpp/utils:core_utils",
     "//rtp_llm/cpp/utils:kv_cache_utils",

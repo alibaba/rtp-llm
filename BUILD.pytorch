@@ -47,6 +47,35 @@ cc_library(
             # "torch/lib/lib*amd*.so*",
         ]),
         "//conditions:default": [],
+    }) + select({
+        # Torch 2.11 ARM wheels keep CPU dependencies in torch/lib and split
+        # NVSHMEM out of libtorch_cuda. Carry them in the C++ link and runfiles.
+        "@//:using_cuda13_arm": [
+            "torch/lib/libtorch_nvshmem.so",
+            "@pip_cuda13_arm_torch_nvidia_nvshmem_cu13//:site-packages/nvidia/nvshmem/lib/libnvshmem_host.so.3",
+            "@pip_cuda13_arm_torch_nvidia_cusparselt_cu13//:site-packages/nvidia/cusparselt/lib/libcusparseLt.so.0",
+            "@pip_cuda13_arm_torch_nvidia_nccl_cu13//:site-packages/nvidia/nccl/lib/libnccl.so.2",
+            "torch/lib/libarm_compute.so",
+            "torch/lib/libarm_compute_graph.so",
+            "torch/lib/libgfortran.so.5",
+            "torch/lib/libnvpl_blas_core.so.0",
+            "torch/lib/libnvpl_blas_lp64_gomp.so.0",
+            "torch/lib/libnvpl_lapack_core.so.0",
+            "torch/lib/libnvpl_lapack_lp64_gomp.so.0",
+        ] + [
+            "@pip_cuda13_arm_torch_nvidia_cudnn_cu13//:site-packages/nvidia/cudnn/lib/libcudnn" + suffix + ".so.9"
+            for suffix in [
+                "",
+                "_adv",
+                "_cnn",
+                "_engines_precompiled",
+                "_engines_runtime_compiled",
+                "_graph",
+                "_heuristic",
+                "_ops",
+            ]
+        ],
+        "//conditions:default": [],
     }),
     hdrs = glob([
         "torch/include/*.h",

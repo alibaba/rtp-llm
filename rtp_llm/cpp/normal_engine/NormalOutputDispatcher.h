@@ -37,7 +37,8 @@ private:
                               bool                 return_all_probs,
                               const torch::Tensor& new_tokens_all,
                               const torch::Tensor& token_ids_cpu,
-                              const torch::Tensor& success_cpu) const;
+                              const torch::Tensor& success_cpu,
+                              const torch::Tensor& selected_probs_cpu) const;
 
 private:
     std::vector<int64_t> output_vocab_ids_;

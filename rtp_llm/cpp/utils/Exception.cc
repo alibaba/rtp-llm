@@ -26,43 +26,56 @@ namespace rtp_llm {
 
 namespace {
 int constexpr VOID_PTR_SZ = 2 + sizeof(void*) * 2;
+
+std::string formatTrace(void* const* frames, int frame_count) {
+    auto const         trace = backtrace_symbols(frames, frame_count);
+    std::ostringstream buf;
+    for (auto i = 1; i < frame_count; ++i) {
+        Dl_info info;
+        if (dladdr(frames[i], &info) && info.dli_sname) {
+            auto const clearName = RTPException::demangle(info.dli_sname);
+            buf << rtp_llm::fmtstr("%-3d %*p %s + %zd",
+                                   i,
+                                   VOID_PTR_SZ,
+                                   frames[i],
+                                   clearName.c_str(),
+                                   static_cast<char*>(frames[i]) - static_cast<char*>(info.dli_saddr));
+        } else {
+            buf << rtp_llm::fmtstr("%-3d %*p %s", i, VOID_PTR_SZ, frames[i], trace ? trace[i] : "[unavailable]");
+        }
+        if (i < frame_count - 1) {
+            buf << std::endl;
+        }
+    }
+
+    if (frame_count == RTPException::MAX_FRAMES)
+        buf << std::endl << "[truncated]";
+
+    std::free(trace);
+    return buf.str();
 }
 
-RTPException::RTPException(char const* file, std::size_t line, const std::string& msg): std::runtime_error{""} {
-    mNbFrames                 = backtrace(mCallstack.data(), MAX_FRAMES);
-    auto const          trace = getTrace();
-    std::runtime_error::operator=(
-        std::runtime_error{rtp_llm::fmtstr("%s (%s:%zu)\n%s", msg.c_str(), file, line, trace.c_str())});
+std::string exceptionMessage(char const* file, std::size_t line, std::string const& msg) {
+    std::array<void*, RTPException::MAX_FRAMES> frames{};
+    auto const                                  count = backtrace(frames.data(), frames.size());
+    auto const                                  trace = formatTrace(frames.data(), count);
+    return rtp_llm::fmtstr("%s (%s:%zu)\n%s", msg.c_str(), file, line, trace.c_str());
+}
+}  // namespace
+
+RTPException::RTPException(char const* file, std::size_t line, const std::string& msg):
+    // Construct the base once with its final text, avoiding assignment and
+    // destruction of a temporary base exception while assembling the trace.
+    std::runtime_error{exceptionMessage(file, line, msg).c_str()} {
+    // Keep the existing getTrace() API and object layout. This second capture
+    // records the same throwing call site after the base has been initialized.
+    mNbFrames = backtrace(mCallstack.data(), MAX_FRAMES);
 }
 
 RTPException::~RTPException() noexcept = default;
 
 std::string RTPException::getTrace() const {
-    auto const         trace = backtrace_symbols(mCallstack.data(), mNbFrames);
-    std::ostringstream buf;
-    for (auto i = 1; i < mNbFrames; ++i) {
-        Dl_info info;
-        if (dladdr(mCallstack[i], &info) && info.dli_sname) {
-            auto const clearName = demangle(info.dli_sname);
-            buf << rtp_llm::fmtstr("%-3d %*p %s + %zd",
-                                   i,
-                                   VOID_PTR_SZ,
-                                   mCallstack[i],
-                                   clearName.c_str(),
-                                   static_cast<char*>(mCallstack[i]) - static_cast<char*>(info.dli_saddr));
-        } else {
-            buf << rtp_llm::fmtstr("%-3d %*p %s", i, VOID_PTR_SZ, mCallstack[i], trace[i]);
-        }
-        if (i < mNbFrames - 1) {
-            buf << std::endl;
-        }
-    }
-
-    if (mNbFrames == MAX_FRAMES)
-        buf << std::endl << "[truncated]";
-
-    std::free(trace);
-    return buf.str();
+    return formatTrace(mCallstack.data(), mNbFrames);
 }
 
 std::string RTPException::demangle(char const* name) {

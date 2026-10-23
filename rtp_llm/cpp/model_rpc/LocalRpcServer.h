@@ -63,6 +63,9 @@ public:
 
     grpc::Status SetRestart(grpc::ServerContext* context, const EmptyPB* request, EmptyPB* response);
 
+    grpc::Status
+    RlControl(grpc::ServerContext* context, const RlControlRequestPB* request, RlControlResponsePB* response);
+
     grpc::Status SetLogLevel(grpc::ServerContext* context, const SetLogLevelRequestPB* request, EmptyPB* response);
 
     grpc::Status StartProfile(grpc::ServerContext* context, const StartProfileRequestPB* request, EmptyPB* response);
@@ -169,6 +172,14 @@ protected:
     std::chrono::steady_clock::time_point torch_allocator_dump_last_completed_at_;
     std::unordered_set<std::string>       torch_allocator_dump_ids_;
     std::deque<std::string>               torch_allocator_dump_id_order_;
+    std::mutex                            rl_control_mutex_;
+    std::string                           rl_phase_ = "running";
+    std::string                           rl_update_id_;
+    uint64_t                              rl_version_sequence_    = 0;
+    int64_t                               rl_global_step_         = 0;
+    int64_t                               rl_pending_global_step_ = 0;
+    uint64_t                              rl_received_weights_    = 0;
+    uint64_t                              rl_applied_weights_     = 0;
 };
 
 }  // namespace rtp_llm

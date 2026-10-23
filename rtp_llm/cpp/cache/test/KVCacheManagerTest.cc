@@ -79,6 +79,61 @@ private:
     bool old_core_dump_on_exception_{false};
 };
 
+TEST_F(KVCacheManagerTest, RLReleaseRestoresFixedCapacity) {
+    const auto config  = makeSimpleMhaCacheConfig(2, 8, 2, DataType::TYPE_BF16);
+    auto       manager = std::make_shared<KVCacheManager>(config, false);
+    ASSERT_TRUE(manager->init());
+    const auto bytes  = manager->backingBytes();
+    const auto blocks = manager->totalBlocksNum();
+    ASSERT_GT(bytes, 0u);
+    for (int cycle = 0; cycle < 3; ++cycle) {
+        auto storage = manager->allLayerCacheBase().at(0).kv_addr.storage().getWeakStorageImpl();
+        ASSERT_FALSE(storage.expired());
+        ASSERT_TRUE(manager->releaseForRL().ok());
+        EXPECT_TRUE(storage.expired());
+        EXPECT_EQ(manager->backingBytes(), 0u);
+        ASSERT_TRUE(manager->restoreForRL().ok());
+        EXPECT_EQ(manager->backingBytes(), bytes);
+        EXPECT_EQ(manager->totalBlocksNum(), blocks);
+        EXPECT_EQ(manager->freeBlocksNum(), manager->availableBlocksNum());
+    }
+}
+
+TEST_F(KVCacheManagerTest, RLReleaseRejectsExternalTensorOwner) {
+    const auto config  = makeSimpleMhaCacheConfig(2, 8, 2, DataType::TYPE_BF16);
+    auto       manager = std::make_shared<KVCacheManager>(config, false);
+    ASSERT_TRUE(manager->init());
+    auto external_view = manager->allLayerCacheBase().at(0).kv_addr;
+    external_view.fill_(1);
+    // This deliberately invalidates the manager. A native engine must fail
+    // closed and restart, rather than report the memory as successfully freed.
+    const auto status = manager->releaseForRL();
+    EXPECT_EQ(status.code(), absl::StatusCode::kInternal);
+    EXPECT_NE(std::string(status.message()).find("external Tensor owner"), std::string::npos);
+    EXPECT_FALSE(manager->restoreForRL().ok());
+    EXPECT_EQ(external_view.sum().item<float>(), static_cast<float>(external_view.numel()));
+}
+
+TEST_F(KVCacheManagerTest, RLReleaseRejectsRequestAndTransferReferences) {
+    const auto config  = makeSimpleMhaCacheConfig(2, 8, 2, DataType::TYPE_BF16);
+    auto       manager = std::make_shared<KVCacheManager>(config, false);
+    ASSERT_TRUE(manager->init());
+    auto pool   = manager->allocator_->getBlockPool();
+    auto blocks = pool->malloc(1);
+    ASSERT_EQ(blocks.size(), 1u);
+    EXPECT_EQ(manager->releaseForRL().code(), absl::StatusCode::kFailedPrecondition);
+    pool->connectorReference(blocks);
+    pool->requestFree(blocks);
+    EXPECT_EQ(manager->releaseForRL().code(), absl::StatusCode::kFailedPrecondition);
+    pool->blockCacheReference(blocks);
+    pool->connectorFree(blocks);
+    EXPECT_EQ(manager->releaseForRL().code(), absl::StatusCode::kFailedPrecondition);
+    pool->blockCacheFree(blocks);
+    pool.reset();
+    EXPECT_TRUE(manager->releaseForRL().ok());
+    EXPECT_TRUE(manager->restoreForRL().ok());
+}
+
 static void assertBlockBytesEq(const std::shared_ptr<rtp_llm::KVCacheManager>& cache_manager,
                                int                                             layer_id,
                                int                                             block_id,

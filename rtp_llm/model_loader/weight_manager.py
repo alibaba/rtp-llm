@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import re
 import threading
 from typing import Any, Mapping, Sequence
@@ -124,6 +125,74 @@ class WeightManager:
         # serialized via the server's request handling, a per-update lock might
         # be redundant or require finer-grained locking within _weights.update_...
         self._lock = threading.Lock()
+        self._rl_update = None
+        self._rl_source_shapes = None
+        if os.environ.get("RTP_LLM_RL_MODE") == "1":
+            config = self._weights_loader.model_config
+            if config.model_type != "qwen_3" or config.enable_fp32_lm_head:
+                raise ValueError("RL mode requires Qwen3 dense with a BF16 LM head")
+
+    def rl_begin(self, max_buffer_bytes: int) -> None:
+        """Called only by the native RL control RPC after TP quiescence."""
+        import json
+        from pathlib import Path
+
+        from safetensors import safe_open
+
+        from rtp_llm.model_loader.rl_weight_update import RlWeightUpdate
+
+        if self._rl_update is not None:
+            raise RuntimeError("another RL weight transaction is active")
+        config = self._weights_loader.model_config
+        if config.model_type != "qwen_3" or config.enable_fp32_lm_head:
+            raise ValueError(
+                "RL updates currently require Qwen3 dense with a BF16 LM head"
+            )
+        if (
+            self._non_owned_global_weights
+            or self._weights_loader.get_load_config().compute_dtype != torch.bfloat16
+        ):
+            raise ValueError("RL updates require owned BF16 weights")
+        if max_buffer_bytes <= 0:
+            raise ValueError("max_buffer_bytes must be positive")
+        if self._rl_source_shapes is None:
+            checkpoint = Path(config.ckpt_path)
+            index = json.loads(
+                (checkpoint / "model.safetensors.index.json").read_text()
+            )["weight_map"]
+            shapes = {}
+            for filename in sorted(set(index.values())):
+                with safe_open(
+                    checkpoint / filename, framework="pt", device="cpu"
+                ) as handle:
+                    for name in handle.keys():
+                        if index.get(name) == filename:
+                            shapes[name] = tuple(handle.get_slice(name).get_shape())
+            if set(shapes) != set(index):
+                raise ValueError("checkpoint HF shape manifest is incomplete")
+            self._rl_source_shapes = shapes
+        self._rl_update = RlWeightUpdate(
+            self._weights_loader,
+            self._weights,
+            self._device,
+            self._rl_source_shapes,
+            max_buffer_bytes,
+        )
+
+    def rl_push(self, name: str, metadata: bytes, timeout: float) -> None:
+        from rtp_llm.utils.cuda_ipc import CudaIpcV2
+
+        if self._rl_update is None:
+            raise RuntimeError("no active RL weight transaction")
+        tensor = CudaIpcV2.import_tensor(metadata)
+        self._rl_update.push(name, tensor, timeout=timeout)
+
+    def rl_finish(self, timeout: float) -> dict:
+        if self._rl_update is None:
+            raise RuntimeError("no active RL weight transaction")
+        result = self._rl_update.finish(timeout=timeout)
+        self._rl_update = None
+        return result
 
     def extract_layer_number(self, s: str) -> int | None:
         """

@@ -222,6 +222,73 @@ KVCacheManager::~KVCacheManager() {
     coordinator_.reset();
 }
 
+size_t KVCacheManager::backingBytes() const {
+    // RL currently admits only dense single-pool models.
+    const auto pool = allocator_ ? allocator_->getBlockPool() : nullptr;
+    return pool ? pool->getTotalSizeBytes() : 0;
+}
+
+absl::Status KVCacheManager::releaseForRL() {
+    if (rl_released_ || !allocator_) {
+        return absl::FailedPreconditionError("RL KV cache is not resident");
+    }
+    if (!dynamic_cast<SingleTypeKVCacheAllocator*>(allocator_.get())) {
+        return absl::FailedPreconditionError("RL KV release requires a single-type allocator");
+    }
+    if (kv_cache_config_.reuse_cache || kv_cache_config_.enable_memory_cache
+        || kv_cache_config_.enable_memory_cache_disk || kv_cache_config_.enable_remote_cache || hasActiveConnectors()
+        || getCacheStore() || use_cuda_malloc_block_pool_) {
+        return absl::FailedPreconditionError(
+            "RL KV release does not support prefix reuse, tier caches or registered backing");
+    }
+    std::vector<c10::weak_intrusive_ptr<c10::StorageImpl>> storage_refs;
+    {
+        const auto pool = allocator_->getBlockPool();
+        if (pool->requestRefBlocksNum() != 0) {
+            return absl::FailedPreconditionError("RL KV still has request references");
+        }
+        if (pool->connectorRefBlocksNum() != 0 || pool->blockCacheRefBlocksNum() != 0) {
+            return absl::FailedPreconditionError("RL KV still has cache or transfer references");
+        }
+        for (const auto& tensor : pool->allLayerCacheBase()) {
+            if (tensor.defined())
+                storage_refs.push_back(tensor.storage().getWeakStorageImpl());
+        }
+        for (const auto& tensor : pool->allLayerScaleCacheBase()) {
+            if (tensor.defined())
+                storage_refs.push_back(tensor.storage().getWeakStorageImpl());
+        }
+    }
+    stop_.store(true, std::memory_order_relaxed);
+    if (metrics_reporter_thread_.joinable()) {
+        metrics_reporter_thread_.join();
+    }
+    // Drop connector ownership before the allocator and its backing pool.
+    coordinator_.reset();
+    allocator_.reset();
+    {
+        std::lock_guard<std::mutex> lock(cache_status_snapshot_mutex_);
+        cache_status_snapshot_.reset();
+    }
+    for (const auto& storage : storage_refs) {
+        if (!storage.expired()) {
+            return absl::InternalError("RL KV storage still has an external Tensor owner");
+        }
+    }
+    rl_released_ = true;
+    return absl::OkStatus();
+}
+
+absl::Status KVCacheManager::restoreForRL() {
+    if (!rl_released_)
+        return absl::FailedPreconditionError("RL KV cache was not released");
+    // Reuse the original finalized config, not current free-memory sizing.
+    if (!init())
+        return absl::InternalError("RL KV restore failed");
+    rl_released_ = false;
+    return absl::OkStatus();
+}
+
 // 初始化和配置相关
 
 bool KVCacheManager::init() {
@@ -368,9 +435,13 @@ int KVCacheManager::estimatePeakNeedBlocks(const BatchKVCacheResourcePtr& batch_
                                                    target_batch_size);
 }
 
-std::vector<int> KVCacheManager::estimateSingleSequencePeakNeedBlocksByPool(
-    const BatchKVCacheResourcePtr& batch_kv_cache_resource,
-    int seq_len, int common_seq_len, int remaining_tokens, int reserve_step, bool enable_reuse_cache) const {
+std::vector<int>
+KVCacheManager::estimateSingleSequencePeakNeedBlocksByPool(const BatchKVCacheResourcePtr& batch_kv_cache_resource,
+                                                           int                            seq_len,
+                                                           int                            common_seq_len,
+                                                           int                            remaining_tokens,
+                                                           int                            reserve_step,
+                                                           bool                           enable_reuse_cache) const {
     return allocator_->estimateSingleSequencePeakNeedBlocksByPool(
         batch_kv_cache_resource, seq_len, common_seq_len, remaining_tokens, reserve_step, enable_reuse_cache);
 }

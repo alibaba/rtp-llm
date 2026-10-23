@@ -56,6 +56,100 @@ protected:
     }
 };
 
+TEST_F(NormalBatchStreamProcessorTest, testBatchedSelectedProbabilitiesPreserveRawLogitsAndOptIn) {
+    for (auto dtype : {torch::kFloat32, torch::kBFloat16}) {
+        ResourceContext resource_context;
+        ModelConfig     model_config;
+        model_config.max_seq_len = 8;
+        model_config.vocab_size  = 3;
+        model_config.num_layers  = 1;
+        RuntimeConfig                runtime_config;
+        std::list<GenerateStreamPtr> streams;
+        for (int row = 0; row < 3; ++row) {
+            auto query                                   = make_shared<GenerateInput>();
+            query->input_ids                             = hostIntBuffer({row});
+            query->generate_config                       = make_shared<GenerateConfig>();
+            query->generate_config->return_softmax_probs = row != 1;
+            query->generate_config->return_logits        = true;
+            auto stream =
+                make_shared<NormalGenerateStream>(query, model_config, runtime_config, resource_context, nullptr);
+            stream->generate_status_->status = StreamState::RUNNING;
+            streams.push_back(stream);
+        }
+        PDSepConfig                 pd_sep_config;
+        ProfilingDebugLoggingConfig logging_config;
+        CacheConfig                 cache_config;
+        NormalBatchStreamProcessor  processor(model_config, pd_sep_config, logging_config, cache_config, false);
+        MergedOutput                outputs;
+        // A graph bucket may include unused rows after the three live requests.
+        auto logits = torch::tensor({0.1f, -2.f, 3.f, 1.f, 4.f, 0.f, 2.f, -3.f, 0.5f, 99.f, 0.f, 1.f})
+                          .reshape({4, 3})
+                          .to(dtype)
+                          .to(torch::kCUDA);
+        auto original                    = logits.clone();
+        auto expected                    = torch::softmax(original.to(torch::kFloat32), -1).cpu();
+        outputs.model_output.logits      = logits;
+        outputs.sampler_output.token_ids = torch::tensor({2, 1, 0}, torch::kInt32).reshape({3, 1}).to(torch::kCUDA);
+        outputs.sampler_output.success   = torch::ones({3}, torch::kBool).to(torch::kCUDA);
+        ASSERT_TRUE(processor.dispatch(StreamGroups(streams), outputs).ok());
+        EXPECT_TRUE(torch::equal(logits, original));
+        int row = 0;
+        for (const auto& stream : streams) {
+            ASSERT_FALSE(stream->hasError());
+            EXPECT_EQ(stream->completeTokenIdsVec(0), (std::vector<int>{row, 2 - row}));
+            if (row == 1) {
+                EXPECT_FALSE(stream->getSoftmaxProbs().defined());
+            } else {
+                EXPECT_NEAR(
+                    stream->getSoftmaxProbs().data_ptr<float>()[1], expected[row][2 - row].item<float>(), 1e-6f);
+            }
+            ++row;
+        }
+    }
+}
+
+TEST_F(NormalBatchStreamProcessorTest, testBatchedSelectedProbabilitiesIsolateInvalidSample) {
+    for (bool sampler_success : {false, true}) {
+        ResourceContext resource_context;
+        ModelConfig     model_config;
+        model_config.max_seq_len = 8;
+        model_config.vocab_size  = 3;
+        model_config.num_layers  = 1;
+        RuntimeConfig                runtime_config;
+        std::list<GenerateStreamPtr> streams;
+        for (int row = 0; row < 3; ++row) {
+            auto query                                   = make_shared<GenerateInput>();
+            query->input_ids                             = hostIntBuffer({row});
+            query->generate_config                       = make_shared<GenerateConfig>();
+            query->generate_config->return_softmax_probs = true;
+            auto stream =
+                make_shared<NormalGenerateStream>(query, model_config, runtime_config, resource_context, nullptr);
+            stream->generate_status_->status = StreamState::RUNNING;
+            streams.push_back(stream);
+        }
+        PDSepConfig                 pd_sep_config;
+        ProfilingDebugLoggingConfig logging_config;
+        CacheConfig                 cache_config;
+        NormalBatchStreamProcessor  processor(model_config, pd_sep_config, logging_config, cache_config, false);
+        MergedOutput                outputs;
+        outputs.model_output.logits      = torch::zeros({3, 3}, torch::kFloat32).to(torch::kCUDA);
+        outputs.sampler_output.token_ids = torch::tensor({2, -1, 0}, torch::kInt32).reshape({3, 1}).to(torch::kCUDA);
+        outputs.sampler_output.success   = torch::tensor({true, sampler_success, true}, torch::kBool).to(torch::kCUDA);
+        ASSERT_TRUE(processor.dispatch(StreamGroups(streams), outputs).ok());
+        int row = 0;
+        for (const auto& stream : streams) {
+            if (row == 1) {
+                EXPECT_TRUE(stream->hasError());
+            } else {
+                ASSERT_FALSE(stream->hasError());
+                EXPECT_EQ(stream->completeTokenIdsVec(0), (std::vector<int>{row, 2 - row}));
+                EXPECT_NEAR(stream->getSoftmaxProbs().data_ptr<float>()[1], 1.f / 3.f, 1e-6f);
+            }
+            ++row;
+        }
+    }
+}
+
 TEST_F(NormalBatchStreamProcessorTest, testWarmUpWithoutCacheManager) {
     ResourceContext resource_context;
     ModelConfig     model_config;

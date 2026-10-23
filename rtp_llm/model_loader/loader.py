@@ -2,7 +2,7 @@ import gc
 import logging
 import os
 from collections import OrderedDict
-from typing import Dict, List, Mapping, NamedTuple, Optional, Tuple
+from typing import Dict, Iterable, Iterator, List, Mapping, NamedTuple, Optional, Tuple
 
 import safetensors
 import torch
@@ -524,6 +524,101 @@ class ModelLoader:
             )
             for name, tensor in weights.items():
                 yield (None, name, tensor)
+
+    def prepare_weights_from_tensors(
+        self,
+        named_tensors: Iterable[Tuple[str, torch.Tensor]],
+        device: str,
+        *,
+        max_buffer_bytes: int,
+    ) -> Iterator[Tuple[Optional[int], str, torch.Tensor]]:
+        """Convert a complete HF tensor stream using the checkpoint load path.
+
+        The producer must make inputs ready on the consuming CUDA stream.
+        Input buffers may be reused when the iterator requests the next tensor.
+        Collectors own copies until a full parameter group can be transformed.
+        The byte limit bounds these pending copies, not conversion workspace or
+        yielded output tensors. Send complete groups together to limit memory.
+        Descriptor-generated weights are emitted after source coverage checks.
+
+        This only converts tensors: it does not pause inference, update storage,
+        or commit a model version. A caller applying outputs in place must keep
+        inference quiescent, exhaust this iterator before committing, and fail
+        the job on any error (earlier groups may already have been applied).
+        """
+        if max_buffer_bytes <= 0:
+            raise ValueError("max_buffer_bytes must be positive")
+        if self._load_config.is_ft_style_weight or self._load_config.merge_lora:
+            raise NotImplementedError("tensor streaming requires unmerged HF weights")
+
+        # New collectors for every update; clear() retains completion history.
+        tensor_map, groups = self._generate_weight_info()
+        group_names = [
+            group.weight.get_tensor_names(group.layer_id, self._load_config)
+            for group in groups
+        ]
+        if sum(len(names) for names in group_names) != len(tensor_map):
+            raise NotImplementedError(
+                "shared HF inputs across weight groups are unsupported"
+            )
+        expected = set(tensor_map)
+        seen = set()
+        pending_bytes = 0
+        sizes = {}
+        try:
+            for name, tensor in named_tensors:
+                if name not in expected:
+                    raise KeyError(f"unexpected HF tensor: {name}")
+                if name in seen:
+                    raise ValueError(f"duplicate HF tensor: {name}")
+                if not isinstance(tensor, torch.Tensor):
+                    raise TypeError(f"HF tensor {name!r} is not a torch.Tensor")
+                size = tensor.numel() * tensor.element_size()
+                if pending_bytes + size > max_buffer_bytes:
+                    raise ValueError(
+                        f"HF tensor buffer exceeds {max_buffer_bytes} bytes at {name}; "
+                        "send complete weight groups together or increase the limit"
+                    )
+                group = tensor_map[name]
+                owned_tensor = tensor.detach().clone()
+                if tensor.is_cuda:
+                    # A transport may reuse its buffer on another stream/process.
+                    torch.cuda.current_stream(tensor.device).synchronize()
+                complete = group.collector.store_tensor(name, owned_tensor)
+                del owned_tensor
+                seen.add(name)
+                sizes[name] = size
+                pending_bytes += size
+                if not complete:
+                    continue
+                converted = group.weight.load(
+                    group.collector, group.layer_id, device, self._load_config
+                )
+                for key in group.weight.get_tensor_names(
+                    group.layer_id, self._load_config
+                ):
+                    pending_bytes -= sizes.pop(key)
+                group.collector.clear()
+                for key, value in converted.items():
+                    yield group.layer_id, key, value
+                del converted
+            missing = expected - seen
+            if missing:
+                raise ValueError(f"missing HF tensors: {sorted(missing)}")
+            # The checkpoint loader also synthesizes weights such as Qwen3's
+            # zero final-layernorm bias, which have no HF source tensors.
+            for group, names in zip(groups, group_names):
+                if names:
+                    continue
+                converted = group.weight.load(
+                    group.collector, group.layer_id, device, self._load_config
+                )
+                for key, value in converted.items():
+                    yield group.layer_id, key, value
+                del converted
+        finally:
+            for group in groups:
+                group.collector.clear()
 
     def _generate_weight_info(self) -> Tuple[Dict[str, WeightInfo], List[WeightInfo]]:
         # WeightInfo = namedtuple("WeightInfo", ["weight", "layer_id", "collector"])

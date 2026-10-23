@@ -1,6 +1,7 @@
 #include <algorithm>
 #include <condition_variable>
 #include <cstddef>
+#include <cstring>
 #include <memory>
 #include <typeinfo>
 #include <ATen/Generator.h>
@@ -1243,13 +1244,34 @@ void GenerateStream::setSoftmaxProbs(const torch::Tensor& softmax_probs,
                                      const torch::Tensor& src_batch_indices) {
     RTP_LLM_PROFILE_FUNCTION();
     RTP_LLM_CHECK(softmax_probs_.defined());
-    auto probs_cpu = softmax_probs.to(torch::kCPU, torch::kFloat32).contiguous();
+    auto probs_cpu = softmax_probs.device().is_cpu() && softmax_probs.scalar_type() == torch::kFloat32
+                             && softmax_probs.is_contiguous() ?
+                         softmax_probs :
+                         softmax_probs.to(torch::kCPU, torch::kFloat32).contiguous();
     RTP_LLM_CHECK(probs_cpu.dim() == 2);
     RTP_LLM_CHECK(probs_cpu.size(0) == currentBatchSize());
     auto num_probs = probs_cpu.size(1);
     RTP_LLM_CHECK(start_pos >= 0);
     RTP_LLM_CHECK(start_pos + num_probs <= softmax_probs_.size(1));
     RTP_LLM_CHECK(currentBatchSize() <= softmax_probs_.size(0));
+
+    // Normal decode already supplies a contiguous CPU probability row. Avoid
+    // constructing Tensor views for each request/token; keep the general copy
+    // for parent-row remapping, aliases and nonstandard destination layouts.
+    if (!src_batch_indices.defined() && softmax_probs_.device().is_cpu()
+        && softmax_probs_.scalar_type() == torch::kFloat32 && softmax_probs_.is_contiguous()
+        && !probs_cpu.is_alias_of(softmax_probs_)) {
+        if (num_probs > 0) {
+            auto*       destination = softmax_probs_.data_ptr<float>();
+            const auto* source      = probs_cpu.data_ptr<float>();
+            const auto  row_stride  = softmax_probs_.size(1);
+            for (int64_t row = 0; row < currentBatchSize(); ++row) {
+                std::memcpy(
+                    destination + row * row_stride + start_pos, source + row * num_probs, num_probs * sizeof(float));
+            }
+        }
+        return;
+    }
 
     if (src_batch_indices.defined()) {
         auto indices_cpu = src_batch_indices.to(torch::kCPU, torch::kLong).contiguous();
