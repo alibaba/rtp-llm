@@ -886,6 +886,7 @@ class PreprocessMetricTest(TestCase):
         ]
         self.assertEqual(depth_values[-1], 2)
 
+        report.reset_mock()
         executor.pool.callbacks[0][0](None)
         executor.pool.callbacks[1][1](RuntimeError("preprocess failed"))
         depth_values = [
@@ -894,7 +895,9 @@ class PreprocessMetricTest(TestCase):
             if call.args
             and call.args[0] == GaugeMetrics.VIT_PREPROCESS_QUEUE_SIZE_METRIC
         ]
-        self.assertEqual(depth_values[-1], 0)
+        report.assert_not_called()
+        self.assertEqual(executor._pending_preprocess_tasks, set())
+        self.assertTrue(all(item.preprocess_ready for item in work_items))
 
 
 class FakeSlowEmbeddingInterface(FakeMultiModalEmbeddingInterface):
@@ -1156,7 +1159,7 @@ class EmptyEmbeddingResultTest(TestCase):
         )
         for output in outputs:
             with self.subTest(output=output), patch(
-                "rtp_llm.multimodal.mm_process_engine.get_multimodal_feature_hash"
+                "rtp_llm.multimodal.mm_work_item.get_multimodal_feature_hash"
             ) as hash_op:
                 with self.assertRaisesRegex(ValueError, "ViT returned empty embedding"):
                     _feature_hashes_from_result((output, None))
@@ -1165,7 +1168,7 @@ class EmptyEmbeddingResultTest(TestCase):
     def test_scalar_tensor_fails_before_any_hash_is_computed(self):
         for output in (torch.tensor(1), [torch.ones((2, 4)), torch.tensor(1)]):
             with self.subTest(output=output), patch(
-                "rtp_llm.multimodal.mm_process_engine.get_multimodal_feature_hash"
+                "rtp_llm.multimodal.mm_work_item.get_multimodal_feature_hash"
             ) as hash_op:
                 with self.assertRaisesRegex(
                     ValueError, "ViT returned scalar embedding"
@@ -1190,7 +1193,7 @@ class AsyncSubmitGetEmbeddingTest(TestCase):
                             "batched_embedding",
                             return_value=[(torch.empty((0, 4)), None)],
                         ), patch(
-                            "rtp_llm.multimodal.mm_process_engine.get_multimodal_feature_hash"
+                            "rtp_llm.multimodal.mm_work_item.get_multimodal_feature_hash"
                         ) as hash_op:
                             with self.assertRaisesRegex(
                                 Exception, "ViT returned empty embedding"
@@ -1242,7 +1245,7 @@ class AsyncSubmitGetEmbeddingTest(TestCase):
         )
         try:
             with patch.object(engine, "_async_compute", side_effect=compute), patch(
-                "rtp_llm.multimodal.mm_process_engine._feature_hashes_from_result",
+                "rtp_llm.multimodal.mm_work_item._feature_hashes_from_result",
                 side_effect=hash_result,
             ) as hash_op:
                 future = pool.submit(engine.get_embedding_result, [first])
@@ -1293,12 +1296,12 @@ class AsyncSubmitGetEmbeddingTest(TestCase):
                 consumer.wait_stream.side_effect = depend_on_gpu
                 try:
                     with patch(
-                        "rtp_llm.multimodal.mm_process_engine._current_cuda_streams",
+                        "rtp_llm.multimodal.mm_work_item._current_cuda_streams",
                         return_value=[producer],
                     ) as record, patch(
                         "torch.cuda.current_stream", return_value=consumer
                     ), patch(
-                        "rtp_llm.multimodal.mm_process_engine._feature_hashes_from_result",
+                        "rtp_llm.multimodal.mm_work_item._feature_hashes_from_result",
                         side_effect=hash_result,
                     ) as hash_op:
                         result = engine.get_embedding_result(
@@ -1402,7 +1405,7 @@ class AsyncSubmitGetEmbeddingTest(TestCase):
         engine._async_compute = compute
         try:
             with patch(
-                "rtp_llm.multimodal.mm_process_engine._feature_hashes_from_result",
+                "rtp_llm.multimodal.mm_work_item._feature_hashes_from_result",
                 return_value=[torch.tensor([-3, 4], dtype=torch.int32)],
             ):
                 result = engine.get_embedding_result([inp], hashes_only=True)[0]
@@ -1907,6 +1910,10 @@ class _StubGreenNetProvider(GreenNetProvider):
     def is_enabled(self) -> bool:
         return True
 
+    async def submit_sources(self, request, mm_inputs, sources):
+        self.source_bytes = list(sources)
+        return await self.preprocess_and_submit(request, mm_inputs)
+
     async def preprocess_and_submit(self, request, mm_inputs):
         self.calls += 1
         self.request_ids.append(str(request.id))
@@ -1945,7 +1952,9 @@ class _UrlRecordingEmbedding(FakeMultiModalEmbeddingInterface):
 class MMProcessEngineGreenNetTest(TestCase):
     def test_source_download_uses_configured_executor(self):
         engine = self._make_engine(source_download_concurrency=2)
-        engine._greennet_provider = _StubGreenNetProvider(GreenNetVerdict(passed=True))
+        engine._inspection._greennet_provider = _StubGreenNetProvider(
+            GreenNetVerdict(passed=True)
+        )
         names = []
 
         def prepare(mm_inputs, vit_config, *, deadline, cancellation_event):
@@ -2023,8 +2032,8 @@ class MMProcessEngineGreenNetTest(TestCase):
 
     def test_stop_cancels_pending_greennet_and_closes_loop(self):
         engine = self._make_engine()
-        loop = engine._ensure_greennet_loop()
-        thread = engine._greennet_loop_thread
+        loop = engine._inspection._ensure_greennet_loop()
+        thread = engine._inspection._greennet_loop_thread
         started, cancelled = threading.Event(), threading.Event()
 
         async def pending():
@@ -2042,11 +2051,11 @@ class MMProcessEngineGreenNetTest(TestCase):
         self.assertTrue(loop.is_closed())
         self.assertFalse(thread.is_alive())
         with self.assertRaisesRegex(RuntimeError, "closed"):
-            engine._ensure_greennet_loop()
+            engine._inspection._ensure_greennet_loop()
 
     def test_async_compute_keeps_original_deadline_for_greennet(self):
         engine = self._make_engine()
-        engine._greennet_provider = _StubGreenNetProvider(
+        engine._inspection._greennet_provider = _StubGreenNetProvider(
             GreenNetVerdict(passed=True), delay=0.3
         )
         inp = self._make_input("fake://deadline")
@@ -2072,7 +2081,7 @@ class MMProcessEngineGreenNetTest(TestCase):
 
         engine.preprocess_executor.preprocess_func = slow_preprocess
         try:
-            with patch.object(engine._scheduler, "submit_and_wait") as forward:
+            with patch.object(engine._scheduler, "submit") as forward:
                 engine._run_async_compute([inp], key, entry, 1, time.monotonic() + 0.02)
                 with self.assertRaises(FtRuntimeException) as raised:
                     entry.wait(timeout=1)
@@ -2114,12 +2123,12 @@ class MMProcessEngineGreenNetTest(TestCase):
         engine = self._make_engine(FakeEmbeddingLengthInterface())
         engine._embedding_cache.resize(0, 0)
         engine._hash_key_cache.resize(0)
-        engine._greennet_provider = _StubGreenNetProvider(
+        engine._inspection._greennet_provider = _StubGreenNetProvider(
             GreenNetVerdict(passed=False, code=2, message="blocked")
         )
         try:
             with patch(
-                "rtp_llm.multimodal.mm_process_engine._feature_hashes_from_result"
+                "rtp_llm.multimodal.mm_work_item._feature_hashes_from_result"
             ) as hash_op:
                 with self.assertRaises(FtRuntimeException) as raised:
                     engine.get_embedding_result([self._make_input("fake://rejected")])
@@ -2207,7 +2216,7 @@ class MMProcessEngineGreenNetTest(TestCase):
     def test_v41_cache_hits_reuse_verdict_across_requests_and_uids(self):
         engine, request = self._make_v41_engine_and_request()
         provider = _StubGreenNetProvider(GreenNetVerdict(passed=True))
-        engine._greennet_provider = provider
+        engine._inspection._greennet_provider = provider
         try:
             with patch.object(
                 engine.mm_part,
@@ -2236,7 +2245,7 @@ class MMProcessEngineGreenNetTest(TestCase):
 
     def test_v41_disabled_inspection_skips_inspection_hook(self):
         engine, request = self._make_v41_engine_and_request()
-        engine._greennet_provider = GreenNetProvider()
+        engine._inspection._greennet_provider = GreenNetProvider()
         try:
             with patch.object(engine.mm_part, "prepare_inspection_inputs") as inspect:
                 result = self._embed_v41_request(engine, request)
@@ -2250,7 +2259,7 @@ class MMProcessEngineGreenNetTest(TestCase):
             with self.subTest(hashes_only=hashes_only):
                 engine, request = self._make_v41_engine_and_request()
                 provider = _StubGreenNetProvider(GreenNetVerdict(passed=True))
-                engine._greennet_provider = provider
+                engine._inspection._greennet_provider = provider
                 media = [self._make_input(request.multimodal_inputs[0].multimodal_url)]
                 try:
                     with patch.object(
@@ -2304,7 +2313,7 @@ class MMProcessEngineGreenNetTest(TestCase):
         provider = _StubGreenNetProvider(
             GreenNetVerdict(passed=True), rewrite_suffix=",not-an-inference-image"
         )
-        engine._greennet_provider = provider
+        engine._inspection._greennet_provider = provider
         source = self._make_input(request.multimodal_inputs[0].multimodal_url)
         try:
             prepared = engine.mm_part.preprocess_input(
@@ -2332,7 +2341,7 @@ class MMProcessEngineGreenNetTest(TestCase):
         for proxy in (False, True):
             with self.subTest(proxy=proxy):
                 engine, request = self._make_v41_engine_and_request()
-                engine._greennet_provider = GreenNetProvider()
+                engine._inspection._greennet_provider = GreenNetProvider()
                 engine.is_proxy_mode = proxy
                 try:
                     report.reset_mock()
@@ -2369,7 +2378,7 @@ class MMProcessEngineGreenNetTest(TestCase):
         for failure in ("unsupported_media", "invalid_input", "unsafe", "scheduler"):
             with self.subTest(failure=failure):
                 engine, request = self._make_v41_engine_and_request()
-                engine._greennet_provider = GreenNetProvider()
+                engine._inspection._greennet_provider = GreenNetProvider()
                 if failure == "unsupported_media":
                     request.multimodal_inputs[0].multimodal_type = int(MMUrlType.VIDEO)
                 elif failure == "invalid_input":
@@ -2377,7 +2386,7 @@ class MMProcessEngineGreenNetTest(TestCase):
                         "data:image/png;base64,bm90IGFuIGltYWdl"
                     )
                 elif failure == "unsafe":
-                    engine._greennet_provider = _StubGreenNetProvider(
+                    engine._inspection._greennet_provider = _StubGreenNetProvider(
                         GreenNetVerdict(passed=False, code=2, message="blocked")
                     )
                 else:
@@ -2416,7 +2425,7 @@ class MMProcessEngineGreenNetTest(TestCase):
     @patch("rtp_llm.multimodal.mm_process_engine.kmonitor.report")
     def test_v41_empty_request_metrics_and_telemetry_failure(self, report):
         engine, request = self._make_v41_engine_and_request()
-        engine._greennet_provider = GreenNetProvider()
+        engine._inspection._greennet_provider = GreenNetProvider()
         try:
             report.reset_mock()
             result = self._embed_v41_request(engine, MultimodalInputsPB())
@@ -2465,7 +2474,7 @@ class MMProcessEngineGreenNetTest(TestCase):
     def test_request_id_reaches_greennet_and_vit_access_logs(self):
         engine = self._make_engine()
         provider = _StubGreenNetProvider(GreenNetVerdict(passed=True, code=1))
-        engine._greennet_provider = provider
+        engine._inspection._greennet_provider = provider
         engine._access_logger = MagicMock(spec=MMAccessLogger)
         request_id = 987654321
 
@@ -2493,7 +2502,7 @@ class MMProcessEngineGreenNetTest(TestCase):
         provider = _StubGreenNetProvider(
             GreenNetVerdict(passed=True, code=1), delay=0.05
         )
-        engine._greennet_provider = provider
+        engine._inspection._greennet_provider = provider
         try:
             with concurrent.futures.ThreadPoolExecutor(max_workers=3) as callers:
                 results = [
@@ -2520,7 +2529,7 @@ class MMProcessEngineGreenNetTest(TestCase):
 
     def test_local_path_passes_when_verdict_passes(self):
         engine = self._make_engine()
-        engine._greennet_provider = _StubGreenNetProvider(
+        engine._inspection._greennet_provider = _StubGreenNetProvider(
             GreenNetVerdict(passed=True, code=1)
         )
         res = engine.mm_embedding_cpp(
@@ -2534,7 +2543,7 @@ class MMProcessEngineGreenNetTest(TestCase):
 
     def test_local_path_raises_when_verdict_fails(self):
         engine = self._make_engine()
-        engine._greennet_provider = _StubGreenNetProvider(
+        engine._inspection._greennet_provider = _StubGreenNetProvider(
             GreenNetVerdict(passed=False, code=2, message="blocked")
         )
         with self.assertRaises(FtRuntimeException) as ctx:
@@ -2553,7 +2562,7 @@ class MMProcessEngineGreenNetTest(TestCase):
     def test_rewritten_inputs_reach_vit(self):
         _UrlRecordingEmbedding.seen_urls = []
         engine = self._make_engine(_UrlRecordingEmbedding())
-        engine._greennet_provider = _StubGreenNetProvider(
+        engine._inspection._greennet_provider = _StubGreenNetProvider(
             GreenNetVerdict(passed=True, code=1), rewrite_suffix="#rewritten"
         )
         engine.mm_embedding_cpp(
@@ -2586,7 +2595,7 @@ class MMProcessEngineGreenNetTest(TestCase):
         provider = _StubGreenNetProvider(
             GreenNetVerdict(passed=True, code=1), rewrite_suffix="#rewritten"
         )
-        engine._greennet_provider = provider
+        engine._inspection._greennet_provider = provider
         inp = self._make_input(
             "./rtp_llm/multimodal/test/testdata/qwen2_vl/1.jpg?gn_dedup"
         )
@@ -2611,7 +2620,7 @@ class MMProcessEngineGreenNetTest(TestCase):
 
     def test_wait_verdict_pass_after_async_submit(self):
         engine = self._make_engine()
-        engine._greennet_provider = _StubGreenNetProvider(
+        engine._inspection._greennet_provider = _StubGreenNetProvider(
             GreenNetVerdict(passed=True, code=1)
         )
         inp = self._make_input(
@@ -2625,7 +2634,7 @@ class MMProcessEngineGreenNetTest(TestCase):
     @patch("rtp_llm.multimodal.mm_process_engine.kmonitor.report")
     def test_wait_verdict_fail_after_async_submit(self, report):
         engine = self._make_engine()
-        engine._greennet_provider = _StubGreenNetProvider(
+        engine._inspection._greennet_provider = _StubGreenNetProvider(
             GreenNetVerdict(passed=False, code=2, message="nsfw")
         )
         inp = self._make_input(
@@ -2653,7 +2662,7 @@ class MMProcessEngineGreenNetTest(TestCase):
         # wait_greennet_verdict called without a prior async_submit must still
         # produce a verdict (kick compute itself).
         engine = self._make_engine()
-        engine._greennet_provider = _StubGreenNetProvider(
+        engine._inspection._greennet_provider = _StubGreenNetProvider(
             GreenNetVerdict(passed=False, code=2, message="bad")
         )
         inp = self._make_input(

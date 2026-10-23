@@ -177,6 +177,13 @@ py_library(
 )
 
 py_test(
+    name = "mm_inspection_pipeline_test",
+    srcs = ["mm_inspection_pipeline_test.py"],
+    deps = [":process_engine_test_helpers"],
+    data = [":testdata"],
+)
+
+py_test(
     name = "mm_remote_embedding_cache_test",
     srcs = ["mm_remote_embedding_cache_test.py"],
     deps = [":process_engine_test_helpers"],

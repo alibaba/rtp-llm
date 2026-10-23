@@ -65,6 +65,9 @@ class AccMetrics(Enum):
     VIT_RPC_SERVER_ERROR_QPS_METRIC = "rtp_llm_vit_rpc_server_error_qps"
     VIT_RPC_PROXY_ERROR_QPS_METRIC = "rtp_llm_vit_rpc_proxy_error_qps"
 
+    GREENNET_SUCCESS_QPS_METRIC = "py_rtp_greennet_success_qps"
+    GREENNET_ERROR_QPS_METRIC = "py_rtp_greennet_error_qps"
+
     # dash_sc DSV4 phase-2: incremented once per request that enters phase-2
     # via the terminate-token-id (token 1) abort path in the think phase.
     # One increment per request — guarded by ``phase2_triggered`` so the
@@ -116,6 +119,9 @@ class GaugeMetrics(Enum):
 
     # vit preprocess
     VIT_PREPROCESS_RT_METRIC = "py_rtp_vit_preprocess_rt"
+    # Milliseconds per non-empty inspection group, including OSS/HTTP work,
+    # excluding input preparation, source handoff wait and GPU embedding.
+    GREENNET_RT_METRIC = "py_rtp_greennet_rt"
     # Per-request embedding latency = wait + forward, sampled once per request in
     # submit_and_wait. Preserves the historical meaning (pre-scheduler this timed
     # the forward under the embedding lock, i.e. lock-wait + forward per request)
@@ -164,6 +170,8 @@ class GaugeMetrics(Enum):
     VIT_DOWNLOAD_RT_METRIC = "py_rtp_vit_download_rt"
     VIT_PREPROCESS_OTHER_RT_METRIC = "py_rtp_vit_preprocess_other_rt"
     VIT_PREPROCESS_QUEUE_SIZE_METRIC = "py_rtp_vit_preprocess_queue_size"
+    VIT_PREPROCESS_DISPATCH_RT_METRIC = "py_rtp_vit_preprocess_dispatch_rt"
+    VIT_PREPROCESS_RETURN_RT_METRIC = "py_rtp_vit_preprocess_return_rt"
     VIT_EMBEDDING_LENGTH_METRIC = "py_rtp_vit_embedding_length"
     VIT_IMAGE_COUNT_METRIC = "py_rtp_vit_image_count"
     VIT_EMBEDDING_QUEUE_SIZE_METRIC = "py_rtp_vit_embedding_queue_size"

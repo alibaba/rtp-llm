@@ -221,6 +221,27 @@ def _submit_concurrently(
 
 
 class MMSchedulerTest(TestCase):
+    def test_late_result_collection_does_not_inflate_scheduler_latency(self):
+        sched = MMScheduler(_FakeMMPart(), batch_wait_ms=0, max_batch_size=1)
+        try:
+            with mock.patch(
+                "rtp_llm.multimodal.mm_scheduler.current_time_ms", return_value=100
+            ) as clock, mock.patch(
+                "rtp_llm.multimodal.mm_scheduler.kmonitor.report"
+            ) as report:
+                request = sched.submit([_FakeWorkItem()])
+                request.future.result(timeout=2)
+                clock.return_value = 9100
+                sched.wait(request)
+                values = [
+                    call.args[1]
+                    for call in report.call_args_list
+                    if call.args[0] == GaugeMetrics.VIT_EMBEDDING_RT_METRIC
+                ]
+                self.assertEqual(values, [0])
+        finally:
+            sched.close()
+
     def test_idle_maintenance_runs_after_completion_in_both_modes(self):
         for prefetch in (0, 1):
             with self.subTest(prefetch=prefetch):

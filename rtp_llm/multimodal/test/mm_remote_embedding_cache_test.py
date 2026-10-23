@@ -278,7 +278,7 @@ class EngineRemoteCacheTest(unittest.TestCase):
             {mm_input.cache_key(): pack_object(plan_object((torch.ones(3, 4), None)))}
         )
         engine = self.engine(store)
-        engine._greennet_provider = _StubGreenNetProvider(
+        engine._inspection._greennet_provider = _StubGreenNetProvider(
             GreenNetVerdict(passed=False, code=2, message="blocked"), delay=0.05
         )
         with self.assertRaises(FtRuntimeException):

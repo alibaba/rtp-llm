@@ -70,6 +70,17 @@ class GreenNetProvider:
     ) -> GreenNetHandle:
         raise NotImplementedError
 
+    async def submit_sources(self, request, mm_inputs, sources: List[bytes]):
+        """Inspect encoded bytes returned by CPU preprocessing, without URLs.
+
+        This internal path must never re-download or rewrite inference input.
+        An unsupported provider fails closed instead of silently skipping audit.
+        """
+        raise NotImplementedError("GreenNet provider cannot inspect CPU sources")
+
+    async def close(self):
+        """Release connections owned by the current inspection event loop."""
+
 
 class NoopGreenNetHandle(GreenNetHandle):
     """No-op handle used when the internal source is unavailable.
