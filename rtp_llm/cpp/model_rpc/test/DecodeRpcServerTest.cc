@@ -122,6 +122,37 @@ TEST(DecodeRpcServerTest, TimeoutLearnedAfterConstructionKeepsAbsoluteDeadline) 
     EXPECT_FALSE(context.requestDeadlineExceeded());
 }
 
+TEST(DecodeRpcServerTest, shutdownRejectsNewGenerateBeforeReadingInput) {
+    DecodeRpcServer server;
+    server.beginShutdown();
+    // A closed entrance must reject before touching the stream or engine.
+    EXPECT_EQ(server.RemoteGenerate(nullptr, nullptr).error_code(), grpc::StatusCode::UNAVAILABLE);
+    EXPECT_EQ(server.BatchGenerateCall(nullptr, nullptr, nullptr).error_code(), grpc::StatusCode::UNAVAILABLE);
+    EXPECT_EQ(server.onflightRequestNum(), 0);
+    EXPECT_TRUE(server.waitForDrain(std::chrono::system_clock::now() + std::chrono::milliseconds(100)));
+}
+
+TEST(DecodeRpcServerTest, shutdownStillWaitsForExistingLoad) {
+    DecodeRpcServer server;
+    server.onflight_load_cache_requests_ = 1;
+    server.beginShutdown();
+    EXPECT_FALSE(server.waitForDrain(std::chrono::system_clock::now() + std::chrono::milliseconds(30)));
+    server.onflight_load_cache_requests_ = 0;
+    EXPECT_TRUE(server.waitForDrain(std::chrono::system_clock::now() + std::chrono::milliseconds(30)));
+}
+
+TEST(DecodeRpcServerTest, shutdownClosesAndCountsExternalHttpRequests) {
+    DecodeRpcServer server;
+    bool            http_closed   = false;
+    size_t          http_onflight = 1;
+    server.setExternalDrainCallbacks([&] { http_closed = true; }, [&] { return http_onflight; });
+    server.beginShutdown();
+    EXPECT_TRUE(http_closed);
+    EXPECT_FALSE(server.waitForDrain(std::chrono::system_clock::now() + std::chrono::milliseconds(30)));
+    http_onflight = 0;
+    EXPECT_TRUE(server.waitForDrain(std::chrono::system_clock::now() + std::chrono::milliseconds(30)));
+}
+
 TEST(DecodeRpcServerTest, invalidPrefillOnlyUsesInvalidArgumentWithDetails) {
     TestDecodeRpcService service;
     int                  listen_port = 0;

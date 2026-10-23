@@ -99,7 +99,6 @@ class _InvalidTypePDSepConfig:
         return _new_config, (PDSepConfig,), tuple(state)
 
 
-
 class MoeConfigPickleTest(unittest.TestCase):
     def test_non_default_fp4_moe_op_round_trip(self):
         config = MoeConfig()
@@ -126,7 +125,6 @@ class PDSepConfigPickleTest(unittest.TestCase):
 
         self.assertEqual(restored.prefill_stop_stream_wait_timeout_ms, 118)
         self.assertEqual(restored.prefill_prepare_resource_pool_size, 119)
-
 
     def test_rejects_invalid_state_length(self):
         for size in (20, 21, 23):
@@ -299,6 +297,18 @@ class HWKernelConfigPickleTest(unittest.TestCase):
 
 
 class RuntimeConfigPickleTest(unittest.TestCase):
+    def test_shutdown_group_round_trip_and_previous_formats(self):
+        config = RuntimeConfig()
+        config.shutdown_worker_grpc_addrs = ["host0:8001", "host1:8001"]
+        restored = pickle.loads(pickle.dumps(config))
+        self.assertEqual(
+            restored.shutdown_worker_grpc_addrs, config.shutdown_worker_grpc_addrs
+        )
+        for size in (12, 13, 14):
+            restored = RuntimeConfig.__new__(RuntimeConfig)
+            restored.__setstate__(config.__getstate__()[:size])
+            self.assertEqual(restored.shutdown_worker_grpc_addrs, [])
+
     def test_output_dispatcher_worker_count_round_trip(self):
         config = RuntimeConfig()
         config.output_dispatcher_worker_count = 3

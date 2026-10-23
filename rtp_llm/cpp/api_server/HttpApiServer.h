@@ -2,6 +2,7 @@
 
 #include <atomic>
 #include <string>
+#include <mutex>
 
 #include "autil/AtomicCounter.h"
 
@@ -25,6 +26,11 @@ class WorkerStatusService;
 class ModelStatusService;
 class SysCmdService;
 class TokenizerService;
+
+struct HttpAdmissionState {
+    std::mutex mutex;
+    bool       draining = false;
+};
 
 class HttpApiServer {
 public:
@@ -66,6 +72,10 @@ public:
     bool        start(const std::string& address);
     bool        start(py::object model_weights_loader, py::object world_info, py::object tokenizer, py::object render);
     void        stop();
+    void        beginShutdown();
+    size_t      onflightRequestNum() const {
+        return active_request_count_->getValue();
+    }
     bool        isStoped() const;
     std::string getListenAddr() const {
         return addr_;
@@ -75,6 +85,7 @@ private:
     void init_controller(const ConcurrencyConfig& concurrency_config, const ParallelismConfig& parallelism_config);
 
 private:
+    static void rejectDuringShutdown(const std::unique_ptr<http_server::HttpResponseWriter>& writer);
     bool registerServices();
     bool registerHealthService();
     bool registerWorkerStatusService();
@@ -86,6 +97,7 @@ private:
     bool registerEmbedingService();
 
 private:
+    std::shared_ptr<HttpAdmissionState>   admission_ = std::make_shared<HttpAdmissionState>();
     bool                                  is_embedding_;
     std::atomic_bool                      is_stopped_{true};
     std::shared_ptr<autil::AtomicCounter> active_request_count_;
@@ -118,10 +130,24 @@ private:
 
 class CounterGuard {
 public:
-    CounterGuard(std::shared_ptr<autil::AtomicCounter> counter): counter_(counter) {
+    CounterGuard(std::shared_ptr<autil::AtomicCounter> counter,
+                 std::shared_ptr<HttpAdmissionState>   admission = nullptr):
+        counter_(std::move(counter)) {
+        std::unique_lock<std::mutex> lock;
+        if (admission) {
+            lock = std::unique_lock<std::mutex>(admission->mutex);
+            if (admission->draining) {
+                counter_.reset();
+                admitted_ = false;
+                return;
+            }
+        }
         if (counter_) {
             counter_->inc();
         }
+    }
+    bool admitted() const {
+        return admitted_;
     }
     ~CounterGuard() {
         if (counter_) {
@@ -130,6 +156,7 @@ public:
     }
 
 private:
+    bool                                  admitted_ = true;
     std::shared_ptr<autil::AtomicCounter> counter_;
 };
 

@@ -198,7 +198,8 @@ bool HttpApiServer::registerTokenizerService() {
 bool HttpApiServer::registerChatService() {
     chat_service_.reset(new ChatService(
         engine_, mm_processor_, request_counter_, tokenizer_, render_, params_.model_config_, metric_reporter_));
-    auto chat_completions_callback = [active_request_count = active_request_count_,
+    auto chat_completions_callback = [admission            = admission_,
+                                      active_request_count = active_request_count_,
                                       chat_service         = chat_service_,
                                       controller           = controller_,
                                       request_counter      = request_counter_,
@@ -207,7 +208,11 @@ bool HttpApiServer::registerChatService() {
                                                             const http_server::HttpRequest& request) -> void {
         auto request_id = request_counter->incAndReturn();
         try {
-            CounterGuard               counter_guard(active_request_count);
+            CounterGuard counter_guard(active_request_count, admission);
+            if (!counter_guard.admitted()) {
+                rejectDuringShutdown(writer);
+                return;
+            }
             ConcurrencyControllerGuard controller_guard(controller);
             if (controller_guard.isPassed() == false) {
                 if (metric_reporter) {
@@ -225,14 +230,19 @@ bool HttpApiServer::registerChatService() {
         }
     };
 
-    auto chat_render_callback = [active_request_count = active_request_count_,
+    auto chat_render_callback = [admission            = admission_,
+                                 active_request_count = active_request_count_,
                                  request_counter      = request_counter_,
                                  metric_reporter      = metric_reporter_,
                                  chat_service = chat_service_](std::unique_ptr<http_server::HttpResponseWriter> writer,
                                                                const http_server::HttpRequest& request) -> void {
         auto request_id = request_counter->incAndReturn();
         try {
-            CounterGuard counter_guard(active_request_count);
+            CounterGuard counter_guard(active_request_count, admission);
+            if (!counter_guard.admitted()) {
+                rejectDuringShutdown(writer);
+                return;
+            }
             chat_service->chatRender(writer, request);
         } catch (const py::error_already_set& e) {
             RTP_LLM_LOG_WARNING("chat render failed, found python exception: [%s]", e.what());
@@ -261,15 +271,23 @@ bool HttpApiServer::registerInferenceService() {
                                                   params_.model_config_,
                                                   metric_reporter_));
     auto inference_internal_callback =
-        [active_request_count = active_request_count_, inference_service = inference_service_](
+        [admission = admission_, active_request_count = active_request_count_, inference_service = inference_service_](
             std::unique_ptr<http_server::HttpResponseWriter> writer, const http_server::HttpRequest& request) -> void {
-        CounterGuard counter_guard(active_request_count);
+        CounterGuard counter_guard(active_request_count, admission);
+        if (!counter_guard.admitted()) {
+            rejectDuringShutdown(writer);
+            return;
+        }
         inference_service->inference(writer, request, /*isInternal=*/true);
     };
-    auto inference_callback = [active_request_count = active_request_count_, inference_service = inference_service_](
-                                  std::unique_ptr<http_server::HttpResponseWriter> writer,
-                                  const http_server::HttpRequest&                  request) -> void {
-        CounterGuard counter_guard(active_request_count);
+    auto inference_callback =
+        [admission = admission_, active_request_count = active_request_count_, inference_service = inference_service_](
+            std::unique_ptr<http_server::HttpResponseWriter> writer, const http_server::HttpRequest& request) -> void {
+        CounterGuard counter_guard(active_request_count, admission);
+        if (!counter_guard.admitted()) {
+            rejectDuringShutdown(writer);
+            return;
+        }
         inference_service->inference(writer, request, /*isInternal=*/false);
     };
 
@@ -280,28 +298,44 @@ bool HttpApiServer::registerInferenceService() {
 bool HttpApiServer::registerEmbedingService() {
     embedding_service_.reset(
         new EmbeddingService(embedding_endpoint_, request_counter_, controller_, metrics_reporter_));
-    auto callback = [active_request_count = active_request_count_,
-                     embedding_service    = embedding_service_](std::unique_ptr<http_server::HttpResponseWriter> writer,
-                                                             const http_server::HttpRequest& request) -> void {
-        CounterGuard counter_guard(active_request_count);
+    auto callback =
+        [admission = admission_, active_request_count = active_request_count_, embedding_service = embedding_service_](
+            std::unique_ptr<http_server::HttpResponseWriter> writer, const http_server::HttpRequest& request) -> void {
+        CounterGuard counter_guard(active_request_count, admission);
+        if (!counter_guard.admitted()) {
+            rejectDuringShutdown(writer);
+            return;
+        }
         embedding_service->embedding(writer, request);
     };
-    auto callback_dense = [active_request_count = active_request_count_, embedding_service = embedding_service_](
-                              std::unique_ptr<http_server::HttpResponseWriter> writer,
-                              const http_server::HttpRequest&                  request) -> void {
-        CounterGuard counter_guard(active_request_count);
+    auto callback_dense =
+        [admission = admission_, active_request_count = active_request_count_, embedding_service = embedding_service_](
+            std::unique_ptr<http_server::HttpResponseWriter> writer, const http_server::HttpRequest& request) -> void {
+        CounterGuard counter_guard(active_request_count, admission);
+        if (!counter_guard.admitted()) {
+            rejectDuringShutdown(writer);
+            return;
+        }
         embedding_service->embedding(writer, request, EmbeddingEndpoint::DENSE);
     };
-    auto callback_sparse = [active_request_count = active_request_count_, embedding_service = embedding_service_](
-                               std::unique_ptr<http_server::HttpResponseWriter> writer,
-                               const http_server::HttpRequest&                  request) -> void {
-        CounterGuard counter_guard(active_request_count);
+    auto callback_sparse =
+        [admission = admission_, active_request_count = active_request_count_, embedding_service = embedding_service_](
+            std::unique_ptr<http_server::HttpResponseWriter> writer, const http_server::HttpRequest& request) -> void {
+        CounterGuard counter_guard(active_request_count, admission);
+        if (!counter_guard.admitted()) {
+            rejectDuringShutdown(writer);
+            return;
+        }
         embedding_service->embedding(writer, request, EmbeddingEndpoint::SPARSE);
     };
-    auto callback_colbert = [active_request_count = active_request_count_, embedding_service = embedding_service_](
-                                std::unique_ptr<http_server::HttpResponseWriter> writer,
-                                const http_server::HttpRequest&                  request) -> void {
-        CounterGuard counter_guard(active_request_count);
+    auto callback_colbert =
+        [admission = admission_, active_request_count = active_request_count_, embedding_service = embedding_service_](
+            std::unique_ptr<http_server::HttpResponseWriter> writer, const http_server::HttpRequest& request) -> void {
+        CounterGuard counter_guard(active_request_count, admission);
+        if (!counter_guard.admitted()) {
+            rejectDuringShutdown(writer);
+            return;
+        }
         embedding_service->embedding(writer, request, EmbeddingEndpoint::COLBERT);
     };
 
@@ -315,8 +349,18 @@ bool HttpApiServer::registerEmbedingService() {
            && http_server_->RegisterRoute("POST", "/", callback);
 }
 
-void HttpApiServer::stop() {
-    RTP_LLM_LOG_WARNING("http api server stopped");
+void HttpApiServer::rejectDuringShutdown(const std::unique_ptr<http_server::HttpResponseWriter>& writer) {
+    writer->SetWriteType(http_server::HttpResponseWriter::WriteType::Normal);
+    writer->SetStatus(503, "Service Unavailable");
+    writer->Write("server is draining");
+    writer->WriteDone();
+}
+
+void HttpApiServer::beginShutdown() {
+    {
+        std::lock_guard<std::mutex> lock(admission_->mutex);
+        admission_->draining = true;
+    }
     is_stopped_.store(true);
 
     if (health_service_) {
@@ -326,7 +370,11 @@ void HttpApiServer::stop() {
     if (worker_status_service_) {
         worker_status_service_->stop();
     }
+}
 
+void HttpApiServer::stop() {
+    RTP_LLM_LOG_WARNING("http api server stopped");
+    beginShutdown();
     // wait all active request finished
     if (active_request_count_) {
         while (active_request_count_->getValue() > 0) {

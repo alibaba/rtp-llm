@@ -1616,6 +1616,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("use_batch_decode_scheduler", &RuntimeConfig::use_batch_decode_scheduler)
         .def_readwrite("model_name", &RuntimeConfig::model_name)
         .def_readwrite("worker_grpc_addrs", &RuntimeConfig::worker_grpc_addrs)
+        .def_readwrite("shutdown_worker_grpc_addrs", &RuntimeConfig::shutdown_worker_grpc_addrs)
         .def_readwrite("worker_addrs", &RuntimeConfig::worker_addrs)
         // Fields merged from PyDeviceResourceConfig
         .def_readwrite("specify_gpu_arch", &RuntimeConfig::specify_gpu_arch)
@@ -1644,10 +1645,11 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       self.worker_addrs,
                                       self.specify_gpu_arch,
                                       self.model_warm_up,
-                                      self.output_dispatcher_worker_count);
+                                      self.output_dispatcher_worker_count,
+                                      self.shutdown_worker_grpc_addrs);
             },
             [](py::tuple t) {
-                if (t.size() != 12 && t.size() != 13 && t.size() != 14)
+                if (t.size() != 12 && t.size() != 13 && t.size() != 14 && t.size() != 15)
                     throw std::runtime_error("Invalid state!");
                 RuntimeConfig c;
                 try {
@@ -1668,6 +1670,9 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                     }
                     if (t.size() >= 14) {
                         c.output_dispatcher_worker_count = t[13].cast<int>();
+                    }
+                    if (t.size() >= 15) {
+                        c.shutdown_worker_grpc_addrs = t[14].cast<std::vector<std::string>>();
                     }
                 } catch (const std::exception& e) {
                     throw std::runtime_error(std::string("RuntimeConfig unpickle error: ") + e.what());
