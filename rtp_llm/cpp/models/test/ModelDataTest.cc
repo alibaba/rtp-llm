@@ -395,6 +395,17 @@ TEST(ModelInputTpSyncChild, DISABLED_RunRank) {
     EXPECT_TRUE(!inputs.kv_cache_group_types.defined() || inputs.kv_cache_group_types.numel() == 0);
     EXPECT_TRUE(!inputs.kv_cache_update_mapping.defined() || inputs.kv_cache_update_mapping.numel() == 0);
 
+    // A terminal frame has the same header as an ordinary prefill, so it can
+    // follow startup/system-prompt inputs without a separate collective.
+    inputs = GptModelInputs{};
+    if (rank == 0) {
+        inputs.skip_run       = true;
+        inputs.stop_execution = true;
+    }
+    tpSyncModelInputs(inputs, config);
+    EXPECT_TRUE(inputs.skip_run);
+    EXPECT_TRUE(inputs.stop_execution);
+
     // Both children exercise sender-side rejection, so malformed metadata cannot strand a peer in a collective.
     config.tp_rank = 0;
     GptModelInputs invalid;
@@ -407,9 +418,9 @@ TEST(ModelInputTpSyncChild, DISABLED_RunRank) {
     EXPECT_THROW(tpSyncModelInputs(invalid, config), RTPException);
     invalid.kv_cache_group_tags.clear();
     EXPECT_THROW(tpSyncModelInputs(invalid, config), RTPException);
-    invalid.kv_cache_group_tags      = {"first", "second"};
-    invalid.kv_cache_block_id        = torch::zeros({2, 1, 1}, torch::kInt32);
-    invalid.kv_cache_update_mapping  = torch::tensor({2, 1, 2}, torch::kInt32).reshape({1, 3});
+    invalid.kv_cache_group_tags     = {"first", "second"};
+    invalid.kv_cache_block_id       = torch::zeros({2, 1, 1}, torch::kInt32);
+    invalid.kv_cache_update_mapping = torch::tensor({2, 1, 2}, torch::kInt32).reshape({1, 3});
     EXPECT_THROW(tpSyncModelInputs(invalid, config), RTPException);
     broadcaster.reset();
     ::alarm(0);

@@ -137,6 +137,93 @@ TEST_F(NormalCacheStoreTest, testStore_emptyCache) {
     mutex.unlock();
 }
 
+TEST_F(NormalCacheStoreTest, QueueSaturationRetainsReadyStores) {
+    CacheStoreInitParams params;
+    params.listen_port   = autil::NetUtil::randomPort();
+    params.enable_metric = false;
+    params.memory_util   = memory_util_;
+    params.thread_count  = 2;
+    params.queue_size    = 1;
+    auto store           = NormalCacheStore::createNormalCacheStore(params);
+    ASSERT_TRUE(store);
+
+    std::promise<void> started, release;
+    auto               released = release.get_future().share();
+    ASSERT_EQ(store->thread_pool_->pushTask([&started, released] {
+        started.set_value();
+        released.wait_for(std::chrono::seconds(5));
+    }),
+              autil::ThreadPoolBase::ERROR_NONE);
+    ASSERT_EQ(started.get_future().wait_for(std::chrono::seconds(2)), std::future_status::ready);
+    // The lock-free pool may admit an extra item beyond its nominal capacity.
+    auto admission = autil::ThreadPoolBase::ERROR_NONE;
+    for (size_t attempt = 0; attempt < 8 && admission == autil::ThreadPoolBase::ERROR_NONE; ++attempt) {
+        admission = store->thread_pool_->pushTask([] {}, false);
+    }
+    ASSERT_EQ(admission, autil::ThreadPoolBase::ERROR_POOL_QUEUE_FULL);
+
+    auto buffer = std::make_shared<RequestBlockBuffer>("queue-backpressure");
+    buffer->addBlock(block_buffer_util_->makeBlockBuffer("a", 16, '0', false));
+    std::promise<bool> completion;
+    auto               completed = completion.get_future();
+    store->store(buffer, [&completion](bool success, CacheStoreErrorCode) { completion.set_value(success); });
+    EXPECT_EQ(completed.wait_for(std::chrono::milliseconds(50)), std::future_status::timeout);
+    release.set_value();
+    ASSERT_EQ(completed.wait_for(std::chrono::seconds(2)), std::future_status::ready);
+    EXPECT_TRUE(completed.get());
+    store->stopTransport();
+}
+
+TEST_F(NormalCacheStoreTest, SaturatedLoadAdmissionDoesNotBlockShutdown) {
+    CacheStoreInitParams params;
+    params.listen_port   = autil::NetUtil::randomPort();
+    params.enable_metric = false;
+    params.memory_util   = memory_util_;
+    params.thread_count  = 2;
+    params.queue_size    = 1;
+    auto store           = NormalCacheStore::createNormalCacheStore(params);
+    ASSERT_TRUE(store);
+
+    std::promise<void> started, release;
+    auto               released = release.get_future().share();
+    ASSERT_EQ(store->thread_pool_->pushTask([&started, released] {
+        started.set_value();
+        released.wait_for(std::chrono::seconds(5));
+    }),
+              autil::ThreadPoolBase::ERROR_NONE);
+    ASSERT_EQ(started.get_future().wait_for(std::chrono::seconds(2)), std::future_status::ready);
+    auto admission = autil::ThreadPoolBase::ERROR_NONE;
+    for (size_t attempt = 0; attempt < 8 && admission == autil::ThreadPoolBase::ERROR_NONE; ++attempt) {
+        admission = store->thread_pool_->pushTask([] {}, false);
+    }
+    ASSERT_EQ(admission, autil::ThreadPoolBase::ERROR_POOL_QUEUE_FULL);
+
+    auto buffer = std::make_shared<RequestBlockBuffer>("load-backpressure");
+    buffer->addBlock(block_buffer_util_->makeBlockBuffer("a", 16, '0', false));
+    std::atomic<int> callbacks{0};
+    auto             load = std::async(std::launch::async, [&] {
+        store->load(
+            buffer,
+            [&](bool success, CacheStoreErrorCode error) {
+                EXPECT_FALSE(success);
+                EXPECT_EQ(error, CacheStoreErrorCode::PushWorkerItemFailed);
+                ++callbacks;
+            },
+            "127.0.0.1",
+            params.listen_port,
+            0,
+            2000);
+    });
+    EXPECT_EQ(load.wait_for(std::chrono::milliseconds(50)), std::future_status::timeout);
+    auto stop = std::async(std::launch::async, [&] { store->stopTransport(); });
+    EXPECT_EQ(load.wait_for(std::chrono::seconds(1)), std::future_status::ready);
+    release.set_value();
+    EXPECT_EQ(stop.wait_for(std::chrono::seconds(2)), std::future_status::ready);
+    load.get();
+    stop.get();
+    EXPECT_EQ(callbacks.load(), 1);
+}
+
 TEST_F(NormalCacheStoreTest, testStore_invalidParams) {
     ASSERT_TRUE(initCacheStores());
 

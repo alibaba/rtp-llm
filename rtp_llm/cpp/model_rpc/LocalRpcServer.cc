@@ -1123,6 +1123,10 @@ grpc::Status LocalRpcServer::DumpTorchAllocatorInternal(grpc::ServerContext*    
 grpc::Status
 LocalRpcServer::CheckHealth(grpc::ServerContext* context, const EmptyPB* request, CheckHealthResponsePB* response) {
     RTP_LLM_LOG_DEBUG("receive cacheStatus rpc request from client: %s", context->peer().c_str());
+    if (engine_ && engine_->isStopping()) {
+        response->set_health("STOPPING");
+        return grpc::Status(grpc::StatusCode::UNAVAILABLE, "engine stopping");
+    }
     response->set_health("OK");
     return grpc::Status::OK;
 }

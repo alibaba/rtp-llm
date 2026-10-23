@@ -149,9 +149,9 @@ public:
     }
 
 private:
-    std::function<void()> allocationChangeCallback() const;
-    void                  reportMetricsLoop();
-    void reportPrefillCacheHitMetrics(const MallocInfo& malloc_info, bool is_first_malloc);
+    std::function<void()>             allocationChangeCallback() const;
+    void                              reportMetricsLoop();
+    void                              reportPrefillCacheHitMetrics(const MallocInfo& malloc_info, bool is_first_malloc);
     std::shared_ptr<BroadcastManager> createMultiRankBlockTransferManager() const;
 
     // 成员变量
@@ -174,8 +174,11 @@ private:
     std::shared_ptr<CPSlotMapper>                   cp_slot_mapper_;
     std::unique_ptr<PrefillCacheHitMetricsReporter> prefill_cache_hit_metrics_reporter_;
 
-    std::atomic<bool> stop_{false};
-    std::thread       metrics_reporter_thread_;
+    std::atomic<bool>       stop_{false};
+    std::mutex              metrics_stop_mutex_;
+    std::mutex              metrics_wait_mutex_;
+    std::condition_variable metrics_wait_cv_;
+    std::thread             metrics_reporter_thread_;
 
     BlockTreeCachePtr                           block_tree_cache_;
     std::shared_ptr<KVCacheAllocationWaitState> allocation_wait_state_;

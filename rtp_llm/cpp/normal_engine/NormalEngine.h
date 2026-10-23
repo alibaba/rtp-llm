@@ -3,6 +3,7 @@
 #include <atomic>
 #include <functional>
 #include <memory>
+#include <mutex>
 #include "absl/status/status.h"
 #include "kmonitor/client/MetricsReporter.h"
 #include "rtp_llm/cpp/engine_base/TorchProfiler.h"
@@ -34,6 +35,10 @@ public:
                                              preRunMode                            mode) override;
     absl::Status                      stop() override;
 
+    bool isStopping() const override {
+        return stop_requested_.load();
+    }
+
     KVCacheInfo  getCacheStatusInfo(int64_t latest_version, bool need_cache_keys) override;
     absl::Status step();
     absl::Status startLoop();
@@ -57,6 +62,7 @@ private:
     void                            initLoadBalance();
     absl::Status                    trySaveStepError() const;
     void                            loop();
+    bool                            synchronizeStopRequested();
     void                            normalizeSystemPromptCacheConfig();
     void                            initCacheManager(std::optional<WarmUpResult> warm_up_result);
     static void                     initializeAndPublishCacheManager(ResourceContext&                            resource_context,
@@ -80,8 +86,10 @@ private:
     bool isDSpark() override;
 
 private:
+    std::mutex                                    stop_mutex_;
     autil::ThreadPtr                              loop_thread_;
     std::atomic<bool>                             running_{false};
+    std::atomic<bool>                             stop_requested_{false};
     std::unique_ptr<Executor>                     executor_;
     ModelConfig                                   model_config_;
     py::object                                    custom_output_selector_;
@@ -98,7 +106,8 @@ private:
     kmonitor::MetricsReporterPtr                  metrics_reporter_;
     std::unique_ptr<ProposeModelEngineInitParams> propose_params_;
     StepWindowProfiler                            step_profiler_;
-    int                                           reserve_step_ = 0;
+    bool                                          sm120_ep_stop_sync_ = false;
+    int                                           reserve_step_       = 0;
 };
 
 }  // namespace rtp_llm

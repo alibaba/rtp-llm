@@ -13,6 +13,8 @@ RequestBlockBufferStore::RequestBlockBufferStore(const std::shared_ptr<MemoryUti
 void RequestBlockBufferStore::stop() {
     std::unique_lock<std::shared_mutex> lock(request_cache_map_mutex_);
     auto                                tmp_buffers = std::move(request_cache_map_);
+    expired_request_caches_.clear();
+    request_expiry_times_.clear();
     lock.unlock();
 
     // avoid deadlock
@@ -163,7 +165,9 @@ RequestBlockBufferStore::makeValidBlocks(const std::vector<std::shared_ptr<Block
         total_len += (block->len + alignment - 1) / alignment * alignment;
     }
 
-    auto tensor = torch::empty({(int64_t)total_len}, torch::TensorOptions().dtype(torch::kUInt8)).pin_memory();
+    // Allocate pinned memory directly: a pageable allocation followed by
+    // pin_memory() doubles the transient host footprint for large transfers.
+    auto tensor = torch::empty({(int64_t)total_len}, torch::TensorOptions().dtype(torch::kUInt8).pinned_memory(true));
     if (!tensor.defined()) {
         RTP_LLM_LOG_WARNING(
             "make valid blocks failed, alloc %zu bytes failed, block count %zu", total_len, blocks.size());
@@ -221,15 +225,29 @@ void RequestBlockBufferStore::delRequestBlockBuffer(const std::string& requestid
 
     {
         std::unique_lock<std::shared_mutex> lock(request_cache_map_mutex_);
-        // Append-ordered, so the oldest entries are at the front.
-        size_t expired_count = 0;
-        while (expired_count < expired_request_caches_.size()
-               && currentTimeUs() - expired_request_caches_[expired_count].second > expired_request_cache_ttl_us_) {
-            request_cache_map_.erase(expired_request_caches_[expired_count].first);
-            ++expired_count;
+        const auto                          now_us  = currentTimeUs();
+        auto                                current = request_cache_map_.find(requestid);
+        if (current != request_cache_map_.end() && !current->second) {
+            request_expiry_times_[requestid] = now_us;
+            expired_request_caches_.push_back({requestid, now_us});
         }
-        expired_request_caches_.erase(expired_request_caches_.begin(), expired_request_caches_.begin() + expired_count);
-        expired_request_caches_.push_back({requestid, currentTimeUs()});
+
+        // Append-ordered, so the oldest entries are at the front. A repeated
+        // deletion refreshes the tombstone, and a request id re-added since its
+        // deletion is not a tombstone, so neither is erased early.
+        while (!expired_request_caches_.empty()
+               && now_us - expired_request_caches_.front().second > expired_request_cache_ttl_us_) {
+            const auto& expired = expired_request_caches_.front();
+            auto        latest  = request_expiry_times_.find(expired.first);
+            if (latest != request_expiry_times_.end() && latest->second == expired.second) {
+                auto cached = request_cache_map_.find(expired.first);
+                if (cached != request_cache_map_.end() && !cached->second) {
+                    request_cache_map_.erase(cached);
+                }
+                request_expiry_times_.erase(latest);
+            }
+            expired_request_caches_.pop_front();
+        }
     }
 }
 

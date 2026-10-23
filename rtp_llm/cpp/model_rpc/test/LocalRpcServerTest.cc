@@ -176,7 +176,12 @@ public:
     }
 
     absl::Status stop() override {
+        stopping_ = true;
         return absl::OkStatus();
+    }
+
+    bool isStopping() const override {
+        return stopping_;
     }
 
     absl::StatusOr<GenerateStreamPtr> preRun(const std::shared_ptr<GenerateInput>&, preRunMode) override {
@@ -191,7 +196,25 @@ public:
 
 private:
     EngineFailureMode mode_;
+    bool              stopping_{false};
 };
+
+TEST(LocalRpcServerTest, HealthReportsUnavailableOnceEngineIsStopping) {
+    TestLocalRpcServer    server;
+    grpc::ServerContext   context;
+    EmptyPB               request;
+    CheckHealthResponsePB response;
+    auto                  engine = std::make_shared<FailingEngine>(EngineFailureMode::REJECT_ALL);
+    server.setEngineForTest(engine);
+
+    EXPECT_TRUE(server.CheckHealth(&context, &request, &response).ok());
+    EXPECT_EQ(response.health(), "OK");
+
+    ASSERT_TRUE(engine->stop().ok());
+    auto status = server.CheckHealth(&context, &request, &response);
+    EXPECT_EQ(status.error_code(), grpc::StatusCode::UNAVAILABLE);
+    EXPECT_EQ(response.health(), "STOPPING");
+}
 
 class RecordingWriter: public LocalRpcServer::WriterInterface {
 public:

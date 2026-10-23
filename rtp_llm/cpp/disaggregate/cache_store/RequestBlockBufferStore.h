@@ -5,6 +5,7 @@
 #include <atomic>
 #include <mutex>
 #include <functional>
+#include <deque>
 #include "rtp_llm/cpp/disaggregate/cache_store/RequestBlockBuffer.h"
 #include "rtp_llm/cpp/disaggregate/cache_store/MemoryUtil.h"
 
@@ -53,7 +54,8 @@ private:
 
     mutable std::shared_mutex                                            request_cache_map_mutex_;
     std::unordered_map<std::string, std::shared_ptr<RequestBlockBuffer>> request_cache_map_;
-    std::vector<std::pair<std::string, int64_t>>                         expired_request_caches_;
+    std::deque<std::pair<std::string, int64_t>>                          expired_request_caches_;
+    std::unordered_map<std::string, int64_t>                             request_expiry_times_;
     // currentTimeUs() is microseconds: 1e6 us/s * 3600 s = one hour.
     int64_t expired_request_cache_ttl_us_ = 1000LL * 1000LL * 60LL * 60LL;
 

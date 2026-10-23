@@ -121,7 +121,7 @@ cc_test(
 # The executor caches RTP_LLM_STREAM_ASYNC, so test both settings in fresh processes.
 [
     cc_test(
-        name = "engine_stop_{}_test".format(mode),
+        name = "engine_stop_{}{}_test".format(mode, suffix),
         srcs = ["EngineStopTest.cc"],
         copts = test_copts,
         env = select({
@@ -135,12 +135,38 @@ cc_test(
                 "RTP_LLM_STREAM_ASYNC": stream_async,
             },
         }),
-        exec_properties = {"gpu": "L20_CU13"},
-        tags = ["L20_CU13"],
+        exec_properties = {"gpu": gpu},
+        tags = [gpu],
+        target_compatible_with = select({
+            "@//:using_cuda13_sm120": [],
+            "//conditions:default": ["@platforms//:incompatible"],
+        }) if suffix else [],
         deps = [":mock_engine"] + cuda13_torch_link_deps,
+        visibility = ["//rtp_llm/models_py/modules/dsv4/test:__pkg__"],
     )
     for mode, stream_async in [
         ("sync", "0"),
         ("async", "1"),
     ]
+    for suffix, gpu in [("", "L20_CU13"), ("_sm120", "RTX_5000_PRO_CU13")]
 ]
+
+cc_test(
+    name = "engine_ep_stop_sm120_test",
+    srcs = ["EngineEpStopTest.cc"],
+    copts = test_copts,
+    deps = [":mock_engine"] + cuda13_torch_link_deps,
+    env = {
+        "TEST_USING_DEVICE": "CUDA",
+        "LD_PRELOAD": "libtorch_cpu.so",
+        "RTP_LLM_STREAM_ASYNC": "0",
+        "GPU_COUNT": "4",
+    },
+    exec_properties = {"gpu": "RTX_5000_PRO_CU13", "gpu_count": "4"},
+    tags = ["RTX_5000_PRO_CU13"],
+    target_compatible_with = select({
+        "@//:using_cuda13_sm120": [],
+        "//conditions:default": ["@platforms//:incompatible"],
+    }),
+    visibility = ["//rtp_llm/models_py/modules/dsv4/test:__pkg__"],
+)

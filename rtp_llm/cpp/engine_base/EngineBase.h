@@ -61,6 +61,10 @@ public:
 
     virtual absl::Status stop() = 0;
 
+    virtual bool isStopping() const {
+        return false;
+    }
+
     virtual absl::StatusOr<GenerateStreamPtr> preRun(const std::shared_ptr<GenerateInput>& generate_input,
                                                      preRunMode                            mode) = 0;
 

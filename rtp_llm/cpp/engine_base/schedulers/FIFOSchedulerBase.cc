@@ -95,6 +95,11 @@ absl::Status FIFOSchedulerBase::enqueue(const GenerateStreamPtr& stream) {
     stream->recordSchedulerEnqueueTime(autil::TimeUtility::currentTimeInMicroSeconds());
     {
         std::lock_guard<std::mutex> lock(lock_);
+        if (stop_) {
+            stream->reportError(ErrorCode::CANCELLED, "scheduler stopped");
+            stream->moveToNext();
+            return absl::CancelledError("scheduler stopped");
+        }
         waiting_streams_.emplace_back(stream);
         schedule_trigger_ = true;
     }
@@ -131,6 +136,13 @@ FIFOSchedulerBase::enqueueGroup(const vector<GenerateStreamPtr>& streams) {
             stream->recordSchedulerEnqueueTime(enqueue_time_us);
         }
         std::lock_guard<std::mutex> lock(lock_);
+        if (stop_) {
+            for (const auto& stream : valid_streams) {
+                stream->reportError(ErrorCode::CANCELLED, "scheduler stopped");
+                stream->moveToNext();
+            }
+            return {std::vector<bool>(streams.size(), false), streams};
+        }
         waiting_streams_.insert(waiting_streams_.end(), valid_streams.begin(), valid_streams.end());
         schedule_trigger_ = true;
     }

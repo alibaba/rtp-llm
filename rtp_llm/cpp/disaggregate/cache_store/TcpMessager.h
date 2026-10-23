@@ -16,6 +16,9 @@ public:
 
 public:
     bool init(MessagerInitParams params) override;
+    // Stops the TCP server/client and their ANet metric reporters. Safe to
+    // call more than once; the destructor remains the backstop.
+    void stop() override;
     void load(const std::shared_ptr<LoadRequest>&                          request,
               const std::shared_ptr<CacheStoreClientLoadMetricsCollector>& collector) override;
 

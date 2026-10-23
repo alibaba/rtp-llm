@@ -17,6 +17,20 @@ public:
     Executor() {};
     virtual absl::Status process(const std::list<GenerateStreamPtr>& streams, int64_t schedule_time_us = 0) = 0;
 
+    // Followers receive the terminal frame through their next ordinary input
+    // sync, including when rank zero is still constructing a system prompt.
+    void stopTpExecution(const ParallelismConfig& parallelism_config) {
+        GptModelInputs inputs;
+        inputs.skip_run       = true;
+        inputs.stop_execution = true;
+        tpSyncModelInputs(inputs, parallelism_config);
+        execution_stopped_ = true;
+    }
+
+    bool executionStopped() const {
+        return execution_stopped_;
+    }
+
     static GptModelDescription genModelDescription(const ModelConfig&       model_config,
                                                    const ParallelismConfig& parallelism_config,
                                                    const EPLBConfig&        eplb_config,
@@ -88,7 +102,8 @@ public:
         return false;
     }
 
-public:
+protected:
+    bool execution_stopped_ = false;
 };
 
 }  // namespace rtp_llm

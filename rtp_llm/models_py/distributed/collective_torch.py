@@ -11,6 +11,7 @@ from typing import Dict, List, Optional, Union
 import torch
 import torch.distributed
 
+from rtp_llm.models_py.utils.arch import get_sm, is_cuda
 from rtp_llm.ops import NcclCommConfig, ParallelismConfig
 
 # ParallelMode enum values matching C++ rtp_llm::ParallelMode in OpData.h
@@ -26,6 +27,7 @@ class Group(Enum):
     DP = "DP"
     TP = "TP"
     DP_AND_TP = "DP_AND_TP"
+    DP_CONTROL = "DP_CONTROL"
 
 
 # Global process group storage
@@ -263,6 +265,32 @@ def init_distributed_environment(
     _init_flashinfer_allreduce(parallelism_config, disable_custom_all_reduce)
 
 
+def _sm120_dp_control_enabled(parallelism_config: ParallelismConfig) -> bool:
+    if parallelism_config.dp_size <= 1 or parallelism_config.ep_size <= 1:
+        return False
+
+    capability = get_sm(parallelism_config.local_rank) if is_cuda() else (-1, -1)
+    world = torch.distributed.group.WORLD
+    device = (
+        torch.device("cuda", parallelism_config.local_rank)
+        if torch.distributed.get_backend(world) == "nccl"
+        else torch.device("cpu")
+    )
+    local = torch.tensor(capability, dtype=torch.int32, device=device)
+    gathered = [torch.empty_like(local) for _ in range(parallelism_config.world_size)]
+    # Every DP/EP rank participates before architecture-dependent new_group calls.
+    torch.distributed.all_gather(gathered, local, group=world)
+    capabilities = torch.stack(gathered).cpu().tolist()
+    enabled = [value == [12, 0] for value in capabilities]
+    if any(enabled) and not all(enabled):
+        raise RuntimeError(
+            "SM120 DP/EP shutdown requires all world ranks to use SM120 when "
+            "any rank does; compute capabilities by world rank: "
+            f"{capabilities}"
+        )
+    return all(enabled)
+
+
 def _create_process_groups(
     parallelism_config: ParallelismConfig,
     backend: str,
@@ -283,6 +311,16 @@ def _create_process_groups(
     world_size = parallelism_config.world_size
     tp_size = parallelism_config.tp_size
     dp_size = parallelism_config.dp_size
+
+    if _sm120_dp_control_enabled(parallelism_config):
+        # Every rank creates groups in the same order; only TP leaders vote.
+        # SM120 control traffic must not inherit the NCCL CUDA promotion below.
+        leaders = list(range(0, world_size, tp_size))
+        control_group = torch.distributed.new_group(
+            ranks=leaders, backend="gloo", timeout=timeout
+        )
+        if world_rank in leaders:
+            _group_map[Group.DP_CONTROL] = control_group
 
     if dp_size > 1 and world_size != dp_size:
         # Create all DP groups - all ranks must participate in creating all DP groups
@@ -418,6 +456,15 @@ def _register_process_groups_to_cpp():
         if pg_world is not None:
             mode_to_group[_CPP_PARALLEL_MODE_DP] = pg_world
 
+    cpu_dp_group = _group_map.get(Group.DP_CONTROL)
+    sm120_dp_ep = (
+        _parallelism_config is not None
+        and _parallelism_config.dp_size > 1
+        and _parallelism_config.ep_size > 1
+        and is_cuda()
+        and get_sm(_parallelism_config.local_rank) == (12, 0)
+    )
+
     # NOTE: These callbacks are NOT thin wrappers around the module-level broadcast()/
     # all_reduce()/all_gather() because the C++ calling convention differs significantly:
     #   - C++ uses int mode (ParallelMode enum ordinal) instead of Group enum
@@ -473,7 +520,18 @@ def _register_process_groups_to_cpp():
         Returns:
             The reduced tensor (dest if provided, otherwise tensor).
         """
-        pg = mode_to_group.get(mode)
+        cpu_dp = (
+            sm120_dp_ep
+            and mode == _CPP_PARALLEL_MODE_DP
+            and tensor.device.type == "cpu"
+        )
+        if cpu_dp and cpu_dp_group is None:
+            raise RuntimeError(
+                "CPU DP control reduction requires an initialized TP leader group"
+            )
+        if cpu_dp and dest is not None and dest.device.type != "cpu":
+            raise ValueError("CPU DP control reduction requires a CPU destination")
+        pg = cpu_dp_group if cpu_dp else mode_to_group.get(mode)
         if pg is None or pg.size() < 2:
             if dest is None:
                 return tensor
@@ -482,6 +540,11 @@ def _register_process_groups_to_cpp():
         target = dest if dest is not None else tensor
         if dest is not None:
             target.copy_(tensor)
+        if cpu_dp:
+            torch.distributed.all_reduce(
+                target, op=_REDUCE_OPS.get(op, torch.distributed.ReduceOp.SUM), group=pg
+            )
+            return target
         device_id = torch.cuda.current_device()
         gpu_t, was_cpu = _ensure_cuda(target, device_id)
         torch.distributed.all_reduce(
