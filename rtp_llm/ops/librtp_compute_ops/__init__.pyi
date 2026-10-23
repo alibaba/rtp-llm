@@ -155,7 +155,7 @@ class LayerKVCache:
     @property
     def layer_id(self) -> int:
         """
-        Global layer id
+        Model-local (stage-local) layer id
         """
 
     @property

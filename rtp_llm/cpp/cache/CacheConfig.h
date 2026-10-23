@@ -78,6 +78,10 @@ public:
         return static_cast<uint32_t>(cache_topology->layers().size());
     }
 
+    uint32_t cacheKeyLayerId(int local_layer_id) const {
+        return global_layer_begin + static_cast<uint32_t>(local_layer_id);
+    }
+
     static uint32_t
     mtpGlobalLayerId(uint32_t main_layer_num, int module_index, uint32_t module_layer_num, int local_layer_id) {
         constexpr uint32_t invalid = std::numeric_limits<uint32_t>::max();

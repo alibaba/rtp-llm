@@ -302,7 +302,8 @@ void populateGroups(CacheConfig&                 config,
 CacheConfig createConfigFromDescs(const ModelConfig&       model_config,
                                   const ParallelismConfig& parallelism_config,
                                   const KVCacheConfig&     kv_cache_config,
-                                  int                      gen_num_per_cycle) {
+                                  int                      gen_num_per_cycle,
+                                  uint32_t                 global_layer_begin) {
     const auto [seq_size, kernel_seq_size] = resolveSeqSizes(model_config, kv_cache_config);
     validateDescs(model_config, kernel_seq_size);
     validateAttentionMetadata(model_config);
@@ -314,7 +315,7 @@ CacheConfig createConfigFromDescs(const ModelConfig&       model_config,
     CacheConfig config;
     config.dtype                   = ctx.dtype;
     config.layer_num               = static_cast<uint32_t>(model_config.num_layers);
-    config.global_layer_begin      = model_config.global_layer_begin;
+    config.global_layer_begin      = global_layer_begin;
     config.cache_min_replay_tokens = std::max(1, model_config.cache_min_replay_tokens);
     config.cache_key_hash_seed     = model_config.cache_key_hash_seed;
 
@@ -387,7 +388,6 @@ ModelConfig CacheConfigCreator::stageScopedModelConfig(const ModelConfig&       
 
     ModelConfig stage_config        = model_config;
     stage_config.num_layers         = range.size;
-    stage_config.global_layer_begin = range.begin;
     stage_config.kv_cache_spec_descs.assign(model_config.kv_cache_spec_descs.begin() + range.begin,
                                             model_config.kv_cache_spec_descs.begin() + range.end());
 
@@ -406,8 +406,10 @@ ModelConfig CacheConfigCreator::stageScopedModelConfig(const ModelConfig&       
 CacheConfig CacheConfigCreator::createBasicConfig(const ModelConfig&       model_config,
                                                   const ParallelismConfig& parallelism_config,
                                                   const KVCacheConfig&     kv_cache_config,
-                                                  int                      gen_num_per_cycle) {
-    auto config        = createConfigFromDescs(model_config, parallelism_config, kv_cache_config, gen_num_per_cycle);
+                                                  int                      gen_num_per_cycle,
+                                                  uint32_t                 global_layer_begin) {
+    auto config        = createConfigFromDescs(
+        model_config, parallelism_config, kv_cache_config, gen_num_per_cycle, global_layer_begin);
     config.linear_step = std::max(1, kv_cache_config.linear_step);
     return config;
 }
@@ -426,7 +428,9 @@ CacheConfig CacheConfigCreator::createWarmupConfig(const ModelConfig&       mode
                                                    const KVCacheConfig&     kv_cache_config,
                                                    int                      gen_num_per_cycle) {
     const auto stage_model_config = stageScopedModelConfig(model_config, parallelism_config);
-    auto       config = createBasicConfig(stage_model_config, parallelism_config, kv_cache_config, gen_num_per_cycle);
+    const auto range = stageLayerRange(parallelism_config, parallelism_config.pp_rank, model_config.num_layers);
+    auto       config = createBasicConfig(
+        stage_model_config, parallelism_config, kv_cache_config, gen_num_per_cycle, range.begin);
     config.model_has_multiple_cache_groups = modelHasMultipleCacheGroups(model_config);
     // Upstream warmup pools reserve the sentinel block plus one allocatable
     // block per group, and never inherit linear_step: the SWA
@@ -451,13 +455,16 @@ CacheConfig CacheConfigCreator::createConfig(const ModelConfig&                 
         "draft proposal token count must fit a non-negative int");
     const int  gen_num_per_cycle = draft_model_config != nullptr ? sp_config->gen_num_per_cycle : 0;
     const auto stage_model_config = stageScopedModelConfig(model_config, parallelism_config);
-    auto       config = createBasicConfig(stage_model_config, parallelism_config, kv_cache_config, gen_num_per_cycle);
+    const auto range = stageLayerRange(parallelism_config, parallelism_config.pp_rank, model_config.num_layers);
+    auto       config = createBasicConfig(
+        stage_model_config, parallelism_config, kv_cache_config, gen_num_per_cycle, range.begin);
     config.model_has_multiple_cache_groups = modelHasMultipleCacheGroups(model_config);
     if (draft_model_config != nullptr) {
         const auto layout = RankLayout::fromParallelismConfig(parallelism_config);
         RTP_LLM_CHECK_WITH_INFO(layout.isLastStage(), "draft cache configuration is only valid on the last PP stage");
         auto draft_model     = stageScopedModelConfig(*draft_model_config, parallelism_config, true);
-        auto draft           = createBasicConfig(draft_model, parallelism_config, kv_cache_config, gen_num_per_cycle);
+        auto draft           = createBasicConfig(
+            draft_model, parallelism_config, kv_cache_config, gen_num_per_cycle, /*global_layer_begin=*/0);
         int  num_mtp_modules = is_mtp && !is_eagle && sp_config->type != SP_TYPE_DSPARK ? gen_num_per_cycle : 1;
         RTP_LLM_CHECK_WITH_INFO(num_mtp_modules > 0, "draft cache configuration requires at least one module");
         config.mtp_sub_configs.reserve(static_cast<size_t>(num_mtp_modules));

@@ -102,7 +102,6 @@ TEST(PPStageCacheConfigTest, PpOneKeepsWholeModel) {
     const auto model  = makeHybridModelConfig(8);
     const auto staged = CacheConfigCreator::stageScopedModelConfig(model, ParallelismConfig{});
     EXPECT_EQ(staged.num_layers, 8);
-    EXPECT_EQ(staged.global_layer_begin, 0u);
     EXPECT_EQ(staged.kv_cache_spec_descs.size(), 8u);
     EXPECT_EQ(staged.hybrid_attention_config.hybrid_attention_types.size(), 8u);
 }
@@ -114,7 +113,6 @@ TEST(PPStageCacheConfigTest, StageScopeUsesConfiguredPartition) {
         const auto staged       = CacheConfigCreator::stageScopedModelConfig(model, makePpConfig(65, 4, rank));
         const auto [begin, end] = expected[static_cast<size_t>(rank)];
         EXPECT_EQ(staged.num_layers, end - begin);
-        EXPECT_EQ(staged.global_layer_begin, static_cast<uint32_t>(begin));
         ASSERT_EQ(staged.kv_cache_spec_descs.size(), static_cast<size_t>(end - begin));
         ASSERT_EQ(staged.hybrid_attention_config.hybrid_attention_types.size(), static_cast<size_t>(end - begin));
         for (int64_t local = 0; local < end - begin; ++local) {

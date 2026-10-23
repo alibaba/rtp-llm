@@ -991,7 +991,7 @@ mtp::DSparkRoundState PPBatchStreamProcessor::buildDSparkRoundState(const GptMod
                                                                     const torch::Tensor&  new_token_lengths,
                                                                     TensorHolder&         host_holder) const {
     const auto            batch_size      = new_token_ids.size(0);
-    const auto            position_factor = model_input_gatherer_config_.position_id_len_factor;
+    const int64_t         position_factor = model_input_gatherer_config_.position_id_len_factor;
     auto                  prefix_lengths  = target_input.prefix_lengths.to(torch::kCPU).to(torch::kInt32).contiguous();
     mtp::DSparkRoundState round_state;
     if (is_decode) {
