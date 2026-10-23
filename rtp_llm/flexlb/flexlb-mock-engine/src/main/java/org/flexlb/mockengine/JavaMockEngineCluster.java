@@ -1382,6 +1382,12 @@ public final class JavaMockEngineCluster {
             requests.finish(id);
         }
 
+        private void rejectRequest(long id) {
+            requests.removeOutput(id);
+            requests.state(id, "rejected");
+            finishRequest(id);
+        }
+
         private EngineRpcService.ErrorDetailsPB cancellationError(long id) {
             var deadline = requests.deadline(id);
             boolean timeout = deadline != null && deadline.expired();
@@ -2247,9 +2253,7 @@ public final class JavaMockEngineCluster {
                     // Backpressure: decode pending queue full — reject so the
                     // caller (master/client) perceives decode overload and can
                     // retry elsewhere. Clean up the per-request state set up above.
-                    requests.removeOutput(requestId);
-                    requests.state(requestId, "rejected");
-                    finishRequest(requestId);
+                    rejectRequest(requestId);
                     observer.onError(io.grpc.Status.RESOURCE_EXHAUSTED
                             .withDescription("decode queue full (backpressure)").asRuntimeException());
                     return;
@@ -2269,9 +2273,7 @@ public final class JavaMockEngineCluster {
                         || shape.inputLen() >= performance.prefillBatchPolicy().maxSeqLen());
                 if (impossible || (!fifo && acquireBlockLease(requestId, shape) == null)) {
                     prefillLackMemRejects.increment();
-                    requests.removeOutput(requestId);
-                    requests.state(requestId, "rejected");
-                    finishRequest(requestId);
+                    rejectRequest(requestId);
                     observer.onError(capacityError(602, String.format(
                             "LACK_MEM: insufficient KV cache blocks (need=%d, avail=%d, spb=%d)",
                             needBlocks(shape), cache.availableBlocks(), seqSizePerBlock)));
@@ -2300,9 +2302,7 @@ public final class JavaMockEngineCluster {
                     // reservation made just above (release loop closure).
                     closePrefillSession(requestId);
                     releaseReservedDecode(requestId);
-                    requests.removeOutput(requestId);
-                    requests.state(requestId, "rejected");
-                    finishRequest(requestId);
+                    rejectRequest(requestId);
                     observer.onError(io.grpc.Status.RESOURCE_EXHAUSTED
                             .withDescription(String.format(
                             "prefill waiting queue full (backpressure): waiting=%d cap=%d",
@@ -2315,86 +2315,7 @@ public final class JavaMockEngineCluster {
             // stream (production C++ engine IsCancelled semantics).
             registerClientGoneListener(requestId, rpcContext);
 
-            // Use a separate executor for blocking poll to avoid starving the
-            // completion scheduler which is responsible for producing responses.
-            // Loop poll until a finished=true frame or timeout, so the mock can
-            // emit a first-token frame (finished=false) at prefill completion
-            // and a terminal frame (finished=true) at decode completion. Client
-            // measures ttft from the first frame and total from the finished
-            // frame; without the loop both metrics collapse to a single
-            // timestamp.
-            responseExecutor.execute(() -> {
-                try {
-                    boolean anyDelivered = false;
-                    while (true) {
-                        if (rpcContext.isCancelled()) {
-                            // Client stream broke mid-flight: the listener has
-                            // already driven the autonomous cancellation; stop
-                            // delivering frames to the dead observer and exit
-                            // WITHOUT onCompleted (the call is gone).
-                            return;
-                        }
-                        EngineRpcService.GenerateOutputsPB output =
-                                queue.poll(responsePollTimeoutMs, TimeUnit.MILLISECONDS);
-                        if (output == null) {
-                            // Timeout with no frame — mirror the pre-change
-                            // behavior of completing the stream. If nothing was
-                            // ever delivered the client sees zero outputs and
-                            // reports empty_response.
-                            break;
-                        }
-                        if (output.hasErrorInfo() && (output.getErrorInfo().getErrorCodeValue() == 603
-                                || output.getErrorInfo().getErrorCodeValue() == 602)) {
-                            var details = EngineRpcService.ErrorDetailsPB.newBuilder()
-                                    .setErrorCode(output.getErrorInfo().getErrorCodeValue())
-                                    .setErrorMessage(output.getErrorInfo().getErrorMessage()).build();
-                            observer.onError(MockRpcErrors.error(MockRpcErrors.status(details), details.getErrorCode(), details.getErrorMessage()));
-                            return;
-                        }
-                        observer.onNext(output);
-                        anyDelivered = true;
-                        boolean terminal = false;
-                        if (output.hasErrorInfo()) {
-                            // Error-only frames (cancel, P->D downstream
-                            // cancel, preemption terminal records) terminate the
-                            // stream: gRPC semantics deliver the failure then
-                            // close. Without this the pump keeps polling until
-                            // the frame-gap timeout (600s default), leaving
-                            // cancelled requests' client streams open far past
-                            // the cancel (functional cancel cases wait 5s).
-                            terminal = true;
-                        } else {
-                            EngineRpcService.FlattenOutputPB flatten = output.getFlattenOutput();
-                            for (int j = 0; j < flatten.getFinishedCount(); j++) {
-                                if (flatten.getFinished(j)) {
-                                    terminal = true;
-                                    break;
-                                }
-                            }
-                        }
-                        if (terminal) {
-                            break;
-                        }
-                    }
-                    observer.onCompleted();
-                    // anyDelivered is intentionally unread beyond diagnostics —
-                    // the client already treats a stream with zero onNext as
-                    // empty_response via its own null firstFrameNanos check.
-                    if (!anyDelivered) {
-                        // no-op branch, kept explicit for reader clarity
-                    }
-                } catch (InterruptedException e) {
-                    observer.onError(e);
-                } catch (RuntimeException e) {
-                    if (!rpcContext.isCancelled()) {
-                        throw e;
-                    }
-                    // Delivering a frame (e.g. the CANCELLED error frame the
-                    // autonomous cancel just queued) to an already-cancelled
-                    // call is expected here; swallow so the pump thread exits
-                    // cleanly instead of dying in the executor.
-                }
-            });
+            pumpResponses(queue, rpcContext, observer);
         }
 
         @Override
@@ -2461,26 +2382,23 @@ public final class JavaMockEngineCluster {
                 continuePrefillSession(session);
             }
 
-            // Loop poll until a finished=true frame or timeout — same pump as
-            // generateStreamCall. Under the BATCH dispatcher the client polls
-            // FetchResponse against the ORIGINAL PREFILL engine (startDecode
-            // handed the prefill-side queue to the Decode engine), so the stream
-            // carries TWO frames per request: a first-token frame (finished=false)
-            // offered at prefill completion and a terminal frame (finished=true)
-            // offered at decode completion. Polling exactly ONE frame collapsed
-            // the stream after the first-token frame, making the client's ttft
-            // and e2e identical by construction (verified: run 20260827_112212
-            // per-second ttft_p50==e2e_p50 everywhere) and truncating e2e for
-            // every request that actually spent decode time. The loop keeps the
-            // empty_response semantics: zero frames delivered before the timeout
-            // still completes the stream without error.
+            pumpResponses(queue, rpcContext, observer);
+        }
+
+        /**
+         * Generate and Fetch consume the same output protocol. A frame-gap timeout
+         * completes even an empty stream; 602/603 become gRPC errors, other error
+         * frames and finished outputs terminate after delivery. Cancellation exits
+         * without completing a dead observer. Poll outside the scheduler so blocked
+         * readers cannot starve the tasks producing their responses.
+         */
+        private void pumpResponses(LinkedBlockingQueue<EngineRpcService.GenerateOutputsPB> queue,
+                                   Context rpcContext,
+                                   StreamObserver<EngineRpcService.GenerateOutputsPB> observer) {
             responseExecutor.execute(() -> {
                 try {
                     while (true) {
                         if (rpcContext.isCancelled()) {
-                            // Client fetch stream broke mid-flight: the
-                            // listener already drove the autonomous cancel;
-                            // exit without touching the dead observer.
                             return;
                         }
                         EngineRpcService.GenerateOutputsPB output =
@@ -2499,11 +2417,6 @@ public final class JavaMockEngineCluster {
                         observer.onNext(output);
                         boolean terminal = false;
                         if (output.hasErrorInfo()) {
-                            // Error-only frames (cancel, P->D downstream
-                            // cancel, preemption terminal records) terminate the
-                            // stream — mirrors the generateStreamCall pump.
-                            // Without this a cancelled request's FetchResponse
-                            // hangs until the 600s frame-gap timeout.
                             terminal = true;
                         } else {
                             EngineRpcService.FlattenOutputPB flatten = output.getFlattenOutput();

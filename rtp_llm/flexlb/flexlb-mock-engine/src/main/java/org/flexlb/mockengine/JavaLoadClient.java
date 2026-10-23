@@ -101,8 +101,7 @@ public final class JavaLoadClient implements AutoCloseable {
     private final EventLoopGroup eventLoopGroup;
     /** Shared Schedule transport; null only in channel-free dry runs. */
     private final MasterTargetRouter router;
-    private final Map<String, ManagedChannel[]> engineChannelPools = new ConcurrentHashMap<>();
-    private final Map<String, AtomicInteger> engineChannelRR = new ConcurrentHashMap<>();
+    private final Map<String, EngineChannelPool> engineChannelPools = new ConcurrentHashMap<>();
     private final HttpClient httpClient = HttpClient.newBuilder()
             .connectTimeout(Duration.ofSeconds(5)).build();
     private final List<RequestResult> results = new ArrayList<>();
@@ -666,9 +665,6 @@ public final class JavaLoadClient implements AutoCloseable {
         result.sendDueEpochMs = sendDueEpochMs;
         result.priority = record.priority;
 
-        EngineRpcService.GenerateInputPB inputPb = null;
-        FlexlbScheduleProtocol.FlexlbScheduleResponsePB scheduleResponse = null;
-
         try {
             if (!acquiredBySender) semaphore.acquire();
         } catch (InterruptedException e) {
@@ -683,176 +679,172 @@ public final class JavaLoadClient implements AutoCloseable {
 
         inflightCount.incrementAndGet();
         try {
-            Exception scheduleExc = null;
-            scheduleInflightCount.incrementAndGet();
-            try {
-                double sendStartEpochMs = replayStartedEpochMs
-                        + (System.nanoTime() - replayStartedNanos) / 1_000_000.0;
-                result.sendStartEpochMs = sendStartEpochMs;
-                result.pacingLagMs = Math.max(0.0, sendStartEpochMs - sendDueEpochMs);
-                actualSentCount.incrementAndGet();
-                if (liveJournal != null) {
-                    ObjectNode event = perRequestNode(result);
-                    if (flowControl != null) flowControl.identify(event);
-                    liveJournal.record("issued", event);
-                }
-
-                inputPb = buildGenerateInput(record);
-                FlexlbScheduleProtocol.FlexlbScheduleRequestPB scheduleReq = buildScheduleRequest(record, inputPb);
-
-                long scheduleStartNanos = System.nanoTime();
-                MasterTargetRouter.ScheduleOutcome outcome = router.schedule(scheduleReq, config.timeoutMs);
-                scheduleResponse = outcome.response;
-                result.masterTarget = outcome.lastTarget;
-                result.failover = outcome.failover;
-                result.scheduleAttempts = outcome.attempts;
-                result.errorKind = outcome.errorKind.label;
-                // Fixed-target failures historically leave Schedule timing unset.
-                if (usesMasterDiscovery() || scheduleResponse != null) {
-                    result.scheduleMs = (System.nanoTime() - scheduleStartNanos) / 1_000_000.0;
-                    result.schedDoneEpochMs = sendStartEpochMs + result.scheduleMs;
-                }
-                if (scheduleResponse == null) {
-                    scheduleExc = outcome.failure;
-                    result.status = "exception";
-                    result.error = outcome.failure == null
-                            ? "no master response" : outcome.failure.toString();
-                    result.totalMs = (System.nanoTime() - startedNanos) / 1_000_000.0;
-                } else {
-                    result.enqueuedByMaster = scheduleResponse.getEnqueuedByMaster();
-                }
-
-                if (scheduleResponse == null) {
-                    // The failure is settled below under the configured fallback policy.
-                } else if (scheduleResponse.getCode() != 200 || !scheduleResponse.getSuccess()) {
-                    result.status = "schedule_error";
-                    result.error = scheduleResponse.getErrorMessage().isEmpty()
-                            ? "code=" + scheduleResponse.getCode()
-                            : scheduleResponse.getErrorMessage();
-                    result.totalMs = (System.nanoTime() - startedNanos) / 1_000_000.0;
-                    // A business response never retries another Master. Discovery
-                    // also forbids direct fallback; fixed-target opt-in is settled below.
-                    result.errorKind = "business";
-                } else {
-                    result.prefill = roleAddr(scheduleResponse, "PREFILL");
-                    result.decode = roleAddr(scheduleResponse, "DECODE");
-
-                    if (!config.fetchOutputStream) {
-                        // Under a NON_BATCH dispatcher the engine only receives the
-                        // request through the client's own GenerateStreamCall
-                        // (submission and stream reading are the same streaming
-                        // call), so skipping the fetch would mean the request
-                        // never reaches any engine. Fail fast instead of silently
-                        // producing a run with zero engine load.
-                        if (!scheduleResponse.getEnqueuedByMaster()) {
-                            System.err.println(
-                                    "FATAL: FETCH_OUTPUT_STREAM=0 requires dispatcher.type=BATCH: "
-                                    + "schedule response reports enqueued_by_master=false "
-                                    + "(request_id=" + record.requestId + "). Under a NON_BATCH "
-                                    + "dispatcher the engine only receives requests through the "
-                                    + "client's GenerateStreamCall stream, so skipping the fetch "
-                                    + "would leave the engine idle. Re-enable stream reading or "
-                                    + "switch the master to a BATCH dispatcher.");
-                            System.exit(86);
-                        }
-                        result.status = "scheduled";
-                        result.totalMs = (System.nanoTime() - startedNanos) / 1_000_000.0;
-                        // Route through tallyResult so the result lands in
-                        // completedResults (drives flexlb_client_completed_total and
-                        // the schedule-latency pushgateway series) instead of
-                        // bumping counters by hand and skipping the record.
-                        tallyResult(result);
-                        responseCount.incrementAndGet();
-                        return result;
-                    }
-                }
-            } catch (Exception e) {
-                scheduleExc = e;
-                result.status = "exception";
-                result.error = e.toString();
-                result.totalMs = (System.nanoTime() - startedNanos) / 1_000_000.0;
-                result.errorKind = MasterTargetRouter.classifyThrowable(e);
-            } finally {
-                scheduleInflightCount.decrementAndGet();
-            }
-
-            // Direct fallback is opt-in. Fixed-target mode retains its historical
-            // any-failure policy; discovery permits it only when no Master answered
-            // and all eligible targets failed with UNAVAILABLE.
-            boolean legacyScheduleFailure = scheduleResponse == null
-                    || "schedule_error".equals(result.status)
-                    || "exception".equals(result.status);
-            boolean terminating = !usesMasterDiscovery()
-                    ? legacyScheduleFailure
-                    : (scheduleResponse == null || "schedule_error".equals(result.status));
-            if (terminating) {
-                boolean fallbackEligible = !usesMasterDiscovery()
-                        ? legacyScheduleFailure
-                        : ("transport".equals(result.errorKind)
-                            && scheduleResponse == null);
-                if (fallbackEligible && config.enableFallback
-                        && !fallbackPrefillAddrs.isEmpty()) {
-                    String prefix = scheduleExc != null
-                            ? "master=" + scheduleExc
-                            : "master=" + result.error;
-                    attemptFallback(record, result, startedNanos, prefix);
-                } else if (usesMasterDiscovery() && scheduleResponse == null) {
-                    // Discovery distinguishes unserved requests from Master responses.
-                    result.routePath = "failed";
-                }
-                tallyResult(result);
-                responseCount.incrementAndGet();
-                return result;
-            }
-
-            // Phase 2: engine stream reading (same request permit)
-            if (scheduleResponse != null && config.fetchOutputStream) {
-                try {
-
-                    String prefillAddr = roleAddr(scheduleResponse, "PREFILL");
-                    if (prefillAddr.isEmpty()) {
-                        prefillAddr = roleAddr(scheduleResponse, "PDFUSION");
-                    }
-                    if (prefillAddr.isEmpty()) {
-                        throw new RuntimeException("schedule response has no PREFILL/PDFUSION address");
-                    }
-
-                    EngineRpcService.GenerateInputPB modifiedInput = copyRoleAddrs(inputPb, scheduleResponse);
-                    ManagedChannel engineChannel = getEngineChannel(prefillAddr);
-                    RpcServiceGrpc.RpcServiceBlockingStub engineStub = RpcServiceGrpc.newBlockingStub(engineChannel)
-                            .withDeadlineAfter(config.timeoutMs, TimeUnit.MILLISECONDS);
-
-                    Iterator<EngineRpcService.GenerateOutputsPB> stream;
-                    if (scheduleResponse.getEnqueuedByMaster()) {
-                        stream = engineStub.fetchResponse(EngineRpcService.FetchRequestPB.newBuilder()
-                                .setRequestId(inputPb.getRequestId())
-                                .build());
-                    } else {
-                        stream = engineStub.generateStreamCall(modifiedInput);
-                    }
-
-                    consumeStream(stream, result, startedNanos);
-                    result.wallClockTs = System.currentTimeMillis() / 1000.0;
-                } catch (Exception e) {
-                    // Fetch failures retain fixed-target opt-in; discovery never
-                    // bypasses the Master for engine-side failures.
-                    if (!usesMasterDiscovery()
-                            && config.enableFallback && !fallbackPrefillAddrs.isEmpty()) {
-                        attemptFallback(record, result, startedNanos, "fetch=" + e);
-                    } else {
-                        result.status = "exception";
-                        result.error = e.toString();
-                        result.totalMs = (System.nanoTime() - startedNanos) / 1_000_000.0;
-                    }
-                }
-            }
-
+            executeRequest(record, result, startedNanos);
             tallyResult(result);
             responseCount.incrementAndGet();
             return result;
         } finally {
             inflightCount.decrementAndGet();
             semaphore.release();
+        }
+    }
+
+    /** Routing and streaming share one admission permit and one result settlement. */
+    private void executeRequest(TraceRecord record, RequestResult result, long startedNanos) {
+        EngineRpcService.GenerateInputPB inputPb = null;
+        FlexlbScheduleProtocol.FlexlbScheduleResponsePB scheduleResponse = null;
+        Exception scheduleExc = null;
+        scheduleInflightCount.incrementAndGet();
+        try {
+            double sendStartEpochMs = replayStartedEpochMs
+                    + (System.nanoTime() - replayStartedNanos) / 1_000_000.0;
+            result.sendStartEpochMs = sendStartEpochMs;
+            result.pacingLagMs = Math.max(0.0, sendStartEpochMs - result.sendDueEpochMs);
+            actualSentCount.incrementAndGet();
+            if (liveJournal != null) {
+                ObjectNode event = perRequestNode(result);
+                if (flowControl != null) flowControl.identify(event);
+                liveJournal.record("issued", event);
+            }
+
+            inputPb = buildGenerateInput(record);
+            FlexlbScheduleProtocol.FlexlbScheduleRequestPB scheduleReq = buildScheduleRequest(record, inputPb);
+
+            long scheduleStartNanos = System.nanoTime();
+            MasterTargetRouter.ScheduleOutcome outcome = router.schedule(scheduleReq, config.timeoutMs);
+            scheduleResponse = outcome.response;
+            result.masterTarget = outcome.lastTarget;
+            result.failover = outcome.failover;
+            result.scheduleAttempts = outcome.attempts;
+            result.errorKind = outcome.errorKind.label;
+            // Fixed-target failures historically leave Schedule timing unset.
+            if (usesMasterDiscovery() || scheduleResponse != null) {
+                result.scheduleMs = (System.nanoTime() - scheduleStartNanos) / 1_000_000.0;
+                result.schedDoneEpochMs = sendStartEpochMs + result.scheduleMs;
+            }
+            if (scheduleResponse == null) {
+                scheduleExc = outcome.failure;
+                result.status = "exception";
+                result.error = outcome.failure == null
+                        ? "no master response" : outcome.failure.toString();
+                result.totalMs = (System.nanoTime() - startedNanos) / 1_000_000.0;
+            } else {
+                result.enqueuedByMaster = scheduleResponse.getEnqueuedByMaster();
+            }
+
+            if (scheduleResponse == null) {
+                // The failure is settled below under the configured fallback policy.
+            } else if (scheduleResponse.getCode() != 200 || !scheduleResponse.getSuccess()) {
+                result.status = "schedule_error";
+                result.error = scheduleResponse.getErrorMessage().isEmpty()
+                        ? "code=" + scheduleResponse.getCode()
+                        : scheduleResponse.getErrorMessage();
+                result.totalMs = (System.nanoTime() - startedNanos) / 1_000_000.0;
+                // A business response never retries another Master. Discovery
+                // also forbids direct fallback; fixed-target opt-in is settled below.
+                result.errorKind = "business";
+            } else {
+                result.prefill = roleAddr(scheduleResponse, "PREFILL");
+                result.decode = roleAddr(scheduleResponse, "DECODE");
+
+                if (!config.fetchOutputStream) {
+                    // Under a NON_BATCH dispatcher the engine only receives the
+                    // request through the client's own GenerateStreamCall
+                    // (submission and stream reading are the same streaming
+                    // call), so skipping the fetch would mean the request
+                    // never reaches any engine. Fail fast instead of silently
+                    // producing a run with zero engine load.
+                    if (!scheduleResponse.getEnqueuedByMaster()) {
+                        System.err.println(
+                                "FATAL: FETCH_OUTPUT_STREAM=0 requires dispatcher.type=BATCH: "
+                                + "schedule response reports enqueued_by_master=false "
+                                + "(request_id=" + record.requestId + "). Under a NON_BATCH "
+                                + "dispatcher the engine only receives requests through the "
+                                + "client's GenerateStreamCall stream, so skipping the fetch "
+                                + "would leave the engine idle. Re-enable stream reading or "
+                                + "switch the master to a BATCH dispatcher.");
+                        System.exit(86);
+                    }
+                    result.status = "scheduled";
+                    result.totalMs = (System.nanoTime() - startedNanos) / 1_000_000.0;
+                    return;
+                }
+            }
+        } catch (Exception e) {
+            scheduleExc = e;
+            result.status = "exception";
+            result.error = e.toString();
+            result.totalMs = (System.nanoTime() - startedNanos) / 1_000_000.0;
+            result.errorKind = MasterTargetRouter.classifyThrowable(e);
+        } finally {
+            scheduleInflightCount.decrementAndGet();
+        }
+
+        // Direct fallback is opt-in. Fixed-target mode retains its historical
+        // any-failure policy; discovery permits it only when no Master answered
+        // and all eligible targets failed with UNAVAILABLE.
+        boolean legacyScheduleFailure = scheduleResponse == null
+                || "schedule_error".equals(result.status)
+                || "exception".equals(result.status);
+        boolean terminating = !usesMasterDiscovery()
+                ? legacyScheduleFailure
+                : (scheduleResponse == null || "schedule_error".equals(result.status));
+        if (terminating) {
+            boolean fallbackEligible = !usesMasterDiscovery()
+                    ? legacyScheduleFailure
+                    : ("transport".equals(result.errorKind)
+                        && scheduleResponse == null);
+            if (fallbackEligible && config.enableFallback
+                    && !fallbackPrefillAddrs.isEmpty()) {
+                String prefix = scheduleExc != null
+                        ? "master=" + scheduleExc
+                        : "master=" + result.error;
+                attemptFallback(record, result, startedNanos, prefix);
+            } else if (usesMasterDiscovery() && scheduleResponse == null) {
+                // Discovery distinguishes unserved requests from Master responses.
+                result.routePath = "failed";
+            }
+            return;
+        }
+
+        // Phase 2: engine stream reading (same request permit)
+        if (scheduleResponse != null && config.fetchOutputStream) {
+            try {
+
+                String prefillAddr = roleAddr(scheduleResponse, "PREFILL");
+                if (prefillAddr.isEmpty()) {
+                    prefillAddr = roleAddr(scheduleResponse, "PDFUSION");
+                }
+                if (prefillAddr.isEmpty()) {
+                    throw new RuntimeException("schedule response has no PREFILL/PDFUSION address");
+                }
+
+                EngineRpcService.GenerateInputPB modifiedInput = copyRoleAddrs(inputPb, scheduleResponse);
+                RpcServiceGrpc.RpcServiceBlockingStub engineStub = engineStub(prefillAddr);
+
+                Iterator<EngineRpcService.GenerateOutputsPB> stream;
+                if (scheduleResponse.getEnqueuedByMaster()) {
+                    stream = engineStub.fetchResponse(EngineRpcService.FetchRequestPB.newBuilder()
+                            .setRequestId(inputPb.getRequestId())
+                            .build());
+                } else {
+                    stream = engineStub.generateStreamCall(modifiedInput);
+                }
+
+                consumeStream(stream, result, startedNanos);
+                result.wallClockTs = System.currentTimeMillis() / 1000.0;
+            } catch (Exception e) {
+                // Fetch failures retain fixed-target opt-in; discovery never
+                // bypasses the Master for engine-side failures.
+                if (!usesMasterDiscovery()
+                        && config.enableFallback && !fallbackPrefillAddrs.isEmpty()) {
+                    attemptFallback(record, result, startedNanos, "fetch=" + e);
+                } else {
+                    result.status = "exception";
+                    result.error = e.toString();
+                    result.totalMs = (System.nanoTime() - startedNanos) / 1_000_000.0;
+                }
+            }
         }
     }
 
@@ -899,22 +891,15 @@ public final class JavaLoadClient implements AutoCloseable {
         String decodeAddr = fallbackDecodeAddrs.isEmpty()
                 ? "" : roundRobinAddr(fallbackDecodeAddrs, fallbackDecodeRR, "");
 
-        EngineRpcService.GenerateConfigPB.Builder fbConfig =
-                buildGenerateInput(record).getGenerateConfig().toBuilder().clearRoleAddrs();
+        EngineRpcService.GenerateInputPB.Builder fbInput = buildGenerateInput(record).toBuilder();
+        EngineRpcService.GenerateConfigPB.Builder fbConfig = fbInput.getGenerateConfigBuilder().clearRoleAddrs();
         fbConfig.addRoleAddrs(toRoleAddrPb(
                 EngineRpcService.RoleTypePB.ROLE_TYPE_PREFILL, prefillAddr));
         if (!decodeAddr.isEmpty()) {
             fbConfig.addRoleAddrs(toRoleAddrPb(
                     EngineRpcService.RoleTypePB.ROLE_TYPE_DECODE, decodeAddr));
         }
-        EngineRpcService.GenerateInputPB fbInput = buildGenerateInput(record).toBuilder()
-                .setGenerateConfig(fbConfig)
-                .build();
-
-        ManagedChannel channel = getEngineChannel(prefillAddr);
-        RpcServiceGrpc.RpcServiceBlockingStub stub = RpcServiceGrpc.newBlockingStub(channel)
-                .withDeadlineAfter(config.timeoutMs, TimeUnit.MILLISECONDS);
-        Iterator<EngineRpcService.GenerateOutputsPB> stream = stub.generateStreamCall(fbInput);
+        Iterator<EngineRpcService.GenerateOutputsPB> stream = engineStub(prefillAddr).generateStreamCall(fbInput.build());
 
         result.scheduleMs = 0.0;
         result.prefill = prefillAddr;
@@ -1126,26 +1111,46 @@ public final class JavaLoadClient implements AutoCloseable {
         return "";
     }
 
+    private RpcServiceGrpc.RpcServiceBlockingStub engineStub(String target) {
+        return RpcServiceGrpc.newBlockingStub(getEngineChannel(target))
+                .withDeadlineAfter(config.timeoutMs, TimeUnit.MILLISECONDS);
+    }
+
     private ManagedChannel getEngineChannel(String target) {
-        ManagedChannel[] pool = engineChannelPools.computeIfAbsent(target, t -> {
-            ManagedChannel[] channels = new ManagedChannel[config.nChannels];
-            for (int i = 0; i < config.nChannels; i++) {
-                channels[i] = NettyChannelBuilder.forTarget(t)
-                        .eventLoopGroup(eventLoopGroup)
-                        .channelType(NioSocketChannel.class)
-                        .maxInboundMessageSize(16 * 1024 * 1024)
-                        .flowControlWindow(1024 * 1024)
-                        .keepAliveTime(KEEPALIVE_TIME_MINUTES, TimeUnit.MINUTES)
-                        .keepAliveTimeout(10, TimeUnit.SECONDS)
-                        .usePlaintext()
-                        .build();
-            }
-            engineChannelRR.put(t, new AtomicInteger());
-            return channels;
-        });
-        AtomicInteger rr = engineChannelRR.get(target);
-        int idx = Math.floorMod(rr.getAndIncrement(), config.nChannels);
-        return pool[idx];
+        return engineChannelPools.computeIfAbsent(target, this::newEngineChannelPool).next();
+    }
+
+    private EngineChannelPool newEngineChannelPool(String target) {
+        ManagedChannel[] channels = new ManagedChannel[config.nChannels];
+        for (int i = 0; i < config.nChannels; i++) {
+            channels[i] = NettyChannelBuilder.forTarget(target)
+                    .eventLoopGroup(eventLoopGroup)
+                    .channelType(NioSocketChannel.class)
+                    .maxInboundMessageSize(16 * 1024 * 1024)
+                    .flowControlWindow(1024 * 1024)
+                    .keepAliveTime(KEEPALIVE_TIME_MINUTES, TimeUnit.MINUTES)
+                    .keepAliveTimeout(10, TimeUnit.SECONDS)
+                    .usePlaintext()
+                    .build();
+        }
+        return new EngineChannelPool(channels);
+    }
+
+    private static final class EngineChannelPool {
+        private final ManagedChannel[] channels;
+        private final AtomicInteger cursor = new AtomicInteger();
+
+        EngineChannelPool(ManagedChannel[] channels) {
+            this.channels = channels;
+        }
+
+        ManagedChannel next() {
+            return channels[Math.floorMod(cursor.getAndIncrement(), channels.length)];
+        }
+
+        void shutdown() {
+            for (ManagedChannel channel : channels) channel.shutdown();
+        }
     }
 
     // ---- Trace Loading ----
@@ -1808,11 +1813,7 @@ public final class JavaLoadClient implements AutoCloseable {
         if (router != null) {
             router.shutdown();
         }
-        for (ManagedChannel[] pool : engineChannelPools.values()) {
-            for (ManagedChannel channel : pool) {
-                channel.shutdown();
-            }
-        }
+        engineChannelPools.values().forEach(EngineChannelPool::shutdown);
         if (eventLoopGroup != null) {
             eventLoopGroup.shutdownGracefully(0, 2, TimeUnit.SECONDS);
         }

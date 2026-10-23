@@ -32,10 +32,14 @@ class JavaLoadClientLegacyFallbackTest {
     private static final String UNREACHABLE_ENGINE = "127.0.0.1:2";
 
     private JavaLoadClient client(Server master, boolean enableFallback, boolean fetch) {
+        return client(master, enableFallback, fetch, 1);
+    }
+
+    private JavaLoadClient client(Server master, boolean enableFallback, boolean fetch, int channels) {
         JavaLoadClient.Config config = new JavaLoadClient.Config(
                 "trace.jsonl", "127.0.0.1:7001", "127.0.0.1:" + master.getPort(),
                 0, 4, 10.0, 1, tempDir.resolve("out").toString(), 1, 0, 0,
-                2_000L, 500.0, fetch, false, 1, 1, 0L, 120, true,
+                2_000L, 500.0, fetch, false, channels, 1, 0L, 120, true,
                 "engine_service", "", 0, 0, "",
                 enableFallback, "", false);
         return new JavaLoadClient(config);
@@ -57,8 +61,25 @@ class JavaLoadClientLegacyFallbackTest {
         Method handle = JavaLoadClient.class.getDeclaredMethod(
                 "handleRequest", JavaLoadClient.TraceRecord.class, Semaphore.class, double.class);
         handle.setAccessible(true);
-        return (JavaLoadClient.RequestResult)
+        var result = (JavaLoadClient.RequestResult)
                 handle.invoke(client, record, new Semaphore(4), 0.0);
+        assertSettled(client, result);
+        return result;
+    }
+
+    private static int count(JavaLoadClient client, String name) throws Exception {
+        var field = JavaLoadClient.class.getDeclaredField(name);
+        field.setAccessible(true);
+        return ((java.util.concurrent.atomic.AtomicInteger) field.get(client)).get();
+    }
+
+    private static void assertSettled(JavaLoadClient client, JavaLoadClient.RequestResult result) throws Exception {
+        assertEquals(1, count(client, "responseCount"));
+        assertEquals(1, count(client, "monitoredCompleted"));
+        assertEquals(List.of(result), client.completedResults);
+        assertEquals(1, client.successCount.get() + client.errorCount.get());
+        assertEquals(0, client.inflightCount.get());
+        assertEquals(0, client.scheduleInflightCount.get());
     }
 
     private static void closeClient(JavaLoadClient client) throws Exception {
@@ -227,7 +248,9 @@ class JavaLoadClientLegacyFallbackTest {
                     .setFlattenOutput(org.flexlb.engine.grpc.EngineRpcService.FlattenOutputPB.newBuilder()
                             .addFinished(true)).build());
             observer.get().onCompleted();
-            assertEquals("ok", future.get(5, java.util.concurrent.TimeUnit.SECONDS).status);
+            var result = future.get(5, java.util.concurrent.TimeUnit.SECONDS);
+            assertEquals("ok", result.status);
+            assertSettled(client, result);
             assertEquals(0, client.inflightCount.get());
             assertEquals(1, permit.availablePermits());
         } finally {
@@ -238,4 +261,117 @@ class JavaLoadClientLegacyFallbackTest {
         }
     }
 
+    @Test
+    void scheduleOnlySettlesOnceWithoutOpeningEngineStream() throws Exception {
+        Server master = master(null, FlexlbScheduleProtocol.FlexlbScheduleResponsePB.newBuilder()
+                .setCode(200).setSuccess(true).setEnqueuedByMaster(true).build());
+        try (JavaLoadClient client = client(master, false, false)) {
+            assertEquals("scheduled", handle(client, rec(1)).status);
+            assertEquals(1, client.successCount.get());
+        } finally {
+            master.shutdownNow().awaitTermination(5, TimeUnit.SECONDS);
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void successfulFallbackPreservesInputAndSettlesOnce(boolean fetchFailure) throws Exception {
+        var received = new java.util.concurrent.atomic.AtomicReference<org.flexlb.engine.grpc.EngineRpcService.GenerateInputPB>();
+        Server engine = NettyServerBuilder.forPort(0).addService(
+                new org.flexlb.engine.grpc.RpcServiceGrpc.RpcServiceImplBase() {
+                    @Override public void generateStreamCall(org.flexlb.engine.grpc.EngineRpcService.GenerateInputPB request,
+                            StreamObserver<org.flexlb.engine.grpc.EngineRpcService.GenerateOutputsPB> observer) {
+                        received.set(request);
+                        observer.onNext(org.flexlb.engine.grpc.EngineRpcService.GenerateOutputsPB.newBuilder()
+                                .setFlattenOutput(org.flexlb.engine.grpc.EngineRpcService.FlattenOutputPB.newBuilder()
+                                        .addFinished(true)).build());
+                        observer.onCompleted();
+                    }
+                }).build().start();
+        Server master = master(fetchFailure ? null : Status.UNAVAILABLE,
+                FlexlbScheduleProtocol.FlexlbScheduleResponsePB.newBuilder()
+                        .setCode(200).setSuccess(true).setEnqueuedByMaster(true)
+                        .addServerStatus(FlexlbScheduleProtocol.FlexlbServerStatusPB.newBuilder()
+                                .setRole("PREFILL").setServerIp("127.0.0.1").setGrpcPort(2)).build());
+        try (JavaLoadClient client = client(master, true, true)) {
+            String target = "127.0.0.1:" + engine.getPort();
+            client.fallbackPrefillAddrs.add(target);
+            var record = rec(17);
+            var result = handle(client, record);
+            assertEquals("ok", result.status);
+            assertEquals("fallback", result.routePath);
+            assertEquals(target, result.prefill);
+            assertEquals(0.0, result.scheduleMs);
+            var input = received.get();
+            assertEquals(record.requestId, input.getRequestId());
+            assertEquals(record.tokenIds, input.getTokenIdsList());
+            assertEquals(record.sourceRid, input.getRequestInfo().getRequestId());
+            assertEquals(record.traceId, input.getRequestInfo().getTraceId());
+            assertEquals(record.outputLen, input.getGenerateConfig().getMaxNewTokens());
+            assertEquals(1, input.getGenerateConfig().getRoleAddrsCount());
+            assertEquals(engine.getPort(), input.getGenerateConfig().getRoleAddrs(0).getGrpcPort());
+            assertEquals(2_000, input.getGenerateConfig().getTimeoutMs());
+            assertTrue(input.getStartTime() > 0);
+        } finally {
+            master.shutdownNow().awaitTermination(5, TimeUnit.SECONDS);
+            engine.shutdownNow().awaitTermination(5, TimeUnit.SECONDS);
+        }
+    }
+
+    @Test
+    void interruptionBeforeAdmissionDoesNotPublishOrReleaseAnUnownedPermit() throws Exception {
+        Server master = master(null, FlexlbScheduleProtocol.FlexlbScheduleResponsePB.getDefaultInstance());
+        try (JavaLoadClient client = client(master, false, true)) {
+            var method = JavaLoadClient.class.getDeclaredMethod("handleRequest",
+                    JavaLoadClient.TraceRecord.class, Semaphore.class, double.class);
+            method.setAccessible(true);
+            var permit = new Semaphore(0);
+            Thread.currentThread().interrupt();
+            var result = (JavaLoadClient.RequestResult) method.invoke(client, rec(1), permit, 0.0);
+            assertTrue(Thread.interrupted(), "retain caller interruption");
+            assertEquals("interrupted", result.error);
+            assertEquals(0, permit.availablePermits());
+            assertEquals(1, count(client, "responseCount"));
+            assertEquals(1, client.errorCount.get());
+            assertEquals(0, count(client, "monitoredCompleted"));
+            assertEquals(0, client.actualSentCount.get());
+            assertTrue(client.completedResults.isEmpty());
+            assertEquals(0, client.inflightCount.get());
+        } finally {
+            Thread.interrupted();
+            master.shutdownNow().awaitTermination(5, TimeUnit.SECONDS);
+        }
+    }
+
+    @Test
+    void enginePoolsKeepPerTargetRoundRobinAndCloseEveryChannel() throws Exception {
+        Server master = master(null, FlexlbScheduleProtocol.FlexlbScheduleResponsePB.getDefaultInstance());
+        var channels = new java.util.HashSet<io.grpc.ManagedChannel>();
+        var executor = java.util.concurrent.Executors.newFixedThreadPool(4);
+        try {
+            try (JavaLoadClient client = client(master, false, true, 2)) {
+                var method = JavaLoadClient.class.getDeclaredMethod("getEngineChannel", String.class);
+                method.setAccessible(true);
+                var first = (io.grpc.ManagedChannel) method.invoke(client, "127.0.0.1:2");
+                var second = (io.grpc.ManagedChannel) method.invoke(client, "127.0.0.1:2");
+                org.junit.jupiter.api.Assertions.assertNotSame(first, second);
+                org.junit.jupiter.api.Assertions.assertSame(first, method.invoke(client, "127.0.0.1:2"));
+                var calls = new ArrayList<java.util.concurrent.Future<io.grpc.ManagedChannel>>();
+                for (int i = 0; i < 64; i++) {
+                    calls.add(executor.submit(() -> (io.grpc.ManagedChannel) method.invoke(client, "127.0.0.1:2")));
+                }
+                for (var call : calls) channels.add(call.get(3, TimeUnit.SECONDS));
+                assertEquals(java.util.Set.of(first, second), channels);
+                var other = (io.grpc.ManagedChannel) method.invoke(client, "127.0.0.1:3");
+                assertFalse(channels.contains(other));
+                channels.add(other);
+                channels.add((io.grpc.ManagedChannel) method.invoke(client, "127.0.0.1:3"));
+                assertEquals(4, channels.size());
+            }
+            assertTrue(channels.stream().allMatch(io.grpc.ManagedChannel::isShutdown));
+        } finally {
+            executor.shutdownNow();
+            master.shutdownNow().awaitTermination(5, TimeUnit.SECONDS);
+        }
+    }
 }
