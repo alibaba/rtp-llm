@@ -88,7 +88,10 @@ from rtp_llm.models_py.modules.dsv4.fp8._compressor_vllm_triton import (
     run_fused_compress_kv_write,
     run_save_partial_states,
 )
-from rtp_llm.models_py.modules.dsv4.fp8._kv_cache_utils import PoolBackedModule
+from rtp_llm.models_py.modules.dsv4.fp8._kv_cache_utils import (
+    PoolBackedModule,
+    guard_live_module_mutation,
+)
 
 # Process-local cache for the device-side cos_sin tensor derived from a
 # given freqs_cis source. DSV4 has ~91 CompressorFP8 instances (main +
@@ -581,6 +584,7 @@ class CompressorFP8(PoolBackedModule):
         self._kv_cache_t = int(kv_cache_t)
 
     def set_cp_ctx(self, cp_ctx: Optional[CPContext]) -> None:
+        guard_live_module_mutation(self, "cp_ctx")
         self._cp_ctx = cp_ctx
         # When ``kv_cache_sharded=True`` flows in via the CPContext, paged KV
         # pools use page-RR ownership and fixed STATE pools use intra-block

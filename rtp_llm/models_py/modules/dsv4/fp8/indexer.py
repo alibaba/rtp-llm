@@ -55,7 +55,10 @@ from rtp_llm.models_py.modules.dsv4.fp8._indexer_score import (
     has_fp8_mqa_logits,
     has_fp8_paged_mqa_logits,
 )
-from rtp_llm.models_py.modules.dsv4.fp8._kv_cache_utils import PoolBackedModule
+from rtp_llm.models_py.modules.dsv4.fp8._kv_cache_utils import (
+    PoolBackedModule,
+    guard_live_module_mutation,
+)
 from rtp_llm.models_py.modules.dsv4.fp8.compressor import (
     CompressorFP8,
     CompressorMeta,
@@ -684,6 +687,7 @@ class IndexerFP8(PoolBackedModule):
         ``indexer.compressor`` directly) so we don't need to forward
         here. Accepting ``None`` with cp_size <= 1 is the no-op.
         """
+        guard_live_module_mutation(self, "cp_ctx")
         if cp_ctx is not None and cp_ctx.cp_size > 1:
             assert (
                 cp_ctx.input_lengths_global is not None

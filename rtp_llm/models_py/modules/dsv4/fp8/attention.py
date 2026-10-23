@@ -164,6 +164,9 @@ def _force_all_cp_raw_q_merge() -> bool:
 
 
 from rtp_llm.models_py.modules.dsv4.fp8._kv_cache_utils import (
+    guard_live_module_mutation,
+)
+from rtp_llm.models_py.modules.dsv4.fp8._kv_cache_utils import (
     pool_physical_tokens_per_block as _dsv4_pool_owner_tokens_per_block,
 )
 from rtp_llm.models_py.modules.dsv4.fp8._kv_cache_utils import (
@@ -497,6 +500,7 @@ def bind_attn_cache(attn, kv_cache=None, block_tables_by_type=None, cp_ctx=BIND_
     view onto ``attn``, restoring the previous binding on exit.  ``None`` for
     the cache/table arguments keeps the current binding; pass ``cp_ctx`` only
     when it should be replaced."""
+    guard_live_module_mutation(attn, "kv-cache binding")
     prev_kv = attn._kv_cache
     prev_bt = attn._block_tables_by_type
     prev_cp = attn._cp_ctx
@@ -1389,6 +1393,7 @@ class AttentionFP8(nn.Module):
         to that full-KV layout; sparse_attn runs on rank-local Q rows
         only so the output is ``[B, chunk_length, H, D]`` — the frame-
         work then all-gathers across ranks and strips padding."""
+        guard_live_module_mutation(self, "cp_ctx")
         self._cp_ctx = cp_ctx
 
     def _pool_view(self, attn_type: str) -> Optional[torch.Tensor]:

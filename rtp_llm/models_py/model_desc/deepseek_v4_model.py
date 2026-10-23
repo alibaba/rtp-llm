@@ -298,6 +298,7 @@ def _args_from_model_config(
     rope_config = attn_config.rope_config
     fp8_kv_cache = attn_config.kv_cache_dtype == KvCacheDataType.FP8
     return V4Args(
+        is_mtp=bool(model_config.is_mtp),
         vocab_size=model_config.vocab_size,
         dim=model_config.hidden_size,
         n_heads=attn_config.head_num,
@@ -1427,6 +1428,16 @@ class DeepSeekV4Model(GptModelBase):
             raise RuntimeError(
                 "DeepSeekV4Model.forward: PyModelInputs carries no attention inputs"
             )
+        if (
+            _is_decode_fmha(fmha_impl)
+            or bool(getattr(attn, "is_target_verify", False))
+            or not attn.is_prefill
+        ):
+            from rtp_llm.models_py.modules.dsv4.fp8._head_prebuild import (
+                drain_async_head,
+            )
+
+            drain_async_head(owner=self.v4)
 
         # Subclass-overridable hidden-state preparation hooks.  When a
         # subclass (e.g. ``DeepSeekV4MtpModel``) overrides
