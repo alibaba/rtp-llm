@@ -15,7 +15,12 @@ from rtp_llm.models_py.triton_kernels.fla.utils import assert_close
 @unittest.skipUnless(torch.cuda.is_available(), "CUDA is required")
 class GdnSm120PrefillTest(unittest.TestCase):
     def test_output_final_and_all_page_states_with_ragged_prefix(self):
-        self.assertEqual(torch.cuda.get_device_capability(), (12, 0))
+        # fail-loud rather than skip: this target is pinned to RTX_5000_PRO_CU13.
+        self.assertEqual(
+            torch.cuda.get_device_capability(),
+            (12, 0),
+            "target pool is RTX_5000_PRO_CU13 (SM120)",
+        )
         for lengths in ((257,), (129, 257)):
             for prefix in (False, True):
                 torch.manual_seed(7330 + sum(lengths) + int(prefix))

@@ -9,8 +9,9 @@ from rtp_llm.models.qwen3_next.qwen3_next_weight import Qwen35MoeWeight
 from rtp_llm.ops import HybridAttentionType
 from rtp_llm.utils.model_weight import CkptWeightInfo, W, identity
 
-# Verified against Qwen/Qwen3.8-Flash-Next model.safetensors.index.json; see
-# docs/design/qwen3.8_flash_next_support_design.md appendix C for the full manifest.
+# Verified against Qwen/Qwen3.8-Flash-Next model.safetensors.index.json; the
+# bring-up status and revisit list live in
+# docs/design/qwen3.8_flash_next_tp8_bringup_handoff.md.
 _PREFIX_ANCHOR = "layers.0.attn_hyper_connection.hc_norm.weight"
 
 _HC_UNIT_TAGS = {

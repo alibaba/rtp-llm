@@ -219,8 +219,12 @@ class PLETransactionCoordinator:
 
     @staticmethod
     def _synchronize_ple_transaction(transaction: _PLETargetTransaction) -> None:
+        # Every pool write and staged gather in a transaction is issued on the
+        # current stream, so a current-stream synchronize observes their
+        # failures without draining unrelated async streams the way a
+        # device-wide sync does (same contract as the prepare-side sync).
         if transaction.prefixes.is_cuda:
-            torch.cuda.synchronize(transaction.prefixes.device)
+            torch.cuda.current_stream(transaction.prefixes.device).synchronize()
 
     def clear_speculative_target_graph_capture(self) -> None:
         """Discard a target stage left by capture warmup, never a live commit."""
@@ -413,6 +417,7 @@ class PLETransactionCoordinator:
                         state_blocks,
                         ctx_blocks,
                         int(transaction.query_len),
+                        graph_capture=transaction.graph_key is not None,
                     ),
                 )
             )
@@ -437,6 +442,8 @@ class PLETransactionCoordinator:
         state_blocks: torch.Tensor,
         ctx_blocks: torch.Tensor,
         query_len: int,
+        *,
+        graph_capture: bool = False,
     ) -> list[_PLEBoundaryWrite]:
         """Stage the page checkpoints an accepted window completes on the way.
 
@@ -448,6 +455,13 @@ class PLETransactionCoordinator:
         the final destination; the final write runs after every slot, so such
         duplicates cannot survive. All geometry stays on the device and adds
         no host synchronization to the commit.
+
+        Boundary pages keep graph-clamped resolution for graph-owned
+        transactions; eager transactions first apply the same in-range
+        contract as the final destination, so a boundary page outside the
+        block table fails loudly instead of silently clamping. Unallocated
+        blocks stay tolerated in both modes: parking routes such writes to
+        the final destination.
         """
         from rtp_llm.models_py.modules.qwen4_exp.ple.ple_commit_prepare_triton import (
             prepare_commit_values,
@@ -465,6 +479,18 @@ class PLETransactionCoordinator:
             crossed = boundary < stage.prefixes + accepted
             base = torch.where(crossed, boundary - stage.prefixes, accepted)
             pages = torch.where(crossed, start_pages + offset, final_pages)
+            if not graph_capture:
+                table_width = min(
+                    int(PLECacheViews._resolve_block_table(inputs, tag).shape[1])
+                    for inputs, tag in (
+                        (stage.state_inputs, PLE_STATE_TAG),
+                        (stage.ctx_inputs, PLE_NGRAM_CTX_TAG),
+                    )
+                )
+                if bool(((pages < 0) | (pages >= table_width)).any().item()):
+                    raise RuntimeError(
+                        "qwen4_exp PLE boundary page exceeds its block table"
+                    )
             slot_state_blocks = PLECacheViews._physical_blocks(
                 stage.state_inputs,
                 PLE_STATE_TAG,
@@ -553,7 +579,10 @@ class PLETransactionCoordinator:
             self._maybe_inject_speculative_fault("commit")
         if not commit:
             if transaction.commit_started:
-                assert transaction.prepared_writes is not None
+                if transaction.prepared_writes is None:
+                    raise RuntimeError(
+                        "qwen4_exp PLE rollback lost its prepared writes"
+                    )
                 for write in transaction.prepared_writes:
                     for slot in write.boundary_slots:
                         write.state_pool.index_copy_(

@@ -239,7 +239,8 @@ py_test(
     deps = [
         "//rtp_llm:testlib",
     ],
-    exec_properties = {'gpu':'A10'},
+    tags = ["L20_CU13"],
+    exec_properties = {"gpu": "L20_CU13"},
 )
 
 py_test(

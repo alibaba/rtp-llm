@@ -149,6 +149,8 @@ def write_prefill_indexer_cache(
         # The MTP draft prefill carries the engine's shifted positions
         # (prompt positions moved one row left plus a tail anchor), so its
         # RoPE positions intentionally differ from the logical cache rows.
+        # TODO(qwen4-bringup): revisit once backbone numerics are aligned;
+        # see docs/design/qwen3.8_flash_next_tp8_bringup_handoff.md §2.
         logical_positions = None
         if is_qsa_rope_style(rope_config, "Base") and not self.is_mtp_draft:
             prefix_len = 0

@@ -1337,9 +1337,14 @@ class Qwen4ExpModel(Qwen35Model):
             hc_mult=model_config.hc_mult,
             norm_eps=model_config.layernorm_eps,
             role=getattr(self.parallelism_config, "role_type", "PDFUSION"),
-            weight_scales=tuple(
-                weights.global_weights.get(name + ".qwen4_fp8_storage_scale")
-                for name in (W.qwen4_hc_mixer_mix_down, W.qwen4_hc_mixer_mix_up, "")
+            weight_scales=(
+                weights.global_weights.get(
+                    W.qwen4_hc_mixer_mix_down + ".qwen4_fp8_storage_scale"
+                ),
+                weights.global_weights.get(
+                    W.qwen4_hc_mixer_mix_up + ".qwen4_fp8_storage_scale"
+                ),
+                None,
             ),
         )
 

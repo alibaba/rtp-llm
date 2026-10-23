@@ -285,5 +285,6 @@ cc_test(
         "@com_google_googletest//:gtest_main",
     ] + torch_deps() + cuda13_torch_link_deps,
     env = {},
-    exec_properties = {"gpu": "A10"},
+    tags = ["L20_CU13"],
+    exec_properties = {"gpu": "L20_CU13"},
 )

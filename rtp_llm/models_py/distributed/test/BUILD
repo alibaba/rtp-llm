@@ -191,6 +191,6 @@ py_test(
     ],
     timeout = "long",
     env = {"GPU_COUNT": "8"},
-    tags = ["manual", "open_skip", "SM120"],
-    exec_properties = {"gpu": "SM120", "gpu_count": "8"},
+    tags = ["manual", "open_skip", "RTX_5000_PRO_CU13"],
+    exec_properties = {"gpu": "RTX_5000_PRO_CU13", "gpu_count": "8"},
 )

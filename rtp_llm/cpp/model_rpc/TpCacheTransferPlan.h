@@ -105,6 +105,31 @@ inline void validateCompleteTransfer(const std::vector<TpCacheTransferPlan>& pla
     if (!std::all_of(seen.begin(), seen.end(), [](bool present) { return present; })) {
         throw std::invalid_argument("typed TP transfer is missing a shard");
     }
+    // The reassembly scratch is uninitialized, so shard slices must tile
+    // [0, destination_bytes) exactly: any gap or overlap would leak garbage
+    // bytes into the destination KV cache.
+    std::vector<const LinearTpCacheSlice*> coverage;
+    for (const auto& plan : plans) {
+        for (const auto& slice : plan.slices) {
+            coverage.push_back(&slice);
+        }
+    }
+    std::sort(coverage.begin(), coverage.end(), [](const LinearTpCacheSlice* a, const LinearTpCacheSlice* b) {
+        return a->destination_offset < b->destination_offset;
+    });
+    size_t tiled = 0;
+    for (const auto* slice : coverage) {
+        if (slice->destination_offset < tiled) {
+            throw std::invalid_argument("typed TP transfer slices overlap in the destination buffer");
+        }
+        if (slice->destination_offset > tiled) {
+            throw std::invalid_argument("typed TP transfer slices leave a gap in the destination buffer");
+        }
+        tiled += slice->bytes;
+    }
+    if (tiled != plans.front().destination_bytes) {
+        throw std::invalid_argument("typed TP transfer slices do not cover the destination buffer");
+    }
 }
 
 }  // namespace rtp_llm

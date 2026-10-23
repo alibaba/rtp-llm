@@ -905,6 +905,15 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
             model_init_params, params.py_model, false, true, DSparkModelRole::NONE, true, dspark_prefill_commit_only_));
     }
 
+    // Reject the EPLB + speculative-target-hooks combination at startup
+    // instead of the first decode step: discovering it after weight loading
+    // wastes the whole bring-up.
+    const auto target_execution_status = validateSpeculativeTargetExecutionPolicy(
+        speculativeTargetTransactionsEnabled(), expert_balancer_ != nullptr);
+    if (!target_execution_status.ok()) {
+        RTP_LLM_FAIL("%s", target_execution_status.ToString().c_str());
+    }
+
     // when warmup, cache manager maybe nullptr
     const auto& cache_config = cache_manager ? cache_manager->cacheConfig() : CacheConfig();
     is_linear_attention_model_ =
