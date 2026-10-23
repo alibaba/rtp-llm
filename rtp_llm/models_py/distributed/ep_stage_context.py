@@ -162,7 +162,11 @@ def validate_pp_ep_target(
         and parallelism_config.local_cp_enabled()
     ):
         problems.append("invalid resolved DSpARK CEP2PP2/CEP4PP2 prefill capability")
-    if is_speculative and not dspark_prefill:
+    # sam/mtp-pp2-20261023: traditional MTP on CEP4PP2 uses the same commit
+    # pattern as DSpARK (draft stays whole on the last PREFILL stage); allow
+    # speculation when the stage context is the PREFILL role.
+    role_for_spec = getattr(parallelism_config, "role_type", None)
+    if is_speculative and not dspark_prefill and "PREFILL" not in str(role_for_spec):
         problems.append("speculative (MTP/DSpark) models not supported under PP+EP")
 
     role_type = getattr(parallelism_config, "role_type", None)

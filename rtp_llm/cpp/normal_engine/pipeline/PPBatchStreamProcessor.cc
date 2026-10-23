@@ -866,10 +866,18 @@ absl::Status PPBatchStreamProcessor::dispatchSpeculativeExecutionResult(
             new_tokens = result.new_token_ids.narrow(0, row, 1).narrow(1, 0, num_new_tokens).contiguous();
         }
 
+        // sam/mtp-pp2-20261023: hand the draft's final hidden rows down to the
+        // stream's SP buffer so the PD handoff can ship propose_hidden (the
+        // decode peer's first draft step needs them).
+        torch::Tensor draft_hidden_states;
+        if (result.hidden_states.defined() && result.hidden_states.dim() == 2
+            && result.hidden_states.size(0) > row) {
+            draft_hidden_states = result.hidden_states.narrow(0, row, 1).clone();
+        }
         stream->specUpdate({std::move(new_tokens),
                             num_new_tokens,
                             draft_tokens,
-                            torch::Tensor(),
+                            std::move(draft_hidden_states),
                             torch::Tensor(),
                             torch::Tensor(),
                             true,

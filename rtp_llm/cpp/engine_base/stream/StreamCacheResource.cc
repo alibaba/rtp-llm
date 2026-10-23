@@ -827,7 +827,7 @@ void StreamCacheResource::releaseKVCacheForPDSep() {
     pd_kvcache_ref_.reset();
 }
 
-// PD cache-store publisher: enumerate this
+// Self-built PD cache-store publisher (no internal overlay): enumerate this
 // stream's blocks exactly the way DecodeRpcServer builds load keys
 // ("kv_"/"kv_scale_"/"k_"/"v_"/"k_scale_"/"v_scale_" + makeCacheKey(model_id,
 // cache_key, layer_id, tag)) and publish them to the cache store under the
@@ -902,6 +902,11 @@ void StreamCacheResource::publishKVCacheForPDSep() {
                 }
                 auto cache_key = makeCacheKey(model_id, std::to_string(cache_keys[block_pos]), global_layer_begin + layer_id, tag);
                 auto parts = cache_manager->convertIndexToBufferByTag(block_id, static_cast<int>(layer_id), tag);
+                // TEMP PROBE (revert before final): dump publish parts for tag
+                for (size_t pi = 0; pi < parts.size(); ++pi) {
+                    RTP_LLM_LOG_WARNING("PROBE publish parts tag=%s layer=%zu block=%zu part=%zu/%zu bytes=%zu",
+                                        tag.c_str(), layer_id, block_pos, pi, parts.size(), parts[pi].size_bytes);
+                }
 
                 auto add_block = [&](const std::string& key, const BlockInfo& block) {
                     if (block.addr == nullptr || block.size_bytes == 0) {
@@ -943,6 +948,78 @@ void StreamCacheResource::publishKVCacheForPDSep() {
                     if (parts.size() == 4) {
                         add_block("k_scale_" + cache_key, parts[2]);
                         add_block("v_scale_" + cache_key, parts[3]);
+                    }
+                }
+            }
+        }
+    }
+
+    // sam/draft-publish-20261022: also publish draft (propose model) KV blocks
+    // so the decode peer's draft starts with full prompt context instead of
+    // cold. mergeMTPModule maps draft local layers onto global layer ids
+    // [cache_config.layer_num, ...); the peer load plan addresses them as
+    // model_id = 1 + module_index with the draft-LOCAL layer id. Guarded to
+    // mtp_sub_configs presence; SP0 path is untouched.
+    for (size_t module_index = 0; module_index < cache_config.mtp_sub_configs.size(); ++module_index) {
+        const auto& sub_config = cache_config.mtp_sub_configs[module_index];
+        if (!sub_config) {
+            continue;
+        }
+        const size_t draft_model_id = 1 + module_index;
+        for (size_t local_layer_id = 0; local_layer_id < sub_config->layer_num; ++local_layer_id) {
+            const uint32_t global_layer_id = CacheConfig::mtpGlobalLayerId(
+                cache_config.layer_num, static_cast<int>(module_index), sub_config->layer_num, local_layer_id);
+            if (global_layer_id == std::numeric_limits<uint32_t>::max() || global_layer_id >= layer_group_ids.size()) {
+                continue;
+            }
+            const auto& layer_gids = layer_group_ids[global_layer_id];
+            if (layer_gids.empty()) {
+                continue;
+            }
+            for (int gid : layer_gids) {
+                const auto& tag = cache_config.tagForGroup(static_cast<size_t>(gid));
+                if (static_cast<size_t>(gid) >= group_block_ids.size() || group_block_ids[gid] == nullptr) {
+                    continue;
+                }
+                const auto& block_ids = group_block_ids[gid]->blocks();
+                for (size_t block_pos = 0; block_pos < block_ids.size(); ++block_pos) {
+                    const auto block_id = block_ids[block_pos];
+                    if (isNullBlockIdx(block_id) || block_pos >= cache_keys.size()) {
+                        continue;
+                    }
+                    auto cache_key = makeCacheKey(draft_model_id, std::to_string(cache_keys[block_pos]), local_layer_id, tag);
+                    auto parts      = cache_manager->convertIndexToBufferByTag(block_id, static_cast<int>(global_layer_id), tag);
+                    for (size_t pi = 0; pi < parts.size(); ++pi) {
+                        RTP_LLM_LOG_WARNING("PROBE publish draft parts tag=%s local_layer=%zu global_layer=%u block=%zu part=%zu/%zu bytes=%zu",
+                                            tag.c_str(), local_layer_id, global_layer_id, block_pos, pi, parts.size(), parts[pi].size_bytes);
+                    }
+                    auto add_block = [&](const std::string& key, const BlockInfo& block) {
+                        if (block.addr == nullptr || block.size_bytes == 0) {
+                            return;
+                        }
+                        std::shared_ptr<void> addr(block.addr, [](void*) {});
+                        request_block_buffer->addBlock(
+                            key, addr, static_cast<uint32_t>(block.size_bytes), block.is_cuda, true);
+                        ++block_count;
+                    };
+                    if (use_kv_key_prefix) {
+                        if (parts.size() != 1 && parts.size() != 2) {
+                            continue;
+                        }
+                        add_block("kv_" + cache_key, parts[0]);
+                        if (parts.size() == 2) {
+                            add_block("kv_scale_" + cache_key, parts[1]);
+                        }
+                    } else {
+                        if (parts.size() != 2 && parts.size() != 4) {
+                            continue;
+                        }
+                        add_block("k_" + cache_key, parts[0]);
+                        add_block("v_" + cache_key, parts[1]);
+                        if (parts.size() == 4) {
+                            add_block("k_scale_" + cache_key, parts[2]);
+                            add_block("v_scale_" + cache_key, parts[3]);
+                        }
                     }
                 }
             }

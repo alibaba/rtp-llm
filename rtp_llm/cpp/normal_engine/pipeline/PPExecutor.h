@@ -151,7 +151,8 @@ private:
                                const torch::Tensor&  target_hidden_states,
                                const torch::Tensor&  new_token_ids,
                                const torch::Tensor&  new_token_lengths,
-                               bool                  is_decode);
+                               bool                  is_decode,
+                               torch::Tensor*        out_draft_last_hidden = nullptr);
 
     void fillFailedDraftRows(PPExecutionResult& result);
 

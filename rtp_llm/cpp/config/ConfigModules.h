@@ -141,9 +141,16 @@ struct ParallelismConfig {
         if (!prefill_cp_config.is_prefill_enabled() || role_type == RoleType::DECODE || tp_size <= 1) {
             return;
         }
-        if (model_type != "deepseek_v4" || !dsv4_prefill_cp_profile_valid() || (speculative && !dspark_prefill)
-            || cuda_graph || layer_micro_batch || enable_sp || use_ub_comm
-            || ffn_disaggregate_config.enable_ffn_disaggregate) {
+        // sam/mtp-pp2-20261023: opt-in traditional MTP prefill on the same
+        // CEP2PP2/CEP4PP2 profile as the DSpARK commit path (the PP wiring
+        // for draft prefill is shared; the profile checks are identical).
+        static const bool mtp_prefill_opt_in = [] {
+            const char* e = getenv("DSV4_PP_EP_MTP_PREFILL");
+            return e != nullptr && std::string(e) == "1";
+        }();
+        if (model_type != "deepseek_v4" || !dsv4_prefill_cp_profile_valid()
+            || (speculative && !dspark_prefill && !mtp_prefill_opt_in) || cuda_graph || layer_micro_batch || enable_sp
+            || use_ub_comm || ffn_disaggregate_config.enable_ffn_disaggregate) {
             throw std::invalid_argument("local PREFILL_CP requires a DSV4 PDFUSION CP2PP4 or opted-in "
                                         "CEP4PP2/CEP2PP2 prefill-only profile (PDFUSION, or PREFILL role for "
                                         "the PP+EP shapes), with unsharded cache and no speculative, graph, "

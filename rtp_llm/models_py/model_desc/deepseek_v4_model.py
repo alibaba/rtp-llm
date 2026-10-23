@@ -356,6 +356,12 @@ class DeepSeekV4Model(GptModelBase):
             # width in _bind_runtime_buffers; only the target actually
             # captures (see _captures_aux_hidden).
             Dsv4SharedRuntimeBufferStore.enable_mtp_hidden()
+        # sam/mtp-pp2-20261023: traditional MTP (non-DSpARK) on PP/CP also
+        # needs the rank-local hidden hand-off buffer (PyWrappedModel requires
+        # it when prefill CP + spec decoding is on). Enable before the shared
+        # store allocates; hc_dim derives as hc_mult*dim (=16384).
+        if int(model_config.gen_num_per_cycle) > 0 and not self._capture_aux_hidden_layer_ids:
+            Dsv4SharedRuntimeBufferStore.enable_mtp_hidden()
         # MoE inter dim from V4 config: explicit (not inter_size which in RTP-LLM
         # is n_shared_experts * moe_intermediate_size for DeepSeek). Use moe_config
         # if available; else read from config's hidden_size-derived fallback.

@@ -1127,7 +1127,8 @@ torch::Tensor PPExecutor::runDraftStep(const GptModelInputs& target_input,
                                        const torch::Tensor&  target_hidden_states,
                                        const torch::Tensor&  new_token_ids,
                                        const torch::Tensor&  new_token_lengths,
-                                       bool                  is_decode) {
+                                       bool                  is_decode,
+                                       torch::Tensor*        out_draft_last_hidden) {
     const bool cp_enabled = parallelism_config_.local_cp_enabled();
 
     GptModelInputs draft_input = target_input;
@@ -1164,10 +1165,25 @@ torch::Tensor PPExecutor::runDraftStep(const GptModelInputs& target_input,
     if (!is_dspark_) {
         if (cp_enabled) {
             /** CP returns per-request final hidden; P has no following draft decode. */
-            (void)draft_model_->getMtpLastHiddenStates(target_input.input_lengths.numel());
+            auto draft_last_hidden = draft_model_->getMtpLastHiddenStates(target_input.input_lengths.numel());
+            // sam/mtp-pp2-20261023: surface the draft's final hidden rows so the
+            // PD handoff can ship propose_hidden to the decode peer (its first
+            // draft step consumes them; see gate#5 in the cold-start analysis).
+            if (out_draft_last_hidden != nullptr && draft_last_hidden.defined()) {
+                *out_draft_last_hidden = draft_last_hidden;
+            }
         } else {
             mtp::maybeOverrideLastHiddenWithMtpBuffer(
                 draft_prefill_output, *draft_model_, draft_input.combo_tokens.numel());
+            // sam/mtp-pp2-20261023: non-CP path keeps the draft model output
+            // tail rows as the handoff hidden (same content as the MTP buffer).
+            if (out_draft_last_hidden != nullptr && draft_prefill_output.all_hidden_states.defined()
+                && draft_prefill_output.all_hidden_states.dim() == 2
+                && draft_prefill_output.all_hidden_states.size(0) > 0) {
+                *out_draft_last_hidden = draft_prefill_output.all_hidden_states.narrow(
+                    0, draft_prefill_output.all_hidden_states.size(0) - new_token_ids.numel(),
+                    new_token_ids.numel());
+            }
         }
 
         if (isStageRoot()) {
@@ -1470,12 +1486,19 @@ absl::Status PPExecutor::process(const ScheduleOutput& schedule_output, int64_t 
                     model_output, *model_, cp_enabled ? -1 : plan.model_input.combo_tokens.numel());
 
                 /** Only model_input carries the target phase to every TP rank. */
+                // sam/mtp-pp2-20261023: also capture the draft's final hidden
+                // into the PP result so the handoff can ship propose_hidden.
+                torch::Tensor draft_last_hidden;
                 execution_result.propose_token_ids = runDraftStep(plan.model_input,
                                                                   plan.draft_next_position_ids,
                                                                   model_output.all_hidden_states,
                                                                   execution_result.new_token_ids,
                                                                   execution_result.new_token_lengths,
-                                                                  plan.model_input.is_target_verify);
+                                                                  plan.model_input.is_target_verify,
+                                                                  &draft_last_hidden);
+                if (draft_last_hidden.defined() && !plan.output_config.return_hidden_states) {
+                    execution_result.hidden_states = draft_last_hidden.to(torch::kCPU).contiguous();
+                }
             }
 
             if (isStageRoot()) {

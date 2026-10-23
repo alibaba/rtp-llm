@@ -388,7 +388,7 @@ void PrefillRpcServer::remoteAllocateResource(PrefillGenerateContext& prefill_co
         prefill_context, client_stream->Read(&allocate_response), ErrorCode::REMOTE_ALLOCATE_RESOURCE_READ_FAILED);
     const auto peer_handoff_version = allocate_response.pd_handoff_version();
     if (peer_handoff_version == 0) {
-        // Revert when peers support handoff v1: proto3 default 0 means the
+        // POC compat, revert when peers support handoff v1: proto3 default 0 means the
         // peer predates PD handoff negotiation; warn and proceed in legacy mode.
         RTP_LLM_LOG_WARNING(
             "legacy peer without PD handoff negotiation, proceed in compat mode, request_id=%ld decode_addr=%s",
@@ -554,9 +554,40 @@ void PrefillRpcServer::remoteGenerate(PrefillGenerateContext& prefill_context) {
     /** PP MTP/EAGLE verifies argmax proposals by token ID and rebuilds draft inputs on D. */
     generate_request.set_proposal_is_point_mass(maga_init_params_.parallelism_config.pp_size > 1
                                                 && !stream->getProposeToken().empty());
-    if (sp_output_buffer && !engine_->isDSpark() && maga_init_params_.parallelism_config.pp_size == 1) {
-        auto all_probs_cpu =
-            sp_output_buffer->all_probs.is_cuda() ? sp_output_buffer->all_probs.cpu() : sp_output_buffer->all_probs;
+    // sam/mtp-pp2-20261023: PP>1 also ships hidden now — the last-stage
+    // draft's final hidden is collected into the SP buffer by
+    // PPBatchStreamProcessor (draft_hidden_states), and the D side's first
+    // draft step needs it. Send whenever the buffer exists (proposals stay
+    // point-mass for pp>1 as before).
+    if (sp_output_buffer && !engine_->isDSpark()) {
+        torch::Tensor all_probs_cpu;
+        if (!sp_output_buffer->all_probs.defined()) {
+            // sam/mtp-pp2-20261023: PP point-mass proposals carry no dense q
+            // (the PP verifier works on token ids). Legacy decode peers (no PD
+            // handoff negotiation) cannot see the field-13 marker and require
+            // dense q; materialize one-hot rows for the draft proposals, the
+            // same distribution contract the pp1 draft sampler ships.
+            const auto&  propose_tokens = stream->getProposeToken();
+            const int64_t draft_count   = static_cast<int64_t>(propose_tokens.size()) - 1;
+            const int64_t vocab         = maga_init_params_.model_config_.vocab_size;
+            if (draft_count > 0 && vocab > 0) {
+                // Single row: q that produced the FIRST inherited proposal
+                // (tokens[1]). Later positions' q are recomputed by the decode
+                // peer's own draft loop; the stacked prev-entry contract is
+                // 2-D [1, vocab] per stream (same as the pp1 dense handoff and
+                // the peer's own pointMassProbs fallback).
+                all_probs_cpu = torch::zeros({1, vocab}, torch::TensorOptions().dtype(torch::kFloat32));
+                const int64_t token_id = static_cast<int64_t>(propose_tokens[1]);
+                RTP_LLM_CHECK_WITH_INFO(token_id >= 0 && token_id < vocab,
+                                        "propose token %ld out of vocab %ld", token_id, vocab);
+                all_probs_cpu.data_ptr<float>()[token_id] = 1.0f;
+            } else {
+                all_probs_cpu = torch::empty({0}, torch::TensorOptions().dtype(torch::kFloat32));
+            }
+        } else {
+            all_probs_cpu = sp_output_buffer->all_probs.is_cuda() ? sp_output_buffer->all_probs.cpu()
+                                                                  : sp_output_buffer->all_probs;
+        }
         torch::Tensor hidden_states_cpu;
         if (!sp_output_buffer->hidden_states.defined()) {
             // dummy hidden states, so datatype is not important

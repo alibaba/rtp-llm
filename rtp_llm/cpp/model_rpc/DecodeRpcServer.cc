@@ -993,7 +993,15 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
             }
         }
 
-        if (include_mtp && engine_->isMTPEagle() && layout.hasLmHead()) {
+        // sam/mtp-gen1-20261022: PD prefill publishes only model_id_0 blocks
+        // on this branch; the draft module blocks can never be served by the
+        // peer. Skip the draft-module load when DSV4_PD_SKIP_MTP_MODULE_LOAD=1
+        // (draft starts cold; handoff still carries proposals/hidden on pp1).
+        static const bool skip_mtp_module_load = [] {
+            const char* e = getenv("DSV4_PD_SKIP_MTP_MODULE_LOAD");
+            return e != nullptr && std::string(e) == "1";
+        }();
+        if (!skip_mtp_module_load && include_mtp && engine_->isMTPEagle() && layout.hasLmHead()) {
             if (propose_maga_init_params_ && propose_maga_init_params_->mtp_model_params_
                 && !propose_maga_init_params_->mtp_model_params_->empty()) {
                 const auto mtp_load_plan = makeMTPModuleLoadPlan(propose_maga_init_params_);

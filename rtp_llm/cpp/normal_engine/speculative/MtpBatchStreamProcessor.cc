@@ -9,6 +9,7 @@
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
 #include <algorithm>
 #include <atomic>
+#include <cstdio>
 #include <cstdlib>
 #include <numeric>
 #include <string>
@@ -1030,6 +1031,25 @@ void MtpBatchStreamProcessor::preparePrefillSpecUpdateInfo(const StreamGroups&  
     }
 }
 
+namespace {
+struct MtpAcceptProbe {
+    std::atomic<uint64_t> rounds{0};
+    std::atomic<uint64_t> sum_accept{0};
+    std::atomic<uint64_t> pos_accept[8];
+    std::atomic<uint64_t> hist[9];
+    MtpAcceptProbe() {
+        for (auto& c : pos_accept)
+            c.store(0);
+        for (auto& c : hist)
+            c.store(0);
+    }
+};
+MtpAcceptProbe& mtpAcceptProbe() {
+    static MtpAcceptProbe probe;
+    return probe;
+}
+}  // namespace
+
 void MtpBatchStreamProcessor::prepareDecodeSpecUpdateInfo(
     const StreamGroups&                          stream_groups,
     const speculative::SpeculativeSamplerOutput& spec_decode_output,
@@ -1061,6 +1081,38 @@ void MtpBatchStreamProcessor::prepareDecodeSpecUpdateInfo(
         // ready, so it does not sync the main thread. Move to main thread only
         // after replacing .item() with a device-side index.
         int cur_accept_len = accept_len[batch_idx_out].item<int>();
+
+        {
+            auto&          probe = mtpAcceptProbe();
+            const uint64_t r     = probe.rounds.fetch_add(1, std::memory_order_relaxed) + 1;
+            probe.sum_accept.fetch_add((uint64_t)cur_accept_len, std::memory_order_relaxed);
+            const int accepted_drafts = std::min(std::max(0, cur_accept_len - 1), 8);
+            for (int j = 0; j < accepted_drafts; ++j) {
+                probe.pos_accept[j].fetch_add(1, std::memory_order_relaxed);
+            }
+            probe.hist[std::min(std::max(cur_accept_len, 0), 8)].fetch_add(1, std::memory_order_relaxed);
+            if (r % 512 == 0) {
+                const double rounds = (double)r;
+                std::string  pos_str;
+                for (int j = 0; j < propose_step_ && j < 8; ++j) {
+                    char buf[64];
+                    snprintf(buf,
+                             sizeof(buf),
+                             " a%d=%.4f",
+                             j + 1,
+                             probe.pos_accept[j].load(std::memory_order_relaxed) / rounds);
+                    pos_str += buf;
+                }
+                RTP_LLM_LOG_INFO("MTP_ACCEPT_PROBE rounds=%llu avg_len=%.4f%s hist1=%llu hist2=%llu hist3=%llu hist4=%llu",
+                                 (unsigned long long)r,
+                                 probe.sum_accept.load(std::memory_order_relaxed) / rounds,
+                                 pos_str.c_str(),
+                                 (unsigned long long)probe.hist[1].load(std::memory_order_relaxed),
+                                 (unsigned long long)probe.hist[2].load(std::memory_order_relaxed),
+                                 (unsigned long long)probe.hist[3].load(std::memory_order_relaxed),
+                                 (unsigned long long)probe.hist[4].load(std::memory_order_relaxed));
+            }
+        }
 
         torch::Tensor last_hidden_states;
         if (propose_step_ > 1 && !is_dspark_) {

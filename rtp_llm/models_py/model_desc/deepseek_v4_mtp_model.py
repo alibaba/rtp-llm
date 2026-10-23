@@ -37,6 +37,23 @@ from rtp_llm.utils.model_weight import W
 
 
 class DeepSeekV4MtpModel(DeepSeekV4Model):
+    # PP view: the draft never shards across stages. ModelFactory only
+    # constructs it on the stage owning ModuleKind.MTP (the last stage,
+    # see ModulePlacement) and loads its single layer whole
+    # (apply_pp_partition=False). The inherited stage view would derive
+    # layer ids from the TARGET's pp_stage_layer_counts (e.g.
+    # range(22, 43) on pp=2) and drop the embedding on non-first stages.
+    def pp_layer_ids(self) -> list[int]:
+        return list(range(self.layer_num))
+
+    @property
+    def pp_has_embedding(self) -> bool:
+        return True
+
+    @property
+    def pp_has_lm_head(self) -> bool:
+        return True
+
     def __init__(
         self,
         model_config: ModelConfig,
@@ -122,8 +139,14 @@ class DeepSeekV4MtpModel(DeepSeekV4Model):
         eps = float(self._v4_args.norm_eps)
         self.enorm = RMSNorm(gw[W.v4_mtp_enorm], eps)
         self.hnorm = RMSNorm(gw[W.v4_mtp_hnorm], eps)
-        self.e_proj = _v4_fp8_linear(gw[W.v4_mtp_e_proj_w], gw[W.v4_mtp_e_proj_s])
-        self.h_proj = _v4_fp8_linear(gw[W.v4_mtp_h_proj_w], gw[W.v4_mtp_h_proj_s])
+        # sam/mtp-gen1-20261022: this checkpoint stores the draft's FP8 block
+        # scales as bf16, while SM120 CudaFp8VllmBlockwiseLinear requires
+        # float32/UE8M0 scales. Upcast bf16->fp32 at load (exact widening,
+        # no numeric change) so the draft linear strategies match.
+        def _scale_f32(t):
+            return t.float() if t is not None and t.dtype == torch.bfloat16 else t
+        self.e_proj = _v4_fp8_linear(gw[W.v4_mtp_e_proj_w], _scale_f32(gw[W.v4_mtp_e_proj_s]))
+        self.h_proj = _v4_fp8_linear(gw[W.v4_mtp_h_proj_w], _scale_f32(gw[W.v4_mtp_h_proj_s]))
 
     # ------------------------------------------------------------------
     # Hidden-state preparation overrides — splice the e/h fusion stage in

@@ -32,9 +32,15 @@ def validate_fp4_indexer_config(
     supported_speculation = (
         speculative_type == SpeculativeType.NONE and generation_slots == 0
     ) or (speculative_type == SpeculativeType.DSPARK and generation_slots == 3)
+    # sam/mtp-gen1-20261022: allow traditional MTP with one generation slot
+    # (pp1 local-PD experiment); FP4 indexer numerics need GSM8K validation.
+    supported_speculation = supported_speculation or (
+        speculative_type == SpeculativeType.MTP and generation_slots in (1, 3)
+    )
     if not supported_speculation:
         raise ValueError(
-            "FP4 indexer supports SP0 or DSpark with three generation slots"
+            "FP4 indexer supports SP0, DSpark with three generation slots, "
+            "or MTP with one generation slot"
         )
     if reuse_cache:
         raise ValueError("FP4 indexer requires prefix reuse disabled")
