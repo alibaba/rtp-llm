@@ -639,6 +639,11 @@ class EplbNodeCountTest(unittest.TestCase):
             # 12 ranks over 3 machines of 4: each 6-rank EP group spans 2.
             (2, 0, 2, 3, 6, 4, 2),
             (2, 1, 2, 3, 6, 4, 2),
+            # Dense PP stages may span nodes unevenly without enabling EPLB.
+            (4, 1, 3, 1, 3, 4, 2),
+            (4, 2, 3, 1, 3, 4, 2),
+            (4, 1, 1, 3, 3, 4, 2),
+            (4, 2, 1, 3, 3, 4, 2),
         ):
             with self.subTest(pp=pp, pp_rank=pp_rank, tp=tp, dp=dp, ep=ep):
                 model, parallel, hw = make_minimal_configs()

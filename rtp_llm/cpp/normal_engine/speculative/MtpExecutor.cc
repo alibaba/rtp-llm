@@ -997,7 +997,7 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
     if (expert_balancer_) {
         RTP_LLM_PROFILE_SCOPE("executor.mtp.prefill_step(eplb_step_forward)");
         int64_t start_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
-        expert_balancer_->stepForward(*model_, executor_collector, !model_input.is_fake_stream);
+        expert_balancer_->stepForward(*model_, executor_collector);
         executor_collector.eplb_step_latency_us = autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
     }
 
@@ -1518,7 +1518,7 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
     if (expert_balancer_) {
         RTP_LLM_PROFILE_SCOPE("executor.mtp.decode_step(eplb_step_forward)");
         int64_t start_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
-        expert_balancer_->stepForward(*model_, executor_collector, !model_input.is_fake_stream);
+        expert_balancer_->stepForward(*model_, executor_collector);
         executor_collector.eplb_step_latency_us = autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
     }
 

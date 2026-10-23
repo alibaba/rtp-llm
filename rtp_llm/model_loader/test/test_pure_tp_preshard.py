@@ -116,6 +116,18 @@ def _legacy(weight, tensors):
 
 
 class LoadConfigExpertMappingTest(unittest.TestCase):
+    def test_no_redundancy_allows_uneven_node_membership(self):
+        for expert_num in (0, 6):
+            with self.subTest(expert_num=expert_num):
+                mapping = LoadConfig.create_redundant_expert(
+                    2, expert_num, expert_num, 3, 2
+                )
+                self.assertEqual(mapping, [list(range(expert_num)) for _ in range(2)])
+
+    def test_node_local_redundancy_requires_divisible_node_count(self):
+        with self.assertRaisesRegex(Exception, "ep_size 3.*num_nodes 2"):
+            LoadConfig.create_redundant_expert(2, 6, 9, 3, 2)
+
     def test_zero_redundancy_uses_identity_mapping(self):
         for ep_size, num_nodes in ((1, 4), (1, 1), (16, 4)):
             with self.subTest(ep_size=ep_size, num_nodes=num_nodes):

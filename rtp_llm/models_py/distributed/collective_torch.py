@@ -182,6 +182,10 @@ def init_distributed_environment(
                 disable_custom_all_reduce,
             )
             _register_process_groups_to_cpp()
+            if parallelism_config.pp_size > 1:
+                register_pp_process_group(
+                    _get_group(Group.PP), _get_group(Group.PP, cpu_backend=True)
+                )
         rocm_rccl = _get_rocm_rccl()
         if rocm_rccl is not None and parallelism_config.tp_size > 1:
             rocm_rccl.prepare_comm_if_needed(parallelism_config, _get_group(Group.TP))
@@ -218,6 +222,10 @@ def init_distributed_environment(
         _parallelism_config = parallelism_config
         _initialized = True
         _register_process_groups_to_cpp()
+        if parallelism_config.pp_size > 1:
+            register_pp_process_group(
+                _get_group(Group.PP), _get_group(Group.PP, cpu_backend=True)
+            )
         if rocm_rccl is not None and parallelism_config.tp_size > 1:
             rocm_rccl.prepare_comm_if_needed(parallelism_config, _get_group(Group.TP))
         _init_flashinfer_allreduce(parallelism_config, disable_custom_all_reduce)
@@ -258,6 +266,10 @@ def init_distributed_environment(
     _parallelism_config = parallelism_config
     _initialized = True
     _register_process_groups_to_cpp()
+    if parallelism_config.pp_size > 1:
+        register_pp_process_group(
+            _get_group(Group.PP), _get_group(Group.PP, cpu_backend=True)
+        )
     if rocm_rccl is not None and parallelism_config.tp_size > 1:
         rocm_rccl.prepare_comm_if_needed(parallelism_config, _get_group(Group.TP))
     init_user_buffers_environment(parallelism_config)
@@ -620,17 +632,6 @@ def _register_process_groups_to_cpp():
         f"Registered C++ comm ops callbacks (modes: {list(mode_to_group.keys())})"
     )
 
-    # PP callbacks: P2P transport + startup snapshot exchange.
-    if (
-        hasattr(librtp_compute_ops, "register_pp_ops")
-        and _parallelism_config is not None
-        and _parallelism_config.pp_size > 1
-    ):
-        register_pp_process_group(
-            _get_group(Group.PP), _get_group(Group.PP, cpu_backend=True)
-        )
-        logging.info("Registered PP communication callbacks (p2p + snapshot exchange)")
-
     # Bootstrap the UDS-backed intra-node TP broadcaster right after new_group.
     # Lazy C++ init can race if a peer reaches tpSyncModelInputs before rank 0
     # binds; cross-node TP keeps the NCCL fallback.
@@ -659,13 +660,16 @@ def register_pp_process_group(
     process_group: torch.distributed.ProcessGroup,
     cpu_process_group: torch.distributed.ProcessGroup,
 ) -> None:
-    """Register PP callbacks: isend/irecv(tensor, global_peer, backend).
-    backend is the C++ P2PBackend value selecting NCCL or gloo; snapshots use gloo.
-    """
-    import librtp_compute_ops
+    """Register C++ PP transport and startup snapshot callbacks."""
+    try:
+        import librtp_compute_ops
+    except ImportError:
+        logging.debug("librtp_compute_ops not available, skip PP comm ops registration")
+        return
 
     if not hasattr(librtp_compute_ops, "register_pp_ops"):
-        raise RuntimeError("register_pp_ops is not available")
+        logging.debug("register_pp_ops not available, skip PP comm ops registration")
+        return
 
     group_ranks = torch.distributed.get_process_group_ranks(process_group)
     backend_to_group = {
@@ -706,7 +710,7 @@ def register_pp_process_group(
             raise RuntimeError("irecv returned no work")
         return work
 
-    # all_gather_object preserves group-rank order, so the list is indexed by pp_rank.
+    # Snapshot results are indexed by pp_rank.
     def cpp_pp_snapshot_exchange(snapshot_bytes: bytes) -> List[bytes]:
         payloads: List[bytes] = [b""] * cpu_process_group.size()
         torch.distributed.all_gather_object(
@@ -715,6 +719,7 @@ def register_pp_process_group(
         return payloads
 
     librtp_compute_ops.register_pp_ops(cpp_isend, cpp_irecv, cpp_pp_snapshot_exchange)
+    logging.info("Registered PP communication callbacks (p2p + snapshot exchange)")
 
 
 def unregister_pp_process_group() -> None:
@@ -1074,8 +1079,6 @@ __all__ = [
     "Group",
     "init_distributed_environment",
     "init_user_buffers_environment",
-    "register_pp_process_group",
-    "unregister_pp_process_group",
     "distributed_environment_initialized",
     "destroy_distributed_environment",
     "send",

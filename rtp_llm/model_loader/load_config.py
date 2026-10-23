@@ -165,6 +165,11 @@ class LoadConfig(BaseModel):
         elif redundant_expert == 0:
             phy2log = [list(range(expert_num)) for _ in range(layer_num)]
         elif redundant_expert % ep_size == 0:
+            check_with_info(
+                num_nodes > 0 and ep_size % num_nodes == 0,
+                f"ep_size {ep_size} must be divisible by num_nodes {num_nodes} "
+                "for node-local redundant expert placement",
+            )
             rank_per_node = ep_size // num_nodes
             redundant_expert_per_ep = redundant_expert // ep_size
             for _ in range(layer_num):

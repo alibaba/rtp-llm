@@ -174,9 +174,9 @@ ExpertBalancer::ExpertBalancer(size_t                       log_exp_num,
     cout << "ExpertBalancer constructed with " << log_exp_num << " logical experts" << endl;
     printf("DEBUG: ExpertBalancer constructor called for linker debug\n");
     const auto layout = RankLayout::fromParallelismConfig(parallelism_config);
-    parallel_mode_     = layout.pp_size > 1 ? ParallelMode::STAGE : ParallelMode::WORLD;
-    eplb_group_size_    = layout.pp_size > 1 ? layout.laneStride() : parallelism_config.world_size;
-    is_eplb_group_root_ = layout.pp_size > 1 ? layout.stageRank() == 0 : ep_rank_ == 0;
+    parallel_mode_                  = ParallelMode::STAGE;
+    eplb_group_size_                = layout.laneStride();
+    is_eplb_group_root_             = layout.pp_size > 1 ? layout.stageRank() == 0 : ep_rank_ == 0;
     executor_collector_.layer_begin = layer_begin_;
     eplb_control_data_              = eplb_config;
 

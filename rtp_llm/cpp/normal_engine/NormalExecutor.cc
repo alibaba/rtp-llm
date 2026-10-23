@@ -326,7 +326,7 @@ absl::Status NormalExecutor::process(const ScheduleOutput& schedule_output, int6
     }
     if (expert_balancer_) {
         int64_t start_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
-        expert_balancer_->stepForward(*model_, executor_collector, !model_input.is_fake_stream);
+        expert_balancer_->stepForward(*model_, executor_collector);
         executor_collector.eplb_step_latency_us = autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
     }
 

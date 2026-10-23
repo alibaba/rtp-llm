@@ -346,27 +346,11 @@ class DeepEPWrapper:
             return cls._instance
 
     @staticmethod
-    def create(
-        config: DeepepWrapperConfig, *, group: Optional[ProcessGroup] = None
-    ) -> None:
-        """Create a new DeepEPWrapper instance.
-
-        Args:
-            config: DeepepWrapperConfig
-            group: Expert communication group. Defaults to WORLD without
-                requiring the RTP process-group registry.
-
-        Returns:
-            None
-
-        Raises:
-            RuntimeError: If DeepEP is not initialized, or config mismatch
-        """
+    def create(config: DeepepWrapperConfig, *, group: ProcessGroup) -> None:
+        """Create the singleton with the supplied expert communication group."""
         try:
             if not torch.distributed.is_initialized():
                 raise RuntimeError("Distributed environment is not initialized")
-            if group is None:
-                group = torch.distributed.group.WORLD
             with DeepEPWrapper._lock:
                 if DeepEPWrapper._initialized:
                     if DeepEPWrapper._instance is None:
@@ -610,9 +594,9 @@ def init_deepep_wrapper(
         deepep_config_adapter, ll_num_max_token_per_rank
     )
 
+    group = torch.distributed.group.WORLD
     if engine_config.parallelism_config.pp_size > 1:
         from rtp_llm.models_py.distributed.collective_torch import Group, _get_group
 
-        DeepEPWrapper.create(deepep_config, group=_get_group(Group.STAGE))
-    else:
-        DeepEPWrapper.create(deepep_config)
+        group = _get_group(Group.STAGE)
+    DeepEPWrapper.create(deepep_config, group=group)

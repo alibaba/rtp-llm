@@ -62,6 +62,11 @@ def _worker(rank, world_size, pp_size, dp_size, tp_size, master_port, queue):
         )
         with patch.dict("sys.modules", {"librtp_compute_ops": cpp_ops}):
             ct._register_process_groups_to_cpp()
+            if pp_size > 1:
+                ct.register_pp_process_group(
+                    ct._get_group(ct.Group.PP),
+                    ct._get_group(ct.Group.PP, cpu_backend=True),
+                )
 
         membership = {
             str(key): torch.distributed.get_process_group_ranks(pg)

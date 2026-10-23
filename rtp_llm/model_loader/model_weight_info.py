@@ -230,12 +230,6 @@ class ModelDeployWeightInfo:
                 - group_base // local_world_size
                 + 1
             )
-            if self.ep_size % num_nodes != 0:
-                raise ValueError(
-                    f"ep_size {self.ep_size} is not a multiple of the {num_nodes} "
-                    f"nodes its EP group spans (pp_rank={self.pp_rank}); EPLB "
-                    f"cannot split the group evenly across nodes"
-                )
         else:
             num_nodes = parallelism_config.world_size // local_world_size
         self.num_nodes = num_nodes

@@ -55,7 +55,7 @@ inline void syncCudaGraphCaptureRanks(const ParallelismConfig& parallelism_confi
     py::gil_scoped_acquire gil;
     try {
         auto collective = py::module_::import("rtp_llm.models_py.distributed.collective_torch");
-        auto group      = collective.attr("Group").attr("WORLD");
+        auto group      = collective.attr("Group").attr("STAGE");
         collective.attr("barrier")(group);
     } catch (const py::error_already_set& e) {
         RTP_LLM_LOG_ERROR("CUDA graph capture rank sync failed at %s:\n%s", phase, e.what());
