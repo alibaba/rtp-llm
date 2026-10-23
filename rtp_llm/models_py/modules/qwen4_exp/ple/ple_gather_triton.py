@@ -1,7 +1,6 @@
 """Fixed-shape, graph-capturable lookup into the TP-local PLE row shards."""
 
 import ctypes
-from pathlib import Path
 
 import torch
 import triton
@@ -160,7 +159,7 @@ def prepare_cpu_uva_shards(
 ) -> tuple[list[torch.Tensor], torch.Tensor]:
     """Pin CPU tables and resolve mapped addresses once, before graph capture.
 
-    cudaHostGetDevicePointer also covers Torch allocators configured to use
+    cuMemHostGetDevicePointer also covers Torch allocators configured to use
     cudaHostRegister, where a host address need not equal the device address.
     The returned CPU tensors own the allocations for all gather/replay calls.
     """
@@ -189,17 +188,14 @@ def prepare_cpu_uva_shards(
     ):
         raise ValueError("PLE CPU UVA shard geometry or indices are invalid")
     torch.cuda.init()
-    libraries = {
-        line.split()[-1]
-        for line in Path("/proc/self/maps").read_text().splitlines()
-        if "/libcudart.so" in line and line.split()[-1].startswith("/")
-    }
-    if len(libraries) != 1:
-        raise RuntimeError("PLE CPU UVA needs one loaded CUDA runtime")
-    runtime = ctypes.CDLL(libraries.pop())
-    get_pointer = runtime.cudaHostGetDevicePointer
+    # Torch wheels and compiled extensions may load different compatible
+    # libcudart builds in one process. Pinned allocations belong to the CUDA
+    # driver; resolving their mapped address through the driver avoids guessing
+    # which runtime created Torch's allocation (or rejecting a valid process).
+    driver = ctypes.CDLL("libcuda.so.1")
+    get_pointer = driver.cuMemHostGetDevicePointer_v2
     get_pointer.argtypes = [
-        ctypes.POINTER(ctypes.c_void_p),
+        ctypes.POINTER(ctypes.c_uint64),
         ctypes.c_void_p,
         ctypes.c_uint,
     ]
@@ -209,10 +205,12 @@ def prepare_cpu_uva_shards(
     with torch.cuda.device(device):
         for index, shard in zip(shard_indices, shards):
             owner = shard if shard.is_pinned() else shard.pin_memory()
-            address = ctypes.c_void_p()
+            address = ctypes.c_uint64()
             code = get_pointer(ctypes.byref(address), owner.data_ptr(), 0)
-            if code or address.value is None:
-                raise RuntimeError(f"PLE CPU UVA pointer mapping failed: CUDA {code}")
+            if code or not address.value:
+                raise RuntimeError(
+                    f"PLE CPU UVA pointer mapping failed: CUDA driver {code}"
+                )
             pinned.append(owner)
             pointers[index] = address.value
         table = torch.tensor(pointers, dtype=torch.int64, device=device)
