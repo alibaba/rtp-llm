@@ -2,7 +2,7 @@ from typing import Optional
 
 import torch
 
-from rtp_llm.models_py.utils.cutlass import setup_cutlass_import_path
+from rtp_llm.utils.cutlass import setup_cutlass_import_path
 
 setup_cutlass_import_path()
 

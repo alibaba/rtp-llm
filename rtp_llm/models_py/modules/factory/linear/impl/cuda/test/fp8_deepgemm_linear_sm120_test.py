@@ -18,6 +18,9 @@ from rtp_llm.models_py.kernels.cuda.fp8_kernel import (
     requant_weight_ue8m0,
 )
 from rtp_llm.models_py.kernels.cuda.fp8_kernel.fp8_kernel import block_quant_dequant
+from rtp_llm.models_py.kernels.cuda.sm120_fp8_blockwise import (
+    sm120_blockwise_fp8_available,
+)
 from rtp_llm.models_py.modules.factory.linear.impl.cuda.fp8_deepgemm_linear import (
     CudaFp8DeepGEMMLinear,
 )
@@ -39,6 +42,17 @@ from rtp_llm.utils.model_weight import (
     sp_head_s_gemm_a8_block,
     sp_neg1,
 )
+
+
+def _skip_if_cutlass_sm120_blockwise(test: unittest.TestCase) -> None:
+    """DeepGEMM FP8 linear is not selected on CUDA13 SM120 CUTLASS builds."""
+    if torch.cuda.is_available() and sm120_blockwise_fp8_available(
+        torch.device("cuda")
+    ):
+        test.skipTest(
+            "CUDA13 SM120 build selects the CUTLASS blockwise FP8 linear; "
+            "DeepGEMM cannot consume its float weight scales"
+        )
 
 
 class OnlineFp8LoaderTestBase(CudaFp8GEMMLinearTestBase):
@@ -294,6 +308,7 @@ class OnlineFp8LoaderTestBase(CudaFp8GEMMLinearTestBase):
                 self.assertTrue(torch.equal(actual[W.attn_qkv_s], expected_scale))
 
     def test_direct_weight_runs_deepgemm(self):
+        _skip_if_cutlass_sm120_blockwise(self)
         torch.manual_seed(20260811)
         weight = torch.randn((768, 768), device="cuda", dtype=torch.bfloat16)
         inputs = torch.randn((93, 768), device="cuda", dtype=torch.bfloat16)
@@ -307,6 +322,7 @@ class OnlineFp8LoaderTestBase(CudaFp8GEMMLinearTestBase):
         self.assertLess(relative_l2, 0.06)
 
     def test_checkpoint_qkv_load_tp_split_and_gemm(self):
+        _skip_if_cutlass_sm120_blockwise(self)
         torch.manual_seed(1427)
         # Non-square QKV and distinct head scales expose transposed-axis errors;
         # tp > kv_heads also exercises KV replication without mocking splitters.
@@ -377,6 +393,10 @@ class OnlineFp8LoaderTestBase(CudaFp8GEMMLinearTestBase):
 
 
 class CudaFp8DeepGEMMLinearSM120Test(OnlineFp8LoaderTestBase, unittest.TestCase):
+    def setUp(self):
+        super().setUp()
+        _skip_if_cutlass_sm120_blockwise(self)
+
     def test_sm120(self):
         self.assertTrue(is_sm12x())
         self.assertTrue(has_deep_gemm())
@@ -385,6 +405,7 @@ class CudaFp8DeepGEMMLinearSM120Test(OnlineFp8LoaderTestBase, unittest.TestCase)
 
 class OnlineLinearAttentionTPTest(unittest.TestCase):
     def test_tp2_linear_attention_shards_preserve_weights_scales_and_gemm(self):
+        _skip_if_cutlass_sm120_blockwise(self)
         torch.manual_seed(1427)
         linear_config = SimpleNamespace(
             linear_num_key_heads=16,

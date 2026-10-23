@@ -73,7 +73,7 @@ py_test(
 py_test(
     name = "test_inline_fp8_quant",
     srcs = ["test_inline_fp8_quant.py"],
-    deps = py_test_deps,
+    deps = py_test_deps + ["//rtp_llm/models_py/standalone:auto_model"],
     tags = ["rocm"],
     exec_properties = {
         'gpu': 'MI308X-ROCM7',

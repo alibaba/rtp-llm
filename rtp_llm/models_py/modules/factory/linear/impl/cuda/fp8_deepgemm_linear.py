@@ -15,6 +15,9 @@ from rtp_llm.models_py.kernels.cuda.fp8_kernel import (
     requant_weight_ue8m0,
     sgl_per_token_group_quant_fp8,
 )
+from rtp_llm.models_py.kernels.cuda.sm120_fp8_blockwise import (
+    sm120_blockwise_fp8_available,
+)
 from rtp_llm.models_py.modules.factory.linear import LinearBase
 
 if TYPE_CHECKING:
@@ -47,6 +50,11 @@ class CudaFp8DeepGEMMLinear(LinearBase):
         if weight.dtype not in (torch.float8_e4m3fn, torch.float8_e4m3fnuz):
             return False
 
+        # SM120 builds with the CUTLASS blockwise binding load float scales
+        # for that backend; DeepGEMM must not consume them.
+        if sm120_blockwise_fp8_available(weight.device):
+            return False
+
         # Check quantization method - handle all other FP8 methods
         quant_method = quant_config.get_method()
         return quant_method == "FP8_PER_BLOCK"
@@ -64,6 +72,11 @@ class CudaFp8DeepGEMMLinear(LinearBase):
         super().__init__(
             weight, weight_scales, input_scales, bias, quant_config, weight_scale_2
         )
+        if sm120_blockwise_fp8_available(weight.device):
+            raise RuntimeError(
+                "SM120 FP8_PER_BLOCK uses the CUTLASS blockwise backend in "
+                "cuda13_sm120 builds; DeepGEMM cannot consume its float scales"
+            )
         # Initialize parameters
         self.weight = weight
         self.weight_scales = weight_scales
@@ -267,7 +280,9 @@ class CudaFp8DeepGEMMLinear(LinearBase):
     ) -> torch.Tensor:
         """Run DeepGEMM with a caller-provided FP8 input and matching scales."""
         if input_fp8.dtype != torch.float8_e4m3fn:
-            error_msg = f"Quantized input dtype must be float8_e4m3fn, got {input_fp8.dtype}"
+            error_msg = (
+                f"Quantized input dtype must be float8_e4m3fn, got {input_fp8.dtype}"
+            )
             logger.error(error_msg)
             raise ValueError(error_msg)
         M, _ = self._validate_input(input_fp8)
