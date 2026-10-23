@@ -6,6 +6,7 @@ import os
 import unittest
 import uuid
 import weakref
+from itertools import product
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
@@ -16,10 +17,10 @@ from rtp_llm.models_py.modules.dsv41 import _engram_decode_prefetch as prefetch
 
 
 class DecodePrefetchCPU(unittest.TestCase):
-    def test_default_off_does_not_touch_cuda_or_layers(self):
-        with patch.dict(os.environ, {}, clear=True), patch.object(
-            torch.cuda, "current_stream"
-        ) as current:
+    def test_explicitly_disabled_does_not_touch_cuda_or_layers(self):
+        with patch.dict(
+            os.environ, {"DSV41_ENGRAM_DEVICE_SCALES": "0"}, clear=True
+        ), patch.object(torch.cuda, "current_stream") as current:
             work = prefetch.DecodeEngramPrefetch(object(), object())
             work.before_layer(0)
             work.close()
@@ -53,8 +54,9 @@ class DecodePrefetchCPU(unittest.TestCase):
             exec(compile(ast.Module(body=[method], type_ignores=[]), source, "exec"), namespace)
             owner = SimpleNamespace(validate=Mock(side_effect=RuntimeError("stale table")))
             runner = SimpleNamespace(metadata=SimpleNamespace(_engram_decode_tables=owner))
+            kwargs = {"valid_request_count": 1} if source.startswith("fp8/") else {}
             with self.subTest(source=source), self.assertRaisesRegex(RuntimeError, "stale table"):
-                namespace["prepare_cuda_graph"](runner, None)
+                namespace["prepare_cuda_graph"](runner, None, **kwargs)
             owner.validate.assert_called_once()
 
     def test_graph_owns_old_table_and_rejects_reload(self):
@@ -116,6 +118,7 @@ class DecodePrefetchCUDA(unittest.TestCase):
         self.context = patch.dict(os.environ, {"DSV41_DECODE_ENGRAM_PREFETCH": "1"})
         self.context.start()
         self.addCleanup(self.context.stop)
+        os.environ.pop("DSV41_ENGRAM_DEVICE_SCALES", None)
         torch.manual_seed(20261022)
         self.layout = EngramLayout(dict(
             engram_layer_ids=[1, 14], engram_num_embeddings=[4000, 4000],
@@ -141,11 +144,42 @@ class DecodePrefetchCUDA(unittest.TestCase):
             self.model.layers[layer].engram = module
             self.sources.append((weight, scales))
 
+    @torch.inference_mode()
+    def test_default_device_scales_and_explicit_host_fallback_are_equivalent(self):
+        from rtp_llm.models_py.modules.dsv41.engram import HostEngramEmbedding
+
+        ids = torch.tensor([[0, 7, -1], [3999, 17, 4000]], device="cuda")
+        for layer in (1, 14):
+            embedding = self.model.layers[layer].engram.embed_tokens
+            pinned = embedding._pinned
+            self.assertIsNotNone(embedding._device_scale_lease)
+            self.assertEqual(embedding._uva[1].dtype, torch.uint8)
+            self.assertNotEqual(
+                embedding._uva[1].data_ptr(), pinned.cuda_view(pinned.scales).data_ptr()
+            )
+            torch.testing.assert_close(embedding._uva[1].cpu(), pinned.scales)
+            with patch.dict(os.environ, {"DSV41_ENGRAM_DEVICE_SCALES": "0"}):
+                fallback = HostEngramEmbedding(
+                    pinned.weight, pinned.scales, pinned=pinned
+                )
+            self.assertIsNone(fallback._device_scale_lease)
+            self.assertEqual(
+                fallback._uva[1].data_ptr(), pinned.cuda_view(pinned.scales).data_ptr()
+            )
+            actual = embedding(ids, ids.device)
+            torch.testing.assert_close(
+                actual, fallback(ids, ids.device), rtol=0, atol=0
+            )
+            self.assertEqual(torch.count_nonzero(actual[:, 2]).item(), 0)
+
     def _run(self, windows, hidden, metadata, asynchronous):
         hashes = self.hash(windows)
         for index, layer in enumerate((1, 14)):
             self.model.layers[layer].engram_hashes = hashes[:, index].contiguous()
-        plan = prefetch.DecodeEngramPrefetch(self.model, metadata) if asynchronous else None
+        with patch.dict(
+            os.environ, {"DSV41_DECODE_ENGRAM_PREFETCH": "1" if asynchronous else "0"}
+        ):
+            plan = prefetch.DecodeEngramPrefetch(self.model, metadata)
         outputs = []
         try:
             for index, layer in enumerate(self.model.layers):
@@ -161,7 +195,9 @@ class DecodePrefetchCUDA(unittest.TestCase):
     @torch.inference_mode()
     def test_replay_changes_hashes_padding_and_switches_batch_graphs(self):
         graphs = []
-        for batch, span in ((1, 1), (1, 6), (7, 6), (64, 6)):
+        for asynchronous, (batch, span) in product(
+            (False, True), ((1, 1), (1, 6), (7, 6), (64, 6))
+        ):
             rows = batch * span
             metadata = SimpleNamespace(batch_size=batch, q_len_per_req=span)
             windows = torch.full((rows, 4), 7, device="cuda", dtype=torch.int32)
@@ -170,12 +206,12 @@ class DecodePrefetchCUDA(unittest.TestCase):
             stream.wait_stream(torch.cuda.current_stream())
             with torch.cuda.stream(stream):
                 for _ in range(2):
-                    self._run(windows, hidden, metadata, True)
+                    self._run(windows, hidden, metadata, asynchronous)
                 expected = self._run(windows, hidden, metadata, False)
             stream.synchronize()
             graph = torch.cuda.CUDAGraph()
             with torch.cuda.graph(graph, stream=stream):
-                outputs = self._run(windows, hidden, metadata, True)
+                outputs = self._run(windows, hidden, metadata, asynchronous)
             graphs.append((graph, metadata, windows, hidden, outputs, [x.data_ptr() for x in outputs]))
         for replay in range(12):
             # Revisit smaller graphs after larger ones; output storage is per graph.

@@ -596,6 +596,118 @@ class _PinnedSharedTable:
             )
 
 
+# Device-scale generations use this cold-path release fence. Retain a failed
+# release rather than freeing GPU scales or unregistering host weights early.
+_DEVICE_SCALE_RELEASE_FAILURES = []
+
+
+class _DeviceScaleLease:
+    """Own a table generation through all future Graph replays and final reads."""
+
+    def __init__(self, uva, pinned):
+        self.uva, self.pinned = uva, pinned
+        device = pinned.device.index
+        if device is None:
+            device = torch.cuda.current_device()
+        # Callback arguments retain BOTH resources until the device drain has
+        # finished; tensor/attribute destructor ordering is not a lifetime edge.
+        self._release = weakref.finalize(
+            self,
+            self._drain,
+            pinned.runtime,
+            device,
+            uva,
+            pinned,
+            _DEVICE_SCALE_RELEASE_FAILURES,
+            logger.warning,
+        )
+
+    @staticmethod
+    def _drain(runtime, device, uva, pinned, failures, warn):
+        def check(values, operation):
+            result, *rest = values
+            if int(result) != 0:
+                raise RuntimeError(f"Engram {operation} failed: {result}")
+            return rest
+
+        try:
+            (previous,) = check(runtime.cudaGetDevice(), "cudaGetDevice")
+            try:
+                if previous != device:
+                    check(runtime.cudaSetDevice(device), "cudaSetDevice")
+                # Unload/reload cold path, after the last Graph/embedding owner.
+                # Covers sync readers, abandoned consumers, and actual replay
+                # streams, without assuming a capture-time record_stream fence.
+                check(runtime.cudaDeviceSynchronize(), "cudaDeviceSynchronize")
+            finally:
+                if previous != device:
+                    check(runtime.cudaSetDevice(previous), "cudaSetDevice(restore)")
+        except BaseException as error:
+            failures.append((uva, pinned))
+            warn("Engram GPU-scale release failed; retaining generation: %s", error)
+
+
+_DEVICE_SCALE_CAPTURE = threading.local()
+
+
+class _DeviceScaleCapturePermit:
+    """Temporary capture authorization; metadata, not this token, owns tables."""
+
+    def __init__(self, plan, resources):
+        # A forgotten close must not make thread-local state a resource owner.
+        self.plan = weakref.ref(plan)
+        self.resources = weakref.ref(resources)
+        self.active = False
+
+    @staticmethod
+    def check_available():
+        current = getattr(_DEVICE_SCALE_CAPTURE, "permit", None)
+        if (
+            current is not None
+            and current.active
+            and current.plan() is not None
+            and current.resources() is not None
+        ):
+            raise RuntimeError("Engram GPU-scale capture plan is not reentrant")
+
+    def install(self):
+        self.check_available()
+        _DEVICE_SCALE_CAPTURE.permit = self
+        self.active = True
+
+    def close(self):
+        # Invalidate first, including an accidental close on another CPU thread.
+        self.active = False
+        if getattr(_DEVICE_SCALE_CAPTURE, "permit", None) is self:
+            del _DEVICE_SCALE_CAPTURE.permit
+
+    @staticmethod
+    def require(embedding, lease):
+        permit = getattr(_DEVICE_SCALE_CAPTURE, "permit", None)
+        plan = permit.plan() if permit is not None else None
+        resources = permit.resources() if permit is not None else None
+        if (
+            permit is None
+            or not permit.active
+            or plan is None
+            or resources is None
+            or getattr(
+                getattr(plan, "_capture_metadata", None), "_engram_decode_tables", None
+            )
+            is not resources
+        ):
+            raise RuntimeError(
+                "Engram GPU-scale capture requires an active decode metadata table owner"
+            )
+        resources.validate()
+        if not any(
+            getattr(state, "device_scale_lease", None) is lease
+            and state.matches(embedding)
+            for _, _, state in resources.entries
+        ):
+            raise RuntimeError("Engram GPU-scale capture table generation is not owned")
+
+
 class HostEngramEmbedding:
     """Native FP8/E8M0 host tensors deliberately not registered as buffers.
 
@@ -619,11 +731,41 @@ class HostEngramEmbedding:
         self.block_size = block_size
         self._pinned = pinned
         self._uva = None
+        self._device_scale_lease = None
         if pinned is not None:
-            self._uva = (pinned.cuda_view(self.weight), pinned.cuda_view(self.scales))
+            if os.getenv("DSV41_ENGRAM_DEVICE_SCALES", "1") == "1":
+                if torch.cuda.is_current_stream_capturing():
+                    raise RuntimeError(
+                        "Engram device scales require startup allocation"
+                    )
+                # Keep the CPU source and all FP8/E8M0 bytes unchanged.
+                self._uva = (
+                    pinned.cuda_view(self.weight),
+                    self.scales.to(pinned.device),
+                )
+                self._device_scale_lease = _DeviceScaleLease(self._uva, pinned)
+            else:
+                self._uva = (
+                    pinned.cuda_view(self.weight),
+                    pinned.cuda_view(self.scales),
+                )
             self._num_sms = torch.cuda.get_device_properties(
                 pinned.device
             ).multi_processor_count
+
+    def _device_scale_resources(self):
+        lease = self._device_scale_lease
+        if lease is not None and (
+            lease.uva is not self._uva or lease.pinned is not self._pinned
+        ):
+            if torch.cuda.is_current_stream_capturing():
+                raise RuntimeError(
+                    "Engram table generation must be prepared before capture"
+                )
+            lease = self._device_scale_lease = _DeviceScaleLease(
+                self._uva, self._pinned
+            )
+        return lease
 
     def warmup_prefetch(self, indices: torch.Tensor, device):
         """Compile and configure the asynchronous lookup during model startup."""
@@ -631,7 +773,13 @@ class HostEngramEmbedding:
             warmup_lookup_prefetch_rows,
         )
 
-        return warmup_lookup_prefetch_rows(*self._uva, indices, self._num_sms)
+        lease = self._device_scale_resources()
+        uva = self._uva
+        try:
+            return warmup_lookup_prefetch_rows(*uva, indices, self._num_sms)
+        finally:
+            if lease is not None:
+                uva[1].record_stream(torch.cuda.current_stream(indices.device))
 
     def __call__(
         self, indices: torch.Tensor, device, *, prefetch=False
@@ -644,7 +792,17 @@ class HostEngramEmbedding:
                 if prefetch
                 else _engram_triton.lookup_host_rows
             )
-            return lookup(*self._uva, indices, self._num_sms)
+            lease = self._device_scale_resources()
+            if lease is not None and torch.cuda.is_current_stream_capturing():
+                _DeviceScaleCapturePermit.require(self, lease)
+            uva = self._uva
+            try:
+                return lookup(*uva, indices, self._num_sms)
+            finally:
+                if lease is not None:
+                    # This covers queued eager uses. The generation lease,
+                    # retained by metadata snapshots, owns future replays.
+                    uva[1].record_stream(torch.cuda.current_stream(indices.device))
         indices = indices.detach().to(device="cpu", dtype=torch.int64)
         valid = indices >= 0
         flat = indices.clamp_min(0).flatten()

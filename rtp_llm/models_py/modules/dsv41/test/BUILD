@@ -124,7 +124,7 @@ py_test(
         tags = ["dsv41_cuda13"],
         legacy_create_init = 0,
     )
-    for name in ["test_prefill_workspace", "test_strategy_select", "test_gate_routing_metadata", "test_v41_aux_capture_mhc", "test_v41_cross_layer_mhc", "test_v41_mega_mhc", "test_mhc_moe_inputs", "test_fake_balance_expert", "test_v41_query_quant", "test_dsv41_kernel_jit_warmup"] + _ENGRAM_SM100_TESTS
+    for name in ["test_prefill_workspace", "test_strategy_select", "test_gate_routing_metadata", "test_v41_aux_capture_mhc", "test_v41_cross_layer_mhc", "test_v41_mega_mhc", "test_mhc_moe_inputs", "test_fake_balance_expert", "test_v41_query_quant", "test_dsv41_kernel_jit_warmup", "test_engram_decode_prefetch"] + _ENGRAM_SM100_TESTS
 ]
 
 dsv4_sm100_py_test(

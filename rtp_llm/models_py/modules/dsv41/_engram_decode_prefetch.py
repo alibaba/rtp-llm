@@ -10,6 +10,23 @@ def enabled():
     return os.getenv("DSV41_DECODE_ENGRAM_PREFETCH", "0") == "1"
 
 
+class _TableSnapshot:
+    """Table generation only: no auxiliary stream is needed for sync Graphs."""
+
+    def __init__(self, embedding):
+        self.embedding = embedding
+        self.uva, self.pinned = embedding._uva, embedding._pinned
+        self.device_scale_lease = embedding._device_scale_resources()
+
+    def matches(self, embedding):
+        return (
+            embedding is self.embedding
+            and embedding._uva is self.uva
+            and embedding._pinned is self.pinned
+            and embedding._device_scale_lease is self.device_scale_lease
+        )
+
+
 class _LookupStream:
     def __init__(self, embedding, device):
         self.embedding = embedding
@@ -56,7 +73,8 @@ class _GraphTables:
     def validate(self):
         model = self.model()
         if model is None or any(
-            model.layers[index].engram is not module
+            index >= len(model.layers)
+            or model.layers[index].engram is not module
             or not state.matches(module.embed_tokens)
             for index, module, state in self.entries
         ):
@@ -111,16 +129,35 @@ class DecodeEngramPrefetch:
 
     def __init__(self, model, metadata):
         self.entries, self.work = [], []
-        if not enabled():
+        self._capture_permit = self._capture_metadata = None
+        asynchronous = enabled()
+        device_scales = os.getenv("DSV41_ENGRAM_DEVICE_SCALES", "1") == "1"
+        if not asynchronous and not device_scales:
             return
+        capture_permit_type = None
+        if device_scales and torch.cuda.is_current_stream_capturing():
+            from rtp_llm.models_py.modules.dsv41.engram import _DeviceScaleCapturePermit
+
+            capture_permit_type = _DeviceScaleCapturePermit
+            # Reject before replacing an outer plan's metadata owner.
+            capture_permit_type.check_available()
         resources = getattr(metadata, "_engram_decode_tables", None)
         if resources is not None:
             resources.validate()
         rows = metadata.batch_size * metadata.q_len_per_req
+        table_entries = []
         for index, layer in enumerate(model.layers):
             module = layer.engram
+            if module is None:
+                continue
+            embedding = module.embed_tokens
+            if (
+                device_scales
+                and getattr(embedding, "_device_scale_lease", None) is not None
+            ):
+                table_entries.append((index, module, _TableSnapshot(embedding)))
             ids = layer.engram_hashes
-            if index >= 20 or module is None or ids is None:
+            if not asynchronous or index >= 20 or ids is None:
                 continue
             if (
                 not ids.is_cuda
@@ -135,10 +172,25 @@ class DecodeEngramPrefetch:
             state = prepare(module)
             if state is not None:
                 self.entries.append((index, module, ids, state))
-        if self.entries and torch.cuda.is_current_stream_capturing():
-            metadata._engram_decode_tables = _GraphTables(
-                model, tuple((i, m, s) for i, m, _, s in self.entries)
-            )
+        # Keep stream states too: old Graphs retain their original auxiliary
+        # stream and external done event even after a later generation reload.
+        table_entries.extend((i, m, s) for i, m, _, s in self.entries)
+        if table_entries and torch.cuda.is_current_stream_capturing():
+            # Publish the future-replay owner before authorizing any lookup.
+            resources = _GraphTables(model, tuple(table_entries))
+            if capture_permit_type is not None:
+                capture_permit_type.check_available()
+            metadata._engram_decode_tables = resources
+            if capture_permit_type is not None:
+                self._capture_metadata = metadata
+                self._capture_permit = capture_permit_type(self, resources)
+                try:
+                    # Last constructor action: no half-built plan gets a permit.
+                    self._capture_permit.install()
+                except BaseException:
+                    self._capture_permit.close()
+                    self._capture_permit = self._capture_metadata = None
+                    raise
 
     def before_layer(self, index):
         for target, module, ids, state in self.entries:
@@ -152,8 +204,15 @@ class DecodeEngramPrefetch:
     def close(self):
         # Join abandoned work too, so a failed forward cannot leave an unjoined
         # capture branch or let the allocator reuse an in-flight output.
-        for work in self.work:
-            work.wait()
-            if work.module._lookup_work is work:
-                work.module._lookup_work = None
-        self.work.clear()
+        try:
+            for work in self.work:
+                work.wait()
+                if work.module._lookup_work is work:
+                    work.module._lookup_work = None
+            self.work.clear()
+        finally:
+            # Keep legacy __new__ CPU fixtures and make failed joins fail closed.
+            permit = getattr(self, "_capture_permit", None)
+            if permit is not None:
+                permit.close()
+                self._capture_permit = self._capture_metadata = None

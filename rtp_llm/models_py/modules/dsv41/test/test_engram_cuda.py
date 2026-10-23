@@ -24,6 +24,10 @@ from rtp_llm.models_py.modules.dsv41.utils import V41MXFP8Linear
 @unittest.skipUnless(torch.cuda.is_available(), "requires a CUDA GPU")
 class EngramCudaTest(unittest.TestCase):
     def setUp(self):
+        # Standalone host-table captures exercise the explicit rollback path.
+        context = patch.dict(os.environ, {"DSV41_ENGRAM_DEVICE_SCALES": "0"})
+        context.start()
+        self.addCleanup(context.stop)
         torch.manual_seed(41)
         config = dict(
             engram_layer_ids=[1, 14],
