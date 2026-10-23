@@ -4,8 +4,9 @@ import json
 import logging
 import threading
 import time
-from typing import Any, Callable, Dict, Union
+from typing import Any, Awaitable, Callable, Dict, Union
 
+import anyio
 from fastapi import Request
 from fastapi import Request as RawRequest
 from fastapi.responses import ORJSONResponse, StreamingResponse
@@ -34,7 +35,7 @@ from rtp_llm.model_factory import ModelFactory
 from rtp_llm.openai.api_datatype import ChatCompletionRequest
 from rtp_llm.openai.openai_endpoint import OpenaiEndpoint
 from rtp_llm.ops import SpecialTokens, TaskType
-from rtp_llm.server.misc import format_exception
+from rtp_llm.server.misc import format_client_exception, format_exception
 from rtp_llm.server.request_headers import extract_request_headers
 from rtp_llm.structure.request_constants import request_id_field_name
 from rtp_llm.telemetry import CURRENT_TRACE_STATE
@@ -51,6 +52,26 @@ from rtp_llm.utils.time_util import current_time_ms
 from rtp_llm.utils.util import check_with_info
 
 USAGE_HEADER = "USAGE"
+
+
+class _ClosingStreamingResponse(StreamingResponse):
+    """Close the request even if ASGI delivery stops before body iteration."""
+
+    def __init__(self, content, *, close: Callable[[], Awaitable[None]], **kwargs):
+        super().__init__(content, **kwargs)
+        self._close = close
+
+    async def __call__(self, scope, receive, send):
+        try:
+            await super().__call__(scope, receive, send)
+        finally:
+            # Starlette cancels the streaming task on disconnect. Keep cleanup
+            # alive inside an enclosing cancellation scope as well.
+            with anyio.CancelScope(shield=True):
+                try:
+                    await self.body_iterator.aclose()
+                finally:
+                    await self._close()
 
 
 def _field(value: Any, name: str) -> Any:
@@ -344,19 +365,6 @@ class FrontendServer(object):
             response.aux_info = None
 
     @staticmethod
-    def _client_exception_payload(
-        request: Dict[str, Any], exception_json: Dict[str, Any]
-    ) -> Dict[str, Any]:
-        payload = dict(exception_json)
-        # Keep the established error aux_info contract. Only strip internal
-        # stack locations from the client-facing message; the access logger
-        # receives the original exception payload before this projection.
-        message = payload.get("message")
-        if isinstance(message, str) and "\n Traceback:" in message:
-            payload["message"] = message.split("\n Traceback:", 1)[0].rstrip()
-        return payload
-
-    @staticmethod
     def _request_disables_speculative(request: Dict[str, Any]) -> bool:
         if "force_disable_sp_run" in request:
             return bool(request["force_disable_sp_run"])
@@ -418,6 +426,7 @@ class FrontendServer(object):
         request: Dict[str, Any],
         response: CompleteResponseAsyncGenerator,
         metric_tags: Dict[str, str] | None = None,
+        finish: Callable[[], None] | None = None,
     ):
         metric_tags = dict(metric_tags or self._request_metric_tags(request))
         # HTTP SERVER span owner for streaming requests: the four exits below
@@ -473,15 +482,21 @@ class FrontendServer(object):
                 1,
                 {**metric_tags, "error_code": str(format_e.get("error_code_str", -1))},
             )
-            client_error = self._client_exception_payload(request, format_e)
+            client_error = format_client_exception(e)
             yield response_data_prefix + json.dumps(
                 client_error, ensure_ascii=False
             ) + "\r\n\r\n"
         finally:
-            if trace_state is not None:
-                # safety net for exits not covered above; idempotent
-                trace_state.finish()
-            self._global_controller.decrement()
+            try:
+                await response.aclose()
+            finally:
+                if trace_state is not None:
+                    # safety net for exits not covered above; idempotent
+                    trace_state.finish()
+                if finish is not None:
+                    finish()
+                else:
+                    self._global_controller.decrement()
 
     async def inference(self, req: Union[str, Dict[Any, Any]], raw_request: RawRequest):
         request_headers = extract_request_headers(getattr(raw_request, "headers", None))
@@ -831,9 +846,7 @@ class FrontendServer(object):
             )
             self._access_logger.log_exception_access(request, e, exception_json)
 
-        rep = ORJSONResponse(
-            self._client_exception_payload(request, exception_json), status_code=500
-        )
+        rep = ORJSONResponse(format_client_exception(e), status_code=500)
         return rep
 
     async def _call_generate_with_report(
@@ -1034,8 +1047,30 @@ class FrontendServer(object):
             raise
 
         if is_streaming:
-            return StreamingResponse(
-                self.stream_response(req, res, metric_tags),
+            finished = False
+            trace_state = CURRENT_TRACE_STATE.get()
+
+            def finish_stream():
+                nonlocal finished
+                if finished:
+                    return
+                finished = True
+                try:
+                    request_metrics.finish()
+                    if trace_state is not None:
+                        trace_state.finish()
+                finally:
+                    self._global_controller.decrement()
+
+            async def close_stream():
+                try:
+                    await res.aclose()
+                finally:
+                    finish_stream()
+
+            return _ClosingStreamingResponse(
+                self.stream_response(req, res, metric_tags, finish_stream),
+                close=close_stream,
                 media_type="text/event-stream",
             )
         async for x in res:
@@ -1061,7 +1096,8 @@ class FrontendServer(object):
                 token_ids = self._frontend_worker.pipeline.encode(prompt)
             return ORJSONResponse({"token_ids": token_ids})
         except Exception as e:
-            return ORJSONResponse(format_exception(e), status_code=500)
+            logging.exception("tokenize failed")
+            return ORJSONResponse(format_client_exception(e), status_code=500)
 
     def tokenizer_encode(self, req: Union[str, Dict[Any, Any]]):
         try:
@@ -1081,7 +1117,8 @@ class FrontendServer(object):
                 response = TokenizerEncodeResponse(token_ids=token_ids, tokens=tokens)
             return ORJSONResponse(content=response.model_dump(exclude_none=True))
         except Exception as e:
-            return ORJSONResponse(format_exception(e), status_code=500)
+            logging.exception("tokenizer_encode failed")
+            return ORJSONResponse(format_client_exception(e), status_code=500)
 
     def check_health(self):
         assert self._frontend_worker is not None
