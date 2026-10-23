@@ -1095,7 +1095,8 @@ py::dict runPyWrappedModelCacheStoreScenario(py::object         py_model,
                                              size_t             forward_count,
                                              bool               ignore_deferred_errors,
                                              bool               capture_only_first_forward,
-                                             bool               skip_first_deferred_error_take) {
+                                             bool               skip_first_deferred_error_take,
+                                             bool               owns_py_model) {
     ensureRuntimeInitialized();
 
     RTP_LLM_CHECK_WITH_INFO(forward_count > 0, "forward_count must be positive");
@@ -1172,6 +1173,7 @@ py::dict runPyWrappedModelCacheStoreScenario(py::object         py_model,
                               /*kernel_block_table_width=*/0,
                               scenario.capture_layer_ids,
                               scenario.capture_dtype};
+    params.owns_py_model = owns_py_model;
     if (cacheless_warmup) {
         params.cache_manager                     = nullptr;
         scenario.inputs.warmup                   = true;
@@ -1654,7 +1656,8 @@ PYBIND11_MODULE(libth_pywrapped_model_cache_store_integration_test, m) {
           py::arg("forward_count")                  = 1,
           py::arg("ignore_deferred_errors")         = false,
           py::arg("capture_only_first_forward")     = false,
-          py::arg("skip_first_deferred_error_take") = false);
+          py::arg("skip_first_deferred_error_take") = false,
+          py::arg("owns_py_model")                  = true);
     m.def("run_dirty_generation_prefill_capture_scenario",
           &rtp_llm::test::runDirtyGenerationPrefillCaptureScenario,
           py::arg("py_model"));

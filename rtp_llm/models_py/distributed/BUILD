@@ -4,6 +4,7 @@ py_library(
         "collective_torch.py",
         "canonical_p2p.py",
         "flashinfer_all_reduce.py",
+        "flashinfer_ipc_all_reduce.py",
         "rocm_rccl.py",
         "symm_mem.py",
     ],
