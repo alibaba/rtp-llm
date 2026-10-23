@@ -56,14 +56,61 @@ BlockTreeLoader::BlockTreeLoader(BlockTree*                      tree,
                 context.loadDescs(), context.joinedLoads(), 0, context.contextId(), /*release_transferred_refs=*/false);
         })) {}
 
+PrefixCacheMatchObservation makeMatchObservation(const std::vector<TreeNode*>&         original_path,
+                                                 const std::vector<std::vector<bool>>& group_valid,
+                                                 const std::vector<int>&               request_tokens,
+                                                 const std::vector<GroupSetPtr>&       group_sets);
+void completeMatchObservation(PrefixCacheMatchObservation&     observation,
+                              const BlockTree&                  tree,
+                              bool                              enable_device_cache,
+                              const std::vector<GroupSetPtr>&   group_sets,
+                              const std::vector<int>&           request_tokens,
+                              int64_t                           begin_time_us);
+
 BlockTreeMatchResult BlockTreeLoader::matchLocked(const CacheKeysType& cache_keys,
                                                    const std::function<bool(size_t)>& valid_prefix,
                                                    const std::vector<int>* request_tokens,
                                                    const PartialTailMatchRequest* partial_tail) {
     std::optional<BlockTreeMatchResult> local;
+    std::optional<PrefixCachePlanPoint> farthest_fork;
+    std::vector<BlockTreeContentRange> ranges;
+    bool authenticated_scan = false;
+    const auto use_authenticated_content = [&ranges](PrefixCacheMatchObservation& observation) {
+        if (ranges.empty()) {
+            observation.content_pos = 0;
+            observation.content_key.reset();
+            observation.content_node_offset = 0;
+            observation.content_partial = false;
+            return;
+        }
+        const auto& best = ranges.front();
+        observation.content_pos = best.matched_end;
+        observation.content_key = best.node->cache_key;
+        observation.content_node_offset = best.matched_end - best.node->parent->token_end;
+        observation.content_partial = best.matched_end < best.node->token_end;
+    };
     if (partial_tail != nullptr && partial_tail->tokens != nullptr && partial_tail->endpoint_key
         && partial_tail->valid_endpoint) {
-        local = preciseLocalMatchLocked(*partial_tail);
+        authenticated_scan = true;
+        const int64_t match_begin_time_us = currentTimeUs();
+        ranges = tree_->contentMatchRanges(
+            *partial_tail->tokens, partial_tail->endpoint_key, partial_tail->source_identity, &farthest_fork);
+        local = preciseLocalMatchLocked(*partial_tail, ranges);
+        if (local && tree_->observabilityEnabled()) {
+            auto observation = makeMatchObservation({}, {}, *partial_tail->tokens, tree_->groupSets());
+            completeMatchObservation(observation,
+                                     *tree_,
+                                     enable_device_cache_,
+                                     tree_->groupSets(),
+                                     *partial_tail->tokens,
+                                     match_begin_time_us);
+            // The ordinary content scan is token-only. The precise path's M
+            // must come from the authenticated ranges used for matching.
+            use_authenticated_content(observation);
+            observation.local_valid_pos = local->matched_device_endpoint;
+            observation.local_valid_key.reset();  // Joint groups may use different source nodes.
+            local->match_observation = std::move(observation);
+        }
         if (local.has_value() && storage_backend_ && !local->short_leaf
             && local->matched_device_endpoint < partial_tail->remote_ceiling) {
             // Complete local candidates keep the established local+remote
@@ -74,15 +121,19 @@ BlockTreeMatchResult BlockTreeLoader::matchLocked(const CacheKeysType& cache_key
             local.reset();
         }
         if (local.has_value() && (!storage_backend_ || local->matched_device_endpoint >= partial_tail->remote_ceiling)) {
+            local->farthest_fork = farthest_fork;
             return std::move(*local);
         }
     }
     if (cache_keys.empty()) {
         if (local.has_value()) {
+            local->farthest_fork = farthest_fork;
             return std::move(*local);
         }
         RTP_LLM_LOG_DEBUG("empty cache_keys, returning empty result");
-        return {};
+        BlockTreeMatchResult result;
+        result.farthest_fork = farthest_fork;
+        return result;
     }
 
     // A farther complete-key backend candidate competes with the pinned local
@@ -114,6 +165,7 @@ BlockTreeMatchResult BlockTreeLoader::matchLocked(const CacheKeysType& cache_key
             for (const auto& resource : result.matched_device_resources) {
                 tree_->groupSets()[resource.group_set_id]->unreferenceBlocks(resource);
             }
+            local->farthest_fork = farthest_fork;
             return std::move(*local);
         } else {
             for (const auto& resource : local->matched_device_resources) {
@@ -125,11 +177,17 @@ BlockTreeMatchResult BlockTreeLoader::matchLocked(const CacheKeysType& cache_key
                       result.matched_device_blocks,
                       cache_keys.size(),
                       tree_->size());
+    if (authenticated_scan && result.match_observation) {
+        // The backend candidate may replace the precise local match result,
+        // but the local content extent still comes from the authenticated scan.
+        use_authenticated_content(*result.match_observation);
+    }
+    result.farthest_fork = farthest_fork;
     return result;
 }
 
-std::optional<BlockTreeMatchResult> BlockTreeLoader::preciseLocalMatchLocked(const PartialTailMatchRequest& request) {
-    const auto ranges = tree_->contentMatchRanges(*request.tokens, request.endpoint_key, request.source_identity);
+std::optional<BlockTreeMatchResult> BlockTreeLoader::preciseLocalMatchLocked(
+    const PartialTailMatchRequest& request, const std::vector<BlockTreeContentRange>& ranges) {
     std::vector<size_t> endpoints;
     std::vector<size_t> boundary_strides{1};
     size_t              joint_boundary = 1;
@@ -179,50 +237,24 @@ std::optional<BlockTreeMatchResult> BlockTreeLoader::preciseLocalMatchLocked(con
         std::vector<std::pair<TreeNode*, size_t>> matched_nodes;
         bool                                      ready = true;
         for (size_t group_id = 0; group_id < tree_->groupSets().size(); ++group_id) {
-            const auto& group = tree_->groupSets()[group_id];
-            if (group->hasZeroStateDemand(endpoint)) {
-                continue;
-            }
-            bool found = false;
-            for (size_t source_index = 0; source_index < ranges.size(); ++source_index) {
-                const auto& range = ranges[source_index];
-                if (endpoint > range.matched_end || endpoint <= range.node->parent->token_end
-                    || (group->requiresExactStateEndpoint() && endpoint != range.node->token_end)) {
-                    continue;
-                }
-                // Build only sources that can actually cover this G. Keeping
-                // every range's ancestor path would use quadratic memory for
-                // a long, fully cached prefix.
-                std::vector<TreeNode*> path;
-                for (auto* cursor = range.node; cursor->parent != nullptr; cursor = cursor->parent) {
-                    path.push_back(cursor);
-                }
-                std::reverse(path.begin(), path.end());
-                const auto required = group->requiredPathIndices(path, endpoint);
-                const bool usable   = group->hasDeviceCoverage(path, endpoint);
-                if (!usable) {
-                    continue;
-                }
-                if (!required.empty()) {
-                    MultiNodeResource   pinned{group_id, Tier::DEVICE};
-                    std::vector<size_t> source_endpoints;
-                    for (const size_t index : required) {
-                        auto* source = path[index];
-                        pinned.node_blocks.emplace_back(nullptr,
-                                                        source->group_set_resources[group_id].getBlocks(Tier::DEVICE));
-                        source_endpoints.push_back(source->token_end);
-                        matched_nodes.emplace_back(source, group_id);
-                    }
-                    result.matched_device_resources.push_back(std::move(pinned));
-                    result.precise_resource_endpoints.push_back(std::move(source_endpoints));
-                }
-                found = true;
-                break;
-            }
-            if (!found) {
+            const auto sources = tree_->coveredDeviceGroupPath(ranges, endpoint, group_id);
+            if (!sources) {
                 ready = false;
                 break;
             }
+            if (sources->empty()) {
+                continue;
+            }
+            MultiNodeResource   pinned{group_id, Tier::DEVICE};
+            std::vector<size_t> source_endpoints;
+            for (auto* source : *sources) {
+                pinned.node_blocks.emplace_back(nullptr,
+                                                source->group_set_resources[group_id].getBlocks(Tier::DEVICE));
+                source_endpoints.push_back(source->token_end);
+                matched_nodes.emplace_back(source, group_id);
+            }
+            result.matched_device_resources.push_back(std::move(pinned));
+            result.precise_resource_endpoints.push_back(std::move(source_endpoints));
         }
         if (!ready) {
             continue;

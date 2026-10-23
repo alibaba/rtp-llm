@@ -589,6 +589,82 @@ TEST_F(SingleTypeCoordinatorCacheManagerTest, HybridRegisteredTailOnlyLinearNeed
     runtime.clearBlocks();
 }
 
+TEST_F(SingleTypeCoordinatorCacheManagerTest, RejectedInternalForkReleasesOptionalStateAndRuntimeAliasPins) {
+    auto config = makeSimpleHybridMhaCacheConfig(4, 16, 4, DataType::TYPE_FP16);
+    allocator_  = std::make_shared<TestSingleTypeCoordinatorCacheManager>(config);
+    ASSERT_TRUE(allocator_->init());
+    BatchKVCacheResource runtime;
+    runtime.resetBatchSize(1);
+    runtime.initGroups(config.topologyPtr());
+    const auto cache = allocator_->blockTreeCacheOwner();
+    const auto& groups = cache->groupSets();
+    PrefixCacheRegistration registration;
+    registration.original_input_tokens       = 8;
+    registration.token_ids                   = {1, 2, 3, 4, 5, 6, 7, 8};
+    registration.base_keys                   = {11, 22};
+    registration.required_continuation_ready = true;
+    PrefixCacheRegistrationPoint fork;
+    fork.endpoint.pos = 7;
+    fork.endpoint.key = 22;
+    fork.internal_only = true;
+    for (size_t id = 0; id < groups.size(); ++id) {
+        const auto& group = groups[id];
+        const auto pool = group->devicePools().front();
+        auto blocks = pool->malloc(2);
+        ASSERT_TRUE(blocks.has_value());
+        pool->incRef(*blocks);
+        runtime.setBatchBlocks(0, group->groupTags().front(), *blocks);
+        PrefixCacheGroupSaveBinding binding;
+        binding.group_set_id = id;
+        fork.group_bindings.push_back(std::move(binding));
+    }
+    registration.points.push_back(std::move(fork));
+    allocator_->prepareRegisteredSave(registration, runtime, 0);
+    ASSERT_TRUE(registration.prepared);
+
+    std::vector<std::vector<GroupSetResource>> resources(2, std::vector<GroupSetResource>(groups.size()));
+    std::vector<BlockIdxType> optional_ids(groups.size(), NULL_BLOCK_IDX);
+    std::vector<size_t> free_before_release(groups.size());
+    for (size_t id = 0; id < groups.size(); ++id) {
+        const auto& binding = registration.points.front().group_bindings[id];
+        if (groups[id]->groupType() == CacheGroupType::LINEAR) {
+            ASSERT_EQ(binding.ownership, PrefixCacheSaveOwnership::OPTIONAL_REQUEST);
+            ASSERT_EQ(binding.resource.device_blocks.size(), 1u);
+            optional_ids[id] = binding.resource.device_blocks.front();
+        } else {
+            ASSERT_EQ(binding.ownership, PrefixCacheSaveOwnership::REQUIRED_RUNTIME);
+        }
+        resources.back()[id] = binding.resource;
+        free_before_release[id] = groups[id]->devicePools().front()->freeBlocksNum();
+    }
+    const std::vector<std::vector<int>> segments{{1, 2, 3, 4}, {5, 6, 7}};
+    const std::vector<size_t> ends{4, 7};
+    bool ready = true;
+    cache->insert({11, 22}, resources, Tier::DEVICE, false, &segments, nullptr, &ends,
+                  std::nullopt, true, &ready);
+    EXPECT_FALSE(ready);
+    EXPECT_TRUE(cache->tree()->findNode({11, 22}).empty());
+    for (size_t id = 0; id < groups.size(); ++id) {
+        if (!isNullBlockIdx(optional_ids[id])) {
+            EXPECT_EQ(groups[id]->devicePools().front()->refCount(optional_ids[id]), 1u);
+        }
+    }
+
+    allocator_->releaseRegisteredSave(registration);
+    allocator_->releaseRegisteredSave(registration);
+    for (size_t id = 0; id < groups.size(); ++id) {
+        const auto pool = groups[id]->devicePools().front();
+        if (!isNullBlockIdx(optional_ids[id])) {
+            EXPECT_FALSE(pool->isAllocated(optional_ids[id]));
+            EXPECT_EQ(pool->freeBlocksNum(), free_before_release[id] + 1);
+        } else {
+            EXPECT_EQ(pool->refCount(runtime.blocks(0, groups[id]->groupTags().front()).back()), 1u);
+        }
+        pool->decRef(runtime.blocks(0, groups[id]->groupTags().front()));
+    }
+    runtime.clearBlocks();
+}
+
 TEST_F(SingleTypeCoordinatorCacheManagerTest, DenseSwaPinsPreserveUnregisteredWindowSlotsAndRealHoles) {
     for (const bool missing_window_slot : {false, true}) {
         SCOPED_TRACE(missing_window_slot);

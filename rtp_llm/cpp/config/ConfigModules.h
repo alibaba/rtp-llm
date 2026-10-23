@@ -171,6 +171,9 @@ struct KVCacheConfig {
     bool                                    reuse_cache           = false;
     // Prefill DEVICE short-tail registration and reuse. Independent of prefix observability.
     bool                                    enable_prefill_partial_tail_reuse = false;
+    // Prefill DEVICE interior common-prefix recovery point registration.
+    // Independent of and combinable with partial tail reuse; default off.
+    bool                                    enable_prefill_common_prefix_recovery = false;
     std::string                             multi_task_prompt     = "";
     std::string                             multi_task_prompt_str = "";
     std::map<std::string, std::vector<int>> multi_task_prompt_tokens;

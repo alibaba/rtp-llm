@@ -82,6 +82,11 @@ public:
         const std::vector<GroupBase>&           groups = topology.groups();
         group_block_size_bytes.reserve(groups.size());
         for (const auto& group : groups) {
+            // BlockTreeStorer omits local-only groups from remote handles.
+            // Keep KVCM's registered spec set in sync with those handles.
+            if (!group.policy.enable_prefix_reuse) {
+                continue;
+            }
             if (group.policy.group_type == CacheGroupType::FULL) {
                 full_group_tags.push_back(group.tag);
             } else {
@@ -327,7 +332,14 @@ public:
         if (!group_policy_->genBlockBuffers(tags, blocks, buffers)) {
             return false;
         }
-        return executeTagTransfers(request.op(), tags, blocks, uris, buffers, response);
+        const bool transferred = executeTagTransfers(request.op(), tags, blocks, uris, buffers, response);
+        if (transferred && request.op() == REMOTE_OPERATION_READ && sdk_check_enabled_ && !blocks.empty()) {
+            // The SDK's TransferTraceInfo does not guarantee a readable log.
+            // Report only after every real LoadKvCaches call has succeeded.
+            RTP_LLM_LOG_INFO(
+                "KVCM_SDK_READ_OK trace_id=%s transferred_blocks=%zu", request.trace_id().c_str(), blocks.size());
+        }
+        return transferred;
     }
 
     void shutdown() noexcept {

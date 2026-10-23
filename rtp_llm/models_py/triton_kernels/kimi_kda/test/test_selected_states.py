@@ -337,6 +337,28 @@ class SelectedStatesTest(unittest.TestCase):
             selected, prefix_oracle(args, raw, [512], [requests]), rtol=0, atol=0
         )
 
+    def test_interior_boundary_reuses_main_state(self):
+        # The interior 64/128 requests can use main-recurrence chunk starts;
+        # the final 192 request must still replay its preceding full chunk.
+        lengths = [192, 129]
+        requests = [[128, 64, 192, 64], [64, 128, 129, 64]]
+        for save_value in (False, True):
+            with self.subTest(save_new_value=save_value):
+                args, raw = inputs(lengths, packed=True, heads=2, dim=64)
+                args["save_new_value"] = save_value
+                positions = torch.tensor(requests, device="cuda", dtype=torch.int64)
+                selected = output_buffer(args, positions)
+                self.outputs_equal(
+                    BASELINE(**args),
+                    selected_call(args, raw["k"], positions, selected),
+                )
+                torch.testing.assert_close(
+                    selected,
+                    prefix_oracle(args, raw, lengths, requests),
+                    rtol=0,
+                    atol=0,
+                )
+
     def test_dense_complete_boundary_requests(self):
         for slots in (16, 32, 64, 128):
             length = slots * 64
@@ -799,6 +821,9 @@ def profile_kernels(invoke, path, roles, warmup=30, iterations=100):
 def benchmark(output_path):
     path = Path(output_path)
     path.parent.mkdir(parents=True, exist_ok=True)
+    position_mode = os.environ.get("RTP_KDA_PERF_POSITION_MODE", "random")
+    if position_mode not in ("random", "interior_boundary"):
+        raise ValueError(f"Unknown KDA position mode: {position_mode}")
     tokens_values = tuple(
         int(value)
         for value in os.environ.get(
@@ -825,7 +850,7 @@ def benchmark(output_path):
         "iterations": 100,
         "compilation_excluded": True,
         "input_allocation_outside_measurement": True,
-        "position_sampling": "random.Random(20261016 + T).sample(range(1,T),8), prefix S",
+        "position_sampling": position_mode,
         "gpu": torch.cuda.get_device_name(),
         "torch": torch.__version__,
         "cuda": torch.version.cuda,
@@ -835,8 +860,14 @@ def benchmark(output_path):
     for index, (tokens, slots) in enumerate(cases):
         args, raw = inputs([tokens], heads=32, dim=128)
         seed = 20261016 + tokens
-        sample_size = max(8, slots)
-        requests = random.Random(seed).sample(range(1, tokens), sample_size)[:slots]
+        if position_mode == "interior_boundary":
+            boundaries = range(64, tokens, 64)
+            if slots > len(boundaries):
+                raise ValueError("Not enough interior boundaries for requested slots")
+            requests = random.Random(seed).sample(boundaries, slots)
+        else:
+            sample_size = max(8, slots)
+            requests = random.Random(seed).sample(range(1, tokens), sample_size)[:slots]
         positions = torch.tensor([requests], device="cuda", dtype=torch.int64)
         selected = output_buffer(args, positions)
         torch.cuda.reset_peak_memory_stats()
@@ -886,7 +917,7 @@ def benchmark(output_path):
                 if variant == "baseline"
                 else (["main", "snapshot"] if slots else ["main"])
             )
-            if variant == "candidate" and 4 < slots <= 32:
+            if variant != "baseline" and 4 < slots <= 32:
                 roles = ["request_map", "main", "snapshot"]
             measured[variant] = profile_kernels(
                 invoke, path.with_name(f"{path.stem}_{index}_{variant}.json"), roles

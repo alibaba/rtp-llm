@@ -714,7 +714,8 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
     spec_bookkeeping_runner_(cuda_graph::graphGetStreamFromPool(true)),
     dspark_cache_store_sync_stream_(cuda_graph::graphGetStreamFromPool(true)) {
     data_type_                  = params.model_config_.data_type;
-    partial_tail_reuse_ = params.kv_cache_config.enable_prefill_partial_tail_reuse
+    partial_tail_reuse_ = (params.kv_cache_config.enable_prefill_partial_tail_reuse
+                           || params.kv_cache_config.enable_prefill_common_prefix_recovery)
                           && role_type_ == RoleType::PREFILL && !warm_up_;
     hidden_size_                = params.model_config_.hidden_size * params.model_config_.hc_mult;
     propose_step_               = propose_params->gen_num_per_circle;

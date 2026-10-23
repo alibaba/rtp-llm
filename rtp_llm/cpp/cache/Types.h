@@ -183,8 +183,9 @@ struct MallocInfo {
         // drops an unaligned final key in every batch before CP sampling.
         // An empty vector is still a valid snapshot, hence optional.
         std::optional<std::vector<CacheKeysType>> theory_window_keys;
-        // Owned full-input token snapshot, populated only when complete prefix
-        // observability is enabled. Empty means content matching is unformed.
+        // Owned full-input token snapshot, populated when complete prefix
+        // observability is enabled OR partial tail reuse needs it. Empty means
+        // content matching is unformed.
         std::vector<int> token_ids;
         // Functional local short-leaf lookup uses this immutable first-prefill
         // view even when prefix observability is disabled.
@@ -227,6 +228,10 @@ struct MallocResult {
         match_cost_time_us(match_cost_time_us),
         status(success ? MallocStatus::NONE : MallocStatus::INTERNAL_ERROR),
         async_context(std::move(async_context)) {}
+
+    // Authenticated local content divergence discovered during the initial
+    // matching attempt. It is independent of the eventual usable G.
+    std::optional<PrefixCachePlanPoint> farthest_fork;
 
     bool         success            = false;
     int          reuse_len          = 0;

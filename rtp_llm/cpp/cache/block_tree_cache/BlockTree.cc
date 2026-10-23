@@ -20,6 +20,35 @@ int64_t steadyTimeUs() {
         .count();
 }
 
+size_t matchingTokenPrefix(const int* source, const int* request, size_t count) {
+    size_t matched = 0;
+    // Most unrelated children differ immediately. Keep that path cheap before
+    // comparing large CP/block segments in batches.
+    for (; matched < count && matched < 4; ++matched) {
+        if (source[matched] != request[matched]) {
+            return matched;
+        }
+    }
+    if (count - matched >= 32) {
+        if (!std::equal(source + matched, source + matched + 32, request + matched)) {
+            while (matched < count && source[matched] == request[matched]) {
+                ++matched;
+            }
+            return matched;
+        }
+        matched += 32;
+    }
+    while (count - matched >= 64 && std::equal(source + matched, source + matched + 64, request + matched)) {
+        matched += 64;
+    }
+    // A failed batch comparison only narrows the search. Locate the first
+    // unequal token exactly; callers still authenticate the source identity.
+    while (matched < count && source[matched] == request[matched]) {
+        ++matched;
+    }
+    return matched;
+}
+
 using Validators = std::vector<std::unique_ptr<MatchValidator>>;
 
 Validators makeValidators(const std::vector<GroupSetPtr>& group_sets) {
@@ -404,10 +433,8 @@ std::optional<BlockTreeContentMatch> BlockTree::contentMatchInfo(const std::vect
             }
             const size_t remaining = request_tokens.size() - frame.pos;
             const size_t limit     = std::min(child->token_ids.size(), remaining);
-            size_t matched = 0;
-            while (matched < limit && child->token_ids[matched] == request_tokens[frame.pos + matched]) {
-                ++matched;
-            }
+            const size_t matched =
+                matchingTokenPrefix(child->token_ids.data(), request_tokens.data() + frame.pos, limit);
             const size_t end = frame.pos + matched;
             if (end > best.pos || (end == best.pos && matched > best.node_offset)) {
                 best = {end, key, matched, matched != child->token_ids.size()};
@@ -456,8 +483,12 @@ std::vector<TreeNode*> BlockTree::contentMatchCandidates(
 std::vector<BlockTreeContentRange> BlockTree::contentMatchRanges(
     const std::vector<int>&                                                   request_tokens,
     const std::function<CacheKeyType(size_t)>&                                endpoint_key,
-    const std::function<bool(size_t, const std::vector<int>&, CacheKeyType)>& source_identity) const {
+    const std::function<bool(size_t, const std::vector<int>&, CacheKeyType)>& source_identity,
+    std::optional<PrefixCachePlanPoint>*                                      farthest_fork) const {
     std::vector<BlockTreeContentRange> ranges;
+    if (farthest_fork != nullptr) {
+        farthest_fork->reset();
+    }
     if (request_tokens.empty() || !endpoint_key) {
         return ranges;
     }
@@ -472,11 +503,9 @@ std::vector<BlockTreeContentRange> BlockTree::contentMatchRanges(
                 continue;
             }
             const size_t limit   = std::min(child->token_ids.size(), request_tokens.size() - parent->token_end);
-            size_t       matched = 0;
-            while (matched < limit && child->token_ids[matched] == request_tokens[parent->token_end + matched]) {
-                ++matched;
-            }
-            if (matched == 0) {
+            const size_t matched =
+                matchingTokenPrefix(child->token_ids.data(), request_tokens.data() + parent->token_end, limit);
+            if (matched == 0 && (farthest_fork == nullptr || parent->token_end == 0)) {
                 continue;
             }
             const bool whole = matched == child->token_ids.size();
@@ -485,6 +514,19 @@ std::vector<BlockTreeContentRange> BlockTree::contentMatchRanges(
             // range unless the caller can authenticate its complete source.
             if (whole ? child->cache_key != endpoint_key(child->token_end) :
                         (!source_identity || !source_identity(parent->token_end, child->token_ids, child->cache_key))) {
+                continue;
+            }
+            // A strict fork has a next token on both sides. The source segment
+            // is authenticated above, including a mismatch at child offset 0
+            // after an authenticated canonical parent.
+            if (farthest_fork != nullptr && matched < limit) {
+                const size_t fork_pos = parent->token_end + matched;
+                if (fork_pos > 0 && (!*farthest_fork || fork_pos > (*farthest_fork)->pos)) {
+                    *farthest_fork = PrefixCachePlanPoint{
+                        (fork_pos - 1) / reuse_unit_tokens_, endpoint_key(fork_pos), fork_pos};
+                }
+            }
+            if (matched == 0) {
                 continue;
             }
             ranges.push_back({child, parent->token_end + matched});
@@ -497,6 +539,39 @@ std::vector<BlockTreeContentRange> BlockTree::contentMatchRanges(
         return lhs.matched_end > rhs.matched_end;
     });
     return ranges;
+}
+
+std::optional<std::vector<TreeNode*>> BlockTree::coveredDeviceGroupPath(
+    const std::vector<BlockTreeContentRange>& ranges, size_t endpoint, size_t group_id) const {
+    if (group_id >= group_sets_.size() || endpoint == 0) {
+        return std::nullopt;
+    }
+    const auto& group = group_sets_[group_id];
+    if (group->hasZeroStateDemand(endpoint)) {
+        return std::any_of(ranges.begin(), ranges.end(), [endpoint](const auto& range) {
+                   return endpoint <= range.matched_end;
+               }) ? std::optional<std::vector<TreeNode*>>(std::vector<TreeNode*>{}) : std::nullopt;
+    }
+    for (const auto& range : ranges) {
+        if (endpoint > range.matched_end || endpoint <= range.node->parent->token_end
+            || (group->requiresExactStateEndpoint() && endpoint != range.node->token_end)) {
+            continue;
+        }
+        std::vector<TreeNode*> path;
+        for (auto* cursor = range.node; cursor->parent != nullptr; cursor = cursor->parent) {
+            path.push_back(cursor);
+        }
+        std::reverse(path.begin(), path.end());
+        if (!group->hasDeviceCoverage(path, endpoint)) {
+            continue;
+        }
+        std::vector<TreeNode*> required_nodes;
+        for (const size_t index : group->requiredPathIndices(path, endpoint)) {
+            required_nodes.push_back(path[index]);
+        }
+        return required_nodes;
+    }
+    return std::nullopt;
 }
 
 size_t BlockTree::contentMatchPos(const std::vector<int>& request_tokens) const {

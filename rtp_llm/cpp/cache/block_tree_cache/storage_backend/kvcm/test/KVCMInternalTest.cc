@@ -448,6 +448,37 @@ TEST(KVCMInternalTest, FullAndLinearWriteSelectionPreservesLegacyIntervals) {
     EXPECT_EQ(selected, (std::vector<std::string>{"FfullLlinear", "Ffull", "Ffull", "FfullLlinear"}));
 }
 
+TEST(KVCMInternalTest, LocalOnlyGroupDoesNotEnterRemoteWriteOrReadSpecs) {
+    auto local = makeGroup("hca_state", 0, CacheGroupType::SWA);
+    ASSERT_FALSE(local.policy.enable_prefix_reuse);
+    auto topology = CacheTopology::create(
+        {makeGroup("full", 0, CacheGroupType::FULL), std::move(local), makeGroup("linear", 0, CacheGroupType::LINEAR)},
+        {{0, {"full", "hca_state", "linear"}}});
+    FullLinearLayerGroupPolicy policy(*topology,
+                                      unusedResolver(),
+                                      /*full_group_tags=*/{"full"},
+                                      /*other_group_tags=*/{"linear"},
+                                      /*write_interval=*/1);
+    ASSERT_TRUE(policy.init());
+    GroupPolicy::LocationSpecGroups location_groups;
+    ASSERT_TRUE(policy.buildLocationSpecGroups(/*tp_size=*/1, location_groups));
+    EXPECT_EQ(policy.groups().size(), 2u);
+    EXPECT_EQ(policy.spec_info_map().size(), 2u);
+    EXPECT_EQ(location_groups.count("FfullLlinear"), 1u);
+    EXPECT_EQ(location_groups.at("FfullLlinear"), (std::vector<std::string>{"tp0_Ffull", "tp0_Llinear"}));
+
+    std::vector<std::string> selected;
+    auto                     request = makeStorageRequest({{{"full", 10}, {"linear", 20}}});
+    ASSERT_TRUE(policy.getNeedWriteGroups(request, /*valid_keys_size=*/1, selected));
+    EXPECT_TRUE(selected.empty());  // Every key has the complete remote group set.
+
+    LocationsView view;
+    auto          location = makeLocation({"tp0_Ffull", "tp0_Llinear"});
+    ASSERT_TRUE(policy.filterNeedLoadLocations({location}, view));
+    ASSERT_EQ(view.size(), 1u);
+    EXPECT_EQ(view[0].size(), 2u);
+}
+
 TEST(KVCMInternalTest, FullAndLinearWriteIntervalOnePreservesLegacyDefaultAndPartialSelection) {
     auto topology = CacheTopology::create(
         {makeGroup("full", 0, CacheGroupType::FULL), makeGroup("linear", 1, CacheGroupType::LINEAR)},

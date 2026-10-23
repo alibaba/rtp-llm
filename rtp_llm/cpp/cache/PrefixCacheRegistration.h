@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstddef>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -21,6 +22,7 @@ struct PrefixCacheGroupSaveBinding {
 struct PrefixCacheRegistrationPoint {
     PrefixCachePlanPoint                     endpoint;
     std::vector<PrefixCacheGroupSaveBinding> group_bindings;
+    bool                                     internal_only{false};
 };
 
 // Request-side intent, captured before matching or generation changes live keys.
@@ -45,6 +47,8 @@ struct PrefixCacheRegistration {
     std::vector<int>                          token_ids;
     CacheKeysType                             base_keys;
     std::vector<PrefixCacheRegistrationPoint> points;
+    // Retain the discovered endpoint even when the original plan already owns it.
+    std::optional<PrefixCachePlanPoint>       farthest_fork;
     bool                                      prepared{false};
     size_t                                    prepared_resume_endpoint{0};
     bool                                      content_completed{false};

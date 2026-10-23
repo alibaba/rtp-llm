@@ -64,6 +64,7 @@ class DeepSeekV4TailReuseFourLayerMTPCP2Test(DeepSeekV4TailReuseFourLayerCP2Test
             "MODEL_SERVICE_CONFIG": route.model_dump_json(),
             "T07_CACHE_PROBE_CP_SIZE": "2",
         }
+        internal_fork = self._testMethodName == "test_mtp_cp2_internal_f800_numerical"
         common_args = (
             " --act_type BF16 --fp8_kv_cache 1 --seq_size_per_block 256"
             " --kernel_seq_size_per_block 128 --max_seq_len 2048"
@@ -118,6 +119,7 @@ class DeepSeekV4TailReuseFourLayerMTPCP2Test(DeepSeekV4TailReuseFourLayerCP2Test
                 "RTP_HOT_HOOK_DUMP_DIR": str(self.probe_dir),
                 "T07_CACHE_PROBE_DIR": str(self.probe_dir),
                 "T07_CACHE_PROBE_ROLE": "prefill",
+                "T10_PRIVATE_FORK_REFERENCE": "1" if internal_fork else "0",
             },
             device_ids=cards[:2],
             port=prefill_port,
@@ -128,6 +130,11 @@ class DeepSeekV4TailReuseFourLayerMTPCP2Test(DeepSeekV4TailReuseFourLayerCP2Test
                 + " --role_type PREFILL --enable_cuda_graph 0"
                 + " --cp_rotate_method ALL_GATHER --prefill_cp_kv_cache_sharded 1"
                 + " --prefill_cp_size 2 --enable_prefill_partial_tail_reuse 1"
+                + (
+                    " --enable_prefill_common_prefix_recovery 1"
+                    if internal_fork
+                    else ""
+                )
             ),
         )
         self.decode = MagaServerManager(
@@ -174,7 +181,7 @@ class DeepSeekV4TailReuseFourLayerMTPCP2Test(DeepSeekV4TailReuseFourLayerCP2Test
         before_prefill = set(draft_dir.glob("prefill_rank*_*.pt"))
         before_trace = set(trace_dir.glob("rank*_step*.pt"))
         before_decode = set(self.probe_dir.glob("mtp_draft_decode_*.pt"))
-        target = self._request_cp(label, prompt)
+        target = super()._request_cp(label, prompt)
         draft_files = set(draft_dir.glob("prefill_rank*_*.pt")) - before_prefill
         trace_files = set(trace_dir.glob("rank*_step*.pt")) - before_trace
         decode_files = set(self.probe_dir.glob("mtp_draft_decode_*.pt")) - before_decode
@@ -313,6 +320,161 @@ class DeepSeekV4TailReuseFourLayerMTPCP2Test(DeepSeekV4TailReuseFourLayerCP2Test
         )
         (self.output_dir / f"draft_numeric_diffs_{label}.json").write_text(
             json.dumps(numeric, indent=2) + "\n"
+        )
+
+    def _request_cp(self, label: str, prompt: str):
+        if self._testMethodName != "test_mtp_cp2_internal_f800_numerical":
+            return super()._request_cp(label, prompt)
+        result = self._request_mtp_cp(label, prompt)
+        self._internal_mtp_requests.append(result)
+        self._internal_mtp_prompts.append(prompt)
+        return result[0]
+
+    def test_mtp_cp2_internal_f800_numerical(self):
+        self._internal_mtp_requests = []
+        self._internal_mtp_prompts = []
+        # Reuse every ordinary CP2 target gate and its private A/B/C oracle.
+        super().test_cp2_internal_f800_numerical()
+        self.assertEqual(len(self._internal_mtp_requests), 3)
+        source, producer, consumer = self._internal_mtp_requests
+        numeric = {}
+        owners = []
+        for rank in (0, 1):
+            before = source[1][rank]
+            for request, resume in ((producer, 512), (consumer, 800)):
+                current = request[1][rank]
+                trace = request[2][rank]
+                self.assertEqual(current["end_position"], 2000)
+                self.assertEqual(int(trace["extra"]["prefix_length"]), resume)
+                self.assertEqual(int(trace["extra"]["seq_len_full"]), 2000 - resume)
+                self.assertLess(
+                    before["captured_unix_ns"], request[0][4]["request_start_unix_ns"]
+                )
+                self.assertLessEqual(
+                    current["captured_unix_ns"], request[0][4]["response_end_unix_ns"]
+                )
+                self.assertEqual(set(current["rows"]), {(0, "swa_kv")})
+                for name in ("source_ids", "source_values", "source_scales"):
+                    if name in before["rows"][(0, "swa_kv")]:
+                        self.assertTrue(
+                            torch.equal(
+                                before["rows"][(0, "swa_kv")][name],
+                                current["rows"][(0, "swa_kv")][name],
+                            )
+                        )
+            row = producer[1][rank]["rows"][(0, "swa_kv")]
+            positions = row["current_save_positions"].reshape(-1)
+            blocks = row["current_save_block_ids"].reshape(-1)
+            for endpoint in (800, 2000):
+                selected = blocks[positions == endpoint]
+                self.assertEqual(selected.numel(), 1)
+                self.assertGreater(int(selected[0]), 0)
+            self.assertNotEqual(
+                int(blocks[positions == 800][0]), int(blocks[positions == 2000][0])
+            )
+            other = producer[1][1 - rank]["rows"][(0, "swa_kv")]
+            self.assertTrue(
+                torch.equal(
+                    row["current_save_block_ids"], other["current_save_block_ids"]
+                )
+            )
+            directory = self.probe_dir / "mtp_draft_prefill"
+            private_f = torch.load(
+                directory / f"private_f800_runtime_rank{rank}.pt", weights_only=False
+            )
+            self.assertEqual(private_f["production_cache_bytes_copied"], 0)
+            self.assertTrue(
+                torch.equal(
+                    row["selected_f800_values"],
+                    private_f["rows"][(0, "swa_kv")]["values"],
+                )
+            )
+            private_row = private_f["rows"][(0, "swa_kv")]
+            if "scales" in private_row:
+                self.assertTrue(
+                    torch.equal(row["selected_f800_scales"], private_row["scales"])
+                )
+            for endpoint, resume in ((1300, 0), (2000, 512)):
+                reference = torch.load(
+                    directory / f"private_reference_rank{rank}_{endpoint}_g{resume}.pt",
+                    weights_only=False,
+                )
+                self.assertEqual(reference["production_cache_bytes_copied"], 0)
+                self.assertEqual(reference["selected_save_slots"], 1)
+            direct = torch.load(
+                directory / f"direct_reference_rank{rank}_2000_g800.pt",
+                weights_only=False,
+            )
+            self.assertEqual(direct["production_cache_bytes_copied"], 0)
+            self.assertEqual(direct["selected_save_slots"], 0)
+            self.assertEqual(
+                direct["provenance"],
+                "private_no_store_A0_to_1300_B512_to_2000_then_C800_to_2000",
+            )
+            if direct["final_last"].numel():
+                owners.append(rank)
+            for name, expected in (
+                ("layer00_tail128", direct["layers"][0]),
+                ("lm_last_hidden", direct["final_last"]),
+                ("lm_logits_last", direct["logits_last"]),
+            ):
+                actual = consumer[2][rank]["tensors"][name].float()
+                expected = expected.float()
+                self.assertEqual(actual.shape, expected.shape)
+                self.assertTrue(torch.isfinite(actual).all())
+                torch.testing.assert_close(actual, expected, rtol=0.002, atol=0.002)
+                difference = (actual - expected).abs()
+                numeric[f"rank{rank}_{name}"] = (
+                    float(difference.max()) if difference.numel() else 0.0
+                )
+        self.assertEqual(len(owners), 1)
+        # Keep cold output as a separate check; it is not the state oracle.
+        for index, label in ((1, "b"), (2, "c")):
+            response = self.session.post(
+                f"http://127.0.0.1:{self.prefill.port}/",
+                json={
+                    "prompt": self._internal_mtp_prompts[index],
+                    "generate_config": {
+                        "max_new_tokens": 2,
+                        "ignore_eos": True,
+                        "top_k": 1,
+                        "top_p": 1.0,
+                        "random_seed": 7,
+                        "reuse_cache": False,
+                        "can_use_pd_separation": True,
+                        "return_input_ids": True,
+                        "return_output_ids": True,
+                        "aux_info": True,
+                    },
+                },
+                timeout=1200,
+            )
+            (self.output_dir / f"mtp_cp2_f800_{label}_cold.http.txt").write_text(
+                response.text
+            )
+            response.raise_for_status()
+            cold = response.json()
+            self.assertNotIn("error_code", cold)
+            self.assertIs(cold.get("finished"), True)
+            self.assertIs(cold["aux_info"].get("pd_sep"), True)
+            self.assertEqual(len(cold["output_ids"]), 1)
+            self.assertEqual(len(cold["output_ids"][0]), 2)
+            self.assertEqual(cold["aux_info"].get("prefill_total_reuse_len"), 0)
+            self.assertEqual(
+                cold["output_ids"],
+                self._internal_mtp_requests[index][0][0]["output_ids"],
+            )
+        (self.output_dir / "mtp_cp2_f800_draft_numeric.json").write_text(
+            json.dumps(
+                {
+                    "oracle_input": "recorded_product_target_pre_HC_activations",
+                    "production_draft_cache_bytes_copied": 0,
+                    "target_hidden_input_independence": False,
+                    "diffs": numeric,
+                },
+                indent=2,
+            )
+            + "\n"
         )
 
     def _run_mtp_cp_case(self, label: str, source_end: int, end_position: int):

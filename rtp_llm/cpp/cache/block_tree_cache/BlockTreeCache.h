@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -143,7 +144,9 @@ public:
                   const std::vector<std::vector<int>>*              token_segments = nullptr,
                   PrefixCachePlanState*                             prefix_plan_state = nullptr,
                   const std::vector<size_t>*                         token_ends = nullptr,
-                  std::optional<int64_t> observation_request_id = std::nullopt);
+                  std::optional<int64_t> observation_request_id = std::nullopt,
+                  bool internal_fork = false,
+                  bool* ready_after_insert = nullptr);
     // Directly reclaim up to num_blocks device blocks belonging to one group set
     // (target_tier = NONE, content dropped). Returns the number actually freed.
     // Atomically protect existing complete per-group histories with one request
@@ -151,8 +154,14 @@ public:
     CachedPrefixResources pinRegisteredGroups(const std::vector<int>& tokens,
                                                const CacheKeysType& base_keys,
                                                size_t base_tokens,
-                                               const std::vector<size_t>& endpoints);
-    void observePublicationSkipped(std::optional<int64_t> request_id, Tier tier, const char* reason);
+                                               const std::vector<size_t>& endpoints,
+                                               const std::vector<PrefixCachePlanPoint>* exact_points = nullptr,
+                                               const std::function<bool(size_t, const std::vector<int>&, CacheKeyType)>&
+                                                   source_identity = {});
+    void observePublicationSkipped(std::optional<int64_t> request_id,
+                                   Tier tier,
+                                   const char* reason,
+                                   std::optional<size_t> internal_fork_pos = std::nullopt);
     int evictForGroup(std::string_view group_tag, size_t num_blocks);
 
     CacheStats                                getStats() const;

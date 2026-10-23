@@ -490,6 +490,7 @@ std::shared_ptr<LoadAsyncContext> CoordinatorCacheManager::prepareKVCache(
         return nullptr;
     }
     BlockTreeMatchResult match_result = block_tree_cache_->match(cache_keys, valid_prefix, request_tokens, partial_tail);
+    prepared.farthest_fork    = match_result.farthest_fork;
     prepared.match_observation = match_result.match_observation;
     std::shared_ptr<LoadAsyncContext> load_context = std::move(match_result.async_context);
     prepared.matched_device_blocks                 = match_result.matched_device_blocks;
@@ -696,6 +697,7 @@ MallocResult CoordinatorCacheManager::initMallocForCommonLen(const MallocInfo& m
         result.match_end_time_us = match_end_time_us;
         result.load_attempted    = load_attempted;
         result.match_observation = std::move(match_observation);
+        result.farthest_fork      = deferred_prepared->farthest_fork;
         return result;
     }
 
@@ -711,6 +713,7 @@ MallocResult CoordinatorCacheManager::initMallocForCommonLen(const MallocInfo& m
     result.match_end_time_us = match_end_time_us;
     result.load_attempted    = load_attempted;
     result.match_observation = prepared.match_observation;
+    result.farthest_fork      = prepared.farthest_fork;
     return result;
 }
 
@@ -1163,7 +1166,8 @@ MallocStatus CoordinatorCacheManager::prepareRequiredContinuation(PrefixCacheReg
 
 void CoordinatorCacheManager::prepareRegisteredSave(PrefixCacheRegistration& registration,
                                                     BatchKVCacheResource& runtime,
-                                                    size_t                      resume_endpoint) {
+                                                    size_t                      resume_endpoint,
+                                                    const CompleteTokenIds*     original_ids) {
     if (!block_tree_cache_ || registration.prepared || !registration.required_continuation_ready
         || runtime.batchSize() == 0) {
         return;
@@ -1172,12 +1176,38 @@ void CoordinatorCacheManager::prepareRegisteredSave(PrefixCacheRegistration& reg
     const auto& group_sets = block_tree_cache_->groupSets();
     RTP_LLM_CHECK(registration.cached_source_pins.empty() && registration.cached_path_resources.empty());
     std::vector<size_t> endpoints;
+    std::vector<PrefixCachePlanPoint> exact_points;
     endpoints.reserve(registration.points.size());
+    exact_points.reserve(registration.points.size());
     for (const auto& point : registration.points) {
         endpoints.push_back(point.endpoint.pos);
+        exact_points.push_back(point.endpoint);
     }
-    auto cached = block_tree_cache_->pinRegisteredGroups(
-        registration.token_ids, registration.base_keys, config_.seq_size_per_block, endpoints);
+    std::function<bool(size_t, const std::vector<int>&, CacheKeyType)> source_identity;
+    if (original_ids != nullptr) {
+        const size_t base = config_.seq_size_per_block;
+        source_identity = [original_ids, &registration, base](size_t begin,
+                                                               const std::vector<int>& source,
+                                                               CacheKeyType key) {
+            if (base == 0 || begin % base != 0 || begin > static_cast<size_t>(std::numeric_limits<int>::max())
+                || source.size() > static_cast<size_t>(std::numeric_limits<int>::max()) - begin) {
+                return false;
+            }
+            const size_t completed_blocks = begin / base;
+            if (completed_blocks > registration.base_keys.size()) {
+                return false;
+            }
+            const int64_t seed = completed_blocks == 0 ? 0 : registration.base_keys[completed_blocks - 1];
+            return cacheKeyForSourceSegment(
+                       *original_ids, source, static_cast<int>(begin), static_cast<int>(base), seed) == key;
+        };
+    }
+    auto cached = block_tree_cache_->pinRegisteredGroups(registration.token_ids,
+                                                          registration.base_keys,
+                                                          config_.seq_size_per_block,
+                                                          endpoints,
+                                                          &exact_points,
+                                                          source_identity);
     // Transfer ownership first, without allocation. Any later preparation error
     // is handled by the existing registration release path.
     registration.cached_source_pins = std::move(cached.pins);
@@ -1240,11 +1270,21 @@ void CoordinatorCacheManager::prepareRegisteredSave(PrefixCacheRegistration& reg
                 registration.content_completed = true;
                 continue;  // Existing saved state satisfies intent without another snapshot.
             }
+            if (point.internal_only && point.endpoint.pos <= resume_endpoint) {
+                binding.state = PrefixCacheSaveState::UNFULFILLED;
+                binding.unfulfilled_reason = "resume_at_or_past_fork";
+                continue;  // No replay and no zero-length selected-state write.
+            }
             RTP_LLM_CHECK_WITH_INFO(binding.group_set_id < group_sets.size(), "invalid registered GroupSet ID");
             const auto& group_set = group_sets[binding.group_set_id];
             if (!group_set || group_set->groupTags().empty()) {
                 binding.state              = PrefixCacheSaveState::UNFULFILLED;
                 binding.unfulfilled_reason = "missing_group_set";
+                continue;
+            }
+            if (point.internal_only && group_set->hasZeroStateDemand(point.endpoint.pos)) {
+                binding.state = PrefixCacheSaveState::CONTENT_COMPLETE;
+                registration.content_completed = true;
                 continue;
             }
             const bool dense_swa = std::all_of(group_set->groupTags().begin(),
@@ -1448,7 +1488,8 @@ void CoordinatorCacheManager::releaseRegisteredSourcePins(PrefixCacheRegistratio
     registration.source_pins.clear();
 }
 
-bool CoordinatorCacheManager::relinquishOptionalRegisteredSave(PrefixCacheRegistration& registration) {
+bool CoordinatorCacheManager::relinquishOptionalRegisteredSave(PrefixCacheRegistration& registration,
+                                                                bool internal_only_only) {
     if (!registration.prepared || !block_tree_cache_) {
         return false;
     }
@@ -1456,7 +1497,13 @@ bool CoordinatorCacheManager::relinquishOptionalRegisteredSave(PrefixCacheRegist
     bool released = false;
     const auto& group_sets = block_tree_cache_->groupSets();
     for (auto& point : registration.points) {
+        if (internal_only_only && !point.internal_only) {
+            continue;
+        }
         for (auto& binding : point.group_bindings) {
+            if (internal_only_only && binding.ownership != PrefixCacheSaveOwnership::OPTIONAL_REQUEST) {
+                continue;  // Shared cached/runtime pins cannot be shed independently.
+            }
             if (binding.ownership == PrefixCacheSaveOwnership::CACHED_REQUEST
                 || binding.ownership == PrefixCacheSaveOwnership::PINNED_RUNTIME) {
                 binding.resource = {};
@@ -1490,11 +1537,13 @@ bool CoordinatorCacheManager::relinquishOptionalRegisteredSave(PrefixCacheRegist
             released = true;
         }
     }
-    for (const auto& pin : registration.cached_source_pins) {
-        kv_cache_groups_[groupIdForTag(pin.tag)]->unreference({pin.block});
+    if (!internal_only_only) {
+        for (const auto& pin : registration.cached_source_pins) {
+            kv_cache_groups_[groupIdForTag(pin.tag)]->unreference({pin.block});
+        }
+        registration.cached_source_pins.clear();
+        registration.cached_path_resources.clear();
     }
-    registration.cached_source_pins.clear();
-    registration.cached_path_resources.clear();
     // A REQUIRED_RUNTIME binding may outlive the runtime's reference after a
     // beam fork drops its original branch. Keep its alias pin until publication
     // or registration release, even when optional saves yield to allocation.
@@ -1512,19 +1561,21 @@ bool CoordinatorCacheManager::relinquishOptionalRegisteredSave(PrefixCacheRegist
             }
         }
     }
-    std::vector<CachedPrefixResources::Pin> retained_runtime_pins;
-    retained_runtime_pins.reserve(registration.runtime_source_pins.size());
-    for (const auto& pin : registration.runtime_source_pins) {
-        const auto required = required_runtime.find(pin.tag);
-        if (required != required_runtime.end() && required->second.count(pin.block) != 0) {
-            retained_runtime_pins.push_back(pin);
-        } else {
-            kv_cache_groups_[groupIdForTag(pin.tag)]->unreference({pin.block});
-            released = true;
+    if (!internal_only_only) {
+        std::vector<CachedPrefixResources::Pin> retained_runtime_pins;
+        retained_runtime_pins.reserve(registration.runtime_source_pins.size());
+        for (const auto& pin : registration.runtime_source_pins) {
+            const auto required = required_runtime.find(pin.tag);
+            if (required != required_runtime.end() && required->second.count(pin.block) != 0) {
+                retained_runtime_pins.push_back(pin);
+            } else {
+                kv_cache_groups_[groupIdForTag(pin.tag)]->unreference({pin.block});
+                released = true;
+            }
         }
+        registration.runtime_source_pins = std::move(retained_runtime_pins);
+        registration.runtime_path_resources.clear();
     }
-    registration.runtime_source_pins = std::move(retained_runtime_pins);
-    registration.runtime_path_resources.clear();
     // A dropped optional destination has no future copy consumer. Retain a
     // source pin only while another mapping (such as required A->C) still
     // reads that source. The fallback path reaches here after prefill work.
@@ -1554,130 +1605,209 @@ void CoordinatorCacheManager::insertIntoCache(const InsertInfo& insert_info, siz
 
     const auto* registration = insert_info.prefix_cache_registration;
     if (registration != nullptr && insert_info.target_tier == Tier::DEVICE) {
-        // The T05 owner completion signal is stronger than populated block IDs.
-        if (!registration->prepared || !registration->content_completed || registration->original_input_tokens == 0) {
-            block_tree_cache_->observePublicationSkipped(insert_info.observation_request_id, insert_info.target_tier,
-                                                         "registration_not_complete");
-            return;
-        }
-        const size_t unit = config_.cache_key_layout_resolved ? config_.reuse_unit_tokens :
-                                                                  config_.seq_size_per_block;
-        const size_t base = config_.seq_size_per_block;
-        RTP_LLM_CHECK_WITH_INFO(unit > 0 && base > 0 && unit % base == 0,
-                                "invalid registered save key geometry");
-        const auto& group_sets = block_tree_cache_->groupSets();
-        size_t      completed_endpoint = registration->prepared_resume_endpoint;
-        for (const auto& point : registration->points) {
-            if (std::any_of(point.group_bindings.begin(), point.group_bindings.end(), [](const auto& binding) {
-                    return binding.state == PrefixCacheSaveState::CONTENT_COMPLETE;
-                })) {
-                completed_endpoint = std::max(completed_endpoint, point.endpoint.pos);
-            }
-        }
-        CacheKeysType keys;
-        std::vector<size_t> token_ends;
-        std::vector<std::vector<int>> token_segments;
-        std::vector<std::vector<GroupSetResource>> resources;
-        size_t previous = 0;
-        for (size_t endpoint = std::min(unit, registration->original_input_tokens);;
-             endpoint = std::min(endpoint + unit, registration->original_input_tokens)) {
-            const size_t key_index = (endpoint - 1) / base;
-            if (key_index >= registration->base_keys.size() || endpoint > registration->token_ids.size()) {
-                break;
-            }
-            const auto point_it = std::find_if(registration->points.begin(), registration->points.end(),
-                                               [endpoint](const auto& point) {
-                                                   return point.endpoint.pos == endpoint;
-                                               });
-            std::vector<GroupSetResource> per_group(group_sets.size());
-            bool full_ready = true;
-            for (size_t group_set_id = 0; group_set_id < group_sets.size(); ++group_set_id) {
-                const auto& group_set = group_sets[group_set_id];
-                if (!group_set || group_set->groupSetId() != group_set_id) {
-                    full_ready = false;
-                    break;
-                }
-                const auto cached = std::find_if(registration->cached_path_resources.begin(),
-                                                  registration->cached_path_resources.end(), [&](const auto& entry) {
-                    return entry.group_set_id == group_set_id && entry.endpoint == endpoint;
-                });
-                if (cached != registration->cached_path_resources.end()) {
-                    per_group[group_set_id] = cached->resource;
-                } else if (point_it != registration->points.end() && endpoint > registration->prepared_resume_endpoint) {
-                    const auto& binding = point_it->group_bindings[group_set_id];
-                    if (binding.group_set_id == group_set_id
-                        && binding.state == PrefixCacheSaveState::CONTENT_COMPLETE) {
-                        per_group[group_set_id] = binding.resource;
-                    }
-                } else if (endpoint <= completed_endpoint && group_set->groupType() == CacheGroupType::SWA) {
-                    const auto saved =
-                        std::find_if(registration->runtime_path_resources.begin(),
-                                     registration->runtime_path_resources.end(),
-                                     [&](const auto& entry) {
-                                         return entry.group_set_id == group_set_id && entry.endpoint == endpoint;
-                                     });
-                    if (saved != registration->runtime_path_resources.end()) {
-                        per_group[group_set_id] = saved->resource;
-                    }
-                } else if (endpoint <= completed_endpoint && group_set->groupType() == CacheGroupType::FULL) {
-                    auto& blocks = per_group[group_set_id].device_blocks;
-                    for (const auto& tag : group_set->groupTags()) {
-                        const auto& runtime_blocks = kv_cache_resource->blocks(0, tag);
-                        const size_t slot = config_.endpointBlockPosition(tag, endpoint);
-                        if (slot >= runtime_blocks.size() || isNullBlockIdx(runtime_blocks[slot])) {
-                            blocks.clear();
-                            break;
-                        }
-                        blocks.push_back(runtime_blocks[slot]);
-                    }
-                }
-                if (group_set->groupType() == CacheGroupType::FULL
-                    && !per_group[group_set_id].hasCompleteDeviceValue()) {
-                    full_ready = false;
-                    break;
-                }
-            }
-            if (!full_ready) {
-                break;
-            }
-            keys.push_back(registration->base_keys[key_index]);
-            token_ends.push_back(endpoint);
-            token_segments.emplace_back(registration->token_ids.begin() + static_cast<std::ptrdiff_t>(previous),
-                                        registration->token_ids.begin() + static_cast<std::ptrdiff_t>(endpoint));
-            resources.push_back(std::move(per_group));
-            previous = endpoint;
-            if (endpoint == registration->original_input_tokens) {
-                break;
-            }
-        }
-        if (!keys.empty()) {
-            resident_prefix_length = block_tree_cache_->insert(keys,
-                                                                 resources,
-                                                                 Tier::DEVICE,
-                                                                 insert_info.is_resident,
-                                                                 &token_segments,
-                                                                 insert_info.prefix_plan_state,
-                                                                 &token_ends,
-                                                                 insert_info.observation_request_id);
-        } else {
-            block_tree_cache_->observePublicationSkipped(insert_info.observation_request_id, insert_info.target_tier,
-                                                         "no_publishable_full_prefix");
-        }
+        publishRegisteredSpineAndFork(insert_info, *kv_cache_resource, *registration, resident_prefix_length);
         return;
     }
 
+    publishLegacyBatches(insert_info, *kv_cache_resource, resident_prefix_length);
+}
+
+void CoordinatorCacheManager::publishRegisteredSpineAndFork(const InsertInfo&              insert_info,
+                                                             BatchKVCacheResource&          kv_cache_resource,
+                                                             const PrefixCacheRegistration& registration,
+                                                             size_t&                        resident_prefix_length) {
+    // The T05 owner completion signal is stronger than populated block IDs.
+    if (!registration.prepared || !registration.content_completed || registration.original_input_tokens == 0) {
+        block_tree_cache_->observePublicationSkipped(insert_info.observation_request_id, insert_info.target_tier,
+                                                     "registration_not_complete");
+        return;
+    }
+    const size_t unit = config_.cache_key_layout_resolved ? config_.reuse_unit_tokens :
+                                                              config_.seq_size_per_block;
+    const size_t base = config_.seq_size_per_block;
+    RTP_LLM_CHECK_WITH_INFO(unit > 0 && base > 0 && unit % base == 0,
+                            "invalid registered save key geometry");
+    const auto& group_sets = block_tree_cache_->groupSets();
+    size_t      completed_endpoint = registration.prepared_resume_endpoint;
+    for (const auto& point : registration.points) {
+        if (std::any_of(point.group_bindings.begin(), point.group_bindings.end(), [](const auto& binding) {
+                return binding.state == PrefixCacheSaveState::CONTENT_COMPLETE;
+            })) {
+            completed_endpoint = std::max(completed_endpoint, point.endpoint.pos);
+        }
+    }
+    CacheKeysType keys;
+    std::vector<size_t> token_ends;
+    std::vector<std::vector<int>> token_segments;
+    std::vector<std::vector<GroupSetResource>> resources;
+    size_t previous = 0;
+    for (size_t endpoint = std::min(unit, registration.original_input_tokens);;
+         endpoint = std::min(endpoint + unit, registration.original_input_tokens)) {
+        const size_t key_index = (endpoint - 1) / base;
+        if (key_index >= registration.base_keys.size() || endpoint > registration.token_ids.size()) {
+            break;
+        }
+        const auto point_it = std::find_if(registration.points.begin(), registration.points.end(),
+                                           [endpoint](const auto& point) {
+                                               return point.endpoint.pos == endpoint;
+                                           });
+        // A noncanonical N belongs to the tail policy only. Internal-only
+        // recovery appends its distinct F point after the original plan.
+        if (endpoint == registration.original_input_tokens && endpoint % unit != 0
+            && point_it == registration.points.end()) {
+            break;
+        }
+        std::vector<GroupSetResource> per_group(group_sets.size());
+        bool full_ready = true;
+        for (size_t group_set_id = 0; group_set_id < group_sets.size(); ++group_set_id) {
+            const auto& group_set = group_sets[group_set_id];
+            if (!group_set || group_set->groupSetId() != group_set_id) {
+                full_ready = false;
+                break;
+            }
+            const auto cached = std::find_if(registration.cached_path_resources.begin(),
+                                              registration.cached_path_resources.end(), [&](const auto& entry) {
+                return entry.group_set_id == group_set_id && entry.endpoint == endpoint;
+            });
+            if (cached != registration.cached_path_resources.end()) {
+                per_group[group_set_id] = cached->resource;
+            } else if (point_it != registration.points.end() && !point_it->internal_only
+                       && endpoint > registration.prepared_resume_endpoint) {
+                const auto& binding = point_it->group_bindings[group_set_id];
+                if (binding.group_set_id == group_set_id
+                    && binding.state == PrefixCacheSaveState::CONTENT_COMPLETE) {
+                    per_group[group_set_id] = binding.resource;
+                }
+            } else if (endpoint <= completed_endpoint && group_set->groupType() == CacheGroupType::SWA) {
+                const auto saved =
+                    std::find_if(registration.runtime_path_resources.begin(),
+                                 registration.runtime_path_resources.end(),
+                                 [&](const auto& entry) {
+                                     return entry.group_set_id == group_set_id && entry.endpoint == endpoint;
+                                 });
+                if (saved != registration.runtime_path_resources.end()) {
+                    per_group[group_set_id] = saved->resource;
+                }
+            } else if (endpoint <= completed_endpoint && group_set->groupType() == CacheGroupType::FULL) {
+                auto& blocks = per_group[group_set_id].device_blocks;
+                for (const auto& tag : group_set->groupTags()) {
+                    const auto& runtime_blocks = kv_cache_resource.blocks(0, tag);
+                    const size_t slot = config_.endpointBlockPosition(tag, endpoint);
+                    if (slot >= runtime_blocks.size() || isNullBlockIdx(runtime_blocks[slot])) {
+                        blocks.clear();
+                        break;
+                    }
+                    blocks.push_back(runtime_blocks[slot]);
+                }
+            }
+            if (group_set->groupType() == CacheGroupType::FULL
+                && !per_group[group_set_id].hasCompleteDeviceValue()) {
+                full_ready = false;
+                break;
+            }
+        }
+        if (!full_ready) {
+            break;
+        }
+        keys.push_back(registration.base_keys[key_index]);
+        token_ends.push_back(endpoint);
+        token_segments.emplace_back(registration.token_ids.begin() + static_cast<std::ptrdiff_t>(previous),
+                                    registration.token_ids.begin() + static_cast<std::ptrdiff_t>(endpoint));
+        resources.push_back(std::move(per_group));
+        previous = endpoint;
+        if (endpoint == registration.original_input_tokens) {
+            break;
+        }
+    }
+    if (!keys.empty()) {
+        resident_prefix_length = block_tree_cache_->insert(keys,
+                                                             resources,
+                                                             Tier::DEVICE,
+                                                             insert_info.is_resident,
+                                                             &token_segments,
+                                                             insert_info.prefix_plan_state,
+                                                             &token_ends,
+                                                             insert_info.observation_request_id);
+    } else {
+        block_tree_cache_->observePublicationSkipped(insert_info.observation_request_id, insert_info.target_tier,
+                                                     "no_publishable_full_prefix");
+    }
+    const auto fork_it = std::find_if(registration.points.begin(), registration.points.end(),
+                                      [](const auto& point) { return point.internal_only; });
+    if (fork_it != registration.points.end() && fork_it->endpoint.pos > registration.prepared_resume_endpoint
+        && fork_it->endpoint.pos <= completed_endpoint) {
+        CacheKeysType fork_keys;
+        std::vector<size_t> fork_ends;
+        std::vector<std::vector<int>> fork_segments;
+        std::vector<std::vector<GroupSetResource>> fork_resources;
+        size_t previous_fork_end = 0;
+        bool ancestors_ready = true;
+        for (size_t index = 0; index < token_ends.size() && token_ends[index] < fork_it->endpoint.pos; ++index) {
+            fork_keys.push_back(keys[index]);
+            fork_ends.push_back(token_ends[index]);
+            fork_segments.push_back(token_segments[index]);
+            fork_resources.emplace_back(group_sets.size());  // Retained ancestors already own their blocks.
+            previous_fork_end = token_ends[index];
+        }
+        const size_t required_ancestor = (fork_it->endpoint.pos - 1) / unit;
+        ancestors_ready = fork_ends.size() == required_ancestor;
+        std::vector<GroupSetResource> fork_group_resources(group_sets.size());
+        for (size_t group_id = 0; group_id < group_sets.size() && ancestors_ready; ++group_id) {
+            if (group_id >= fork_it->group_bindings.size()) {
+                ancestors_ready = false;
+                break;
+            }
+            const auto& binding = fork_it->group_bindings[group_id];
+            if (binding.group_set_id != group_id
+                || (binding.state != PrefixCacheSaveState::CONTENT_COMPLETE
+                    && binding.state != PrefixCacheSaveState::CACHED_REF)) {
+                ancestors_ready = false;
+                break;
+            }
+            if (binding.resource.hasCompleteDeviceValue()) {
+                fork_group_resources[group_id] = binding.resource;
+            }
+        }
+        if (ancestors_ready && fork_it->endpoint.pos <= registration.token_ids.size()) {
+            fork_keys.push_back(fork_it->endpoint.key);
+            fork_ends.push_back(fork_it->endpoint.pos);
+            fork_segments.emplace_back(
+                registration.token_ids.begin() + static_cast<std::ptrdiff_t>(previous_fork_end),
+                registration.token_ids.begin() + static_cast<std::ptrdiff_t>(fork_it->endpoint.pos));
+            fork_resources.push_back(std::move(fork_group_resources));
+            block_tree_cache_->insert(fork_keys,
+                                      fork_resources,
+                                      Tier::DEVICE,
+                                      false,
+                                      &fork_segments,
+                                      nullptr,
+                                      &fork_ends,
+                                      insert_info.observation_request_id,
+                                      true);
+        } else {
+            block_tree_cache_->observePublicationSkipped(insert_info.observation_request_id,
+                                                         Tier::DEVICE,
+                                                         "internal_fork_missing_ancestor_or_group",
+                                                         fork_it->endpoint.pos);
+        }
+    }
+}
+
+void CoordinatorCacheManager::publishLegacyBatches(const InsertInfo&     insert_info,
+                                                   BatchKVCacheResource& kv_cache_resource,
+                                                   size_t&               resident_prefix_length) {
     // Preserve the single-group publication contract: only batch zero becomes
     // reusable. Multi-group requests retain their per-batch publication semantics.
     const int batch_size =
-        config_.groupNums() == 1 ? std::min(1, kv_cache_resource->batchSize()) : kv_cache_resource->batchSize();
+        config_.groupNums() == 1 ? std::min(1, kv_cache_resource.batchSize()) : kv_cache_resource.batchSize();
 
     for (int batch_id = 0; batch_id < batch_size; ++batch_id) {
-        const auto& full_keys = kv_cache_resource->cacheKeys(batch_id);
+        const auto& full_keys = kv_cache_resource.cacheKeys(batch_id);
         if (full_keys.empty()) {
             continue;
         }
         CacheKeysType insert_keys = full_keys;
-        if (config_.cache_key_layout_resolved && !kv_cache_resource->lastBlockAligned()) {
+        if (config_.cache_key_layout_resolved && !kv_cache_resource.lastBlockAligned()) {
             insert_keys.pop_back();
         }
         insert_keys = config_.canonicalCacheKeys(insert_keys);
@@ -1705,7 +1835,7 @@ void CoordinatorCacheManager::insertIntoCache(const InsertInfo& insert_info, siz
                     mapping_valid = false;
                     break;
                 }
-                const auto& blocks = kv_cache_resource->blocks(batch_id, tag);
+                const auto& blocks = kv_cache_resource.blocks(batch_id, tag);
                 for (size_t i = 0; i < insert_keys.size(); ++i) {
                     const size_t position = config_.canonicalBlockPosition(tag, i);
                     if (position >= blocks.size() || isNullBlockIdx(blocks[position])) {

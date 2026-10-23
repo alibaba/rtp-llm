@@ -475,6 +475,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def(py::init<>())
         .def_readwrite("reuse_cache", &KVCacheConfig::reuse_cache)
         .def_readwrite("enable_prefill_partial_tail_reuse", &KVCacheConfig::enable_prefill_partial_tail_reuse)
+        .def_readwrite("enable_prefill_common_prefix_recovery", &KVCacheConfig::enable_prefill_common_prefix_recovery)
         .def_readwrite("enable_remote_cache", &KVCacheConfig::enable_remote_cache)
         .def_readwrite("enable_device_cache", &KVCacheConfig::enable_device_cache)
         .def_readwrite("multi_task_prompt", &KVCacheConfig::multi_task_prompt)
@@ -575,7 +576,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def(py::pickle(
             [](const KVCacheConfig& self) {
                 return py::make_tuple(std::string("KVCacheConfig"),
-                                      8,
+                                      9,
                                       self.reuse_cache,
                                       self.multi_task_prompt,
                                       self.multi_task_prompt_str,
@@ -643,9 +644,18 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       self.kv_cache_event_instance_group,
                                       self.kv_cache_event_instance_id,
                                       self.kv_cache_event_host_ip_port,
-                                      self.enable_prefill_partial_tail_reuse);
+                                      self.enable_prefill_partial_tail_reuse,
+                                      self.enable_prefill_common_prefix_recovery);
             },
             [](py::tuple t) {
+                const bool has_common_prefix_field =
+                    t.size() == 71 && py::isinstance<py::int_>(t[1]) && t[1].cast<int>() == 9;
+                const bool enable_prefill_common_prefix_recovery =
+                    has_common_prefix_field ? t[70].cast<bool>() : false;
+                if (has_common_prefix_field) {
+                    t    = t[py::slice(0, 70, 1)].cast<py::tuple>();
+                    t[1] = py::int_(8);
+                }
                 const bool has_partial_tail_field =
                     t.size() == 70 && py::isinstance<py::int_>(t[1]) && t[1].cast<int>() == 8;
                 const bool enable_prefill_partial_tail_reuse =
@@ -764,6 +774,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                     c.kv_cache_event_host_ip_port     = event_state[68].cast<std::string>();
                 }
                 c.enable_prefill_partial_tail_reuse = enable_prefill_partial_tail_reuse;
+                c.enable_prefill_common_prefix_recovery = enable_prefill_common_prefix_recovery;
                 return c;
             }));
 

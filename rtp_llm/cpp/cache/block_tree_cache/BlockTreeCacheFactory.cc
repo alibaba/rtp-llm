@@ -465,7 +465,10 @@ BlockTreeCachePtr createBlockTreeCache(const CacheConfig&                       
 
     std::vector<GroupSetPtr>              group_sets;
     std::vector<std::vector<std::string>> group_members;
-    if (!buildGroupMembers(cache_config, kv_cache_config.enable_prefill_partial_tail_reuse, group_members)) {
+    if (!buildGroupMembers(cache_config,
+                           kv_cache_config.enable_prefill_partial_tail_reuse
+                               || kv_cache_config.enable_prefill_common_prefix_recovery,
+                           group_members)) {
         return nullptr;
     }
     if (disk_enabled) {

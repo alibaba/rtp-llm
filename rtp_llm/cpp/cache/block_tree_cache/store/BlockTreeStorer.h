@@ -43,9 +43,14 @@ public:
                                  const std::vector<std::vector<int>>*              token_segments = nullptr,
                                  PrefixCachePlanState*                             prefix_plan_state = nullptr,
                                  const std::vector<size_t>*                         token_ends = nullptr,
-                  std::optional<int64_t> observation_request_id = std::nullopt);
+                  std::optional<int64_t> observation_request_id = std::nullopt,
+                  bool internal_fork = false,
+                  bool* ready_after_insert = nullptr);
     void             stopAdmissionLocked();
-    void observePublicationSkipped(std::optional<int64_t> request_id, Tier tier, const char* reason);
+    void observePublicationSkipped(std::optional<int64_t> request_id,
+                                   Tier tier,
+                                   const char* reason,
+                                   std::optional<size_t> internal_fork_pos = std::nullopt);
 
 private:
     using StoreTask    = StoreTaskRunner::Task;
@@ -58,7 +63,9 @@ private:
                                          const std::vector<std::vector<int>>*              token_segments,
                                          PrefixCachePlanState*                             prefix_plan_state,
                                          const std::vector<size_t>*                         token_ends,
-                                         std::optional<int64_t> observation_request_id);
+                                         std::optional<int64_t> observation_request_id,
+                                         bool internal_fork,
+                                         bool* ready_after_insert);
     StorageRequest   makeStorageRequest(const CacheKeysType&                              cache_keys,
                                         const std::vector<std::vector<GroupSetResource>>& resources,
                                         const std::vector<size_t>*                         token_ends = nullptr) const;

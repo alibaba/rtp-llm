@@ -1,5 +1,6 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/store/BlockTreeStorer.h"
 
+#include <algorithm>
 #include <chrono>
 #include <cassert>
 #include <exception>
@@ -83,7 +84,9 @@ void logPrefixPublication(const std::string& instance,
                           Tier tier,
                           const BlockTreeInsertResult* result,
                           const char* reason,
-                          size_t unfulfilled_count) {
+                          size_t unfulfilled_count,
+                          std::optional<size_t> internal_fork_pos = std::nullopt,
+                          std::optional<bool> internal_fork_ready = std::nullopt) {
     std::ostringstream payload;
     payload << "{\"kind\":\"publication\",\"schema_version\":1,\"instance\":" << jsonEscape(instance)
             << ",\"request_id\":" << (request_id ? std::to_string(*request_id) : "null")
@@ -92,7 +95,21 @@ void logPrefixPublication(const std::string& instance,
             << ",\"inserted_nodes\":" << (result ? result->inserted_nodes.size() : 0)
             << ",\"adopted_nodes\":" << (result ? result->adopted_nodes.size() : 0)
             << ",\"accepted_resources\":" << (result ? result->accepted_resource_count : 0)
-            << ",\"unfulfilled_plan_points\":" << unfulfilled_count << ",\"reason\":";
+            << ",\"unfulfilled_plan_points\":" << unfulfilled_count
+            << ",\"internal_fork\":" << (internal_fork_pos ? "true" : "false")
+            << ",\"internal_fork_pos\":";
+    if (internal_fork_pos) {
+        payload << *internal_fork_pos;
+    } else {
+        payload << "null";
+    }
+    payload << ",\"internal_fork_ready\":";
+    if (internal_fork_ready) {
+        payload << (*internal_fork_ready ? "true" : "false");
+    } else {
+        payload << "null";
+    }
+    payload << ",\"reason\":";
     if (reason) {
         payload << jsonEscape(reason);
     } else {
@@ -126,9 +143,12 @@ BlockTreeStorer::BlockTreeStorer(BlockTree*                      tree,
     storage_backend_(std::move(storage_backend)),
     settled_(std::move(settled)) {}
 
-void BlockTreeStorer::observePublicationSkipped(std::optional<int64_t> request_id, Tier tier, const char* reason) {
+void BlockTreeStorer::observePublicationSkipped(std::optional<int64_t> request_id,
+                                                Tier tier,
+                                                const char* reason,
+                                                std::optional<size_t> internal_fork_pos) {
     if (tree_->observabilityEnabled()) {
-        logPrefixPublication(tree_->observabilityInstance(), request_id, tier, nullptr, reason, 0);
+        logPrefixPublication(tree_->observabilityInstance(), request_id, tier, nullptr, reason, 0, internal_fork_pos);
     }
 }
 
@@ -144,7 +164,9 @@ StorageWriteTask BlockTreeStorer::storeLocked(const CacheKeysType&              
                                               const std::vector<std::vector<int>>* token_segments,
                                               PrefixCachePlanState* prefix_plan_state,
                                               const std::vector<size_t>* token_ends,
-                                              std::optional<int64_t> observation_request_id) {
+                                              std::optional<int64_t> observation_request_id,
+                                              bool internal_fork,
+                                              bool* ready_after_insert) {
     resident_prefix_length = 0;
     assert(!is_resident || target_tier == Tier::DEVICE);
     RTP_LLM_CHECK_WITH_INFO(target_tier == Tier::DEVICE || target_tier == Tier::HOST || target_tier == Tier::DISK,
@@ -158,12 +180,15 @@ StorageWriteTask BlockTreeStorer::storeLocked(const CacheKeysType&              
                             token_segments,
                             prefix_plan_state,
                             token_ends,
-                            observation_request_id);
+                            observation_request_id,
+                            internal_fork,
+                            ready_after_insert);
     } else {
         submitLowerTierLocked(cache_keys, resources, target_tier, token_segments, prefix_plan_state, observation_request_id);
         return {};
     }
-    return storage_backend_ ? storage_backend_->prepareWrite(makeStorageRequest(cache_keys, resources, token_ends)) :
+    return storage_backend_ && !internal_fork ?
+               storage_backend_->prepareWrite(makeStorageRequest(cache_keys, resources, token_ends)) :
                               StorageWriteTask{};
 }
 
@@ -174,7 +199,9 @@ void BlockTreeStorer::publishDeviceLocked(const CacheKeysType&                  
                                           const std::vector<std::vector<int>>*              token_segments,
                                           PrefixCachePlanState*                             prefix_plan_state,
                                           const std::vector<size_t>*                         token_ends,
-                                          std::optional<int64_t> observation_request_id) {
+                                          std::optional<int64_t> observation_request_id,
+                                          bool internal_fork,
+                                          bool* ready_after_insert) {
     const bool plan_reached = tree_->observabilityEnabled() && !cache_keys.empty()
                               && resources.size() == cache_keys.size();
     std::vector<PrefixCachePlanPoint> plan_points;
@@ -189,14 +216,31 @@ void BlockTreeStorer::publishDeviceLocked(const CacheKeysType&                  
     }
     const BlockTreeInsertResult insert_result =
         tree_->insertNode(cache_keys, resources, false, is_resident, token_segments, token_ends);
+    std::optional<bool> fork_ready;
+    if (internal_fork) {
+        const auto path = tree_->findNode(cache_keys);
+        fork_ready = token_ends != nullptr && path.size() == cache_keys.size()
+                     && path.back()->token_end == token_ends->back()
+                     && std::all_of(tree_->groupSets().begin(), tree_->groupSets().end(), [&](const auto& group) {
+                            return group->hasDeviceCoverage(path, token_ends->back());
+                        });
+        if (ready_after_insert != nullptr) {
+            *ready_after_insert = *fork_ready;
+        }
+    }
     const auto unfulfilled = tree_->unfulfilledPlanPoints(plan_points, cache_keys);
     logPrefixPlanUnfulfilled(tree_->observabilityInstance(),
                              unfulfilled,
                              stopping_.load() ? "store_stopped" : "insert_not_fulfilled",
                              ErrorInfo::OkStatus(), observation_request_id);
     if (tree_->observabilityEnabled()) {
+        const char* publication_reason = unfulfilled.empty() ? nullptr : "insert_not_fulfilled";
+        if (internal_fork && fork_ready.has_value() && !*fork_ready) {
+            publication_reason = "internal_fork_insert_incomplete";
+        }
         logPrefixPublication(tree_->observabilityInstance(), observation_request_id, Tier::DEVICE,
-                             &insert_result, unfulfilled.empty() ? nullptr : "insert_not_fulfilled", unfulfilled.size());
+                             &insert_result, publication_reason, unfulfilled.size(),
+                             internal_fork ? std::optional<size_t>(token_ends->back()) : std::nullopt, fork_ready);
     }
     const bool tree_data_mutated = !insert_result.inserted_nodes.empty() || !insert_result.adopted_nodes.empty();
     if (tree_data_mutated || !insert_result.newly_resident_nodes.empty()) {

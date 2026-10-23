@@ -73,6 +73,7 @@ class DeepSeekV4TailReuseFourLayerMTPTest(DeepSeekV4TailReuseFourLayerTest):
             "REMOTE_RPC_SERVER_IP": "localhost",
             "MODEL_SERVICE_CONFIG": route.model_dump_json(),
         }
+        internal_fork = self._testMethodName.startswith("test_internal_")
         common_args = (
             "--tp_size 1 --ep_size 1 --dp_size 1 --world_size 1"
             " --act_type BF16 --fp8_kv_cache 1 --seq_size_per_block 256"
@@ -127,6 +128,7 @@ class DeepSeekV4TailReuseFourLayerMTPTest(DeepSeekV4TailReuseFourLayerTest):
                 "RTP_HOT_HOOK_DUMP_DIR": str(self.probe_dir),
                 "T07_CACHE_PROBE_DIR": str(self.probe_dir),
                 "T07_CACHE_PROBE_ROLE": "prefill",
+                "T10_PRIVATE_FORK_REFERENCE": "1" if internal_fork else "0",
             },
             device_ids=cards[:1],
             port=prefill_port,
@@ -135,6 +137,11 @@ class DeepSeekV4TailReuseFourLayerMTPTest(DeepSeekV4TailReuseFourLayerTest):
                 common_args
                 + " --role_type PREFILL --enable_cuda_graph 0"
                 + " --enable_prefill_partial_tail_reuse 1"
+                + (
+                    " --enable_prefill_common_prefix_recovery 1"
+                    if internal_fork
+                    else ""
+                )
             ),
         )
         self.decode = MagaServerManager(
@@ -284,6 +291,71 @@ class DeepSeekV4TailReuseFourLayerMTPTest(DeepSeekV4TailReuseFourLayerTest):
             self._draft_prefill_by_label["mtp_reused_1320"][0],
             self._draft_prefill_by_label["mtp_reused_1320"][1],
         )
+
+    def test_internal_f800_target_and_draft(self):
+        self._draft_prefill_by_label = {}
+        label = "mtp_internal_f800"
+        fork_at = 800
+        prompt_a, prompt_b, tokens_a, tokens_b = self._fork_prompts(label, fork_at)
+        prefix = self._extend_prompt(f"Tail reuse {label} branch:", fork_at)
+        prompt_c = None
+        for third in (" green", " amber", " violet", " silver"):
+            candidate = self.tokenizer.encode(prefix + third)
+            if (
+                len(candidate) == fork_at + 1
+                and candidate[:fork_at] == tokens_a[:fork_at]
+                and candidate[fork_at] not in (tokens_a[fork_at], tokens_b[fork_at])
+            ):
+                prompt_c = self._extend_prompt(prefix + third, 2000)
+                break
+        self.assertIsNotNone(prompt_c, "no third MTP branch at F800")
+
+        _, source, _, _ = self._request_mtp(f"{label}_source_1300", prompt_a)
+        reused_b, after_b, trace_b, decode_b = self._request_mtp(
+            f"{label}_b_2000", prompt_b
+        )
+        self._assert_pair(
+            f"{label}_b", 2000, 768, source, after_b, reused_b, trace_b, decode_b
+        )
+        for key, row in after_b["rows"].items():
+            if key[1] in ("csa_kv", "hca_kv", "indexer_kv"):
+                continue
+            positions = row["current_save_positions"].reshape(-1)
+            blocks = row["current_save_block_ids"].reshape(-1)
+            for endpoint in (800, 2000):
+                selected = blocks[positions == endpoint]
+                self.assertEqual(selected.numel(), 1, f"{key}: target F/N")
+                self.assertGreater(int(selected[0]), 0)
+        private_f = torch.load(
+            self.probe_dir / "private_f800_runtime.pt", weights_only=False
+        )
+        self.assertEqual(private_f["production_cache_bytes_copied"], 0)
+        for key, row in after_b["rows"].items():
+            saved = row.get("selected_f800_values")
+            if saved is not None:
+                self.assertTrue(
+                    torch.equal(saved, private_f["rows"][key]["values"]),
+                    f"{key}: target private F save differs",
+                )
+        draft_b = self._draft_prefill_by_label[f"{label}_b_2000"][0]
+        self.assertEqual(draft_b["end_position"], 2000)
+        draft_row = draft_b["rows"][(0, "swa_kv")]
+        draft_positions = draft_row["current_save_positions"].reshape(-1)
+        draft_blocks = draft_row["current_save_block_ids"].reshape(-1)
+        for endpoint in (800, 2000):
+            selected = draft_blocks[draft_positions == endpoint]
+            self.assertEqual(selected.numel(), 1, f"draft {endpoint}")
+            self.assertGreater(int(selected[0]), 0)
+
+        reused_c, after_c, trace_c, decode_c = self._request_mtp(
+            f"{label}_c_2000", prompt_c
+        )
+        self._assert_pair(
+            f"{label}_c", 2000, 800, source, after_c, reused_c, trace_c, decode_c
+        )
+        cold_c, _, _, _ = self._request(f"{label}_c_cold", prompt_c, False)
+        self.assertEqual(cold_c["aux_info"].get("prefill_total_reuse_len"), 0)
+        self.assertEqual(reused_c["output_ids"], cold_c["output_ids"])
 
 
 if __name__ == "__main__":

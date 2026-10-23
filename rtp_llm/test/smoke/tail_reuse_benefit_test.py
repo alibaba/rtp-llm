@@ -69,7 +69,7 @@ class _TailReuseBenefitTest(unittest.TestCase):
     def _write(self, name, value):
         (self.output_dir / name).write_text(json.dumps(value, indent=2) + "\n")
 
-    def _start(self, mode, feature, observation):
+    def _start(self, mode, feature, observation, internal=False):
         ports = [MagaServerManager.get_free_port() for _ in range(2)]
         self.profile_dir = self.output_dir / f"{mode}_profiles"
         self.profile_dir.mkdir()
@@ -120,6 +120,8 @@ class _TailReuseBenefitTest(unittest.TestCase):
             " --enable_device_cache 1 --enable_memory_cache 0"
             " --enable_disk_cache 0 --enable_remote_cache 0 --enable_cuda_graph 0"
         )
+        if self._testMethodName == "test_internal_fork_benefit":
+            common = common.replace("--kv_cache_mem_mb 4096", "--kv_cache_mem_mb 2048")
         if self.cp_size == 2:
             common += " --prefill_cp_kv_cache_sharded 1 --prefill_cp_size 2"
         managers = []
@@ -132,6 +134,8 @@ class _TailReuseBenefitTest(unittest.TestCase):
             args += f" --role_type {role.upper()}"
             if i == 0:
                 args += f" --enable_prefill_partial_tail_reuse {int(feature)}"
+                if self._testMethodName == "test_internal_fork_benefit":
+                    args += f" --enable_prefill_common_prefix_recovery {int(internal)}"
             if self.cp_size == 2:
                 args += " --cp_rotate_method " + (
                     "ALL_GATHER" if i == 0 else "PREFILL_CP"
@@ -429,6 +433,127 @@ class _TailReuseBenefitTest(unittest.TestCase):
                     "copy_save_isolated_cost": "separate evidence required; not inferred from wall time",
                     "tensor_capture": False,
                     "profile_selection": "post-measurement profile_source/profile_target are excluded from measured JSONL and pairs by explicit request-ID selection; all events and raw HTTP retained",
+                },
+            },
+        )
+
+    def test_internal_fork_benefit(self):
+        self.assertEqual(self.cp_size, 1)
+        results = {}
+        for mode, tail, internal, observation in (
+            ("both_off", False, False, True),
+            ("f_off", True, False, True),
+            ("f_on", True, True, True),
+            ("f_on_quiet", True, True, False),
+        ):
+            self._start(mode, feature=tail, observation=observation, internal=internal)
+            try:
+                warm = self._extend_prompt("Unrelated F benefit warmup:", 1300)
+                self._request(mode, "warmup_source", warm, True, observation)
+                self._request(
+                    mode,
+                    "warmup_target",
+                    self._extend_prompt(warm, 2000),
+                    True,
+                    observation,
+                )
+                prefix = self._extend_prompt("Common F benefit source:", 800)
+                source_prompt = self._extend_prompt(prefix, 1300)
+                source_ids = self.tokenizer.encode(source_prompt)
+                branches = []
+                for suffix in (" branch", " amber", " violet", " silver", " orange"):
+                    candidate = self.tokenizer.encode(prefix + suffix)
+                    if (
+                        len(candidate) > 800
+                        and candidate[:800] == source_ids[:800]
+                        and candidate[800] != source_ids[800]
+                        and all(candidate[800] != token for token, _ in branches)
+                    ):
+                        branches.append(
+                            (candidate[800], self._extend_prompt(prefix + suffix, 2000))
+                        )
+                    if len(branches) == 2:
+                        break
+                self.assertEqual(len(branches), 2)
+                source = self._request(
+                    mode, "source_1300", source_prompt, True, observation
+                )
+                producer = self._request(
+                    mode, "producer_2000", branches[0][1], True, observation
+                )
+                beneficiary = self._request(
+                    mode, "beneficiary_2000", branches[1][1], True, observation
+                )
+                cold = self._request(
+                    mode, "beneficiary_cold", branches[1][1], False, observation
+                )
+                self.assertEqual(source["aux_info"]["prefill_total_reuse_len"], 0)
+                self.assertEqual(producer["aux_info"]["prefill_total_reuse_len"], 768)
+                self.assertEqual(
+                    beneficiary["aux_info"]["prefill_total_reuse_len"],
+                    800 if internal else 768,
+                )
+                self.assertEqual(cold["aux_info"]["prefill_total_reuse_len"], 0)
+                self.assertEqual(beneficiary["output_ids"], cold["output_ids"])
+                results[mode] = {
+                    "source": source,
+                    "producer": producer,
+                    "beneficiary": beneficiary,
+                }
+            finally:
+                self.prefill.stop_server()
+                self.decode.stop_server()
+        both_off = results["both_off"]
+        off = results["f_off"]
+        on = results["f_on"]
+        quiet = results["f_on_quiet"]
+        for label in ("source", "producer", "beneficiary"):
+            self.assertEqual(both_off[label]["input_sha256"], off[label]["input_sha256"])
+            self.assertEqual(off[label]["input_sha256"], on[label]["input_sha256"])
+            self.assertEqual(on[label]["input_sha256"], quiet[label]["input_sha256"])
+            self.assertEqual(both_off[label]["output_ids"], off[label]["output_ids"])
+            self.assertEqual(off[label]["output_ids"], on[label]["output_ids"])
+            self.assertEqual(on[label]["output_ids"], quiet[label]["output_ids"])
+        for label in ("producer", "beneficiary"):
+            self.assertEqual(
+                both_off[label]["aux_info"]["prefill_total_reuse_len"],
+                off[label]["aux_info"]["prefill_total_reuse_len"],
+            )
+        for label in ("producer", "beneficiary"):
+            self.assertEqual(
+                on[label]["aux_info"]["prefill_total_reuse_len"],
+                quiet[label]["aux_info"]["prefill_total_reuse_len"],
+            )
+        aggregate = {}
+        for mode, rows in results.items():
+            measured = list(rows.values())
+            aggregate[mode] = {
+                "sum_used_tokens": sum(
+                    row["aux_info"]["prefill_total_reuse_len"] for row in measured
+                ),
+                "sum_input_tokens": sum(row["input_tokens"] for row in measured),
+                "ttft_ms": {
+                    label: row["engine_ttft_ms"] for label, row in rows.items()
+                },
+                "generated_tokens_per_http_second": {
+                    label: row["generated_tokens_per_http_second"]
+                    for label, row in rows.items()
+                },
+            }
+        self._write(
+            "internal_fork_benefit_manifest.json",
+            {
+                "modes": results,
+                "aggregate": aggregate,
+                "beneficiary_delta_g": (
+                    on["beneficiary"]["aux_info"]["prefill_total_reuse_len"]
+                    - off["beneficiary"]["aux_info"]["prefill_total_reuse_len"]
+                ),
+                "limits": {
+                    "throughput": "serial generated tokens divided by HTTP wall time",
+                    "memory": "device-wide before/after samples; no peak attribution",
+                    "copy_save_isolated_cost": "not measured separately",
+                    "shared_gpu": "timings are descriptive, not a speedup claim",
                 },
             },
         )

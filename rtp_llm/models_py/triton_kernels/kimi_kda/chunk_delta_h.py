@@ -74,9 +74,32 @@ def _selected_prefix_weighted_k(
     K: tl.constexpr,
     BT: tl.constexpr,
     OFFSET_K: tl.constexpr,
+    MATCH_WY_LAYOUT: tl.constexpr = False,
 ):
     # Match recompute_w_u_fwd_kda_kernel's kg calculation, including its
     # low-precision store, but use the requested prefix as the chunk end.
+    if MATCH_WY_LAYOUT:
+        # Transposed replay must form kg in the same [token, key] layout as
+        # recompute_w_u_fwd_kda_kernel to preserve its FP32 dot ordering.
+        p_k = tl.make_block_ptr(
+            raw_k, (T, K), (H * K, 1), (0, OFFSET_K), (BT, 64), (1, 0)
+        )
+        b_k = tl.load(p_k, boundary_check=(0, 1))
+        p_gk = tl.make_block_ptr(
+            gk + (bos * HV + i_h).to(tl.int64) * K,
+            (T, K),
+            (HV * K, 1),
+            (0, OFFSET_K),
+            (BT, 64),
+            (1, 0),
+        )
+        b_gk = tl.load(p_gk, boundary_check=(0, 1)).to(tl.float32)
+        b_kg = b_k * tl.where(
+            (tl.arange(0, BT) < T)[:, None],
+            exp2(last_gate[None, :] - b_gk),
+            0,
+        )
+        return tl.trans(b_kg.to(b_k.dtype))
     p_k = tl.make_block_ptr(raw_k, (K, T), (1, H * K), (OFFSET_K, 0), (64, BT), (0, 1))
     b_k = tl.load(p_k, boundary_check=(0, 1))
     p_gk = tl.make_block_ptr(
@@ -96,6 +119,15 @@ def _selected_prefix_weighted_k(
     return b_kg.to(b_k.dtype)
 
 
+@triton.jit
+def _selected_capture_chunk(prefix, sequence_len, BT: tl.constexpr):
+    # The main recurrence already holds the exact FP32 state at an interior
+    # chunk boundary. The sequence end has no following chunk to capture.
+    previous_chunk = (tl.maximum(prefix, 1) - 1) // BT
+    aligned_interior = (prefix > 0) & (prefix < sequence_len) & (prefix % BT == 0)
+    return tl.where(aligned_interior, prefix // BT, previous_chunk)
+
+
 @triton.jit(do_not_specialize=["T"])
 def _prepare_selected_state_capture(
     state_positions,
@@ -109,6 +141,7 @@ def _prepare_selected_state_capture(
     S: tl.constexpr,
     BLOCK_S: tl.constexpr,
     IS_VARLEN: tl.constexpr,
+    ALIGN_INTERIOR: tl.constexpr,
 ):
     i_t, i_n = tl.program_id(0), tl.program_id(1)
     table_index = i_n * NT + i_t
@@ -128,7 +161,10 @@ def _prepare_selected_state_capture(
     slots = tl.arange(0, BLOCK_S)
     prefixes = tl.load(state_positions + i_n * S + slots, mask=slots < S, other=0)
     valid = (slots < S) & (prefixes > 0) & (prefixes <= T)
-    chunk = (tl.maximum(prefixes, 1) - 1) // BT
+    if ALIGN_INTERIOR:
+        chunk = _selected_capture_chunk(prefixes, T, BT)
+    else:
+        chunk = (tl.maximum(prefixes, 1) - 1) // BT
     first_slot = tl.min(tl.where(valid & (chunk == i_t), slots, S), 0)
     tl.store(capture_slots + table_index, tl.where(first_slot < S, first_slot, -1))
 
@@ -191,7 +227,10 @@ def _chunk_gated_delta_rule_state_kernel_base(
         prefix = tl.load(state_positions + i_n * NUM_STATE_POSITIONS + i_s)
         valid_prefix = (prefix >= 0) & (prefix <= T)
         prefix = tl.where(valid_prefix, prefix, 0).to(tl.int32)
-        chunk_start = (tl.maximum(prefix, 1) - 1) // BT * BT
+        if REUSE_NEW_VALUE and not TRANSPOSE_STATE:
+            chunk_start = _selected_capture_chunk(prefix, T, BT) * BT
+        else:
+            chunk_start = (tl.maximum(prefix, 1) - 1) // BT * BT
         bos += chunk_start
         T = prefix - chunk_start
         NT = tl.cdiv(T, BT)
@@ -356,11 +395,18 @@ def _chunk_gated_delta_rule_state_kernel_base(
             mask=request_slots < NUM_STATE_POSITIONS,
             other=0,
         )
-        requested_chunks = tl.where(
-            (requested_prefixes > 0) & (requested_prefixes <= T),
-            (tl.maximum(requested_prefixes, 1) - 1) // BT,
-            NT,
-        ).to(tl.int32)
+        if SAVE_NEW_VALUE and not TRANSPOSE_STATE:
+            requested_chunks = tl.where(
+                (requested_prefixes > 0) & (requested_prefixes <= T),
+                _selected_capture_chunk(requested_prefixes, T, BT),
+                NT,
+            ).to(tl.int32)
+        else:
+            requested_chunks = tl.where(
+                (requested_prefixes > 0) & (requested_prefixes <= T),
+                (tl.maximum(requested_prefixes, 1) - 1) // BT,
+                NT,
+            ).to(tl.int32)
         next_capture_chunk = tl.min(requested_chunks, 0)
 
     # main recurrence
@@ -437,7 +483,11 @@ def _chunk_gated_delta_rule_state_kernel_base(
             else:
                 for i_s in range(NUM_STATE_POSITIONS):
                     prefix = tl.load(state_positions + i_n * NUM_STATE_POSITIONS + i_s)
-                    if (prefix > 0) & (prefix <= T) & ((prefix - 1) // BT == i_t):
+                    if SAVE_NEW_VALUE and not TRANSPOSE_STATE:
+                        request_chunk = _selected_capture_chunk(prefix, T, BT)
+                    else:
+                        request_chunk = (prefix - 1) // BT
+                    if (prefix > 0) & (prefix <= T) & (request_chunk == i_t):
                         selected_state = (
                             selected_states
                             + ((i_n * NUM_STATE_POSITIONS + i_s) * HV + i_h).to(
@@ -739,7 +789,7 @@ def _chunk_gated_delta_rule_state_kernel_base(
 
         if SELECT_STATES:
             b_k = _selected_prefix_weighted_k(
-                raw_k, gk, b_gk_last1, bos, i_h, T, H, HV, K, BT, 0
+                raw_k, gk, b_gk_last1, bos, i_h, T, H, HV, K, BT, 0, TRANSPOSE_STATE
             )
         else:
             p_k_i0 = tl.arange(0, 64).to(tl.int64) + (0)
@@ -755,7 +805,18 @@ def _chunk_gated_delta_rule_state_kernel_base(
         if K > 64:
             if SELECT_STATES:
                 b_k = _selected_prefix_weighted_k(
-                    raw_k, gk, b_gk_last2, bos, i_h, T, H, HV, K, BT, 64
+                    raw_k,
+                    gk,
+                    b_gk_last2,
+                    bos,
+                    i_h,
+                    T,
+                    H,
+                    HV,
+                    K,
+                    BT,
+                    64,
+                    TRANSPOSE_STATE,
                 )
             else:
                 p_k_i0 = tl.arange(0, 64).to(tl.int64) + (64)
@@ -771,7 +832,18 @@ def _chunk_gated_delta_rule_state_kernel_base(
         if K > 128:
             if SELECT_STATES:
                 b_k = _selected_prefix_weighted_k(
-                    raw_k, gk, b_gk_last3, bos, i_h, T, H, HV, K, BT, 128
+                    raw_k,
+                    gk,
+                    b_gk_last3,
+                    bos,
+                    i_h,
+                    T,
+                    H,
+                    HV,
+                    K,
+                    BT,
+                    128,
+                    TRANSPOSE_STATE,
                 )
             else:
                 p_k_i0 = tl.arange(0, 64).to(tl.int64) + (128)
@@ -787,7 +859,18 @@ def _chunk_gated_delta_rule_state_kernel_base(
         if K > 192:
             if SELECT_STATES:
                 b_k = _selected_prefix_weighted_k(
-                    raw_k, gk, b_gk_last4, bos, i_h, T, H, HV, K, BT, 192
+                    raw_k,
+                    gk,
+                    b_gk_last4,
+                    bos,
+                    i_h,
+                    T,
+                    H,
+                    HV,
+                    K,
+                    BT,
+                    192,
+                    TRANSPOSE_STATE,
                 )
             else:
                 p_k_i0 = tl.arange(0, 64).to(tl.int64) + (192)
@@ -1142,6 +1225,7 @@ def chunk_gated_delta_rule_fwd_h(
                 S=state_positions.shape[1],
                 BLOCK_S=triton.next_power_of_2(state_positions.shape[1]),
                 IS_VARLEN=cu_seqlens is not None,
+                ALIGN_INTERIOR=save_new_value and not transpose_state_layout,
                 num_warps=1,
             )
     capture_launch = None
@@ -1192,6 +1276,15 @@ def chunk_gated_delta_rule_fwd_h(
                 "num_stages": 3,
             }
         replay_launch = _CAPTURE_LAUNCH_CONFIGS[replay_key]
+        if transpose_state_layout:
+            # The ordinary transposed path keeps its autotuned output. Its
+            # selected-state specialization needs two warps to retain exact
+            # FP32 parity with independently replayed prefixes.
+            capture_launch = replay_launch = {
+                "BV": 32,
+                "num_warps": 2,
+                "num_stages": 3,
+            }
 
     state_kernel = (
         _chunk_gated_delta_rule_capture_kernel
@@ -1279,4 +1372,28 @@ def chunk_gated_delta_rule_fwd_h(
             num_warps=launch_config["num_warps"],
             num_stages=launch_config["num_stages"],
         )
+        if transpose_state_layout:
+            # Capture uses the exact-prefix launch above. The public outputs
+            # still follow the ordinary autotuned path and its save setting.
+            chunk_gated_delta_rule_fwd_kernel_h_blockdim64[grid](
+                k=k,
+                v=u,
+                w=w,
+                v_new=v_new,
+                g=g,
+                gk=gk,
+                h=h,
+                h0=initial_state,
+                ht=final_state,
+                cu_seqlens=cu_seqlens,
+                chunk_offsets=chunk_offsets,
+                T=T,
+                H=H,
+                HV=HV,
+                K=K,
+                V=V,
+                BT=BT,
+                USE_EXP2=use_exp2,
+                TRANSPOSE_STATE=True,
+            )
     return h, v_new, final_state
