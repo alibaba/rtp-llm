@@ -6,6 +6,9 @@ import unittest
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
 from types import SimpleNamespace
+from unittest.mock import patch
+
+import torch
 
 from rtp_llm.config.py_config_modules import VitConfig
 from rtp_llm.multimodal.mm_batch_pipeline import PrefetchedMMBatch
@@ -13,6 +16,9 @@ from rtp_llm.multimodal.mm_scheduler import (
     MMScheduler,
     MMSchedulerExecutionError,
     MMSchedulerTimeoutError,
+)
+from rtp_llm.multimodal.multimodal_mixins.deepseek_v41.gpu_input_transfer import (
+    _pack_rgb_bytes,
 )
 from rtp_llm.multimodal.multimodal_mixins.deepseek_v41.packed_graph import (
     PackedVisionGraph,
@@ -89,11 +95,67 @@ class Backend(MultiModalEmbeddingInterface):
         return list(data_list)
 
 
+class RGBBytePackingTest(unittest.TestCase):
+    def test_mixed_shapes_and_nonzero_storage_offset_are_byte_exact(self):
+        first = torch.arange(120, dtype=torch.uint8).reshape(4, 10, 3)[1:]
+        second = torch.tensor([0, 127, 128, 254, 255, 1], dtype=torch.uint8).reshape(
+            1, 2, 3
+        )
+        images = [second, first, second]
+        expected = torch.cat([image.reshape(-1) for image in images])
+        # A subview catches writes outside the destination range.
+        storage = torch.full((expected.numel() + 6,), 77, dtype=torch.uint8)
+        _pack_rgb_bytes(images, storage[3:-3])
+        self.assertTrue(torch.equal(storage[3:-3], expected))
+        self.assertEqual(storage[:3].tolist(), [77] * 3)
+        self.assertEqual(storage[-3:].tolist(), [77] * 3)
+
+    def test_upload_thread_avoids_aten_copy_without_changing_thread_count(self):
+        images = [
+            torch.full((8, 7, 3), 255, dtype=torch.uint8),
+            torch.full((3, 2, 3), 128, dtype=torch.uint8),
+        ]
+        destination = torch.empty(sum(rgb.numel() for rgb in images), dtype=torch.uint8)
+        expected = torch.cat([rgb.view(-1) for rgb in images])
+        original_pointer = destination.data_ptr()
+        thread_count = torch.get_num_threads()
+        with patch.object(
+            torch.Tensor, "copy_", side_effect=AssertionError("per-image copy")
+        ):
+            with patch.object(
+                torch,
+                "set_num_threads",
+                side_effect=AssertionError("global thread change"),
+            ):
+                with ThreadPoolExecutor(1, thread_name_prefix="mm-upload") as executor:
+                    executor.submit(_pack_rgb_bytes, images, destination).result(5)
+        self.assertEqual(torch.get_num_threads(), thread_count)
+        self.assertEqual(destination.data_ptr(), original_pointer)
+        self.assertTrue(torch.equal(destination, expected))
+
+    def test_distinct_batches_do_not_alias_source_or_each_other(self):
+        image = torch.arange(18, dtype=torch.uint8).reshape(2, 3, 3)
+        first = torch.empty(18, dtype=torch.uint8)
+        second = torch.empty(18, dtype=torch.uint8)
+        _pack_rgb_bytes([image], first)
+        retained = first.clone()
+        image.fill_(255)
+        _pack_rgb_bytes([image], second)
+        self.assertTrue(torch.equal(first, retained))
+        self.assertEqual(second.tolist(), [255] * 18)
+
+    def test_empty_pack_preserves_destination(self):
+        destination = torch.full((3,), 19, dtype=torch.uint8)
+        _pack_rgb_bytes([], destination)
+        self.assertEqual(destination.tolist(), [19] * 3)
+
+
 class BatchPipelineTest(unittest.TestCase):
     def test_ready_queue_is_drained_even_with_expired_wait_window(self):
         scheduler = MMScheduler.__new__(MMScheduler)
         scheduler._stopped = threading.Event()
         scheduler._collect_wakeup = threading.Event()
+        scheduler._collector_idle = threading.Event()
         scheduler._waiting = queue.Queue()
         scheduler._pending = None
         scheduler._max_batch_size = 3

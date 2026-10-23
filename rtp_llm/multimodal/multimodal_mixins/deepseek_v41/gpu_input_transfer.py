@@ -7,11 +7,29 @@ batch owns its host/device storage; no shared mutable slot can cross requests.
 
 from dataclasses import dataclass
 
+import numpy as np
 import torch
 
 from rtp_llm.models_py.modules.dsv41.vision_preprocess_tables import ResizeTables
 from rtp_llm.multimodal.multimodal_mixins.multimodal_common import PreparedMMInputs
 from rtp_llm.utils.cuda_graph_gate import cuda_graph_gate
+
+
+def _pack_rgb_bytes(images, host):
+    """Copy validated contiguous CPU uint8 images without ATen parallel work.
+
+    NumPy views share the tensor storage; copyto performs only a byte copy and
+    does not enlist the PyTorch intra-op pool for every image. In particular,
+    the upload thread must not change process-wide torch/OMP thread settings.
+    The caller owns host until its asynchronous H2D has completed.
+    """
+    destination = host.numpy()
+    offset = 0
+    for rgb in images:
+        source = rgb.numpy().reshape(-1)
+        count = source.size
+        np.copyto(destination[offset : offset + count], source, casting="no")
+        offset += count
 
 
 @dataclass(frozen=True)
@@ -85,11 +103,7 @@ class RGBBatchUploader:
 
         with torch.profiler.record_function("v41_pin_rgb_batch"):
             host = torch.empty(total, dtype=torch.uint8, pin_memory=True)
-            offset = 0
-            for rgb in images:
-                count = rgb.numel()
-                host[offset : offset + count].copy_(rgb.view(-1))
-                offset += count
+            _pack_rgb_bytes(images, host)
 
         with torch.cuda.device(self.device), cuda_graph_gate.operation():
             if self._stream is None:
