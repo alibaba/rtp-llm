@@ -1,6 +1,7 @@
 #include <algorithm>
 #include <array>
 #include <chrono>
+#include <cstdlib>
 #include <exception>
 #include <functional>
 #include <limits>
@@ -778,12 +779,12 @@ public:
         test_kv_cache_config.kernel_seq_size_per_block = 2;
 
         auto configure_cache_model = [](ModelConfig& cache_model_config) {
-            cache_model_config.data_type                    = rtp_llm::TYPE_INT8;
-            cache_model_config.attn_config.kv_head_num      = 128;
-            cache_model_config.attn_config.size_per_head    = 256;
+            cache_model_config.data_type                           = rtp_llm::TYPE_INT8;
+            cache_model_config.attn_config.kv_head_num             = 128;
+            cache_model_config.attn_config.size_per_head           = 256;
             cache_model_config.attn_config.tokens_per_block        = 2;
             cache_model_config.attn_config.kernel_tokens_per_block = 2;
-            cache_model_config.attn_config.kv_cache_dtype   = KvCacheDataType::BASE;
+            cache_model_config.attn_config.kv_cache_dtype          = KvCacheDataType::BASE;
         };
         configure_cache_model(score_cache_model_config);
         configure_cache_model(propose_cache_model_config);
@@ -1030,6 +1031,8 @@ public:
 
     void runSingleBatchPrefillScenario(bool simulate_cp_mutation, bool with_cp_hidden_buffers = true);
     void runSingleBatchDecodeScenario(bool with_prefill_only);
+    void runMultiBatchPrefillScenario(int fake_index = -1);
+    void runMultiBatchDecodeScenario(int fake_index = -1);
 
     void setupAlignmentModel(FakeModel*          model,
                              vector<string>&     forward_trace,
@@ -1592,6 +1595,51 @@ TEST_F(MtpExecutorTest, testDpFakeDecodePreservesDecodeWorkContract) {
     EXPECT_EQ(fake_decode_stream->getSPOutputBuffer()->propose_step, propose_step);
 }
 
+TEST_F(MtpExecutorTest, testFakeSpeculativeSamplerOutputCoversPaddedDecodeBatch) {
+    // Aligned DP decode can pad one real stream with N fake streams. The fake
+    // accept tensors must carry one row per stream; otherwise the post-draft
+    // rebuild rejects them on its accept_len batch check.
+    unsetenv("RTP_LLM_STREAM_ASYNC");
+    unsetenv("RTP_LLM_MTP_ASYNC_DEVICE_STATE");
+
+    constexpr int batch_size   = 2;
+    constexpr int propose_step = 2;
+
+    speculative::SpeculativeSamplerOutput spec_decode_output;
+    MtpExecutor::fillFakeSpeculativeSamplerOutput(spec_decode_output, batch_size, propose_step);
+
+    ASSERT_TRUE(spec_decode_output.accept_len.is_cuda());
+    ASSERT_TRUE(spec_decode_output.accept_tokens.is_cuda());
+    ASSERT_EQ(spec_decode_output.accept_len.dim(), 1);
+    ASSERT_EQ(spec_decode_output.accept_len.size(0), batch_size);
+    ASSERT_EQ(spec_decode_output.accept_tokens.dim(), 2);
+    ASSERT_EQ(spec_decode_output.accept_tokens.size(0), batch_size);
+    ASSERT_EQ(spec_decode_output.accept_tokens.size(1), propose_step + 1);
+    EXPECT_EQ((vector<int>{propose_step + 1, propose_step + 1}), toVec<int>(spec_decode_output.accept_len));
+
+    ModelConfig                 model_config;
+    PDSepConfig                 pd_sep_config;
+    ProfilingDebugLoggingConfig profiling_debug_logging_config;
+    CacheConfig                 cache_config;
+    SpeculativeExecutionConfig  sp_config;
+    model_config.num_layers     = 1;
+    sp_config.gen_num_per_cycle = propose_step;
+    MtpBatchStreamProcessor processor(
+        model_config, pd_sep_config, profiling_debug_logging_config, cache_config, sp_config, false);
+
+    GptModelInputs  model_input;
+    GptModelOutputs model_output;
+    model_output.all_hidden_states = torch::zeros({batch_size * (propose_step + 1), 2}, torch::kFloat32);
+    torch::Tensor hidden_states_d_t;
+    TensorHolder  holder;
+
+    EXPECT_NO_THROW(processor.updateDecodePostDraftModelInput(
+        model_input, model_output, spec_decode_output, batch_size, hidden_states_d_t, holder));
+    EXPECT_EQ((vector<int>{propose_step + 1, propose_step + 1}), toVec<int>(model_input.input_lengths));
+    EXPECT_EQ((vector<int>{propose_step, 2 * propose_step + 1}), toVec<int>(model_input.lm_output_indexes));
+    EXPECT_EQ(batch_size * (propose_step + 1), hidden_states_d_t.size(0));
+}
+
 TEST_F(MtpExecutorTest, testDecodeRoleRejectsPrefillOnlyWithoutModelWorkWhenFfnDisabled) {
     MtpExecutorTestConfig test_config;
     test_config.role_type = RoleType::DECODE;
@@ -1931,6 +1979,17 @@ TEST_F(MtpExecutorTest, testDSparkRemoteTpRankFailurePreventsPrefillDispatch) {
 }
 
 TEST_F(MtpExecutorTest, testMultiBatchPrefill) {
+    runMultiBatchPrefillScenario();
+}
+
+TEST_F(MtpExecutorTest, MixedFakePrefillStillSamplesAndCommitsRealRows) {
+    for (int fake_index : {0, 1}) {
+        SCOPED_TRACE(fake_index);
+        runMultiBatchPrefillScenario(fake_index);
+    }
+}
+
+void MtpExecutorTest::runMultiBatchPrefillScenario(int fake_index) {
     MtpExecutorTestConfig test_config;
     test_config.gen_num_per_cycle = 4;
     auto components               = createMtpExecutorComponents(test_config);
@@ -1942,6 +2001,10 @@ TEST_F(MtpExecutorTest, testMultiBatchPrefill) {
         components.model_config, components.runtime_config, components.resource_context, {0, 1, 2, 3});
     GenerateStreamPtr stream2 =
         createContextStream(components.model_config, components.runtime_config, components.resource_context, {2, 3});
+    if (fake_index >= 0) {
+        (fake_index == 0 ? stream1 : stream2)->setIsFakeStream(true);
+    }
+    EXPECT_FALSE(StreamGroups({stream1, stream2}).isFakeStream());
 
     // set fake model outputs
     auto target_input  = GptModelInputs{};
@@ -2756,6 +2819,17 @@ TEST_F(MtpExecutorTest, testDecodeOneStepSpecLogitsCapReplacesInvalidDraftWithTa
 }
 
 TEST_F(MtpExecutorTest, testMultiBatchDecode) {
+    runMultiBatchDecodeScenario();
+}
+
+TEST_F(MtpExecutorTest, MixedFakeDecodeStillVerifiesAndCommitsRealRows) {
+    for (int fake_index : {0, 1}) {
+        SCOPED_TRACE(fake_index);
+        runMultiBatchDecodeScenario(fake_index);
+    }
+}
+
+void MtpExecutorTest::runMultiBatchDecodeScenario(int fake_index) {
     // test multi batch decode not accept & accept all
     // input s1:[0, 1, 2, 3] + [2] s2:[3, 2, 1] + [3]
     // darft s1:[2]+[1,2,3] s2:[3]+[0,2,2]
@@ -2789,6 +2863,10 @@ TEST_F(MtpExecutorTest, testMultiBatchDecode) {
 
     GenerateStreamPtr stream2 = createDecodeStream(
         components.model_config, components.runtime_config, components.resource_context, {3, 2}, spec_update_info2);
+    if (fake_index >= 0) {
+        (fake_index == 0 ? stream1 : stream2)->setIsFakeStream(true);
+    }
+    EXPECT_FALSE(StreamGroups({stream1, stream2}).isFakeStream());
 
     // set fake model outputs
     // set 3 step draft model outputs

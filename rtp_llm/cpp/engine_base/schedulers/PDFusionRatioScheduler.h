@@ -62,9 +62,15 @@ private:
                                     int64_t                  lifecycle_capacity);
 
 private:
+    void deferReturnedPrefill() override {
+        deferred_unclassified_prefill_ = true;
+    }
+
+private:
     // new_streams_ keeps the admitted prefill cohort across chunks. The flag marks that the cohort
     // returned by the previous schedule round must be classified before it can be scheduled again.
     bool                         has_unclassified_prefill_batch_ = false;
+    bool                         deferred_unclassified_prefill_  = false;
     std::list<GenerateStreamPtr> pending_decode_streams_;
     // Per-prefill-round scratch state, guarded by the scheduler lock.
     std::unique_ptr<AdmissionPeakState> admission_peak_state_;

@@ -524,6 +524,152 @@ TEST_F(NormalEngineTest, testDecodeRoleRejectsPrefillOnlyBeforeScheduling) {
     EXPECT_EQ(positive_stream->curBlocksNum(), 0);
 }
 
+TEST_F(NormalEngineTest, testSm120DecodeRejectsFanOutAboveCapturedGraph) {
+    CustomConfig config;
+    auto         engine = createMockEngine(config);
+
+    engine->sm120_decode_graph_replay_required_ = true;
+    engine->captured_decode_graph_bs_           = 1;
+    // Keep stream_bound low so the conservative fan-out cap equals the row cap.
+    engine->runtime_config.max_generate_batch_size = 1;
+
+    auto query                                   = make_shared<GenerateInput>();
+    query->input_ids                             = torch::tensor({1, 2, 3, 4}, torch::kInt32);
+    query->generate_config                       = make_shared<GenerateConfig>();
+    query->generate_config->max_new_tokens       = 1;
+    query->generate_config->num_return_sequences = 2;
+
+    auto stream = engine->enqueue(query);
+    ASSERT_NE(stream, nullptr);
+    EXPECT_TRUE(stream->hasError());
+    EXPECT_EQ(stream->statusInfo().code(), ErrorCode::INVALID_PARAMS);
+    EXPECT_NE(stream->statusInfo().ToString().find("sm120_decode"), std::string::npos);
+    EXPECT_NE(stream->statusInfo().ToString().find("num_return_sequences"), std::string::npos);
+    EXPECT_EQ(engine->getScheduler().onflightStreams(), 0);
+
+    // The same fan-out fits once the captured graphs cover its rows.
+    engine->captured_decode_graph_bs_ = 2;
+
+    auto fitting_query                                   = make_shared<GenerateInput>();
+    fitting_query->input_ids                             = torch::tensor({1, 2, 3, 4}, torch::kInt32);
+    fitting_query->generate_config                       = make_shared<GenerateConfig>();
+    fitting_query->generate_config->max_new_tokens       = 1;
+    fitting_query->generate_config->num_return_sequences = 2;
+
+    auto fitting_stream = engine->makeStream(fitting_query);
+    ASSERT_NE(fitting_stream, nullptr);
+    EXPECT_FALSE(fitting_stream->hasError());
+}
+
+TEST_F(NormalEngineTest, testSm120DecodePrefillRejectsLocalDecodeFallback) {
+    CustomConfig config;
+    config.role_type = RoleType::PREFILL;
+    auto engine      = createMockEngine(config);
+
+    engine->sm120_decode_prefill_rejects_local_decode_ = true;
+
+    auto local_fallback                             = make_shared<GenerateInput>();
+    local_fallback->input_ids                       = torch::tensor({1, 2, 3, 4}, torch::kInt32);
+    local_fallback->generate_config                 = make_shared<GenerateConfig>();
+    local_fallback->generate_config->max_new_tokens = 5;
+    auto local_stream                               = engine->enqueue(local_fallback);
+    ASSERT_NE(local_stream, nullptr);
+    EXPECT_TRUE(local_stream->hasError());
+    EXPECT_EQ(local_stream->statusInfo().code(), ErrorCode::INVALID_PARAMS);
+    EXPECT_NE(local_stream->statusInfo().ToString().find("local decode"), std::string::npos);
+    EXPECT_FALSE(engine->validateStreamForScheduling(local_stream));
+    EXPECT_EQ(engine->getScheduler().onflightStreams(), 0);
+
+    auto pd_query                             = make_shared<GenerateInput>();
+    pd_query->input_ids                       = torch::tensor({1, 2, 3, 4}, torch::kInt32);
+    pd_query->generate_config                 = make_shared<GenerateConfig>();
+    pd_query->generate_config->max_new_tokens = 5;
+    pd_query->generate_config->pd_separation  = true;
+    auto pd_stream                            = engine->makeStream(pd_query);
+    ASSERT_NE(pd_stream, nullptr);
+    EXPECT_FALSE(pd_stream->hasError());
+    EXPECT_TRUE(engine->validateStreamForScheduling(pd_stream));
+
+    auto prefill_only                             = make_shared<GenerateInput>();
+    prefill_only->input_ids                       = torch::tensor({1, 2, 3, 4}, torch::kInt32);
+    prefill_only->generate_config                 = make_shared<GenerateConfig>();
+    prefill_only->generate_config->max_new_tokens = 0;
+    auto prefill_only_stream                      = engine->makeStream(prefill_only);
+    ASSERT_NE(prefill_only_stream, nullptr);
+    EXPECT_FALSE(prefill_only_stream->hasError());
+    EXPECT_TRUE(engine->validateStreamForScheduling(prefill_only_stream));
+
+    auto first_token                             = make_shared<GenerateInput>();
+    first_token->input_ids                       = torch::tensor({1, 2, 3, 4}, torch::kInt32);
+    first_token->generate_config                 = make_shared<GenerateConfig>();
+    first_token->generate_config->max_new_tokens = 1;
+    auto first_token_stream                      = engine->makeStream(first_token);
+    ASSERT_NE(first_token_stream, nullptr);
+    EXPECT_FALSE(first_token_stream->hasError());
+    EXPECT_TRUE(engine->validateStreamForScheduling(first_token_stream));
+
+    auto fake                             = make_shared<GenerateInput>();
+    fake->input_ids                       = torch::tensor({1, 2, 3, 4}, torch::kInt32);
+    fake->generate_config                 = make_shared<GenerateConfig>();
+    fake->generate_config->max_new_tokens = 5;
+    fake->fake_query                      = true;
+    auto fake_stream                      = engine->makeStream(fake);
+    ASSERT_NE(fake_stream, nullptr);
+    EXPECT_FALSE(fake_stream->hasError());
+    EXPECT_TRUE(engine->validateStreamForScheduling(fake_stream));
+}
+
+TEST_F(NormalEngineTest, testSm120DecodeAdmissionPrefersFixedBsAndFanOutCap) {
+    CustomConfig config;
+    auto         engine = createMockEngine(config);
+
+    engine->sm120_decode_graph_replay_required_ = true;
+    engine->captured_decode_graph_bs_           = 32;
+    engine->decode_fixed_bs_                    = 8;
+    // stream_bound=1 so max fan-out equals the FIXED_BS row cap (8); n=16 is
+    // rejected only because row_cap prefers FIXED_BS over captured=32.
+    engine->runtime_config.max_generate_batch_size = 1;
+
+    auto over_fixed                                   = make_shared<GenerateInput>();
+    over_fixed->input_ids                             = torch::tensor({1, 2, 3, 4}, torch::kInt32);
+    over_fixed->generate_config                       = make_shared<GenerateConfig>();
+    over_fixed->generate_config->max_new_tokens       = 1;
+    over_fixed->generate_config->num_return_sequences = 16;
+    auto over_fixed_stream                            = engine->enqueue(over_fixed);
+    ASSERT_NE(over_fixed_stream, nullptr);
+    EXPECT_TRUE(over_fixed_stream->hasError());
+    EXPECT_EQ(over_fixed_stream->statusInfo().code(), ErrorCode::INVALID_PARAMS);
+    EXPECT_NE(over_fixed_stream->statusInfo().ToString().find("admission row cap 8"), std::string::npos);
+    EXPECT_NE(over_fixed_stream->statusInfo().ToString().find("RTP_LLM_DECODE_FIXED_BS"), std::string::npos);
+    EXPECT_EQ(engine->getScheduler().onflightStreams(), 0);
+
+    // Restore a full stream_bound so the multi-stream fan-out case exercises
+    // row_cap / stream_bound (=1), not the row cap alone.
+    engine->runtime_config.max_generate_batch_size = 8;
+    // row_cap=8, stream_bound=8 => max fan-out 1; n=2 is rejected even though 2 <= 8.
+    auto over_fanout                                   = make_shared<GenerateInput>();
+    over_fanout->input_ids                             = torch::tensor({1, 2, 3, 4}, torch::kInt32);
+    over_fanout->generate_config                       = make_shared<GenerateConfig>();
+    over_fanout->generate_config->max_new_tokens       = 1;
+    over_fanout->generate_config->num_return_sequences = 2;
+    auto over_fanout_stream                            = engine->enqueue(over_fanout);
+    ASSERT_NE(over_fanout_stream, nullptr);
+    EXPECT_TRUE(over_fanout_stream->hasError());
+    EXPECT_EQ(over_fanout_stream->statusInfo().code(), ErrorCode::INVALID_PARAMS);
+    EXPECT_NE(over_fanout_stream->statusInfo().ToString().find("max fan-out"), std::string::npos);
+    EXPECT_EQ(engine->getScheduler().onflightStreams(), 0);
+
+    // n=1 always fits the conservative cap.
+    auto ok                                   = make_shared<GenerateInput>();
+    ok->input_ids                             = torch::tensor({1, 2, 3, 4}, torch::kInt32);
+    ok->generate_config                       = make_shared<GenerateConfig>();
+    ok->generate_config->max_new_tokens       = 1;
+    ok->generate_config->num_return_sequences = 1;
+    auto ok_stream                            = engine->makeStream(ok);
+    ASSERT_NE(ok_stream, nullptr);
+    EXPECT_FALSE(ok_stream->hasError());
+}
+
 TEST_F(NormalEngineTest, testDirectEngineEntriesConvertPrefillValidationErrorsToStreamErrors) {
     CustomConfig config;
     auto         engine = createMockEngine(config);

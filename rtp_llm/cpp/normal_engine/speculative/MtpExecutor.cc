@@ -580,6 +580,17 @@ bool MtpExecutor::shouldSyncDecodeInputOnRank0(bool alignment_only) {
     return !alignment_only;
 }
 
+void MtpExecutor::fillFakeSpeculativeSamplerOutput(speculative::SpeculativeSamplerOutput& output,
+                                                   int64_t                                batch_size,
+                                                   int                                    propose_step) {
+    // Aligned DP padding can put any number of fake streams in one decode
+    // step; cover every row so the post-draft rebuild's accept_len batch
+    // check sees one entry per stream.
+    const auto int32_gpu = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA);
+    output.accept_len    = torch::full({batch_size}, (int64_t)(propose_step + 1), int32_gpu);
+    output.accept_tokens = torch::zeros({batch_size, (int64_t)(propose_step + 1)}, int32_gpu);
+}
+
 static std::shared_ptr<NormalGenerateStream> makeFakeStream(int                    max_new_tokens,
                                                             size_t                 reserved_blocks,
                                                             const ModelConfig&     model_config,
@@ -1737,10 +1748,7 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
         RTP_LLM_PROFILE_SCOPE("executor.mtp.decode_step(rejection_sampling)");
 
         if (model_input.is_fake_stream) {
-            speculative_sampler_output.accept_len = torch::full(
-                {1}, (int64_t)(propose_step_ + 1), torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA));
-            speculative_sampler_output.accept_tokens = torch::zeros(
-                {1, (int64_t)(propose_step_ + 1)}, torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA));
+            fillFakeSpeculativeSamplerOutput(speculative_sampler_output, (int64_t)batch_size, propose_step_);
         } else {
             // gatherSpecSamplerInput reads host stream state updated by the previous
             // bookkeeping worker. DROP_BROAD_SYNC therefore needs this narrow sync

@@ -94,6 +94,9 @@ public:
                                                              bool linear_attention,
                                                              bool cache_snapshot_ready = false);
     static int selectMtpPreviousSeqLenUpperBound(bool pending, int previous_next_bound, int host_seq_len);
+    static void              fillFakeSpeculativeSamplerOutput(speculative::SpeculativeSamplerOutput& output,
+                                                              int64_t                                batch_size,
+                                                              int                                    propose_step);
 
 protected:
     static bool dsparkPrefillCPRoleIsValid(const PrefillCPConfig& prefill_cp_config, RoleType role_type);

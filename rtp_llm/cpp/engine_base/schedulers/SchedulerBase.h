@@ -20,6 +20,10 @@ public:
     virtual std::pair<std::vector<bool>, std::vector<GenerateStreamPtr>>
     enqueueGroup(const std::vector<GenerateStreamPtr>& streams)     = 0;
     virtual absl::StatusOr<std::list<GenerateStreamPtr>> schedule() = 0;
+    // If an aligned engine defers its returned batch before executing it, some
+    // schedulers must retain the cohort as an unfinished prefill. Other
+    // scheduler types keep the ordinary next-step classification behavior.
+    virtual void deferReturnedPrefill() {}
 
     // Conservative-KV scheduling variant for async execution. The async path
     // schedules step N+1 before step N's specUpdate has run, so seq_len is not

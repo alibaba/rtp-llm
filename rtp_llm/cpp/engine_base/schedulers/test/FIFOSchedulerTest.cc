@@ -11,6 +11,7 @@
 #include "gtest/gtest.h"
 #include "autil/TimeUtility.h"
 
+#define private public
 #define protected public
 #include "rtp_llm/cpp/engine_base/schedulers/FIFOScheduler.h"
 #include "rtp_llm/cpp/engine_base/schedulers/BatchDecodeScheduler.h"
@@ -1203,6 +1204,31 @@ TEST_F(FIFOSchedulerTest, testBatchDecodeSchedulerRestoresBatchGateAfterMixedMod
     EXPECT_EQ(full_batch_it->get(), batch_peer.get());
 }
 
+TEST_F(FIFOSchedulerTest, testBatchDecodeSchedulerKeepsBatchSizeBelowGraphLimit) {
+    auto [cache_manager, resource_context, model_config, runtime_config] =
+        makeBatchDecodeResources(test::makeSimpleMhaCacheConfig(1, 32, 1, rtp_llm::DataType::TYPE_FP16, 1, 4));
+    ASSERT_TRUE(cache_manager->init());
+    BatchDecodeScheduler scheduler(runtime_config, cache_manager, nullptr);
+    ASSERT_EQ(scheduler.batch_size_, 2);
+    scheduler.setMaxBatchSize(2);
+
+    // A runtime raise above the captured sm120_decode graph geometry is refused.
+    scheduler.updateSchedulerInfo(R"({"batch_size": 4, "mode": "decode"})");
+    EXPECT_EQ(scheduler.batch_size_, 2);
+
+    // Lowering, and updates within the limit, still apply.
+    scheduler.updateSchedulerInfo(R"({"batch_size": 1, "mode": "decode"})");
+    EXPECT_EQ(scheduler.batch_size_, 1);
+    scheduler.updateSchedulerInfo(R"({"batch_size": 2, "mode": "prefill"})");
+    EXPECT_EQ(scheduler.batch_size_, 2);
+    EXPECT_EQ(scheduler.scheduler_type_, BatchDecodeScheduler::SchedulerType::kBatchPrefill);
+
+    // Without a limit, non-sm120 engines keep accepting runtime raises.
+    BatchDecodeScheduler unlimited_scheduler(runtime_config, cache_manager, nullptr);
+    unlimited_scheduler.updateSchedulerInfo(R"({"batch_size": 4, "mode": "decode"})");
+    EXPECT_EQ(unlimited_scheduler.batch_size_, 4);
+}
+
 TEST_F(FIFOSchedulerTest, testBatchDecodeSchedulerKeepsHomogeneousPositiveTailBehindBatchGate) {
     auto [cache_manager, resource_context, model_config, runtime_config] =
         makeBatchDecodeResources(makeMhaCacheConfig(1, 32, 1, 4, 1, rtp_llm::DataType::TYPE_FP16));
@@ -2062,6 +2088,47 @@ TEST_F(FIFOSchedulerTest, testDecodeHeavyCadence) {
     ASSERT_TRUE(r5.ok());
     ASSERT_EQ(r5.value().size(), 1);  // pure-context (s2)
     ASSERT_EQ(scheduler.waitingStreamsSize(), 0);
+}
+
+TEST_F(FIFOSchedulerTest, testAlignedDpDeferredPrefillStaysUnclassified) {
+    CacheConfig cache_config  = makeMhaCacheConfig(1, 16, 1, 4, 8, rtp_llm::DataType::TYPE_FP16);
+    auto        cache_manager = std::make_shared<KVCacheManager>(cache_config);
+    ASSERT_TRUE(cache_manager->init());
+    ResourceContext resource_context;
+    resource_context.cache_manager = cache_manager;
+    ModelConfig model_config;
+    model_config.max_seq_len = 8192;
+    RuntimeConfig runtime_config;
+    runtime_config.max_generate_batch_size                     = 100;
+    runtime_config.fifo_scheduler_config.max_batch_tokens_size = 8192;
+    runtime_config.fifo_scheduler_config.decode_prefill_ratio  = "0";
+    PDSepConfig            pd_sep_config                       = makePDFusionPDSepConfig();
+    ParallelismConfig      parallelism_config;
+    ModelSpecificConfig    model_specific_config;
+    PDFusionRatioScheduler scheduler(
+        runtime_config, model_config, pd_sep_config, parallelism_config, model_specific_config, cache_manager);
+    auto stream = makeStream({1, 2, 3}, model_config, runtime_config, resource_context);
+    ASSERT_TRUE(scheduler.enqueue(stream).ok());
+    auto selected = scheduler.schedule();
+    ASSERT_TRUE(selected.ok());
+    ASSERT_EQ(selected.value(), std::list<GenerateStreamPtr>{stream});
+    ASSERT_TRUE(scheduler.has_unclassified_prefill_batch_);
+
+    // Simulate an aligned global decode vote stripping this real prefill from
+    // the executor list before NormalExecutor could calculate prompt cache.
+    scheduler.deferReturnedPrefill();
+    selected.value().clear();
+    EXPECT_FALSE(scheduler.classifyActivePrefillBatch());
+    EXPECT_EQ(scheduler.new_streams_, std::list<GenerateStreamPtr>{stream});
+    EXPECT_TRUE(stream->isContextStream());
+    EXPECT_TRUE(scheduler.pending_decode_streams_.empty());
+    EXPECT_FALSE(scheduler.has_unclassified_prefill_batch_);
+
+    // The one-shot deferral is spent; the same actual stream classifier has
+    // main's behavior on the next (completed non-chunk) prefill snapshot.
+    EXPECT_TRUE(scheduler.classifyActivePrefillBatch());
+    EXPECT_FALSE(stream->isContextStream());
+    EXPECT_EQ(scheduler.pending_decode_streams_, std::list<GenerateStreamPtr>{stream});
 }
 
 TEST_F(FIFOSchedulerTest, testDecodeRoundReapsErroredWaitingStream) {

@@ -2,6 +2,8 @@
 #include "rtp_llm/cpp/engine_base/EngineBase.h"
 #include "rtp_llm/cpp/normal_engine/NormalExecutor.h"
 #include "rtp_llm/cpp/normal_engine/NormalEngine.h"
+#include "rtp_llm/cpp/normal_engine/Dsv4DpPrefillPolicy.h"
+#include "rtp_llm/models_py/bindings/core/ExecOps.h"
 #include "rtp_llm/cpp/normal_engine/NormalGenerateStream.h"
 #include "rtp_llm/cpp/utils/StatusUtil.h"
 #include "rtp_llm/cpp/engine_base/schedulers/FIFOScheduler.h"
@@ -203,6 +205,119 @@ NormalEngine::NormalEngine(const EngineInitParams&                       params,
             "remove the generation-prefill configuration when using speculative execution on PDFUSION (type=%s)",
             SpeculativeExecutionConfig::to_string(sp_config.type).c_str());
     }
+    const auto resolved_moe_strategy = resolveModelMoeStrategy(
+        model_config_.model_type, params.moe_config.moe_strategy, std::getenv("DSV4_MOE_STRATEGY"));
+    RTP_LLM_CHECK_WITH_INFO(!(resolved_moe_strategy == "sm120_decode" && parallelism_config.dp_size > 1
+                              && pd_sep_config.role_type == RoleType::PDFUSION && sp_config.type != SP_TYPE_NONE),
+                            "sm120_decode with speculative DP requires separate PREFILL and DECODE roles; "
+                            "speculative PDFUSION does not synchronize rank-local prefill/decode batches");
+    dp_prefill_phase_sync_ = dsv4DpPrefillPhaseSyncEnabled(model_config_.model_type,
+                                                           resolved_moe_strategy.c_str(),
+                                                           pd_sep_config.role_type,
+                                                           parallelism_config.pp_size,
+                                                           parallelism_config.tp_size,
+                                                           parallelism_config.dp_size,
+                                                           parallelism_config.ep_size,
+                                                           parallelism_config.world_size,
+                                                           sp_config.type != SP_TYPE_NONE,
+                                                           parallelism_config.prefill_cp_config.is_enabled(),
+                                                           ffn_disaggregate_config.enable_ffn_disaggregate);
+    dp_decode_batch_sync_  = params.hw_kernel_config.enable_cuda_graph && resolved_moe_strategy == "sm120_decode"
+                            && !ffn_disaggregate_config.enable_ffn_disaggregate
+                            && !parallelism_config.prefill_cp_config.is_enabled() && parallelism_config.pp_size == 1
+                            && parallelism_config.tp_size == 1 && parallelism_config.dp_size > 1
+                            && parallelism_config.ep_size == parallelism_config.dp_size
+                            && parallelism_config.world_size == parallelism_config.dp_size
+                            && (pd_sep_config.role_type == RoleType::DECODE || dp_prefill_phase_sync_);
+    RTP_LLM_CHECK_WITH_INFO(!sm120DecodeDpGraphMisaligned(resolved_moe_strategy.c_str(),
+                                                          pd_sep_config.role_type,
+                                                          parallelism_config.dp_size,
+                                                          params.hw_kernel_config.enable_cuda_graph,
+                                                          dp_decode_batch_sync_),
+                            "sm120_decode with CUDA graph and DP>1 requires synchronized decode batches: use the "
+                            "TP=1, DP=EP=world_size>1 profile with a separate DECODE role (or aligned PDFUSION), "
+                            "no local context parallelism and no FFN disaggregation; other DP topologies capture "
+                            "rank-local graphs and mismatch the WORLD all-gather at runtime");
+    RTP_LLM_CHECK_WITH_INFO(!sm120FusedMoeDpDecodeMisaligned(
+                                resolved_moe_strategy.c_str(), pd_sep_config.role_type, parallelism_config.dp_size),
+                            "sm120_fused_moe with DP>1 on decode-capable roles issues mismatched WORLD "
+                            "collectives across prefill/decode phases; use sm120_decode (aligned) or "
+                            "TP-only / PREFILL-only");
+    // PREFILL + sm120_decode + CUDA graph + DP>1 has no decode-batch sync.
+    // Admission rejects local-decode requests; PD-separated, prefill-only,
+    // max_new_tokens<=1, and fake streams stay allowed.
+    sm120_decode_prefill_rejects_local_decode_ =
+        sm120DecodePrefillLocalDecodeMisaligned(resolved_moe_strategy.c_str(),
+                                                pd_sep_config.role_type,
+                                                parallelism_config.dp_size,
+                                                params.hw_kernel_config.enable_cuda_graph);
+    // RTP_LLM_DECODE_FIXED_BS is part of the SM120 aligned DP decode profile
+    // only. Other engines ignore it so a stale setting cannot abort startup or
+    // add fake rows to real decode batches on unrelated architectures.
+    if (const char* value = std::getenv("RTP_LLM_DECODE_FIXED_BS"); value && *value) {
+        if (!dp_decode_batch_sync_) {
+            RTP_LLM_LOG_WARNING("RTP_LLM_DECODE_FIXED_BS=%s is ignored: it only applies to the SM120 aligned DP "
+                                "decode profile (sm120_decode MoE, CUDA graph, TP=1, DP=EP=world_size>1)",
+                                value);
+        } else {
+            size_t parsed = 0;
+            try {
+                decode_fixed_bs_ = std::stoi(value, &parsed);
+            } catch (const std::exception&) {
+                throw std::invalid_argument("RTP_LLM_DECODE_FIXED_BS must be a nonnegative integer");
+            }
+            if (value[parsed] != '\0' || decode_fixed_bs_ < 0) {
+                throw std::invalid_argument("RTP_LLM_DECODE_FIXED_BS must be a nonnegative integer");
+            }
+            if (decode_fixed_bs_ > 0 && runtime_config.max_generate_batch_size > decode_fixed_bs_) {
+                throw std::invalid_argument("max_generate_batch_size must not exceed RTP_LLM_DECODE_FIXED_BS; "
+                                            "increase the fixed batch or reduce the scheduler limit");
+            }
+        }
+    }
+    // sm120_decode rejects rank-local eager decode fallback (PyWrappedModel
+    // fails the forward), so the captured decode graphs must cover every decode
+    // batch the engine itself forms: synchronized steps pad up to
+    // RTP_LLM_DECODE_FIXED_BS, the batch-decode scheduler gates rounds by
+    // batch_decode_scheduler_batch_size, and max_generate_batch_size bounds
+    // scheduled streams. Admission rejects per-request fan-out above
+    // sm120DecodeMaxFanOutForAdmission(row_cap, stream_bound), and speculative
+    // aligned streams above one non-beam sequence (see validateStreamForScheduling).
+    // PREFILL roles never decode, so their (unused) decode graphs are not
+    // required to cover it.
+    if (resolved_moe_strategy == "sm120_decode" && params.hw_kernel_config.enable_cuda_graph
+        && pd_sep_config.role_type != RoleType::PREFILL) {
+        const bool    explicit_capture_sizes = !params.hw_kernel_config.decode_capture_batch_sizes.empty();
+        const int64_t batch_decode_scheduler_batch_size =
+            runtime_config.use_batch_decode_scheduler ?
+                runtime_config.batch_decode_scheduler_config.batch_decode_scheduler_batch_size :
+                int64_t{0};
+        const int64_t required_decode_graph_bs =
+            sm120DecodeGraphBatchRequirement(batch_decode_scheduler_batch_size, decode_fixed_bs_);
+        const int64_t captured_decode_graph_bs = largestDecodeCaptureBatchSize(
+            params.hw_kernel_config.decode_capture_batch_sizes, params.concurrency_config.concurrency_limit);
+        RTP_LLM_CHECK_WITH_INFO(captured_decode_graph_bs >= required_decode_graph_bs,
+                                "sm120_decode requires a decode CUDA graph covering every decode batch the engine "
+                                "can form: largest captured batch size is %lld but the engine-controlled bound is "
+                                "%lld (batch_decode_scheduler_batch_size=%lld, RTP_LLM_DECODE_FIXED_BS=%d); extend "
+                                "decode_capture_batch_sizes or raise concurrency_limit, which sizes the default "
+                                "capture buckets",
+                                static_cast<long long>(captured_decode_graph_bs),
+                                static_cast<long long>(required_decode_graph_bs),
+                                static_cast<long long>(batch_decode_scheduler_batch_size),
+                                decode_fixed_bs_);
+        RTP_LLM_CHECK_WITH_INFO(
+            !sm120DecodeCapturedBelowMaxGenerate(runtime_config.max_generate_batch_size, captured_decode_graph_bs),
+            "sm120_decode largest captured decode batch size is %lld from %s, below max_generate_batch_size=%lld; "
+            "a decode batch above the largest captured bucket has no graph to replay; extend "
+            "decode_capture_batch_sizes or raise concurrency_limit, which sizes the default capture buckets",
+            static_cast<long long>(captured_decode_graph_bs),
+            explicit_capture_sizes ? "an explicit decode_capture_batch_sizes list" :
+                                     "the default buckets ending at concurrency_limit",
+            static_cast<long long>(runtime_config.max_generate_batch_size));
+        sm120_decode_graph_replay_required_ = true;
+        captured_decode_graph_bs_           = captured_decode_graph_bs;
+    }
     if (!model_config_.output_vocab_ids.empty()) {
         RTP_LLM_CHECK_WITH_INFO(sp_config.type == SP_TYPE_NONE && !propose_params_,
                                 "output vocabulary pruning does not support speculative, MTP, or EAGLE engines");
@@ -320,8 +435,16 @@ void NormalEngine::initScheduler() {
                             runtime_config.fifo_scheduler_config.pdfusion_scheduler_mode.c_str());
     }
     if (runtime_config.use_batch_decode_scheduler) {
-        scheduler_.reset(new BatchDecodeScheduler(
+        std::unique_ptr<BatchDecodeScheduler> batch_decode_scheduler(new BatchDecodeScheduler(
             runtime_config, resource_context_.cache_manager, metrics_reporter_, parallelism_config.dp_rank));
+        if (sm120_decode_graph_replay_required_) {
+            // Runtime scheduler_info updates may raise the batch size; cap them
+            // at the decode geometry the captured graphs cover so a raise cannot
+            // form a batch with no graph to replay.
+            batch_decode_scheduler->setMaxBatchSize(
+                static_cast<uint32_t>(decode_fixed_bs_ > 0 ? decode_fixed_bs_ : captured_decode_graph_bs_));
+        }
+        scheduler_ = std::move(batch_decode_scheduler);
         RTP_LLM_LOG_INFO("create batch decode scheduler done");
     } else if (pdfusion_scheduler_mode == PDFusionSchedulerMode::RATIO
                && pd_sep_config.role_type == RoleType::PDFUSION) {
@@ -714,7 +837,7 @@ WarmUpResult NormalEngine::decodeWarmUp(const EngineInitParams& params) {
 #endif
 }
 
-std::shared_ptr<GenerateStream> NormalEngine::createMinFakeStream(int32_t max_new_tokens) {
+std::shared_ptr<GenerateStream> NormalEngine::createMinFakeStream(int32_t max_new_tokens, bool prefill_only) {
     RTP_LLM_LOG_DEBUG("create min fake query");
     auto fake_input                             = makeFakeInput(1);
     fake_input->generate_config->max_new_tokens = max_new_tokens;
@@ -723,7 +846,8 @@ std::shared_ptr<GenerateStream> NormalEngine::createMinFakeStream(int32_t max_ne
     stream->setIsFakeStream(true);
     stream->setMetricsReporter(nullptr);
     stream->fakeInitKVBlock();
-    if (pd_sep_config.role_type == RoleType::PDFUSION || pd_sep_config.role_type == RoleType::DECODE) {
+    if (!prefill_only
+        && (pd_sep_config.role_type == RoleType::PDFUSION || pd_sep_config.role_type == RoleType::DECODE)) {
         auto new_tokens = torch::zeros({1, 1}, torch::kInt32);
 
         StreamUpdateInfo update_info{new_tokens,
@@ -865,6 +989,11 @@ void NormalEngine::loop() {
     }
 }
 
+int64_t NormalEngine::synchronizeDpStepState(int64_t local_value) {
+    auto state = torch::full({1}, local_value, torch::TensorOptions().dtype(torch::kInt64).device(torch::kCUDA));
+    return execAllReduce({state, ReduceOp::Max, false, ParallelMode::DP_AND_TP}).buffer.item<int64_t>();
+}
+
 absl::Status NormalEngine::trySaveStepError() const {
     return absl::UnimplementedError("can not save yet!");
 }
@@ -873,11 +1002,61 @@ bool NormalEngine::validateStreamForScheduling(const GenerateStreamPtr& stream) 
     if (stream->hasError()) {
         return false;
     }
-    if (pd_sep_config.role_type != RoleType::DECODE || !stream->generateConfig()->isPrefillOnly()) {
-        return true;
+    if (pd_sep_config.role_type == RoleType::DECODE && stream->generateConfig()->isPrefillOnly()) {
+        stream->reportError(ErrorCode::INVALID_PARAMS, kDecodeRolePrefillOnlyError);
+        return false;
     }
-    stream->reportError(ErrorCode::INVALID_PARAMS, kDecodeRolePrefillOnlyError);
-    return false;
+    if (sm120_decode_prefill_rejects_local_decode_ && stream->generateInput() && !stream->generateInput()->fake_query
+        && stream->generateConfig() && !stream->generateConfig()->isPrefillOnly()
+        && !stream->generateConfig()->pd_separation && stream->generateConfig()->max_new_tokens > 1) {
+        stream->reportError(ErrorCode::INVALID_PARAMS,
+                            "PREFILL role with sm120_decode CUDA graph and DP>1 cannot run local decode; "
+                            "use PD separation (can_use_pd_separation) or a synchronized decode profile");
+        return false;
+    }
+    if (sm120_decode_graph_replay_required_ && !stream->generateInput()->fake_query
+        && !stream->generateConfig()->isPrefillOnly()) {
+        const bool speculative_aligned =
+            dp_decode_batch_sync_ && propose_params_
+            && (propose_params_->sp_type == SP_TYPE_MTP || propose_params_->sp_type == SP_TYPE_EAGLE
+                || propose_params_->sp_type == SP_TYPE_DSPARK);
+        if (speculative_aligned && sm120DecodeRejectsSpeculativeFanOut(stream->maxBatchSize(), stream->hasNumBeams())) {
+            stream->reportError(ErrorCode::INVALID_PARAMS,
+                                "sm120_decode speculative (MTP/Eagle) aligned decode requires one "
+                                "non-beam sequence per stream; reduce num_return_sequences/beams");
+            return false;
+        }
+        const int64_t row_cap =
+            sm120DecodeAdmissionRowCap(captured_decode_graph_bs_, static_cast<int64_t>(decode_fixed_bs_));
+        int64_t stream_bound = std::max(int64_t{1}, runtime_config.max_generate_batch_size);
+        if (runtime_config.use_batch_decode_scheduler) {
+            // UpdateSchedulerInfo may raise BDS up to the setMaxBatchSize ceiling
+            // (row_cap). Bound fan-out against that ceiling, not only the
+            // configured startup batch size.
+            stream_bound = std::max(
+                {stream_bound,
+                 std::max(int64_t{1}, runtime_config.batch_decode_scheduler_config.batch_decode_scheduler_batch_size),
+                 row_cap});
+        }
+        const int64_t max_request_rows = sm120DecodeMaxFanOutForAdmission(row_cap, stream_bound);
+        if (sm120DecodeRequestExceedsGraph(stream->maxBatchSize(), max_request_rows)) {
+            std::string bound_msg = "admission row cap " + std::to_string(row_cap);
+            if (decode_fixed_bs_ > 0) {
+                bound_msg += " (RTP_LLM_DECODE_FIXED_BS=" + std::to_string(decode_fixed_bs_) + ")";
+            } else {
+                bound_msg += " (largest captured decode graph " + std::to_string(captured_decode_graph_bs_) + ")";
+            }
+            bound_msg += ", max fan-out " + std::to_string(max_request_rows) + " for stream_bound "
+                         + std::to_string(stream_bound);
+            stream->reportError(ErrorCode::INVALID_PARAMS,
+                                "sm120_decode decode CUDA graph " + bound_msg + ", but this request fans out to "
+                                    + std::to_string(stream->maxBatchSize())
+                                    + " sequences (num_return_sequences/beams); reduce the fan-out, lower concurrency, "
+                                      "or extend decode_capture_batch_sizes / RTP_LLM_DECODE_FIXED_BS");
+            return false;
+        }
+    }
+    return true;
 }
 
 std::shared_ptr<GenerateStream> NormalEngine::createStream(const std::shared_ptr<GenerateInput>& input) {
@@ -1008,7 +1187,13 @@ absl::Status NormalEngine::step() try {
             RTP_LLM_PROFILE_SCOPE_DYNAMIC("engine.normal.schedule(reserve_step=%d)", reserve_step_);
             CHECK_AND_ASSIGN(streams, scheduler_->schedule());
         }
-        if (parallelism_config.dp_size > 1) {
+    }
+    const bool aligned_dp = dp_prefill_phase_sync_ || dp_decode_batch_sync_;
+    if (aligned_dp) {
+        mayAddFakeStream(streams);
+    }
+    if (parallelism_config.tp_rank == 0 && !ffn_disaggregate_config.is_ffn_service()) {
+        if (parallelism_config.dp_size > 1 && !aligned_dp) {
             RTP_LLM_PROFILE_SCOPE("engine.normal.may_add_fake_stream_work");
             mayAddFakeStream(streams);
         }
@@ -1111,6 +1296,52 @@ bool NormalEngine::shouldAddMtpFakePrefill(bool has_prefill, bool use_batch_deco
 }
 
 void NormalEngine::mayAddFakeStream(std::list<GenerateStreamPtr>& streams) {
+    if (dp_prefill_phase_sync_) {
+        const bool local_decode =
+            std::any_of(streams.begin(), streams.end(), [](const auto& stream) { return !stream->isContextStream(); });
+        auto reduce_any_prefill = [this, local_decode](bool local_prefill) -> bool {
+            auto state = synchronizeDpStepState(dsv4DpPhaseVote(local_prefill, local_decode, dp_previous_prefill_));
+            dp_previous_prefill_ = dsv4DpPhaseIsPrefill(state, dp_previous_prefill_);
+            return dp_previous_prefill_;
+        };
+        if (alignDsv4DpPrefillPhase(streams, reduce_any_prefill, [this] { return createMinFakeStream(1, true); })) {
+            RTP_LLM_LOG_DEBUG("DSV4 DP/EP: synchronized prefill phase, streams=%zu", streams.size());
+            return;
+        }
+        // Deferred prefills remain new/unclassified in the ratio scheduler.
+        // Retain them as an unexecuted cohort, never promote them to decode.
+        scheduler_->deferReturnedPrefill();
+        streams.remove_if([](const auto& stream) { return stream->isContextStream(); });
+    }
+    if (dp_decode_batch_sync_) {
+        if (std::any_of(streams.begin(), streams.end(), [](const auto& stream) { return stream->hasNumBeams(); })) {
+            // Beam counts depend on committed token length. Freeze the prior
+            // async step before deciding the common EP payload extent. Non-normal
+            // executors (for example MTP) have no state to sync; skip them.
+            if (auto* normal_executor = dynamic_cast<NormalExecutor*>(executor_.get())) {
+                normal_executor->syncStreamState();
+            }
+        }
+        auto reduce_max_batch = [this](int64_t local_batch) { return synchronizeDpStepState(local_batch); };
+        alignDsv4DpDecodeBatch(
+            streams,
+            reduce_max_batch,
+            [this] {
+                if (isMTPEagle()) {
+                    return MtpExecutor::createMinFakeDecodeStream(
+                        sp_config.gen_num_per_cycle,
+                        model_config_,
+                        runtime_config,
+                        resource_context_,
+                        propose_params_->getEngineInitParams().model_config_.vocab_size,
+                        isDSpark());
+                }
+                return createMinFakeStream(1);
+            },
+            decode_fixed_bs_,
+            isMTPEagle());
+        return;
+    }
     if (isMTPEagle()) {
         int        propose_step   = sp_config.gen_num_per_cycle;
         int        mtp_vocab_size = propose_params_->getEngineInitParams().model_config_.vocab_size;
@@ -1123,6 +1354,8 @@ void NormalEngine::mayAddFakeStream(std::list<GenerateStreamPtr>& streams) {
                 }
                 break;
             case RoleType::DECODE:
+                // Fixed decode padding (RTP_LLM_DECODE_FIXED_BS) is applied only by
+                // alignDsv4DpDecodeBatch in the SM120 aligned profile above.
                 if (streams.empty()) {
                     streams.emplace_back(MtpExecutor::createMinFakeDecodeStream(
                         propose_step, model_config_, runtime_config, resource_context_, mtp_vocab_size, is_dspark));

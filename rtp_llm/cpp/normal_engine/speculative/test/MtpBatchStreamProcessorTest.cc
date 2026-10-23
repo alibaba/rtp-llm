@@ -1,3 +1,4 @@
+#include <algorithm>
 #include <cstdlib>
 #include <chrono>
 #include <cstring>
@@ -1213,7 +1214,9 @@ TEST_F(MtpBatchStreamProcessorTest, testUpdatePrefillPostDraftModelInput) {
     vector<int> expect_combo_tokens = {2, 2, 3, 2, 1, 2, 3};
     EXPECT_EQ(expect_combo_tokens, toVec<int>(combo_tokens));
 }
-TEST_F(MtpBatchStreamProcessorTest, testUpdatePrefillPostDraftModelInputShiftsComboPositionIds) {
+class MtpPrefillPositionDeviceTest: public MtpBatchStreamProcessorTest, public testing::WithParamInterface<bool> {};
+
+TEST_P(MtpPrefillPositionDeviceTest, shiftsComboPositionIdsAndRetainsHostMirror) {
     ModelConfig                 model_config;
     PDSepConfig                 pd_sep_config;
     ProfilingDebugLoggingConfig profiling_debug_logging_config;
@@ -1247,18 +1250,37 @@ TEST_F(MtpBatchStreamProcessorTest, testUpdatePrefillPostDraftModelInputShiftsCo
         torch::tensor({100, 101, 102, 110, 111, 112, 200, 201, 202, 210, 211, 212,
                        220, 221, 222, 300, 301, 302, 310, 311, 312},
                       torch::kInt32);
+    if (GetParam()) {
+        model_input.combo_position_ids = model_input.combo_position_ids.cuda();
+    }
     GptModelOutputs model_output;
     model_output.all_hidden_states = torch::zeros({7, 2}, torch::kFloat32);
     SamplerOutput sampler_output;
     sampler_output.token_ids = torch::tensor({1, -2, 12, 1, 2, 23, 3, 2, 1}, torch::kInt32).reshape({3, 3});
     TensorHolder holder;
     processor.updatePrefillPostDraftModelInput(stream_groups, model_input, model_output, sampler_output, holder);
+    EXPECT_EQ(model_input.combo_position_ids.is_cuda(), GetParam());
+    EXPECT_TRUE(model_input.combo_tokens.is_cuda());
+    if (GetParam()) {
+        const auto mirror = std::find_if(holder.tensors.begin(), holder.tensors.end(), [](const auto& tensor) {
+            return tensor.numel() == 21 && tensor.device().is_cpu() && tensor.is_pinned();
+        });
+        ASSERT_NE(mirror, holder.tensors.end());
+        EXPECT_EQ((vector<int>{110, 111, 112, 112, 112, 112, 210, 211, 212, 220, 221,
+                               222, 222, 222, 222, 310, 311, 312, 320, 321, 322}),
+                  toVec<int>(*mirror));
+        holder.release();
+        ASSERT_EQ(holder.clear_tensors.size(), 1);
+        EXPECT_FALSE(holder.clear_tensors.front().empty());
+    }
     EXPECT_EQ((vector<int>{11, 12, 21, 22, 23, 31, 3}), toVec<int>(model_input.combo_tokens));
     EXPECT_EQ((vector<int>{110, 111, 112, 112, 112, 112,
                            210, 211, 212, 220, 221, 222, 222, 222, 222,
                            310, 311, 312, 320, 321, 322}),
               toVec<int>(model_input.combo_position_ids));
 }
+
+INSTANTIATE_TEST_SUITE_P(HostAndCuda, MtpPrefillPositionDeviceTest, testing::Bool());
 
 TEST_F(MtpBatchStreamProcessorTest, testUpdateDecodePostDraftModelInput) {
     unsetenv("RTP_LLM_STREAM_ASYNC");

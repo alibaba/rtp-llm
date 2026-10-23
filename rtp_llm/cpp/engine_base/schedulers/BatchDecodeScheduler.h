@@ -105,13 +105,33 @@ public:
     void updateSchedulerInfo(const std::string& scheduler_info) override {
         BatchDecodeSchedulerConfigLocal config;
         autil::legacy::FromJsonString(config, scheduler_info);
-        batch_size_ = config.batch_size_;
+        if (max_batch_size_ > 0 && config.batch_size_ > max_batch_size_) {
+            // Raising above the captured sm120_decode graph geometry would form
+            // decode batches with no graph to replay; keep the current size.
+            RTP_LLM_LOG_WARNING("BatchDecodeScheduler rejects batch size %u above the decode graph limit %u; "
+                                "keeping batch size %u",
+                                config.batch_size_,
+                                max_batch_size_,
+                                batch_size_);
+        } else {
+            batch_size_ = config.batch_size_;
+        }
         if (config.mode_ == "decode") {
             scheduler_type_ = SchedulerType::kBatchDecode;
         } else if (config.mode_ == "prefill") {
             scheduler_type_ = SchedulerType::kBatchPrefill;
         }
         RTP_LLM_LOG_INFO("BatchDecodeScheduler update batch size to %d, mode to %d", batch_size_, int(scheduler_type_));
+    }
+
+    // Caps runtime batch_size_ raises and clamps the current size down when the
+    // configured startup value already exceeds the sm120_decode geometry.
+    // 0 keeps the unlimited default used by non-sm120 engines.
+    void setMaxBatchSize(uint32_t max_batch_size) {
+        max_batch_size_ = max_batch_size;
+        if (max_batch_size_ > 0 && batch_size_ > max_batch_size_) {
+            batch_size_ = max_batch_size_;
+        }
     }
 
     // 根据状态机转移后的目标状态，将 stream 路由到对应的队列
@@ -278,6 +298,7 @@ private:
     std::list<GenerateStreamPtr> loading_cache_streams_;
     std::list<GenerateStreamPtr> running_streams_;
     uint32_t                     batch_size_;
+    uint32_t                     max_batch_size_ = 0;
     bool                         reorder_request_;
     uint32_t                     current_step_ = 0;
     bool                         draining_mixed_modes_ = false;

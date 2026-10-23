@@ -372,6 +372,14 @@ bool PDFusionRatioScheduler::tryAdmitKVForPrefill(const GenerateStreamPtr& new_s
 }
 
 bool PDFusionRatioScheduler::classifyActivePrefillBatch() {
+    // An aligned DP decode round can remove these streams without executing
+    // their prompt. They are already in new_streams_; retain them for a later
+    // prefill round rather than treating queue position as prefill completion.
+    if (deferred_unclassified_prefill_) {
+        deferred_unclassified_prefill_ = false;
+        has_unclassified_prefill_batch_ = false;
+        return false;
+    }
     const bool classified = !new_streams_.empty();
     for (auto it = new_streams_.begin(); it != new_streams_.end();) {
         const auto& stream = *it;

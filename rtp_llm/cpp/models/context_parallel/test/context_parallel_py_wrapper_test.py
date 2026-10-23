@@ -304,6 +304,38 @@ class TestContextParallelProcessor(unittest.TestCase):
         self.assertEqual(shuffle_indices.cpu().tolist(), [0, 1, 6, 7])
         self.assertEqual(position_ids.tolist(), [4, 5, 10, 0])
 
+    def test_sm120_cp_rebuilds_default_prefix_positions(self):
+        _, _, _, positions, _ = cp_test.remap_multimodal_inputs(
+            torch.arange(8, dtype=torch.int32),
+            torch.arange(8, dtype=torch.int32),
+            [],
+            [],
+            torch.empty(0, dtype=torch.int32),
+            0,
+            2,
+            torch.tensor([8], dtype=torch.int32),
+            torch.empty(0, dtype=torch.int32),
+            torch.tensor([4], dtype=torch.int32),
+            rebuild_default_position_ids_on_prefix=True,
+        )
+        self.assertEqual(positions.tolist(), [4, 5, 10, 11])
+
+    def test_off_target_cp_keeps_explicit_prefix_positions(self):
+        _, _, _, positions, _ = cp_test.remap_multimodal_inputs(
+            torch.arange(8, dtype=torch.int32),
+            torch.arange(8, dtype=torch.int32) + 20,
+            [],
+            [],
+            torch.empty(0, dtype=torch.int32),
+            0,
+            2,
+            torch.tensor([8], dtype=torch.int32),
+            torch.empty(0, dtype=torch.int32),
+            torch.tensor([4], dtype=torch.int32),
+            rebuild_default_position_ids_on_prefix=False,
+        )
+        self.assertEqual(positions.tolist(), [24, 25, 30, 0])
+
     def test_rank_chunk_fully_inside_image_slices_feature_and_deepstack(self):
         combo_tokens = torch.arange(14, dtype=torch.int32)
         feature = torch.arange(20, dtype=torch.float32).reshape(10, 2)
