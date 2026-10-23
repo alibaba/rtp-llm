@@ -1,0 +1,8 @@
+{
+  "source_kind": "content_addressed",
+  "sha256": "73b724748c90fa1ff3e81332da82e6c541ca9edb58af76c67e87265da8614047",
+  "commit": null,
+  "commit_status": "unverified",
+  "source_url": "https://github.com/huggingface/transformers/blob/main/src/transformers/models/qwen4_exp/modeling_qwen4_exp.py",
+  "note": "Vendored upstream reference for Qwen4 parity qualification. The byte-identical copy is pinned by sha256 above; changing the vendored file requires deliberately updating this manifest, which makes the change visible in review."
+}

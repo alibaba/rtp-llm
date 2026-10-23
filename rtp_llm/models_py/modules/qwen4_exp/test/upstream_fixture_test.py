@@ -52,10 +52,23 @@ class UpstreamFixtureTest(unittest.TestCase):
                 )
                 self.assertEqual(upstream_source_path(), str(source))
 
-    def test_required_coverage_rejects_missing_fixture(self):
+    def test_required_coverage_defaults_to_vendored_fixture(self):
+        # Required qualification without explicit env falls back to the vendored
+        # in-repo copy; only the real-weight checkpoint stays an external fixture.
         with patch.dict(os.environ, {"QWEN4_EXP_REQUIRE_PARITY": "1"}, clear=True):
-            with self.assertRaisesRegex(RuntimeError, "uncovered"):
+            with self.assertRaisesRegex(RuntimeError, "checkpoint fixture"):
                 upstream_source_path()
+        with patch.dict(
+            os.environ,
+            {
+                "QWEN4_EXP_REQUIRE_PARITY": "1",
+                "QWEN4_EXP_CKPT_DIR": tempfile.gettempdir(),
+            },
+            clear=True,
+        ):
+            source = upstream_source_path()
+            self.assertTrue(Path(source).is_file())
+            self.assertTrue(source.endswith("modeling_qwen4_exp.py"))
 
     def test_missing_download_cannot_skip_required_qualification(self):
         with patch.dict(os.environ, {"QWEN4_EXP_REQUIRE_PARITY": "1"}):
