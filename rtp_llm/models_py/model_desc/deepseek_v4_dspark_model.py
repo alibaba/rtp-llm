@@ -34,7 +34,10 @@ from typing import Any, Optional, Tuple
 
 import torch
 
-from rtp_llm.config.cuda_graph import CudaGraphSelectionMode, GenerationPrefillCudaGraphUnsupportedBackend
+from rtp_llm.config.cuda_graph import (
+    CudaGraphSelectionMode,
+    GenerationPrefillCudaGraphUnsupportedBackend,
+)
 from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.model_loader.model_weight_info import ModelWeights
 from rtp_llm.models_py.model_desc.deepseek_v4_model import DeepSeekV4Model
@@ -736,7 +739,7 @@ class DeepSeekV4DSparkModel(DSparkProposerMixin, DeepSeekV4Model):
         tokens_per_block: int,
         graph_metadata: Any,
     ) -> torch.Tensor:
-        hidden = self.v4.embed(query_ids)
+        hidden = self.v4.embed_full(query_ids)
         hidden = hidden.unsqueeze(2).repeat(1, 1, self.v4.hc_mult, 1)
 
         # The hyper-connection choreography lives in Block.forward_decode;

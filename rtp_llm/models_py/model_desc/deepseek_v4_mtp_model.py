@@ -146,7 +146,7 @@ class DeepSeekV4MtpModel(DeepSeekV4Model):
         )
 
     def _embed_mtp_inputs(self, input_ids: torch.Tensor) -> torch.Tensor:
-        return self.v4.embed(input_ids)
+        return self.v4.embed_full(input_ids)
 
     def _build_fused_chunked(
         self,

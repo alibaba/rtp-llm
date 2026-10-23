@@ -8,11 +8,25 @@ from unittest.mock import Mock, patch
 
 import torch
 
-from rtp_llm.models_py.model_desc.deepseek_v4_ppu.base_model import Dsv4MtpHiddenBufferSpec, Dsv4SharedRuntimeBufferStore
-from rtp_llm.models_py.model_desc.deepseek_v4_ppu.model import PpuDeepSeekV4Model as DeepSeekV4Model
-from rtp_llm.models_py.model_desc.deepseek_v4_ppu.mtp_model import PpuDeepSeekV4MtpModel as DeepSeekV4MtpModel
-from rtp_llm.models_py.modules.dsv4.ppu.transformer import PpuV4Transformer as V4Transformer
-from rtp_llm.models_py.model_desc.deepseek_v4_mtp_model import DeepSeekV4MtpModel as GenericDeepSeekV4MtpModel
+from rtp_llm.models_py.model_desc.deepseek_v4_ppu.base_model import (
+    Dsv4MtpHiddenBufferSpec,
+    Dsv4SharedRuntimeBufferStore,
+)
+from rtp_llm.models_py.model_desc.deepseek_v4_ppu.model import (
+    PpuDeepSeekV4Model as DeepSeekV4Model,
+)
+from rtp_llm.models_py.model_desc.deepseek_v4_ppu.mtp_model import (
+    PpuDeepSeekV4MtpModel as DeepSeekV4MtpModel,
+)
+from rtp_llm.models_py.modules.dsv4.ppu.transformer import (
+    PpuV4Transformer as V4Transformer,
+)
+from rtp_llm.models_py.modules.dsv4.transformer import (
+    V4Transformer as GenericV4Transformer,
+)
+from rtp_llm.models_py.model_desc.deepseek_v4_mtp_model import (
+    DeepSeekV4MtpModel as GenericDeepSeekV4MtpModel,
+)
 
 
 class _RuntimeModule(torch.nn.Module):
@@ -74,6 +88,11 @@ class PpuMtpHiddenTest(unittest.TestCase):
                         embed=torch.nn.Embedding.from_pretrained(weight[:, :local_dim]),
                     )
                     v4._embed = types.MethodType(V4Transformer._embed, v4)
+                    # The generic MTP fusion calls ``embed_full``; at tp_size=1
+                    # it returns the local embedding unchanged (no collective).
+                    v4.embed_full = types.MethodType(
+                        GenericV4Transformer.embed_full, v4
+                    )
                     model = object.__new__(model_type)
                     torch.nn.Module.__init__(model)
                     values = dict(
