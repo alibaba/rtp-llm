@@ -512,6 +512,8 @@ struct RuntimeConfig {
 
     std::string              model_name = "";
     std::vector<std::string> worker_grpc_addrs;
+    // All engine ranks in world-rank order, unlike the TP-only worker addresses.
+    std::vector<std::string> shutdown_worker_grpc_addrs;
     std::vector<std::string> worker_addrs;
 
     // Fields merged from PyDeviceResourceConfig

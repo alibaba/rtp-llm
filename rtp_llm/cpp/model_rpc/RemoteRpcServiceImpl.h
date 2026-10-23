@@ -99,6 +99,13 @@ public:
         return decode_server_->RemoteGenerate(context, stream);
     }
 
+    grpc::Status BatchGenerateCall(grpc::ServerContext*        context,
+                                   const BatchGenerateInputPB* request,
+                                   BatchGenerateOutputsPB*     response) override {
+        return decode_server_ ? decode_server_->BatchGenerateCall(context, request, response) :
+                                LocalRpcServiceImpl::BatchGenerateCall(context, request, response);
+    }
+
     grpc::Status RemoteGenerateNew(grpc::ServerContext*              context,
                                    const RemoteGenerateRequestPBNew* request,
                                    RemoteGenerateResponsePBNew*      response) override {
@@ -122,10 +129,34 @@ public:
         return grpc::Status(grpc::StatusCode::UNIMPLEMENTED, error_msg);
     }
 
+    void setExternalDrainCallbacks(std::function<void()> begin, std::function<size_t()> count) override {
+        if (decode_server_) {
+            decode_server_->setExternalDrainCallbacks(std::move(begin), std::move(count));
+        } else {
+            LocalRpcServiceImpl::setExternalDrainCallbacks(std::move(begin), std::move(count));
+        }
+    }
+
     void beginShutdown() override {
+        LocalRpcServiceImpl::beginShutdown();
         if (prefill_server_) {
             prefill_server_->beginShutdown();
+        } else if (decode_server_) {
+            decode_server_->beginShutdown();
         }
+    }
+
+    bool waitForDrain(std::chrono::system_clock::time_point deadline) override {
+        return decode_server_ ? decode_server_->waitForDrain(deadline) : LocalRpcServiceImpl::waitForDrain(deadline);
+    }
+
+    grpc::Status ExecuteFunction(grpc::ServerContext*     context,
+                                 const FunctionRequestPB* request,
+                                 FunctionResponsePB*      response) override {
+        if (request->has_shutdown_request() && decode_server_) {
+            return decode_server_->shutdownStatus(request->shutdown_request(), response->mutable_shutdown_response());
+        }
+        return LocalRpcServiceImpl::ExecuteFunction(context, request, response);
     }
 
     void stop() override {

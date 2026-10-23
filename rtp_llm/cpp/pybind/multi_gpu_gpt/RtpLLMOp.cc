@@ -437,6 +437,17 @@ void RtpLLMOp::initRPCServer(const EngineInitParams                        maga_
                                              http_server_address,
                                              maga_init_params,
                                              token_processor));
+        std::weak_ptr<HttpApiServer> http_server = http_server_;
+        model_rpc_service_->setExternalDrainCallbacks(
+            [http_server] {
+                if (auto server = http_server.lock()) {
+                    server->beginShutdown();
+                }
+            },
+            [http_server] {
+                auto server = http_server.lock();
+                return server ? server->onflightRequestNum() : size_t(0);
+            });
         if (model_rpc_port < 0) {
             is_server_ready_ = true;
             return;
@@ -484,45 +495,42 @@ void RtpLLMOp::startHttpServer(py::object model_weights_loader,
 }
 
 void RtpLLMOp::stop() {
-    const int64_t stop_timeout_ms = getGrpcStopTimeoutMs();
-    if (!is_server_shutdown_) {
-        if (model_rpc_service_) {
-            model_rpc_service_->beginShutdown();
-        }
-        if (grpc_server_) {
-            auto begin_wait_us = autil::TimeUtility::currentTimeInMicroSeconds();
-            while (auto onflight_request = model_rpc_service_->onflightRequestNum()) {
-                RTP_LLM_LOG_INFO("rpc service has [%lu] onflight request, waiting 1s, stop_timeout_ms=%ld",
-                                 onflight_request,
-                                 stop_timeout_ms);
-                sleep(1);
-                if (autil::TimeUtility::currentTimeInMicroSeconds() - begin_wait_us > stop_timeout_ms * 1000) {
-                    RTP_LLM_LOG_INFO("rpc service wait timeout, no more waiting");
-                    break;
-                }
-            }
-            RTP_LLM_LOG_INFO("Server shutdowning");
-            grpc_server_->Shutdown();
-            grpc_server_.reset();
-        }
-        if (model_rpc_service_) {
-            pybind11::gil_scoped_release release;
-            model_rpc_service_->stop();
-            pybind11::gil_scoped_acquire acquire;
-            model_rpc_service_.reset();
-        }
-        if (http_server_) {
-            http_server_->stop();
-            http_server_.reset();
-        }
-        is_server_shutdown_ = true;
-        // bounded flush of remaining spans; never blocks process exit
-        {
-            pybind11::gil_scoped_release release;
-            telemetry::TelemetryRuntime::shutdown();
-        }
-        stopKmonitorFactory();
+    // Python forwards (including CUDA graph replay) still need the GIL while
+    // requests drain. Release it before waiting, including on another stop().
+    pybind11::gil_scoped_release release;
+    std::lock_guard<std::mutex>  stop_lock(stop_mutex_);
+    if (is_server_shutdown_) {
+        return;
     }
+    auto deadline = std::chrono::system_clock::now() + std::chrono::milliseconds(getGrpcStopTimeoutMs());
+    if (model_rpc_service_) {
+        model_rpc_service_->beginShutdown();
+        if (!model_rpc_service_->waitForDrain(deadline)) {
+            RTP_LLM_LOG_WARNING("RPC drain deadline expired; cancelling remaining requests");
+            deadline = std::chrono::system_clock::now();
+        }
+    }
+    if (grpc_server_) {
+        // Use the remaining drain budget; a synchronous Shutdown() without a
+        // deadline can wait forever for a stalled streaming client.
+        grpc_server_->Shutdown(deadline);
+        grpc_server_.reset();
+    }
+    if (model_rpc_service_) {
+        model_rpc_service_->stop();
+    }
+    if (http_server_) {
+        http_server_->stop();
+    }
+    {
+        // These objects own Python model/tokenizer references.
+        pybind11::gil_scoped_acquire acquire;
+        http_server_.reset();
+        model_rpc_service_.reset();
+    }
+    is_server_shutdown_ = true;
+    telemetry::TelemetryRuntime::shutdown();
+    stopKmonitorFactory();
 }
 
 RtpLLMOp::~RtpLLMOp() {

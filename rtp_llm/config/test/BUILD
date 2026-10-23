@@ -101,3 +101,10 @@ py_test(
         "//rtp_llm/access_logger:access_logger",
     ],
 )
+
+py_test(
+    name = "shutdown_worker_addrs_test",
+    srcs = ["shutdown_worker_addrs_test.py"],
+    data = ["//:th_transformer_config"],
+    deps = ["//rtp_llm:config", "//rtp_llm:ops"],
+)

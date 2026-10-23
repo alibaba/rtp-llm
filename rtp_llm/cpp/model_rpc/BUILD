@@ -67,6 +67,7 @@ cc_library(
             "TensorPbConvert.cc",
             "MultimodalPbConverter.cc",
             "ResponseBuffer.cc",
+            "ShutdownCoordinator.cc",
         ],
     ),
     hdrs = glob(
@@ -75,6 +76,7 @@ cc_library(
             "RPCPool.h",
             # Owned by :response_buffer so its public header has a single cc_library.
             "ResponseBuffer.h",
+            "ShutdownCoordinator.h",
         ],
     ),
     visibility = ["//visibility:public"],
@@ -82,6 +84,7 @@ cc_library(
         ":embedding_arpc_deps",
         ":model_rpc_pool",
         ":response_buffer",
+        ":shutdown_coordinator",
         ":rpc_error_code",
         ":tensor_pb_convert",
         "//rtp_llm/cpp/cache:cache_types",
@@ -145,4 +148,13 @@ cc_library(
         "@grpc//:grpc++",
         "@havenask//aios/autil:time",
     ],
+)
+
+cc_library(
+    name = "shutdown_coordinator",
+    srcs = ["ShutdownCoordinator.cc"],
+    hdrs = ["ShutdownCoordinator.h"],
+    copts = copts(),
+    deps = ["//rtp_llm/cpp/model_rpc/proto:model_rpc_service_cc_proto"],
+    visibility = ["//visibility:public"],
 )
