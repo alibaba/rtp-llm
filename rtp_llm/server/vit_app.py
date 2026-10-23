@@ -34,7 +34,10 @@ from rtp_llm.server.mm_cache_metadata import (
     get_mm_cache_keys,
     get_mm_cache_metadata,
 )
-from rtp_llm.server.request_headers import extract_request_headers
+from rtp_llm.server.request_headers import (
+    extract_correlation_request_id,
+    extract_request_headers,
+)
 from rtp_llm.server.vit_rpc_server import MultimodalRpcServer, create_rpc_server
 
 
@@ -73,6 +76,7 @@ def register_mm_cache_routes(app: FastAPI, engine: MMProcessEngine) -> None:
                 request.timeout_ms,
                 user_id=headers.get("x-dashscope-uid", ""),
                 service_name=headers.get("x-dashscope-service", ""),
+                external_request_id=extract_correlation_request_id(headers),
             )
         except NotImplementedError as error:
             raise HTTPException(status_code=501, detail=str(error)) from error

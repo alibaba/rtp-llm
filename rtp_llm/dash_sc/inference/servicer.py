@@ -695,7 +695,12 @@ def _make_generate_input(
     input_ids_tensor: Optional[torch.Tensor] = None,
 ) -> GenerateInput:
     headers = dict(request_headers or {})
-    headers.update(_headers_from_invocation_metadata(invocation_metadata))
+    metadata_headers = _headers_from_invocation_metadata(invocation_metadata)
+    headers.update(metadata_headers)
+    # Metadata takes precedence even when upstream uses the RequestId alias.
+    external_request_id = extract_correlation_request_id(metadata_headers)
+    if external_request_id:
+        headers["x-dashscope-request-id"] = external_request_id
     trace_id = str(generate_config.trace_id or extract_trace_id(headers) or "")
     # ``input_ids_tensor`` is the zero-copy INT32 view the codec built straight off the
     # request payload (see ``ParsedInputIds``). Long-context dash requests otherwise pay

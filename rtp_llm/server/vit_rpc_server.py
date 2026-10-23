@@ -47,7 +47,10 @@ from rtp_llm.server.mm_cache_metadata import (
     get_mm_cache_metadata,
     metadata_to_proto,
 )
-from rtp_llm.server.request_headers import extract_request_headers
+from rtp_llm.server.request_headers import (
+    extract_correlation_request_id,
+    extract_request_headers,
+)
 from rtp_llm.server.vit_rpc_constants import VIT_ERROR_REPORTED_METADATA_KEY
 
 
@@ -169,6 +172,7 @@ class MultimodalRpcServer(MultimodalRpcServiceServicer):
                     timeout_ms,
                     user_id=headers.get("x-dashscope-uid", ""),
                     service_name=headers.get("x-dashscope-service", ""),
+                    external_request_id=extract_correlation_request_id(headers),
                     cancellation_event=cancellation,
                     binary_hashes=True,
                 )
@@ -204,15 +208,13 @@ class MultimodalRpcServer(MultimodalRpcServiceServicer):
     def AsyncSubmitEmbedding(self, multimodal_inputs: MultimodalInputsPB, context):
         try:
             converted_inputs = trans_mm_input(multimodal_inputs)
+            headers = extract_request_headers(dict(context.invocation_metadata() or ()))
             self.engine.async_submit(
                 converted_inputs,
                 multimodal_inputs.request_id,
-                user_id=extract_request_headers(
-                    dict(context.invocation_metadata() or ())
-                ).get("x-dashscope-uid", ""),
-                service_name=extract_request_headers(
-                    dict(context.invocation_metadata() or ())
-                ).get("x-dashscope-service", ""),
+                user_id=headers.get("x-dashscope-uid", ""),
+                service_name=headers.get("x-dashscope-service", ""),
+                external_request_id=extract_correlation_request_id(headers),
             )
             return EmptyPB()
         except FtRuntimeException as error:
@@ -232,18 +234,16 @@ class MultimodalRpcServer(MultimodalRpcServiceServicer):
         verdict = None
         try:
             converted_inputs = trans_mm_input(multimodal_inputs)
+            headers = extract_request_headers(dict(context.invocation_metadata() or ()))
             cancellation_event = self._register_rpc_completion(context)
             verdict = self.engine.wait_greennet_verdict(
                 converted_inputs,
                 timeout_ms=_rpc_timeout_ms(context, VitConfig.DEFAULT_MM_TIMEOUT_MS),
                 request_id=multimodal_inputs.request_id,
                 cancellation_event=cancellation_event,
-                user_id=extract_request_headers(
-                    dict(context.invocation_metadata() or ())
-                ).get("x-dashscope-uid", ""),
-                service_name=extract_request_headers(
-                    dict(context.invocation_metadata() or ())
-                ).get("x-dashscope-service", ""),
+                user_id=headers.get("x-dashscope-uid", ""),
+                service_name=headers.get("x-dashscope-service", ""),
+                external_request_id=extract_correlation_request_id(headers),
             )
             if verdict is None:
                 raise RuntimeError("ViT GreenNet returned no verdict")
@@ -338,6 +338,7 @@ class MultimodalRpcServer(MultimodalRpcServiceServicer):
                 cancellation_event=cancellation_event,
                 user_id=headers.get("x-dashscope-uid", ""),
                 service_name=headers.get("x-dashscope-service", ""),
+                external_request_id=extract_correlation_request_id(headers),
             )
             res = merge_embedding_results(results)
             output_pb = self._transport.transfer(multimodal_inputs, res)

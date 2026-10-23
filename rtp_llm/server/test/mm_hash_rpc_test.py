@@ -86,6 +86,7 @@ class MMHashRpcTest(unittest.IsolatedAsyncioTestCase):
         self.request.headers = {
             "X-DashScope-Uid": "uid-rpc",
             "X-DashScope-Service": "service-rpc",
+            "X-DashScope-RequestId": "dash-hash-rpc",
         }
         self.keys = multimodal_cache_keys(self.request)
 
@@ -200,6 +201,8 @@ class MMHashRpcTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(call.kwargs["hashes_only"])
         self.assertEqual(call.kwargs["user_id"], "uid-rpc")
         self.assertEqual(call.kwargs["service_name"], "service-rpc")
+        self.assertEqual(call.kwargs["external_request_id"], "dash-hash-rpc")
+        self.assertEqual(call.kwargs["request_id"], 123)
         self.assertIsNotNone(call.kwargs["cancellation_event"])
         self.assertEqual(
             self.request.greennet_verified_vit,

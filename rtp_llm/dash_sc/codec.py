@@ -1097,6 +1097,19 @@ def parse_request_controls(
         if value is not None:
             request_headers[header_name] = value
 
+    # Keep the full upstream ID for inspection; tracing may truncate its copy.
+    for header_name in ("x-dashscope-request-id", "x-dashscope-requestid"):
+        value = _normalize_non_empty_str(
+            _lookup_ds_request_control(ds_attrs, header_name)
+        )
+        if value is not None:
+            request_headers["x-dashscope-request-id"] = value
+            break
+    if "x-dashscope-request-id" not in request_headers:
+        value = _normalize_non_empty_str(request.id)
+        if value is not None:
+            request_headers["x-dashscope-request-id"] = value
+
     return DashScRequestControls(
         return_input_ids=return_input_ids,
         enable_thinking=enable_thinking,

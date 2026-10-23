@@ -887,6 +887,7 @@ class MMCacheApiTest(unittest.TestCase):
                 headers={
                     "x-DashScope-uID": "uid-http",
                     "X-DashScope-Service": "service-http",
+                    "X-DashScope-RequestId": "dash-hash-http",
                 },
             )
             self.assertEqual(response.status_code, 200, response.text)
@@ -906,6 +907,7 @@ class MMCacheApiTest(unittest.TestCase):
                     "hashes_only": True,
                     "user_id": "uid-http",
                     "service_name": "service-http",
+                    "external_request_id": "dash-hash-http",
                 },
             )
 

@@ -428,6 +428,7 @@ class MMProcessEngine:
         user_id,
         service_name,
         cancellation_event=None,
+        external_request_id: str = "",
     ) -> GreenNetVerdict:
         """Gate shared embeddings with this caller's request-scoped inspection."""
         if not mm_inputs:
@@ -438,6 +439,7 @@ class MMProcessEngine:
             request_id=request_id,
             user_id=user_id,
             service_name=service_name,
+            external_request_id=external_request_id,
             deadline=deadline,
         )
         try:
@@ -470,6 +472,7 @@ class MMProcessEngine:
         request_id: int = 0,
         user_id: str = "",
         service_name: str = "",
+        external_request_id: str = "",
     ) -> MMEmbeddingRes:
         """Run one synchronous request and account for every failure boundary."""
         if not self.is_proxy_mode:
@@ -481,6 +484,7 @@ class MMProcessEngine:
                 request_id=request_id,
                 user_id=user_id,
                 service_name=service_name,
+                external_request_id=external_request_id,
             )
             _report_vit_metric(
                 GaugeMetrics.VIT_EMBEDDING_LENGTH_METRIC,
@@ -499,6 +503,7 @@ class MMProcessEngine:
         request_id: int = 0,
         user_id: str = "",
         service_name: str = "",
+        external_request_id: str = "",
     ) -> MMEmbeddingRes:
         """Synchronous embedding path with greennet (used by the in-process /
         cpp / rpc entrypoints). Preprocess + inspect run, ViT runs concurrently
@@ -511,6 +516,7 @@ class MMProcessEngine:
                 request_id=request_id,
                 user_id=user_id,
                 service_name=service_name,
+                external_request_id=external_request_id,
                 deadline=deadline,
                 worker_sources=True,
             )
@@ -575,6 +581,7 @@ class MMProcessEngine:
                     request_id,
                     user_id=user_id,
                     service_name=service_name,
+                    external_request_id=external_request_id,
                     deadline=deadline,
                     worker_sources=True,
                 )
@@ -585,6 +592,7 @@ class MMProcessEngine:
                     request_id=request_id,
                     user_id=user_id,
                     service_name=service_name,
+                    external_request_id=external_request_id,
                     deadline=deadline,
                     worker_sources=True,
                 )
@@ -663,6 +671,7 @@ class MMProcessEngine:
         cancellation_event: Optional[threading.Event] = None,
         user_id: str = "",
         service_name: str = "",
+        external_request_id: str = "",
     ) -> GreenNetVerdict:
         """Block until every input's greennet verdict is decided; return the
         first non-passing verdict (first-failure-wins), else a passing verdict.
@@ -697,6 +706,7 @@ class MMProcessEngine:
                 cancellation_event=cancellation_event,
                 user_id=user_id,
                 service_name=service_name,
+                external_request_id=external_request_id,
                 cached_inspection_inputs=(
                     cached_inspection_inputs
                     if self._request_scoped_inspection()
@@ -709,6 +719,7 @@ class MMProcessEngine:
                 request_id=request_id,
                 user_id=user_id,
                 service_name=service_name,
+                external_request_id=external_request_id,
                 cancellation_event=cancellation_event,
             )
             if not verdict.passed:
@@ -749,6 +760,7 @@ class MMProcessEngine:
         request_id: int = 0,
         user_id: str = "",
         service_name: str = "",
+        external_request_id: str = "",
     ) -> MMEmbeddingRes:
         """Process multimodal inputs from C++ interface."""
         try:
@@ -764,7 +776,11 @@ class MMProcessEngine:
             self.report_vit_error(error)
             raise
         res = self._embed_with_greennet_sync(
-            mm_inputs, request_id=request_id, user_id=user_id, service_name=service_name
+            mm_inputs,
+            request_id=request_id,
+            user_id=user_id,
+            service_name=service_name,
+            external_request_id=external_request_id,
         )
         try:
             with cuda_graph_gate.operation():
@@ -1049,6 +1065,7 @@ class MMProcessEngine:
         request_id: int = 0,
         user_id: str = "",
         service_name: str = "",
+        external_request_id: str = "",
     ) -> List[str]:
         """Asynchronously submit multimodal URLs for embedding computation.
 
@@ -1063,6 +1080,7 @@ class MMProcessEngine:
                 request_id=request_id,
                 user_id=user_id,
                 service_name=service_name,
+                external_request_id=external_request_id,
             )
             return [cache_key for cache_key, _ in claims]
         except Exception as error:
@@ -1078,6 +1096,7 @@ class MMProcessEngine:
         hashes_only: bool = False,
         user_id: str = "",
         service_name: str = "",
+        external_request_id: str = "",
     ) -> List[MMEmbeddingRes]:
         """Retrieve embedding results, blocking until ready if necessary.
 
@@ -1104,6 +1123,7 @@ class MMProcessEngine:
                 cancellation_event=cancellation_event,
                 user_id=user_id,
                 service_name=service_name,
+                external_request_id=external_request_id,
                 cached_inspection_inputs=(
                     cached_inspection_inputs
                     if self._request_scoped_inspection()
@@ -1116,6 +1136,7 @@ class MMProcessEngine:
                 request_id=request_id,
                 user_id=user_id,
                 service_name=service_name,
+                external_request_id=external_request_id,
                 cancellation_event=cancellation_event,
             )
             if not verdict.passed:
@@ -1218,6 +1239,7 @@ class MMProcessEngine:
         user_id: str = "",
         service_name: str = "",
         cached_inspection_inputs: Optional[List[MultimodalInput]] = None,
+        external_request_id: str = "",
     ) -> List[Tuple[str, MMEmbeddingCacheEntry]]:
         self._raise_if_async_request_cancelled(request_id, cancellation_event)
         # Validate every input before creating any shared PENDING entries.
@@ -1263,6 +1285,7 @@ class MMProcessEngine:
                 queue_timeout_ms=queue_timeout_ms,
                 user_id=user_id,
                 service_name=service_name,
+                external_request_id=external_request_id,
             )
             self._raise_if_async_request_cancelled(request_id, cancellation_event)
             return claims
@@ -1499,6 +1522,7 @@ class MMProcessEngine:
         deadline: float,
         user_id: str = "",
         service_name: str = "",
+        external_request_id: str = "",
     ) -> Optional[concurrent.futures.Future]:
         if time.monotonic() >= deadline:
             error = FtRuntimeException(
@@ -1515,6 +1539,7 @@ class MMProcessEngine:
             deadline=deadline,
             user_id=user_id,
             service_name=service_name,
+            external_request_id=external_request_id,
         )
 
     def _submit_async_compute_batch(
@@ -1524,6 +1549,7 @@ class MMProcessEngine:
         queue_timeout_ms: Optional[int] = None,
         user_id: str = "",
         service_name: str = "",
+        external_request_id: str = "",
     ) -> None:
         if not pending:
             return
@@ -1572,6 +1598,7 @@ class MMProcessEngine:
                         deadline,
                         user_id,
                         service_name,
+                        external_request_id,
                     )
                     self._async_tasks[entry].future = future
                     future.add_done_callback(
@@ -1599,6 +1626,7 @@ class MMProcessEngine:
         service_name: str = "",
         *,
         deadline: float,
+        external_request_id: str = "",
     ) -> Optional[concurrent.futures.Future]:
         handle = None
         if not self.is_proxy_mode:
@@ -1613,6 +1641,7 @@ class MMProcessEngine:
                 request_id,
                 user_id=user_id,
                 service_name=service_name,
+                external_request_id=external_request_id,
                 deadline=deadline,
                 worker_sources=True,
             )
