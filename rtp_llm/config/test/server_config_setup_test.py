@@ -414,7 +414,7 @@ class GenerateConfigTest(TestCase):
             return value
 
         event_state = state
-        state = (state[0], 6, *state[2:-6])
+        state = (state[0], 6, *state[2:-7])
         version_five_state = (state[0], 5, *state[2:], True)
         self.assertEqual(restore(version_five_state).__getstate__(), event_state)
         version_four_state = (state[0], 4, *state[2:50], 123, *state[50:], True)
