@@ -11,6 +11,7 @@
 #include "gtest/gtest.h"
 #include "autil/TimeUtility.h"
 
+#define private public
 #define protected public
 #include "rtp_llm/cpp/engine_base/schedulers/FIFOScheduler.h"
 #include "rtp_llm/cpp/engine_base/schedulers/BatchDecodeScheduler.h"
@@ -1201,6 +1202,31 @@ TEST_F(FIFOSchedulerTest, testBatchDecodeSchedulerRestoresBatchGateAfterMixedMod
     EXPECT_EQ(full_batch_it->get(), late_same_mode.get());
     ++full_batch_it;
     EXPECT_EQ(full_batch_it->get(), batch_peer.get());
+}
+
+TEST_F(FIFOSchedulerTest, testBatchDecodeSchedulerKeepsBatchSizeBelowGraphLimit) {
+    auto [cache_manager, resource_context, model_config, runtime_config] =
+        makeBatchDecodeResources(test::makeSimpleMhaCacheConfig(1, 32, 1, rtp_llm::DataType::TYPE_FP16, 1, 4));
+    ASSERT_TRUE(cache_manager->init());
+    BatchDecodeScheduler scheduler(runtime_config, cache_manager, nullptr);
+    ASSERT_EQ(scheduler.batch_size_, 2);
+    scheduler.setMaxBatchSize(2);
+
+    // A runtime raise above the captured sm120_decode graph geometry is refused.
+    scheduler.updateSchedulerInfo(R"({"batch_size": 4, "mode": "decode"})");
+    EXPECT_EQ(scheduler.batch_size_, 2);
+
+    // Lowering, and updates within the limit, still apply.
+    scheduler.updateSchedulerInfo(R"({"batch_size": 1, "mode": "decode"})");
+    EXPECT_EQ(scheduler.batch_size_, 1);
+    scheduler.updateSchedulerInfo(R"({"batch_size": 2, "mode": "prefill"})");
+    EXPECT_EQ(scheduler.batch_size_, 2);
+    EXPECT_EQ(scheduler.scheduler_type_, BatchDecodeScheduler::SchedulerType::kBatchPrefill);
+
+    // Without a limit, non-sm120 engines keep accepting runtime raises.
+    BatchDecodeScheduler unlimited_scheduler(runtime_config, cache_manager, nullptr);
+    unlimited_scheduler.updateSchedulerInfo(R"({"batch_size": 4, "mode": "decode"})");
+    EXPECT_EQ(unlimited_scheduler.batch_size_, 4);
 }
 
 TEST_F(FIFOSchedulerTest, testBatchDecodeSchedulerKeepsHomogeneousPositiveTailBehindBatchGate) {

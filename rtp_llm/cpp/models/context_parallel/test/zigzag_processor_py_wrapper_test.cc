@@ -142,11 +142,12 @@ zigzagRemapMultimodalInputs(const torch::Tensor&                combo_tokens,
                             int                                 cp_size,
                             const std::optional<torch::Tensor>& input_lengths,
                             const std::optional<torch::Tensor>& sequence_lengths,
-                            const std::optional<torch::Tensor>& prefix_lengths) {
+                            const std::optional<torch::Tensor>& prefix_lengths,
+                            bool                                uses_default_position_ids) {
     ParallelismConfig config;
     config.tp_rank = cp_rank;
     config.tp_size = cp_size;
-    ZigZagProcessor processor(config);
+    ZigZagProcessor processor(config, false, uses_default_position_ids);
 
     GptModelInputs inputs;
     inputs.combo_tokens       = combo_tokens;
@@ -258,9 +259,10 @@ PYBIND11_MODULE(libth_context_parallel_py_wrapper_test, m) {
           py::arg("mm_features_locs"),
           py::arg("cp_rank"),
           py::arg("cp_size"),
-          py::arg("input_lengths")    = py::none(),
-          py::arg("sequence_lengths") = py::none(),
-          py::arg("prefix_lengths")   = py::none(),
+          py::arg("input_lengths")             = py::none(),
+          py::arg("sequence_lengths")          = py::none(),
+          py::arg("prefix_lengths")            = py::none(),
+          py::arg("uses_default_position_ids") = false,
           "Remap multimodal features and deepstack inputs for one context-parallel rank");
 
     m.def("remap_token_fields",

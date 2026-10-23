@@ -20,8 +20,11 @@ enum class ProcessorType {
 class IContextParallelProcessor {
 public:
     explicit IContextParallelProcessor(const ParallelismConfig& parallelism_config,
-                                       bool                     prefer_local_hidden_states = false):
-        parallelism_config_(parallelism_config), prefer_local_hidden_states_(prefer_local_hidden_states) {}
+                                       bool                     prefer_local_hidden_states = false,
+                                       bool                     uses_default_position_ids  = false):
+        parallelism_config_(parallelism_config),
+        prefer_local_hidden_states_(prefer_local_hidden_states),
+        uses_default_position_ids_(uses_default_position_ids) {}
     virtual ~IContextParallelProcessor() = default;
 
     /// @brief Prepare context parallel inputs: split and shuffle tokens, compute restore indices and masks.
@@ -78,12 +81,15 @@ protected:
     // Used only when global and local row counts are equal. DeepSeek's MTP
     // buffer is rank-local, while ordinary model output is global.
     const bool prefer_local_hidden_states_;
+    const bool uses_default_position_ids_;
 };
 
 class ContextParallelProcessorFactory {
 public:
-    static std::unique_ptr<IContextParallelProcessor>
-    create(ProcessorType type, const ParallelismConfig& parallelism_config, bool prefer_local_hidden_states = false);
+    static std::unique_ptr<IContextParallelProcessor> create(ProcessorType            type,
+                                                             const ParallelismConfig& parallelism_config,
+                                                             bool prefer_local_hidden_states = false,
+                                                             bool uses_default_position_ids  = false);
 };
 
 }  // namespace rtp_llm
