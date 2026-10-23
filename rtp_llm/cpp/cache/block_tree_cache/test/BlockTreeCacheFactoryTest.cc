@@ -570,8 +570,12 @@ protected:
     StorageMatchResult matchImpl(const StorageRequest& request) override {
         return {request.handles.size(), nullptr};
     }
-    void readImpl(const StorageRequest&, const std::shared_ptr<StorageBackendMatchMeta>&) override {}
-    void writeImpl(const StorageRequest&) override {}
+    ErrorInfo readImpl(const StorageRequest&, const std::shared_ptr<StorageBackendMatchMeta>&) override {
+        return ErrorInfo::OkStatus();
+    }
+    ErrorInfo writeImpl(const StorageRequest&) override {
+        return ErrorInfo::OkStatus();
+    }
 
 private:
     std::shared_ptr<size_t> shutdown_count_;
@@ -614,8 +618,12 @@ protected:
         }
         return {local_matched_blocks_, nullptr};
     }
-    void readImpl(const StorageRequest&, const std::shared_ptr<StorageBackendMatchMeta>&) override {}
-    void writeImpl(const StorageRequest&) override {}
+    ErrorInfo readImpl(const StorageRequest&, const std::shared_ptr<StorageBackendMatchMeta>&) override {
+        return ErrorInfo::OkStatus();
+    }
+    ErrorInfo writeImpl(const StorageRequest&) override {
+        return ErrorInfo::OkStatus();
+    }
 
 private:
     size_t              match_calls_{0};
@@ -638,8 +646,12 @@ protected:
     StorageMatchResult matchImpl(const StorageRequest&) override {
         return {};
     }
-    void readImpl(const StorageRequest&, const std::shared_ptr<StorageBackendMatchMeta>&) override {}
-    void writeImpl(const StorageRequest&) override {}
+    ErrorInfo readImpl(const StorageRequest&, const std::shared_ptr<StorageBackendMatchMeta>&) override {
+        return ErrorInfo::OkStatus();
+    }
+    ErrorInfo writeImpl(const StorageRequest&) override {
+        return ErrorInfo::OkStatus();
+    }
 
 private:
     size_t init_calls_{0};

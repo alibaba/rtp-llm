@@ -224,7 +224,7 @@ protected:
         return {matched, nullptr};
     }
 
-    void readImpl(const StorageRequest& request, const std::shared_ptr<StorageBackendMatchMeta>&) override {
+    ErrorInfo readImpl(const StorageRequest& request, const std::shared_ptr<StorageBackendMatchMeta>&) override {
         std::vector<std::vector<std::string>> group_tags;
         for (const auto& handles : request.handles) {
             group_tags.emplace_back();
@@ -236,9 +236,10 @@ protected:
             std::lock_guard<std::mutex> lock(mutex_);
             read_group_tags_ = std::move(group_tags);
         }
+        return ErrorInfo::OkStatus();
     }
 
-    void writeImpl(const StorageRequest& request) override {
+    ErrorInfo writeImpl(const StorageRequest& request) override {
         std::vector<std::vector<std::string>> group_tags(request.handles.size());
         {
             std::lock_guard<std::mutex> storage_lock(state_->mutex);
@@ -255,6 +256,7 @@ protected:
             std::lock_guard<std::mutex> lock(mutex_);
             write_group_tags_ = std::move(group_tags);
         }
+        return ErrorInfo::OkStatus();
     }
 
 private:

@@ -35,8 +35,9 @@ public:
 protected:
     bool               initImpl() override;
     StorageMatchResult matchImpl(const StorageRequest& request) override;
-    void readImpl(const StorageRequest& request, const std::shared_ptr<StorageBackendMatchMeta>& match_meta) override;
-    void writeImpl(const StorageRequest& request) override;
+    ErrorInfo          readImpl(const StorageRequest&                           request,
+                                const std::shared_ptr<StorageBackendMatchMeta>& match_meta) override;
+    ErrorInfo          writeImpl(const StorageRequest& request) override;
     void shutdownImpl() noexcept override;
 
 private:

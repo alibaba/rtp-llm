@@ -15,6 +15,7 @@
 #include "rtp_llm/cpp/cache/KVCacheResource.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/block_pool/DeviceBlockPool.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/storage_backend/StorageBackendExecutor.h"
+#include "rtp_llm/cpp/utils/ErrorCode.h"
 
 namespace rtp_llm {
 
@@ -95,7 +96,7 @@ public:
     void read(StorageRequest request, std::shared_ptr<StorageBackendMatchMeta> match_meta, Done done);
     StorageWriteTask prepareWrite(StorageRequest request);
     // Returns admission only, not the I/O result; never waits for completion.
-    // Source pins live until execution or rejection.
+    // Source pins live until execution or rejection. UNKNOWN preserves source blocks.
     bool write(StorageWriteTask task);
     // Must not be called from backend I/O or completion callbacks.
     void shutdown();
@@ -111,9 +112,11 @@ protected:
 
     virtual bool               initImpl()                                                           = 0;
     virtual StorageMatchResult matchImpl(const StorageRequest& request)                             = 0;
-    virtual void               readImpl(const StorageRequest&                           request,
+    // Unknown broadcast completion reports TRANSFER_COMPLETION_UNKNOWN and preserves
+    // READ targets or WRITE sources that workers may still access.
+    virtual ErrorInfo          readImpl(const StorageRequest&                           request,
                                         const std::shared_ptr<StorageBackendMatchMeta>& match_meta) = 0;
-    virtual void               writeImpl(const StorageRequest& request)                             = 0;
+    virtual ErrorInfo          writeImpl(const StorageRequest& request)                             = 0;
     virtual void               shutdownImpl() noexcept {}
 
 private:

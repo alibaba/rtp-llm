@@ -140,6 +140,11 @@ public:
         cv_.notify_all();
     }
 
+    void setReadResult(ErrorInfo result) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        read_result_ = std::move(result);
+    }
+
     void waitForMatches(size_t count) {
         std::unique_lock<std::mutex> lock(mutex_);
         cv_.wait(lock, [&] { return match_calls_ >= count; });
@@ -176,17 +181,20 @@ protected:
         return {request.handles.size(), nullptr};
     }
 
-    void readImpl(const StorageRequest&, const std::shared_ptr<StorageBackendMatchMeta>&) override {
+    ErrorInfo readImpl(const StorageRequest&, const std::shared_ptr<StorageBackendMatchMeta>&) override {
         std::unique_lock<std::mutex> lock(mutex_);
         ++read_calls_;
         cv_.notify_all();
         cv_.wait(lock, [&] { return release_reads_; });
+        return read_result_;
     }
 
-    void writeImpl(const StorageRequest& request) override {
+    ErrorInfo writeImpl(const StorageRequest& request) override {
         std::lock_guard<std::mutex> lock(mutex_);
         ++write_calls_;
         written_keys_ += request.handles.size();
+
+        return ErrorInfo::OkStatus();
     }
 
 private:
@@ -194,6 +202,7 @@ private:
     std::condition_variable cv_;
     bool                    release_matches_{true};
     bool                    release_reads_{true};
+    ErrorInfo               read_result_;
     size_t                  match_calls_{0};
     size_t                  read_calls_{0};
     size_t                  write_calls_{0};
@@ -1108,6 +1117,55 @@ TEST_F(StreamCacheResourceTest, StorageMatchDefersReusePublicationUntilReadCompl
     EXPECT_EQ(resource.kvCache().cacheResource(0).memoryReuseBlockNum(), 0u);
     EXPECT_EQ(resource.kvCache().cacheResource(0).diskReuseBlockNum(), 0u);
     EXPECT_EQ(resource.kvCache().cacheResource(0).storageBackendReuseBlockNum(), 2u);
+}
+
+TEST_F(StreamCacheResourceTest, UnknownStorageReadFreezesTargetsBeforePrefillRecomputeOrCapacityRetry) {
+    for (bool capacity_shortfall : {false, true}) {
+        SCOPED_TRACE(capacity_shortfall);
+        auto backend = prepareStorageBackendResource(false, false, RoleType::PREFILL);
+        backend->blockReads();
+        backend->setReadResult(ErrorInfo(ErrorCode::TRANSFER_COMPLETION_UNKNOWN, "backend payload still writes"));
+        auto& resource = stream_->streamCacheResource();
+        ASSERT_TRUE(resource.initKVBlock().ok());
+        backend->waitForReads(1);
+        const auto context = std::dynamic_pointer_cast<LoadAsyncContext>(resource.allocator_load_context_);
+        ASSERT_NE(context, nullptr);
+        const auto original = resource.kvCache().blocks(0, "default");
+        ASSERT_EQ(original.size(), 3u);
+        const auto  pool = cache_manager_->coordinator_manager_->groupBlockPools().front();
+        BlockIdList held;
+        if (capacity_shortfall) {
+            held = pool->malloc(pool->freeBlocksNum() - 1).value();
+            pool->incRef(held);
+        }
+        backend->releaseReads();
+        context->waitDone();
+        EXPECT_FALSE(context->success());
+        EXPECT_TRUE(pool->isFrozen(original[0]));
+        EXPECT_TRUE(pool->isFrozen(original[1]));
+        EXPECT_FALSE(pool->isFrozen(original[2]));
+        EXPECT_EQ(pool->referencedBlocksNum(BlockTreeRefType::FROZEN), 2u);
+        EXPECT_TRUE(resource.loadCacheDone());
+        EXPECT_EQ(stream_->reuseLength(), 0);
+        EXPECT_EQ(stream_->remoteReuseLength(), 0);
+        EXPECT_FALSE(stream_->hasError());
+        if (capacity_shortfall) {
+            EXPECT_EQ(resource.curBlocksNum(), 0);
+            EXPECT_EQ(resource.mallocFailedTimes(), 1);
+            pool->decRef(held);
+        } else {
+            const auto replacement = resource.kvCache().blocks(0, "default");
+            EXPECT_NE(replacement[0], original[0]);
+            EXPECT_NE(replacement[1], original[1]);
+            EXPECT_EQ(replacement[2], original[2]);
+        }
+        stream_->releaseResource();
+        backend->shutdown();
+        EXPECT_EQ(pool->referencedBlocksNum(BlockTreeRefType::FROZEN), 2u);
+        EXPECT_EQ(pool->refCount(original[0]), 1u);
+        EXPECT_EQ(pool->refCount(original[1]), 1u);
+        EXPECT_EQ(cache_manager_->freeBlocksNum(), 6u);
+    }
 }
 
 TEST_F(StreamCacheResourceTest, StorageMatchDoesNotBlockIndependentAllocation) {

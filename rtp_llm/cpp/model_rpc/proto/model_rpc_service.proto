@@ -873,6 +873,8 @@ message RemoteOperationRequestPB {
 message RemoteOperationResponsePB {
     RemoteBlockMaskPB succeed_block = 1;  // for read/write, TODO
     repeated string actual_uris = 2; // only for write
+    // Execution result after the handler returns; absence does not confirm completion.
+    google.protobuf.BoolValue success = 3;
 }
 
 message FunctionResponsePB {

@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <chrono>
 #include <future>
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <numeric>
@@ -31,6 +32,10 @@ using ::testing::_;
 using ::testing::Invoke;
 using ::testing::Return;
 
+[[maybe_unused]] std::pair<bool, kv_cache_manager::UriStrVec> completedSave(kv_cache_manager::UriStrVec actual_uris) {
+    return {true, std::move(actual_uris)};
+}
+
 // Test-only observation of backend-owned I/O completion; not a write mode or
 // a BlockTree task-pool workflow barrier. The fixtures submit no concurrent I/O.
 [[maybe_unused]] bool waitForBackendOperationsForTest(StorageBackend& backend) {
@@ -42,6 +47,7 @@ struct KVCMBroadcastState {
     std::mutex                            mutex;
     std::vector<RemoteOperationRequestPB> requests;
     bool                                  fail{false};
+    std::function<grpc::Status(const RemoteOperationRequestPB&, FunctionResponsePB&)> handler;
 };
 
 class KVCMBroadcastRpcService final: public RpcService::Service {
@@ -62,6 +68,10 @@ public:
         if (state_->fail) {
             return grpc::Status(grpc::StatusCode::INTERNAL, "injected KVCM broadcast failure");
         }
+        if (state_->handler) {
+            return state_->handler(remote_request, *response);
+        }
+        response->mutable_remote_response()->mutable_success()->set_value(true);
         if (remote_request.op() == REMOTE_OPERATION_WRITE) {
             auto* remote_response = response->mutable_remote_response();
             for (int index = 0; index < remote_request.uris_size(); ++index) {
@@ -353,8 +363,11 @@ environmentBuffers(const BackendEnvironment& environment, int layer, const std::
 [[maybe_unused]] BackendHandle makeBackend(const BackendEnvironment&                 environment,
                                            const ParallelismConfig&                  parallelism_config,
                                            const std::shared_ptr<MockClientWrapper>& client_wrapper,
-                                           std::shared_ptr<BroadcastManager>         broadcast_manager = nullptr) {
+                                           std::shared_ptr<BroadcastManager>         broadcast_manager = nullptr,
+                                           int                                       timeout_ms        = 30000) {
     KVCacheConfig kv_cache_config;
+    kv_cache_config.kvcm_get_broadcast_timeout = timeout_ms;
+    kv_cache_config.kvcm_put_broadcast_timeout = timeout_ms;
     kv_cache_config.kvcm_server_address = "unused-test-address";
     RuntimeConfig runtime_config;
     runtime_config.model_name = "kvcm_test_model";

@@ -2,7 +2,6 @@
 
 #include <algorithm>
 #include <condition_variable>
-#include <exception>
 #include <mutex>
 #include <string>
 #include <utility>
@@ -33,13 +32,7 @@ public:
     }
 
     void waitDone() override {
-        try {
-            broadcast_result_->waitDone();
-        } catch (const std::exception& error) {
-            evaluate(ErrorInfo(ErrorCode::TRANSFER_COMPLETION_UNKNOWN, error.what()));
-        } catch (...) {
-            evaluate(ErrorInfo(ErrorCode::TRANSFER_COMPLETION_UNKNOWN, "unknown multi-rank transfer failure"));
-        }
+        (void)broadcast_result_->waitForCompletion();
         evaluate();
         std::unique_lock<std::mutex> lock(mutex_);
         cv_.wait(lock, [this] { return evaluated_; });
@@ -91,20 +84,17 @@ private:
         broadcast_result_->onDone([self = std::move(self)] { self->evaluate(); });
     }
 
-    void evaluate(ErrorInfo forced_error = ErrorInfo::OkStatus()) {
-        TransferResult result =
-            forced_error.ok() ? TransferResult{} : TransferResult(std::move(forced_error), CacheCopyError::RPC_FAILED);
-        if (result.ok()) {
-            if (!broadcast_result_->done()) {
-                return;
+    void evaluate() {
+        if (!broadcast_result_->done()) {
+            return;
+        }
+        TransferResult result;
+        auto           error = broadcast_result_->errorInfo();
+        if (!error.ok()) {
+            if (StaticConfig::user_ft_core_dump_on_exception) {
+                RTP_LLM_FAIL("multi-rank transfer aborted, at least one worker RPC status is not OK");
             }
-            if (!broadcast_result_->success()) {
-                if (StaticConfig::user_ft_core_dump_on_exception) {
-                    RTP_LLM_FAIL("multi-rank transfer aborted, at least one worker RPC status is not OK");
-                }
-                result = {ErrorInfo(ErrorCode::TRANSFER_COMPLETION_UNKNOWN, "multi-rank transfer RPC failed"),
-                          CacheCopyError::RPC_FAILED};
-            }
+            result = {std::move(error), CacheCopyError::RPC_FAILED};
         }
 
         const auto responses = broadcast_result_->responses();

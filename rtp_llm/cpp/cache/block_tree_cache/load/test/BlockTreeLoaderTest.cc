@@ -47,11 +47,13 @@ protected:
     StorageMatchResult matchImpl(const StorageRequest& request) override {
         return {request.keys->size(), nullptr};
     }
-    void readImpl(const StorageRequest&, const std::shared_ptr<StorageBackendMatchMeta>&) override {
+    ErrorInfo readImpl(const StorageRequest&, const std::shared_ptr<StorageBackendMatchMeta>&) override {
         ++read_calls;
         throw std::runtime_error("injected remote read failure");
     }
-    void writeImpl(const StorageRequest&) override {}
+    ErrorInfo writeImpl(const StorageRequest&) override {
+        return ErrorInfo::OkStatus();
+    }
 };
 
 TEST(BlockTreeLoaderTest, CrcDeviceReuseDoesNotPromoteUnprotectedBackendFailure) {

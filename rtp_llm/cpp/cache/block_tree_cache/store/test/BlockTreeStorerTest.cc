@@ -182,7 +182,6 @@ public:
         return addresses_;
     }
     std::function<void(const StorageRequest&)> inspect_write;
-
     bool submittedOutsideTreeLock() const {
         return submitted_outside_tree_lock_;
     }
@@ -194,8 +193,10 @@ protected:
     StorageMatchResult matchImpl(const StorageRequest& request) override {
         return {request.handles.size(), nullptr};
     }
-    void readImpl(const StorageRequest&, const std::shared_ptr<StorageBackendMatchMeta>&) override {}
-    void writeImpl(const StorageRequest& request) override {
+    ErrorInfo readImpl(const StorageRequest&, const std::shared_ptr<StorageBackendMatchMeta>&) override {
+        return ErrorInfo::OkStatus();
+    }
+    ErrorInfo writeImpl(const StorageRequest& request) override {
         if (inspect_write) {
             inspect_write(request);
         }
@@ -216,6 +217,8 @@ protected:
                 addresses_.push_back(buffers.front().addr);
             }
         }
+
+        return ErrorInfo::OkStatus();
     }
 
 private:
