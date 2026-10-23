@@ -74,10 +74,9 @@ gRPC FlexlbService.Schedule (FlexlbGrpcServer, HTTP 端口 + 100)
     ↓ 校验客户端提供的 block_cache_keys 与 cache_key_block_size
 RouteService.route()
     ├─ scheduler.type=DIRECT：当前调用链执行 DefaultRouter.route()
-    └─ scheduler.type=QUEUE：RequestScheduler.submit()
-           ↓ 全局队列与 Prefill 子队列按入队顺序派发（FIFO），不因优先级插队
-           ├─ ordering.type=FIFO：队列满时新请求直接拒绝
-           └─ ordering.type=PRIORITY：队列满时按优先级抢占已排队的低优先级请求腾出名额
+    └─ scheduler.type=QUEUE：PriorityScheduler.submit()
+           ├─ ordering.type=FIFO：普通路由后提交到 Prefill WorkerBatcher
+           └─ ordering.type=PRIORITY：PriorityAdmissionScheduler 做优先级准入/抢占
     ↓
 DefaultRouter：按非空角色 map 固定顺序路由 PDFUSION → DECODE → PREFILL → VIT，
                首个成功角色的 worker group 约束后续角色的候选（group 亲和链）

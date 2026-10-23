@@ -5,8 +5,7 @@
 `DISPATCHING`，确认并提交路由成功响应时进入 `ACKNOWLEDGED`，随后由 Encoder 的 WorkerStatus 活跃任务、
 完成任务或失活超时推进状态。Frontend 负责把请求发给选中的 Encoder，FlexLB 不做
 Encoder 批量派发，也不调用 Encoder Cancel RPC。Encoder QUEUE 只在模型配置包含 Encoder role 时创建，
-始终按入队顺序派发；`ordering.type=PRIORITY` 只在该队列满、需要准入新请求时按优先级决定能否
-抢占已排队的低优先级请求，不改变未满时的派发顺序。队列用 `dispatcher.maxInflightPerEncoderWorker` 限制每个 Encoder 的
+按照 FIFO 或 PRIORITY 顺序决策，并用 `dispatcher.maxInflightPerEncoderWorker` 限制每个 Encoder 的
 `running + waiting + 本地待观察请求` 数量。WorkerStatus 更新、请求结束和 endpoint 退役会唤醒等待的
 Encoder 请求；队列超时和取消按 Encoder 阶段独立清理。Generation 沿用原调度流程及独立队列。
 
@@ -24,11 +23,8 @@ Encoder 请求；队列超时和取消按 Encoder 阶段独立清理。Generatio
 
 QUEUE 模式下，`ordering.type` 和 `dispatcher.type` 是两个正交维度：
 
-- ordering：`FIFO`（默认）或 `PRIORITY`。两种取值下，全局队列和 Prefill 子队列在
-  未满时都按入队顺序派发，不会因为后到的高优先级请求插到先到的请求前面。
-  `PRIORITY` 只在全局队列或子队列的共享名额已满、需要准入新请求时参与比较：
-  按优先级挑选一个可抢占的低优先级请求腾出名额，腾不出名额时拒绝新请求；
-  `FIFO` 在队列满时一律拒绝新请求。
+- ordering：`FIFO`（默认）或 `PRIORITY`；PRIORITY 由 `PriorityAdmissionScheduler`
+  进行优先级准入、状态快照和可选抢占。
 - dispatcher：`BATCH`（默认）或 `NON_BATCH`；前者通过引擎 enqueue RPC
   发布 batch，后者将路由决策返回调用方，由调用方向引擎发请求。
 
@@ -62,11 +58,9 @@ QUEUE 模式下，`ordering.type` 和 `dispatcher.type` 是两个正交维度：
    入队生效。
    Encoder 使用独立队列。
 3. 调度器在可能向引擎或调用方发布前装配唯一的绝对过期事件。
-4. FIFO 与 PRIORITY ordering 共用同一套 plan/commit 流程：先调用
+4. PRIORITY ordering 进入优先级 plan/commit；FIFO ordering 先调用
    `DefaultRouter`，提交 endpoint 预留后才把请求放入目标 Prefill 的
-   `WorkerBatcher`。PRIORITY ordering 只在提交被目标 endpoint 的容量阻塞时额外
-   触发一次性 priority rescue（`EvictionManager.tryAdmit`），尝试抢占该 endpoint
-   上已选中的低优先级请求，不改变未阻塞时的提交顺序。
+   `WorkerBatcher`。
 
 路由、预留、inflight 注册和发布都属于同一 request generation。失败或
 取消只能通过调度器的单一 reducer 收敛，避免重复回滚和重复完成 future。

@@ -88,7 +88,7 @@ class OrderedRequestQueueTest {
     }
 
     @Test
-    void priorityOrderingIgnoresPriorityAndKeepsEnqueueOrderAfterArbitraryUnlink() {
+    void priorityKeepsFifoInsideBucketAfterArbitraryUnlink() {
         OrderedRequestQueue queue = new OrderedRequestQueue(true);
         GlobalQueueEntry low = entry(10);
         GlobalQueueEntry highFirst = entry(90);
@@ -99,7 +99,7 @@ class OrderedRequestQueueTest {
 
         assertTrue(queue.remove(highFirst));
 
-        assertEquals(List.of(low, highSecond), queue.scanForPlanningCandidates(
+        assertEquals(List.of(highSecond, low), queue.scanForPlanningCandidates(
                 10, 20, candidate -> true));
     }
 
@@ -251,7 +251,7 @@ class OrderedRequestQueueTest {
     }
 
     @Test
-    void newHighPriorityWorkDoesNotJumpAheadOfAnOlderLowerPriorityRequest() {
+    void newHighPriorityWorkInterruptsAnUnfinishedLowPriorityScan() {
         var queue = new OrderedRequestQueue(true);
         var first = entry(50);
         var next = entry(50);
@@ -260,9 +260,9 @@ class OrderedRequestQueueTest {
         assertTrue(queue.scanForPlanningCandidates(1, 1, candidate -> false).isEmpty());
         var high = entry(90);
         queue.add(high);
-        assertEquals(List.of(next), queue.scanForPlanningCandidates(1, 1, candidate -> true));
-        queue.remove(next);
         assertEquals(List.of(high), queue.scanForPlanningCandidates(1, 1, candidate -> true));
+        queue.remove(high);
+        assertEquals(List.of(next), queue.scanForPlanningCandidates(1, 1, candidate -> true));
     }
 
     @Test
@@ -287,7 +287,7 @@ class OrderedRequestQueueTest {
     }
 
     @Test
-    void cleanupWakeDuringCaptureKeepsRequestsInEnqueueOrderWithinTheFrontier() {
+    void cleanupWakeDuringCapturePreservesPriorityWithinTheFrontier() {
         var queue = new OrderedRequestQueue(true);
         var high = entry(90);
         var low = entry(50);
@@ -304,7 +304,7 @@ class OrderedRequestQueueTest {
             }
             return true;
         });
-        assertEquals(List.of(low, high), captured);
+        assertEquals(List.of(high, low), captured);
     }
 
     @Test
@@ -338,9 +338,12 @@ class OrderedRequestQueueTest {
                     assertTrue(checked.get() <= 6);
                     assertEquals(captured.size(), new HashSet<>(captured).size());
                     Comparator<GlobalQueueEntry> order = Comparator.comparingLong(entry -> entry.sequence);
+                    if (priority) {
+                        order = Comparator.<GlobalQueueEntry>comparingInt(entry -> entry.priority)
+                                .reversed().thenComparing(order);
+                    }
                     assertEquals(ready.stream().sorted(order).limit(captured.size()).toList(), captured,
-                            "each frontier must be a prefix of the ready requests in enqueue order, "
-                                    + "regardless of priority");
+                            "each frontier must be a prefix of the ready requests in queue order");
                     for (var entry : captured) {
                         ready.remove(entry);
                         if (random.nextBoolean()) {

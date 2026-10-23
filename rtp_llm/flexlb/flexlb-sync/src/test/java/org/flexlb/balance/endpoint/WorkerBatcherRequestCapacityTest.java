@@ -67,7 +67,7 @@ class WorkerBatcherRequestCapacityTest {
             assertTrue(EndpointTestSupport.offer(fixture.endpoint, second));
             assertEquals(accepted, EndpointTestSupport.offer(fixture.endpoint, incoming));
             assertEquals(2L, fixture.endpoint.observedRequestCount());
-            assertEquals(accepted ? List.of(first, incoming) : List.of(first, second),
+            assertEquals(accepted ? List.of(incoming, first) : List.of(first, second),
                     fixture.endpoint.captureQueueSnapshot().items());
             verify(fixture.runtime.events(), times(accepted ? 1 : 0)).onQueuedItemPreempted(second, incoming);
             assertFalse(fixture.endpoint.removeQueued(accepted ? second : incoming, "non-owner cleanup"));
@@ -421,7 +421,7 @@ class WorkerBatcherRequestCapacityTest {
             assertTrue(EndpointTestSupport.offer(fixture.endpoint, third));
 
             assertTrue(EndpointTestSupport.offer(fixture.endpoint, incoming));
-            assertEquals(List.of(first, second, incoming), fixture.endpoint.captureQueueSnapshot().items());
+            assertEquals(List.of(incoming, first, second), fixture.endpoint.captureQueueSnapshot().items());
             verify(fixture.runtime.events()).onQueuedItemPreempted(third, incoming);
         }
     }

@@ -462,7 +462,7 @@ class TransientCapacityQueueContractTest {
 
     @Test
     @Timeout(20)
-    void prefillQueueUsesArrivalOrderRegardlessOfPriorityWhenNotFull() throws Exception {
+    void prefillQueueUsesPriorityOrderingBeforeArrivalOrder() throws Exception {
         try (Fixture fixture = new Fixture(RoleType.DECODE)) {
             fixture.config.fixedWindowDecision().setMaxRequests(1);
             fixture.config.fixedWindowDecision().setMaxCollectionWaitMs(50L);
@@ -478,7 +478,7 @@ class TransientCapacityQueueContractTest {
 
             assertTrue(fixture.submission.awaitCommands(
                     1, 2, TimeUnit.SECONDS));
-            assertEquals(List.of("261"), fixture.submission.requestIds());
+            assertEquals(List.of("262"), fixture.submission.requestIds());
             assertFalse(fixture.submission.awaitCommands(
                     1, 200, TimeUnit.MILLISECONDS));
         }

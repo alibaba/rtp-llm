@@ -56,18 +56,18 @@ class WorkerBatcherQueueTest {
     }
 
     @Test
-    void batchModeKeepsFifoQueueEvenWithPriorityOrderingConfiguredWithoutAnExtraRequestCountLimit() {
+    void batchModeKeepsPriorityQueueWithoutAnExtraRequestCountLimit() {
         SchedulingTestConfig.useBatchDispatcher(config).setMaxInflightPerPrefillWorker(1);
         WorkerBatcher runtime = runningRuntime();
         ScheduledRequest low = item(901L, 10, Long.MAX_VALUE, 1, 128);
         ScheduledRequest high = item(902L, 90, Long.MAX_VALUE, 2, 128);
         assertEquals(ACCEPTED, runtime.offerWithResult(low));
         assertEquals(ACCEPTED, runtime.offerWithResult(high));
-        assertEquals(List.of(low, high), runtime.captureQueueSnapshot().items());
+        assertEquals(List.of(high, low), runtime.captureQueueSnapshot().items());
     }
 
     @Test
-    void offerOrderIsFifoRegardlessOfConfiguredPriority() {
+    void priorityOrderIsPriorityDescendingThenActualOfferFifo() {
         WorkerBatcher runtime = runningRuntime();
         long now = System.currentTimeMillis();
 
@@ -78,7 +78,7 @@ class WorkerBatcherQueueTest {
 
         WorkerBatcher.QueueSnapshot snapshot =
                 runtime.captureQueueSnapshot();
-        assertEquals(List.of("1", "2", "3", "4"), requestIds(snapshot.items()));
+        assertEquals(List.of("2", "1", "3", "4"), requestIds(snapshot.items()));
         assertEquals(4, snapshot.items().size());
         assertEquals("test-worker", snapshot.endpointId());
     }

@@ -12,15 +12,7 @@ import java.util.TreeSet;
 import java.util.function.Predicate;
 
 /**
- * FIFO scan order for the model queue, with an optional fixed-range PRIORITY
- * index kept only to pick a preemption victim when the caller's capacity
- * check reports the queue full.
- *
- * <p>{@link #scanForPlanningCandidates} always returns pending requests in
- * enqueue order, regardless of priority: a request's priority never changes
- * when it gets planned while the queue has room. Priority only matters to
- * {@link #findQueuedRequestToPreempt}, which the caller invokes solely when
- * admitting a new request would exceed the configured queue capacity.</p>
+ * FIFO or fixed-range PRIORITY index for the model queue.
  *
  * <p>The coordinator lock is the sole synchronization boundary. Entries are
  * intrusive nodes, so completion and cancellation unlink an arbitrary request
@@ -29,10 +21,14 @@ import java.util.function.Predicate;
  */
 final class OrderedRequestQueue {
 
-    private static final int PRIORITY_LEVELS = PriorityNormalizer.MAX_PRIORITY + 1;
+    private static final int PRIORITY_LEVELS =
+            PriorityNormalizer.MAX_PRIORITY + 1;
 
     private static final Comparator<GlobalQueueEntry> SEQUENCE_ORDER =
             Comparator.comparingLong(entry -> entry.sequence);
+    private static final Comparator<GlobalQueueEntry> PRIORITY_ORDER =
+            Comparator.<GlobalQueueEntry>comparingInt(entry -> entry.priority).reversed()
+                    .thenComparing(SEQUENCE_ORDER);
 
     private final boolean priorityOrdering;
     private final Bucket fifo = new Bucket();
@@ -127,51 +123,26 @@ final class OrderedRequestQueue {
         }
         List<GlobalQueueEntry> result = new ArrayList<>(Math.min(candidateLimit, size));
         for (int checked = 0; checked < scanBudget && result.size() < candidateLimit; checked++) {
-            GlobalQueueEntry entry = pollOldestPendingRequest();
+            int priority = priorityOrdering
+                    ? pendingPriorities.previousSetBit(PRIORITY_LEVELS - 1) : -1;
+            Bucket bucket = priorityOrdering
+                    ? (priority < 0 ? null : priorityBuckets[priority]) : fifo;
+            if (bucket == null) {
+                break;
+            }
+            GlobalQueueEntry entry = bucket.pollNextRequest();
             if (entry == null) {
                 break;
+            }
+            if (priorityOrdering && !bucket.hasPendingRequests()) {
+                pendingPriorities.clear(priority);
             }
             if (!result.contains(entry) && eligible.test(entry)) {
                 result.add(entry);
             }
         }
+        result.sort(priorityOrdering ? PRIORITY_ORDER : SEQUENCE_ORDER);
         return result;
-    }
-
-    /**
-     * Remove and return the pending request with the smallest enqueue sequence across
-     * every priority level, so planning always proceeds in enqueue order regardless of
-     * priority. Priority buckets stay in place purely so {@link #findQueuedRequestToPreempt}
-     * can still pick a victim by priority when the queue is full.
-     */
-    private GlobalQueueEntry pollOldestPendingRequest() {
-        if (!priorityOrdering) {
-            return fifo.pollNextRequest();
-        }
-        int oldestPriority = -1;
-        GlobalQueueEntry oldest = null;
-        for (int priority = 0; priority < PRIORITY_LEVELS; priority++) {
-            if (!pendingPriorities.get(priority)) {
-                continue;
-            }
-            GlobalQueueEntry candidate = priorityBuckets[priority].peekNextRequest();
-            if (candidate == null) {
-                continue;
-            }
-            if (oldest == null || candidate.sequence < oldest.sequence) {
-                oldest = candidate;
-                oldestPriority = priority;
-            }
-        }
-        if (oldest == null) {
-            return null;
-        }
-        Bucket bucket = priorityBuckets[oldestPriority];
-        GlobalQueueEntry entry = bucket.pollNextRequest();
-        if (!bucket.hasPendingRequests()) {
-            pendingPriorities.clear(oldestPriority);
-        }
-        return entry;
     }
 
     boolean hasUnscannedRequests() {

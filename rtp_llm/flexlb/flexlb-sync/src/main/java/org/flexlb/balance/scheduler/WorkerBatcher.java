@@ -21,6 +21,7 @@ import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.enums.PrefillQueueEnqueueResult;
 import org.flexlb.util.Logger;
 import org.flexlb.util.PriorityNormalizer;
+import org.flexlb.util.PriorityOrdering;
 
 import java.util.ArrayList;
 import java.util.Collections;
@@ -47,14 +48,11 @@ import java.util.function.Supplier;
  * may independently be delivered through
  * EnqueueBatch or as individual route decisions.
  *
- * <p>The active queue is the single source of truth for queued requests and is
- * always ordered by {@link #FIFO_QUEUE_ORDER} (unique monotonic enqueue
- * sequence): a request's priority never moves it ahead of requests already
- * waiting. Priority only decides which lower-priority request gets evicted
- * when {@link #enqueue} finds the shared engine sub-queue slot full; see
- * {@link PrefillState#oneQueuedPreemptionVictimUnderLock}. A monotonic
- * mutation generation lets snapshots and diagnostics identify queue-state
- * changes.
+ * <p>The active queue is the single source of truth for queued requests.
+ * PRIORITY ordering uses
+ * the explicit priority comparator ({@link #PRIORITY_QUEUE_ORDER}); FIFO uses
+ * a unique monotonic enqueue sequence. A monotonic mutation generation lets
+ * snapshots and diagnostics identify queue-state changes.
  */
 public final class WorkerBatcher {
 
@@ -197,15 +195,27 @@ public final class WorkerBatcher {
         }
     }
 
-    /** Queue dispatch order: unique monotonic enqueue sequence. */
+    /**
+     * PRIORITY queue order: delegates to
+     * {@link PriorityOrdering#STRICT} (priority desc → enqueue-seq asc for
+     * same-priority FIFO) with {@code requestId} as the final deterministic
+     * tie-break.
+     *
+     * <p>{@link #FIFO_QUEUE_ORDER} preserves enqueue order.
+     */
+    public static final Comparator<ScheduledRequest> PRIORITY_QUEUE_ORDER =
+            (left, right) -> PriorityOrdering.compareWithRequestId(
+                    left.priority(), left.enqueueSeq(), left.requestId(),
+                    right.priority(), right.enqueueSeq(), right.requestId());
+
+    /** FIFO order: unique monotonic enqueue sequence. */
     public static final Comparator<ScheduledRequest> FIFO_QUEUE_ORDER =
             Comparator.comparingLong(ScheduledRequest::enqueueSeq);
 
-    /**
-     * Route-projection order mirroring {@link #FIFO_QUEUE_ORDER}, so a
-     * probed request's predicted queue position matches where it would
-     * actually land for cost-based routing.
-     */
+    private static final Comparator<GroupPlanner.Item> PRIORITY_PROJECTION_ORDER =
+            (left, right) -> PriorityOrdering.compareWithRequestId(
+                    left.priority(), left.enqueueSeq(), left.requestId(),
+                    right.priority(), right.enqueueSeq(), right.requestId());
     private static final Comparator<GroupPlanner.Item> FIFO_PROJECTION_ORDER =
             Comparator.comparingLong(GroupPlanner.Item::enqueueSeq)
                     .thenComparing(GroupPlanner.Item::requestId);
@@ -324,13 +334,18 @@ public final class WorkerBatcher {
                 && resolvedDecision.getType()
                 == DecisionPolicyConfig.Type.FIXED_WINDOW
                 ? resolvedDecision : null;
+        boolean priorityOrdering = config.isPriorityOrdering();
         this.endpointEvents = Objects.requireNonNull(
                 endpointEvents, "endpointEvents");
         this.deliveryStrategy = Objects.requireNonNull(
                 deliveryStrategy, "deliveryStrategy");
-        this.projectionOrder = FIFO_PROJECTION_ORDER;
+        Comparator<ScheduledRequest> queueOrder = priorityOrdering
+                ? PRIORITY_QUEUE_ORDER : FIFO_QUEUE_ORDER;
+        this.projectionOrder =
+                priorityOrdering
+                        ? PRIORITY_PROJECTION_ORDER : FIFO_PROJECTION_ORDER;
         this.activeIndex = queueScheduling
-                ? PrefillActiveIndex.ordered(INITIAL_QUEUE_ALLOCATION, FIFO_QUEUE_ORDER)
+                ? PrefillActiveIndex.ordered(INITIAL_QUEUE_ALLOCATION, queueOrder)
                 : PrefillActiveIndex.disabled();
         this.prefillState = new PrefillState(queueLock, activeIndex, capacityAvailableSignal);
         this.normalStopFailure = new CancellationException(
@@ -1899,11 +1914,10 @@ public final class WorkerBatcher {
 
     /**
      * Wait while the exact active head is blocked by the exact rejecting
-     * resource. Offers wake the condition, but since the queue is FIFO a tail
-     * offer never changes the active head, so the predicate stays true and the
-     * wait continues. Capacity is checked after listener installation while
-     * queueLock is held, closing the release-before-await race without
-     * polling.
+     * resource. Offers wake the condition: a new higher-priority head exits the
+     * wait immediately, while a tail offer leaves the predicate true. Capacity
+     * is checked after listener installation while queueLock is held, closing
+     * the release-before-await race without polling.
      */
     private void awaitBlockedHeadCapacity(
             BatcherCycleResult blocked)
