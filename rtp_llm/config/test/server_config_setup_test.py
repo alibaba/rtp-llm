@@ -1075,6 +1075,7 @@ class KevCheckpointStartupTest(TestCase):
             ("", "", ""),
             (self._raw_path, "qwen35_dense", "LANGUAGE_MODEL"),
             (self._prepared_path, "qwen35_dense", None),
+            (self._raw_path, "qwen_2", "LANGUAGE_MODEL"),
         ):
             with self.subTest(
                 tokenizer=tokenizer, model_type=model_type, task=task_type
@@ -1099,7 +1100,7 @@ class KevCheckpointStartupTest(TestCase):
 
         for field, value, message in (
             ("tokenizer_path", "/models/unrelated-tokenizer", "tokenizer"),
-            ("model_type", "qwen_2", "model_type=qwen35_dense"),
+            ("model_type", "bert", "qwen35_dense, qwen_2 or qwen_3"),
             ("task_type", "DENSE_EMBEDDING", "LANGUAGE_MODEL"),
         ):
             with self.subTest(field=field):
