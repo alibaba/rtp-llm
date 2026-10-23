@@ -72,6 +72,7 @@ public final class QueuedRequestScheduler extends AbstractRequestScheduler imple
     private long nextSheddingNanos;
     private long nextRescueRetryNanos;
     private long nextLocalMigrationNanos;
+    private final long hardSheddingWaitMs;
     private final org.flexlb.config.RoutingConfig.HotspotRescueConfig hotspotRescue;
     /** Mutated only by the decision owner; ingress/retry events remain separately classified. */
     private final Map<String, PrefillTrafficTrend> trafficTrends = new LinkedHashMap<>();
@@ -93,6 +94,8 @@ public final class QueuedRequestScheduler extends AbstractRequestScheduler imple
             Collections.newSetFromMap(new IdentityHashMap<>());
     private final ArrayDeque<Plan> completedPlans = new ArrayDeque<>();
     private final ArrayDeque<RequestContext> controlInbox = new ArrayDeque<>();
+    /** STOP has excluded delivery; the decision owner waits out any earlier placement/preparation. */
+    private final Set<RequestRoute> retiredRoutes = Collections.newSetFromMap(new IdentityHashMap<>());
     /** Published by the decision thread; timeout readers never acquire the queue lock. */
     private volatile Map<String, Object> latestQueueWaitSnapshot = Map.of("cause", "waiting for placement");
     private final ExecutorService planners;
@@ -115,6 +118,8 @@ public final class QueuedRequestScheduler extends AbstractRequestScheduler imple
         this.orderedQueue = new OrderedRequestQueue(queueSettings.priorityOrdering());
         this.waitingRequests = new PlacementCapacityWaitQueue(queueSettings.priorityOrdering(), availability);
         this.shedding = config.queueScheduler().getPrefillQueueShedding();
+        this.hardSheddingWaitMs = shedding == null ? config.queueScheduler().getQueueTimeoutMs()
+                : Math.min(shedding.getMaxWaitMs(), config.queueScheduler().getQueueTimeoutMs());
         var balance = config.getRouter().getRoles().getPrefill().getTokenBalance();
         this.hotspotRescue = balance == null ? null : balance.getHotspotRescue();
         this.scanBudgetMultiplier = config.queueScheduler().getScanBudgetMultiplier();
@@ -152,6 +157,69 @@ public final class QueuedRequestScheduler extends AbstractRequestScheduler imple
     @Override
     protected void queueControl(RequestContext exact) {
         postEvent(new QueueEvent(EventKind.CONTROL, null, exact, null));
+    }
+
+    @Override
+    public void onQueueEvent(RequestRoute route, QueueKind kind, RequestRoute incoming, Throwable cause) {
+        if (kind == QueueKind.RETIRED && route.ctx().data().getScheduler() == this && requests.isCurrent(route.ctx())) {
+            lock.lock();
+            try {
+                if (!closed.get()) {
+                    retiredRoutes.add(route);
+                    changed.signal();
+                    return;
+                }
+            } finally { lock.unlock(); }
+        }
+        super.onQueueEvent(route, kind, incoming, cause);
+    }
+
+    private void requeueRetiredRoutes() {
+        List<RequestRoute> ready;
+        lock.lock();
+        try { ready = List.copyOf(retiredRoutes); }
+        finally { lock.unlock(); }
+        for (var route : ready) {
+            if (!withdrawRetiredRoute(route)) { continue; }
+            lock.lock();
+            try { retiredRoutes.remove(route); }
+            finally { lock.unlock(); }
+        }
+    }
+
+    /** Retry only work claimed by STOP, never an Engine delivery or an unrelated generation. */
+    boolean withdrawRetiredRoute(RequestRoute route) {
+        var context = route.ctx();
+        var state = context.snapshot();
+        if (!requests.isCurrent(context) || state.route() != route || state.phase() != Phase.OPEN
+                || state.cancellation() != null || route.future().isDone()) { return true; }
+        if (state.delivery() != null) { return true; }
+        var claim = claimLocalRoute(route);
+        if (claim == null) { return false; }
+        boolean detached = false;
+        try {
+            checkState(route.prefillEp().ownership.updateQueue(
+                    org.flexlb.balance.endpoint.PrefillState.QueueChange.ACK_STOP, route, 0L,
+                    System.currentTimeMillis()) != null, "retired route was not stopped");
+            if (route.decodeEp() != null) {
+                var released = route.decodeEp().release(route.decodeReservation(), DecodeResources.ReleaseReason.NOT_SENT).status();
+                checkState(released == DecodeResources.ReservationReleaseResult.RELEASED
+                        || released == DecodeResources.ReservationReleaseResult.STALE, "retirement retained Decode resources");
+            }
+            context.bindPlacement(claim.token, route, PublicationResult.WITHDRAWN);
+            detached = true;
+        } catch (RuntimeException failure) {
+            claim.terminate(buildErrorResponse(StrategyErrorType.DISPATCH_FAILED, "retired route withdrawal failed"));
+            Logger.error("Retired Prefill route withdrawal failed: request_id={}", route.requestId(), failure);
+        } finally {
+            claim.finish();
+        }
+        state = context.snapshot();
+        if (detached && state.phase() == Phase.OPEN && state.cancellation() == null && !route.future().isDone()
+                && !requeue(route)) {
+            publish(context, buildErrorResponse(StrategyErrorType.DISPATCH_FAILED, "scheduler closed during retirement"), false);
+        }
+        return true;
     }
 
     public void completeWithdrawal(AdmissionHandle withdrawal, boolean committed) {
@@ -197,23 +265,30 @@ public final class QueuedRequestScheduler extends AbstractRequestScheduler imple
     }
 
     public AdmissionHandle claimQueuedRoute(DecodeEndpoint endpoint, DecodeResources.ReservationHandle victim, int incomingPriority) {
+        RequestContext context = requests.findActive(victim.requestId());
+        if (context == null) { return null; }
+        var item = context.snapshot().route();
+        if (item == null || item.priority() >= incomingPriority || item.decodeEp() != endpoint
+                || !Objects.equals(item.decodeReservation(), victim)) { return null; }
+        return claimLocalRoute(item);
+    }
+
+    private AdmissionHandle claimLocalRoute(RequestRoute item) {
         if (!runtime.registerAdmission()) { return null; }
         boolean transferred = false;
         PlacementToken token = null;
-        RequestContext context = requests.findActive(victim.requestId());
+        RequestContext context = item.ctx();
         try {
-            if (context == null || context.data().getScheduler() != this) { return null; }
+            if (context.data().getScheduler() != this) { return null; }
             synchronized (context) {
                 var state = context.snapshot();
-                RequestRoute item = state.route();
                 // Context serializes the exact queue claim with delivery permit transfer.
-                if (item == null || item.priority() >= incomingPriority
-                        || item.decodeEp() != endpoint || !Objects.equals(item.decodeReservation(), victim)
+                if (state.route() != item
                         || !requests.isCurrent(context) || state.phase() != Phase.OPEN
                         || state.cancellation() != null || state.delivery() != null || state.placement() != null
                         || state.preemption() != null || state.engine().decodeAccepted()
                         || context.data().getFuture().isDone() || item.requestExpired(System.currentTimeMillis())
-                        || !endpoint.ownership(victim).withdrawable()) { return null; }
+                        || item.decodeEp() != null && !item.decodeEp().ownership(item.decodeReservation()).withdrawable()) { return null; }
                 var claim = context.beginPlacement(item);
                 if (!(claim instanceof Granted<PlacementToken> granted)) { return null; }
                 token = granted.value();
@@ -441,6 +516,7 @@ public final class QueuedRequestScheduler extends AbstractRequestScheduler imple
                 } finally { lock.unlock(); }
                 runControlActions(controls);
                 if (completed != null) { processCompletedPlan(completed); }
+                requeueRetiredRoutes();
                 migrateHotspotQueues();
                 shedOverloadedQueue();
                 lock.lock();
@@ -472,7 +548,7 @@ public final class QueuedRequestScheduler extends AbstractRequestScheduler imple
                             && (inFlight.size() == plannerCount || closed.get()
                                 || (!orderedQueue.hasUnscannedRequests() && !waitingRequests.hasReadyRequests()))) {
                         try {
-                            if (shedding == null && hotspotRescue == null) { changed.await(); }
+                            if (shedding == null && hotspotRescue == null && retiredRoutes.isEmpty()) { changed.await(); }
                             else { changed.await(100L, TimeUnit.MILLISECONDS); break; }
                         }
                         catch (InterruptedException interruption) {
@@ -592,7 +668,7 @@ public final class QueuedRequestScheduler extends AbstractRequestScheduler imple
             long nowMs = System.currentTimeMillis();
             for (var entry : queuedEntries.values()) {
                 if (!entry.removed && !inFlight.contains(entry) && waitingRequests.isWaiting(entry)
-                        && entry.context.data().getRequest().getSeqLen() <= hotspotRescue.getMaxInputTokens()
+                        && (hotspotRescue.getMaxInputTokens() == 0 || entry.context.data().getRequest().getSeqLen() <= hotspotRescue.getMaxInputTokens())
                         && nowMs - entry.context.snapshot().createdAtMs() >= hotspotRescue.getMinWaitMs()) {
                     waitingRequests.remove(entry);
                     orderedQueue.markRequestReadyForRetry(entry);
@@ -897,14 +973,16 @@ public final class QueuedRequestScheduler extends AbstractRequestScheduler imple
         }
         for (var entry : expired) {
             var trend = trafficTrends.get(trafficPool(entry));
-            if (trend != null) { trend.discard(entry.sheddingEstimate.fleetWorkMs()); }
+            int workers = poolWorkers.getOrDefault(trafficPool(entry), entry.sheddingEstimate.workers());
+            if (trend != null) { trend.discard((double) entry.sheddingEstimate.workMs() / Math.max(1, workers)); }
         }
         Map<String, Object> trends = new LinkedHashMap<>();
         for (var tracked : trafficTrends.entrySet()) {
             var pool = pools.getOrDefault(tracked.getKey(), List.of());
             double work = pool.stream().mapToDouble(c -> c.estimate().fleetWorkMs()).sum();
             var snapshot = tracked.getValue().observe(System.nanoTime() / 1_000_000L, work,
-                    shedding.getExpectedWaitThresholdMs(), shedding.getMaxWaitMs());
+                    shedding.getExpectedWaitThresholdMs(), hardSheddingWaitMs,
+                    pool.stream().mapToLong(c -> c.estimate().workMs()).max().orElse(0));
             trends.put(tracked.getKey() == null ? "<default>" : "group:" + tracked.getKey(), snapshot);
         }
         trafficTrendSnapshot = Collections.unmodifiableMap(trends);
@@ -912,7 +990,8 @@ public final class QueuedRequestScheduler extends AbstractRequestScheduler imple
             var pool = poolEntry.getValue();
             var snapshot = (PrefillTrafficTrend.Snapshot) trends.get(
                     poolEntry.getKey() == null ? "<default>" : "group:" + poolEntry.getKey());
-            victims.addAll(PrefillQueueShedding.adaptiveVictims(pool, shedding, snapshot));
+            victims.addAll(PrefillQueueShedding.adaptiveVictims(pool, shedding, snapshot,
+                    entry -> Math.max(0L, nowMs - entry.context.snapshot().createdAtMs())));
         }
         lock.lock();
         try {
@@ -963,6 +1042,8 @@ public final class QueuedRequestScheduler extends AbstractRequestScheduler imple
             Set<GlobalQueueEntry> all = Collections.newSetFromMap(new IdentityHashMap<>());
             all.addAll(orderedQueue.drain());
             all.addAll(queuedEntries.values());
+            for (var route : retiredRoutes) { all.add(new GlobalQueueEntry(route.ctx(), null)); }
+            retiredRoutes.clear();
             waitingRequests.clear();
             preemptionQuotaWaiters.clear();
             for (QueueEvent event : events) {

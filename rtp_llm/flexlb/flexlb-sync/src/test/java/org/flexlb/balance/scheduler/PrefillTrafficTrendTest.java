@@ -70,6 +70,9 @@ class PrefillTrafficTrendTest {
     }
     @Test void abruptBurstGetsFiniteObservationButUnchangingBacklogCannotKeepIt() {
         var recovery = new PrefillQueueSheddingConfig.RecoveryConfig();
+        recovery.setWindowMs(2_000);
+        recovery.setMaxGraceMs(10_000);
+        recovery.setBurstProbeMs(4_000);
         var trend = new PrefillTrafficTrend(recovery);
         arrivals(trend, 1000, 100000);
         var first = trend.observe(0, 50000, 30000, 60000);

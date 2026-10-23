@@ -70,6 +70,8 @@ message FlexlbScheduleRequestPB {
     FlexlbServerStatusPB selected_vit = 17;
     // Select ViT before media hashes are ready; this query owns no generation lifecycle.
     bool vit_route_only = 18;
+    // Optional conversation affinity. Empty preserves prefix-cache routing.
+    string session_id = 19;
 }
 
 message FlexlbServerStatusPB {

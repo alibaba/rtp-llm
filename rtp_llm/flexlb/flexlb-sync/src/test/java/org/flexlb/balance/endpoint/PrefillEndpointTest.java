@@ -947,6 +947,33 @@ class PrefillEndpointTest {
     }
 
     @Test
+    void nonBatchLearnsOnlyOnceFromEachAuthoritativeSuccessfulCompletion() {
+        FlexlbConfig config = SchedulingTestConfig.newConfig();
+        config.setDispatcher(ConfigTestSupport.nonBatch());
+        config.getRouter().getRoles().getPrefill().getExecutionTimeEstimator()
+                .setType(RoutingConfig.EstimatorType.LEARNING);
+        PrefillEndpoint target = routeEndpoint(config, "127.0.0.8");
+        try {
+            var initial = target.predictor.evaluator();
+            for (long id = 1; id <= 7; id++) {
+                RequestRoute route = createRequestRoute(target, config, id, 4_096L, 3_072L);
+                var reservation = EndpointTestSupport.reserveUnqueued(target, route, 100L);
+                try (var preparation = EndpointTestSupport.preparation(reservation);
+                     var handoff = target.commit(new PrefillState.CommitPlan(PrefillState.CommitKind.DIRECT,
+                             List.of(route), List.of(reservation), null, new long[0], null, System.currentTimeMillis()))) { }
+                if (id == 6) { target.release(null, route); }
+                else if (id == 4) { reportRejectedBatchMember(target, -1, id); }
+                else { reportSuccessfulBatchMember(target, -1, id, id == 5 ? 0 : 14); }
+                // Replayed reports and non-success/zero-duration samples must not fill the learner's batch of four.
+                for (int repeat = 0; repeat < 5; repeat++) { reportSuccessfulBatchMember(target, -1, id, 14); }
+                if (id < 7) { assertSame(initial, target.predictor.evaluator()); }
+            }
+            assertNotSame(initial, target.predictor.evaluator());
+            assertEquals(0, target.ownership.progress().outstandingRequests());
+        } finally { target.close(); }
+    }
+
+    @Test
     void authoritativeWorkerTerminalAppliesLearningImmediately() {
         PrefillEndpoint learningEndpoint = createLearningEndpoint();
         try {

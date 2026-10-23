@@ -268,6 +268,8 @@ class OpenaiEndpoint(object):
             config.response_format = ResponseFormat(type="json_object")
         if request.trace_id != None:
             config.trace_id = request.trace_id
+        if request.session_id is not None:
+            config.session_id = request.session_id
         if request.stream == True:
             config.is_streaming = True
         if request.temperature != None:

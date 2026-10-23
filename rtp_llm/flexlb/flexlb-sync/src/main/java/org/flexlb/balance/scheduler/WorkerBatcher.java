@@ -348,7 +348,10 @@ public final class WorkerBatcher {
                 }
                 cleanupFailure = Failures.run(cleanupFailure, capacityAvailableSignal);
                 try {
-                    item.ctx().data().getScheduler().onQueueEvent(item, AbstractRequestScheduler.QueueKind.REJECTED, null, terminalFailure);
+                    item.ctx().data().getScheduler().onQueueEvent(item,
+                            terminalFailure == normalStopFailure ? AbstractRequestScheduler.QueueKind.RETIRED
+                                    : AbstractRequestScheduler.QueueKind.REJECTED,
+                            null, terminalFailure);
                     boolean acknowledged = prefillState.updateQueue(PrefillState.QueueChange.ACK_STOP, item, 0L, System.currentTimeMillis()) != null;
                     if (!acknowledged) {
                         cleanupFailure = Failures.append(cleanupFailure, stopAcknowledgementFailure);

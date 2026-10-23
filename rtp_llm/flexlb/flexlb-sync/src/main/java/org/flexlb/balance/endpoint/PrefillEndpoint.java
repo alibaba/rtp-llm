@@ -81,6 +81,20 @@ public class PrefillEndpoint extends WorkerEndpoint {
                     .thenComparingLong(GroupPlanner.Item::requestId);
 
     public final PrefillState ownership;
+    private final long configuredPendingTokens;
+    public final long serviceWindowMs;
+    private volatile long adaptivePendingTokens = 1;
+    private volatile long budgetRefreshMs = Long.MIN_VALUE;
+
+    public long pendingComputeLimit() {
+        if (configuredPendingTokens > 0) { return configuredPendingTokens; }
+        long now = System.nanoTime() / 1_000_000L;
+        if (budgetRefreshMs == Long.MIN_VALUE || now - budgetRefreshMs >= 1_000) {
+            adaptivePendingTokens = org.flexlb.balance.strategy.PrefillAdaptiveBudget.tokensFor(predictor.evaluator(), serviceWindowMs);
+            budgetRefreshMs = now;
+        }
+        return adaptivePendingTokens;
+    }
 
     private final DeliveryMetricsReporter reporter;
 
@@ -106,7 +120,12 @@ public class PrefillEndpoint extends WorkerEndpoint {
         this.projectionOrder = config.isPriorityOrdering() ? PRIORITY_PROJECTION_ORDER : FIFO_PROJECTION_ORDER;
         this.ownership = new PrefillState(new ReentrantLock(), PrefillActiveIndex.disabled(), System::currentTimeMillis);
         var balance = config.getRouter().getRoles().getPrefill().getTokenBalance();
-        if (balance != null) { ownership.enableTokenWorkload(balance.getWindowMs(), balance.getMaxPendingComputeTokens()); }
+        serviceWindowMs = org.flexlb.balance.strategy.PrefillAdaptiveBudget.serviceWindowMs(config);
+        configuredPendingTokens = balance == null ? 0 : balance.getMaxPendingComputeTokens();
+        if (balance != null) {
+            ownership.enableTokenWorkload(balance.getWindowMs() > 0 ? balance.getWindowMs() : serviceWindowMs * 5,
+                    this::pendingComputeLimit);
+        }
 
     }
 

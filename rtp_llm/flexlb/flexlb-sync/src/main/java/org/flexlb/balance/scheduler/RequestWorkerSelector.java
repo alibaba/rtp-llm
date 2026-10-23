@@ -116,7 +116,7 @@ public class RequestWorkerSelector {
         String group = selectedVit == null ? policyGroup : selectedVit.getGroup();
         for (RoleType role : requiredRoles) {
             if (role.supportsPrefill()) {
-                return prefillSelector.estimateQueuedWork(context.data().getRequest(), role, group);
+                return prefillSelector.estimateQueuedWork(context.data().getRequest(), role, group, context.prefillMigrationSource());
             }
         }
         return null;

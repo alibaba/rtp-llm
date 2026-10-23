@@ -502,7 +502,8 @@ public final class EndpointTestSupport {
         TestRequestRuntime() {
             org.flexlb.balance.scheduler.DeliveryTestSupport.stubRouteDelivery(requests, this::onCompleted);
             org.mockito.Mockito.doAnswer(invocation -> {
-                if (invocation.getArgument(1) == AbstractRequestScheduler.QueueKind.REJECTED) {
+                if (invocation.getArgument(1) == AbstractRequestScheduler.QueueKind.REJECTED
+                        || invocation.getArgument(1) == AbstractRequestScheduler.QueueKind.RETIRED) {
                     onQueueOfferFailure(invocation.getArgument(0), invocation.getArgument(3));
                 }
                 return null;

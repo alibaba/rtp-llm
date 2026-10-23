@@ -118,6 +118,7 @@ def _reset_sanitize_warn_state():
 
 
 class GenerateConfig(BaseModel):
+    session_id: Optional[str] = None
     # --- private attrs（不参与序列化/schema，生命周期与实例绑定） ---
     _diverge_depth_warned: bool = PrivateAttr(default=False)
     _ban_auto_downgraded: bool = PrivateAttr(default=False)

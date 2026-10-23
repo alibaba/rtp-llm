@@ -2,6 +2,7 @@ package org.flexlb.balance.endpoint;
 
 import org.flexlb.balance.projection.WorkSnapshot.Phase;
 import org.flexlb.balance.scheduler.RequestRoute;
+import org.flexlb.balance.prediction.PrefillBatchFeatures;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.enums.PriorityPreemptionProgress;
@@ -47,7 +48,17 @@ public final class PrefillObservation {
         boolean released = !reduction.terminals.isEmpty() || reduction.unknownRequests < state.unknownEngineRequestCount;
         reduction.nowMs = full ? nowMs : state.clock.getAsLong();
         Map<Long, List<RequestRoute>> inputs = reduction.batchOutcomes.isEmpty() ? Map.of() : new HashMap<>();
-        List<BatchCompletion> completions = reduction.batchOutcomes.isEmpty() ? List.of() : new ArrayList<>();
+        List<BatchCompletion> completions = new ArrayList<>();
+        // NON_BATCH owns singleton decisions too. Learn only from authoritative successful terminals;
+        // settlement removes their exact owner, so duplicate status reports cannot train twice.
+        for (var terminal : reduction.terminals.values()) {
+            if (terminal.owner().batch == null && terminal.errorCode() == 0L && terminal.executionTimeMs() > 0L) {
+                var features = new PrefillBatchFeatures(List.of(new PrefillBatchFeatures.Item(
+                        terminal.inputTokens(), terminal.inputTokens() - terminal.computeTokens())));
+                completions.add(new BatchCompletion(-1L, features, terminal.owner().route.prefillWorkMs(),
+                        terminal.executionTimeMs(), true, true));
+            }
+        }
         for (var change : reduction.batchOutcomes.entrySet()) {
             var batch = change.getKey(); var outcome = change.getValue();
             List<RequestRoute> survivors = new ArrayList<>(batch.members.size());
@@ -81,10 +92,11 @@ public final class PrefillObservation {
             long input = task.inputLength() > 0L ? task.inputLength() : Math.max(0L, entry.route.seqLen());
             long hit = task.inputLength() > 0L ? task.prefixLength() : entry.route.hitCache();
             long compute = input - Math.clamp(hit, 0L, input);
-            var next = new TerminalObservation(entry, task.executionTimeMs(), task.errorCode(), compute, task.priorityPreemptionProgress());
+            var next = new TerminalObservation(entry, task.executionTimeMs(), task.errorCode(), compute, input, task.priorityPreemptionProgress());
             facts.merge(task.requestId(), next, (first, other) -> new TerminalObservation(first.owner(),
                     Math.max(first.executionTimeMs(), other.executionTimeMs()), first.errorCode() != 0L ? first.errorCode() : other.errorCode(),
-                    Math.max(first.computeTokens(), other.computeTokens()), PriorityPreemptionProgress.merge(first.preemptionProgress(), other.preemptionProgress())));
+                    Math.max(first.computeTokens(), other.computeTokens()), Math.max(first.inputTokens(), other.inputTokens()),
+                    PriorityPreemptionProgress.merge(first.preemptionProgress(), other.preemptionProgress())));
         }
         return facts;
     }

@@ -47,10 +47,30 @@ public final class PrefillQueueShedding {
     /** Same bounded recovery decision for production and deterministic traffic experiments. */
     public static <T> List<T> adaptiveVictims(List<Candidate<T>> candidates,
             org.flexlb.config.PrefillQueueSheddingConfig config, PrefillTrafficTrend.Snapshot trend) {
+        return adaptiveVictims(candidates, config, trend, ignored -> Long.MAX_VALUE);
+    }
+
+    /** Automatic soft shedding gives a young request its soft wait budget. Hard overload is immediate.
+     * Filter the original victims rather than evicting higher-priority/cache-beneficial work instead.
+     * Age is the original request age, so retries, migration and repeated bursts cannot renew it.
+     */
+    public static <T> List<T> adaptiveVictims(List<Candidate<T>> candidates,
+            org.flexlb.config.PrefillQueueSheddingConfig config, PrefillTrafficTrend.Snapshot trend,
+            java.util.function.ToLongFunction<T> ageMs) {
+        var selected = selectAdaptiveVictims(candidates, config, trend);
+        if (config.getRecovery() == null || config.getRecovery().getWindowMs() != 0
+                || candidates.stream().mapToDouble(c -> c.estimate().fleetWorkMs()).sum() >= config.getMaxWaitMs()) {
+            return selected;
+        }
+        return selected.stream().filter(value -> ageMs.applyAsLong(value) >= config.getExpectedWaitThresholdMs()).toList();
+    }
+
+    private static <T> List<T> selectAdaptiveVictims(List<Candidate<T>> candidates,
+            org.flexlb.config.PrefillQueueSheddingConfig config, PrefillTrafficTrend.Snapshot trend) {
         if (config.getRecovery() == null || trend == null || !trend.grace()) {
             return victims(candidates, config.getExpectedWaitThresholdMs());
         }
-        if (trend.state() == PrefillTrafficTrend.State.BURST_PROBE) {
+        if (trend.state() == PrefillTrafficTrend.State.BURST_PROBE || config.getRecovery().getWindowMs() == 0) {
             return victims(candidates, config.getMaxWaitMs());
         }
         long threshold = (long) Math.min(config.getMaxWaitMs(),

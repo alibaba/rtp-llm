@@ -1270,6 +1270,7 @@ class FlexlbServiceImplTest {
         FlexlbScheduleProtocol.FlexlbScheduleRequestPB request = FlexlbScheduleProtocol.FlexlbScheduleRequestPB.newBuilder()
                 .setRequestId(99999L)
                 .setSeqLen(2048)
+                .setSessionId("conversation-42")
                 .setCacheKeyBlockSize(1024L)
                 .addBlockCacheKeys(100L)
                 .addBlockCacheKeys(200L)
@@ -1283,6 +1284,7 @@ class FlexlbServiceImplTest {
         // Then: verify cacheKeyBlockSize is propagated to Request
         RequestContext capturedCtx = ctxCaptor.getValue();
         Request capturedRequest = capturedCtx.data().getRequest();
+        assertEquals("conversation-42", capturedRequest.getSessionId());
         assertEquals(1024L, capturedRequest.getCacheKeyBlockSize());
         assertEquals(2, capturedRequest.getBlockCacheKeys().size());
         assertEquals(100L, capturedRequest.getBlockCacheKeys().get(0));

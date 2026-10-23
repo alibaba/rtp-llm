@@ -127,6 +127,20 @@ class _FakeInputPB:
 
 
 class MasterClientBatchPayloadTest(unittest.IsolatedAsyncioTestCase):
+    async def test_session_id_is_forwarded_and_missing_session_stays_empty(self):
+        for session in (None, "", "conversation-42"):
+            client = _CaptureMasterClient()
+            query = _FakeInput()
+            query.generate_config.session_id = session
+            await client.get_backend_role_addrs(
+                block_cache_keys=[1],
+                cache_key_block_size=1024,
+                input=query,
+                request_id=42,
+                input_pb=_FakeInputPB(),
+            )
+            self.assertEqual(client.calls[0]["request_pb"].session_id, session or "")
+
     def test_python_reason_enum_matches_schedule_wire_values(self):
         self.assertEqual(
             int(AdmissionRejectReason.UNSPECIFIED),

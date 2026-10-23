@@ -79,6 +79,30 @@ class PrefillStateSnapshotTest {
         assertEquals(0, state.tokenWorkload(0).score());
     }
 
+    @ParameterizedTest
+    @ValueSource(booleans = {true, false})
+    void nonBatchLearningUsesReportedInputAndCacheWithLegacyFallback(boolean reportedInput) {
+        RequestRoute route = item(77);
+        when(route.hitCache()).thenReturn(90L);
+        when(route.prefillWorkMs()).thenReturn(123L);
+        var lease = state.reserveUnqueuedRoute(route, 123L, 0L).reservation();
+        try (var preparation = EndpointTestSupport.preparation(lease);
+             var handoff = EndpointTestSupport.commitRoutes(state, List.of(route), List.of(lease), generation.tryAcquireHandoff())) { }
+        var terminal = task(77, null, 0L, 40L);
+        terminal.setBatchId(-1L);
+        terminal.setInputLength(reportedInput ? 200L : 0L);
+        terminal.setPrefixLength(25L);
+        var completed = reconcile(Map.of("77", terminal), Map.of(), ignored -> 0L).batchCompletions();
+        assertEquals(1, completed.size());
+        var sample = completed.getFirst();
+        assertTrue(sample.learningEligible());
+        assertEquals(40, sample.actualWorkMs());
+        assertEquals(123, sample.predictedWorkMs());
+        assertEquals(reportedInput ? 200 : 100, sample.originalFeatures().items().getFirst().seqLen());
+        assertEquals(reportedInput ? 25 : 90, sample.originalFeatures().items().getFirst().hitCache());
+        assertTrue(reconcile(Map.of("77", terminal), Map.of(), ignored -> 0L).batchCompletions().isEmpty());
+    }
+
     @Test
     void stableAdmissionSummaryIsReusedOnlyForTheExactInputs() {
         var first = state.admissionSummary(50, 1L);

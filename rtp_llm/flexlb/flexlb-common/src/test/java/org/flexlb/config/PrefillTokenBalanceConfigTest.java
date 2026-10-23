@@ -9,8 +9,10 @@ class PrefillTokenBalanceConfigTest {
     }
     @Test void optInDefaultsAndValidation() {
         assertNull(ConfigTestFixtures.parse("{}").getRouter().getRoles().getPrefill().getTokenBalance());
-        assertEquals(10000, parse("{}").getRouter().getRoles().getPrefill().getTokenBalance().getWindowMs());
-        for (String value : new String[]{"{\"windowMs\":0}", "{\"maxPendingComputeTokens\":0}",
+        assertEquals(0, parse("{}").getRouter().getRoles().getPrefill().getTokenBalance().getWindowMs());
+        assertEquals(RoutingConfig.EstimatorType.LEARNING,
+                parse("{}").getRouter().getRoles().getPrefill().getExecutionTimeEstimator().getType());
+        for (String value : new String[]{"{\"windowMs\":-1}", "{\"maxPendingComputeTokens\":-1}",
                 "{\"minPrefixHitPercent\":101}", "{\"minPrefixHitPercent\":-1}"}) {
             assertThrows(RuntimeException.class, () -> parse(value));
         }
@@ -20,10 +22,10 @@ class PrefillTokenBalanceConfigTest {
     }
     @Test void validatesBoundedHotspotRescue() {
         var rescue = parse("{\"hotspotRescue\":{}}").getRouter().getRoles().getPrefill().getTokenBalance().getHotspotRescue();
-        assertEquals(5000, rescue.getMinWaitMs());
-        for (String value : new String[]{"{\"minWaitMs\":0}", "{\"maxInputTokens\":0}",
+        assertEquals(0, rescue.getMinWaitMs());
+        for (String value : new String[]{"{\"minWaitMs\":-1}", "{\"maxInputTokens\":-1}",
                 "{\"maxIdlePendingTokens\":-1}", "{\"maxIdlePendingTokens\":140000}"}) {
-            assertThrows(RuntimeException.class, () -> parse("{\"hotspotRescue\":" + value + "}"));
+            assertThrows(RuntimeException.class, () -> parse("{\"maxPendingComputeTokens\":140000,\"hotspotRescue\":" + value + "}"));
         }
     }
 

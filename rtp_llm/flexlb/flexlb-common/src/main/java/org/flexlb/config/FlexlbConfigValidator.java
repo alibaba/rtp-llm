@@ -157,13 +157,13 @@ final class FlexlbConfigValidator {
                     "scheduler.prefillQueueShedding.maxWaitMs", "must be at least expectedWaitThresholdMs");
             var recovery = shedding.getRecovery();
             if (recovery != null) {
-                positive(recovery.getWindowMs(), "scheduler.prefillQueueShedding.recovery.windowMs");
+                nonNegative(recovery.getWindowMs(), "scheduler.prefillQueueShedding.recovery.windowMs");
                 require(recovery.getWindowMs() <= Long.MAX_VALUE / 4,
                         "scheduler.prefillQueueShedding.recovery.windowMs", "is too large");
-                positive(recovery.getBurstProbeMs(), "scheduler.prefillQueueShedding.recovery.burstProbeMs");
+                nonNegative(recovery.getBurstProbeMs(), "scheduler.prefillQueueShedding.recovery.burstProbeMs");
                 require(recovery.getBurstProbeMs() <= shedding.getMaxWaitMs(),
                         "scheduler.prefillQueueShedding.recovery.burstProbeMs", "must not exceed maxWaitMs");
-                positive(recovery.getMaxGraceMs(), "scheduler.prefillQueueShedding.recovery.maxGraceMs");
+                nonNegative(recovery.getMaxGraceMs(), "scheduler.prefillQueueShedding.recovery.maxGraceMs");
                 require(recovery.getMaxGraceMs() <= shedding.getMaxWaitMs(),
                         "scheduler.prefillQueueShedding.recovery.maxGraceMs", "must not exceed maxWaitMs");
                 range(recovery.getWaitMultiplier(), 1.0, 10.0, "scheduler.prefillQueueShedding.recovery.waitMultiplier");
@@ -243,15 +243,15 @@ final class FlexlbConfigValidator {
         if (balance != null) {
             range(balance.getMinPrefixHitPercent(), 0, RoutingConfig.PERCENTAGE_SCALE,
                     "router.roles.prefill.tokenBalance.minPrefixHitPercent");
-            positive(balance.getWindowMs(), "router.roles.prefill.tokenBalance.windowMs");
-            positive(balance.getMaxPendingComputeTokens(),
+            nonNegative(balance.getWindowMs(), "router.roles.prefill.tokenBalance.windowMs");
+            nonNegative(balance.getMaxPendingComputeTokens(),
                     "router.roles.prefill.tokenBalance.maxPendingComputeTokens");
             var rescue = balance.getHotspotRescue();
             if (rescue != null) {
-                positive(rescue.getMinWaitMs(), "router.roles.prefill.tokenBalance.hotspotRescue.minWaitMs");
-                positive(rescue.getMaxInputTokens(), "router.roles.prefill.tokenBalance.hotspotRescue.maxInputTokens");
+                nonNegative(rescue.getMinWaitMs(), "router.roles.prefill.tokenBalance.hotspotRescue.minWaitMs");
+                nonNegative(rescue.getMaxInputTokens(), "router.roles.prefill.tokenBalance.hotspotRescue.maxInputTokens");
                 nonNegative(rescue.getMaxIdlePendingTokens(), "router.roles.prefill.tokenBalance.hotspotRescue.maxIdlePendingTokens");
-                require(rescue.getMaxIdlePendingTokens() < balance.getMaxPendingComputeTokens(),
+                require(balance.getMaxPendingComputeTokens() == 0 || rescue.getMaxIdlePendingTokens() < balance.getMaxPendingComputeTokens(),
                         "router.roles.prefill.tokenBalance.hotspotRescue.maxIdlePendingTokens", "must be below pending waterline");
             }
             require(prefill.getCacheAffinity() == null, "router.roles.prefill",

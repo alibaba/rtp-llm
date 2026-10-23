@@ -413,7 +413,7 @@ class WorkerBatcherQueueTest {
             }
             return null;
         }).when(events).onQueueEvent(org.mockito.ArgumentMatchers.any(),
-                org.mockito.ArgumentMatchers.eq(AbstractRequestScheduler.QueueKind.REJECTED),
+                org.mockito.ArgumentMatchers.eq(AbstractRequestScheduler.QueueKind.RETIRED),
                 org.mockito.ArgumentMatchers.isNull(), org.mockito.ArgumentMatchers.any());
         runtime.start();
         assertTrue(runtime.offer(queued));

@@ -59,6 +59,7 @@ public class CostBasedPrefillStrategy {
     private final String deliveryMode;
     private final RoutingConfig.TokenBalanceConfig tokenBalance;
     private final Object tokenSelectionLock = new Object();
+    private final SessionWorkerAffinity sessions = new SessionWorkerAffinity();
 
     public CostBasedPrefillStrategy(EndpointRegistry endpointRegistry,
                                     CacheAwareService cacheAwareService,
@@ -82,6 +83,11 @@ public class CostBasedPrefillStrategy {
     /** Advisory overload estimate includes busy workers, before admission-capacity filtering. */
     public PrefillQueueShedding.Estimate estimateQueuedWork(
             Request request, RoleType role, String group) {
+        return estimateQueuedWork(request, role, group, null);
+    }
+
+    public PrefillQueueShedding.Estimate estimateQueuedWork(
+            Request request, RoleType role, String group, PrefillEndpoint migrationSource) {
         var fleet = endpointRegistry.prefillRoutingSnapshot(role).stream()
                 .filter(entry -> group == null || group.equals(entry.endpoint().getStatus().topologySnapshot().group()))
                 .toList();
@@ -90,8 +96,12 @@ public class CostBasedPrefillStrategy {
                 fleet.stream().map(EndpointRegistry.PrefillRoutingEntry::address).toList());
         long bestWork = Long.MAX_VALUE;
         long bestHit = -1L;
+        var previous = tokenBalance == null || migrationSource != null ? null
+                : sessions.get(SessionWorkerAffinity.key(request, role, group));
+        boolean sticky = previous != null && fleet.stream().anyMatch(entry -> entry.endpoint() == previous);
         for (var entry : fleet) {
             var endpoint = entry.endpoint();
+            if (endpoint == migrationSource || sticky && endpoint != previous) { continue; }
             if (endpoint.predictor == null) { return null; }
             long hit = calculateCacheMatch(endpoint, entry.address(), matches, request).effectiveHitTokens();
             long work = PrefillPredictionBoundary.predictSingleRequestMs(
@@ -101,6 +111,7 @@ public class CostBasedPrefillStrategy {
                 bestWork = work;
             }
         }
+        if (bestHit < 0) { return null; }
         return new PrefillQueueShedding.Estimate(
                 request.getSeqLen(), bestHit, bestWork, fleet.size());
     }
@@ -128,6 +139,16 @@ public class CostBasedPrefillStrategy {
         long seqLen = request.getSeqLen();
 
         EndpointDiscovery discovery = discoverAvailableEndpoints(request, metadata, roleType, group);
+        var sessionKey = tokenBalance == null ? null : SessionWorkerAffinity.key(request, roleType, group);
+        // A withdrawn request must exclude its own source, even if another turn updated the session hint.
+        var previous = route.ctx().prefillMigrationSource() == null ? sessions.get(sessionKey) : null;
+        PrefillEndpoint sticky = null;
+        if (previous != null) {
+            for (var entry : discovery.candidates()) {
+                if (entry.endpoint() == previous) { sticky = previous; break; }
+            }
+            if (sticky == null) { sessions.forget(sessionKey, previous); }
+        }
         if (discovery.candidates().isEmpty()) {
             Logger.debug("Prefill select failed: no admission capacity, request_id={}",
                     requestId);
@@ -171,21 +192,25 @@ public class CostBasedPrefillStrategy {
             var escape = tokenBalance.getHotspotRescue();
             long createdAt = route.ctx().snapshot().createdAtMs();
             boolean agedShort = escape != null && createdAt > 0L
-                    && System.currentTimeMillis() - createdAt >= escape.getMinWaitMs()
-                    && seqLen <= escape.getMaxInputTokens();
+                    && System.currentTimeMillis() - createdAt >= (escape.getMinWaitMs() > 0 ? escape.getMinWaitMs()
+                            : discovery.candidates().stream().mapToLong(e -> e.endpoint().serviceWindowMs * 2).min().orElse(4_000))
+                    && (escape.getMaxInputTokens() == 0 || seqLen <= escape.getMaxInputTokens());
             if (agedShort && fleetMaxHit > 0L) {
                 rescue = true;
                 for (var entry : discovery.candidates()) {
                     long hit = calculateCacheMatch(entry.endpoint(), entry.address(), cacheMatchResults, request).effectiveHitTokens();
-                    if (hit == fleetMaxHit && entry.endpoint().ownership.tokenWorkload(System.nanoTime() / 1_000_000L)
-                            .pendingTokens() < tokenBalance.getMaxPendingComputeTokens()) {
+                    if (hit == fleetMaxHit && hasTokenCapacity(entry.endpoint())) {
                         rescue = false;
                         break;
                     }
                 }
             }
             rescue |= escape != null && route.ctx().prefillMigrationSource() != null;
-            if (!rescue && PrefillTokenBalance.cacheFirst(fleetMaxHit, seqLen, tokenBalance.getMinPrefixHitPercent())
+            if (sticky != null && route.ctx().prefillMigrationSource() == null) {
+                // A session stays on its owner until the owner is full; a lower hit count is not a reason to move.
+                rescue = agedShort && !hasTokenCapacity(sticky);
+            }
+            if (sticky == null && !rescue && PrefillTokenBalance.cacheFirst(fleetMaxHit, seqLen, tokenBalance.getMinPrefixHitPercent())
                     && survivors.maximumCacheHit < fleetMaxHit) {
                 return PlacementResult.blocked(roleType);
             }
@@ -198,8 +223,17 @@ public class CostBasedPrefillStrategy {
             // Parallel planners must see earlier choices before asynchronous admission commits.
             // Only scoring + soft reservation are serialized; cache lookup/projection stay parallel.
             synchronized (tokenSelectionLock) {
-                selectedIndex = rescue ? selectRescueCandidate(survivors, roleType, group, seqLen, route.ctx().prefillMigrationSource())
-                        : selectBestCandidate(survivors, survivors.minimumTtftRank, roleType, group, seqLen);
+                selectedIndex = -1;
+                if (rescue) {
+                    selectedIndex = selectRescueCandidate(survivors, roleType, group, seqLen,
+                            sticky != null ? sticky : route.ctx().prefillMigrationSource());
+                } else if (sticky != null) {
+                    for (int i = 0; i < survivors.size(); i++) {
+                        if (survivors.endpoint(i) == sticky && hasTokenCapacity(sticky)) { selectedIndex = i; break; }
+                    }
+                } else {
+                    selectedIndex = selectBestCandidate(survivors, survivors.minimumTtftRank, roleType, group, seqLen);
+                }
                 if (selectedIndex >= 0) {
                     route.reserveTokenPlan(survivors.endpoint(selectedIndex).ownership.planTokenWork(
                             Math.max(0L, seqLen - survivors.cacheHit(selectedIndex))));
@@ -216,6 +250,7 @@ public class CostBasedPrefillStrategy {
         }
 
         PrefillEndpoint best = survivors.endpoint(selectedIndex);
+        if (sessionKey != null) { route.onPrefillCommit(() -> sessions.remember(sessionKey, best)); }
         long bestCacheHit = survivors.cacheHit(selectedIndex);
         long selectedPrefillMs = survivors.prefillMs(selectedIndex);
         WorkerEndpoint.GenerationPin selectedPin =
@@ -406,6 +441,12 @@ public class CostBasedPrefillStrategy {
                 .count();
     }
 
+    private boolean hasTokenCapacity(PrefillEndpoint endpoint) {
+        var work = endpoint.ownership.tokenWorkload(System.nanoTime() / 1_000_000L);
+        return work.pendingTokens() + (double) work.plannedTokens() < endpoint.pendingComputeLimit()
+                && (endpoint.requestLimit == 0 || endpoint.ownership.progress().outstandingRequests() < endpoint.requestLimit);
+    }
+
     /** Advisory capture only. Context/delivery ownership is rechecked atomically before removal. */
     public java.util.List<RequestRoute> hotspotMigrationCandidates() {
         if (tokenBalance == null || tokenBalance.getHotspotRescue() == null) { return java.util.List.of(); }
@@ -415,7 +456,7 @@ public class CostBasedPrefillStrategy {
         var idleGroups = new java.util.HashSet<String>();
         for (var entry : fleet) {
             var work = entry.endpoint().ownership.tokenWorkload(nowMs);
-            if (work.pendingTokens() + work.plannedTokens() <= rescue.getMaxIdlePendingTokens()) {
+            if (idleForRescue(entry.endpoint(), work)) {
                 idleGroups.add(entry.endpoint().getStatus().topologySnapshot().group());
             }
         }
@@ -423,15 +464,29 @@ public class CostBasedPrefillStrategy {
         for (var entry : fleet) {
             var endpoint = entry.endpoint();
             if (!idleGroups.contains(endpoint.getStatus().topologySnapshot().group())
-                    || endpoint.ownership.tokenWorkload(nowMs).pendingTokens() < tokenBalance.getMaxPendingComputeTokens()) { continue; }
+                    || hasTokenCapacity(endpoint)) { continue; }
             for (var route : endpoint.ownership.captureQueue(64).items()) {
-                if (route.seqLen() <= rescue.getMaxInputTokens() && route.decodeEp() != null
+                if ((rescue.getMaxInputTokens() == 0 || route.seqLen() <= rescue.getMaxInputTokens()) && route.decodeEp() != null
                         && route.ctx().prefillMigrationSource() == null
-                        && wallMs - route.ctx().snapshot().createdAtMs() >= rescue.getMinWaitMs()) { candidates.add(route); }
+                        && wallMs - route.ctx().snapshot().createdAtMs() >= (rescue.getMinWaitMs() > 0 ? rescue.getMinWaitMs() : endpoint.serviceWindowMs * 2)
+                        && fleet.stream().anyMatch(target -> target.endpoint() != endpoint
+                                && java.util.Objects.equals(target.endpoint().getStatus().topologySnapshot().group(),
+                                        endpoint.getStatus().topologySnapshot().group())
+                                && idleForRescue(target.endpoint(), target.endpoint().ownership.tokenWorkload(nowMs))
+                                && (rescue.getMaxInputTokens() > 0 || PrefillPredictionBoundary.predictSingleRequestMs(
+                                        target.endpoint().predictor.evaluator(), route.seqLen(), 0) <= target.endpoint().serviceWindowMs / 2))) {
+                    candidates.add(route);
+                }
             }
         }
         candidates.sort(java.util.Comparator.comparingLong(RequestRoute::seqLen).thenComparingLong(RequestRoute::enqueueSeq));
         return candidates;
+    }
+
+    private boolean idleForRescue(PrefillEndpoint endpoint, PrefillTokenWorkload.Snapshot work) {
+        long limit = Math.min(tokenBalance.getHotspotRescue().getMaxIdlePendingTokens(), endpoint.pendingComputeLimit() / 10);
+        return work.pendingTokens() + (double) work.plannedTokens() <= limit
+                && (limit > 0 || endpoint.ownership.progress().outstandingRequests() == 0);
     }
 
     /** Escape only to truly idle capacity; total input length was bounded before this call. */
@@ -442,7 +497,10 @@ public class CostBasedPrefillStrategy {
         double minimum = Double.POSITIVE_INFINITY;
         for (int i = 0; i < candidates.size(); i++) {
             var work = candidates.endpoint(i).ownership.tokenWorkload(nowMs);
-            if (candidates.endpoint(i) == excluded || work.pendingTokens() + work.plannedTokens() > tokenBalance.getHotspotRescue().getMaxIdlePendingTokens()) { continue; }
+            if (candidates.endpoint(i) == excluded || !idleForRescue(candidates.endpoint(i), work)
+                    || tokenBalance.getHotspotRescue().getMaxInputTokens() == 0
+                    && PrefillPredictionBoundary.predictSingleRequestMs(candidates.endpoint(i).predictor.evaluator(), seqLen, 0)
+                            > candidates.endpoint(i).serviceWindowMs / 2) { continue; }
             scores[i] = work.score() + Math.max(0L, seqLen - candidates.cacheHit(i));
             minimum = Math.min(minimum, scores[i]);
         }
@@ -462,7 +520,7 @@ public class CostBasedPrefillStrategy {
             if (!PrefillTokenBalance.eligible(candidates.cacheHit(i), maxHit, cacheFirst)) { continue; }
             var work = candidates.endpoint(i).ownership.tokenWorkload(nowMs);
             // Preserve a busy cache leader by parking globally, where existing HIT_RATE shedding applies.
-            if (!PrefillTokenBalance.hasCapacity(work.pendingTokens(), tokenBalance.getMaxPendingComputeTokens())) { continue; }
+            if (!hasTokenCapacity(candidates.endpoint(i))) { continue; }
             scores[i] = work.score() + Math.max(0L, seqLen - candidates.cacheHit(i));
             minimum = Math.min(minimum, scores[i]);
         }

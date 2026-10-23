@@ -63,6 +63,13 @@ public class ConfigService {
             FlexlbConfigValidator.validateDocumentShape(tree);
             FlexlbConfig config = STRICT_MAPPER.treeToValue(
                     tree, FlexlbConfig.class);
+            // Opt-in token balancing can learn service time without a deployment-specific formula.
+            // An explicit estimator retains its existing meaning, including calibrated FORMULA models.
+            if (tree.at("/router/roles/prefill/tokenBalance").isObject()
+                    && tree.at("/router/roles/prefill/executionTimeEstimator").isMissingNode()) {
+                config.getRouter().getRoles().getPrefill().getExecutionTimeEstimator()
+                        .setType(RoutingConfig.EstimatorType.LEARNING);
+            }
             FlexlbConfigValidator.validate(config);
             return config;
         } catch (ConfigValidationException error) {

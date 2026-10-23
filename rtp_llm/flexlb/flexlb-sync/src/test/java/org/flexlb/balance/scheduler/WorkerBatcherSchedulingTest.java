@@ -301,7 +301,7 @@ class WorkerBatcherSchedulingTest {
         doThrow(failure).when(endpoint).signal(PrefillEndpoint.Signal.PLACEMENT);
         assertSame(failure, runtime.stopAndAwait());
         verify(events).onQueueEvent(org.mockito.ArgumentMatchers.same(request),
-                org.mockito.ArgumentMatchers.eq(AbstractRequestScheduler.QueueKind.REJECTED),
+                org.mockito.ArgumentMatchers.eq(AbstractRequestScheduler.QueueKind.RETIRED),
                 org.mockito.ArgumentMatchers.isNull(), org.mockito.ArgumentMatchers.any());
         assertTrue(state.retireGenerationOwnership().ownedItems().isEmpty());
     }

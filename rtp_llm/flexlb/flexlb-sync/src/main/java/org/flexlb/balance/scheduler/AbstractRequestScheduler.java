@@ -141,7 +141,7 @@ public abstract class AbstractRequestScheduler implements RequestScheduler {
         }
     }
 
-    public enum QueueKind { CONTROL, EXPIRED, PREEMPTED, REJECTED }
+    public enum QueueKind { CONTROL, EXPIRED, PREEMPTED, REJECTED, RETIRED }
     public void onQueueEvent(RequestRoute route, QueueKind kind, RequestRoute incoming, Throwable cause) {
         var ctx = route.ctx();
         if (ctx.data().getScheduler() != this || !requests.isCurrent(ctx)) { return; }
@@ -153,7 +153,7 @@ public abstract class AbstractRequestScheduler implements RequestScheduler {
         }
         var error = kind == QueueKind.PREEMPTED ? StrategyErrorType.PRIORITY_PREEMPTED : StrategyErrorType.DISPATCH_FAILED;
         String detail = kind == QueueKind.PREEMPTED ? "preempted by higher-priority request " + incoming.requestId()
-                : kind == QueueKind.REJECTED ? "Worker scheduling queue rejected request: "
+                : kind == QueueKind.REJECTED || kind == QueueKind.RETIRED ? "Worker scheduling queue rejected request: "
                 + (cause == null ? "endpoint publication failed" : cause.getMessage()) : "queued request cancelled";
         if (kind == QueueKind.CONTROL) {
             synchronized (ctx) {
@@ -484,6 +484,7 @@ public abstract class AbstractRequestScheduler implements RequestScheduler {
             }
             var facts = ctx.snapshot().delivery();
             var response = facts.identity().item().successResponse(facts.identity().kind() == DeliveryClaimKind.BATCH_ENQUEUE);
+            facts.identity().item().rememberSessionWorker();
             runtime.deadlines().update(ctx, ctx.snapshot().deadlines());
             publishSelected(publication, candidate, RequestFuture.Completion.RESPONSE, response, null, false);
         } catch (RuntimeException | Error failed) {

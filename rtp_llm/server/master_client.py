@@ -392,6 +392,7 @@ class MasterClient:
             force_disable_sp_run=gc.force_disable_sp_run,
             model="engine_service",
             api_key=api_key,
+            session_id=getattr(gc, "session_id", None) or "",
             cache_key_block_size=cache_key_block_size,
             priority=priority,
         )

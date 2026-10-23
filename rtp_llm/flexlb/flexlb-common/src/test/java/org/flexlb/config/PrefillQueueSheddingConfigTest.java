@@ -43,9 +43,9 @@ class PrefillQueueSheddingConfigTest {
 
     @Test void validatesRecoveryWithoutExtendingHardDeadline() {
         var config = parse("{\"recovery\":{}}");
-        assertEquals(10000, config.queueScheduler().getPrefillQueueShedding().getRecovery().getMaxGraceMs());
+        assertEquals(0, config.queueScheduler().getPrefillQueueShedding().getRecovery().getMaxGraceMs());
         assertEquals(61000, config.resolveExpiresAtMs(1000));
-        for (String value : new String[]{"{\"windowMs\":0}", "{\"maxGraceMs\":0}",
+        for (String value : new String[]{"{\"windowMs\":-1}", "{\"maxGraceMs\":-1}",
                 "{\"maxGraceMs\":60001}", "{\"waitMultiplier\":0.9}", "{\"maxEvictionFraction\":0}",
                 "{\"minArrivalDropFraction\":1.1}", "{\"minQueueDrainFraction\":0}"}) {
             assertThrows(RuntimeException.class, () -> parse("{\"recovery\":" + value + "}"));

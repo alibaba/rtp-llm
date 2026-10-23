@@ -169,6 +169,7 @@ class ThinkingConfig(BaseModel):
 
 
 class ChatCompletionRequest(BaseModel):
+    session_id: Optional[str] = None
     model: Optional[str] = None
     messages: List[ChatMessage]
     functions: Optional[List[GPTFunctionDefinition]] = None

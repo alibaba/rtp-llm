@@ -45,6 +45,10 @@ public final class Request {
     @JsonProperty("request_id")
     private final long requestId;
 
+    @ToString.Exclude
+    @JsonProperty("session_id")
+    private final String sessionId;
+
     /** Upstream generation timeout retained for transport compatibility. */
     @JsonProperty("generate_timeout")
     @Builder.Default
@@ -82,7 +86,7 @@ public final class Request {
 
     private Request(List<Long> blockCacheKeys, List<String> cacheAffinityKeys,
                     ServerStatus selectedVit, boolean vitRouteOnly, long seqLen, long cacheKeyBlockSize,
-                    long requestId, long generateTimeout, long requestTimeMs, String apiKey,
+                    long requestId, String sessionId, long generateTimeout, long requestTimeMs, String apiKey,
                     int maxNewTokens, int numBeams, boolean forceDisableSpRun, String model,
                     int rawPriority) {
         this.blockCacheKeys = blockCacheKeys == null ? List.of() : List.copyOf(blockCacheKeys);
@@ -92,6 +96,7 @@ public final class Request {
         this.seqLen = seqLen;
         this.cacheKeyBlockSize = cacheKeyBlockSize;
         this.requestId = requestId;
+        this.sessionId = sessionId;
         this.generateTimeout = generateTimeout;
         this.requestTimeMs = requestTimeMs;
         this.apiKey = apiKey;

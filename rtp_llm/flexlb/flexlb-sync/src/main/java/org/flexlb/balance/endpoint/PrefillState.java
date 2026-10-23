@@ -276,7 +276,7 @@ public final class PrefillState {
         }
     }
 
-    record TerminalObservation(RequestEntry owner, long executionTimeMs, long errorCode, long computeTokens,
+    record TerminalObservation(RequestEntry owner, long executionTimeMs, long errorCode, long computeTokens, long inputTokens,
             PriorityPreemptionProgress preemptionProgress) { }
 
     public final ReentrantLock lock;
@@ -286,10 +286,14 @@ public final class PrefillState {
     final Map<Long, RequestEntry> requests = new HashMap<>();
     final LongSupplier clock;
     private org.flexlb.balance.strategy.PrefillTokenWorkload tokenWorkload;
-    private long pendingTokenLimit;
+    private LongSupplier pendingTokenLimit;
 
     /** Installed before this endpoint generation is published. */
     void enableTokenWorkload(long windowMs, long pendingTokenLimit) {
+        enableTokenWorkload(windowMs, () -> pendingTokenLimit);
+    }
+
+    void enableTokenWorkload(long windowMs, LongSupplier pendingTokenLimit) {
         this.pendingTokenLimit = pendingTokenLimit;
         tokenWorkload = new org.flexlb.balance.strategy.PrefillTokenWorkload(windowMs);
     }
@@ -308,7 +312,7 @@ public final class PrefillState {
     }
 
     private boolean tokenCapacityAvailable() {
-        return tokenWorkload == null || tokenWorkload.snapshot(System.nanoTime() / 1_000_000L).pendingTokens() < pendingTokenLimit;
+        return tokenWorkload == null || tokenWorkload.snapshot(System.nanoTime() / 1_000_000L).pendingTokens() < pendingTokenLimit.getAsLong();
     }
 
     public org.flexlb.balance.strategy.PrefillTokenWorkload.Reservation planTokenWork(long tokens) {

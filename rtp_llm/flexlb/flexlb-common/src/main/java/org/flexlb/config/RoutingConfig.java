@@ -39,19 +39,19 @@ public final class RoutingConfig {
         /** Above this percentage, the largest reusable prefix wins without a TTFT cap. */
         private double minPrefixHitPercent = 50.0;
         /** Exact sliding window of successful completion observations. */
-        private long windowMs = 10_000L;
+        private long windowMs;
         /** Backpressure at this pending uncached work; one oversized request may enter an empty worker. */
-        private long maxPendingComputeTokens = 140_000L;
+        private long maxPendingComputeTokens;
         /** Optional escape from an overloaded cache leader for small, aged requests. */
-        private HotspotRescueConfig hotspotRescue;
+        private HotspotRescueConfig hotspotRescue = new HotspotRescueConfig();
     }
 
     @Getter
     @Setter
     public static final class HotspotRescueConfig {
-        private long minWaitMs = 5_000L;
+        private long minWaitMs;
         /** Total input, not just uncached tokens: a cache miss on the target must stay cheap. */
-        private long maxInputTokens = 32_768L;
+        private long maxInputTokens;
         private long maxIdlePendingTokens = 0L;
     }
 

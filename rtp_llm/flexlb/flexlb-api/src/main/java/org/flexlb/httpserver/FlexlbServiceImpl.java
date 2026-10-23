@@ -823,6 +823,7 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
             request.selectedVit(vit);
         }
         request.seqLen(pb.getSeqLen());
+        request.sessionId(pb.getSessionId());
         // Keep the wire values for transport compatibility and request
         // observability. FlexLB scheduling expiration is owned by the QUEUE
         // configuration below, not by the caller.

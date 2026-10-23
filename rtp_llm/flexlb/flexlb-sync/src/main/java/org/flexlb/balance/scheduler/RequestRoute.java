@@ -39,6 +39,17 @@ public final class RequestRoute implements GroupPlanner.Input, AutoCloseable {
     private ServerStatus vit;
     private long prefillWorkMs;
     private org.flexlb.balance.strategy.PrefillTokenWorkload.Reservation tokenPlan;
+    private Runnable sessionCommit;
+
+    public void onPrefillCommit(Runnable callback) {
+        checkState(constructionState == BUILDING, "session callback requires route construction");
+        sessionCommit = callback;
+    }
+
+    /** Called only for a confirmed successful delivery, never on speculative selection or rejection. */
+    public void rememberSessionWorker() {
+        if (sessionCommit != null) { sessionCommit.run(); }
+    }
 
     public void reserveTokenPlan(org.flexlb.balance.strategy.PrefillTokenWorkload.Reservation plan) {
         if (constructionState != BUILDING || tokenPlan != null) {
@@ -75,6 +86,7 @@ public final class RequestRoute implements GroupPlanner.Input, AutoCloseable {
             decode = selected.decode;
             prefillWorkMs = selected.prefillWorkMs;
             tokenPlan = selected.tokenPlan;
+            sessionCommit = selected.sessionCommit;
             prefillVersion = selected.prefillVersion;
             decodeVersion = selected.decodeVersion;
         }

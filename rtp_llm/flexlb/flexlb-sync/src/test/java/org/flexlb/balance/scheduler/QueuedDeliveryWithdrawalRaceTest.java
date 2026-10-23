@@ -127,9 +127,13 @@ class QueuedDeliveryWithdrawalRaceTest {
     @Timeout(15)
     void migrationCannotWithdrawAnEngineDelivery() throws Exception {
         try (var fixture = new Fixture()) {
+            var remembered = new java.util.concurrent.atomic.AtomicInteger();
+            ReflectionTestUtils.setField(fixture.route, "sessionCommit", (Runnable) remembered::incrementAndGet);
+            assertEquals(0, remembered.get());
             fixture.select(evaluator(() -> {}));
             fixture.runtime.deliveries().awaitDeliveries();
             fixture.assertDelivered();
+            assertEquals(1, remembered.get(), "only confirmed delivery records session affinity");
             assertFalse(fixture.owner.migrateQueuedRoute(fixture.route));
             assertNull(fixture.context.prefillMigrationSource());
         }
@@ -143,6 +147,69 @@ class QueuedDeliveryWithdrawalRaceTest {
                 return 1.0;
             }
         };
+    }
+
+    @Test @Timeout(15)
+    void retirementRequeuesUnsentWorkWithoutChangingDeadlineOrCompletingTheClient() throws Exception {
+        try (var fixture = new Fixture()) {
+            long deadline = fixture.context.data().getRequestExpiresAtMs();
+            assertNull(fixture.batcher.stopAndAwait());
+            assertFalse(fixture.future.isDone());
+            ReflectionTestUtils.invokeMethod(fixture.owner, "requeueRetiredRoutes");
+            assertNull(fixture.context.snapshot().route());
+            assertNull(fixture.context.snapshot().placement());
+            assertEquals(DecodeResources.Ownership.NONE, fixture.decode.ownership(fixture.reservation));
+            assertEquals(0, fixture.prefill.ownership.progress().queueDepth());
+            assertTrue(fixture.prefill.ownership.retireGenerationOwnership().ownedItems().isEmpty());
+            assertEquals(deadline, fixture.context.data().getRequestExpiresAtMs());
+            assertFalse(fixture.future.isDone());
+            verify(fixture.client, never()).batchEnqueueAsync(anyString(), anyInt(), any());
+            fixture.future.cancel(false);
+        }
+    }
+
+    @Test @Timeout(15)
+    void retirementWaitsForEarlierWithdrawalAndThenRequeuesExactlyOnce() throws Exception {
+        try (var fixture = new Fixture()) {
+            var earlier = fixture.owner.claimQueuedRoute(fixture.decode, fixture.reservation, 100);
+            assertNotNull(earlier);
+            assertNull(fixture.batcher.stopAndAwait());
+            assertFalse(fixture.owner.withdrawRetiredRoute(fixture.route), "do not race an earlier placement token");
+            earlier.finish();
+            ReflectionTestUtils.invokeMethod(fixture.owner, "requeueRetiredRoutes");
+            assertNull(fixture.context.snapshot().route());
+            assertEquals(DecodeResources.Ownership.NONE, fixture.decode.ownership(fixture.reservation));
+            fixture.owner.onQueueEvent(fixture.route, AbstractRequestScheduler.QueueKind.RETIRED, null, null);
+            ReflectionTestUtils.invokeMethod(fixture.owner, "requeueRetiredRoutes");
+            var events = (java.util.Collection<?>) ReflectionTestUtils.getField(fixture.owner, "events");
+            assertEquals(1, events.stream().filter(event -> "REQUEUE".equals(
+                    String.valueOf(ReflectionTestUtils.getField(event, "kind")))).count(),
+                    "capacity/control events are separate from the one route requeue");
+            fixture.future.cancel(false);
+        }
+    }
+
+    @Test @Timeout(15)
+    void cancellationWinsOverRetirementRequeue() throws Exception {
+        try (var fixture = new Fixture()) {
+            assertNull(fixture.batcher.stopAndAwait());
+            fixture.future.cancel(false);
+            ReflectionTestUtils.invokeMethod(fixture.owner, "requeueRetiredRoutes");
+            assertTrue(fixture.future.isCancelled());
+            verify(fixture.client, never()).batchEnqueueAsync(anyString(), anyInt(), any());
+        }
+    }
+
+    @Test @Timeout(15)
+    void retirementDoesNotReplayCommittedDelivery() throws Exception {
+        try (var fixture = new Fixture()) {
+            fixture.select(evaluator(() -> {}));
+            fixture.runtime.deliveries().awaitDeliveries();
+            fixture.assertDelivered();
+            assertNull(fixture.batcher.stopAndAwait());
+            ReflectionTestUtils.invokeMethod(fixture.owner, "requeueRetiredRoutes");
+            fixture.assertDelivered();
+        }
     }
 
     private static void await(CountDownLatch latch) {
