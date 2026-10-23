@@ -4,7 +4,12 @@ import org.flexlb.balance.scheduler.RequestContext;
 import org.flexlb.dao.SchedulingMetadata;
 import org.flexlb.dao.loadbalance.Request;
 import org.junit.jupiter.api.Test;
+import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Map;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -151,6 +156,77 @@ class ServerScheduleLatencyRecorderTest {
         assertTrue(((Map<?, ?>) snapshot.get("server_total_ms")).containsKey("p99"));
         assertTrue(((Map<?, ?>) snapshot.get("batch_wait_ms_by_priority")).isEmpty());
         assertEquals("", recorder.batchWaitPriorityLogSuffix());
+    }
+
+    @Test
+    void sparseBucketsKeepExactPercentilesAtPageAndOverflowBoundaries() {
+        ServerScheduleLatencyRecorder recorder = new ServerScheduleLatencyRecorder();
+        long end = TimeUnit.SECONDS.toNanos(1000);
+        long[] values = {0, 1, 254, 255, 256, 257, 511, 512, 1024, 65536, 119999, 120000, 120001};
+        for (long value : values) {
+            recorder.recordCompletion(contextWithBatchWait(end, value, metadata(40)), end);
+        }
+        Map<?, ?> histogram = (Map<?, ?>) recorder.snapshot().get("batch_wait_ms");
+        assertEquals((long) values.length, histogram.get("count"));
+        for (int percentile : new int[]{50, 90, 95, 99}) {
+            long expected = Math.min(120000, values[(int) Math.ceil(values.length * percentile / 100.0) - 1]);
+            assertEquals(expected, histogram.get("p" + percentile));
+        }
+        assertEquals(120001L, histogram.get("max"), "overflow must retain the actual maximum");
+        assertEquals(Arrays.stream(values).average().orElseThrow(), (double) histogram.get("mean"), 0.001);
+        recorder.reset();
+        recorder.recordCompletion(contextWithBatchWait(end, 256, metadata(40)), end);
+        assertLatency(recorder.snapshot(), "batch_wait_ms", 256L);
+    }
+
+    @Test
+    void concurrentFirstSamplesDoNotLoseBucketsOrCounts() throws Exception {
+        ServerScheduleLatencyRecorder recorder = new ServerScheduleLatencyRecorder();
+        long end = TimeUnit.SECONDS.toNanos(1000);
+        long[] values = {256, 257, 511, 512, 513, 120000, 120001, 121000};
+        CountDownLatch start = new CountDownLatch(1);
+        try (var workers = Executors.newFixedThreadPool(values.length)) {
+            var futures = new ArrayList<Future<?>>();
+            for (long value : values) {
+                var context = contextWithBatchWait(end, value, metadata(40));
+                futures.add(workers.submit(() -> {
+                    start.await();
+                    for (int sample = 0; sample < 1000; sample++) { recorder.recordCompletion(context, end); }
+                    return null;
+                }));
+            }
+            start.countDown();
+            for (var future : futures) { future.get(10, TimeUnit.SECONDS); }
+        }
+        Map<?, ?> histogram = (Map<?, ?>) recorder.snapshot().get("batch_wait_ms");
+        assertEquals(8000L, histogram.get("count"));
+        assertEquals(512L, histogram.get("p50"));
+        assertEquals(120000L, histogram.get("p99"));
+        assertEquals(121000L, histogram.get("max"));
+        assertEquals(Arrays.stream(values).average().orElseThrow(), (double) histogram.get("mean"), 0.001);
+        assertPriorityBucket((Map<?, ?>) recorder.snapshot().get("batch_wait_ms_by_priority"), 40, 8000L, 512L);
+    }
+
+    @Test
+    void shortLatencyPrioritiesDoNotAllocateFullTwoMinuteHistograms() {
+        var bean = java.lang.management.ManagementFactory.getThreadMXBean();
+        org.junit.jupiter.api.Assumptions.assumeTrue(bean instanceof com.sun.management.ThreadMXBean);
+        var allocations = (com.sun.management.ThreadMXBean) bean;
+        org.junit.jupiter.api.Assumptions.assumeTrue(allocations.isThreadAllocatedMemorySupported());
+        allocations.setThreadAllocatedMemoryEnabled(true);
+        ServerScheduleLatencyRecorder recorder = new ServerScheduleLatencyRecorder();
+        long end = TimeUnit.SECONDS.toNanos(1000);
+        recorder.recordCompletion(contextWithBatchWait(end, 10, metadata(1)), end);
+        var contexts = new ArrayList<RequestContext>();
+        for (int priority = 2; priority <= 11; priority++) {
+            contexts.add(contextWithBatchWait(end, 10, metadata(priority)));
+        }
+        long thread = Thread.currentThread().threadId();
+        long before = allocations.getThreadAllocatedBytes(thread);
+        for (var context : contexts) { recorder.recordCompletion(context, end); }
+        long allocated = allocations.getThreadAllocatedBytes(thread) - before;
+        assertTrue(allocated < 256 * 1024L, "ten short-latency priorities allocated " + allocated + " bytes");
+        assertEquals(11, ((Map<?, ?>) recorder.snapshot().get("batch_wait_ms_by_priority")).size());
     }
 
     private static SchedulingMetadata metadata(int priority) {

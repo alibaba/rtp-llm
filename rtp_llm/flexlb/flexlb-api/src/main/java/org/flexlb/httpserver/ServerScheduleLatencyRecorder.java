@@ -11,13 +11,14 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicLongArray;
+import java.util.concurrent.atomic.AtomicReferenceArray;
 import java.util.concurrent.atomic.LongAdder;
 
 /**
  * Server-side Schedule latency recorder used by online evaluation.
  *
- * <p>The recorder uses fixed millisecond buckets and does not allocate on the
- * request path. Client transport and client-side channel queueing are excluded.
+ * <p>Exact millisecond buckets are allocated in pages; the common short-latency
+ * page is preallocated. Client transport and client-side channel queueing are excluded.
  */
 @Slf4j
 @Component
@@ -169,10 +170,16 @@ public class ServerScheduleLatencyRecorder {
     }
 
     private static final class LatencyHistogram {
-        private final AtomicLongArray buckets = new AtomicLongArray(MAX_TRACKED_MS + 1);
+        private static final int PAGE_SIZE = 256;
+        private final AtomicReferenceArray<AtomicLongArray> pages =
+                new AtomicReferenceArray<>(MAX_TRACKED_MS / PAGE_SIZE + 1);
         private final LongAdder count = new LongAdder();
         private final LongAdder sumMs = new LongAdder();
         private final AtomicLong maxMs = new AtomicLong();
+
+        private LatencyHistogram() {
+            pages.set(0, new AtomicLongArray(PAGE_SIZE));
+        }
 
         private void recordBetween(long startNanos, long endNanos) {
             if (startNanos <= 0 || endNanos < startNanos) {
@@ -180,7 +187,13 @@ public class ServerScheduleLatencyRecorder {
             }
             long valueMs = TimeUnit.NANOSECONDS.toMillis(endNanos - startNanos);
             int bucket = (int) Math.min(valueMs, MAX_TRACKED_MS);
-            buckets.incrementAndGet(bucket);
+            int pageIndex = bucket / PAGE_SIZE;
+            AtomicLongArray page = pages.get(pageIndex);
+            if (page == null) {
+                AtomicLongArray fresh = new AtomicLongArray(PAGE_SIZE);
+                page = pages.compareAndSet(pageIndex, null, fresh) ? fresh : pages.get(pageIndex);
+            }
+            page.incrementAndGet(bucket % PAGE_SIZE);
             count.increment();
             sumMs.add(valueMs);
             maxMs.accumulateAndGet(valueMs, Math::max);
@@ -217,10 +230,16 @@ public class ServerScheduleLatencyRecorder {
         private long percentile(long samples, double percentile) {
             long target = Math.max(1, (long) Math.ceil(samples * percentile));
             long seen = 0;
-            for (int value = 0; value <= MAX_TRACKED_MS; value++) {
-                seen += buckets.get(value);
-                if (seen >= target) {
-                    return value;
+            for (int pageIndex = 0; pageIndex < pages.length(); pageIndex++) {
+                AtomicLongArray page = pages.get(pageIndex);
+                if (page == null) {
+                    continue;
+                }
+                for (int offset = 0; offset < PAGE_SIZE; offset++) {
+                    seen += page.get(offset);
+                    if (seen >= target) {
+                        return pageIndex * PAGE_SIZE + offset;
+                    }
                 }
             }
             return MAX_TRACKED_MS;
