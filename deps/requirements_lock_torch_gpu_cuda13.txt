@@ -568,6 +568,7 @@ cuda-bindings==13.0.3 \
     --hash=sha256:fce6d6b162457475b35e1a259ab643e683d1d20a84459fea898782e2f1e10a3b
     # via
     #   cuda-python
+    #   humming-kernels
     #   torch
 cuda-pathfinder==1.3.2 \
     --hash=sha256:7bd2774bc6be93aea226d579f415a63803b2b2c062207ed06c1d6dfc9cfacc3c
@@ -968,9 +969,6 @@ hf-xet==1.6.0 \
     --hash=sha256:f2f7278c05c22fd60cb436cda1269649b3e81db65ecdc8496e5e164aa4143e7b \
     --hash=sha256:fb4fadde1b2b70bf4c0c14a6dccbe7194b1c28947fefd5bbe3fed9d940676c3b
     # via huggingface-hub
-humming-kernels==0.1.16 \
-    --hash=sha256:683212692f5e1339961e4322aff1ba116523e2681b2aafeaf7c081bc4e1f5627
-    # via -r deps/requirements_torch_gpu_cuda13.txt
 httpcore==1.0.9 \
     --hash=sha256:2d400746a40668fc9dec9810239072b40b4484b640a8c38fd654a024c7a1bf55 \
     --hash=sha256:6e34463af53fd2ab5d807f399a9b45ea31c3dfa2276f15a2c3f00afff6e176e8
@@ -989,6 +987,9 @@ huggingface-hub==1.32.0 \
     #   timm
     #   tokenizers
     #   transformers
+humming-kernels==0.1.16 \
+    --hash=sha256:683212692f5e1339961e4322aff1ba116523e2681b2aafeaf7c081bc4e1f5627
+    # via -r deps/requirements_torch_gpu_cuda13.txt
 idna==3.10 \
     --hash=sha256:12f65c9b470abda6dc35cf8e63cc574b1c52b11df2c86030af0ac09b01b13ea9 \
     --hash=sha256:946d195a0d259cbba61165e88e65941f16e9b36ea6ddb97f00452bae8b1287d3
@@ -1009,6 +1010,7 @@ jinja2==3.1.6 \
     --hash=sha256:85ece4451f492d0c13c5dd7c13a64681a86afae63a5f347908daf103ce6d2f67
     # via
     #   -r deps/requirements_base.txt
+    #   humming-kernels
     #   torch
 jiter==0.10.0 \
     --hash=sha256:023aa0204126fe5b87ccbcd75c8a0d0261b9abdbbf46d55e7ae9f8e22424eeb8 \
@@ -1856,6 +1858,7 @@ numpy==1.26.4 \
     #   contourpy
     #   decord
     #   flashinfer-python
+    #   humming-kernels
     #   librosa
     #   matplotlib
     #   ml-dtypes
@@ -3168,6 +3171,7 @@ safetensors==0.7.0 \
     # via
     #   -r deps/requirements_base.txt
     #   -r deps/requirements_torch_gpu_cuda13.txt
+    #   humming-kernels
     #   timm
     #   transformers
 scikit-learn==1.7.0 \
@@ -3480,6 +3484,7 @@ tabulate==0.9.0 \
     # via
     #   -r deps/requirements_torch_gpu_cuda13.txt
     #   flashinfer-python
+    #   humming-kernels
 threadpoolctl==3.6.0 \
     --hash=sha256:43a0b8fd5a2928500110039e43a5eed8480b918967083ea48dc3ab9f13c4a7fb \
     --hash=sha256:8ab8b4aa3491d812b623328249fab5302a68d2d71745c8a4c719a2fcaba9f44e
@@ -3611,6 +3616,7 @@ torch @ https://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/miji/0430/torch-2.11.0%
     #   flash-attn
     #   flash-attn-4
     #   flashinfer-python
+    #   humming-kernels
     #   quack-kernels
     #   rtp-kernel
     #   sentence-transformers
@@ -3660,6 +3666,7 @@ tqdm==4.67.1 \
     # via
     #   flashinfer-python
     #   huggingface-hub
+    #   humming-kernels
     #   openai
     #   sentence-transformers
     #   tilelang
@@ -3689,6 +3696,7 @@ triton==3.6.0 \
     --hash=sha256:ef5523241e7d1abca00f1d240949eebdd7c673b005edbbce0aca95b8191f1d43
     # via
     #   -r deps/requirements_torch_gpu_cuda13.txt
+    #   humming-kernels
     #   torch
     #   xgrammar
 typer==0.27.2 \
