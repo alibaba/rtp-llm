@@ -6,6 +6,7 @@
 #include "autil/ThreadPool.h"
 #include <condition_variable>
 #include "rtp_llm/cpp/cache/connector/p2p/P2PConnectorConfig.h"
+#include "rtp_llm/cpp/cache/connector/p2p/P2PWriteRpcUtil.h"
 #include "rtp_llm/cpp/cache/connector/p2p/plan/TransferPlan.h"
 #include <map>
 #include <mutex>
@@ -57,6 +58,9 @@ private:
                                                              size_t                          block_count,
                                                              P2PBroadcastClient::RankRoutes& routes,
                                                              int64_t*                        planned_bytes) const;
+    ErrorInfo                           selectSendRoutes(const P2PConnectorStartWriteRequestPB& request,
+                                                         const P2PBroadcastClient::RankRoutes&  receive_routes,
+                                                         P2PBroadcastClient::RankRoutes&        send_routes) const;
 
     const P2PConnectorSchedulerConfig                config_;
     std::mutex                                       plan_cache_mutex_;
@@ -65,8 +69,7 @@ private:
     std::shared_ptr<P2PBroadcastClient>              client_;
     kmonitor::MetricsReporterPtr                     metrics_reporter_;
     std::vector<std::string>                         transfer_addrs_;
-    std::mutex                                                              source_clients_mutex_;
-    std::map<std::vector<std::string>, std::shared_ptr<P2PBroadcastClient>> source_clients_;
+    p2p_internal::PeerClientCache<std::vector<std::string>, P2PBroadcastClient> source_clients_;
     std::shared_ptr<autil::ThreadPool>                          control_pool_;
     mutable std::mutex                                          requests_mutex_;
     std::condition_variable                                     requests_cv_;

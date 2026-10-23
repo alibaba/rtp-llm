@@ -7,6 +7,7 @@
 #include <limits>
 #include <map>
 #include <mutex>
+#include <stdexcept>
 #include <thread>
 #include <sys/resource.h>
 
@@ -18,6 +19,7 @@
 #include "rtp_llm/cpp/cache/connector/p2p/P2PWorkerDecodeWrite.h"
 #include "rtp_llm/cpp/cache/connector/p2p/LayerCacheBufferUtil.h"
 #include "rtp_llm/cpp/cache/connector/p2p/P2PSchedulerPrefillWrite.h"
+#include "rtp_llm/cpp/cache/connector/p2p/P2PWriteRpcUtil.h"
 #include "rtp_llm/cpp/cache/connector/p2p/plan/KVCacheTransferPlanner.h"
 #include "rtp_llm/cpp/cache/connector/p2p/plan/ShardLayoutFactory.h"
 #include "rtp_llm/cpp/cache/test/BlockTreeCacheAllocatorTestHelper.h"
@@ -349,7 +351,9 @@ protected:
         auto resource = std::make_shared<KVCacheResource>();
         resource->initGroups(config_.topologyPtr());
         resource->setCacheKeys(calculateCacheKeys(token_ids_.data(), token_ids_.size(), 4));
-        resource->mutableBlockIds("default").assign({7, 8, 9, 10});
+        for (const auto& tag : resource->groupTags()) {
+            resource->mutableBlockIds(tag).assign({7, 8, 9, 10});
+        }
         return resource;
     }
 
@@ -606,7 +610,9 @@ TEST_F(P2PConnectorWriteSchedulerTest, ReceiverSelectsSuffixWithoutReturningRang
         ASSERT_EQ(send.routes_size(), 1);
         ASSERT_EQ(receive.routes_size(), 1);
         for (int layer = 0; layer < 2; ++layer) {
-            EXPECT_EQ(send.routes(0).layer_blocks(layer).cache_keys_size(), 2);
+            ASSERT_EQ(send.routes(0).layer_blocks(layer).cache_keys_size(), 1);
+            EXPECT_EQ(send.routes(0).layer_blocks(layer).cache_keys(0), keys_[2]);
+            EXPECT_EQ(send.routes(0).layer_blocks(layer).block_ids(0), 9);
             ASSERT_EQ(receive.routes(0).layer_blocks(layer).cache_keys_size(), 1);
             EXPECT_EQ(receive.routes(0).layer_blocks(layer).cache_keys(0), keys_[2]);
         }
@@ -615,6 +621,68 @@ TEST_F(P2PConnectorWriteSchedulerTest, ReceiverSelectsSuffixWithoutReturningRang
     ASSERT_TRUE(await([&] { return !context->resourceHoldPending(); }));
     EXPECT_TRUE(context->success()) << context->errorInfo().ToString();
     EXPECT_EQ(allocator_->devicePrefixBlocksForTest(keys_), 3u);
+}
+
+TEST_F(P2PConnectorWriteSchedulerTest, SourceSelectionKeepsOnlyCandidateBlocksAtOriginalPositions) {
+    auto resource = source();
+    ASSERT_TRUE(decode_->selectSourceBlocks(*resource, input_length_, kv_ready_token_count_, routing_).ok());
+    EXPECT_EQ(resource->cacheKeys(), keys_);
+    EXPECT_EQ(resource->blocks("default"), (BlockIndicesType{NULL_BLOCK_IDX, 8, 9}));
+}
+
+TEST_F(P2PConnectorWriteSchedulerTest, SourceSelectionUsesGroupTailPoliciesAndSkipsNonReusableGroups) {
+    for (const bool reuse_linear : {true, false}) {
+        auto config                          = test::makeFullSwaLinearCacheConfig();
+        auto groups                          = config.topology().groups();
+        groups[2].policy.enable_prefix_reuse = reuse_linear;
+        config.setTopology(std::move(groups), config.topology().layers());
+        decode_.reset();
+        decode_config_.topology = config.topologyPtr();
+        createDecode();
+        KVCacheResource resource;
+        resource.initGroups(config.topologyPtr());
+        resource.setCacheKeys({11, 22, 33, 44, 55, 66});
+        for (const auto& tag : resource.groupTags()) {
+            resource.mutableBlockIds(tag).assign({7, 8, 9, 10, 11, 12});
+        }
+        const auto error = decode_->selectSourceBlocks(resource, 4, 24, routing_);
+        ASSERT_TRUE(error.ok()) << error.ToString();
+        EXPECT_EQ(resource.blocks("full"), (BlockIndicesType{NULL_BLOCK_IDX, 8, 9, 10, 11, 12}));
+        EXPECT_EQ(resource.blocks("swa"),
+                  (BlockIndicesType{NULL_BLOCK_IDX, NULL_BLOCK_IDX, NULL_BLOCK_IDX, NULL_BLOCK_IDX, 11, 12}));
+        if (reuse_linear) {
+            EXPECT_EQ(
+                resource.blocks("linear"),
+                (BlockIndicesType{NULL_BLOCK_IDX, NULL_BLOCK_IDX, NULL_BLOCK_IDX, NULL_BLOCK_IDX, NULL_BLOCK_IDX, 12}));
+        } else {
+            EXPECT_TRUE(resource.blocks("linear").empty());
+        }
+    }
+}
+
+TEST_F(P2PConnectorWriteSchedulerTest, SenderRouteSelectionRejectsIncompleteKeyBlockPairs) {
+    auto                           input = request();
+    P2PBroadcastClient::RankRoutes receive_routes(2), send_routes;
+    auto                           owner   = source();
+    const auto                     planned = prefill_->planFor(2);
+    ASSERT_TRUE(planned->ok());
+    ASSERT_TRUE(prefill_->buildPrefillRankRoutes(planned->plan, *owner, 2, 1, receive_routes, nullptr).ok());
+    ASSERT_TRUE(prefill_->selectSendRoutes(input, receive_routes, send_routes).ok());
+    ASSERT_EQ(send_routes.size(), 2u);
+    for (const auto& rank_routes : send_routes) {
+        ASSERT_EQ(rank_routes.size(), 1u);
+        for (const auto& layer : rank_routes.front().layer_blocks()) {
+            ASSERT_EQ(layer.cache_keys_size(), 1);
+            ASSERT_EQ(layer.block_ids_size(), 1);
+            EXPECT_EQ(layer.cache_keys(0), keys_[2]);
+            EXPECT_EQ(layer.block_ids(0), 9);
+        }
+    }
+    input.mutable_decode_workers(0)->mutable_routes(0)->mutable_layer_blocks(0)->clear_block_ids();
+    EXPECT_TRUE(prefill_->selectSendRoutes(input, receive_routes, send_routes).hasError());
+    input = request();
+    input.mutable_decode_workers(0)->clear_routes();
+    EXPECT_TRUE(prefill_->selectSendRoutes(input, receive_routes, send_routes).hasError());
 }
 
 TEST_F(P2PConnectorWriteSchedulerTest, StartWriteSendsRemainingBudgetInsteadOfAnAbsoluteDeadline) {
@@ -667,6 +735,83 @@ TEST_F(P2PConnectorWriteSchedulerTest, ReceiverBuildsLocalDeadlineFromRemainingB
     ASSERT_TRUE(await([&]() { return prefill_->inflightContextCount() == 0; }));
 }
 
+TEST_F(P2PConnectorWriteSchedulerTest, ReceiverRejectsWritebackThatWouldEatKvReserve) {
+    prefill_.reset();
+    prefill_config_.p2p_writeback_kv_reserve_ratio = 1.0;
+    prefill_ = std::make_unique<P2PSchedulerPrefillWrite>(prefill_config_, allocator_, nullptr, prefill_client_);
+    ASSERT_TRUE(prefill_->init());
+    const auto                       prefix_blocks = allocator_->devicePrefixBlocksForTest(keys_);
+    P2PConnectorStartWriteResponsePB response;
+    prefill_->handleWrite(request(), response);
+    EXPECT_EQ(response.error_code(), transErrorCodeToRPC(ErrorCode::MALLOC_FAILED)) << response.error_message();
+    EXPECT_TRUE(response.stopped());
+    EXPECT_EQ(prefill_->inflightContextCount(), 0u);
+    EXPECT_EQ(decode_workers_[0].starts, 0);
+    EXPECT_EQ(allocator_->devicePrefixBlocksForTest(keys_), prefix_blocks);
+}
+
+TEST_F(P2PConnectorWriteSchedulerTest, ReceiverChecksEachIndependentPoolAndReleasesRejectedTargets) {
+    prefill_.reset();
+    decode_.reset();
+    const auto full                     = test::makeMhaSpec("full", 4, DataType::TYPE_FP16, 1, 2);
+    const auto swa                      = test::makeMhaSpec("swa", 4, DataType::TYPE_FP16, 1, 2);
+    auto       policy                   = defaultCacheGroupPolicy(CacheGroupType::SWA);
+    policy.enable_prefix_reuse          = true;
+    policy.sliding_window_size          = 8;
+    config_.use_independent_block_pools = true;
+    config_.fromGroupedSpecs({full, swa},
+                             {{0}, {1}},
+                             {CacheGroupType::FULL, CacheGroupType::SWA},
+                             {"full", "swa"},
+                             {defaultCacheGroupPolicy(CacheGroupType::FULL), policy});
+    config_.setGroupBlockLayout({8, 32}, {full->block_size_bytes(), swa->block_size_bytes()}, {0, 0});
+    using MultiAllocator = test::BlockTreeCacheTestAllocator<CoordinatorCacheManager>;
+    auto allocator = std::make_shared<MultiAllocator>(config_, AllocationType::DEVICE, nullptr, 0, RoleType::PREFILL);
+    ASSERT_TRUE(allocator->init());
+    ASSERT_TRUE(test::seedCompleteBlockTreePath(allocator, {keys_.front()}).success);
+    prefill_config_.topology                       = config_.topologyPtr();
+    prefill_config_.p2p_writeback_kv_reserve_ratio = 0.75;
+    prefill_ = std::make_unique<P2PSchedulerPrefillWrite>(prefill_config_, allocator, nullptr, prefill_client_);
+    ASSERT_TRUE(prefill_->init());
+    decode_config_.topology = config_.topologyPtr();
+    createDecode();
+    const auto& pools = allocator->groupBlockPools();
+    ASSERT_EQ(pools.size(), 2u);
+    ASSERT_EQ(pools[0]->totalBlocksNum(), 7u);
+    ASSERT_EQ(pools[1]->totalBlocksNum(), 31u);
+    const auto full_free      = pools[0]->freeBlocksNum();
+    const auto swa_free       = pools[1]->freeBlocksNum();
+    const auto full_available = pools[0]->availableBlocksNum();
+    const auto swa_available  = pools[1]->availableBlocksNum();
+    ASSERT_LT(full_available - keys_.size(), 6u);
+    ASSERT_GE(full_available + swa_available - 2 * keys_.size(), 29u);
+
+    P2PConnectorStartWriteResponsePB response;
+    prefill_->handleWrite(request(), response);
+
+    EXPECT_EQ(response.error_code(), transErrorCodeToRPC(ErrorCode::MALLOC_FAILED)) << response.error_message();
+    EXPECT_TRUE(response.stopped());
+    EXPECT_EQ(prefill_->inflightContextCount(), 0u);
+    EXPECT_EQ(decode_workers_[0].starts, 0);
+    EXPECT_EQ(prefill_workers_[0].starts, 0);
+    EXPECT_EQ(pools[0]->freeBlocksNum(), full_free);
+    EXPECT_EQ(pools[1]->freeBlocksNum(), swa_free);
+    EXPECT_EQ(pools[0]->availableBlocksNum(), full_available);
+    EXPECT_EQ(pools[1]->availableBlocksNum(), swa_available);
+    EXPECT_EQ(allocator->devicePrefixBlocksForTest(keys_), 1u);
+}
+
+TEST_F(P2PConnectorWriteSchedulerTest, OutOfRangeKvReserveRatioFailsInit) {
+    for (const double ratio : {-0.1, 1.5}) {
+        auto prefill_config                           = prefill_config_;
+        prefill_config.p2p_writeback_kv_reserve_ratio = ratio;
+        EXPECT_FALSE(P2PSchedulerPrefillWrite(prefill_config, allocator_, nullptr, prefill_client_).init());
+        auto decode_config                           = decode_config_;
+        decode_config.p2p_writeback_kv_reserve_ratio = ratio;
+        EXPECT_FALSE(P2PSchedulerDecodeWrite(decode_config, decode_client_, *decode_source_worker_).init());
+    }
+}
+
 TEST_F(P2PConnectorWriteSchedulerTest, KvReadyBoundaryCapsCompleteTokenKeys) {
     kv_ready_token_count_ = 8;
     auto context          = asyncWrite(source());
@@ -694,6 +839,19 @@ TEST_F(P2PConnectorWriteSchedulerTest, FullyCachedHandshakeSkipsWorkersAndReleas
     EXPECT_EQ(prefill_workers_[0].starts, 0);
     EXPECT_EQ(decode_workers_[0].starts, 0);
     EXPECT_EQ(allocator_->freeBlocksNum(), free);
+}
+
+TEST_F(P2PConnectorWriteSchedulerTest, FullyCachedHandshakeNeedsNoKvReserve) {
+    prefill_.reset();
+    prefill_config_.p2p_writeback_kv_reserve_ratio = 1.0;
+    prefill_ = std::make_unique<P2PSchedulerPrefillWrite>(prefill_config_, allocator_, nullptr, prefill_client_);
+    ASSERT_TRUE(prefill_->init());
+    ASSERT_TRUE(test::seedCompleteBlockTreePath(allocator_, keys_).success);
+    P2PConnectorStartWriteResponsePB response;
+    prefill_->handleWrite(request(), response);
+    EXPECT_EQ(response.error_code(), ErrorCodePB::NONE_ERROR) << response.error_message();
+    EXPECT_EQ(response.accepted_block_count(), 0);
+    EXPECT_EQ(decode_workers_[0].starts, 0);
 }
 
 TEST_F(P2PConnectorWriteSchedulerTest, FullyCachedHandshakeRejectsDeadlineReachedDuringAdmission) {
@@ -800,9 +958,8 @@ TEST_F(P2PConnectorWriteSchedulerTest, LocalLoadRunsAlongsideReceiveAndPublicati
         const auto request = decode_workers_[rank].lastStart();
         ASSERT_EQ(request.routes_size(), 1);
         for (const auto& layer : request.routes(0).layer_blocks()) {
-            ASSERT_EQ(layer.cache_keys_size(), 2);
-            EXPECT_EQ(std::set<int64_t>(layer.cache_keys().begin(), layer.cache_keys().end()),
-                      (std::set<int64_t>{keys_[1], keys_[2]}));
+            ASSERT_EQ(layer.cache_keys_size(), 1);
+            EXPECT_EQ(layer.cache_keys(0), keys_[2]);
         }
     }
     completeAll();
@@ -1113,6 +1270,9 @@ TEST_F(P2PConnectorWriteSchedulerTest, CpWritebackIncludesPromptBoundaryAndPubli
     ASSERT_TRUE(decode_->planFor(2)->ok());
     ASSERT_TRUE(prefill_->planFor(1)->ok());
     EXPECT_EQ(decode_->planFor(2)->plan.digest(), prefill_->planFor(1)->plan.digest());
+    auto selected = source();
+    ASSERT_TRUE(decode_->selectSourceBlocks(*selected, input_length_, kv_ready_token_count_, routing_).ok());
+    EXPECT_EQ(selected->blocks("default"), (BlockIndicesType{NULL_BLOCK_IDX, NULL_BLOCK_IDX, 9, 10}));
     auto context = asyncWrite(source());
     ASSERT_NE(context, nullptr);
     ASSERT_TRUE(await([&]() { return decode_workers_[0].starts == 1 || context->done(); }));
@@ -1986,6 +2146,49 @@ TEST(P2PConnectorAsyncWriteContextTest, StartWriteCompletionWakesCheckerAndRelea
     EXPECT_TRUE(completion.get().ok());
     EXPECT_FALSE(context->resourceHoldPending());
     checker.stop();
+}
+
+TEST(P2PWritebackKvReserveTest, RatioMustBeWithinZeroAndOne) {
+    EXPECT_TRUE(validWritebackKvReserveRatio(0.0));
+    EXPECT_TRUE(validWritebackKvReserveRatio(1.0));
+    EXPECT_FALSE(validWritebackKvReserveRatio(-0.1));
+    EXPECT_FALSE(validWritebackKvReserveRatio(1.5));
+    EXPECT_FALSE(validWritebackKvReserveRatio(std::numeric_limits<double>::quiet_NaN()));
+}
+
+TEST(P2PWriteRpcUtilTest, CallForResultKeepsFailureCause) {
+    std::string failure;
+    EXPECT_EQ(*p2p_internal::callForResult([] { return std::make_shared<int>(7); }, failure), 7);
+    EXPECT_TRUE(failure.empty());
+    EXPECT_EQ(p2p_internal::callForResult([] { return std::shared_ptr<int>{}; }, failure), nullptr);
+    EXPECT_EQ(failure, "no result");
+    EXPECT_EQ(p2p_internal::callForResult(
+                  []() -> std::shared_ptr<int> { throw std::runtime_error("connection refused"); }, failure),
+              nullptr);
+    EXPECT_EQ(failure, "connection refused");
+}
+
+TEST(P2PWriteRpcUtilTest, PeerClientCacheEvictsOnlyIdleUnheldClients) {
+    p2p_internal::PeerClientCache<std::string, int> cache(/*idle_ttl_ms=*/1);
+    int                                             created = 0;
+    const auto                                      create  = [&] { return std::make_shared<int>(++created); };
+    const auto idle = [] { std::this_thread::sleep_for(std::chrono::milliseconds(5)); };
+
+    auto held = cache.get("held", create);
+    EXPECT_EQ(cache.get("held", create), held);
+    cache.get("dropped", create);
+    EXPECT_EQ(created, 2);
+
+    idle();
+    EXPECT_EQ(cache.get("held", create), held);
+    EXPECT_EQ(*cache.get("dropped", create), 3);
+
+    held.reset();
+    idle();
+    EXPECT_EQ(*cache.get("held", create), 4);
+
+    EXPECT_EQ(cache.get("failed", [] { return std::shared_ptr<int>{}; }), nullptr);
+    EXPECT_EQ(*cache.get("failed", create), 5);
 }
 
 }  // namespace

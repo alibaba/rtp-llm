@@ -37,7 +37,9 @@ void P2PSchedulerDecodeWrite::stop() {
 bool P2PSchedulerDecodeWrite::init() {
     if (async_write_pool_ || !client_ || !config_.topology || config_.p2p_writeback_timeout_ms <= 0
         || config_.load_cache_timeout_ms <= 0 || config_.p2p_lease_query_timeout_ms <= 0
-        || config_.p2p_cancel_broadcast_timeout_ms <= 0 || config_.parallelism_config.tp_size <= 0
+        || config_.p2p_cancel_broadcast_timeout_ms <= 0
+        || !validWritebackKvReserveRatio(config_.p2p_writeback_kv_reserve_ratio)
+        || config_.parallelism_config.tp_size <= 0
         || config_.worker_grpc_addrs.size() != static_cast<size_t>(config_.parallelism_config.tp_size)) {
         return false;
     }
@@ -139,6 +141,79 @@ ErrorInfo P2PSchedulerDecodeWrite::buildDecodeRankRoutes(const TransferPlan&    
     return ErrorInfo::OkStatus();
 }
 
+std::optional<P2PSchedulerDecodeWrite::WriteRange> P2PSchedulerDecodeWrite::writeRange(
+    int input_length, size_t kv_ready_token_count, const Meta::P2PRoutingContext& routing) const {
+    const int expected_cp_size =
+        config_.parallelism_config.prefill_cp_config.kv_cache_sharded ? routing.prefill_tp_size : 1;
+    if (input_length < 0 || static_cast<size_t>(input_length) > kv_ready_token_count || routing.prefill_cp_size <= 0
+        || routing.prefill_cp_size != expected_cp_size || config_.cache_key_tokens_per_block == 0) {
+        return std::nullopt;
+    }
+    // P reuses whole CP units, so both ends round down to one; the unit straddling the prompt is resent whole.
+    const size_t block_size = config_.cache_key_tokens_per_block;
+    const size_t cp_size    = routing.prefill_cp_size;
+    return WriteRange{static_cast<size_t>(input_length) / block_size / cp_size * cp_size,
+                      kv_ready_token_count / block_size / cp_size * cp_size};
+}
+
+ErrorInfo P2PSchedulerDecodeWrite::selectSourceBlocks(KVCacheResource&               resource,
+                                                      int                            input_length,
+                                                      size_t                         kv_ready_token_count,
+                                                      const Meta::P2PRoutingContext& routing) {
+    const auto range = writeRange(input_length, kv_ready_token_count, routing);
+    if (!range || !config_.topology || resource.cacheKeysAreCpCanonical()
+        || resource.groupNums() != config_.topology->groups().size()) {
+        return ErrorInfo(ErrorCode::INVALID_PARAMS, "invalid writeback source snapshot");
+    }
+    if (range->end_block > resource.cacheKeys().size()) {
+        return ErrorInfo(ErrorCode::INVALID_PARAMS, "writeback source keys do not cover ready KV");
+    }
+    const auto planned = planFor(routing.prefill_tp_size);
+    if (!planned->ok()) {
+        return planned->error;
+    }
+    resource.cacheKeys().resize(range->end_block);
+    // All layers of a group share one block table, so the positions sent per tag decide which blocks to keep.
+    std::map<std::string, std::set<size_t>> sent_positions;
+    for (const auto& route : planned->plan.routes) {
+        auto& positions = sent_positions[route.cache_tag];
+        for (const auto pos : KVCacheTransferPlanner::resolveKeys(route.src_keys, range->end_block)) {
+            if (pos >= range->start_block && pos < range->end_block) {
+                positions.insert(pos);
+            }
+        }
+    }
+    for (const auto& group : config_.topology->groups()) {
+        std::set<BlockIdxType> retained;
+        const auto             sent = sent_positions.find(group.tag);
+        if (sent != sent_positions.end() && !sent->second.empty()) {
+            if (config_.topology->layerIdsForGroup(group.tag).empty()) {
+                return ErrorInfo(ErrorCode::INVALID_PARAMS, "writeback source group has no layers");
+            }
+            const std::vector<size_t> positions(sent->second.begin(), sent->second.end());
+            const auto                buffer = LayerCacheBufferUtil::convertLayerTagForRoute(
+                resource, group, config_.topology->layerIdsForGroup(group.tag).front(), positions, 0, 1, config_.cache_key_tokens_per_block);
+            if (!buffer.ok()) {
+                return buffer.status();
+            }
+            for (const auto& [key, block_id] : buffer.value()->blockIdMap()) {
+                retained.insert(block_id);
+            }
+        }
+        auto       block_ids = resource.blocks(group.tag);
+        for (auto& block_id : block_ids) {
+            if (!retained.count(block_id)) {
+                block_id = NULL_BLOCK_IDX;
+            }
+        }
+        while (!block_ids.empty() && isNullBlockIdx(block_ids.back())) {
+            block_ids.pop_back();
+        }
+        resource.mutableBlockIds(group.tag).assign(std::move(block_ids));
+    }
+    return ErrorInfo::OkStatus();
+}
+
 std::shared_ptr<P2PConnectorAsyncWriteContext> P2PSchedulerDecodeWrite::asyncWrite(KVCacheResourcePtr resource,
                                                                                    std::vector<int>   token_ids,
                                                                                    int                input_length,
@@ -155,38 +230,51 @@ std::shared_ptr<P2PConnectorAsyncWriteContext> P2PSchedulerDecodeWrite::asyncWri
     if (!source_group) {
         return nullptr;
     }
-    auto context = std::make_shared<P2PConnectorAsyncWriteContext>(
-        routing.unique_key,
-        deadline,
-        client_,
-        config_.p2p_cancel_broadcast_timeout_ms,
-        config_.p2p_lease_query_timeout_ms,
-        [source_group]() {
-            source_group->cancel();
-            source_group->releaseSourceResource();
-        },
-        metrics_reporter_);
-    if (!checker_.addContext(context)) {
-        context->finishWithoutTransfer(
-            ErrorInfo(ErrorCode::OUTPUT_QUEUE_FULL, "writeback checker stopped or duplicate key"));
-        return context;
-    }
-    const auto accepted = async_write_pool_->pushTask(
-        [this,
-         context,
-         source_group,
-         token_ids = std::move(token_ids),
-         input_length,
-         kv_ready_token_count,
-         routing = std::move(routing),
-         deadline]() {
-            startAsyncWriteCalls(
-                context, source_group, token_ids, input_length, kv_ready_token_count, routing, deadline);
-        },
-        false,
-        false);
-    if (accepted != autil::ThreadPoolBase::ERROR_NONE) {
-        context->finishWithoutTransfer(ErrorInfo(ErrorCode::OUTPUT_QUEUE_FULL, "writeback kickoff queue unavailable"));
+    const auto release_source = [source_group]() {
+        source_group->cancel();
+        source_group->releaseSourceResource();
+    };
+    std::shared_ptr<P2PConnectorAsyncWriteContext> context;
+    try {
+        context = std::make_shared<P2PConnectorAsyncWriteContext>(routing.unique_key,
+                                                                  deadline,
+                                                                  client_,
+                                                                  config_.p2p_cancel_broadcast_timeout_ms,
+                                                                  config_.p2p_lease_query_timeout_ms,
+                                                                  release_source,
+                                                                  metrics_reporter_);
+        if (!checker_.addContext(context)) {
+            context->finishWithoutTransfer(
+                ErrorInfo(ErrorCode::OUTPUT_QUEUE_FULL, "writeback checker stopped or duplicate key"));
+            return context;
+        }
+        const auto accepted = async_write_pool_->pushTask(
+            [this,
+             context,
+             source_group,
+             token_ids = std::move(token_ids),
+             input_length,
+             kv_ready_token_count,
+             routing = std::move(routing),
+             deadline]() {
+                startAsyncWriteCalls(
+                    context, source_group, token_ids, input_length, kv_ready_token_count, routing, deadline);
+            },
+            false,
+            false);
+        if (accepted != autil::ThreadPoolBase::ERROR_NONE) {
+            context->finishWithoutTransfer(
+                ErrorInfo(ErrorCode::OUTPUT_QUEUE_FULL, "writeback kickoff queue unavailable"));
+        }
+    } catch (...) {
+        // Without a queued kickoff nothing else would ever release the held source.
+        if (context) {
+            context->finishWithoutTransfer(
+                ErrorInfo(ErrorCode::P2P_CONNECTOR_SCHEDULER_CALL_WORKER_FAILED, "writeback submission failed"));
+        } else {
+            release_source();
+        }
+        throw;
     }
     return context;
 }
@@ -211,12 +299,9 @@ void P2PSchedulerDecodeWrite::startAsyncWriteCalls(const std::shared_ptr<P2PConn
         context->finishWithoutTransfer(ErrorInfo(ErrorCode::INVALID_PARAMS, message));
     };
     try {
-        if (input_length < 0 || static_cast<size_t>(input_length) > kv_ready_token_count
-            || kv_ready_token_count > token_ids.size()
+        const auto range = writeRange(input_length, kv_ready_token_count, routing);
+        if (!range || kv_ready_token_count > token_ids.size()
             || token_ids.size() > static_cast<size_t>(std::numeric_limits<int>::max())
-            || routing.prefill_cp_size
-                   != (config_.parallelism_config.prefill_cp_config.kv_cache_sharded ? routing.prefill_tp_size : 1)
-            || routing.prefill_cp_size <= 0 || config_.cache_key_tokens_per_block == 0
             || formatGrpcHostPort(routing.prefill_addr.first, routing.prefill_addr.second).empty()) {
             return invalid("invalid writeback input or peer endpoint");
         }
@@ -227,10 +312,9 @@ void P2PSchedulerDecodeWrite::startAsyncWriteCalls(const std::shared_ptr<P2PConn
         if (!planned->ok()) {
             return context->finishWithoutTransfer(planned->error);
         }
-        const auto   block_size      = config_.cache_key_tokens_per_block;
-        const size_t cp_size         = routing.prefill_cp_size;
-        const auto   blocks          = kv_ready_token_count / block_size / cp_size * cp_size;
-        const size_t candidate_start = static_cast<size_t>(input_length) / block_size / cp_size * cp_size;
+        const auto block_size      = config_.cache_key_tokens_per_block;
+        const auto blocks          = range->end_block;
+        const auto candidate_start = range->start_block;
         if (blocks <= candidate_start) {
             return context->finishWithoutTransfer();
         }
@@ -247,9 +331,6 @@ void P2PSchedulerDecodeWrite::startAsyncWriteCalls(const std::shared_ptr<P2PConn
         if (calculateCacheKeys(token_ids.data(), blocks * block_size, block_size) != resource.cacheKeys()
             || std::set<int64_t>(resource.cacheKeys().begin(), resource.cacheKeys().end()).size() != blocks) {
             return invalid("writeback source key hash mismatch");
-        }
-        if (blocks == 0) {
-            return context->finishWithoutTransfer();
         }
 
         // STARTWRITE RPC

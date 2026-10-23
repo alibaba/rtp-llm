@@ -14,6 +14,11 @@ namespace rtp_llm {
 constexpr size_t kP2PDecodeKickoffThreadCount = 4;
 constexpr size_t kP2PDecodeKickoffQueueSize   = 1024;
 
+// Also rejects NaN; an out-of-range ratio would make the reserve's size_t conversion undefined.
+inline bool validWritebackKvReserveRatio(double reserve_ratio) {
+    return reserve_ratio >= 0.0 && reserve_ratio <= 1.0;
+}
+
 inline int64_t getP2PTransferListenPort(int64_t cache_store_listen_port) {
     // Reuse the reserved per-worker slot right after cache_store_listen_port.
     // Keep port 0 unchanged so tests can still request an ephemeral port.
@@ -29,6 +34,7 @@ struct P2PConnectorSchedulerConfig {
     int64_t                  p2p_cancel_broadcast_timeout_ms              = 1000;
     int64_t                     p2p_cancelled_keys_ttl_ms    = 3600 * 1000;
     int64_t                     p2p_writeback_timeout_ms     = 5000;
+    double                               p2p_writeback_kv_reserve_ratio               = 0.1;
     std::shared_ptr<const CacheTopology> topology;
     size_t                               cache_key_tokens_per_block = 1;
     int                                  cp_rank = 0;
@@ -55,6 +61,7 @@ struct P2PConnectorSchedulerConfig {
         config.p2p_cancel_broadcast_timeout_ms = cache_store_config.p2p_cancel_broadcast_timeout_ms;
         config.p2p_cancelled_keys_ttl_ms       = cache_store_config.p2p_cancelled_keys_ttl_ms;
         config.p2p_writeback_timeout_ms        = cache_store_config.p2p_writeback_timeout_ms;
+        config.p2p_writeback_kv_reserve_ratio  = cache_store_config.p2p_writeback_kv_reserve_ratio;
         return config;
     }
 };

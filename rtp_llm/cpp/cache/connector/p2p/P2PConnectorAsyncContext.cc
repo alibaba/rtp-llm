@@ -1,6 +1,7 @@
 #include "rtp_llm/cpp/cache/connector/p2p/P2PConnectorAsyncContext.h"
 #include "rtp_llm/cpp/cache/connector/p2p/P2PConnectorConfig.h"
 
+#include "rtp_llm/cpp/cache/connector/p2p/P2PWriteRpcUtil.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/cpp/utils/TimeUtil.h"
 #include "rtp_llm/cpp/utils/ErrorCode.h"
@@ -1116,15 +1117,21 @@ void P2PConnectorAsyncWriteContext::runControl(const std::shared_ptr<autil::Thre
         }
         std::shared_ptr<DecodeWriteHelper::CancelResult>       peer_result;
         std::shared_ptr<P2PBroadcastClient::TpBroadcastResult> worker_result;
-        try {
-            if (worker_control && timeout > 0) {
-                worker_result = self->client_->controlWriteAsync(self->unique_key_, CANCEL_WRITE, deadline, timeout);
-            }
-        } catch (...) {}
-        try {
-            if (peer_cancel)
-                peer_result = peer_cancel();
-        } catch (...) {}
+        std::string                                            failure;
+        if (worker_control && timeout > 0) {
+            worker_result = p2p_internal::callForResult(
+                [&] { return self->client_->controlWriteAsync(self->unique_key_, CANCEL_WRITE, deadline, timeout); },
+                failure);
+            if (!worker_result)
+                RTP_LLM_LOG_WARNING(
+                    "writeback worker cancel failed, unique_key=%s: %s", self->unique_key_.c_str(), failure.c_str());
+        }
+        if (peer_cancel) {
+            peer_result = p2p_internal::callForResult(peer_cancel, failure);
+            if (!peer_result)
+                RTP_LLM_LOG_WARNING(
+                    "writeback peer cancel failed, unique_key=%s: %s", self->unique_key_.c_str(), failure.c_str());
+        }
         std::lock_guard<std::mutex> lock(self->mutex_);
         self->peer_cancel_result_ = std::move(peer_result);
         self->control_result_     = std::move(worker_result);

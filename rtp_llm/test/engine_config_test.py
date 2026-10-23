@@ -257,13 +257,16 @@ class EngineConfigTest(TestCase):
         config = CacheStoreConfig()
         self.assertFalse(config.p2p_writeback_enable)
         self.assertEqual(config.p2p_writeback_timeout_ms, 5000)
+        self.assertAlmostEqual(config.p2p_writeback_kv_reserve_ratio, 0.1)
         config.p2p_writeback_enable = True
         config.p2p_writeback_timeout_ms = 1234
+        config.p2p_writeback_kv_reserve_ratio = 0.25
 
         restored = pickle.loads(pickle.dumps(config))
-        self.assertEqual(len(config.__getstate__()), 28)
+        self.assertEqual(len(config.__getstate__()), 29)
         self.assertTrue(restored.p2p_writeback_enable)
         self.assertEqual(restored.p2p_writeback_timeout_ms, 1234)
+        self.assertAlmostEqual(restored.p2p_writeback_kv_reserve_ratio, 0.25)
 
 
 class SetupPdSepConfigTest(TestCase):

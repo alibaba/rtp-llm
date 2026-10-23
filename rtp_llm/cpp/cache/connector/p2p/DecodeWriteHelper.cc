@@ -44,17 +44,10 @@ std::shared_ptr<BroadcastManager> DecodeWriteHelper::server(const std::string& a
     if (!parseGrpcHostPort(address, host, port)) {
         return nullptr;
     }
-    std::lock_guard<std::mutex> lock(mutex_);
-    const auto                  it = servers_.find(address);
-    if (it != servers_.end()) {
-        return it->second;
-    }
-    auto peer = std::make_shared<BroadcastManager>(std::vector<std::string>{address});
-    if (!peer->init()) {
-        return nullptr;
-    }
-    servers_.emplace(address, peer);
-    return peer;
+    return servers_.get(address, [&]() -> std::shared_ptr<BroadcastManager> {
+        auto peer = std::make_shared<BroadcastManager>(std::vector<std::string>{address});
+        return peer->init() ? peer : nullptr;
+    });
 }
 
 std::shared_ptr<DecodeWriteHelper::CancelResult> DecodeWriteHelper::cancel(const std::string& prefill_addr,

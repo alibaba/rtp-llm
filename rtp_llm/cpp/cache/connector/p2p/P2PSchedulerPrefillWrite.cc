@@ -1,4 +1,5 @@
 #include "rtp_llm/cpp/cache/connector/p2p/P2PSchedulerPrefillWrite.h"
+#include "rtp_llm/cpp/cache/connector/p2p/P2PWritebackResourceUtil.h"
 #include "rtp_llm/cpp/cache/CPSlotMapper.h"
 
 #include "rtp_llm/cpp/cache/KVCacheHashUtil.h"
@@ -12,6 +13,7 @@
 #include <algorithm>
 #include <limits>
 #include <set>
+#include <tuple>
 #include <thread>
 #include <future>
 #include "rtp_llm/cpp/cache/block_tree_cache/load/LoadAsyncContext.h"
@@ -80,6 +82,7 @@ bool P2PSchedulerPrefillWrite::init() {
     if (initialized_ || !coordinator_manager_ || !client_ || !config_.topology || config_.p2p_cancel_broadcast_timeout_ms <= 0
         || config_.p2p_writeback_timeout_ms <= 0 || config_.load_cache_timeout_ms <= 0
         || config_.p2p_lease_query_timeout_ms <= 0
+        || !validWritebackKvReserveRatio(config_.p2p_writeback_kv_reserve_ratio)
         || config_.worker_addrs.size() != static_cast<size_t>(config_.parallelism_config.tp_size)
         || config_.worker_grpc_addrs.size() != config_.worker_addrs.size()) {
         return false;
@@ -97,15 +100,10 @@ bool P2PSchedulerPrefillWrite::init() {
 }
 
 std::shared_ptr<P2PBroadcastClient> P2PSchedulerPrefillWrite::sourceClient(const std::vector<std::string>& addresses) {
-    std::lock_guard<std::mutex> lock(source_clients_mutex_);
-    const auto                  it = source_clients_.find(addresses);
-    if (it != source_clients_.end())
-        return it->second;
-    auto client = std::make_shared<P2PBroadcastClient>(addresses, config_.p2p_cancel_broadcast_timeout_ms);
-    if (!client->init())
-        return nullptr;
-    source_clients_.emplace(addresses, client);
-    return client;
+    return source_clients_.get(addresses, [&]() -> std::shared_ptr<P2PBroadcastClient> {
+        auto client = std::make_shared<P2PBroadcastClient>(addresses, config_.p2p_cancel_broadcast_timeout_ms);
+        return client->init() ? client : nullptr;
+    });
 }
 
 std::shared_ptr<const PlanResult> P2PSchedulerPrefillWrite::planFor(int decode_tp_size) {
@@ -307,6 +305,57 @@ size_t P2PSchedulerPrefillWrite::inflightContextCount() const {
         requests_.begin(), requests_.end(), [](const auto& item) { return item.second->resourceHoldPending(); });
 }
 
+ErrorInfo P2PSchedulerPrefillWrite::selectSendRoutes(const P2PConnectorStartWriteRequestPB& request,
+                                                     const P2PBroadcastClient::RankRoutes&  receive_routes,
+                                                     P2PBroadcastClient::RankRoutes&        send_routes) const {
+    using RouteLayerKey = std::tuple<int32_t, uint32_t, int64_t>;
+    std::set<RouteLayerKey> receive_keys;
+    for (const auto& rank_routes : receive_routes) {
+        for (const auto& route : rank_routes) {
+            for (const auto& layer : route.layer_blocks()) {
+                for (const auto key : layer.cache_keys()) {
+                    receive_keys.emplace(route.route_id(), layer.layer_id(), key);
+                }
+            }
+        }
+    }
+    auto uncovered_keys = receive_keys;
+    send_routes.clear();
+    for (const auto& worker : request.decode_workers()) {
+        auto& rank_routes = send_routes.emplace_back();
+        for (const auto& source : worker.routes()) {
+            TransferRoutePB route = source;
+            route.clear_layer_blocks();
+            for (const auto& source_layer : source.layer_blocks()) {
+                if (source_layer.cache_keys_size() != source_layer.block_ids_size()) {
+                    return ErrorInfo(ErrorCode::INVALID_PARAMS, "writeback source key/block count mismatch");
+                }
+                LayerCacheBlockPB layer = source_layer;
+                layer.clear_cache_keys();
+                layer.clear_block_ids();
+                for (int i = 0; i < source_layer.cache_keys_size(); ++i) {
+                    const RouteLayerKey key{source.route_id(), source_layer.layer_id(), source_layer.cache_keys(i)};
+                    if (receive_keys.count(key)) {
+                        layer.add_cache_keys(source_layer.cache_keys(i));
+                        layer.add_block_ids(source_layer.block_ids(i));
+                        uncovered_keys.erase(key);
+                    }
+                }
+                if (layer.cache_keys_size() > 0) {
+                    route.add_layer_blocks()->Swap(&layer);
+                }
+            }
+            if (route.layer_blocks_size() > 0) {
+                rank_routes.push_back(std::move(route));
+            }
+        }
+    }
+    if (!uncovered_keys.empty()) {
+        return ErrorInfo(ErrorCode::INVALID_PARAMS, "writeback source routes do not cover receiver keys");
+    }
+    return ErrorInfo::OkStatus();
+}
+
 void P2PSchedulerPrefillWrite::handleWrite(const P2PConnectorStartWriteRequestPB& request,
                                            P2PConnectorStartWriteResponsePB&      response,
                                            std::function<bool()>                  is_cancelled) {
@@ -428,14 +477,13 @@ void P2PSchedulerPrefillWrite::handleWrite(const P2PConnectorStartWriteRequestPB
     const auto                                               observe         = [&] {
         if (start_submission.valid()
             && start_submission.wait_for(std::chrono::milliseconds(0)) == std::future_status::ready) {
-            try {
-                receive_result = start_submission.get();
-            } catch (...) {}
+            std::string failure;
+            receive_result = p2p_internal::callForResult([&] { return start_submission.get(); }, failure);
             if (receive_result)
                 receive_result->setDoneCallback(notify);
             else
                 state->fail(ErrorInfo(ErrorCode::P2P_CONNECTOR_SCHEDULER_CALL_WORKER_FAILED,
-                                      "writeback receive broadcast failed"));
+                                      "writeback receive broadcast failed: " + failure));
         }
         if (receive_result) {
             const auto first = receive_result->firstError();
@@ -451,14 +499,13 @@ void P2PSchedulerPrefillWrite::handleWrite(const P2PConnectorStartWriteRequestPB
         }
         if (send_submission.valid()
             && send_submission.wait_for(std::chrono::milliseconds(0)) == std::future_status::ready) {
-            try {
-                send_result = send_submission.get();
-            } catch (...) {}
+            std::string failure;
+            send_result = p2p_internal::callForResult([&] { return send_submission.get(); }, failure);
             if (send_result)
                 send_result->setDoneCallback(notify);
             else
                 state->fail(ErrorInfo(ErrorCode::P2P_CONNECTOR_SCHEDULER_CALL_WORKER_FAILED,
-                                      "writeback sender broadcast failed"));
+                                      "writeback sender broadcast failed: " + failure));
         }
         if (send_result) {
             const auto first = send_result->firstError();
@@ -499,12 +546,19 @@ void P2PSchedulerPrefillWrite::handleWrite(const P2PConnectorStartWriteRequestPB
         count = blocks - start;
         if (count == 0 && !load_context)
             return ErrorInfo::OkStatus();
+        // Checked after admission so each pool already reflects this writeback's real per-group, per-rank demand.
+        if (!writebackKeepsKvReserve(allocator_->cacheGroups(), config_.p2p_writeback_kv_reserve_ratio))
+            return ErrorInfo(ErrorCode::MALLOC_FAILED, "writeback would leave too few available KV blocks");
         P2PBroadcastClient::RankRoutes routes(transfer_addrs_.size());
+        P2PBroadcastClient::RankRoutes send_routes;
         if (count > 0) {
             const auto error =
                 buildPrefillRankRoutes(planned->plan, *resource, start, count, routes, &metrics.planned_bytes);
             if (error.hasError())
                 return error;
+            const auto send_error = selectSendRoutes(request, routes, send_routes);
+            if (send_error.hasError())
+                return send_error;
         }
         if (load_context && !load_context->commit())
             return ErrorInfo(ErrorCode::CACHE_STORE_STORE_FAILED, "writeback local load submission failed");
@@ -555,8 +609,7 @@ void P2PSchedulerPrefillWrite::handleWrite(const P2PConnectorStartWriteRequestPB
                 parseGrpcHostPort(address, host, port);
                 send.peer_workers.emplace_back(std::move(host), port);
             }
-            for (const auto& source : request.decode_workers())
-                send.routes.emplace_back(source.routes().begin(), source.routes().end());
+            send.routes     = std::move(send_routes);
             send_submission = submitWriteRpc(
                 control_pool_,
                 [this, addresses = source_addrs, send = std::move(send)]() mutable {
@@ -601,12 +654,14 @@ void P2PSchedulerPrefillWrite::handleWrite(const P2PConnectorStartWriteRequestPB
                 load_context->abortPending();
             if (control_submission.valid()
                 && control_submission.wait_for(std::chrono::milliseconds(0)) == std::future_status::ready) {
-                try {
-                    control_result = control_submission.get();
-                } catch (...) {}
+                std::string failure;
+                control_result = p2p_internal::callForResult([&] { return control_submission.get(); }, failure);
                 if (control_result)
                     control_result->setProgressCallback(notify);
                 else {
+                    RTP_LLM_LOG_WARNING("writeback receive stop control failed, unique_key=%s: %s",
+                                        unique_key.c_str(),
+                                        failure.c_str());
                     next_control_ms = currentTimeMs() + interval_ms;
                     interval_ms = std::min(interval_ms * 2, kControlMaxIntervalMs);
                 }

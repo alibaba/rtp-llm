@@ -8,6 +8,7 @@
 #include "autil/LockFreeThreadPool.h"
 #include <map>
 #include <mutex>
+#include <optional>
 
 namespace rtp_llm {
 
@@ -25,6 +26,10 @@ public:
     ~P2PSchedulerDecodeWrite();
     bool                                           init();
     void stop();
+    ErrorInfo                                      selectSourceBlocks(KVCacheResource&               resource,
+                                                                      int                            input_length,
+                                                                      size_t                         kv_ready_token_count,
+                                                                      const Meta::P2PRoutingContext& routing);
     std::shared_ptr<P2PConnectorAsyncWriteContext> asyncWrite(KVCacheResourcePtr resource,
                                                          std::vector<int>        token_ids,
                                                          int                     input_length,
@@ -36,6 +41,12 @@ public:
     }
 
 private:
+    struct WriteRange {
+        size_t start_block = 0;
+        size_t end_block   = 0;
+    };
+    std::optional<WriteRange>
+    writeRange(int input_length, size_t kv_ready_token_count, const Meta::P2PRoutingContext& routing) const;
     std::shared_ptr<const PlanResult> planFor(int prefill_tp_size);
     ErrorInfo buildDecodeRankRoutes(const TransferPlan&              plan,
                                     KVCacheResource&                 resource,
