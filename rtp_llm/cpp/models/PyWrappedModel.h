@@ -5,6 +5,7 @@
 #include "rtp_llm/cpp/models/HiddenStateCapturePublisher.h"
 #include "rtp_llm/cpp/models/ModelTypes.h"
 #include "rtp_llm/cpp/models/GenerationPrefillCudaGraphEligibility.h"
+#include "rtp_llm/cpp/model_utils/Dsv4MoeStrategy.h"
 
 #include "rtp_llm/cpp/cache/KVCacheManager.h"
 #include "rtp_llm/models_py/bindings/core/torch_utils/TypeConvert.h"
@@ -13,6 +14,7 @@
 #include <string>
 #include <atomic>
 #include <cstdint>
+#include <cstdlib>
 #include <memory>
 #include <mutex>
 #include <unordered_set>
@@ -169,6 +171,7 @@ private:
     // the normal main-generation wrapper can own this secondary runner.
     const bool                       owns_generation_prefill_cuda_graph_{false};
     bool                             enable_cuda_graph_{false};
+    bool                             sm120_decode_requires_graph_replay_{false};
     bool                             is_prefill_cuda_graph_mode_{false};
     GenerationPrefillCudaGraphStatus generation_prefill_cuda_graph_init_status_{
         GenerationPrefillCudaGraphStatus::NOT_REQUESTED};
@@ -227,6 +230,7 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
                                                                                params.parallelism_config.role_type,
                                                                                params.sp_config.type)),
     enable_cuda_graph_(params.hw_kernel_config.enable_cuda_graph && allow_cuda_graph),
+    sm120_decode_requires_graph_replay_(params.description.moe_runtime_config.moe_strategy == "sm120_decode"),
     is_prefill_cuda_graph_mode_(is_prefill_cuda_graph_mode),
     generation_prefill_cuda_graph_init_status_(owns_generation_prefill_cuda_graph_ ?
                                                    GenerationPrefillCudaGraphStatus::CAPTURE_UNAVAILABLE :
@@ -627,8 +631,11 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
         // Row count identifies global versus rank-local hidden input. The
         // model capability only resolves the small-input case where those
         // counts happen to be equal.
-        context_parallel_processor_ = ContextParallelProcessorFactory::create(
-            ProcessorType::ZIG_ZAG, params.parallelism_config, has_mtp_hidden_buffer_);
+        context_parallel_processor_ =
+            ContextParallelProcessorFactory::create(ProcessorType::ZIG_ZAG,
+                                                    params.parallelism_config,
+                                                    has_mtp_hidden_buffer_,
+                                                    params.description.uses_default_position_ids);
         RTP_LLM_LOG_INFO("Context parallel processor initialized with ZIG_ZAG strategy, prefer_local_hidden_states=%d.",
                          static_cast<int>(has_mtp_hidden_buffer_));
     }

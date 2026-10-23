@@ -170,3 +170,15 @@ cc_test(
     }),
     visibility = ["//rtp_llm/models_py/modules/dsv4/test:__pkg__"],
 )
+
+cc_test(
+    name = "dsv4_dp_prefill_policy_test",
+    srcs = ["Dsv4DpPrefillPolicyTest.cc"],
+    copts = test_copts,
+    deps = [
+        "//rtp_llm/cpp/normal_engine:dsv4_dp_prefill_policy",
+        "@com_google_googletest//:gtest",
+        "@com_google_googletest//:gtest_main",
+    ],
+    visibility = ["//rtp_llm/models_py/modules/dsv4/test:__pkg__"],
+)

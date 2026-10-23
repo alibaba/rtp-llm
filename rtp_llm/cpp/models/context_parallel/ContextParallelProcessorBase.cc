@@ -318,14 +318,25 @@ void IContextParallelProcessor::handleInputs(GptModelInputs&                    
     const int64_t global_token_num        = total_input_tokens.numel();
     const int64_t local_token_num         = cp_split_input_tokens.numel();
 
+    // Default text positions may be stale after a PD prefix transfer. Only
+    // reconstruct them when model configuration establishes token-index
+    // semantics: cached multimodal features can leave an ordinary text suffix
+    // while its explicit positions still encode the original image layout.
+    bool has_explicit_position_ids =
+        model_input.combo_position_ids.defined() && model_input.combo_position_ids.numel() > 0;
+    const bool has_single_axis_position_ids =
+        has_explicit_position_ids && model_input.combo_position_ids.numel() == global_token_num;
+    if (uses_default_position_ids_ && !has_multimodal_input && has_prefix_reuse && has_single_axis_position_ids) {
+        model_input.combo_position_ids = torch::Tensor();
+        has_explicit_position_ids      = false;
+    }
+
     // Per-local-token remap: for each token this rank keeps after the CP split,
     // record its global source index + validity. Reused to CP-split every per-token
     // side input the same way as combo_tokens: text_tokens_mask and combo_tokens_type_ids.
     // Without splitting the mask/type_ids, the embedding
     // op would read a global-length mask misaligned with this rank's token chunk
     // (multimodal placeholder ids stay -1 but get unmasked -> out-of-bounds).
-    const bool has_explicit_position_ids =
-        model_input.combo_position_ids.defined() && model_input.combo_position_ids.numel() > 0;
     const bool has_engram       = model_input.engram_token_windows.defined();
     const bool need_token_remap = has_engram || model_input.text_tokens_mask.defined()
                                   || model_input.combo_tokens_type_ids.defined() || has_explicit_position_ids

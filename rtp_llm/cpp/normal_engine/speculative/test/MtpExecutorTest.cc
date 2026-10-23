@@ -771,12 +771,12 @@ public:
         test_kv_cache_config.kernel_seq_size_per_block = 2;
 
         auto configure_cache_model = [](ModelConfig& cache_model_config) {
-            cache_model_config.data_type                    = rtp_llm::TYPE_INT8;
-            cache_model_config.attn_config.kv_head_num      = 128;
-            cache_model_config.attn_config.size_per_head    = 256;
+            cache_model_config.data_type                           = rtp_llm::TYPE_INT8;
+            cache_model_config.attn_config.kv_head_num             = 128;
+            cache_model_config.attn_config.size_per_head           = 256;
             cache_model_config.attn_config.tokens_per_block        = 2;
             cache_model_config.attn_config.kernel_tokens_per_block = 2;
-            cache_model_config.attn_config.kv_cache_dtype   = KvCacheDataType::BASE;
+            cache_model_config.attn_config.kv_cache_dtype          = KvCacheDataType::BASE;
         };
         configure_cache_model(score_cache_model_config);
         configure_cache_model(propose_cache_model_config);
@@ -1023,6 +1023,8 @@ public:
 
     void runSingleBatchPrefillScenario(bool simulate_cp_mutation, bool with_cp_hidden_buffers = true);
     void runSingleBatchDecodeScenario(bool with_prefill_only);
+    void runMultiBatchPrefillScenario(int fake_index = -1);
+    void runMultiBatchDecodeScenario(int fake_index = -1);
 
     void setupAlignmentModel(FakeModel*          model,
                              vector<string>&     forward_trace,
@@ -1128,9 +1130,9 @@ TEST_P(MtpCacheStrideTest, ForwardAndPrepareUseSingleGroupStrideOnly) {
         if (with_linear) {
             config.layer_num = single_layer ? 1 : 2;
             config.fromGroupedSpecs({test::makeLinearSpec("linear", 4, TYPE_FP16, 1, 1), full},
-                                    {{0}, {single_layer ? 0 : 1}},
-                                    {CacheGroupType::LINEAR, CacheGroupType::FULL},
-                                    {"linear", "full"});
+                                               {{0}, {single_layer ? 0 : 1}},
+                                               {CacheGroupType::LINEAR, CacheGroupType::FULL},
+                                               {"linear", "full"});
         }
         auto groups = config.topology().groups();
         for (auto& group : groups) {
@@ -1838,6 +1840,17 @@ TEST_F(MtpExecutorTest, testDSparkRemoteTpRankFailurePreventsPrefillDispatch) {
 }
 
 TEST_F(MtpExecutorTest, testMultiBatchPrefill) {
+    runMultiBatchPrefillScenario();
+}
+
+TEST_F(MtpExecutorTest, MixedFakePrefillStillSamplesAndCommitsRealRows) {
+    for (int fake_index : {0, 1}) {
+        SCOPED_TRACE(fake_index);
+        runMultiBatchPrefillScenario(fake_index);
+    }
+}
+
+void MtpExecutorTest::runMultiBatchPrefillScenario(int fake_index) {
     MtpExecutorTestConfig test_config;
     test_config.gen_num_per_cycle = 4;
     auto components               = createMtpExecutorComponents(test_config);
@@ -1849,6 +1862,10 @@ TEST_F(MtpExecutorTest, testMultiBatchPrefill) {
         components.model_config, components.runtime_config, components.resource_context, {0, 1, 2, 3});
     GenerateStreamPtr stream2 =
         createContextStream(components.model_config, components.runtime_config, components.resource_context, {2, 3});
+    if (fake_index >= 0) {
+        (fake_index == 0 ? stream1 : stream2)->setIsFakeStream(true);
+    }
+    EXPECT_FALSE(StreamGroups({stream1, stream2}).isFakeStream());
 
     // set fake model outputs
     auto target_input  = GptModelInputs{};
@@ -2663,6 +2680,17 @@ TEST_F(MtpExecutorTest, testDecodeOneStepSpecLogitsCapReplacesInvalidDraftWithTa
 }
 
 TEST_F(MtpExecutorTest, testMultiBatchDecode) {
+    runMultiBatchDecodeScenario();
+}
+
+TEST_F(MtpExecutorTest, MixedFakeDecodeStillVerifiesAndCommitsRealRows) {
+    for (int fake_index : {0, 1}) {
+        SCOPED_TRACE(fake_index);
+        runMultiBatchDecodeScenario(fake_index);
+    }
+}
+
+void MtpExecutorTest::runMultiBatchDecodeScenario(int fake_index) {
     // test multi batch decode not accept & accept all
     // input s1:[0, 1, 2, 3] + [2] s2:[3, 2, 1] + [3]
     // darft s1:[2]+[1,2,3] s2:[3]+[0,2,2]
@@ -2696,6 +2724,10 @@ TEST_F(MtpExecutorTest, testMultiBatchDecode) {
 
     GenerateStreamPtr stream2 = createDecodeStream(
         components.model_config, components.runtime_config, components.resource_context, {3, 2}, spec_update_info2);
+    if (fake_index >= 0) {
+        (fake_index == 0 ? stream1 : stream2)->setIsFakeStream(true);
+    }
+    EXPECT_FALSE(StreamGroups({stream1, stream2}).isFakeStream());
 
     // set fake model outputs
     // set 3 step draft model outputs

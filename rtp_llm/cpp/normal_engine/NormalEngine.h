@@ -55,7 +55,7 @@ private:
     void                            initScheduler();
     std::shared_ptr<GenerateStream> createStream(const std::shared_ptr<GenerateInput>& input);
     bool                            validateStreamForScheduling(const GenerateStreamPtr& stream) const;
-    std::shared_ptr<GenerateStream> createMinFakeStream(int32_t max_new_tokens);
+    std::shared_ptr<GenerateStream> createMinFakeStream(int32_t max_new_tokens, bool prefill_only = false);
     WarmUpResult                    warmUp(const EngineInitParams& params);
     WarmUpResult                    prefillWarmUp(const EngineInitParams& params);
     WarmUpResult                    decodeWarmUp(const EngineInitParams& params);
@@ -63,6 +63,7 @@ private:
     absl::Status                    trySaveStepError() const;
     void                            loop();
     bool                            synchronizeStopRequested();
+    std::optional<int64_t>          synchronizeDpStepState(int64_t local_value);
     void                            normalizeSystemPromptCacheConfig();
     void                            initCacheManager(std::optional<WarmUpResult> warm_up_result);
     static void                     initializeAndPublishCacheManager(ResourceContext&                            resource_context,
@@ -77,7 +78,7 @@ private:
     static size_t warmUpReservedBlockCount(size_t seq_len, size_t reserve_tokens, size_t tokens_per_block);
     static bool   shouldEarlyReturnEmptyBatch(bool streams_empty, int64_t tp_size, bool enable_ffn_disaggregate);
     static bool   shouldAddMtpFakePrefill(bool has_prefill, bool use_batch_decode_scheduler, int64_t dp_size);
-    void          mayAddFakeStream(std::list<GenerateStreamPtr>& streams);
+    bool          mayAddFakeStream(std::list<GenerateStreamPtr>& streams);
 
     void initExecutor(const EngineInitParams& params, std::unique_ptr<ProposeModelEngineInitParams>& propose_params);
 
@@ -106,8 +107,12 @@ private:
     kmonitor::MetricsReporterPtr                  metrics_reporter_;
     std::unique_ptr<ProposeModelEngineInitParams> propose_params_;
     StepWindowProfiler                            step_profiler_;
-    bool                                          sm120_ep_stop_sync_ = false;
-    int                                           reserve_step_       = 0;
+    int                                           reserve_step_          = 0;
+    bool                                          dp_prefill_phase_sync_ = false;
+    bool                                          dp_previous_prefill_   = false;
+    bool                                          dp_decode_batch_sync_  = false;
+    bool                                          sm120_ep_stop_sync_    = false;
+    int                                           decode_fixed_bs_       = 0;
 };
 
 }  // namespace rtp_llm

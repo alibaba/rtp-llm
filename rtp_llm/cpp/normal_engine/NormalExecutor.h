@@ -32,6 +32,7 @@ public:
                             std::function<void()>                  profile_step_start  = nullptr,
                             std::function<void()>                  profile_step_finish = nullptr);
     ~NormalExecutor();
+    void         syncStreamState();
     absl::Status process(const std::list<GenerateStreamPtr>& streams, int64_t schedule_time_us = 0) override;
     void         reportMetrics(const StreamGroups&                        stream_groups,
                                RtpLLMExecutorMetricsCollector&            executor_collector,

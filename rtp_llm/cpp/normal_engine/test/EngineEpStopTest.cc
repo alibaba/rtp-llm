@@ -4,6 +4,7 @@
 #include <cstdlib>
 #include <spawn.h>
 #include <sys/wait.h>
+#include <tuple>
 #include <unistd.h>
 #include <pybind11/embed.h>
 #include <torch/csrc/distributed/c10d/FileStore.hpp>
@@ -75,6 +76,7 @@ public:
 TEST_F(EngineEpStopChild, DISABLED_RunRank) {
     const int   rank     = std::atoi(std::getenv("RTP_ENGINE_EP_TEST_RANK"));
     const int   tp_size  = std::atoi(std::getenv("RTP_ENGINE_EP_TEST_TP_SIZE"));
+    const bool  aligned  = std::atoi(std::getenv("RTP_ENGINE_EP_TEST_ALIGNED")) != 0;
     const char* base_env = std::getenv("RTP_ENGINE_EP_TEST_BASE");
     ASSERT_NE(base_env, nullptr);
     const std::string      base(base_env);
@@ -111,11 +113,20 @@ leaders = dist.new_group(
         py::cpp_function([](py::args) { throw std::runtime_error("unexpected broadcast"); }),
         py::cpp_function([&](torch::Tensor value, int op, int mode, py::object) {
             EXPECT_EQ(op, static_cast<int>(ReduceOp::Max));
-            EXPECT_EQ(mode, static_cast<int>(ParallelMode::DP));
             EXPECT_EQ(rank % tp_size, 0);
-            EXPECT_TRUE(value.is_cpu()) << "stop votes must not synchronize the GPU";
             EXPECT_TRUE(expert_traffic) << "dense replicas must not vote across DP";
             ++stop_votes;
+            if (aligned) {
+                EXPECT_EQ(mode, static_cast<int>(ParallelMode::DP_AND_TP));
+                EXPECT_TRUE(value.is_cuda()) << "aligned scheduling must use its existing GPU vote";
+                c10d::AllreduceOptions options;
+                options.reduceOp = c10d::ReduceOp::MAX;
+                std::vector<torch::Tensor> tensors{value};
+                ep->allreduce(tensors, options)->wait();
+                return value;
+            }
+            EXPECT_EQ(mode, static_cast<int>(ParallelMode::DP));
+            EXPECT_TRUE(value.is_cpu()) << "unaligned stop votes must not synchronize the GPU";
             dist.attr("all_reduce")(
                 value, py::arg("op") = dist.attr("ReduceOp").attr("MAX"), py::arg("group") = leaders);
             return value;
@@ -128,8 +139,9 @@ leaders = dist.new_group(
     for (int trial = 0; trial < 18; ++trial) {
         auto engine = createMockEngine(CustomConfig{});
         ASSERT_TRUE(engine->stop().ok());
-        const int model_kind = trial % 3;
-        expert_traffic       = model_kind != 0;
+        const int model_kind          = trial % 3;
+        expert_traffic                = model_kind != 0;
+        engine->dp_decode_batch_sync_ = aligned && expert_traffic;
         // The mock engine starts as a single-rank model. Match the production
         // SM120 DP/EP initialization when installing this multi-rank topology.
         engine->sm120_ep_stop_sync_      = true;
@@ -190,7 +202,7 @@ leaders = dist.new_group(
     ::alarm(0);
 }
 
-class EngineEpStopTest: public ::testing::TestWithParam<int> {};
+class EngineEpStopTest: public ::testing::TestWithParam<std::tuple<int, bool>> {};
 
 TEST_P(EngineEpStopTest, StaggeredTpLeadersStopAllEpRanks) {
     ASSERT_GE(torch::cuda::device_count(), 4);
@@ -210,7 +222,8 @@ TEST_P(EngineEpStopTest, StaggeredTpLeadersStopAllEpRanks) {
         }
         values.push_back("RTP_ENGINE_EP_TEST_RANK=" + std::to_string(rank));
         values.push_back("RTP_ENGINE_EP_TEST_BASE=" + base);
-        values.push_back("RTP_ENGINE_EP_TEST_TP_SIZE=" + std::to_string(GetParam()));
+        values.push_back("RTP_ENGINE_EP_TEST_TP_SIZE=" + std::to_string(std::get<0>(GetParam())));
+        values.push_back("RTP_ENGINE_EP_TEST_ALIGNED=" + std::to_string(std::get<1>(GetParam())));
         std::vector<char*> env;
         for (auto& value : values) {
             env.push_back(value.data());
@@ -262,7 +275,11 @@ TEST_P(EngineEpStopTest, StaggeredTpLeadersStopAllEpRanks) {
     ::rmdir(base.c_str());
 }
 
-INSTANTIATE_TEST_SUITE_P(TensorParallelSizes, EngineEpStopTest, ::testing::Values(1, 2));
+INSTANTIATE_TEST_SUITE_P(TensorParallelSizes,
+                         EngineEpStopTest,
+                         ::testing::Values(std::make_tuple(1, false),
+                                           std::make_tuple(2, false),
+                                           std::make_tuple(1, true)));
 
 }  // namespace
 }  // namespace rtp_llm

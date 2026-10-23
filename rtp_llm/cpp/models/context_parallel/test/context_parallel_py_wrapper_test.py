@@ -304,6 +304,39 @@ class TestContextParallelProcessor(unittest.TestCase):
         self.assertEqual(shuffle_indices.cpu().tolist(), [0, 1, 6, 7])
         self.assertEqual(position_ids.tolist(), [4, 5, 10, 0])
 
+    def test_cached_image_preserves_single_axis_positions(self):
+        # The image is fully cached, so no image features remain in the suffix.
+        # MMWITHTAG's final position is 14 despite the token index being 9.
+        _, _, _, positions, _ = cp_test.remap_multimodal_inputs(
+            torch.tensor([42], dtype=torch.int32),
+            torch.tensor([14], dtype=torch.int32),
+            [],
+            [],
+            torch.empty(0, dtype=torch.int32),
+            0,
+            2,
+            torch.tensor([1], dtype=torch.int32),
+            torch.empty(0, dtype=torch.int32),
+            torch.tensor([9], dtype=torch.int32),
+        )
+        self.assertEqual(positions.tolist(), [14, 0])
+
+    def test_default_text_rebuilds_stale_prefix_positions(self):
+        _, _, _, positions, _ = cp_test.remap_multimodal_inputs(
+            torch.arange(8, dtype=torch.int32),
+            torch.arange(8, dtype=torch.int32),
+            [],
+            [],
+            torch.empty(0, dtype=torch.int32),
+            0,
+            2,
+            torch.tensor([8], dtype=torch.int32),
+            torch.empty(0, dtype=torch.int32),
+            torch.tensor([4], dtype=torch.int32),
+            uses_default_position_ids=True,
+        )
+        self.assertEqual(positions.tolist(), [4, 5, 10, 11])
+
     def test_rank_chunk_fully_inside_image_slices_feature_and_deepstack(self):
         combo_tokens = torch.arange(14, dtype=torch.int32)
         feature = torch.arange(20, dtype=torch.float32).reshape(10, 2)

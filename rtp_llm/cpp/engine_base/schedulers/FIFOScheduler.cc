@@ -5,6 +5,7 @@
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
+#include "autil/EnvUtil.h"
 
 #include <algorithm>
 #include <chrono>
@@ -618,8 +619,14 @@ void FIFOScheduler::evaluateWaitingGroupQueue() {
 
 absl::StatusOr<list<GenerateStreamPtr>> FIFOScheduler::schedule() {
     unique_lock<mutex> lock(lock_);
-    if (need_fill_fake_stream_ || !loading_cache_streams_.empty() || !loading_cache_group_queue_.empty()
-        || !waiting_group_queue_.empty()) {
+    if (need_fill_fake_stream_) {
+        // Empty DP ranks still participate in the next shared model round.
+        // Preserve the default while allowing a bounded startup-time latency probe.
+        static const int64_t fake_stream_wait_ms =
+            std::clamp<int64_t>(autil::EnvUtil::getEnv<int64_t>("RTP_LLM_DP_FAKE_STREAM_WAIT_MS", 10), 1, 10);
+        cond_.wait_for(lock, std::chrono::milliseconds(fake_stream_wait_ms), [this] { return waitPredicate(); });
+    } else if (!loading_cache_streams_.empty() || !loading_cache_group_queue_.empty()
+               || !waiting_group_queue_.empty()) {
         cond_.wait_for(lock, std::chrono::milliseconds(10), [this] { return waitPredicate(); });
     } else if (!waiting_streams_.empty()) {
         // No running work can release capacity. Poll PD-held block releases without turning a
