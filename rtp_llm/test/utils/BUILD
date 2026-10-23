@@ -41,7 +41,7 @@ py_binary(
 
 py_library(
     name = "device_resource",
-    deps = [":filelock"],
+    deps = [":filelock", ":jit_sys_path_setup"],
     srcs = ["device_resource.py"],
 )
 
