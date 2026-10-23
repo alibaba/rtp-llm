@@ -2,9 +2,9 @@
 from __future__ import annotations
 
 import json
-import lzma
 from traffic import prefix_lineage, prefix_lineage_v3
 from traffic.lineage_model import LineageModel
+from traffic.lineage_envelope import decompress
 
 CODECS = {2: prefix_lineage.BlockAlignedLineageCodec,
           3: prefix_lineage_v3.ExactLengthLineageCodec}
@@ -23,10 +23,7 @@ def decode_model(raw: bytes, manifest=None, *, expected_version: str | None = No
         module = codec_for_version(codec.get("version"))
     else:
         # 生成 sidecar / 内存 API 从自描述 envelope 读取版本；文件消费方传入 manifest。
-        decoder = lzma.LZMADecompressor(memlimit=128 * 1024 * 1024)
-        data = decoder.decompress(raw, max_length=128 * 1024 * 1024)
-        if not decoder.eof or decoder.unused_data:
-            raise ValueError("invalid or oversized lineage envelope")
+        data = decompress(raw, "invalid or oversized lineage envelope")
         if data.startswith(prefix_lineage.MAGIC):
             module = codec_for_version(2)
         else:
@@ -35,7 +32,7 @@ def decode_model(raw: bytes, manifest=None, *, expected_version: str | None = No
             except (ValueError, KeyError, TypeError):
                 raise ValueError("missing lineage codec version") from None
             module = codec_for_version(version)
-    model = module.decode(raw)
+    model = module.decode(raw) if manifest is not None else module._parse(data)
     metadata = model.metadata.to_dict()
     if expected_version is not None and expected_version != str(model.metadata.version):
         raise ValueError("source version disagrees with model contents")

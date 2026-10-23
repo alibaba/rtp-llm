@@ -131,9 +131,9 @@ public final class JavaMockEngineCluster {
         EngineEventLog engineEventLog = EngineEventLog.open(config.eventsFile);
         try {
             startRole(config, performance, serversByPort, bossGroup, workerGroup, services, scheduler, stats,
-                    0, config.nPrefill, "prefill", EngineRpcService.RoleTypePB.ROLE_TYPE_PREFILL);
+                    0, config.nPrefill, "prefill");
             startRole(config, performance, serversByPort, bossGroup, workerGroup, services, scheduler, stats,
-                    config.nPrefill, config.nDecode, "decode", EngineRpcService.RoleTypePB.ROLE_TYPE_DECODE);
+                    config.nPrefill, config.nDecode, "decode");
             for (FastRpcService service : services.values()) {
                 service.setEngineEventLog(engineEventLog);
             }
@@ -235,8 +235,7 @@ public final class JavaMockEngineCluster {
                                   ClusterStats stats,
                                   int portOffset,
                                   int count,
-                                  String roleName,
-                                  EngineRpcService.RoleTypePB roleType) throws IOException {
+                                  String roleName) throws IOException {
         for (int i = 0; i < count; i++) {
             int grpcPort = config.baseGrpcPort + portOffset + i;
             startEngine(config, performance, serversByPort, bossGroup, workerGroup,

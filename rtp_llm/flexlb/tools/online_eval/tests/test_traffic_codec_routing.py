@@ -4,6 +4,7 @@ import json
 import lzma
 import tempfile
 import unittest
+from unittest.mock import patch
 from pathlib import Path
 
 from traffic import datasets, prefix_lineage, prefix_lineage_v3
@@ -14,6 +15,31 @@ from scripts.pipeline.materialize_traffic import main as materialize_main
 
 
 class CodecRoutingTest(unittest.TestCase):
+    def test_each_route_decompresses_once_and_preserves_the_decoded_model(self):
+        events = [[0, 513, -1, 0], [1000, 1025, 0, 1]]
+        for version, codec in ((2, prefix_lineage), (3, prefix_lineage_v3)):
+            raw = codec.encode(events)
+            expected = codec.decode(raw)
+            manifest = dict(codec=dict(name='prefix_lineage', version=version),
+                            version=version, block_size=512)
+            for selected in (None, manifest):
+                with self.subTest(version=version, manifest=selected):
+                    with patch('traffic.lineage_envelope.lzma.LZMADecompressor',
+                               wraps=lzma.LZMADecompressor) as decoder:
+                        actual = decode_model(raw, selected).to_wire()
+                    self.assertEqual(expected, actual)
+                    self.assertEqual(1, decoder.call_count)
+
+    def test_both_routes_reject_truncated_or_concatenated_envelopes(self):
+        for version, codec in ((2, prefix_lineage), (3, prefix_lineage_v3)):
+            raw = codec.encode([[0, 513, -1, 0]])
+            manifest = dict(codec=dict(name='prefix_lineage', version=version),
+                            version=version, block_size=512)
+            for invalid in (raw[:-1], raw + b'trailing', raw + raw):
+                for selected in (None, manifest):
+                    with self.subTest(version=version, manifest=selected), self.assertRaisesRegex(ValueError, 'envelope'):
+                        decode_model(invalid, selected)
+
     def test_detection_uses_header_not_length_or_file_name(self):
         events = [[0, 512, -1, 0], [1000, 1024, 0, 1]]
         for version, codec in ((2, prefix_lineage), (3, prefix_lineage_v3)):

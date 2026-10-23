@@ -22,9 +22,9 @@ class ReplayUniquePrefixTest {
         var keys=JavaLoadClient.computeBlockKeys(tokens,512);
         var record=new JavaLoadClient.TraceRecord(1,"r","trace",0,2048,8,keys,tokens,50,512);
         var client=client();
-        var first=client.makeLoopRequest(record,1,0);
-        var again=client.makeLoopRequest(record,1,0);
-        var second=client.makeLoopRequest(record,2,0);
+        var first=client.makeLoopRequest(record,1);
+        var again=client.makeLoopRequest(record,1);
+        var second=client.makeLoopRequest(record,2);
         assertEquals(first.blockKeys,again.blockKeys);
         assertTrue(Collections.disjoint(keys,first.blockKeys));
         assertTrue(Collections.disjoint(first.blockKeys,second.blockKeys));

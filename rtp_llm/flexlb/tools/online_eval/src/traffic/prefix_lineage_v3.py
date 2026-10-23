@@ -4,6 +4,7 @@ import lzma
 
 from traffic.lineage_model import DEFAULT_PREFIX_BLOCK_SIZE, prefix_block_size, MAX_LINEAGE_EVENTS as MAX_EVENTS
 from traffic.lineage_model import LineageModel
+from traffic.lineage_envelope import decompress
 
 
 def validate(events, block_size=DEFAULT_PREFIX_BLOCK_SIZE):
@@ -33,11 +34,7 @@ def encode(events, provenance=None, *, block_size=DEFAULT_PREFIX_BLOCK_SIZE):
                                    separators=(',', ':'), allow_nan=False).encode(), preset=6)
 
 
-def _decode_payload(raw):
-    decoder = lzma.LZMADecompressor(memlimit=128*1024*1024)
-    data = decoder.decompress(raw, max_length=128*1024*1024)
-    if not decoder.eof or decoder.unused_data:
-        raise ValueError('invalid or oversized lineage v3 envelope')
+def _parse_payload(data):
     model = json.loads(data)
     metadata, events = model['metadata'], model['events']
     block_size = prefix_block_size(metadata.get('block_size'))
@@ -51,7 +48,10 @@ class ExactLengthLineageCodec:
     """Decode the persisted format into the common, unit-safe domain model."""
 
     def decode(self, raw):
-        return LineageModel.from_wire(*_decode_payload(raw))
+        return self._parse(decompress(raw, 'invalid or oversized lineage v3 envelope'))
+
+    def _parse(self, data):
+        return LineageModel.from_wire(*_parse_payload(data))
 
     def encode(self, events, provenance=None, *, block_size=DEFAULT_PREFIX_BLOCK_SIZE):
         return encode(events, provenance, block_size=block_size)

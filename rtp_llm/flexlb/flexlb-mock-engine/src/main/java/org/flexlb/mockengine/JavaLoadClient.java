@@ -393,7 +393,7 @@ public final class JavaLoadClient implements AutoCloseable {
 
                 final TraceRecord loopRecord;
                 if (loopIdx > 0) {
-                    loopRecord = makeLoopRequest(record, loopIdx, sentCount);
+                    loopRecord = makeLoopRequest(record, loopIdx);
                 } else {
                     loopRecord = record;
                 }
@@ -615,7 +615,7 @@ public final class JavaLoadClient implements AutoCloseable {
     }
 
     // Package-visible for loop-mode rid disjointness assertions in tests.
-    TraceRecord makeLoopRequest(TraceRecord req, int loopIdx, int sentCount) {
+    TraceRecord makeLoopRequest(TraceRecord req, int loopIdx) {
         // Suffix carries the shard index defensively: even though loop mode shards
         // the trace, this keeps rid namespaces disjoint across shards if shard
         // counts change or a trace contains duplicated sourceRids.

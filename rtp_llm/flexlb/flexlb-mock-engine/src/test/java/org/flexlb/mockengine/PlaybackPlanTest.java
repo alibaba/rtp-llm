@@ -61,8 +61,8 @@ class PlaybackPlanTest {
             assertEquals(2L, stride.getLong(client));
             var a = client.parseTraceRecord(JSON.readTree("{\"rid\":\"a\",\"il\":1024,\"ol\":2,\"bh\":[1,2]}"));
             var b = client.parseTraceRecord(JSON.readTree("{\"rid\":\"b\",\"il\":1024,\"ol\":2,\"bh\":[1,3]}"));
-            var nextA = client.makeLoopRequest(a, 1, 0);
-            var nextB = client.makeLoopRequest(b, 1, 1);
+            var nextA = client.makeLoopRequest(a, 1);
+            var nextB = client.makeLoopRequest(b, 1);
             assertNotEquals(a.blockKeys, nextA.blockKeys);
             assertNotEquals(nextA.blockKeys, nextB.blockKeys);
             assertEquals(nextA.blockKeys.get(0), nextB.blockKeys.get(0));

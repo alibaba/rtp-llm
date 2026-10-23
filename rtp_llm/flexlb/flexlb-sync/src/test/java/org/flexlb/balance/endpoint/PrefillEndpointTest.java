@@ -282,10 +282,18 @@ class PrefillEndpointTest {
     @CsvSource({"500,600,15", "500,-1,65", "-1,20,15"})
     void repackNormalizesInvalidFeatures(long seqLen, long hitCache, long expectedMs) {
         ScheduledRequest survivor = org.mockito.Mockito.spy(createScheduledRequest(1L, 500L, 200L));
+        AtomicReference<Boolean> invalidFeatures = new AtomicReference<>(false);
+        // Configure the fault before admission. Flip only its input state after
+        // commit so initial feature validation stays real and deterministic.
+        org.mockito.Mockito.doAnswer(ignored -> invalidFeatures.get() ? seqLen : 500L)
+                .when(survivor).seqLen();
+        org.mockito.Mockito.doAnswer(ignored -> invalidFeatures.get() ? hitCache : 200L)
+                .when(survivor).hitCache();
         ScheduledRequest finished = createScheduledRequest(2L, 300L, 100L);
         registerBatch(endpoint, 1L, 100L, List.of(survivor, finished));
-        org.mockito.Mockito.doReturn(seqLen).when(survivor).seqLen();
-        org.mockito.Mockito.doReturn(hitCache).when(survivor).hitCache();
+        invalidFeatures.set(true);
+        assertEquals(seqLen, survivor.seqLen());
+        assertEquals(hitCache, survivor.hitCache());
 
         assertDoesNotThrow(() -> reportRejectedBatchMember(endpoint, 1L, 2L));
         assertEquals(expectedMs, endpoint.captureRouteProjectionInputs().work().totalRemainingWorkMs().orElseThrow());

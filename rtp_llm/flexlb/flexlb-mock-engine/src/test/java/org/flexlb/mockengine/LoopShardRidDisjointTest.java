@@ -101,7 +101,7 @@ class LoopShardRidDisjointTest {
                 for (JavaLoadClient.TraceRecord r : slice) {
                     // Mirrors run(): loopIdx == 0 uses the original record.
                     JavaLoadClient.TraceRecord sent =
-                            loopIdx == 0 ? r : client.makeLoopRequest(r, loopIdx, 0);
+                            loopIdx == 0 ? r : client.makeLoopRequest(r, loopIdx);
                     assertTrue(rids.add(sent.requestId),
                             "duplicate rid within shard " + shard + ": " + sent.sourceRid);
                 }
@@ -137,7 +137,7 @@ class LoopShardRidDisjointTest {
             Set<Long> rids = new HashSet<>();
             for (int loopIdx = 1; loopIdx <= 2; loopIdx++) {
                 for (JavaLoadClient.TraceRecord r : trace) {
-                    JavaLoadClient.TraceRecord sent = client.makeLoopRequest(r, loopIdx, 0);
+                    JavaLoadClient.TraceRecord sent = client.makeLoopRequest(r, loopIdx);
                     assertEquals(r.sourceRid + "_S" + shard + "_L" + loopIdx, sent.sourceRid);
                     rids.add(sent.requestId);
                 }

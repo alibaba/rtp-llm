@@ -1,11 +1,6 @@
 """Explicit adaptation to client-record v1; raw Java rows are never relabeled."""
 from copy import deepcopy
-from typing import Protocol
 from schema_contract import matches_schema
-
-
-class ClientRecordReader(Protocol):
-    def snapshot_records(self) -> list: ...
 
 
 class ClientRecordAdapter:
