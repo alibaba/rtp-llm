@@ -41,28 +41,38 @@ __global__ void dsv41DecodeReplayMetadataKernel(Dsv41DecodeReplayMetadataPlan pl
         }
         const Dsv41ReplayPoolDesc& pool = plan.pools[p];
         const int64_t              cols = min(pool.block_stride, plan.pool_mirror_stride[p]);
-        const int64_t              src_row = static_cast<int64_t>(r) * pool.block_stride;
-        const int64_t              dst_row = static_cast<int64_t>(r) * plan.pool_mirror_stride[p];
+        const int64_t              mirror_cols = plan.pool_mirror_stride[p];
+        const int64_t src_row = static_cast<int64_t>(r) * pool.block_stride;
+        const int64_t dst_row = static_cast<int64_t>(r) * plan.pool_mirror_stride[p];
         if (r < live_request_count) {
-            for (int64_t c = threadIdx.x; c < cols; c += blockDim.x) {
-                mirror[dst_row + c] = pool.block_table[src_row + c];
+            // Copy the live source columns; zero any mirror columns the
+            // source does not cover (Python: dst_bt[..., n_cols:].zero_()).
+            for (int64_t c = threadIdx.x; c < mirror_cols; c += blockDim.x) {
+                mirror[dst_row + c] = c < cols ? pool.block_table[src_row + c] : 0;
             }
-        } else if (threadIdx.x == 0) {
-            for (int64_t c = 0; c < cols; ++c) {
+        } else {
+            for (int64_t c = threadIdx.x; c < mirror_cols; c += blockDim.x) {
                 mirror[dst_row + c] = 0;
             }
         }
     }
-    if (r >= live_request_count) {
-        return;
-    }
-
+    // Dummy rows (r >= live) are recomputed with sp=0, exactly like the
+    // Python chain: its grid covered the full capture capacity, the C++ fill
+    // had already zeroed the dummy length mirrors (prefix=0 / seq+1=1) and
+    // block-table rows, so every pool lookup hit block id 0 and resolved the
+    // write slot to -1 — which the captured SWA KV writer skips. Skipping the
+    // recompute would leave the previous (larger) replay's positive slot ids
+    // in these rows; a freed block reallocated to a live request would then
+    // be corrupted by the dummy row's stale write.
     const int Q = plan.q_len;
     const int W = plan.window;
 
     const int q = static_cast<int>(threadIdx.x);
     if (q < Q) {
-        int           sp      = start_pos[r] - start_offset;
+        int sp = 0;
+        if (r < live_request_count) {
+            sp = start_pos[r] - start_offset;
+        }
         // Mirror _build_start_pos_from_attention_inputs' clamp so the whole
         // [sp, sp + q_len) window stays within KV/pool capacity.
         if (sp < 0) {
