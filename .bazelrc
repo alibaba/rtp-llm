@@ -154,6 +154,7 @@ build:cuda13 --copt=-Wno-array-bounds
 build:cuda13 --copt=-Wno-unused-result
 build:cuda13 --copt=-Wno-array-parameter
 build:cuda13 --copt=-Wno-narrowing
+build:cuda13 --cxxopt=--param=destructive-interference-size=64
 # cuda13 owns its own dep chain: torch 2.11+cu130, triton 3.6.0, dedicated
 # pip_gpu_cuda13_torch / torch_2.11_py310_cuda repos and a dedicated whl_deps
 # branch in arch_select.bzl.  Selects that need to treat cu13 the same as
