@@ -154,6 +154,42 @@ def _propagate_meta_map(
         attn._set_prefill_meta_shared(meta_by_ratio.get(int(attn.compress_ratio)))
 
 
+def propagate_prebuilt_prefill_meta_fp8(
+    v4: "V4Transformer",
+    bundle,
+    kv_cache,
+    block_tables_by_type,
+    workspace: "PrefillWorkspace",
+) -> bool:
+    """Patch and propagate a prebuilt SM120 metadata set.
+
+    ``patch_prebuilt_metas`` rebuilds the block-table-dependent fields against
+    the real per-chunk tables; the rest of the bundle is byte-identical to the
+    eager build by construction (validated at consume time). Returns ``True``
+    on engagement. Out-of-domain bundles fall back to eager preparation;
+    unexpected failures disable further prediction attempts for the process.
+    """
+    from rtp_llm.models_py.modules.dsv4.fp8 import _head_prebuild
+
+    try:
+        _head_prebuild.patch_prebuilt_metas(bundle, kv_cache, block_tables_by_type)
+    except _head_prebuild._PatchOutOfDomain:
+        return False
+    except Exception:
+        _head_prebuild.disable_async_head()
+        logger.exception(
+            "[dsv4-async-head] unexpected patch failure; disabling predictive prebuild"
+        )
+        return False
+    meta_by_ratio = {
+        int(r): meta._replace(workspace=workspace)
+        for r, meta in bundle.meta_by_ratio.items()
+    }
+    with record_function_range("dsv4.fp8.prefill_meta.propagate"):
+        _propagate_meta_map(v4, meta_by_ratio)
+    return True
+
+
 def clear_prefill_meta_shared_fp8(v4: "V4Transformer") -> None:
     """Reverse of :func:`build_and_propagate_prefill_meta_fp8` — clears
     the per-layer ``AttentionFP8._prefill_meta_shared`` slot so a stale

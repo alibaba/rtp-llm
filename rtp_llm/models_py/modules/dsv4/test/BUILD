@@ -160,6 +160,7 @@ _SOURCE_CPU_TESTS = [
     "test_cp_deferred_verify_cpu",
     "test_cp_host_staging_cpu",
     "test_head_host_mirror_scalars_cpu",
+    "test_prefill_async_head_cpu",
     "test_suffix_gather_max_host_cpu",
     "test_mhc_prenorm_dg_cpu",
 ]
@@ -169,6 +170,7 @@ _SOURCE_CPU_TESTS = [
 _TRITON_SOURCE_CPU_TESTS = [
     "test_cp_host_staging_cpu",
     "test_head_host_mirror_scalars_cpu",
+    "test_prefill_async_head_cpu",
 ]
 
 [
@@ -194,6 +196,15 @@ py_test(
     env = {"CUDA_VISIBLE_DEVICES": ""},
 )
 
+py_test(
+    name = "test_prefill_async_head_stream",
+    srcs = ["test_prefill_async_head_stream.py"],
+    deps = ["//rtp_llm:torch", "//rtp_llm:device"],
+    data = ["//rtp_llm/models_py:prefill_optimization_source_data"],
+    tags = ["RTX_5000_PRO_CU13"],
+    exec_properties = {"gpu": "RTX_5000_PRO_CU13", "gpu_count": "1"},
+    target_compatible_with = _DSV4_SM120_ONLY,
+)
 
 # Exact-SM120 hardware tests; built only by cuda13_sm120.
 [
@@ -268,6 +279,7 @@ test_suite(
         "//rtp_llm/cpp/normal_engine/test:engine_stop_async_sm120_test",
         "//rtp_llm/cpp/normal_engine/test:engine_ep_stop_sm120_test",
         "//rtp_llm/cpp/normal_engine/test:dsv4_dp_prefill_policy_test",
+        ":test_prefill_async_head_stream",
         ":test_indexer_topk_backend_sm120",
         ":test_dsv4_kernel_jit_warmup_sm120",
         ":test_aux_hidden_capture_sm120",
