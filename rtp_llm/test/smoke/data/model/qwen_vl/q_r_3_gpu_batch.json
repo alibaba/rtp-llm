@@ -26,21 +26,21 @@
                 "extra_configs": {
                     "add_vision_id": false
                 },
-                "max_tokens": 100,
+                "max_tokens": 90,
                 "temperature": 0.0,
                 "top_p": 0.01
             },
             "result": {
                 "id": "chat-",
                 "object": "chat.completion",
-                "created": 1705334081,
+                "created": 1791782516,
                 "model": "",
                 "choices": [
                     {
                         "index": 0,
                         "message": {
                             "role": "assistant",
-                            "content": "This is a heartwarming, sun-drenched photograph capturing a tender moment between a woman and her dog on a beach at sunset.\n\n**Key Elements:**\n\n*   **The Subjects:** A woman with long, dark hair, wearing a plaid shirt and dark pants, is sitting on the sand. She is smiling warmly, looking at her dog. Beside her, a large, light-colored Labrador Retriever, wearing a colorful harness, is sitting and extending its paw to give a high",
+                            "content": "This is a heartwarming, sun-drenched photograph capturing a tender moment between a woman and her dog on a beach at sunset.\n\n**Key Elements:**\n\n*   **The Subjects:** A woman with long, dark hair, wearing a plaid shirt and dark pants, is sitting on the sand. She is smiling warmly, looking at her dog. Beside her, a large, light-colored Labrador Retriever, wearing a colorful harness,",
                             "partial": false
                         },
                         "finish_reason": "length"
@@ -48,8 +48,8 @@
                 ],
                 "usage": {
                     "prompt_tokens": 2766,
-                    "total_tokens": 2866,
-                    "completion_tokens": 100,
+                    "total_tokens": 2856,
+                    "completion_tokens": 90,
                     "prompt_tokens_details": {
                         "image_tokens": 2752
                     }

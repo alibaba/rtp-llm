@@ -32,7 +32,7 @@ struct BlockTreeMatchResult {
 class BlockTreeLoader {
 public:
     // Invoked with the shared cache mutex held.
-    using SettledFn = std::function<void(bool tree_data_mutated, bool check_watermark)>;
+    using SettledFn = std::function<void(bool check_watermark)>;
 
     BlockTreeLoader(BlockTree*                      tree,
                     BlockTreeEvictor&               evictor,

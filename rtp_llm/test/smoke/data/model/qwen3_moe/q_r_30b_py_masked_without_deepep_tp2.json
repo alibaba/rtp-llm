@@ -93,7 +93,7 @@
             }
           },
           {
-            "response": "\n\nThe error:\n\n```\nNameError: name 'screen_manager' is not defined\n```\n\nmeans that you're trying to use a variable or object called",
+            "response": "\n\nThe error `NameError: name 'screen_manager' is not defined` means that you're trying to use a variable or object called `screen_manager`,",
             "response_alternatives": null,
             "hidden_states": null,
             "logits": null,

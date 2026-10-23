@@ -78,7 +78,8 @@ BlockTreeCacheMetricsReporter::BlockTreeCacheMetricsReporter(
     metrics_reporter_(std::move(metrics_reporter)) {}
 
 std::vector<BlockTreePoolMetricsSnapshot>
-BlockTreeCacheMetricsReporter::collectPoolMetricsSnapshots(const std::vector<GroupSetPtr>& group_sets) const {
+BlockTreeCacheMetricsReporter::collectPoolMetricsSnapshots(const std::vector<GroupSetPtr>&       group_sets,
+                                                           std::chrono::steady_clock::time_point now) {
     std::unordered_set<const IBlockPool*>     reported_device_pools;
     std::vector<BlockTreePoolMetricsSnapshot> snapshots;
     for (const GroupSetPtr& group_set : group_sets) {
@@ -102,7 +103,28 @@ BlockTreeCacheMetricsReporter::collectPoolMetricsSnapshots(const std::vector<Gro
 
         const std::shared_ptr<BlockTreeDiskBlockPool> disk_pool = group_set->diskPool();
         if (disk_pool != nullptr) {
-            snapshots.push_back(makePoolMetricsSnapshot(Tier::DISK, *disk_pool));
+            auto               snapshot = makePoolMetricsSnapshot(Tier::DISK, *disk_pool);
+            const PoolIOSample sample{disk_pool->readBytes(), disk_pool->writeBytes(), now};
+            snapshot.read_bytes  = static_cast<int64_t>(sample.read_bytes);
+            snapshot.write_bytes = static_cast<int64_t>(sample.write_bytes);
+            auto [it, inserted]  = pool_io_samples_.emplace(disk_pool.get(), sample);
+            if (inserted) {
+                snapshot.read_bandwidth_bytes_per_sec  = 0;
+                snapshot.write_bandwidth_bytes_per_sec = 0;
+            } else {
+                auto&        previous    = it->second;
+                const double elapsed_sec = std::chrono::duration<double>(now - previous.time).count();
+                if (elapsed_sec > 0) {
+                    const size_t read_delta =
+                        sample.read_bytes >= previous.read_bytes ? sample.read_bytes - previous.read_bytes : 0;
+                    const size_t write_delta =
+                        sample.write_bytes >= previous.write_bytes ? sample.write_bytes - previous.write_bytes : 0;
+                    snapshot.read_bandwidth_bytes_per_sec  = read_delta / elapsed_sec;
+                    snapshot.write_bandwidth_bytes_per_sec = write_delta / elapsed_sec;
+                    previous                               = sample;
+                }
+            }
+            snapshots.push_back(std::move(snapshot));
         }
     }
     return snapshots;
@@ -277,10 +299,8 @@ void BlockTreeCacheMetricsReporter::reportEvictionFinished(const EvictionTransfe
     if (metrics_reporter_ == nullptr) {
         return;
     }
-    const int64_t finish_time_us = currentTimeUs();
     for (size_t desc_index = 0; desc_index < task.descriptors().size(); ++desc_index) {
-        reportEvictedDescriptor(
-            task.descriptors()[desc_index], task.timings[desc_index], group_sets, finish_time_us, true);
+        reportEvictedDescriptor(task.descriptors()[desc_index], task.timings[desc_index], group_sets, true);
     }
 }
 
@@ -289,26 +309,20 @@ void BlockTreeCacheMetricsReporter::reportEvictionFinished(const EvictionDropTas
     if (metrics_reporter_ == nullptr) {
         return;
     }
-    const int64_t finish_time_us = currentTimeUs();
-    reportEvictedDescriptor(task.primary_desc, task.primary_timing, group_sets, finish_time_us, true);
+    reportEvictedDescriptor(task.primary_desc, task.primary_timing, group_sets, true);
     for (size_t desc_index = 0; desc_index < task.dependent_prune_descs.size(); ++desc_index) {
-        reportEvictedDescriptor(task.dependent_prune_descs[desc_index],
-                                task.dependent_prune_timings[desc_index],
-                                group_sets,
-                                finish_time_us,
-                                false);
+        reportEvictedDescriptor(
+            task.dependent_prune_descs[desc_index], task.dependent_prune_timings[desc_index], group_sets, false);
     }
     for (size_t desc_index = 0; desc_index < task.cascade_descs.size(); ++desc_index) {
-        reportEvictedDescriptor(
-            task.cascade_descs[desc_index], task.cascade_timings[desc_index], group_sets, finish_time_us, false);
+        reportEvictedDescriptor(task.cascade_descs[desc_index], task.cascade_timings[desc_index], group_sets, false);
     }
 }
 
 void BlockTreeCacheMetricsReporter::reportEvictedDescriptor(const TransferDescriptor&       desc,
                                                             const EvictionTimingSnapshot&   timing,
                                                             const std::vector<GroupSetPtr>& group_sets,
-                                                            int64_t                         finish_time_us,
-                                                            bool report_candidate_times) const {
+                                                            bool report_block_idletime) const {
     const size_t group_set_id = desc.group_set_id;
     if (group_set_id >= group_sets.size()) {
         return;
@@ -319,17 +333,14 @@ void BlockTreeCacheMetricsReporter::reportEvictedDescriptor(const TransferDescri
     }
 
     RtpLLMCacheEvictionMetricsCollector collector;
-    collector.source_tier                = tierName(desc.source_tier);
-    collector.target_tier                = tierName(desc.target_tier);
-    collector.group_type                 = metricCacheGroupTypeName(group_set->groupType());
-    collector.report_eviction            = true;
-    collector.tier_residence_time_ms     = (finish_time_us - timing.tier_enter_time_us) / 1000;
-    collector.report_tier_residence_time = true;
-    if (report_candidate_times) {
-        collector.candidate_idle_time_ms     = (timing.selected_time_us - timing.last_access_time_us) / 1000;
-        collector.candidate_age_ms           = (timing.selected_time_us - timing.insert_time_us) / 1000;
-        collector.report_candidate_idle_time = true;
-        collector.report_candidate_age       = true;
+    collector.source_tier       = tierName(desc.source_tier);
+    collector.target_tier       = tierName(desc.target_tier);
+    collector.group_type        = metricCacheGroupTypeName(group_set->groupType());
+    collector.report_eviction   = true;
+    collector.block_lifetime_ms = std::max<int64_t>(0, (timing.selected_time_us - timing.tier_enter_time_us) / 1000);
+    if (report_block_idletime) {
+        collector.block_idletime_ms     = (timing.selected_time_us - timing.last_access_time_us) / 1000;
+        collector.report_block_idletime = true;
     }
     metrics_reporter_->report<RtpLLMCacheEvictionMetrics, RtpLLMCacheEvictionMetricsCollector>(nullptr, &collector);
 }
@@ -411,6 +422,20 @@ void BlockTreeCacheMetricsReporter::reportQueueBacklog(const BlockTreeQueueSizes
     collector.report_transfer          = false;
     collector.report_queue_backlog     = true;
     metrics_reporter_->report<RtpLLMCacheTransferMetrics, RtpLLMCacheTransferMetricsCollector>(nullptr, &collector);
+}
+
+void BlockTreeCacheMetricsReporter::maybeReportCopyError(Tier                  source_tier,
+                                                         Tier                  target_tier,
+                                                         const TransferResult& result) const {
+    if (!metrics_reporter_ || result.ok()) {
+        return;
+    }
+    RtpLLMCacheCopyErrorMetricsCollector collector;
+    collector.error_type     = cacheCopyErrorName(result.copy_error);
+    collector.copy_direction = source_tier == Tier::DEVICE ? "FROM_GPU" :
+                               target_tier == Tier::DEVICE ? "TO_GPU" :
+                               target_tier == Tier::DISK   ? "TO_DISK" : "FROM_DISK";
+    metrics_reporter_->report<RtpLLMCacheTransferMetrics, RtpLLMCacheCopyErrorMetricsCollector>(nullptr, &collector);
 }
 
 int64_t BlockTreeCacheMetricsReporter::reportTransferStarted(CacheTransferOperation operation,

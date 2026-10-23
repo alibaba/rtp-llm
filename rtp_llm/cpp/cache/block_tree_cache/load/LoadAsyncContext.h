@@ -79,6 +79,8 @@ public:
     void         startJoinWait(int64_t start_time_us);
     bool         completeJoinedOne(bool success, bool& join_completed, int64_t& join_wait_latency_us);
     bool         completeTransfers(size_t count, bool success);
+    void         cancelUnsubmittedTransfers();
+    ErrorInfo    errorInfo() const override;
     bool         aggregateSuccess() const;
     bool         settle(bool success);
     bool         onTaskFail();

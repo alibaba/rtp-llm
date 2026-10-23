@@ -13,12 +13,13 @@ class HostDiskTransferExecutor: public TransferExecutor {
 public:
     HostDiskTransferExecutor(BlockTreeTaskPool&                             transfer_task_pool,
                              size_t                                         max_descriptors_per_batch,
-                             std::shared_ptr<BlockTreeCacheMetricsReporter> metrics_reporter = nullptr);
+                             std::shared_ptr<BlockTreeCacheMetricsReporter> metrics_reporter = nullptr,
+                             BlockTreeTaskPool*                             load_task_pool   = nullptr);
 
 private:
     friend class DeviceDiskTransferExecutor;
 
-    TransferStatus executeBatch(const std::vector<HostBufferView>&     hosts,
+    TransferResult executeBatch(const std::vector<HostBufferView>&     hosts,
                                 const std::vector<TransferDescriptor>& descriptors,
                                 const std::vector<const GroupSet*>&    group_sets) override;
 

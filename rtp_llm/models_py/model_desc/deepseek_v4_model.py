@@ -43,6 +43,7 @@ from rtp_llm.config.cuda_graph import (
 from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.model_loader.model_weight_info import ModelWeights
 from rtp_llm.models_py.model_desc.module_base import GptModelBase
+from rtp_llm.models_py.modules.dsv4 import _profiler
 from rtp_llm.models_py.modules.dsv4.chunk_env import (
     DSV4_CHUNK_TOKENS_ENV,
     chunked_moe_enabled,
@@ -1407,13 +1408,15 @@ class DeepSeekV4Model(GptModelBase):
                 prepare_hidden_fn=prep_decode,
             )
         elif attn.is_prefill:
+            with _profiler.moe_record_function_scope():
+                capture = self.capture_context(inputs.capture_hidden_states)
             return forward_prefill(
                 self.v4,
                 self.kv_cache,
                 self.parallelism_config,
                 inputs,
                 prepare_hidden_fn=prep_prefill,
-                capture_context=self.capture_context(inputs.capture_hidden_states),
+                capture_context=capture,
             )
         else:
             return forward_decode(

@@ -33,11 +33,12 @@ LoadTaskRunner::TaskPtr LoadTaskRunner::createTask(const std::shared_ptr<LoadAsy
         return nullptr;
     }
 
-    return std::make_shared<Task>(
+    auto task = std::make_shared<Task>(
         std::move(task_load_descs),
         TransferTask(std::move(host_to_device_descriptors), std::chrono::milliseconds(host_timeout_ms_)),
         TransferTask(std::move(disk_to_device_descriptors), std::chrono::milliseconds(disk_timeout_ms_)),
         context);
+    return task;
 }
 
 void LoadTaskRunner::runTransfer(TaskPtr                        task,
@@ -56,17 +57,19 @@ void LoadTaskRunner::runTransfer(TaskPtr                        task,
         transfer_dispatcher.runTransfer(
             task->host_to_device_task,
             [this, task, &transfer_dispatcher, &metrics_reporter, transfer_begin, callback = std::move(callback)](
-                ErrorInfo error) mutable {
+                TransferResult result) mutable {
+                task->host_result = result;
                 try {
                     reportStageFinished(*task,
                                         metrics_reporter,
                                         Tier::HOST,
                                         task->host_to_device_task.descriptors(),
                                         transfer_begin,
-                                        error.ok());
-                    if (!error.ok()) {
+                                        result.ok());
+                    metrics_reporter.maybeReportCopyError(Tier::HOST, Tier::DEVICE, result);
+                    if (!result.ok()) {
                         task->phase = Task::Phase::FINISHED;
-                        callback(std::move(error));
+                        callback(std::move(result.status));
                         return;
                     }
                     startDiskTransfer(task, transfer_dispatcher, metrics_reporter, callback);
@@ -102,16 +105,18 @@ void LoadTaskRunner::startDiskTransfer(TaskPtr                        task,
         metrics_reporter.reportTransferStarted(CacheTransferOperation::LOAD, Tier::DISK, Tier::DEVICE);
     transfer_dispatcher.runTransfer(
         task->disk_to_device_task,
-        [this, task, &metrics_reporter, transfer_begin, callback = std::move(callback)](ErrorInfo error) mutable {
+        [this, task, &metrics_reporter, transfer_begin, callback = std::move(callback)](TransferResult result) mutable {
+            task->disk_result = result;
             try {
                 reportStageFinished(*task,
                                     metrics_reporter,
                                     Tier::DISK,
                                     task->disk_to_device_task.descriptors(),
                                     transfer_begin,
-                                    error.ok());
+                                    result.ok());
+                metrics_reporter.maybeReportCopyError(Tier::DISK, Tier::DEVICE, result);
                 task->phase = Task::Phase::FINISHED;
-                callback(std::move(error));
+                callback(std::move(result.status));
             } catch (const std::exception& exception) {
                 task->phase = Task::Phase::FINISHED;
                 callback(ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, exception.what()));

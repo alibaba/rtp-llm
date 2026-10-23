@@ -130,6 +130,23 @@ def _warn_on_explicit_cache_path(path: str | Path) -> None:
         pass
 
 
+def backend_pythonpath_prefix(environ: Mapping[str, str] | None = None) -> list[str]:
+    """Stable-path PYTHONPATH entries to put ahead of runfiles for spawned servers.
+
+    The gpu_lock launcher (jit_sys_path_setup) copies pip packages out of the
+    bazel runfiles into a stable cache and exports _JIT_CACHE_PATHS. Server
+    processes must import from that cache: flashinfer records the imported
+    package's absolute source paths in its workspace's ninja files, and bazel
+    removes the runfiles tree as soon as the owning test finishes.
+    """
+    environ = os.environ if environ is None else environ
+    return [
+        entry
+        for entry in environ.get("_JIT_CACHE_PATHS", "").split(os.pathsep)
+        if entry
+    ]
+
+
 def local_jit_fallback(name: str) -> Path:
     return Path(tempfile.gettempdir()).resolve() / f"rtp-llm-{os.getuid()}" / name
 

@@ -40,9 +40,7 @@ BlockTreeCache::BlockTreeCache(std::unique_ptr<BlockTree>                     tr
         config_.disk_cache_sync_timeout_ms,
         config_.max_descriptors_per_transfer_batch,
         [this](Tier tier) { return config_.isTierEnabled(tier); },
-        [this](bool tree_data_mutated, bool check_watermark) {
-            onWorkflowSettledLocked(tree_data_mutated, check_watermark);
-        }),
+        [this](bool check_watermark) { onWorkflowSettledLocked(check_watermark); }),
     loader_(tree_.get(),
             evictor_,
             transfer_dispatcher_.get(),
@@ -53,9 +51,7 @@ BlockTreeCache::BlockTreeCache(std::unique_ptr<BlockTree>                     tr
             config_.host_cache_sync_timeout_ms,
             config_.enable_device_cache,
             storage_backend_,
-            [this](bool tree_data_mutated, bool check_watermark) {
-                onWorkflowSettledLocked(tree_data_mutated, check_watermark);
-            }),
+            [this](bool check_watermark) { onWorkflowSettledLocked(check_watermark); }),
     storer_(tree_.get(),
             evictor_,
             transfer_dispatcher_.get(),
@@ -65,9 +61,7 @@ BlockTreeCache::BlockTreeCache(std::unique_ptr<BlockTree>                     tr
             config_.host_cache_sync_timeout_ms,
             config_.disk_cache_sync_timeout_ms,
             storage_backend_,
-            [this](bool tree_data_mutated, bool check_watermark) {
-                onWorkflowSettledLocked(tree_data_mutated, check_watermark);
-            }) {}
+            [this](bool check_watermark) { onWorkflowSettledLocked(check_watermark); }) {}
 
 bool BlockTreeCache::init() {
     if (initialized_) {
@@ -112,7 +106,7 @@ bool BlockTreeCache::init() {
 BlockTreeCache::~BlockTreeCache() {
     full_prefix_scanner_.reset();
     RTP_LLM_LOG_INFO("destroying, closing load tickets...");
-    loader_.shutdown();
+    shutdownLoads();
     if (storage_backend_) {
         storage_backend_->shutdown();
     }
@@ -134,14 +128,18 @@ BlockTreeCache::~BlockTreeCache() {
     RTP_LLM_LOG_INFO("destroyed");
 }
 
-bool BlockTreeCache::executeTransfer(TransferTask task) {
+void BlockTreeCache::shutdownLoads() {
+    loader_.shutdown();
+}
+
+TransferResult BlockTreeCache::executeTransfer(TransferTask task) {
     auto context = transfer_dispatcher_->executePerRank(std::move(task));
     context->waitDone();
-    if (!context->success()) {
-        RTP_LLM_LOG_WARNING("per-rank block transfer failed: %s", context->errorInfo().ToString().c_str());
-        return false;
+    auto result = context->result();
+    if (!result.ok()) {
+        RTP_LLM_LOG_WARNING("per-rank block transfer failed: %s", result.status.ToString().c_str());
     }
-    return true;
+    return result;
 }
 
 BlockTreeMatchResult BlockTreeCache::match(const CacheKeysType&               cache_keys,
@@ -261,34 +259,12 @@ KVCacheSnapshot BlockTreeCache::logicalCacheSnapshot() const {
     return tree_->logicalCacheSnapshot();
 }
 
-BlockTreeKeySnapshot BlockTreeCache::getKeySnapshot() const {
+BlockTreeKeySnapshot BlockTreeCache::getKeySnapshot(int64_t latest_version) const {
     std::lock_guard<std::mutex> lock(mutex_);
     BlockTreeKeySnapshot        snapshot;
-    snapshot.version = mutation_version_;
-
-    std::vector<const TreeNode*> pending;
-    pending.reserve(tree_->size());
-    for (const auto& [cache_key, child] : tree_->root()->children) {
-        (void)cache_key;
-        if (child) {
-            pending.push_back(child);
-        }
-    }
-    while (!pending.empty()) {
-        const TreeNode* node = pending.back();
-        pending.pop_back();
-        const bool reusable = std::any_of(node->group_set_resources.begin(),
-                                          node->group_set_resources.end(),
-                                          [](const GroupSetResource& resource) { return !resource.is_empty(); });
-        if (reusable) {
-            snapshot.keys.push_back(node->cache_key);
-        }
-        for (const auto& [cache_key, child] : node->children) {
-            (void)cache_key;
-            if (child) {
-                pending.push_back(child);
-            }
-        }
+    snapshot.version = tree_->keyVersion();
+    if (latest_version != snapshot.version) {
+        snapshot.keys = tree_->cacheKeys();
     }
     return snapshot;
 }
@@ -297,10 +273,7 @@ bool BlockTreeCache::abortPendingLoad(const std::shared_ptr<AsyncContext>& conte
     return loader_.abortPendingLoad(context);
 }
 
-void BlockTreeCache::onWorkflowSettledLocked(bool tree_data_mutated, bool check_watermark) {
-    if (tree_data_mutated) {
-        ++mutation_version_;
-    }
+void BlockTreeCache::onWorkflowSettledLocked(bool check_watermark) {
     if (check_watermark) {
         checkWatermark();
     }

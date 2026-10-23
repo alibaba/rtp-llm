@@ -4,8 +4,6 @@
 #include <algorithm>
 #include <stdexcept>
 #include <chrono>
-#include <cstdlib>
-#include <cstring>
 #include <limits>
 #include <numeric>
 
@@ -122,6 +120,10 @@ void reportPoolCacheMetrics(const kmonitor::MetricsReporterPtr& metrics_reporter
     pool_collector.report_eviction_target_ref_blocks = pool_snapshot.tier != tierName(Tier::DEVICE);
     pool_collector.store_ref_blocks                  = static_cast<int64_t>(pool_snapshot.store_ref_blocks);
     pool_collector.used_ratio                        = pool_snapshot.used_ratio;
+    pool_collector.read_bytes                        = pool_snapshot.read_bytes;
+    pool_collector.write_bytes                       = pool_snapshot.write_bytes;
+    pool_collector.read_bandwidth_bytes_per_sec      = pool_snapshot.read_bandwidth_bytes_per_sec;
+    pool_collector.write_bandwidth_bytes_per_sec     = pool_snapshot.write_bandwidth_bytes_per_sec;
 
     kmonitor::MetricsTags pool_tags("pool_name", pool_snapshot.pool_name);
     pool_tags.AddTag("tier", pool_snapshot.tier);
@@ -172,11 +174,6 @@ GroupedCacheLayerLayout projectLayout(const GroupedCacheLayerLayout&       sourc
         groups.emplace(target_group.tag, CacheLayerLayout(std::move(layers)));
     }
     return GroupedCacheLayerLayout(std::move(target_topology), std::move(groups));
-}
-
-bool cacheStatusSnapshotEnabled() {
-    const char* env = std::getenv("RTP_LLM_CACHE_STATUS_SNAPSHOT");
-    return env != nullptr && std::strcmp(env, "1") == 0;
 }
 
 void reportCacheOperation(const kmonitor::MetricsReporterPtr&          metrics_reporter,
@@ -255,14 +252,6 @@ KVCacheManager::KVCacheManager(const CacheConfig&                 config,
 }
 
 KVCacheManager::~KVCacheManager() {
-    {
-        std::lock_guard<std::mutex> lock(cache_status_refresh_mutex_);
-        cache_status_refresh_stopped_ = true;
-    }
-    cache_status_refresh_cv_.notify_all();
-    if (cache_status_refresh_thread_.joinable()) {
-        cache_status_refresh_thread_.join();
-    }
     {
         std::lock_guard<std::mutex> lock(allocation_wait_state_->mutex);
         allocation_wait_state_->stopped.store(true, std::memory_order_release);
@@ -455,6 +444,11 @@ void KVCacheManager::free(const FreeInfo& free_info) {
 
 bool KVCacheManager::abortPendingLoad(const std::shared_ptr<AsyncContext>& context) {
     return coordinator_manager_ != nullptr && coordinator_manager_->abortPendingLoad(context);
+}
+
+bool KVCacheManager::detachSharedBlocksForRecompute(const BatchKVCacheResourcePtr& resource,
+                                                    int                            device_ready_reuse_length) {
+    return coordinator_manager_->detachSharedBlocksForRecompute(resource, device_ready_reuse_length);
 }
 
 uint64_t KVCacheManager::allocationGeneration() const {
@@ -667,65 +661,6 @@ size_t KVCacheManager::maxAvailableTokensNum() const {
 }
 
 KVCacheInfo KVCacheManager::getKVCacheInfo(int64_t latest_version, bool need_cache_keys) const {
-    if (need_cache_keys && cacheStatusSnapshotEnabled()) {
-        std::shared_ptr<const KVCacheInfo> snapshot;
-        {
-            std::lock_guard<std::mutex> lock(cache_status_snapshot_mutex_);
-            snapshot = cache_status_snapshot_;
-        }
-        if (snapshot) {
-            return *snapshot;
-        }
-    }
-    return buildKVCacheInfo(latest_version, need_cache_keys);
-}
-
-void KVCacheManager::refreshKVCacheInfoSnapshot() {
-    if (!coordinator_manager_ || !cacheStatusSnapshotEnabled()) {
-        return;
-    }
-    {
-        std::lock_guard<std::mutex> lock(cache_status_refresh_mutex_);
-        if (cache_status_refresh_stopped_) {
-            return;
-        }
-        if (!cache_status_refresh_thread_.joinable()) {
-            {
-                std::lock_guard<std::mutex> snapshot_lock(cache_status_snapshot_mutex_);
-                cache_status_snapshot_ = std::make_shared<KVCacheInfo>(buildKVCacheInfo(-1, false));
-            }
-            cache_status_refresh_thread_ = std::thread(&KVCacheManager::cacheStatusRefreshLoop, this);
-        }
-        cache_status_refresh_requested_ = true;
-    }
-    cache_status_refresh_cv_.notify_one();
-}
-
-void KVCacheManager::cacheStatusRefreshLoop() {
-    while (true) {
-        {
-            std::unique_lock<std::mutex> lock(cache_status_refresh_mutex_);
-            cache_status_refresh_cv_.wait(
-                lock, [this] { return cache_status_refresh_stopped_ || cache_status_refresh_requested_; });
-            if (cache_status_refresh_stopped_) {
-                return;
-            }
-            cache_status_refresh_requested_ = false;
-        }
-        // Coalesce requests arriving during construction into one subsequent refresh.
-        // Main's atomic BlockTree key snapshot and FULL-pool capacity projection
-        // remain the source of truth; this worker only moves work off the engine loop.
-        try {
-            auto                        snapshot = std::make_shared<KVCacheInfo>(buildKVCacheInfo(-1, true));
-            std::lock_guard<std::mutex> lock(cache_status_snapshot_mutex_);
-            cache_status_snapshot_ = std::move(snapshot);
-        } catch (const std::exception& error) {
-            RTP_LLM_LOG_ERROR("cache status refresh failed: %s", error.what());
-        }
-    }
-}
-
-KVCacheInfo KVCacheManager::buildKVCacheInfo(int64_t latest_version, bool need_cache_keys) const {
     KVCacheInfo info;
     info.version = latest_version;
 
@@ -735,7 +670,7 @@ KVCacheInfo KVCacheManager::buildKVCacheInfo(int64_t latest_version, bool need_c
     }
 
     if (need_cache_keys && block_tree_cache_) {
-        BlockTreeKeySnapshot snapshot = block_tree_cache_->getKeySnapshot();
+        BlockTreeKeySnapshot snapshot = block_tree_cache_->getKeySnapshot(latest_version);
         info.version                  = snapshot.version;
         info.cached_keys              = std::move(snapshot.keys);
     }
@@ -802,7 +737,13 @@ bool KVCacheManager::executeFunction(const FunctionRequestPB& request, FunctionR
     }
 
     MemoryOperationResponsePB* memory_response = response.mutable_mem_response();
-    memory_response->set_code(MemoryOperationResponsePB::FAILED);
+    memory_response->set_code(MemoryOperationResponsePB::INVALID_REQUEST);
+    memory_response->mutable_error_info()->set_error_code(static_cast<int64_t>(ErrorCode::INVALID_PARAMS));
+    memory_response->mutable_error_info()->set_error_message("invalid grouped transfer request");
+    memory_response->clear_block_errors();
+    for (int i = 0; i < request.mem_request().copy_items_size(); ++i) {
+        memory_response->add_block_errors(MemoryOperationResponsePB::INVALID_REQUEST);
+    }
     std::vector<TransferDescriptor> descriptors;
     if (!BlockTransferRequestConverter::decodeTransfer(
             request.mem_request(), descriptors, block_tree_cache_->groupSets())) {
@@ -812,17 +753,18 @@ bool KVCacheManager::executeFunction(const FunctionRequestPB& request, FunctionR
 
     const int64_t timeout_ms = request.mem_request().timeout_ms();
     if (timeout_ms > std::numeric_limits<int>::max()) {
+        memory_response->mutable_error_info()->set_error_message("transfer timeout exceeds supported range");
         RTP_LLM_LOG_WARNING("KVCacheManager::executeFunction: transfer timeout exceeds supported range");
         return true;
     }
     const auto timeout =
         timeout_ms > 0 ? std::chrono::milliseconds(timeout_ms) : BlockTreeTaskPool::kDefaultQueueWaitTimeout;
-    const bool transfer_success = block_tree_cache_->executeTransfer(TransferTask(std::move(descriptors), timeout));
-    if (!transfer_success) {
+    const auto status = block_tree_cache_->executeTransfer(TransferTask(descriptors, timeout));
+    BlockTransferRequestConverter::encodeTransferResult(*memory_response, status);
+    if (!status.ok()) {
         RTP_LLM_LOG_WARNING("KVCacheManager::executeFunction: grouped transfer failed");
         return true;
     }
-    memory_response->set_code(MemoryOperationResponsePB::OK);
     return true;
 }
 
@@ -968,39 +910,6 @@ void KVCacheManager::stopCacheEventPublisher() {
     cache_event_publisher_.reset();
 }
 
-void KVCacheManager::recordCacheHitTokens(int64_t input_length, const RtpLLMCacheReuseMetricsCollector& metrics) {
-    std::lock_guard<std::mutex> lock(cache_hit_mutex_);
-    cache_hit_input_tokens_ += input_length;
-    cache_hit_reuse_tokens_ += metrics.kv_cache_reuse_length;
-    cache_hit_device_tokens_ += metrics.device_reuse_length;
-    cache_hit_host_tokens_ += metrics.host_reuse_length;
-    cache_hit_disk_tokens_ += metrics.disk_reuse_length;
-}
-
-bool KVCacheManager::collectCacheHitRates(std::chrono::steady_clock::time_point now,
-                                          RtpLLMCacheReuseMetricsCollector&     metrics) {
-    std::lock_guard<std::mutex> lock(cache_hit_mutex_);
-    metrics.report_hit_rates = false;
-    if (now - cache_hit_window_start_ < std::chrono::minutes(1)) {
-        return false;
-    }
-    cache_hit_window_start_ = now;
-    if (cache_hit_input_tokens_ > 0) {
-        const double scale        = 100.0 / cache_hit_input_tokens_;
-        metrics.kv_cache_hit_rate = static_cast<float>(cache_hit_reuse_tokens_ * scale);
-        metrics.device_hit_rate   = static_cast<float>(cache_hit_device_tokens_ * scale);
-        metrics.host_hit_rate     = static_cast<float>(cache_hit_host_tokens_ * scale);
-        metrics.disk_hit_rate     = static_cast<float>(cache_hit_disk_tokens_ * scale);
-        metrics.report_hit_rates  = true;
-    }
-    cache_hit_input_tokens_  = 0;
-    cache_hit_reuse_tokens_  = 0;
-    cache_hit_device_tokens_ = 0;
-    cache_hit_host_tokens_   = 0;
-    cache_hit_disk_tokens_   = 0;
-    return metrics.report_hit_rates;
-}
-
 void KVCacheManager::reportMetricsLoop() {
     RTP_LLM_PROFILE_FUNCTION();
     kmonitor::MetricsTags tags;
@@ -1014,11 +923,6 @@ void KVCacheManager::reportMetricsLoop() {
 
         RtpLLMCacheMetricsCollector global_metrics = collectGlobalCacheMetrics(coordinator_manager_);
         metrics_reporter_->report<RtpLLMCacheMetrics, RtpLLMCacheMetricsCollector>(&tags, &global_metrics);
-
-        RtpLLMCacheReuseMetricsCollector hit_metrics;
-        if (collectCacheHitRates(std::chrono::steady_clock::now(), hit_metrics)) {
-            metrics_reporter_->report<RtpLLMCacheReuseMetrics, RtpLLMCacheReuseMetricsCollector>(&tags, &hit_metrics);
-        }
 
         const auto now        = std::chrono::steady_clock::now();
         const bool should_log = (now - last_log_time) >= kLogInterval;

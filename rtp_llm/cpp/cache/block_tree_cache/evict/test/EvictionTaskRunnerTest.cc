@@ -24,7 +24,6 @@ using ScriptedTransferEngine = block_tree_cache_test::ScriptedPerRankBlockTransf
 TEST(EvictionTimingSnapshotTest, CapturesCandidateMetadataAtSelectionTime) {
     CandidateMeta candidate_meta;
     candidate_meta.tier_enter_time_us  = 10;
-    candidate_meta.insert_time_us      = 20;
     candidate_meta.last_access_time_us = 30;
 
     const int64_t                before = currentTimeUs();
@@ -32,7 +31,6 @@ TEST(EvictionTimingSnapshotTest, CapturesCandidateMetadataAtSelectionTime) {
     const int64_t                after = currentTimeUs();
 
     EXPECT_EQ(timing.tier_enter_time_us, 10);
-    EXPECT_EQ(timing.insert_time_us, 20);
     EXPECT_EQ(timing.last_access_time_us, 30);
     EXPECT_GE(timing.selected_time_us, before);
     EXPECT_LE(timing.selected_time_us, after);
@@ -61,7 +59,7 @@ class BatchCountingTransferEngine: public ScriptedTransferEngine {
 public:
     using ScriptedTransferEngine::ScriptedTransferEngine;
 
-    std::shared_ptr<AsyncContext> execute(TransferTask task) override {
+    std::shared_ptr<TransferAsyncContext> execute(TransferTask task) override {
         const auto& descriptors = task.descriptors();
         batches_.push_back(descriptors);
         if (on_submit_) {
@@ -93,7 +91,7 @@ class DeferredTransferEngine final: public PerRankBlockTransferEngine {
 public:
     explicit DeferredTransferEngine(const std::vector<GroupSetPtr>& groups): PerRankBlockTransferEngine(groups) {}
 
-    std::shared_ptr<AsyncContext> execute(TransferTask task) override {
+    std::shared_ptr<TransferAsyncContext> execute(TransferTask task) override {
         const auto& descriptors = task.descriptors();
         batches_.push_back(descriptors);
         auto context = std::make_shared<TransferBatchAsyncContext>();

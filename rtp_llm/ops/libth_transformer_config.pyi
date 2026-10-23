@@ -729,6 +729,7 @@ class HybridAttentionType:
     def value(self) -> int:
         ...
 class KVCacheConfig:
+    enable_crc: bool
     enable_device_cache: bool
     enable_memory_cache: bool
     enable_disk_cache: bool

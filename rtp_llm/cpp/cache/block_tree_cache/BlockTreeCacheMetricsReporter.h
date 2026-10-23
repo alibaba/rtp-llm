@@ -2,16 +2,19 @@
 
 #include <array>
 #include <atomic>
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <functional>
 #include <memory>
+#include <optional>
 #include <string>
 #include <unordered_map>
 #include <vector>
 
 #include "rtp_llm/cpp/cache/block_tree_cache/evict/BlockTreeEvictor.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/group_set/GroupSet.h"
+#include "rtp_llm/cpp/utils/ErrorCode.h"
 
 namespace kmonitor {
 class MetricsReporter;
@@ -35,6 +38,11 @@ struct BlockTreePoolMetricsSnapshot {
     size_t      load_ref_blocks{0};
     size_t      eviction_target_ref_blocks{0};
     size_t      store_ref_blocks{0};
+
+    std::optional<int64_t> read_bytes;
+    std::optional<int64_t> write_bytes;
+    std::optional<double>  read_bandwidth_bytes_per_sec;
+    std::optional<double>  write_bandwidth_bytes_per_sec;
 };
 
 enum class CacheTransferOperation : uint8_t {
@@ -90,7 +98,8 @@ public:
     explicit BlockTreeCacheMetricsReporter(std::shared_ptr<kmonitor::MetricsReporter> metrics_reporter);
 
     std::vector<BlockTreePoolMetricsSnapshot>
-    collectPoolMetricsSnapshots(const std::vector<GroupSetPtr>& group_sets) const;
+    collectPoolMetricsSnapshots(const std::vector<GroupSetPtr>&       group_sets,
+                                std::chrono::steady_clock::time_point now = std::chrono::steady_clock::now());
     std::vector<BlockTreeEvictableMetricsSnapshot>
     collectEvictableMetricsSnapshots(const std::vector<GroupSetPtr>& group_sets, const BlockTreeEvictor& evictor) const;
     void reportEvictableCandidateCount(const std::vector<BlockTreeEvictableMetricsSnapshot>& snapshots) const;
@@ -110,24 +119,34 @@ public:
     void reportLoadJoinWait(int64_t join_wait_latency_us) const;
 
     int64_t reportTransferStarted(CacheTransferOperation operation, Tier source_tier, Tier target_tier);
-    void    reportTransferFinished(CacheTransferOperation                 operation,
-                                   Tier                                   source_tier,
-                                   Tier                                   target_tier,
-                                   size_t                                 descriptors_per_transfer,
-                                   int64_t                                begin_time_us,
-                                   bool                                   success,
-                                   const std::vector<TransferDescriptor>& successful_descriptors,
-                                   const std::vector<GroupSetPtr>&        group_sets);
-    void    reportQueueWaitMetric(bool        callback,
-                                  const char* pool_type,
-                                  const char* operation,
-                                  Tier        source_tier,
-                                  Tier        target_tier,
-                                  int64_t     latency_us) const noexcept;
-    void    reportStorePublish(Tier target_tier, size_t accepted_blocks, size_t duplicate_blocks) const;
-    void    reportQueueBacklog(const BlockTreeQueueSizes& queue_sizes, const char* pool_type) const;
+    // Report once after all batches/ranks of a logical copy have completed.
+    void maybeReportCopyError(Tier source_tier, Tier target_tier, const TransferResult& result) const;
+    void reportTransferFinished(CacheTransferOperation                 operation,
+                                Tier                                   source_tier,
+                                Tier                                   target_tier,
+                                size_t                                 descriptors_per_transfer,
+                                int64_t                                begin_time_us,
+                                bool                                   success,
+                                const std::vector<TransferDescriptor>& successful_descriptors,
+                                const std::vector<GroupSetPtr>&        group_sets);
+    void reportQueueWaitMetric(bool        callback,
+                               const char* pool_type,
+                               const char* operation,
+                               Tier        source_tier,
+                               Tier        target_tier,
+                               int64_t     latency_us) const noexcept;
+    void reportStorePublish(Tier target_tier, size_t accepted_blocks, size_t duplicate_blocks) const;
+    void reportQueueBacklog(const BlockTreeQueueSizes& queue_sizes, const char* pool_type) const;
 
 private:
+    struct PoolIOSample {
+        size_t                                read_bytes{0};
+        size_t                                write_bytes{0};
+        std::chrono::steady_clock::time_point time;
+    };
+
+    std::unordered_map<const IBlockPool*, PoolIOSample> pool_io_samples_;
+
     static constexpr size_t kOperationCount = 3;
     static constexpr size_t kDirectionCount = 5;
 
@@ -135,8 +154,7 @@ private:
     void       reportEvictedDescriptor(const TransferDescriptor&       desc,
                                        const EvictionTimingSnapshot&   timing,
                                        const std::vector<GroupSetPtr>& group_sets,
-                                       int64_t                         finish_time_us,
-                                       bool                            report_candidate_times) const;
+                                       bool                            report_block_idletime) const;
     void
     reportEvictionTrigger(Tier source_tier, CacheGroupType group_type, const char* trigger_type, int64_t count) const;
     void reportStoreBlocks(Tier target_tier, const char* outcome, size_t block_count) const;

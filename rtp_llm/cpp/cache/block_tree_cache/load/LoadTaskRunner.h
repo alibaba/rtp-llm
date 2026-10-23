@@ -42,7 +42,10 @@ public:
         std::vector<TransferDescriptor> load_descs;
         TransferTask                    host_to_device_task;
         TransferTask                    disk_to_device_task;
-        std::vector<bool>               target_installed;
+        // Published before completion; settlement invalidates only source records with a confirmed CRC mismatch.
+        TransferResult    host_result;
+        TransferResult    disk_result;
+        std::vector<bool> target_installed;
         // A submitted task owns the committed context until settlement completes.
         std::shared_ptr<LoadAsyncContext> context;
         Phase                             phase{Phase::CREATED};

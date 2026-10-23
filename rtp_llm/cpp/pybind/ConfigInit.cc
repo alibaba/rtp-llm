@@ -476,6 +476,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("reuse_cache", &KVCacheConfig::reuse_cache)
         .def_readwrite("enable_remote_cache", &KVCacheConfig::enable_remote_cache)
         .def_readwrite("enable_device_cache", &KVCacheConfig::enable_device_cache)
+        .def_readwrite("enable_crc", &KVCacheConfig::enable_crc)
         .def_readwrite("multi_task_prompt", &KVCacheConfig::multi_task_prompt)
         .def_readwrite("multi_task_prompt_str", &KVCacheConfig::multi_task_prompt_str)
         .def_readwrite("multi_task_prompt_tokens", &KVCacheConfig::multi_task_prompt_tokens)
@@ -576,7 +577,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def(py::pickle(
             [](const KVCacheConfig& self) {
                 return py::make_tuple(std::string("KVCacheConfig"),
-                                      9,
+                                      10,
                                       self.reuse_cache,
                                       self.multi_task_prompt,
                                       self.multi_task_prompt_str,
@@ -644,21 +645,33 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       self.kv_cache_event_instance_group,
                                       self.kv_cache_event_instance_id,
                                       self.kv_cache_event_host_ip_port,
+                                      self.enable_crc,
                                       self.enable_linear_cache_reclaim,
                                       self.kv_cache_pool_block_weights);
             },
             [](py::tuple t) {
+                // Pickle version ladder after merging main: v8 = main's enable_crc
+                // (index 69); v9 adds enable_linear_cache_reclaim (index 70);
+                // v10 adds kv_cache_pool_block_weights (index 71). Each step
+                // strips its tail field and steps the version down, so older
+                // mainline states keep decoding unchanged.
                 const py::tuple pool_weights_state = t;
                 const bool      has_pool_weights_field =
-                    t.size() == 71 && py::isinstance<py::int_>(t[1]) && t[1].cast<int>() == 9;
+                    t.size() == 72 && py::isinstance<py::int_>(t[1]) && t[1].cast<int>() == 10;
                 if (has_pool_weights_field) {
-                    t    = t[py::slice(0, 70, 1)].cast<py::tuple>();
-                    t[1] = py::int_(8);
+                    t    = t[py::slice(0, 71, 1)].cast<py::tuple>();
+                    t[1] = py::int_(9);
                 }
                 const py::tuple reclaim_state = t;
                 const bool      has_reclaim_field =
-                    t.size() == 70 && py::isinstance<py::int_>(t[1]) && t[1].cast<int>() == 8;
+                    t.size() == 71 && py::isinstance<py::int_>(t[1]) && t[1].cast<int>() == 9;
                 if (has_reclaim_field) {
+                    t    = t[py::slice(0, 70, 1)].cast<py::tuple>();
+                    t[1] = py::int_(8);
+                }
+                const py::tuple crc_state = t;
+                const bool has_crc_field  = t.size() == 70 && py::isinstance<py::int_>(t[1]) && t[1].cast<int>() == 8;
+                if (has_crc_field) {
                     t    = t[py::slice(0, 69, 1)].cast<py::tuple>();
                     t[1] = py::int_(7);
                 }
@@ -771,11 +784,14 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                     c.kv_cache_event_instance_id      = event_state[67].cast<std::string>();
                     c.kv_cache_event_host_ip_port     = event_state[68].cast<std::string>();
                 }
+                if (has_crc_field) {
+                    c.enable_crc = crc_state[69].cast<bool>();
+                }
                 if (has_reclaim_field) {
-                    c.enable_linear_cache_reclaim = reclaim_state[69].cast<bool>();
+                    c.enable_linear_cache_reclaim = reclaim_state[70].cast<bool>();
                 }
                 if (has_pool_weights_field) {
-                    c.kv_cache_pool_block_weights = pool_weights_state[70].cast<std::string>();
+                    c.kv_cache_pool_block_weights = pool_weights_state[71].cast<std::string>();
                 }
                 return c;
             }));

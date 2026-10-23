@@ -59,6 +59,7 @@ public:
                                      bool                                              is_resident);
 
     bool      isRemovable(TreeNode* node) const;
+    void      removePendingNodes(const std::unordered_set<TreeNode*>& nodes);
     TreeNode* removeNodeAndEmptyAncestors(TreeNode* node);
 
     TreeNode* root() const {
@@ -73,6 +74,10 @@ public:
     }
     size_t size() const {
         return node_pool_.size();
+    }
+    CacheKeysType cacheKeys() const;
+    int64_t keyVersion() const {
+        return key_version_;
     }
 
     // Diagnostic-only bounded walk over node_pool_[cursor, min(cycle_end_index, size())).
@@ -110,6 +115,10 @@ private:
     ReusableGroupLocations                reusable_group_locations_;
     std::unique_ptr<TreeNode>             root_;
     std::deque<std::unique_ptr<TreeNode>> node_pool_;
+    std::unordered_map<CacheKeyType, std::unique_ptr<TreeNode>> pending_node_pool_;
+    // Indexed together with node_pool_ for contiguous snapshot copies.
+    CacheKeysType cache_keys_;
+    int64_t       key_version_{-1};
 };
 
 }  // namespace rtp_llm

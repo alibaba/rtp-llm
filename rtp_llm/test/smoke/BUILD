@@ -154,7 +154,7 @@ smoke_test(
     data = [
         ":flexlb_runtime_bundle",
     ],
-    gpu_type = ["L20D_TEST"],
+    gpu_type = ["SM103_CU13"],
     sleep_time_qr = 2,
     test_envs = {
         "SMOKE_START_FLEXLB_MASTER": "1",

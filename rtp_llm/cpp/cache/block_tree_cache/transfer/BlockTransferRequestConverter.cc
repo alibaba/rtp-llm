@@ -110,6 +110,9 @@ bool BlockTransferRequestConverter::encodeTransfer(MemoryOperationRequestPB&    
     }
     request.set_timeout_ms(remaining->count());
     const auto&                             descriptors = task.descriptors();
+    if (descriptors.empty()) {
+        return false;
+    }
     const TransferDescriptor&               first       = descriptors.front();
     MemoryOperationRequestPB::CopyDirection request_direction;
     if (!directionFor(first, request_direction)) {
@@ -118,10 +121,9 @@ bool BlockTransferRequestConverter::encodeTransfer(MemoryOperationRequestPB&    
     request.set_copy_direction(request_direction);
 
     for (const TransferDescriptor& descriptor : descriptors) {
-        if (descriptor.source_tier != first.source_tier || descriptor.target_tier != first.target_tier) {
-            return false;
-        }
-        if (descriptor.group_set_id >= group_sets.size() || !group_sets[descriptor.group_set_id]) {
+        if (!descriptor.isExecutable() || descriptor.group_set_id >= group_sets.size()
+            || !group_sets[descriptor.group_set_id] || descriptor.source_tier != first.source_tier
+            || descriptor.target_tier != first.target_tier) {
             return false;
         }
         const GroupSet& group_set = *group_sets[descriptor.group_set_id];
@@ -235,6 +237,77 @@ bool BlockTransferRequestConverter::decodeTransfer(const MemoryOperationRequestP
     descriptors.insert(
         descriptors.end(), std::make_move_iterator(decoded.begin()), std::make_move_iterator(decoded.end()));
     return true;
+}
+
+MemoryOperationResponsePB::Code BlockTransferRequestConverter::encodeCode(CacheCopyError error) {
+    switch (error) {
+        case CacheCopyError::NONE:
+            return MemoryOperationResponsePB::OK;
+        case CacheCopyError::NOT_EXECUTED:
+            return MemoryOperationResponsePB::NOT_EXECUTED;
+        case CacheCopyError::INVALID_REQUEST:
+            return MemoryOperationResponsePB::INVALID_REQUEST;
+        case CacheCopyError::IO_FAILED:
+            return MemoryOperationResponsePB::IO_FAILED;
+        case CacheCopyError::CRC_COMPUTE_FAILED:
+            return MemoryOperationResponsePB::CRC_COMPUTE_FAILED;
+        case CacheCopyError::CRC_MISMATCH:
+            return MemoryOperationResponsePB::CRC_MISMATCH;
+        default:
+            return MemoryOperationResponsePB::COPY_FAILED;
+    }
+}
+
+CacheCopyError BlockTransferRequestConverter::decodeCode(MemoryOperationResponsePB::Code error) {
+    switch (error) {
+        case MemoryOperationResponsePB::OK:
+            return CacheCopyError::NONE;
+        case MemoryOperationResponsePB::NOT_EXECUTED:
+            return CacheCopyError::NOT_EXECUTED;
+        case MemoryOperationResponsePB::INVALID_REQUEST:
+            return CacheCopyError::INVALID_REQUEST;
+        case MemoryOperationResponsePB::IO_FAILED:
+            return CacheCopyError::IO_FAILED;
+        case MemoryOperationResponsePB::CRC_COMPUTE_FAILED:
+            return CacheCopyError::CRC_COMPUTE_FAILED;
+        case MemoryOperationResponsePB::CRC_MISMATCH:
+            return CacheCopyError::CRC_MISMATCH;
+        default:
+            return CacheCopyError::COPY_FAILED;
+    }
+}
+
+void BlockTransferRequestConverter::encodeTransferResult(MemoryOperationResponsePB& response,
+                                                         const TransferResult&      result) {
+    response.set_code(encodeCode(result.copy_error));
+    response.mutable_error_info()->set_error_code(static_cast<int64_t>(result.status.code()));
+    response.mutable_error_info()->set_error_message(result.status.ToString());
+    response.clear_block_errors();
+    for (const auto error : result.block_errors) {
+        response.add_block_errors(encodeCode(error));
+    }
+}
+
+TransferResult BlockTransferRequestConverter::decodeTransferResult(const MemoryOperationResponsePB& response,
+                                                                   size_t                           block_count) {
+    TransferResult result;
+    if (static_cast<size_t>(response.block_errors_size()) != block_count) {
+        result = ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "transfer response block count mismatch");
+        result.expandBlockErrors(block_count);
+        return result;
+    }
+    result.copy_error = decodeCode(response.code());
+    for (int index = 0; index < response.block_errors_size(); ++index) {
+        const auto block_error = decodeCode(response.block_errors(index));
+        result.block_errors.push_back(block_error);
+        result.copy_error = std::max(result.copy_error, block_error);
+    }
+    const auto& error = response.error_info();
+    result.status     = ErrorInfo(static_cast<ErrorCode>(error.error_code()), error.error_message());
+    if (result.copy_error != CacheCopyError::NONE && result.ok()) {
+        result.status = ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "remote block transfer failed");
+    }
+    return result;
 }
 
 }  // namespace rtp_llm

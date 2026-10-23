@@ -42,9 +42,9 @@ public:
     explicit CountingSingleTypePerRankBlockTransferEngine(const std::vector<GroupSetPtr>& groups):
         PerRankBlockTransferEngine(groups) {}
 
-    std::shared_ptr<AsyncContext> execute(TransferTask) override {
+    std::shared_ptr<TransferAsyncContext> execute(TransferTask) override {
         ++submit_count_;
-        return std::make_shared<CompletedAsyncContext>(ErrorInfo::OkStatus());
+        return std::make_shared<CompletedTransferAsyncContext>(ErrorInfo::OkStatus());
     }
 
     size_t submitCount() const {
@@ -524,6 +524,9 @@ TEST_F(SingleTypeCoordinatorCacheManagerTest, AvailableCapacityUsesFreePlusCache
 
     pool->incRef(*block);
     EXPECT_EQ(allocator_->availableBlocksNum(), total_blocks - 1);
+    const std::vector<KVCachePoolMetricsSnapshot> request_snapshots = allocator_->poolMetricsSnapshots();
+    ASSERT_EQ(request_snapshots.size(), 1u);
+    EXPECT_FLOAT_EQ(request_snapshots.front().used_ratio, 20.0f);
     pool->decRef(*block);
     EXPECT_EQ(allocator_->availableBlocksNum(), total_blocks);
 
@@ -531,6 +534,8 @@ TEST_F(SingleTypeCoordinatorCacheManagerTest, AvailableCapacityUsesFreePlusCache
     ASSERT_EQ(snapshots.size(), 1u);
     EXPECT_EQ(snapshots.front().free_blocks, total_blocks - 1);
     EXPECT_EQ(snapshots.front().available_blocks, total_blocks);
+    EXPECT_EQ(snapshots.front().used_blocks, 1u);
+    EXPECT_FLOAT_EQ(snapshots.front().used_ratio, 0.0f);
 
     pool->decTreeRef(*block, BlockTreeRefType::CACHE);
     EXPECT_EQ(allocator_->freeBlocksNum(), total_blocks);

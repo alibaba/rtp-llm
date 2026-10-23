@@ -9,6 +9,32 @@
 namespace rtp_llm {
 namespace {
 
+TEST(TransferResultTest, MergePreservesMessagesAndHighestPriorityCode) {
+    for (bool crc_first : {false, true}) {
+        TransferResult crc(TransferStatus::CRC_MISMATCH);
+        TransferResult invalid(TransferStatus::INVALID_ARGS);
+        TransferResult result;
+        result.merge(crc_first ? crc : invalid);
+        result.merge(TransferResult{});
+        result.merge(crc_first ? invalid : crc);
+        EXPECT_EQ(result.copy_error, CacheCopyError::CRC_MISMATCH);
+        EXPECT_EQ(result.status.code(), ErrorCode::EXECUTION_EXCEPTION);
+        EXPECT_EQ(result.status.ToString(),
+                  crc_first ? "cache integrity verification failed; invalid block transfer request" :
+                              "invalid block transfer request; cache integrity verification failed");
+    }
+}
+
+TEST(TransferResultTest, NestedMergePreservesAllMessagesAndFirstCodeAtEqualPriority) {
+    TransferResult result(ErrorInfo(ErrorCode::DEADLINE_EXCEEDED, "first"));
+    TransferResult batches(ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "second"));
+    batches.merge(ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "third"));
+    result.merge(std::move(batches));
+    result.merge(TransferResult{});
+    EXPECT_EQ(result.status.code(), ErrorCode::DEADLINE_EXCEEDED);
+    EXPECT_EQ(result.status.ToString(), "first; second; third");
+}
+
 TEST(TransferDescriptorTest, FactoriesBuildExecutableDescriptors) {
     EXPECT_TRUE(TransferDescriptor::deviceToHost(0, {1, 2}, 3).isExecutable());
     EXPECT_TRUE(TransferDescriptor::hostToDevice(0, 3, {1, 2}).isExecutable());

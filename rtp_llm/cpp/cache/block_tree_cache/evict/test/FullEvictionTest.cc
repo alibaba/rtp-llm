@@ -455,9 +455,12 @@ TEST(FullPruneTest, DetachesBusyClosureAndKeepsTransferSourceAlive) {
 
     EXPECT_EQ(environment.cache->evictForGroup("group0", /*num_blocks=*/1), 1);
 
-    EXPECT_EQ(environment.cache->tree()->findNode({100, 200, 300, 400}).size(), 3u);
+    EXPECT_EQ(environment.cache->tree()->findNode({100, 200, 300, 400}).size(), 1u);
     EXPECT_EQ(environment.cache->tree()->findNode({600}).size(), 1u);
-    EXPECT_TRUE(path[1]->group_set_resources[0].is_empty());
+    ASSERT_EQ(environment.cache->tree()->pending_node_pool_.size(), 1u);
+    EXPECT_EQ(environment.cache->tree()->pending_node_pool_.at(300).get(), busy_descendant);
+    EXPECT_EQ(busy_descendant->parent, nullptr);
+    EXPECT_EQ(busy_descendant->index, std::numeric_limits<size_t>::max());
     EXPECT_TRUE(busy_resource.hasTier(Tier::HOST));
     EXPECT_EQ(busy_resource.host_block, host_block);
     EXPECT_EQ(busy_resource.transfer_state, GroupSetTransferState::LOAD_PENDING);
@@ -465,9 +468,13 @@ TEST(FullPruneTest, DetachesBusyClosureAndKeepsTransferSourceAlive) {
     EXPECT_TRUE(environment.host_pool->isAllocated(host_block));
     EXPECT_EQ(environment.cache->getStats().device_heap_total_size, 2u);
 
-    // This structural test has no real load task to settle the detached source.
-    busy_resource.transfer_state    = GroupSetTransferState::IDLE;
-    busy_resource.transfer_detached = false;
+    const int64_t key_version = environment.cache->tree()->keyVersion();
+    environment.cache->evictor_.discardDetachedTransfer(
+        {{busy_descendant, 0, 2, Tier::HOST, Tier::DEVICE, {host_block}}});
+    environment.cache->tree()->removePendingNodes({busy_descendant});
+    EXPECT_TRUE(environment.cache->tree()->pending_node_pool_.empty());
+    EXPECT_FALSE(environment.host_pool->isAllocated(host_block));
+    EXPECT_EQ(environment.cache->tree()->keyVersion(), key_version);
 }
 
 TEST(FullPruneTest, PrunesCascadedDescendantGroupResourcesAndTopology) {
@@ -580,22 +587,29 @@ TEST(FullPruneTest, DetachesBusyDescendantGroupResource) {
 
     auto path = cache->tree()->findNode({100, 200, 300});
     ASSERT_EQ(path.size(), 3u);
-    GroupSetResource& busy_resource = path[2]->group_set_resources[1];
-    busy_resource.transfer_state    = GroupSetTransferState::LOAD_PENDING;
+    TreeNode* const   busy_descendant = path[2];
+    GroupSetResource& busy_resource   = busy_descendant->group_set_resources[1];
+    busy_resource.transfer_state      = GroupSetTransferState::LOAD_PENDING;
 
     EXPECT_EQ(cache->evictForGroup("group0", /*num_blocks=*/1), 1);
 
     path = cache->tree()->findNode({100, 200, 300});
-    ASSERT_EQ(path.size(), 3u);
-    EXPECT_TRUE(path[2]->group_set_resources[0].is_empty());
+    ASSERT_EQ(path.size(), 1u);
+    ASSERT_EQ(cache->tree()->pending_node_pool_.size(), 1u);
+    EXPECT_EQ(cache->tree()->pending_node_pool_.at(300).get(), busy_descendant);
+    EXPECT_EQ(busy_descendant->parent, nullptr);
+    EXPECT_TRUE(busy_descendant->group_set_resources[0].is_empty());
     EXPECT_EQ(busy_resource.host_block, swa_host_block);
     EXPECT_TRUE(busy_resource.transfer_detached);
     EXPECT_TRUE(swa_host_pool->isAllocated(swa_host_block));
     EXPECT_FALSE(full_host_pool->isAllocated(full_host_block));
 
-    // This structural test has no real load task to settle the detached source.
-    busy_resource.transfer_state    = GroupSetTransferState::IDLE;
-    busy_resource.transfer_detached = false;
+    const int64_t key_version = cache->tree()->keyVersion();
+    cache->evictor_.discardDetachedTransfer({{busy_descendant, 1, 2, Tier::HOST, Tier::DEVICE, {swa_host_block}}});
+    cache->tree()->removePendingNodes({busy_descendant});
+    EXPECT_TRUE(cache->tree()->pending_node_pool_.empty());
+    EXPECT_FALSE(swa_host_pool->isAllocated(swa_host_block));
+    EXPECT_EQ(cache->tree()->keyVersion(), key_version);
 }
 
 TEST(FullPruneTest, DetachesBusyClosureRootGroupResource) {
@@ -622,21 +636,28 @@ TEST(FullPruneTest, DetachesBusyClosureRootGroupResource) {
 
     auto path = cache->tree()->findNode({100, 200});
     ASSERT_EQ(path.size(), 2u);
-    GroupSetResource& busy_resource = path[1]->group_set_resources[1];
+    TreeNode* const   busy_root     = path[1];
+    GroupSetResource& busy_resource = busy_root->group_set_resources[1];
     busy_resource.transfer_state    = GroupSetTransferState::LOAD_PENDING;
 
     EXPECT_EQ(cache->evictForGroup("group0", /*num_blocks=*/1), 1);
 
     path = cache->tree()->findNode({100, 200});
-    ASSERT_EQ(path.size(), 2u);
-    EXPECT_TRUE(path[1]->group_set_resources[0].is_empty());
+    ASSERT_EQ(path.size(), 1u);
+    ASSERT_EQ(cache->tree()->pending_node_pool_.size(), 1u);
+    EXPECT_EQ(cache->tree()->pending_node_pool_.at(200).get(), busy_root);
+    EXPECT_EQ(busy_root->parent, nullptr);
+    EXPECT_TRUE(busy_root->group_set_resources[0].is_empty());
     EXPECT_EQ(busy_resource.host_block, swa_host_block);
     EXPECT_TRUE(busy_resource.transfer_detached);
     EXPECT_TRUE(swa_host_pool->isAllocated(swa_host_block));
 
-    // This structural test has no real load task to settle the detached source.
-    busy_resource.transfer_state    = GroupSetTransferState::IDLE;
-    busy_resource.transfer_detached = false;
+    const int64_t key_version = cache->tree()->keyVersion();
+    cache->evictor_.discardDetachedTransfer({{busy_root, 1, 1, Tier::HOST, Tier::DEVICE, {swa_host_block}}});
+    cache->tree()->removePendingNodes({busy_root});
+    EXPECT_TRUE(cache->tree()->pending_node_pool_.empty());
+    EXPECT_FALSE(swa_host_pool->isAllocated(swa_host_block));
+    EXPECT_EQ(cache->tree()->keyVersion(), key_version);
 }
 
 TEST(FullPruneTest, ReverseDirectDropPrunesCascadedFullSubtree) {
