@@ -92,8 +92,8 @@ class RoutedExpertsStrategy(nn.Module):
     define ``setup_weights`` + ``can_handle``.
     """
 
-    # Registered names currently include mega, mega_se, mega_fused,
-    # grouped_fp4, local_loop, and deepep.
+    # Registered names currently include mega, mega_se, grouped_fp4,
+    # local_loop, and deepep.
     name: ClassVar[str]
 
     # True when ``forward`` already returns ``routed + shared`` (the strategy
@@ -268,27 +268,14 @@ def select_strategy(
     # checkpoint weights have block-32 MXFP8 scales: run the exact private
     # shared-expert path independently, without requantizing the checkpoint.
     separate_shared = cfg.shared_fp8_block_size == 32
-    if separate_shared and forced in ("mega_se", "mega_fused"):
+    if separate_shared and forced == "mega_se":
         forced = "mega" if cfg.ep_size > 1 else None
-    # The current DeepGEMM shared-expert API and the older experimental fused
-    # API use incompatible buffers. Never allow both variants to race.
     if cfg.ep_size > 1 and not explicit_env and not separate_shared:
-        from rtp_llm.models_py.modules.dsv41.moe.mega_fused_buf import (
-            mega_moe_fused_requested,
-        )
         from rtp_llm.models_py.modules.dsv41.moe.mega_se_buf import (
             mega_moe_se_requested,
         )
 
-        se_requested = mega_moe_se_requested()
-        fused_requested = mega_moe_fused_requested()
-        if se_requested and fused_requested:
-            raise RuntimeError(
-                "DSV4_USE_MEGA_MOE_SE (defaults to 1) conflicts with "
-                "DSV4_USE_MEGA_MOE_FUSED=1; set DSV4_USE_MEGA_MOE_SE=0 "
-                "to select the older fused variant."
-            )
-        if se_requested:
+        if mega_moe_se_requested():
             if forced not in (None, "mega", "mega_se"):
                 raise RuntimeError(
                     "DSV4_USE_MEGA_MOE_SE=1 conflicts with requested MoE "
@@ -296,33 +283,11 @@ def select_strategy(
                 )
             forced, strict = "mega_se", True
 
-    # ``DSV4_USE_MEGA_MOE_FUSED=1`` opts the EP routed path into the fused
-    # Mega kernel. It is a Mega variant, so it only kicks in where the
-    # non-fused Mega would (ep_size > 1) and replaces an unspecified/"mega"
-    # selection. Strict so an unavailable fused kernel fails loudly rather
-    # than silently downgrading to non-fused (which would invalidate tests).
-    if (
-        cfg.ep_size > 1
-        and forced in (None, "mega")
-        and not explicit_env
-        and not separate_shared
-    ):
-        from rtp_llm.models_py.modules.dsv41.moe.mega_fused_buf import (
-            mega_moe_fused_requested,
-        )
-
-        if mega_moe_fused_requested():
-            forced, strict = "mega_fused", True
-
     if forced is not None:
         for cls in _STRATEGY_PRIORITY:
             if cls.name == forced:
                 if cls.can_handle(cfg):
-                    if cfg.ep_size > 1 and cls.name not in (
-                        "mega",
-                        "mega_fused",
-                        "mega_se",
-                    ):
+                    if cfg.ep_size > 1 and cls.name not in ("mega", "mega_se"):
                         raise RuntimeError(
                             "DSV4 EP MoE requires MegaMoEStrategy. "
                             f"Requested strategy {forced!r} would bypass Mega "
