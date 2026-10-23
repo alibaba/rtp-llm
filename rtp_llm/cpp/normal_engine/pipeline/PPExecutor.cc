@@ -332,15 +332,24 @@ void PPExecutor::publishPdPlanRequests(const GptModelInputs& model_input, const 
                 layer_gids.push_back(0);
             }
             for (int gid : layer_gids) {
-                if (static_cast<int64_t>(gid) >= mi.kv_cache_block_id.size(0)) {
+                // The plan's block table is laid out in the PP-canonical group order, which can differ
+                // from this stage's local group order (stage 1 puts swa_kv first). Index by canonical column.
+                const auto&   group_desc = cache_config.topology().groupById(static_cast<size_t>(gid));
+                const int64_t col        = group_desc.canonical_idx == kCanonicalIdxUnset ?
+                                               static_cast<int64_t>(gid) :
+                                               static_cast<int64_t>(group_desc.canonical_idx);
+                if (col >= mi.kv_cache_block_id.size(0)) {
                     continue;
                 }
-                const auto& tag = cache_config.tagForGroup(static_cast<size_t>(gid));
+                const auto& tag      = cache_config.tagForGroup(static_cast<size_t>(gid));
+                size_t      tag_null = 0, tag_added = 0;
                 for (int64_t block_pos = 0; block_pos < nblocks; ++block_pos) {
-                    const int block_id = mi.kv_cache_block_id[gid][i][block_pos].item<int>();
+                    const int block_id = mi.kv_cache_block_id[col][i][block_pos].item<int>();
                     if (isNullBlockIdx(block_id)) {
+                        ++tag_null;
                         continue;
                     }
+                    ++tag_added;
                     const auto cache_key = makeCacheKey(model_id,
                                                         std::to_string(keys_row[block_pos].item<int64_t>()),
                                                         global_layer_begin + layer_id,
@@ -384,6 +393,24 @@ void PPExecutor::publishPdPlanRequests(const GptModelInputs& model_input, const 
                             add_block("v_scale_" + cache_key, parts[3]);
                         }
                     }
+                }
+                if (std::getenv("RTP_LLM_PD_PUBLISH_DEBUG") != nullptr
+                    && global_layer_begin + layer_id + 1 == static_cast<int64_t>(global_layer_begin + local_layers)) {
+                    std::string present;
+                    for (int64_t bp = 0; bp < nblocks; ++bp) {
+                        if (!isNullBlockIdx(mi.kv_cache_block_id[col][i][bp].item<int>())) {
+                            present += std::to_string(bp) + ",";
+                        }
+                    }
+                    RTP_LLM_LOG_INFO("PD_PUBLISH_TAG rank=%ld layer=%ld tag=%s added=%zu null=%zu nblocks=%ld "
+                                     "present_pos=%s",
+                                     (long)parallelism_config_.world_rank,
+                                     (long)(global_layer_begin + layer_id),
+                                     tag.c_str(),
+                                     tag_added,
+                                     tag_null,
+                                     (long)nblocks,
+                                     present.substr(0, 200).c_str());
                 }
                 if (plan_failed) {
                     break;
