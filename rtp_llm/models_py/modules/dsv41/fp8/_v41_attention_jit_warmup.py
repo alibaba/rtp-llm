@@ -10,6 +10,7 @@ metadata kernels, so arbitrary prefix reuse does not require an M/N grid.
 from __future__ import annotations
 
 import logging
+import os
 from dataclasses import dataclass
 from functools import partial
 from itertools import product
@@ -823,10 +824,17 @@ def _warm_native_selectors(max_seq_len, device):
     if max_seq_len < 512:
         return
     width = 1024 if max_seq_len >= 1024 else 512
+    sorted_decode_available = (
+        os.environ.get("DSV41_DECODE_DEEPSELECT", "1") == "1"
+        and os.environ.get("DSV41_DECODE_DEEPSELECT_SORTED", "1") == "1"
+        and getattr(dense.rtp_llm_ops, "deepselect_bf16_dense_sorted", None) is not None
+        and dense.is_available(device, torch.bfloat16, enabled=True)
+    )
     dense_types = tuple(
         dtype
         for dtype in (torch.float32, torch.bfloat16)
         if dense.is_available(device, dtype)
+        or (dtype == torch.bfloat16 and sorted_decode_available)
     )
     sparse_available = sparse.is_available(device)
     if dense_types or sparse_available:
@@ -848,9 +856,25 @@ def _warm_native_selectors(max_seq_len, device):
                     for finite in (False, True):
                         _require_launch(
                             dense.try_select_tokens(
-                                logits, ends, out=output, filter_finite=finite
+                                logits,
+                                ends,
+                                out=output,
+                                filter_finite=finite,
+                                enabled=True,
                             ),
                             "native dense DeepSelect",
+                        )
+                    if dtype == torch.bfloat16 and sorted_decode_available:
+                        _require_launch(
+                            dense.try_select_tokens(
+                                logits,
+                                ends,
+                                out=output,
+                                filter_finite=False,
+                                enabled=True,
+                                sorted_index=True,
+                            ),
+                            "native sorted dense DeepSelect",
                         )
                 if dtype == torch.bfloat16 and sparse_available:
                     _require_launch(

@@ -205,7 +205,14 @@ struct EpilogueRunner {
                                 indices_u32[j] = end_vocab_idx - 1;
                             }
                         }
-                        out[j] = (OutIdxT)indices_u32[j] + output_idx_offset;
+                        if constexpr (Config::canonicalize_nan && Config::sorted_index && !Config::pin_last_index) {
+                            // Dense token selection may retain masked tail -INF
+                            // ties. Preserve the unsorted outlet's bounds check.
+                            out[j] = indices_u32[j] < end_vocab_idx ? (OutIdxT)indices_u32[j] + output_idx_offset :
+                                                                      args.idx_oob_fill_value;
+                        } else {
+                            out[j] = (OutIdxT)indices_u32[j] + output_idx_offset;
+                        }
                     }
                     st_global<NUM_OUTPUT_IDX_PER_ROUND>(result_indices + i, out);
                 }

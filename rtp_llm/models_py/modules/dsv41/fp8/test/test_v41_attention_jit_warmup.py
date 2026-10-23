@@ -2,6 +2,7 @@
 
 import ast
 import importlib.util
+import os
 import re
 import sys
 import unittest
@@ -262,6 +263,7 @@ class V41AttentionWarmupCPU(unittest.TestCase):
 
         native_raw, native_finite = Mock(), Mock()
         dense = SimpleNamespace(
+            rtp_llm_ops=SimpleNamespace(deepselect_bf16_dense_sorted=Mock()),
             is_available=Mock(return_value=True),
             try_select_tokens=Mock(return_value=object()),
         )
@@ -360,6 +362,143 @@ class V41AttentionWarmupCPU(unittest.TestCase):
             dense.is_available.return_value = True
             dense.try_select_tokens.return_value = None
             with self.assertRaisesRegex(RuntimeError, "native dense DeepSelect"):
+                warmup._warm_native_selectors(512, "cpu")
+
+    def test_default_sorted_decode_warms_when_prefill_deepselect_is_disabled(self):
+        import torch
+
+        dense = SimpleNamespace(
+            rtp_llm_ops=SimpleNamespace(deepselect_bf16_dense_sorted=Mock()),
+            is_available=lambda device, dtype, enabled=None: (
+                dtype == torch.bfloat16 and enabled is True
+            ),
+            try_select_tokens=Mock(
+                side_effect=lambda *args, **kw: (
+                    kw["out"] if kw.get("enabled") is True else None
+                )
+            ),
+        )
+        package = "rtp_llm.models_py.modules.dsv41.fp8"
+        modules = {
+            package: SimpleNamespace(
+                _v41_deepselect=SimpleNamespace(is_available=lambda device: False),
+                _v41_prefill_deepselect=dense,
+                _v41_prefill_topk=SimpleNamespace(_TOPK_V3_OK=False),
+            )
+        }
+        with patch.dict(sys.modules, modules), patch.dict(
+            os.environ,
+            {"DSV41_PREFILL_DEEPSELECT": "0", "DSV41_DECODE_DEEPSELECT": "1"},
+        ), patch.object(
+            torch.cuda,
+            "get_device_properties",
+            return_value=SimpleNamespace(multi_processor_count=148),
+        ):
+            os.environ.pop("DSV41_DECODE_DEEPSELECT_SORTED", None)
+            warmup._warm_native_selectors(32768, "cpu")
+        sorted_calls = [
+            c
+            for c in dense.try_select_tokens.call_args_list
+            if c.kwargs.get("sorted_index")
+        ]
+        self.assertEqual({c.args[0].shape[0] for c in sorted_calls}, {1, 149})
+        self.assertTrue(all(c.kwargs["enabled"] for c in sorted_calls))
+
+    def test_sorted_decode_warmup_honors_switches_and_native_capability(self):
+        import torch
+
+        package = "rtp_llm.models_py.modules.dsv41.fp8"
+        for prefill, decode, sorted_enabled, binding in product(("0", "1"), repeat=4):
+            with self.subTest(
+                prefill=prefill, decode=decode, sorted=sorted_enabled, binding=binding
+            ):
+                ops = SimpleNamespace()
+                if binding == "1":
+                    ops.deepselect_bf16_dense_sorted = Mock()
+                dense = SimpleNamespace(
+                    rtp_llm_ops=ops,
+                    is_available=lambda device, dtype, enabled=None: (
+                        dtype == torch.bfloat16
+                        and (prefill == "1" if enabled is None else enabled)
+                    ),
+                    try_select_tokens=Mock(side_effect=lambda *a, **kw: kw["out"]),
+                )
+                native_fallback = Mock()
+                topk = SimpleNamespace(
+                    _TOPK_V3_OK=True,
+                    rtp_llm_ops=SimpleNamespace(topk_v3=native_fallback),
+                    _get_topk_workspace=lambda device: object(),
+                    supports_bf16=lambda: True,
+                )
+                modules = {
+                    package: SimpleNamespace(
+                        _v41_deepselect=SimpleNamespace(is_available=lambda d: False),
+                        _v41_prefill_deepselect=dense,
+                        _v41_prefill_topk=topk,
+                    )
+                }
+                with patch.dict(sys.modules, modules), patch.dict(
+                    os.environ,
+                    {
+                        "DSV41_PREFILL_DEEPSELECT": prefill,
+                        "DSV41_DECODE_DEEPSELECT": decode,
+                        "DSV41_DECODE_DEEPSELECT_SORTED": sorted_enabled,
+                    },
+                ), patch.object(
+                    torch.cuda,
+                    "get_device_properties",
+                    return_value=SimpleNamespace(multi_processor_count=148),
+                ), patch.object(
+                    torch.cuda,
+                    "_lazy_init",
+                    side_effect=AssertionError("CPU-only fixture"),
+                ):
+                    warmup._warm_native_selectors(512, "cpu")
+                calls = dense.try_select_tokens.call_args_list
+                sorted_calls = [c for c in calls if c.kwargs.get("sorted_index")]
+                sorted_expected = decode == sorted_enabled == binding == "1"
+                self.assertEqual(len(sorted_calls), 2 if sorted_expected else 0)
+                self.assertEqual(
+                    len(calls) - len(sorted_calls),
+                    4 if prefill == "1" or sorted_expected else 0,
+                )
+                # Even without the preferred binding, startup loads fallback.
+                self.assertEqual(native_fallback.call_count, 4)
+
+    def test_sorted_decode_warmup_propagates_native_execution_errors(self):
+        import torch
+
+        dense = SimpleNamespace(
+            rtp_llm_ops=SimpleNamespace(deepselect_bf16_dense_sorted=Mock()),
+            is_available=lambda device, dtype, enabled=None: (
+                dtype == torch.bfloat16 and enabled is True
+            ),
+            try_select_tokens=Mock(
+                side_effect=lambda *a, **kw: (
+                    None if kw.get("sorted_index") else kw["out"]
+                )
+            ),
+        )
+        package = "rtp_llm.models_py.modules.dsv41.fp8"
+        modules = {
+            package: SimpleNamespace(
+                _v41_deepselect=SimpleNamespace(is_available=lambda device: False),
+                _v41_prefill_deepselect=dense,
+                _v41_prefill_topk=SimpleNamespace(_TOPK_V3_OK=False),
+            )
+        }
+        with patch.dict(sys.modules, modules), patch.dict(
+            os.environ,
+            {"DSV41_DECODE_DEEPSELECT": "1", "DSV41_DECODE_DEEPSELECT_SORTED": "1"},
+        ), patch.object(
+            torch.cuda,
+            "get_device_properties",
+            return_value=SimpleNamespace(multi_processor_count=148),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "native sorted dense DeepSelect"):
+                warmup._warm_native_selectors(512, "cpu")
+            dense.try_select_tokens.side_effect = RuntimeError("native launch failed")
+            with self.assertRaisesRegex(RuntimeError, "native launch failed"):
                 warmup._warm_native_selectors(512, "cpu")
 
     def test_topk_witnesses_cover_actual_native_dispatcher(self):

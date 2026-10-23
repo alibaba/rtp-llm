@@ -514,6 +514,10 @@ def select_tokens(logits, plan, *, inplace=False):
         lengths = plan.compact_lengths if plan.compact_lengths is not None else legacy_lengths
     selected = deepselect.try_select_tokens(
         scores, lengths, out=output, filter_finite=False, enabled=enabled,
+        sorted_index=(
+            scores.dtype == torch.bfloat16
+            and os.environ.get("DSV41_DECODE_DEEPSELECT_SORTED", "1") == "1"
+        ),
     )
     if selected is None:
         # topk_v3 also consumes scores.stride(0); preserve the scorer storage.

@@ -57,14 +57,18 @@ class SparseDecodeTopKRoutingCPU(unittest.TestCase):
                 os.environ
             ):
                 os.environ.pop("DSV41_DECODE_DEEPSELECT", None)
+                os.environ.pop("DSV41_DECODE_DEEPSELECT_SORTED", None)
                 if switch is not None:
                     os.environ["DSV41_DECODE_DEEPSELECT"] = switch
 
-                def select(scores, lengths, *, out, filter_finite, enabled):
+                def select(
+                    scores, lengths, *, out, filter_finite, enabled, sorted_index
+                ):
                     self.assertEqual(scores.dtype, self.logits.dtype)
                     self.assertEqual(scores.shape, (2, 4096))
                     self.assertEqual(lengths.shape, (2,))
                     self.assertFalse(filter_finite)
+                    self.assertEqual(sorted_index, self.logits.dtype == torch.bfloat16)
                     self.assertEqual(enabled, switch != "0")
                     return out if enabled and available else None
 
@@ -287,6 +291,40 @@ class SparseDecodeCUDA(unittest.TestCase):
         self.context = torch.inference_mode()
         self.context.__enter__()
         self.addCleanup(self.context.__exit__, None, None, None)
+
+    def test_default_sorted_deepselect_survives_sparse_restore_with_candidate_holes(
+        self,
+    ):
+        torch.manual_seed(2048512)
+        rows, k = 7, 2048
+        blocks = (torch.arange(k, device="cuda", dtype=torch.int32) * 2)[None].repeat(
+            rows, 1
+        )
+        active = torch.ones_like(blocks, dtype=torch.bool)
+        active[:, 1::3] = False
+        lengths = torch.tensor(
+            [0, 1, 511, 512, 513, 16385, 32761], device="cuda", dtype=torch.int32
+        )
+        table = torch.ones(rows, 256, device="cuda", dtype=torch.int32)
+        plan = sparse.SparseDecodePlan(blocks, active, table, lengths, None)
+        logits = torch.randn(rows, k * 8, device="cuda", dtype=torch.bfloat16)
+        logits[:, :4] = torch.nan
+        with patch.dict(os.environ, {"DSV41_DECODE_DEEPSELECT_SORTED": "0"}):
+            baseline = sparse.select_tokens(logits, plan)
+        with patch.dict(os.environ), patch.object(
+            sparse.rtp_llm_ops,
+            "deepselect_bf16_dense_sorted",
+            wraps=sparse.rtp_llm_ops.deepselect_bf16_dense_sorted,
+        ) as native:
+            os.environ.pop("DSV41_DECODE_DEEPSELECT_SORTED", None)
+            actual = sparse.select_tokens(logits, plan)
+        native.assert_called_once()
+        torch.testing.assert_close(
+            actual.sort(-1).values, baseline.sort(-1).values, rtol=0, atol=0
+        )
+        for row in actual.cpu():
+            valid = row[row >= 0]
+            self.assertTrue(bool((valid[1:] > valid[:-1]).all()))
 
     def test_clean_logits_preserves_dtype_and_mask(self):
         k, rows = 512, 4

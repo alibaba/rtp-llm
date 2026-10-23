@@ -34,7 +34,7 @@ bool deepselect_bf16_available() {
 
 namespace {
 
-template<bool DENSE, bool CANDIDATES = false>
+template<bool DENSE, bool CANDIDATES = false, bool SORTED_TOKENS = false>
 void deepselect_bf16_impl(const torch::Tensor& logits,
                           const torch::Tensor& ends,
                           torch::Tensor&       output,
@@ -76,7 +76,7 @@ void deepselect_bf16_impl(const torch::Tensor& logits,
     args.batch_size                = static_cast<uint32_t>(rows);
     args.vocab_size                = static_cast<uint32_t>(width);
     args.topk                      = topk;
-    args.sorted_index              = CANDIDATES;
+    args.sorted_index              = CANDIDATES || SORTED_TOKENS;
     args.input                     = logits.data_ptr();
     args.output_index              = output.data_ptr();
     args.end_ptr                   = ends.data_ptr<int32_t>();
@@ -100,14 +100,15 @@ void deepselect_bf16_impl(const torch::Tensor& logits,
     }
 
     // Match the upstream BF16 normal dispatcher, but instantiate only K512,
-    // int32 indices and no sorting/value output. No FP32 logits or workspace.
+    // int32 indices and optional index sorting, without value output.
+    // Sorting uses upstream's window epilogue within the selecting CTA.
     const auto launch = [&](auto finite) {
         constexpr bool FILTER_FINITE = decltype(finite)::value;
         if (rows <= properties->multiProcessorCount) {
             using Config = TopkSelectConfig<nv_bfloat16,
                                             int32_t,
                                             false,
-                                            false,
+                                            SORTED_TOKENS,
                                             false,
                                             512,
                                             512,
@@ -124,7 +125,7 @@ void deepselect_bf16_impl(const torch::Tensor& logits,
             using Config = TopkSelectConfig<nv_bfloat16,
                                             int32_t,
                                             false,
-                                            false,
+                                            SORTED_TOKENS,
                                             false,
                                             512,
                                             256,
@@ -139,7 +140,7 @@ void deepselect_bf16_impl(const torch::Tensor& logits,
             topk_select_bf16_normal::run_topk_select_kernel<Config>(args);
         }
     };
-    if constexpr (DENSE) {
+    if constexpr (DENSE && !SORTED_TOKENS) {
         if (filter_finite) {
             launch(std::true_type{});
         } else {
@@ -171,6 +172,11 @@ void deepselect_bf16_candidates(const torch::Tensor& scores,
                                 const torch::Tensor& ends,
                                 torch::Tensor&       output) {
     deepselect_bf16_impl<true, true>(scores, ends, output, false);
+}
+
+void deepselect_bf16_dense_sorted(const torch::Tensor& logits, const torch::Tensor& ends, torch::Tensor& output) {
+    // Decode publication already filters nonfinite scores, after selection.
+    deepselect_bf16_impl<true, false, true>(logits, ends, output, false);
 }
 
 }  // namespace torch_ext

@@ -516,6 +516,10 @@ def select_tokens(
             out=output,
             filter_finite=False,
             enabled=os.environ.get("DSV41_DECODE_DEEPSELECT", "1") == "1",
+            sorted_index=(
+                logits.dtype == torch.bfloat16
+                and os.environ.get("DSV41_DECODE_DEEPSELECT_SORTED", "1") == "1"
+            ),
         )
     if selected is None:
         rtp_llm_ops.topk_v3(
