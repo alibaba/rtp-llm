@@ -7,7 +7,225 @@ import unittest
 from contextlib import redirect_stderr, redirect_stdout
 from unittest.mock import MagicMock, patch
 
-from rtp_llm.test.utils.device_resource import get_cuda_info, main, python_code
+from rtp_llm.test.utils.device_resource import (
+    DeviceResource,
+    get_cuda_info,
+    main,
+    python_code,
+)
+
+
+class SharedGpuAcquisitionTest(unittest.TestCase):
+    module = "rtp_llm.test.utils.device_resource"
+
+    def setUp(self):
+        for name, value in (
+            ("get_gpu_ids", [0, 1]),
+            ("get_ip", "127.0.0.1"),
+            ("_nvidia_smi", "/usr/bin/nvidia-smi"),
+        ):
+            patcher = patch(f"{self.module}.{name}", return_value=value)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        self.resource = DeviceResource(1)
+        self.resource.acquire_timeout = 2
+        memory_patch = patch.object(
+            self.resource, "_get_gpu_memory_used_mib", return_value=0
+        )
+        self.memory_query = memory_patch.start()
+        self.addCleanup(memory_patch.stop)
+        kill_patch = patch(f"{self.module}.os.kill")
+        self.kill = kill_patch.start()
+        self.addCleanup(kill_patch.stop)
+        self.addCleanup(self.kill.assert_not_called)
+        self.addCleanup(self.resource.gpu_locks.close)
+
+    def test_compute_pids_are_busy_without_interpreting_container_proc(self):
+        # Even a host PID numerically equal to this container's PID is ambiguous.
+        for pids in ([12345], [os.getpid()], [12345, 67890]):
+            with self.subTest(pids=pids), patch.object(
+                self.resource, "_get_gpu_pids", return_value=pids
+            ), patch(f"{self.module}.os.path.exists") as exists:
+                self.assertTrue(self.resource._gpu_is_busy("0"))
+                exists.assert_not_called()
+
+    def test_empty_query_is_idle_and_unknown_query_is_busy(self):
+        for result, busy in (([], False), (None, True)):
+            with self.subTest(result=result), patch.object(
+                self.resource, "_get_gpu_pids", return_value=result
+            ):
+                self.assertEqual(self.resource._gpu_is_busy("0"), busy)
+
+    def test_non_nvidia_worker_keeps_file_lock_only_behavior(self):
+        with patch(f"{self.module}._nvidia_smi", return_value=None), patch.object(
+            self.resource, "_get_gpu_pids"
+        ) as query:
+            self.assertFalse(self.resource._gpu_is_busy("0"))
+            query.assert_not_called()
+            self.memory_query.assert_not_called()
+
+    def test_hidden_host_pids_require_idle_device_memory(self):
+        # nvidia-smi in a PID namespace can return no apps despite a busy GPU.
+        with patch.object(self.resource, "_get_gpu_pids", return_value=[]):
+            for used, busy in (
+                (0, False),
+                (16, False),
+                (17, True),
+                (11500, True),
+                (None, True),
+            ):
+                with self.subTest(used_mib=used):
+                    self.memory_query.return_value = used
+                    self.assertEqual(self.resource._gpu_is_busy("0"), busy)
+
+    def test_hidden_host_memory_is_rechecked_after_group_lock(self):
+        self.resource.total_gpus = [0]
+        for changed in (2800, None):
+            with self.subTest(changed=changed), patch(f"{self.module}.FileLock"), patch(
+                f"{self.module}.time"
+            ) as clock, patch.object(self.resource, "_get_gpu_pids", return_value=[]):
+                self.memory_query.side_effect = [0, changed, 0, 0]
+                clock.time.return_value = 0
+                self.assertIs(self.resource.__enter__(), self.resource)
+                clock.sleep.assert_called_once_with(1)
+                self.resource.__exit__(None, None, None)
+
+    def test_hidden_host_memory_busy_or_unknown_obeys_acquire_timeout(self):
+        self.resource.total_gpus = [0]
+        for used in (2800, None):
+            with self.subTest(used_mib=used), patch(f"{self.module}.FileLock"), patch(
+                f"{self.module}.time"
+            ) as clock, patch.object(
+                self.resource, "_get_gpu_pids", return_value=[]
+            ), patch.object(
+                self.resource, "_locked_gpu_ids", return_value=[]
+            ):
+                self.memory_query.return_value = used
+                clock.time.side_effect = [0, 0, 0, 2]
+                with self.assertRaisesRegex(TimeoutError, "within 2s"):
+                    self.resource.__enter__()
+                clock.sleep.assert_called_once_with(1)
+                self.assertEqual(self.resource.gpu_ids, [])
+
+    def test_busy_first_candidate_does_not_block_idle_candidate(self):
+        with patch(f"{self.module}.FileLock"), patch.object(
+            self.resource,
+            "_get_gpu_pids",
+            side_effect=lambda gpu: [12345] if gpu == "0" else [],
+        ):
+            self.assertTrue(self.resource._lock_gpus())
+            self.assertEqual(self.resource.gpu_ids, ["1"])
+
+    def test_entry_waits_for_busy_or_unknown_gpu_to_become_idle(self):
+        self.resource.total_gpus = [0]
+        for first in ([12345], None):
+            with self.subTest(first=first), patch(f"{self.module}.FileLock"), patch(
+                f"{self.module}.time"
+            ) as clock, patch.object(
+                self.resource, "_get_gpu_pids", side_effect=[first, [], []]
+            ):
+                clock.time.return_value = 0
+                self.assertIs(self.resource.__enter__(), self.resource)
+                self.assertEqual(self.resource.gpu_ids, ["0"])
+                clock.sleep.assert_called_once_with(1)
+                self.resource.__exit__(None, None, None)
+
+    def test_entry_rechecks_occupancy_after_group_lock(self):
+        self.resource.total_gpus = [0]
+        for changed in ([12345], None):
+            with self.subTest(changed=changed), patch(f"{self.module}.FileLock"), patch(
+                f"{self.module}.time"
+            ) as clock, patch.object(
+                self.resource, "_get_gpu_pids", side_effect=[[], changed, [], []]
+            ):
+                clock.time.return_value = 0
+                self.assertIs(self.resource.__enter__(), self.resource)
+                clock.sleep.assert_called_once_with(1)
+                self.resource.__exit__(None, None, None)
+
+    def test_busy_and_unknown_acquisition_obey_timeout(self):
+        self.resource.total_gpus = [0]
+        for result in ([12345], None):
+            with self.subTest(result=result), patch(f"{self.module}.FileLock"), patch(
+                f"{self.module}.time"
+            ) as clock, patch.object(
+                self.resource, "_get_gpu_pids", return_value=result
+            ), patch.object(
+                self.resource, "_locked_gpu_ids", return_value=[]
+            ):
+                clock.time.side_effect = [0, 0, 0, 2]
+                with self.assertRaisesRegex(TimeoutError, "within 2s"):
+                    self.resource.__enter__()
+                clock.sleep.assert_called_once_with(1)
+                self.assertEqual(self.resource.gpu_ids, [])
+
+    def test_exit_only_releases_owned_locks_without_query_or_signal(self):
+        self.resource.gpu_ids = ["0"]
+        with patch(f"{self.module}.FileLock"), patch.object(
+            self.resource, "_get_gpu_pids", return_value=[12345]
+        ) as query, patch.object(self.resource.gpu_locks, "close") as close:
+            self.resource.__exit__(None, None, None)
+            query.assert_not_called()
+            close.assert_called_once()
+            self.assertEqual(self.resource.gpu_ids, [])
+            self.memory_query.assert_not_called()
+
+
+class GpuMemoryQueryTest(unittest.TestCase):
+    def setUp(self):
+        # These query-parser tests never enumerate or initialize real devices.
+        self.resource = object.__new__(DeviceResource)
+
+    def test_reads_one_physical_gpu_in_mib(self):
+        for value in ("0\n", " 16 \n", "11500\n"):
+            with self.subTest(value=value), patch(
+                "rtp_llm.test.utils.device_resource.subprocess.run",
+                return_value=subprocess.CompletedProcess([], 0, value, ""),
+            ) as run:
+                self.assertEqual(
+                    self.resource._get_gpu_memory_used_mib("7"), int(value)
+                )
+                run.assert_called_once_with(
+                    [
+                        "nvidia-smi",
+                        "--query-gpu=memory.used",
+                        "--format=csv,noheader,nounits",
+                        "--id=7",
+                    ],
+                    capture_output=True,
+                    text=True,
+                    timeout=10,
+                )
+
+    def test_malformed_failed_or_timed_out_query_is_unknown(self):
+        for value in (
+            "",
+            "N/A",
+            "[Not Supported]",
+            "0 MiB",
+            "-1",
+            "0\n0",
+            "0.0",
+            "０",
+        ):
+            with self.subTest(value=value), patch(
+                "rtp_llm.test.utils.device_resource.subprocess.run",
+                return_value=subprocess.CompletedProcess([], 0, value, ""),
+            ):
+                self.assertIsNone(self.resource._get_gpu_memory_used_mib("0"))
+        with patch(
+            "rtp_llm.test.utils.device_resource.subprocess.run",
+            return_value=subprocess.CompletedProcess([], 1, "0", "failed"),
+        ):
+            self.assertIsNone(self.resource._get_gpu_memory_used_mib("0"))
+        for error in (
+            subprocess.TimeoutExpired("nvidia-smi", 10),
+            OSError("unavailable"),
+        ):
+            with self.subTest(error=error), patch(
+                "rtp_llm.test.utils.device_resource.subprocess.run", side_effect=error
+            ):
+                self.assertIsNone(self.resource._get_gpu_memory_used_mib("0"))
 
 
 class CudaDriverProbeTest(unittest.TestCase):
