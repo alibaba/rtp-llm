@@ -16,6 +16,7 @@
 #include <atomic>
 #include <condition_variable>
 #include <iterator>
+#include <list>
 #include <cstdint>
 #include <memory>
 #include <mutex>
@@ -686,6 +687,10 @@ public:
         int  max_mtp_advance               = 0;
         // Immutable pinned sources for an asynchronously published grown table.
         std::vector<torch::Tensor> cache_snapshot_host_buffers;
+        // The MTP executor materializes these immutable host snapshots at its
+        // batch boundary, before constructing StreamGroups or reading pages.
+        bool batch_cache_snapshot_upload   = false;
+        bool cache_snapshot_upload_pending = false;
     };
 
     uint64_t setMtpAsyncDeviceState(MtpAsyncDeviceState state) {
@@ -769,14 +774,19 @@ public:
     // Called under the stream mutex; cache-key reads and host table updates
     // must not race specUpdate. Preserves every non-table field and the epoch.
     absl::Status reserveMtpCacheFromUpperBound(const MtpAsyncDeviceState& state);
+    static void  flushMtpCacheSnapshotUploads(const std::list<std::shared_ptr<GenerateStream>>& streams,
+                                              std::optional<torch::Stream> upload_stream = std::nullopt);
     bool         replaceMtpCacheSnapshot(uint64_t                   expected_epoch,
                                          torch::Tensor              physical,
                                          torch::Tensor              kernel,
-                                         std::vector<torch::Tensor> host_buffers);
+                                         std::vector<torch::Tensor> host_buffers,
+                                         bool                       upload_pending = false);
     void         clearMtpCacheSnapshot() {
         std::lock_guard<std::mutex> lock(*mtp_async_state_mutex_);
         mtp_async_state_.next_kv_cache_block_id_gpu        = torch::Tensor();
         mtp_async_state_.next_kv_cache_kernel_block_id_gpu = torch::Tensor();
+        mtp_async_state_.cache_snapshot_upload_pending     = false;
+        mtp_async_state_.cache_snapshot_host_buffers.clear();
     }
     torch::Tensor getLastHiddenStatesGpu() const {
         std::lock_guard<std::mutex> lock(*mtp_async_state_mutex_);

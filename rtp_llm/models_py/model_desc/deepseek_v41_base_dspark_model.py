@@ -264,6 +264,7 @@ class DeepSeekV4DSparkModel(DSparkProposerMixin, DeepSeekV4Model):
             # Commit/proposal math reads device length mirrors and block
             # tables; no host metadata values are consumed during replay.
             cuda_graph_uses_device_metadata=True,
+            cuda_graph_preparation_in_graph=True,
         )
 
     def _load_extra_weights(self, weights: ModelWeights) -> None:

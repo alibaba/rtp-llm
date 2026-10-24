@@ -335,9 +335,10 @@ void fusedGreedyTop1Renorm(const torch::Tensor& logits,
                                 && onehot_out.size(1) == logits.size(1) && onehot_out.device() == logits.device(),
                             "fusedGreedyTop1Renorm: onehot_out must be a contiguous CUDA FP32 [batch,vocab] tensor "
                             "on the logits device");
-    RTP_LLM_CHECK_WITH_INFO(samples.is_cuda() && samples.is_contiguous() && samples.scalar_type() == torch::kInt32
-                                && samples.numel() == logits.size(0) && samples.device() == logits.device(),
-                            "fusedGreedyTop1Renorm: samples must be a contiguous CUDA INT32 [batch] view "
+    RTP_LLM_CHECK_WITH_INFO(samples.is_cuda() && (samples.is_contiguous() || samples.dim() == 1)
+                                && samples.scalar_type() == torch::kInt32 && samples.numel() == logits.size(0)
+                                && samples.device() == logits.device(),
+                            "fusedGreedyTop1Renorm: samples must be a CUDA INT32 [batch] view "
                             "on the logits device");
     const int64_t batch_size = logits.size(0);
     const int64_t vocab_size = logits.size(1);
@@ -355,7 +356,8 @@ void fusedGreedyTop1Renorm(const torch::Tensor& logits,
                                             static_cast<int>(vocab_size),
                                             partials.data_ptr<float>(),
                                             at::cuda::getCurrentCUDAStream().stream(),
-                                            write_onehot));
+                                            write_onehot,
+                                            samples.stride(samples.dim() - 1)));
 }
 
 }  // anonymous namespace
@@ -524,7 +526,9 @@ static GreedyOutput flashinferSampleGreedy(const GreedyParams& params, const tor
             // sampling_probs_t is the full-width all_probs output here (the
             // gate rejected narrower widths and cum_log_probs consumers).
             all_probs_point_mass = params.all_probs_point_mass;
-            fusedGreedyTop1Renorm(params.logits, sampling_probs_t, samples_t, /*write_onehot=*/!all_probs_point_mass);
+            const auto samples_out =
+                transposed_tokens.defined() ? samples_t : params.token_ids.select(1, params.token_ids.size(1) - 1);
+            fusedGreedyTop1Renorm(params.logits, sampling_probs_t, samples_out, /*write_onehot=*/!all_probs_point_mass);
         } else {
             torch::Tensor selected_tokens = torch::argmax(probs_t, -1, /*keepdim=*/false);
             samples_t.copy_(selected_tokens, true);
@@ -662,7 +666,7 @@ static GreedyOutput flashinferSampleGreedy(const GreedyParams& params, const tor
     if (transposed_tokens.defined()) {
         auto transposed_t = transposed_tokens.transpose(0, 1).contiguous();
         params.token_ids.copy_(transposed_t, true);
-    } else {
+    } else if (!fused_greedy_top1) {
         params.token_ids.select(1, params.token_ids.size(1) - 1).copy_(direct_samples, true);
     }
     check_cuda_error();
@@ -873,7 +877,11 @@ void markovSoftmaxStep(const MarkovSoftmaxStepParams& params) {
                                              at::cuda::getCurrentCUDAStream().stream()));
 }
 
-torch::Tensor markovArgmaxStep(const MarkovArgmaxStepParams& params) {
+torch::Tensor cudaMarkovArgmaxStep(const MarkovArgmaxStepParams& params,
+                                   const torch::Tensor&          output_tokens,
+                                   const torch::Tensor&          d2t_map,
+                                   const torch::Tensor&          embedding_weights,
+                                   const torch::Tensor&          next_embedding) {
     RTP_LLM_CHECK_WITH_INFO(params.logits.defined() && params.logits.is_cuda()
                                 && params.logits.scalar_type() == torch::kFloat32 && params.logits.dim() == 2
                                 && params.logits.stride(1) == 1,
@@ -894,8 +902,42 @@ torch::Tensor markovArgmaxStep(const MarkovArgmaxStepParams& params) {
     RTP_LLM_CHECK_WITH_INFO(params.markov_bias.size(0) == batch_size && params.markov_bias.size(1) == vocab_size
                                 && params.temperature.numel() == batch_size,
                             "markovArgmaxStep: batch/vocab shape mismatch between logits, markov_bias, temperature");
-    auto tokens =
-        torch::empty({batch_size}, torch::TensorOptions().dtype(torch::kInt32).device(params.logits.device()));
+    auto tokens = output_tokens.defined() ? output_tokens :
+                                            torch::empty({batch_size}, params.logits.options().dtype(torch::kInt32));
+    RTP_LLM_CHECK_WITH_INFO(tokens.device() == params.logits.device() && tokens.scalar_type() == torch::kInt32
+                                && tokens.dim() == 1 && tokens.numel() == batch_size
+                                && (batch_size <= 1 || tokens.stride(0) > 0),
+                            "markovArgmaxStep: output tokens must be CUDA int32 [batch] with distinct rows");
+    MarkovArgmaxOutputParams output;
+    output.token_stride = tokens.stride(0);
+    if (d2t_map.defined()) {
+        RTP_LLM_CHECK_WITH_INFO(d2t_map.device() == params.logits.device() && d2t_map.scalar_type() == torch::kInt64
+                                    && d2t_map.dim() == 1 && d2t_map.numel() >= vocab_size,
+                                "markovArgmaxStep: vocabulary map must be CUDA int64 [vocab]");
+        output.d2t_map    = d2t_map.data_ptr<int64_t>();
+        output.map_stride = d2t_map.stride(0);
+    }
+    if (next_embedding.defined()) {
+        RTP_LLM_CHECK_WITH_INFO(embedding_weights.defined() && embedding_weights.device() == params.logits.device()
+                                    && embedding_weights.dim() == 2
+                                    && (embedding_weights.scalar_type() == torch::kFloat32
+                                        || embedding_weights.scalar_type() == torch::kHalf
+                                        || embedding_weights.scalar_type() == torch::kBFloat16)
+                                    && next_embedding.device() == params.logits.device()
+                                    && next_embedding.scalar_type() == embedding_weights.scalar_type()
+                                    && next_embedding.dim() == 2 && next_embedding.is_contiguous()
+                                    && next_embedding.size(0) == batch_size
+                                    && next_embedding.size(1) == embedding_weights.size(1),
+                                "markovArgmaxStep: next embedding must be contiguous CUDA [batch,rank] "
+                                "with the FP32/BF16/FP16 weight dtype");
+        output.embedding_weights      = embedding_weights.data_ptr();
+        output.next_embedding         = next_embedding.data_ptr();
+        output.embedding_rows         = embedding_weights.size(0);
+        output.embedding_width        = embedding_weights.size(1);
+        output.weight_row_stride      = embedding_weights.stride(0);
+        output.weight_col_stride      = embedding_weights.stride(1);
+        output.embedding_element_size = embedding_weights.element_size();
+    }
     if (batch_size == 0) {
         return tokens;
     }
@@ -930,8 +972,13 @@ torch::Tensor markovArgmaxStep(const MarkovArgmaxStepParams& params) {
                                             static_cast<int>(batch_size),
                                             static_cast<int>(vocab_size),
                                             partials.data_ptr<float>(),
-                                            at::cuda::getCurrentCUDAStream().stream()));
+                                            at::cuda::getCurrentCUDAStream().stream(),
+                                            output));
     return tokens;
+}
+
+torch::Tensor markovArgmaxStep(const MarkovArgmaxStepParams& params) {
+    return cudaMarkovArgmaxStep(params, {}, {}, {}, {});
 }
 
 void mappingDraft2Target(const MappingDraft2TargetParams& params) {

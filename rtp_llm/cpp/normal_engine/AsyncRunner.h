@@ -21,6 +21,9 @@ public:
 
     void launch(std::function<void()> fn);
     void sync(const torch::Stream& wait_stream);
+    torch::Stream stream() const {
+        return stream_;
+    }
 
 private:
     void workerLoop();

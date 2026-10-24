@@ -5,6 +5,8 @@
 #include "rtp_llm/models_py/bindings/common/kernels/banRepeatNgram.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
 #include <ATen/cuda/CUDAContext.h>
+#include "rtp_llm/models_py/bindings/cuda/kernels/attention_input_metadata.h"
+#include "rtp_llm/models_py/bindings/cuda/kernels/speculative_sampling/greedy_top1_renorm.h"
 #include <ATen/cuda/CUDAGeneratorImpl.h>
 #include <cuda_runtime.h>
 #include <algorithm>
@@ -1593,4 +1595,70 @@ TEST_F(CudaSamplerTest, testExactJointSmallTopKUsesFullVocabularyTopPAndRetainsT
     EXPECT_EQ(sampled[3], 0);
     EXPECT_LT(sampled[5], 100);
     EXPECT_LT(sampled[7], 3);
+}
+
+TEST_F(CudaSamplerTest, AttentionMetadataMatchesSerialForRaggedAndMultiTileBatches) {
+    for (int batch : {0, 1, 7, 64, 257, 513}) {
+        for (bool with_prefix : {false, true}) {
+            std::vector<int32_t> lengths(batch), prefixes(batch), q{0}, kv{0}, offsets;
+            int                  max_len = 0;
+            for (int b = 0; b < batch; ++b) {
+                lengths[b]  = (b * 7 + 3) % 19;
+                prefixes[b] = with_prefix ? 32768 + b * 31 : 0;
+                max_len     = std::max(max_len, lengths[b]);
+                q.push_back(q.back() + lengths[b]);
+                kv.push_back(kv.back() + lengths[b] + prefixes[b]);
+            }
+            for (int b = 0; b < batch; ++b)
+                for (int j = 0; j < lengths[b]; ++j)
+                    offsets.push_back(b * max_len - q[b]);
+            auto len     = cudaIntTensor(lengths, {batch});
+            auto pre     = with_prefix ? cudaIntTensor(prefixes, {batch}) : torch::Tensor();
+            auto q_out   = torch::empty({batch + 1}, len.options());
+            auto kv_out  = torch::empty_like(q_out);
+            auto pad_out = torch::empty({q.back()}, len.options());
+            invokeBuildAttentionInputMetadata(len, pre, q_out, kv_out, pad_out, at::cuda::getCurrentCUDAStream());
+            EXPECT_EQ(toHostInt(q_out), q);
+            EXPECT_EQ(toHostInt(kv_out), kv);
+            EXPECT_EQ(toHostInt(pad_out), offsets);
+        }
+    }
+}
+
+TEST_F(CudaSamplerTest, GreedyTop1TokenStridePreservesHistoryAndTieRules) {
+    for (int batch : {1, 7, 64, 129, 384}) {
+        for (int vocab : {17, 64, 16385, 129280}) {
+            auto logits = torch::randn({batch, vocab}, torch::TensorOptions().device(torch::kCUDA));
+            logits.select(0, 0).fill_(-INFINITY);
+            if (batch > 1) {
+                logits.select(0, 1).fill_(0);
+                logits[1][3] = NAN;
+                logits[1][7] = NAN;
+            }
+            auto      expected = torch::argmax(logits, -1).to(torch::kInt32);
+            const int splits   = greedyTop1RenormSplits(batch, vocab);
+            auto      partials = torch::empty({2, batch, splits}, logits.options());
+            for (bool onehot : {false, true}) {
+                auto output = torch::full({batch, 11}, -7, expected.options());
+                auto probs  = torch::empty_like(logits);
+                ASSERT_EQ(invokeGreedyTop1Renorm(logits.data_ptr<float>(),
+                                                 probs.data_ptr<float>(),
+                                                 output.data_ptr<int32_t>() + 10,
+                                                 batch,
+                                                 vocab,
+                                                 partials.data_ptr<float>(),
+                                                 at::cuda::getCurrentCUDAStream(),
+                                                 onehot,
+                                                 11),
+                          cudaSuccess);
+                EXPECT_TRUE(torch::equal(output.select(1, 10), expected));
+                EXPECT_TRUE(output.narrow(1, 0, 10).eq(-7).all().item<bool>());
+                if (onehot) {
+                    auto reference = torch::zeros_like(probs);
+                    reference.scatter_(1, expected.to(torch::kLong).unsqueeze(1), 1);
+                    EXPECT_TRUE(torch::equal(probs, reference));
+                }
+            }
+        }
+    }
 }
