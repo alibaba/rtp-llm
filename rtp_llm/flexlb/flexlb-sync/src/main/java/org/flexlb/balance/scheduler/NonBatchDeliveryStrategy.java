@@ -27,7 +27,10 @@ import static org.flexlb.balance.scheduler.PrefillAdmissionResources.rollbackRes
 import static org.flexlb.balance.scheduler.PrefillAdmissionResources.sameIdentitySequence;
 import static org.flexlb.balance.scheduler.PrefillAdmissionResources.throwRollbackFailure;
 
-/** Individual route admission, ownership, publication, and projection. */
+/**
+ * NON_BATCH 模式的投递策略：请求逐个投递给 Prefill，不攒批。
+ * 负责预留容量、提交归属、发布路由和估算 TTFT。
+ */
 public final class NonBatchDeliveryStrategy implements DeliveryStrategy {
 
     private final RequestRegistry requests;
