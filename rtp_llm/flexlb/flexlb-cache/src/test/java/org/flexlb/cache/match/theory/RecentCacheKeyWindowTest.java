@@ -103,7 +103,7 @@ class RecentCacheKeyWindowTest {
     }
 
     @Test
-    void should_report_age_of_capacity_evicted_keys_but_not_expired_ones() {
+    void should_report_age_of_capacity_evicted_and_expired_keys() {
         AtomicLong now = new AtomicLong(0L);
         RecentCacheKeyWindow window = new RecentCacheKeyWindow(1000L, 2L, now::get);
 
@@ -113,13 +113,13 @@ class RecentCacheKeyWindowTest {
 
         now.set(300L);
         RecentCacheKeyWindow.Snapshot full = window.record(List.of(3L));
-        assertEquals(1L, full.getCapacityEvictions());
-        assertEquals(300L, full.getCapacityEvictionAgeSumMs());
+        assertEquals(1L, full.getEvictions());
+        assertEquals(300L, full.getEvictionAgeSumMs());
 
         now.set(5000L);
         RecentCacheKeyWindow.Snapshot expired = window.record(List.of(4L));
-        assertEquals(0L, expired.getCapacityEvictions());
-        assertEquals(0L, expired.getCapacityEvictionAgeSumMs());
+        assertEquals(2L, expired.getEvictions());
+        assertEquals(4700L + 4900L, expired.getEvictionAgeSumMs());
     }
 
     @Test

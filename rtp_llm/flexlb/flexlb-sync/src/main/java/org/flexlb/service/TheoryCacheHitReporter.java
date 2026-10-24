@@ -107,7 +107,7 @@ public class TheoryCacheHitReporter {
         if (cacheMetricsReporter != null && config.getObservability().getCacheHit().isMetricsEnabled()) {
             cacheMetricsReporter.reportTheoryPoolMetrics(snapshot.getPoolUsedKeys(), snapshot.getPoolCapacityKeys());
             cacheMetricsReporter.reportTheoryCacheEvictionMetrics(
-                    snapshot.getCapacityEvictions(), snapshot.getCapacityEvictionAgeSumMs());
+                    snapshot.getEvictions(), snapshot.getEvictionAgeSumMs());
         }
         return config.getObservability().getCacheHit().isMetricsEnabled() ? hitTokens : null;
     }

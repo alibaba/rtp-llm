@@ -370,7 +370,7 @@ public class CacheMetricsReporter {
     }
 
     /**
-     * Report capacity evictions of the theory key pool: count and summed age (ms).
+     * Report evictions of the theory key pool: count and summed age (ms).
      */
     public void reportTheoryCacheEvictionMetrics(long evictions, long ageSumMs) {
         if (evictions <= 0L) {

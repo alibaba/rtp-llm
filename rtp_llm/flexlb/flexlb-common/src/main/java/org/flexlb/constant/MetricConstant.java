@@ -461,12 +461,12 @@ public class MetricConstant {
     public static final String CACHE_THEORY_TOTAL_COUNT = "app.cache.theory.total.count";
 
     /**
-     * Keys evicted from the theory pool because it was full (counter).
+     * Keys evicted from the theory pool, expired or displaced by capacity (counter).
      */
     public static final String CACHE_THEORY_EVICT_COUNT = "app.cache.theory.evict.count";
 
     /**
-     * Sum of ages (ms since last seen) of capacity-evicted keys (counter).
+     * Sum of ages (ms since last seen) of evicted keys (counter).
      * Average eviction TTL = rate(sum) / rate(count).
      */
     public static final String CACHE_THEORY_EVICT_AGE_MS_SUM = "app.cache.theory.evict.age.ms.sum";

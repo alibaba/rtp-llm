@@ -31,8 +31,8 @@ public class RecentCacheKeyWindow {
     private final int tableMask;
 
     private int uniqueSize;
-    private long capacityEvictions;
-    private long capacityEvictionAgeSumMs;
+    private long evictions;
+    private long evictionAgeSumMs;
 
     RecentCacheKeyWindow(long timeWindowMs, long maxCacheKeys, LongSupplier nowSupplier) {
         if (timeWindowMs <= 0L) {
@@ -59,8 +59,8 @@ public class RecentCacheKeyWindow {
 
     public Snapshot record(List<Long> cacheKeys) {
         long nowMs = nowSupplier.getAsLong();
-        capacityEvictions = 0L;
-        capacityEvictionAgeSumMs = 0L;
+        evictions = 0L;
+        evictionAgeSumMs = 0L;
         evictExpired(nowMs);
 
         long requestOccurrences = 0L;
@@ -89,7 +89,7 @@ public class RecentCacheKeyWindow {
             logRequest(nowMs, requestOccurrences, requestHitOccurrences);
         }
         return new Snapshot(timeWindowMs, requestOccurrences, requestHitOccurrences,
-                capacityEvictions, capacityEvictionAgeSumMs, uniqueSize, maxCacheKeys);
+                evictions, evictionAgeSumMs, uniqueSize, maxCacheKeys);
     }
 
     private void retainCacheKey(long cacheKey, long nowMs) {
@@ -100,9 +100,7 @@ public class RecentCacheKeyWindow {
             return;
         }
         if (uniqueSize == maxCacheKeys) {
-            capacityEvictions++;
-            capacityEvictionAgeSumMs += Math.max(0L, nowMs - oldestTimestampMs());
-            evictOldestCacheKey();
+            evictOldestCacheKey(nowMs);
         }
         int newSlot = findEmptySlot(cacheKey);
         tableKeys[newSlot] = cacheKey;
@@ -115,7 +113,7 @@ public class RecentCacheKeyWindow {
     private void evictExpired(long nowMs) {
         long expireBeforeOrAt = nowMs - timeWindowMs;
         while (uniqueSize > 0 && oldestTimestampMs() <= expireBeforeOrAt) {
-            evictOldestCacheKey();
+            evictOldestCacheKey(nowMs);
         }
     }
 
@@ -123,7 +121,9 @@ public class RecentCacheKeyWindow {
         return tableLastSeenTimestampMs[expirationHeapSlots[0]];
     }
 
-    private void evictOldestCacheKey() {
+    private void evictOldestCacheKey(long nowMs) {
+        evictions++;
+        evictionAgeSumMs += nowMs - oldestTimestampMs();
         int oldestSlot = expirationHeapSlots[0];
         removeFromExpirationHeap(0);
         removeFromHashTable(oldestSlot);
@@ -265,20 +265,20 @@ public class RecentCacheKeyWindow {
         private final long timeWindowMs;
         private final long requestOccurrences;
         private final long requestHitOccurrences;
-        /** Keys evicted because the pool was full during this record call (not window expiry). */
-        private final long capacityEvictions;
-        /** Sum of (eviction time - last seen time) over those keys; divide by capacityEvictions for average TTL. */
-        private final long capacityEvictionAgeSumMs;
+        /** Keys evicted during this record call, either expired or displaced because the pool was full. */
+        private final long evictions;
+        /** Sum of (eviction time - last seen time) over those keys; divide by evictions for average TTL. */
+        private final long evictionAgeSumMs;
         /** Unique keys held in the pool after this record call. */
         private final long poolUsedKeys;
         private final long poolCapacityKeys;
 
         Snapshot(long timeWindowMs, long requestOccurrences, long requestHitOccurrences,
-                 long capacityEvictions, long capacityEvictionAgeSumMs, long poolUsedKeys, long poolCapacityKeys) {
+                 long evictions, long evictionAgeSumMs, long poolUsedKeys, long poolCapacityKeys) {
             this.poolUsedKeys = poolUsedKeys;
             this.poolCapacityKeys = poolCapacityKeys;
-            this.capacityEvictions = capacityEvictions;
-            this.capacityEvictionAgeSumMs = capacityEvictionAgeSumMs;
+            this.evictions = evictions;
+            this.evictionAgeSumMs = evictionAgeSumMs;
             this.timeWindowMs = timeWindowMs;
             this.requestOccurrences = requestOccurrences;
             this.requestHitOccurrences = requestHitOccurrences;
