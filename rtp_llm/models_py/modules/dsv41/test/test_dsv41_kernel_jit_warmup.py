@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import ast
 import copy
+import logging
 import os
 import sys
 import types
@@ -1173,7 +1174,7 @@ class V41KernelJitWarmupTest(unittest.TestCase):
         )
         self.assertEqual(warmup._prefill_topology(model), (1, False))
 
-    def test_initialize_materialized_branch_warms_after_base_binds_cache(self):
+    def model_initialize_fixture(self):
         source = _REPO / "rtp_llm/models_py/model_desc/deepseek_v41_base_model.py"
         tree = ast.parse(source.read_text())
         method = copy.deepcopy(
@@ -1200,11 +1201,22 @@ class V41KernelJitWarmupTest(unittest.TestCase):
             def initialize(self, resource):
                 self.kv_cache = resource.kv_cache
 
-        namespace = {"Base": Base}
+        namespace = {"Base": Base, "torch": torch, "os": os, "logging": logging}
         exec(compile(module, str(source), "exec"), namespace)
         instance = namespace["Extracted"]()
         instance._materialized = True
         instance._is_decode_role = False
+        instance._v4_args = types.SimpleNamespace(v41_config={}, commit_only=False)
+        instance.v4 = types.SimpleNamespace(
+            embed=types.SimpleNamespace(weight=types.SimpleNamespace(device="cuda:0"))
+        )
+        return instance
+
+    def test_initialize_materialized_branch_warms_after_base_binds_cache(self):
+        instance = self.model_initialize_fixture()
+        self.stack.enter_context(
+            mock.patch.object(torch.cuda, "is_available", return_value=False)
+        )
         for commit_only in (False, True):
             with self.subTest(commit_only=commit_only):
                 instance._v4_args = types.SimpleNamespace(
@@ -1251,6 +1263,84 @@ class V41KernelJitWarmupTest(unittest.TestCase):
         self.assertIs(instance.kv_cache, cache)
         decode.assert_called_once_with(instance, device="cuda:1")
         prefill.assert_not_called()
+
+    def test_initialize_pdl_policy_precedes_warmup(self):
+        for decode in (False, True):
+            for setting in (None, "0", "1"):
+                with self.subTest(decode=decode, setting=setting), ExitStack() as stack:
+                    instance = self.model_initialize_fixture()
+                    instance._is_decode_role = decode
+                    expected = setting != "0"
+                    state = {"pdl": not expected}
+                    setter = mock.Mock(
+                        side_effect=lambda value: state.update(pdl=value)
+                    )
+                    stack.enter_context(mock.patch.dict(os.environ, {}, clear=True))
+                    if setting is not None:
+                        os.environ["DSV41_PDL"] = setting
+                    stack.enter_context(
+                        mock.patch.dict(
+                            sys.modules,
+                            {"deep_gemm": fake_module("deep_gemm", set_pdl=setter)},
+                        )
+                    )
+                    stack.enter_context(mock.patch.object(torch.version, "hip", None))
+                    stack.enter_context(
+                        mock.patch.object(torch.cuda, "is_available", return_value=True)
+                    )
+                    stack.enter_context(
+                        mock.patch.object(
+                            torch.cuda, "get_device_capability", return_value=(10, 3)
+                        )
+                    )
+                    warm = stack.enter_context(
+                        mock.patch.object(
+                            warmup,
+                            (
+                                "warmup_v41_decode_jit"
+                                if decode
+                                else "warmup_v41_prefill_jit"
+                            ),
+                            side_effect=lambda *a, **kw: self.assertIs(
+                                state["pdl"], expected
+                            ),
+                        )
+                    )
+                    self.assertTrue(
+                        instance._initialize_impl(types.SimpleNamespace(kv_cache=None))
+                    )
+                    setter.assert_called_once_with(expected)
+                    warm.assert_called_once()
+
+    def test_initialize_pdl_hardware_and_model_guards(self):
+        for config, cuda, hip, major, enabled in (
+            ({}, True, None, 9, True),
+            ({}, True, None, 8, False),
+            ({}, False, None, 10, False),
+            ({}, True, "7.0", 10, False),
+            (None, True, None, 10, False),
+        ):
+            with self.subTest(config=config, cuda=cuda, hip=hip, major=major):
+                instance = self.model_initialize_fixture()
+                instance._v4_args.v41_config = config
+                setter = mock.Mock()
+                with mock.patch.dict(
+                    sys.modules,
+                    {"deep_gemm": fake_module("deep_gemm", set_pdl=setter)},
+                ), mock.patch.object(torch.version, "hip", hip), mock.patch.object(
+                    torch.cuda, "is_available", return_value=cuda
+                ), mock.patch.object(
+                    torch.cuda, "get_device_capability", return_value=(major, 0)
+                ), mock.patch.object(
+                    warmup, "warmup_v41_prefill_jit"
+                ):
+                    self.assertTrue(
+                        instance._initialize_impl(types.SimpleNamespace(kv_cache=None))
+                    )
+                if enabled:
+                    setter.assert_called_once_with(True)
+                else:
+                    setter.assert_not_called()
 
     def test_initial_model_warmup_dispatches_by_role(self):
         source = _REPO / "rtp_llm/models_py/model_desc/deepseek_v41_base_model.py"

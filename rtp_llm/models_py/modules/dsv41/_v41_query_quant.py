@@ -166,21 +166,13 @@ def _query_norm_quant_kernel(
     BLOCK: tl.constexpr,
     PDL: tl.constexpr = False,
 ):
-    if PDL:
-        # Producer only: QA completion still orders this kernel. The following
-        # QB may initialize early but must GDC-wait before reading Q/scales.
-        tl.inline_asm_elementwise(
-            "griddepcontrol.launch_dependents; // $0",
-            "=r",
-            [],
-            dtype=tl.int32,
-            is_pure=False,
-            pack=1,
-        )
     row = tl.program_id(0).to(tl.int64)
     cols = tl.arange(0, BLOCK)
-    x = tl.load(X + row * stride_x + cols, cols < D, 0).to(tl.float32)
+    # Immutable weights may be loaded while QA is still producing activations.
     w = tl.load(W + cols, cols < D, 0).to(tl.float32)
+    if PDL:
+        tl.extra.cuda.gdc_wait()
+    x = tl.load(X + row * stride_x + cols, cols < D, 0).to(tl.float32)
     inv = tl.rsqrt(tl.sum(x * x, 0) / D + EPS)
     # Match the existing strided norm's materialized BF16 boundary.
     y = (x * inv * w).to(tl.bfloat16)
@@ -195,6 +187,9 @@ def _query_norm_quant_kernel(
     quant = tl.div_rn(groups, scale[:, None])
     quant = tl.minimum(tl.maximum(quant, -448.0), 448.0)
     tl.store(Q + row * D + cols, tl.reshape(quant, (BLOCK,)), cols < D)
+    if PDL:
+        # QB may initialize during scale packing, but must wait before reads.
+        tl.extra.cuda.gdc_launch_dependents()
     group_ids = tl.arange(0, BLOCK // 32)
     exponent = tl.where(group_ids < D // 32, exponent, 0)
     packed = tl.sum(
@@ -209,6 +204,11 @@ def query_norm_quant(
     x: torch.Tensor, weight: torch.Tensor, eps: float, *, pdl: bool = False
 ):
     """Return BF16 Q plus FP8 Q and packed MN-major UE8M0 scales."""
+    import deep_gemm
+
+    pdl = pdl or (
+        torch.cuda.get_device_capability(x.device)[0] >= 9 and deep_gemm.get_pdl()
+    )
     flat = x.view(-1, x.shape[-1])
     rows, width = flat.shape
     normalized = torch.empty(x.shape, device=x.device, dtype=x.dtype)
@@ -231,6 +231,7 @@ def query_norm_quant(
             eps,
             triton.next_power_of_2(width),
             PDL=pdl,
+            launch_pdl=pdl,
             num_warps=8 if width > 1024 else 4,
             enable_fp_fusion=False,
         )
