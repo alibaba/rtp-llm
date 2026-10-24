@@ -74,3 +74,11 @@ models_py_test(
     src = "fp8_dense_gemv_test.py",
     gpu = "RTX_5000_PRO_CU13",
 )
+
+py_test(
+    name = "rocm_fp8_consumer_test",
+    srcs = ["rocm_fp8_consumer_test.py"],
+    deps = ["//rtp_llm:testlib"],
+    tags = ["rocm"],
+    exec_properties = {"gpu": "MI308X-ROCM7"},
+)
