@@ -1012,6 +1012,29 @@ class PrefillEndpointTest {
 
     // ---- observedRequestCount ----
 
+    @ParameterizedTest
+    @CsvSource({"1,1", "2,0"})
+    void retainedExecutionCompletionCannotRetireACancelingControlOwner(long overlayBatch, int expectedInflight) {
+        registerBatch(endpoint, 1L, 100, List.of(createScheduledRequest(101L, 500, 0)));
+        TaskInfo success = taskInfo(101L, 1L, TaskPhase.RUNNING, 0, 100);
+        TaskInfo canceling = taskInfo(101L, overlayBatch, TaskPhase.RUNNING, 0, 0);
+        canceling.setPriorityPreemptionProgress(PriorityPreemptionProgress.CANCELING);
+        WorkerStatusResponse response = new WorkerStatusResponse();
+        response.setRunningTaskInfo(Map.of("101", canceling));
+        response.setFinishedTaskInfo(Map.of("101", success));
+        EndpointTestSupport.applyStatus(endpoint, response);
+        assertEquals(expectedInflight, endpoint.getInflightBatchCount(), "only an exact control identity can defer retirement");
+        if (expectedInflight == 0) return;
+
+        TaskInfo canceled = taskInfo(101L, 1L, TaskPhase.RUNNING, 8429, 200);
+        canceled.setPriorityPreemptionProgress(PriorityPreemptionProgress.CANCELED);
+        response.setRunningTaskInfo(Map.of());
+        response.setFinishedTaskInfo(Map.of("101", canceled));
+        EndpointTestSupport.applyStatus(endpoint, response);
+        assertEquals(0, endpoint.getInflightBatchCount());
+        assertEquals(0, endpoint.observedRequestCount());
+    }
+
     @Test
     void observedRequestCountUnionsEngineTasksWithLocalLedger() {
         registerBatch(endpoint, 1L, 100, List.of(

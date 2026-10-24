@@ -22,6 +22,7 @@ class MockVitServerTest {
         int grpc = freePort(), http = freePort();
         var child = new ProcessBuilder(System.getProperty("java.home") + "/bin/java", "-cp",
                 System.getProperty("java.class.path"), MockVitServer.class.getName(),
+                "--engine-config", "../tools/mock_bundle/engine-config.json", "--calibration", "../tools/mock_bundle/performance.json",
                 "--port", Integer.toString(grpc), "--http-port", Integer.toString(http))
                 .redirectErrorStream(true).redirectOutput(ProcessBuilder.Redirect.DISCARD).start();
         var channel = ManagedChannelBuilder.forAddress("127.0.0.1", grpc).usePlaintext().build();

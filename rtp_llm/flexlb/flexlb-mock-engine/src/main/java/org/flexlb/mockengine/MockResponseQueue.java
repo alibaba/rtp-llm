@@ -22,6 +22,8 @@ final class MockResponseQueue extends LinkedBlockingQueue<EngineRpcService.Gener
         synchronized (this) {
             if (terminal) return false;
             finishes = output.hasErrorInfo() || output.getFlattenOutput().getFinishedList().contains(true);
+            // Real nextOutput gives Error precedence over buffered outputs.
+            if (output.hasErrorInfo()) super.clear();
             if (!super.offer(output)) return false;
             if (finishes) {
                 terminal = true;

@@ -16,13 +16,14 @@ final class MockRemoteDecodeCall implements StreamObserver<EngineRpcService.Gene
     }
 
     interface Lease {
+        default CompletableFuture<Void> load() { return CompletableFuture.completedFuture(null); }
         boolean start(LinkedBlockingQueue<EngineRpcService.GenerateOutputsPB> outputs);
         void cancel();
         void completed();
         default void completePrefill() { cancel(); }
     }
 
-    private enum Stage { ALLOCATE, LOAD, GENERATE, RUNNING, CLOSED }
+    private enum Stage { ALLOCATE, LOAD, LOADING, GENERATE, RUNNING, CLOSED }
 
     private final Backend backend;
     private final StreamObserver<EngineRpcService.GenerateOutputsPB> response;
@@ -68,10 +69,8 @@ final class MockRemoteDecodeCall implements StreamObserver<EngineRpcService.Gene
                 throw Status.INVALID_ARGUMENT.withDescription("RemoteGenerate identity changed")
                         .asRuntimeException();
             } else if (stage == Stage.LOAD && request.getStage() == EngineRpcService.RemoteStage.LOAD) {
-                // KV bytes are simulated. The resource lease and network stage
-                // are real; no GPU/RDMA transfer performance is claimed here.
-                stage = Stage.GENERATE;
-                response.onNext(EngineRpcService.GenerateOutputsPB.getDefaultInstance());
+                stage = Stage.LOADING;
+                lease.load().whenComplete((ignored, error) -> loaded(error));
             } else if (stage == Stage.GENERATE && request.getStage() == EngineRpcService.RemoteStage.PREFILL_COMPLETE) {
                 if (!clientId.equals(request.getClientId()))
                     throw Status.INVALID_ARGUMENT.withDescription("Prefill completion identity mismatch").asRuntimeException();
@@ -100,6 +99,17 @@ final class MockRemoteDecodeCall implements StreamObserver<EngineRpcService.Gene
             }
         } catch (RuntimeException error) {
             abort(error);
+        }
+    }
+
+    private synchronized void loaded(Throwable error) {
+        if (stage != Stage.LOADING) return;
+        if (error != null) {
+            while (error instanceof java.util.concurrent.CompletionException && error.getCause() != null) error = error.getCause();
+            abort(error);
+        } else {
+            stage = Stage.GENERATE;
+            response.onNext(EngineRpcService.GenerateOutputsPB.getDefaultInstance());
         }
     }
 

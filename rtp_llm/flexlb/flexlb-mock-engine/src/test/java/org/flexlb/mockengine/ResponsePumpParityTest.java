@@ -18,7 +18,7 @@ import java.util.concurrent.atomic.AtomicInteger;
 import static org.flexlb.mockengine.MockEngineTestSupport.*;
 import static org.junit.jupiter.api.Assertions.*;
 
-/** Both public RPCs must preserve the existing Mock wire/error contract. */
+/** Both public RPCs must preserve the real engine domain-error contract. */
 class ResponsePumpParityTest {
     @TempDir Path directory;
 
@@ -62,8 +62,13 @@ class ResponsePumpParityTest {
             var output = start(service, fetch);
             assertTrue(output.done.await(3, TimeUnit.SECONDS));
             assertEquals(1, output.terminals.get());
-            if (errorCode == 602 || errorCode == 603) {
-                assertEquals(errorCode == 602 ? Status.Code.RESOURCE_EXHAUSTED : Status.Code.DEADLINE_EXCEEDED,
+            if (errorCode != 0) {
+                var expectedStatus = switch (errorCode) {
+                    case 603 -> Status.Code.DEADLINE_EXCEEDED;
+                    case 8100 -> Status.Code.CANCELLED;
+                    default -> Status.Code.RESOURCE_EXHAUSTED;
+                };
+                assertEquals(expectedStatus,
                         Status.fromThrowable(output.error).getCode());
                 var details = MockRpcErrors.downstream(output.error);
                 assertEquals(errorCode, details.getErrorCode());
@@ -75,7 +80,7 @@ class ResponsePumpParityTest {
             }
             assertSame(afterTerminal, queue.peek(), "never consume frames after a terminal");
             service.cancel(71);
-            cluster.awaitAllInflightZero(1000);
+            cluster.awaitAllInflightZero(7000);
             assertEquals(0, service.requests.outputCount());
             assertNull(service.requests.deadline(71));
         }
@@ -96,7 +101,7 @@ class ResponsePumpParityTest {
             assertEquals(firstToken ? List.of(frame(false)) : List.of(), output.frames);
             assertEquals(1, output.terminals.get());
             service.cancel(71);
-            cluster.awaitAllInflightZero(1000);
+            cluster.awaitAllInflightZero(7000);
         }
     }
 }

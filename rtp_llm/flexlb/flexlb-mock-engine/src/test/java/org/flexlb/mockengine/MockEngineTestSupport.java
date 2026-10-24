@@ -191,27 +191,13 @@ final class MockEngineTestSupport {
                 "prefill", prefill,
                 "decode", decode));
         MockMasterConfig.writeWithPrefillExpression(master, prefillFormula);
-        return MockPerformanceModel.load(performance.toString(), master.toString());
+        return MockModelFixture.load(performance.toString(), master.toString());
     }
 
     static MockPerformanceModel decodeModel(
-            Path tempDir, double decodeStepMs, Integer maxPendingRequests)
+            Path tempDir, double decodeStepMs)
             throws IOException {
-        return decodeModel(tempDir, decodeStepMs, maxPendingRequests, false);
-    }
-
-    static MockPerformanceModel decodeModel(
-            Path tempDir,
-            double decodeStepMs,
-            Integer maxPendingRequests,
-            boolean reportQueuedAsKvAllocated) throws IOException {
         Map<String, Object> decodeConfig = new LinkedHashMap<>();
-        if (maxPendingRequests != null) {
-            decodeConfig.put("max_pending_requests", maxPendingRequests);
-        }
-        if (reportQueuedAsKvAllocated) {
-            decodeConfig.put("report_queued_as_kv_allocated", true);
-        }
         return performanceModel(
                 tempDir, "10", 0.1, decodeStepMs, Map.of(), decodeConfig);
     }

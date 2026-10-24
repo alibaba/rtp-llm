@@ -81,7 +81,7 @@ final class MockRemoteDecodeStream implements AutoCloseable {
                 });
         request.onNext(EngineRpcService.GenerateRequestPB.newBuilder()
                 .setStage(EngineRpcService.RemoteStage.ALLOCATE)
-                .setRequestId(requestId).setClientId(clientId).setInput(input).build());
+                .setRequestId(requestId).setClientId(clientId).setInput(MockRequestRules.decodeInput(input)).build());
         } finally {
             leaseContext.detach(previous);
         }

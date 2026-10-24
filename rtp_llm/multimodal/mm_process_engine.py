@@ -824,7 +824,19 @@ class MMProcessEngine:
                 forward_profiler=self.profiler.profile_forward,
                 **scheduler_args,
             )
+            from rtp_llm.config.effective_config import export_requested, vit_snapshot
+
+            export_requested(
+                lambda revision: vit_snapshot(
+                    vit_config, revision=revision, work_budget=self._scheduler._work_budget,
+                    hash_cache_accounting=MMHashKeyCache.accounting(),
+                    greennet_enabled=self._greennet_enabled(),
+                ),
+                rank=self.server_id,
+            )
         except Exception:
+            if hasattr(self, "_scheduler"):
+                self._scheduler.close()
             self._async_compute_executor.shutdown(wait=True, cancel_futures=True)
             self.preprocess_executor.shutdown()
             if self._remote_embedding_cache is not None:

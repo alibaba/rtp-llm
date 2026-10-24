@@ -69,15 +69,17 @@ def test_final_effective_mock_settings_are_frozen_before_backend_projection():
     plan = environment(
         dict(
             prefill_perf=dict(fixed_ms=10, scale=1, max_batch_tokens=1024, max_batch_requests=2),
-            prefill_max_waiting_batches=0,
             prefill_cache_policy=dict(device_tree=False, memory_tree=True, memory_blocks=42),
         ),
         "env",
         "batch-window",
     )
     snapshot = EnvironmentSnapshot.read(plan["rendered"])
-    assert snapshot.performance["prefill"]["memory_cache"] == dict(enabled=True, capacity_blocks=42, enable_prefix_tree=True)
-    assert snapshot.performance["prefill"]["max_waiting_batches"] == 0
+    role = snapshot.performance["engine_config"]["roles"]["prefill"]
+    assert role["capacity"]["memory_blocks"] == 42
+    assert role["capacity"]["enable_memory_prefix_tree"] is True
+    assert role["scheduler"]["max_generate_batch_size"] == 2
+    assert snapshot.performance["prefill"] == {"fixed_ms": 10, "scale": 1}
     # Live declaration patches cannot silently reinterpret the frozen effective configuration.
     plan["prefill_perf"]["fixed_ms"] = 999
     plan["prefill_cache_policy"]["memory_blocks"] = 99

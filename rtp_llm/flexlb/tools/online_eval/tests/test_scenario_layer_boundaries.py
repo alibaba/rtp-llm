@@ -99,7 +99,9 @@ def test_probe_error_releases_partial_ownership(tmp_path):
 def test_partial_mock_failure_retains_exact_owned_process_for_bounded_cleanup(tmp_path):
     created, remembered = [], []
     process = Mock()
-    spec = EnvSpec(label="partial", n_prefill=1, n_decode=1, perf={})
+    spec = EnvSpec(
+        label="partial", n_prefill=1, n_decode=1, perf=__import__("adapters.environment_config", fromlist=["default_perf"]).default_perf()
+    )
     manager = EnvManager(
         tmp_path, verbose=False, on_environment=created.append, on_processes=lambda env: remembered.append(env.mock), defer_cleanup=True
     )
@@ -137,7 +139,13 @@ def test_master_restart_records_replacement_even_when_readiness_fails(tmp_path):
 
 
 def test_invalid_master_probe_does_not_change_mock_or_environment_spec(tmp_path):
-    raw = EnvSpec(label="probe", n_prefill=1, n_decode=1, perf={}, raw_config="invalid")
+    raw = EnvSpec(
+        label="probe",
+        n_prefill=1,
+        n_decode=1,
+        perf=__import__("adapters.environment_config", fromlist=["default_perf"]).default_perf(),
+        raw_config="invalid",
+    )
     mock_spec = replace(raw, raw_config=None)
     manager = EnvManager(tmp_path, mock_spec=mock_spec)
     env = NS(
@@ -149,16 +157,18 @@ def test_invalid_master_probe_does_not_change_mock_or_environment_spec(tmp_path)
         discovery_file=tmp_path / "discovery.json",
         mock_http_port=55150,
     )
-    # Stop before process spawn: config serialization must see the separate valid mock spec.
+    # Mock configuration no longer reads or rewrites Master configuration.
     with (
         patch("adapters.environment.MOCK_JAR", NS(is_file=lambda: True)),
         patch("adapters.environment.resolve_java21", return_value="java"),
-        patch("adapters.environment._write_master_config", side_effect=RuntimeError("stop")) as render,
+        patch("flexlb_cfg.render_process_config", side_effect=AssertionError("Master read")),
+        patch("adapters.environment.ProcessOps.start", side_effect=RuntimeError("stop")) as spawn,
     ):
         with pytest.raises(RuntimeError, match="stop"):
             manager._start_mock(env)
-    assert render.call_args.args == (env, mock_spec)
-    assert env.spec is raw and env.spec.raw_config == "invalid"
+    assert "--engine-config" in spawn.call_args.args[0]
+    assert "--master-config" not in spawn.call_args.args[0]
+    assert env.spec is raw
 
 
 @pytest.mark.parametrize("value", [False, -1, "0", None])
@@ -176,17 +186,21 @@ def test_zero_owner_decoder_preserves_both_decode_counters():
 
 
 def test_victim_start_renders_its_own_environment_spec(tmp_path):
-    spec = EnvSpec(label="victim", n_prefill=1, n_decode=1, perf={})
+    spec = EnvSpec(
+        label="victim", n_prefill=1, n_decode=1, perf=__import__("adapters.environment_config", fromlist=["default_perf"]).default_perf()
+    )
     env = NS(spec=spec, run_dir=tmp_path, base_grpc_port=55151, perf_file=tmp_path / "perf.json")
     manager = EnvManager(tmp_path, mock_spec=replace(spec, raw_config="mock-only"))
     with (
         patch("adapters.environment.port_accepting", return_value=False),
         patch("adapters.environment.resolve_java21", return_value="java"),
-        patch("adapters.environment._write_master_config", side_effect=RuntimeError("stop")) as render,
+        patch("adapters.environment.ProcessOps.start", side_effect=RuntimeError("stop")) as spawn,
     ):
         with pytest.raises(RuntimeError, match="stop"):
             manager.start_victim(env, "prefill")
-    assert render.call_args.args == (env,)
+    argv = spawn.call_args.args[0]
+    assert str(tmp_path / "victim-prefill-engine-config.json") in argv
+    assert "--master-config" not in argv
 
 
 @pytest.fixture(autouse=True)

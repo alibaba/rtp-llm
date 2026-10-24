@@ -68,8 +68,8 @@ class JavaMockEngineClusterTest {
 
         EngineRpcService.WorkerStatusPB initial = awaitStatus(service,
                 status -> status.getRunningTaskInfoCount() == 5
-                        && status.getRunningQueryLen() == 2
-                        && status.getWaitingQueryLen() == 3,
+                        && status.getRunningTaskInfoList().stream().filter(t -> t.getPhase() == EngineRpcService.TaskPhase.TASK_PHASE_RUNNING).count() == 2
+                        && status.getRunningTaskInfoList().stream().filter(t -> t.getPhase() == EngineRpcService.TaskPhase.TASK_PHASE_RECEIVED).count() == 3,
                 1_000);
         assertEquals(0, initial.getFinishedTaskListCount());
         assertEquals(3, initial.getRunningTaskInfoList().stream()
@@ -81,8 +81,7 @@ class JavaMockEngineClusterTest {
 
         EngineRpcService.WorkerStatusPB secondRunning = awaitStatus(service,
                 status -> status.getRunningTaskInfoCount() == 3
-                        && status.getRunningQueryLen() == 3
-                        && status.getWaitingQueryLen() == 0
+                        && status.getRunningTaskInfoList().stream().allMatch(t -> t.getPhase() == EngineRpcService.TaskPhase.TASK_PHASE_RUNNING)
                         && status.getFinishedTaskListCount() == 2,
                 2_000);
         assertTrue(secondRunning.getRunningTaskInfoList().stream()

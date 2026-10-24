@@ -15,7 +15,7 @@ class MockMetricOwnershipTest {
         var master = directory.resolve("master.json");
         java.nio.file.Files.writeString(perf, "{\"block_size\":64,\"prefill\":{\"formula\":\"1\"},\"decode\":{}}");
         java.nio.file.Files.writeString(master, "{}");
-        var model = MockPerformanceModel.load(perf.toString(), master.toString());
+        var model = MockModelFixture.load(perf.toString(), master.toString());
         try (var cluster = MockEngineTestCluster.create(model, 63180, 0, 1)) {
             var d = cluster.decode(0);
             var field = d.getClass().getDeclaredField("cache");
@@ -39,6 +39,48 @@ class MockMetricOwnershipTest {
             assertEquals(0L, reuse.get(0).get("rtp_llm_stream_cache_memory_reuse_length"));
             assertEquals(128, d.cacheHitSnapshot().inputTokens());
             assertEquals(64, d.cacheHitSnapshot().reuseTokens());
+        }
+    }
+
+    @Test void rpcEventsAreReportedOnceAndNeverReplayedByPeriodicSamples() {
+        var reports = new ArrayList<String>();
+        var kinds = new java.util.HashMap<String, Object>();
+        var sink = (FlexMonitor) java.lang.reflect.Proxy.newProxyInstance(getClass().getClassLoader(),
+                new Class<?>[]{FlexMonitor.class}, (proxy, method, args) -> {
+                    if (method.getName().equals("register")) kinds.put((String)args[0], args[1]);
+                    if (method.getName().equals("report")) reports.add((String)args[0]);
+                    return null;
+                });
+        var monitor = new WhaleMockMonitor(sink);
+        var labels = Map.of("role", "ROLE_TYPE_PREFILL");
+        monitor.reportCacheStatus(labels, 12); monitor.reportWorkerStatus(labels, 15);
+        var values = Map.<String, Number>of("rtp_llm_rpc_worker_status_qps", 1,
+                "rtp_llm_rpc_worker_status_total_rt_us", 15, "rtp_llm_rpc_cache_status_qps", 1,
+                "rtp_llm_rpc_cache_status_total_rt_us", 12);
+        monitor.sample(values, labels, System.nanoTime());
+        monitor.sample(values, labels, System.nanoTime());
+        for (String name : values.keySet()) assertEquals(1, java.util.Collections.frequency(reports, name), name);
+        assertEquals(org.flexlb.enums.FlexMetricType.QPS, kinds.get("rtp_llm_rpc_cache_status_qps"));
+        monitor.close(); monitor.reportCacheStatus(labels, 100);
+        assertEquals(4, reports.size(), "closed monitor does not publish callbacks");
+    }
+
+    @Test void prefillExecutionStallBelongsToStepButNotModelForwardOrQueueWait() throws Exception {
+        var model = MockEngineTestSupport.performanceModel(directory, "10");
+        try (var cluster = MockEngineTestCluster.create(model, 63185, 1, 0)) {
+            var service = cluster.prefill(0);
+            var events = new java.util.concurrent.CopyOnWriteArrayList<Map<String, Number>>();
+            var reporter = service.getClass().getDeclaredField("eventMetricReporter");
+            reporter.setAccessible(true);
+            reporter.set(service, (java.util.function.Consumer<Map<String, Number>>) events::add);
+            service.setFaultConfig(FaultInjectionConfig.builder().generateDelayMs(30).build());
+            MockEngineTestSupport.enqueueAndFetch(service, MockEngineTestSupport.batch(40,
+                    MockEngineTestSupport.slot(0, MockEngineTestSupport.input(42, 10))));
+            cluster.awaitCompleted(1, 3000);
+            var forward = events.stream().filter(row -> row.containsKey("rtp_llm_model_forward_us")).toList();
+            assertEquals(1, forward.size());
+            assertEquals(10000.0, forward.get(0).get("rtp_llm_model_forward_us"));
+            assertEquals(40000.0, forward.get(0).get("rtp_llm_sp_step_latency_us"));
         }
     }
 
@@ -98,6 +140,28 @@ class MockMetricOwnershipTest {
         monitor.sample(Map.of("rtp_llm_generate_batch_size", 0), d, System.nanoTime());
         assertEquals(java.util.List.of(4.0), batches);
         assertEquals(java.util.List.of(4.0, 0.0), running);
+    }
+
+    @Test void queueObservationsAreSchedulerOwnedAndFallbackUsesCounterRegistration() {
+        var samples = new ArrayList<String>();
+        var kinds = new java.util.HashMap<String, Object>();
+        var sink = (FlexMonitor) java.lang.reflect.Proxy.newProxyInstance(getClass().getClassLoader(),
+                new Class<?>[]{FlexMonitor.class}, (proxy, method, args) -> {
+                    if (method.getName().equals("report")) samples.add((String)args[0]);
+                    if (method.getName().equals("register")) kinds.put((String)args[0], args[1]);
+                    return null;
+                });
+        var monitor = new WhaleMockMonitor(sink);
+        var tags = Map.of("role", "ROLE_TYPE_PREFILL");
+        var round = Map.<String, Number>of("rtp_llm_wait_stream_size", 2, "rtp_llm_loading_cache_stream_size", 1,
+                "rtp_llm_scheduler_admitted_context_batch_size", 1, "rtp_llm_scheduler_admitted_context_token_size", 64,
+                "rtp_llm_scheduler_waiting_oldest_age_us", 1000);
+        monitor.reportScheduler(round, tags);
+        monitor.sample(round, tags, System.nanoTime());
+        monitor.sample(round, tags, System.nanoTime());
+        assertEquals(5, samples.size(), "periodic snapshots cannot duplicate scheduler observations");
+        monitor.reportEvent(Map.of("rtp_llm_scheduler_group_fallback_acc", 2), tags);
+        assertEquals(org.flexlb.enums.FlexMetricType.COUNTER, kinds.get("rtp_llm_scheduler_group_fallback_acc"));
     }
 
     @Test void streamDimensionsUseLocalOutputAndDoNotInventZeroGaugeSamples() {

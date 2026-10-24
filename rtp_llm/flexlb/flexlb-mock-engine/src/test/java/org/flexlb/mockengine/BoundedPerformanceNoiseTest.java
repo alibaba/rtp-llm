@@ -18,7 +18,7 @@ class BoundedPerformanceNoiseTest {
         Path master = directory.resolve("master.json");
         Files.writeString(performance, json);
         MockMasterConfig.writeWithPrefillExpression(master, "100 + sum(computeTokens / 1024.) * 100");
-        return MockPerformanceModel.load(performance.toString(), master.toString());
+        return MockModelFixture.load(performance.toString(), master.toString());
     }
 
     private static MockPerformanceModel.RequestShape request(int tokens) {

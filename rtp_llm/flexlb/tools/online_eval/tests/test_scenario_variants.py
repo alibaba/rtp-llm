@@ -38,20 +38,23 @@ class VariantProgramsTest(unittest.TestCase):
         from adapters.environment_config import default_perf
 
         doc = scenario()
-        disabled = dict(fixed_ms=3000, scale=1, max_batch_tokens=0, max_batch_requests=0)
+        disabled = dict(fixed_ms=3000, scale=1, max_batch_tokens=2048, max_batch_requests=4)
         limited = dict(disabled, max_batch_tokens=1024, max_batch_requests=2)
         doc["environment"]["prefill_perf"] = disabled
         doc["variants"] = [dict(id="disabled"), dict(id="limited", environment_overrides=dict(prefill_perf=limited))]
         for plan, expected in zip(compile_scenarios([("budget.yaml", doc)], "batch-window"), (disabled, limited)):
             spec = make_env_spec(plan["environment"], plan["profile"], dict(master_base=28000))
-            self.assertEqual(spec.perf["prefill"], expected)
+            self.assertEqual(spec.perf["prefill"], {key: expected[key] for key in ("fixed_ms", "scale")})
+            self.assertEqual(
+                spec.perf["engine_config"]["roles"]["prefill"]["scheduler"]["max_generate_batch_size"], expected["max_batch_requests"]
+            )
             self.assertEqual(spec.perf["decode"], default_perf()["decode"])
             spec.perf["prefill"]["fixed_ms"] = 0
             self.assertEqual(plan["environment"]["prefill_perf"]["fixed_ms"], 3000)
         self.assertEqual(doc["environment"]["prefill_perf"], disabled)
 
     def test_startup_prefill_budget_rejects_incomplete_unknown_and_nonfinite_values(self):
-        valid = dict(fixed_ms=3000, scale=1, max_batch_tokens=0, max_batch_requests=0)
+        valid = dict(fixed_ms=3000, scale=1, max_batch_tokens=2048, max_batch_requests=4)
         invalid = [{}, dict(valid, unknown=1)]
         for key in valid:
             for value in (True, -1, float("nan"), float("inf"), "1"):

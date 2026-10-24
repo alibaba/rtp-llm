@@ -59,6 +59,7 @@ final class MockLruBlockCache {
     // Updated under the cache monitor on 0 <-> 1 reference transitions.
     private int referencedBlocks;
     private final double reserveRatio;
+    private Integer observedReserveBlocks;
     private final boolean floorReserve;
     /**
      * cache key → reference count. ref == 0: pure LRU block (evictable);
@@ -327,7 +328,7 @@ final class MockLruBlockCache {
      * free — the hash channel carries no key for them, so they cannot become
      * reusable cache entries.
      *
-     * @return true when the indexed key set changed (drives cacheVersion bumps)
+     * @return true when the indexed key set changed
      */
     synchronized boolean admit(BlockLease lease, List<Long> keys) {
         dereference(lease.hitKeys);
@@ -456,6 +457,7 @@ final class MockLruBlockCache {
      * in-place continuation.
      */
     synchronized void clear() {
+        tree.keySet().forEach(key -> keyListener.accept(key, false));
         blocks.clear();
         referencedBlocks = 0;
         tree.clear();
@@ -554,7 +556,13 @@ final class MockLruBlockCache {
     }
 
     /** Reserve watermark in blocks: ceil(reserveRatio x totalBlocks). */
+    synchronized void setObservedReserveBlocks(int count) {
+        if (count < 0 || count > totalBlocks) throw new IllegalArgumentException("reserve blocks outside pool");
+        observedReserveBlocks = count;
+    }
+
     synchronized int reserveBlocks() {
+        if (observedReserveBlocks != null) return observedReserveBlocks;
         return (int) (floorReserve ? Math.floor(totalBlocks * reserveRatio) : Math.ceil(totalBlocks * reserveRatio));
     }
 
@@ -626,6 +634,12 @@ final class MockLruBlockCache {
         evictionListener = listener == null ? event -> {} : listener;
     }
 
+    private java.util.function.BiConsumer<Long, Boolean> keyListener = (key, added) -> {};
+
+    synchronized void setKeyListener(java.util.function.BiConsumer<Long, Boolean> listener) {
+        keyListener = listener;
+    }
+
     /** Build edges only for newly indexed blocks; a suffix write never reparents a hit. */
     private void indexSequence(List<Long> keys) {
         Long parent = null;
@@ -638,6 +652,7 @@ final class MockLruBlockCache {
                 TreeNode node = new TreeNode();
                 node.parent = parent;
                 tree.put(key, node);
+                keyListener.accept(key, true);
                 if (parent != null) {
                     tree.get(parent).children.add(key);
                     refreshLeaf(parent);
@@ -680,6 +695,7 @@ final class MockLruBlockCache {
     private void removeNode(Long key) {
         TreeNode node = tree.remove(key);
         if (node == null) return;
+        keyListener.accept(key, false);
         if (node.leaf != null) leaves.remove(node.leaf);
         if (node.parent != null && tree.containsKey(node.parent)) {
             tree.get(node.parent).children.remove(key);
@@ -693,6 +709,34 @@ final class MockLruBlockCache {
     }
 
     /** Oldest eligible leaf, then its unbranched ancestors; whole-chain rounding. */
+    synchronized int usedBlocks() { return totalBlocks - freeBlocks(); }
+    synchronized List<List<Long>> watermarkCandidates(int count) {
+        List<List<Long>> result = new ArrayList<>();
+        if (count <= 0) return result;
+        if (!prefixTreeEnabled) {
+            for (var entry : blocks.entrySet()) {
+                if (entry.getValue() == 0) { result.add(List.of(entry.getKey())); if (--count <= 0) break; }
+            }
+            return result;
+        }
+        Set<Long> selected = new HashSet<>();
+        for (var leaf : leaves) {
+            List<Long> chain = new ArrayList<>();
+            Long key = leaf.key();
+            while (key != null && chain.size() < count && Integer.valueOf(0).equals(blocks.get(key)) && selected.add(key)) {
+                chain.add(key);
+                var node = tree.get(key);
+                Long parent = node.parent;
+                if (parent == null || tree.get(parent).children.size() != 1) break;
+                key = parent;
+            }
+            java.util.Collections.reverse(chain);
+            if (!chain.isEmpty()) { result.add(chain); count -= chain.size(); }
+            if (count <= 0) break;
+        }
+        return result;
+    }
+
     private int evictChains(int minBlocks, String reason) {
         if (!prefixTreeEnabled) return evictFlatLru(minBlocks, reason);
         int freed = 0;

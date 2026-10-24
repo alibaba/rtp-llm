@@ -18,6 +18,21 @@ class ReviewOwnershipRegressionTest {
         return field.get(object);
     }
 
+    @Test void pendingErrorOverridesBufferedOutputButLateErrorCannotReplaceCommittedSuccess() {
+        var first = EngineRpcService.GenerateOutputsPB.newBuilder().setRequestId(1)
+                .setFlattenOutput(EngineRpcService.FlattenOutputPB.newBuilder().addFinished(false)).build();
+        var failure = EngineRpcService.GenerateOutputsPB.newBuilder().setRequestId(1)
+                .setErrorInfo(EngineRpcService.RpcErrorPB.newBuilder().setErrorCodeValue(8100)).build();
+        var queue = new MockResponseQueue();
+        queue.offer(first); queue.offer(failure);
+        assertEquals(1, queue.size());
+        assertTrue(queue.poll().hasErrorInfo());
+        var success = new MockResponseQueue();
+        success.offer(first.toBuilder().setFlattenOutput(first.getFlattenOutput().toBuilder().setFinished(0, true)).build());
+        assertFalse(success.offer(failure));
+        assertFalse(success.poll().hasErrorInfo());
+    }
+
     @Test void cancelBeforePhaseTwoCannotRecreateReceivedTaskOrPendingCredit() throws Exception {
         var model = performanceModel(directory, "1", 1);
         try (var cluster = MockEngineTestCluster.create(model, 62240, 1, 0)) {

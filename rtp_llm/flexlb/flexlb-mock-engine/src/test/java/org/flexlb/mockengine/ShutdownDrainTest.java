@@ -80,9 +80,9 @@ class ShutdownDrainTest {
         int n = 20;
         enqueueBatch(prefillServices.get(0), 9000, 1, n, decodeServices);
 
-        // Wait until both decode engines have running AND queued requests.
+        // During a long forward, later arrivals wait for its boundary; both populations must be drained.
         for (JavaMockEngineCluster.FastRpcService decode : decodeServices) {
-            await(() -> decode.getActiveDecodeCount() >= 4
+            await(() -> decode.getActiveDecodeCount() >= 1
                             && decode.getDecodePendingQueueDepth() >= 1, 5_000,
                     "decode engine " + decode.getGrpcPort() + " never built a backlog: active="
                             + decode.getActiveDecodeCount()

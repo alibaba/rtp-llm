@@ -24,7 +24,9 @@ def test_launch_preserves_explicit_zero_false_and_empty_values_and_jvm_options()
         whale=False,
         auto_fetch=False,
         events_file="",
-        decode_kv_pool_blocks=0,
+        rpc_threads=0,
+        calibration="calibration.json",
+        engine_config="engine-config.json",
     )
     argv = spec.argv()
     assert argv[:5] == ["java", "-Xmx1g", "-XX:+ExitOnOutOfMemoryError", "-jar", "mock.jar"]
@@ -36,7 +38,9 @@ def test_launch_preserves_explicit_zero_false_and_empty_values_and_jvm_options()
         "--whale": "false",
         "--auto-fetch": "false",
         "--events-file": "",
-        "--decode-kv-pool-blocks": "0",
+        "--rpc-threads": "0",
+        "--calibration": "calibration.json",
+        "--engine-config": "engine-config.json",
     }
     argv.append("unrelated")
     assert "unrelated" not in spec.argv()

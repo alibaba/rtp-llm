@@ -104,7 +104,7 @@ class StatusFaultInjectionTest {
         var released = workerStatus(prefill, held.getLatestFinishedVersion());
         assertEquals(1, released.getFinishedTaskListCount());
         assertEquals(7101, released.getFinishedTaskList(0).getRequestId());
-        assertEquals(1, released.getLatestFinishedVersion());
+        assertEquals(cursor(prefill, 1), released.getLatestFinishedVersion());
         assertEquals(released.getFinishedTaskListList(), workerStatus(prefill, 0).getFinishedTaskListList(),
                 "independent lagging readers retain the same real completion");
         assertEquals(0, workerStatus(prefill, released.getLatestFinishedVersion()).getFinishedTaskListCount());
@@ -176,46 +176,46 @@ class StatusFaultInjectionTest {
         enqueueAndFetch(prefill, batch(1001, slot(0, input(1, 10))));
         EngineRpcService.WorkerStatusPB first = awaitFinished(prefill, 0, 1, 5_000);
         assertEquals(1, first.getFinishedTaskListCount());
-        assertEquals(1, first.getLatestFinishedVersion());
+        assertEquals(cursor(prefill, 1), first.getLatestFinishedVersion());
 
         // A second completion (v2) becomes visible at cursor 1.
         enqueueAndFetch(prefill, batch(1002, slot(0, input(2, 10))));
-        EngineRpcService.WorkerStatusPB second = awaitFinished(prefill, 1, 1, 5_000);
+        EngineRpcService.WorkerStatusPB second = awaitFinished(prefill, cursor(prefill, 1), 1, 5_000);
         assertEquals(1, second.getFinishedTaskListCount());
         assertEquals(2, second.getFinishedTaskList(0).getRequestId());
-        assertEquals(2, second.getLatestFinishedVersion());
+        assertEquals(cursor(prefill, 2), second.getLatestFinishedVersion());
 
         // Suppress: the SAME query now hides the completion, but the cursor
         // (latestFinishedVersion) still reports the REAL value — the master
         // advances past a completion it never received.
         inject(basePort, "status_suppress_finished", null);
-        EngineRpcService.WorkerStatusPB suppressed = workerStatus(prefill, 1);
+        EngineRpcService.WorkerStatusPB suppressed = workerStatus(prefill, cursor(prefill, 1));
         assertEquals(0, suppressed.getFinishedTaskListCount(),
                 "suppress_finished must empty finishedTaskList");
-        assertEquals(2, suppressed.getLatestFinishedVersion(),
+        assertEquals(cursor(prefill, 2), suppressed.getLatestFinishedVersion(),
                 "latestFinishedVersion stays REAL under suppression");
 
         // Master advances to the real cursor. Under the retain-window
         // protocol the read no longer destroys the record — but for THIS
         // master (cursor now at 2) the suppressed completion is permanently
         // lost: no future poll at its advanced cursor ever returns it.
-        workerStatus(prefill, 2);
+        workerStatus(prefill, cursor(prefill, 2));
         clearInject(basePort);
-        EngineRpcService.WorkerStatusPB afterClear = workerStatus(prefill, 2);
+        EngineRpcService.WorkerStatusPB afterClear = workerStatus(prefill, cursor(prefill, 2));
         assertEquals(0, afterClear.getFinishedTaskListCount(),
                 "suppressed completion stays lost for the master whose cursor advanced");
-        assertEquals(2, afterClear.getLatestFinishedVersion());
+        assertEquals(cursor(prefill, 2), afterClear.getLatestFinishedVersion());
 
         // A consumer whose cursor has NOT advanced past the suppressed
         // version (e.g. the standby master in dual-flexlb HA, polling the
         // same engine with an independent cursor) still receives it — the
         // shared backlog survives reads and is bounded only by the retain
         // window trimmed in periodicCleanup.
-        EngineRpcService.WorkerStatusPB laggingConsumer = workerStatus(prefill, 1);
+        EngineRpcService.WorkerStatusPB laggingConsumer = workerStatus(prefill, cursor(prefill, 1));
         assertEquals(1, laggingConsumer.getFinishedTaskListCount(),
                 "an un-advanced cursor still sees the suppressed completion");
         assertEquals(2, laggingConsumer.getFinishedTaskList(0).getRequestId());
-        assertEquals(2, laggingConsumer.getLatestFinishedVersion());
+        assertEquals(cursor(prefill, 2), laggingConsumer.getLatestFinishedVersion());
     }
 
     // ════════════════════════════════════════════════════════════════
@@ -236,8 +236,8 @@ class StatusFaultInjectionTest {
         EngineRpcService.WorkerStatusPB suppressed = workerStatus(prefill, 0);
         assertEquals(0, suppressed.getRunningTaskInfoCount(),
                 "suppress_running must empty runningTaskInfo");
-        assertEquals(1, suppressed.getRunningQueryLen(),
-                "runningQueryLen stays REAL (self-inconsistent report)");
+        assertEquals(0, suppressed.getRunningQueryLen(), "real leaves the legacy field unset");
+        assertEquals(1, prefill.getActivePrefillRequestCount(), "suppression cannot alter actual execution");
 
         // finished is NOT suppressed by the running fault.
         EngineRpcService.WorkerStatusPB done = awaitFinished(prefill, 0, 1, 5_000);
@@ -262,13 +262,14 @@ class StatusFaultInjectionTest {
         EngineRpcService.WorkerStatusPB running = workerStatus(prefill, 0);
         assertEquals(1, running.getRunningTaskInfoCount());
         assertEquals(7008, running.getRunningTaskInfo(0).getRequestId());
-        assertEquals(2, running.getRunningQueryLen(), "runningQueryLen stays REAL");
+        assertEquals(0, running.getRunningQueryLen(), "real leaves the legacy field unset");
+        assertEquals(2, prefill.getActivePrefillRequestCount(), "suppression cannot alter actual execution");
 
         // Finished list: rid 7007 swallowed too (double swallow).
         EngineRpcService.WorkerStatusPB done = awaitFinished(prefill, 0, 1, 5_000);
         assertEquals(1, done.getFinishedTaskListCount());
         assertEquals(7008, done.getFinishedTaskList(0).getRequestId());
-        assertEquals(2, done.getLatestFinishedVersion(),
+        assertEquals(cursor(prefill, 2), done.getLatestFinishedVersion(),
                 "latestFinishedVersion counts BOTH completions (7007 is only hidden)");
     }
 
@@ -367,13 +368,13 @@ class StatusFaultInjectionTest {
                 "fakes never touch the real cursor");
 
         // Continuous reporting: EVERY poll re-reports it, whatever the cursor.
-        EngineRpcService.WorkerStatusPB again = workerStatus(prefill, 999);
+        EngineRpcService.WorkerStatusPB again = workerStatus(prefill, cursor(prefill, 999));
         assertEquals(1, again.getFinishedTaskListCount(),
                 "finished-form fake is re-reported on every poll");
 
         // A finished form without errorCode carries no error_info.
         inject(basePort, "status_fake_task", "\"rid\":8802,\"phase\":\"finished\"");
-        EngineRpcService.WorkerStatusPB both = workerStatus(prefill, 999);
+        EngineRpcService.WorkerStatusPB both = workerStatus(prefill, cursor(prefill, 999));
         assertEquals(2, both.getFinishedTaskListCount());
         assertFalse(both.getFinishedTaskList(1).hasErrorInfo());
         assertEquals(8802, both.getFinishedTaskList(1).getRequestId());
@@ -397,11 +398,11 @@ class StatusFaultInjectionTest {
                 "duplicate_finished must enqueue the completion twice");
         assertEquals(31, done.getFinishedTaskList(0).getRequestId());
         assertEquals(31, done.getFinishedTaskList(1).getRequestId());
-        assertEquals(1, done.getLatestFinishedVersion(),
+        assertEquals(cursor(prefill, 1), done.getLatestFinishedVersion(),
                 "both copies share ONE version");
 
         // Advancing the cursor past that version consumes BOTH copies.
-        EngineRpcService.WorkerStatusPB next = workerStatus(prefill, 1);
+        EngineRpcService.WorkerStatusPB next = workerStatus(prefill, cursor(prefill, 1));
         assertEquals(0, next.getFinishedTaskListCount());
     }
 
@@ -417,11 +418,11 @@ class StatusFaultInjectionTest {
 
         enqueueAndFetch(prefill, batch(4001, slot(0, input(41, 10))));
         EngineRpcService.WorkerStatusPB done = awaitFinished(prefill, 0, 1, 5_000);
-        assertEquals(1, done.getLatestFinishedVersion());
+        assertEquals(cursor(prefill, 1), done.getLatestFinishedVersion());
 
         inject(basePort, "status_cursor_regress", "\"n\":1");
-        EngineRpcService.WorkerStatusPB rewound = workerStatus(prefill, 1);
-        assertEquals(0, rewound.getLatestFinishedVersion(),
+        EngineRpcService.WorkerStatusPB rewound = workerStatus(prefill, cursor(prefill, 1));
+        assertEquals(done.getLatestFinishedVersion() - 1, rewound.getLatestFinishedVersion(),
                 "cursor_regress must rewind latestFinishedVersion");
         assertEquals(0, rewound.getFinishedTaskListCount(),
                 "the replayed interval is empty (already consumed)");
@@ -550,7 +551,7 @@ class StatusFaultInjectionTest {
         assertEquals(2, ack2.getErrorsCount());
         assertEquals(77L, ack2.getErrors(0).getErrorInfo().getErrorCode());
         assertEquals(77L, ack2.getErrors(1).getErrorInfo().getErrorCode());
-        EngineRpcService.WorkerStatusPB done2 = awaitFinished(prefill, 1, 1, 5_000);
+        EngineRpcService.WorkerStatusPB done2 = awaitFinished(prefill, cursor(prefill, 1), 1, 5_000);
         assertEquals(1, done2.getFinishedTaskListCount(),
                 "only the admitted member completes under the injected code");
     }
@@ -611,7 +612,7 @@ class StatusFaultInjectionTest {
         // — same batch_id throughout (stream group_id → TaskInfo).
         EngineRpcService.WorkerStatusPB done = awaitFinished(prefill, 0, 3, 5_000);
         assertEquals(3, done.getFinishedTaskListCount());
-        assertEquals(3, done.getLatestFinishedVersion());
+        assertEquals(cursor(prefill, 3), done.getLatestFinishedVersion());
         EngineRpcService.TaskInfoPB failed = findByRid(done, 101);
         assertNotNull(failed, "the batch's first member must be reported finished");
         assertTrue(failed.hasErrorInfo(), "the injected member carries error_info");
@@ -633,7 +634,7 @@ class StatusFaultInjectionTest {
         EngineRpcService.EnqueueBatchResponsePB ack2 =
                 enqueueAndFetch(prefill, batch(7102, slot(0, input(104, 10), input(105, 10), input(106, 10))));
         assertEquals(3, ack2.getSuccessesCount());
-        EngineRpcService.WorkerStatusPB done2 = awaitFinished(prefill, 3, 3, 5_000);
+        EngineRpcService.WorkerStatusPB done2 = awaitFinished(prefill, cursor(prefill, 3), 3, 5_000);
         assertTrue(findByRid(done2, 104).hasErrorInfo());
         assertEquals(8431L, findByRid(done2, 104).getErrorInfo().getErrorCode());
         assertTrue(findByRid(done2, 105).hasErrorInfo());
@@ -713,14 +714,14 @@ class StatusFaultInjectionTest {
         // Explicit k=0 is equally inert.
         inject(basePort, "prefill_async_partial_fail", "\"k\":0");
         enqueueAndFetch(prefill, batch(7302, slot(0, input(303, 10))));
-        EngineRpcService.WorkerStatusPB k0Done = awaitFinished(prefill, 2, 1, 5_000);
+        EngineRpcService.WorkerStatusPB k0Done = awaitFinished(prefill, cursor(prefill, 2), 1, 5_000);
         assertFalse(findByRid(k0Done, 303).hasErrorInfo(), "k=0 must inject nothing");
         assertEquals(3, prefill.getCompletedCount());
 
         // Armed (k=1, custom code) → exactly one typed failure.
         inject(basePort, "prefill_async_partial_fail", "\"k\":1,\"code\":9001");
         enqueueAndFetch(prefill, batch(7303, slot(0, input(304, 10), input(305, 10))));
-        EngineRpcService.WorkerStatusPB armedDone = awaitFinished(prefill, 3, 2, 5_000);
+        EngineRpcService.WorkerStatusPB armedDone = awaitFinished(prefill, cursor(prefill, 3), 2, 5_000);
         assertTrue(findByRid(armedDone, 304).hasErrorInfo());
         assertEquals(9001L, findByRid(armedDone, 304).getErrorInfo().getErrorCode());
         assertFalse(findByRid(armedDone, 305).hasErrorInfo());
@@ -728,7 +729,7 @@ class StatusFaultInjectionTest {
         // Disarmed (enabled=false) → the next batch is fully clean.
         disable(basePort, "prefill_async_partial_fail");
         enqueueAndFetch(prefill, batch(7304, slot(0, input(306, 10), input(307, 10))));
-        EngineRpcService.WorkerStatusPB disarmedDone = awaitFinished(prefill, 5, 2, 5_000);
+        EngineRpcService.WorkerStatusPB disarmedDone = awaitFinished(prefill, cursor(prefill, 5), 2, 5_000);
         assertFalse(findByRid(disarmedDone, 306).hasErrorInfo(),
                 "disabled injection must not fail members");
         assertFalse(findByRid(disarmedDone, 307).hasErrorInfo());
@@ -757,26 +758,11 @@ class StatusFaultInjectionTest {
         failedStream.await(10_000);
         survivorStream.await(10_000);
 
-        // Failed member: exactly ONE frame — the in-band typed error terminal
-        // (production stream->reportError's client-visible half). The code
-        // rides the RAW enum value (8500 sits outside ErrorCodePB; proto3 open
-        // enums keep it on the wire) and the message text carries the numeric
-        // too; the stream COMPLETES right after the frame (the pump treats
-        // hasErrorInfo frames as terminal), it does not error.
-        assertNull(failedStream.error.get(),
-                "the error frame must complete the stream, not error it");
-        assertEquals(1, failedStream.frames.size(),
-                "the failed member delivers exactly the error frame");
-        EngineRpcService.GenerateOutputsPB frame = failedStream.frames.get(0);
-        assertEquals(401L, frame.getRequestId());
-        assertTrue(frame.hasErrorInfo(), "the terminal frame carries error_info");
-        assertEquals(8500, frame.getErrorInfo().getErrorCodeValue(),
-                "the injected code rides the raw enum value");
-        assertTrue(frame.getErrorInfo().getErrorMessage().contains("8500"),
-                "the message text carries the numeric code as well");
-        assertTrue(frame.getErrorInfo().getErrorMessage()
-                        .contains("injected prefill_async_partial_fail"),
-                "the message identifies the injection");
+        assertNotNull(failedStream.error.get());
+        assertTrue(failedStream.frames.isEmpty(), "failed members cannot emit successful response frames");
+        var details = MockRpcErrors.downstream(failedStream.error.get());
+        assertEquals(8500, details.getErrorCode());
+        assertTrue(details.getErrorMessage().contains("injected prefill_async_partial_fail"));
 
         // Survivor of the SAME batch: the normal single terminal frame
         // (prefill-only cluster), no error_info — members settle
@@ -826,6 +812,20 @@ class StatusFaultInjectionTest {
     //  Cluster scaffolding (direct service calls, MockControlServer on :0)
     // ════════════════════════════════════════════════════════════════
 
+    private final Map<JavaMockEngineCluster.FastRpcService, Long> versionSeeds = new java.util.IdentityHashMap<>();
+
+    private long cursor(JavaMockEngineCluster.FastRpcService service, long completionNumber) {
+        return completionNumber == 0 ? 0 : versionSeeds.get(service) + completionNumber - 1;
+    }
+
+    private void captureVersionSeed(JavaMockEngineCluster.FastRpcService service) {
+        try {
+            var field = service.getClass().getDeclaredField("completionVersion");
+            field.setAccessible(true);
+            versionSeeds.put(service, ((java.util.concurrent.atomic.AtomicLong) field.get(service)).get());
+        } catch (ReflectiveOperationException error) { throw new AssertionError(error); }
+    }
+
     private int startCluster(MockPerformanceModel model, int nPrefill, int nDecode)
             throws IOException {
         int basePort = PORT_ALLOCATOR.getAndAdd(nPrefill + nDecode + 10);
@@ -844,6 +844,7 @@ class StatusFaultInjectionTest {
                     "prefill", EngineRpcService.RoleTypePB.ROLE_TYPE_PREFILL,
                     port, services, scheduler, model, 100,
                     new JavaMockEngineCluster.ClusterStats());
+            captureVersionSeed(service);
             services.put(port, service);
             prefillServices.add(service);
         }
@@ -853,6 +854,7 @@ class StatusFaultInjectionTest {
                     "decode", EngineRpcService.RoleTypePB.ROLE_TYPE_DECODE,
                     port, services, scheduler, model, 100,
                     new JavaMockEngineCluster.ClusterStats());
+            captureVersionSeed(service);
             services.put(port, service);
             decodeServices.add(service);
         }

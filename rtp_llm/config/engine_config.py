@@ -244,6 +244,7 @@ class EngineConfig:
             load_config=load_config,
         )
 
+        engine_config.config_provenance = getattr(py_env_configs, "config_provenance", {})
         runtime_config.max_generate_batch_size = concurrency_config.concurrency_limit
 
         # Setup PD separation config

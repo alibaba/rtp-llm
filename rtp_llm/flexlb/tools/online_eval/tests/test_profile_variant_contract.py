@@ -274,7 +274,6 @@ def test_environment_vocabulary_is_shared_with_an_explicit_backend_boundary(monk
         ("master_debug_log", "true", "env.master_debug_log: expected boolean"),
         ("master_sync_log", None, "env.master_sync_log: expected boolean"),
         ("mock_fetch_attach_timeout_ms", 0, "env.mock_fetch_attach_timeout_ms: expected integer >= 1"),
-        ("prefill_max_waiting_batches", -1, "env.prefill_max_waiting_batches: expected integer >= 0"),
     ],
 )
 def test_optional_scalar_rejections_keep_their_exact_messages(field, invalid, error):
@@ -288,7 +287,9 @@ def test_optional_scalar_declarations_preserve_presence_and_extend_in_one_row():
     assert result["debug_enabled"] is False and result["master_sync_log"] is False
     for field in ("mock_auto_fetch", "master_debug_log", "mock_fetch_attach_timeout_ms", "prefill_max_waiting_batches"):
         assert field not in result
-    assert environment({"prefill_max_waiting_batches": 0}, "env", "batch-window")["prefill_max_waiting_batches"] == 0
+    assert environment({"mock_auto_fetch": False}, "env", "batch-window")["mock_auto_fetch"] is False
+    with pytest.raises(ScenarioError, match="unknown fields"):
+        environment({"prefill_max_waiting_batches": 0}, "env", "batch-window")
     extra = {**OPTIONAL_SCALARS, "new_boolean": (bool, False, None), "new_positive_integer": (int, object(), 1)}
     normalized = {}
     optional_scalars({"new_boolean": True, "new_positive_integer": 3}, "env", normalized, declarations=extra)

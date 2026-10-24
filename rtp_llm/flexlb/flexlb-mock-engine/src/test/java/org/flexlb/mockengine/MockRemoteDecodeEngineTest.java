@@ -40,7 +40,7 @@ class MockRemoteDecodeEngineTest {
         MockMasterConfig.writeWithPrefillExpression(master, "10");
         decode = new JavaMockEngineCluster.FastRpcService("decode",
                 EngineRpcService.RoleTypePB.ROLE_TYPE_DECODE, 0, new ConcurrentHashMap<>(), scheduler,
-                MockPerformanceModel.load(perf.toString(), master.toString()), 8,
+                MockModelFixture.load(perf.toString(), master.toString()), 8,
                 new JavaMockEngineCluster.ClusterStats());
         decode.setWhaleRemote(true);
         server = ServerBuilder.forPort(0).addService(decode).build().start();
@@ -124,6 +124,23 @@ class MockRemoteDecodeEngineTest {
         }
     }
 
+    @Test void loadDeadlineClosesReservationAndLateCompletionCannotGenerate() throws Exception {
+        start();
+        var field = decode.getClass().getDeclaredField("performance"); field.setAccessible(true);
+        ((MockPerformanceModel)field.get(decode)).pdPolicy = new MockPdPolicy(0, 20, 1000, 1, 25, 1000, 128, 2000);
+        var transfer = new CompletableFuture<Void>();
+        decode.setRemoteLoadBackend(id -> transfer);
+        try (var stream = stream(42, new CompletableFuture<>())) {
+            stream.allocated().get(3, TimeUnit.SECONDS);
+            var error = assertThrows(java.util.concurrent.ExecutionException.class, () -> stream.load().get(3, TimeUnit.SECONDS));
+            assertEquals(8300, MockRpcErrors.downstream(error.getCause()).getErrorCode());
+            awaitDrain();
+            assertTrue(transfer.isCancelled());
+            assertFalse(transfer.complete(null));
+            assertEquals(0, decode.getOccupiedKvTokens());
+        }
+    }
+
     @Test
     void duplicateStreamCannotReleaseTheOriginalReservation() throws Exception {
         start();
@@ -172,7 +189,7 @@ class MockRemoteDecodeEngineTest {
                 frame -> fail("failed allocation cannot produce output"), error -> {}, () -> {})) {
             var failure = assertThrows(java.util.concurrent.ExecutionException.class,
                     () -> call.allocated().get(3, TimeUnit.SECONDS));
-            assertEquals(602, MockRpcErrors.downstream(failure).getErrorCode());
+            assertEquals(607, MockRpcErrors.downstream(failure).getErrorCode());
             assertTrue(decode.requests.deadlineIds().isEmpty(), "failed admission must release its timer owner");
             awaitDrain();
         }

@@ -8,7 +8,7 @@ import unittest
 from pathlib import Path
 from types import SimpleNamespace
 
-from adapters.environment import _write_master_config
+from adapters.environment import EnvManager
 from adapters.perf_presets import ROOT, load_performance_file, load_preset
 from flexlb_cfg import render_env
 from flexlb_profile_data import load_mock_calibration
@@ -61,7 +61,9 @@ class MockCalibrationTest(unittest.TestCase):
         config = json.loads(render_env("single-nonbatch"))
         expression = config["router"]["roles"]["prefill"]["executionTimeEstimator"]["expression"]
         self.assertEqual(expression, calibration["prefill_expression"])
-        self.assertEqual(load_preset("default")[0]["block_size"], calibration["block_size"])
+        self.assertEqual(
+            load_preset("default")[0]["engine_config"]["roles"]["prefill"]["kv_cache"]["seq_size_per_block"], calibration["block_size"]
+        )
 
     def test_run_files_expose_effective_default_calibration(self):
         calibration = load_mock_calibration()
@@ -71,14 +73,13 @@ class MockCalibrationTest(unittest.TestCase):
             spec = make_env_spec(plan, "single-nonbatch", {"master_base": 28000})
             run_dir = Path(directory)
             perf_path = run_dir / "perf.json"
-            perf_path.write_text(json.dumps(spec.perf))
-            master_path = _write_master_config(SimpleNamespace(run_dir=run_dir, spec=spec))
+            engine_path = EnvManager._write_mock_configuration(None, SimpleNamespace(run_dir=run_dir), spec, perf_path)
             observed_perf = json.loads(perf_path.read_text())
-            envelope = json.loads(master_path.read_text())
-            envs = dict(envelope["zone_process_setting"]["process_info"]["envs"])
-            master = json.loads(envs["FLEXLB_CONFIG"])
-            estimator = master["router"]["roles"]["prefill"]["executionTimeEstimator"]
-            self.assertEqual(estimator["expression"], calibration["prefill_expression"])
+            engine = json.loads(engine_path.read_text())
+            self.assertNotIn("engine_config", observed_perf)
+            self.assertEqual(engine["roles"]["prefill"]["capacity"]["device_blocks"], spec.prefill_cache_blocks)
+            self.assertEqual(engine["roles"]["decode"]["capacity"]["device_blocks"], spec.decode_cache_blocks)
+            self.assertEqual(observed_perf, {key: value for key, value in spec.perf.items() if key != "engine_config"})
             self.assertEqual(observed_perf["calibration_id"], calibration["id"])
             self.assertEqual(observed_perf["calibration_sha256"], expected_sha)
             for key, value in calibration["decode"].items():

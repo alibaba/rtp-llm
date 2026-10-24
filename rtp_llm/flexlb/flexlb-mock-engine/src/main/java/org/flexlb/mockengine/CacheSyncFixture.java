@@ -12,7 +12,9 @@ final class CacheSyncFixture {
     private long churnStart, appliedEpoch, intervalNanos;
     private int delta;
     private CacheFixtureWire.Keys wireKeys;
-    private EngineRpcService.CacheStatusPB compatibilityPayload;
+    private long fullResponses, unchangedResponses;
+    record Snapshot(long version, CacheFixtureWire.Keys keys) {}
+    synchronized Snapshot capture() { advance(); return new Snapshot(version, wireKeys); }
 
     CacheSyncFixture(int worker, int workers, int unique, int shared, long initialVersion) {
         this(worker, workers, unique, shared, initialVersion, System::nanoTime);
@@ -29,7 +31,6 @@ final class CacheSyncFixture {
 
     private void rebuild() {
         wireKeys = CacheFixtureWire.Keys.create(worker, workers, unique, shared, offset, version);
-        compatibilityPayload = null;
     }
 
     /** Changes only private keys; polling frequency never controls mutation rate. */
@@ -58,17 +59,23 @@ final class CacheSyncFixture {
     synchronized EngineRpcService.CacheStatusPB response() { return response(-1L); }
 
     synchronized EngineRpcService.CacheStatusPB response(long latestVersion) {
-        var frame = wireResponse(latestVersion);
-        if (compatibilityPayload == null) compatibilityPayload = frame.toProto();
-        return compatibilityPayload;
+        return wireResponse(latestVersion).toProto();
     }
 
     synchronized CacheFixtureWire.Frame wireResponse(long latestVersion) {
-        advance(); calls++;
-        var header = EngineRpcService.CacheStatusPB.newBuilder().setVersion(version).build();
-        entries += wireKeys.count(); bytes += header.getSerializedSize() + wireKeys.encodedSize();
-        // Real engines send full snapshots even when the requested version matches.
-        return new CacheFixtureWire.Frame(header, wireKeys);
+        var snapshot = capture();
+        boolean full = latestVersion != snapshot.version();
+        recordResponse(full, snapshot.keys());
+        var header = EngineRpcService.CacheStatusPB.newBuilder().setVersion(snapshot.version()).build();
+        return new CacheFixtureWire.Frame(header, full ? snapshot.keys() : null);
+    }
+
+    synchronized void recordResponse(boolean full, CacheFixtureWire.Keys keys) {
+        calls++;
+        if (full) {
+            fullResponses++;
+            entries += keys.count(); bytes += keys.encodedSize();
+        } else unchangedResponses++;
     }
 
     synchronized CacheFixtureWire.Keys keys() { return wireKeys; }
@@ -83,8 +90,8 @@ final class CacheSyncFixture {
         result.put("replacement_keys_per_second", delta == 0 ? 0.0 : delta * 1e9 / intervalNanos);
         result.put("responses", calls); result.put("entries", entries); result.put("key_payload_bytes", bytes);
         result.put("changed_versions", changedVersions); result.put("added_keys", changedKeys);
-        result.put("removed_keys", changedKeys); result.put("full_responses", calls);
-        result.put("unchanged_responses", 0L);
+        result.put("removed_keys", changedKeys); result.put("full_responses", fullResponses);
+        result.put("unchanged_responses", unchangedResponses);
         result.put("sum", Long.toUnsignedString(wireKeys.sum())); result.put("xor", Long.toUnsignedString(wireKeys.xor()));
         return result;
     }

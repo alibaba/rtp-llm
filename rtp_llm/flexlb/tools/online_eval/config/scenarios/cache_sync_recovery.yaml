@@ -79,8 +79,9 @@ parameters:
     post_s: 120
     unique_keys: 176000
     shared_keys: 65000
-    delta_keys: 117
-    churn_interval_ms: 6000
+    # 同版本省略 keys；提高快照变更频率，同时保持约 2360 keys/s 的输入强度。
+    delta_keys: 59
+    churn_interval_ms: 3000
     expired_workers: 12
   observation:
     sample_s: 2
@@ -91,7 +92,7 @@ parameters:
     converged_samples: 5
   checks:
     max_status_age_ms: 10000
-    min_cache_responses_per_s: 35
+    min_cache_full_responses_per_s: 35
     min_added_keys_per_s: 2000
     max_added_keys_per_s: 2700
 variants:

@@ -15,7 +15,6 @@ final class WhaleMockMonitor implements AutoCloseable {
     private boolean closed;
     private static final class EngineSample {
         final Map<String, Long> previous = new HashMap<>();
-        boolean schedulerReported;
         final PrefillTpsMetrics.Reader prefillTps = new PrefillTpsMetrics.Reader();
         final CounterRateMetrics.Reader decodeTps = new CounterRateMetrics.Reader();
         final CacheHitMetrics.Reader cacheHits = new CacheHitMetrics.Reader();
@@ -100,8 +99,17 @@ final class WhaleMockMonitor implements AutoCloseable {
     }
 
     synchronized void reportWorkerStatus(Map<String, String> labels, long latencyUs) {
+        reportRpcStatus(labels, "worker_status", latencyUs);
+    }
+
+    synchronized void reportCacheStatus(Map<String, String> labels, long latencyUs) {
+        reportRpcStatus(labels, "cache_status", latencyUs);
+    }
+
+    private void reportRpcStatus(Map<String, String> labels, String rpc, long latencyUs) {
+        if (closed) return;
         FlexMetricTags tags = new FlexMetricTags.ImmutableFlexMetricTags(labels);
-        String qps = "rtp_llm_rpc_worker_status_qps", latency = "rtp_llm_rpc_worker_status_total_rt_us";
+        String qps = "rtp_llm_rpc_" + rpc + "_qps", latency = "rtp_llm_rpc_" + rpc + "_total_rt_us";
         if (registered.add(qps)) monitor.register(qps, FlexMetricType.QPS);
         if (registered.add(latency)) monitor.register(latency, FlexMetricType.GAUGE);
         monitor.report(qps, tags, 1.0);
@@ -114,7 +122,8 @@ final class WhaleMockMonitor implements AutoCloseable {
         metrics.forEach((name, value) -> {
             if (!belongsToRole(name, labels)) return;
             if (!registered.contains(name)) {
-                monitor.register(name, FlexMetricType.GAUGE);
+                monitor.register(name, MockMetricContract.require(name).type() == MockMetricContract.Type.COUNTER
+                        ? FlexMetricType.COUNTER : FlexMetricType.GAUGE);
                 registered.add(name);
             }
             monitor.report(name, tags, value.doubleValue());
@@ -137,7 +146,6 @@ final class WhaleMockMonitor implements AutoCloseable {
             }
             monitor.report(entry.getKey(), tags, entry.getValue().doubleValue());
         }
-        state(labels).schedulerReported = true;
     }
 
     synchronized void sample(Map<String, Number> metrics, Map<String, String> labels, long now) {
@@ -146,8 +154,6 @@ final class WhaleMockMonitor implements AutoCloseable {
         sample.sampledAt = now;
         if (closed) return;
         FlexMetricTags tags = new FlexMetricTags.ImmutableFlexMetricTags(labels);
-        boolean hadSchedulerSteps = sample.schedulerReported;
-        sample.schedulerReported = false;
         Map<String, Long> deltas = new HashMap<>();
         metrics.forEach((name, value) -> {
             if (MockMetricContract.require(name).type() == MockMetricContract.Type.COUNTER) {
@@ -169,17 +175,9 @@ final class WhaleMockMonitor implements AutoCloseable {
         }
         metrics.forEach((name, value) -> {
             if (!belongsToRole(name, labels)) return;
-            // Preserve execution-round samples. A periodic zero between two
-            // short P batches must not dilute them. With no rounds this period,
-            // retain the instantaneous gauge so idle engines return to zero.
-            if (name.equals("rtp_llm_context_batch_size")) return;
-            if (name.equals("rtp_llm_generate_batch_size") && value.doubleValue() == 0) return;
-            // P running size is sampled at execution transitions. FIFO blocks
-            // while idle; periodic zeros would bias low-traffic averages.
-            // Completion already emits the terminal zero, so preserve that event.
-            if (name.equals("rtp_llm_running_stream_size")
-                    && "ROLE_TYPE_PREFILL".equals(labels.get("role"))) return;
-            if (hadSchedulerSteps && schedulerMetric(name)) return;
+            // Real scheduler observations are produced by schedule(), never
+            // by a wall-clock scrape. The final empty round reports idle zero.
+            if (MockMetricContract.require(name).sampling() != MockMetricContract.Sampling.SNAPSHOT) return;
             if (!registered.contains(name)) {
                 monitor.register(name, FlexMetricType.GAUGE);
                 registered.add(name);

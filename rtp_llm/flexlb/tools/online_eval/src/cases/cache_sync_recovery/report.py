@@ -236,6 +236,8 @@ def write_report(directory, raw, result, *, run=None, presentation=None):
                 [
                     "阶段",
                     "Mock缓存响应/s",
+                    "全量快照/s",
+                    "未变化响应/s",
                     "Master P同步成功/s",
                     "状态应用成功/s",
                     "条目/s",
@@ -249,6 +251,8 @@ def write_report(directory, raw, result, *, run=None, presentation=None):
                     [
                         phase,
                         round(v["actual_rpc"]["responses"], 3),
+                        round(v["actual_rpc"]["full_responses"], 3),
+                        round(v["actual_rpc"]["unchanged_responses"], 3),
                         v["cache_success_s"],
                         v["worker_status_success_s"],
                         round(v["actual_rpc"]["entries"]),

@@ -16,8 +16,10 @@ final class MockRpcErrors {
     }
     static Status status(EngineRpcService.ErrorDetailsPB error) {
         return switch ((int) error.getErrorCode()) {
+            case 511 -> Status.OUT_OF_RANGE;
+            case 605 -> Status.INVALID_ARGUMENT;
             case 602, 8106, 8211, 8429 -> Status.RESOURCE_EXHAUSTED;
-            case 603, 8203, 8204, 8213, 8214 -> Status.DEADLINE_EXCEEDED;
+            case 603, 8203, 8204, 8213, 8214, 8300 -> Status.DEADLINE_EXCEEDED;
             case 8100 -> Status.CANCELLED;
             case 8207 -> Status.UNAVAILABLE;
             default -> Status.INTERNAL;

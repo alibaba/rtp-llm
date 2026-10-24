@@ -3,13 +3,12 @@
 import ipaddress
 import json
 import os
-from pathlib import Path
 import shlex
 import socket
 import sys
+from pathlib import Path
 
 from deployment import resolve
-
 
 ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(ROOT.parent / "online_eval" / "src"))
@@ -67,27 +66,19 @@ def command(env):
     address = ipaddress.ip_address(host)
     if address.is_loopback or address.is_unspecified or address.version != 4:
         raise ValueError("POD_IP must be a routable IPv4 pod address")
-    block_size = integer(env, "MOCK_BLOCK_SIZE", 1024)
-    numeric = dict(n_prefill=prefill, n_decode=decode, base_grpc_port=port, block_size=block_size)
-    for role in ("PREFILL", "DECODE"):
-        key = f"MOCK_{role}_BLOCK_SIZE"
-        if key in env:
-            numeric[f"{role.lower()}_block_size"] = integer(env, key, block_size)
+    numeric = dict(n_prefill=prefill, n_decode=decode, base_grpc_port=port)
     for flag, key, default in (
-        ("--prefill-kv-pool-blocks", "MOCK_PREFILL_KV_POOL_BLOCKS", 1024),
-        ("--decode-kv-pool-blocks", "MOCK_DECODE_KV_POOL_BLOCKS", 1024),
-        ("--decode-max-concurrency", "MOCK_DECODE_MAX_CONCURRENCY", 128),
         ("--event-loop-threads", "MOCK_EVENT_LOOP_THREADS", 4),
         ("--completion-threads", "MOCK_COMPLETION_THREADS", 4),
     ):
         numeric[flag.removeprefix("--").replace("-", "_")] = integer(env, key, default)
-    performance = json_object(
-        env.get("MOCK_PERFORMANCE_CONFIG_JSON", (ROOT / "performance.json").read_text()),
-        "MOCK_PERFORMANCE_CONFIG_JSON",
-    )
-    if "block_size" in performance and performance["block_size"] != block_size:
-        raise ValueError("Performance block_size must match MOCK_BLOCK_SIZE")
-    performance["block_size"] = block_size
+    if "MOCK_ENGINE_CONFIG_JSON" not in env:
+        raise ValueError("MOCK_ENGINE_CONFIG_JSON is required; import the real effective configuration and capacity")
+    engine = json_object(env["MOCK_ENGINE_CONFIG_JSON"], "MOCK_ENGINE_CONFIG_JSON")
+    from runtime_configs import calibration_input, reject_removed_environment
+
+    performance = calibration_input(env)
+    reject_removed_environment(env)
     master = json_object(env.get("FLEXLB_CONFIG", "{}"), "FLEXLB_CONFIG")
     fetch = boolean(env, "FETCH_OUTPUT_STREAM", "1")
     kmonitor = boolean(env, "MOCK_KMONITOR_ENABLED", "true")
@@ -96,22 +87,36 @@ def command(env):
     java = str(Path(env.get("JAVA_HOME", "/opt/taobao/java")) / "bin/java")
     jar = Path(env.get("MOCK_BUNDLE_JAR_DIR", str(ROOT / "jars"))) / "mock.jar"
     args = MockLaunchSpec(
-        java=java, jar=jar, jvm_options=tuple(shlex.split(env.get("MOCK_JAVA_OPTS", "-Xms512m -Xmx2g"))),
-        whale=True, whale_bundle=not remote_decode, kmonitor=kmonitor, host=host,
-        unique_engine_ips=False, auto_fetch=not fetch, cache_status_compact_encoding=compact,
+        java=java,
+        jar=jar,
+        jvm_options=tuple(shlex.split(env.get("MOCK_JAVA_OPTS", "-Xms512m -Xmx2g"))),
+        whale=True,
+        whale_bundle=not remote_decode,
+        kmonitor=kmonitor,
+        host=host,
+        unique_engine_ips=False,
+        auto_fetch=not fetch,
+        cache_status_compact_encoding=compact,
         endpoint_file=runtime / "endpoints.json",
         discovery_file=None if remote_decode else runtime / "discovery.json",
-        performance=runtime / "performance.json", master_config=runtime / "master-config.json",
+        calibration=runtime / "calibration.json",
+        engine_config=runtime / "engine-config.json",
         **numeric,
     ).argv()
     runtime.mkdir(parents=True, exist_ok=True)
-    (runtime / "performance.json").write_text(json.dumps(performance))
+    (runtime / "calibration.json").write_text(json.dumps(performance))
+    (runtime / "engine-config.json").write_text(json.dumps(engine))
     (runtime / "master-config.json").write_text(json.dumps(master))
-    plan.record(runtime, prefill=prefill, decode=decode, host=host, grpc_base_port=port,
-                vip_grpc_endpoints=[
-                    {"role": "prefill" if i < prefill else "decode", "ip": host, "port": port + i}
-                    for i in range(prefill + decode)
-                ])
+    plan.record(
+        runtime,
+        prefill=prefill,
+        decode=decode,
+        host=host,
+        grpc_base_port=port,
+        vip_grpc_endpoints=[
+            {"role": "prefill" if i < prefill else "decode", "ip": host, "port": port + i} for i in range(prefill + decode)
+        ],
+    )
     return args
 
 

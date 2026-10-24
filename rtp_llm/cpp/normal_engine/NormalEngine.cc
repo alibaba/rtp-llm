@@ -239,6 +239,9 @@ NormalEngine::NormalEngine(const EngineInitParams&                       params,
 #endif
     initCacheManager(warm_up_result);
     RTP_LLM_LOG_INFO("create cache manager done");
+    if (const char* output = std::getenv("RTP_LLM_KV_CAPACITY_OUTPUT"); output && *output) {
+        resource_context_.cache_manager->exportCapacity(output, reserve_step_);
+    }
 
     initExecutor(params, propose_params_);
 

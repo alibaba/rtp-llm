@@ -5,7 +5,7 @@
 
 `PrefillRpcServer::prepareAllocateResource()` 在本地 `enqueueRequest()` 之前调用 `remoteAllocateResource()`。P 通过 `RemoteGenerate(stage=ALLOCATE)` 通知选中的 D，并等待分配结果。D 此时已经持有 KV，可以上报已分配状态，但还没有进入 Decode 计算。
 
-D 的 KV 临时不足会等待容量变化，受请求绝对超时和取消约束，不使用阶段重试窗口作为容量等待上限；永久容量不足立即失败。P 的准备阶段失败后不能继续把请求作为正常 Prefill 接受。有效的下游 `ErrorDetailsPB` 保留领域错误码，内存分配失败为 `602`、请求超时为 `603`；只有缺少有效 details 的裸 `RESOURCE_EXHAUSTED` 才兜底为 `8211`。**Decode 计算槽满与 KV 不够是两个条件**：KV 能分配时，可以先预留资源，再等待计算槽。
+P 的 batch slot 在有界准备池中并行执行连接准备与 ALLOCATE 重试；只有准备阶段重试，不重放 forward 或输出。连接 readiness 受 request/retry/max RPC 最小预算约束，已开始的 ALLOCATE 不受 retry deadline 截断。D 的 KV 临时不足会等待容量变化，受请求绝对超时和取消约束，不使用阶段重试窗口作为容量等待上限；永久容量不足立即失败。P 的准备阶段失败后不能继续把请求作为正常 Prefill 接受。有效的下游 `ErrorDetailsPB` 保留领域错误码，内存分配失败为 `602`、请求超时为 `603`；只有缺少有效 details 的裸 `RESOURCE_EXHAUSTED` 才兜底为 `8211`。**Decode 计算槽满与 KV 不够是两个条件**：KV 能分配时，可以先预留资源，再等待计算槽。
 
 BATCH 模式的 `EnqueueBatch` 只完成准备和本地入队。`FetchResponse` 从 deferred context map 中取出上下文，调用 `finishStream()`，推进远端加载 KV 和 Decode 生成。Fetch 可以在 P 算完之前到达；这时它等待 P 的计算结果。它也可以稍后到达。
 
@@ -56,7 +56,7 @@ P 的计算完成事件继续按原来的时间发布。`retainComputed()` 将�
 
 Mock 用一次状态转换模拟 KV 传输，不模拟网络搬运耗时、分块传输和真实 GPU；状态观察可以验证协议顺序，不能拿它测真实 KV 网络带宽。`prefill_contexts` 统计尚未接续的 deferred context；D 开始后，取消传播由 P/D ownership 关系继续维护，不能把这个计数当作 C++ 的全部 RPC onflight。
 
-请求期限有一个未模拟到逐点一致的边界：若准备阶段已耗尽请求期限，真实引擎在发布 ACK 时同步拒绝；当前 Mock 将剩余期限下限设为 1 ms，再异步清理。Fetch 附着期限和请求剩余期限需要分别验证。
+发布 Fetch 附着入口前检查请求剩余期限；准备阶段已耗尽期限时返回 603，不再把期限延至至少 1 ms。Fetch 附着期限、请求总期限和真实传输期限是不同预算。
 
 ## 两种启动模式
 
@@ -151,7 +151,7 @@ Prefill ownership、Decode reservation/dispatch permit 和引擎负载应分别�
 
 | 功能 | Mock / real 参照 | 已验证行为 | 模拟边界与缺口 | 代表 UT |
 |---|---|---|---|---|
-| FIFO 准入 | `MockPrefillBatchPolicy`；[FIFOScheduler.cc](../../../../../cpp/engine_base/schedulers/FIFOScheduler.cc) | token、矩形预算、CP 对齐及候选选择边界 | 形状与准入规则，不验证真实模型执行 | [MockPrefillBatchPolicyTest](../../../../flexlb-mock-engine/src/test/java/org/flexlb/mockengine/MockPrefillBatchPolicyTest.java) |
+| FIFO 准入 | `MockPrefillBatchPolicy`、`MockFifoPrefillQueue`；[FIFOScheduler.cc](../../../../../cpp/engine_base/schedulers/FIFOScheduler.cc) | 普通/group 隔离、残余组、大小超限退回、token/矩形预算、CP 对齐及候选选择边界 | Host loading 独立完成、普通/group loading 隔离及争用、取消释放已有回归；不验证 DMA 和真实模型执行 | [MockFifoPrefillQueueTest](../../../../flexlb-mock-engine/src/test/java/org/flexlb/mockengine/MockFifoPrefillQueueTest.java)、[MockPrefillBatchPolicyTest](../../../../flexlb-mock-engine/src/test/java/org/flexlb/mockengine/MockPrefillBatchPolicyTest.java) |
 | PD 生命周期与取消 | `MockPrefillSession`、`JavaMockEngineCluster`；[PrefillBatchRpcServer.cc](../../../../../cpp/model_rpc/PrefillBatchRpcServer.cc)、[DecodeRpcServer.cc](../../../../../cpp/model_rpc/DecodeRpcServer.cc) | 预留、绝对请求超时、临时容量等待、Fetch 交接、PREFILL_COMPLETE、取消释放、终态唯一性及跨进程断链 | 公开输出链路限单返回序列；协议回归不验证实际推理 | [PrefillFetchLifecycleTest](../../../../flexlb-mock-engine/src/test/java/org/flexlb/mockengine/PrefillFetchLifecycleTest.java)、[WhaleIndependentProcessTest](../../../../flexlb-mock-engine/src/test/java/org/flexlb/mockengine/WhaleIndependentProcessTest.java) |
 | KV 缓存 | `MockLruBlockCache`、`MockMemoryBlockCache`；[DeviceBlockPool.cc](../../../../../cpp/cache/block_tree_cache/block_pool/DeviceBlockPool.cc) | 容量、native-token 复用边界与缓存策略、引用释放、host 命中和树驱逐的模型不变量 | 不验证真实 KV tensor、DMA、hybrid/SWA 多池或磁盘数据正确性 | [CacheReferenceAccountingTest](../../../../flexlb-mock-engine/src/test/java/org/flexlb/mockengine/CacheReferenceAccountingTest.java)、[MockMemoryBlockCacheTest](../../../../flexlb-mock-engine/src/test/java/org/flexlb/mockengine/MockMemoryBlockCacheTest.java)、[TreeEvictionTest](../../../../flexlb-mock-engine/src/test/java/org/flexlb/mockengine/TreeEvictionTest.java) |
 | 性能、EOS 与 MTP | `MockPerformanceModel`、`MockEosModel`、`MockDecodeStepMetrics` | 配置公式、吞吐锚点、输出长度规则及接受 token 记账 | 校准后的近似模型，不模拟实际采样、stop words 或 draft/verify 推理 | [ProductionCaliberDecodeTest](../../../../flexlb-mock-engine/src/test/java/org/flexlb/mockengine/ProductionCaliberDecodeTest.java)、[WhaleEosModelTest](../../../../flexlb-mock-engine/src/test/java/org/flexlb/mockengine/WhaleEosModelTest.java)、[MockDecodeStepMetricsTest](../../../../flexlb-mock-engine/src/test/java/org/flexlb/mockengine/MockDecodeStepMetricsTest.java) |

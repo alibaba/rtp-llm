@@ -29,7 +29,7 @@ class MockVitServiceTest {
     private MultimodalRpcServiceGrpc.MultimodalRpcServiceBlockingStub stub;
 
     void start(MockVitService.Config config) throws Exception {
-        service = new MockVitService(config);
+        service = MockVitTestSupport.service(config);
         server = NettyServerBuilder.forPort(0).addService(service).build().start();
         channel = ManagedChannelBuilder.forAddress("127.0.0.1", server.getPort()).usePlaintext().build();
         stub = MultimodalRpcServiceGrpc.newBlockingStub(channel).withDeadlineAfter(10, TimeUnit.SECONDS);
@@ -91,6 +91,30 @@ class MockVitServiceTest {
         assertTrue(service.snapshot().get("embedding_bytes") <= 2400);
         assertTrue(service.snapshot().get("hash_bytes") <= 8192);
     }
+    @Test void directoryUsesRecentHashesAndOneUnionLimitAcrossEmbeddingTiers() throws Exception {
+        var document = (com.fasterxml.jackson.databind.node.ObjectNode)MockEngineConfigFixture.load().snapshot();
+        ((com.fasterxml.jackson.databind.node.ObjectNode)document.path("roles").path("vit")).put("mm_cache_gpu_max_bytes", 1024);
+        service = new MockVitService(MockVitService.Config.defaults(), null, document);
+        var cacheField = MockVitService.class.getDeclaredField("embeddingCache"); cacheField.setAccessible(true);
+        var hashField = MockVitService.class.getDeclaredField("hashCache"); hashField.setAccessible(true);
+        @SuppressWarnings("unchecked") var cache = (MockVitEmbeddingCache<MockVitImage.Result>)cacheField.get(service);
+        var hashes = (MockVitHashCache)hashField.get(service);
+        var value = MockVitImage.compute(image(56, 56, 1), 8, 1 << 20, 1 << 20, 1000);
+        hashes.put("old", value, "g"); hashes.put("hash", value, "g");
+        for (String key : List.of("gpu-old", "hash", "gpu-new")) cache.put(key, value,
+                List.of(new MockVitEmbeddingCache.Tensor(value.embedding(), 128, 4, MockVitEmbeddingCache.Device.GPU)), "g");
+        cache.put("cpu", value, List.of(new MockVitEmbeddingCache.Tensor(value.embedding(), 128, 4, MockVitEmbeddingCache.Device.CPU)), "g");
+        var one = service.cacheDirectory(1);
+        assertEquals(List.of("hash"), one.getKeysList());
+        assertEquals(0, one.getGpuEmbeddingKeysCount(), "residency itself is bounded before union filtering");
+        var three = service.cacheDirectory(3);
+        assertEquals(List.of("old", "hash"), three.getKeysList());
+        assertEquals(List.of("gpu-new", "hash"), three.getGpuEmbeddingKeysList());
+        assertEquals(0, three.getCpuEmbeddingKeysCount());
+        EngineRpcService.WorkerStatusPB status = MockEngineTestSupport.unary(o -> service.getWorkerStatus(EngineRpcService.StatusVersionPB.getDefaultInstance(), o));
+        assertEquals(1, status.getStatusVersion());
+    }
+
     @Test void repeatedConcurrentRequestsShareComputationAndStatusRemainsAvailable() throws Exception {
         var d = MockVitService.Config.defaults();
         start(new MockVitService.Config(8, 1, 4, 1 << 20, 1 << 20, d.maxInputBytes(), d.maxOutputBytes(), 100));
@@ -115,6 +139,9 @@ class MockVitServiceTest {
         start(new MockVitService.Config(8, 1, 4, 1 << 20, 1 << 20, d.maxInputBytes(), d.maxOutputBytes(), 150));
         var image = image(224, 224, 0xabcdef);
         var surviving = CompletableFuture.supplyAsync(() -> stub.remoteMultimodalEmbedding(inputs(image)));
+        long admittedBy = System.nanoTime() + TimeUnit.SECONDS.toNanos(2);
+        while (service.snapshot().get("pending") == 0 && System.nanoTime() < admittedBy) Thread.sleep(1);
+        assertEquals(1, service.snapshot().get("pending"), "long-lived producer must own the shared task before the short waiter joins");
         var expired = stub.withDeadlineAfter(20, TimeUnit.MILLISECONDS);
         assertEquals(Status.Code.DEADLINE_EXCEEDED, assertThrows(StatusRuntimeException.class,
                 () -> expired.remoteMultimodalEmbedding(inputs(image))).getStatus().getCode());
@@ -170,6 +197,39 @@ class MockVitServiceTest {
                 () -> stub.asyncSubmitEmbedding(EngineRpcService.MultimodalInputsPB.getDefaultInstance())).getStatus().getCode());
         stub.waitGreenNetVerdict(inputs(image));
         assertEquals(1, service.computations.get());
+    }
+
+    @Test void slowDownloadDoesNotClaimGpuAndConfiguredHeadersReachOrigin() throws Exception {
+        var document = MockEngineConfigFixture.load().snapshot();
+        var limits = (com.fasterxml.jackson.databind.node.ObjectNode) document.path("roles").path("vit");
+        limits.put("download_headers", "{\"X-Mock-Image\":\"allowed\"}");
+        var config = new MockVitService.Config(8, limits.path("vit_concurrency").intValue(), limits.path("vit_max_queue_size").intValue(),
+                limits.path("mm_cache_cpu_max_bytes").longValue(), limits.path("mm_hash_key_cache_max_bytes").longValue(),
+                MockEngineConfig.vitImageBytes(limits), 1 << 20, 0);
+        var entered = new java.util.concurrent.CountDownLatch(1);
+        var release = new java.util.concurrent.CountDownLatch(1);
+        var header = new java.util.concurrent.atomic.AtomicReference<String>();
+        var origin = com.sun.net.httpserver.HttpServer.create(new java.net.InetSocketAddress("127.0.0.1", 0), 0);
+        var png = java.util.Base64.getDecoder().decode(image(28, 28, 0x123456).getMultimodalUrl().split(",", 2)[1]);
+        origin.createContext("/image", exchange -> {
+            header.set(exchange.getRequestHeaders().getFirst("X-Mock-Image")); entered.countDown();
+            try { release.await(); exchange.sendResponseHeaders(200, png.length); exchange.getResponseBody().write(png); }
+            catch (InterruptedException error) { Thread.currentThread().interrupt(); }
+            finally { exchange.close(); }
+        });
+        origin.start();
+        try (var strict = new MockVitService(config, null, document)) {
+            var remote = image(28, 28, 0).toBuilder().setMultimodalUrl("http://127.0.0.1:" + origin.getAddress().getPort() + "/image").build();
+            var slow = strict.acquire(remote, 5000);
+            assertTrue(entered.await(2, TimeUnit.SECONDS));
+            assertEquals(0, strict.snapshot().get("gpu_batches"));
+            assertEquals(0, strict.snapshot().get("gpu_queued"));
+            assertEquals(4, strict.acquire(image(28, 28, 0x654321), 2000).get(2, TimeUnit.SECONDS).rows());
+            assertFalse(slow.isDone());
+            release.countDown();
+            assertEquals(4, slow.get(2, TimeUnit.SECONDS).rows());
+            assertEquals("allowed", header.get());
+        } finally { release.countDown(); origin.stop(0); }
     }
 
 }

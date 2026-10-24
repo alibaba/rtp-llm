@@ -77,13 +77,14 @@ class RealBehaviorParityTest {
             assertNotNull(result.failure);
             assertEquals(Status.Code.DEADLINE_EXCEEDED, Status.fromThrowable(result.failure).getCode());
             assertEquals(603, MockRpcErrors.downstream(result.failure).getErrorCode());
-            for (var service : c.services().values()) assertEquals(0, cache(service).heldBlocks());
+            assertTrue(cache(c.prefill(0)).heldBlocks() > 0, "deadline reports immediately while forward still owns KV");
             Thread.sleep(550);
+            for (var service : c.services().values()) assertEquals(0, cache(service).heldBlocks());
             for (var service : c.services().values()) assertTrue(service.getSnapshot().get("active_decode_requests").equals(0));
         }
     }
 
-    @Test void deadlineDuringLocalAllocateKeepsTimeoutCauseAndCannotAcquireLate() throws Exception {
+    @org.junit.jupiter.api.RepeatedTest(10) void deadlineDuringLocalAllocateKeepsTimeoutCauseAndCannotAcquireLate() throws Exception {
         try (var c = MockEngineTestCluster.create(performanceModel(directory, "1"), 62000, 1, 1)) {
             var pool = cache(c.decode(0));
             var held = pool.acquire(pool.totalBlocks() - pool.reserveBlocks(), List.of());
@@ -108,10 +109,10 @@ class RealBehaviorParityTest {
             try {
                 var pending = worker.submit(() -> enqueue(c.prefill(0), batch(90, slot(0,
                         inputWithDecode(90, 1024, c.decode(0).getGrpcPort(), 8)))));
-                var field = c.prefill(0).getClass().getDeclaredField("prefillRegistrations");
+                var field = c.prefill(0).getClass().getDeclaredField("batchAdmissions");
                 field.setAccessible(true);
                 long limit = System.nanoTime() + TimeUnit.SECONDS.toNanos(2);
-                while (!((java.util.Set<?>) field.get(c.prefill(0))).contains(90L) && System.nanoTime() < limit) Thread.sleep(1);
+                while (!((java.util.Map<?, ?>) field.get(c.prefill(0))).containsKey(90L) && System.nanoTime() < limit) Thread.sleep(1);
                 assertTrue(c.prefill(0).cancelRequest(90).found());
                 var ack = pending.get(1, TimeUnit.SECONDS);
                 assertEquals(0, ack.getSuccessesCount());

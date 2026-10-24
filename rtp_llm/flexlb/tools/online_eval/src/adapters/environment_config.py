@@ -133,9 +133,7 @@ class EnvSpec:
     # the mock-maintained MODEL_SERVICE_CONFIG.discovery_file.
     discovery: str = "file"
     domain_addrs: dict = field(default_factory=dict)  # {prefill: "a,b", decode: "a,b"}
-    # Per-role KV pool size in BLOCKS — forwarded to the Java mock as
-    # --prefill-kv-pool-blocks / --decode-kv-pool-blocks (NOT a key-count
-    # cap: since KV v2 this is the total block count of the pool).
+    # Explicit synthetic capacity; real allocator observations cannot be overridden.
     prefill_cache_blocks: int = DEFAULT_PREFILL_CACHE_BLOCKS
     decode_cache_blocks: int = DEFAULT_DECODE_CACHE_BLOCKS
     master_extra_args: list = field(default_factory=list)

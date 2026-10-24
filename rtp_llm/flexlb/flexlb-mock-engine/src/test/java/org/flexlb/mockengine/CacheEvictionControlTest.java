@@ -124,7 +124,7 @@ class CacheEvictionControlTest {
         assertEquals(0, idle.get("cache_key_set").size());
 
         enqueueAndFetch(prefill, batch(9600, slot(0, inputWithBlockKeys(
-                9601, 10, decode.getGrpcPort(), List.of(101L, 102L, 103L)))));
+                9601, 3 * 1024, decode.getGrpcPort(), List.of(101L, 102L, 103L)))));
         awaitCompleted(decode, 1, 10_000);
         awaitEngineCacheKeys("prefill-0", 3, 10_000);
         awaitEngineCacheKeys("decode-0", 3, 10_000);
@@ -159,7 +159,7 @@ class CacheEvictionControlTest {
         JavaMockEngineCluster.FastRpcService decode = decodeServices.get(0);
 
         enqueueAndFetch(prefill, batch(9610, slot(0, inputWithBlockKeys(
-                9611, 10, decode.getGrpcPort(), List.of(201L, 202L)))));
+                9611, 2 * 1024, decode.getGrpcPort(), List.of(201L, 202L)))));
         awaitCompleted(decode, 1, 10_000);
         awaitEngineCacheKeys("prefill-0", 2, 10_000);
 
@@ -198,7 +198,7 @@ class CacheEvictionControlTest {
         JavaMockEngineCluster.FastRpcService decode = decodeServices.get(0);
 
         enqueueAndFetch(prefill, batch(9620, slot(0, inputWithBlockKeys(
-                9621, 10, decode.getGrpcPort(), List.of(301L, 302L)))));
+                9621, 2 * 1024, decode.getGrpcPort(), List.of(301L, 302L)))));
         awaitCompleted(decode, 1, 10_000);
         awaitEngineCacheKeys("prefill-0", 2, 10_000);
 
@@ -241,7 +241,7 @@ class CacheEvictionControlTest {
         JavaMockEngineCluster.FastRpcService decode = decodeServices.get(0);
 
         enqueueAndFetch(prefill, batch(9630, slot(0, inputWithBlockKeys(
-                9631, 10, decode.getGrpcPort(), List.of(401L, 402L)))));
+                9631, 2 * 1024, decode.getGrpcPort(), List.of(401L, 402L)))));
         awaitCompleted(decode, 1, 10_000);
         awaitEngineCacheKeys("prefill-0", 2, 10_000);
         awaitEngineCacheKeys("decode-0", 2, 10_000);
@@ -346,7 +346,7 @@ class CacheEvictionControlTest {
     /** gRPC getCacheStatus with needCacheKeys — the master-facing sync surface. */
     private static EngineRpcService.CacheStatusPB cacheStatus(JavaMockEngineCluster.FastRpcService service) {
         return unary(observer -> service.getCacheStatus(
-                EngineRpcService.CacheVersionPB.newBuilder().setNeedCacheKeys(true).build(),
+                EngineRpcService.CacheVersionPB.newBuilder().setNeedCacheKeys(true).setLatestCacheVersion(-1).build(),
                 observer));
     }
 

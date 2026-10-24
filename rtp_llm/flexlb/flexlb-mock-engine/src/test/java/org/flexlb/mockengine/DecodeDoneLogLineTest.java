@@ -97,7 +97,7 @@ class DecodeDoneLogLineTest {
         // Flat 20 ms model steps at sleep_scale 0.1 (decodeModel default):
         // each step books/sleeps ~2 ms, so every stream finishes in tens of
         // ms — comfortably observable, fast to wait.
-        MockPerformanceModel model = MockEngineTestSupport.decodeModel(tempDir, 20.0, null);
+        MockPerformanceModel model = MockEngineTestSupport.decodeModel(tempDir, 20.0);
         JavaMockEngineCluster.FastRpcService decode = newDecodeService(model, 8);
         Path eventsFile = tempDir.resolve("engine_events.jsonl");
         decode.setEngineEventLog(JavaMockEngineCluster.EngineEventLog.open(eventsFile.toString()));

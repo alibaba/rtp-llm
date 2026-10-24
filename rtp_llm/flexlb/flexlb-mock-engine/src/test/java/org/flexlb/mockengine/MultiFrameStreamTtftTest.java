@@ -209,7 +209,7 @@ class MultiFrameStreamTtftTest {
                         "tokens_per_step", 1.0,
                         "step_ms_by_batch", List.of(List.of(1, decodeStepMs)))));
         MockMasterConfig.writeWithPrefillExpression(master, prefillFormulaMs);
-        MockPerformanceModel model = MockPerformanceModel.load(performance.toString(), master.toString());
+        MockPerformanceModel model = MockModelFixture.load(performance.toString(), master.toString());
 
         prefill = new JavaMockEngineCluster.FastRpcService(
                 "prefill", EngineRpcService.RoleTypePB.ROLE_TYPE_PREFILL,

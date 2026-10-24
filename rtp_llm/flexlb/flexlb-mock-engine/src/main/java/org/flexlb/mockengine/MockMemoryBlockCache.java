@@ -20,6 +20,7 @@ final class MockMemoryBlockCache {
         Long parent;
         final Set<Long> children = new HashSet<>();
         Entry entry;
+        boolean published;
         int committedSubtree;
     }
     private record Pending(Entry entry, Long parent) {}
@@ -32,6 +33,12 @@ final class MockMemoryBlockCache {
     private final NavigableSet<Entry> victims = new TreeSet<>(Comparator
             .comparingLong((Entry e) -> e.accessSequence).thenComparingLong(e -> e.key));
     private final DoubleConsumer onEviction;
+    private java.util.function.BiConsumer<Long, Boolean> keyListener = (key, added) -> {};
+
+    synchronized void setKeyListener(java.util.function.BiConsumer<Long, Boolean> listener) {
+        keyListener = listener;
+    }
+
     private long evictions, writeRejected, generation, accessSequence;
     private int pinned;
 
@@ -143,7 +150,12 @@ final class MockMemoryBlockCache {
                             entry.accessSequence = ++accessSequence;
                             entries.put(r.getKey(), entry);
                             indexNode(r.getKey(), item.parent());
-                            tree.get(r.getKey()).entry = entry;
+                            Node node = tree.get(r.getKey());
+                            node.entry = entry;
+                            if (!node.published) {
+                                node.published = true;
+                                keyListener.accept(r.getKey(), true);
+                            }
                             updateSubtree(r.getKey(), 1);
                             changed = true;
                         }
@@ -188,6 +200,14 @@ final class MockMemoryBlockCache {
             reserved.put(key, new Pending(e, i == 0 ? null : keys.get(i - 1)));
         }
         return new WriteLease(reserved);
+    }
+
+    synchronized int usedBlocks() { return entries.size() + pending.size(); }
+    synchronized int totalBlocks() { return capacity; }
+    synchronized int evictTo(int target) {
+        int before = entries.size();
+        while (usedBlocks() > target && evictOne()) { }
+        return before - entries.size();
     }
 
     private boolean evictOne() {
@@ -248,6 +268,7 @@ final class MockMemoryBlockCache {
             Node node = tree.get(current);
             if (node == null || !node.children.isEmpty()) return;
             tree.remove(current);
+            if (node.published) keyListener.accept(current, false);
             Long parent = node.parent;
             if (parent != null) {
                 Node parentNode = tree.get(parent);
@@ -283,6 +304,7 @@ final class MockMemoryBlockCache {
     synchronized long evictions() { return evictions; }
     boolean prefixTreeEnabled() { return prefixTreeEnabled; }
     synchronized void clear() {
+        tree.forEach((key, node) -> { if (node.published) keyListener.accept(key, false); });
         generation++; pinned = 0; entries.clear(); tree.clear(); pending.clear(); victims.clear();
     }
 }

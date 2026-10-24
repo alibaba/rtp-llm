@@ -26,11 +26,11 @@ class MockCalibrationConsistencyTest {
         MockMasterConfig.writeWithPrefillExpression(master, expression);
         var mapper = new ObjectMapper();
         var envelope = mapper.readTree(master.toFile());
-        var legacy = MockPerformanceModel.load(performance.toString(), master.toString());
+        var legacy = MockModelFixture.load(performance.toString(), master.toString());
         String flat = envelope.path("zone_process_setting").path("process_info")
                 .path("envs").get(0).get(1).asText();
         Files.writeString(master, flat);
-        var standalone = MockPerformanceModel.load(performance.toString(), master.toString());
+        var standalone = MockModelFixture.load(performance.toString(), master.toString());
         assertEquals(legacy.prefillExpressionState(), standalone.prefillExpressionState());
     }
 
@@ -50,13 +50,13 @@ class MockCalibrationConsistencyTest {
                 expected.path("prefill_expression").asText());
         var mapper = new ObjectMapper();
         mapper.writeValue(performance.toFile(), Map.of("calibration_sha256", sha));
-        var model = MockPerformanceModel.load(performance.toString(), master.toString());
+        var model = MockModelFixture.load(performance.toString(), master.toString());
         assertEquals(expected.path("decode").path("tokens_per_step").asDouble(),
                 model.tokensPerStep());
 
         Files.writeString(performance, "{\"calibration_sha256\":\"stale\"}");
         var error = assertThrows(IllegalStateException.class,
-                () -> MockPerformanceModel.load(performance.toString(), master.toString()));
+                () -> MockModelFixture.load(performance.toString(), master.toString()));
         assertTrue(error.getMessage().contains("calibration_sha256 disagrees"));
     }
 }

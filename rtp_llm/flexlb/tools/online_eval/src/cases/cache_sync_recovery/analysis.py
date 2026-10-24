@@ -35,11 +35,11 @@ def analyze(evidence):
         measured = evidence["intensity"]["measurement"]
         checks += [
             evaluate("cache_converged", ready, "eq", True),
-            evaluate("actual_sync_intensity", measured["responses"], "ge", limits["min_cache_responses_per_s"]),
+            evaluate("actual_sync_intensity", measured["full_responses"], "ge", limits["min_cache_full_responses_per_s"]),
             evaluate(
                 "response_shape",
-                measured["totals"]["entries"] == measured["totals"]["responses"] * keys
-                and measured["totals"]["full_responses"] == measured["totals"]["responses"],
+                measured["totals"]["entries"] == measured["totals"]["full_responses"] * keys
+                and measured["totals"]["full_responses"] + measured["totals"]["unchanged_responses"] == measured["totals"]["responses"],
                 "eq",
                 True,
             ),

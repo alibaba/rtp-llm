@@ -16,6 +16,7 @@ import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -81,9 +82,10 @@ class CancelTerminalBatchIdTest {
         EngineRpcService.TaskPhase phase = prefill.cancel(requestId);
         assertNotNull(phase, "cancel should observe a tracked prefill request");
 
+        awaitTerminal(requestId);
         EngineRpcService.TaskInfoPB terminal = completionOf(requestId);
         assertNotNull(terminal, "a terminal for the cancelled request must be published");
-        assertEquals(EngineRpcService.ErrorCodePB.CANCELLED.getNumber(),
+        assertEquals(8100,
                 terminal.getErrorInfo().getErrorCode(),
                 "terminal must carry the CANCELLED error code");
         assertEquals(batchId, terminal.getBatchId(),
@@ -115,13 +117,19 @@ class CancelTerminalBatchIdTest {
 
         // Re-cancel of the same id hits the priority-cancel terminal record armed by
         // the tracked branch (the engine keeps its one-shot cancel semantics).
+        JavaMockEngineCluster.CancelResult retry = prefill.cancelRequest(requestId);
+        assertTrue(retry.found());
+        assertFalse(retry.alreadyFinished(), "a repeated intent cannot finish the running forward");
+        awaitTerminal(requestId);
+        long beforeTerminalRetry = stats.cancelCensusAlreadyCancelled.sum();
         JavaMockEngineCluster.CancelResult terminalRecord = prefill.cancelRequest(requestId);
         assertTrue(terminalRecord.found() && terminalRecord.alreadyFinished(),
                 "terminal record re-cancel must report found + already-finished");
-        assertEquals(1L, stats.cancelCensusAlreadyCancelled.sum(),
+        assertEquals(beforeTerminalRetry + 1, stats.cancelCensusAlreadyCancelled.sum(),
                 "terminal record-branch re-cancel must be counted");
 
         // And the typed terminal from the tracked branch carries the batch id.
+        awaitTerminal(requestId);
         EngineRpcService.TaskInfoPB terminal = completionOf(requestId);
         assertNotNull(terminal);
         assertEquals(88L, terminal.getBatchId(),
@@ -176,7 +184,7 @@ class CancelTerminalBatchIdTest {
                 "decode", Map.of("scale", 1.0, "tokens_per_step", 1.0,
                         "step_ms_by_batch", List.of(List.of(1, 1.0)))));
         MockMasterConfig.writeWithPrefillExpression(master, prefillExpression);
-        return MockPerformanceModel.load(performance.toString(), master.toString());
+        return MockModelFixture.load(performance.toString(), master.toString());
     }
 
     // ──────────── Terminal-frame access through the status RPC ────────────

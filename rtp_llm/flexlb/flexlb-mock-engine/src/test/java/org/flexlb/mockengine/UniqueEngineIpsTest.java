@@ -143,8 +143,7 @@ class UniqueEngineIpsTest {
         Path endpointFile = tempDir.resolve("endpoint.json");
         JavaMockEngineCluster.Config config = JavaMockEngineCluster.Config.parse(with(new String[]{
                 "--endpoint-file", endpointFile.toString(),
-                "--performance", tempDir.resolve("performance.json").toString(),
-                "--master-config", tempDir.resolve("master.json").toString(),
+                "--engine-config", "../tools/mock_bundle/engine-config.json", "--calibration", tempDir.resolve("performance.json").toString(),
                 "--base-grpc-port", "64000",
         }, extra));
         JavaMockEngineCluster.writeDiscoveryFiles(config);
@@ -154,8 +153,7 @@ class UniqueEngineIpsTest {
     private String[] baseArgs() {
         return new String[]{
                 "--endpoint-file", tempDir.resolve("endpoint.json").toString(),
-                "--performance", tempDir.resolve("performance.json").toString(),
-                "--master-config", tempDir.resolve("master.json").toString(),
+                "--engine-config", "../tools/mock_bundle/engine-config.json", "--calibration", tempDir.resolve("performance.json").toString(),
         };
     }
 

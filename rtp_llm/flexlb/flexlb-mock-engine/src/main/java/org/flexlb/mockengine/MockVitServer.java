@@ -10,9 +10,7 @@ public final class MockVitServer {
         int httpPort = 0;
         boolean kmonitor = false;
         java.nio.file.Path model = null;
-        var defaults = MockVitService.Config.defaults();
-        int hidden = defaults.hiddenSize(), concurrency = defaults.concurrency(), queue = defaults.queueCapacity();
-        long embeddings = defaults.embeddingCacheBytes(), hashes = defaults.hashCacheBytes(), delay = defaults.computeDelayMs();
+        String engineFile = null, calibrationFile = null;
         for (int i = 0; i < args.length; i += 2) {
             if (i + 1 == args.length) throw new IllegalArgumentException("missing value for " + args[i]);
             switch (args[i]) {
@@ -20,18 +18,22 @@ public final class MockVitServer {
                 case "--model-path" -> model = java.nio.file.Path.of(args[i + 1]);
                 case "--port" -> port = Integer.parseInt(args[i + 1]);
                 case "--http-port" -> httpPort = Integer.parseInt(args[i + 1]);
-                case "--hidden-size" -> hidden = Integer.parseInt(args[i + 1]);
-                case "--concurrency" -> concurrency = Integer.parseInt(args[i + 1]);
-                case "--queue-capacity" -> queue = Integer.parseInt(args[i + 1]);
-                case "--embedding-cache-bytes" -> embeddings = Long.parseLong(args[i + 1]);
-                case "--hash-cache-bytes" -> hashes = Long.parseLong(args[i + 1]);
-                case "--compute-delay-ms" -> delay = Long.parseLong(args[i + 1]);
+                case "--engine-config" -> engineFile = args[i + 1];
+                case "--calibration" -> calibrationFile = args[i + 1];
                 default -> throw new IllegalArgumentException("unknown argument " + args[i]);
             }
         }
-        var service = new MockVitService(new MockVitService.Config(hidden, concurrency, queue, embeddings, hashes,
-                defaults.maxInputBytes(), defaults.maxOutputBytes(), delay),
-                model == null ? null : MockV41Image.Config.fromModel(model));
+        if (engineFile == null || calibrationFile == null) throw new IllegalArgumentException("--engine-config and --calibration are required");
+        var effective = MockEngineConfig.load(engineFile);
+        var limits = effective.role("vit");
+        var calibration = new com.fasterxml.jackson.databind.ObjectMapper().readTree(java.nio.file.Path.of(calibrationFile).toFile()).path("vit");
+        MockEngineConfig.fields(calibration, "hidden_size", "max_output_bytes", "compute_delay_ms");
+        var config = new MockVitService.Config(MockEngineConfig.integer(calibration, "hidden_size", 1),
+                limits.path("vit_concurrency").intValue(), limits.path("vit_max_queue_size").intValue(),
+                limits.path("mm_cache_cpu_max_bytes").longValue(), limits.path("mm_hash_key_cache_max_bytes").longValue(),
+                MockEngineConfig.vitImageBytes(limits), MockEngineConfig.integer(calibration, "max_output_bytes", 1),
+                MockEngineConfig.integer(calibration, "compute_delay_ms", 0));
+        var service = new MockVitService(config, model == null ? null : MockV41Image.Config.fromModel(model), effective.snapshot());
         MockVitMonitor monitor = null;
         if (kmonitor) {
             var tags = new java.util.HashMap<>(WhaleMockMonitor.engineTags(System.getenv(),
@@ -40,7 +42,7 @@ public final class MockVitServer {
             monitor = new MockVitMonitor(WhaleMockMonitor.createSink(), tags);
             monitor.start(service);
         }
-        var server = NettyServerBuilder.forPort(port).maxInboundMessageSize(defaults.maxInputBytes() * 2)
+        var server = NettyServerBuilder.forPort(port).maxInboundMessageSize(config.maxInputBytes() * 2)
                 .addService(io.grpc.ServerInterceptors.intercept(service,
                         monitor == null ? java.util.List.of() : java.util.List.of(monitor))).build().start();
         if (httpPort < 0 || httpPort > 65535 || httpPort == port) {
@@ -52,6 +54,12 @@ public final class MockVitServer {
         com.sun.net.httpserver.HttpServer health = null;
         if (httpPort != 0) {
             health = com.sun.net.httpserver.HttpServer.create(new java.net.InetSocketAddress(httpPort), 16);
+            health.createContext("/effective_config", exchange -> {
+                byte[] body = new com.fasterxml.jackson.databind.ObjectMapper().writeValueAsBytes(service.effectiveConfiguration());
+                exchange.getResponseHeaders().set("Content-Type", "application/json");
+                exchange.sendResponseHeaders(200, body.length);
+                try (var output = exchange.getResponseBody()) { output.write(body); }
+            });
             health.createContext("/health", exchange -> {
                 boolean ready = !server.isShutdown() && !server.isTerminated();
                 byte[] body = (ready ? "ok" : "not ready").getBytes(java.nio.charset.StandardCharsets.UTF_8);

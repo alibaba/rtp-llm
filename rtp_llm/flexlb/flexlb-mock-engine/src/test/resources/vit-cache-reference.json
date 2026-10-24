@@ -1,0 +1,380 @@
+{
+  "hash_cache_accounting": {
+    "entry_overhead": 96,
+    "ascii_base": 49,
+    "latin1_base": 73,
+    "bmp_base": 74,
+    "ucs4_base": 76,
+    "hash_list_bytes": 88,
+    "tensor_object_bytes": 80,
+    "record_bytes": 80,
+    "integer_bytes": 24
+  },
+  "embedding": [
+    {
+      "capacity": 32,
+      "operations": [
+        [
+          "put",
+          "a",
+          8
+        ],
+        [
+          "put",
+          "b",
+          8
+        ],
+        [
+          "put",
+          "c",
+          8
+        ],
+        [
+          "put",
+          "d",
+          8
+        ],
+        [
+          "remove",
+          "b"
+        ],
+        [
+          "remove",
+          "d"
+        ],
+        [
+          "put",
+          "large",
+          16
+        ]
+      ],
+      "expected": [
+        {
+          "keys": [
+            "a"
+          ],
+          "resident": 8,
+          "used": 8,
+          "free": 24,
+          "largest": 24
+        },
+        {
+          "keys": [
+            "a",
+            "b"
+          ],
+          "resident": 16,
+          "used": 16,
+          "free": 16,
+          "largest": 16
+        },
+        {
+          "keys": [
+            "a",
+            "b",
+            "c"
+          ],
+          "resident": 24,
+          "used": 24,
+          "free": 8,
+          "largest": 8
+        },
+        {
+          "keys": [
+            "a",
+            "b",
+            "c",
+            "d"
+          ],
+          "resident": 32,
+          "used": 32,
+          "free": 0,
+          "largest": 0
+        },
+        {
+          "keys": [
+            "a",
+            "c",
+            "d"
+          ],
+          "resident": 24,
+          "used": 24,
+          "free": 8,
+          "largest": 8
+        },
+        {
+          "keys": [
+            "a",
+            "c"
+          ],
+          "resident": 16,
+          "used": 16,
+          "free": 16,
+          "largest": 8
+        },
+        {
+          "keys": [
+            "c",
+            "large"
+          ],
+          "resident": 24,
+          "used": 24,
+          "free": 8,
+          "largest": 8
+        }
+      ]
+    },
+    {
+      "capacity": 32,
+      "operations": [
+        [
+          "put",
+          "small",
+          16
+        ],
+        [
+          "put",
+          "large",
+          80
+        ]
+      ],
+      "expected": [
+        {
+          "keys": [
+            "small"
+          ],
+          "resident": 16,
+          "used": 16,
+          "free": 16,
+          "largest": 16
+        },
+        {
+          "keys": [
+            "small"
+          ],
+          "resident": 16,
+          "used": 16,
+          "free": 16,
+          "largest": 16
+        }
+      ]
+    },
+    {
+      "capacity": 16,
+      "operations": [
+        [
+          "put",
+          "a",
+          1
+        ],
+        [
+          "put",
+          "b",
+          1
+        ],
+        [
+          "remove",
+          "a"
+        ],
+        [
+          "put",
+          "c",
+          8
+        ]
+      ],
+      "expected": [
+        {
+          "keys": [
+            "a"
+          ],
+          "resident": 1,
+          "used": 1,
+          "free": 15,
+          "largest": 8
+        },
+        {
+          "keys": [
+            "a",
+            "b"
+          ],
+          "resident": 2,
+          "used": 2,
+          "free": 14,
+          "largest": 0
+        },
+        {
+          "keys": [
+            "b"
+          ],
+          "resident": 1,
+          "used": 1,
+          "free": 15,
+          "largest": 8
+        },
+        {
+          "keys": [
+            "b",
+            "c"
+          ],
+          "resident": 9,
+          "used": 9,
+          "free": 7,
+          "largest": 0
+        }
+      ]
+    },
+    {
+      "capacity": 32,
+      "operations": [
+        [
+          "put",
+          "a",
+          16
+        ],
+        [
+          "put",
+          "b",
+          16
+        ],
+        [
+          "get",
+          "a"
+        ],
+        [
+          "put",
+          "c",
+          16
+        ]
+      ],
+      "expected": [
+        {
+          "keys": [
+            "a"
+          ],
+          "resident": 16,
+          "used": 16,
+          "free": 16,
+          "largest": 16
+        },
+        {
+          "keys": [
+            "a",
+            "b"
+          ],
+          "resident": 32,
+          "used": 32,
+          "free": 0,
+          "largest": 0
+        },
+        {
+          "keys": [
+            "a",
+            "b"
+          ],
+          "resident": 32,
+          "used": 32,
+          "free": 0,
+          "largest": 0
+        },
+        {
+          "keys": [
+            "a",
+            "c"
+          ],
+          "resident": 32,
+          "used": 32,
+          "free": 0,
+          "largest": 0
+        }
+      ]
+    }
+  ],
+  "hashes": {
+    "capacity": 1100,
+    "operations": [
+      [
+        "put",
+        "a",
+        4
+      ],
+      [
+        "put",
+        "é",
+        4
+      ],
+      [
+        "probe",
+        "a"
+      ],
+      [
+        "consume",
+        "a"
+      ],
+      [
+        "put",
+        "中",
+        4
+      ],
+      [
+        "put",
+        "🙂",
+        4
+      ],
+      [
+        "put",
+        "a",
+        4096
+      ]
+    ],
+    "expected": [
+      {
+        "keys": [
+          "a"
+        ],
+        "resident": 515
+      },
+      {
+        "keys": [
+          "a",
+          "é"
+        ],
+        "resident": 1054
+      },
+      {
+        "keys": [
+          "a",
+          "é"
+        ],
+        "resident": 1054
+      },
+      {
+        "keys": [
+          "é",
+          "a"
+        ],
+        "resident": 1054
+      },
+      {
+        "keys": [
+          "a",
+          "中"
+        ],
+        "resident": 1056
+      },
+      {
+        "keys": [
+          "中",
+          "🙂"
+        ],
+        "resident": 1086
+      },
+      {
+        "keys": [
+          "中",
+          "🙂"
+        ],
+        "resident": 1086
+      }
+    ]
+  }
+}

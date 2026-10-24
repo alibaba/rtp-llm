@@ -29,6 +29,7 @@ import static org.flexlb.mockengine.MockEngineTestSupport.httpGet;
 import static org.flexlb.mockengine.MockEngineTestSupport.inputWithBlockKeys;
 import static org.flexlb.mockengine.MockEngineTestSupport.performanceModel;
 import static org.flexlb.mockengine.MockEngineTestSupport.slot;
+import static org.flexlb.mockengine.MockEngineTestSupport.workerStatus;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
@@ -128,25 +129,24 @@ class BlockPoolMetricsObservabilityTest {
         scheduler.awaitTermination(3, TimeUnit.SECONDS);
     }
 
-    /**
-     * The prefill LACK_MEM rejection surface: an oversized request (11 blocks
-     * vs the 10-block pool) is rejected synchronously with error 602 AND
-     * counted by mock_engine_lack_mem_rejects_total in both emission modes —
-     * while kv_admission_fails (the DECODE-side terminal-failure counter)
-     * stays 0, the two surfaces must never cross-book.
-     */
+    /** Permanent scheduler allocation failures count on P, independently of D admission failures. */
     @Test
-    void lackMemRejectCounterCountsPrefillSyncRejections() throws Exception {
+    void lackMemRejectCounterCountsPrefillSchedulerFailures() throws Exception {
         MockPerformanceModel model = performanceModel(tempDir, "10");
+        model.observedReserveBlocks = 1;
         JavaMockEngineCluster.FastRpcService prefill = newPrefillService(model, 10);
 
         EngineRpcService.GenerateInputPB tooBig = inputWithBlockKeys(
-                7L, SPB, List.of(1L, 2L, 3L, 4L, 5L, 6L, 7L, 8L, 9L, 10L, 11L));
+                7L, 10 * SPB, List.of(1L, 2L, 3L, 4L, 5L, 6L, 7L, 8L, 9L, 10L));
         EngineRpcService.EnqueueBatchResponsePB ack =
                 enqueueAndFetch(prefill, batch(1, slot(0, tooBig)));
-        assertEquals(1, ack.getErrorsCount(), "the oversized request must be rejected");
-        assertEquals(JavaMockEngineCluster.LACK_MEM_ERROR_CODE,
-                ack.getErrors(0).getErrorInfo().getErrorCode());
+        assertEquals(1, ack.getSuccessesCount(), "enqueue ACK precedes scheduler allocation outcome");
+        long until = System.nanoTime() + TimeUnit.SECONDS.toNanos(2);
+        while (workerStatus(prefill, -1).getFinishedTaskListList().stream().noneMatch(t -> t.getRequestId() == 7L)
+                && System.nanoTime() < until) Thread.sleep(1);
+        var terminal = workerStatus(prefill, -1).getFinishedTaskListList().stream()
+                .filter(t -> t.getRequestId() == 7L).findFirst().orElseThrow();
+        assertEquals(602, terminal.getErrorInfo().getErrorCode());
 
         // Per-engine mode: the rejection is on the prefill engine, and the
         // decode-flavored admission-fail counter stays 0.
@@ -156,7 +156,7 @@ class BlockPoolMetricsObservabilityTest {
         assertEquals(1L,
                 perEngine.get("mock_engine_lack_mem_rejects_total")
                         .getOrDefault(prefillPort, -1L),
-                "one synchronous 602 rejection must be counted");
+                "one scheduler 602 failure must be counted");
         assertEquals(0L,
                 perEngine.get("mock_engine_kv_admission_fails_total")
                         .getOrDefault(prefillPort, -1L),
@@ -255,7 +255,7 @@ class BlockPoolMetricsObservabilityTest {
     @Test
     void decodeReuseCounterAccumulatesOwnLruHits() throws Exception {
         MockPerformanceModel model =
-                MockEngineTestSupport.decodeModel(tempDir, 10_000.0, null);
+                MockEngineTestSupport.decodeModel(tempDir, 10_000.0);
         JavaMockEngineCluster.FastRpcService decode =
                 MockEngineTestSupport.decodeService(
                         model, BASE_PORT + 50, services, scheduler, 8);
@@ -332,7 +332,7 @@ class BlockPoolMetricsObservabilityTest {
      */
     @Test
     void decodeAdmissionFailureIsRequestTerminalLackMem() throws Exception {
-        MockPerformanceModel model = MockEngineTestSupport.decodeModel(tempDir, 20.0, null);
+        MockPerformanceModel model = MockEngineTestSupport.decodeModel(tempDir, 20.0);
         JavaMockEngineCluster.FastRpcService decode = newDecodeService(model, 10);
         Path eventsFile = tempDir.resolve("engine_events.jsonl");
         decode.setEngineEventLog(

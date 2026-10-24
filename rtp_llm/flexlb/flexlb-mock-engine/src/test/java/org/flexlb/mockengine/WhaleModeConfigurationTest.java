@@ -172,21 +172,21 @@ class WhaleModeConfigurationTest {
         env.put("FETCH_OUTPUT_STREAM", "1");
         env.put("MOCK_RUN_DIR", directory.toString());
         env.remove("POD_IP");
-        env.remove("MOCK_PERFORMANCE_CONFIG");
-        env.remove("MOCK_MASTER_CONFIG");
+        env.remove("MOCK_CALIBRATION_CONFIG");
+        env.remove("MOCK_ENGINE_CONFIG");
         String literal = "{\"label\":\"spaces $HOME 'quotes' `false`\"}";
-        env.put("MOCK_PERFORMANCE_CONFIG_JSON", literal);
-        env.put("MOCK_MASTER_CONFIG_JSON", "{}");
+        env.put("MOCK_CALIBRATION_CONFIG_JSON", literal);
+        env.put("MOCK_ENGINE_CONFIG_JSON", "{}");
         Process process = builder.start();
         assertTrue(process.waitFor(3, TimeUnit.SECONDS));
         String args = new String(process.getInputStream().readAllBytes(), java.nio.charset.StandardCharsets.UTF_8);
         assertEquals(0, process.exitValue(), args);
-        assertEquals(literal, Files.readString(directory.resolve("performance.json")));
-        assertEquals("{}", Files.readString(directory.resolve("master.json")));
+        assertEquals(literal, Files.readString(directory.resolve("calibration.json")));
+        assertEquals("{}", Files.readString(directory.resolve("engine-config.json")));
         assertTrue(args.contains("--host\n10.1.2.3\n"), args);
         assertTrue(args.contains("--auto-fetch\nfalse\n"), args);
 
-        env.put("MOCK_PERFORMANCE_CONFIG", "ambiguous.json");
+        env.put("MOCK_CALIBRATION_CONFIG", "ambiguous.json");
         Process refused = builder.start();
         assertTrue(refused.waitFor(3, TimeUnit.SECONDS));
         assertEquals(2, refused.exitValue());
@@ -194,7 +194,7 @@ class WhaleModeConfigurationTest {
 
     private JavaMockEngineCluster.Config config(String... options) {
         List<String> args = new ArrayList<>(List.of("--endpoint-file", "endpoints.json",
-                "--performance", "performance.json", "--master-config", "master.json"));
+                "--engine-config", "../tools/mock_bundle/engine-config.json", "--calibration", "performance.json"));
         args.addAll(List.of(options));
         return JavaMockEngineCluster.Config.parse(args.toArray(String[]::new));
     }
@@ -250,9 +250,13 @@ class WhaleModeConfigurationTest {
 
     private void assertBundleCompletion(boolean eos, boolean direct) throws Exception {
         var cfg = config("--whale", "true", "--whale-bundle", "true", "--auto-fetch", "true",
-                "--host", "10.1.2.3", "--n-prefill", "1", "--n-decode", "1",
-                "--prefill-block-size", "512", "--decode-block-size", "64",
-                "--prefill-kv-pool-blocks", "32", "--decode-kv-pool-blocks", "32");
+                "--host", "10.1.2.3", "--n-prefill", "1", "--n-decode", "1");
+        var engineDocument = (com.fasterxml.jackson.databind.node.ObjectNode) MockEngineConfigFixture.load().snapshot();
+        for (String role : new String[]{"prefill", "decode"}) {
+            ((com.fasterxml.jackson.databind.node.ObjectNode)engineDocument.path("roles").path(role).path("capacity")).put("device_blocks", 32).put("reserve_blocks", 1).put("seq_size_per_block", role.equals("prefill") ? 512 : 64);
+            ((com.fasterxml.jackson.databind.node.ObjectNode)engineDocument.path("roles").path(role).path("kv_cache")).put("seq_size_per_block", role.equals("prefill") ? 512 : 64).put("reuse_cache", true);
+        }
+        cfg.engineConfig = MockEngineConfig.parse(engineDocument);
         Path perf = directory.resolve("bundle-perf.json");
         Path master = directory.resolve("bundle-master.json");
         Files.writeString(perf, "{\"block_size\":1024,\"sleep_scale\":1,\"jitter_pct\":0,"
@@ -267,7 +271,7 @@ class WhaleModeConfigurationTest {
         }
         if (direct) Files.writeString(perf, Files.readString(perf).replace("[[1,2]]", "[[1,30]]"));
         MockMasterConfig.writeWithPrefillExpression(master, "2");
-        var model = MockPerformanceModel.load(perf.toString(), master.toString());
+        var model = MockModelFixture.load(perf.toString(), master.toString());
         var boss = new io.netty.channel.nio.NioEventLoopGroup(1);
         var worker = new io.netty.channel.nio.NioEventLoopGroup(1);
         var scheduler = java.util.concurrent.Executors.newScheduledThreadPool(2);
@@ -515,13 +519,13 @@ class WhaleModeConfigurationTest {
         for (int i = 1; i <= 10; i++)
             monitor.sample(idle, tags, now + i * 5_000_000_000L);
         assertEquals(List.of(1.0, 0.0), running);
-        // Decode keeps its existing periodic idle reporting.
+        // Both roles preserve the final scheduler round, with no periodic zeros.
         monitor.sample(idle, java.util.Map.of("role", "ROLE_TYPE_DECODE"), now);
-        assertEquals(List.of(1.0, 0.0, 0.0), running);
+        assertEquals(List.of(1.0, 0.0), running);
     }
 
     @Test
-    void schedulerSamplesSuppressOnlyTheirPollingInterval() {
+    void schedulerSamplesAreNeverRepeatedByPeriodicSnapshots() {
         List<Double> running = new ArrayList<>();
         var sink = (org.flexlb.metric.FlexMonitor) java.lang.reflect.Proxy.newProxyInstance(
                 getClass().getClassLoader(), new Class<?>[]{org.flexlb.metric.FlexMonitor.class},
@@ -539,9 +543,9 @@ class WhaleModeConfigurationTest {
         monitor.reportScheduler(java.util.Map.of("rtp_llm_running_stream_size", 3), java.util.Map.of());
         monitor.reportScheduler(java.util.Map.of("rtp_llm_running_stream_size", 1), java.util.Map.of());
         monitor.sample(idle, java.util.Map.of(), now + 5_000_000_000L);
-        assertEquals(List.of(0.0, 3.0, 1.0), running);
+        assertEquals(List.of(3.0, 1.0), running);
         monitor.sample(idle, java.util.Map.of(), now + 10_000_000_000L);
-        assertEquals(List.of(0.0, 3.0, 1.0, 0.0), running);
+        assertEquals(List.of(3.0, 1.0), running);
     }
 
     @Test
@@ -564,8 +568,8 @@ class WhaleModeConfigurationTest {
         env.put("START_PORT", "22290");
         env.put("POD_IP", "10.1.2.3");
         env.put("FETCH_OUTPUT_STREAM", "0");
-        env.put("MOCK_PERFORMANCE_CONFIG", "performance.json");
-        env.put("MOCK_MASTER_CONFIG", "master.json");
+        env.put("MOCK_CALIBRATION_CONFIG", "performance.json");
+        env.put("MOCK_ENGINE_CONFIG", "master.json");
         env.put("MOCK_RUN_DIR", directory.toString());
         env.remove("MOCK_KMONITOR_ENABLED");
         Process process = builder.start();

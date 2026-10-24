@@ -61,9 +61,10 @@ legacy JAR 是否存在取决于 CI 配方，见[构建与产物](README.md#ci-�
 | `RTP_LLM_MOCK_BUNDLE=1` | 必填的 test-only 开关 |
 | `START_PORT` | Master HTTP 端口；management 与 Mock control 从配置偏移派生 |
 | `POD_IP` | 对外通告的 Pod 地址；不能是 loopback 或 `0.0.0.0` |
-| `FLEXLB_CONFIG` | 传给 Master 的完整配置，也是 Mock 公式投影的来源 |
-| `MOCK_BUNDLE_OVERRIDES_YAML` | 覆盖逻辑 P/D 数、heap、block size、KV pool 和 D 并发 |
-| `MOCK_PERFORMANCE_CONFIG_JSON` | 完整性能 JSON；覆盖镜像内默认性能文件 |
+| `FLEXLB_CONFIG` | 传给 Master 的完整配置 |
+| `MOCK_BUNDLE_OVERRIDES_YAML` | 仅覆盖逻辑 P/D 数与 heap |
+| `MOCK_ENGINE_CONFIG_JSON` | real 有效行为与容量快照；缺省使用显式 synthetic 测试文件 |
+| `MOCK_CALIBRATION_CONFIG_JSON` | 独立的耗时、EOS 与模拟参数 |
 | `MOCK_EOS_CONFIG_JSON` | 可选 EOS 对象；设置后覆盖 performance 内 EOS |
 | `FETCH_OUTPUT_STREAM` | `0` 自动接续、不等 frontend Fetch；`1` 等待完整 FetchResponse |
 | `MOCK_EVENT_LOG_ENABLED` | 是否保存请求级 JSONL；生产式观测默认依赖 KMonitor |
@@ -71,9 +72,9 @@ legacy JAR 是否存在取决于 CI 配方，见[构建与产物](README.md#ci-�
 | `MOCK_BUNDLE_LEGACY_MASTER=1` | 使用镜像内 pin 的 legacy Master |
 | `MOCK_PREFILL_COUNT` / `MOCK_DECODE_COUNT` | 可覆盖 YAML 中 P/D 数；与 overrides 同时设置时必须一致 |
 
-`MOCK_BUNDLE_OVERRIDES_YAML` 只接受实现列出的字段，数量、块容量和并发覆盖必须为正整数；heap 接受正整数字节数或 JVM 容量字符串（如 `512m`、`8g`）。P/D 数量变化后必须同时检查 Pod CPU/内存、端口数、Mock heap、每引擎 KV 容量和 D 并发；只增逻辑实例不会自动增加 Pod 资源。
+`MOCK_BUNDLE_OVERRIDES_YAML` 只接受实现列出的字段，数量必须为正整数；heap 接受正整数字节数或 JVM 容量字符串（如 `512m`、`8g`）。P/D 数量变化后必须同时检查 Pod CPU/内存、端口数、Mock heap、每引擎 KV 容量和 D 并发；只增逻辑实例不会自动增加 Pod 资源。
 
-性能 JSON 的 `block_size` 必须与 bundle 的物理 block size 一致。P/D 使用不同有效 block size 时同时配置 `prefill_block_size`、`decode_block_size` 和对应 pool blocks，不能用路由层旧缓存块参数替代物理 KV 块。
+行为、校准、allocator 容量与支持边界统一见[引擎配置](../architecture/engine-configuration.md)。
 
 ## 独立 Mock：bundle 镜像
 
@@ -87,17 +88,14 @@ legacy JAR 是否存在取决于 CI 配方，见[构建与产物](README.md#ci-�
 | `MOCK_GRPC_BASE_PORT` | 默认 29130；全部 P 在前、D 在后连续分配 gRPC 端口 |
 | `START_PORT` | 可选 HTTP 控制/健康端口；设置后 gRPC 从 `START_PORT+1` 开始，显式 gRPC 基端口必须一致 |
 | `POD_IP` | 必须是可通告的 IPv4 Pod 地址；缺省解析 hostname |
-| `MOCK_BLOCK_SIZE` | 1024 token |
-| `MOCK_PREFILL_BLOCK_SIZE` / `MOCK_DECODE_BLOCK_SIZE` | 可选的 P/D 有效 block size |
-| `MOCK_PREFILL_KV_POOL_BLOCKS` / `MOCK_DECODE_KV_POOL_BLOCKS` | 每引擎各 1024 块 |
-| `MOCK_DECODE_MAX_CONCURRENCY` | 每个 D 为 128 |
 | `MOCK_EVENT_LOOP_THREADS` / `MOCK_COMPLETION_THREADS` | 各 4 |
 | `MOCK_JAVA_OPTS` | `-Xms512m -Xmx2g`；支持引号，不执行 shell |
 | `FETCH_OUTPUT_STREAM` | 默认 1；0 开启自动接续 |
 | `MOCK_KMONITOR_ENABLED` | true |
 | `MOCK_CACHE_STATUS_COMPACT_ENCODING` | false；显式启用紧凑 CacheStatus 编码 |
-| `MOCK_PERFORMANCE_CONFIG_JSON` | 完整性能 JSON；缺省读取镜像内 performance.json；block_size 必须匹配 |
-| `FLEXLB_CONFIG` | 默认 `{}`；Mock 的性能公式配置来源 |
+| `MOCK_ENGINE_CONFIG_JSON` | 必填，角色行为与 allocator 容量 |
+| `MOCK_CALIBRATION_CONFIG_JSON` | 校准 JSON，缺省读取镜像内文件 |
+
 | `MOCK_BUNDLE_RUN_DIR` | 固定脚本为每次启动建立独立运行目录 |
 | `MOCK_BUNDLE_JAR_DIR` | 镜像内 tools/mock_bundle/jars，从中读取 mock.jar |
 | `JAVA_HOME` | `/opt/taobao/java` |
@@ -110,6 +108,7 @@ MOCK_DEPLOYMENT_MODE=single_pod
 MOCK_PREFILL_COUNT=2
 MOCK_DECODE_COUNT=3
 FETCH_OUTPUT_STREAM=1
+MOCK_ENGINE_CONFIG_JSON=<有效引擎与容量 JSON>
 ```
 
 按引擎拆分时，P 角色和 D 角色分别配置：
@@ -120,6 +119,7 @@ MOCK_DEPLOYMENT_MODE=per_engine
 ROLE_TYPE=PREFILL
 START_PORT=7001
 FETCH_OUTPUT_STREAM=1
+MOCK_ENGINE_CONFIG_JSON=<有效引擎与容量 JSON>
 ```
 
 D 角色使用 `ROLE_TYPE=DECODE`；P/D 的数量由 Whale 各角色副本数决定。
@@ -145,8 +145,8 @@ HTTP 健康监听。single_pod 产生的本地 discovery.json 仅供诊断，不
 | `ROLE_TYPE` | `PREFILL` 或 `DECODE` |
 | `POD_IP` | 平台通告地址；缺省时入口尝试取 Pod 内首个地址 |
 | `START_PORT` | HTTP 健康/控制端口；gRPC 为 `START_PORT+1` |
-| `MOCK_PERFORMANCE_CONFIG` / `_JSON` | 性能配置路径或完整 JSON，二选一 |
-| `MOCK_MASTER_CONFIG` / `_JSON` | 与 Master 匹配的配置路径或完整 JSON，二选一 |
+| `MOCK_ENGINE_CONFIG` / `_JSON` | 有效引擎配置路径或完整 JSON，二选一，必填 |
+| `MOCK_CALIBRATION_CONFIG` / `_JSON` | 校准路径或完整 JSON，二选一，必填 |
 | `FETCH_OUTPUT_STREAM` | `1` 等待 Fetch；`0` 自动接续 |
 | `MOCK_KMONITOR_ENABLED` | Whale 默认为 true；缺少真实 adapter 时启动失败 |
 | `MOCK_EVENT_LOG_ENABLED` | 可选请求级事件日志 |
@@ -161,8 +161,8 @@ P/D 的 `per_engine` 模式不负责启动 Master 或 ViT。每个 ViT Pod 通�
 `python3 /opt/flexlb-mock/tools/mock_bundle/vit.py` 启动一个 Java Mock ViT，
 要求 `RTP_LLM_MOCK_BUNDLE=1`、`ROLE_TYPE=VIT`，并提供真实模型的
 `CHECKPOINT_PATH` 或 `TOKENIZER_PATH`。`START_PORT` 是 HTTP 健康口，
-gRPC 是其加一；ViT 并发由 `VIT_MAX_CONCURRENT_REQUESTS` 控制，
-缓存预算由 `MOCK_VIT_CACHE_BYTES` 控制。该入口不加载 Torch，也不生成模型 metadata。
+gRPC 是其加一。`MOCK_ENGINE_CONFIG_JSON` 必须包含 `vit` 角色；
+并发、两层队列与缓存预算来自该角色。该入口不加载 Torch，也不生成模型 metadata。
 
 独立 Master 使用包含真实 VipServer adapter/client 的 JAR。CI 配方支持时，
 构建参数 `master_vipserver=true` 打包并证明该能力；运行入口为

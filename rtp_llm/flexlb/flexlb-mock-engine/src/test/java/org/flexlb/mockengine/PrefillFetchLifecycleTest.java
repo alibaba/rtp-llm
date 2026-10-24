@@ -33,6 +33,42 @@ class PrefillFetchLifecycleTest {
         assertEquals(0, ack.getErrorsCount());
     }
 
+    @Test void waitToRunBudgetIsIndependentOfRequestDeadlineAndFetchTtl() throws Exception {
+        var model = performanceModel(tempDir, "200", 1, 5);
+        model.setPrefillBatchPolicy(new MockPrefillBatchPolicy(1, 10000, 10000, 1, false, 0, 0, false));
+        model.pdPolicy = new MockPdPolicy(0, 1000, 15, 1, 5000, 10000, 128, 2000);
+        try (var cluster = MockEngineTestCluster.create(model, 62110, 1, 1)) {
+            var first = new Output(); var waiting = new Output();
+            cluster.prefill(0).generateStreamCall(inputWithDecode(77, 2048, cluster.decode(0).getGrpcPort(), 8), first);
+            cluster.prefill(0).generateStreamCall(inputWithDecode(78, 2048, cluster.decode(0).getGrpcPort(), 8), waiting);
+            assertTrue(waiting.done.await(1, TimeUnit.SECONDS));
+            assertNotNull(waiting.error);
+            assertEquals(8213, MockRpcErrors.downstream(waiting.error).getErrorCode());
+            first.success();
+            released(cluster);
+        }
+    }
+
+    @Test void expiredFetchPublicationRejectsInsteadOfArmingOneMillisecondTtl() throws Exception {
+        try (var cluster = cluster("10")) {
+            var input = inputWithDecode(76, 2048, cluster.decode(0).getGrpcPort(), 8);
+            input = input.toBuilder().setGenerateConfig(input.getGenerateConfig().toBuilder().setTimeoutMs(10000)).build();
+            var ack = enqueue(cluster.prefill(0), batch(76, slot(0, input)).toBuilder().setFetchAttachTimeoutMs(10000).build());
+            assertEquals(1, ack.getSuccessesCount());
+            var contexts = cluster.prefill(0).getClass().getDeclaredField("prefillSessions");
+            contexts.setAccessible(true);
+            var session = (MockPrefillSession)((Map<?, ?>)contexts.get(cluster.prefill(0))).get(76L);
+            var started = MockPrefillSession.class.getDeclaredField("preparationStartedNanos");
+            started.setAccessible(true);
+            started.setLong(session, System.nanoTime() - TimeUnit.SECONDS.toNanos(11));
+            var publish = cluster.prefill(0).getClass().getDeclaredMethod("armFetchExpiry", long.class, long.class);
+            publish.setAccessible(true);
+            var rejected = (EngineRpcService.ErrorDetailsPB)publish.invoke(cluster.prefill(0), 76L, 10000L);
+            assertEquals(603, rejected.getErrorCode());
+            released(cluster);
+        }
+    }
+
     private static long value(JavaMockEngineCluster.FastRpcService s, String key) {
         return ((Number) s.getSnapshot().get(key)).longValue();
     }
@@ -230,7 +266,7 @@ class PrefillFetchLifecycleTest {
         }
     }
 
-    @Test void pendingFetchIsNotALeakAndDecodeCancelKeepsOriginalFailureFrame() throws Exception {
+    @Test void pendingFetchIsNotALeakAndDecodeCancelPreservesTypedFailure() throws Exception {
         try (var c = cluster("150")) {
             submit(c, 11, 3000);
             c.decode(0).checkLeakDrain(0);
@@ -238,7 +274,9 @@ class PrefillFetchLifecycleTest {
             Output output = fetch(c, 11);
             c.decode(0).cancel(11);
             assertTrue(output.done.await(2, TimeUnit.SECONDS));
-            assertTrue(output.frames.stream().anyMatch(EngineRpcService.GenerateOutputsPB::hasErrorInfo));
+            assertNotNull(output.error);
+            assertEquals(8100, MockRpcErrors.downstream(output.error).getErrorCode());
+            assertFalse(output.frames.stream().anyMatch(EngineRpcService.GenerateOutputsPB::hasErrorInfo));
             Thread.sleep(200);
             released(c);
         }

@@ -76,13 +76,13 @@ class CacheSyncFixtureTest {
         assertEquals(110, fixture.response().getCacheKeysCount());
     }
 
-    @Test void allVersionsStillReturnFullSnapshotsAndCountersAreNotPollDependent() {
+    @Test void unchangedVersionOmitsKeysAndCountsOnlyFullPayloads() {
         var fixture = new CacheSyncFixture(0, 6, 176, 65, 2, () -> 0L);
         for (long requested : new long[]{-1, 2, 2, 3})
-            assertEquals(241, fixture.response(requested).getCacheKeysCount());
-        assertEquals(0L, fixture.snapshot().get("unchanged_responses"));
-        assertEquals(4L, fixture.snapshot().get("full_responses"));
-        assertEquals(964L, fixture.snapshot().get("entries"));
+            assertEquals(requested == 2 ? 0 : 241, fixture.response(requested).getCacheKeysCount());
+        assertEquals(2L, fixture.snapshot().get("unchanged_responses"));
+        assertEquals(2L, fixture.snapshot().get("full_responses"));
+        assertEquals(482L, fixture.snapshot().get("entries"));
         assertEquals(0L, fixture.snapshot().get("added_keys"));
     }
 }

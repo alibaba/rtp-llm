@@ -114,15 +114,6 @@ def load_performance_bundle(path):
         for key in ("schema_version", "id", "model", "hardware", "status", "source", "prefill_expression"):
             document.pop(key)
         document["calibration"] = Path(path).name
-    prefill = document.get("prefill", {})
-    if isinstance(prefill, dict):
-        if prefill.get("fifo") is not None and {"direct_batch_size_max", "max_batch_requests", "max_batch_tokens"}.intersection(prefill):
-            raise ValueError("prefill.fifo cannot be combined with legacy prefill batch limits")
-        memory = prefill.get("memory_cache", {})
-        if isinstance(memory, dict):
-            obsolete = {"read_ms_per_block", "write_ms_per_block", "copy_lifecycle"}.intersection(memory)
-            if obsolete:
-                raise ValueError(f"unsupported prefill.memory_cache fields: {sorted(obsolete)}")
     capture = document.pop("capture", None)
     if capture is not None:
         if not isinstance(capture, dict) or capture.get("status") not in ("verified", "legacy_unverified", "orphan"):
@@ -134,7 +125,34 @@ def load_performance_bundle(path):
             raise ValueError("verified capture requires deployment and window")
     master = document.pop("master", {})
     PairedMasterSettings.from_record(master)
+    if "block_size" in document:
+        # A calibration archive records its capture geometry; it is not runtime behavior.
+        document.pop("block_size")
+    if "engine_config" not in document:
+        document["engine_config"] = json.loads((ROOT.parent / "mock_bundle/engine-config.json").read_text())
     resolve_performance_calibration(document, path)
+    allowed = {
+        "sleep_scale",
+        "jitter_pct",
+        "engine_config",
+        "prefill",
+        "decode",
+        "vit",
+        "calibration_id",
+        "calibration_model",
+        "calibration_hardware",
+        "calibration_status",
+        "calibration_sha256",
+    }
+    if set(document) - allowed:
+        raise ValueError("unknown calibration fields: " + str(sorted(set(document) - allowed)))
+    for role, fields in {
+        "prefill": {"expression", "fixed_ms", "min_ms", "scale", "noise"},
+        "decode": {"scale", "noise", "step_ms_by_batch", "step_base_ms", "step_per_running_ms", "tokens_per_step", "eos"},
+    }.items():
+        values = document.get(role, {})
+        if not isinstance(values, dict) or set(values) - fields:
+            raise ValueError("invalid " + role + " calibration fields")
     return document, capture, master
 
 

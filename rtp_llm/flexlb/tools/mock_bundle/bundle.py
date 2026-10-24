@@ -1,11 +1,8 @@
 """Supervise one master and a local mock cluster as separate JVMs in a test Pod."""
 
 import json
-import re
-
-from deployment import resolve
-from master_compat import mock_formula_config, legacy_discovery
 import os
+import re
 import shutil
 import signal
 import socket
@@ -16,14 +13,16 @@ import urllib.request
 from pathlib import Path
 
 import yaml
+from deployment import resolve
+from master_compat import legacy_discovery, mock_formula_config
 
 ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(ROOT.parent / "online_eval"))
 sys.path.insert(0, str(ROOT.parent / "online_eval" / "src"))
+from adapters.mock_launch import MockLaunchSpec
+from adapters.perf_presets import resolve_performance_calibration
 from flexlb_cfg import render_env, render_process_config
 from mode_profiles import load_mode_tables, resolve_address_plan, resolve_mode
-from adapters.perf_presets import resolve_performance_calibration
-from adapters.mock_launch import MockLaunchSpec
 
 
 def normalize_heap(value, name):
@@ -39,6 +38,7 @@ def master_discovery_environment(endpoints, legacy):
     """Embedded masters always consume the changing file, never a static snapshot."""
     return legacy_discovery(endpoints, file_discovery=True) if legacy else endpoints["env"]
 
+
 def vit_configuration(cfg, env, mock_port, legacy):
     enabled = env.get("MOCK_VIT_ENABLED", "0")
     if enabled not in {"0", "1"}:
@@ -47,17 +47,7 @@ def vit_configuration(cfg, env, mock_port, legacy):
         return None
     if legacy:
         raise ValueError("modern Mock ViT requires the modern Master protocol")
-    values = {}
-    for name, default in {"port": mock_port + cfg["prefill"] + cfg["decode"],
-                          "hidden_size": 128, "concurrency": 4, "queue_capacity": 64,
-                          "embedding_cache_bytes": 67108864, "hash_cache_bytes": 8388608,
-                          "compute_delay_ms": 1}.items():
-        raw = env.get("MOCK_VIT_" + name.upper(), str(default))
-        if not raw.isdecimal():
-            raise ValueError("invalid MOCK_VIT_" + name.upper())
-        values[name] = int(raw)
-        if values[name] < (0 if name.endswith("bytes") or name == "compute_delay_ms" else 1):
-            raise ValueError("invalid MOCK_VIT_" + name.upper())
+    values = {"port": int(env.get("MOCK_VIT_PORT", mock_port + cfg["prefill"] + cfg["decode"]))}
     if not mock_port + cfg["prefill"] + cfg["decode"] <= values["port"] <= 65535:
         raise ValueError("Mock ViT port overlaps P/D or exceeds 65535")
     return values
@@ -82,25 +72,11 @@ def run():
     cfg_path = Path(os.environ.get("MOCK_BUNDLE_CONFIG_PATH", ROOT / "bundle.yaml"))
     cfg = yaml.safe_load(cfg_path.read_text())
     overrides = yaml.safe_load(os.environ.get("MOCK_BUNDLE_OVERRIDES_YAML", "{}"))
-    numeric_overrides = {
-        "prefill",
-        "decode",
-        "block_size",
-        "prefill_block_size",
-        "decode_block_size",
-        "prefill_kv_pool_blocks",
-        "decode_kv_pool_blocks",
-        "decode_max_concurrency",
-    }
-    if not isinstance(overrides, dict) or set(overrides) - numeric_overrides - {
-        "mock_heap",
-        "master_heap",
-    }:
+    numeric_overrides = {"prefill", "decode"}
+    if not isinstance(overrides, dict) or set(overrides) - numeric_overrides - {"mock_heap", "master_heap"}:
         raise ValueError("unsupported bundle override")
     for role in numeric_overrides:
-        if role in overrides and (
-            type(overrides[role]) is not int or overrides[role] <= 0
-        ):
+        if role in overrides and (type(overrides[role]) is not int or overrides[role] <= 0):
             raise ValueError(f"{role} must be a positive integer")
     for role in ("prefill", "decode"):
         key = "MOCK_" + role.upper() + "_COUNT"
@@ -116,17 +92,14 @@ def run():
         cfg[name] = normalize_heap(cfg[name], name)
     mode = resolve_mode("whale_embedded", cfg["master_mode"]) if "master_mode" in cfg else None
     profile = mode["master_profile"] if mode else cfg["profile"]
-    observation = (mode["observation"] if mode else
-                   load_mode_tables()["runtime_modes"]["whale_embedded"]["observation"])
+    observation = mode["observation"] if mode else load_mode_tables()["runtime_modes"]["whale_embedded"]["observation"]
     cfg.setdefault("kmonitor", observation["kmonitor"])
     if "profile" in cfg and cfg["profile"] != profile:
         raise ValueError("master_mode and profile disagree")
     fetch_output_stream = os.environ.get("FETCH_OUTPUT_STREAM", "0")
     if fetch_output_stream not in {"0", "1"}:
         raise ValueError("FETCH_OUTPUT_STREAM must be 0 or 1")
-    event_log_enabled = os.environ.get(
-        "MOCK_EVENT_LOG_ENABLED", "1" if observation["jsonl"] else "0"
-    )
+    event_log_enabled = os.environ.get("MOCK_EVENT_LOG_ENABLED", "1" if observation["jsonl"] else "0")
     if event_log_enabled not in {"0", "1"}:
         raise ValueError("MOCK_EVENT_LOG_ENABLED must be 0 or 1")
     http_port = int(os.environ.get("START_PORT", "7001"))
@@ -138,28 +111,20 @@ def run():
     raw = os.environ.get("FLEXLB_CONFIG") or render_env(profile)
     legacy = os.environ.get("MOCK_BUNDLE_LEGACY_MASTER") == "1"
     vit_cfg = vit_configuration(cfg, os.environ, mock_port, legacy)
-    mock_raw = mock_formula_config(raw, legacy,
-                                   os.environ.get("MOCK_PREFILL_EXECUTION_FORMULA"))
+    mock_raw = mock_formula_config(raw, legacy, os.environ.get("MOCK_PREFILL_EXECUTION_FORMULA"))
     (runtime / "master-source-config.json").write_text(raw)
     dispatcher = json.loads(raw).get("dispatcher", {}).get("type", "BATCH")
-    (runtime / "master-config.json").write_text(
-        render_process_config(
-            profile, jvm_heap=cfg["master_heap"], raw_config=mock_raw
-        )
-    )
+    (runtime / "master-config.json").write_text(render_process_config(profile, jvm_heap=cfg["master_heap"], raw_config=mock_raw))
     performance_path = (cfg_path.parent / cfg["performance"]).resolve()
-    performance_json = os.environ.get("MOCK_PERFORMANCE_CONFIG_JSON")
+    from runtime_configs import engine_input
+
+    engine = engine_input(os.environ, cfg_path.parent / cfg["engine_config"])
+    (runtime / "engine-config.json").write_text(json.dumps(engine))
+    performance_json = os.environ.get("MOCK_CALIBRATION_CONFIG_JSON")
     eos_json = os.environ.get("MOCK_EOS_CONFIG_JSON")
-    performance = json.loads(
-        performance_json
-        if performance_json is not None
-        else performance_path.read_text()
-    )
+    performance = json.loads(performance_json if performance_json is not None else performance_path.read_text())
     if not isinstance(performance, dict):
-        raise ValueError("MOCK_PERFORMANCE_CONFIG_JSON must be a JSON object")
-    if performance.get("block_size", cfg["block_size"]) != cfg["block_size"]:
-        raise ValueError("performance block_size must match bundle block_size")
-    performance["block_size"] = cfg["block_size"]
+        raise ValueError("MOCK_CALIBRATION_CONFIG_JSON must be a JSON object")
     if eos_json is not None:
         eos = json.loads(eos_json)
         if not isinstance(eos, dict):
@@ -202,7 +167,7 @@ def run():
         java_home = env.get("JAVA_HOME")
         java = shutil.which("java", path=env.get("PATH"))
         if java is None:
-            candidates = ([Path(java_home) / "bin" / "java"] if java_home else [])
+            candidates = [Path(java_home) / "bin" / "java"] if java_home else []
             candidates.append(Path("/opt/taobao/java/bin/java"))
             java = next((str(path) for path in candidates if path.is_file()), "java")
         # FetchResponse originates in a different Pod, so its advertised engine
@@ -211,25 +176,30 @@ def run():
         if pod_ip.startswith("127.") or pod_ip == "0.0.0.0":
             raise ValueError("bundle requires an advertised Pod IP")
         address_plan = resolve_address_plan(
-            "whale_embedded",
-            external_engine_clients=(dispatcher == "NON_BATCH" or fetch_output_stream == "1"),
-            pod_ip=pod_ip,
+            "whale_embedded", external_engine_clients=(dispatcher == "NON_BATCH" or fetch_output_stream == "1"), pod_ip=pod_ip
         )
         # With output fetching enabled the frontend owns continuation and completion.
         mock = start(
             "mock",
             MockLaunchSpec(
-                java=java, jar=jars / "mock.jar", jvm_options=("-Xmx" + cfg["mock_heap"],),
-                whale=True, whale_bundle=True, kmonitor=cfg["kmonitor"],
-                n_prefill=cfg["prefill"], n_decode=cfg["decode"], base_grpc_port=mock_port,
-                event_loop_threads=cfg["event_loop_threads"], completion_threads=cfg["completion_threads"],
-                decode_max_concurrency=cfg.get("decode_max_concurrency"), host=pod_ip,
-                unique_engine_ips=address_plan["unique_engine_ips"], auto_fetch=fetch_output_stream == "0",
-                endpoint_file=runtime / "endpoints.json", discovery_file=runtime / "discovery.json",
-                performance=performance_path, master_config=runtime / "master-config.json",
-                block_size=cfg["block_size"], prefill_block_size=cfg.get("prefill_block_size"),
-                decode_block_size=cfg.get("decode_block_size"),
-                prefill_kv_pool_blocks=cfg["prefill_kv_pool_blocks"], decode_kv_pool_blocks=cfg["decode_kv_pool_blocks"],
+                java=java,
+                jar=jars / "mock.jar",
+                jvm_options=("-Xmx" + cfg["mock_heap"],),
+                whale=True,
+                whale_bundle=True,
+                kmonitor=cfg["kmonitor"],
+                n_prefill=cfg["prefill"],
+                n_decode=cfg["decode"],
+                base_grpc_port=mock_port,
+                event_loop_threads=cfg["event_loop_threads"],
+                completion_threads=cfg["completion_threads"],
+                host=pod_ip,
+                unique_engine_ips=address_plan["unique_engine_ips"],
+                auto_fetch=fetch_output_stream == "0",
+                endpoint_file=runtime / "endpoints.json",
+                discovery_file=runtime / "discovery.json",
+                calibration=performance_path,
+                engine_config=runtime / "engine-config.json",
                 events_file=runtime / "engine-events.jsonl" if event_log_enabled == "1" else None,
             ).argv(),
             env,
@@ -239,12 +209,25 @@ def run():
         env.update(master_discovery_environment(endpoints, legacy))
 
         if vit_cfg is not None:
-            vit = start("vit", [java, "-Xms64m", "-Xmx512m", "-Djava.awt.headless=true", "-cp", str(jars / "mock.jar"),
-                                "org.flexlb.mockengine.MockVitServer",
-                                *[part for key, value in vit_cfg.items()
-                                  for part in ("--" + key.replace("_", "-"), str(value))],
-                                *(["--model-path", os.environ["MOCK_VIT_MODEL_PATH"]]
-                                  if os.environ.get("MOCK_VIT_MODEL_PATH") else [])], env)
+            vit = start(
+                "vit",
+                [
+                    java,
+                    "-Xms64m",
+                    "-Xmx512m",
+                    "-Djava.awt.headless=true",
+                    "-cp",
+                    str(jars / "mock.jar"),
+                    "org.flexlb.mockengine.MockVitServer",
+                    "--engine-config",
+                    str(runtime / "engine-config.json"),
+                    "--calibration",
+                    str(performance_path),
+                    *[part for key, value in vit_cfg.items() for part in ("--" + key.replace("_", "-"), str(value))],
+                    *(["--model-path", os.environ["MOCK_VIT_MODEL_PATH"]] if os.environ.get("MOCK_VIT_MODEL_PATH") else []),
+                ],
+                env,
+            )
             ready(vit_cfg["port"], vit, pod_ip)
             service = json.loads(env["MODEL_SERVICE_CONFIG"])
             pd_discovery = Path(service["discovery_file"])
@@ -256,11 +239,7 @@ def run():
                 group["vit_endpoint"] = {"address": "mock.vit.hosts.address", "protocol": "http", "path": "/"}
             env["MODEL_SERVICE_CONFIG"] = json.dumps(service)
             (runtime / "model-service.json").write_text(env["MODEL_SERVICE_CONFIG"])
-        env.update(
-            FLEXLB_CONFIG=raw,
-            SERVER_PORT=str(http_port),
-            MANAGEMENT_SERVER_PORT=str(http_port + 1),
-        )
+        env.update(FLEXLB_CONFIG=raw, SERVER_PORT=str(http_port), MANAGEMENT_SERVER_PORT=str(http_port + 1))
         master = start(
             "master",
             [
@@ -282,34 +261,23 @@ def run():
             if master.poll() is not None:
                 raise RuntimeError("master exited before application readiness")
             try:
-                with urllib.request.urlopen(
-                    f"http://127.0.0.1:{http_port}/hook/process_ok", timeout=2
-                ) as response:
+                with urllib.request.urlopen(f"http://127.0.0.1:{http_port}/hook/process_ok", timeout=2) as response:
                     if response.status == 200:
                         break
             except OSError:
                 if time.monotonic() >= deadline:
-                    raise TimeoutError("master application readiness deadline exceeded")
+                    raise TimeoutError("master application readiness deadline exceeded") from None
                 time.sleep(0.2)
         if stopping:
             return
-        with urllib.request.urlopen(
-            f"http://127.0.0.1:{http_port}/hook/after_start",
-            timeout=cfg["startup_timeout_s"],
-        ) as response:
+        with urllib.request.urlopen(f"http://127.0.0.1:{http_port}/hook/after_start", timeout=cfg["startup_timeout_s"]) as response:
             response.read()
-        with urllib.request.urlopen(
-            f"http://127.0.0.1:{http_port}/health", timeout=2
-        ) as response:
+        with urllib.request.urlopen(f"http://127.0.0.1:{http_port}/health", timeout=2) as response:
             response.read()
         (runtime / "identity.json").write_text(
             json.dumps(
                 {
-                    "mode": (
-                        "WHALE_BUNDLE_FETCH"
-                        if fetch_output_stream == "1"
-                        else "WHALE_BUNDLE_SCHEDULE_ONLY"
-                    ),
+                    "mode": ("WHALE_BUNDLE_FETCH" if fetch_output_stream == "1" else "WHALE_BUNDLE_SCHEDULE_ONLY"),
                     "deployment": plan.mode,
                     "master_discovery": plan.master_discovery,
                     "fetch_output_stream": fetch_output_stream == "1",

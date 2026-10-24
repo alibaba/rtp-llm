@@ -380,28 +380,24 @@ class PythonCompatControlApiTest {
 
         assertEquals(10L, perf.prefillMs(List.of(shape)), "baseline prefill should be 10ms");
         assertEquals(1L, perf.decodeMs(1, 1), "baseline decode should be 1ms");
-        assertEquals(1, prefill.getMaxPrefillConcurrency(), "default max_prefill_concurrency");
 
         httpPost("/set_perf",
                 "{\"engine\":\"prefill-0\",\"prefill_fixed_ms\":50,"
-                        + "\"decode_scale\":2.0,\"max_prefill_concurrency\":3}");
+                        + "\"decode_scale\":2.0}");
 
         assertEquals(50L, perf.prefillMs(List.of(shape)),
                 "prefill_fixed_ms must take effect");
         assertEquals(2L, perf.decodeMs(1, 1),
                 "decode_scale must double decode latency");
-        assertEquals(3, prefill.getMaxPrefillConcurrency());
 
-        // worker_status available_concurrency mirrors Python:
-        // max(0, max_prefill_concurrency - running) == 3 when idle.
+        // Real leaves available_concurrency unset.
         EngineRpcService.WorkerStatusPB status = unary(observer -> prefill.getWorkerStatus(
                 EngineRpcService.StatusVersionPB.newBuilder().build(), observer));
-        assertEquals(3, status.getAvailableConcurrency(),
-                "idle prefill available_concurrency should equal max_prefill_concurrency");
+        assertEquals(0, status.getAvailableConcurrency());
     }
 
     // ════════════════════════════════════════════════════════════════
-    //  Test 6: max_prefill_concurrency lanes run prefills in parallel
+    //  Test 6: calibration updates are isolated per engine
     // ════════════════════════════════════════════════════════════════
 
     @Test
@@ -412,46 +408,18 @@ class PythonCompatControlApiTest {
         MockPerformanceModel second = prefillServices.get(1).getPerformance();
         MockPerformanceModel.RequestShape shape = first.shape(
                 inputWithDecode(1, 10, decodeServices.get(0).getGrpcPort()), new MockLruBlockCache(16));
-        int initialCap = initial.maxWaitingPrefillBatches();
 
-        httpPost("/set_perf", "{\"engine\":\"prefill-0\",\"prefill_fixed_ms\":50,\"max_waiting_batches\":3}");
+        httpPost("/set_perf", "{\"engine\":\"prefill-0\",\"prefill_fixed_ms\":50}");
         httpPost("/set_perf", "{\"engine\":\"decode-0\",\"decode_scale\":7}");
         assertEquals(50L, first.prefillMs(List.of(shape)));
-        assertEquals(3, first.maxWaitingPrefillBatches());
         assertEquals(10L, second.prefillMs(List.of(shape)));
-        assertEquals(initialCap, second.maxWaitingPrefillBatches());
         assertEquals(7L, decodeServices.get(0).getPerformance().decodeMs(1, 1));
         assertEquals(1L, decodeServices.get(1).getPerformance().decodeMs(1, 1));
         assertEquals(10L, initial.prefillMs(List.of(shape)), "startup template stays unchanged");
-        assertEquals(initialCap, initial.maxWaitingPrefillBatches());
 
         httpPost("/set_perf", "{\"engine\":\"prefill-1\",\"prefill_fixed_ms\":500}");
         assertEquals(50L, first.prefillMs(List.of(shape)), "later writes to a sibling stay isolated");
         assertEquals(500L, second.prefillMs(List.of(shape)));
-    }
-
-    @Test
-    void maxPrefillConcurrencyLanesRunInParallel() throws Exception {
-        // sleep_scale=1.0, formula "200" -> each prefill batch takes ~200ms.
-        startCluster(model("200", 1.0), 1, 1);
-        JavaMockEngineCluster.FastRpcService prefill = prefillServices.get(0);
-        JavaMockEngineCluster.FastRpcService decode = decodeServices.get(0);
-
-        httpPost("/set_perf", "{\"engine\":\"prefill-0\",\"max_prefill_concurrency\":3}");
-
-        long startNanos = System.nanoTime();
-        for (int i = 0; i < 3; i++) {
-            enqueueAndFetch(prefill, batch(6000 + i, slot(0,
-                    inputWithDecode(9100 + i, 10, decode.getGrpcPort()))));
-        }
-        awaitCompleted(decode, 3, 10_000);
-        long elapsedMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startNanos);
-
-        // 3 parallel lanes: ~200ms total. Serial (legacy C=1) would be >= 600ms.
-        assertTrue(elapsedMs < 500,
-                "3 batches of 200ms with concurrency 3 should finish < 500ms, took " + elapsedMs);
-        assertTrue(elapsedMs >= 180,
-                "prefill sleep should actually happen, took " + elapsedMs);
     }
 
     // ════════════════════════════════════════════════════════════════
@@ -600,7 +568,7 @@ class PythonCompatControlApiTest {
 
     @Test
     void rpcCountsAndCancelledRidsExposed() throws Exception {
-        startCluster(model("10", 0.1), 1, 1);
+        startCluster(model("500", 1.0), 1, 1);
         JavaMockEngineCluster.FastRpcService prefill = prefillServices.get(0);
 
         enqueueAndFetch(prefill, batch(9000, slot(0,
@@ -608,6 +576,8 @@ class PythonCompatControlApiTest {
                 inputWithDecode(9501, 10, decodeServices.get(0).getGrpcPort()))));
 
         prefill.cancel(9500);
+        long until = System.nanoTime() + TimeUnit.SECONDS.toNanos(2);
+        while (prefill.getCancelledCount() == 0 && System.nanoTime() < until) Thread.sleep(1);
 
         JsonNode engine = engineByName("prefill-0");
         assertEquals(1, engine.get("rpc_counts").get("enqueue_batch").asLong());

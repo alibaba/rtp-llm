@@ -24,11 +24,11 @@ class DecodeLinkBreakTest {
         public void onCompleted() { done.countDown(); }
         void broken() throws Exception {
             assertTrue(done.await(2, TimeUnit.SECONDS), "P stream must terminate without client deadline");
-            assertNull(error);
-            var errors = frames.stream().filter(EngineRpcService.GenerateOutputsPB::hasErrorInfo).toList();
-            assertEquals(1, errors.size());
-            assertEquals(8209, errors.get(0).getErrorInfo().getErrorCodeValue());
-            assertFalse(errors.get(0).getErrorInfo().getErrorMessage().isBlank());
+            assertNotNull(error);
+            var details = MockRpcErrors.downstream(error);
+            assertEquals(8209, details.getErrorCode());
+            assertFalse(details.getErrorMessage().isBlank());
+            assertFalse(frames.stream().anyMatch(EngineRpcService.GenerateOutputsPB::hasErrorInfo));
             assertFalse(frames.stream().anyMatch(f -> f.getFlattenOutput().getFinishedList().contains(true)));
         }
     }
@@ -62,7 +62,8 @@ class DecodeLinkBreakTest {
             c.awaitAllInflightZero(2000);
             assertEquals(0, ((Number) c.prefill(0).getSnapshot().get("response_buffers")).intValue());
             c.decode(0).setStopped(true); // repeated teardown must be harmless
-            assertEquals(1, out.frames.stream().filter(EngineRpcService.GenerateOutputsPB::hasErrorInfo).count());
+            assertNotNull(out.error);
+            assertFalse(out.frames.stream().anyMatch(EngineRpcService.GenerateOutputsPB::hasErrorInfo));
         }
     }
 
@@ -116,11 +117,10 @@ class DecodeLinkBreakTest {
                 cancel.get(2, TimeUnit.SECONDS);
                 stop.get(2, TimeUnit.SECONDS);
                 assertTrue(out.done.await(2, TimeUnit.SECONDS));
-                assertNull(out.error);
-                var errors = out.frames.stream().filter(EngineRpcService.GenerateOutputsPB::hasErrorInfo).toList();
-                assertEquals(1, errors.size());
-                int code = errors.get(0).getErrorInfo().getErrorCodeValue();
-                assertTrue(code == 8209 || code == EngineRpcService.ErrorCodePB.CANCELLED_VALUE);
+                assertNotNull(out.error);
+                int code = (int) MockRpcErrors.downstream(out.error).getErrorCode();
+                assertTrue(code == 8209 || code == 8100);
+                assertFalse(out.frames.stream().anyMatch(EngineRpcService.GenerateOutputsPB::hasErrorInfo));
             }
         } finally { workers.shutdownNow(); }
     }

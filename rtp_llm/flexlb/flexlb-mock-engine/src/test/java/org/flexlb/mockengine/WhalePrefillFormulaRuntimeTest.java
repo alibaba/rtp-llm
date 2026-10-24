@@ -23,7 +23,7 @@ class WhalePrefillFormulaRuntimeTest {
         Files.writeString(perf, "{\"block_size\":2,\"prefill\":{\"scale\":0.5}}");
         Path config = directory.resolve("master.json");
         MockMasterConfig.writeWithPrefillExpression(config, "200");
-        var model = MockPerformanceModel.load(perf.toString(), config.toString());
+        var model = MockModelFixture.load(perf.toString(), config.toString());
         var cache = new MockLruBlockCache(10);
         cache.admit(List.of(1L, 2L));
         var request = model.shape(EngineRpcService.GenerateInputPB.newBuilder()
@@ -44,7 +44,7 @@ class WhalePrefillFormulaRuntimeTest {
         Files.writeString(perf, "{}");
         Path config = directory.resolve("aggregate-master.json");
         MockMasterConfig.writeWithPrefillExpression(config, "200");
-        var model = MockPerformanceModel.load(perf.toString(), config.toString());
+        var model = MockModelFixture.load(perf.toString(), config.toString());
         var cache = new MockLruBlockCache(10);
         var first = model.shape(EngineRpcService.GenerateInputPB.newBuilder()
                 .addAllTokenIds(List.of(1, 2, 3, 4)).build(), cache);

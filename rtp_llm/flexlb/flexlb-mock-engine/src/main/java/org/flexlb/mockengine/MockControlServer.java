@@ -80,6 +80,8 @@ final class MockControlServer {
         this.engineManager = engineManager;
         this.httpServer = HttpServer.create(new InetSocketAddress(host, httpPort), 0);
         httpServer.createContext("/snapshot", this::handleSnapshot);
+        httpServer.createContext("/effective_config", exchange -> sendJson(exchange, 200,
+                Map.of("engines", services.values().stream().map(JavaMockEngineCluster.FastRpcService::effectiveConfiguration).toList())));
         httpServer.createContext("/inject", this::handleInject);
         httpServer.createContext("/clear_inject", this::handleClearInject);
         httpServer.createContext("/health", this::handleHealth);
@@ -191,6 +193,8 @@ final class MockControlServer {
             sendJson(exchange, 200, action.apply(body, service));
         } catch (ApiException apiFailure) {
             sendJson(exchange, apiFailure.status, apiFailure.response);
+        } catch (IllegalArgumentException failure) {
+            sendJson(exchange, 400, Map.of("error", failure.getMessage()));
         } catch (Exception failure) {
             // Always answer malformed JSON and unexpected handler failures;
             // if a response was already committed there is nothing left to do.
@@ -554,23 +558,12 @@ final class MockControlServer {
     private void handleSetPerf(HttpExchange exchange) throws IOException {
         handleServicePost(exchange, (body, service) -> {
             MockPerformanceModel perf = service.getPerformance();
-            if (body.has("cache_retention_blocks")) {
-                JsonNode value = body.get("cache_retention_blocks");
-                if (!value.isIntegralNumber() || !value.canConvertToInt()
-                        || value.asInt() < 0 || value.asInt() > service.getCacheBlocks()) {
-                    throw new ApiException(400, "cache_retention_blocks outside physical pool");
-                }
+            MockEngineConfig.fields(body, "engine", "port", "prefill_fixed_ms", "decode_scale");
+            for (String key : new String[]{"prefill_fixed_ms", "decode_scale"}) {
+                JsonNode value = body.get(key);
+                if (value != null && (!value.isNumber() || !Double.isFinite(value.doubleValue()) || value.doubleValue() < 0))
+                    throw new IllegalArgumentException(key + " must be finite and nonnegative");
             }
-            if (body.has("decode_retry_times") || body.has("decode_retry_interval_ms")
-                    || body.has("decode_retry_timeout_ms")) {
-                throw new ApiException(400, "decode_retry_* no longer controls KV capacity admission; use request timeout_ms");
-            }
-            if (body.has("max_waiting_batches") && body.path("max_waiting_batches").asInt() < 0)
-                throw new ApiException(400, "max_waiting_batches must be >= 0 (0 = unbounded)");
-            if (body.has("cache_retention_blocks"))
-                service.setCacheRetentionBlocks(body.get("cache_retention_blocks").asInt());
-            if (body.has("max_prefill_concurrency"))
-                service.setMaxPrefillConcurrency(body.get("max_prefill_concurrency").asInt());
             perf.applyOverrides(body);
             return successResponse(service);
         });
@@ -706,7 +699,7 @@ final class MockControlServer {
             // (stopped=true, no phantom server) instead of stopped=false with
             // nothing listening.
             Server existing = serversByPort.get(port);
-            if (existing != null && !existing.isShutdown()) {
+            if (existing != null) {
                 existing.shutdown();
                 try {
                     if (!existing.awaitTermination(5, TimeUnit.SECONDS)) {

@@ -142,11 +142,13 @@ class CrashAfterTest {
                     "crash resets the rpc counters");
             assertEquals(0, intField(wiped, "waiting"), "crash wipes the wait queues");
 
-            // The 4th in-process request sees the stopped rejection: empty ack.
+            // An in-process call on the stopped object gets a per-request UNAVAILABLE answer.
             EngineRpcService.EnqueueBatchResponsePB fourth = enqueue(prefill,
                     batch(3004, slot(0, input(4, 10))));
             assertEquals(0, fourth.getSuccessesCount());
-            assertEquals(0, fourth.getErrorsCount());
+            assertEquals(1, fourth.getErrorsCount());
+            assertEquals(4, fourth.getErrors(0).getRequestId());
+            assertEquals(14, fourth.getErrors(0).getErrorInfo().getErrorCode());
 
             // Port kill: after the CRASH_PORT_KILL_DELAY_MS grace a REAL gRPC
             // channel gets connection-refused (UNAVAILABLE) — the master's
@@ -405,7 +407,7 @@ class CrashAfterTest {
                     EngineRpcService.EnqueueBatchRequestPB.newBuilder()
                             .setBatchId(2L)
                             .build());
-            return response != null; // stopped engines answer empty acks — still "serving"
+            return response != null; // stopped objects answer UNAVAILABLE entries — the transport still responds
         } catch (StatusRuntimeException e) {
             return false;
         } finally {

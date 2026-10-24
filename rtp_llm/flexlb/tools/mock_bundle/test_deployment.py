@@ -2,9 +2,9 @@ import contextlib
 import io
 import json
 import os
-from pathlib import Path
 import tempfile
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 
 import bundle
@@ -21,8 +21,7 @@ class DeploymentTest(unittest.TestCase):
         ):
             with self.subTest(mode=mode):
                 plan = deployment.resolve({"MOCK_DEPLOYMENT_MODE": mode})
-                self.assertEqual((plan.entrypoint, plan.master_discovery, plan.remote_decode),
-                                 (entrypoint, discovery, remote))
+                self.assertEqual((plan.entrypoint, plan.master_discovery, plan.remote_decode), (entrypoint, discovery, remote))
 
     def test_legacy_entrypoints_and_deprecation(self):
         self.assertEqual(deployment.resolve({}).mode, "embedded")
@@ -42,7 +41,8 @@ class DeploymentTest(unittest.TestCase):
             {"MOCK_DEPLOYMENT_MODE": "single_pod", "MOCK_BUNDLE_FILE_DISCOVERY": "1"},
             {"MOCK_DEPLOYMENT_MODE": "single_pod", "MOCK_BUNDLE_OVERRIDES_YAML": "{}"},
             {"MOCK_DEPLOYMENT_MODE": "per_engine", "MOCK_BUNDLE_LEGACY_MASTER": "1"},
-            {"MOCK_BUNDLE_ROLE": "typo"}, {"MOCK_REMOTE_DECODE": "maybe"},
+            {"MOCK_BUNDLE_ROLE": "typo"},
+            {"MOCK_REMOTE_DECODE": "maybe"},
             {"MOCK_REMOTE_DECODE": "true"},
         ]
         for env in cases:
@@ -50,16 +50,16 @@ class DeploymentTest(unittest.TestCase):
                 deployment.resolve(env)
 
     def test_dispatch_uses_plan(self):
-        for mode, module in (("embedded", bundle), ("single_pod", standalone_mock),
-                             ("per_engine", standalone_mock)):
-            with patch.dict(os.environ, {"MOCK_DEPLOYMENT_MODE": mode}, clear=True), \
-                    patch.object(module, "run") as run:
+        for mode, module in (("embedded", bundle), ("single_pod", standalone_mock), ("per_engine", standalone_mock)):
+            with patch.dict(os.environ, {"MOCK_DEPLOYMENT_MODE": mode}, clear=True), patch.object(module, "run") as run:
                 deployment.main()
                 run.assert_called_once_with()
 
     def test_wrong_direct_entrypoint_fails_before_launch(self):
-        with patch.dict(os.environ, {"RTP_LLM_MOCK_BUNDLE": "1", "MOCK_DEPLOYMENT_MODE": "single_pod"}, clear=True), \
-                patch.object(bundle.subprocess, "Popen") as start:
+        with (
+            patch.dict(os.environ, {"RTP_LLM_MOCK_BUNDLE": "1", "MOCK_DEPLOYMENT_MODE": "single_pod"}, clear=True),
+            patch.object(bundle.subprocess, "Popen") as start,
+        ):
             with self.assertRaisesRegex(ValueError, "launcher conflicts"):
                 bundle.run()
             start.assert_not_called()
@@ -75,16 +75,22 @@ class DeploymentTest(unittest.TestCase):
 
     def test_per_engine_role_and_single_pod_vip_port_plan(self):
         with tempfile.TemporaryDirectory() as directory:
-            base = {"RTP_LLM_MOCK_BUNDLE": "1", "POD_IP": "10.0.0.5",
-                    "MOCK_BUNDLE_RUN_DIR": directory, "START_PORT": "7001"}
+            base = {
+                "RTP_LLM_MOCK_BUNDLE": "1",
+                "POD_IP": "10.0.0.5",
+                "MOCK_BUNDLE_RUN_DIR": directory,
+                "START_PORT": "7001",
+                "MOCK_ENGINE_CONFIG_JSON": (Path(__file__).parent / "engine-config.json").read_text(),
+            }
             for role in ("PREFILL", "DECODE"):
                 args = standalone_mock.command({**base, "MOCK_DEPLOYMENT_MODE": "per_engine", "ROLE_TYPE": role})
                 self.assertEqual(args[args.index("--whale-bundle") + 1], "false")
                 self.assertNotIn("--discovery-file", args)
                 plan = json.loads(Path(directory, "deployment.json").read_text())
                 self.assertEqual(plan["vip_grpc_endpoints"], [{"role": role.lower(), "ip": "10.0.0.5", "port": 7002}])
-            args = standalone_mock.command({**base, "MOCK_DEPLOYMENT_MODE": "single_pod",
-                                            "MOCK_PREFILL_COUNT": "2", "MOCK_DECODE_COUNT": "3"})
+            args = standalone_mock.command(
+                {**base, "MOCK_DEPLOYMENT_MODE": "single_pod", "MOCK_PREFILL_COUNT": "2", "MOCK_DECODE_COUNT": "3"}
+            )
             self.assertEqual(args[args.index("--whale-bundle") + 1], "true")
             plan = json.loads(Path(directory, "deployment.json").read_text())
             self.assertEqual([e["port"] for e in plan["vip_grpc_endpoints"]], list(range(7002, 7007)))

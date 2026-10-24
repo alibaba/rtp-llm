@@ -23,6 +23,7 @@ final class MockVitImage {
         long embeddingBytes() { return embedding.getFp32Data().size() + embedding.getBf16Data().size(); }
         long hashBytes() { return hashes.getInt32Data().size(); }
     }
+    record Prepared(int rows, int hiddenSize, int bytes, long seed, double downloadMs) {}
     private MockVitImage() {}
 
     static String key(EngineRpcService.MultimodalInputPB image) {
@@ -57,32 +58,57 @@ final class MockVitImage {
 
     static Result compute(EngineRpcService.MultimodalInputPB input, int hiddenSize,
                           int maxInputBytes, long maxOutputBytes, long timeoutMs) throws Exception {
+        return forward(prepare(input, hiddenSize, maxInputBytes, maxOutputBytes, timeoutMs, java.util.Map.of()));
+    }
+
+    static Prepared prepare(EngineRpcService.MultimodalInputPB input, int hiddenSize,
+                            int maxInputBytes, long maxOutputBytes, long timeoutMs,
+                            java.util.Map<String, String> headers) throws Exception {
+        return prepare(input, hiddenSize, maxInputBytes, maxOutputBytes, timeoutMs, headers, null);
+    }
+
+    static Prepared prepare(EngineRpcService.MultimodalInputPB input, int hiddenSize,
+                            int maxInputBytes, long maxOutputBytes, long timeoutMs,
+                            java.util.Map<String, String> headers, MockVitMediaCache mediaCache) throws Exception {
+        long downloadStarted = System.nanoTime();
         if (input.getMultimodalType() != 1) throw new IllegalArgumentException("Mock ViT currently supports IMAGE only");
         if (input.getMultimodalTensor().getSerializedSize() != 0)
             throw new IllegalArgumentException("Mock ViT requires URL images, not preprocessed tensors");
-        byte[] raw;
         String url = input.getMultimodalUrl();
-        if (url.startsWith("data:")) {
-            int comma = url.indexOf(',');
-            if (comma < 0 || !url.substring(0, comma).endsWith(";base64"))
-                throw new IllegalArgumentException("image data URL must be base64");
-            if ((long)(url.length() - comma - 1) * 3 / 4 > maxInputBytes)
-                throw new IllegalArgumentException("image exceeds byte limit");
-            raw = Base64.getDecoder().decode(url.substring(comma + 1));
-        } else {
-            URI uri = URI.create(url);
-            if (!"http".equals(uri.getScheme()) && !"https".equals(uri.getScheme()))
-                throw new IllegalArgumentException("image URL must use http, https or data");
-            var client = HttpClient.newBuilder().connectTimeout(Duration.ofMillis(timeoutMs))
-                    .followRedirects(HttpClient.Redirect.NORMAL).build();
-            var response = client.send(HttpRequest.newBuilder(uri).timeout(Duration.ofMillis(timeoutMs)).GET().build(),
-                    HttpResponse.BodyHandlers.ofInputStream());
-            try (var body = response.body()) {
-                if (response.statusCode() / 100 != 2) throw new IllegalArgumentException("image download HTTP " + response.statusCode());
-                raw = body.readNBytes(maxInputBytes + 1);
+        byte[] raw = mediaCache == null ? null : mediaCache.get(url);
+        if (raw == null) {
+            if (url.startsWith("data:")) {
+                int comma = url.indexOf(',');
+                if (comma < 0 || !url.substring(0, comma).endsWith(";base64"))
+                    throw new IllegalArgumentException("image data URL must be base64");
+                if ((long)(url.length() - comma - 1) * 3 / 4 > maxInputBytes)
+                    throw new IllegalArgumentException("image exceeds byte limit");
+                try { raw = Base64.getDecoder().decode(url.substring(comma + 1)); }
+                catch (IllegalArgumentException error) { throw MockRpcErrors.error(io.grpc.Status.INTERNAL, 906, "Multimodal download failed: invalid base64"); }
+            } else {
+                URI uri = URI.create(url);
+                if (!"http".equals(uri.getScheme()) && !"https".equals(uri.getScheme()))
+                    throw new IllegalArgumentException("image URL must use http, https or data");
+                var client = HttpClient.newBuilder().connectTimeout(Duration.ofMillis(timeoutMs))
+                        .followRedirects(HttpClient.Redirect.NORMAL).build();
+                var request = HttpRequest.newBuilder(uri).timeout(Duration.ofMillis(timeoutMs));
+                headers.forEach(request::header);
+                try {
+                    var response = client.send(request.GET().build(), HttpResponse.BodyHandlers.ofInputStream());
+                    try (var body = response.body()) {
+                        if (response.statusCode() != 200) throw MockRpcErrors.error(io.grpc.Status.INTERNAL, 906,
+                                "Multimodal download failed: HTTP " + response.statusCode());
+                        raw = body.readNBytes(maxInputBytes + 1);
+                    }
+                } catch (java.io.IOException error) {
+                    throw MockRpcErrors.error(io.grpc.Status.INTERNAL, 906, "Multimodal download failed: " + error.getMessage());
+                }
             }
+            if (raw.length > maxInputBytes) throw new IllegalArgumentException("image exceeds byte limit");
+            if (mediaCache != null) mediaCache.put(url, raw);
         }
         if (raw.length > maxInputBytes) throw new IllegalArgumentException("image exceeds byte limit");
+        double downloadMs = (System.nanoTime() - downloadStarted) / 1e6;
         BufferedImage image;
         try (var stream = ImageIO.createImageInputStream(new ByteArrayInputStream(raw))) {
             var readers = ImageIO.getImageReaders(stream);
@@ -115,8 +141,13 @@ final class MockVitImage {
         digest.update(cacheKey.substring(cacheKey.indexOf('_')).getBytes(StandardCharsets.UTF_8));
         digest.update(ByteBuffer.allocate(8).putInt(geometry[0]).putInt(geometry[1]).array());
         byte[] seed = digest.digest();
-        long state = ByteBuffer.wrap(seed).getLong();
-        ByteBuffer features = ByteBuffer.allocate((int)bytes).order(ByteOrder.LITTLE_ENDIAN);
+        return new Prepared(rows, hiddenSize, (int)bytes, ByteBuffer.wrap(seed).getLong(), downloadMs);
+    }
+
+    static Result forward(Prepared image) {
+        int rows = image.rows(), hiddenSize = image.hiddenSize();
+        long state = image.seed();
+        ByteBuffer features = ByteBuffer.allocate(image.bytes()).order(ByteOrder.LITTLE_ENDIAN);
         ByteBuffer hashes = ByteBuffer.allocate(rows * 4).order(ByteOrder.LITTLE_ENDIAN);
         for (int row = 0; row < rows; row++) {
             int start = features.position();
