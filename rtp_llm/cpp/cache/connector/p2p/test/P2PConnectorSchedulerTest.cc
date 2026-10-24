@@ -900,7 +900,7 @@ TEST_F(P2PConnectorSchedulerTest, DecodeCompactStateProjectsUsingPrefillCpSize) 
 
 TEST(P2PDecodeRouteProjectionTest, CompactStateUsesGroupBlockSizeOnCp1Destination) {
     P2PConnectorSchedulerConfig config;
-    config.seq_size_per_block = 1024;
+    config.cache_key_tokens_per_block = 1024;
     config.topology = test::makeTestCacheTopology(1, 1, {{0}}, 2048, {CacheGroupType::SWA});
     config.parallelism_config.tp_size = 1;
     config.parallelism_config.prefill_cp_config.kv_cache_sharded = true;
@@ -909,7 +909,7 @@ TEST(P2PDecodeRouteProjectionTest, CompactStateUsesGroupBlockSizeOnCp1Destinatio
     KVCacheResource resource;
     resource.initGroups(config.topology);
     resource.cacheKeys() = {100, 101, 102};
-    resource.mutableBlockIds(0).assign({10, 11, NULL_BLOCK_IDX});
+    resource.mutableBlockIds("group0").assign({10, 11, NULL_BLOCK_IDX});
     TransferPlan plan;
     for (int source_rank = 0; source_rank < 2; ++source_rank) {
         TransferRoute route;
@@ -939,7 +939,7 @@ TEST(P2PDecodeRouteProjectionTest, CompactStateUsesGroupBlockSizeOnCp1Destinatio
             EXPECT_EQ(blocks.block_ids(expected_count - 1), 11);
         }
     }
-    resource.mutableBlockIds(0).assign({10, NULL_BLOCK_IDX, 12});
+    resource.mutableBlockIds("group0").assign({10, NULL_BLOCK_IDX, 12});
     EXPECT_FALSE(scheduler.buildDecodeRankRoutes(plan, resource, {2, -1}, 1).ok());
 }
 

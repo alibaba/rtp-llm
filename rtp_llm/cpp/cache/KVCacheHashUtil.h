@@ -5,7 +5,7 @@
 
 namespace rtp_llm {
 
-CacheKeysType calculateCacheKeys(const int* token_ids, size_t token_count, int seq_size_per_block);
+CacheKeysType calculateCacheKeys(const int* token_ids, size_t token_count, int seq_size_per_block, int64_t initial_hash = 0);
 
 // Initial fill: build cache_keys for all blocks (including the final partial block).
 // Also updates BatchKVCacheResource::last_block_aligned based on seq_len % seq_size_per_block.

@@ -1560,8 +1560,8 @@ TEST_F(StreamCacheResourceTest, WritebackAccountingWaitsForSuccessfulAllocationA
     auto&        resource = stream_->streamCacheResource();
     MallocResult matched{true, 4};
     matched.reuse_accounting.unaccounted_block_indices = {1};
-    auto allocator             = std::make_shared<testing::NiceMock<MockKVCacheAllocator>>(cache_manager_->config_);
-    cache_manager_->allocator_ = allocator;
+    auto allocator             = std::make_shared<testing::NiceMock<MockCoordinatorCacheManager>>(cache_manager_->config_);
+    cache_manager_->coordinator_manager_ = allocator;
     EXPECT_CALL(*allocator, initMallocForCommonLen(testing::_)).WillRepeatedly(testing::Return(matched));
     EXPECT_CALL(*allocator, incrMalloc(testing::_))
         .WillOnce(testing::Return(MallocResult{false, 0, 0, MallocStatus::RETRYABLE_RESOURCE_EXHAUSTED}))
@@ -1597,8 +1597,8 @@ TEST_F(StreamCacheResourceTest, OnlySuccessfulPrefillReleaseRequestsAccountingCo
         prepareResource(true, role);
         auto& resource = stream_->streamCacheResource();
         ASSERT_TRUE(resource.initKVBlock().ok());
-        const auto actual_allocator = cache_manager_->allocator_;
-        auto allocator = std::make_shared<testing::NiceMock<MockKVCacheAllocator>>(cache_manager_->config_);
+        const auto actual_allocator = cache_manager_->coordinator_manager_;
+        auto allocator = std::make_shared<testing::NiceMock<MockCoordinatorCacheManager>>(cache_manager_->config_);
         EXPECT_CALL(*allocator, insertIntoCache(testing::_, testing::_))
             .WillOnce(testing::Invoke([&](const InsertInfo& info, size_t& resident_prefix_length) {
                 EXPECT_EQ(info.account_for_prefill, role == RoleType::PREFILL);
@@ -1607,10 +1607,10 @@ TEST_F(StreamCacheResourceTest, OnlySuccessfulPrefillReleaseRequestsAccountingCo
         EXPECT_CALL(*allocator, free(testing::_)).WillOnce(testing::Invoke([&](const FreeInfo& info) {
             actual_allocator->free(info);
         }));
-        cache_manager_->allocator_ = allocator;
+        cache_manager_->coordinator_manager_ = allocator;
         stream_->generate_status_->status = StreamState::FINISHED;
         resource.releaseResource();
-        cache_manager_->allocator_ = actual_allocator;
+        cache_manager_->coordinator_manager_ = actual_allocator;
     }
 }
 
