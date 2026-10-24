@@ -671,6 +671,7 @@ CoordinatorCacheManager::prepareKVCache(const CacheKeysType&                 cac
     }
     const int                         cp_scale     = (cp_mapper && cp_mapper->isSharded()) ? cp_mapper->cpSize() : 1;
     BlockTreeMatchResult              match_result = block_tree_cache_->match(cache_keys, valid_prefix);
+    prepared.reuse_accounting = std::move(match_result.reuse_accounting);
     std::shared_ptr<LoadAsyncContext> load_context = std::move(match_result.async_context);
     prepared.matched_device_blocks                 = match_result.matched_device_blocks;
     prepared.total_logical_blocks =
@@ -795,6 +796,7 @@ MallocResult CoordinatorCacheManager::initMallocForCommonLen(const MallocInfo& m
                             load_context};
         result.match_end_time_us = match_end_time_us;
         result.load_attempted    = load_attempted;
+        result.reuse_accounting  = std::move(deferred_prepared->reuse_accounting);
         return result;
     }
 
@@ -805,6 +807,7 @@ MallocResult CoordinatorCacheManager::initMallocForCommonLen(const MallocInfo& m
         true, static_cast<int>(prepared.matched_device_blocks) * reuse_unit_tokens, match_cost_time_us, load_context};
     result.match_end_time_us = match_end_time_us;
     result.load_attempted    = load_attempted;
+    result.reuse_accounting  = std::move(prepared.reuse_accounting);
     return result;
 }
 
@@ -1186,10 +1189,10 @@ void CoordinatorCacheManager::insertIntoCache(const InsertInfo& insert_info, siz
         resources.resize(publish_prefix);
         if (insert_info.is_resident) {
             const size_t batch_resident_prefix_length =
-                block_tree_cache_->insert(insert_keys, resources, insert_info.target_tier, true);
+                block_tree_cache_->insert(insert_keys, resources, insert_info.target_tier, true, insert_info.account_for_prefill);
             resident_prefix_length += batch_resident_prefix_length;
         } else {
-            block_tree_cache_->insert(insert_keys, resources, insert_info.target_tier);
+            block_tree_cache_->insert(insert_keys, resources, insert_info.target_tier, false, insert_info.account_for_prefill);
         }
     }
 }

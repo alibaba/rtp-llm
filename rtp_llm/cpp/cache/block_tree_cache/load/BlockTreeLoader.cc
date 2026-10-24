@@ -156,6 +156,12 @@ BlockTreeMatchResult BlockTreeLoader::createMatchResult(std::vector<TreeNode*>& 
     }
     const int64_t access_time_us = currentTimeUs();
 
+    for (size_t index = 0; index < path.size(); ++index) {
+        if (!path[index]->is_accounted) {
+            result.reuse_accounting.unaccounted_block_indices.push_back(index);
+        }
+    }
+
     for (size_t candidate_count = path.size(); candidate_count > 0; --candidate_count) {
         if (!candidate_valid[candidate_count - 1]) {
             continue;

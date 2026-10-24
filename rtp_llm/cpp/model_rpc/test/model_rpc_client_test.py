@@ -1250,6 +1250,31 @@ class ModelRpcClientTest(TestCase):
         self.assertEqual(elements[0]["type"], "tag")
         self.assertEqual(elements[1]["type"], "json_schema")
 
+    def test_trans_output_preserves_writeback_billing_and_physical_reuse(self):
+        input_py = GenerateInput(
+            token_ids=torch.arange(8, dtype=torch.int32),
+            generate_config=GenerateConfig(aux_info=True),
+            request_id=1,
+            mm_inputs=[],
+        )
+        for first_use_len in (0, 2):
+            with self.subTest(first_use_len=first_use_len):
+                outputs_pb = GenerateOutputsPB()
+                output_pb = outputs_pb.flatten_output
+                output_pb.finished.append(False)
+                aux_info = output_pb.aux_info.add()
+                aux_info.total_reuse_len = 6 - first_use_len
+                aux_info.writeback_first_use_len = first_use_len
+                aux_info.local_reuse_len = 6
+
+                outputs = trans_output(input_py, outputs_pb, StreamState())
+
+                actual = outputs.generate_outputs[0].aux_info
+                self.assertEqual(actual.reuse_len, 6 - first_use_len)
+                self.assertEqual(actual.actual_reuse_len, 6)
+                self.assertEqual(actual.writeback_first_use_len, first_use_len)
+                self.assertEqual(actual.local_reuse_len, 6)
+
     def test_trans_output_preserves_speculative_acceptance_counters(self):
         input_py = GenerateInput(
             token_ids=torch.tensor([1, 2], dtype=torch.int32),
