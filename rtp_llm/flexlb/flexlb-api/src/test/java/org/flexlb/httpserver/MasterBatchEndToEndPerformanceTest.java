@@ -1142,12 +1142,12 @@ class MasterBatchEndToEndPerformanceTest extends FlexLBMockTestBase {
         }
         Throwable failure = simulatedStatusFailure.get();
         if (failure != null) {
-            throw new AssertionError("simulated Engine status projection failed", failure);
+            throw new AssertionError("simulated Engine status handling failed", failure);
         }
         assertEquals(expected, simulatedCompletionCount.get(),
                 "every successful route must receive actual-worker completion evidence");
         assertTrue(acceptedRequests.isEmpty(), "accepted batches must all match a published route");
-        assertTrue(simulatedCompletions.isEmpty(), "terminal projection queue must be drained");
+        assertTrue(simulatedCompletions.isEmpty(), "terminal completion queue must be drained");
         assertEquals(0, scheduler.getTrackedRequestCount(), "request lifecycle registry must be drained");
         for (String address : endpointRegistry.endpointAddressSnapshot(RoleType.PREFILL)) {
             PrefillEndpoint endpoint = (PrefillEndpoint) endpointRegistry.get(RoleType.PREFILL, address);

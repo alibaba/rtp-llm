@@ -107,7 +107,7 @@ final class DecodeState {
      */
     private final ReentrantLock admissionLock = new ReentrantLock();
 
-    /** Monotonic diagnostic generation for the layered admission projection. */
+    /** Monotonic diagnostic generation for the layered admission view. */
     private final AtomicLong admissionVersion = new AtomicLong();
 
     /**

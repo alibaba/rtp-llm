@@ -638,7 +638,7 @@ class DecodeSelectorTest {
 
         Assertions.assertNotNull(selected);
         Assertions.assertEquals("127.0.0.2", selected.getServerIp(),
-                "routing must project this request through the exact Decode gate");
+                "routing must check this request against the exact Decode gate");
     }
 
     @ParameterizedTest

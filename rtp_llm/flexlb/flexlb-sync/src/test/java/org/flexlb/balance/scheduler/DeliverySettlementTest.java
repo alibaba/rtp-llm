@@ -268,7 +268,7 @@ class DeliverySettlementTest {
         assertFalse(failure.isSuccess());
 
         if (decodeFirst) { decodeFinished(member); }
-        // Retirement drains endpoint ownership before projecting its exact items.
+        // Retirement drains endpoint ownership before handling its exact items.
         assertTrue(ledger.prefill.terminalizeCommittedItem(member.item()));
         registry.applyPrefillRetirementItem(prefill, member.item());
         if (!decodeFirst) {

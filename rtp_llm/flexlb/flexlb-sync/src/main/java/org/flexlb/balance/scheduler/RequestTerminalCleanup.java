@@ -78,7 +78,7 @@ final class RequestTerminalCleanup {
             failure = runStep(failure,
                     exact.prefillEp() == null ? null : () -> exact.prefillEp().expireCommittedItem(exact));
         } else {
-            // A projection may lag endpoint ownership. Never roll back an Engine/protocol owner.
+            // Event handling may lag endpoint ownership. Never roll back an Engine/protocol owner.
             failure = runStep(failure,
                     exact.decodeEp() == null ? null
                             : () -> exact.decodeEp().release(

@@ -138,11 +138,11 @@ public class PvLogData {
                 .sorted(Map.Entry.comparingByKey()).map(Map.Entry::getValue).toList();
         if (ctx.getResponse() != null) {
             Response source = ctx.getResponse();
-            Response projected = new PvResponse();
-            projected.setServerStatus(source.getServerStatus());
-            projected.setQueueLength(source.getQueueLength());
-            projected.setWorkerSummary(source.getWorkerSummary());
-            this.response = projected;
+            Response copy = new PvResponse();
+            copy.setServerStatus(source.getServerStatus());
+            copy.setQueueLength(source.getQueueLength());
+            copy.setWorkerSummary(source.getWorkerSummary());
+            this.response = copy;
         }
         this.error = ctx.getErrorMessage();
         this.success = ctx.isSuccess();

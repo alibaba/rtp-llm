@@ -328,7 +328,7 @@ public final class WorkerDirectory implements WorkerStatusProvider {
         }
     }
 
-    /** Non-owning monitoring projection; no live endpoint map escapes. */
+    /** Non-owning monitoring view; no live endpoint map escapes. */
     public List<String> endpointAddresses(RoleType role, String group) {
         List<WorkerEndpoint.GenerationPin> captured = captureEndpoints(role, group);
         try {

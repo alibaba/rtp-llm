@@ -439,7 +439,7 @@ class RouteTtftEstimateTest {
     }
 
     @Test
-    void projectionNeverTouchesRouteSuffixAfterProbeCompletion() {
+    void estimateNeverTouchesRouteSuffixAfterProbeCompletion() {
         PrefillTtftEstimate.Candidate result = estimate(
                 queue(true, constraints(3, 0L), List.of(
                         item(1L, 100, 1L, 10L),
@@ -454,7 +454,7 @@ class RouteTtftEstimateTest {
     }
 
     @Test
-    void projectionNeverTouchesLaterBatchGroup() {
+    void estimateNeverTouchesLaterBatchGroup() {
         PrefillTtftEstimate.Candidate result = estimate(
                 queue(true, constraints(1, 0L), List.of(
                         item(1L, 10, 1L, 999L))),
@@ -484,7 +484,7 @@ class RouteTtftEstimateTest {
     }
 
     @Test
-    void projectionNeverEvaluatesKvBlockAfterProbe() {
+    void estimateNeverEvaluatesKvBlockAfterProbe() {
         GroupPlanner.Constraints kvLimited = new GroupPlanner.Constraints(
                 1, 1_000_000L, 50L, 0L, 30L);
 

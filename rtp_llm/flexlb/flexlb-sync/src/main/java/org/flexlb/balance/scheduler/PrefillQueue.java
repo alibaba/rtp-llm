@@ -711,7 +711,7 @@ public final class PrefillQueue {
                     cleanupFailure = appendCleanupFailure(
                             cleanupFailure, callbackFailure);
                     // Do not acknowledge: generation retirement still owns
-                    // this exact pending identity and will project it again.
+                    // this exact pending identity and will handle it again.
                     continue;
                 }
                 try {

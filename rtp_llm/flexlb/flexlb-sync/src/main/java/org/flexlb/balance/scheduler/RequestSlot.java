@@ -2148,7 +2148,7 @@ public final class RequestSlot {
             terminal = commitTerminalStateLocked(action.transition());
         } catch (Throwable failure) {
             transitionFailure = failure;
-            terminal = commitTerminalStateLocked(TerminalOutcome.fail("terminal projection failed"));
+            terminal = commitTerminalStateLocked(TerminalOutcome.fail("terminal transition failed"));
         }
         if (!terminal.state().isTerminal()) {
             transitionFailure = appendFailure(
@@ -2156,7 +2156,7 @@ public final class RequestSlot {
                     new IllegalStateException(
                             "terminal transition did not terminate request "
                                     + requestId));
-            terminal = commitTerminalStateLocked(TerminalOutcome.fail("terminal projection did not terminate"));
+            terminal = commitTerminalStateLocked(TerminalOutcome.fail("terminal transition did not terminate"));
         }
 
         if (encoderEndpoint != null) {

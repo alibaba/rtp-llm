@@ -79,7 +79,7 @@ class IncrementalPredictionTest {
     }
 
     @Test
-    void projectionMatchesFullEvaluationAcrossExpiryPriorityAndProbePositions() throws Exception {
+    void estimateMatchesFullEvaluationAcrossExpiryPriorityAndProbePositions() throws Exception {
         var model = new FormulaPredictor(formula());
         var policy = new BatchTtftEstimator().ttftEstimationRule();
         var full = new PrefillTimePredictor.Evaluator() {

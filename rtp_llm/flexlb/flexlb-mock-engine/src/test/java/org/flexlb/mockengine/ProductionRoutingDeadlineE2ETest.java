@@ -29,7 +29,7 @@ class ProductionRoutingDeadlineE2ETest {
         // window. Endpoint selection must still publish it: the second request
         // immediately completes the batch, and the real mock engine can serve
         // both well before that deadline. The request registry, not route
-        // projection, is the sole owner of terminal request deadlines.
+        // status handling, is the sole owner of terminal request deadlines.
         try (AutoTpmE2EHarness h = new AutoTpmE2EHarness(
                 BASE_PORT, 1, 1, "1", 1.0,
                 false, true, decision, true)) {

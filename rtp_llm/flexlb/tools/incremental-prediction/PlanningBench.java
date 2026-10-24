@@ -11,7 +11,7 @@ import org.flexlb.balance.estimate.*;
 import org.flexlb.balance.scheduler.*;
 import static org.mockito.Mockito.mock;
 
-/** Forked benchmark of whole prefix selection and five-candidate frozen queue projection. */
+/** Forked benchmark of whole prefix selection and five-candidate frozen queue estimate. */
 public class PlanningBench {
     static volatile double sink;
     static final ThreadMXBean CPU = (ThreadMXBean) ManagementFactory.getThreadMXBean();

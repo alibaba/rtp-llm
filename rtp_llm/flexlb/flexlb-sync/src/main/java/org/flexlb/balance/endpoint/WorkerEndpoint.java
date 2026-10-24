@@ -100,7 +100,7 @@ public class WorkerEndpoint {
     }
 
     /**
-     * Project active-request ownership from a successful same-version status
+     * Derive active-request ownership from a successful same-version status
      * heartbeat without replaying versioned endpoint state or terminal facts.
      */
     public Runnable observeStatusHeartbeat(

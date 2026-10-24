@@ -550,7 +550,7 @@ class SchedulingSmokeTest(FlexLBSmokeBase):
         """S7: Concurrent requests should spread across >=2 workers.
 
         SHORTEST_TTFT serializes selection per routing group and chooses the
-        oldest last-selection timestamp within its projected-TTFT candidate
+        oldest last-selection timestamp within its estimated-TTFT candidate
         pool. Concurrent requests should therefore rotate across peers.
         """
         start = time.monotonic()
@@ -612,7 +612,7 @@ class SchedulingSmokeTest(FlexLBSmokeBase):
         SHORTEST_TTFT scores each endpoint by estimated TTFT. Setting
         prefill-0 to 10ms and prefill-1 to 500ms should route most
         requests to prefill-0. Candidate-pool LRU may distribute requests when
-        endpoint projections are close enough to share the pool.
+        endpoint estimates are close enough to share the pool.
         """
         start = time.monotonic()
         perf_engines: list[str] = []
@@ -695,7 +695,7 @@ class SchedulingSmokeTest(FlexLBSmokeBase):
         """S9: High pending count excludes the hotspot endpoint.
 
         SHORTEST_TTFT inherits the common prefill pending hard filter before
-        projected-TTFT selection. A worker with an injected hotspot queue
+        estimated-TTFT selection. A worker with an injected hotspot queue
         must therefore receive no requests while healthy peers are available.
         """
         start = time.monotonic()

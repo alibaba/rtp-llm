@@ -89,7 +89,7 @@ public class SnapshotBench {
         return new Endpoint(runtime, lock, last);
     }
 
-    static Sample read(List<Endpoint> endpoints, boolean project, int repetitions) {
+    static Sample read(List<Endpoint> endpoints, boolean estimate, int repetitions) {
         long id = Thread.currentThread().threadId();
         long bytes = CPU.getThreadAllocatedBytes(id), cpu = CPU.getCurrentThreadCpuTime();
         long started = System.nanoTime(), checksum = 0;
@@ -97,7 +97,7 @@ public class SnapshotBench {
             for (var endpoint : endpoints) {
                 var inputs = endpoint.runtime.captureLoadView();
                 checksum += inputs.queue().activeItems().size();
-                if (project) checksum += PrefillTtftEstimate.estimate(inputs, PROBE, model,
+                if (estimate) checksum += PrefillTtftEstimate.estimate(inputs, PROBE, model,
                         estimator.ttftEstimationRule()).requiredEstimatedTtftMs();
             }
         }
@@ -105,13 +105,13 @@ public class SnapshotBench {
                 CPU.getThreadAllocatedBytes(id) - bytes, checksum);
     }
 
-    static void fleet(int count, int depth, int planners, String mode, boolean project) throws Exception {
+    static void fleet(int count, int depth, int planners, String mode, boolean estimate) throws Exception {
         var endpoints = new ArrayList<Endpoint>();
         for (int i = 0; i < count; i++) endpoints.add(endpoint(depth, i));
-        int repetitions = project ? 2 : 8;
-        long expected = read(endpoints, project, repetitions).checksum;
+        int repetitions = estimate ? 2 : 8;
+        long expected = read(endpoints, estimate, repetitions).checksum;
         String name = "fleet" + count + "_depth" + depth + "_p" + planners + "_" + mode
-                + (project ? "_project" : "_capture");
+                + (estimate ? "_estimate" : "_capture");
         System.out.println("VERIFY " + name + " checksum=" + expected);
         try (var pool = Executors.newFixedThreadPool(planners)) {
             for (int round = 0; round < 5; round++) {
@@ -129,7 +129,7 @@ public class SnapshotBench {
                     for (int i = 0; i < planners; i++) {
                         tasks.add(pool.submit(() -> {
                             gate.await();
-                            return read(endpoints, project, repetitions);
+                            return read(endpoints, estimate, repetitions);
                         }));
                     }
                     gate.countDown();

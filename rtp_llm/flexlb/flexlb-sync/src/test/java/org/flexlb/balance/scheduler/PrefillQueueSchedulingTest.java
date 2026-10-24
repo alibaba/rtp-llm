@@ -134,7 +134,7 @@ class PrefillQueueSchedulingTest {
 
     @Test
     @Timeout(value = 10, unit = TimeUnit.SECONDS)
-    void projectionCacheTracksCapacityBlockAndWake() {
+    void loadViewCacheTracksCapacityBlockAndWake() {
         FlexlbConfig config = singleConfig();
         PrefillEndpoint endpoint = stableEndpoint(stableStatus());
         EstimateCacheBlock delivery = new EstimateCacheBlock();

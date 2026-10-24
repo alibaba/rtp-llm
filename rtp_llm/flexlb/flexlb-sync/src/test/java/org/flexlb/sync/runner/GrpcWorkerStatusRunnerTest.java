@@ -203,7 +203,7 @@ class GrpcWorkerStatusRunnerTest {
         assertTrue(publicationHeldLock.get(),
                 "publication must commit under the generation lock");
         assertTrue(notifierReleasedLock.get(),
-                "endpoint facts must project after releasing that lock");
+                "endpoint facts must be handled after releasing that lock");
     }
 
     @Test
@@ -220,9 +220,9 @@ class GrpcWorkerStatusRunnerTest {
         WorkerDirectory directory = directory(registry, status);
         when(registry.get(RoleType.DECODE, ipPort, status))
                 .thenReturn(endpoint);
-        java.util.concurrent.atomic.AtomicBoolean projected =
+        java.util.concurrent.atomic.AtomicBoolean notified =
                 new java.util.concurrent.atomic.AtomicBoolean();
-        Runnable activity = () -> projected.set(true);
+        Runnable activity = () -> notified.set(true);
         when(endpoint.observeStatusHeartbeat(any(), any()))
                 .thenReturn(activity);
 
@@ -256,7 +256,7 @@ class GrpcWorkerStatusRunnerTest {
                 org.mockito.Mockito.eq(status), observation.capture());
         assertTrue(observation.getValue().activeTasks().values().stream()
                 .anyMatch(active -> active.requestId().equals("123")));
-        assertTrue(projected.get());
+        assertTrue(notified.get());
         WorkerStatus.PollLease nextPoll = status.tryBeginStatusPoll();
         assertNotNull(nextPoll, "the asynchronous owner must close the exact poll lease");
         nextPoll.close();

@@ -647,7 +647,7 @@ def _group_order_ok(order: list, rids: list) -> bool:
 # slot baseline (only a wave's first submitter parked; every later
 # submitter route-rejected {8402, 8510} regardless of priority — probes
 # E8/E8b/E8c/E10, CostBasedPrefillStrategy evaluateCandidates dropping
-# BLOCKED projections) was superseded by the pull-based
+# BLOCKED estimates) was superseded by the pull-based
 # PendingPlacementCoordinator (commit 6ad0315f10; park path
 # RequestScheduler.java L95-112): capacity-blocked submitters park in a
 # WaitBucket (TreeSet, ORDER = priority desc + sequence asc) and are
@@ -2003,7 +2003,7 @@ def atpm_preempt_decode_engine_owned(ctx: CaseContext):
         w1_zero_eviction = not (w1_yielded or w1_owned)
         w1_inc_rejected = (not w1_inc_ok) and w1_inc_code in EV2_REJECT_FAMILY
         # EV-2 baseline (behaviour finding, probes E9/E11 + the
-        # DecodeEndpoint projection math): DECODE_RESERVED eviction never
+        # DecodeEndpoint eviction math): DECODE_RESERVED eviction never
         # fires — the kv dimension is mathematically unreachable
         # (freedKv is a subset of currentHardCharges, so "fits after
         # eviction" implies "fits without it", contradicting the
@@ -3298,7 +3298,7 @@ def atpm_decode_reservation_priority(ctx: CaseContext):
         )
         w1_delta = (now_victim or 0.0) - (base_victim or 0.0)
         # EV-2 baseline (behaviour finding, probes E9/E11 + the
-        # DecodeEndpoint projection math): decode eviction never fires —
+        # DecodeEndpoint eviction math): decode eviction never fires —
         # the kv dimension is unreachable (freedKv ⊆ currentHardCharges)
         # and the slots dimension is absorbed engine-side, so the
         # strictly-lower-priority victim selection has no observation

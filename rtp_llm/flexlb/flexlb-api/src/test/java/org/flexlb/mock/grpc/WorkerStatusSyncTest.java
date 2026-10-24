@@ -46,7 +46,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  *       directly to an immutable observation</li>
  *   <li>The prepared observation updates the committed in-memory status</li>
  *   <li>The prepared-status transaction atomically commits the WorkerStatus
- *       observation and projects endpoint-owned reconciliation facts</li>
+ *       observation and handles endpoint-owned reconciliation facts</li>
  * </ul>
  *
  * <p>Note: In production, {@link org.flexlb.sync.runner.GrpcWorkerStatusRunner} performs

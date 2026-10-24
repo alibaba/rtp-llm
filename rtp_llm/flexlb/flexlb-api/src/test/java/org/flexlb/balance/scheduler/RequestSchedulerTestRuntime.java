@@ -160,7 +160,7 @@ public final class RequestSchedulerTestRuntime implements AutoCloseable {
         runtime.maintainExpiration();
     }
 
-    /** Apply and project one exact worker-status transaction. */
+    /** Apply and notify one exact worker-status transaction. */
     public void applyStatus(
             WorkerStatus status, WorkerStatusResponse response) {
         Objects.requireNonNull(status, "status");
