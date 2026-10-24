@@ -103,10 +103,11 @@ final class MockEngineConfig {
 
     private static void validateVit(JsonNode vit) {
         fields(vit, "vit_concurrency", "vit_max_queue_size", "gpu_max_batch_size", "gpu_max_batch_images",
-                "gpu_batch_wait_ms", "mm_max_queue_size", "mm_cache_gpu_max_bytes", "mm_cache_cpu_max_bytes", "mm_hash_key_cache_max_bytes", "mm_remote_cache_enable", "mm_transport_mode", "hash_cache_accounting", "mm_cache_item_num", "url_cache_item_num", "work_budget", "mm_timeout_ms", "mm_image_max_file_size_kb", "use_local_preprocess", "mm_preprocess_max_workers", "download_headers");
+                "gpu_batch_wait_ms", "mm_max_queue_size", "mm_cache_gpu_max_bytes", "mm_cache_cpu_max_bytes", "mm_hash_key_cache_max_bytes", "mm_remote_cache_enable", "mm_transport_mode", "hash_cache_accounting", "greennet_enabled", "mm_cache_item_num", "url_cache_item_num", "work_budget", "mm_timeout_ms", "mm_image_max_file_size_kb", "use_local_preprocess", "mm_preprocess_max_workers", "download_headers");
         if (!vit.has("work_budget")) fail("vit.work_budget is required (nullable)");
         vitWorkBudget(vit);
         MockVitHashCache.validateAccounting(vit.path("hash_cache_accounting"));
+        if (bool(vit, "greennet_enabled")) fail("GreenNet inspection is unsupported");
         if (bool(vit, "mm_remote_cache_enable")) fail("remote embedding cache is unsupported");
         if (!vit.path("mm_transport_mode").asText().equals("grpc")) fail("only inline grpc embedding transport is supported");
         for (String field : new String[]{"vit_concurrency", "gpu_max_batch_size", "mm_max_queue_size"})

@@ -140,6 +140,7 @@
       "mm_cache_cpu_max_bytes": 67108864,
       "mm_hash_key_cache_max_bytes": 8388608,
       "mm_remote_cache_enable": false,
+      "greennet_enabled": false,
       "mm_transport_mode": "grpc",
       "work_budget": null,
       "mm_timeout_ms": 120000,

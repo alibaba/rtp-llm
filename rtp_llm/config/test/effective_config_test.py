@@ -200,6 +200,8 @@ class EffectiveConfigTest(unittest.TestCase):
         self.assertEqual(result["vit_max_queue_size"], 0)
         self.assertIsNone(result["work_budget"])
         self.assertIsNone(result["hash_cache_accounting"])
+        self.assertFalse(result["greennet_enabled"])
+        self.assertTrue(vit_snapshot(vit, revision="fixture", greennet_enabled=True)["roles"]["vit"]["greennet_enabled"])
         accounting = {"tensor_object_bytes": 80}
         self.assertEqual(vit_snapshot(vit, revision="fixture", hash_cache_accounting=accounting)["roles"]["vit"]["hash_cache_accounting"], accounting)
         budget = NS(

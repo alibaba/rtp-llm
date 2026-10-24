@@ -24,7 +24,7 @@ final class MockVitEmbeddingCache<V> implements AutoCloseable {
         final String generation;
         MockTensorPool.Block gpuBlock, cpuBlock;
         long gpuBytes, cpuBytes;
-        boolean offloaded, retired, ready;
+        boolean offloaded, retired, ready, errorReported;
         int readers;
         Entry(V value, List<Tensor> layout, String generation) {
             this.value = value; this.layout = List.copyOf(layout); this.generation = generation;
@@ -36,6 +36,17 @@ final class MockVitEmbeddingCache<V> implements AutoCloseable {
     private final ReentrantLock transfer = new ReentrantLock();
     private long gpuBytes, cpuBytes, evictions, promotions, demotions, transferErrors;
     private boolean closed;
+    private volatile java.util.function.Consumer<Map<String, Number>> metrics = ignored -> {};
+    java.util.function.ToLongFunction<V> tokens = ignored -> 0;
+    void setMetrics(java.util.function.Consumer<Map<String, Number>> reporter) { metrics = reporter; }
+    private void report(Map<String, Number> values) {
+        try { metrics.accept(values); } catch (RuntimeException ignored) { /* telemetry owns no storage */ }
+    }
+    private synchronized void residency() {
+        long count = entries.values().stream().filter(entry -> entry.gpuBytes + entry.cpuBytes > 0)
+                .mapToLong(entry -> tokens.applyAsLong(entry.value)).sum();
+        report(Map.of("py_rtp_vit_embedding_cache_tokens", count, "py_rtp_vit_embedding_cache_bytes", gpuBytes + cpuBytes));
+    }
     // Harness-only completion/failure controls. No sleeps or bandwidth/performance model.
     BiConsumer<Copy, V> copier = (operation, value) -> {};
     Function<V, List<CompletableFuture<Void>>> releaseEvents = value -> List.of();
@@ -54,6 +65,15 @@ final class MockVitEmbeddingCache<V> implements AutoCloseable {
             else cpu = Math.addExact(MockTensorPool.align(cpu, tensor.elementSize), tensor.bytes);
         }
         return new Bytes(gpu, cpu);
+    }
+    synchronized String touch(String key) {
+        var entry = entries.get(key);
+        if (entry == null || !entry.ready) return null;
+        if (entry.gpuBytes + entry.cpuBytes > 0) {
+            var lru = entry.gpuBytes > 0 ? gpuLru : cpuLru;
+            lru.remove(key); lru.put(key, entry);
+        }
+        return entry.generation;
     }
     synchronized boolean contains(String key) { var entry = entries.get(key); return entry != null && entry.ready; }
     synchronized String tier(String key) {
@@ -117,11 +137,17 @@ final class MockVitEmbeddingCache<V> implements AutoCloseable {
                 if (store(key, entry, false)) { synchronized (this) { promotions++; } }
             }
             return new Hit<>(entry.value, entry.generation);
-        } finally { transfer.unlock(); }
+        } finally { transfer.unlock(); residency(); }
     }
     private void read(Entry<V> entry) {
         try { copier.accept(Copy.READ, entry.value); }
-        catch (RuntimeException error) { synchronized (this) { transferErrors++; } throw error; }
+        catch (RuntimeException error) {
+            synchronized (this) {
+                transferErrors++;
+                if (!entry.errorReported) { entry.errorReported = true; report(Map.of("py_rtp_vit_error_qps", 1)); }
+            }
+            throw MockVitErrors.markReported(MockVitErrors.normalize(error));
+        }
     }
     void put(String key, V value, List<Tensor> layout, String generation) {
         transfer.lock();
@@ -131,7 +157,7 @@ final class MockVitEmbeddingCache<V> implements AutoCloseable {
             synchronized (this) { entries.put(key, entry); }
             var required = bytes(layout, false);
             store(key, entry, required.gpu > gpu.stats().capacity());
-        } finally { transfer.unlock(); }
+        } finally { transfer.unlock(); residency(); }
     }
     private boolean store(String key, Entry<V> entry, boolean offload) {
         var required = bytes(entry.layout, offload);
@@ -220,7 +246,7 @@ final class MockVitEmbeddingCache<V> implements AutoCloseable {
         var entry = entries.remove(key);
         if (entry == null) return;
         uncharge(key, entry);
-        if (eviction) evictions++;
+        if (eviction) { evictions++; report(Map.of("py_rtp_vit_embedding_cache_eviction_qps", 1)); }
         try { copier.accept(Copy.DETACH, entry.value); }
         catch (RuntimeException error) {
             if (entry.readers > 0) { entry.retired = true; return; }
@@ -230,7 +256,7 @@ final class MockVitEmbeddingCache<V> implements AutoCloseable {
     void remove(String key) {
         transfer.lock();
         try { synchronized (this) { removeLocked(key, false); } }
-        finally { transfer.unlock(); }
+        finally { transfer.unlock(); residency(); }
     }
     private synchronized void releaseReader(Entry<V> entry) {
         if (--entry.readers == 0 && entry.retired) release(entry);
@@ -251,6 +277,6 @@ final class MockVitEmbeddingCache<V> implements AutoCloseable {
     @Override public void close() {
         transfer.lock();
         try { synchronized (this) { closed = true; for (String key : List.copyOf(entries.keySet())) removeLocked(key, false); } }
-        finally { transfer.unlock(); }
+        finally { transfer.unlock(); residency(); }
     }
 }

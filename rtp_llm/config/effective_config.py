@@ -102,7 +102,7 @@ def snapshot(engine, model, *, revision, capacity=None):
     }
 
 
-def vit_snapshot(vit, *, revision, work_budget=None, hash_cache_accounting=None):
+def vit_snapshot(vit, *, revision, work_budget=None, hash_cache_accounting=None, greennet_enabled=False):
     scheduler = vit.embedding_scheduler_args()
     names = (
         "vit_concurrency",
@@ -144,6 +144,7 @@ def vit_snapshot(vit, *, revision, work_budget=None, hash_cache_accounting=None)
                 },
                 "mm_transport_mode": vit.output_transport.mode,
                 "hash_cache_accounting": hash_cache_accounting,
+                "greennet_enabled": bool(greennet_enabled),
                 "vit_concurrency": max(1, int(vit.vit_concurrency)),
                 "vit_max_queue_size": max(0, int(vit.vit_max_queue_size)),
                 "gpu_max_batch_size": scheduler["max_batch_size"],

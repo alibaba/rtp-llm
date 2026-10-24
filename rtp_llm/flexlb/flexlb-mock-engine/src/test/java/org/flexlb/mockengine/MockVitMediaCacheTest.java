@@ -31,7 +31,7 @@ class MockVitMediaCacheTest {
             var document = (com.fasterxml.jackson.databind.node.ObjectNode)MockEngineConfigFixture.load().snapshot();
             ((com.fasterxml.jackson.databind.node.ObjectNode)document.path("roles").path("vit"))
                     .put("vit_concurrency", 1).put("vit_max_queue_size", 4).put("mm_cache_gpu_max_bytes", 0)
-                    .put("mm_cache_cpu_max_bytes", 0).put("mm_hash_key_cache_max_bytes", 0).put("url_cache_item_num", 1);
+                    .put("mm_cache_cpu_max_bytes", 0).put("mm_hash_key_cache_max_bytes", 0).put("url_cache_item_num", 1).put("use_local_preprocess", true);
             var config = new MockVitService.Config(8, 1, 4, 0, 0, 1 << 20, 1 << 20, 0);
             try (var service = new MockVitService(config, null, document)) {
                 var a = image.toBuilder().setMultimodalUrl("http://127.0.0.1:" + server.getAddress().getPort() + "/a").build();

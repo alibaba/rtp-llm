@@ -83,7 +83,8 @@ final class MockVitImage {
                     throw new IllegalArgumentException("image data URL must be base64");
                 if ((long)(url.length() - comma - 1) * 3 / 4 > maxInputBytes)
                     throw new IllegalArgumentException("image exceeds byte limit");
-                raw = Base64.getDecoder().decode(url.substring(comma + 1));
+                try { raw = Base64.getDecoder().decode(url.substring(comma + 1)); }
+                catch (IllegalArgumentException error) { throw MockRpcErrors.error(io.grpc.Status.INTERNAL, 906, "Multimodal download failed: invalid base64"); }
             } else {
                 URI uri = URI.create(url);
                 if (!"http".equals(uri.getScheme()) && !"https".equals(uri.getScheme()))
@@ -92,11 +93,15 @@ final class MockVitImage {
                         .followRedirects(HttpClient.Redirect.NORMAL).build();
                 var request = HttpRequest.newBuilder(uri).timeout(Duration.ofMillis(timeoutMs));
                 headers.forEach(request::header);
-                var response = client.send(request.GET().build(),
-                        HttpResponse.BodyHandlers.ofInputStream());
-                try (var body = response.body()) {
-                    if (response.statusCode() / 100 != 2) throw new IllegalArgumentException("image download HTTP " + response.statusCode());
-                    raw = body.readNBytes(maxInputBytes + 1);
+                try {
+                    var response = client.send(request.GET().build(), HttpResponse.BodyHandlers.ofInputStream());
+                    try (var body = response.body()) {
+                        if (response.statusCode() != 200) throw MockRpcErrors.error(io.grpc.Status.INTERNAL, 906,
+                                "Multimodal download failed: HTTP " + response.statusCode());
+                        raw = body.readNBytes(maxInputBytes + 1);
+                    }
+                } catch (java.io.IOException error) {
+                    throw MockRpcErrors.error(io.grpc.Status.INTERNAL, 906, "Multimodal download failed: " + error.getMessage());
                 }
             }
             if (raw.length > maxInputBytes) throw new IllegalArgumentException("image exceeds byte limit");

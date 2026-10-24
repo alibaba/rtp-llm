@@ -22,19 +22,20 @@ class MockVitMonitorTest {
     @Test void pollingIsExcludedAndCachedEmbeddingStillCountsAsRpc() throws Exception {
         try (var service = MockVitTestSupport.service(MockVitService.Config.defaults());
              var monitor = new MockVitMonitor(sink, tags)) {
+            monitor.start(service);
             var server = NettyServerBuilder.forPort(0).addService(service).intercept(monitor).build().start();
             var channel = ManagedChannelBuilder.forAddress("127.0.0.1", server.getPort()).usePlaintext().build();
             try {
                 var stub = MultimodalRpcServiceGrpc.newBlockingStub(channel).withDeadlineAfter(5, TimeUnit.SECONDS);
                 stub.getWorkerStatus(EngineRpcService.StatusVersionPB.getDefaultInstance());
                 stub.getCacheStatus(EngineRpcService.CacheVersionPB.getDefaultInstance());
-                verify(sink, never()).report(anyString(), any(), anyDouble());
+                verify(sink, never()).report(eq("mock_vit_rpc_qps"), any(), anyDouble());
                 var input = MockVitServiceTest.inputs(MockVitServiceTest.image(28, 28, 0xabcdef));
                 stub.remoteMultimodalEmbedding(input);
                 stub.remoteMultimodalEmbedding(input);
                 assertEquals(1, service.computations.get());
-                verify(sink, times(2)).report(eq("py_rtp_vit_qps"), any(), eq(1.0));
-                verify(sink, times(2)).report(eq("py_rtp_vit_success_qps"), any(), eq(1.0));
+                verify(sink, times(1)).report(eq("py_rtp_vit_qps"), any(), eq(1.0));
+                verify(sink, times(1)).report(eq("py_rtp_vit_success_qps"), any(), eq(1.0));
                 verify(sink, never()).report(eq("py_rtp_vit_error_qps"), any(), anyDouble());
                 verify(sink, times(2)).report(eq("mock_vit_rpc_success_qps"), argThat(t ->
                         t.getTags().get("method").equals("RemoteMultimodalEmbedding")
@@ -43,7 +44,7 @@ class MockVitMonitorTest {
                 stub.getMultimodalHashes(EngineRpcService.MultimodalHashRequestPB.newBuilder().addKeys("missing").build());
                 verify(sink).report(eq("mock_vit_rpc_qps"), argThat(t ->
                         "GetMultimodalHashes".equals(t.getTags().get("method"))), eq(1.0));
-                verify(sink, times(2)).report(eq("py_rtp_vit_qps"), any(), eq(1.0));
+                verify(sink, times(1)).report(eq("py_rtp_vit_qps"), any(), eq(1.0));
                 assertThrows(StatusRuntimeException.class, () -> stub.remoteMultimodalEmbedding(
                         EngineRpcService.MultimodalInputsPB.getDefaultInstance()));
                 verify(sink).report(eq("mock_vit_rpc_error_qps"), argThat(t ->
@@ -92,6 +93,7 @@ class MockVitMonitorTest {
         var d = MockVitService.Config.defaults();
         try (var service = MockVitTestSupport.service(new MockVitService.Config(8, 1, 4, 1 << 20, 1 << 20,
                 d.maxInputBytes(), d.maxOutputBytes(), 500)); var monitor = new MockVitMonitor(sink, tags)) {
+            monitor.start(service);
             var server = NettyServerBuilder.forPort(0).addService(service).intercept(monitor).build().start();
             var channel = ManagedChannelBuilder.forAddress("127.0.0.1", server.getPort()).usePlaintext().build();
             try {

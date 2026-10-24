@@ -131,4 +131,15 @@ class MockEngineConfigTest {
         var config = MockEngineConfig.parse(document);
         assertEquals(Long.MAX_VALUE, config.role("vit").path("gpu_max_batch_images").longValue());
     }
+    @Test void unsupportedInspectionCannotBeSilentlyImportedAsPassingVerdicts() {
+        ObjectNode document = (ObjectNode)MockEngineConfigFixture.load().snapshot();
+        var vit = (ObjectNode)document.path("roles").path("vit");
+        vit.put("greennet_enabled", true);
+        assertThrows(IllegalArgumentException.class, () -> MockEngineConfig.parse(document));
+        assertThrows(IllegalArgumentException.class, () -> new MockVitService(MockVitService.Config.defaults(), null, document));
+        vit.remove("greennet_enabled");
+        assertThrows(IllegalArgumentException.class, () -> MockEngineConfig.parse(document));
+        vit.put("greennet_enabled", false);
+        assertDoesNotThrow(() -> MockEngineConfig.parse(document));
+    }
 }

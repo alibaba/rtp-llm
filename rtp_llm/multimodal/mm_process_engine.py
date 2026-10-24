@@ -830,6 +830,7 @@ class MMProcessEngine:
                 lambda revision: vit_snapshot(
                     vit_config, revision=revision, work_budget=self._scheduler._work_budget,
                     hash_cache_accounting=MMHashKeyCache.accounting(),
+                    greennet_enabled=self._greennet_enabled(),
                 ),
                 rank=self.server_id,
             )

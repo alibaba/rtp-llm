@@ -67,7 +67,7 @@ class MockVitEmbeddingCacheTest {
             assertFalse(cache.contains("a")); assertEquals(0, cache.stats().get("gpu_pool_used_bytes"));
             cache.copier = (operation, value) -> {}; put(cache, "a", 16, 0); put(cache, "b", 16, 0);
             cache.copier = (operation, value) -> { if (operation == MockVitEmbeddingCache.Copy.READ) throw new IllegalStateException("restore failed"); };
-            assertThrows(IllegalStateException.class, () -> cache.get("a"));
+            assertThrows(io.grpc.StatusRuntimeException.class, () -> cache.get("a"));
             assertTrue(cache.contains("a")); assertEquals("cpu", cache.tier("a"));
             cache.copier = (operation, value) -> { if (operation == MockVitEmbeddingCache.Copy.STORE) throw new IllegalStateException("promotion failed"); };
             assertEquals("a", cache.get("a").value());

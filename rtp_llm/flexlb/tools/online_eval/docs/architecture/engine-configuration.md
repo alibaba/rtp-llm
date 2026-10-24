@@ -165,11 +165,22 @@ D 当前 RemoteGenerate 不调用 `decode_retry_times/timeout_ms`，这两个字
 V 分别使用 `vit_concurrency + vit_max_queue_size` 的异步接单额度，
 `mm_max_queue_size` 的 forward 等待队列，以及 batch 请求数、图片数和收集窗口。
 普通 URL 的 `RemoteMultimodalEmbedding` 实际调用 real 的 `get_embedding_result`，与 async submit/hash 共享按 key 的异步接单；
-新增多图工作在创建任务前整体检查异步额度。每个 URL 各产生一个 MMWorkItem；模型 `preprocess_batch_size` 不合并这些独立的 async job。
+新增多图工作先认领 entry，再整体预留异步额度；准入失败时终结本次新增 entry，撤销本次请求所有权。每个 URL 各产生一个 MMWorkItem；模型 `preprocess_batch_size` 不合并这些独立的 async job。
 V4.1 typed RPC 对应 `submit_v41`，绕过 async C+Q 和 URL preprocess，完整验证请求及总图片上限后，所有图片作为一次 scheduler 请求接单。
 同请求多图不拆成多个 GPU 入队请求；即使编码缓存全部命中，也先经过图片数和 waiting 队列门禁。
 图片超限返回 INVALID_ARGUMENT/902；GPU waiting 队列满返回 RESOURCE_EXHAUSTED/903；URL async admission 满返回 RESOURCE_EXHAUSTED/409。
 MM 错误详情保留到 P，903 可重试，902/409 不重试。
+异步任务按 `request_id` 集合持有 entry，同一 ID 的重复认领不增加 owner；取消只移除该请求的所有权，
+无其他 owner 的排队任务可取消，已运行任务保留到执行结束。提交部分失败只清理本次 claims，不能取消同 ID 的较早工作。
+GPU/CPU embedding 预算都为零时，real 不保留 pending entry，同 key 也不合并计算；Hash 预算不改变这一规则。
+`AsyncSubmitEmbedding` 的 ACK 表示提交成功，不取决于后台是否已完成；其后台期限取本批正媒体期限的最大值，
+没有正值时使用 `mm_timeout_ms`，不继承 ACK RPC 的等待期限。
+Hash RPC 先验证所有 missing key 的 URL 输入，再按一批接单；响应保留请求 key 的顺序和重复项，
+总 hash 行数上限为 1048576。首次补算响应不带 generation，后续缓存探测返回驻留 Hash 的 generation。
+错误保留 `ErrorDetailsPB` 和 `x-rtp-vit-error-reported`，后台失败按结果上报一次，调用方和代理不重复计数。
+`py_rtp_vit_qps/success_qps` 在实际计算入口/成功边界上报，缓存命中和 typed 路径不增加这两个指标；
+`mock_vit_rpc_*` 单独记录 RPC 流量。缓存 hit/miss/inflight 在认领时上报，eviction 在驱逐时上报，
+resident tokens/bytes 在完成、回迁、移除和清理后上报，不用定时 snapshot 替代 real 的事件指标。
 typed 编码缓存位于 model forward 内，使用独立 item-count LRU，读取 real 同名环境变量 `V41_IMAGE_ENCODE_CACHE_ITEMS`（默认 16，非正关闭）；
 可信 content hash、processor identity 和网格共同作 key，空 hash 绕过缓存。它不占通用 URL embedding/hash 的字节容量。
 GPU、CPU embedding 按实际输出 tensor 的元素数、dtype、目标设备及 tensor 对象身份去重计费；
@@ -184,7 +195,10 @@ Hash 按总计费先驱逐，池分配仍失败则直接旁路该项。
 `hash_cache_accounting` 从 real `MMHashKeyCache.accounting()` 导出 Python 字符串、列表、tensor wrapper、
 记录及字典项的计费布局，Mock 必须显式导入，不能使用 JVM 对象大小或固定常数猜测。
 Hash 查询元数据不刷新 LRU；消费且 generation 一致才刷新。超大替换删除自身旧 generation，不冲掉无关记录。
-`url_cache_item_num` 控制每个逻辑 worker 的 URL 原始字节 LRU，独立于 embedding 字节预算；
+URL 原始字节 LRU 独立于 embedding 字节预算。local preprocess 使用当前进程的 `url_cache_item_num`；
+spawn preprocess 各子进程独立导入默认 10 项缓存，父进程的 resize 不传播到子进程，Mock 保留该实际作用域。
+预处理 IPC 提交损坏时重建池并重试一次；结果读取遇到损坏、或连续超时达到 worker 数时重建，清空旧 worker 的 URL 缓存和 pending 统计。
+预处理耗时只在结果被成功消费时上报，迟到完成不补报。Mock 使用逻辑线程 worker，不模拟操作系统进程终止机制。
 缓存命中仍校验当前文件大小限制。`mm_cache_item_num` 保留 real 的模型内部旧缓存配置，
 当前通用 URL scheduler 不使用它；V4.1 编码缓存由上面的独立环境变量控制。
 
@@ -193,6 +207,8 @@ used/pending，不能重新分配；默认 CPU 模拟事件立即完成，测试
 这些事件用于验证所有权和容量，不拟合 CUDA/DMA 延迟、forward workspace 或真实 OOM。
 模拟输出的 shape/dtype 由现有模型/校准输入决定，比较容量时必须先匹配输出 tensor 布局。
 只支持 inline gRPC，不接受 RDMA 和远端 embedding cache。
+`greennet_enabled` 导出 real provider 的最终启用状态；Mock 必须显式接受 `false`，启用检查时拒绝配置，
+不能把未实现的检查当作通过。该字段是运行时能力投影，不是新的 VitConfig 调参项。
 
 V 的 `work_budget` 来自初始化完成后的 real `MMScheduler`，必须显式为 `null` 或五维预算对象。
 五维为 `input_patches`、`output_tokens`、`estimated_workspace_bytes`、
@@ -252,7 +268,8 @@ Mock 的公共入口是 `MockEngineConfig`、`MockVitServer` 和 `JavaMockEngine
 | `mm_image_max_file_size_kb` | 同名 V 字段 | 文件限制为 KB×1024；不再从性能校准文件提供输入文件容量 |
 | `mm_cache_gpu_max_bytes`、`mm_cache_cpu_max_bytes`、`mm_hash_key_cache_max_bytes` | 同名 V 字段 | 三个独立预算；固定逻辑池、连续空间及 pending 回收，GPU 淘汰下放 CPU；不模拟物理分配/搬运耗时 |
 | `MMHashKeyCache.accounting()` | `hash_cache_accounting` | real 运行时派生的 Python 元数据布局，必填；不是新的 VitConfig 调参项 |
-| `url_cache_item_num`、`mm_cache_item_num` | 同名 V 字段 | URL 原始数据按条数 LRU；旧 embedding 条数配置保留给模型内部，通用 scheduler 不使用 |
+| `url_cache_item_num`、`mm_cache_item_num` | 同名 V 字段 | URL 原始数据按条数 LRU，local/spawn 作用域见上文；旧 embedding 条数配置保留给模型内部 |
+| real provider `is_enabled()` | `greennet_enabled` | 最终能力状态，必填；检查开启时 Mock 拒绝启动 |
 | `get_batch_work_budget()` 初始化结果 | `vit.work_budget` | 不是 VitConfig 原生字段；从实际 scheduler 导出的派生值。当前具体模型均为 None |
 
 ### 异名或旧名容易导致的误解
