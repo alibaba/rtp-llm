@@ -201,7 +201,10 @@ class PrefillFastPathCudaTest(_PrefillForwardTestBase):
         )
         with patch.dict(
             "sys.modules",
-            {"flash_mla": SimpleNamespace(flash_mla_sparse_fwd=sparse_fwd)},
+            {
+                name: SimpleNamespace(flash_mla_sparse_fwd=sparse_fwd)
+                for name in ("flash_mla", "flash_mla_legacy")
+            },
         ):
             out = attn._attn_fp8_swa_via_concat(qkv, common)
 
