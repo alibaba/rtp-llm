@@ -3,12 +3,10 @@ package org.flexlb.balance.scheduler;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.queue.QueueState;
 
-import java.util.function.Supplier;
-
 /**
  * 一台 Prefill 排队队列的调度线程主循环。
  * <p>
- * 每一轮先等队列里有请求，再调用 {@code processQueue} 选出请求并交付，然后按返回的
+ * 每一轮先等队列里有请求，再调用 {@link QueuePicker#processQueue} 选出请求并交付，然后按返回的
  * {@link ProcessQueueResult} 决定下一轮之前等什么：队首被投递容量挡住时等容量空出来，
  * 在等凑组或 Prefill KV 容量时等队列或调度输入变化、或者到点。
  * 循环中抛出意外异常时停止整个队列。
@@ -20,23 +18,20 @@ final class PrefillQueueLoop {
     private final CapacityBlockedHead capacityBlockedHead;
     private final QueueWaitRecorder queueWaitRecorder;
     private final PrefillQueueLifecycle lifecycle;
-    /**
-     * 跑一轮调度：从队列里选出请求并交付。
-     */
-    private final Supplier<ProcessQueueResult> processQueue;
+    private final QueuePicker queuePicker;
 
     PrefillQueueLoop(QueueState queueState,
                      PrefillEndpoint prefillEndpoint,
                      CapacityBlockedHead capacityBlockedHead,
                      QueueWaitRecorder queueWaitRecorder,
                      PrefillQueueLifecycle lifecycle,
-                     Supplier<ProcessQueueResult> processQueue) {
+                     QueuePicker queuePicker) {
         this.queueState = queueState;
         this.prefillEndpoint = prefillEndpoint;
         this.capacityBlockedHead = capacityBlockedHead;
         this.queueWaitRecorder = queueWaitRecorder;
         this.lifecycle = lifecycle;
-        this.processQueue = processQueue;
+        this.queuePicker = queuePicker;
     }
 
     void run() {
@@ -66,7 +61,7 @@ final class PrefillQueueLoop {
             return;
         }
 
-        ProcessQueueResult result = processQueue.get();
+        ProcessQueueResult result = queuePicker.processQueue();
         if (result.waitReason() != null) {
             queueWaitRecorder.record(result.request(), result.waitReason());
         }

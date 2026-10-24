@@ -52,6 +52,18 @@ record ProcessQueueResult(
                 queueVersion, schedulingInputVersion, wakeAtMs, waitReason);
     }
 
+    /**
+     * 队首在等 Prefill 的 KV 容量，等到队列或调度输入变化、或请求超时再进下一轮。
+     */
+    static ProcessQueueResult awaitingPrefillKvCapacity(
+            ScheduledRequest head,
+            long queueVersion,
+            long schedulingInputVersion) {
+        return ProcessQueueResult.awaitingSchedulingChange(
+                head, queueVersion, schedulingInputVersion,
+                head.expiresAtMs(), "Prefill KV capacity exhausted");
+    }
+
     static ProcessQueueResult simple(boolean capacityChanged) {
         return new ProcessQueueResult(
                 capacityChanged, null, null, 0L, 0L, 0L, null);

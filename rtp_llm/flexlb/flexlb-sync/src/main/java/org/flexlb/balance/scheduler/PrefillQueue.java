@@ -7,9 +7,6 @@ import org.flexlb.balance.endpoint.PrefillState;
 import org.flexlb.balance.estimate.PrefillTtftEstimate;
 import org.flexlb.balance.estimate.PrefillTtftEstimator;
 import org.flexlb.balance.planner.GroupPlanner;
-import org.flexlb.balance.prediction.PrefillPredictionBoundary;
-import org.flexlb.balance.prediction.PrefillTimePredictor;
-import org.flexlb.balance.queue.BatchCapacityView;
 import org.flexlb.balance.queue.GroupingLimits;
 import org.flexlb.balance.queue.LoadViewCache;
 import org.flexlb.balance.queue.QueueState;
@@ -24,7 +21,6 @@ import java.util.Comparator;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.OptionalLong;
 import java.util.concurrent.TimeUnit;
 import java.util.function.Supplier;
 
@@ -69,28 +65,11 @@ public final class PrefillQueue {
     private static final Comparator<GroupPlanner.Item> FIFO_ESTIMATE_ORDER =
             Comparator.comparingLong(GroupPlanner.Item::enqueueSeq)
                     .thenComparing(GroupPlanner.Item::requestId);
-    private static final GroupPlanner.ItemAccess<ScheduledRequest>
-            PLANNER_ITEM_ACCESS = new GroupPlanner.ItemAccess<>() {
-                @Override
-                public long enqueuedAtMs(ScheduledRequest item) {
-                    return item.enqueuedAtMs();
-                }
-
-                @Override
-                public long seqLen(ScheduledRequest item) {
-                    return item.seqLen();
-                }
-            };
-    private static final String SINGLE_DECISION_REASON = "single_request";
     /** Initial queue index allocation; unrelated to admission limits. */
     private static final int INITIAL_QUEUE_ALLOCATION = 16;
 
     private final String key;
     private final PrefillEndpoint prefillEndpoint;
-    private final QueueCapacity queueCapacity;
-    private final FlexlbConfig config;
-    private final GroupingLimits groupingLimits;
-    private final boolean singleDecision;
     private final PrefillTtftEstimator ttftEstimator;
     private final QueueState queueState;
     private final LoadViewCache loadViewCache;
@@ -101,7 +80,6 @@ public final class PrefillQueue {
     private final CapacityBlockedHead capacityBlockedHead;
     private final QueueWaitRecorder queueWaitRecorder;
     private final QueuedRequestRemover queuedRequestRemover;
-    private final GroupCommitter groupCommitter;
     private final PrefillQueueLoop loop;
 
     public PrefillQueue(
@@ -125,10 +103,7 @@ public final class PrefillQueue {
         FlexlbConfig config = configSupplier.get();
         this.key = key;
         this.prefillEndpoint = prefillEp;
-        this.queueCapacity = queueCapacity;
-        this.config = config;
-        this.singleDecision = config.isSingleDecision();
-        this.groupingLimits = new GroupingLimits(config, configSupplier);
+        GroupingLimits groupingLimits = new GroupingLimits(config, configSupplier);
         boolean priorityOrdering = config.isPriorityOrdering();
         this.ttftEstimator = ttftEstimator;
         Comparator<ScheduledRequest> queueOrder = priorityOrdering
@@ -144,7 +119,7 @@ public final class PrefillQueue {
                                                              prefillState,
                                                              prefillEp,
                                                              queueCapacity);
-        this.groupCommitter = new GroupCommitter(key,
+        GroupCommitter groupCommitter = new GroupCommitter(key,
                                                  queueState,
                                                  prefillEndpoint,
                                                  queueCapacity,
@@ -152,6 +127,14 @@ public final class PrefillQueue {
                                                  deliveryStrategy,
                                                  capacityBlockedHead,
                                                  queuedRequestRemover);
+        QueuePicker queuePicker = config.isSingleDecision()
+                ? new SingleRequestPicker(queueState, prefillEp, config, groupCommitter)
+                : new FixedWindowPicker(queueState,
+                                        prefillEp,
+                                        config,
+                                        groupingLimits,
+                                        ttftEstimator,
+                                        groupCommitter);
         this.loadViewCache = new LoadViewCache(queueState,
                                                prefillState,
                                                prefillEp,
@@ -178,7 +161,7 @@ public final class PrefillQueue {
                                          capacityBlockedHead,
                                          queueWaitRecorder,
                                          lifecycle,
-                                         this::processQueue);
+                                         queuePicker);
     }
 
     public void start() {
@@ -314,309 +297,12 @@ public final class PrefillQueue {
 
     // ==================== Queue ownership and load view ====================
 
-    private static long now() {
-        return System.currentTimeMillis();
-    }
-
     private List<ScheduledRequest> activeItemsInSchedulingOrder() {
         return queueState.activeIndex().capture().items();
     }
 
-    private ActiveQueueSnapshot snapshotActiveQueueHead() {
-        queueState.lock();
-        try {
-            ScheduledRequest head = queueState.activeIndex().peek();
-            return new ActiveQueueSnapshot(
-                    queueState.queueVersion(), queueState.schedulingInputVersion(),
-                    head == null ? List.of() : List.of(head));
-        } finally {
-            queueState.unlock();
-        }
-    }
-
-    private ActiveQueueSnapshot snapshotActiveQueue() {
-        long version;
-        long inputVersion;
-        List<ScheduledRequest> items;
-        queueState.lock();
-        try {
-            version = queueState.queueVersion();
-            inputVersion = queueState.schedulingInputVersion();
-            if (queueState.activeIndex().isEmpty()) {
-                return new ActiveQueueSnapshot(
-                        version, inputVersion, List.of());
-            }
-            items = queueState.activeIndex().capture().items();
-        } finally {
-            queueState.unlock();
-        }
-        return new ActiveQueueSnapshot(version, inputVersion, items);
-    }
-
-    private record ActiveQueueSnapshot(
-            long queueVersion,
-            long schedulingInputVersion,
-            List<ScheduledRequest> items) {
-        ScheduledRequest head() {
-            return items.isEmpty() ? null : items.get(0);
-        }
-    }
-
     public PrefillTtftEstimate.LoadView captureLoadView() {
         return loadViewCache.capture();
-    }
-
-    // ==================== Group decisions ====================
-
-    private ProcessQueueResult processQueue() {
-        return singleDecision
-                ? processSingleRequest()
-                : processFixedWindow();
-    }
-
-    private ProcessQueueResult processSingleRequest() {
-        ActiveQueueSnapshot snapshot = snapshotActiveQueueHead();
-        ScheduledRequest head = snapshot.head();
-        if (head == null) {
-            return ProcessQueueResult.NO_ACTION;
-        }
-
-        long nowMs = now();
-        if (head.requestExpired(nowMs)) {
-            Logger.debug("flexlb_single_drop request_id={} "
-                            + "reason=request_expired expires_at_ms={} now_ms={}",
-                    head.requestId(), head.expiresAtMs(), nowMs);
-            groupCommitter.dropHead(head);
-            return ProcessQueueResult.CAPACITY_CHANGED;
-        }
-
-        GroupPlanner.Shape shape =
-                GroupPlanner.Shape.empty().add(head.seqLen());
-        BatchCapacityView capacity = BatchCapacityView.of(prefillEndpoint, config);
-        if (!shape.fitsKv(capacity.kvCapacityFor(shape))) {
-            return awaitPrefillKvCapacity(
-                    head, snapshot.queueVersion(),
-                    snapshot.schedulingInputVersion());
-        }
-
-        // Worker status and delivery ledgers advance independently. Re-read
-        // the advisory gate immediately before hard-capacity admission.
-        capacity = BatchCapacityView.of(prefillEndpoint, config);
-        if (!shape.fitsKv(capacity.kvCapacityFor(shape))) {
-            return awaitPrefillKvCapacity(
-                    head, snapshot.queueVersion(),
-                    snapshot.schedulingInputVersion());
-        }
-
-        return groupCommitter.runPredictionBound(head, () -> {
-            PrefillTimePredictor predictor =
-                    prefillEndpoint.getPredictor();
-            PrefillTimePredictor.Evaluator evaluator =
-                    predictor.evaluator();
-            return groupCommitter.admitAndDeliverCapacityFeasiblePrefix(
-                    List.of(head), SINGLE_DECISION_REASON,
-                    evaluator, OptionalLong.empty());
-        });
-    }
-
-    private ProcessQueueResult processFixedWindow() {
-        if (queueState.activeIndex().isEmpty()) {
-            return ProcessQueueResult.NO_ACTION;
-        }
-
-        // Cheap advisory gates avoid sorting while the worker cannot dispatch.
-        ScheduledRequest observedHead;
-        int observedSize;
-        long observedOldestEnqueuedAtMs = Long.MAX_VALUE;
-        long observedQueueVersion;
-        long observedSchedulingInputVersion;
-        queueState.lock();
-        try {
-            observedHead = queueState.activeIndex().peek();
-            observedSize = queueState.activeIndex().size();
-            observedQueueVersion = queueState.queueVersion();
-            observedSchedulingInputVersion = queueState.schedulingInputVersion();
-            for (ScheduledRequest item : queueState.activeIndex()) {
-                observedOldestEnqueuedAtMs = Math.min(
-                        observedOldestEnqueuedAtMs, item.enqueuedAtMs());
-            }
-        } finally {
-            queueState.unlock();
-        }
-        if (observedHead == null) {
-            return ProcessQueueResult.NO_ACTION;
-        }
-
-        long nowMs = now();
-        long fixedWaitMs = groupingLimits.collectionWindowMs();
-        BatchCapacityView capacity = BatchCapacityView.of(prefillEndpoint, config);
-        int batchMaxCount = groupingLimits.maxRequests();
-        long predictThresholdMs = groupingLimits.predictedExecutionBudgetMs();
-        long batchMaxTokens = capacity.batchTokenCapacity();
-
-        if (observedHead.requestExpired(nowMs)) {
-            Logger.debug("flexlb_batch_drop request_id={} "
-                            + "reason=request_expired expires_at_ms={} now_ms={}",
-                    observedHead.requestId(),
-                    observedHead.expiresAtMs(), nowMs);
-            groupCommitter.dropHead(observedHead);
-            return ProcessQueueResult.CAPACITY_CHANGED;
-        }
-
-        boolean fullCandidate = observedSize >= batchMaxCount;
-        if (predictThresholdMs <= 0 && !fullCandidate
-                && !GroupPlanner.windowElapsed(
-                observedOldestEnqueuedAtMs, nowMs, fixedWaitMs)) {
-            return awaitCollectionWindow(
-                    observedHead,
-                    observedQueueVersion,
-                    observedSchedulingInputVersion,
-                    observedOldestEnqueuedAtMs, fixedWaitMs);
-        }
-
-        GroupPlanner.Shape observedHeadShape = GroupPlanner.Shape.empty().add(observedHead.seqLen());
-        long batchKvTokens = capacity.kvCapacityFor(observedHeadShape);
-        if (!observedHeadShape.fitsKv(batchKvTokens)) {
-            return awaitPrefillKvCapacity(
-                    observedHead,
-                    observedQueueVersion,
-                    observedSchedulingInputVersion);
-        }
-
-        // The ordered snapshot is the selection linearization point;
-        // prediction intentionally runs after releasing the queue lock.
-        ActiveQueueSnapshot snapshot = snapshotActiveQueue();
-        ScheduledRequest head = snapshot.head();
-        if (head == null) {
-            return ProcessQueueResult.NO_ACTION;
-        }
-
-        nowMs = now();
-        capacity = BatchCapacityView.of(prefillEndpoint, config);
-        batchMaxCount = groupingLimits.maxRequests();
-        predictThresholdMs = groupingLimits.predictedExecutionBudgetMs();
-        batchMaxTokens = capacity.batchTokenCapacity();
-        if (head.requestExpired(nowMs)) {
-            Logger.debug("flexlb_batch_drop request_id={} "
-                            + "reason=request_expired expires_at_ms={} now_ms={}",
-                    head.requestId(), head.expiresAtMs(), nowMs);
-            groupCommitter.dropHead(head);
-            return ProcessQueueResult.CAPACITY_CHANGED;
-        }
-        ScheduledRequest expiredMember = firstExpiredMember(
-                snapshot.items(), batchMaxCount, nowMs);
-        if (expiredMember != null) {
-            Logger.debug("flexlb_batch_drop request_id={} "
-                            + "reason=request_expired expires_at_ms={} now_ms={}",
-                    expiredMember.requestId(),
-                    expiredMember.expiresAtMs(), nowMs);
-            groupCommitter.dropHead(expiredMember);
-            return ProcessQueueResult.CAPACITY_CHANGED;
-        }
-        GroupPlanner.Shape headShape =
-                GroupPlanner.Shape.empty().add(head.seqLen());
-        batchKvTokens = capacity.kvCapacityFor(headShape);
-        if (!headShape.fitsKv(batchKvTokens)) {
-            return awaitPrefillKvCapacity(
-                    head, snapshot.queueVersion(),
-                    snapshot.schedulingInputVersion());
-        }
-
-        long exactBatchMaxTokens = batchMaxTokens;
-        long exactBatchKvTokens = batchKvTokens;
-        int exactBatchMaxCount = batchMaxCount;
-        long exactPredictThresholdMs = predictThresholdMs;
-        long exactFixedWaitMs = fixedWaitMs;
-        return groupCommitter.runPredictionBound(head, () -> {
-            PrefillTimePredictor.Evaluator evaluator = prefillEndpoint.getPredictor().evaluator();
-            PrefillTimePredictor.Evaluator planningEvaluator =
-                    exactPredictThresholdMs > 0 ? evaluator : null;
-            GroupPlanner.Constraints plannerConstraints =
-                    new GroupPlanner.Constraints(
-                            exactBatchMaxCount, exactBatchMaxTokens,
-                            exactBatchKvTokens, exactPredictThresholdMs,
-                            exactFixedWaitMs);
-            GroupPlanner.Selection<ScheduledRequest> selection =
-                    GroupPlanner.selectWithPrediction(
-                            snapshot.items(), PLANNER_ITEM_ACCESS,
-                            plannerConstraints,
-                            planningEvaluator == null ? null :
-                                    ttftEstimator.newGroupPredictor(planningEvaluator));
-            GroupPlanner.Plan<ScheduledRequest> plan =
-                    GroupPlanner.evaluateReadiness(
-                            selection, plannerConstraints, now());
-            if (plan.ready()) {
-                return admitDecisionGroup(
-                        plan.items(), plan.shape(), plan.reason(),
-                        evaluator, committedPrediction(plan));
-            }
-            return awaitCollectionWindow(
-                    head, snapshot.queueVersion(),
-                    snapshot.schedulingInputVersion(),
-                    plan.windowOpenedAtMs(), exactFixedWaitMs);
-        });
-    }
-
-    private static ProcessQueueResult awaitCollectionWindow(
-            ScheduledRequest head,
-            long queueVersion,
-            long schedulingInputVersion,
-            long windowOpenedAtMs,
-            long collectionWindowMs) {
-        long collectionDeadline = GroupPlanner.collectionDeadlineMs(
-                windowOpenedAtMs, collectionWindowMs);
-        return ProcessQueueResult.awaitingSchedulingChange(
-                head, queueVersion, schedulingInputVersion,
-                Math.min(collectionDeadline, head.expiresAtMs()), "Prefill collection window");
-    }
-
-    private static ProcessQueueResult awaitPrefillKvCapacity(
-            ScheduledRequest head,
-            long queueVersion,
-            long schedulingInputVersion) {
-        return ProcessQueueResult.awaitingSchedulingChange(
-                head, queueVersion, schedulingInputVersion,
-                head.expiresAtMs(), "Prefill KV capacity exhausted");
-    }
-
-    private static ScheduledRequest firstExpiredMember(
-            List<ScheduledRequest> orderedItems,
-            int maxCount,
-            long nowMs) {
-        int inspected = Math.min(
-                Math.max(1, maxCount), orderedItems.size());
-        for (int index = 0; index < inspected; index++) {
-            ScheduledRequest item = orderedItems.get(index);
-            if (item.requestExpired(nowMs)) {
-                return item;
-            }
-        }
-        return null;
-    }
-
-    private ProcessQueueResult admitDecisionGroup(List<ScheduledRequest> picked,
-                                                  GroupPlanner.Shape shape,
-                                                  String reason,
-                                                  PrefillTimePredictor.Evaluator evaluator,
-                                                  OptionalLong plannedCommittedPredictionMs) {
-        BatchCapacityView capacity = BatchCapacityView.of(prefillEndpoint, config);
-        if ((picked.size() > 1 && !shape.fitsCompute(capacity.batchTokenCapacity()))
-                || !shape.fitsKv(capacity.kvCapacityFor(shape))) {
-            return ProcessQueueResult.NO_ACTION;
-        }
-        return groupCommitter.admitAndDeliverCapacityFeasiblePrefix(
-                picked, reason, evaluator,
-                plannedCommittedPredictionMs);
-    }
-
-    private static OptionalLong committedPrediction(
-            GroupPlanner.Plan<ScheduledRequest> plan) {
-        if (plan.selectedPredictionMs().isEmpty()) {
-            return OptionalLong.empty();
-        }
-        return OptionalLong.of(
-                PrefillPredictionBoundary.committedDecisionGroupMs(
-                        plan.selectedPredictionMs().getAsDouble()));
     }
 
     // ==================== Internal: Run loop ====================
