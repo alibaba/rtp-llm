@@ -9,6 +9,7 @@ import org.flexlb.balance.planner.GroupPlanner;
 import org.flexlb.balance.prediction.PrefillTimePredictor;
 import org.flexlb.balance.projection.PrefillTtftEstimate;
 import org.flexlb.balance.projection.estimator.PrefillTtftEstimator;
+import org.flexlb.balance.queue.QueuedRequestsSnapshot;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.SchedulingMetadata;
@@ -79,7 +80,7 @@ class PrefillQueueQueueTest {
         assertEquals(ACCEPTED, runtime.offerWithResult(item(3, 50, now + 1_000, now + 200, 128)));
         assertEquals(ACCEPTED, runtime.offerWithResult(item(4, 50, now + 5_000, now - 100, 128)));
 
-        PrefillQueue.QueueSnapshot snapshot =
+        QueuedRequestsSnapshot snapshot =
                 runtime.captureQueueSnapshot();
         assertEquals(List.of("2", "1", "3", "4"), requestIds(snapshot.items()));
         assertEquals(4, snapshot.items().size());
@@ -120,11 +121,11 @@ class PrefillQueueQueueTest {
         ScheduledRequest first = item(11, 70, Long.MAX_VALUE, 1, 128);
         ScheduledRequest second = item(12, 50, Long.MAX_VALUE, 2, 128);
 
-        PrefillQueue.QueueSnapshot empty =
+        QueuedRequestsSnapshot empty =
                 runtime.captureQueueSnapshot();
         assertEquals(ACCEPTED, runtime.offerWithResult(first));
         assertEquals(ACCEPTED, runtime.offerWithResult(second));
-        PrefillQueue.QueueSnapshot offered =
+        QueuedRequestsSnapshot offered =
                 runtime.captureQueueSnapshot();
 
         assertTrue(offered.queueVersion() > empty.queueVersion());
@@ -135,7 +136,7 @@ class PrefillQueueQueueTest {
                 runtime.queueSizeByPriority());
 
         assertTrue(runtime.removeQueued(first, "test exact removal"));
-        PrefillQueue.QueueSnapshot removed =
+        QueuedRequestsSnapshot removed =
                 runtime.captureQueueSnapshot();
         assertTrue(removed.queueVersion() > offered.queueVersion());
         assertEquals(List.of(second), removed.items());

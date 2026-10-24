@@ -17,6 +17,8 @@ import org.flexlb.balance.projection.PrefillTtftEstimate;
 import org.flexlb.balance.projection.QueueSnapshot.AdmissionBlock;
 import org.flexlb.balance.projection.WorkSnapshot;
 import org.flexlb.balance.projection.estimator.PrefillTtftEstimator;
+import org.flexlb.balance.queue.QueueWaitSnapshot;
+import org.flexlb.balance.queue.QueuedRequestsSnapshot;
 import org.flexlb.config.DecisionPolicyConfig;
 import org.flexlb.config.DispatcherConfig;
 import org.flexlb.config.FlexlbConfig;
@@ -28,10 +30,8 @@ import org.flexlb.util.PriorityNormalizer;
 import org.flexlb.util.PriorityOrdering;
 
 import java.util.ArrayList;
-import java.util.Collections;
 import java.util.Comparator;
 import java.util.HashMap;
-import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -59,73 +59,6 @@ import java.util.function.Supplier;
  * snapshots and diagnostics identify queue-state changes.
  */
 public final class PrefillQueue {
-
-    /** Immutable queue state materialized under this runtime's queue lock. */
-    public record QueueSnapshot(
-            String endpointId,
-            long queueVersion,
-            List<ScheduledRequest> items) {
-        public QueueSnapshot {
-            if (queueVersion < 0L) {
-                throw new IllegalArgumentException(
-                        "queueVersion must be non-negative");
-            }
-            items = List.copyOf(items);
-        }
-    }
-
-    /** Frozen decision evidence; the log representation is materialized only on failure. */
-    private static final class QueueWaitSnapshot {
-        private final String endpoint;
-        private final String cause;
-        private final long capturedAtMs;
-        private final long queueVersion;
-        private final int[] requestCountsByPriority;
-        private final long prefillRequests;
-        private final int prefillBatchSlots;
-        private final DecodeRoutingView decode;
-        private volatile Map<String, Object> diagnostics;
-
-        private QueueWaitSnapshot(String endpoint, String cause, long capturedAtMs, long queueVersion,
-                                  int[] requestCountsByPriority, long prefillRequests, int prefillBatchSlots, DecodeRoutingView decode) {
-            this.endpoint = endpoint;
-            this.cause = cause;
-            this.capturedAtMs = capturedAtMs;
-            this.queueVersion = queueVersion;
-            this.requestCountsByPriority = requestCountsByPriority;
-            this.prefillRequests = prefillRequests;
-            this.prefillBatchSlots = prefillBatchSlots;
-            this.decode = decode;
-        }
-
-        private Map<String, Object> diagnostics() {
-            Map<String, Object> cached = diagnostics;
-            if (cached != null) { return cached; }
-            Map<Integer, Integer> priorityCounts = new HashMap<>();
-            int depth = 0;
-            for (int priority = 0; priority < requestCountsByPriority.length; priority++) {
-                if (requestCountsByPriority[priority] > 0) { priorityCounts.put(priority, requestCountsByPriority[priority]); }
-                depth += requestCountsByPriority[priority];
-            }
-            Map<String, Object> details = new LinkedHashMap<>();
-            details.put("cause", cause);
-            details.put("capturedAtMs", capturedAtMs);
-            details.put("endpoint", endpoint);
-            details.put("queueDepth", depth);
-            details.put("queueVersion", queueVersion);
-            details.put("priorityCounts", Collections.unmodifiableMap(priorityCounts));
-            details.put("prefillRequests", prefillRequests);
-            details.put("prefillBatchSlots", prefillBatchSlots);
-            if (decode != null) {
-                details.put("decode", Map.of("endpoint", decode.address(), "version", decode.admissionVersion(),
-                        "engineLoad", decode.engineLoad(), "totalLoad", decode.totalLoad(),
-                        "kvTotal", decode.totalKv(), "kvAvailable", decode.placementUsage().availableKvAfterReservations()));
-            }
-            cached = Collections.unmodifiableMap(details);
-            diagnostics = cached;
-            return cached;
-        }
-    }
 
     private enum RuntimeState {
         NEW,
@@ -235,8 +168,6 @@ public final class PrefillQueue {
     private static final String SINGLE_DECISION_REASON = "single_request";
     /** Initial queue index allocation; unrelated to admission limits. */
     private static final int INITIAL_QUEUE_ALLOCATION = 16;
-    private static final Map<String, Object> INITIAL_WAIT_DIAGNOSTICS =
-            Map.of("cause", "waiting for Prefill decision");
 
     private final String key;
     private final PrefillEndpoint prefillEndpoint;
@@ -910,7 +841,7 @@ public final class PrefillQueue {
 
     public Map<String, Object> waitDiagnostics() {
         QueueWaitSnapshot snapshot = waitSnapshot;
-        return snapshot == null ? INITIAL_WAIT_DIAGNOSTICS : snapshot.diagnostics();
+        return snapshot == null ? QueueWaitSnapshot.INITIAL_DIAGNOSTICS : snapshot.diagnostics();
     }
 
     /** Capture fixed-size counters without formatting the PV record on the scheduling loop. */
@@ -935,10 +866,10 @@ public final class PrefillQueue {
                 prefillRequests, prefillBatchSlots, decode);
     }
 
-    public QueueSnapshot captureQueueSnapshot() {
+    public QueuedRequestsSnapshot captureQueueSnapshot() {
         queueLock.lock();
         try {
-            return new QueueSnapshot(
+            return new QueuedRequestsSnapshot(
                     key,
                     queueVersion.get(),
                     activeItemsInSchedulingOrder());

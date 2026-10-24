@@ -10,6 +10,7 @@ import org.flexlb.balance.prediction.PrefillPredictionBoundary;
 import org.flexlb.balance.prediction.PrefillTimePredictor;
 import org.flexlb.balance.projection.PrefillTtftEstimate;
 import org.flexlb.balance.projection.estimator.PrefillTtftEstimator;
+import org.flexlb.balance.queue.QueuedRequestsSnapshot;
 import org.flexlb.balance.scheduler.EndpointEventProjector;
 import org.flexlb.balance.scheduler.PlacementAvailability;
 import org.flexlb.balance.scheduler.PrefillQueue;
@@ -155,7 +156,7 @@ public class PrefillEndpoint extends WorkerEndpoint {
     }
 
     /** Capture exact queued identities for eviction planning. */
-    public PrefillQueue.QueueSnapshot captureQueueSnapshot() {
+    public QueuedRequestsSnapshot captureQueueSnapshot() {
         return runtime.captureQueueSnapshot();
     }
 
