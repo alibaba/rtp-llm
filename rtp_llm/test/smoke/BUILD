@@ -229,3 +229,13 @@ custom_smoke_test(
     tags = ["qwen4_serving_contract"],
     data = ["//rtp_llm:sdk", "data/model/qwen_vl/1.jpeg"],
 )
+
+# P0 text-only TP4 contract: no extra ViT GPU or image request.
+custom_smoke_test(
+    name = "qwen4_native_fp8_cache128_text_tp4_sm120",
+    main = "qwen4_text_contract_test.py",
+    smoke_args = "--world_size 4",
+    gpu_type = ["RTX_5000_PRO_CU13"],
+    tags = ["qwen4_text_contract"],
+    data = ["//rtp_llm:sdk", "qwen4_serving_contract_test.py"],
+)
