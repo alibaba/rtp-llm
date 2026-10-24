@@ -3,8 +3,13 @@ import logging
 import os
 from typing import Dict, List, Optional
 
+import requests
+
+from rtp_llm.test.perf_test.cache_grid.runner.scheduler import configure_scheduler
 from rtp_llm.test.perf_test.dataset import extract_arg
 from rtp_llm.test.utils.maga_server_manager import MagaServerManager
+
+EXISTING_SERVER_PORT_ENV = "CACHE_PERF_EXISTING_SERVER_PORT"
 
 
 class EngineServer:
@@ -14,6 +19,7 @@ class EngineServer:
         self._args = args
         self._remaining_args = remaining_args
         self._server: Optional[MagaServerManager] = None
+        self._existing_port = self._read_existing_port()
 
     def start(
         self,
@@ -23,6 +29,14 @@ class EngineServer:
         use_batch_decode_scheduler: Optional[bool] = True,
     ) -> None:
         """Assemble CLI args and start MagaServerManager."""
+        if self._existing_port is not None:
+            response = requests.get(
+                f"http://127.0.0.1:{self._existing_port}/health", timeout=10
+            )
+            response.raise_for_status()
+            logging.info("Using existing engine server on port %d", self._existing_port)
+            return
+
         engine_cli = self._build_engine_cli(max_seq_len, max_concurrency)
 
         env: Dict[str, str] = {
@@ -36,6 +50,9 @@ class EngineServer:
             env["USE_BATCH_DECODE_SCHEDULER"] = (
                 "1" if use_batch_decode_scheduler else "0"
             )
+        if getattr(self._args, "cache_profile_backend", "kineto") == "nsys":
+            env["GEN_TIMELINE_SYNC"] = "0"
+            engine_cli += " --gen_timeline_sync=False"
 
         logging.info(f"Starting server with engine CLI: {engine_cli}")
         logging.info(f"remaining_args (raw list): {self._remaining_args}")
@@ -60,10 +77,33 @@ class EngineServer:
         if server is not None:
             server.stop_server()
 
+    def set_scheduler_mode(self, *, batch_size: int, mode: str) -> Dict[str, object]:
+        """Configure BatchDecodeScheduler before issuing performance requests."""
+        return configure_scheduler(
+            self.port, batch_size=batch_size, mode=mode, post=requests.post, attempts=20
+        )
+
     @property
     def port(self) -> int:
+        if self._existing_port is not None:
+            return self._existing_port
         assert self._server is not None, "Server not started"
         return self._server.port
+
+    @staticmethod
+    def _read_existing_port() -> Optional[int]:
+        value = os.environ.get(EXISTING_SERVER_PORT_ENV)
+        if value is None or not value.strip():
+            return None
+        try:
+            port = int(value)
+        except ValueError as error:
+            raise ValueError(
+                f"{EXISTING_SERVER_PORT_ENV} must be an integer"
+            ) from error
+        if not 1 <= port <= 65535:
+            raise ValueError(f"{EXISTING_SERVER_PORT_ENV} must be between 1 and 65535")
+        return port
 
     @property
     def log_file_path(self) -> Optional[str]:

@@ -494,16 +494,55 @@ class BuildRecordTest(TestCase):
         self.assertEqual(payload["input_ids"], [10, 20, 30])
         self.assertEqual(payload["generated_ids"], [10, 20, 30, 40])
 
+    def test_long_list_input_ids_are_retained_when_logging_is_allowed(self) -> None:
+        input_ids = list(range(4097))
+        rec = _make_record()
+        rec.capture_structured_request(
+            _make_infer_request(),
+            input_ids=input_ids,
+        )
+
+        payload = rec.build_record(server_id=1, rank_id=0)
+
+        self.assertEqual(payload["input_token_len"], len(input_ids))
+        self.assertEqual(payload["input_ids"], input_ids)
+        self.assertIs(rec._repetition_monitor.input_ids, input_ids)
+
     def test_logging_consent_omits_tokens_without_disabling_repetition(self) -> None:
+        class TrackingInputIds:
+            def __init__(self) -> None:
+                self.item_accesses = 0
+
+            def __len__(self) -> int:
+                return 2
+
+            def __getitem__(self, index):
+                self.item_accesses += 1
+                return (10, 20)[index]
+
+        input_ids = TrackingInputIds()
         rec = _make_record(log_input_output=False)
-        rec.capture_structured_request(_make_infer_request(input_ids=[10, 20]))
+        rec.capture_structured_request(_make_infer_request(), input_ids=input_ids)
+        self.assertEqual(input_ids.item_accesses, 0)
+        self.assertIsNone(rec.input_ids)
+        self.assertIs(rec._repetition_monitor.input_ids, input_ids)
+
         rec.record_generated_ids([30, 40])
         payload = rec.build_record(server_id=1, rank_id=0)
         self.assertIsNone(payload["input_ids"])
         self.assertIsNone(payload["generated_ids"])
         self.assertEqual(payload["input_token_len"], 2)
-        self.assertEqual(rec.input_ids, [10, 20])
+        self.assertIsNone(rec.input_ids)
         self.assertEqual(rec.generated_ids, [30, 40])
+
+    def test_logging_consent_fallback_keeps_wire_ids_as_a_view(self) -> None:
+        rec = _make_record(log_input_output=False)
+        rec.capture_structured_request(_make_infer_request(input_ids=[10, 20]))
+
+        self.assertEqual(rec.input_len, 2)
+        self.assertIsNone(rec.input_ids)
+        self.assertIsInstance(rec._repetition_monitor.input_ids, memoryview)
+        self.assertEqual(list(rec._repetition_monitor.input_ids), [10, 20])
 
     def test_frontend_records_generate_config_role_addrs_by_phase(self) -> None:
         rec = _make_record()
