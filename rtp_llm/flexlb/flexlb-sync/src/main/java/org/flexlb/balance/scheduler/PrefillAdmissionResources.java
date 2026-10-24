@@ -20,7 +20,7 @@ import java.util.List;
  * optional per-request Decode permit, identity validation, and the canonical
  * post-commit cleanup state machine.</p>
  */
-final class PrefillAdmissionResources {
+public final class PrefillAdmissionResources {
 
     private static final PrefillTtftEstimate.AdmissionBlockSemantics
             DECODE_BLOCK = new PrefillTtftEstimate.AdmissionBlockSemantics(
@@ -37,7 +37,7 @@ final class PrefillAdmissionResources {
         OWNERSHIP_LOST
     }
 
-    static final class Member {
+    public static final class Member {
         final ScheduledRequest item;
         final DecodeEndpoint.EngineDispatchPermit decode;
         MemberOwnership ownership = MemberOwnership.ADMISSION_OWNED;
@@ -48,7 +48,7 @@ final class PrefillAdmissionResources {
         }
     }
 
-    static DeliveryBlockReason.Attempt<Member> prepareMember(ScheduledRequest item) {
+    public static DeliveryBlockReason.Attempt<Member> prepareMember(ScheduledRequest item) {
         DecodeDecideInfo decide = item.decodeDecideInfo();
         if (decide.isAbsent()) {
             // The committed topology has no independent Decode resource.
@@ -104,7 +104,7 @@ final class PrefillAdmissionResources {
         }
     }
 
-    static <T> DeliveryBlockReason.Attempt<T> rejectedPrefill(
+    public static <T> DeliveryBlockReason.Attempt<T> rejectedPrefill(
             ScheduledRequest item,
             PrefillState.CapacityStatus status,
             DeliveryBlockReason capacityFull) {
@@ -123,33 +123,33 @@ final class PrefillAdmissionResources {
         };
     }
 
-    static IllegalStateException missingEndpoint(
+    public static IllegalStateException missingEndpoint(
             String role,
             ScheduledRequest item) {
         return new IllegalStateException(
                 role + " is unavailable: request_id=" + item.requestId());
     }
 
-    static IllegalStateException retired(
+    public static IllegalStateException retired(
             String role,
             ScheduledRequest item) {
         return new EndpointRetiredException(role, item);
     }
 
-    static <T> DeliveryBlockReason.Attempt<T> accepted(T value) {
+    public static <T> DeliveryBlockReason.Attempt<T> accepted(T value) {
         return DeliveryBlockReason.Attempt.accepted(value);
     }
 
-    static <T> DeliveryBlockReason.Attempt<T> rejected(
+    public static <T> DeliveryBlockReason.Attempt<T> rejected(
             DeliveryBlockReason boundary) {
         return DeliveryBlockReason.Attempt.rejected(boundary);
     }
 
-    static <T> DeliveryBlockReason.Attempt<T> failed(Throwable cause) {
+    public static <T> DeliveryBlockReason.Attempt<T> failed(Throwable cause) {
         return rejected(DeliveryBlockReason.failed(cause));
     }
 
-    static Throwable rollbackReservation(
+    public static Throwable rollbackReservation(
             PrefillState.Reservation reservation,
             Throwable priorFailure) {
         if (reservation == null) {
@@ -163,7 +163,7 @@ final class PrefillAdmissionResources {
         return priorFailure;
     }
 
-    static Throwable rollbackPermit(
+    public static Throwable rollbackPermit(
             DecodeEndpoint.EngineDispatchPermit permit,
             Throwable priorFailure) {
         if (permit == null) {
@@ -177,7 +177,7 @@ final class PrefillAdmissionResources {
         return priorFailure;
     }
 
-    static Throwable rollbackMember(
+    public static Throwable rollbackMember(
             Member member,
             Throwable priorFailure) {
         if (member == null
@@ -189,7 +189,7 @@ final class PrefillAdmissionResources {
         return failure;
     }
 
-    static void preserveRejectedCause(
+    public static void preserveRejectedCause(
             Throwable rollbackFailure,
             DeliveryBlockReason boundary) {
         if (boundary.status() == DeliveryBlockReason.Status.FAILED
@@ -198,7 +198,7 @@ final class PrefillAdmissionResources {
         }
     }
 
-    static void throwRollbackFailure(Throwable failure) {
+    public static void throwRollbackFailure(Throwable failure) {
         if (failure instanceof RuntimeException runtime) {
             throw runtime;
         }
@@ -209,7 +209,7 @@ final class PrefillAdmissionResources {
                 "admission rollback failed", failure);
     }
 
-    static boolean sameIdentitySequence(
+    public static boolean sameIdentitySequence(
             List<Member> expected,
             List<ScheduledRequest> supplied) {
         if (expected.size() != supplied.size()) {
@@ -223,7 +223,7 @@ final class PrefillAdmissionResources {
         return true;
     }
 
-    static CommittedAdmissionOwner createCommittedOwner(
+    public static CommittedAdmissionOwner createCommittedOwner(
             List<Member> exactMembers) {
         return new CommittedAdmissionOwner(exactMembers);
     }
@@ -257,7 +257,7 @@ final class PrefillAdmissionResources {
      * Fully allocated before the ledger crosses its canonical commit point.
      * Binding the returned handoff only assigns its reference.
      */
-    static final class CommittedAdmissionOwner implements AutoCloseable {
+    public static final class CommittedAdmissionOwner implements AutoCloseable {
         private final IdentityHashMap<ScheduledRequest, Member> membersByIdentity;
         private final Member[] members;
         private PrefillState.CommittedHandoff handoff;
@@ -283,7 +283,7 @@ final class PrefillAdmissionResources {
         }
 
         /** No-throw bind after one Prefill group has committed. */
-        synchronized void bindPrefillHandoff(
+        public synchronized void bindPrefillHandoff(
                 PrefillState.CommittedHandoff exactHandoff) {
             handoff = exactHandoff;
             bound = true;

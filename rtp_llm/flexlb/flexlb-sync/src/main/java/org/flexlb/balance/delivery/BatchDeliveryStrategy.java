@@ -1,18 +1,15 @@
-package org.flexlb.balance.scheduler;
+package org.flexlb.balance.delivery;
 
-import org.flexlb.balance.delivery.BlockedRequest;
-import org.flexlb.balance.delivery.DeliveryBlockReason;
-import org.flexlb.balance.delivery.DeliveryMetrics;
-import org.flexlb.balance.delivery.DeliveryResult;
-import org.flexlb.balance.delivery.DeliveryStrategy;
-import org.flexlb.balance.delivery.DeliveryTransaction;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.endpoint.PrefillState;
 import org.flexlb.balance.prediction.PrefillBatchFeatures;
 import org.flexlb.balance.prediction.PrefillPredictionBoundary;
 import org.flexlb.balance.prediction.PrefillTimePredictor;
 import org.flexlb.balance.projection.WorkSnapshot;
+import org.flexlb.balance.scheduler.PrefillAdmissionResources;
+import org.flexlb.balance.scheduler.RequestRegistry;
 import org.flexlb.balance.scheduler.RequestSlot.DeliveryClaim;
+import org.flexlb.balance.scheduler.ScheduledRequest;
 
 import java.util.ArrayList;
 import java.util.IdentityHashMap;
@@ -118,7 +115,7 @@ public final class BatchDeliveryStrategy implements DeliveryStrategy {
         }
     }
 
-    DeliveryBlockReason.Attempt<BatchTransaction> prepareAdmission(ScheduledRequest head) {
+    public DeliveryBlockReason.Attempt<BatchTransaction> prepareAdmission(ScheduledRequest head) {
         try {
             DeliveryBlockReason.Attempt<PreparedSubmission> submissionAttempt = prepareSubmission.get();
             if (!submissionAttempt.accepted()) {
@@ -352,7 +349,7 @@ public final class BatchDeliveryStrategy implements DeliveryStrategy {
     }
 
     /** One owner and one explicit state machine for the complete batch flow. */
-    static final class BatchTransaction implements DeliveryTransaction {
+    public static final class BatchTransaction implements DeliveryTransaction {
         private enum Phase {
             PREPARED,
             COMMITTED,
@@ -400,7 +397,7 @@ public final class BatchDeliveryStrategy implements DeliveryStrategy {
             return transaction;
         }
 
-        synchronized DeliveryBlockReason.Attempt<ScheduledRequest> append(
+        public synchronized DeliveryBlockReason.Attempt<ScheduledRequest> append(
                 ScheduledRequest exact) {
             requirePrepared("append");
             requireAdmissionPrepared("append");
@@ -583,7 +580,7 @@ public final class BatchDeliveryStrategy implements DeliveryStrategy {
             }
         }
 
-        long batchId() {
+        public long batchId() {
             return batchId;
         }
 
@@ -595,7 +592,7 @@ public final class BatchDeliveryStrategy implements DeliveryStrategy {
             return evaluator;
         }
 
-        boolean transferToEndpoint(ScheduledRequest exactItem) {
+        public boolean transferToEndpoint(ScheduledRequest exactItem) {
             requirePhase(Phase.SUBMITTED, "transfer admission");
             return committedAdmission.transferToEndpoint(exactItem);
         }

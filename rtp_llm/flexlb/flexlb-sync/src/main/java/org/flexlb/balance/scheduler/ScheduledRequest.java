@@ -161,12 +161,12 @@ public final class ScheduledRequest implements Prioritized {
     }
 
     /** Observe without transferring; optimistic preparation does not transfer ownership. */
-    PrefillState.RouteReservation publishedRouteReservation() {
+    public PrefillState.RouteReservation publishedRouteReservation() {
         return publishedRouteReservation.get();
     }
 
     /** Transfer only the reservation validated during optimistic preparation. */
-    boolean takePublishedRouteReservation(
+    public boolean takePublishedRouteReservation(
             PrefillState.RouteReservation expected) {
         return publishedRouteReservation.compareAndSet(
                 Objects.requireNonNull(expected, "expected"), null);

@@ -98,7 +98,7 @@ class CacheHitFeedbackFlowTest {
         when(configs.loadBalanceConfig()).thenReturn(config);
         registry = new EndpointRegistry(configs, RunnerTestSupport.eventSink(),
                 mock(org.flexlb.service.monitor.BatchSchedulerReporter.class),
-                new org.flexlb.balance.scheduler.NonBatchDeliveryStrategy(
+                new org.flexlb.balance.delivery.NonBatchDeliveryStrategy(
                         mock(org.flexlb.balance.scheduler.RequestRegistry.class),
                         mock(org.flexlb.balance.delivery.DeliveryMetrics.class)),
                 new org.flexlb.balance.projection.estimator.NonBatchTtftEstimator(),

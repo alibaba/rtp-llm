@@ -1,15 +1,13 @@
-package org.flexlb.balance.scheduler;
+package org.flexlb.balance.delivery;
 
-import org.flexlb.balance.delivery.BlockedRequest;
-import org.flexlb.balance.delivery.DeliveryBlockReason;
-import org.flexlb.balance.delivery.DeliveryMetrics;
-import org.flexlb.balance.delivery.DeliveryStrategy;
-import org.flexlb.balance.delivery.DeliveryTransaction;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.prediction.PrefillPredictionBoundary;
 import org.flexlb.balance.prediction.PrefillTimePredictor;
 import org.flexlb.balance.projection.WorkSnapshot;
+import org.flexlb.balance.scheduler.PrefillAdmissionResources;
+import org.flexlb.balance.scheduler.RequestRegistry;
 import org.flexlb.balance.scheduler.RequestSlot.DeliveryClaim;
+import org.flexlb.balance.scheduler.ScheduledRequest;
 
 import java.util.ArrayList;
 import java.util.List;

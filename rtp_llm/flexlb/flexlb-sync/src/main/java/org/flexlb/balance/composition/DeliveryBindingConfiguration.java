@@ -1,13 +1,13 @@
 package org.flexlb.balance.composition;
 
+import org.flexlb.balance.delivery.BatchDeliveryStrategy;
 import org.flexlb.balance.delivery.DeliveryMetrics;
 import org.flexlb.balance.delivery.DeliveryStrategy;
+import org.flexlb.balance.delivery.NonBatchDeliveryStrategy;
 import org.flexlb.balance.projection.estimator.BatchTtftEstimator;
 import org.flexlb.balance.projection.estimator.NonBatchTtftEstimator;
 import org.flexlb.balance.projection.estimator.PrefillTtftEstimator;
-import org.flexlb.balance.scheduler.BatchDeliveryStrategy;
 import org.flexlb.balance.scheduler.DefaultBatchDispatcher;
-import org.flexlb.balance.scheduler.NonBatchDeliveryStrategy;
 import org.flexlb.balance.scheduler.RequestRegistry;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.DispatcherConfig;

@@ -1,18 +1,18 @@
 package org.flexlb.balance.endpoint;
 
+import org.flexlb.balance.delivery.BatchDeliveryStrategy;
 import org.flexlb.balance.delivery.BlockedRequest;
 import org.flexlb.balance.delivery.DeliveryBlockReason;
 import org.flexlb.balance.delivery.DeliveryMetrics;
 import org.flexlb.balance.delivery.DeliveryResult;
 import org.flexlb.balance.delivery.DeliveryStrategy;
 import org.flexlb.balance.delivery.DeliveryTransaction;
+import org.flexlb.balance.delivery.NonBatchDeliveryStrategy;
 import org.flexlb.balance.projection.PrefillTtftEstimate;
 import org.flexlb.balance.projection.estimator.BatchTtftEstimator;
 import org.flexlb.balance.projection.estimator.NonBatchTtftEstimator;
 import org.flexlb.balance.projection.estimator.PrefillTtftEstimator;
-import org.flexlb.balance.scheduler.BatchDeliveryStrategy;
 import org.flexlb.balance.scheduler.EndpointEventProjector;
-import org.flexlb.balance.scheduler.NonBatchDeliveryStrategy;
 import org.flexlb.balance.scheduler.PlacementAvailability;
 import org.flexlb.balance.scheduler.QueueCapacity;
 import org.flexlb.balance.scheduler.RequestRegistry;

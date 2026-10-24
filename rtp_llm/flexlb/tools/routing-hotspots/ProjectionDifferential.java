@@ -6,7 +6,6 @@ import java.util.*;
 import org.flexlb.balance.delivery.DeliveryMetrics;
 import org.flexlb.balance.planner.GroupPlanner;
 import org.flexlb.balance.projection.*;
-import org.flexlb.balance.scheduler.NonBatchDeliveryStrategy;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
 
 /** Run identically against both revisions; compare complete selections and candidates. */

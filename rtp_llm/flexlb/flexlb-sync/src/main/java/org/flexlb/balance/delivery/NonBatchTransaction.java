@@ -1,12 +1,11 @@
-package org.flexlb.balance.scheduler;
+package org.flexlb.balance.delivery;
 
-import org.flexlb.balance.delivery.BlockedRequest;
-import org.flexlb.balance.delivery.DeliveryBlockReason;
-import org.flexlb.balance.delivery.DeliveryTransaction;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.endpoint.PrefillState;
 import org.flexlb.balance.prediction.PrefillTimePredictor;
 import org.flexlb.balance.projection.WorkSnapshot;
+import org.flexlb.balance.scheduler.PrefillAdmissionResources;
+import org.flexlb.balance.scheduler.ScheduledRequest;
 
 import java.util.ArrayList;
 import java.util.IdentityHashMap;
@@ -25,7 +24,7 @@ import static org.flexlb.balance.scheduler.PrefillAdmissionResources.throwRollba
 /**
  * NON_BATCH 模式的一次投递事务：按顺序持有本次请求的预留，并负责提交、交付和回滚。
  */
-final class NonBatchTransaction implements DeliveryTransaction {
+public final class NonBatchTransaction implements DeliveryTransaction {
     private final NonBatchDeliveryStrategy owner;
     private final PrefillEndpoint prefill;
     private List<ScheduledRequest> items = List.of();
@@ -54,7 +53,7 @@ final class NonBatchTransaction implements DeliveryTransaction {
         return new NonBatchTransaction(owner, blocked);
     }
 
-    synchronized DeliveryBlockReason.Attempt<ScheduledRequest> append(ScheduledRequest exact,
+    public synchronized DeliveryBlockReason.Attempt<ScheduledRequest> append(ScheduledRequest exact,
                                                                       PrefillTimePredictor.Evaluator evaluator) {
         requirePrepared("append");
         if (prefill.isRetired()) {
