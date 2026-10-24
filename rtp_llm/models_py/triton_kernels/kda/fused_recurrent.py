@@ -73,6 +73,7 @@ def fused_recurrent_kda_fwd_kernel(
     APPLY_BETA_SIGMOID: tl.constexpr,
     ALLOW_NEG_EIGVAL: tl.constexpr,
     STATE_V_FIRST: tl.constexpr,
+    TRANSPOSE_STATE_LAYOUT: tl.constexpr,
     num_stages: tl.constexpr,
 ):
     pid = tl.program_id(0)
@@ -123,11 +124,17 @@ def fused_recurrent_kda_fwd_kernel(
 
     mask_k = o_k < K
     mask_v = o_v < V
-    mask_h = mask_v[:, None] & mask_k[None, :]
-
-    # Match FLA's transpose_state_layout=True arithmetic: keep the register
-    # tile [V,K], while translating addresses to RTP's canonical [K,V] cache.
-    b_h = tl.zeros([BV, BK], dtype=tl.float32)
+    # Register layout controls reduction order independently of cache layout.
+    # Kimi-Linear retains its original [K,V] reduction; K3 uses FLA's [V,K].
+    if TRANSPOSE_STATE_LAYOUT:
+        state_k, state_v = o_k[None, :], o_v[:, None]
+        mask_h = mask_v[:, None] & mask_k[None, :]
+        b_h = tl.zeros([BV, BK], dtype=tl.float32)
+    else:
+        state_k, state_v = o_k[:, None], o_v[None, :]
+        mask_h = mask_k[:, None] & mask_v[None, :]
+        b_h = tl.zeros([BK, BV], dtype=tl.float32)
+    state_offset = state_v * K + state_k if STATE_V_FIRST else state_k * V + state_v
     if USE_INITIAL_STATE:
         if IS_CONTINUOUS_BATCHING:
             load_block_offset = cal_block_idx(sequence_length - 1, SEQ_SIZE_PER_BLOCK)
@@ -139,10 +146,7 @@ def fused_recurrent_kda_fwd_kernel(
             p_h0 = h0 + read_block_id * stride_init_state_token + i_hv * K * V
         else:
             p_h0 = h0 + (i_n * HV + i_hv) * K * V
-        if STATE_V_FIRST:
-            p_h0 = p_h0 + o_v[:, None] * K + o_k[None, :]
-        else:
-            p_h0 = p_h0 + o_k[None, :] * V + o_v[:, None]
+        p_h0 += state_offset
         b_h += tl.load(p_h0, mask=mask_h, other=0).to(tl.float32)
 
     for i_t in tl.range(0, T, num_stages=num_stages):
@@ -181,9 +185,12 @@ def fused_recurrent_kda_fwd_kernel(
         else:
             b_gk = b_g
 
-        b_h *= exp(b_gk[None, :])
-
-        b_v -= tl.sum(b_h * b_k[None, :], 1)
+        if TRANSPOSE_STATE_LAYOUT:
+            b_h *= exp(b_gk[None, :])
+            b_v -= tl.sum(b_h * b_k[None, :], 1)
+        else:
+            b_h *= exp(b_gk[:, None])
+            b_v -= tl.sum(b_h * b_k[:, None], 0)
         if IS_BETA_HEADWISE:
             b_beta = tl.load(
                 p_beta,
@@ -199,8 +206,12 @@ def fused_recurrent_kda_fwd_kernel(
                 b_beta = b_beta * 2
         b_v *= b_beta
 
-        b_h += b_v[:, None] * b_k[None, :]
-        b_o = tl.sum(b_h * b_q[None, :], 1)
+        if TRANSPOSE_STATE_LAYOUT:
+            b_h += b_v[:, None] * b_k[None, :]
+            b_o = tl.sum(b_h * b_q[None, :], 1)
+        else:
+            b_h += b_k[:, None] * b_v[None, :]
+            b_o = tl.sum(b_h * b_q[:, None], 0)
         tl.store(
             p_o,
             b_o.to(p_o.dtype.element_ty),
@@ -220,10 +231,7 @@ def fused_recurrent_kda_fwd_kernel(
             else:
                 p_ht = ht + (bos + i_t) * stride_final_state_token
             p_ht = p_ht + i_hv * K * V
-            if STATE_V_FIRST:
-                p_ht = p_ht + o_v[:, None] * K + o_k[None, :]
-            else:
-                p_ht = p_ht + o_k[None, :] * V + o_v[:, None]
+            p_ht += state_offset
             tl.store(p_ht, b_h.to(p_ht.dtype.element_ty), mask=mask_h)
 
         p_q += H * K
@@ -235,10 +243,7 @@ def fused_recurrent_kda_fwd_kernel(
 
     if not IS_CONTINUOUS_BATCHING:
         p_ht = ht + (i_n * HV + i_hv) * K * V
-        if STATE_V_FIRST:
-            p_ht = p_ht + o_v[:, None] * K + o_k[None, :]
-        else:
-            p_ht = p_ht + o_k[None, :] * V + o_v[:, None]
+        p_ht += state_offset
         tl.store(p_ht, b_h.to(p_ht.dtype.element_ty), mask=mask_h)
 
 
@@ -263,11 +268,13 @@ def fused_recurrent_kda_fwd(
     allow_neg_eigval: bool = False,
     lower_bound: Optional[float] = None,
     state_v_first: bool = False,
+    transpose_state_layout: bool = True,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     B, T, H, K, V = *k.shape, v.shape[-1]
     HV = v.shape[2]
     N = B if cu_seqlens is None else len(cu_seqlens) - 1
-    BK, BV = triton.next_power_of_2(K), 16
+    BK = triton.next_power_of_2(K)
+    BV = 16 if transpose_state_layout else min(triton.next_power_of_2(V), 8)
     NK, NV = triton.cdiv(K, BK), triton.cdiv(V, BV)
     assert NK == 1, "NK > 1 is not supported yet"
 
@@ -334,8 +341,9 @@ def fused_recurrent_kda_fwd(
         APPLY_BETA_SIGMOID=use_beta_sigmoid_in_kernel,
         ALLOW_NEG_EIGVAL=allow_neg_eigval,
         STATE_V_FIRST=state_v_first,
+        TRANSPOSE_STATE_LAYOUT=transpose_state_layout,
         num_warps=1,
-        num_stages=2,
+        num_stages=2 if transpose_state_layout else 3,
     )
     return o, final_state
 
@@ -361,6 +369,7 @@ def fused_recurrent_kda(
     allow_neg_eigval: bool = False,
     lower_bound: Optional[float] = None,
     state_v_first: bool = False,
+    transpose_state_layout: bool = True,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     if scale is None:
         scale = k.shape[-1] ** -0.5
@@ -387,5 +396,6 @@ def fused_recurrent_kda(
         allow_neg_eigval=allow_neg_eigval,
         lower_bound=lower_bound,
         state_v_first=state_v_first,
+        transpose_state_layout=transpose_state_layout,
     )
     return o, final_state

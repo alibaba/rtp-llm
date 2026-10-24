@@ -134,10 +134,15 @@ def naive_recurrent_kda(
 class TestKdaOps(unittest.TestCase):
 
     def test_decode_vs_naive(self):
-        for B, lower_bound, nonzero_state in product(
-            (1, 4, 8), (None, SAFE_GATE_LOWER_BOUND), (False, True)
+        for B, lower_bound, nonzero_state, transpose_state_layout in product(
+            (1, 4, 8), (None, SAFE_GATE_LOWER_BOUND), (False, True), (False, True)
         ):
-            with self.subTest(B=B, lower_bound=lower_bound, nonzero_state=nonzero_state):
+            with self.subTest(
+                B=B,
+                lower_bound=lower_bound,
+                nonzero_state=nonzero_state,
+                transpose_state_layout=transpose_state_layout,
+            ):
                 q, k, v, g_raw, beta, A_log, dt_bias, state = make_kda_inputs(B, 1)
                 if nonzero_state:
                     # A one-token update from zero cannot observe the gate.
@@ -158,6 +163,7 @@ class TestKdaOps(unittest.TestCase):
                     inplace_final_state=True,
                     use_qk_l2norm_in_kernel=True,
                     use_gate_in_kernel=True,
+                    transpose_state_layout=transpose_state_layout,
                 )
 
                 o_naive, fs_naive = naive_recurrent_kda(
