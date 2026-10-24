@@ -32,7 +32,10 @@ void check_renorm_inputs(const torch::Tensor& probs, const torch::Tensor& renorm
     TORCH_CHECK(renorm_probs.is_contiguous(), "renorm_probs must be contiguous");
 }
 
-void check_sampling_inputs(const torch::Tensor& probs, const torch::Tensor& output, const torch::Tensor& valid) {
+void check_sampling_inputs(const torch::Tensor& probs,
+                           const torch::Tensor& output,
+                           const torch::Tensor& valid,
+                           bool                 allow_row_stride = false) {
     TORCH_CHECK(probs.is_cuda(), "probs must be a CUDA tensor");
     TORCH_CHECK(output.is_cuda(), "output must be a CUDA tensor");
     TORCH_CHECK(valid.is_cuda(), "valid must be a CUDA tensor");
@@ -46,7 +49,12 @@ void check_sampling_inputs(const torch::Tensor& probs, const torch::Tensor& outp
     TORCH_CHECK(valid.scalar_type() == at::kBool, "valid must be bool dtype");
     TORCH_CHECK(probs.device() == output.device(), "output device must match probs device");
     TORCH_CHECK(probs.device() == valid.device(), "valid device must match probs device");
-    TORCH_CHECK(probs.is_contiguous(), "probs must be contiguous");
+    if (allow_row_stride) {
+        TORCH_CHECK(probs.stride(1) == 1 && probs.stride(0) >= probs.size(1), "probs must be row-major");
+        TORCH_CHECK(probs.stride(0) <= std::numeric_limits<uint32_t>::max(), "probs row stride exceeds uint32 range");
+    } else {
+        TORCH_CHECK(probs.is_contiguous(), "probs must be contiguous");
+    }
     TORCH_CHECK(output.is_contiguous(), "output must be contiguous");
     TORCH_CHECK(valid.is_contiguous(), "valid must be contiguous");
 }
@@ -140,7 +148,7 @@ void sampling_from_probs(torch::Tensor                probs,
                          std::optional<torch::Tensor> maybe_offset_arr,
                          uint64_t                     offset_val,
                          int64_t                      cuda_stream) {
-    check_sampling_inputs(probs, output, valid);
+    check_sampling_inputs(probs, output, valid, /*allow_row_stride=*/true);
 
     at::cuda::CUDAGuard device_guard(probs.device());
     const auto          batch_size = static_cast<uint32_t>(output.size(0));
@@ -157,6 +165,7 @@ void sampling_from_probs(torch::Tensor                probs,
         indices.defined() ? static_cast<int32_t*>(indices.data_ptr()) : nullptr,
         batch_size,
         vocab_size,
+        static_cast<uint32_t>(probs.stride(0)),
         deterministic,
         seed.defined() ? reinterpret_cast<uint64_t*>(seed.data_ptr<int64_t>()) : nullptr,
         seed_val,
@@ -314,7 +323,7 @@ void top_p_renorm_probs(torch::Tensor                probs,
     float* top_p_ptr = top_p.defined() ? static_cast<float*>(top_p.data_ptr()) : nullptr;
 
     cudaError_t status = cudaSuccess;
-    if (vocab_size < flashinfer::sampling::air_top_p::NUM_BUCKETS) {
+    if (vocab_size < flashinfer::sampling::air_top_p::NUM_BUCKETS || vocab_size == 4096) {
         status = flashinfer::sampling::TopPRenormProb<float>(static_cast<float*>(probs.data_ptr()),
                                                              static_cast<float*>(renorm_probs.data_ptr()),
                                                              top_p_ptr,

@@ -12,6 +12,9 @@ namespace rtp_llm {
 
 namespace speculative {
 
+// Shared DSpARK Target/Draft setting. Zero disables fixed-width truncation.
+int dsparkForceTopK();
+
 struct SpeculativeSamplerOutput {
 public:
     torch::Tensor accept_tokens;
@@ -69,7 +72,9 @@ public:
                                     const torch::Tensor& markov_w1,
                                     const torch::Tensor& markov_w2,
                                     size_t               draft_vocab_size,
-                                    bool                 batch_all_greedy) const;
+                                    bool                 batch_all_greedy,
+                                    int                  force_topk      = 0,
+                                    int                  joint_max_top_k = 0) const;
 
 private:
     void batchSample(SpeculativeSamplerOutput&           sample_output,

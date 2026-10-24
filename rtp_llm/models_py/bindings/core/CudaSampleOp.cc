@@ -13,6 +13,7 @@
 #include "rtp_llm/models_py/bindings/cuda/kernels/speculative_sampling/sampling.h"
 #include "rtp_llm/models_py/bindings/cuda/kernels/speculative_sampling/markov_softmax.h"
 #include "rtp_llm/models_py/bindings/cuda/kernels/speculative_sampling/greedy_top1_renorm.h"
+#include "rtp_llm/models_py/bindings/cuda/kernels/deepselect_fp32.h"
 #include "rtp_llm/cpp/utils/DebugUtils.h"
 #include "rtp_llm/models_py/bindings/cuda/kernels/sampling/sampling.h"
 #include <cstddef>
@@ -413,10 +414,46 @@ static GreedyOutput flashinferSampleGreedy(const GreedyParams& params, const tor
     // The fused greedy top-1 path skips both: its caller declared the logits
     // buffer private (skip_logits_probs_restore) and the one-hot(argmax)
     // output does not depend on softmax values.
+    const auto force_topk = [&]() -> int64_t {
+        if (params.force_topk <= 0 || fused_greedy_top1 || !params.skip_logits_probs_restore
+            || params.return_original_all_probs || params.cum_log_probs.has_value()
+            || !params.output_all_probs.has_value() || params.output_all_probs->sizes() != params.logits.sizes()) {
+            return 0;
+        }
+        const auto* ks = params.top_k.data_ptr<int32_t>();
+        if (std::all_of(ks, ks + batch_size, [](int32_t k) { return k == 1; })) {
+            return 0;
+        }
+        // Explicit top-k uses the existing full-vocabulary filter so tied
+        // tokens at the cutoff remain in the support. Unfiltered rows also
+        // need the full distribution; only top-p-only rows use the cap.
+        if (!std::all_of(ks, ks + batch_size, [](int32_t k) { return k <= 0; })) {
+            return 0;
+        }
+        const auto* ps = params.top_p.data_ptr<float>();
+        if (std::any_of(
+                ps, ps + batch_size, [](float p) { return std::abs(p) < 1e-7f || std::abs(p - 1.0f) < 1e-7f; })) {
+            return 0;
+        }
+        int64_t width = params.force_topk;
+        return width < params.logits.size(1) ? width : 0;
+    }();
+    torch::Tensor topk_indices;
     torch::Tensor probs_t;
     if (!fused_greedy_top1) {
-        probs_t = torch::softmax(params.logits, -1);
-        params.logits.copy_(probs_t, true);
+        if (force_topk > 0) {
+            const auto* device_properties = at::cuda::getDeviceProperties(params.logits.get_device());
+            auto        selected          = force_topk == 4096 && batch_size >= 16 && params.logits.size(1) == 129280
+                                    && device_properties->major == 10
+                                    && (device_properties->minor == 0 || device_properties->minor == 3) ?
+                                                torch_ext::deepselect_fp32_topk_prefilter(params.logits) :
+                                                torch_ext::deepselect_fp32_topk(params.logits, force_topk);
+            topk_indices                  = std::get<1>(selected);
+            probs_t                       = torch::softmax(std::get<0>(selected), -1);
+        } else {
+            probs_t = torch::softmax(params.logits, -1);
+            params.logits.copy_(probs_t, true);
+        }
     }
     auto success = torch::empty({(int64_t)batch_size}, torch::TensorOptions().dtype(torch::kBool).device(torch::kCUDA));
 
@@ -440,10 +477,12 @@ static GreedyOutput flashinferSampleGreedy(const GreedyParams& params, const tor
     RTP_LLM_CHECK_WITH_INFO(output_width > 0 && output_width <= params.logits.size(1),
                             "output probability width must be in (0, padded vocab size]");
     const bool need_full_sampling_probs = output_all_probs_t.defined() && output_width < params.logits.size(1);
-    auto       sampling_probs_t = need_full_sampling_probs ? torch::zeros_like(params.logits) : output_all_probs_t;
+    auto       sampling_probs_t         = force_topk > 0           ? torch::empty_like(probs_t) :
+                                          need_full_sampling_probs ? torch::zeros_like(params.logits) :
+                                                                     output_all_probs_t;
 
     // top_k/top_p are CPU tensors with int32/float32 dtype
-    auto top_k_ptr = params.top_k.data_ptr<int32_t>();
+    auto top_k_ptr = top_k_t.data_ptr<int32_t>();
     auto top_p_ptr = params.top_p.data_ptr<float>();
 
     std::transform(top_p_ptr, top_p_ptr + batch_size, top_p_ptr, [&](auto t) { return std::abs(t) < 1e-7 ? 1.0 : t; });
@@ -495,27 +534,67 @@ static GreedyOutput flashinferSampleGreedy(const GreedyParams& params, const tor
         }
         success = torch::Tensor();  // mark as undefined — all succeeded
     } else if (all_top_k_no_limit) {
-        top_p_sampling_from_probs(probs_t,
-                                  samples_t.squeeze(0),
-                                  success_t,
-                                  std::nullopt,
-                                  top_p_t,
-                                  1.0,
-                                  deterministic,
-                                  seed_t,
-                                  0,
-                                  offset_t,
-                                  0,
-                                  (int64_t)cur_stream);
+        const bool all_top_p_unrestricted =
+            std::all_of(top_p_ptr, top_p_ptr + batch_size, [](float p) { return p == 1.0f; });
+        if (all_top_p_unrestricted) {
+            sampling_from_probs(probs_t,
+                                samples_t.squeeze(0),
+                                success_t,
+                                std::nullopt,
+                                deterministic,
+                                seed_t,
+                                0,
+                                offset_t,
+                                0,
+                                (int64_t)cur_stream);
+        } else {
+            top_p_sampling_from_probs(probs_t,
+                                      samples_t.squeeze(0),
+                                      success_t,
+                                      std::nullopt,
+                                      top_p_t,
+                                      1.0,
+                                      deterministic,
+                                      seed_t,
+                                      0,
+                                      offset_t,
+                                      0,
+                                      (int64_t)cur_stream);
+        }
         if (need_renorm_probs) {
-            top_p_renorm_probs(probs_t, sampling_probs_t, top_p_t, 1.0, (int64_t)cur_stream);
+            if (all_top_p_unrestricted) {
+                sampling_probs_t.copy_(probs_t, true);
+            } else {
+                top_p_renorm_probs(probs_t, sampling_probs_t, top_p_t, 1.0, (int64_t)cur_stream);
+            }
         }
     } else {
         // top_k<=0 means "no limit" in RTP config. The combined FlashInfer
         // kernel takes a top_k array, so normalize mixed batches after the
         // pure top-p route has been selected.
         std::transform(top_k_ptr, top_k_ptr + batch_size, top_k_ptr, [](auto t) { return t <= 0 ? 1 << 30 : t; });
-        if (all_top_p_one) {
+        const auto* device_properties = at::cuda::getDeviceProperties(probs_t.get_device());
+        const bool  exact_joint_small_k =
+            torch_ext::deepselect_fp32_available() && device_properties->major == 10
+            && (device_properties->minor == 0 || device_properties->minor == 3) && need_renorm_probs && !all_top_p_one
+            && force_topk == 0 && probs_t.size(1) >= 512 && probs_t.size(1) % 256 == 0
+            && std::all_of(top_k_ptr, top_k_ptr + batch_size, [](int32_t k) { return k >= 2 && k <= 512; });
+        if (exact_joint_small_k) {
+            const auto max_k      = *std::max_element(top_k_ptr, top_k_ptr + batch_size);
+            auto       top_k_cuda = top_k_t.to(probs_t.device(), /*non_blocking=*/true);
+            auto       top_p_cuda = top_p_t.to(probs_t.device(), /*non_blocking=*/true);
+            torch_ext::deepselect_fp32_joint_topk_topp(probs_t, sampling_probs_t, top_k_cuda, top_p_cuda, max_k);
+            sampling_from_probs(sampling_probs_t,
+                                samples_t.squeeze(0),
+                                success_t,
+                                std::nullopt,
+                                deterministic,
+                                seed_t,
+                                0,
+                                offset_t,
+                                0,
+                                (int64_t)cur_stream);
+        } else if (all_top_p_one) {
             top_k_sampling_from_probs(probs_t,
                                       samples_t.squeeze(0),
                                       success_t,
@@ -558,6 +637,11 @@ static GreedyOutput flashinferSampleGreedy(const GreedyParams& params, const tor
 
     if (params.return_original_all_probs && sampling_probs_t.defined()) {
         sampling_probs_t.copy_(probs_t);
+    }
+    if (force_topk > 0) {
+        output_all_probs_t.zero_().scatter_(1, topk_indices, sampling_probs_t);
+        auto sampled_indices = samples_t.squeeze(0).to(torch::kLong).unsqueeze(1);
+        samples_t.copy_(topk_indices.gather(1, sampled_indices).squeeze(1).view({1, batch_size}));
     }
     if (need_full_sampling_probs) {
         output_all_probs_t.copy_(sampling_probs_t.slice(1, 0, output_width));
@@ -661,8 +745,9 @@ GreedyOutput sampleGreedy(const GreedyParams& params) {
 
 torch::Tensor sampleFromProbs(const torch::Tensor& probabilities) {
     RTP_LLM_CHECK_WITH_INFO(probabilities.defined() && probabilities.is_cuda() && probabilities.dim() == 2
-                                && probabilities.scalar_type() == torch::kFloat32 && probabilities.is_contiguous(),
-                            "probability sampling expects contiguous CUDA FP32 [batch,vocab] probabilities");
+                                && probabilities.scalar_type() == torch::kFloat32 && probabilities.stride(1) == 1
+                                && probabilities.stride(0) >= probabilities.size(1),
+                            "probability sampling expects row-major CUDA FP32 [batch,vocab] probabilities");
     const auto          batch_size = probabilities.size(0);
     at::cuda::CUDAGuard device_guard(probabilities.device());
     auto [seed, offset] = get_seed_and_offset(/*increment_size=*/4);
@@ -742,10 +827,12 @@ void markovSoftmaxStep(const MarkovSoftmaxStepParams& params) {
                             "markovSoftmaxStep: q_all_probs must be a row-major [batch,vocab] FP32 view "
                             "on the logits device");
     RTP_LLM_CHECK_WITH_INFO(
-        params.q_contig.defined() && params.q_contig.is_cuda() && params.q_contig.scalar_type() == torch::kFloat32
-            && params.q_contig.is_contiguous() && params.q_contig.dim() == 2 && params.q_contig.size(0) == batch_size
-            && params.q_contig.size(1) == vocab_size && params.q_contig.device() == params.logits.device(),
-        "markovSoftmaxStep: q_contig must be a contiguous [batch,vocab] FP32 CUDA tensor "
+        !params.q_contig.defined()
+            || (params.q_contig.is_cuda() && params.q_contig.scalar_type() == torch::kFloat32
+                && params.q_contig.is_contiguous() && params.q_contig.dim() == 2
+                && params.q_contig.size(0) == batch_size && params.q_contig.size(1) == vocab_size
+                && params.q_contig.device() == params.logits.device()),
+        "markovSoftmaxStep: q_contig must be undefined or a contiguous [batch,vocab] FP32 CUDA tensor "
         "on the logits device");
     if (batch_size == 0) {
         return;
@@ -779,7 +866,7 @@ void markovSoftmaxStep(const MarkovSoftmaxStepParams& params) {
                                              params.temperature.data_ptr<float>(),
                                              params.q_all_probs.data_ptr<float>(),
                                              params.q_all_probs.stride(0),
-                                             params.q_contig.data_ptr<float>(),
+                                             params.q_contig.defined() ? params.q_contig.data_ptr<float>() : nullptr,
                                              static_cast<int>(batch_size),
                                              static_cast<int>(vocab_size),
                                              partials.data_ptr<float>(),

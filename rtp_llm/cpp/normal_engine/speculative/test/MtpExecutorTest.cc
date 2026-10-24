@@ -2802,6 +2802,78 @@ TEST_F(MtpExecutorTest, testDSparkReducedVocabFeedsMappedTargetTokenIntoMarkovCh
     EXPECT_EQ((std::vector<int32_t>{5, 5}), toVec<int32_t>(point_mass_output.token_ids.cpu()));
 }
 
+TEST_F(MtpExecutorTest, testDSparkForceTopKMapsDraftDistributionToVocabulary) {
+    namespace spec                 = rtp_llm::speculative;
+    constexpr int32_t        gamma = 2, draft_vocab = 4, target_vocab = 8;
+    auto                     d2t = torch::tensor({1, 3, 5, 7}, torch::kInt64).to(torch::kCUDA);
+    spec::SpeculativeSampler sampler(d2t, gamma);
+    auto                     logits = torch::tensor({0.0f, 4.0f, 1.0f, 3.0f, 5.0f, 0.0f, 4.0f, 1.0f}, torch::kFloat32)
+                      .reshape({gamma, draft_vocab})
+                      .to(torch::kCUDA);
+    auto anchors     = torch::tensor({0}, torch::kInt32).to(torch::kCUDA);
+    auto temperature = torch::ones({1}, torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA));
+    auto markov_w1   = torch::zeros({target_vocab, 1}, temperature.options());
+    auto markov_w2   = torch::zeros({draft_vocab, 1}, temperature.options());
+    auto output =
+        sampler.sampleDSparkDraft(logits, anchors, temperature, {}, {}, markov_w1, markov_w2, draft_vocab, false, 2);
+    auto q               = output.all_probs.cpu().contiguous();
+    auto ids             = toVec<int32_t>(output.token_ids.cpu());
+    auto expected_first  = torch::softmax(torch::tensor({4.0f, 3.0f}), -1);
+    auto expected_second = torch::softmax(torch::tensor({5.0f, 4.0f}), -1);
+    EXPECT_NEAR(q[0][0][1].item<float>(), expected_first[0].item<float>(), 1e-5f);
+    EXPECT_NEAR(q[0][0][3].item<float>(), expected_first[1].item<float>(), 1e-5f);
+    EXPECT_NEAR(q[0][1][0].item<float>(), expected_second[0].item<float>(), 1e-5f);
+    EXPECT_NEAR(q[0][1][2].item<float>(), expected_second[1].item<float>(), 1e-5f);
+    EXPECT_EQ(q[0][0][0].item<float>(), 0.0f);
+    EXPECT_EQ(q[0][0][2].item<float>(), 0.0f);
+    EXPECT_EQ(q[0][1][1].item<float>(), 0.0f);
+    EXPECT_EQ(q[0][1][3].item<float>(), 0.0f);
+    EXPECT_TRUE(ids[0] == 3 || ids[0] == 7);
+    EXPECT_TRUE(ids[1] == 1 || ids[1] == 5);
+}
+
+#if USING_CUDA
+TEST_F(MtpExecutorTest, testDSparkForceTopK4096PreservesFullVocabularyQ) {
+    const auto* properties = at::cuda::getDeviceProperties(0);
+    if (properties->major != 10 || (properties->minor != 0 && properties->minor != 3)) {
+        GTEST_SKIP() << "DeepSelect FP32 K4096 requires SM100 or SM103";
+    }
+    constexpr int64_t  batch = 2, vocab = 8192;
+    std::vector<float> values(batch * vocab, -30.0f);
+    values[7]                            = 3.0f;
+    values[111]                          = 3.0f;
+    values[4097]                         = 2.0f;
+    values[vocab]                        = 5.0f;
+    values[vocab + 1]                    = 4.0f;
+    values[vocab + 2]                    = 3.0f;
+    auto                     f32         = torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA);
+    auto                     logits      = torch::tensor(values).reshape({batch, vocab}).to(torch::kCUDA);
+    auto                     anchors     = torch::zeros({batch}, f32.dtype(torch::kInt32));
+    auto                     temperature = torch::tensor({1.0f, 2.0f}, torch::kFloat32).to(torch::kCUDA);
+    auto                     top_p       = torch::full({batch}, 0.75f, f32);
+    auto                     markov      = torch::zeros({vocab, 1}, f32.dtype(torch::kBFloat16));
+    spec::SpeculativeSampler sampler(torch::Tensor(), 1);
+
+    std::vector<float> expected_values(batch * vocab, 0.0f);
+    expected_values[7] = expected_values[111] = 0.5f;
+    expected_values[vocab]                    = 0.62245933f;
+    expected_values[vocab + 1]                = 0.37754067f;
+    auto expected                             = torch::tensor(expected_values).reshape({batch, vocab}).to(torch::kCUDA);
+    auto output =
+        sampler.sampleDSparkDraft(logits, anchors, temperature, {}, top_p, markov, markov, vocab, false, 4096);
+    EXPECT_TRUE(torch::allclose(output.all_probs.select(1, 0), expected, 1e-5, 1e-6));
+    auto tokens = toVec<int32_t>(output.token_ids.cpu());
+    EXPECT_TRUE(tokens[0] == 7 || tokens[0] == 111);
+    EXPECT_TRUE(tokens[1] == 0 || tokens[1] == 1);
+
+    // A direct call with explicit top-k must bypass the forced compact path.
+    auto top_k = torch::full({batch}, 2, f32.dtype(torch::kInt32));
+    auto explicit_k =
+        sampler.sampleDSparkDraft(logits, anchors, temperature, top_k, top_p, markov, markov, vocab, false, 4096);
+    EXPECT_TRUE(torch::allclose(explicit_k.all_probs.select(1, 0), expected, 1e-5, 1e-6));
+}
+#endif
+
 TEST_F(MtpExecutorTest, testDecodeOneStepSpecLogitsCapReplacesInvalidDraftWithTargetToken) {
     size_t propose_step = 1;
     size_t vocab_size   = 4;
@@ -3931,6 +4003,60 @@ TEST_F(MtpExecutorTest, testCudaSelectedMtpLogprobsAvoidDenseAcceptedRowCopy) {
                                             /*dim=*/0)
                              .index({emitted_ids.index({5}).item<int64_t>()});
     EXPECT_TRUE(torch::allclose(zero_top.token_logprobs.cpu(), last_expected.reshape({1}).cpu(), 1e-3, 1e-3));
+}
+
+TEST_F(MtpExecutorTest, testDSparkExactJointSmallTopKUsesFullVocabularyTopPAndRetainsTies) {
+    constexpr int64_t  batch = 4, gamma = 2, vocab = 512;
+    std::vector<float> logits(batch * gamma * vocab, -100.0f);
+    for (int step = 0; step < gamma; ++step) {
+        int64_t row0 = step * vocab, row1 = (gamma + step) * vocab;
+        int64_t row2     = (2 * gamma + step) * vocab;
+        logits[row0]     = std::log(0.5f);
+        logits[row0 + 1] = std::log(0.3f);
+        logits[row0 + 2] = std::log(0.19f);
+        logits[row0 + 3] = std::log(0.01f);
+        logits[row1]     = 3.0f;
+        logits[row1 + 1] = 2.0f;
+        logits[row1 + 2] = 1.0f;
+        for (int i = 0; i < 100; ++i)
+            logits[row2 + i] = 5.0f;
+        int64_t row3     = (3 * gamma + step) * vocab;
+        logits[row3]     = std::log(0.6f);
+        logits[row3 + 1] = std::log(0.4f);
+        logits[row3 + 2] = std::log(1.0e-8f);
+    }
+    auto                     f32         = torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA);
+    auto                     base_logits = torch::tensor(logits).reshape({batch * gamma, vocab}).to(torch::kCUDA);
+    auto                     anchors     = torch::zeros({batch}, f32.dtype(torch::kInt32));
+    auto                     temperature = torch::ones({batch}, f32);
+    auto                     top_k       = torch::tensor({2, 40, 40, 3}, torch::kInt32).to(torch::kCUDA);
+    auto                     top_p       = torch::tensor({0.55f, 0.2f, 0.95f, 1.0f}, torch::kFloat32).to(torch::kCUDA);
+    auto                     markov      = torch::zeros({vocab, 1}, f32);
+    spec::SpeculativeSampler sampler(torch::Tensor(), gamma);
+    auto                     output =
+        sampler.sampleDSparkDraft(base_logits, anchors, temperature, top_k, top_p, markov, markov, vocab, false, 0, 40);
+    auto         q      = output.all_probs.cpu().contiguous();
+    const float* values = q.data_ptr<float>();
+    for (int step = 0; step < gamma; ++step) {
+        const float* a = values + step * vocab;
+        const float* b = values + (gamma + step) * vocab;
+        const float* c = values + (2 * gamma + step) * vocab;
+        const float* d = values + (3 * gamma + step) * vocab;
+        EXPECT_NEAR(a[0], 0.625f, 1e-5f);
+        EXPECT_NEAR(a[1], 0.375f, 1e-5f);
+        for (int i = 2; i < vocab; ++i)
+            EXPECT_EQ(a[i], 0.0f);
+        EXPECT_NEAR(b[0], 1.0f, 1e-5f);
+        for (int i = 1; i < vocab; ++i)
+            EXPECT_EQ(b[i], 0.0f);
+        for (int i = 0; i < 100; ++i)
+            EXPECT_NEAR(c[i], 0.01f, 1e-5f);
+        for (int i = 100; i < vocab; ++i)
+            EXPECT_EQ(c[i], 0.0f);
+        EXPECT_GT(d[2], 0.0f);
+        for (int i = 3; i < vocab; ++i)
+            EXPECT_EQ(d[i], 0.0f);
+    }
 }
 
 }  // namespace rtp_llm
