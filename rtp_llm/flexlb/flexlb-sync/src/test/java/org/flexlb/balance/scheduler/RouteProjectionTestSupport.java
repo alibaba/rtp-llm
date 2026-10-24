@@ -4,8 +4,8 @@ import org.flexlb.balance.delivery.CapacityBoundary;
 import org.flexlb.balance.delivery.DeliveryMetrics;
 import org.flexlb.balance.planner.GroupPlanner;
 import org.flexlb.balance.prediction.PrefillTimePredictor;
-import org.flexlb.balance.projection.QueueSnapshot;
 import org.flexlb.balance.projection.PrefillTtftEstimate;
+import org.flexlb.balance.projection.QueueSnapshot;
 import org.flexlb.balance.projection.WorkSnapshot;
 
 import java.util.ArrayList;

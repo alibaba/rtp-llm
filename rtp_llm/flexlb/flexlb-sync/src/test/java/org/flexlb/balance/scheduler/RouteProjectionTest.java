@@ -3,8 +3,8 @@ package org.flexlb.balance.scheduler;
 import org.flexlb.balance.planner.GroupPlanner;
 import org.flexlb.balance.prediction.PrefillBatchFeatures;
 import org.flexlb.balance.prediction.PrefillTimePredictor;
-import org.flexlb.balance.projection.QueueSnapshot;
 import org.flexlb.balance.projection.PrefillTtftEstimate;
+import org.flexlb.balance.projection.QueueSnapshot;
 import org.flexlb.balance.projection.WorkSnapshot;
 import org.junit.jupiter.api.Test;
 
