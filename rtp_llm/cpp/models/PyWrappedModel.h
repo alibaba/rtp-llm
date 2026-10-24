@@ -132,6 +132,7 @@ private:
     GraphBase* graph_runner_{nullptr};
     py::object py_model_;
     py::object py_forward_method_;
+    py::object py_lm_head_method_;
     py::object held_attn_pyobj_;
     bool       enable_cuda_graph_{false};
     bool       is_prefill_cuda_graph_mode_{false};
@@ -242,10 +243,19 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
         RTP_LLM_LOG_ERROR("Python model initialize failed:\n%s", e.what());
         throw;
     }
-    const char* forward_method     = dspark_model_role_ == DSparkModelRole::PROPOSE ? "forward_propose" :
-                                     dspark_model_role_ == DSparkModelRole::COMMIT  ? "forward_commit" :
-                                                                                      "forward";
-    py_forward_method_             = py_model_.attr(forward_method);
+    const char* forward_method = dspark_model_role_ == DSparkModelRole::PROPOSE ? "forward_propose" :
+                                 dspark_model_role_ == DSparkModelRole::COMMIT  ? "forward_commit" :
+                                                                                  "forward";
+    py_forward_method_         = py_model_.attr(forward_method);
+    if (weights_.lm_head && weights_.lm_head->kernel.dtype() == torch::kUInt8) {
+        RTP_LLM_CHECK_WITH_INFO(py::hasattr(py_model_, "compute_quantized_logits"),
+                                "Packed LM head requires Python compute_quantized_logits");
+        // Packed heads may expose their native output dtype so TP gathers
+        // BF16 logits before the sampler's FP32 promotion.
+        py_lm_head_method_ = py::hasattr(py_model_, "_compute_quantized_logits_native") ?
+                                 py_model_.attr("_compute_quantized_logits_native") :
+                                 py_model_.attr("compute_quantized_logits");
+    }
     const auto py_model_class_name = py::str(py_instance.attr("__class__").attr("__name__")).cast<std::string>();
     const bool is_deepseek_v4_python_model = py_model_class_name == "DeepSeekV4Model"
                                              || py_model_class_name == "DeepSeekV4MtpModel"
@@ -290,6 +300,9 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
         graph_params.max_context_batch_size     = params.concurrency_config.concurrency_limit;
         graph_params.prefill_capture_seq_lens   = params.hw_kernel_config.prefill_capture_seq_lens;
         graph_params.decode_capture_batch_sizes = params.hw_kernel_config.decode_capture_batch_sizes;
+        graph_params.draft_prefill_use_decode_buckets =
+            py::hasattr(py_instance, "draft_prefill_use_decode_buckets")
+            && py_instance.attr("draft_prefill_use_decode_buckets").cast<bool>();
         if (params.kv_cache_layer_layout.has_value()) {
             graph_params.kv_cache_group_tags = params.kv_cache_layer_layout->topology().groupTagsSnapshot();
         }

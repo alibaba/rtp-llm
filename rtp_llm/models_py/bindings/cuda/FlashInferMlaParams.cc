@@ -386,10 +386,33 @@ void FlashInferMlaAttnParams::refreshBuffer(
     // Get current CUDA stream
     cudaStream_t stream = GET_CURRENT_STREAM();
 
-    // Single async copy from HOST to DEVICE for the entire buffer
-    // Since all tensors are in continuous memory, we can copy the entire buffer at once
-    size_t total_bytes = buf_h.numel() * sizeof(int32_t);
-    cudaMemcpyAsync(buf_d.data_ptr(), buf_h.data_ptr(), total_bytes, cudaMemcpyHostToDevice, stream);
+    RTP_LLM_CHECK_WITH_INFO(
+        page_num >= 0 && page_num <= max_page_num_, "invalid page_num %d (reserved %d)", page_num, max_page_num_);
+    RTP_LLM_CHECK_WITH_INFO(reuse_page_num >= 0 && reuse_page_num <= max_reuse_page_num_,
+                            "invalid reuse_page_num %d (reserved %d)",
+                            reuse_page_num,
+                            max_reuse_page_num_);
+
+    // Keep the capture-time storage layout, but skip unused capacity in the two
+    // large page-index arrays. Storage offsets also work when a view is empty.
+    const int64_t page_offset  = page_indice_h.storage_offset() - buf_h.storage_offset();
+    const int64_t reuse_offset = reuse_cache_page_indice_h.storage_offset() - buf_h.storage_offset();
+    const int64_t tail_offset  = decode_page_indptr_h.storage_offset() - buf_h.storage_offset();
+    auto*         src          = buf_h.data_ptr<int32_t>();
+    auto*         dst          = buf_d.data_ptr<int32_t>();
+    auto          copy_range   = [&](int64_t offset, int64_t elements) {
+        if (elements > 0) {
+            cudaMemcpyAsync(dst + offset,
+                            src + offset,
+                            static_cast<size_t>(elements) * sizeof(int32_t),
+                            cudaMemcpyHostToDevice,
+                            stream);
+        }
+    };
+    copy_range(0, page_offset + page_num);
+    copy_range(reuse_offset, reuse_page_num);
+    // Copy all small fields and positions, including their existing padding.
+    copy_range(tail_offset, buf_h.numel() - tail_offset);
 
     // Update tensor shapes (without reallocating memory)
     // Use vector<int64_t> which can be implicitly converted to c10::IntArrayRef

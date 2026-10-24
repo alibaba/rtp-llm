@@ -205,15 +205,21 @@ def serialize_grammar_tokenizer_info(
     return serialize(encoded_vocab, tokenizer_metadata_json)
 
 
-def get_block_cache_keys(token_ids: List[int], block_size: int) -> List[int]:
+def get_block_cache_keys(
+    token_ids: List[int], block_size: int, mtp_lookahead: bool = False
+) -> List[int]:
     try:
-        # split token_ids into chunks of size block_size, dropping the last chunk if it is smaller than block_size
+        # MTP KV at position R - 1 also depends on token R. Hash that lookahead
+        # once: the first chunk has B + 1 tokens, later chunks have B tokens.
+        # Only complete dependencies are advertised to prefix-aware routing.
         token_ids_list: List[List[int]] = []
-        for i in range(0, len(token_ids), block_size):
-            chunk = token_ids[i : i + block_size]
-            if len(chunk) == block_size:
-                token_ids_list.append(chunk)
-        return cpp_get_block_cache_keys(token_ids_list)  # type: ignore
+        lookahead = int(mtp_lookahead)
+        for end in range(block_size + lookahead, len(token_ids) + 1, block_size):
+            begin = end - block_size if token_ids_list else 0
+            token_ids_list.append(token_ids[begin:end])
+        return cpp_get_block_cache_keys(  # type: ignore
+            token_ids_list, mtp_lookahead=mtp_lookahead
+        )
     except Exception as e:
         logging.error(f"get block ids error: {e}")
         # If an error occurs, return an empty list

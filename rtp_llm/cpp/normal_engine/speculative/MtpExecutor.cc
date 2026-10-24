@@ -1658,6 +1658,14 @@ void MtpExecutor::launchTargetVerifyPrepareAsync(const GptModelInputs& model_inp
     model_input_copy.sequence_lengths =
         torch::empty({0}, torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA));
     model_input_copy.is_target_verify = true;
+    if (!is_dspark_ && propose_step_ > 1 && !(useStreamAsync() && useDropBroadSync())) {
+        // Initial TP synchronization has published the real host position bases
+        // on every rank. Expand them before graph preparation, which also stages
+        // TextMrope's private position buffer. The later draft loop replaces only
+        // its own position tensor; it does not advance the stable host stream.
+        // DROP_BROAD_SYNC may expose stale host positions and keeps its old path.
+        batch_stream_processor_->expandTargetVerifyPositionIdsForPrepare(model_input_copy, batch_size);
+    }
     ensureModelInputsOnCuda(model_input_copy, "decode.target_prepare");
 
     // Device-first inputs are produced on the main stream; the async prepare

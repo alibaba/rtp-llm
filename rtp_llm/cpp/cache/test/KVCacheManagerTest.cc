@@ -347,6 +347,73 @@ TEST_F(KVCacheManagerTest, InitAcceptsFullAndLinearGroups) {
     EXPECT_NE(cache_manager->convertIndexToAddr(/*block_index=*/1, /*layer_id=*/3).kv_addr, nullptr);
 }
 
+TEST_F(KVCacheManagerTest, OnlyMtpRequiresLookaheadBeforePublishingAnAlignedBlock) {
+    constexpr int spb = 64;
+    for (auto type : {SP_TYPE_NONE, SP_TYPE_MTP, SP_TYPE_EAGLE, SP_TYPE_EAGLE3, SP_TYPE_DSPARK}) {
+        SCOPED_TRACE(static_cast<int>(type));
+        auto                       config = makeSimpleMhaCacheConfig(1, 8, spb, DataType::TYPE_FP16);
+        SpeculativeExecutionConfig sp_config;
+        sp_config.type = type;
+        auto manager   = std::make_shared<KVCacheManager>(
+            config, false, nullptr, KVCacheConfig{}, ParallelismConfig{}, RuntimeConfig{}, sp_config);
+        ASSERT_TRUE(manager->init());
+        auto       resource = makeDSV4BatchResource(config);
+        auto       tokens   = makeDSV4CompleteTokenIds(2 * spb, 2 * spb, spb);
+        MallocInfo malloc_info{resource, tokens};
+        malloc_info.enable_device_cache = false;
+        ASSERT_TRUE(manager->malloc(malloc_info).success);
+        ASSERT_EQ(resource->cacheKeys().size(), 2);
+        EXPECT_EQ(resource->lastBlockAligned(), type != SP_TYPE_MTP);
+        manager->insertIntoCache(InsertInfo{resource, tokens, false});
+        EXPECT_EQ(resource->cacheKeys().size(), type == SP_TYPE_MTP ? 1 : 2);
+        manager->free(FreeInfo{resource, tokens});
+    }
+}
+
+TEST_F(KVCacheManagerTest, MtpLookaheadMismatchBacksOffFullAndLinearReuseTogether) {
+    constexpr int spb      = 4;
+    constexpr int boundary = 2 * spb;
+    constexpr int length   = 4 * spb + 1;
+    for (bool changed_lookahead : {false, true}) {
+        SCOPED_TRACE(changed_lookahead);
+        auto                       config = makeSimpleHybridMhaCacheConfig(4, 32, spb, DataType::TYPE_BF16);
+        SpeculativeExecutionConfig sp_config;
+        sp_config.type = SP_TYPE_MTP;
+        auto manager   = std::make_shared<KVCacheManager>(
+            config, false, nullptr, KVCacheConfig{}, ParallelismConfig{}, RuntimeConfig{}, sp_config);
+        ASSERT_TRUE(manager->init());
+        auto seed        = makeDSV4BatchResource(config);
+        auto seed_tokens = makeDSV4CompleteTokenIds(length, length, spb);
+        seed_tokens->data(0)[boundary + (changed_lookahead ? 0 : 1)] += 10000;
+        MallocInfo seed_malloc{seed, seed_tokens};
+        seed_malloc.reuse_cache         = true;
+        seed_malloc.enable_device_cache = false;
+        ASSERT_TRUE(manager->malloc(seed_malloc).success);
+        const auto seed_full_blocks  = seed->blocks(0, 1);
+        const auto seed_linear_block = seed->blocks(0, 0)[1];
+        ASSERT_FALSE(isNullBlockIdx(seed_linear_block));
+        manager->insertIntoCache(InsertInfo{seed, seed_tokens, false});
+        manager->free(FreeInfo{seed, seed_tokens});
+
+        auto       warm        = makeDSV4BatchResource(config);
+        auto       warm_tokens = makeDSV4CompleteTokenIds(length, length, spb);
+        MallocInfo warm_malloc{warm, warm_tokens};
+        warm_malloc.reuse_cache         = true;
+        warm_malloc.enable_device_cache = true;
+        auto result                     = manager->malloc(warm_malloc);
+        ASSERT_TRUE(result.success);
+        // LINEAR checkpoints are every two blocks in this fixture. A changed
+        // x_R invalidates both groups at R and leaves no earlier checkpoint.
+        EXPECT_EQ(result.reuse_len, changed_lookahead ? 0 : boundary);
+        if (!changed_lookahead) {
+            EXPECT_EQ(warm->blocks(0, 1)[0], seed_full_blocks[0]);
+            EXPECT_EQ(warm->blocks(0, 1)[1], seed_full_blocks[1]);
+            EXPECT_EQ(warm->blocks(0, 0)[1], seed_linear_block);
+        }
+        manager->free(FreeInfo{warm, warm_tokens});
+    }
+}
+
 TEST_F(KVCacheManagerTest, DSV4IndependentPoolsUseGpuBacking) {
     auto expect_pool_backing = [](RoleType role_type) {
         auto config = makeCompactDSV4ManagerConfig(/*block_num=*/8);

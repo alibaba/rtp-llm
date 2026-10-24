@@ -217,9 +217,7 @@ class QuantizationConfig(ABC):
                 group_size = weight_block[0]
                 quant_method = Fp8BlockWiseQuantConfig.get_method()
         if quant_method == "compressed-tensors":
-            group_name, group_config = _pick_config_group(
-                quant_config["config_groups"]
-            )
+            group_name, group_config = _pick_config_group(quant_config["config_groups"])
             weights_config = group_config["weights"]
             # Absent or explicitly null when the checkpoint quantizes weights
             # only. Legacy FP8 per-channel checkpoints accept that shape, while
@@ -229,11 +227,7 @@ class QuantizationConfig(ABC):
             weight_type = weights_config.get("type")
             weight_strategy = weights_config.get("strategy")
             weight_dynamic = weights_config.get("dynamic", False)
-            if (
-                weight_type == "float"
-                and bits == 8
-                and weight_strategy == "channel"
-            ):
+            if weight_type == "float" and bits == 8 and weight_strategy == "channel":
                 if activation_config is None:
                     logging.getLogger(__name__).warning(
                         "compressed-tensors group %s has no input_activations; "
@@ -292,17 +286,11 @@ class QuantizationConfig(ABC):
                         "ignore_patterns": ignore_patterns,
                     }
                 )
-            elif (
-                weight_type == "int"
-                and bits == 4
-                and weight_strategy == "group"
-            ):
+            elif weight_type == "int" and bits == 4 and weight_strategy == "group":
                 # Kimi-K2.5 routed-expert MoE: int4 g32 symmetric, dyn fp8 act.
                 group_size = int(weights_config.get("group_size", 32))
                 ignore_patterns = quant_config.get("ignore", [])
-                quant_method = (
-                    CompressedW4A8Int4PerChannelQuantConfig.get_method()
-                )
+                quant_method = CompressedW4A8Int4PerChannelQuantConfig.get_method()
                 return CompressedW4A8Int4PerChannelQuantConfig.from_config(
                     {
                         "bits": bits,
@@ -334,13 +322,41 @@ class QuantizationConfig(ABC):
             ):
                 quant_method = Fp8PerChannelQuarkQuantConfig.get_method()
             if (
-                quark_weights_config["dtype"] == "fp4" 
+                quark_weights_config["dtype"] == "fp4"
                 and quark_weights_config["qscheme"] == "per_group"
             ):
                 quant_method = MXFp4QuarkQuantConfig.get_method()
                 group_size = quark_weights_config["group_size"]
-                
+
         if quant_method == "modelopt":
+            if quant_config.get("quant_algo") == "MIXED_PRECISION":
+                from rtp_llm.config.modelopt_mixed import ModelOptMixedPrecisionConfig
+
+                architecture = config_json.get("text_config", config_json)
+                num_layers = architecture.get("num_hidden_layers")
+                if num_layers is None and any(
+                    ".layers." in name for name in quant_config["quantized_layers"]
+                ):
+                    raise ValueError(
+                        "ModelOpt mixed layer recipes require num_hidden_layers for coverage validation"
+                    )
+                layer_types = architecture.get("layer_types")
+                interval = architecture.get("full_attention_interval")
+                if layer_types is None and num_layers is not None and interval:
+                    layer_types = [
+                        (
+                            "full_attention"
+                            if (i + 1) % interval == 0
+                            else "linear_attention"
+                        )
+                        for i in range(num_layers)
+                    ]
+                return ModelOptMixedPrecisionConfig(
+                    quantized_layers=quant_config["quantized_layers"],
+                    ignore=quant_config.get("ignore", []),
+                    num_layers=num_layers,
+                    layer_types=layer_types,
+                )
             config_groups = quant_config["config_groups"]
             weights_config = config_groups["group_0"]["weights"]
             activation_config = config_groups["group_0"]["input_activations"]
@@ -349,14 +365,17 @@ class QuantizationConfig(ABC):
             group_size = weights_config["group_size"]
             if (
                 weights_config["type"] == "float"
-                and bits == 4 and activation_bits == 4
+                and bits == 4
+                and activation_bits == 4
                 and group_size == 16
             ):
                 quant_method = ModelOptFp4Config.get_method()
                 mixed_attention = False
                 text_config = config_json.get("text_config", None)
                 if text_config is not None:
-                    full_attention_interval = text_config.get("full_attention_interval", 0)
+                    full_attention_interval = text_config.get(
+                        "full_attention_interval", 0
+                    )
                     if full_attention_interval != 0:
                         mixed_attention = True
                 return ModelOptFp4Config.from_config(
@@ -368,7 +387,6 @@ class QuantizationConfig(ABC):
                         "mixed_attention": mixed_attention,
                     }
                 )
-            
 
         result = cls.from_config(
             {
@@ -594,7 +612,11 @@ class Fp8PerChannelCompressedQuantConfig(CompressedTensorsQuantConfig):
 
 class QuarkQuantConfig(QuantizationConfig):
     def __init__(
-        self, bits: int = 0, group_size: int = 0, is_quanted: bool = False, **kwargs: Any
+        self,
+        bits: int = 0,
+        group_size: int = 0,
+        is_quanted: bool = False,
+        **kwargs: Any,
     ):
         super().__init__(bits=bits, group_size=group_size, is_quanted=is_quanted)
 
@@ -638,6 +660,7 @@ class Fp8PerChannelQuarkQuantConfig(QuarkQuantConfig):
     @classmethod
     def _from_config(cls, config: Dict[str, Any]) -> "QuantizationConfig":
         return Fp8PerChannelQuarkQuantConfig(**config)
+
 
 class MXFp4QuarkQuantConfig(QuarkQuantConfig):
     def __init__(
@@ -794,7 +817,7 @@ class ModelOptFp4Config(QuantizationConfig):
 
     def __init__(self, bits: int, group_size: int, is_quanted: bool, **kwargs: Any):
         super().__init__(bits=bits, group_size=group_size, is_quanted=is_quanted)
-        self.mixed_attention = kwargs.get('mixed_attention', False)
+        self.mixed_attention = kwargs.get("mixed_attention", False)
 
     @classmethod
     def get_method(cls) -> str:
@@ -1004,9 +1027,7 @@ DEFAULT_MODELOPT_FP4_QUANT_CONFIG = ModelOptFp4Config(
 )
 
 DEFAULT_W4A8_INT4_PER_CHANNEL_QUANT_CONFIG = W4a8Int4PerChannelQuantConfig(
-    bits=4,
-    group_size=128,
-    is_quanted=False
+    bits=4, group_size=128, is_quanted=False
 )
 
 DEFAULT_COMPRESSED_W4A8_INT4_PER_CHANNEL_QUANT_CONFIG = (

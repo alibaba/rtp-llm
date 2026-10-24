@@ -8,6 +8,14 @@ py_test_deps = [
     "//rtp_llm/models_py/standalone:py_standalone_testlib",
 ]
 
+py_test(
+    name = "dense_mlp_tiling_test",
+    srcs = ["dense_mlp_tiling_test.py"],
+    deps = py_test_deps,
+    tags = ["RTX_5000_PRO"],
+    exec_properties = {"gpu": "RTX_5000_PRO"},
+)
+
 # FlashInfer dependencies (包括 apache-tvm-ffi 用于 JIT 编译)
 flashinfer_deps = [
     "//rtp_llm:apache-tvm-ffi",

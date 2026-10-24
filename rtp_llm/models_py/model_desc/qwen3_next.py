@@ -45,10 +45,14 @@ from rtp_llm.models_py.triton_kernels.fla.chunk import (
     is_flydsl_chunk_gdn_enabled,
     is_flydsl_chunk_gdn_shape_supported,
 )
+from rtp_llm.models_py.triton_kernels.fla.chunk_cache_store import (
+    chunk_gated_delta_rule_with_cache_store,
+)
 from rtp_llm.models_py.triton_kernels.fla.fused_recurrent import (
     fused_recurrent_gated_delta_rule,
 )
 from rtp_llm.models_py.triton_kernels.fla.gdn_gating import fused_gdn_gating
+from rtp_llm.models_py.utils.arch import get_sm
 from rtp_llm.models_py.utils.debug import cudagraph_debug_kernel
 from rtp_llm.models_py.utils.typed_storage_view import LinearCacheConverter
 from rtp_llm.ops import (
@@ -217,8 +221,28 @@ class Qwen3NextGatedDeltaNetPrefill(Qwen3NextGatedDeltaNetBase):
         linear_attn_config: LinearAttentionConfig,
         parallelism_config: ParallelismConfig,
         weights: Dict[str, torch.Tensor],
+        max_prefill_tokens: int = 0,
     ):
         super().__init__(linear_attn_config, parallelism_config, weights)
+        projection = weights[W.linear_attn_conv1d_w]
+        self.max_prefill_tokens = (
+            max_prefill_tokens
+            if max_prefill_tokens > 0
+            and projection.is_cuda
+            and get_sm(projection.device) == (12, 0)
+            else 0
+        )
+
+    def _should_tile_prefill(self, attn_inputs, total_tokens):
+        # input_lengths is the existing CPU mirror. A large aggregate of short
+        # requests must retain the batched path, with no device-to-host query.
+        return (
+            self.max_prefill_tokens > 0
+            and total_tokens > self.max_prefill_tokens
+            and not attn_inputs.input_lengths.is_cuda
+            and max(attn_inputs.input_lengths.tolist(), default=0)
+            > self.max_prefill_tokens
+        )
 
     def _conv1d(
         self,
@@ -314,6 +338,27 @@ class Qwen3NextGatedDeltaNetPrefill(Qwen3NextGatedDeltaNetBase):
             value = value.view(
                 1, value.shape[0], self.local_num_v_heads, self.head_v_dim
             )
+        if (
+            self._should_tile_prefill(attn_inputs, query.shape[1])
+            and ssm_states is not None
+            and self.max_prefill_tokens % seq_size_per_block == 0
+        ):
+            return chunk_gated_delta_rule_with_cache_store(
+                query,
+                key,
+                value,
+                g,
+                beta,
+                initial_states,
+                cu_seqlens_without_padding,
+                attn_inputs.prefix_lengths_device,
+                attn_inputs.kv_cache_kernel_block_id_device,
+                ssm_states,
+                seq_size_per_block,
+                max_tokens=self.max_prefill_tokens,
+                cu_seqlens_cpu=attn_inputs.cu_seqlens,
+            ).squeeze_(0)
+
         use_flydsl_chunk_gdn = (
             is_flydsl_chunk_gdn_enabled()
             and is_flydsl_chunk_gdn_shape_supported(query, key, value, beta)
@@ -839,6 +884,7 @@ class Qwen3NextGatedDeltaNet(nn.Module):
         layernorm_eps: float,
         quant_config: Optional[object] = None,
         hw_kernel_config: Optional["HWKernelConfig"] = None,
+        max_prefill_tokens: int = 0,
     ):
         super().__init__()
         self.linear_attn_config = linear_attn_config
@@ -926,7 +972,10 @@ class Qwen3NextGatedDeltaNet(nn.Module):
             self.in_proj_fused = None
 
         self.prefill_gdn = Qwen3NextGatedDeltaNetPrefill(
-            linear_attn_config, parallelism_config, weights
+            linear_attn_config,
+            parallelism_config,
+            weights,
+            max_prefill_tokens=max_prefill_tokens,
         )
         self.decode_gdn = Qwen3NextGatedDeltaNetDecode(
             linear_attn_config, parallelism_config, weights
@@ -1236,6 +1285,7 @@ class Qwen3NextDecoderLayer(nn.Module):
                 config.layernorm_eps,
                 config.quant_config,
                 hw_kernel_config=hw_kernel_config,
+                max_prefill_tokens=config.prefill_operator_max_tokens,
             )
         else:
             attn_configs = config.getAttentionConfigs(
@@ -1268,6 +1318,7 @@ class Qwen3NextDecoderLayer(nn.Module):
                 config.quant_config,
                 hw_kernel_config=hw_kernel_config,
                 enable_w4a16_sm120=config.enable_w4a16_sm120_dense_ffn,
+                max_prefill_tokens=config.prefill_operator_max_tokens,
             )
 
         self.input_layernorm = RMSResNorm(

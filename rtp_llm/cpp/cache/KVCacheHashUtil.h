@@ -6,18 +6,23 @@
 namespace rtp_llm {
 
 // Initial fill: build cache_keys for all blocks (including the final partial block).
-// Also updates BatchKVCacheResource::last_block_aligned based on seq_len % seq_size_per_block.
+// MTP keys include one lookahead token per block. The final key is provisional
+// until that token is known, even for an exactly aligned input. Keep it for PD
+// page indexing, but mark last_block_aligned=false so it cannot be published.
 void initCacheKeys(BatchKVCacheResourcePtr batch_kv_cache_resource,
                    CompleteTokenIdsPtr     complete_token_ids,
-                   int                     seq_size_per_block);
+                   int                     seq_size_per_block,
+                   bool                    mtp_lookahead = false);
 
 // Subsequent fill: rebuild cache_keys only for fully-aligned blocks (ignores the tail partial block).
-// Also updates BatchKVCacheResource::last_block_aligned based on current seq_len.
+// With MTP, only blocks with a known lookahead are retained. All returned keys
+// are publishable, so last_block_aligned is true even if tokens have a tail.
 void updateCacheKeys(BatchKVCacheResourcePtr batch_kv_cache_resource,
                      CompleteTokenIdsPtr     complete_token_ids,
-                     int                     seq_size_per_block);
+                     int                     seq_size_per_block,
+                     bool                    mtp_lookahead = false);
 
-// Drop the last block in cache_keys
+// Drop an incomplete/provisional last key before publishing reusable blocks.
 void dropLastPartialBlock(BatchKVCacheResourcePtr batch_kv_cache_resource);
 
 }  // namespace rtp_llm

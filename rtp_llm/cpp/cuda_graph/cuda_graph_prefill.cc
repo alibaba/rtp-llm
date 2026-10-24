@@ -107,8 +107,25 @@ std::vector<int> CudaGraphRunner::getPrefillSequenceLengthsToCapture() {
                                 num_tokens_per_bs_,
                                 sp_steps_);
         std::vector<int> result;
-        for (int i = 1; i <= max_bs_; ++i) {
-            result.push_back(i * num_tokens_per_bs_);
+        if (draft_prefill_use_decode_buckets_ && !decode_capture_batch_sizes_.empty()) {
+            // Draft prefill verifies the same active batches as decode. Reuse
+            // explicit buckets so each possible batch does not retain another
+            // attention workspace. Replay already rounds up and clears padding.
+            auto batches = decode_capture_batch_sizes_;
+            // Explicit opt-in must still cover the full advertised concurrency;
+            // a truncated decode list must not force larger draft batches eager.
+            batches.push_back(static_cast<int>(max_bs_));
+            std::sort(batches.begin(), batches.end());
+            batches.erase(std::unique(batches.begin(), batches.end()), batches.end());
+            for (int batch : batches) {
+                RTP_LLM_CHECK_WITH_INFO(
+                    batch > 0 && batch <= max_bs_, "draft prefill capture batch %d outside [1, %d]", batch, max_bs_);
+                result.push_back(batch * num_tokens_per_bs_);
+            }
+        } else {
+            for (int i = 1; i <= max_bs_; ++i) {
+                result.push_back(i * num_tokens_per_bs_);
+            }
         }
         RTP_LLM_LOG_INFO(
             "Speculative draft model prefill: capture seq_lens at %d intervals, %zu total (max_bs=%d, num_tokens_per_bs=%d)",

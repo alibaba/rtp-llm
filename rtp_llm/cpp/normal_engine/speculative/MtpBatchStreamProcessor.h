@@ -62,6 +62,10 @@ public:
 
     void expandTargetVerifyPositionIds(const StreamGroups& stream_groups, GptModelInputs& model_input) const;
 
+    // Expand the real, TP-synchronized host bases before async target preparation.
+    // Unknown layouts keep the original input and the existing prepare fallback.
+    bool expandTargetVerifyPositionIdsForPrepare(GptModelInputs& model_input, size_t batch_size) const;
+
     void updateDecodeDraftModelInput(GptModelInputs&        model_input,
                                      const GptModelOutputs& model_output,
                                      const torch::Tensor&   draft_token_ids,

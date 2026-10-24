@@ -64,6 +64,9 @@ class RequestExtractor:
         )
         top_level_config, remain_kwargs = self._partition_generate_config_fields(kwargs)
         config_values = self.default_generate_config.model_dump()
+        if self.default_generate_config._ban_auto_downgraded:
+            # Re-evaluate the requested policy after merging request cardinality.
+            config_values["enable_cross_sequence_ban"] = True
         config_values.update(nested_config)
         config_values.update(top_level_config)
 
