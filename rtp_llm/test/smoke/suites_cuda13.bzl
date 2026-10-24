@@ -117,7 +117,6 @@ def cuda13_suites():
                         "ENABLE_LAYER_MICRO_BATCH=0",
                         "LINEAR_STEP=1",
                         "DG_JIT_CPP_STANDARD=20",
-                        "DG_JIT_CACHE_DIR=__TEST_TMPDIR__/deep_gemm_pd_cache",
                         "THINK_MODE=1",
                         "THINK_START_TAG=<think>",
                         "THINK_END_TAG=</think>",
