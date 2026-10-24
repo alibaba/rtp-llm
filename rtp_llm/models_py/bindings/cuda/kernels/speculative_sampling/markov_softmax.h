@@ -38,13 +38,13 @@ size_t markovSoftmaxStepPartialsBytes(int batch_size, int vocab_size);
 // Replaces the per-step host chain cast -> add -> div_ -> softmax -> copy_
 // with two row-split kernels that read the FP32 logits view (row-strided: a
 // select() of the [B, gamma, vocab] proposal view) and the native-dtype
-// contiguous bias [batch_size, vocab_size], and write q to BOTH:
+// contiguous bias [batch_size, vocab_size], and write q to:
 //   - q_all_probs: the (row-strided) all_probabilities.select(1, step) slice
 //     consumed by rejection sampling, and
-//   - q_contig: a contiguous [batch_size, vocab_size] scratch consumed by
-//     FlashInfer SamplingFromProb (may be nullptr when no sampling follows).
+//   - q_contig: optional contiguous [batch_size, vocab_size] sampler scratch;
+//     nullptr when sampling reads the row-strided q_all_probs directly.
 // Kernel 1 folds each (row, split) chunk into an online max/sum accumulator;
-// kernel 2 combines the per-row accumulators and writes both q outputs.
+// kernel 2 combines the per-row accumulators and writes the requested q outputs.
 //
 // Per-element math mirrors ATen exactly: FP32 add of the exact FP32 cast of
 // the bias, FP32 division by the row temperature, expf(x - row_max), and a

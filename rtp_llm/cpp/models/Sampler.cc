@@ -302,7 +302,8 @@ SamplerOutput Sampler::forward(const SamplerInputs& inputs) {
                  generator,
                  greedy_sampling_buffer_ptr,
                  inputs.skip_logits_probs_restore,
-                 inputs.all_probs_point_mass});
+                 inputs.all_probs_point_mass,
+                 inputs.force_topk});
             all_probs_point_mass = all_probs_point_mass && greedy_output.all_probs_point_mass;
             if (greedy_output.success.defined()) {
                 success.copy_(greedy_output.success);

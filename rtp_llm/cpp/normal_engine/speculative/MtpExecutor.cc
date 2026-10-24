@@ -2808,6 +2808,8 @@ SamplerOutput MtpExecutor::sampleDSparkDraft(const StreamGroups&  stream_groups,
     bool    batch_all_greedy             = true;
     bool    has_top_k                    = false;
     bool    has_top_p                    = false;
+    int     joint_max_top_k              = 0;
+    bool    all_small_explicit_top_k     = true;
     constexpr float kMinDraftTemperature = 1.0e-6f;
     for (const auto& stream : stream_groups.allStreams()) {
         // DSpARK admission is configuration-defined. needTilingForSampling()
@@ -2833,24 +2835,50 @@ SamplerOutput MtpExecutor::sampleDSparkDraft(const StreamGroups&  stream_groups,
         top_ps[row]           = std::abs(config->top_p) < 1e-7f ? 1.0f : config->top_p;
         has_top_k             = has_top_k || config->top_k > 0;
         has_top_p             = has_top_p || std::abs(top_ps[row] - 1.0f) >= 1e-7f;
+        all_small_explicit_top_k = all_small_explicit_top_k && config->top_k >= 2 && config->top_k <= 512;
+        joint_max_top_k          = std::max(joint_max_top_k, config->top_k);
         ++row;
         batch_all_greedy = batch_all_greedy && !stochastic;
     }
     buffer_holder_.hold_host(temperature_cpu);
     buffer_holder_.hold_host(top_k_cpu);
     buffer_holder_.hold_host(top_p_cpu);
-    auto temperature = temperature_cpu.to(base_logits.device(), /*non_blocking=*/true);
-    auto top_k       = has_top_k ? top_k_cpu.to(base_logits.device(), /*non_blocking=*/true) : torch::Tensor();
-    auto top_p       = has_top_p ? top_p_cpu.to(base_logits.device(), /*non_blocking=*/true) : torch::Tensor();
-    return speculative_sampler_->sampleDSparkDraft(base_logits,
-                                                   anchors,
-                                                   temperature,
-                                                   top_k,
-                                                   top_p,
-                                                   dspark_markov_w1_,
-                                                   dspark_markov_w2_,
-                                                   draft_vocab_size_,
-                                                   batch_all_greedy);
+    auto temperature        = temperature_cpu.to(base_logits.device(), /*non_blocking=*/true);
+    auto top_k              = has_top_k ? top_k_cpu.to(base_logits.device(), /*non_blocking=*/true) : torch::Tensor();
+    auto top_p              = has_top_p ? top_p_cpu.to(base_logits.device(), /*non_blocking=*/true) : torch::Tensor();
+    int  force_topk         = speculative::dsparkForceTopK();
+    bool exact_joint_device = false;
+#if USING_CUDA
+    if (has_top_k && has_top_p && all_small_explicit_top_k) {
+        const auto* properties = at::cuda::getDeviceProperties(base_logits.get_device());
+        exact_joint_device     = properties->major == 10 && (properties->minor == 0 || properties->minor == 3);
+    }
+#endif
+    // The compact draft path is only valid for top-p-only batches. Explicit
+    // top-k keeps the full-vocabulary tie and joint-support semantics; an
+    // unfiltered row must retain the full draft distribution.
+    if (has_top_k || !has_top_p) {
+        force_topk = 0;
+    } else {
+        for (int64_t i = 0; i < batch_size; ++i) {
+            if (std::abs(top_ps[i] - 1.0f) < 1e-7f) {
+                force_topk = 0;
+                break;
+            }
+        }
+    }
+    return speculative_sampler_->sampleDSparkDraft(
+        base_logits,
+        anchors,
+        temperature,
+        top_k,
+        top_p,
+        dspark_markov_w1_,
+        dspark_markov_w2_,
+        draft_vocab_size_,
+        batch_all_greedy,
+        force_topk,
+        exact_joint_device && draft_vocab_size_ >= 512 && draft_vocab_size_ % 256 == 0 ? joint_max_top_k : 0);
 }
 
 void MtpExecutor::runDSparkProposal(GptModelInputs&                                  proposal_input,

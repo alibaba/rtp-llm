@@ -1,4 +1,5 @@
 #include "rtp_llm/cpp/normal_engine/speculative/MtpBatchStreamProcessor.h"
+#include "rtp_llm/cpp/normal_engine/speculative/SpeculativeSampler.h"
 #include "rtp_llm/cpp/multimodal_processor/MultimodalInputUtils.h"
 #include "rtp_llm/cpp/cuda_graph/cuda_graph_device_shims.h"
 #include "rtp_llm/models_py/bindings/core/ExecOps.h"
@@ -1528,6 +1529,9 @@ MtpBatchStreamProcessor::gatherSpecSamplerInput(const StreamGroups&             
     // greedy sampler may skip the softmax-probs writeback into logits and
     // take its fused top-1 path.
     sampler_inputs.skip_logits_probs_restore = true;
+    if (is_dspark_) {
+        sampler_inputs.force_topk = speculative::dsparkForceTopK();
+    }
 
     // TODO(async): debug formatting is CPU-only. Keep the .cpu() explicit
     // and do not route this through the model-input fast path.

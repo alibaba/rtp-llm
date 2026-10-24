@@ -1,4 +1,5 @@
 #include "rtp_llm/models_py/bindings/core/ExecOps.h"
+#include "rtp_llm/models_py/bindings/cuda/kernels/deepselect_fp32.h"
 #include "rtp_llm/models_py/bindings/cuda/kernels/sampling/sampling.h"
 #include "rtp_llm/models_py/bindings/cuda/ops/tests/CudaTestUtils.h"
 #include "rtp_llm/models_py/bindings/common/kernels/banRepeatNgram.h"
@@ -10,6 +11,7 @@
 #include <cmath>
 #include <functional>
 #include <iostream>
+#include <limits>
 #include <string>
 #include <vector>
 using namespace std;
@@ -83,6 +85,25 @@ protected:
     }
 };
 
+TEST_F(CudaSamplerTest, testDeepSelect4096ReturnsOriginalValues) {
+    const auto* properties = at::cuda::getDeviceProperties(0);
+    if (!torch_ext::deepselect_fp32_available() || properties->major != 10
+        || (properties->minor != 0 && properties->minor != 3)) {
+        GTEST_SKIP() << "DeepSelect FP32 requires SM100 or SM103";
+    }
+    const auto options = torch::TensorOptions().device(torch::kCUDA).dtype(torch::kFloat32);
+    for (int64_t vocab_size : {4096, 129280}) {
+        auto logits = torch::randn({2, vocab_size}, options);
+        logits.select(1, 0).fill_(std::numeric_limits<float>::quiet_NaN());
+        logits.select(1, 1).fill_(std::numeric_limits<float>::infinity());
+        logits.select(1, vocab_size - 1).fill_(-std::numeric_limits<float>::infinity());
+        auto selected = torch_ext::deepselect_fp32_topk(logits, 4096);
+        auto expected = logits.gather(1, std::get<1>(selected));
+        EXPECT_TRUE(torch::equal(std::get<0>(selected).view(torch::kInt32), expected.view(torch::kInt32)))
+            << "vocab_size=" << vocab_size;
+    }
+}
+
 TEST_F(CudaSamplerTest, testMarkovSoftmaxRejectsBadOutputRank) {
     const auto              options = torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA);
     MarkovSoftmaxStepParams params{torch::zeros({1, 4}, options),
@@ -95,6 +116,88 @@ TEST_F(CudaSamplerTest, testMarkovSoftmaxRejectsBadOutputRank) {
     execMarkovSoftmaxStep(params);
     EXPECT_TRUE(torch::equal(params.q_contig, torch::full({1, 4}, 0.25f, options)));
     EXPECT_TRUE(torch::equal(params.q_all_probs, params.q_contig));
+    params.q_contig = torch::Tensor();
+    params.q_all_probs.zero_();
+    execMarkovSoftmaxStep(params);
+    EXPECT_TRUE(torch::equal(params.q_all_probs, torch::full({1, 4}, 0.25f, options)));
+}
+
+TEST_F(CudaSamplerTest, testMarkovScaledLogitsMatchesEagerForStridedProposal) {
+    const auto options     = torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA);
+    auto       proposal    = torch::randn({3, 5, 513}, options);
+    auto       logits      = proposal.select(1, 2);
+    auto       temperature = cudaTensor({0.7f, 1.0f, 1.3f}, {3});
+    ASSERT_FALSE(logits.is_contiguous());
+    for (auto dtype : {torch::kFloat32, torch::kBFloat16, torch::kFloat16}) {
+        auto bias     = torch::randn({3, 513}, options).to(dtype);
+        auto expected = (logits + bias.to(torch::kFloat32)).div(temperature.unsqueeze(1));
+        auto actual   = torch_ext::markov_scaled_logits(logits, bias, temperature);
+        EXPECT_TRUE(actual.is_contiguous());
+        EXPECT_LE((actual - expected).abs().max().item<float>(), 1e-6f) << "bias dtype " << dtype;
+    }
+}
+
+TEST_F(CudaSamplerTest, testSamplingFromStridedDraftProbabilitiesMatchesContiguous) {
+    constexpr int64_t  vocab_size = 4096;
+    std::vector<float> values(2 * 3 * vocab_size, 0.0f);
+    values[vocab_size]         = 0.5f;
+    values[vocab_size + 1]     = 0.5f;
+    values[4 * vocab_size + 2] = 0.5f;
+    values[4 * vocab_size + 3] = 0.5f;
+    auto q                     = cudaTensor(values, {2, 3, vocab_size});
+    auto strided               = q.select(1, 1);
+    ASSERT_FALSE(strided.is_contiguous());
+    auto options            = torch::TensorOptions().device(torch::kCUDA);
+    auto sampled_strided    = torch::empty({2}, options.dtype(torch::kInt32));
+    auto sampled_contiguous = torch::empty_like(sampled_strided);
+    auto sampled_unaligned  = torch::empty_like(sampled_strided);
+    auto valid_strided      = torch::empty({2}, options.dtype(torch::kBool));
+    auto valid_contiguous   = torch::empty_like(valid_strided);
+    auto valid_unaligned    = torch::empty_like(valid_strided);
+    auto padded             = torch::zeros({2, 3, vocab_size + 1}, options);
+    auto unaligned          = padded.select(1, 1).slice(1, 0, vocab_size);
+    unaligned.copy_(strided);
+
+    sampling_from_probs(
+        strided, sampled_strided, valid_strided, std::nullopt, true, std::nullopt, 123, std::nullopt, 0);
+    sampling_from_probs(strided.contiguous(),
+                        sampled_contiguous,
+                        valid_contiguous,
+                        std::nullopt,
+                        true,
+                        std::nullopt,
+                        123,
+                        std::nullopt,
+                        0);
+    sampling_from_probs(
+        unaligned, sampled_unaligned, valid_unaligned, std::nullopt, true, std::nullopt, 123, std::nullopt, 0);
+    check_cuda_error();
+
+    EXPECT_TRUE(torch::equal(sampled_strided, sampled_contiguous));
+    EXPECT_TRUE(torch::equal(sampled_unaligned, sampled_contiguous));
+    EXPECT_TRUE(valid_strided.all().item<bool>());
+    EXPECT_TRUE(valid_contiguous.all().item<bool>());
+    EXPECT_TRUE(valid_unaligned.all().item<bool>());
+}
+
+TEST_F(CudaSamplerTest, testUnrestrictedTopPSamplingMatchesUnfilteredSampling) {
+    auto options = torch::TensorOptions().device(torch::kCUDA).dtype(torch::kFloat32);
+    auto probs   = torch::rand({32, 4096}, options);
+    probs.div_(probs.sum(-1, true));
+    auto sampled_top_p      = torch::empty({32}, options.dtype(torch::kInt32));
+    auto sampled_unfiltered = torch::empty_like(sampled_top_p);
+    auto valid_top_p        = torch::empty({32}, options.dtype(torch::kBool));
+    auto valid_unfiltered   = torch::empty_like(valid_top_p);
+
+    top_p_sampling_from_probs(
+        probs, sampled_top_p, valid_top_p, std::nullopt, std::nullopt, 1.0, true, std::nullopt, 123, std::nullopt, 0);
+    sampling_from_probs(
+        probs, sampled_unfiltered, valid_unfiltered, std::nullopt, true, std::nullopt, 123, std::nullopt, 0);
+    check_cuda_error();
+
+    EXPECT_TRUE(torch::equal(sampled_top_p, sampled_unfiltered));
+    EXPECT_TRUE(torch::equal(valid_top_p, valid_unfiltered));
+    EXPECT_TRUE(valid_unfiltered.all().item<bool>());
 }
 
 TEST_F(CudaSamplerTest, testMarkovWrappersRejectDifferentDevices) {
@@ -526,6 +629,110 @@ TEST_F(CudaSamplerTest, testTopKTopPAllProbsMatchesJointSamplingSupport) {
 
     ASSERT_VECTOR_NEAR(toHostFloat(output_all_probs_t), std::vector<float>({0.625f, 0.375f, 0, 0}), 1e-5);
     assertTokenIn(toHostInt(output_token_ids_t), step, {0, 1});
+}
+
+TEST_F(CudaSamplerTest, testUnrestrictedTopPReturnsOriginalDistributionForRejection) {
+    constexpr int64_t  vocab_size = 4096;
+    std::vector<float> logits(vocab_size, -20.0f);
+    logits[0]                                     = 2.0f;
+    logits[1]                                     = 1.0f;
+    logits[2]                                     = 0.0f;
+    auto                       logits_t           = cudaTensor(logits, {1, vocab_size});
+    auto                       expected           = torch::softmax(logits_t, -1);
+    auto                       output_all_probs_t = torch::empty_like(logits_t);
+    auto                       output_token_ids_t = cudaIntTensor({0, 0}, {1, 2});
+    std::vector<at::Generator> generators{torch::make_generator<at::CUDAGeneratorImpl>()};
+    generators[0].set_current_seed(20261023);
+
+    GreedyParams params({logits_t,
+                         cudaIntTensor({-1}, {1}),
+                         cudaIntTensor({1}, {1}),
+                         output_token_ids_t,
+                         1,
+                         pinnedIntTensor({0}),
+                         pinnedFloatTensor({1.0f}),
+                         pinnedFloatTensor({1.0f}),
+                         nullopt,
+                         nullopt,
+                         nullopt,
+                         nullopt,
+                         false,
+                         output_all_probs_t,
+                         nullopt,
+                         nullopt,
+                         nullopt,
+                         generators});
+    auto         output = execSampleGreedy(params);
+    check_cuda_error();
+
+    ASSERT_TRUE(output.success.cpu().all().item<bool>());
+    EXPECT_TRUE(torch::allclose(output_all_probs_t, expected, 1e-6, 1e-7));
+    assertTokenIn(toHostInt(output_token_ids_t), 1, {0, 1, 2});
+}
+
+TEST_F(CudaSamplerTest, testAirTopPRenormSkipsUnrestrictedRowsInMixedBatch) {
+    constexpr int64_t  vocab_size = 4096;
+    std::vector<float> values(2 * vocab_size, 0.0f);
+    for (int64_t row = 0; row < 2; ++row) {
+        values[row * vocab_size]     = 0.5f;
+        values[row * vocab_size + 1] = 0.3f;
+        values[row * vocab_size + 2] = 0.2f;
+    }
+    auto probs  = cudaTensor(values, {2, vocab_size});
+    auto output = torch::empty_like(probs);
+    auto top_p  = pinnedFloatTensor({1.0f, 0.55f}).to(torch::kCUDA);
+    top_p_renorm_probs(probs, output, top_p, 1.0);
+    check_cuda_error();
+
+    EXPECT_TRUE(torch::equal(output.select(0, 0), probs.select(0, 0)));
+    auto expected = cudaTensor({0.625f, 0.375f, 0.0f}, {3});
+    EXPECT_TRUE(torch::allclose(output.select(0, 1).slice(0, 0, 3), expected, 1e-5, 1e-6));
+    EXPECT_NEAR(output.select(0, 1).sum().item<float>(), 1.0f, 1e-5f);
+}
+
+TEST_F(CudaSamplerTest, testCompactTopPRenorm4096MatchesSortedReference) {
+    constexpr int64_t batch = 4, width = 4096;
+    torch::manual_seed(20261024);
+    auto options = torch::TensorOptions().device(torch::kCUDA).dtype(torch::kFloat32);
+    auto probs   = torch::rand({batch, width}, options);
+    probs.div_(probs.sum(-1, true));
+    auto top_p  = torch::tensor({0.25f, 0.55f, 0.95f, 1.0f}, options);
+    auto output = torch::empty_like(probs);
+    top_p_renorm_probs(probs, output, top_p, 1.0);
+    check_cuda_error();
+
+    auto        host_probs   = toHostFloat(probs);
+    auto        host_output  = toHostFloat(output);
+    const float thresholds[] = {0.25f, 0.55f, 0.95f, 1.0f};
+    for (int64_t row = 0; row < batch; ++row) {
+        if (thresholds[row] == 1.0f) {
+            for (int64_t col = 0; col < width; ++col) {
+                EXPECT_EQ(host_output[row * width + col], host_probs[row * width + col]);
+            }
+            continue;
+        }
+        std::vector<float> sorted(host_probs.begin() + row * width, host_probs.begin() + (row + 1) * width);
+        std::sort(sorted.begin(), sorted.end(), std::greater<float>());
+        float mass   = 0.0f;
+        float cutoff = 0.0f;
+        for (float value : sorted) {
+            mass += value;
+            cutoff = value;
+            if (mass >= thresholds[row])
+                break;
+        }
+        float kept_mass = 0.0f;
+        for (int64_t col = 0; col < width; ++col) {
+            float value = host_probs[row * width + col];
+            if (value >= cutoff)
+                kept_mass += value;
+        }
+        for (int64_t col = 0; col < width; ++col) {
+            float value    = host_probs[row * width + col];
+            float expected = value >= cutoff ? value / kept_mass : 0.0f;
+            EXPECT_NEAR(host_output[row * width + col], expected, 1e-5f);
+        }
+    }
 }
 
 TEST_F(CudaSamplerTest, testCudaSamplingKernelFailed) {
@@ -1159,4 +1366,122 @@ TEST_F(CudaSamplerTest, testTokenHistoryDirectScatterNgramStillBans) {
             ASSERT_EQ(tokens_direct[b * (step + 1) + s], history[b * (step + 1) + s]);
         }
     }
+}
+
+TEST_F(CudaSamplerTest, testForceTopKReturnsVocabularyProbabilities) {
+    constexpr int64_t  vocab_size = 16;
+    std::vector<float> logits(vocab_size, -10.0f);
+    logits[1] = 1.0f;
+    logits[3] = 3.0f;
+    logits[5] = 5.0f;
+    logits[7] = 4.0f;
+    auto run  = [&](int force_topk, int request_topk, float top_p) {
+        auto         scores = cudaTensor(logits, {1, vocab_size});
+        auto         tokens = cudaIntTensor({0, 0}, {1, 2});
+        auto         probs  = torch::zeros_like(scores);
+        GreedyParams p({scores,
+                        cudaIntTensor({-1}, {1}),
+                        cudaIntTensor({1}, {1}),
+                        tokens,
+                        1,
+                        pinnedIntTensor({request_topk}),
+                        pinnedFloatTensor({top_p}),
+                        pinnedFloatTensor({1.0f})});
+        p.output_all_probs          = probs;
+        p.skip_logits_probs_restore = true;
+        p.force_topk                = force_topk;
+        auto generator              = torch::make_generator<at::CUDAGeneratorImpl>();
+        generator.set_current_seed(20261023);
+        p.generator = {generator};
+        execSampleGreedy(p);
+        check_cuda_error();
+        return std::make_pair(toHostInt(tokens)[1], toHostFloat(probs));
+    };
+
+    auto [token, probs] = run(4, 0, 1.0f);
+    auto expected       = torch::softmax(torch::tensor(logits), -1);
+    ASSERT_GE(token, 0);
+    for (int i = 0; i < vocab_size; ++i) {
+        EXPECT_NEAR(probs[i], expected[i].item<float>(), 1e-5f);
+    }
+    auto [limited_token, limited_probs] = run(4, 2, 1.0f);
+    ASSERT_TRUE(limited_token == 5 || limited_token == 7);
+    EXPECT_EQ(limited_probs[1], 0.0f);
+    EXPECT_EQ(limited_probs[3], 0.0f);
+    auto [nucleus_token, nucleus_probs] = run(4, 0, 0.8f);
+    ASSERT_TRUE(nucleus_token == 5 || nucleus_token == 7);
+    EXPECT_EQ(nucleus_probs[1], 0.0f);
+    EXPECT_EQ(nucleus_probs[3], 0.0f);
+    auto [joint_token, joint_probs] = run(4, 2, 0.8f);
+    ASSERT_TRUE(joint_token == 5 || joint_token == 7);
+    auto expected_joint = torch::softmax(torch::tensor({5.0f, 4.0f}), -1);
+    EXPECT_NEAR(joint_probs[5], expected_joint[0].item<float>(), 1e-5f);
+    EXPECT_NEAR(joint_probs[7], expected_joint[1].item<float>(), 1e-5f);
+    EXPECT_EQ(joint_probs[1], 0.0f);
+    EXPECT_EQ(joint_probs[3], 0.0f);
+    // Explicit joint filtering retains the full-vocabulary top-p boundary.
+    auto [tight_token, tight_probs]       = run(4, 2, 0.7f);
+    auto [baseline_token, baseline_probs] = run(0, 2, 0.7f);
+    ASSERT_TRUE(tight_token == 5 || tight_token == 7);
+    ASSERT_TRUE(baseline_token == 5 || baseline_token == 7);
+    EXPECT_EQ(tight_probs, baseline_probs);
+    EXPECT_EQ(tight_probs[1], 0.0f);
+    EXPECT_EQ(tight_probs[3], 0.0f);
+    auto [full_token, full_probs] = run(0, 0, 1.0f);
+    EXPECT_GT(full_probs[0], 0.0f);
+}
+
+TEST_F(CudaSamplerTest, testExactJointSmallTopKUsesFullVocabularyTopPAndRetainsTies) {
+    constexpr int64_t  batch = 4, vocab = 512;
+    std::vector<float> logits(batch * vocab, -100.0f);
+    logits[0]         = std::log(0.5f);
+    logits[1]         = std::log(0.3f);
+    logits[2]         = std::log(0.19f);
+    logits[3]         = std::log(0.01f);
+    logits[vocab]     = 3.0f;
+    logits[vocab + 1] = 2.0f;
+    logits[vocab + 2] = 1.0f;
+    for (int i = 0; i < 100; ++i)
+        logits[2 * vocab + i] = 5.0f;
+    logits[3 * vocab]     = std::log(0.6f);
+    logits[3 * vocab + 1] = std::log(0.4f);
+    logits[3 * vocab + 2] = std::log(1.0e-8f);
+    auto         scores   = cudaTensor(logits, {batch, vocab});
+    auto         tokens   = cudaIntTensor(std::vector<int32_t>(batch * 2, 0), {batch, 2});
+    auto         probs    = torch::zeros_like(scores);
+    GreedyParams params({scores,
+                         cudaIntTensor(std::vector<int32_t>(batch, -1), {batch}),
+                         cudaIntTensor(std::vector<int32_t>(batch, 1), {batch}),
+                         tokens,
+                         1,
+                         pinnedIntTensor({2, 40, 40, 3}),
+                         pinnedFloatTensor({0.55f, 0.2f, 0.95f, 1.0f}),
+                         pinnedFloatTensor({1.0f, 1.0f, 1.0f, 1.0f})});
+    params.output_all_probs          = probs;
+    params.skip_logits_probs_restore = true;
+    auto generator                   = torch::make_generator<at::CUDAGeneratorImpl>();
+    generator.set_current_seed(1729);
+    params.generator.assign(batch, generator);
+    execSampleGreedy(params);
+    check_cuda_error();
+    auto q = toHostFloat(probs);
+    EXPECT_NEAR(q[0], 0.625f, 1e-5f);
+    EXPECT_NEAR(q[1], 0.375f, 1e-5f);
+    for (int i = 2; i < vocab; ++i)
+        EXPECT_EQ(q[i], 0.0f);
+    EXPECT_NEAR(q[vocab], 1.0f, 1e-5f);
+    for (int i = 1; i < vocab; ++i)
+        EXPECT_EQ(q[vocab + i], 0.0f);
+    for (int i = 0; i < 100; ++i)
+        EXPECT_NEAR(q[2 * vocab + i], 0.01f, 1e-5f);
+    for (int i = 100; i < vocab; ++i)
+        EXPECT_EQ(q[2 * vocab + i], 0.0f);
+    EXPECT_GT(q[3 * vocab + 2], 0.0f);
+    for (int i = 3; i < vocab; ++i)
+        EXPECT_EQ(q[3 * vocab + i], 0.0f);
+    auto sampled = toHostInt(tokens);
+    EXPECT_LT(sampled[1], 2);
+    EXPECT_EQ(sampled[3], 0);
+    EXPECT_LT(sampled[5], 100);
+    EXPECT_LT(sampled[7], 3);
 }
