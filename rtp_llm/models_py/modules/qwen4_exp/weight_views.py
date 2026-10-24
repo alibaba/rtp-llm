@@ -23,6 +23,7 @@ class WeightView:
     compute: torch.Tensor
     update_requires_restart: bool
     alias_owner: torch.Tensor | None = None
+    compute_scale: torch.Tensor | None = None
 
 
 @dataclass(frozen=True)
@@ -53,9 +54,11 @@ def summarize_compute_inventory(inventory: ComputeWeightInventory):
                 source.setdefault(storage_id(tensor), tensor)
     extra_compute = {}
     for entry in entries:
-        key = storage_id(entry.compute)
-        if key not in source:
-            extra_compute.setdefault(key, entry.compute)
+        for tensor in (entry.compute, entry.compute_scale):
+            if tensor is not None:
+                key = storage_id(tensor)
+                if key not in source:
+                    extra_compute.setdefault(key, tensor)
 
     def describe(storages):
         groups = {}
@@ -199,7 +202,14 @@ def record_projection_consumer(weights, name, module):
         weights.get(name + FP8_STORAGE_SCALE_SUFFIX),
         compute,
         True,
-        getattr(module.weight, "_base", None),
+        # A format-converted allocation is compute storage, not an alias of
+        # checkpoint storage (e.g. E4M3FN -> FNUZ with scale compensation).
+        (
+            getattr(module.weight, "_base", None)
+            if module.weight.dtype == weights[name].dtype
+            else None
+        ),
+        getattr(module, "scale", None),
     )
 
 

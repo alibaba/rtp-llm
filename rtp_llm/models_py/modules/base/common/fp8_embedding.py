@@ -32,6 +32,11 @@ class Fp8VocabEmbedding(nn.Module):
         self.weight_scale = weight_scale.to(device=device, dtype=torch.float32).reshape(
             1
         )
+        self.rocm_decode_table = None
+        if torch.version.hip is not None:
+            from .rocm_fp8 import fn_decode_table
+
+            self.rocm_decode_table = fn_decode_table(device)
         self.column_scales = None
         self.tp_size = tp_size
         self.hidden_size = weight.shape[1]
@@ -109,7 +114,18 @@ class Fp8VocabEmbedding(nn.Module):
                 raise ValueError("vocabulary text mask must match packed token ids")
         from rtp_llm.models_py.triton_kernels.common.fp8_vocab_lookup import vocab_rows
 
-        output = vocab_rows(input, self.weight, self.weight_scale, text_tokens_mask)
+        if self.rocm_decode_table is not None:
+            from .rocm_fp8 import vocab_rows as rocm_vocab_rows
+
+            output = rocm_vocab_rows(
+                input,
+                self.weight,
+                self.weight_scale,
+                self.rocm_decode_table,
+                text_tokens_mask,
+            )
+        else:
+            output = vocab_rows(input, self.weight, self.weight_scale, text_tokens_mask)
         if self.tp_size > 1:
             rows, width = output.shape
             output = all_gather(output, group=Group.TP)
@@ -138,6 +154,9 @@ class Fp8VocabEmbedding(nn.Module):
             )
         ):
             raise ValueError("vocabulary text mask must match packed token ids")
+        if self.rocm_decode_table is not None:
+            value = self.forward(input, text_tokens_mask=text_tokens_mask)
+            return value.repeat(1, branches)
         if (
             self.column_scales is not None
             and branches == 4

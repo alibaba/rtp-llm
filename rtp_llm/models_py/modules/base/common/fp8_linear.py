@@ -16,6 +16,10 @@ def dequantize_parameter(weights, name):
 
 
 def _quantize_projection_input(rows, *, role, scale=None, output=None):
+    if torch.version.hip is not None:
+        from .rocm_fp8 import quantize_input
+
+        return quantize_input(rows, scale=scale, output=output)
     if scale is None and role in ("DECODE", "PDFUSION"):
         from rtp_llm.models_py.triton_kernels.common.fp8_small_quant import (
             try_small_fp8_quant,
@@ -39,6 +43,12 @@ class Fp8Linear(nn.Module):
         self.use_scaled_mm = (
             weight.is_cuda and weight.shape[0] % 16 == 0 and weight.shape[1] % 16 == 0
         )
+        if self.use_scaled_mm and torch.version.hip is not None:
+            from .rocm_fp8 import convert_fn_weight, native_fp8_dtype
+
+            self.weight, self.scale = convert_fn_weight(
+                self.weight, self.scale, native_fp8_dtype(weight.device)
+            )
         self.unit_scale = torch.ones_like(self.scale) if self.use_scaled_mm else None
         # Tiny unaligned gates use a BF16 compute copy, made before capture.
         self.compute_weight = (
@@ -72,7 +82,8 @@ class Fp8Linear(nn.Module):
     def forward_silu_and_mul(self, gate_up):
         """Consume a gated projection with one activation/FP8 quant launch."""
         if not (
-            self.compute_weight is None
+            torch.version.hip is None
+            and self.compute_weight is None
             and self.role in ("DECODE", "PDFUSION")
             and gate_up.ndim == 2
             and gate_up.shape[0] in (4, 8, 12, 16)
@@ -91,7 +102,7 @@ class Fp8Linear(nn.Module):
         padded = torch.empty(
             ((rows + 15) // 16 * 16, width),
             device=gate_up.device,
-            dtype=torch.float8_e4m3fn,
+            dtype=self.weight.dtype,
         )
         result = try_silu_mul_fp8_quant(gate_up, output=padded)
         if result is None:
@@ -127,7 +138,7 @@ class Fp8Linear(nn.Module):
             padded_output = torch.empty(
                 (rows.shape[0] + padding, rows.shape[1]),
                 device=rows.device,
-                dtype=torch.float8_e4m3fn,
+                dtype=self.weight.dtype,
             )
         quantized, scale = _quantize_projection_input(
             rows.contiguous(), role=self.role, scale=input_scale, output=padded_output
@@ -159,6 +170,7 @@ def project_fp8_pair(x, first, second):
         and first.bias is None
         and second.bias is None
         and first.weight.shape[1] == second.weight.shape[1] == x.shape[-1]
+        and first.weight.dtype == second.weight.dtype
         and first.weight.device == second.weight.device == x.device
         and x.is_cuda
         and x.dtype == torch.bfloat16
@@ -182,7 +194,7 @@ def project_fp8_pair(x, first, second):
         torch.empty(
             (rows.shape[0] + padding, rows.shape[1]),
             device=x.device,
-            dtype=torch.float8_e4m3fn,
+            dtype=first.weight.dtype,
         )
         if padding
         else None

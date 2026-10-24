@@ -408,6 +408,15 @@ class Qwen4ExpNGramEmbedding(nn.Module):
                     self._cpu_uva_pointers,
                     scale=self.weight_scale,
                 )
+            if ngram_ids.is_cuda and torch.version.hip is not None:
+                if torch.cuda.is_current_stream_capturing():
+                    raise RuntimeError(
+                        "HIP CPU PLE lookup must be prepared outside capture"
+                    )
+                # Eager only. Graph replay uses prepare_cpu_graph_rows and a
+                # stable device buffer; no host sync may enter capture.
+                rows = self._gather_torch(ngram_ids.cpu())
+                return rows.to(ngram_ids.device)
             if ngram_ids.is_cuda:
                 raise RuntimeError(
                     "CPU PLE tables on CUDA require pinned NVIDIA UVA mapping"
