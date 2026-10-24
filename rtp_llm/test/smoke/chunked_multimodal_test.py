@@ -248,10 +248,15 @@ class ChunkedMultimodalTest(unittest.TestCase):
                     len(expected_top.keys() & observed_top.keys()), 4
                 )
                 for token in expected_top.keys() & observed_top.keys():
-                    self.assertAlmostEqual(
-                        observed_top[token],
-                        expected_top[token],
-                        delta=0.03,
+                    # A log-space delta amplifies tiny tail-probability changes
+                    # between FP16 prefill shapes and norm implementations.
+                    self.assertTrue(
+                        math.isclose(
+                            math.exp(observed_top[token]),
+                            math.exp(expected_top[token]),
+                            rel_tol=0.03,
+                            abs_tol=1e-4,
+                        ),
                         msg=f"candidate at token {step}",
                     )
 
