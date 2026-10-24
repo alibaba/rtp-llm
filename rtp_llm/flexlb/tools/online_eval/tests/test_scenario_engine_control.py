@@ -1,13 +1,11 @@
 import json
 import urllib.request
-import sys
 import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace as NS
 from unittest.mock import MagicMock, patch
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from scenario.actions import engine_control as ec
 
 

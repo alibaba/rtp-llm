@@ -1,9 +1,7 @@
-import sys
 import unittest
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT))
 
 from mode_profiles import (load_mode_tables, master_mode_for_profile,
                            resolve_address_plan, resolve_mode)

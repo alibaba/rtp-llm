@@ -1,13 +1,10 @@
 import json
-import sys
 import tempfile
 import time
 import unittest
-from pathlib import Path
 from types import SimpleNamespace as NS
 from unittest.mock import patch
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from scenario.actions import engine_fault as ef
 from scenario.runtime import Deadline, RuntimeContext
 

@@ -16,7 +16,6 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from unittest import mock
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from adapters import port_windows as ports
 from scenario import instance_runner as runner
 from scenario import result_validation

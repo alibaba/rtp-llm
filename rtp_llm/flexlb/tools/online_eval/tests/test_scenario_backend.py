@@ -1,7 +1,6 @@
 """Actual consumer threads with fake RPC transports: no Java or network required."""
 
 import json
-import sys
 import tempfile
 import threading
 import time
@@ -10,7 +9,6 @@ from pathlib import Path
 from types import SimpleNamespace as NS
 from unittest.mock import Mock, patch
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from scenario.backend import BoundedOps
 from scenario.request_batch import RequestBatch
 from scenario.lease import validate_lease

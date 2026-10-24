@@ -3,14 +3,12 @@
 import ast
 import copy
 import json
-import sys
 import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT))
 from scenario.program_compiler import configure_program
 from scenario import ScenarioError, load_scenarios
 from program_fixtures import compile_scenarios

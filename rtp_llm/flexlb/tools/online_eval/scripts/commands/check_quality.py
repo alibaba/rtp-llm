@@ -12,7 +12,7 @@ def main():
     environment = dict(os.environ)
     environment['PYTHONPATH'] = os.pathsep.join((str(root / 'src'), str(root)))
     commands = (
-        [sys.executable, '-m', 'ruff', 'check', 'src', 'scripts', 'tests'],
+        [sys.executable, '-m', 'ruff', 'check', 'src', 'scripts', 'tests', *sorted(path.name for path in root.glob('*.py'))],
         [sys.executable, '-c', 'from importlinter.cli import lint_imports_command; lint_imports_command()',
          '--config', '.importlinter'],
     )

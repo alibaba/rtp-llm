@@ -9,7 +9,6 @@ import unittest
 from pathlib import Path
 
 TOOLS = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(TOOLS))
 
 from flexlb_cfg import render_env
 from scenario import ScenarioError, load_scenarios

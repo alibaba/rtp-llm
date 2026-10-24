@@ -1,12 +1,10 @@
 import json
-import sys
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
 
 SCRIPT_DIR = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(SCRIPT_DIR))
 
 from adapters.environment import EnvManager
 from adapters.environment_config import EnvSpec, MasterSpec

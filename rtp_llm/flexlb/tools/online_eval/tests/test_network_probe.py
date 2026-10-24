@@ -1,13 +1,10 @@
 """Socket occupancy probes must preserve address coverage without serving traffic."""
 
 import socket
-import sys
-from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from runtime.network import PROBE_BIND_HOST, port_accepting, port_in_use
 

@@ -1,11 +1,9 @@
 import copy
 import json
-import sys
 import unittest
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT))
 from flexlb_cfg import render_env
 from scenario import load_scenarios
 from program_fixtures import compile_scenarios

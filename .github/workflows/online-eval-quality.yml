@@ -28,6 +28,8 @@ jobs:
           python-version: '3.11'
       - run: python -m pip install -r requirements.txt -r requirements-quality.txt pytest
       - run: python scripts/commands/check_quality.py
-      - run: python -m pytest -q tests/test_quality_boundaries.py tests/test_case_author_contract.py tests/test_case_extension_boundaries.py
-        env:
-          PYTHONPATH: src:.
+      - name: Install Prometheus
+        run: |
+          curl -fsSL https://github.com/prometheus/prometheus/releases/download/v3.2.1/prometheus-3.2.1.linux-amd64.tar.gz | tar xz -C "$RUNNER_TEMP"
+          echo "PROMETHEUS_BIN=$RUNNER_TEMP/prometheus-3.2.1.linux-amd64/prometheus" >> "$GITHUB_ENV"
+      - run: python -m pytest -q -ra

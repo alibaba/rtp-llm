@@ -1,7 +1,6 @@
 """Master fault ownership and observable recovery, without Java startup."""
 
 import json
-import sys
 import tempfile
 import time
 import unittest
@@ -9,7 +8,6 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from adapters.master_evidence import endpoint_loads
 from scenario.actions import master
 from cases.master_ha_failover import actions as ha

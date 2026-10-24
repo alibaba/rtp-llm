@@ -9,12 +9,10 @@ layering (base < profile < override), the OMIT sentinel, the
 
 import hashlib
 import json
-import sys
 import unittest
 from pathlib import Path
 
 SCRIPT_DIR = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(SCRIPT_DIR))
 
 from flexlb_cfg import (  # noqa: E402
     DSV4_PREFILL_EXPRESSION,

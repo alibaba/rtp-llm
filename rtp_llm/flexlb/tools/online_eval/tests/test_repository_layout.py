@@ -9,7 +9,6 @@ from pathlib import Path
 from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT))
 
 from scripts.pipeline import execute_cases as parallel_runner
 from scenario import instance_runner

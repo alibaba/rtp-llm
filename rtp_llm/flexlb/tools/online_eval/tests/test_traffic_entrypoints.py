@@ -9,7 +9,6 @@ import unittest
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT / "src"))
 
 from traffic.prefix_lineage import encode
 from traffic.datasets import build_manifest

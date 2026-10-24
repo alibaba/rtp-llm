@@ -262,8 +262,11 @@ class PerformanceGateTest(unittest.TestCase):
             panels = report_panels(curves, evidence()["criteria"], view("master_performance.yaml"))
             self.assertNotIn("发送 QPS", [c["name"] for p in panels for c in p["series"]])
             self.assertTrue(any(p['caption'] for p in panels if not p['series']))
-            # HTML must still exist for INVALID runs, with embedded plotting code.
-            bundle = report(d, e, analyze(e))
+            # Exercise delivery with a genuinely invalid frozen verdict.
+            e["samples"] = []
+            invalid = analyze(e)
+            self.assertEqual(invalid["verdict"], "INVALID")
+            bundle = report(d, e, invalid)
             self.assertTrue((bundle / "report.html").is_file())
 
     def test_archived_actual_hit_ratio_is_shown_as_percent(self):

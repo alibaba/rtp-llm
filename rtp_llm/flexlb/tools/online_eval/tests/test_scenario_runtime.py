@@ -1,11 +1,9 @@
 """Cooperative deadline and ownership tests use no threads, sleeps or services."""
 
-import sys
 import tempfile
 import unittest
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from program_fixtures import compile_scenarios
 from scenario.contracts import (

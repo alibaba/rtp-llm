@@ -47,13 +47,13 @@ from dataclasses import dataclass, fields
 from typing import Mapping, Optional, Union
 
 from flexlb_profile_data import (
-    DSV4_PREFILL_EXPRESSION,
+    DSV4_PREFILL_EXPRESSION as DSV4_PREFILL_EXPRESSION,
+    PROFILE_CAPS as PROFILE_CAPS,
     FUNCTIONAL_DEFAULTS,
     GENERATOR_DEFAULTS,
     STRESS_BASE,
     PROFILES,
     PROFILE_SPECS,
-    PROFILE_CAPS,
     STRESS_PROFILE,
     FUNCTIONAL_PROFILE_KWARGS,
     STRESS_DECISION_RETYPE_DEFAULTS,
