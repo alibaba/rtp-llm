@@ -734,7 +734,7 @@ class CPDeltaRuleMNPrecomputeSm120(KeyedCompileMixin):
         thread_idx: cutlass.Int32,
     ):
         copy_atom = cute.make_copy_atom(
-            cute.nvgpu.CopyR2GOp(), self.acc_dtype, num_bits_per_copy=64
+            cute.nvgpu.CopyUniversalOp(), self.acc_dtype, num_bits_per_copy=64
         )
         tiled_copy = cute.make_tiled_copy_C(copy_atom, tiled_mma)
         thr_copy = tiled_copy.get_slice(thread_idx)
@@ -1960,7 +1960,7 @@ class CPDeltaRuleFixupHmmaSm120(KeyedCompileMixin):
         tiled_mma = cute.make_tiled_mma(WarpMmaTF32Op((16, 8, 8)))
         copy_atom = cute.make_copy_atom(cute.nvgpu.CopyUniversalOp(), cutlass.Float32)
         store_atom = cute.make_copy_atom(
-            cute.nvgpu.CopyR2GOp(), cutlass.Float32, num_bits_per_copy=64
+            cute.nvgpu.CopyUniversalOp(), cutlass.Float32, num_bits_per_copy=64
         )
         tiled_copy_C = cute.make_tiled_copy_C(copy_atom, tiled_mma)
         tiled_store_C = cute.make_tiled_copy_C(store_atom, tiled_mma)

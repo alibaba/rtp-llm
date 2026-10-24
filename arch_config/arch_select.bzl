@@ -108,6 +108,7 @@ def whl_deps():
             "fastsafetensors@https://rtp-maga.cn-zhangjiakou.oss.aliyuncs.com/0502/fastsafetensors-0.1.20%2Bali-cp310-cp310-linux_x86_64.whl",
             "tilelang==0.1.15",
             "apache-tvm-ffi==0.1.12",
+            "nvidia-cutlass-dsl[cu13]==4.4.2",
         ],
         "@rtp_llm//:using_cuda13_arm": [
             "torch@https://rtp-maga.cn-zhangjiakou.oss.aliyuncs.com/rtp_llm/arm_pkg/torch-2.11.0%2Bcu130-cp310-cp310-manylinux_2_28_aarch64.whl",

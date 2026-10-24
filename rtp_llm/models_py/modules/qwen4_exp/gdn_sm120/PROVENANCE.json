@@ -5,7 +5,8 @@
   "adaptations": [
     "Redirect utility import to current FlashInfer0.6.9 shared cache/SM helpers",
     "Namespace isolated under Qwen4; no global dependency replacement",
-    "Use cached host architecture queries and original FlashInfer scratch allocator for the CP kernel; bypass only the stale high-level checkpoint rejection, retaining kernel checkpoint arguments"
+    "Use cached host architecture queries and original FlashInfer scratch allocator for the CP kernel; bypass only the stale high-level checkpoint rejection, retaining kernel checkpoint arguments",
+    "Use CUTLASS DSL 4.4.2 CopyUniversalOp for both 64-bit register-to-global stores; preserve copy width, dtype and tiled layout"
   ],
   "files": [
     {
@@ -60,7 +61,7 @@
       "name": "delta_rule_cp_sm120.py",
       "source_path": "flashinfer/gdn_kernels/delta_rule_dsl/delta_rule_cp_sm120.py",
       "source_sha256": "b02c8ef1ba98177d3695a2cbece5dfd8c208d8339265ab3dbda6e7e23fec5ba1",
-      "adapted_sha256": "6b733a53deae49a7718b33dfdc6e602eca3379474804dde4015f0d14287cd05f"
+      "adapted_sha256": "7d6ac16522cb0ddadb5bb7b96cd142ccf632760fa55283ca45ca900eaf872c2a"
     }
   ]
 }

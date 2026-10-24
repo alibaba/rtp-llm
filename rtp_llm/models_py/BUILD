@@ -238,3 +238,5 @@ py_library(
     }),
     visibility = ["//visibility:public"],
 )
+
+exports_files(["utils/cutlass.py"])

@@ -3,7 +3,9 @@
 # CUDA 13.2 / torch 2.11+cu130 / triton 3.6.0 dep set.
 # Includes official DeepEP main@a56d6156 built against NCCL 2.30.4 and
 # NVSHMEM 3.5.19, plus the RTP FlashInfer 0.6.9 CUDA 13.2 wheels.
-# FlashAttention 3 and nvidia_cutlass_dsl remain deferred.
+# FlashAttention 3 remains deferred.
+# SM120 GDN requires the CUDA 13 compiler, not the default CUDA 12 base.
+nvidia-cutlass-dsl[cu13]==4.4.2
 
 # Core torch stack — wheels mirrored to OSS by us; upstream is
 # https://download.pytorch.org/whl/cu130/.

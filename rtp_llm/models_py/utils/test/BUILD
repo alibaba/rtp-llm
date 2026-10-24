@@ -50,3 +50,11 @@ py_test (
     },
     tags = ["L20_CU13"],
 )
+
+py_test(
+    name = "cutlass_import_test",
+    srcs = ["cutlass_import_test.py"],
+    data = ["//rtp_llm/models_py:utils/cutlass.py"],
+    env = {"GPU_COUNT": "0"},
+    tags = ["cpu"],
+)

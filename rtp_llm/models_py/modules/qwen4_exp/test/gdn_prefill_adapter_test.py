@@ -14,6 +14,20 @@ from rtp_llm.models_py.triton_kernels.fla.utils import assert_close
 
 @unittest.skipUnless(torch.cuda.is_available(), "CUDA is required")
 class GdnSm120PrefillTest(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        import cutlass
+        from cutlass._mlir._mlir_libs import _cutlass_ir
+
+        print(
+            "CUTLASS_COMPILER",
+            cutlass.__version__,
+            cutlass.CUDA_VERSION,
+            cutlass.__file__,
+            _cutlass_ir.__file__,
+            flush=True,
+        )
+
     def test_output_final_and_all_page_states_with_ragged_prefix(self):
         self.assertEqual(torch.cuda.get_device_capability(), (12, 0))
         for lengths in ((257,), (129, 257)):

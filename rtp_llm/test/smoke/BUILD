@@ -239,3 +239,30 @@ custom_smoke_test(
     tags = ["qwen4_text_contract"],
     data = ["//rtp_llm:sdk", "qwen4_serving_contract_test.py"],
 )
+
+# P1 isolated ViT integration, retaining all existing 64-token target defaults.
+custom_smoke_test(
+    name = "qwen4_native_fp8_cache128_vit2_tp4_sm120_functional",
+    main = "qwen4_serving_contract_test.py",
+    args = [
+        "--image-question=animal",
+        "--cache-block-size=128",
+        "--decode-capture-config=1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16",
+        "--concurrency-limit=16",
+    ],
+    smoke_args = "--world_size 5",
+    gpu_type = ["RTX_5000_PRO_CU13"],
+    tags = ["qwen4_serving_contract"],
+    data = ["//rtp_llm:sdk", "data/model/qwen_vl/1.jpeg"],
+)
+
+# Native FP8 TP4/EP4 all-gather contract; DeepEP remains disabled.
+custom_smoke_test(
+    name = "qwen4_native_fp8_cache128_text_tp4_ep4_sm120",
+    main = "qwen4_text_contract_test.py",
+    args = ["--ep-size=4"],
+    smoke_args = "--world_size 4",
+    gpu_type = ["RTX_5000_PRO_CU13"],
+    tags = ["qwen4_text_contract"],
+    data = ["//rtp_llm:sdk", "qwen4_serving_contract_test.py"],
+)
