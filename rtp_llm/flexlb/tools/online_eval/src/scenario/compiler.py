@@ -6,8 +6,9 @@ import copy
 from dataclasses import dataclass, replace
 from scenario.environment_declaration import EnvironmentDeclaration, variant_environment_fields
 from scenario.environment_resolver import EnvironmentResolver
-from scenario.plan import CompiledInstance, EnvironmentPlan, ExecutionBudgets, json_document, attachment_document
+from scenario.plan import CompiledInstance, EnvironmentPlan, ExecutionBudgets, json_document
 from scenario.program import ProgramPlan, VariantPlan
+from scenario.stage_parameters import AdapterParameters
 from adapters.java_mock_resources import JavaMockBudget
 from scenario.execution_policy import normalize_metadata, normalize_execution
 
@@ -339,9 +340,7 @@ def _compile_profile(context, p):
             registered.definition.execution_requirements.validate(policy)
     except ValueError as exc:
         fail(source + f"::{vid}.execution", str(exc))
-    attachments = dict(metadata=metadata, implementation=copy.deepcopy(doc.implementation),
-                       test_kind=metadata["kind"], collection_profile=policy["collection"],
-                       workload_runtime=policy["monitoring"] if metadata["kind"] == "workload" else {})
+    attachments = dict(implementation=copy.deepcopy(doc.implementation))
     for key in ("reports", "reporting"):
         value = getattr(variant, key)
         if value is not None:
@@ -359,7 +358,9 @@ def _compile_profile(context, p):
                                     json_document(resolved.master_patch.declared),
                                     tuple(resolved.effective_axes.items()), resolved.effective_capabilities),
         execution=ExecutionBudgets.read(policy), stages=compiled, findings=tuple(findings),
-        attachments_json=attachment_document(attachments),
+        metadata=AdapterParameters(metadata),
+        **{key: tuple(value) if key == "reports" else AdapterParameters(value)
+           for key, value in attachments.items()},
     ))
     return instances
 

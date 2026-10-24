@@ -1,7 +1,7 @@
 """Immutable execution contracts; JSON belongs to admission and artifact codecs."""
 from __future__ import annotations
 
-from dataclasses import dataclass, fields
+from dataclasses import dataclass, fields, field
 import json
 from typing import Optional, TYPE_CHECKING
 
@@ -13,17 +13,15 @@ from flexlb_cfg import PROFILES
 from scenario.environment_snapshot import EnvironmentSnapshot
 from document_io import DocumentError as ScenarioError
 from scenario.validation import mapping, number, identifier
-from scenario.stage_parameters import StageParameters, decode_parameters
+from scenario.references import validate_references, enter_stage
+from scenario.execution_policy import EXECUTION_BUDGETS
+from scenario.stage_parameters import StageParameters, AdapterParameters, decode_parameters
 from adapters.java_mock_resources import JavaMockBudget
 
 
 def json_document(value):
     return json.dumps(value, separators=(",", ":"), allow_nan=False)
 
-
-def attachment_document(value):
-    # Stable envelope order without reordering case-owned nested definitions.
-    return json_document({key: value[key] for key in sorted(value)})
 
 
 @dataclass(frozen=True)
@@ -38,7 +36,7 @@ class ExecutionBudgets:
     monitoring: Optional[MonitoringPolicy] = None
 
     def __post_init__(self):
-        for name in ("timeout_s", "stage_timeout_s", "cleanup_timeout_s", "finalize_timeout_s", "report_timeout_s", "archive_timeout_s"):
+        for name in EXECUTION_BUDGETS:
             number(getattr(self, name), "execution." + name, minimum=.001)
 
     @classmethod
@@ -157,13 +155,16 @@ class CompiledInstance:
     requires: tuple[str, ...]
     tags: tuple[str, ...]
     resource_budget: JavaMockBudget
-    attachments_json: str = "{}"
+    metadata: AdapterParameters = field(default_factory=lambda: AdapterParameters({"kind": "functional"}))
+    implementation: Optional[AdapterParameters] = None
+    reports: Optional[tuple[str, ...]] = None
+    reporting: Optional[AdapterParameters] = None
 
     @classmethod
     def read(cls, value):
         if isinstance(value, cls):
             return value
-        required = {item.name for item in fields(cls)} - {"attachments_json"}
+        required = {item.name for item in fields(cls)} - {"metadata", "implementation", "reports", "reporting"}
         attachments = {"metadata", "reports", "reporting", "implementation", "test_kind",
                        "collection_profile", "workload_runtime"}
         mapping(value, "instance", required | {"resource_budget", "scenario", "variant",
@@ -185,31 +186,10 @@ class CompiledInstance:
         # Frozen references are structural dependencies, never arbitrary JSON paths.
         from scenario.stage_compiler import OUTPUTS
         seen = {}
-        def references(payload):
-            if isinstance(payload, dict):
-                if "$ref" in payload:
-                    from scenario.stage_parameters import OutputReference
-                    reference = OutputReference.read(payload)
-                    if reference.stage_id not in seen:
-                        raise ScenarioError("unknown or forward frozen stage reference")
-                    schema = seen[reference.stage_id]
-                    if schema is not None and reference.field not in schema:
-                        raise ScenarioError("unknown frozen output field")
-                else:
-                    for child in payload.values():
-                        references(child)
-            elif isinstance(payload, list):
-                for child in payload:
-                    references(child)
         setup_seen, torn_down = False, False
         for index, stage in enumerate(stages):
-            if torn_down or (stage.action == "setup" and index != 0):
-                raise ScenarioError("invalid frozen stage lifecycle")
-            if stage.action == "setup":
-                setup_seen = True
-            elif not setup_seen:
-                raise ScenarioError("frozen setup must precede actions")
-            references(stage.parameters.to_dict())
+            setup_seen = enter_stage(stage.action, index, setup_seen, torn_down, "frozen stage")
+            validate_references(stage.parameters.to_dict(), "frozen stage.params", seen)
             seen[stage.id] = OUTPUTS.get(stage.action)
             torn_down = stage.action == "teardown"
         for name in ("findings", "requires", "tags"):
@@ -250,15 +230,15 @@ class CompiledInstance:
         for key, expected in projections.items():
             if key in value and value[key] != expected:
                 raise ScenarioError("instance policy projection disagrees with canonical policy: " + key)
-        attachment_data = {key: value[key] for key in attachments - set(projections) - {"metadata"} if key in value}
-        attachment_data.update(metadata=metadata, **projections)
         resource_budget = JavaMockBudget.from_metadata(value["resource_budget"])
         scalar = {key: value[key] for key in ("id", "scenario_id", "variant_id", "profile", "category",
                   "description", "source", "source_path", "grade", "estimated_duration_s")}
         return cls(**scalar, environment=environment, execution=ExecutionBudgets.read(policy),
                    stages=stages, findings=tuple(value["findings"]), requires=tuple(value["requires"]),
                    tags=tuple(value["tags"]), resource_budget=resource_budget,
-                   attachments_json=attachment_document(attachment_data))
+                   metadata=AdapterParameters(metadata),
+                   **{key: tuple(value[key]) if key == "reports" else AdapterParameters(value[key])
+                      for key in ("implementation", "reports", "reporting") if key in value})
 
     def to_dict(self):
         result = {key: getattr(self, key) for key in ("id", "scenario_id", "variant_id", "profile", "category",
@@ -268,7 +248,15 @@ class CompiledInstance:
             environment=self.environment.to_dict(), execution=self.execution.to_dict(),
             stages=[stage.to_dict() for stage in self.stages], findings=list(self.findings),
             requires=list(self.requires), tags=list(self.tags), resource_budget=self.resource_budget.to_metadata())
-        result.update(json.loads(self.attachments_json))
+        metadata = self.metadata.to_dict()
+        result.update(metadata=metadata, test_kind=metadata["kind"],
+                      collection_profile=self.execution.collection,
+                      workload_runtime=self.execution.monitoring.to_dict()
+                          if metadata["kind"] == "workload" and self.execution.monitoring else {})
+        for key in ("implementation", "reports", "reporting"):
+            value = getattr(self, key)
+            if value is not None:
+                result[key] = list(value) if key == "reports" else value.to_dict()
         return result
 
 

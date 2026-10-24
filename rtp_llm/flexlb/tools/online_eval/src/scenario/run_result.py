@@ -169,7 +169,7 @@ class RunResult:
     def to_dict(self):
         outcome = self.adjudicate()
         plan = self.plan
-        attachments = json.loads(plan.attachments_json)
+        metadata = plan.metadata.to_dict()
         result = dict(id=plan.id, scenario_id=plan.scenario_id, variant_id=plan.variant_id,
             profile=plan.profile, category=plan.category, source=plan.source, grade=plan.grade,
             effective_axes=dict(plan.environment.axes), effective_capabilities=list(plan.environment.capabilities),
@@ -179,11 +179,11 @@ class RunResult:
             finding_resolved=list(self.execution.finding_resolved), source_path=plan.source_path,
             resource_budget=plan.resource_budget.to_metadata(),
             resolved_config=json.loads(plan.environment.snapshot.master_json), clock_domain="monotonic",
-            test_kind=attachments.get("test_kind", "functional"), outcome=asdict(outcome))
+            test_kind=metadata["kind"], outcome=asdict(outcome))
         if self.artifacts:
             result['artifacts'] = dict(self.artifacts)
-        if "implementation" in attachments:
-            result["implementation"] = attachments["implementation"]
+        if plan.implementation is not None:
+            result["implementation"] = plan.implementation.to_dict()
         if self.finalization_started:
             result["execution_status"] = self.execution.status
             result["finalization"] = [phase.to_dict() for phase in self.finalization]

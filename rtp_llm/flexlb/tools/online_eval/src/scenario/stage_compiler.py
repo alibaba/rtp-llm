@@ -15,7 +15,7 @@ from analysis.checks import validate_comparison
 from scenario.request_parameters import normalize_request_parameters
 
 
-from scenario.references import reference
+from scenario.references import reference, validate_references, enter_stage
 
 
 def _empty_params(params, loc, outputs):
@@ -91,16 +91,6 @@ class _StageCompiler:
         return tuple(self._stage(value, index, f"{path}[{index}]")
                      for index, value in enumerate(values))
 
-    def _enter(self, action, index, loc):
-        if self.torn_down:
-            fail(loc, "no stage may follow teardown")
-        if action == "setup":
-            if self.setup_seen or index != 0:
-                fail(loc, "setup must occur exactly once as the first stage")
-            self.setup_seen = True
-        elif not self.setup_seen:
-            fail(loc, "setup must precede actions")
-
     def _handler_params(self, descriptor, params, loc, action):
         if descriptor.owners and self.case not in descriptor.owners:
             fail(loc + ".action", f"action {action!r} belongs to cases {sorted(descriptor.owners)!r}")
@@ -118,17 +108,6 @@ class _StageCompiler:
             fail(loc, "adapter validate must return a mapping")
         return params
 
-    def _references(self, value, path):
-        if isinstance(value, dict):
-            if "$ref" in value:
-                reference(value, path, self.outputs)
-            else:
-                for key, child in value.items():
-                    self._references(child, path + "." + str(key))
-        elif isinstance(value, list):
-            for index, child in enumerate(value):
-                self._references(child, f"{path}[{index}]")
-
     def _stage(self, value, index, loc):
         if not isinstance(value, StageDefinition):
             fail(loc, "expected StageDefinition")
@@ -140,7 +119,7 @@ class _StageCompiler:
         action = value.action
         if not isinstance(action, str) or action not in (set(OUTPUTS) | set(self.handlers)):
             fail(loc + ".action", f"unsupported action {action!r}")
-        self._enter(action, index, loc)
+        self.setup_seen = enter_stage(action, index, self.setup_seen, self.torn_down, loc)
         timeout = number(value.timeout_s if value.timeout_s is not None else self.default_timeout, loc + ".timeout_s", minimum=0.001)
         params = copy.deepcopy(value.params)
         descriptor = self.handlers.get(action)
@@ -150,7 +129,7 @@ class _StageCompiler:
             _CORE_ACTIONS[action].validate(params, loc, self.outputs)
             if action == "teardown":
                 self.torn_down = True
-        self._references(params, loc + ".params")
+        validate_references(params, loc + ".params", self.outputs)
         self.outputs[sid] = descriptor.outputs if descriptor is not None else OUTPUTS[action]
         if descriptor is not None and descriptor.next_environment is not None:
             self.environment = copy.deepcopy(descriptor.next_environment(params))
