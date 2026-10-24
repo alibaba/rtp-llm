@@ -632,6 +632,7 @@ def h20_oss_suites():
     native.test_suite(
         name = "smoke_h20_vl",
         tests = [
+            ":chunked_multimodal",
             # Golden regression for common RoPE position_id == 0 semantics:
             # Qwen3-VL image position ids contain zero-valued spatial axes.
             smoke_test(

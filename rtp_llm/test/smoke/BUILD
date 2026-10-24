@@ -4,7 +4,7 @@ custom_smoke_test(
     name = "chunked_multimodal",
     main = "chunked_multimodal_test.py",
     smoke_args = "--world_size 1",
-    gpu_type = ["L20_CU13"],
+    gpu_type = ["H20_CU13"],
     data = [
         "//rtp_llm:sdk",
         "data/model/qwen_vl/q_r_3.json",
