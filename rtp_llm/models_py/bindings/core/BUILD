@@ -308,6 +308,7 @@ cc_library(
         "@//:using_cuda": [
             "//rtp_llm/models_py/bindings/cuda/kernels/sampling:sampling",
             "//rtp_llm/models_py/bindings/cuda/kernels:kernels_speculative_sampling",
+            "//rtp_llm/models_py/bindings/cuda/kernels:deepselect_fp32",
         ],
         "//conditions:default": [],
     }),

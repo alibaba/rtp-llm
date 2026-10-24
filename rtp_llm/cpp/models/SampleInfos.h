@@ -68,6 +68,7 @@ public:
     // writing softmax probabilities back into it. Set only by the speculative
     // (MTP) gather; every other path keeps the legacy in-place contract.
     bool skip_logits_probs_restore = false;
+    int  force_topk                = 0;  // DSpARK fixed-width sampling; 0 keeps full vocabulary.
 
     // When true every consumer of all_probs treats the renormalized
     // distribution as a point mass at the sampled token, so the sampler may

@@ -79,7 +79,13 @@ public:
     static __device__ __forceinline__ void topk_select_kernel_devfunc(const TopkSelectArgs& args,
                                                                       const TmaParams&      tma_params) {
         uint32_t batch_idx = blockIdx.x;
-        int32_t  requested_end =
+        if (args.candidate_counts) {
+            const int  count = __ldg(args.candidate_counts + batch_idx);
+            const bool valid = count >= 4096 && count <= 8192;
+            if (valid == args.skip_valid_candidates)
+                return;
+        }
+        int32_t requested_end =
             args.end_ptr == nullptr ? static_cast<int32_t>(args.vocab_size) : __ldg(args.end_ptr + batch_idx);
         uint32_t end_vocab_idx = requested_end <= 0 ? 0u : min(static_cast<uint32_t>(requested_end), args.vocab_size);
 
@@ -93,6 +99,9 @@ public:
             const float* input = static_cast<const float*>(args.input) + uint64_t(batch_idx) * args.stride_input_batch;
             OutIdxT*     output =
                 static_cast<OutIdxT*>(args.output_index) + uint64_t(batch_idx) * args.stride_output_index_batch;
+            float* output_values = Config::return_value ? static_cast<float*>(args.output_value)
+                                                              + uint64_t(batch_idx) * args.stride_output_value_batch :
+                                                          nullptr;
             for (uint32_t slot = threadIdx.x; slot < args.topk; slot += NUM_THREADS) {
                 bool valid = slot < end_vocab_idx;
                 if constexpr (FILTER_FINITE) {
@@ -100,7 +109,15 @@ public:
                         valid = (__float_as_uint(__ldg(input + slot)) & 0x7fffffffu) < 0x7f800000u;
                     }
                 }
-                output[slot] = valid ? static_cast<OutIdxT>(slot) : static_cast<OutIdxT>(-1);
+                output[slot] =
+                    valid ?
+                        static_cast<OutIdxT>(
+                            args.index_map ? args.index_map[uint64_t(batch_idx) * args.stride_index_map_batch + slot] :
+                                             slot) :
+                        static_cast<OutIdxT>(-1);
+                if constexpr (Config::return_value) {
+                    output_values[slot] = valid ? input[slot] : args.value_oob_fill_value;
+                }
             }
             return;
         }
@@ -622,6 +639,9 @@ public:
         __syncthreads();
         OutIdxT* output =
             static_cast<OutIdxT*>(args.output_index) + uint64_t(batch_idx) * args.stride_output_index_batch;
+        float* output_values = Config::return_value ? static_cast<float*>(args.output_value)
+                                                          + uint64_t(batch_idx) * args.stride_output_value_batch :
+                                                      nullptr;
         for (uint32_t slot = threadIdx.x; slot < args.topk; slot += NUM_THREADS) {
             uint64_t pair  = smem.surviving_topk_pairs[survivor_buf_idx][slot];
             uint32_t index = static_cast<uint32_t>(pair);
@@ -629,7 +649,23 @@ public:
             if constexpr (FILTER_FINITE) {
                 valid = valid && ((static_cast<uint32_t>(pair >> 32) & 0x7fffffffu) < 0x7f800000u);
             }
-            output[slot] = valid ? static_cast<OutIdxT>(index) : static_cast<OutIdxT>(-1);
+            output[slot] =
+                valid ?
+                    static_cast<OutIdxT>(args.index_map ?
+                                             args.index_map[uint64_t(batch_idx) * args.stride_index_map_batch + index] :
+                                             index) :
+                    static_cast<OutIdxT>(-1);
+            if constexpr (Config::return_value) {
+                uint32_t value_bits = static_cast<uint32_t>(pair >> 32);
+                float    value      = __uint_as_float(value_bits);
+                // Selection canonicalizes NaNs to +inf; the old gather returned
+                // the original payload, so reload only exceptional values.
+                if (valid && (value_bits & 0x7fffffffu) == 0x7f800000u) {
+                    value =
+                        static_cast<const float*>(args.input)[uint64_t(batch_idx) * args.stride_input_batch + index];
+                }
+                output_values[slot] = valid ? value : args.value_oob_fill_value;
+            }
         }
     }
 };
@@ -648,7 +684,8 @@ void run_topk_select_kernel(const TopkSelectArgs& args) {
     KU_ASSERT(args.return_value == Config::return_value, "Dispatch failure");
     static_assert(cute::is_same_v<typename Config::ValueT, float>);
     static_assert(cute::is_same_v<typename Config::OutIdxT, int32_t>);
-    static_assert(Config::max_topk == 512 && !Config::sorted_index && !Config::sorted_value && !Config::return_value);
+    static_assert((Config::max_topk == 512 || Config::max_topk == 4096) && !Config::sorted_index
+                  && !Config::sorted_value);
     KU_ASSERT(args.vocab_size < MAX_VOCAB_SIZE, "`vocab_size` is too big");
 
     using Kernel = TopkSelectKernelFP32<Config, FILTER_FINITE>;

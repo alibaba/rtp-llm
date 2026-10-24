@@ -1,5 +1,7 @@
 #include "rtp_llm/cpp/normal_engine/speculative/SpeculativeSampler.h"
 #include <algorithm>
+#include <cerrno>
+#include <cstdlib>
 #include <limits>
 #include <vector>
 #include "rtp_llm/models_py/bindings/core/ExecOps.h"
@@ -8,10 +10,26 @@
 #if USING_CUDA
 #include <ATen/cuda/CUDAContext.h>
 #include "rtp_llm/models_py/bindings/cuda/kernels/sampling/sampling.h"
+#include "rtp_llm/models_py/bindings/cuda/kernels/deepselect_fp32.h"
 #endif
 
 namespace rtp_llm {
 namespace speculative {
+
+int dsparkForceTopK() {
+    const char* value = std::getenv("RTP_LLM_DSPARK_FORCE_TOPK");
+    if (value == nullptr) {
+        return 4096;
+    }
+    char* end = nullptr;
+    errno     = 0;
+    long topk = std::strtol(value, &end, 10);
+    RTP_LLM_CHECK_WITH_INFO(errno == 0 && end != value && *end == '\0' && topk >= 0
+                                && topk <= std::numeric_limits<int>::max(),
+                            "RTP_LLM_DSPARK_FORCE_TOPK must be an integer in [0, INT_MAX], got '%s'",
+                            value);
+    return static_cast<int>(topk);
+}
 
 FastTopKSamplerOutput FastTopKSampler::forward(const torch::Tensor& logits, int top_k) {
     FastTopKSamplerOutput output;
@@ -39,7 +57,9 @@ SamplerOutput SpeculativeSampler::sampleDSparkDraft(const torch::Tensor& base_lo
                                                     const torch::Tensor& markov_w1,
                                                     const torch::Tensor& markov_w2,
                                                     size_t               draft_vocab_size,
-                                                    bool                 batch_all_greedy) const {
+                                                    bool                 batch_all_greedy,
+                                                    int                  force_topk,
+                                                    int                  joint_max_top_k) const {
     RTP_LLM_PROFILE_SCOPE("speculative_sampler.sample_dspark_draft");
     RTP_LLM_CHECK_WITH_INFO(temperature.defined() && temperature.is_cuda() && temperature.is_contiguous()
                                 && temperature.scalar_type() == torch::kFloat32 && temperature.dim() == 1,
@@ -66,6 +86,16 @@ SamplerOutput SpeculativeSampler::sampleDSparkDraft(const torch::Tensor& base_lo
     // preserves greedy output. Mixed batches retain the dense distribution.
     // Float partial indices are exact only below 2^24.
     const bool point_mass_path = batch_all_greedy && draft_vocab_size < (1u << 24);
+#if USING_CUDA
+    const int64_t compact_width =
+        !point_mass_path && !top_k.defined() && force_topk > 0 && force_topk < static_cast<int64_t>(draft_vocab_size) ?
+            force_topk :
+            0;
+    const bool sample_from_strided_q = !point_mass_path && compact_width == 0 && !top_k.defined() && !top_p.defined();
+#else
+    const int64_t compact_width         = 0;
+    const bool    sample_from_strided_q = false;
+#endif
 
     auto previous_tokens = anchors.reshape({batch_size}).to(torch::kLong);
     auto all_probabilities =
@@ -73,18 +103,25 @@ SamplerOutput SpeculativeSampler::sampleDSparkDraft(const torch::Tensor& base_lo
             torch::Tensor() :
             torch::empty({batch_size, static_cast<int64_t>(propose_step_), static_cast<int64_t>(draft_vocab_size)},
                          torch::TensorOptions().dtype(torch::kFloat32).device(base_logits.device()));
-    // Contiguous per-step q scratch consumed by FlashInfer sampling; reused
-    // across draft steps because each step's fused kernel fully rewrites it
-    // and the sampler consumes it on the same stream before the next step.
-    auto sampling_probabilities =
-        point_mass_path ? torch::Tensor() :
-                          torch::empty({batch_size, static_cast<int64_t>(draft_vocab_size)},
-                                       torch::TensorOptions().dtype(torch::kFloat32).device(base_logits.device()));
-    const bool    filter_draft           = !point_mass_path && (top_k.defined() || top_p.defined());
-    torch::Tensor filtered_probabilities = filter_draft ? torch::empty_like(sampling_probabilities) : torch::Tensor();
-    torch::Tensor topk_probabilities     = top_k.defined() && top_p.defined() && !point_mass_path ?
-                                               torch::empty_like(sampling_probabilities) :
-                                               torch::Tensor();
+    if (compact_width > 0) {
+        all_probabilities.zero_();
+    }
+    // Filtered paths need contiguous per-step scratch. Reuse it across steps
+    // because each step fully rewrites it before sampling on the same stream.
+    const auto sampling_width = compact_width > 0 ? compact_width : static_cast<int64_t>(draft_vocab_size);
+    auto       sampling_probabilities =
+        point_mass_path || sample_from_strided_q || compact_width > 0 ?
+                  torch::Tensor() :
+                  torch::empty({batch_size, sampling_width},
+                         torch::TensorOptions().dtype(torch::kFloat32).device(base_logits.device()));
+    const bool    filter_draft = !point_mass_path && (top_k.defined() || top_p.defined());
+    torch::Tensor filtered_probabilities =
+        filter_draft ? torch::empty({batch_size, sampling_width},
+                                    torch::TensorOptions().dtype(torch::kFloat32).device(base_logits.device())) :
+                       torch::Tensor();
+    torch::Tensor topk_probabilities = top_k.defined() && top_p.defined() && !point_mass_path && joint_max_top_k == 0 ?
+                                           torch::empty_like(sampling_probabilities) :
+                                           torch::Tensor();
     std::vector<torch::Tensor> token_columns;
     token_columns.reserve(propose_step_);
     // lm_head shards are padded to a TP alignment before gather. Sampling
@@ -105,16 +142,36 @@ SamplerOutput SpeculativeSampler::sampleDSparkDraft(const torch::Tensor& base_lo
         } else {
             // The draft sampling distribution must also be the q supplied to
             // rejection sampling. Match target top-k/top-p truncation here.
-            execMarkovSoftmaxStep({proposal_logits.select(1, step),
-                                   markov_bias,
-                                   temperature,
-                                   all_probabilities.select(1, step),
-                                   sampling_probabilities});
-            auto draft_q = sampling_probabilities;
+            torch::Tensor compact_indices;
+            torch::Tensor draft_q;
+#if USING_CUDA
+            if (compact_width > 0) {
+                auto step_logits = proposal_logits.select(1, step);
+                auto selected =
+                    compact_width == 4096 && batch_size >= 16 && draft_vocab_size == 129280
+                            && step_logits.stride(0) % 256 == 0 && markov_bias.scalar_type() == torch::kBFloat16 ?
+                        torch_ext::deepselect_fp32_markov_topk_prefilter(step_logits, markov_bias, temperature) :
+                        torch_ext::deepselect_fp32_topk(
+                            torch_ext::markov_scaled_logits(step_logits, markov_bias, temperature), compact_width);
+                compact_indices = std::get<1>(selected);
+                draft_q         = torch::softmax(std::get<0>(selected), -1);
+            } else
+#endif
+            {
+                execMarkovSoftmaxStep({proposal_logits.select(1, step),
+                                       markov_bias,
+                                       temperature,
+                                       all_probabilities.select(1, step),
+                                       sampling_probabilities});
+                draft_q = sample_from_strided_q ? all_probabilities.select(1, step) : sampling_probabilities;
+            }
             if (filter_draft) {
 #if USING_CUDA
                 const auto stream = reinterpret_cast<uintptr_t>(at::cuda::getCurrentCUDAStream().stream());
-                if (top_k.defined() && top_p.defined()) {
+                if (joint_max_top_k > 0) {
+                    torch_ext::deepselect_fp32_joint_topk_topp(
+                        draft_q, filtered_probabilities, top_k, top_p, joint_max_top_k);
+                } else if (top_k.defined() && top_p.defined()) {
                     top_k_renorm_probs(draft_q, topk_probabilities, top_k, 0, stream);
                     top_p_renorm_probs(draft_q, filtered_probabilities, top_p, 1.0, stream);
                     filtered_probabilities.masked_fill_(topk_probabilities.eq(0), 0.0);
@@ -129,8 +186,7 @@ SamplerOutput SpeculativeSampler::sampleDSparkDraft(const torch::Tensor& base_lo
                 auto values = std::get<0>(sorted);
                 auto keep   = torch::ones_like(values, torch::TensorOptions().dtype(torch::kBool));
                 if (top_k.defined()) {
-                    auto kth = values.gather(
-                        1, top_k.clamp(1, static_cast<int64_t>(draft_vocab_size)).to(torch::kLong).sub(1).unsqueeze(1));
+                    auto kth = values.gather(1, top_k.clamp(1, sampling_width).to(torch::kLong).sub(1).unsqueeze(1));
                     keep.logical_and_(values.ge(kth));
                 }
                 if (top_p.defined()) {
@@ -141,10 +197,17 @@ SamplerOutput SpeculativeSampler::sampleDSparkDraft(const torch::Tensor& base_lo
                 filtered_probabilities.zero_().scatter_(1, std::get<1>(sorted), values.masked_fill(~keep, 0.0));
                 filtered_probabilities.div_(filtered_probabilities.sum(-1, true).clamp_min_(1e-10));
 #endif
-                all_probabilities.select(1, step).copy_(filtered_probabilities);
                 draft_q = filtered_probabilities;
             }
             sampled_draft_tokens = execSampleFromProbs(draft_q).to(torch::kInt32);
+            if (compact_width > 0) {
+                all_probabilities.select(1, step).scatter_(1, compact_indices, draft_q);
+                sampled_draft_tokens = compact_indices.gather(1, sampled_draft_tokens.to(torch::kLong).unsqueeze(1))
+                                           .squeeze(1)
+                                           .to(torch::kInt32);
+            } else if (filter_draft) {
+                all_probabilities.select(1, step).copy_(draft_q);
+            }
         }
         auto sampled_target_tokens = sampled_draft_tokens;
         if (d2t_map_.defined()) {
@@ -206,20 +269,19 @@ void SpeculativeSampler::batchSample(SpeculativeSamplerOutput&           sample_
     }
 
     // Both per-stream masks share one pinned allocation and one device copy.
-    auto masks = torch::empty({2, (long)batch_size},
-                              torch::TensorOptions().dtype(torch::kBool).pinned_memory(true));
-    auto* do_sample_ptr = masks.data_ptr<bool>();
+    auto  masks = torch::empty({2, (long)batch_size}, torch::TensorOptions().dtype(torch::kBool).pinned_memory(true));
+    auto* do_sample_ptr  = masks.data_ptr<bool>();
     auto* force_mask_ptr = do_sample_ptr + batch_size;
-    bool has_force = false;
-    int stream_idx = 0;
+    bool  has_force      = false;
+    int   stream_idx     = 0;
     for (const GenerateStreamPtr& stream : streams) {
-        do_sample_ptr[stream_idx] = stream->generateConfig()->stochastic();
+        do_sample_ptr[stream_idx]  = stream->generateConfig()->stochastic();
         force_mask_ptr[stream_idx] = stream->forceSpAccept();
         has_force |= force_mask_ptr[stream_idx];
         stream_idx++;
     }
     buffer_holder_.hold_host(masks);
-    auto masks_d = masks.to(target_device, true);
+    auto masks_d     = masks.to(target_device, true);
     auto do_sample_d = masks_d.select(0, 0);
 
     // Folded finalization capability (CUDA kernel): the rejection kernel

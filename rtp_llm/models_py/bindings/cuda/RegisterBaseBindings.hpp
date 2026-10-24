@@ -279,13 +279,14 @@ void registerBasicCudaOps(py::module& rtp_ops_m) {
     // are relative to row_starts[r], padded with -1 past the per-row
     // valid count. CUDA-only.
     rtp_ops_m.def("deepselect_fp32_available", &deepselect_fp32_available);
-    rtp_ops_m.def("deepselect_fp32",
-                  &deepselect_fp32,
-                  "FP32 K512 DeepSelect for V4.1 prefill",
-                  py::arg("logits"),
-                  py::arg("ends"),
-                  py::arg("output"),
-                  py::arg("filter_finite") = true);
+    rtp_ops_m.def(
+        "deepselect_fp32",
+        static_cast<void (*)(const torch::Tensor&, const torch::Tensor&, torch::Tensor&, bool)>(&deepselect_fp32),
+        "FP32 K512 DeepSelect for V4.1 prefill",
+        py::arg("logits"),
+        py::arg("ends"),
+        py::arg("output"),
+        py::arg("filter_finite") = true);
     rtp_ops_m.def("deepselect_bf16_available", &deepselect_bf16_available);
     rtp_ops_m.def("deepselect_bf16_dense",
                   &deepselect_bf16_dense,

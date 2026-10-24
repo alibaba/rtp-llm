@@ -36,4 +36,11 @@ struct TopkSelectArgs {
 
     uint64_t     shared_memory_size_per_sm;
     cudaStream_t stream;
+
+    // Optional FP32 K4096 candidate path: skip rows outside/inside [4096,8192]
+    // and translate selected local candidate slots to vocabulary ids.
+    const int32_t* candidate_counts;
+    const int32_t* index_map;
+    uint64_t       stride_index_map_batch;
+    bool           skip_valid_candidates;
 };

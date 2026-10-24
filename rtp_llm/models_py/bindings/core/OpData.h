@@ -323,6 +323,7 @@ struct GreedyParams {
     // [batch, vocab] matrix and only write the token. Default false keeps
     // the legacy fully-materialized all_probs contract for every caller.
     bool all_probs_point_mass = false;
+    int  force_topk           = 0;
 };
 
 struct GreedyOutput {
