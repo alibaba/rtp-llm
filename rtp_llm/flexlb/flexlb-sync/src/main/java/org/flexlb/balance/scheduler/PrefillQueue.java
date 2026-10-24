@@ -108,6 +108,7 @@ public final class PrefillQueue {
     private final PrefillQueueEnqueuer enqueuer;
     private final CapacityBlockedHead capacityBlockedHead;
     private final QueueWaitRecorder queueWaitRecorder;
+    private final PrefillQueueLoop loop;
 
     public PrefillQueue(
             String key,
@@ -168,6 +169,12 @@ public final class PrefillQueue {
                                                  queueCapacity,
                                                  endpointEvents,
                                                  config);
+        this.loop = new PrefillQueueLoop(queueState,
+                                         prefillEp,
+                                         capacityBlockedHead,
+                                         queueWaitRecorder,
+                                         lifecycle,
+                                         this::processQueue);
     }
 
     public void start() {
@@ -965,128 +972,7 @@ public final class PrefillQueue {
     // ==================== Internal: Run loop ====================
 
     private void runLoop() {
-        try {
-            while (!queueState.isStopped() && !Thread.currentThread().isInterrupted()) {
-                try {
-                    runOneCycle();
-                } catch (InterruptedException ie) {
-                    Thread.currentThread().interrupt();
-                    return;
-                } catch (Throwable t) {
-                    // Every expected delivery failure is terminalized inside the
-                    // typed cycle. An escaping Throwable is therefore an invariant
-                    // failure; retrying the same ACTIVE state can only spin.
-                    lifecycle.stopAfterUnexpectedLoopFailure(t);
-                    return;
-                }
-            }
-        } finally {
-            lifecycle.markLoopFinished();
-        }
-    }
-
-    private void runOneCycle() throws InterruptedException {
-        waitForNonEmpty();
-        if (queueState.isStopped()) {
-            return;
-        }
-
-        ProcessQueueResult result = processQueue();
-        if (result.waitReason() != null) {
-            queueWaitRecorder.record(result.request(), result.waitReason());
-        }
-        if (result.placementCapacityChanged()) {
-            // Only a committed removal creates a new queue seat. Advisory
-            // waits and delivery-capacity misses must not feed placement back
-            // into itself.
-            prefillEndpoint.signalPlacementCapacityChanged();
-        }
-        if (result.capacityBlocked()) {
-            awaitBlockedHeadCapacity(result);
-        } else if (result.awaitingSchedulingChange()) {
-            awaitSchedulingChange(result);
-        }
-    }
-
-    private void waitForNonEmpty() throws InterruptedException {
-        queueState.lockInterruptibly();
-        try {
-            while (!queueState.isStopped() && queueState.activeIndex().isEmpty()) {
-                capacityBlockedHead.setUnderLock(null);
-                queueState.awaitChange();
-            }
-        } finally {
-            queueState.unlock();
-        }
-    }
-
-    /**
-     * Wait while the exact active head is blocked by the exact rejecting
-     * resource. Offers wake the condition: a new higher-priority head exits the
-     * wait immediately, while a tail offer leaves the predicate true. Capacity
-     * is checked after listener installation while the queue lock is held, closing
-     * the release-before-await race without polling.
-     */
-    private void awaitBlockedHeadCapacity(
-            ProcessQueueResult blocked)
-            throws InterruptedException {
-        queueState.lockInterruptibly();
-        try {
-            if (queueState.isStopped()) {
-                return;
-            }
-            capacityBlockedHead.setUnderLock(blocked);
-            while (!queueState.isStopped()
-                    && queueState.activeIndex().peek() == blocked.request()
-                    && !blocked.request().requestExpired(System.currentTimeMillis())
-                    && !blocked.unavailable().availability().isAvailable()) {
-                long expiresAtMs = blocked.request().expiresAtMs();
-                long nowMs = System.currentTimeMillis();
-                if (expiresAtMs <= nowMs) {
-                    return;
-                }
-                if (expiresAtMs == Long.MAX_VALUE) {
-                    queueState.awaitChange();
-                } else {
-                    queueState.awaitChangeFor(expiresAtMs - nowMs);
-                }
-            }
-        } finally {
-            try {
-                capacityBlockedHead.setUnderLock(null);
-            } finally {
-                queueState.unlock();
-            }
-        }
-    }
-
-    /**
-     * Wait for the exact queue/input generation captured by the policy or
-     * for its deadline. Every predicate and signal is serialized by the queue lock.
-     */
-    private void awaitSchedulingChange(
-            ProcessQueueResult waiting)
-            throws InterruptedException {
-        queueState.lockInterruptibly();
-        try {
-            while (!queueState.isStopped()
-                    && queueState.activeIndex().peek() == waiting.request()
-                    && queueState.queueVersion() == waiting.queueVersion()
-                    && queueState.schedulingInputVersion()
-                    == waiting.schedulingInputVersion()) {
-                long nowMs = System.currentTimeMillis();
-                if (waiting.wakeAtMs() <= nowMs) {
-                    return;
-                }
-                if (waiting.wakeAtMs() == Long.MAX_VALUE) {
-                    queueState.awaitChange();
-                } else {
-                    queueState.awaitChangeFor(waiting.wakeAtMs() - nowMs);
-                }
-            }
-        } finally {
-            queueState.unlock();
-        }
+        loop.run();
     }
 
     /** Wake decisions whose advisory worker-status or predictor input changed. */
