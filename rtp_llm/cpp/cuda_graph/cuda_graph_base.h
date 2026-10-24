@@ -75,6 +75,8 @@ struct GraphParams {
     torch::Tensor position_encoding;
     torch::Tensor token_type_embedding;
 
+    // Shared by eager forwards and every graph bucket; owned by the monitor.
+    torch::Tensor expert_token_counts;
 };
 
 class GraphBase {

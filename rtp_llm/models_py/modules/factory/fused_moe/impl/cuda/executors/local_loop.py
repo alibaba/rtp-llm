@@ -41,6 +41,7 @@ from rtp_llm.models_py.modules.factory.fused_moe.utils.fp8_fp4.expert import (
     Expert,
     require_silu_mul_split,
 )
+from rtp_llm.models_py.utils.expert_load_monitor import ExpertLoadContext
 
 from .fp8_fp4_base import Fp8Fp4ExecutorBase, split_moe_w13_gate_up
 
@@ -215,6 +216,7 @@ class LocalLoopExecutor(Fp8Fp4ExecutorBase):
         x: torch.Tensor,
         weights: torch.Tensor,
         indices: torch.Tensor,
+        expert_load: Optional[ExpertLoadContext],
     ) -> torch.Tensor:
         """Per-expert compute over [local_expert_start, local_expert_end).
 
@@ -223,6 +225,8 @@ class LocalLoopExecutor(Fp8Fp4ExecutorBase):
             avoids data-dependent ``torch.where``)
           - eager: ``_forward_eager`` (only iterates routed tokens per expert)
         """
+        if expert_load is not None:
+            expert_load.record_ids(indices)
         return self._forward_into_buf(
             x,
             weights,

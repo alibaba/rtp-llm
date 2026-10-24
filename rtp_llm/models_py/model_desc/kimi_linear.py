@@ -771,7 +771,10 @@ class KimiLinearDecoderLayer(nn.Module):
         hidden_states, residual = self.post_attention_layernorm(hidden_states, residual)
 
         # MLP (Dense or MoE)
-        hidden_states = self.mlp(hidden_states)
+        if isinstance(self.mlp, GenericMoeLayer):
+            hidden_states = self.mlp(hidden_states, expert_load=None)
+        else:
+            hidden_states = self.mlp(hidden_states)
 
         return DecodeLayerOutput(hidden_states, residual)
 

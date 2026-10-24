@@ -155,7 +155,7 @@ class DeepGemmMaskedExecutorV2CudaGraphTest(unittest.TestCase):
         warmup_stream = torch.cuda.Stream()
         warmup_stream.wait_stream(torch.cuda.current_stream())
         with torch.cuda.stream(warmup_stream):
-            self.fused_moe(static_hidden, static_weights, static_ids)
+            self.fused_moe(static_hidden, static_weights, static_ids, expert_load=None)
         torch.cuda.current_stream().wait_stream(warmup_stream)
         torch.cuda.synchronize()
 
@@ -163,7 +163,9 @@ class DeepGemmMaskedExecutorV2CudaGraphTest(unittest.TestCase):
         graph_output = None
         try:
             with torch.cuda.graph(graph):
-                graph_output = self.fused_moe(static_hidden, static_weights, static_ids)
+                graph_output = self.fused_moe(
+                    static_hidden, static_weights, static_ids, expert_load=None
+                )
 
             replay_hidden, replay_weights, replay_ids = self._make_inputs(
                 offset=2, skewed_routing=True
@@ -180,7 +182,9 @@ class DeepGemmMaskedExecutorV2CudaGraphTest(unittest.TestCase):
             graph.replay()
             captured = graph_output.clone()
 
-            eager = self.fused_moe(static_hidden, static_weights, static_ids)
+            eager = self.fused_moe(
+                static_hidden, static_weights, static_ids, expert_load=None
+            )
             torch.testing.assert_close(captured, eager, rtol=2e-2, atol=2e-2)
         finally:
             torch.cuda.synchronize()

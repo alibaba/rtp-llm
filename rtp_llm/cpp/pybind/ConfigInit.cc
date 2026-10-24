@@ -1850,6 +1850,8 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("eplb_control_step", &EPLBConfig::eplb_control_step)
         .def_readwrite("eplb_test_mode", &EPLBConfig::eplb_test_mode)
         .def_readwrite("eplb_balance_layer_per_step", &EPLBConfig::eplb_balance_layer_per_step)
+        .def_readwrite("eplb_metrics_report_interval", &EPLBConfig::eplb_metrics_report_interval)
+        .def_readwrite("eplb_metrics_snapshot_max_files", &EPLBConfig::eplb_metrics_snapshot_max_files)
         .def("enable_eplb", &EPLBConfig::enable_eplb, "Get enable_eplb status")
         .def("phy_exp_num", &EPLBConfig::phy_exp_num, py::arg("expert_num"), "Get physical expert number")
         .def(py::pickle(
@@ -1862,10 +1864,12 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       self.eplb_stats_window_size,
                                       self.eplb_control_step,
                                       self.eplb_test_mode,
-                                      self.eplb_balance_layer_per_step);
+                                      self.eplb_balance_layer_per_step,
+                                      self.eplb_metrics_report_interval,
+                                      self.eplb_metrics_snapshot_max_files);
             },
             [](py::tuple t) {
-                if (t.size() != 9)
+                if (t.size() != 9 && t.size() != 11)
                     throw std::runtime_error("Invalid state!");
                 EPLBConfig c;
                 try {
@@ -1882,6 +1886,10 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                     c.eplb_control_step           = t[6].cast<int>();
                     c.eplb_test_mode              = t[7].cast<bool>();
                     c.eplb_balance_layer_per_step = t[8].cast<int>();
+                    if (t.size() == 11) {
+                        c.eplb_metrics_report_interval    = t[9].cast<int>();
+                        c.eplb_metrics_snapshot_max_files = t[10].cast<int>();
+                    }
                 } catch (const std::exception& e) {
                     throw std::runtime_error(std::string("EPLBConfig unpickle error: ") + e.what());
                 }

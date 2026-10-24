@@ -6,6 +6,13 @@ py_test(
 )
 
 py_test(
+    name = "eplb_config_test",
+    srcs = ["eplb_config_test.py"],
+    data = ["//rtp_llm:sdk"],
+    deps = ["//rtp_llm:testlib"],
+)
+
+py_test(
     name = "server_config_setup_test",
     srcs = [
         "server_config_setup_test.py",

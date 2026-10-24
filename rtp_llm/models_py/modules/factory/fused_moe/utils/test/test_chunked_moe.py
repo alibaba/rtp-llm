@@ -18,6 +18,7 @@ from rtp_llm.models_py.modules.factory.fused_moe.utils.fp8_fp4.chunked_layer imp
     resolve_moe_max_tokens_per_rank,
     synchronized_moe_chunk_plan,
 )
+from rtp_llm.models_py.utils.expert_load_monitor import ExpertLoadContext
 from rtp_llm.models_py.utils.profiler import (
     disable_record_function_ranges,
     record_function_ranges_enabled,
@@ -33,12 +34,23 @@ class _FakeMoe(nn.Module):
         self.output_buffers = []
         self.ranges_enabled = []
 
-    def forward(self, x, input_ids, observer=None, out=None):
+    def forward(
+        self,
+        x,
+        input_ids,
+        expert_load,
+        observer=None,
+        out=None,
+    ):
         if x.size(0) > self.capacity:
             raise RuntimeError("chunk overflow")
         self.token_chunks.append(x.size(0))
         self.input_id_chunks.append(None if input_ids is None else input_ids.clone())
         self.ranges_enabled.append(record_function_ranges_enabled())
+        if expert_load is not None:
+            expert_load.expert_token_counts.add_(
+                torch.tensor([x.size(0), x.size(0) * 2])
+            )
         result = x * 3
         if out is not None:
             out.copy_(result)
@@ -65,6 +77,21 @@ def _fake_layer(dim=4, capacity=5, is_decode_role=False):
 
 
 class ChunkedMoeTest(unittest.TestCase):
+    def test_monitor_context_sums_chunks_until_next_step_reset(self):
+        layer = _fake_layer(capacity=3)
+        counts = torch.zeros((2,), dtype=torch.int32)
+        context = ExpertLoadContext(counts)
+        output = layer(torch.ones(7, 4), expert_load=context)
+        self.assertEqual(counts.tolist(), [7, 14])
+        torch.testing.assert_close(output, torch.full((7, 4), 3.0))
+        layer(torch.ones(2, 4), expert_load=context)
+        self.assertEqual(counts.tolist(), [9, 18])
+        counts.zero_()
+        layer(torch.ones(2, 4), expert_load=context)
+        self.assertEqual(counts.tolist(), [2, 4])
+        layer(torch.ones(1, 4), expert_load=None)
+        self.assertEqual(counts.tolist(), [2, 4])
+
     def test_observer_receives_positions_for_each_chunk(self):
         layer = _fake_layer(dim=2, capacity=3)
         records = []
@@ -77,7 +104,7 @@ class ChunkedMoeTest(unittest.TestCase):
 
         layer._observer_factory = factory
         x = torch.arange(14, dtype=torch.float32).view(7, 2)
-        layer(x, positions=torch.arange(7))
+        layer(x, positions=torch.arange(7), expert_load=None)
         self.assertEqual(
             [p.tolist() for _, p, _ in records], [[0, 1, 2], [3, 4, 5], [6]]
         )
@@ -86,7 +113,7 @@ class ChunkedMoeTest(unittest.TestCase):
     def test_caller_controls_profiling_scope(self):
         layer = _fake_layer()
         layer._record_function_scope = disable_record_function_ranges
-        layer(torch.ones(7, 4))
+        layer(torch.ones(7, 4), expert_load=None)
         self.assertEqual(layer._moe.ranges_enabled, [False, False])
         self.assertTrue(record_function_ranges_enabled())
 
@@ -99,7 +126,7 @@ class ChunkedMoeTest(unittest.TestCase):
             mock.patch("torch.distributed.all_reduce") as sync,
         ):
             with synchronized_moe_chunk_plan([layer], 3, torch.device("cpu")):
-                layer(torch.ones(3, 4))
+                layer(torch.ones(3, 4), expert_load=None)
         sync.assert_not_called()
 
     def test_prefill_budget_shrinks_to_moe_chunk_capacity(self):
@@ -156,10 +183,10 @@ class ChunkedMoeTest(unittest.TestCase):
         layer = _fake_layer(dim=3, capacity=5)
         x = torch.arange(4 * 3, dtype=torch.float32).view(4, 3)
 
-        first = layer(x)
+        first = layer(x, expert_load=None)
         cache_key = (x.device, layer.dim, x.dtype)
         self.assertEqual(_FINAL_OUT_CACHE[cache_key].size(0), layer.max_tokens_per_rank)
-        second = layer(x + 1)
+        second = layer(x + 1, expert_load=None)
 
         self.assertTrue(torch.equal(second, (x + 1) * 3))
         self.assertEqual(len(layer._moe.output_buffers), 2)
@@ -206,7 +233,7 @@ class ChunkedMoeTest(unittest.TestCase):
         layer = _fake_layer(dim=3, capacity=5)
         x = torch.arange(17 * 3, dtype=torch.float32).view(17, 3)
         input_ids = torch.arange(100, 117)
-        output = layer(x, input_ids)
+        output = layer(x, input_ids=input_ids, expert_load=None)
         self.assertTrue(torch.equal(output, x * 3))
         self.assertEqual(layer._moe.token_chunks, [5, 5, 5, 2])
         self.assertEqual(
@@ -226,7 +253,7 @@ class ChunkedMoeTest(unittest.TestCase):
     def test_decode_rejects_oversized_input(self):
         layer = _fake_layer(capacity=4, is_decode_role=True)
         with self.assertRaisesRegex(ValueError, "decode MoE input tokens=5"):
-            layer(torch.zeros(5, 4), torch.arange(5))
+            layer(torch.zeros(5, 4), input_ids=torch.arange(5), expert_load=None)
         self.assertEqual(layer._moe.token_chunks, [])
 
     def test_pdfusion_decode_forward_skips_world_token_sync(self):
@@ -247,8 +274,9 @@ class ChunkedMoeTest(unittest.TestCase):
         ):
             output = layer(
                 torch.ones(3, 4),
-                torch.arange(3),
+                input_ids=torch.arange(3),
                 is_decode_forward=True,
+                expert_load=None,
             )
 
         all_reduce.assert_not_called()
@@ -260,15 +288,16 @@ class ChunkedMoeTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "decode MoE input tokens=5"):
             layer(
                 torch.zeros(5, 4),
-                torch.arange(5),
+                input_ids=torch.arange(5),
                 is_decode_forward=True,
+                expert_load=None,
             )
         self.assertEqual(layer._moe.token_chunks, [])
 
     def test_input_ids_are_optional(self):
         layer = _fake_layer(dim=3, capacity=5)
         x = torch.arange(7 * 3, dtype=torch.float32).view(7, 3)
-        output = layer(x)
+        output = layer(x, expert_load=None)
         self.assertTrue(torch.equal(output, x * 3))
         self.assertEqual(layer._moe.token_chunks, [5, 2])
         self.assertEqual(layer._moe.input_id_chunks, [None, None])
@@ -282,13 +311,15 @@ class ChunkedMoeTest(unittest.TestCase):
                 with self.assertRaisesRegex(
                     ValueError, "CUDA graph capture MoE input tokens=5"
                 ):
-                    layer(torch.zeros(5, 4), torch.arange(5))
+                    layer(
+                        torch.zeros(5, 4), input_ids=torch.arange(5), expert_load=None
+                    )
         self.assertEqual(layer._moe.token_chunks, [])
 
     def test_input_ids_must_match_flattened_tokens(self):
         layer = _fake_layer(dim=2, capacity=4)
         with self.assertRaisesRegex(ValueError, "input_ids has 4 tokens, expected 5"):
-            layer(torch.zeros(5, 2), torch.arange(4))
+            layer(torch.zeros(5, 2), input_ids=torch.arange(4), expert_load=None)
 
     def test_mega_output_capacity_uses_aligned_buffer_capacity(self):
         buffer = type("Buffer", (), {"num_max_tokens_per_rank": 384})()

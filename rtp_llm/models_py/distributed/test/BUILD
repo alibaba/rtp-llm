@@ -179,3 +179,18 @@ py_test(
         "gpu_count": "4",
     },
 )
+
+# Real C++ monitors share the model's existing NCCL communicator.
+py_test(
+    name = "expert_load_collective_test",
+    srcs = ["expert_load_collective_test.py"],
+    deps = [
+        "//rtp_llm:testlib",
+        "//rtp_llm/models_py/distributed:collective_torch",
+    ],
+    data = ["//rtp_llm/cpp/models/eplb/test:th_eplb_py_wrapper_test"],
+    env = {"GPU_COUNT": "2"},
+    exec_properties = {"gpu": "L20_CU13", "gpu_count": "2"},
+    tags = ["L20_CU13"],
+    timeout = "moderate",
+)

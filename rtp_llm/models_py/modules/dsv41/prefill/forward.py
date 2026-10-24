@@ -126,6 +126,7 @@ from rtp_llm.models_py.modules.dsv41.prefill_workspace import (
 from rtp_llm.models_py.modules.factory.attention.common import (
     create_write_cache_store_impl,
 )
+from rtp_llm.models_py.utils.expert_load_monitor import expert_load_for_layer
 from rtp_llm.ops import ParallelismConfig
 from rtp_llm.ops.compute_ops import (
     KVCache,
@@ -323,6 +324,7 @@ def forward_layers(
     positions: torch.Tensor,  # [T_total] int64 — per-token global absolute pos
     cu_seqlens: torch.Tensor,  # [B+1] int64 — request boundaries
     block_tables_by_type: Optional[Dict[int, torch.Tensor]],
+    expert_token_counts: Optional[torch.Tensor],
     attn_inputs: Optional[PyAttentionInputs] = None,
     prepare_hidden_fn: Optional[Any] = None,
     allow_ced: bool = False,
@@ -603,6 +605,7 @@ def forward_layers(
                 else v4.layers
             )
             for layer_idx, layer_call in enumerate(layer_calls):
+                expert_load = expert_load_for_layer(expert_token_counts, layer_idx)
                 if layer_idx == 21 and ced_tail is not None:
                     with _profiler.record_function_range("dsv41.ced.compact"):
                         if not ced_in_l20:
@@ -656,6 +659,7 @@ def forward_layers(
                                 ced_tail,
                                 kv_cache=kv_cache,
                                 block_tables_by_type=block_tables_by_type,
+                                expert_load=expert_load,
                             )
                         else:
                             h = layer_call(
@@ -665,6 +669,7 @@ def forward_layers(
                                 cu_seqlens,  # [B+1]
                                 kv_cache=kv_cache,
                                 block_tables_by_type=block_tables_by_type,
+                                expert_load=expert_load,
                             )  # [T, hc, dim]
                     if shared_prefill is not None:
                         release_v41_prefill_shared(shared_prefill, layer_idx)
@@ -924,5 +929,6 @@ def forward_prefill(
         attn_inputs=attn,
         prepare_hidden_fn=prepare_hidden_fn,
         allow_ced=permits_ced(inputs),
+        expert_token_counts=inputs.expert_token_counts,
     )  # [T_total, dim]
     return PyModelOutputs(hidden)

@@ -26,6 +26,7 @@ from rtp_llm.models_py.modules.factory.fused_moe.defs.type import (
     ExecutorType,
     RouterType,
 )
+from rtp_llm.models_py.utils.expert_load_monitor import ExpertLoadContext
 
 SKIP_TP_ALLREDUCE_ARG: Final[Literal["skip_tp_allreduce"]] = "skip_tp_allreduce"
 
@@ -67,6 +68,7 @@ class ExpertTokensMetadata:
     expected_m: Optional[int] = None
     expert_num_tokens: Optional[torch.Tensor] = None
     expert_num_tokens_cpu: Optional[Union[List[int], torch.Tensor]] = None
+    counts_are_padded: bool = False
 
 
 @dataclass
@@ -84,6 +86,7 @@ class ExpertForwardPayload:
     expert_ids_are_local: bool = False
     router_context: object | None = None
     gate_payload: Optional[ExpertGatePayload] = None
+    expert_load: Optional[ExpertLoadContext] = None
 
 
 @dataclass
@@ -293,6 +296,7 @@ class FusedMoe(torch.nn.Module):
         self,
         hidden_states: torch.Tensor,
         gate_payload: ExpertGatePayload,
+        expert_load: Optional[ExpertLoadContext],
         activation: str = "silu",
         expert_map: Optional[torch.Tensor] = None,
         a2_scale: Optional[torch.Tensor] = None,
@@ -317,6 +321,7 @@ class FusedMoe(torch.nn.Module):
             extra_expert_args=extra_expert_args,
             extra_finalize_args=extra_finalize_args,
             skip_tp_allreduce=skip_tp_allreduce,
+            expert_load=expert_load,
         )
 
     def forward(
@@ -324,6 +329,7 @@ class FusedMoe(torch.nn.Module):
         hidden_states: torch.Tensor,
         topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,
+        expert_load: Optional[ExpertLoadContext],
         inplace: bool = False,
         activation: str = "silu",
         expert_map: Optional[torch.Tensor] = None,
@@ -360,6 +366,7 @@ class FusedMoe(torch.nn.Module):
             extra_expert_args=extra_expert_args,
             extra_finalize_args=extra_finalize_args,
             skip_tp_allreduce=skip_tp_allreduce,
+            expert_load=expert_load,
         )
 
     def _validate_skip_tp_allreduce(self, skip_tp_allreduce: bool) -> None:
@@ -373,7 +380,6 @@ class FusedMoe(torch.nn.Module):
         self,
         hidden_states: torch.Tensor,
         expert_payload: ExpertForwardPayload,
-        *,
         activation: str,
         expert_map: Optional[torch.Tensor],
         a2_scale: Optional[torch.Tensor],
@@ -381,8 +387,19 @@ class FusedMoe(torch.nn.Module):
         extra_expert_args: Optional[Dict[str, Any]],
         extra_finalize_args: Optional[FinalizeArgs],
         skip_tp_allreduce: bool,
+        expert_load: Optional[ExpertLoadContext],
     ) -> torch.Tensor:
         self._validate_skip_tp_allreduce(skip_tp_allreduce)
+        metadata = expert_payload.expert_tokens_meta
+        has_dispatch_counts = (
+            metadata is not None
+            and metadata.expert_num_tokens is not None
+            and not metadata.counts_are_padded
+        )
+        if expert_load is not None and has_dispatch_counts:
+            expert_load.expert_token_counts.add_(metadata.expert_num_tokens)
+            expert_load = None
+        expert_payload.expert_load = expert_load
 
         if (
             expert_payload.expert_x.numel() == 0
