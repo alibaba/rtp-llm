@@ -5,7 +5,6 @@ import org.flexlb.balance.delivery.DeliveryBlockReason;
 import org.flexlb.balance.delivery.DeliveryGroup;
 import org.flexlb.balance.delivery.DeliveryStrategy;
 import org.flexlb.balance.delivery.DeliveryTransaction;
-import org.flexlb.balance.endpoint.DecodeEndpoint.DecodeRoutingView;
 import org.flexlb.balance.endpoint.PrefillActiveIndex;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.endpoint.PrefillState;
@@ -20,7 +19,6 @@ import org.flexlb.balance.queue.BatchCapacityView;
 import org.flexlb.balance.queue.GroupingLimits;
 import org.flexlb.balance.queue.LoadViewCache;
 import org.flexlb.balance.queue.QueueState;
-import org.flexlb.balance.queue.QueueWaitSnapshot;
 import org.flexlb.balance.queue.QueuedRequestsSnapshot;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.enums.PrefillQueueEnqueueResult;
@@ -109,9 +107,7 @@ public final class PrefillQueue {
     private final PrefillQueueLifecycle lifecycle;
     private final PrefillQueueEnqueuer enqueuer;
     private final CapacityBlockedHead capacityBlockedHead;
-
-    /** Last waiting decision; timeout readers never acquire the queue lock. */
-    private volatile QueueWaitSnapshot waitSnapshot;
+    private final QueueWaitRecorder queueWaitRecorder;
 
     public PrefillQueue(
             String key,
@@ -150,6 +146,7 @@ public final class PrefillQueue {
         this.prefillState = new PrefillState(queueState.reentrantLock(),
                                              queueState.activeIndex(),
                                              capacityBlockedHead.capacityAvailableSignal());
+        this.queueWaitRecorder = new QueueWaitRecorder(key, queueState, prefillState);
         this.loadViewCache = new LoadViewCache(queueState,
                                                prefillState,
                                                prefillEp,
@@ -289,30 +286,7 @@ public final class PrefillQueue {
     }
 
     public Map<String, Object> waitDiagnostics() {
-        QueueWaitSnapshot snapshot = waitSnapshot;
-        return snapshot == null ? QueueWaitSnapshot.INITIAL_DIAGNOSTICS : snapshot.diagnostics();
-    }
-
-    /** Capture fixed-size counters without formatting the PV record on the scheduling loop. */
-    private void recordQueueWait(ScheduledRequest head, String reason) {
-        int[] requestCountsByPriority = new int[PriorityNormalizer.MAX_PRIORITY + 1];
-        long version;
-        long prefillRequests;
-        int prefillBatchSlots;
-        queueState.lock();
-        try {
-            version = queueState.queueVersion();
-            prefillRequests = prefillState.observedRequestCount();
-            prefillBatchSlots = prefillState.batchLeasesInUseUnderLock();
-            for (int priority = 0; priority < requestCountsByPriority.length; priority++) {
-                requestCountsByPriority[priority] = queueState.activeIndex().size(priority);
-            }
-        } finally {
-            queueState.unlock();
-        }
-        DecodeRoutingView decode = head.decodeEp() == null ? null : head.decodeEp().routingView();
-        waitSnapshot = new QueueWaitSnapshot(key, reason, now(), version, requestCountsByPriority,
-                prefillRequests, prefillBatchSlots, decode);
+        return queueWaitRecorder.diagnostics();
     }
 
     public QueuedRequestsSnapshot captureQueueSnapshot() {
@@ -1019,7 +993,7 @@ public final class PrefillQueue {
 
         ProcessQueueResult result = processQueue();
         if (result.waitReason() != null) {
-            recordQueueWait(result.request(), result.waitReason());
+            queueWaitRecorder.record(result.request(), result.waitReason());
         }
         if (result.placementCapacityChanged()) {
             // Only a committed removal creates a new queue seat. Advisory
