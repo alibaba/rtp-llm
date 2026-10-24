@@ -30,6 +30,16 @@ py_test (
     exec_properties = {'gpu':'MI308X-ROCM7'},
 )
 
+py_test(
+    name = "fused_add_layernorm_test_cuda",
+    main = "rocm_fused_add_layernorm_test.py",
+    srcs = ["rocm_fused_add_layernorm_test.py"],
+    deps = py_test_deps,
+    timeout = "long",
+    tags = ["H20_CU13"],
+    exec_properties = {"gpu": "H20_CU13", "gpu_count": "1"},
+)
+
 py_test (
     name = "rocm_general_layer_norm_test",
     srcs = ["rocm_general_layer_norm_test.py"],

@@ -4,6 +4,7 @@ from enum import Enum
 class CudaGraphSelectionMode(str, Enum):
     EAGER = "eager"
     DECODE_GRAPH = "decode_graph"
+    EMBEDDING_GRAPH = "embedding_graph"
     GENERATION_PREFILL_GRAPH = "generation_prefill_graph"
 
 

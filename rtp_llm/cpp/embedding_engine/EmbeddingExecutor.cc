@@ -1,3 +1,6 @@
+#include <cstdlib>
+#include <initializer_list>
+#include <string>
 #include "ATen/ops/ones.h"
 #include "c10/core/ScalarType.h"
 #include "rtp_llm/cpp/utils/StatusUtil.h"
@@ -68,6 +71,18 @@ EmbeddingExecutor::EmbeddingExecutor(const EngineInitParams& params, py::object 
         parallelism_config,
     });
     model_init_params.metrics_reporter = metrics_reporter_;
+    // Embedding uses the same Python wrapper as generation. Forward the engine
+    // configuration explicitly; aggregate defaults otherwise leave graphs off
+    // and their shape/block capacities at zero even when the server enables them.
+    model_init_params.hw_kernel_config             = params.hw_kernel_config;
+    model_init_params.concurrency_config           = params.concurrency_config;
+    model_init_params.device_resource_config       = params.device_resource_config;
+    model_init_params.max_seq_len                  = model_config_.max_seq_len;
+    model_init_params.hidden_size                  = model_config_.hidden_size;
+    // Embedding has no KV cache, but the shared graph runner still allocates
+    // block-table input buffers and requires a positive width. One unused
+    // column satisfies that contract without depending on cache page geometry.
+    model_init_params.kernel_block_table_width = 1;
 
     RTP_LLM_CHECK_WITH_INFO(!params.py_model.is_none(), "py_model must be provided, legacy C++ GptModel path removed");
     RTP_LLM_LOG_INFO("init executor with python model");
@@ -116,6 +131,19 @@ torch::Tensor toCudaInt32ModelInput(const torch::Tensor& tensor) {
 }
 #endif
 }  // namespace
+
+void EmbeddingExecutor::prepareEmbeddingInputMetadata(torch::Tensor& tokens,
+                                                     torch::Tensor& input_lengths,
+                                                     torch::Tensor& sequence_lengths,
+                                                     torch::Tensor& prefix_lengths) {
+    // Normalize gathered host metadata before model-facing device conversion.
+    // Graph planning obtains its host views separately in PyWrappedModel.
+    for (auto* tensor : {&tokens, &input_lengths, &sequence_lengths, &prefix_lengths}) {
+        if (tensor->defined()) {
+            *tensor = tensor->to(torch::TensorOptions().dtype(torch::kInt32).device(torch::kCPU)).contiguous();
+        }
+    }
+}
 
 absl::StatusOr<GptModelInputs> EmbeddingExecutor::gatherModelInput(const std::list<EmbeddingStreamPtr>& streams) const {
     int64_t token_num  = 0;
@@ -246,11 +274,18 @@ absl::StatusOr<GptModelInputs> EmbeddingExecutor::gatherModelInput(const std::li
         model_input.need_moe_gating = true;
     }
     reportMetrics(batch_size, token_num, max_seq_len);
+    // Normalize gathered host metadata before the model-facing device conversion.
+    prepareEmbeddingInputMetadata(model_input.combo_tokens,
+                                  model_input.input_lengths,
+                                  model_input.sequence_lengths,
+                                  model_input.prefix_lengths);
 #if USING_CUDA
     // TODO(async): embedding streams are still gathered through CPU pointers,
     // but the model-facing GptModelInputs metadata should be CUDA resident.
     // Non-CUDA platforms keep the host pipeline: buildPyAttentionInputs's
     // device-metadata branch requires the CUDA-only metadata kernel.
+    // Models opt in to host metadata through their generic capability flag.
+    // Keep gathered tensors on CPU for their request-preparation hooks.
     if (!requires_host_input_metadata_) {
         model_input.combo_tokens     = toCudaInt32ModelInput(model_input.combo_tokens);
         model_input.input_lengths    = toCudaInt32ModelInput(model_input.input_lengths);

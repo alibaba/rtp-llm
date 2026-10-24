@@ -36,6 +36,17 @@ py_test(
 )
 
 py_test(
+    name = "bert_multimodal_embedding_test_rocm",
+    srcs = ["bert_multimodal_embedding_test.py", "bert_embedding_test_utils.py"],
+    main = "bert_multimodal_embedding_test.py",
+    deps = py_test_deps,
+    env = {"GPU_COUNT": "1"},
+    timeout = "long",
+    tags = ["rocm"],
+    exec_properties = {"gpu": "MI308X-ROCM7", "gpu_count": "1"},
+)
+
+py_test(
     name = "bert_embedding_op_test",
     srcs = ["bert_embedding_op_test.py", "bert_embedding_test_utils.py"],
     main = "bert_embedding_op_test.py",
@@ -183,6 +194,25 @@ py_test(
         "gpu": "H20_CU13",
         "gpu_count": "1",
     },
+)
+
+# Exercise CPU planning and native metadata contracts under both GPU builds.
+py_test(
+    name = "bert_encoder_graph_metadata_test",
+    main = "bert_encoder_graph_metadata_test.py",
+    srcs = ["bert_encoder_graph_metadata_test.py"],
+    deps = ["//rtp_llm/models_py/standalone:py_standalone_testlib"],
+    tags = ["H20_CU13"],
+    exec_properties = {"gpu": "H20_CU13", "gpu_count": "1"},
+)
+
+py_test(
+    name = "bert_encoder_graph_metadata_test_rocm",
+    main = "bert_encoder_graph_metadata_test.py",
+    srcs = ["bert_encoder_graph_metadata_test.py"],
+    deps = ["//rtp_llm/models_py/standalone:py_standalone_testlib"],
+    tags = ["rocm"],
+    exec_properties = {"gpu": "MI308X-ROCM7", "gpu_count": "1"},
 )
 
 py_test(

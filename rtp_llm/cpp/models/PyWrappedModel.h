@@ -359,6 +359,16 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
         RTP_LLM_LOG_ERROR("Python model initialize failed:\n%s", e.what());
         throw;
     }
+    if (enable_cuda_graph_ && is_prefill_cuda_graph_mode && params.sp_config.type == SP_TYPE_NONE) {
+        const std::string reason =
+            py::hasattr(py_model_, "embedding_cuda_graph_unsupported_reason") ?
+                py_model_.attr("embedding_cuda_graph_unsupported_reason")().cast<std::string>() :
+                "model does not implement the embedding Transformer graph contract";
+        if (!reason.empty()) {
+            RTP_LLM_LOG_WARNING("embedding CUDA graph unavailable, using eager: %s", reason.c_str());
+            enable_cuda_graph_ = false;
+        }
+    }
     // Registration enables the handler; only batches with selected prefill rows invoke it.
     if (py::hasattr(py_model_, "custom_output_handler")) {
         initializeCustomOutput();
@@ -373,13 +383,23 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
     if (py::hasattr(py_model_, "host_input_metadata_builder")) {
         host_input_metadata_builder_ =
             py_model_.attr("host_input_metadata_builder").cast<std::shared_ptr<torch_ext::HostInputMetadataBuilder>>();
-        RTP_LLM_CHECK_WITH_INFO(!host_input_metadata_builder_
-                                   || (!enable_cuda_graph_ && !params.device_resource_config.enable_layer_micro_batch),
-                               "native host input metadata requires graphs and layer microbatching disabled");
+        // Embedding graphs build request-local host metadata before graph
+        // eligibility/planning, outside capture. Keep it for eager fallback too.
+        // Generation graphs and layer microbatching do not have this contract.
+        const bool host_metadata_graph_supported =
+            is_prefill_cuda_graph_mode && params.sp_config.type == SP_TYPE_NONE;
+        RTP_LLM_CHECK_WITH_INFO(
+            !host_input_metadata_builder_
+                || ((!enable_cuda_graph_ || host_metadata_graph_supported)
+                    && !params.device_resource_config.enable_layer_micro_batch),
+            "native host input metadata requires eager or embedding prefill graphs with layer microbatching disabled");
     }
-    if (enable_cuda_graph_ && !params.kv_cache_layer_layout.has_value()) {
-        // No published topology means there is no trustworthy model geometry
-        // for any graph role (including prefill warmup). Keep the eager path.
+    const bool is_embedding_prefill_graph =
+        is_prefill_cuda_graph_mode && params.sp_config.type == SP_TYPE_NONE;
+    if (enable_cuda_graph_ && !is_embedding_prefill_graph && !params.kv_cache_layer_layout.has_value()) {
+        // Generation graphs need published cache geometry, including prefill
+        // warmup. Embedding prefill graphs are cache-free and have already
+        // passed the model's embedding graph capability check above.
         RTP_LLM_LOG_WARNING(
             "CUDA graph enabled but kv_cache_layer_layout not available; skipping graph capture and using eager path");
         enable_cuda_graph_ = false;

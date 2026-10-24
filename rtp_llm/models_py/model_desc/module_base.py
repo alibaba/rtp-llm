@@ -117,6 +117,119 @@ class GptModelBase(nn.Module):
             )
         return True
 
+    def embedding_cuda_graph_unsupported_reason(self) -> str:
+        """Capability query, not a Graph enable switch. Empty means supported."""
+        if (
+            type(self).prepare_transformer_inputs
+            is GptModelBase.prepare_transformer_inputs
+            or type(self).forward is GptModelBase.forward
+        ):
+            return "model has no split embedding/Transformer implementation"
+        if self.kv_cache is not None:
+            return "embedding graphs require a cache-free model"
+        if getattr(self.config, "use_attention_linear_bias", False):
+            return "embedding graph attention linear bias requires an adapter"
+        if getattr(self.config, "headwise_config", None) is not None:
+            return "embedding graph headwise attention requires an adapter"
+        if self.parallelism_config.prefill_cp_config.is_enabled():
+            return "embedding graph context parallelism is not implemented"
+        configs = self.config.getAttentionConfigs(
+            self.parallelism_config.get_attn_tp_size()
+        )
+        return AttnImplFactory.embedding_cuda_graph_unsupported_reason(
+            configs, self.fmha_config
+        )
+
+    def prepare_transformer_inputs(self, inputs: PyModelInputs) -> torch.Tensor:
+        """Prepare [tokens, hidden_size] outside capture; forward consumes input_hiddens."""
+        raise NotImplementedError("model must implement embedding input preparation")
+
+    def prepare_embedding_attention_inputs(
+        self, attn_inputs, host_tokens, host_text_mask
+    ):
+        """Prepare model metadata from host views; never read pending H2D copies."""
+        return attn_inputs
+
+    def validate_embedding_graph_inputs(self, inputs: PyModelInputs) -> bool:
+        """Side-effect-free request eligibility, before backend planning."""
+        attention = get_attention_inputs_value(inputs)
+        groups = attention.values() if isinstance(attention, Mapping) else [attention]
+        for attn in groups:
+            lengths = attn.input_lengths
+            prefix = attn.prefix_lengths
+            if (
+                not attn.is_prefill
+                or attn.is_target_verify
+                or lengths is None
+                or lengths.is_cuda
+                or lengths.dtype != torch.int32
+                or lengths.ndim != 1
+                or not lengths.is_contiguous()
+                or lengths.numel() == 0
+                or bool((lengths < 0).any())
+                or bool((lengths > self.config.max_seq_len).any())
+            ):
+                return False
+            tokens = getattr(inputs, "input_ids", None)
+            if tokens is not None and tokens.numel():
+                if (
+                    tokens.ndim != 1
+                    or tokens.dtype != torch.int32
+                    or not tokens.is_cuda
+                    or not tokens.is_contiguous()
+                    or tokens.numel() != int(lengths.sum())
+                ):
+                    return False
+            if (
+                prefix is None
+                or prefix.is_cuda
+                or prefix.dtype != torch.int32
+                or prefix.ndim != 1
+            ):
+                return False
+            if (
+                prefix.numel() != lengths.numel()
+                or not prefix.is_contiguous()
+                or bool(prefix.any())
+            ):
+                return False
+        return self.validate_embedding_input_features(inputs)
+
+    def validate_embedding_input_features(self, inputs):
+        # The default adapter reconstructs positions from zero for each sequence.
+        # Models with explicit positions must provide their own replay adapter.
+        attention = get_attention_inputs_value(inputs)
+        groups = attention.values() if isinstance(attention, Mapping) else [attention]
+        for source in [inputs, *groups]:
+            positions = getattr(source, "combo_position_ids", None)
+            if positions is not None and positions.numel():
+                return False
+        mm = inputs.multimodal_inputs
+        mask = inputs.embedding_inputs.text_tokens_mask
+        return (
+            not mm.multimodal_features
+            and (mm.mm_features_locs is None or mm.mm_features_locs.numel() == 0)
+            and (mask is None or mask.numel() == 0)
+        )
+
+    def prepare_embedding_graph_attention(
+        self, inputs: PyModelInputs, is_cuda_graph=True
+    ):
+        return self.prepare_fmha_impl(inputs, True, "embedding_graph")
+
+    def prepare_embedding_graph_replay(self, attention, graph_inputs, request_inputs):
+        """Plan against fixed Graph buffers, retaining request addresses outside capture."""
+        if attention is None:
+            return
+        graph_attention = get_attention_inputs_value(graph_inputs)
+        if isinstance(attention, Mapping):
+            for tag, impl in attention.items():
+                impl.prepare_cuda_graph(
+                    select_attention_inputs_for_tag(graph_attention, tag)
+                )
+        else:
+            attention.prepare_cuda_graph(graph_attention)
+
     def prepare_fmha_impl(
         self,
         inputs: PyModelInputs,

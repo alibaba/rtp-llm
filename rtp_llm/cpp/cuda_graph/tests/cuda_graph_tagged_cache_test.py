@@ -20,15 +20,22 @@ from rtp_llm.ops.compute_ops import (
     PyModelInputs,
     PyModelOutputs,
     get_typemeta,
+    rtp_llm_ops,
 )
 
-GROUP_TAGS = ["full", "aux"]
-HIDDEN_SIZE = 4
-TOKENS_PER_BLOCK = 8
-KERNEL_BLOCK_TABLE_WIDTH = 8
 
+from rtp_llm.cpp.cuda_graph.tests.cuda_graph_input_test_utils import (
+    EmbeddingGraphTestModel,
+    GROUP_TAGS,
+    HIDDEN_SIZE,
+    KERNEL_BLOCK_TABLE_WIDTH,
+    TOKENS_PER_BLOCK,
+    _build_common_inputs,
+    _build_prefill_inputs,
+    _tag_attention_inputs,
+)
 
-class TaggedBlockTableModel:
+class TaggedBlockTableModel(EmbeddingGraphTestModel):
     """Small graph-safe model whose output exposes both tag-local block tables."""
 
     def prepare_fmha_impl(
@@ -47,7 +54,7 @@ class TaggedBlockTableModel:
         return PyModelOutputs(inputs.input_hiddens + signature)
 
 
-class TaggedSequenceLengthModel:
+class TaggedSequenceLengthModel(EmbeddingGraphTestModel):
     """Expose the cumulative lengths used by a tagged captured graph."""
 
     def prepare_fmha_impl(
@@ -151,7 +158,7 @@ class RetryableGraphPrepareModel(TaggedBlockTableModel):
         return self.graph_prepare
 
 
-class CapturedHostLengthModel:
+class CapturedHostLengthModel(EmbeddingGraphTestModel):
     """Model a HIP Graph kernel that directly consumes mapped host metadata."""
 
     def prepare_fmha_impl(
@@ -173,11 +180,14 @@ class CapturedHostLengthModel:
         return PyModelOutputs(inputs.input_hiddens + first_length)
 
 
-class TextOnlyMultimodalCapableModel:
+class TextOnlyMultimodalCapableModel(EmbeddingGraphTestModel):
     """Qwen3-VL-like graph model used without request-side multimodal payload."""
 
     input_hiddens_numel = -1
     cuda_graph_selection_mode = None
+
+    def prepare_transformer_inputs(self, inputs):
+        return self.forward(inputs).hidden_states
 
     def __init__(self) -> None:
         self.bert_buffer_shapes: list[tuple[int, int]] = []
@@ -193,6 +203,8 @@ class TextOnlyMultimodalCapableModel:
 
     def forward(self, inputs: PyModelInputs, fmha_impl=None) -> PyModelOutputs:
         self.input_hiddens_numel = inputs.input_hiddens.numel()
+        if self.input_hiddens_numel > 0:
+            return PyModelOutputs(inputs.input_hiddens)
         position_ids = inputs.bert_embedding_inputs.combo_position_ids
         token_type_ids = inputs.bert_embedding_inputs.combo_tokens_type_ids
         self.bert_buffer_shapes.append(
@@ -223,6 +235,8 @@ class BertWeightAwareModel(TextOnlyMultimodalCapableModel):
     """Expose both fixed embedding tables and request-owned dynamic IDs."""
 
     def forward(self, inputs: PyModelInputs, fmha_impl=None) -> PyModelOutputs:
+        if inputs.input_hiddens.numel() > 0:
+            return PyModelOutputs(inputs.input_hiddens)
         base = super().forward(inputs, fmha_impl).hidden_states
         position_bias = inputs.bert_embedding_inputs.position_encoding.index_select(
             0, inputs.bert_embedding_inputs.combo_position_ids.to(torch.int64)
@@ -239,6 +253,8 @@ class PrefillPaddingBlockTableModel(TextOnlyMultimodalCapableModel):
     """Make any non-zero padding-row block id visible in every real output."""
 
     def forward(self, inputs: PyModelInputs, fmha_impl=None) -> PyModelOutputs:
+        if inputs.input_hiddens.numel() > 0:
+            return PyModelOutputs(inputs.input_hiddens)
         base = super().forward(inputs, fmha_impl).hidden_states
         padding_signature = (
             inputs.attention_inputs["full"].kv_cache_kernel_block_id_device[-1].sum()
@@ -314,57 +330,6 @@ class DraftBlockTableModel:
         return PyModelOutputs(inputs.input_hiddens + signature.unsqueeze(1))
 
 
-def _tag_attention_inputs(
-    common: PyAttentionInputs, tags: list[str], values: dict[str, int]
-) -> dict[str, PyAttentionInputs]:
-    tagged = {}
-    for tag in tags:
-        tag_inputs = copy.copy(common)
-        host_blocks = torch.full_like(
-            common.kv_cache_kernel_block_id, values[tag], device="cpu"
-        ).pin_memory()
-        device_blocks = host_blocks.cuda()
-        tag_inputs.kv_cache_kernel_block_id = host_blocks
-        tag_inputs.kv_cache_kernel_block_id_device = device_blocks
-        tag_inputs.kv_cache_block_id = host_blocks
-        tag_inputs.kv_cache_block_id_device = device_blocks
-        tagged[tag] = tag_inputs
-    return tagged
-
-
-def _build_common_inputs(
-    attention_inputs: PyAttentionInputs,
-    tags: list[str],
-    values: dict[str, int],
-    batch_size: int,
-    token_count: int,
-    block_count: int,
-) -> PyModelInputs:
-    inputs = PyModelInputs()
-    inputs.input_ids = torch.arange(token_count, dtype=torch.int32, device="cuda")
-    inputs.input_hiddens = torch.zeros(
-        (token_count, HIDDEN_SIZE), dtype=torch.bfloat16, device="cuda"
-    )
-
-    attention_inputs.dtype = get_typemeta(torch.zeros(1, dtype=torch.bfloat16))
-    attention_inputs.padding_offset = torch.zeros(
-        token_count, dtype=torch.int32, device="cuda"
-    )
-    attention_inputs.total_tokens = token_count
-    attention_inputs.kv_cache_kernel_block_id = torch.zeros(
-        (batch_size, block_count), dtype=torch.int32
-    ).pin_memory()
-    attention_inputs.kv_cache_kernel_block_id_device = (
-        attention_inputs.kv_cache_kernel_block_id.cuda()
-    )
-    attention_inputs.kv_cache_block_id = attention_inputs.kv_cache_kernel_block_id
-    attention_inputs.kv_cache_block_id_device = (
-        attention_inputs.kv_cache_kernel_block_id_device
-    )
-    inputs.attention_inputs = _tag_attention_inputs(attention_inputs, tags, values)
-    return inputs
-
-
 def _with_mrope_positions(inputs: PyModelInputs) -> PyModelInputs:
     token_count = inputs.input_ids.numel()
     inputs.combo_position_ids = (
@@ -413,40 +378,6 @@ def _build_decode_inputs(
         batch_size=batch_size,
         token_count=batch_size,
         block_count=block_count,
-    )
-
-
-def _build_prefill_inputs(
-    tags: list[str], values: dict[str, int], seq_len: int | list[int] = 4
-) -> PyModelInputs:
-    seq_lens = [seq_len] if isinstance(seq_len, int) else seq_len
-    token_count = sum(seq_lens)
-    cu_seqlens = [0]
-    for length in seq_lens:
-        cu_seqlens.append(cu_seqlens[-1] + length)
-
-    attention_inputs = PyAttentionInputs()
-    attention_inputs.is_prefill = True
-    attention_inputs.is_target_verify = False
-    attention_inputs.input_lengths = torch.tensor(
-        seq_lens, dtype=torch.int32
-    ).pin_memory()
-    attention_inputs.prefix_lengths = torch.zeros(
-        len(seq_lens), dtype=torch.int32
-    ).pin_memory()
-    attention_inputs.cu_seqlens = torch.tensor(
-        cu_seqlens, dtype=torch.int32
-    ).pin_memory()
-    attention_inputs.cu_seqlens_device = attention_inputs.cu_seqlens.cuda()
-    attention_inputs.cu_kv_seqlens_device = attention_inputs.cu_seqlens_device.clone()
-    attention_inputs.context_total_kv_length = token_count
-    return _build_common_inputs(
-        attention_inputs,
-        tags,
-        values,
-        batch_size=len(seq_lens),
-        token_count=token_count,
-        block_count=max(1, (max(seq_lens) + TOKENS_PER_BLOCK - 1) // TOKENS_PER_BLOCK),
     )
 
 
@@ -1181,84 +1112,6 @@ class TestCudaGraphTaggedCache(unittest.TestCase):
         runner.make_input_ids_scalar(scalar_input_ids)
         self.assertFalse(runner.canRun(scalar_input_ids))
 
-    def test_legacy_embedding_keeps_capture_buffers_and_eligibility(self) -> None:
-        weights = torch.ones((2, 1), dtype=torch.bfloat16, device="cuda")
-        for has_positions, has_token_types in (
-            (False, False),
-            (True, False),
-            (False, True),
-            (True, True),
-        ):
-            with self.subTest(positions=has_positions, token_types=has_token_types):
-                runner = CudaGraphRunner()
-                model = TextOnlyMultimodalCapableModel()
-                runner.init_prefill(
-                    model,
-                    2,
-                    TOKENS_PER_BLOCK,
-                    KERNEL_BLOCK_TABLE_WIDTH,
-                    [4],
-                    HIDDEN_SIZE,
-                    GROUP_TAGS,
-                    weights if has_positions else None,
-                    weights if has_token_types else None,
-                )
-                # Main always allocates both max_seq_len * max_batch buffers;
-                # both are sliced per bucket only when position weights exist.
-                full_capacity = 2 * TOKENS_PER_BLOCK
-                expected_shapes = {(full_capacity, full_capacity)}
-                if has_positions:
-                    expected_shapes.add((4, 4))
-                self.assertEqual(set(model.bert_buffer_shapes), expected_shapes)
-
-                inputs = _build_prefill_inputs(
-                    GROUP_TAGS, {"full": 1, "aux": 2}, seq_len=[2, 2]
-                )
-                # Request-owned BERT IDs are not a legacy graph eligibility
-                # requirement. The generation-only validation must not leak in.
-                self.assertTrue(runner.canPrepare(inputs))
-                self.assertTrue(runner.canRun(inputs))
-
-    def test_legacy_embedding_refreshes_bert_ids_during_prepare(self) -> None:
-        runner = CudaGraphRunner()
-        position_encoding = torch.tensor(
-            [[3], [7]], dtype=torch.bfloat16, device="cuda"
-        )
-        token_type_embedding = torch.tensor(
-            [[5], [11]], dtype=torch.bfloat16, device="cuda"
-        )
-        runner.init_prefill(
-            BertWeightAwareModel(),
-            1,
-            TOKENS_PER_BLOCK,
-            KERNEL_BLOCK_TABLE_WIDTH,
-            [TOKENS_PER_BLOCK],
-            HIDDEN_SIZE,
-            GROUP_TAGS,
-            position_encoding,
-            token_type_embedding,
-        )
-        for ids in ([0, 1, 0, 1], [1, 0, 1, 0]):
-            inputs = _build_prefill_inputs(GROUP_TAGS, {"full": 1, "aux": 2})
-            positions = torch.tensor(ids, dtype=torch.int32, device="cuda")
-            token_types = 1 - positions
-            inputs.bert_embedding_inputs = BertEmbeddingInputs(
-                positions, position_encoding, token_types, token_type_embedding, 1.0
-            )
-            self.assertTrue(runner.canRun(inputs))
-            # No separate metadata-only prepare: forward calls prepareInputs(),
-            # including the legacy attention-stage BERT ID copies.
-            output = runner.forward(inputs)
-            torch.cuda.synchronize()
-            expected = (
-                inputs.input_ids.to(torch.bfloat16).unsqueeze(1) * 10
-                + torch.arange(
-                    HIDDEN_SIZE, dtype=torch.bfloat16, device="cuda"
-                ).unsqueeze(0)
-                + position_encoding.index_select(0, positions.to(torch.int64))
-                + token_type_embedding.index_select(0, token_types.to(torch.int64))
-            )
-            torch.testing.assert_close(output.hidden_states, expected)
 
     def test_generation_prefill_installs_embedding_weights_before_capture(self) -> None:
         runner = CudaGraphRunner()
