@@ -17,6 +17,17 @@ cuda13_sm100_py_test(
     deps = ["//rtp_llm:eplb", ":torch"],
 )
 
+cuda13_sm100_py_test(
+    name = "runtime_distributed_8gpu_test",
+    main = "runtime_distributed_test.py",
+    srcs = ["runtime_distributed_test.py", "runtime_test.py"],
+    gpu_count = 8,
+    env = {"EPLB_TEST_WORLD_SIZE": "8"},
+    tags = ["manual"],
+    timeout = "moderate",
+    deps = ["//rtp_llm:eplb", ":torch"],
+)
+
 py_test(
     name = "runtime_test",
     srcs = ["runtime_test.py"],

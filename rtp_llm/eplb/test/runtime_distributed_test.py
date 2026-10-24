@@ -40,13 +40,13 @@ def _check_weights(layer):
         )
 
 
-def _run_distributed(rank, path, scenario):
+def _run_distributed(rank, path, scenario, world_size):
     torch.cuda.set_device(rank)
     torch.set_num_threads(1)
     dist.init_process_group(
         "nccl",
         init_method=f"file://{path}",
-        world_size=2,
+        world_size=world_size,
         rank=rank,
         timeout=timedelta(seconds=120),
     )
@@ -54,9 +54,14 @@ def _run_distributed(rank, path, scenario):
         # Initialize WORLD before any point-to-point exchange.
         dist.all_reduce(torch.zeros(1, device="cuda"))
         layer = make_layer(
-            (0, 1, 2, 3, 0, 1, 2, 3), layer_id=2, ep_rank=rank, ep_size=2, device="cuda"
+            (0, 1, 2, 3, 0, 1, 2, 3),
+            layer_id=2,
+            ep_rank=rank,
+            ep_size=world_size,
+            device="cuda",
         )
-        local_ids = layer.physical_to_logical[rank * 4 : (rank + 1) * 4].cuda()
+        local = layer.num_local_experts
+        local_ids = layer.physical_to_logical[rank * local : (rank + 1) * local].cuda()
         fp8 = (local_ids[:, None] + torch.arange(3, device="cuda")).to(
             torch.float8_e4m3fn
         )
@@ -79,7 +84,7 @@ def _run_distributed(rank, path, scenario):
                     (torch.arange(4), torch.randint(0, 4, (4,), generator=generator))
                 )
                 next_physical = next_physical[torch.randperm(8, generator=generator)]
-                _shuffle_weights(layer, next_physical, 2)
+                _shuffle_weights(layer, next_physical, world_size)
                 _publish_layout(layer, next_physical)
                 torch.cuda.synchronize()
                 _check_weights(layer)
@@ -88,7 +93,7 @@ def _run_distributed(rank, path, scenario):
                 [layer],
                 make_config(eplb_update_time=1, eplb_stats_window_size=8),
                 rank,
-                2,
+                world_size,
                 1,
             )
             ids = torch.tensor(
@@ -104,9 +109,9 @@ def _run_distributed(rank, path, scenario):
             with torch.cuda.graph(graph, stream=stream):
                 captured = layer.map_ids(ids)
             for hot in (2, 3, 0, 1):
-                counts = torch.zeros(3, 4, dtype=torch.int64, device="cuda")
+                counts = torch.zeros(3, local, dtype=torch.int64, device="cuda")
                 current_local = layer.physical_to_logical[
-                    rank * 4 : (rank + 1) * 4
+                    rank * local : (rank + 1) * local
                 ].cuda()
                 counts[2] = (current_local == hot) * (2**33)
                 saved = counts.clone()
@@ -125,9 +130,9 @@ def _run_distributed(rank, path, scenario):
                     layer.physical_to_logical[mapped[logical >= 0]],
                     logical[logical >= 0],
                 )
-                maps = torch.empty(2, 8, dtype=torch.int64, device="cuda")
+                maps = torch.empty(world_size, 8, dtype=torch.int64, device="cuda")
                 dist.all_gather_into_tensor(maps, layer.physical_to_logical.cuda())
-                assert torch.equal(maps[0], maps[1])
+                assert torch.equal(maps, maps[0].expand_as(maps))
         assert pointers == [
             tensor.data_ptr()
             for tensor in (
@@ -144,17 +149,20 @@ def _run_distributed(rank, path, scenario):
 class RuntimeDistributedTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        if torch.cuda.device_count() < 2:
+        cls.world_size = int(os.environ.get("EPLB_TEST_WORLD_SIZE", "2"))
+        if cls.world_size not in (2, 8):
+            raise ValueError("EPLB_TEST_WORLD_SIZE must be 2 or 8")
+        if torch.cuda.device_count() < cls.world_size:
             raise RuntimeError(
-                "runtime_distributed_test requires two visible CUDA GPUs"
+                f"runtime_distributed_test requires {cls.world_size} visible CUDA GPUs"
             )
 
     def run_scenario(self, scenario):
         with tempfile.TemporaryDirectory(prefix="eplb-runtime-") as directory:
             mp.spawn(
                 _run_distributed,
-                args=(os.path.join(directory, "rendezvous"), scenario),
-                nprocs=2,
+                args=(os.path.join(directory, "rendezvous"), scenario, self.world_size),
+                nprocs=self.world_size,
                 join=True,
             )
 
