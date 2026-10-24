@@ -303,7 +303,7 @@
                         "index": 0,
                         "message": {
                             "role": "assistant",
-                            "content": "The current weather in San Francisco is 17°C (62.6°F) with 72% humidity and partly cloudy skies.",
+                            "content": "The current weather in San Francisco is 17°C (62.6°F), with 72% humidity and partly cloudy skies.",
                             "name": null,
                             "reasoning_content": null,
                             "function_call": null,
