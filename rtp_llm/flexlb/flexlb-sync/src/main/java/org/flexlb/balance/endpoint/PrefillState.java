@@ -377,7 +377,7 @@ public final class PrefillState {
         }
 
         /** Simulate terminal metrics without mutating canonical batch work. */
-        private BatchCompletion projectedCompletion(
+        private BatchCompletion completionAfterTerminals(
                 Map<String, TerminalObservation> terminals) {
             long maxExecutionTimeMs = batch.maxExecutionTimeMs;
             boolean successfulCompletion = batch.successfulCompletion;
@@ -1382,7 +1382,7 @@ public final class PrefillState {
         List<BatchCompletion> completions = new ArrayList<>(
                 Math.min(terminals.size(), reductions.size()));
         for (BatchReduction reduction : reductions.values()) {
-            BatchCompletion completion = reduction.projectedCompletion(terminals);
+            BatchCompletion completion = reduction.completionAfterTerminals(terminals);
             if (completion != null) {
                 completions.add(completion);
             }

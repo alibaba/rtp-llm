@@ -198,7 +198,7 @@ class RequestRegistryTest {
         context.setRequestPhase(RequestPhase.ENCODER);
         CompletableFuture<Response> future = lifecycle.register(context);
         WorkerStatus worker = mock(WorkerStatus.class);
-        EncoderEndpoint endpoint = new EncoderEndpoint(worker, new EndpointEventProjector(lifecycle));
+        EncoderEndpoint endpoint = new EncoderEndpoint(worker, new EndpointEventHandler(lifecycle));
         Response route = new Response();
         route.setSuccess(true);
 
@@ -250,7 +250,7 @@ class RequestRegistryTest {
         WorkerStatus.EngineObservation engine = mock(WorkerStatus.EngineObservation.class);
         when(worker.committedEngineObservation()).thenReturn(engine);
         when(engine.runningTaskList()).thenReturn(Map.of());
-        EncoderEndpoint endpoint = new EncoderEndpoint(worker, new EndpointEventProjector(lifecycle));
+        EncoderEndpoint endpoint = new EncoderEndpoint(worker, new EndpointEventHandler(lifecycle));
 
         try (var pin = endpoint.tryPinGeneration()) {
             assertTrue(lifecycle.claimEncoderRoute("109", future, pin));
@@ -291,7 +291,7 @@ class RequestRegistryTest {
         WorkerStatus.EngineObservation engine = mock(WorkerStatus.EngineObservation.class);
         when(worker.committedEngineObservation()).thenReturn(engine);
         when(engine.runningTaskList()).thenReturn(Map.of());
-        EncoderEndpoint endpoint = new EncoderEndpoint(worker, new EndpointEventProjector(lifecycle));
+        EncoderEndpoint endpoint = new EncoderEndpoint(worker, new EndpointEventHandler(lifecycle));
 
         try (var pin = endpoint.tryPinGeneration()) {
             assertTrue(lifecycle.claimEncoderRoute("110", future, pin));
@@ -317,7 +317,7 @@ class RequestRegistryTest {
     @Test
     void concurrentEncoderSelectionsKeepEveryPendingRequest() throws Exception {
         EncoderEndpoint endpoint = new EncoderEndpoint(mock(WorkerStatus.class),
-                new EndpointEventProjector(lifecycle));
+                new EndpointEventHandler(lifecycle));
         int requestCount = 32;
         CountDownLatch start = new CountDownLatch(1);
         try (var executor = Executors.newFixedThreadPool(8)) {
@@ -345,7 +345,7 @@ class RequestRegistryTest {
     @Test
     void encoderStatusAndCleanupRaceCannotDoubleReleasePendingRequest() throws Exception {
         WorkerStatus worker = mock(WorkerStatus.class);
-        EncoderEndpoint endpoint = new EncoderEndpoint(worker, new EndpointEventProjector(lifecycle));
+        EncoderEndpoint endpoint = new EncoderEndpoint(worker, new EndpointEventHandler(lifecycle));
         try (var executor = Executors.newFixedThreadPool(2)) {
             for (int index = 0; index < 32; index++) {
                 String requestId = "encoder-race-" + index;
@@ -381,7 +381,7 @@ class RequestRegistryTest {
         CompletableFuture<Response> encoderFuture = lifecycle.register(context);
         CompletableFuture<Response> generationFuture = lifecycle.register(context(108L));
         WorkerStatus worker = mock(WorkerStatus.class);
-        EncoderEndpoint endpoint = new EncoderEndpoint(worker, new EndpointEventProjector(lifecycle));
+        EncoderEndpoint endpoint = new EncoderEndpoint(worker, new EndpointEventHandler(lifecycle));
         Response route = new Response();
         route.setSuccess(true);
         try (var pin = endpoint.tryPinGeneration()) {
@@ -406,7 +406,7 @@ class RequestRegistryTest {
         failedContext.setRequestPhase(RequestPhase.ENCODER);
         CompletableFuture<Response> failedFuture = lifecycle.register(failedContext);
         WorkerStatus failedWorker = mock(WorkerStatus.class);
-        EncoderEndpoint failedEndpoint = new EncoderEndpoint(failedWorker, new EndpointEventProjector(lifecycle));
+        EncoderEndpoint failedEndpoint = new EncoderEndpoint(failedWorker, new EndpointEventHandler(lifecycle));
         Response route = new Response();
         route.setSuccess(true);
         try (var pin = failedEndpoint.tryPinGeneration()) {
@@ -432,7 +432,7 @@ class RequestRegistryTest {
         inactiveContext.setRequestPhase(RequestPhase.ENCODER);
         CompletableFuture<Response> inactiveFuture = lifecycle.register(inactiveContext);
         WorkerStatus inactiveWorker = mock(WorkerStatus.class);
-        EncoderEndpoint inactiveEndpoint = new EncoderEndpoint(inactiveWorker, new EndpointEventProjector(lifecycle));
+        EncoderEndpoint inactiveEndpoint = new EncoderEndpoint(inactiveWorker, new EndpointEventHandler(lifecycle));
         try (var pin = inactiveEndpoint.tryPinGeneration()) {
             assertTrue(lifecycle.claimEncoderRoute("110", inactiveFuture, pin));
         }
@@ -450,7 +450,7 @@ class RequestRegistryTest {
         context.setRequestPhase(RequestPhase.ENCODER);
         CompletableFuture<Response> future = lifecycle.register(context);
         WorkerStatus worker = mock(WorkerStatus.class);
-        EncoderEndpoint endpoint = new EncoderEndpoint(worker, new EndpointEventProjector(lifecycle));
+        EncoderEndpoint endpoint = new EncoderEndpoint(worker, new EndpointEventHandler(lifecycle));
         Response route = new Response();
         route.setSuccess(true);
         try (var pin = endpoint.tryPinGeneration()) {
@@ -473,7 +473,7 @@ class RequestRegistryTest {
         context.setRequestPhase(RequestPhase.ENCODER);
         CompletableFuture<Response> future = lifecycle.register(context);
         EncoderEndpoint endpoint = new EncoderEndpoint(mock(WorkerStatus.class),
-                new EndpointEventProjector(lifecycle));
+                new EndpointEventHandler(lifecycle));
         try (var pin = endpoint.tryPinGeneration()) {
             assertTrue(lifecycle.claimEncoderRoute("113", future, pin));
         }

@@ -1,6 +1,6 @@
 package org.flexlb.balance.endpoint;
 
-import org.flexlb.balance.scheduler.EndpointEventProjector;
+import org.flexlb.balance.scheduler.EndpointEventHandler;
 import org.flexlb.balance.scheduler.PlacementAvailability;
 import org.flexlb.dao.master.TaskInfo;
 import org.flexlb.dao.master.WorkerStatus;
@@ -99,7 +99,7 @@ class DecodeEndpointAdmissionTest {
         PlacementAvailability availability =
                 mock(PlacementAvailability.class);
         DecodeEndpoint exactEndpoint = new DecodeEndpoint(
-                status, mock(EndpointEventProjector.class), availability);
+                status, mock(EndpointEventHandler.class), availability);
 
         DecodeEndpoint.ReservationHandle speculative;
         try (WorkerEndpoint.GenerationPin pin =
@@ -772,7 +772,7 @@ class DecodeEndpointAdmissionTest {
 
     @Test
     void versionedReceivedTaskEmitsActivityWithoutAdvancingAcceptance() {
-        EndpointEventProjector events = mock(EndpointEventProjector.class);
+        EndpointEventHandler events = mock(EndpointEventHandler.class);
         endpoint = new DecodeEndpoint(status, events);
         DecodeEndpoint.ReservationHandle reservation =
                 reserve(1L, 500, 508, 30);

@@ -359,7 +359,7 @@ class DefaultRouterTest {
     }
 
     @Test
-    void projectedDecodeBlockUsesDecodeWaitDomain() {
+    void estimatedDecodeBlockUsesDecodeWaitDomain() {
         when(modelMeta.requiredRoles()).thenReturn(List.of(RoleType.PREFILL));
         DefaultRouter router = router();
         BalanceContext context = context(111L);

@@ -190,7 +190,7 @@ class PrefillStateSnapshotTest {
     }
 
     @Test
-    void retirementProjectsQueuedPreparedAndCommittedItemsWithoutModeExceptions() {
+    void retirementHandlesQueuedPreparedAndCommittedItemsWithoutModeExceptions() {
         ScheduledRequest queued = item(1), prepared = item(2), committed = item(3);
         enqueue(queued);
         var preparedReservation = state.reserveUnqueuedRoute(prepared, 20L, Long.MAX_VALUE).reservation();

@@ -16,7 +16,7 @@ import static org.junit.jupiter.api.Assertions.assertNotSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
-/** Contract tests for the canonical route-projection value boundary. */
+/** Contract tests for the canonical route-estimate value boundary. */
 class RouteTtftEstimateTest {
 
     @Test
@@ -72,7 +72,7 @@ class RouteTtftEstimateTest {
                 routeEstimationRule());
         assertTrue(result.selectable());
         assertEquals(before, captured.estimateMs(20L, 0L),
-                "a projection-owned evaluator cannot change mid-call");
+                "a estimate-owned evaluator cannot change mid-call");
     }
 
     @Test

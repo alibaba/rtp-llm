@@ -418,7 +418,7 @@ class RequestLifecycleDeliveryLockContractTest {
         assertNotNull(claim);
         RequestSlot original = lifecycle.requestSlot("207");
 
-        new EndpointEventProjector(lifecycle).onPrefillStatus(endpoint, RoleType.PDFUSION,
+        new EndpointEventHandler(lifecycle).onPrefillStatus(endpoint, RoleType.PDFUSION,
                 List.of(PrefillState.WorkerStatusFact.terminal(
                         registered.item(), PrefillState.WorkerStatusFact.Kind.COMPLETED, 0L)));
         Response terminal = registered.future().get(5L, TimeUnit.SECONDS);

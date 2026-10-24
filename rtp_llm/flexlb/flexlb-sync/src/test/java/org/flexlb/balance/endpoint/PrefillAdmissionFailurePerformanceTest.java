@@ -2,7 +2,7 @@ package org.flexlb.balance.endpoint;
 
 import org.flexlb.balance.PlacementResult;
 import org.flexlb.balance.delivery.DeliveryStrategy;
-import org.flexlb.balance.scheduler.EndpointEventProjector;
+import org.flexlb.balance.scheduler.EndpointEventHandler;
 import org.flexlb.balance.strategy.CostBasedPrefillStrategy;
 import org.flexlb.balance.strategy.SelectedRole;
 import org.flexlb.config.DispatcherConfig;
@@ -39,7 +39,7 @@ class PrefillAdmissionFailurePerformanceTest {
         config.setDispatcher(DispatcherConfig.nonBatch());
         config.getDispatcher().setMaxInflightPerPrefillWorker(1);
         var delivery = mock(DeliveryStrategy.class);
-        var events = mock(EndpointEventProjector.class);
+        var events = mock(EndpointEventHandler.class);
         var reporter = mock(BatchSchedulerReporter.class);
         long singleWorkerAllocation = 0L;
         for (int workerCount : new int[]{1, 64, 512, 1024}) {

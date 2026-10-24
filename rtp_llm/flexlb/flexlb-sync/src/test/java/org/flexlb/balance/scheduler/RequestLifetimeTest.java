@@ -346,12 +346,12 @@ class RequestLifetimeTest {
                 assertFalse(future.isDone());
             }
 
-            EndpointEventProjector projector = new EndpointEventProjector(registry);
+            EndpointEventHandler eventHandler = new EndpointEventHandler(registry);
             if (evidenceSource == RoleType.PREFILL) {
-                projector.onPrefillStatus(prefill, RoleType.PREFILL,
+                eventHandler.onPrefillStatus(prefill, RoleType.PREFILL,
                         List.of(PrefillState.WorkerStatusFact.active(item)));
             } else {
-                projector.onDecodeStatus(decode, List.of(DecodeEndpoint.WorkerStatusFact.active(reservation)));
+                eventHandler.onDecodeStatus(decode, List.of(DecodeEndpoint.WorkerStatusFact.active(reservation)));
             }
 
             if (!ackBeforeEvidence) {

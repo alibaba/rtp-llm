@@ -2,7 +2,7 @@ package org.flexlb.balance.endpoint;
 
 import org.flexlb.balance.delivery.DeliveryResult;
 import org.flexlb.balance.preemption.PreemptionCancelPhase;
-import org.flexlb.balance.scheduler.EndpointEventProjector;
+import org.flexlb.balance.scheduler.EndpointEventHandler;
 import org.flexlb.balance.scheduler.PlacementAvailability;
 import org.flexlb.config.RoutingConfig;
 import org.flexlb.dao.master.WorkerStatus;
@@ -26,18 +26,18 @@ import java.util.function.Predicate;
 public class DecodeEndpoint extends WorkerEndpoint {
     private static final Logger logger = LoggerFactory.getLogger("syncLogger");
     private final DecodeState state;
-    private final EndpointEventProjector endpointEvents;
+    private final EndpointEventHandler endpointEvents;
     private final PlacementAvailability placementAvailability;
     private final Set<Runnable> engineDispatchCapacityListeners = ConcurrentHashMap.newKeySet();
 
     // Construction
 
-    public DecodeEndpoint(WorkerStatus status, EndpointEventProjector endpointEvents) {
+    public DecodeEndpoint(WorkerStatus status, EndpointEventHandler endpointEvents) {
         this(status, endpointEvents, new PlacementAvailability());
     }
 
     DecodeEndpoint(WorkerStatus status,
-                   EndpointEventProjector endpointEvents,
+                   EndpointEventHandler endpointEvents,
                    PlacementAvailability placementAvailability) {
         super(status);
         this.state = new DecodeState(status);

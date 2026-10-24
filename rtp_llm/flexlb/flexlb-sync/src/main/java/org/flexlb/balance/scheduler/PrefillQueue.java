@@ -172,7 +172,7 @@ public final class PrefillQueue {
     private final String key;
     private final PrefillEndpoint prefillEndpoint;
     private final QueueCapacity queueCapacity;
-    private final EndpointEventProjector endpointEvents;
+    private final EndpointEventHandler endpointEvents;
     private final FlexlbConfig config;
     private final Supplier<FlexlbConfig> configSupplier;
     private final DecisionPolicyConfig fixedWindowDecision;
@@ -243,7 +243,7 @@ public final class PrefillQueue {
             FlexlbConfig config,
             DeliveryStrategy deliveryStrategy,
             PrefillTtftEstimator ttftEstimator,
-            EndpointEventProjector endpointEvents,
+            EndpointEventHandler endpointEvents,
             QueueCapacity queueCapacity) {
         this(key, prefillEp, () -> config, deliveryStrategy, ttftEstimator, endpointEvents, queueCapacity);
     }
@@ -253,7 +253,7 @@ public final class PrefillQueue {
                          Supplier<FlexlbConfig> configSupplier,
                          DeliveryStrategy deliveryStrategy,
                          PrefillTtftEstimator ttftEstimator,
-                         EndpointEventProjector endpointEvents,
+                         EndpointEventHandler endpointEvents,
                          QueueCapacity queueCapacity) {
         this.configSupplier = configSupplier;
         FlexlbConfig config = configSupplier.get();

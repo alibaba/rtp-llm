@@ -11,7 +11,7 @@ import org.flexlb.balance.prediction.PrefillBatchFeatures;
 import org.flexlb.balance.prediction.PrefillPredictionBoundary;
 import org.flexlb.balance.prediction.PrefillTimePredictor;
 import org.flexlb.balance.queue.QueuedRequestsSnapshot;
-import org.flexlb.balance.scheduler.EndpointEventProjector;
+import org.flexlb.balance.scheduler.EndpointEventHandler;
 import org.flexlb.balance.scheduler.PlacementAvailability;
 import org.flexlb.balance.scheduler.PrefillQueue;
 import org.flexlb.balance.scheduler.QueueCapacity;
@@ -83,7 +83,7 @@ public class PrefillEndpoint extends WorkerEndpoint {
     private final boolean engineSubQueueMode;
     private final PrefillQueue runtime;
     private final PrefillState prefillState;
-    private final EndpointEventProjector endpointEvents;
+    private final EndpointEventHandler endpointEvents;
     private final BatchSchedulerReporter reporter;
     private final PlacementAvailability placementAvailability;
     private final EndpointRegistry endpointRegistry;
@@ -93,7 +93,7 @@ public class PrefillEndpoint extends WorkerEndpoint {
                     Supplier<FlexlbConfig> configSupplier,
                     DeliveryStrategy deliveryStrategy,
                     PrefillTtftEstimator ttftEstimator,
-                    EndpointEventProjector endpointEvents,
+                    EndpointEventHandler endpointEvents,
                     BatchSchedulerReporter reporter,
                     PlacementAvailability placementAvailability,
                     EndpointRegistry endpointRegistry,

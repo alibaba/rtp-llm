@@ -13,7 +13,7 @@ import org.flexlb.balance.endpoint.PrefillState;
 import org.flexlb.balance.endpoint.WorkerEndpoint;
 import org.flexlb.balance.estimate.NonBatchTtftEstimator;
 import org.flexlb.balance.estimate.PrefillTtftEstimate;
-import org.flexlb.balance.scheduler.EndpointEventProjector;
+import org.flexlb.balance.scheduler.EndpointEventHandler;
 import org.flexlb.balance.scheduler.PlacementAvailability;
 import org.flexlb.balance.scheduler.QueueCapacity;
 import org.flexlb.balance.scheduler.RequestRegistry;
@@ -189,14 +189,14 @@ final class StrategyTestSupport {
     private static final class TestRequestRuntime {
         private final RequestRegistry requests =
                 Mockito.mock(RequestRegistry.class);
-        private final EndpointEventProjector events =
-                Mockito.mock(EndpointEventProjector.class);
+        private final EndpointEventHandler events =
+                Mockito.mock(EndpointEventHandler.class);
 
         RequestRegistry requests() {
             return requests;
         }
 
-        EndpointEventProjector events() {
+        EndpointEventHandler events() {
             return events;
         }
     }

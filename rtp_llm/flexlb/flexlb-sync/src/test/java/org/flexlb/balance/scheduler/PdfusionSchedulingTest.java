@@ -87,7 +87,7 @@ class PdfusionSchedulingTest {
                         }), new AtomicLong()::incrementAndGet,
                         lifecycle, new DeliveryMetrics(reporter))
                 : new NonBatchDeliveryStrategy(lifecycle, new DeliveryMetrics(reporter));
-        EndpointRegistry endpoints = new EndpointRegistry(service, new EndpointEventProjector(lifecycle), reporter,
+        EndpointRegistry endpoints = new EndpointRegistry(service, new EndpointEventHandler(lifecycle), reporter,
                 delivery, batch ? new BatchTtftEstimator() : new NonBatchTtftEstimator(),
                 availability, queueCapacity);
         WorkerStatus worker = WorkerStatus.createDiscovered(RoleType.PDFUSION, "g1", "127.0.0.1", 8080, 8081, "test");
@@ -140,15 +140,15 @@ class PdfusionSchedulingTest {
             status.setStatusVersion(2L);
             status.setLatestFinishedVersion(1L);
             status.setFinishedTaskInfo(Map.of(Long.toString(requestId), finished));
-            Runnable projection;
+            Runnable statusNotifier;
             worker.lock.lock();
             try {
-                projection = endpoint.applyPreparedStatus(worker,
+                statusNotifier = endpoint.applyPreparedStatus(worker,
                         worker.prepareNewStatus(worker.freezeStatusResponse(status)));
             } finally {
                 worker.lock.unlock();
             }
-            projection.run();
+            statusNotifier.run();
             assertEquals(0, endpoint.observedRequestCount());
             assertEquals(0, endpoint.getInflightBatchCount());
             assertTrue(committedWork.containsRequest(Long.toString(requestId)),

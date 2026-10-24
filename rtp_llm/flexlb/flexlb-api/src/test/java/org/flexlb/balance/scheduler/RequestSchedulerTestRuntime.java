@@ -45,7 +45,7 @@ import java.util.function.Supplier;
 public final class RequestSchedulerTestRuntime implements AutoCloseable {
 
     private final RequestRegistry lifecycle;
-    private final EndpointEventProjector endpointEvents;
+    private final EndpointEventHandler endpointEvents;
     private final PlacementAvailability placementAvailability =
             new PlacementAvailability();
     private final QueueCapacity queueCapacity = new QueueCapacity();
@@ -63,7 +63,7 @@ public final class RequestSchedulerTestRuntime implements AutoCloseable {
             RequestSchedulerReporter requestReporter) {
         this.lifecycle = new RequestRegistry(
                 configService, batchReporter, requestReporter);
-        this.endpointEvents = new EndpointEventProjector(lifecycle);
+        this.endpointEvents = new EndpointEventHandler(lifecycle);
         DispatcherConfig dispatcher = Objects.requireNonNull(
                 configService.loadBalanceConfig().getDispatcher(),
                 "dispatcher");
@@ -183,7 +183,7 @@ public final class RequestSchedulerTestRuntime implements AutoCloseable {
                             + status.getLogicalIpPort() + "#" + status.getGenerationId());
         }
 
-        Runnable projection;
+        Runnable statusNotifier;
         status.lock.lock();
         try {
             long responseVersion = Objects.requireNonNull(
@@ -195,17 +195,17 @@ public final class RequestSchedulerTestRuntime implements AutoCloseable {
                                 + committedVersion + ", response=" + responseVersion);
             }
             if (responseVersion == committedVersion) {
-                projection = endpoint.observeStatusHeartbeat(
+                statusNotifier = endpoint.observeStatusHeartbeat(
                         status, observation);
             } else {
                 WorkerStatus.PreparedStatus prepared =
                         status.prepareNewStatus(observation);
-                projection = endpoint.applyPreparedStatus(status, prepared);
+                statusNotifier = endpoint.applyPreparedStatus(status, prepared);
             }
         } finally {
             status.lock.unlock();
         }
-        projection.run();
+        statusNotifier.run();
     }
 
     /**

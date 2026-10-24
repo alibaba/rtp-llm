@@ -1,6 +1,6 @@
 package org.flexlb.balance.endpoint;
 
-import org.flexlb.balance.scheduler.EndpointEventProjector;
+import org.flexlb.balance.scheduler.EndpointEventHandler;
 import org.flexlb.dao.master.WorkerStatus;
 
 import java.util.ArrayList;
@@ -18,14 +18,14 @@ public final class EncoderEndpoint extends WorkerEndpoint {
 
     private record RequestObservation(boolean seenInWorker, long estimatedUncachedTokens) { }
 
-    private final EndpointEventProjector endpointEvents;
+    private final EndpointEventHandler endpointEvents;
     private final ConcurrentMap<String, RequestObservation> requestObservations = new ConcurrentHashMap<>();
     private final AtomicInteger pendingRequestCount = new AtomicInteger();
 
     /**
-     * Bind an Encoder worker generation to its request lifecycle projector.
+     * Bind an Encoder worker generation to its request lifecycle eventHandler.
      */
-    public EncoderEndpoint(WorkerStatus status, EndpointEventProjector endpointEvents) {
+    public EncoderEndpoint(WorkerStatus status, EndpointEventHandler endpointEvents) {
         super(status);
         this.endpointEvents = endpointEvents;
     }
@@ -101,7 +101,7 @@ public final class EncoderEndpoint extends WorkerEndpoint {
         WorkerStatus.StatusObservation observation = prepared.observation();
         if (!observation.alive()) { beginRetirement(); }
         ws.publishPreparedStatus(prepared);
-        return projectStatus(observation, true);
+        return statusNotifier(observation, true);
     }
 
     @Override
@@ -110,10 +110,10 @@ public final class EncoderEndpoint extends WorkerEndpoint {
         if (observation.owner() != ws) {
             throw new IllegalArgumentException("Status observation belongs to another WorkerStatus generation");
         }
-        return projectStatus(observation, false);
+        return statusNotifier(observation, false);
     }
 
-    private Runnable projectStatus(WorkerStatus.StatusObservation observation, boolean includeFinished) {
+    private Runnable statusNotifier(WorkerStatus.StatusObservation observation, boolean includeFinished) {
         List<WorkerStatus.TaskObservation> running = new ArrayList<>();
         List<WorkerStatus.TaskObservation> finished = new ArrayList<>();
         for (WorkerStatus.TaskObservation task : observation.activeTasks().values()) {

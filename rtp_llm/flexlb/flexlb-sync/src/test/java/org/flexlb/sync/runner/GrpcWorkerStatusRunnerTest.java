@@ -153,7 +153,7 @@ class GrpcWorkerStatusRunnerTest {
     }
 
     @Test
-    void newGenerationProjectionRunsOutsideWorkerStatusLock() {
+    void newGenerationStatusNotifierRunsOutsideWorkerStatusLock() {
         WorkerStatus status = RunnerTestSupport.discovered(
                 RoleType.DECODE, null, "127.0.0.1",
                 8080, 8081, "test-site");
@@ -162,7 +162,7 @@ class GrpcWorkerStatusRunnerTest {
         assertNotNull(pollLease);
 
         AtomicBoolean publicationHeldLock = new AtomicBoolean();
-        AtomicBoolean projectionReleasedLock = new AtomicBoolean();
+        AtomicBoolean notifierReleasedLock = new AtomicBoolean();
         WorkerEndpoint endpoint = mock(WorkerEndpoint.class);
         EndpointRegistry registry = mock(EndpointRegistry.class);
         WorkerDirectory directory = directory(registry, status);
@@ -176,7 +176,7 @@ class GrpcWorkerStatusRunnerTest {
                     status.publishPreparedStatus(invocation.getArgument(2));
                     return new EndpointRegistry.EndpointPublication(
                             endpoint,
-                            () -> projectionReleasedLock.set(
+                            () -> notifierReleasedLock.set(
                                     !status.lock.isHeldByCurrentThread()));
                 });
 
@@ -202,12 +202,12 @@ class GrpcWorkerStatusRunnerTest {
 
         assertTrue(publicationHeldLock.get(),
                 "publication must commit under the generation lock");
-        assertTrue(projectionReleasedLock.get(),
+        assertTrue(notifierReleasedLock.get(),
                 "endpoint facts must project after releasing that lock");
     }
 
     @Test
-    void sameVersionResponseProjectsExactEndpointActivity() {
+    void sameVersionResponseNotifiesExactEndpointActivity() {
         WorkerStatus status = RunnerTestSupport.alive(
                 RoleType.DECODE, null, "127.0.0.1",
                 8080, 8081, "test-site");

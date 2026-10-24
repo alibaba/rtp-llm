@@ -292,7 +292,7 @@ public class RequestRegistry {
         if (slot != null) { slot.processEncoderStatus(source, task, finished); }
     }
 
-    void projectEncoderRetirement(EncoderEndpoint source, String requestId) {
+    void applyEncoderRetirement(EncoderEndpoint source, String requestId) {
         RequestSlot slot = requestSlot(requestId, RequestPhase.ENCODER);
         if (slot != null) { slot.recordEncoderRetirement(source); }
     }
@@ -301,13 +301,13 @@ public class RequestRegistry {
         processDecodeStatus(source, DecodeEndpoint.WorkerStatusFact.accepted(reservation));
     }
 
-    void projectPrefillRetirementItem(PrefillEndpoint source, ScheduledRequest exact) {
+    void applyPrefillRetirementItem(PrefillEndpoint source, ScheduledRequest exact) {
         if (exact == null || exact.prefillEp() != source) { return; }
         RequestSlot slot = requestSlot(exact.requestId());
         if (slot != null) { slot.recordPrefillRetirement(source, exact); }
     }
 
-    void projectDecodeRetirementReservation(DecodeEndpoint source, DecodeEndpoint.ReservationHandle exact) {
+    void applyDecodeRetirementReservation(DecodeEndpoint source, DecodeEndpoint.ReservationHandle exact) {
         RequestSlot slot = requestSlot(exact.requestId());
         if (slot != null) { slot.recordDecodeRetirement(source, exact); }
     }

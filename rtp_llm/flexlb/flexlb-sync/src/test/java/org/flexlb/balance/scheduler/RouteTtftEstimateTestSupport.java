@@ -12,7 +12,7 @@ import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
 
-/** Frozen-value builders shared by canonical route-projection tests. */
+/** Frozen-value builders shared by canonical route-estimate tests. */
 final class RouteTtftEstimateTestSupport {
 
     static final long NOW_MS = 10_000L;

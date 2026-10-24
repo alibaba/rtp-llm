@@ -6,7 +6,7 @@ import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.eviction.EngineCancelChannel;
 import org.flexlb.balance.eviction.EngineCancelChannel.CancelAck;
 import org.flexlb.balance.preemption.CancelTarget;
-import org.flexlb.balance.scheduler.EndpointEventProjector;
+import org.flexlb.balance.scheduler.EndpointEventHandler;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.engine.grpc.EngineRpcService;
@@ -521,7 +521,7 @@ class HttpMockCancelIntegrationTest {
         WorkerStatus status = WorkerStatus.createDiscovered(
                 RoleType.DECODE, "test", "127.0.0.1",
                 grpcPort - 2, grpcPort, null);
-        return new DecodeEndpoint(status, mock(EndpointEventProjector.class));
+        return new DecodeEndpoint(status, mock(EndpointEventHandler.class));
     }
 
     private MockPerformanceModel model(double decodeStepMs,

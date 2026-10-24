@@ -1089,7 +1089,7 @@ class PrefillEndpointTest {
     }
 
     @Test
-    void projectionCapturesExactPublishedIdentityBeforeActiveRemoval() {
+    void loadViewCapturesExactPublishedIdentityBeforeActiveRemoval() {
         PrefillEndpoint handoffEndpoint = newFixedWindowEndpoint(60_000);
         try {
             ScheduledRequest active = createScheduledRequest(handoffEndpoint, 111L, 500L, 0L);
@@ -1616,15 +1616,15 @@ class PrefillEndpointTest {
 
     private static void applyHeartbeat(PrefillEndpoint endpoint, WorkerStatusResponse response) {
         WorkerStatus status = endpoint.getStatus();
-        Runnable projection;
+        Runnable statusNotifier;
         status.lock.lock();
         try {
             response.setStatusVersion(status.appliedStatusCursor().statusVersion());
-            projection = endpoint.observeStatusHeartbeat(status, status.freezeStatusResponse(response));
+            statusNotifier = endpoint.observeStatusHeartbeat(status, status.freezeStatusResponse(response));
         } finally {
             status.lock.unlock();
         }
-        projection.run();
+        statusNotifier.run();
     }
 
     @Test
@@ -1651,7 +1651,7 @@ class PrefillEndpointTest {
     }
 
     @Test
-    void closeProjectsEveryCommittedRouteAcrossSchedulingModes() {
+    void closeHandlesEveryCommittedRouteAcrossSchedulingModes() {
         registerDirect(endpoint, 100L, 100L);
         ScheduledRequest route = createScheduledRequest(200L, 200L, 0L);
         // A queue route can only be reserved after its canonical item has been

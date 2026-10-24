@@ -260,10 +260,10 @@ class PrefillQueueSchedulingTest {
         assertNotNull(inputs.queue().admissionBlock());
         assertNull(inputs.queue().admissionBlock().semantics(),
                 "batch capacity waits must not impose publication restrictions");
-        PrefillTtftEstimate.TtftEstimationRule projection = new BatchTtftEstimator().ttftEstimationRule();
+        PrefillTtftEstimate.TtftEstimationRule rule = new BatchTtftEstimator().ttftEstimationRule();
         PrefillTtftEstimate.Candidate candidate = PrefillTtftEstimate.estimate(
                 inputs, new PrefillTtftEstimate.Probe("22", 50, now + 1L, Long.MAX_VALUE, 10L, 0L, 0L),
-                endpoint.getPredictor().evaluator(), projection, now);
+                endpoint.getPredictor().evaluator(), rule, now);
         assertTrue(candidate.selectable(),
                 "a delivery-only wait must leave incoming backlog selectable");
 
@@ -286,14 +286,14 @@ class PrefillQueueSchedulingTest {
         CountDownLatch materializing = new CountDownLatch(1);
         CountDownLatch finish = new CountDownLatch(1);
         doAnswer(invocation -> {
-            if (Thread.currentThread().getName().startsWith("projection-reader")) {
+            if (Thread.currentThread().getName().startsWith("estimate-reader")) {
                 materializing.countDown();
                 await(finish);
             }
             return invocation.callRealMethod();
         }).when(head).seqLen();
         try (var readers = java.util.concurrent.Executors.newFixedThreadPool(
-                16, Thread.ofPlatform().name("projection-reader-", 0).factory())) {
+                16, Thread.ofPlatform().name("estimate-reader-", 0).factory())) {
             assertEquals(ACCEPTED, runtime.offerWithResult(head));
             await(delivery.firstPrepareEntered);
             var first = readers.submit(runtime::captureLoadView);
@@ -323,7 +323,7 @@ class PrefillQueueSchedulingTest {
 
     @Test
     @Timeout(value = 10, unit = TimeUnit.SECONDS)
-    void capacityBlockInvalidatesAnUnfinishedProjectionCapture() throws Exception {
+    void capacityBlockInvalidatesAnUnfinishedEstimateCapture() throws Exception {
         FlexlbConfig config = singleConfig();
         PrefillEndpoint endpoint = stableEndpoint(stableStatus());
         EstimateCacheBlock delivery = new EstimateCacheBlock();
@@ -501,14 +501,14 @@ class PrefillQueueSchedulingTest {
             }
             return transaction;
         });
-        EndpointEventProjector projector = mock(EndpointEventProjector.class);
+        EndpointEventHandler eventHandler = mock(EndpointEventHandler.class);
         PrefillQueue runtime = new PrefillQueue(
-                "retired-commit", endpoint, () -> config, delivery, mock(PrefillTtftEstimator.class), projector, new QueueCapacity());
+                "retired-commit", endpoint, () -> config, delivery, mock(PrefillTtftEstimator.class), eventHandler, new QueueCapacity());
         runtimes.add(runtime);
         runtime.start();
 
         assertEquals(ACCEPTED, runtime.offerWithResult(retiredItem));
-        org.mockito.Mockito.verify(projector, org.mockito.Mockito.timeout(5000)).onPreparedDeliveryFailure(
+        org.mockito.Mockito.verify(eventHandler, org.mockito.Mockito.timeout(5000)).onPreparedDeliveryFailure(
                 org.mockito.ArgumentMatchers.eq(retiredItem),
                 org.mockito.ArgumentMatchers.isA(EndpointRetiredException.class));
 
@@ -517,13 +517,13 @@ class PrefillQueueSchedulingTest {
     }
 
     @Test
-    void windowUpdateInvalidatesProjectionWithoutQueueMutation() {
+    void windowUpdateInvalidatesEstimateWithoutQueueMutation() {
         FlexlbConfig initial = fixedConfig();
         initial.decisionPolicy().setMaxCollectionWaitMs(100L);
         AtomicReference<FlexlbConfig> current = new AtomicReference<>(initial);
-        PrefillQueue runtime = new PrefillQueue("hot-window-projection", stableEndpoint(stableStatus()),
+        PrefillQueue runtime = new PrefillQueue("hot-window-estimate", stableEndpoint(stableStatus()),
                 current::get, mock(DeliveryStrategy.class), mock(PrefillTtftEstimator.class),
-                mock(EndpointEventProjector.class), new QueueCapacity());
+                mock(EndpointEventHandler.class), new QueueCapacity());
         runtimes.add(runtime);
         runtime.start();
 
@@ -554,7 +554,7 @@ class PrefillQueueSchedulingTest {
         PrefillEndpoint endpoint = stableEndpoint(stableStatus());
         EventDrivenBlock delivery = new EventDrivenBlock();
         PrefillQueue runtime = new PrefillQueue("hot-window-delivery", endpoint, current::get, delivery, delivery,
-                mock(EndpointEventProjector.class), new QueueCapacity());
+                mock(EndpointEventHandler.class), new QueueCapacity());
         runtimes.add(runtime);
         runtime.start();
 
@@ -582,7 +582,7 @@ class PrefillQueueSchedulingTest {
                                          PrefillTtftEstimator estimator) {
         PrefillQueue runtime = new PrefillQueue(
                 "scheduling-test", endpoint, () -> config, delivery, estimator,
-                mock(EndpointEventProjector.class), new QueueCapacity());
+                mock(EndpointEventHandler.class), new QueueCapacity());
         runtimes.add(runtime);
         runtime.start();
         return runtime;

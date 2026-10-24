@@ -170,7 +170,7 @@ class EndpointCleanupDeadlockTest {
             if (kind.startsWith("decode")) {
                 var endpoint = spy(new DecodeEndpoint(WorkerStatus.createDiscovered(
                         RoleType.DECODE, null, "127.0.0.1", 8080, 8081, null),
-                        mock(EndpointEventProjector.class)));
+                        mock(EndpointEventHandler.class)));
                 DecodeEndpoint.ReservationHandle reservation;
                 try (var pin = endpoint.tryPinGeneration()) {
                     assertNotNull(pin);

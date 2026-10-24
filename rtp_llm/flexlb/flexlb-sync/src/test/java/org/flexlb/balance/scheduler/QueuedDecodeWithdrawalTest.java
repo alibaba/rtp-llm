@@ -64,7 +64,7 @@ class QueuedDecodeWithdrawalTest {
         when(queue.requeue(any())).thenReturn(true);
         registry.attachGlobalQueue(queue);
         decode = new DecodeEndpoint(WorkerStatus.createDiscovered(RoleType.DECODE, null,
-                "127.0.0.1", 8000, 8001, null), mock(EndpointEventProjector.class));
+                "127.0.0.1", 8000, 8001, null), mock(EndpointEventHandler.class));
     }
 
     @AfterEach
@@ -105,7 +105,7 @@ class QueuedDecodeWithdrawalTest {
         decode.close();
         WorkerStatus status = WorkerStatus.createDiscovered(RoleType.DECODE, null,
                 "127.0.0.1", 8000, 8001, null);
-        decode = new DecodeEndpoint(status, new EndpointEventProjector(registry));
+        decode = new DecodeEndpoint(status, new EndpointEventHandler(registry));
         applyStatus(Map.of(), Map.of());
         var item = queued(42);
         var slot = registry.requestSlot("42");
@@ -143,14 +143,14 @@ class QueuedDecodeWithdrawalTest {
         response.setFinishedTaskInfo(finished);
         response.setStatusVersion(Math.max(1, status.appliedStatusCursor().statusVersion() + 1));
         response.setLatestFinishedVersion(Math.max(0, status.appliedStatusCursor().latestFinishedTaskVersion()) + finished.size());
-        Runnable projection;
+        Runnable statusNotifier;
         status.lock.lock();
         try {
-            projection = decode.applyPreparedStatus(status, status.prepareNewStatus(status.freezeStatusResponse(response)));
+            statusNotifier = decode.applyPreparedStatus(status, status.prepareNewStatus(status.freezeStatusResponse(response)));
         } finally {
             status.lock.unlock();
         }
-        projection.run();
+        statusNotifier.run();
     }
 
     @Test
@@ -259,8 +259,8 @@ class QueuedDecodeWithdrawalTest {
             return true;
         }).when(queue).requeue(item);
 
-        registry.projectDecodeRetirementReservation(decode, item.decodeReservation());
-        registry.projectDecodeRetirementReservation(decode, item.decodeReservation());
+        registry.applyDecodeRetirementReservation(decode, item.decodeReservation());
+        registry.applyDecodeRetirementReservation(decode, item.decodeReservation());
 
         verify(queue, org.mockito.Mockito.times(1)).requeue(item);
         assertEquals(RequestState.Phase.QUEUED, registry.getRequestState("26", 0).state());
@@ -273,7 +273,7 @@ class QueuedDecodeWithdrawalTest {
         var claim = slot.claimDelivery(item, DeliveryClaimKind.ROUTE_DECISION, 0L, () -> true);
         assertNotNull(claim);
 
-        registry.projectDecodeRetirementReservation(decode, item.decodeReservation());
+        registry.applyDecodeRetirementReservation(decode, item.decodeReservation());
 
         assertFalse(item.future().isDone());
         verify(queue, never()).requeue(any());
@@ -288,8 +288,8 @@ class QueuedDecodeWithdrawalTest {
     @Test
     void decodeRetirementDuringPublicationWaitsForAdmissionToClose() {
         var item = queued(27, publishing -> {
-            registry.projectDecodeRetirementReservation(decode, publishing.decodeReservation());
-            registry.projectDecodeRetirementReservation(decode, publishing.decodeReservation());
+            registry.applyDecodeRetirementReservation(decode, publishing.decodeReservation());
+            registry.applyDecodeRetirementReservation(decode, publishing.decodeReservation());
             assertNull(registry.requestSlot("27").claimDelivery(publishing,
                     DeliveryClaimKind.BATCH_ENQUEUE, 1L, () -> {
                         throw new AssertionError("retired Decode must not receive the route");
@@ -307,11 +307,11 @@ class QueuedDecodeWithdrawalTest {
     void bothEndpointRetirementsDuringPublicationUseOnePendingRequeue(boolean decodeFirst) {
         var item = queued(33, publishing -> {
             if (decodeFirst) {
-                registry.projectDecodeRetirementReservation(decode, publishing.decodeReservation());
+                registry.applyDecodeRetirementReservation(decode, publishing.decodeReservation());
                 registry.onQueuedWorkerStopped(publishing);
             } else {
                 registry.onQueuedWorkerStopped(publishing);
-                registry.projectDecodeRetirementReservation(decode, publishing.decodeReservation());
+                registry.applyDecodeRetirementReservation(decode, publishing.decodeReservation());
             }
             verify(queue, never()).requeue(any());
         });
@@ -326,7 +326,7 @@ class QueuedDecodeWithdrawalTest {
     @EnumSource(value = CancelReason.class, names = {"CLIENT_CANCELLED", "DEADLINE_EXCEEDED"})
     void cancellationWinsOverDeferredDecodeRequeue(CancelReason reason) throws Exception {
         var item = queued(28, publishing -> {
-            registry.projectDecodeRetirementReservation(decode, publishing.decodeReservation());
+            registry.applyDecodeRetirementReservation(decode, publishing.decodeReservation());
             registry.cancelRequest("28", 0, reason);
         });
         assertFalse(item.future().get(2, TimeUnit.SECONDS).isSuccess());
@@ -377,7 +377,7 @@ class QueuedDecodeWithdrawalTest {
     void decodeRetirementAfterDeliveryHandoffDoesNotRequeue() throws Exception {
         var item = queued(31);
         assertNotNull(registry.requestSlot("31").claimDelivery(item, DeliveryClaimKind.BATCH_ENQUEUE, 1L, () -> true));
-        registry.projectDecodeRetirementReservation(decode, item.decodeReservation());
+        registry.applyDecodeRetirementReservation(decode, item.decodeReservation());
         verify(queue, never()).requeue(any());
         assertFalse(item.future().get(2, TimeUnit.SECONDS).isSuccess());
     }
@@ -386,7 +386,7 @@ class QueuedDecodeWithdrawalTest {
     void closedQueueEndsDecodeRetirementRequeue() throws Exception {
         var item = queued(32);
         when(queue.requeue(item)).thenReturn(false);
-        registry.projectDecodeRetirementReservation(decode, item.decodeReservation());
+        registry.applyDecodeRetirementReservation(decode, item.decodeReservation());
         assertFalse(item.future().get(2, TimeUnit.SECONDS).isSuccess());
         assertNull(decode.reservationHandle("32"));
         assertNull(registry.requestSlot("32").activeItem());

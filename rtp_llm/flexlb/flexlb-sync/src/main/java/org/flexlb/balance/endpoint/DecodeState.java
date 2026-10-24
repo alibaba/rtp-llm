@@ -809,11 +809,11 @@ final class DecodeState {
                 }
                 released = released.plus(held.capacityRelease());
             }
-            if (projectedEvictionCapacityFitsLocked(
+            if (evictionCapacityFitsAfterReleaseLocked(
                     capacity, kvTokens, kvBudgetTokens, CapacityRelease.NONE)) {
                 return false;
             }
-            if (!projectedEvictionCapacityFitsLocked(
+            if (!evictionCapacityFitsAfterReleaseLocked(
                     capacity, kvTokens, kvBudgetTokens, released)) {
                 return false;
             }
@@ -837,7 +837,7 @@ final class DecodeState {
         }
     }
 
-    private boolean projectedEvictionCapacityFitsLocked(
+    private boolean evictionCapacityFitsAfterReleaseLocked(
             AdmissionCapacity capacity, long requiredKvTokens, long kvBudgetTokens, CapacityRelease released) {
         return capacity.evaluate(routingViewLocked().placementUsage(), requiredKvTokens, kvBudgetTokens, released).fits();
     }
@@ -907,12 +907,12 @@ final class DecodeState {
                 }
                 released = released.plus(request.capacityRelease());
             }
-            if (projectedEvictionCapacityFitsLocked(
+            if (evictionCapacityFitsAfterReleaseLocked(
                     capacity, incomingKvTokens, incomingKvBudgetTokens,
                     CapacityRelease.NONE)) {
                 return PreemptionBeginResult.INFEASIBLE;
             }
-            if (!projectedEvictionCapacityFitsLocked(
+            if (!evictionCapacityFitsAfterReleaseLocked(
                     capacity, incomingKvTokens, incomingKvBudgetTokens, released)) {
                 return PreemptionBeginResult.INFEASIBLE;
             }

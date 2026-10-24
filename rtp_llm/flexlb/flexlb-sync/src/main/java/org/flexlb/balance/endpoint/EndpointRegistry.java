@@ -2,7 +2,7 @@ package org.flexlb.balance.endpoint;
 
 import org.flexlb.balance.delivery.DeliveryStrategy;
 import org.flexlb.balance.estimate.PrefillTtftEstimator;
-import org.flexlb.balance.scheduler.EndpointEventProjector;
+import org.flexlb.balance.scheduler.EndpointEventHandler;
 import org.flexlb.balance.scheduler.PlacementAvailability;
 import org.flexlb.balance.scheduler.QueueCapacity;
 import org.flexlb.config.ConfigService;
@@ -37,7 +37,7 @@ public class EndpointRegistry {
     /** Result of publishing a fully initialized endpoint generation. */
     public record EndpointPublication(
             WorkerEndpoint endpoint,
-            Runnable statusProjection) {
+            Runnable statusNotifier) {
     }
 
     /**
@@ -123,7 +123,7 @@ public class EndpointRegistry {
     private volatile List<Map.Entry<String, DecodeEndpoint>> decodeDirectory =
             List.of();
     private final ConfigService configService;
-    private final EndpointEventProjector endpointEvents;
+    private final EndpointEventHandler endpointEvents;
     private final BatchSchedulerReporter reporter;
     private final DeliveryStrategy deliveryStrategy;
     private final PrefillTtftEstimator ttftEstimator;
@@ -156,7 +156,7 @@ public class EndpointRegistry {
 
     @Autowired
     public EndpointRegistry(ConfigService configService,
-                            EndpointEventProjector endpointEvents,
+                            EndpointEventHandler endpointEvents,
                             BatchSchedulerReporter reporter,
                             DeliveryStrategy deliveryStrategy,
                             PrefillTtftEstimator ttftEstimator,
@@ -375,10 +375,10 @@ public class EndpointRegistry {
             EndpointPublication publication;
             try {
                 candidate = createEndpoint(status, role);
-                Runnable projection = candidate.initializeFromPreparedStatus(
+                Runnable statusNotifier = candidate.initializeFromPreparedStatus(
                         status, observation);
                 publication = new EndpointPublication(
-                        candidate, projection);
+                        candidate, statusNotifier);
                 startCandidate(candidate);
                 status.publishPreparedStatus(prepared);
             } catch (Throwable reductionOrCommitFailure) {

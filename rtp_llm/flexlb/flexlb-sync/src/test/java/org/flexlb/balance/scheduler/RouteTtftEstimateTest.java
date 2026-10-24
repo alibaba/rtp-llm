@@ -201,7 +201,7 @@ class RouteTtftEstimateTest {
     }
 
     @Test
-    void batchProjectionStopsAtProbeCompletion() {
+    void batchEstimateStopsAtProbeCompletion() {
         List<GroupPlanner.Item> active = List.of(
                 item(1L, 100, 1L, 10L),
                 item(2L, 10, 2L, 100L));
@@ -216,7 +216,7 @@ class RouteTtftEstimateTest {
     }
 
     @Test
-    void routeProjectionStopsAtProbeCompletion() {
+    void routeEstimateStopsAtProbeCompletion() {
         List<GroupPlanner.Item> active = List.of(
                 item(1L, 100, 1L, 10L),
                 item(2L, 10, 2L, 100L));
@@ -528,7 +528,7 @@ class RouteTtftEstimateTest {
     }
 
     @Test
-    void singletonProjectionEvaluatesOneFrozenPredictorOnce() {
+    void singletonEstimateEvaluatesOneFrozenPredictorOnce() {
         AtomicInteger singleCalls = new AtomicInteger();
         AtomicInteger batchCalls = new AtomicInteger();
         PrefillTimePredictor.Evaluator evaluator = evaluator(
@@ -556,11 +556,11 @@ class RouteTtftEstimateTest {
         assertEquals(OptionalLong.of(20L), result.estimatedTtftMs());
         assertEquals(1, singleCalls.get());
         assertEquals(1, batchCalls.get(),
-                "singleton projection evaluates one frozen predictor exactly once");
+                "singleton estimate evaluates one frozen predictor exactly once");
     }
 
     @Test
-    void singletonProjectionReusesAnIdenticalModelAcrossEndpoints() {
+    void singletonEstimateReusesAnIdenticalModelAcrossEndpoints() {
         Object sharedSnapshot = new Object();
         AtomicInteger singleCalls = new AtomicInteger();
         AtomicInteger batchCalls = new AtomicInteger();

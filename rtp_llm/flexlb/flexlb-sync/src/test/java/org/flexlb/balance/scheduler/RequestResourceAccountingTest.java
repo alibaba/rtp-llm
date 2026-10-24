@@ -119,7 +119,7 @@ class RequestResourceAccountingTest {
     }
 
     @Test
-    void localRollbackCannotReleaseAnEngineOwnerWhoseProjectionHasNotArrived() throws Exception {
+    void localRollbackCannotReleaseAnEngineOwnerWhoseEstimateHasNotArrived() throws Exception {
         try (Fixture f = new Fixture()) {
             var acquisition = f.decode.acquireDispatchPermit(f.reservation, f.capacity);
             assertEquals(DecodeEndpoint.EngineDispatchPermitAcquireStatus.ACQUIRED, acquisition.status());
@@ -262,9 +262,9 @@ class RequestResourceAccountingTest {
             var reporter = mock(BatchSchedulerReporter.class);
             var requestReporter = mock(RequestSchedulerReporter.class);
             requests = new RequestRegistry(service, reporter, requestReporter);
-            var projector = new EndpointEventProjector(requests);
+            var eventHandler = new EndpointEventHandler(requests);
             var queueCapacity = new QueueCapacity();
-            var endpoints = new EndpointRegistry(service, projector, reporter,
+            var endpoints = new EndpointRegistry(service, eventHandler, reporter,
                     new NonBatchDeliveryStrategy(requests, new DeliveryMetrics(reporter)),
                     new NonBatchTtftEstimator(),
                     new PlacementAvailability(), queueCapacity);
@@ -276,7 +276,7 @@ class RequestResourceAccountingTest {
                 prefill = (PrefillEndpoint) endpoints.publishPreparedEndpoint(worker.getIpPort(), worker,
                         worker.prepareNewStatus(worker.freezeStatusResponse(status(RoleType.PREFILL, 1, Map.of(), Map.of(), TOTAL_KV)))).endpoint();
             } finally { worker.lock.unlock(); }
-            decode = new DecodeEndpoint(WorkerStatus.createDiscovered(RoleType.DECODE, "g", "127.0.0.2", 8080, 8081, "test"), projector);
+            decode = new DecodeEndpoint(WorkerStatus.createDiscovered(RoleType.DECODE, "g", "127.0.0.2", 8080, 8081, "test"), eventHandler);
             decodeStatus(Map.of(), Map.of(), TOTAL_KV);
             try (var pin = decode.tryPinGeneration()) {
                 reservation = decode.reserve(pin, ID, HARD_KV, EXPECTED_KV, 50);
@@ -412,10 +412,10 @@ class RequestResourceAccountingTest {
 
     private static void applyStatus(WorkerEndpoint endpoint, WorkerStatusResponse response) {
         var worker = endpoint.getStatus();
-        Runnable projection;
+        Runnable statusNotifier;
         worker.lock.lock();
-        try { projection = endpoint.applyPreparedStatus(worker, worker.prepareNewStatus(worker.freezeStatusResponse(response))); }
+        try { statusNotifier = endpoint.applyPreparedStatus(worker, worker.prepareNewStatus(worker.freezeStatusResponse(response))); }
         finally { worker.lock.unlock(); }
-        projection.run();
+        statusNotifier.run();
     }
 }

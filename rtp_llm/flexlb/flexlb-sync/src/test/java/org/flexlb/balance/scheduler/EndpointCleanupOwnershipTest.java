@@ -64,7 +64,7 @@ class EndpointCleanupOwnershipTest {
         String id = "7001";
         registry.register(RequestLifecycleTestSupport.context(config, id));
         var endpoint = new DecodeEndpoint(WorkerStatus.createDiscovered(
-                RoleType.DECODE, null, "127.0.0.1", 8080, 8081, null), mock(EndpointEventProjector.class));
+                RoleType.DECODE, null, "127.0.0.1", 8080, 8081, null), mock(EndpointEventHandler.class));
         try (var pin = endpoint.tryPinGeneration()) {
             assertNotNull(pin);
             assertNotNull(endpoint.reserveUnqueued(pin, id, 1L, 1L, 50));
@@ -100,7 +100,7 @@ class EndpointCleanupOwnershipTest {
     void registrationAfterAbsentCheckAcquiresFreshReservation(boolean confirmed) throws Exception {
         String id = "7003";
         var endpoint = new DecodeEndpoint(WorkerStatus.createDiscovered(
-                RoleType.DECODE, null, "127.0.0.1", 8080, 8081, null), mock(EndpointEventProjector.class));
+                RoleType.DECODE, null, "127.0.0.1", 8080, 8081, null), mock(EndpointEventHandler.class));
         var oldReservation = reserve(endpoint, id, 100L, 150L);
         if (confirmed) {
             EndpointCleanupTestSupport.confirmDecode(endpoint, id);
@@ -214,7 +214,7 @@ class EndpointCleanupOwnershipTest {
         String id = "7005";
         registry.register(RequestLifecycleTestSupport.context(config, id));
         var endpoint = new DecodeEndpoint(WorkerStatus.createDiscovered(
-                RoleType.DECODE, null, "127.0.0.1", 8080, 8081, null), mock(EndpointEventProjector.class));
+                RoleType.DECODE, null, "127.0.0.1", 8080, 8081, null), mock(EndpointEventHandler.class));
         var reservation = reserve(endpoint, id, 100L, 150L);
         EndpointCleanupTestSupport.confirmDecode(endpoint, id);
         assertEquals(0, endpoint.evictExpiredRequests(-1L, registry::retainForSchedulerCleanup));

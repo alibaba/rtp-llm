@@ -35,7 +35,7 @@ class PrefillQueueStatusSnapshotTest {
                 "snapshot-test", endpoint, config,
                 mock(DeliveryStrategy.class),
                 mock(PrefillTtftEstimator.class),
-                mock(EndpointEventProjector.class), new QueueCapacity());
+                mock(EndpointEventHandler.class), new QueueCapacity());
 
         assertEquals(2_097_152L, runtime.captureLoadView()
                 .queue().constraints().batchTokenCapacity());
@@ -57,14 +57,14 @@ class PrefillQueueStatusSnapshotTest {
                 "snapshot-test", endpoint, org.flexlb.balance.scheduler.SchedulingTestConfig.newConfig(),
                 mock(DeliveryStrategy.class),
                 mock(PrefillTtftEstimator.class),
-                mock(EndpointEventProjector.class), new QueueCapacity());
+                mock(EndpointEventHandler.class), new QueueCapacity());
 
         assertEquals(150L, runtime.captureLoadView()
                 .queue().constraints().batchTokenCapacity());
     }
 
     @Test
-    void batchTokenProjectionUsesOneCoherentEngineObservation() {
+    void batchTokenEstimateUsesOneCoherentEngineObservation() {
         WorkerStatusResponse first = statusResponse(
                 700L, 600L, 1_000L, 1L);
         WorkerStatusResponse second = statusResponse(
@@ -93,7 +93,7 @@ class PrefillQueueStatusSnapshotTest {
                 org.flexlb.balance.scheduler.SchedulingTestConfig.newConfig(),
                 mock(DeliveryStrategy.class),
                 mock(PrefillTtftEstimator.class),
-                mock(EndpointEventProjector.class), new QueueCapacity());
+                mock(EndpointEventHandler.class), new QueueCapacity());
 
         GroupPlanner.Constraints capacity = runtime
                 .captureLoadView().queue().constraints();

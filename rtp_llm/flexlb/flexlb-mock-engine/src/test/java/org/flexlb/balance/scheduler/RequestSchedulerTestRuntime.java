@@ -39,7 +39,7 @@ import java.util.function.Supplier;
 public final class RequestSchedulerTestRuntime implements AutoCloseable {
 
     private final RequestRegistry lifecycle;
-    private final EndpointEventProjector endpointEvents;
+    private final EndpointEventHandler endpointEvents;
     private final PlacementAvailability placementAvailability =
             new PlacementAvailability();
     private final QueueCapacity queueCapacity = new QueueCapacity();
@@ -61,7 +61,7 @@ public final class RequestSchedulerTestRuntime implements AutoCloseable {
                 prepareBatchSubmission, "prepareBatchSubmission");
         this.lifecycle = new RequestRegistry(
                 configService, batchReporter, requestReporter);
-        this.endpointEvents = new EndpointEventProjector(lifecycle);
+        this.endpointEvents = new EndpointEventHandler(lifecycle);
         AtomicLong batchIds = new AtomicLong();
         DeliveryMetrics deliveryMetrics = new DeliveryMetrics(batchReporter);
         DeliveryStrategy delivery = configService.loadBalanceConfig().getDispatcher().requiresGenerateInput()
@@ -170,7 +170,7 @@ public final class RequestSchedulerTestRuntime implements AutoCloseable {
                             + status.getIpPort() + "#" + status.getGenerationId());
         }
 
-        Runnable projection;
+        Runnable statusNotifier;
         status.lock.lock();
         try {
             long responseVersion = Objects.requireNonNull(
@@ -184,16 +184,16 @@ public final class RequestSchedulerTestRuntime implements AutoCloseable {
             WorkerStatus.StatusObservation observation =
                     status.freezeStatusResponse(response);
             if (responseVersion == committedVersion) {
-                projection = endpoint.observeStatusHeartbeat(status, observation);
+                statusNotifier = endpoint.observeStatusHeartbeat(status, observation);
             } else {
                 WorkerStatus.PreparedStatus prepared =
                         status.prepareNewStatus(observation);
-                projection = endpoint.applyPreparedStatus(status, prepared);
+                statusNotifier = endpoint.applyPreparedStatus(status, prepared);
             }
         } finally {
             status.lock.unlock();
         }
-        projection.run();
+        statusNotifier.run();
     }
 
     private static SelectedRole select(

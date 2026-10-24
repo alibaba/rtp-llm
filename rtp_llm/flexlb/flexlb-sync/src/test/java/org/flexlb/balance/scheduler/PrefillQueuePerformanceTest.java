@@ -123,7 +123,7 @@ class PrefillQueuePerformanceTest {
 
     @Test
     @Timeout(value = 30, unit = TimeUnit.SECONDS)
-    void immutableProjectionCaptureRemainsBoundedAtDeepQueueDepth()
+    void immutableEstimateCaptureRemainsBoundedAtDeepQueueDepth()
             throws Exception {
         int operations = Integer.getInteger(
                 "flexlb.perf.queue-capture.operations-per-round", 500);
@@ -227,7 +227,7 @@ class PrefillQueuePerformanceTest {
                 config,
                 delivery,
                 delivery,
-                mock(EndpointEventProjector.class), new QueueCapacity());
+                mock(EndpointEventHandler.class), new QueueCapacity());
         runtime.start();
         long now = System.currentTimeMillis();
         List<ScheduledRequest> items = new ArrayList<>(depth);

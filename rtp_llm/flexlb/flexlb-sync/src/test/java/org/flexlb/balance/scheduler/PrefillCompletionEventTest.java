@@ -34,10 +34,10 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
 /** Prefill status must carry stage completion through the real endpoint and slot reducers. */
-class PrefillCompletionProjectionTest {
+class PrefillCompletionEventTest {
     @ParameterizedTest
     @ValueSource(booleans = {false, true})
-    void successfulPrefillCompletionReleasesTokensAndProjectsHandoffEvidence(boolean decodeAlreadyAccepted)
+    void successfulPrefillCompletionReleasesTokensAndRecordsHandoffEvidence(boolean decodeAlreadyAccepted)
             throws Exception {
         var config = SchedulingTestConfig.newConfig();
         SchedulingTestConfig.useNonBatchDispatcher(config);
@@ -46,9 +46,9 @@ class PrefillCompletionProjectionTest {
         var reporter = mock(BatchSchedulerReporter.class);
         var requestReporter = mock(RequestSchedulerReporter.class);
         var requests = new RequestRegistry(service, reporter, requestReporter);
-        var projector = new EndpointEventProjector(requests);
+        var eventHandler = new EndpointEventHandler(requests);
         var queueCapacity = new QueueCapacity();
-        var endpoints = new EndpointRegistry(service, projector, reporter,
+        var endpoints = new EndpointRegistry(service, eventHandler, reporter,
                 new NonBatchDeliveryStrategy(requests, new DeliveryMetrics(reporter)),
                 new NonBatchTtftEstimator(),
                 new PlacementAvailability(), queueCapacity);
@@ -68,7 +68,7 @@ class PrefillCompletionProjectionTest {
             }
             WorkerStatus decodeWorker = WorkerStatus.createDiscovered(
                     RoleType.DECODE, "g1", "127.0.0.2", 8080, 8081, "test");
-            DecodeEndpoint decode = new DecodeEndpoint(decodeWorker, projector);
+            DecodeEndpoint decode = new DecodeEndpoint(decodeWorker, eventHandler);
             applyStatus(decode, decodeStatus(1L, Map.of()));
             DecodeEndpoint.ReservationHandle reservation;
             var capacity = new DecodeEndpoint.AdmissionCapacity(10L, 90L);
@@ -171,14 +171,14 @@ class PrefillCompletionProjectionTest {
 
     private static void applyStatus(WorkerEndpoint endpoint, WorkerStatusResponse response) {
         WorkerStatus worker = endpoint.getStatus();
-        Runnable projection;
+        Runnable statusNotifier;
         worker.lock.lock();
         try {
-            projection = endpoint.applyPreparedStatus(worker,
+            statusNotifier = endpoint.applyPreparedStatus(worker,
                     worker.prepareNewStatus(worker.freezeStatusResponse(response)));
         } finally {
             worker.lock.unlock();
         }
-        projection.run();
+        statusNotifier.run();
     }
 }

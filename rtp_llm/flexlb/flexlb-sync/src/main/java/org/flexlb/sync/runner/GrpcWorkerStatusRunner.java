@@ -23,7 +23,7 @@ import static org.flexlb.constant.CommonConstants.DEADLINE_EXCEEDED_MESSAGE;
 public class GrpcWorkerStatusRunner implements Runnable {
 
     private static final Logger logger = LoggerFactory.getLogger("syncLogger");
-    private static final Runnable NO_STATUS_PROJECTION = () -> { };
+    private static final Runnable NO_STATUS_NOTIFIER = () -> { };
 
     private final String ipPort;
     private final String modelName;
@@ -162,8 +162,8 @@ public class GrpcWorkerStatusRunner implements Runnable {
             WorkerEndpoint ep;
             WorkerStatus.StepMetrics previousStep;
             WorkerStatus.StatusObservation committedObservation;
-            Runnable statusProjection = NO_STATUS_PROJECTION;
-            Runnable activityProjection = NO_STATUS_PROJECTION;
+            Runnable statusNotifier = NO_STATUS_NOTIFIER;
+            Runnable activityNotifier = NO_STATUS_NOTIFIER;
             EndpointRegistry.DetachedGeneration endpointToRetire = null;
             boolean generationRetiring = false;
             workerStatus.lock.lock();
@@ -235,7 +235,7 @@ public class GrpcWorkerStatusRunner implements Runnable {
                         EndpointRegistry.EndpointPublication application =
                                 applyNewStatusVersion(prepared, exactEndpoint);
                         ep = application.endpoint();
-                        statusProjection = application.statusProjection();
+                        statusNotifier = application.statusNotifier();
                     } catch (Throwable reductionOrPublicationFailure) {
                         endpointToRetire = workerDirectory.beginRetirement(
                                 roleType, ipPort, workerStatus);
@@ -270,14 +270,14 @@ public class GrpcWorkerStatusRunner implements Runnable {
                     // running_tasks is a full active snapshot even when its
                     // status_version is unchanged. Derive exact endpoint-owned
                     // liveness facts without replaying versioned mutation.
-                    activityProjection = ep.observeStatusHeartbeat(
+                    activityNotifier = ep.observeStatusHeartbeat(
                             workerStatus, observation);
                 }
             } finally {
                 workerStatus.lock.unlock();
                 try {
-                    statusProjection.run();
-                    activityProjection.run();
+                    statusNotifier.run();
+                    activityNotifier.run();
                 } finally {
                     if (generationRetiring) {
                         workerDirectory.completeRetirement(
@@ -308,17 +308,17 @@ public class GrpcWorkerStatusRunner implements Runnable {
             WorkerEndpoint exactEndpoint) {
         WorkerStatus.StatusObservation observation = prepared.observation();
         if (exactEndpoint != null) {
-            Runnable projection =
+            Runnable statusNotifier =
                     exactEndpoint.applyPreparedStatus(workerStatus, prepared);
             return new EndpointRegistry.EndpointPublication(
                     observation.alive() ? exactEndpoint : null,
-                    projection);
+                    statusNotifier);
         }
 
         if (!observation.alive()) {
             workerStatus.publishPreparedStatus(prepared);
             return new EndpointRegistry.EndpointPublication(
-                    null, NO_STATUS_PROJECTION);
+                    null, NO_STATUS_NOTIFIER);
         }
 
         // Only the first committed status of this WorkerStatus generation may

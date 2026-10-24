@@ -1,6 +1,6 @@
 package org.flexlb.balance.endpoint;
 
-import org.flexlb.balance.scheduler.EndpointEventProjector;
+import org.flexlb.balance.scheduler.EndpointEventHandler;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
 import org.junit.jupiter.api.Test;
@@ -26,7 +26,7 @@ class EncoderEndpointTest {
     @Test
     @SuppressWarnings("unchecked")
     void retirementWaitsForRegistrationAlreadyInsideTheGenerationGate() throws Exception {
-        EndpointEventProjector events = mock(EndpointEventProjector.class);
+        EndpointEventHandler events = mock(EndpointEventHandler.class);
         EncoderEndpoint endpoint = endpoint(events);
         assertTrue(endpoint.trackSelectedRequest("Aa", 10));
         ConcurrentMap<String, Object> requests = (ConcurrentMap<String, Object>)
@@ -87,7 +87,7 @@ class EncoderEndpointTest {
 
     @Test
     void closingSeveralPendingRequestsNotifiesCapacityOnce() {
-        EndpointEventProjector events = mock(EndpointEventProjector.class);
+        EndpointEventHandler events = mock(EndpointEventHandler.class);
         EncoderEndpoint endpoint = endpoint(events);
         assertTrue(endpoint.trackSelectedRequest("request-1", 10));
         assertTrue(endpoint.trackSelectedRequest("request-2", 20));
@@ -101,7 +101,7 @@ class EncoderEndpointTest {
         verify(events).onEncoderCapacityChanged();
     }
 
-    private static EncoderEndpoint endpoint(EndpointEventProjector events) {
+    private static EncoderEndpoint endpoint(EndpointEventHandler events) {
         return new EncoderEndpoint(WorkerStatus.createDiscovered(
                 RoleType.ENCODER, "default", "127.0.0.1", 8001, 8002, ""), events);
     }

@@ -18,7 +18,7 @@ import java.util.concurrent.atomic.AtomicLong;
  */
 public class WorkerEndpoint {
 
-    private static final Runnable NO_STATUS_PROJECTION = () -> { };
+    private static final Runnable NO_STATUS_NOTIFIER = () -> { };
 
     private static final AtomicLong RETIREMENT_THREAD_SEQUENCE =
             new AtomicLong();
@@ -84,7 +84,7 @@ public class WorkerEndpoint {
             beginRetirement();
         }
         ws.publishPreparedStatus(prepared);
-        return NO_STATUS_PROJECTION;
+        return NO_STATUS_NOTIFIER;
     }
 
     /**
@@ -96,7 +96,7 @@ public class WorkerEndpoint {
             WorkerStatus ws,
             WorkerStatus.StatusObservation observation) {
         requireStatusGeneration(ws);
-        return NO_STATUS_PROJECTION;
+        return NO_STATUS_NOTIFIER;
     }
 
     /**
@@ -111,7 +111,7 @@ public class WorkerEndpoint {
             throw new IllegalArgumentException(
                     "Status observation belongs to another WorkerStatus generation");
         }
-        return NO_STATUS_PROJECTION;
+        return NO_STATUS_NOTIFIER;
     }
 
     protected final void requireStatusGeneration(WorkerStatus ws) {

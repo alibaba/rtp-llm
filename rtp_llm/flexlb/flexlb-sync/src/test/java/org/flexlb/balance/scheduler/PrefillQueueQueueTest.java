@@ -169,8 +169,8 @@ class PrefillQueueQueueTest {
     }
 
     @Test
-    void stoppingQueueProjectsUndispatchedItemsForRequeueExactlyOnce() {
-        EndpointEventProjector events = mock(EndpointEventProjector.class);
+    void stoppingQueueReturnsUndispatchedItemsForRequeueExactlyOnce() {
+        EndpointEventHandler events = mock(EndpointEventHandler.class);
         PrefillQueue runtime = new PrefillQueue("test-worker", prefillEndpoint, config, deliveryStrategy, deliveryStrategy, events,
                 new QueueCapacity());
         runtimes.add(runtime);
@@ -192,7 +192,7 @@ class PrefillQueueQueueTest {
                 () -> config,
                 deliveryStrategy,
                 deliveryStrategy,
-                mock(EndpointEventProjector.class), new QueueCapacity());
+                mock(EndpointEventHandler.class), new QueueCapacity());
         runtimes.add(runtime);
         runtime.start();
         return runtime;

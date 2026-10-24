@@ -367,7 +367,7 @@ class EncoderSchedulingIntegrationTest {
         when(engine.runningTaskList()).thenReturn(tasks);
         when(engine.runningQueryLen()).thenReturn(running);
         when(engine.waitingQueryLen()).thenReturn(waiting);
-        EncoderEndpoint endpoint = new EncoderEndpoint(status, new EndpointEventProjector(requests));
+        EncoderEndpoint endpoint = new EncoderEndpoint(status, new EndpointEventHandler(requests));
         when(directory.captureEndpoint(eq(RoleType.ENCODER), eq(ip)))
                 .thenAnswer(invocation -> endpoint.tryPinGeneration());
         return endpoint;

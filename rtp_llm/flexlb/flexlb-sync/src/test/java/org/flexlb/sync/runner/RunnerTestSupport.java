@@ -4,7 +4,7 @@ import org.flexlb.balance.delivery.DeliveryStrategy;
 import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.endpoint.WorkerEndpoint;
 import org.flexlb.balance.estimate.NonBatchTtftEstimator;
-import org.flexlb.balance.scheduler.EndpointEventProjector;
+import org.flexlb.balance.scheduler.EndpointEventHandler;
 import org.flexlb.balance.scheduler.PlacementAvailability;
 import org.flexlb.balance.scheduler.QueueCapacity;
 import org.flexlb.config.ConfigService;
@@ -20,13 +20,13 @@ import java.util.Map;
 /** Package-local fixtures for the frozen status/endpoint composition boundary. */
 public final class RunnerTestSupport {
 
-    private static final EndpointEventProjector NOOP_EVENT_SINK =
-            Mockito.mock(EndpointEventProjector.class);
+    private static final EndpointEventHandler NOOP_EVENT_SINK =
+            Mockito.mock(EndpointEventHandler.class);
 
     private RunnerTestSupport() {
     }
 
-    public static EndpointEventProjector eventSink() {
+    public static EndpointEventHandler eventSink() {
         return NOOP_EVENT_SINK;
     }
 

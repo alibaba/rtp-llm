@@ -12,16 +12,16 @@ import org.springframework.stereotype.Component;
 import java.util.List;
 
 /**
- * Total projection boundary from endpoint-owned facts into exact RequestSlot
+ * Total entry point from endpoint-owned facts into exact RequestSlot
  * transitions. Endpoint accounting is already committed before this class is
  * called; stale generations are legal no-ops and are never queued for replay.
  */
 @Component
-public final class EndpointEventProjector {
+public final class EndpointEventHandler {
 
     private final RequestRegistry scheduler;
 
-    public EndpointEventProjector(RequestRegistry scheduler) {
+    public EndpointEventHandler(RequestRegistry scheduler) {
         this.scheduler = scheduler;
     }
 
@@ -29,13 +29,13 @@ public final class EndpointEventProjector {
             PrefillEndpoint source,
             RoleType role,
             List<PrefillState.WorkerStatusFact> facts) {
-        projectPrefillStatus(source, role, facts);
+        handlePrefillStatus(source, role, facts);
     }
 
     public void onDecodeStatus(
             DecodeEndpoint source,
             List<DecodeEndpoint.WorkerStatusFact> facts) {
-        projectDecodeStatus(source, facts);
+        handleDecodeStatus(source, facts);
     }
 
     public void onEncoderStatus(EncoderEndpoint source,
@@ -45,7 +45,7 @@ public final class EndpointEventProjector {
             try {
                 scheduler.processEncoderStatus(source, task, false);
             } catch (Throwable failure) {
-                logErrorNoFail("Encoder status fact projection isolated: request_id={}",
+                logErrorNoFail("Encoder status fact handling isolated: request_id={}",
                         task.requestId(), failure);
             }
         }
@@ -53,7 +53,7 @@ public final class EndpointEventProjector {
             try {
                 scheduler.processEncoderStatus(source, task, true);
             } catch (Throwable failure) {
-                logErrorNoFail("Encoder finished fact projection isolated: request_id={}",
+                logErrorNoFail("Encoder finished fact handling isolated: request_id={}",
                         task.requestId(), failure);
             }
         }
@@ -71,9 +71,9 @@ public final class EndpointEventProjector {
     public void onEncoderGenerationRetired(EncoderEndpoint source, List<String> requestIds) {
         for (String requestId : requestIds) {
             try {
-                scheduler.projectEncoderRetirement(source, requestId);
+                scheduler.applyEncoderRetirement(source, requestId);
             } catch (Throwable failure) {
-                logErrorNoFail("Encoder retirement projection isolated: request_id={}",
+                logErrorNoFail("Encoder retirement handling isolated: request_id={}",
                         requestId, failure);
             }
         }
@@ -86,9 +86,9 @@ public final class EndpointEventProjector {
             return;
         }
         try {
-            projectPrefillRetirementFacts(endpoint, ownedItems);
+            handlePrefillRetirement(endpoint, ownedItems);
         } catch (Throwable failure) {
-            logErrorNoFail("Endpoint event projection isolated: event={}",
+            logErrorNoFail("Endpoint event handling isolated: event={}",
                     "prefill retirement", failure);
         }
     }
@@ -100,9 +100,9 @@ public final class EndpointEventProjector {
             return;
         }
         try {
-            projectDecodeRetirementFacts(endpoint, ownedReservations);
+            handleDecodeRetirement(endpoint, ownedReservations);
         } catch (Throwable failure) {
-            logErrorNoFail("Endpoint event projection isolated: event={}",
+            logErrorNoFail("Endpoint event handling isolated: event={}",
                     "decode retirement", failure);
         }
     }
@@ -115,7 +115,7 @@ public final class EndpointEventProjector {
         try {
             scheduler.onQueuedItemPreempted(victim, incoming);
         } catch (Throwable failure) {
-            logErrorNoFail("Queued preemption projection failed: request_id={}", victim.requestId(), failure);
+            logErrorNoFail("Queued preemption handling failed: request_id={}", victim.requestId(), failure);
         }
     }
 
@@ -133,7 +133,7 @@ public final class EndpointEventProjector {
         scheduler.failDeliveryPreparation(exactItem, cause);
     }
 
-    private void projectPrefillStatus(
+    private void handlePrefillStatus(
             PrefillEndpoint source,
             RoleType role,
             List<PrefillState.WorkerStatusFact> facts) {
@@ -142,14 +142,14 @@ public final class EndpointEventProjector {
                 scheduler.processPrefillStatus(source, role, fact);
             } catch (Throwable failure) {
                 logErrorNoFail(
-                        "Prefill status fact projection isolated: request_id={} engine={}",
+                        "Prefill status fact handling isolated: request_id={} engine={}",
                         fact.item().requestId(), source.getIp(),
                         failure);
             }
         }
     }
 
-    private void projectDecodeStatus(
+    private void handleDecodeStatus(
             DecodeEndpoint source,
             List<DecodeEndpoint.WorkerStatusFact> facts) {
         for (DecodeEndpoint.WorkerStatusFact fact : facts) {
@@ -157,42 +157,42 @@ public final class EndpointEventProjector {
                 scheduler.processDecodeStatus(source, fact);
             } catch (Throwable failure) {
                 logErrorNoFail(
-                        "Decode status fact projection isolated: request_id={} engine={}",
+                        "Decode status fact handling isolated: request_id={} engine={}",
                         fact.reservation().requestId(),
                         source.getIp(), failure);
             }
         }
     }
 
-    private void projectPrefillRetirementFacts(
+    private void handlePrefillRetirement(
             PrefillEndpoint retiredEndpoint,
             List<ScheduledRequest> ownedItems) {
         for (int index = 0; index < ownedItems.size(); index++) {
             ScheduledRequest exactItem = ownedItems.get(index);
             try {
-                scheduler.projectPrefillRetirementItem(
+                scheduler.applyPrefillRetirementItem(
                         retiredEndpoint, exactItem);
             } catch (Throwable failure) {
                 logErrorNoFail(
-                        "Prefill retirement item projection isolated: request_id={} engine={}",
+                        "Prefill retirement item handling isolated: request_id={} engine={}",
                         exactItem == null ? -1 : exactItem.requestId(),
                         retiredEndpoint.getIp(), failure);
             }
         }
     }
 
-    private void projectDecodeRetirementFacts(
+    private void handleDecodeRetirement(
             DecodeEndpoint retiredEndpoint,
             List<DecodeEndpoint.ReservationHandle> ownedReservations) {
         for (int index = 0; index < ownedReservations.size(); index++) {
             DecodeEndpoint.ReservationHandle reservation =
                     ownedReservations.get(index);
             try {
-                scheduler.projectDecodeRetirementReservation(
+                scheduler.applyDecodeRetirementReservation(
                         retiredEndpoint, reservation);
             } catch (Throwable failure) {
                 logErrorNoFail(
-                        "Decode retirement reservation projection isolated: "
+                        "Decode retirement reservation handling isolated: "
                                 + "request_id={} generation={}",
                         reservation.requestId(),
                         reservation.endpointGenerationId(),
@@ -205,7 +205,7 @@ public final class EndpointEventProjector {
         try {
             Logger.error(format, arguments);
         } catch (Throwable ignoredDiagnosticFailure) {
-            // Continue projecting the remaining exact facts.
+            // Continue handling the remaining exact facts.
         }
     }
 

@@ -13,7 +13,7 @@ import org.flexlb.balance.estimate.BatchTtftEstimator;
 import org.flexlb.balance.estimate.NonBatchTtftEstimator;
 import org.flexlb.balance.estimate.PrefillTtftEstimate;
 import org.flexlb.balance.estimate.PrefillTtftEstimator;
-import org.flexlb.balance.scheduler.EndpointEventProjector;
+import org.flexlb.balance.scheduler.EndpointEventHandler;
 import org.flexlb.balance.scheduler.PlacementAvailability;
 import org.flexlb.balance.scheduler.QueueCapacity;
 import org.flexlb.balance.scheduler.RequestRegistry;
@@ -40,14 +40,14 @@ public final class EndpointTestSupport {
 
     static PrefillEndpoint standalonePrefillEndpoint(
             WorkerStatus status, FlexlbConfig config, DeliveryStrategy deliveryStrategy,
-            EndpointEventProjector endpointEvents, BatchSchedulerReporter reporter) {
+            EndpointEventHandler endpointEvents, BatchSchedulerReporter reporter) {
         return standalonePrefillEndpoint(status, () -> config, deliveryStrategy,
                 endpointEvents, reporter, new PlacementAvailability());
     }
 
     static PrefillEndpoint standalonePrefillEndpoint(
             WorkerStatus status, Supplier<FlexlbConfig> configSupplier, DeliveryStrategy deliveryStrategy,
-            EndpointEventProjector endpointEvents, BatchSchedulerReporter reporter,
+            EndpointEventHandler endpointEvents, BatchSchedulerReporter reporter,
             PlacementAvailability availability) {
         EndpointRegistry registry = org.mockito.Mockito.mock(EndpointRegistry.class);
         org.mockito.Mockito.when(registry.getEndpointCount(status.getRole())).thenReturn(1);
@@ -58,8 +58,8 @@ public final class EndpointTestSupport {
                 new QueueCapacity());
     }
 
-    static EndpointEventProjector noopEventSink() {
-        return org.mockito.Mockito.mock(EndpointEventProjector.class);
+    static EndpointEventHandler noopEventSink() {
+        return org.mockito.Mockito.mock(EndpointEventHandler.class);
     }
 
     static WorkerStatus workerStatus(
@@ -91,10 +91,10 @@ public final class EndpointTestSupport {
         try {
             WorkerStatus.PreparedStatus prepared = status.prepareNewStatus(
                     status.freezeStatusResponse(response));
-            Runnable projection =
+            Runnable statusNotifier =
                     endpoint.applyPreparedStatus(status, prepared);
             status.recordSuccessfulPoll(response.isAlive());
-            return projection;
+            return statusNotifier;
         } finally {
             status.lock.unlock();
         }
@@ -321,8 +321,8 @@ public final class EndpointTestSupport {
     static class TestRequestRuntime {
         private final RequestRegistry requests =
                 org.mockito.Mockito.mock(RequestRegistry.class);
-        private final EndpointEventProjector events =
-                org.mockito.Mockito.mock(EndpointEventProjector.class);
+        private final EndpointEventHandler events =
+                org.mockito.Mockito.mock(EndpointEventHandler.class);
         private final List<PrefillRetirement> prefillRetirements =
                 new CopyOnWriteArrayList<>();
         private final List<ScheduledRequest> offerFailures =
@@ -347,7 +347,7 @@ public final class EndpointTestSupport {
             return requests;
         }
 
-        EndpointEventProjector events() {
+        EndpointEventHandler events() {
             return events;
         }
 

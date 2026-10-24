@@ -26,7 +26,7 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
  * evaluates only items 0..i). Batch service independently predicts each
  * prefix length via {@code batchDurationMs(items[0..i+1])}.
  */
-@DisplayName("Delivery projection contracts")
+@DisplayName("Delivery rule contracts")
 class NonBatchDeliveryEstimateTest {
 
     private static GroupPlanner.Item item(long id, long seqLen) {
@@ -44,10 +44,10 @@ class NonBatchDeliveryEstimateTest {
 
     // ═══════════════════════════════════════════════════════════════════════
     @Nested
-    @DisplayName("Route projection: lazy cumulative cursor")
+    @DisplayName("Route rule: lazy cumulative cursor")
     class RouteService {
 
-        private final PrefillTtftEstimate.TtftEstimationRule projection =
+        private final PrefillTtftEstimate.TtftEstimationRule rule =
                 new NonBatchTtftEstimator().ttftEstimationRule();
 
         @Test
@@ -56,7 +56,7 @@ class NonBatchDeliveryEstimateTest {
                     List.of(item(1L, 100L), item(2L, 200L), item(3L, 50L));
             CountingPredictions pred = new CountingPredictions();
             PrefillTtftEstimate.GroupService svc =
-                    projection.service(plan(items, OptionalDouble.empty()), pred);
+                    rule.service(plan(items, OptionalDouble.empty()), pred);
             // offset(0)=100, offset(1)=100+200=300, offset(2)=300+50=350
             assertEquals(100L, svc.completionOffsetMs(0));
             assertEquals(300L, svc.completionOffsetMs(1));
@@ -70,7 +70,7 @@ class NonBatchDeliveryEstimateTest {
                     List.of(item(1L, 100L), item(2L, 200L), item(3L, 50L));
             CountingPredictions pred = new CountingPredictions();
             PrefillTtftEstimate.GroupService svc =
-                    projection.service(plan(items, OptionalDouble.empty()), pred);
+                    rule.service(plan(items, OptionalDouble.empty()), pred);
             svc.completionOffsetMs(1);
             assertEquals(1, pred.itemCalls(1L));
             assertEquals(1, pred.itemCalls(2L));
@@ -85,7 +85,7 @@ class NonBatchDeliveryEstimateTest {
             CountingPredictions pred = new CountingPredictions();
             pred.failOn(3L);
             PrefillTtftEstimate.GroupService svc =
-                    projection.service(plan(items, OptionalDouble.empty()), pred);
+                    rule.service(plan(items, OptionalDouble.empty()), pred);
             assertEquals(300L, svc.completionOffsetMs(1),
                     "probe TTFT preserved even when suffix will fail");
             assertThrows(RuntimeException.class, svc::totalDurationMs,
@@ -97,7 +97,7 @@ class NonBatchDeliveryEstimateTest {
             List<GroupPlanner.Item> items = List.of(item(1L, 100L), item(2L, 200L));
             CountingPredictions pred = new CountingPredictions();
             PrefillTtftEstimate.GroupService svc =
-                    projection.service(plan(items, OptionalDouble.empty()), pred);
+                    rule.service(plan(items, OptionalDouble.empty()), pred);
             svc.completionOffsetMs(1);
             svc.completionOffsetMs(0);
             svc.totalDurationMs();
@@ -110,7 +110,7 @@ class NonBatchDeliveryEstimateTest {
             List<GroupPlanner.Item> items =
                     List.of(item(1L, 100L), item(2L, 200L), item(3L, 50L));
             CountingPredictions pred = new CountingPredictions();
-            PrefillTtftEstimate.GroupPlanning planning = projection.planning(pred);
+            PrefillTtftEstimate.GroupPlanning planning = rule.planning(pred);
             // Through index 1: items[0]+items[1] = 100+200 = 300
             assertEquals(300.0, planning.durationMs(items, 1));
             assertEquals(0, pred.itemCalls(3L), "suffix beyond index not evaluated");
@@ -118,7 +118,7 @@ class NonBatchDeliveryEstimateTest {
 
         @Test
         void memberIndexIsBoundsChecked() {
-            PrefillTtftEstimate.GroupService svc = projection.service(
+            PrefillTtftEstimate.GroupService svc = rule.service(
                     plan(List.of(item(1L, 100L)), OptionalDouble.empty()),
                     new CountingPredictions());
             assertThrows(IndexOutOfBoundsException.class, () -> svc.completionOffsetMs(1));
@@ -128,10 +128,10 @@ class NonBatchDeliveryEstimateTest {
 
     // ═══════════════════════════════════════════════════════════════════════
     @Nested
-    @DisplayName("Batch projection: per-prefix independent prediction")
+    @DisplayName("Batch rule: per-prefix independent prediction")
     class BatchService {
 
-        private final PrefillTtftEstimate.TtftEstimationRule projection =
+        private final PrefillTtftEstimate.TtftEstimationRule rule =
                 new BatchTtftEstimator().ttftEstimationRule();
 
         @Test
@@ -141,7 +141,7 @@ class NonBatchDeliveryEstimateTest {
                     List.of(item(1L, 100L), item(2L, 200L), item(3L, 50L));
             CountingPredictions pred = new CountingPredictions();
             PrefillTtftEstimate.GroupService svc =
-                    projection.service(plan(items, OptionalDouble.empty()), pred);
+                    rule.service(plan(items, OptionalDouble.empty()), pred);
             // offset(0) = batchDurationMs([item1]) = 100*1 = 100
             assertEquals(100L, svc.completionOffsetMs(0));
             // offset(1) = batchDurationMs([item1,item2]) = 100*2 = 200
@@ -156,7 +156,7 @@ class NonBatchDeliveryEstimateTest {
             List<GroupPlanner.Item> items = List.of(item(1L, 100L), item(2L, 200L));
             CountingPredictions pred = new CountingPredictions();
             PrefillTtftEstimate.GroupService svc =
-                    projection.service(plan(items, OptionalDouble.empty()), pred);
+                    rule.service(plan(items, OptionalDouble.empty()), pred);
             svc.completionOffsetMs(0);
             svc.completionOffsetMs(0); // repeated
             svc.completionOffsetMs(1);
@@ -169,7 +169,7 @@ class NonBatchDeliveryEstimateTest {
         void planningDurationDelegates() {
             List<GroupPlanner.Item> items = List.of(item(1L, 100L), item(2L, 200L));
             CountingPredictions pred = new CountingPredictions();
-            PrefillTtftEstimate.GroupPlanning planning = projection.planning(pred);
+            PrefillTtftEstimate.GroupPlanning planning = rule.planning(pred);
             // Batch planning returns batchPlanningDurationMs = 777 always.
             assertEquals(777.0, planning.durationMs(items, items.size() - 1));
         }

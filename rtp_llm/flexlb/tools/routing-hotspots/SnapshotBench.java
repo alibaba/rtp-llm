@@ -71,7 +71,7 @@ public class SnapshotBench {
         var config = config();
         // No scheduler thread or RPCs. Mutations still use the real ownership ledger and lock.
         var runtime = new PrefillQueue("bench-" + seed, null, config, strategy, estimator,
-                new EndpointEventProjector(registry), new QueueCapacity());
+                new EndpointEventHandler(registry), new QueueCapacity());
         Field lockField = PrefillQueue.class.getDeclaredField("queueLock");
         lockField.setAccessible(true);
         var lock = (ReentrantLock) lockField.get(runtime);

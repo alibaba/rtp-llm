@@ -57,9 +57,9 @@ class RequestConfirmationTimeoutTest {
         var reporter = mock(BatchSchedulerReporter.class);
         var requestReporter = mock(RequestSchedulerReporter.class);
         var requests = new RequestRegistry(service, reporter, requestReporter);
-        var projector = new EndpointEventProjector(requests);
+        var eventHandler = new EndpointEventHandler(requests);
         var queueCapacity = new QueueCapacity();
-        var endpoints = new EndpointRegistry(service, projector, reporter,
+        var endpoints = new EndpointRegistry(service, eventHandler, reporter,
                 new NonBatchDeliveryStrategy(requests, new DeliveryMetrics(reporter)),
                 new NonBatchTtftEstimator(),
                 new PlacementAvailability(), queueCapacity);
@@ -77,7 +77,7 @@ class RequestConfirmationTimeoutTest {
             } finally {
                 prefillWorker.lock.unlock();
             }
-            decode = new DecodeEndpoint(worker(RoleType.DECODE, "127.0.0.2"), projector);
+            decode = new DecodeEndpoint(worker(RoleType.DECODE, "127.0.0.2"), eventHandler);
             applyStatus(decode, status(RoleType.DECODE));
             var capacity = new DecodeEndpoint.AdmissionCapacity(1L, 90L);
             DecodeEndpoint.ReservationHandle reservation;
@@ -202,14 +202,14 @@ class RequestConfirmationTimeoutTest {
 
     private static void applyStatus(WorkerEndpoint endpoint, WorkerStatusResponse response) {
         WorkerStatus worker = endpoint.getStatus();
-        Runnable projection;
+        Runnable statusNotifier;
         worker.lock.lock();
         try {
-            projection = endpoint.applyPreparedStatus(worker,
+            statusNotifier = endpoint.applyPreparedStatus(worker,
                     worker.prepareNewStatus(worker.freezeStatusResponse(response)));
         } finally {
             worker.lock.unlock();
         }
-        projection.run();
+        statusNotifier.run();
     }
 }
