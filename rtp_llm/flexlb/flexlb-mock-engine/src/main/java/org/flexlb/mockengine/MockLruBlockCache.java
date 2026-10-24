@@ -328,7 +328,7 @@ final class MockLruBlockCache {
      * free — the hash channel carries no key for them, so they cannot become
      * reusable cache entries.
      *
-     * @return true when the indexed key set changed (drives cacheVersion bumps)
+     * @return true when the indexed key set changed
      */
     synchronized boolean admit(BlockLease lease, List<Long> keys) {
         dereference(lease.hitKeys);
@@ -457,6 +457,7 @@ final class MockLruBlockCache {
      * in-place continuation.
      */
     synchronized void clear() {
+        tree.keySet().forEach(key -> keyListener.accept(key, false));
         blocks.clear();
         referencedBlocks = 0;
         tree.clear();
@@ -633,6 +634,12 @@ final class MockLruBlockCache {
         evictionListener = listener == null ? event -> {} : listener;
     }
 
+    private java.util.function.BiConsumer<Long, Boolean> keyListener = (key, added) -> {};
+
+    synchronized void setKeyListener(java.util.function.BiConsumer<Long, Boolean> listener) {
+        keyListener = listener;
+    }
+
     /** Build edges only for newly indexed blocks; a suffix write never reparents a hit. */
     private void indexSequence(List<Long> keys) {
         Long parent = null;
@@ -645,6 +652,7 @@ final class MockLruBlockCache {
                 TreeNode node = new TreeNode();
                 node.parent = parent;
                 tree.put(key, node);
+                keyListener.accept(key, true);
                 if (parent != null) {
                     tree.get(parent).children.add(key);
                     refreshLeaf(parent);
@@ -687,6 +695,7 @@ final class MockLruBlockCache {
     private void removeNode(Long key) {
         TreeNode node = tree.remove(key);
         if (node == null) return;
+        keyListener.accept(key, false);
         if (node.leaf != null) leaves.remove(node.leaf);
         if (node.parent != null && tree.containsKey(node.parent)) {
             tree.get(node.parent).children.remove(key);

@@ -27,9 +27,10 @@ def analyze(evidence):
                  and evidence["convergence_samples"] >= observation["converged_samples"])
         measured = evidence["intensity"]["measurement"]
         checks += [evaluate("cache_converged", ready, "eq", True),
-                   evaluate("actual_sync_intensity", measured["responses"], "ge", limits["min_cache_responses_per_s"]),
-                   evaluate("response_shape", measured["totals"]["entries"] == measured["totals"]["responses"]*keys
-                            and measured["totals"]["full_responses"] == measured["totals"]["responses"], "eq", True),
+                   evaluate("actual_sync_intensity", measured["full_responses"], "ge", limits["min_cache_full_responses_per_s"]),
+                   evaluate("response_shape", measured["totals"]["entries"] == measured["totals"]["full_responses"]*keys
+                            and measured["totals"]["full_responses"] + measured["totals"]["unchanged_responses"]
+                            == measured["totals"]["responses"], "eq", True),
                    evaluate("clock_input_intensity", limits["min_added_keys_per_s"] <= measured["added_keys"]
                             <= limits["max_added_keys_per_s"], "eq", True),
                    evaluate("sampling_complete", evidence["max_sample_gap_s"], "le", observation["max_gap_s"]),

@@ -700,7 +700,7 @@ final class MockControlServer {
             // (stopped=true, no phantom server) instead of stopped=false with
             // nothing listening.
             Server existing = serversByPort.get(port);
-            if (existing != null && !existing.isShutdown()) {
+            if (existing != null) {
                 existing.shutdown();
                 try {
                     if (!existing.awaitTermination(5, TimeUnit.SECONDS)) {

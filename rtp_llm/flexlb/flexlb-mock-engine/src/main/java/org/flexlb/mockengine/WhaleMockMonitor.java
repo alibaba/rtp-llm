@@ -99,8 +99,17 @@ final class WhaleMockMonitor implements AutoCloseable {
     }
 
     synchronized void reportWorkerStatus(Map<String, String> labels, long latencyUs) {
+        reportRpcStatus(labels, "worker_status", latencyUs);
+    }
+
+    synchronized void reportCacheStatus(Map<String, String> labels, long latencyUs) {
+        reportRpcStatus(labels, "cache_status", latencyUs);
+    }
+
+    private void reportRpcStatus(Map<String, String> labels, String rpc, long latencyUs) {
+        if (closed) return;
         FlexMetricTags tags = new FlexMetricTags.ImmutableFlexMetricTags(labels);
-        String qps = "rtp_llm_rpc_worker_status_qps", latency = "rtp_llm_rpc_worker_status_total_rt_us";
+        String qps = "rtp_llm_rpc_" + rpc + "_qps", latency = "rtp_llm_rpc_" + rpc + "_total_rt_us";
         if (registered.add(qps)) monitor.register(qps, FlexMetricType.QPS);
         if (registered.add(latency)) monitor.register(latency, FlexMetricType.GAUGE);
         monitor.report(qps, tags, 1.0);
@@ -168,7 +177,7 @@ final class WhaleMockMonitor implements AutoCloseable {
             if (!belongsToRole(name, labels)) return;
             // Real scheduler observations are produced by schedule(), never
             // by a wall-clock scrape. The final empty round reports idle zero.
-            if (schedulerMetric(name)) return;
+            if (MockMetricContract.require(name).sampling() != MockMetricContract.Sampling.SNAPSHOT) return;
             if (!registered.contains(name)) {
                 monitor.register(name, FlexMetricType.GAUGE);
                 registered.add(name);

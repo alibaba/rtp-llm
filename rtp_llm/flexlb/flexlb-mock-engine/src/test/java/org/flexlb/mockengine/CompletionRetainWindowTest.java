@@ -15,7 +15,6 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
-import java.util.stream.Collectors;
 
 import static org.flexlb.mockengine.MockEngineTestSupport.batch;
 import static org.flexlb.mockengine.MockEngineTestSupport.enqueue;
@@ -26,25 +25,7 @@ import static org.flexlb.mockengine.MockEngineTestSupport.workerStatus;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
-/**
- * Unit tests for the completion backlog delivery protocol rework
- * (dual-flexlb HA prerequisite): {@code getWorkerStatus} used to head-trim
- * the shared {@code completions} queue by the CALLER's cursor, so with two
- * masters polling the same engine each keeping an independent cursor, the
- * first poller permanently destroyed the second poller's unconsumed records
- * (active-master inflight leak). The rework keeps the read path a pure
- * cursor filter (no destruction) and bounds the backlog with a retain
- * window enforced at each insertion.
- *
- * <p>Coverage: dual-consumer non-starvation, single-consumer increment
- * protocol byte-compatibility (same cursor → same increment list), retain
- * window trimming (oldest first, latestVersion never regresses), and a
- * lagging consumer inside the window still receiving its backlog.
- *
- * <p>Completion readiness is awaited via {@code latestFinishedVersion}
- * (monotonic, unaffected by trimming) — after a cleanup the trimmed records
- * are no longer visible to a cursor-0 poll by design.
- */
+/** Real runtime-meta protocol: independent opaque cursors, fixed FIFO history and wall-clock status. */
 class CompletionRetainWindowTest {
 
     private static final AtomicInteger PORT_ALLOCATOR = new AtomicInteger(63500);
@@ -88,150 +69,38 @@ class CompletionRetainWindowTest {
         prefill = null;
     }
 
-    // ════════════════════════════════════════════════════════════════
-    //  Dual-consumer: independent cursors must not starve each other
-    // ════════════════════════════════════════════════════════════════
-
     @Test
-    void secondMasterWithIndependentCursorStillReceivesFullBacklog() throws Exception {
+    void consumersHaveIndependentOpaqueCursors() throws Exception {
+        assertEquals(0, workerStatus(prefill, 0).getLatestFinishedVersion());
         publishCompletions(1, 2);
-
-        // Master A polls first with its own cursor at 0 and receives the
-        // full increment.
-        EngineRpcService.WorkerStatusPB first = workerStatus(prefill, 0);
-        assertEquals(2, first.getFinishedTaskListCount());
-        assertEquals(2, first.getLatestFinishedVersion());
-
-        // Master B polls AFTER A with ITS OWN cursor still at 0: the shared
-        // backlog must survive A's read (the old head-trim protocol consumed
-        // it here, leaking B's inflight entries forever).
-        EngineRpcService.WorkerStatusPB second = workerStatus(prefill, 0);
-        assertEquals(2, second.getFinishedTaskListCount(),
-                "A's poll must not consume B's unconsumed backlog");
-        assertEquals(2, second.getLatestFinishedVersion());
-        assertEquals(finishedRids(first), finishedRids(second),
-                "both consumers with the same cursor see the same increment list");
-
-        // B advances its own cursor to 2 → B's next poll is empty (its own
-        // consumption state, independent of A's).
-        EngineRpcService.WorkerStatusPB bCaughtUp = workerStatus(prefill, 2);
-        assertEquals(0, bCaughtUp.getFinishedTaskListCount());
-        assertEquals(2, bCaughtUp.getLatestFinishedVersion());
-
-        // A NEW completion shows up: both consumers independently receive it
-        // from their own (now equal) cursors.
-        publishCompletions(3, 1);
-        EngineRpcService.WorkerStatusPB forA = workerStatus(prefill, 2);
-        assertEquals(1, forA.getFinishedTaskListCount());
-        assertEquals(3, forA.getLatestFinishedVersion());
-        EngineRpcService.WorkerStatusPB forB = workerStatus(prefill, 2);
-        assertEquals(1, forB.getFinishedTaskListCount());
-        assertEquals(finishedRids(forA), finishedRids(forB));
-    }
-
-    @Test
-    void repeatedPollAtSameCursorIsIdempotent() throws Exception {
-        publishCompletions(1, 2);
-
-        // Single-master compatibility: polling twice at the SAME cursor
-        // returns the SAME increment list both times (the master may retry
-        // or re-poll before advancing its cursor).
-        EngineRpcService.WorkerStatusPB first = workerStatus(prefill, 0);
-        EngineRpcService.WorkerStatusPB again = workerStatus(prefill, 0);
-        assertEquals(finishedRids(first), finishedRids(again));
-        assertEquals(2, again.getLatestFinishedVersion());
-    }
-
-    // ════════════════════════════════════════════════════════════════
-    //  Single-consumer increment protocol stays unchanged
-    // ════════════════════════════════════════════════════════════════
-
-    @Test
-    void singleConsumerCursorAdvanceProtocolUnchanged() throws Exception {
-        publishCompletions(1, 2);
-
-        // Cursor 0 → the full increment.
-        EngineRpcService.WorkerStatusPB all = workerStatus(prefill, 0);
-        assertEquals(List.of(1L, 2L), finishedRids(all));
-        assertEquals(2, all.getLatestFinishedVersion());
-
-        // Cursor advanced to latest → empty increment, cursor unchanged.
-        EngineRpcService.WorkerStatusPB caughtUp = workerStatus(prefill, 2);
+        var first = workerStatus(prefill, 0);
+        long cursor = first.getLatestFinishedVersion();
+        assertTrue(cursor > System.currentTimeMillis() * 1000 - 10_000_000L);
+        assertEquals(List.of(1L, 2L), finishedRids(first));
+        assertEquals(first.getFinishedTaskListList(), workerStatus(prefill, 0).getFinishedTaskListList());
+        var caughtUp = workerStatus(prefill, cursor);
         assertEquals(0, caughtUp.getFinishedTaskListCount());
-        assertEquals(2, caughtUp.getLatestFinishedVersion());
-
-        // New completion after the cursor → exactly the delta.
+        assertEquals(cursor, caughtUp.getLatestFinishedVersion());
         publishCompletions(3, 1);
-        EngineRpcService.WorkerStatusPB delta = workerStatus(prefill, 2);
+        var delta = workerStatus(prefill, cursor);
         assertEquals(List.of(3L), finishedRids(delta));
-        assertEquals(3, delta.getLatestFinishedVersion());
-
-        // Mid-window cursor → only the tail past that cursor.
-        EngineRpcService.WorkerStatusPB tail = workerStatus(prefill, 1);
-        assertEquals(List.of(2L, 3L), finishedRids(tail));
-    }
-
-    // ════════════════════════════════════════════════════════════════
-    //  Retain window: periodicCleanup trims oldest-first
-    // ════════════════════════════════════════════════════════════════
-
-    @Test
-    void insertionTrimsBacklogBeforeAnyCleanup() throws Exception {
-        prefill.setCompletionRetainWindow(2);
-        publishCompletions(1, 4);
-
-        // Capacity holds immediately, even if cleanup has never run.
-        assertEquals(List.of(3L, 4L), finishedRids(workerStatus(prefill, 0)));
-
-        // Housekeeping does not alter the retained window.
+        assertEquals(cursor + 1, delta.getLatestFinishedVersion());
+        assertEquals(delta.getFinishedTaskListList(), workerStatus(prefill, cursor).getFinishedTaskListList());
         prefill.periodicCleanup();
-
-        EngineRpcService.WorkerStatusPB afterTrim = workerStatus(prefill, 0);
-        assertEquals(2, afterTrim.getFinishedTaskListCount(),
-                "backlog is capped at the retain window");
-        assertEquals(List.of(3L, 4L), finishedRids(afterTrim),
-                "the most recent records are retained, oldest trimmed first");
-        assertEquals(4, afterTrim.getLatestFinishedVersion(),
-                "latestFinishedVersion never regresses on trim");
-
-        // A slow consumer whose cursor is still inside the retained window
-        // keeps receiving its slice.
-        EngineRpcService.WorkerStatusPB lagging = workerStatus(prefill, 3);
-        assertEquals(List.of(4L), finishedRids(lagging));
+        assertEquals(3, workerStatus(prefill, 0).getFinishedTaskListCount());
     }
 
     @Test
-    void periodicCleanupKeepsBacklogWhenInsideWindow() throws Exception {
-        prefill.setCompletionRetainWindow(8);
-        publishCompletions(1, 3);
-
-        prefill.periodicCleanup();
-
-        EngineRpcService.WorkerStatusPB afterCleanup = workerStatus(prefill, 0);
-        assertEquals(3, afterCleanup.getFinishedTaskListCount(),
-                "cleanup must not trim inside the retain window");
-        assertEquals(List.of(1L, 2L, 3L), finishedRids(afterCleanup));
-    }
-
-    @Test
-    void backlogStaysBoundedAcrossPublishAndCleanupRounds() throws Exception {
-        prefill.setCompletionRetainWindow(3);
-        // Three rounds of (publish 2 completions + cleanup): the queue must
-        // converge to the window, never grow past it. Readiness is awaited
-        // via latestFinishedVersion — earlier rounds' trimmed records are
-        // legitimately invisible to a cursor-0 poll.
-        for (int round = 0; round < 3; round++) {
-            publishCompletions(1 + round * 2, 2);
-            prefill.periodicCleanup();
-        }
-
-        EngineRpcService.WorkerStatusPB bounded = workerStatus(prefill, 0);
-        assertTrue(bounded.getFinishedTaskListCount() <= 3,
-                "backlog never exceeds the retain window across rounds");
-        assertEquals(6, bounded.getLatestFinishedVersion());
-        // The last round's records (rid 5, 6) plus one older (rid 4) — the
-        // 3 most recent by version.
-        assertEquals(List.of(4L, 5L, 6L), finishedRids(bounded));
+    void emptyDeltaEchoesFutureCursorAndStatusVersionIsWallTime() throws Exception {
+        long before = System.currentTimeMillis() * 1000;
+        var empty = workerStatus(prefill, Long.MAX_VALUE);
+        assertEquals(Long.MAX_VALUE, empty.getLatestFinishedVersion());
+        assertTrue(empty.getStatusVersion() >= before);
+        assertTrue(empty.getStatusVersion() <= System.currentTimeMillis() * 1000 + 999);
+        publishCompletions(1, 1);
+        var future = workerStatus(prefill, Long.MAX_VALUE);
+        assertEquals(0, future.getFinishedTaskListCount());
+        assertEquals(Long.MAX_VALUE, future.getLatestFinishedVersion());
     }
 
     @Test
@@ -270,64 +139,25 @@ class CompletionRetainWindowTest {
         assertEquals(1000, delayed.getFinishedTaskListCount());
         assertEquals(2L, finishedRids(delayed).get(0));
         assertEquals(1001L, finishedRids(delayed).get(999));
-        assertEquals(1001, delayed.getLatestFinishedVersion());
-        assertEquals(List.of(1001L), finishedRids(workerStatus(prefill, 1000)));
+        assertEquals(atCapacity.getLatestFinishedVersion() + 1, delayed.getLatestFinishedVersion());
+        assertEquals(List.of(1001L), finishedRids(workerStatus(prefill, atCapacity.getLatestFinishedVersion())));
         assertEquals(finishedRids(delayed), finishedRids(workerStatus(prefill, 0)),
                 "another consumer cannot recover the clipped rid or consume this one's backlog");
     }
 
-    @Test
-    void reducingCapacityAndZeroWindowApplyImmediately() throws Exception {
-        publishCompletions(1, 4);
-        prefill.setCompletionRetainWindow(1);
-        assertEquals(List.of(4L), finishedRids(workerStatus(prefill, 0)));
-        prefill.setCompletionRetainWindow(0);
-        assertTrue(finishedRids(workerStatus(prefill, 0)).isEmpty());
-        publishCompletions(5, 1);
-        assertEquals(5, workerStatus(prefill, 0).getLatestFinishedVersion());
-        assertTrue(finishedRids(workerStatus(prefill, 0)).isEmpty());
-    }
-
-    // ════════════════════════════════════════════════════════════════
-    //  Scaffolding
-    // ════════════════════════════════════════════════════════════════
-
-    /**
-     * Enqueues one single-request batch per requestId (each finishing in
-     * ~10ms per the "10" prefill formula) and waits until their
-     * completions are published (latestFinishedVersion reaches the last
-     * rid — rids are consecutive starting at 1 and the completion version
-     * counter is per-engine, so version == rid here).
-     */
     private void publishCompletions(long firstRequestId, int count) throws Exception {
+        long initial = firstRequestId - 1;
         for (int i = 0; i < count; i++) {
             long rid = firstRequestId + i;
             enqueue(prefill, batch(9000 + rid, slot(0, input(rid, 10))));
         }
-        awaitVersion(firstRequestId + count - 1);
-    }
-
-    /**
-     * Polls (at cursor 0 — reads are non-destructive under the rework) until
-     * {@code latestFinishedVersion} reaches {@code expectedVersion}. The
-     * version counter is monotonic and unaffected by retain-window trimming,
-     * so this is the reliable readiness signal even after cleanups.
-     */
-    private void awaitVersion(long expectedVersion) throws InterruptedException {
-        long deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(5_000);
-        EngineRpcService.WorkerStatusPB last = workerStatus(prefill, 0);
-        while (last.getLatestFinishedVersion() < expectedVersion
-                && System.nanoTime() < deadline) {
-            Thread.sleep(10);
-            last = workerStatus(prefill, 0);
-        }
-        assertEquals(expectedVersion, last.getLatestFinishedVersion(),
-                "completions did not publish within the timeout");
+        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+        while (workerStatus(prefill, 0).getFinishedTaskListCount() < Math.min(1000, initial + count)
+                && System.nanoTime() < deadline) Thread.sleep(2);
+        assertEquals(Math.min(1000, initial + count), workerStatus(prefill, 0).getFinishedTaskListCount());
     }
 
     private static List<Long> finishedRids(EngineRpcService.WorkerStatusPB status) {
-        return status.getFinishedTaskListList().stream()
-                .map(EngineRpcService.TaskInfoPB::getRequestId)
-                .collect(Collectors.toList());
+        return status.getFinishedTaskListList().stream().map(EngineRpcService.TaskInfoPB::getRequestId).toList();
     }
 }

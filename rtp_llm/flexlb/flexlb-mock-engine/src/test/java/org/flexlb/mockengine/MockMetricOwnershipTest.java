@@ -42,6 +42,48 @@ class MockMetricOwnershipTest {
         }
     }
 
+    @Test void rpcEventsAreReportedOnceAndNeverReplayedByPeriodicSamples() {
+        var reports = new ArrayList<String>();
+        var kinds = new java.util.HashMap<String, Object>();
+        var sink = (FlexMonitor) java.lang.reflect.Proxy.newProxyInstance(getClass().getClassLoader(),
+                new Class<?>[]{FlexMonitor.class}, (proxy, method, args) -> {
+                    if (method.getName().equals("register")) kinds.put((String)args[0], args[1]);
+                    if (method.getName().equals("report")) reports.add((String)args[0]);
+                    return null;
+                });
+        var monitor = new WhaleMockMonitor(sink);
+        var labels = Map.of("role", "ROLE_TYPE_PREFILL");
+        monitor.reportCacheStatus(labels, 12); monitor.reportWorkerStatus(labels, 15);
+        var values = Map.<String, Number>of("rtp_llm_rpc_worker_status_qps", 1,
+                "rtp_llm_rpc_worker_status_total_rt_us", 15, "rtp_llm_rpc_cache_status_qps", 1,
+                "rtp_llm_rpc_cache_status_total_rt_us", 12);
+        monitor.sample(values, labels, System.nanoTime());
+        monitor.sample(values, labels, System.nanoTime());
+        for (String name : values.keySet()) assertEquals(1, java.util.Collections.frequency(reports, name), name);
+        assertEquals(org.flexlb.enums.FlexMetricType.QPS, kinds.get("rtp_llm_rpc_cache_status_qps"));
+        monitor.close(); monitor.reportCacheStatus(labels, 100);
+        assertEquals(4, reports.size(), "closed monitor does not publish callbacks");
+    }
+
+    @Test void prefillExecutionStallBelongsToStepButNotModelForwardOrQueueWait() throws Exception {
+        var model = MockEngineTestSupport.performanceModel(directory, "10");
+        try (var cluster = MockEngineTestCluster.create(model, 63185, 1, 0)) {
+            var service = cluster.prefill(0);
+            var events = new java.util.concurrent.CopyOnWriteArrayList<Map<String, Number>>();
+            var reporter = service.getClass().getDeclaredField("eventMetricReporter");
+            reporter.setAccessible(true);
+            reporter.set(service, (java.util.function.Consumer<Map<String, Number>>) events::add);
+            service.setFaultConfig(FaultInjectionConfig.builder().generateDelayMs(30).build());
+            MockEngineTestSupport.enqueueAndFetch(service, MockEngineTestSupport.batch(40,
+                    MockEngineTestSupport.slot(0, MockEngineTestSupport.input(42, 10))));
+            cluster.awaitCompleted(1, 3000);
+            var forward = events.stream().filter(row -> row.containsKey("rtp_llm_model_forward_us")).toList();
+            assertEquals(1, forward.size());
+            assertEquals(10000.0, forward.get(0).get("rtp_llm_model_forward_us"));
+            assertEquals(40000.0, forward.get(0).get("rtp_llm_sp_step_latency_us"));
+        }
+    }
+
     @Test void deployedMtpForwardBelongsToPrefillAndDecodeRetainsItsOwnStep() {
         var reports = new ArrayList<String>();
         var sink = (FlexMonitor) java.lang.reflect.Proxy.newProxyInstance(getClass().getClassLoader(),

@@ -61,16 +61,16 @@ class CacheFixtureWireTest {
             assertEquals(expected, EngineRpcService.CacheStatusPB.parseFrom(out.toByteArray()));
         }
     }
-    @Test void inFlightWireSnapshotSurvivesChurnAndSameVersionRemainsFull() {
+    @Test void inFlightWireSnapshotSurvivesChurnAndSameVersionOmitsKeys() {
         var clock = new AtomicLong();
         var f = new CacheSyncFixture(0, 120, 176, 65, 2, clock::get);
         var first = f.wireResponse(-1); f.churn(17, 1); clock.set(5_000_001);
         var second = f.wireResponse(2);
         assertEquals(reference(0, 120, 176, 65, 0, 2), first.toProto());
         assertEquals(reference(0, 120, 176, 65, 85, 7), second.toProto());
-        assertEquals(241, f.wireResponse(7).toProto().getCacheKeysCount());
+        assertEquals(0, f.wireResponse(7).toProto().getCacheKeysCount());
         assertEquals(241, f.wireResponse(8).toProto().getCacheKeysCount());
-        assertEquals(964L, f.snapshot().get("entries"));
+        assertEquals(723L, f.snapshot().get("entries"));
         assertEquals(85L, f.snapshot().get("removed_keys"));
     }
     @Test void productionSizeResponseMatchesReference() {
@@ -189,11 +189,12 @@ class CacheFixtureWireTest {
                 assertEquals(response, merged.toProto(), "in-flight snapshot survives live cache eviction");
                 var evicted = stub.getCacheStatus(request);
                 assertEquals(241, evicted.getCacheKeysCount());
-                assertEquals(evicted, stub.getCacheStatus(request.toBuilder().setLatestCacheVersion(evicted.getVersion()).build()),
-                        "acknowledged versions still return full keys like real");
+                assertEquals(evicted.toBuilder().clearCacheKeys().build(),
+                        stub.getCacheStatus(request.toBuilder().setLatestCacheVersion(evicted.getVersion()).build()),
+                        "acknowledged versions omit keys like BlockTreeCache::getKeySnapshot");
                 assertTrue(evicted.getVersion() > response.getVersion());
                 var scalar = stub.getCacheStatus(request.toBuilder().setNeedCacheKeys(false).build());
-                assertEquals(evicted.getVersion(), scalar.getVersion());
+                assertEquals(request.getLatestCacheVersion(), scalar.getVersion());
                 assertEquals(2, response.getBlockSize());
                 assertTrue(response.getTotalKvCache() > 0);
                 assertEquals(0, stub.getCacheStatus(request.toBuilder().setNeedCacheKeys(false).build()).getCacheKeysCount());

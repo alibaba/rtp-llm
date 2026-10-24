@@ -91,6 +91,25 @@ class MockVitServiceTest {
         assertTrue(service.snapshot().get("embedding_bytes") <= 2400);
         assertTrue(service.snapshot().get("hash_bytes") <= 8192);
     }
+    @Test void directoryUsesRecentHashesAndOneUnionLimitAcrossEmbeddingTiers() throws Exception {
+        start(MockVitService.Config.defaults());
+        for (String fieldName : List.of("hashes", "gpuEmbeddings", "embeddings")) {
+            var field = MockVitService.class.getDeclaredField(fieldName); field.setAccessible(true);
+            @SuppressWarnings("unchecked") var values = (java.util.Map<String, Object>) field.get(service);
+            if (fieldName.equals("hashes")) { values.put("old", null); values.put("hash", null); }
+            else if (fieldName.equals("gpuEmbeddings")) { values.put("gpu-old", null); values.put("hash", null); values.put("gpu-new", null); }
+            else { values.put("cpu", null); }
+        }
+        var one = service.cacheDirectory(1);
+        assertEquals(List.of("hash"), one.getKeysList());
+        assertEquals(0, one.getGpuEmbeddingKeysCount(), "residency itself is bounded before union filtering");
+        var three = service.cacheDirectory(3);
+        assertEquals(List.of("old", "hash"), three.getKeysList());
+        assertEquals(List.of("gpu-new", "hash"), three.getGpuEmbeddingKeysList());
+        assertEquals(0, three.getCpuEmbeddingKeysCount());
+        assertEquals(1, stub.getWorkerStatus(EngineRpcService.StatusVersionPB.getDefaultInstance()).getStatusVersion());
+    }
+
     @Test void repeatedConcurrentRequestsShareComputationAndStatusRemainsAvailable() throws Exception {
         var d = MockVitService.Config.defaults();
         start(new MockVitService.Config(8, 1, 4, 1 << 20, 1 << 20, d.maxInputBytes(), d.maxOutputBytes(), 100));

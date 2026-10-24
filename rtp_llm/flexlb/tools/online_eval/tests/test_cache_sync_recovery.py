@@ -157,7 +157,7 @@ def test_report_preserves_gc_events_and_shared_time_origin(tmp_path):
         f'[{stamp}][2.0s][info][gc] GC(9) Pause Full (G1 Compaction Pause) 63G->20G(64G) 180.000ms\n')
     raw = dict(parameters=config()['parameters'], environment={}, errors=[], checks=[dict(
         id='healthy_survivors',status='PASS',actual=0)], intensity={'measurement': dict(
-            responses=1,entries=241000,key_payload_bytes=100)}, expiry_scope='discovery',
+            responses=1,full_responses=1,unchanged_responses=0,entries=241000,key_payload_bytes=100)}, expiry_scope='discovery',
         events=[dict(id='cache_only_started',epoch_s=epoch-120),
                 dict(id='performance_observation_finished',epoch_s=epoch+2),
                 dict(id='observation_finished',epoch_s=epoch+5)],
@@ -327,8 +327,8 @@ def pressure_evidence(intervention=False):
         gc_available=True, gc=[dict(epoch_s=15,full=True,duration_ms=180)],
         events=[dict(id=k,epoch_s=t) for k,t in [('cache_baseline_ready',9),('cache_only_started',10),
             ('measurement_started',10),('performance_observation_finished',17),('observation_finished',18)]],
-        intensity={'measurement':dict(responses=50,entries=50*241000,key_payload_bytes=200000000,
-            added_keys=2340,totals=dict(responses=15000,full_responses=15000,entries=15000*241000))})
+        intensity={'measurement':dict(responses=50,full_responses=50,unchanged_responses=0,entries=50*241000,key_payload_bytes=200000000,
+            added_keys=2340,totals=dict(responses=15000,full_responses=15000,unchanged_responses=0,entries=15000*241000))})
 
 
 @pytest.mark.parametrize('recovery', [False, True])
@@ -346,11 +346,27 @@ def test_core_checks_and_validity_are_separate_without_weakening_recovery(recove
         assert analyze(evidence)['verdict'] == 'FAIL'
 
 
+def test_same_version_responses_are_empty_and_do_not_count_as_payload_pressure():
+    from cases.cache_sync_recovery.analysis import analyze
+    evidence = pressure_evidence()
+    measured = evidence['intensity']['measurement']
+    measured['full_responses'] = 40
+    measured['totals'].update(full_responses=12000, unchanged_responses=3000, entries=12000*241000)
+    assert analyze(evidence)['verdict'] == 'PASS'
+    measured['full_responses'] = 10
+    measured['totals'].update(full_responses=3000, unchanged_responses=12000, entries=3000*241000)
+    result = analyze(evidence)
+    assert result['validity'] == 'INVALID', 'high poll QPS cannot replace actual key payload pressure'
+    assert next(c for c in result['checks'] if c['id'] == 'response_shape')['status'] == 'PASS'
+    measured['totals']['unchanged_responses'] -= 1
+    assert next(c for c in analyze(evidence)['checks'] if c['id'] == 'response_shape')['status'] == 'ERROR'
+
+
 @pytest.mark.parametrize('failure', ['pressure','shape','mutations','gap','client'])
 def test_invalid_measurement_cannot_become_valid_functional_pass(failure):
     from cases.cache_sync_recovery.analysis import analyze
     evidence = pressure_evidence()
-    if failure == 'pressure': evidence['intensity']['measurement']['responses'] = 34
+    if failure == 'pressure': evidence['intensity']['measurement']['full_responses'] = 34
     if failure == 'shape': evidence['intensity']['measurement']['totals']['entries'] -= 1
     if failure == 'mutations': evidence['intensity']['measurement']['added_keys'] = 1999
     if failure == 'gap': evidence['max_sample_gap_s'] = 11

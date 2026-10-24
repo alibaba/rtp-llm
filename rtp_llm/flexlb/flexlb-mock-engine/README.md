@@ -10,14 +10,14 @@ CacheStatus 的额外编码优化由 `--cache-status-compact-encoding true` 开�
 独立 Whale Mock role 对应环境变量 `MOCK_CACHE_STATUS_COMPACT_ENCODING=1`。
 开启后用每次 RPC 独立持有的 `long[]` 快照编码自然 keys，绕过临时 Set 和 protobuf map；
 Device、Host 和外部 fixture 的重复 keys 只输出一次。响应仍是标准 CacheStatusPB，
-相同版本也返回全量 keys，`need_cache_keys=false` 仍只返回标量，KV 容量和 LRU 驱逐不变。
-该开关不复用旧版本快照，不限制 keys 数量，不改变同步频率或启用未变化 keys 省略。
+同版本省略 keys，`need_cache_keys=false` 回显客户端版本并只返回容量等标量。
+编码开关只减少 Java 对象分配，不改变同步协议；不能用于推断 real 的序列化成本。
 
-核对了 `246852c6a` 和当前 next 的 real 实现：[LocalRpcServer::GetCacheStatus](../../cpp/model_rpc/LocalRpcServer.cc)
-仍逐次向 protobuf map 填入完整 keys；`246852c6a` 的 Device/Host 合并还会创建临时 unordered_set，
-因此 Mock 不默认启用这项编码优化。
-real 的 [KVCacheManager::getKVCacheInfo / refreshKVCacheInfoSnapshot](../../cpp/cache/KVCacheManager.cc)
-另有 `RTP_LLM_CACHE_STATUS_SNAPSHOT=1` 的快照复用路径；它与这里减少 Java 对象的开关分别控制，不能视为同一配置。
+同步协议依据为 real 的 [KVCacheManager::getKVCacheInfo](../../cpp/cache/KVCacheManager.cc)
+和 [BlockTreeCache::getKeySnapshot](../../cpp/cache/block_tree_cache/BlockTreeCache.cc)：
+key 版本初始为 -1，只在逻辑节点创建、最终移除时递增；GPU/Host 副本搬运、引用计数和容量变化不改变 key 版本。
+版本和 key 集合在同一临界区取快照。客户端版本不同时返回当前完整集合；版本相同时返回空集合。
+空集合是否表示清空索引由响应版本是否变化决定，容量始终实时读取。
 
 | 组件 | 职责 |
 |---|---|
@@ -46,10 +46,11 @@ BATCH 默认 `--auto-fetch false`：Decode 先保留 KV 并报告 `KV_ALLOCATED`
 P 已产生完整输出时，远程路径协商并发送 `PREFILL_COMPLETE`；本地路径使用同一资源结算规则，不执行额外 Decode step。EnqueueBatch 在分配资源前整批拒绝重复 request_id，并拒绝与单 DP 引擎不符的 rank 及缺少 input 的成员。
 
 WorkerStatus 在移除 running 条目前先发布终态记录；running、保留的 completion 和 finished cursor 在同一监视器内取快照。队列操作和文件写入在快照临界区之外执行。
-`MOCK_COMPLETION_RETAIN_WINDOW` 控制保留容量，超出容量立即淘汰最旧记录；读取不消费记录。慢消费者无法补取已淘汰的 completion。
+完成记录固定保留 1000 条，插入时淘汰最旧记录；读取不消费记录。慢消费者无法补取已淘汰的 completion。
+`status_version` 是读取时的微秒墙钟；完成版本以进程启动时的微秒墙钟为种子，每次发布递增。响应 finished cursor 是客户端游标与本次返回记录版本的最大值，没有新记录时回显客户端游标。
 `MOCK_STATUS_SNAPSHOT_LOG=true` 配合 `--events-file` 可记录状态 RPC 快照，排查终态遗漏。
 
-取消通过 gRPC `RpcService/Cancel`、HTTP `/cancel_request` 或进程内测试通道使用同一合同。停止 Decode、崩溃或强制移除会向所属 Prefill 响应队列投递 `8209 REMOTE_GENERATE_FAILED`；正常排空不产生断链错误。容量和请求超时通过 gRPC status 与 `ErrorDetailsPB` trailer 返回；下游有效领域错误优先于传输层兜底。其他模拟业务错误仍走 `error_info` 数据帧，响应队列只接受一个终态；不模拟真实 keepalive 时延。
+取消通过 gRPC `RpcService/Cancel`、HTTP `/cancel_request` 或进程内测试通道使用同一合同。停止 Decode、崩溃或强制移除会向所属 Prefill 响应队列投递 `8209 REMOTE_GENERATE_FAILED`；正常排空不产生断链错误。容量和请求超时通过 gRPC status 与 `ErrorDetailsPB` trailer 返回；下游有效领域错误优先于传输层兜底。请求业务错误通过 gRPC `onError` 和领域错误详情结束响应，响应队列只接受一个终态；不模拟真实 keepalive 时延。
 
 单引擎关闭先停止准入、关闭调用并打断回调，验证 transport 与该引擎回调均退出后才释放端口和所有者。关闭失败保留资源归属，允许重试；线程忽略中断时不能报告关闭成功。
 
@@ -68,7 +69,9 @@ host cache 是可选的前缀元数据缓存，不为 Decode 创建 memory cache
 
 Memory 默认使用前缀树驱逐：读刷新 recency，在飞读写保护容量，只驱逐最旧的合格叶节点。`enable_memory_prefix_tree: false` 仅用于匹配显式关闭该策略的真实配置。成功 H2D 读取后 host 条目被消费并归还容量；失败或取消只释放保护，条目仍可复用。崩溃清空两层缓存。
 
-该模型的 H2D / D2H 复制是原子的元数据操作，不模拟 tensor、DMA 重叠、host pin、写入队列、partial block 或 disk tier；配置不接受 copy-delay 和 copy-lifecycle 开关。驱逐 lifetime 是插入到驱逐的时长，不是过期时间。
+H2D / D2H 模拟描述符队列、完成回调与资源保护，不执行真实 tensor 复制、DMA 或 host pin，也不模拟 partial block 或 disk tier；行为参数来自 real 有效配置，复制耗时来自校准值。驱逐 lifetime 是插入到驱逐的时长，不是过期时间。
+
+Whale/KMonitor 的周期采样间隔固定为 1 秒，与 stdout 调试统计周期独立。WorkerStatus / CacheStatus 的 QPS 和 metadata 读取耗时在每次读取完成时上报，耗时不包含 protobuf map 构造、编码和网络发送；周期采样不重放 RPC、scheduler 或 forward 事件。P 的 model forward 指标只计模型耗时，MTP step 指标包含执行阶段注入的停顿，不计入队和等待执行 lane 的时间；Mock 不模拟 native executor 的 bookkeeping 成本。ViT 保留 real worker 的常量状态版本 1 和无增量版本的目录快照协议。
 
 ## HTTP 控制与采集
 
@@ -100,9 +103,9 @@ Java 测试位于 `src/test/java/org/flexlb/mockengine/`，通过 FlexLB 根目�
 合成 cache fixture 的 gRPC 响应直接从不可变的 key 几何快照编码标准
 `CacheStatusPB`，不在 Mock 中为每个版本重新构造完整 protobuf Map。
 该路径仍返回相同的 key、bool 值、版本、容量和 block size；在途响应持有自己的
-快照，不会被后续 churn 或 grow 改写。cold / changed / future / same version
-均返回全量 keys；不支持通过 JVM 属性省略同版本载荷。冻结 churn 也不会降低
-单次同步载荷。普通推理缓存响应不变。
+快照，不会被后续 churn 改写。cold / changed / future version 返回全量 keys；
+same version 返回空 keys。冻结 churn 后，相同版本轮询不再产生 key 载荷。
+自然 key 和 fixture key 先合并版本再判断是否变化，不能用合并后的客户端游标直接判断 fixture 自身版本。
 
 协议依据为 `LocalRpcServer::GetCacheStatus` 和 `model_rpc_service.proto`；
 `CacheFixtureWireTest` 用原始 protobuf parser、完整响应字节及真实 gRPC 客户端验证。

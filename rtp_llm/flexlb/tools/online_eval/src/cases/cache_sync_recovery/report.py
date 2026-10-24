@@ -123,8 +123,9 @@ def write_report(directory, raw, result, *, run=None, presentation=None):
         kpis=[dict(label='功能判定',value=data['outcome']['gate']),dict(label='实验有效性（含同步强度）',value=data['outcome']['validity']),
               dict(label='Full GC次数',value=sum(g['full'] for g in gc) if raw.get('gc_available', True) else None),
               dict(label='未参与撤出的 Worker 受影响数',value=len(set(raw.get('affected_workers',[]))-set(raw.get('victims',[]))))],
-        sections=[table('分阶段实测',['阶段','Mock缓存响应/s','Master P同步成功/s','状态应用成功/s','条目/s','MiB/s','diff百万key/s','FullGC次/分','GC暂停占比','未参与撤出的 Worker 最长未更新ms'],
-            [[phase, round(v['actual_rpc']['responses'],3), v['cache_success_s'], v['worker_status_success_s'], round(v['actual_rpc']['entries']),
+        sections=[table('分阶段实测',['阶段','Mock缓存响应/s','全量快照/s','未变化响应/s','Master P同步成功/s','状态应用成功/s','条目/s','MiB/s','diff百万key/s','FullGC次/分','GC暂停占比','未参与撤出的 Worker 最长未更新ms'],
+            [[phase, round(v['actual_rpc']['responses'],3), round(v['actual_rpc']['full_responses'],3),
+              round(v['actual_rpc']['unchanged_responses'],3), v['cache_success_s'], v['worker_status_success_s'], round(v['actual_rpc']['entries']),
               round(v['actual_rpc']['key_payload_bytes']/2**20,3),v['diff_million_keys_s'],
               v['full_gc_per_min'],v['gc_pause_fraction'],v['max_healthy_age_ms']]
              for phase,v in summaries.items()]),table('功能断言' ,['断言','状态','实际值'],[[c['id'],c['status'],str(c['actual'])] for c in checks]),

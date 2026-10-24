@@ -19,6 +19,9 @@ final class MockMetricContract {
     }
 
     static final List<Metric> ALL = List.of(
+        metric("mock_cache_status_rpcs_total", "cache_status_rpcs_total", "completed CacheStatus metadata read counter", Type.COUNTER, Unit.COUNT, Role.BOTH, Aggregation.SUM, Sampling.SNAPSHOT),
+        metric("rtp_llm_rpc_cache_status_qps", "cache_status_qps", "CacheStatus metadata reads per second", Type.GAUGE, Unit.REQUESTS_PER_SECOND, Role.BOTH, Aggregation.SUM, Sampling.EVENT),
+        metric("rtp_llm_rpc_cache_status_total_rt_us", "cache_status_rt_us", "CacheStatus metadata read duration; excludes protobuf map encoding and network", Type.GAUGE, Unit.MICROSECONDS, Role.BOTH, Aggregation.NONE, Sampling.EVENT),
         metric("rtp_llm_rpc_worker_status_qps", "worker_status_qps", "completed WorkerStatus RPCs per second; independent scrape reader", Type.GAUGE, Unit.REQUESTS_PER_SECOND, Role.BOTH, Aggregation.SUM, Sampling.EVENT),
         metric("rtp_llm_rpc_worker_status_total_rt_us", "worker_status_rt_us", "latest WorkerStatus state-read duration; excludes response encoding and network", Type.GAUGE, Unit.MICROSECONDS, Role.BOTH, Aggregation.NONE, Sampling.EVENT),
         metric("mock_worker_status_rpcs_total", "worker_status_rpcs_total", "completed WorkerStatus RPC counter for lossless rate derivation", Type.COUNTER, Unit.COUNT, Role.BOTH, Aggregation.SUM, Sampling.SNAPSHOT),

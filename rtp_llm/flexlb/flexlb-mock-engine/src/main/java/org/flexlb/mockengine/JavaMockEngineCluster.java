@@ -176,7 +176,7 @@ public final class JavaMockEngineCluster {
                 } catch (RuntimeException error) {
                     System.err.println("Whale mock metric reporting failed: " + error);
                 }
-            }, config.statsIntervalMs, config.statsIntervalMs, TimeUnit.MILLISECONDS);
+            }, 1000, 1000, TimeUnit.MILLISECONDS);
         }
 
         scheduler.scheduleAtFixedRate(() -> {
@@ -246,8 +246,10 @@ public final class JavaMockEngineCluster {
     private static void configureWhaleMetrics(FastRpcService service, WhaleMockMonitor whaleMonitor) {
         if (whaleMonitor != null) service.schedulerMetricReporter =
                 values -> whaleMonitor.reportScheduler(values, service.whaleMetricTags());
-        if (whaleMonitor != null) service.statusMetricReporter =
-                latency -> whaleMonitor.reportWorkerStatus(service.whaleMetricTags(), latency);
+        if (whaleMonitor != null) {
+            service.statusMetricReporter = latency -> whaleMonitor.reportWorkerStatus(service.whaleMetricTags(), latency);
+            service.cacheMetricReporter = latency -> whaleMonitor.reportCacheStatus(service.whaleMetricTags(), latency);
+        }
         if (whaleMonitor != null) service.eventMetricReporter =
                 values -> whaleMonitor.reportEvent(values, service.whaleMetricTags());
         if (whaleMonitor != null) service.cacheEvictionReporter = (scope, ms) -> {
@@ -642,8 +644,7 @@ public final class JavaMockEngineCluster {
             if (memoryCache != null && policy.memory().enabled()) {
                 int used = memoryCache.usedBlocks();
                 memoryWatermarkTriggered |= used >= policy.memory().highBlocks(memoryCache.totalBlocks());
-                if (memoryWatermarkTriggered && memoryCache.evictTo(policy.memory().lowBlocks(memoryCache.totalBlocks())) > 0)
-                    cacheVersion.incrementAndGet();
+                if (memoryWatermarkTriggered) memoryCache.evictTo(policy.memory().lowBlocks(memoryCache.totalBlocks()));
                 memoryWatermarkTriggered &= memoryCache.usedBlocks() > policy.memory().lowBlocks(memoryCache.totalBlocks());
             }
             if (!policy.device().enabled() || !(roleType == EngineRpcService.RoleTypePB.ROLE_TYPE_DECODE
@@ -656,7 +657,7 @@ public final class JavaMockEngineCluster {
             if (needed <= 0) { deviceWatermarkTriggered = false; return; }
             if (memoryCache == null) {
                 for (var keys : cache.watermarkCandidates(needed))
-                    if (cache.evict(keys)) cacheVersion.incrementAndGet();
+                    cache.evict(keys);
                 return;
             }
             // BlockTreeEvictor submits one asynchronous descriptor batch, then
@@ -667,9 +668,7 @@ public final class JavaMockEngineCluster {
             for (var keys : cache.watermarkCandidates(Math.min(needed, performance.hostTransferPolicy.descriptors()))) {
                 var device = cache.pinExisting(keys);
                 if (device == null) continue;
-                long evictions = memoryCache.evictions();
                 var host = memoryCache.beginWrite(keys);
-                if (memoryCache.evictions() != evictions) cacheVersion.incrementAndGet();
                 if (host == null) {
                     cache.release(device); copies.forEach(copy -> copy.finish(false));
                     return;
@@ -686,7 +685,7 @@ public final class JavaMockEngineCluster {
                         if (!watermarkWrites.remove(copy)) continue;
                         pendingWatermarkBlocks -= keys.size();
                         copy.finish(error == null);
-                        if (error == null && copy.epoch == crashEpoch.get() && cache.evict(keys)) cacheVersion.incrementAndGet();
+                        if (error == null && copy.epoch == crashEpoch.get()) cache.evict(keys);
                     }
                 }
                 if (error == null) scheduleWatermarks();
@@ -731,7 +730,7 @@ public final class JavaMockEngineCluster {
                 if (closed) return;
                 closed = true;
                 if (success && epoch == crashEpoch.get()) {
-                    if (host.commit()) cacheVersion.incrementAndGet();
+                    host.commit();
                 } else host.close();
                 // A crash has already reset GPU reference accounting.
                 if (epoch == crashEpoch.get()) {
@@ -807,13 +806,10 @@ public final class JavaMockEngineCluster {
             if (deviceCache) {
                 // Publish once at FINISHED. Retain the connector's ownership for P->D.
                 activeBlockLeases.computeIfPresent(id, (ignored, lease) -> cache.retainComputed(lease, shape.blockKeys()));
-                cacheVersion.incrementAndGet();
             }
             if (memoryCache == null || !prefillCacheEnabled(shape, "reuse_cache")
                     || !prefillCacheEnabled(shape, "enable_memory_cache")) return;
-            long before = memoryCache.evictions();
             var host = memoryCache.beginWrite(shape.blockKeys());
-            if (memoryCache.evictions() != before) cacheVersion.incrementAndGet();
             if (host == null) return; // optional cache write failure never fails the request
             // With device indexing disabled, the active request's naked allocation
             // remains the source owner until this synchronous copy has committed.
@@ -1181,41 +1177,12 @@ public final class JavaMockEngineCluster {
          *  ack, not a connection reset); 200ms is far inside the master's
          *  3-strike retire scale. */
         static final long CRASH_PORT_KILL_DELAY_MS = 200L;
-        /**
-         * Real-engine finished capacity: 1000 records, oldest first. Each
-         * consumer retains its own cursor; records evicted before it polls
-         * are permanently lost. Override with MOCK_COMPLETION_RETAIN_WINDOW.
-         */
-        static final int DEFAULT_COMPLETION_RETAIN_WINDOW = readCompletionRetainWindow();
+        /** Real RpcServerRuntimeMeta retains the newest 1000 finished records. */
+        static final int DEFAULT_COMPLETION_RETAIN_WINDOW = 1000;
 
-        /**
-         * Reads {@code MOCK_COMPLETION_RETAIN_WINDOW} (non-negative int); a
-         * malformed value falls back to 1000 — a load-test tool stays robust
-         * on config typos instead of failing the run (same discipline as
-         * JavaLoadClient's PRIORITY sanitization).
-         */
-        private static int readCompletionRetainWindow() {
-            String val = System.getenv("MOCK_COMPLETION_RETAIN_WINDOW");
-            if (val == null || val.isEmpty()) {
-                return 1000;
-            }
-            try {
-                int parsed = Integer.parseInt(val);
-                if (parsed < 0) {
-                    // Negative typos must NOT clamp to 0: a 0 window would
-                    // wipe the whole backlog at every cleanup, silently
-                    // starving every consumer — degrade to the default
-                    // instead, same as a malformed value.
-                    System.err.println("invalid MOCK_COMPLETION_RETAIN_WINDOW=" + val
-                            + " (must be a non-negative int); falling back to 1000");
-                    return 1000;
-                }
-                return parsed;
-            } catch (NumberFormatException e) {
-                System.err.println("invalid MOCK_COMPLETION_RETAIN_WINDOW=" + val
-                        + " (must be a non-negative int); falling back to 1000");
-                return 1000;
-            }
+        private static long currentTimeUs() {
+            var now = java.time.Instant.now();
+            return now.getEpochSecond() * 1_000_000L + now.getNano() / 1000;
         }
 
         private final String engineName;
@@ -1286,10 +1253,10 @@ public final class JavaMockEngineCluster {
         private final ArrayDeque<Double> recentPrefillTimes = new ArrayDeque<>();
         private final ArrayDeque<Double> recentDecodeTimes = new ArrayDeque<>();
         private final AtomicLong statusVersion = new AtomicLong();
-        private final AtomicLong completionVersion = new AtomicLong();
+        private final AtomicLong completionVersion = new AtomicLong(currentTimeUs());
         private volatile CacheSyncFixture cacheSyncFixture;
-        private boolean naturalCacheSeeded;
-        private final AtomicLong cacheVersion = new AtomicLong(1);
+        private volatile boolean naturalCacheSeeded;
+        private final MockCacheKeyIndex cacheKeyIndex = new MockCacheKeyIndex();
         private final Map<Integer, AtomicLong> nextPrefillAvailableNanosByDp = new ConcurrentHashMap<>();
         // ── KV capacity model v2: single block-pool truth ──
         // In-flight requests pin blocks via per-request leases (acquired at
@@ -1459,7 +1426,7 @@ public final class JavaMockEngineCluster {
          * remove entries — each flexlb instance keeps an independent
          * per-worker cursor, so the earliest poller must not destroy records
          * a slower consumer has not read yet. Bounded by the retain window
-         * ({@link #completionRetainWindow}) enforced on every insertion.
+         * ({@link #DEFAULT_COMPLETION_RETAIN_WINDOW}) enforced on every insertion.
          */
         private final ArrayDeque<VersionedTask> completions = new ArrayDeque<>();
         /**
@@ -1868,9 +1835,13 @@ public final class JavaMockEngineCluster {
         private final LongAdder lifetimeContextRequests = new LongAdder();
         private final LongAdder lifetimeGenerateTokens = new LongAdder();
         private final CounterRateMetrics workerStatusRates = new CounterRateMetrics();
+        private final CounterRateMetrics cacheStatusRates = new CounterRateMetrics();
+        private final CounterRateMetrics.Reader prometheusCacheStatus = new CounterRateMetrics.Reader();
+        private final AtomicLong cacheStatusRtUs = new AtomicLong();
         private final CounterRateMetrics.Reader prometheusWorkerStatus = new CounterRateMetrics.Reader();
         private final AtomicLong workerStatusRtUs = new AtomicLong();
         java.util.function.LongConsumer statusMetricReporter = ignored -> {};
+        java.util.function.LongConsumer cacheMetricReporter = ignored -> {};
         private final CounterRateMetrics decodeTps = new CounterRateMetrics();
         private final CounterRateMetrics.Reader prometheusDecodeTps = new CounterRateMetrics.Reader();
         private final AtomicLong hitTokensTotal = new AtomicLong();
@@ -1881,16 +1852,6 @@ public final class JavaMockEngineCluster {
          * time; tests inject short timeouts to exercise the timeout path).
          */
         private volatile long responsePollTimeoutMs = DEFAULT_RESPONSE_POLL_TIMEOUT_MS;
-        /**
-         * Completion backlog retain window: the number of most-recent
-         * completion records (by version) kept in {@link #completions} for
-         * multi-consumer cursor delivery. Trimmed oldest-first on every insertion — reads never remove entries, so two
-         * masters with independent cursors can poll concurrently without one
-         * starving the other's backlog. Overridable via
-         * {@link #setCompletionRetainWindow(int)} (tests inject small windows
-         * to exercise the trim path).
-         */
-        private volatile int completionRetainWindow = DEFAULT_COMPLETION_RETAIN_WINDOW;
         /** Test/default constructor: derives engine name from role+port, default KV capacity. */
         FastRpcService(String roleName,
                        EngineRpcService.RoleTypePB roleType,
@@ -1946,6 +1907,8 @@ public final class JavaMockEngineCluster {
                     ? new MockLruBlockCache(totalBlocks, performance.prefillReserveBlockRatio / 100.0)
                     : new MockLruBlockCache(totalBlocks);
             if (performance.observedReserveBlocks != null) cache.setObservedReserveBlocks(performance.observedReserveBlocks);
+            this.cache.setKeyListener(cacheKeyIndex::update);
+            if (memoryCache != null) memoryCache.setKeyListener(cacheKeyIndex::update);
             // Cache invalidation must not depend on event-log/monitor wiring.
             this.cache.setEvictionListener(this::onCacheEviction);
             this.cache.setPrefixTreeEnabled(roleType == EngineRpcService.RoleTypePB.ROLE_TYPE_DECODE
@@ -2087,13 +2050,13 @@ public final class JavaMockEngineCluster {
                 if (!stopped && statusDeliveryFaultsActive) {
                     statusDeliveryFaults.releaseReady(System.nanoTime(), this::publishCompletionNow);
                 }
-                latestVersion = completionVersion.get();
+                latestVersion = requestedVersion;
                 visibleRunning = new ArrayList<>(runningTasks.values());
                 cancelingOverlays.forEach((id, task) -> { if (!runningTasks.containsKey(id)) visibleRunning.add(task); });
                 for (VersionedTask completion : completions) {
-                    if (completion.version > requestedVersion
-                            && completion.version <= latestVersion) {
+                    if (completion.version > requestedVersion) {
                         visibleCompletions.add(completion);
+                        latestVersion = Math.max(latestVersion, completion.version);
                     }
                 }
                 if (statusSnapshotLog && engineEventLog != null) {
@@ -2132,7 +2095,8 @@ public final class JavaMockEngineCluster {
                     .setRoleType(roleType)
                     .setAvailableKvCache(availableKvTokens())
                     .setTotalKvCache(totalKvTokens)
-                    .setStatusVersion(statusVersion.incrementAndGet())
+                    .setStatusVersion(statusVersion.updateAndGet(previous ->
+                            faultConfig.isStatusVersionRegress() ? previous - 1 : currentTimeUs()))
                     .setLatestFinishedVersion(latestVersion)
                     .setDpSize(1)
                     .setTpSize(effectiveConfig == null ? 1 : effectiveConfig.path("roles").path(roleName.toLowerCase()).path("model").path("tp_size").intValue())
@@ -2250,9 +2214,6 @@ public final class JavaMockEngineCluster {
             if (cursorRegress > 0) {
                 status.setLatestFinishedVersion(
                         Math.max(0L, status.getLatestFinishedVersion() - cursorRegress));
-            }
-            if (faultConfig.isStatusVersionRegress()) {
-                status.setStatusVersion(statusVersion.addAndGet(-2L));
             }
             for (FaultInjectionConfig.StatusFakeTask fake : faultConfig.getStatusFakeTasks()) {
                 if (fake.isFinishedForm()) {
@@ -2647,22 +2608,6 @@ public final class JavaMockEngineCluster {
             this.responsePollTimeoutMs = responsePollTimeoutMs;
         }
 
-        /**
-         * Override the completion backlog retain window (mainly for tests
-         * exercising immediate oldest-first trimming; production keeps the
-         * {@link #DEFAULT_COMPLETION_RETAIN_WINDOW} default, itself
-         * overridable via env {@code MOCK_COMPLETION_RETAIN_WINDOW}).
-         */
-        void setCompletionRetainWindow(int completionRetainWindow) {
-            if (completionRetainWindow < 0) {
-                throw new IllegalArgumentException("completion retain window must be >= 0");
-            }
-            synchronized (completionLock) {
-                this.completionRetainWindow = completionRetainWindow;
-                trimCompletionsLocked();
-            }
-        }
-
         /** Wire the cluster-shared engine_events.jsonl writer (null disables). */
         void setEngineEventLog(EngineEventLog engineEventLog) {
             this.engineEventLog = engineEventLog;
@@ -2670,7 +2615,6 @@ public final class JavaMockEngineCluster {
         }
 
         private void onCacheEviction(MockLruBlockCache.EvictionEvent event) {
-            if (event.blocksFreed() > 0) cacheVersion.incrementAndGet();
             reportMetricEvent(Map.of("mock_cache_direct_evicted_blocks", event.blocksFreed()));
             if (engineEventLog == null) return;
             ObjectNode row = OBJECT_MAPPER.createObjectNode();
@@ -2873,7 +2817,6 @@ public final class JavaMockEngineCluster {
             recordLifecycleEnd(requestId, true);
             requestStates.put(requestId, "cancelled");
             cancelledCount.incrementAndGet();
-            statusVersion.incrementAndGet();
             LinkedBlockingQueue<EngineRpcService.GenerateOutputsPB> queue = responseQueues.get(requestId);
             if (queue != null) {
                 queue.offer(EngineRpcService.GenerateOutputsPB.newBuilder()
@@ -3402,7 +3345,6 @@ public final class JavaMockEngineCluster {
                 task.setBatchId(batchId);
             }
             publishCompletion(task.build());
-            statusVersion.incrementAndGet();
         }
 
         private void recordPriorityPreemptionCanceled(long requestId,
@@ -3429,7 +3371,6 @@ public final class JavaMockEngineCluster {
                 task.setBatchId(batchId);
             }
             publishCompletion(task.build());
-            statusVersion.incrementAndGet();
         }
 
         /** Preserve the exact EnqueueBatch identity on typed Prefill terminals. */
@@ -3699,7 +3640,7 @@ public final class JavaMockEngineCluster {
                             int prefix = Math.min(keys.size(), load.shape().hitBlocks());
                             activeBlockLeases.computeIfPresent(id, (ignored, lease) -> cache.retainComputed(lease, keys.subList(0, prefix)));
                         }
-                        if (read.consume() > 0) cacheVersion.incrementAndGet();
+                        read.consume();
                     }
                 }
                 requestStates.put(id, "waiting");
@@ -3910,7 +3851,7 @@ public final class JavaMockEngineCluster {
                     long readDelay = startDelayNanos;
                     Runnable release = () -> {
                         if (read != null && memoryReads.remove(id, read)) {
-                            if (read.consume() > 0) cacheVersion.incrementAndGet();
+                            read.consume();
                         }
                     };
                     if (readDelay == 0) release.run();
@@ -3935,9 +3876,10 @@ public final class JavaMockEngineCluster {
                     }
                     if (priority != null) commitSchedulerCancellation(id, priority);
                 }
-                // One modeled forward per P batch; excludes waiting and injected delay.
+                // MtpExecutor times the execution step after prepareStreams; queue/lane waiting is excluded.
+                // Model compute and execution stalls are separate observations; native bookkeeping is not simulated.
                 reportMetricEvent(Map.of("rtp_llm_model_forward_us", executionMs * 1000.0,
-                        "rtp_llm_sp_step_latency_us", executionMs * 1000.0));
+                        "rtp_llm_sp_step_latency_us", (executionMs + generateDelayMs) * 1000.0));
                 int activeCount = 0;
                 // ── prefill_async_partial_fail (execution-phase partial
                 // failure): snapshot the volatile config ONCE for the whole
@@ -5047,8 +4989,8 @@ public final class JavaMockEngineCluster {
             // prefill-side completion's alreadyCancelled branch.
             if (alreadyCancelled) {
                 releaseBlockLease(requestId);
-            } else if (admitBlockLease(requestId, shape)) {
-                cacheVersion.incrementAndGet();
+            } else {
+                admitBlockLease(requestId, shape);
             }
         }
 
@@ -5095,7 +5037,6 @@ public final class JavaMockEngineCluster {
         private void finishDecodeKvFailure(long requestId, MockPerformanceModel.RequestShape shape,
                 long batchId, int terminalBatchSize,
                 LinkedBlockingQueue<EngineRpcService.GenerateOutputsPB> responseQueue, String stage) {
-            statusVersion.incrementAndGet();
             // engine_events.jsonl failure row (error_code key present →
             // aggregate/canvas joins exclude it from latency calibers).
             writeDecodeDoneEventCore(shape, batchId, terminalBatchSize, false,
@@ -5252,7 +5193,7 @@ public final class JavaMockEngineCluster {
         /** Caller holds completionLock. Fault-delayed records get their cursor here. */
         private void publishCompletionNow(EngineRpcService.TaskInfoPB task) {
             cancelingOverlays.remove(task.getRequestId());
-            long version = completionVersion.incrementAndGet();
+            long version = completionVersion.getAndIncrement();
             StatusDeliveryFaults.Rule delivery = statusDeliveryFaults.rules.get(task.getRequestId());
             if (delivery != null) delivery.releasedVersion = version;
             completions.add(new VersionedTask(version, task));
@@ -5266,7 +5207,7 @@ public final class JavaMockEngineCluster {
         }
 
         private void trimCompletionsLocked() {
-            while (completions.size() > completionRetainWindow) {
+            while (completions.size() > DEFAULT_COMPLETION_RETAIN_WINDOW) {
                 completions.removeFirst();
                 completionRetentionDrops++;
             }
@@ -5350,42 +5291,31 @@ public final class JavaMockEngineCluster {
         boolean cacheStatusCompactEncoding;
 
         private java.util.Set<Long> naturalCacheKeys() {
-            var keys = cache.snapshotKeys();
-            if (memoryCache == null) return keys;
-            var combined = new java.util.HashSet<>(keys);
-            combined.addAll(memoryCache.keys());
-            return combined;
+            return cacheKeyIndex.keys();
         }
 
         private CacheFixtureWire.Frame cacheStatusFrame(EngineRpcService.CacheVersionPB request) {
+            long started = System.nanoTime();
             stats.cacheRpcs.increment();
-            // Capture the natural version before its keys: concurrent writes remain visible on the next poll.
-            long naturalVersion = cacheVersion.get();
+            MockCacheKeyIndex.Snapshot snapshot;
+            synchronized (cacheKeyIndex) {
+                snapshot = cacheKeyIndex.snapshot(cacheSyncFixture, request.getLatestCacheVersion(), request.getNeedCacheKeys());
+            }
             var status = EngineRpcService.CacheStatusPB.newBuilder()
                     .setAvailableKvCache(availableKvTokens()).setTotalKvCache(totalKvTokens)
-                    .setBlockSize(performance.blockSize());
-            CacheSyncFixture fixture = cacheSyncFixture;
-            CacheFixtureWire.Keys external = null;
-            long externalVersion = 0;
-            if (fixture != null) {
-                if (request.getNeedCacheKeys()) {
-                    var frame = fixture.wireResponse(request.getLatestCacheVersion());
-                    external = frame.keys();
-                    externalVersion = frame.header().getVersion();
-                } else externalVersion = fixture.version();
+                    .setBlockSize(performance.blockSize()).setVersion(snapshot.version());
+            // Real reports metadata read time before protobuf key-map serialization.
+            long readUs = Math.max(0L, (System.nanoTime() - started) / 1000);
+            cacheStatusRates.add(1);
+            cacheStatusRtUs.set(readUs);
+            cacheMetricReporter.accept(readUs);
+            if (cacheStatusCompactEncoding) {
+                var keys = CacheFixtureWire.NaturalKeys.takeSnapshots(snapshot.natural(), new long[0], snapshot.external());
+                return new CacheFixtureWire.Frame(status.build(), snapshot.external(), keys);
             }
-            status.setVersion(naturalVersion + externalVersion);
-            if (request.getNeedCacheKeys() && cacheStatusCompactEncoding) {
-                var natural = CacheFixtureWire.NaturalKeys.takeSnapshots(cache.snapshotKeyArray(),
-                        memoryCache == null ? new long[0] : memoryCache.snapshotKeyArray(), external);
-                return new CacheFixtureWire.Frame(status.build(), external, natural);
-            }
-            if (request.getNeedCacheKeys()) {
-                for (Long key : naturalCacheKeys())
-                    if (external == null || !external.contains(key)) status.putCacheKeys(key, true);
-            }
-            // The header contains only natural-only keys; synthetic keys remain streamed with constant scratch space.
-            return new CacheFixtureWire.Frame(status.build(), external);
+            for (long key : snapshot.natural())
+                if (snapshot.external() == null || !snapshot.external().contains(key)) status.putCacheKeys(key, true);
+            return new CacheFixtureWire.Frame(status.build(), snapshot.external());
         }
 
         /**
@@ -5400,11 +5330,7 @@ public final class JavaMockEngineCluster {
          * @return true when at least one key was actually removed
          */
         boolean evictCacheKeys(List<Long> keys) {
-            boolean changed = cache.evict(keys);
-            if (changed) {
-                cacheVersion.incrementAndGet();
-            }
-            return changed;
+            return cache.evict(keys);
         }
 
         // ──────────── KV capacity model v2: block-pool helpers ────────────
@@ -5594,12 +5520,8 @@ public final class JavaMockEngineCluster {
             releaseMemoryRead(requestId);
             MockLruBlockCache.BlockLease lease = activeBlockLeases.remove(requestId);
             if (lease != null) {
-                long beforeEvictions = cache.retentionEvictions();
                 releaseAfterMemoryCopy(requestId, lease);
                 scheduleWatermarks();
-                if (cache.retentionEvictions() != beforeEvictions) {
-                    cacheVersion.incrementAndGet();
-                }
                 wakeFifoOnCapacityRelease();
             }
         }
@@ -5666,8 +5588,7 @@ public final class JavaMockEngineCluster {
 
         /** Current cache version (gRPC getCacheStatus / /cache_evict echo). */
         long getCacheVersion() {
-            CacheSyncFixture fixture = cacheSyncFixture;
-            return cacheVersion.get() + (fixture == null ? 0 : fixture.version());
+            synchronized (cacheKeyIndex) { return cacheKeyIndex.version(cacheSyncFixture); }
         }
 
         /** One-time warm start of the ordinary cache; subsequent requests own all changes. */
@@ -5681,7 +5602,6 @@ public final class JavaMockEngineCluster {
                 throw new IllegalArgumentException("seed requires unique keys within physical cache capacity");
             cache.admit(keys);
             naturalCacheSeeded = true;
-            cacheVersion.incrementAndGet();
             return Map.of("mode", "natural", "keys", cache.snapshotKeys().size(), "version", getCacheVersion());
         }
 
@@ -5689,25 +5609,28 @@ public final class JavaMockEngineCluster {
                 int unique, int shared, int delta, int intervalMs) {
             if (!"PREFILL".equals(getRoleName()))
                 throw new IllegalArgumentException("cache fixture requires PREFILL");
-            if ("configure".equals(operation)) {
-                if (cacheSyncFixture != null)
-                    throw new IllegalArgumentException("external keys already configured");
-                var candidate = new CacheSyncFixture(worker, workers, unique, shared, 1);
-                candidate.churn(delta, intervalMs); // Validate everything before selecting the source.
-                cacheSyncFixture = candidate;
-            } else {
-                if (cacheSyncFixture == null) throw new IllegalArgumentException("controlled fixture not configured");
-                if ("churn".equals(operation)) cacheSyncFixture.churn(delta, intervalMs);
-                else if (!"inspect".equals(operation)) throw new IllegalArgumentException("unknown fixture operation");
-            }
-            synchronized (cacheSyncFixture) {
-                var result = new java.util.LinkedHashMap<>(cacheSyncFixture.snapshot());
-                var external = cacheSyncFixture.keys();
-                result.put("fixture_version", external.version());
-                result.put("version", cacheVersion.get() + external.version());
-                result.put("reported_keys", external.count()
-                        + naturalCacheKeys().stream().filter(key -> !external.contains(key)).count());
-                return result;
+            // Serialize source selection with snapshots and process reset.
+            synchronized (cacheKeyIndex) {
+                if ("configure".equals(operation)) {
+                    if (cacheSyncFixture != null)
+                        throw new IllegalArgumentException("external keys already configured");
+                    var candidate = new CacheSyncFixture(worker, workers, unique, shared, 1);
+                    candidate.churn(delta, intervalMs); // Validate everything before selecting the source.
+                    cacheSyncFixture = candidate;
+                } else {
+                    if (cacheSyncFixture == null) throw new IllegalArgumentException("controlled fixture not configured");
+                    if ("churn".equals(operation)) cacheSyncFixture.churn(delta, intervalMs);
+                    else if (!"inspect".equals(operation)) throw new IllegalArgumentException("unknown fixture operation");
+                }
+                synchronized (cacheSyncFixture) {
+                    var result = new java.util.LinkedHashMap<>(cacheSyncFixture.snapshot());
+                    var external = cacheSyncFixture.keys();
+                    result.put("fixture_version", external.version());
+                    result.put("version", getCacheVersion());
+                    result.put("reported_keys", external.count()
+                            + naturalCacheKeys().stream().filter(key -> !external.contains(key)).count());
+                    return result;
+                }
             }
         }
 
@@ -6011,6 +5934,7 @@ public final class JavaMockEngineCluster {
             synchronized (completionLock) {
                 runningTasks.clear();
                 completions.clear();
+                completionVersion.set(currentTimeUs());
                 statusDeliveryFaults.rules.clear();
                 statusDeliveryFaultsActive = false;
             }
@@ -6047,8 +5971,11 @@ public final class JavaMockEngineCluster {
             // KV memory: every held block and LRU entry is gone with the process.
             cache.clear();
             if (memoryCache != null) memoryCache.clear();
-            cacheVersion.incrementAndGet();
-            statusVersion.incrementAndGet();
+            synchronized (cacheKeyIndex) {
+                cacheSyncFixture = null;
+                naturalCacheSeeded = false;
+                cacheKeyIndex.reset();
+            }
             // Observability histories are process memory as well.
             synchronized (requestLifecycles) {
                 requestLifecycles.clear();
@@ -6115,6 +6042,12 @@ public final class JavaMockEngineCluster {
             cacheHitMetrics.reset(System.nanoTime());
             decodeTps.reset(System.nanoTime());
             prometheusDecodeTps.reset();
+            workerStatusRates.reset(System.nanoTime());
+            cacheStatusRates.reset(System.nanoTime());
+            prometheusWorkerStatus.reset();
+            prometheusCacheStatus.reset();
+            workerStatusRtUs.set(0);
+            cacheStatusRtUs.set(0);
             hitTokensTotal.set(0);
             lifetimeContextComputeTokens.reset();
             lifetimeContextTokens.reset();
@@ -6342,7 +6275,6 @@ public final class JavaMockEngineCluster {
         int getCacheBlocks() { return cache.totalBlocks(); }
         void setCacheRetentionBlocks(int limit) {
             cache.setRetentionBlocks(limit);
-            cacheVersion.incrementAndGet();
         }
         /** spb — the pool's token<->block conversion factor (reported as block_size). */
         int getSeqSizePerBlock() { return seqSizePerBlock; }
@@ -6421,7 +6353,6 @@ public final class JavaMockEngineCluster {
             // relative to what is really running.
             long pressure = Math.max(0, absoluteTokens - occupiedKvTokens());
             faultConfig = faultConfig.toBuilder().kvPressureTokens(pressure).build();
-            statusVersion.incrementAndGet();
         }
 
         private AtomicLong pickPrefillLane(int dpRank) {
@@ -6702,6 +6633,7 @@ public final class JavaMockEngineCluster {
 
         /** Settle the HTTP reader once per scrape; snapshots themselves are read-only. */
         void drainTpsWindows() {
+            prometheusCacheStatus.sample(cacheStatusRates.snapshot(), System.nanoTime());
             prometheusWorkerStatus.sample(workerStatusRates.snapshot(), System.nanoTime());
             prometheusDecodeTps.sample(decodeTps.snapshot(), System.nanoTime());
             prometheusPrefillTps.sample(prefillTps.snapshot(), System.nanoTime());
@@ -6873,6 +6805,9 @@ public final class JavaMockEngineCluster {
             snap.put("decode_step_tokens_total", decodeTps.snapshot().tokens());
             snap.putAll(prometheusPrefillTps.last());
             snap.put("generate_tps", prometheusDecodeTps.lastTokens());
+            snap.put("cache_status_qps", prometheusCacheStatus.last());
+            snap.put("cache_status_rt_us", cacheStatusRtUs.get());
+            snap.put("cache_status_rpcs_total", cacheStatusRates.snapshot().tokens());
             snap.put("worker_status_qps", prometheusWorkerStatus.last());
             snap.put("worker_status_rt_us", workerStatusRtUs.get());
             snap.put("worker_status_rpcs_total", workerStatusRates.snapshot().tokens());

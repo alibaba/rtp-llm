@@ -477,15 +477,40 @@ public final class MockVitService extends MultimodalRpcServiceGrpc.MultimodalRpc
     @Override public synchronized void getCacheStatus(EngineRpcService.CacheVersionPB request,
                                                       StreamObserver<EngineRpcService.CacheStatusPB> observer) {
         var output = EngineRpcService.CacheStatusPB.newBuilder();
-        if (request.getNeedCacheKeys()) output.setMultimodalCache(EngineRpcService.MultimodalCacheStatusPB.newBuilder()
-                .setWorkerInstance(instance).addAllKeys(hashes.keySet().stream().limit(100000).toList())
-                .addAllCpuEmbeddingKeys(embeddings.keySet().stream().limit(100000).toList())
-                .addAllGpuEmbeddingKeys(gpuEmbeddings.keySet().stream().limit(100000).toList()));
+        if (request.getNeedCacheKeys()) output.setMultimodalCache(cacheDirectory(100000));
         if (output.build().getSerializedSize() > (16 << 20)) {
             observer.onError(Status.RESOURCE_EXHAUSTED.withDescription("ViT directory exceeds 16 MiB").asRuntimeException()); return;
         }
         observer.onNext(output.build()); observer.onCompleted();
     }
+    /** get_mm_cache_keys: recent hashes first, then GPU/CPU residency, one union limit. */
+    synchronized EngineRpcService.MultimodalCacheStatusPB cacheDirectory(int limit) {
+        var recent = new java.util.ArrayList<>(hashes.reversed().keySet().stream().limit(limit).toList());
+        java.util.Collections.reverse(recent);
+        var tiers = new LinkedHashMap<String, String>();
+        for (String key : gpuEmbeddings.reversed().keySet()) {
+            if (tiers.size() >= limit) break;
+            tiers.put(key, "gpu");
+        }
+        for (String key : embeddings.reversed().keySet()) {
+            if (tiers.size() >= limit) break;
+            tiers.putIfAbsent(key, "cpu");
+        }
+        var selected = new java.util.HashSet<>(recent);
+        for (String key : tiers.keySet()) {
+            if (selected.size() >= limit) break;
+            selected.add(key);
+        }
+        var directory = EngineRpcService.MultimodalCacheStatusPB.newBuilder().setWorkerInstance(instance).addAllKeys(recent);
+        tiers.forEach((key, tier) -> {
+            if (selected.contains(key)) {
+                if (tier.equals("gpu")) directory.addGpuEmbeddingKeys(key);
+                else directory.addCpuEmbeddingKeys(key);
+            }
+        });
+        return directory.build();
+    }
+
     public synchronized Map<String, Long> snapshot() {
         return Map.of("embedding_bytes", embeddingBytes, "gpu_embedding_bytes", gpuBytes, "hash_bytes", hashBytes,
                 "gpu_queued", gpuScheduler == null ? 0L : (long)gpuScheduler.queued(),

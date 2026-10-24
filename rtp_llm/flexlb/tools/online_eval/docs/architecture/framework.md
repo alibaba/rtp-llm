@@ -177,4 +177,4 @@ Mock cluster 的 gRPC 协议调度使用独立的轻量执行器；业务回调�
 
 超过 RPC 在途上限的新调用通过正常协议返回 `RESOURCE_EXHAUSTED`，错误描述明确标记为 mock harness 限制；这不表示真实引擎的 KV、调度队列或 GPU 容量不足。已接收调用的取消与终态通知不受该准入限制，取消通知不等待引擎业务额度；已过期的排队调用不执行业务方法。移除引擎时停止该引擎的 RPC 所有者；cluster 收尾先停止并等待服务与传输，再有界回收协议执行器和业务回调，未终止则报告失败并允许重试。该机制仍不模拟真实 Pod 的 CPU、GC 或过载时延。
 
-缓存 RPC 每次复制当前 keys、重新构造完整 protobuf，并使用生成代码的标准序列化。相同版本仍返回完整 keys；不复用成员快照、protobuf 或编码字节。真实引擎的可选缓存状态快照不作为默认行为。协议一致不代表锁竞争、CPU、GC 和 RPC 时延等价；Mock 门禁不能替代真实引擎的缓存同步性能验证。
+缓存 RPC 遵循 real 的 key 版本协议：版本变化时返回完整 key 快照，同版本省略 keys，容量实时刷新；`need_cache_keys=false` 回显请求版本。自然缓存与合成 fixture 共用这一响应规则，fixture 不占推理 KV 容量。同步强度按实际响应 entries/s 和 bytes/s 验收；冻结 churn 会减少 key 载荷。编码优化及其边界见 [Mock Engine](../../../../flexlb-mock-engine/README.md)。协议一致不代表锁竞争、CPU、GC 和 RPC 时延等价；Mock 门禁不能替代真实引擎的缓存同步性能验证。

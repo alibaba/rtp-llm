@@ -88,7 +88,7 @@ class MockMemoryBlockCacheTest {
             assertEquals(2, gpu.referencedKeyBlocks());
             assertEquals(1, gpu.heldBlocks());
             var result = new java.util.concurrent.atomic.AtomicReference<EngineRpcService.CacheStatusPB>();
-            p.getCacheStatus(EngineRpcService.CacheVersionPB.newBuilder().setNeedCacheKeys(true).build(),
+            p.getCacheStatus(EngineRpcService.CacheVersionPB.newBuilder().setNeedCacheKeys(true).setLatestCacheVersion(-1).build(),
                     new io.grpc.stub.StreamObserver<EngineRpcService.CacheStatusPB>() {
                         public void onNext(EngineRpcService.CacheStatusPB x) { result.set(x); }
                         public void onError(Throwable t) { fail(t); }
@@ -265,11 +265,12 @@ class MockMemoryBlockCacheTest {
             for (long key = 100; key < 110; key++) memory.write(List.of(key));
             try (var held = memory.pinRead(java.util.stream.LongStream.range(100, 109).boxed().toList(), 0)) {
                 gpu.admit(List.of(1L, 2L));
+                long beforeVersion = service.getCacheVersion();
                 var apply = service.getClass().getDeclaredMethod("applyWatermarks"); apply.setAccessible(true); apply.invoke(service);
                 assertEquals(9, memory.size(), "the first victim stays evicted when later allocation fails");
                 assertEquals(0, memory.pendingBlocks());
                 assertEquals(2, gpu.usedBlocks(), "failed demotion keeps the GPU source");
-                assertTrue(((java.util.concurrent.atomic.AtomicLong)field(service, "cacheVersion")).get() > 0,
+                assertEquals(beforeVersion + 1, service.getCacheVersion(),
                         "directory version must expose host evictions even when no transfer was accepted");
             }
         }

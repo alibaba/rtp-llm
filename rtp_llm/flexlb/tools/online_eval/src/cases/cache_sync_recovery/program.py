@@ -19,7 +19,7 @@ INPUTS = InputContract.from_fields({
         | {"shared_keys": COUNT},
     "observation": {"sample_s": NONNEGATIVE, "max_gap_s": NONNEGATIVE, "converged_samples": POSITIVE_COUNT,
                     "capture": {"max_samples": POSITIVE_COUNT, "max_bytes": POSITIVE_COUNT}},
-    "checks": dict.fromkeys(("max_status_age_ms", "min_cache_responses_per_s",
+    "checks": dict.fromkeys(("max_status_age_ms", "min_cache_full_responses_per_s",
         "min_added_keys_per_s", "max_added_keys_per_s"), NONNEGATIVE),
     "traffic": JavaFlowSpec.input_fields(),
 })

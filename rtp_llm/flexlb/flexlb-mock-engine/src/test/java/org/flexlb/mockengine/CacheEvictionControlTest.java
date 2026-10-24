@@ -346,7 +346,7 @@ class CacheEvictionControlTest {
     /** gRPC getCacheStatus with needCacheKeys — the master-facing sync surface. */
     private static EngineRpcService.CacheStatusPB cacheStatus(JavaMockEngineCluster.FastRpcService service) {
         return unary(observer -> service.getCacheStatus(
-                EngineRpcService.CacheVersionPB.newBuilder().setNeedCacheKeys(true).build(),
+                EngineRpcService.CacheVersionPB.newBuilder().setNeedCacheKeys(true).setLatestCacheVersion(-1).build(),
                 observer));
     }
 
