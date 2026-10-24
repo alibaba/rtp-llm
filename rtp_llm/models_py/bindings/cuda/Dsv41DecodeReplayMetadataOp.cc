@@ -59,6 +59,7 @@ buildDsv41DecodeReplayMetadataPlan(const std::vector<at::Tensor>& block_tables,
                                    const std::vector<std::string>& roles,
                                    const std::vector<int64_t>&     entries_per_block,
                                    const std::vector<int64_t>&     tokens_per_block,
+                                   const std::vector<int64_t>&     raw_tokens_per_block,
                                    const at::Tensor&               valid_requests,
                                    const at::Tensor&               start_pos_out,
                                    const at::Tensor&               position_ids,
@@ -70,6 +71,7 @@ buildDsv41DecodeReplayMetadataPlan(const std::vector<at::Tensor>& block_tables,
                                    const at::Tensor&               topk_buffer_compressed,
                                    const at::Tensor&               swa_topk_length,
                                    const std::vector<at::Tensor>&  pool_write_slots,
+                                   const std::vector<at::Tensor>&  pool_state_slots,
                                    const std::vector<at::Tensor>&  pool_block_table_mirrors,
                                    const std::vector<at::Tensor>&  swa_slot_outputs,
                                    const std::vector<int64_t>&     swa_slot_pool_indices,
@@ -80,12 +82,15 @@ buildDsv41DecodeReplayMetadataPlan(const std::vector<at::Tensor>& block_tables,
     auto plan = std::make_shared<Dsv41DecodeReplayMetadataPlan>();
 
     TORCH_CHECK(block_tables.size() == roles.size() && block_tables.size() == entries_per_block.size()
-                    && block_tables.size() == tokens_per_block.size(),
+                    && block_tables.size() == tokens_per_block.size()
+                    && block_tables.size() == raw_tokens_per_block.size(),
                 "pool descriptor vectors must have equal length");
     TORCH_CHECK(static_cast<int64_t>(block_tables.size()) <= kMaxDsv41ReplayPools,
                 "pool count exceeds the fused plan capacity");
     TORCH_CHECK(static_cast<int64_t>(pool_write_slots.size()) <= kMaxDsv41ReplayPools,
                 "pool write slot vector exceeds the fused plan capacity");
+    TORCH_CHECK(static_cast<int64_t>(pool_state_slots.size()) <= kMaxDsv41ReplayPools,
+                "pool state slot vector exceeds the fused plan capacity");
     TORCH_CHECK(static_cast<int64_t>(pool_block_table_mirrors.size()) <= kMaxDsv41ReplayPools,
                 "pool mirror vector exceeds the fused plan capacity");
     TORCH_CHECK(static_cast<int64_t>(swa_slot_outputs.size()) <= kMaxDsv41ReplaySwaSlotSets,
@@ -98,13 +103,14 @@ buildDsv41DecodeReplayMetadataPlan(const std::vector<at::Tensor>& block_tables,
         const auto& table = requireCudaInt32(block_tables[p], "pool block_table");
         TORCH_CHECK(table.dim() == 2, "pool block_table must be rank 2");
         TORCH_CHECK(table.size(0) >= batch_size, "pool block_table rows must cover the capture batch");
-        auto& desc  = plan->pools[p];
-        desc.block_table       = table.data_ptr<int32_t>();
-        desc.block_stride      = table.size(1);
-        desc.entries_per_block = static_cast<int32_t>(entries_per_block[p]);
-        desc.tokens_per_block  = static_cast<int32_t>(tokens_per_block[p]);
-        desc.max_blocks        = static_cast<int32_t>(table.size(1));
-        desc.role              = roleFromName(roles[p]);
+        auto& desc              = plan->pools[p];
+        desc.block_table        = table.data_ptr<int32_t>();
+        desc.block_stride       = table.size(1);
+        desc.entries_per_block  = static_cast<int32_t>(entries_per_block[p]);
+        desc.tokens_per_block   = static_cast<int32_t>(tokens_per_block[p]);
+        desc.raw_tokens_per_block = static_cast<int32_t>(raw_tokens_per_block[p]);
+        desc.max_blocks         = static_cast<int32_t>(table.size(1));
+        desc.role               = roleFromName(roles[p]);
     }
     for (size_t p = 0; p < pool_write_slots.size(); ++p) {
         if (!pool_write_slots[p].defined() || pool_write_slots[p].numel() == 0) {
@@ -113,6 +119,14 @@ buildDsv41DecodeReplayMetadataPlan(const std::vector<at::Tensor>& block_tables,
         const auto& slots = requireCudaInt64(pool_write_slots[p], "pool write slots");
         TORCH_CHECK(slots.numel() >= batch_size * q_len, "pool write slots must cover the capture token count");
         plan->pool_write_slots[p] = slots.data_ptr<int64_t>();
+    }
+    for (size_t p = 0; p < pool_state_slots.size(); ++p) {
+        if (!pool_state_slots[p].defined() || pool_state_slots[p].numel() == 0) {
+            continue;  // pool without a state slot buffer: kernel skips it
+        }
+        const auto& slots = requireCudaInt64(pool_state_slots[p], "pool state slots");
+        TORCH_CHECK(slots.numel() >= batch_size * q_len, "pool state slots must cover the capture token count");
+        plan->pool_state_slots[p] = slots.data_ptr<int64_t>();
     }
     for (size_t p = 0; p < pool_block_table_mirrors.size(); ++p) {
         TORCH_CHECK(pool_block_table_mirrors[p].defined(), "pool block table mirror must be defined");
@@ -123,18 +137,18 @@ buildDsv41DecodeReplayMetadataPlan(const std::vector<at::Tensor>& block_tables,
                     "pool block table mirror columns must cover the source table");
         plan->pool_block_table_mirror[p] = mirror.data_ptr<int32_t>();
         plan->pool_mirror_stride[p]      = mirror.size(1);
-        // The metadata mirror's width is the addressing domain the previous
-        // Python path used for every clamp (phase2b BT_STRIDE, translate
-        // max_num_blocks_per_req); keep the kernel on the same domain.
-        if (static_cast<int32_t>(mirror.size(1)) < plan->pools[p].max_blocks) {
-            plan->pools[p].max_blocks = static_cast<int32_t>(mirror.size(1));
-        }
+        // The Python caller pre-widened every mirror to max(mirror, source)
+        // columns, so the mirror fully covers the captured source table.
+        // The clamp domain for every block-id lookup is the mirror width —
+        // the same domain the Python chain's fused Triton kernels use
+        // (BT_STRIDE, translate max_num_blocks_per_req, state-ring modulus).
+        plan->pools[p].max_blocks = static_cast<int32_t>(mirror.size(1));
     }
     for (size_t s = 0; s < swa_slot_outputs.size(); ++s) {
         TORCH_CHECK(swa_slot_outputs[s].defined(), "swa slot output must be defined");
         const auto& out = requireCudaInt32(swa_slot_outputs[s], "swa slot output");
-        plan->swa_slot_outputs[s]        = out.data_ptr<int32_t>();
-        plan->swa_slot_pool_indices[s]   = static_cast<int32_t>(swa_slot_pool_indices[s]);
+        plan->swa_slot_outputs[s]      = out.data_ptr<int32_t>();
+        plan->swa_slot_pool_indices[s] = static_cast<int32_t>(swa_slot_pool_indices[s]);
     }
 
     TORCH_CHECK(valid_requests.defined(), "valid_requests must be defined");

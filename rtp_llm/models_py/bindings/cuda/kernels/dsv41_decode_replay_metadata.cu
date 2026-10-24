@@ -29,21 +29,22 @@ __global__ void dsv41DecodeReplayMetadataKernel(Dsv41DecodeReplayMetadataPlan pl
     }
 
     // ---- Block-table mirror refresh (all threads of the block cooperate) ----
-    // Live rows snapshot the captured per-tag mirror (refreshed by the C++
-    // runner's fused strided D2D copy); rows past the live batch are zeroed
-    // so a request that left a larger earlier replay cannot survive in the
-    // metadata's pool_block_tables. Matches the Python chain's mirror
-    // contract (dst_bt[bs:].zero_() plus full-row copy).
+    // Live rows snapshot the captured per-tag source table (refreshed by the
+    // C++ runner's fused strided D2D copy) into the metadata's persistent
+    // pool_block_tables mirror, bounded to the intersection like the Python
+    // chain (n_cols = min(src, dst); dst tail rows/columns zeroed). Rows past
+    // the live batch are zeroed so a request that left a larger earlier
+    // replay cannot survive in the metadata's pool_block_tables.
     for (int p = 0; p < plan.pool_count; ++p) {
         int32_t* mirror = plan.pool_block_table_mirror[p];
         if (mirror == nullptr) {
             continue;
         }
-        const Dsv41ReplayPoolDesc& pool = plan.pools[p];
-        const int64_t              cols = min(pool.block_stride, plan.pool_mirror_stride[p]);
+        const Dsv41ReplayPoolDesc& pool        = plan.pools[p];
+        const int64_t              cols        = min(pool.block_stride, plan.pool_mirror_stride[p]);
         const int64_t              mirror_cols = plan.pool_mirror_stride[p];
-        const int64_t src_row = static_cast<int64_t>(r) * pool.block_stride;
-        const int64_t dst_row = static_cast<int64_t>(r) * plan.pool_mirror_stride[p];
+        const int64_t              src_row     = static_cast<int64_t>(r) * pool.block_stride;
+        const int64_t              dst_row     = static_cast<int64_t>(r) * plan.pool_mirror_stride[p];
         if (r < live_request_count) {
             // Copy the live source columns; zero any mirror columns the
             // source does not cover (Python: dst_bt[..., n_cols:].zero_()).
@@ -56,6 +57,10 @@ __global__ void dsv41DecodeReplayMetadataKernel(Dsv41DecodeReplayMetadataPlan pl
             }
         }
     }
+    // Every downstream block-id lookup reads the mirror, so all lookups in
+    // this block must observe the refreshed mirror content.
+    __syncthreads();
+
     // Dummy rows (r >= live) are recomputed with sp=0, exactly like the
     // Python chain: its grid covered the full capture capacity, the C++ fill
     // had already zeroed the dummy length mirrors (prefix=0 / seq+1=1) and
@@ -137,53 +142,82 @@ __global__ void dsv41DecodeReplayMetadataKernel(Dsv41DecodeReplayMetadataPlan pl
             }
         }
 
-        // ---- Per-pool write-slot mappings ----
+        // Block-id lookups read the MIRROR (mirror stride row), and the clamp
+        // domain is the mirror's width — the exact domain the Python chain
+        // used (fused_phase2b BT_STRIDE, translate max_num_blocks_per_req,
+        // state-ring % max_blocks).
         for (int p = 0; p < plan.pool_count; ++p) {
             const Dsv41ReplayPoolDesc& pool  = plan.pools[p];
             int64_t*                   slots = plan.pool_write_slots[p];
-            if (slots == nullptr) {
+            const int32_t*             table = plan.pool_block_table_mirror[p];
+            if (slots == nullptr || table == nullptr) {
                 continue;
             }
-            const int64_t row = static_cast<int64_t>(r) * pool.block_stride;
+            const int64_t  row   = static_cast<int64_t>(r) * plan.pool_mirror_stride[p];
+            const int64_t  m_max = static_cast<int64_t>(pool.max_blocks) - 1;
+            const int64_t  E     = pool.entries_per_block;
             if (pool.role == kSwaKv || pool.role == kDecoderSwaKv || pool.role == kHcaKv) {
-                // Ratio-1: every token writes.
-                const int64_t bis     = abs_pos / pool.tokens_per_block;
-                const int64_t clamped = min(max(bis, int64_t(0)), static_cast<int64_t>(pool.max_blocks - 1));
-                const int64_t bid     = static_cast<int64_t>(pool.block_table[row + clamped]);
-                const int     in_blk  = abs_pos % pool.entries_per_block;
-                slots[out_rq]         = (bid > 0) ? bid * pool.entries_per_block + in_blk : -1;
+                // Ratio-1: every token writes (kernel-domain position).
+                const int64_t pos     = abs_pos;
+                const int64_t bis     = pos / pool.tokens_per_block;
+                const int64_t clamped = min(max(bis, int64_t(0)), m_max);
+                const int64_t bid     = static_cast<int64_t>(table[row + clamped]);
+                const int64_t in_blk  = pos % E;
+                slots[out_rq]         = (bid > 0) ? bid * E + in_blk : -1;
             } else if (pool.role == kCsaKv || pool.role == kIndexerKv) {
-                // Ratio-2 boundary: (abs+1) % 2 == 0.
-                const bool    on_b    = ((abs_pos + 1) % 2) == 0;
-                const int64_t cmp_idx = (abs_pos + 1) / 2 - 1;
+                // Ratio-4 boundary: (abs+1) % 4 == 0 (production fused
+                // phase2b Triton kernel semantics for V4.1 as well).
+                const int64_t abs_p1  = static_cast<int64_t>(abs_pos) + 1;
+                const bool    on_b    = (abs_p1 % 4) == 0;
+                const int64_t cmp_idx = abs_p1 / 4 - 1;
                 const bool    skip    = !on_b || cmp_idx < 0;
                 const int64_t safe    = skip ? 0 : cmp_idx;
                 const int64_t bis     = safe / pool.tokens_per_block;
-                const int64_t clamped = min(max(bis, int64_t(0)), static_cast<int64_t>(pool.max_blocks - 1));
-                const int64_t bid     = static_cast<int64_t>(pool.block_table[row + clamped]);
-                const int     in_blk  = static_cast<int>(safe % pool.entries_per_block);
-                slots[out_rq]         = (!skip && bid > 0) ? bid * pool.entries_per_block + in_blk : -1;
-            } else {  // kStateRing: cyclic (pos // tpb) % max_blocks
-                const int64_t block_in_seq =
-                    (static_cast<int64_t>(abs_pos) / pool.tokens_per_block) % pool.max_blocks;
-                const int64_t bid    = static_cast<int64_t>(pool.block_table[row + block_in_seq]);
-                const int     in_blk = abs_pos % pool.entries_per_block;
-                slots[out_rq]        = (bid > 0) ? bid * pool.entries_per_block + in_blk : -1;
+                const int64_t clamped = min(max(bis, int64_t(0)), m_max);
+                const int64_t bid     = static_cast<int64_t>(table[row + clamped]);
+                const int64_t in_blk  = safe % E;
+                slots[out_rq]         = (!skip && bid > 0) ? bid * E + in_blk : -1;
             }
+            // kStateRing pools write through pool_state_slots below.
+        }
+
+        // ---- Compressor state rings: cyclic (pos // tpb) % max_blocks ----
+        // Mirrors _update_compressor_state_slot_mappings -> positions are the
+        // raw token positions; table read through the mirror; entries_per_block
+        // is the in-block modulo domain.
+        for (int p = 0; p < plan.pool_count; ++p) {
+            const Dsv41ReplayPoolDesc& pool  = plan.pools[p];
+            int64_t*                   slots = plan.pool_state_slots[p];
+            const int32_t*             table = plan.pool_block_table_mirror[p];
+            if (slots == nullptr || table == nullptr || pool.role != kStateRing) {
+                continue;
+            }
+            const int64_t row          = static_cast<int64_t>(r) * plan.pool_mirror_stride[p];
+            const int64_t block_in_seq = (static_cast<int64_t>(abs_pos) / pool.tokens_per_block)
+                                         % static_cast<int64_t>(pool.max_blocks);
+            const int64_t bid    = static_cast<int64_t>(table[row + block_in_seq]);
+            const int64_t in_blk = abs_pos % pool.entries_per_block;
+            slots[out_rq]        = (bid > 0) ? bid * pool.entries_per_block + in_blk : -1;
         }
 
         // ---- SWA global read slots: translate swa_abs_idx through the SWA table ----
         // Two consumers exist: the parent metadata (SWA_KV table) and, under
         // bounded replay, the decoder-SWA child metadata (DECODER_SWA table).
+        // Translation reads the mirror with the mirror width as
+        // max_num_blocks_per_req, exactly like translate_local_to_global_slots.
         for (int s = 0; s < kMaxDsv41ReplaySwaSlotSets; ++s) {
             int32_t* dst = plan.swa_slot_outputs[s];
             if (dst == nullptr || plan.swa_abs_idx == nullptr) {
                 continue;
             }
             const Dsv41ReplayPoolDesc& swa  = plan.pools[plan.swa_slot_pool_indices[s]];
-            const int64_t              row  = static_cast<int64_t>(r) * swa.block_stride;
             const int32_t*             base = plan.swa_abs_idx + (static_cast<int64_t>(r) * Q + q) * W;
             int32_t*                   out  = dst + out_rq * W;
+            const int32_t*             table = plan.pool_block_table_mirror[plan.swa_slot_pool_indices[s]];
+            if (table == nullptr) {
+                continue;
+            }
+            const int64_t row = static_cast<int64_t>(r) * plan.pool_mirror_stride[plan.swa_slot_pool_indices[s]];
             for (int k = 0; k < W; ++k) {
                 const int tok = base[k];
                 if (tok < 0) {
@@ -195,7 +229,7 @@ __global__ void dsv41DecodeReplayMetadataKernel(Dsv41DecodeReplayMetadataPlan pl
                     out[k] = -1;
                     continue;
                 }
-                const int64_t bid = static_cast<int64_t>(swa.block_table[row + bid_idx]);
+                const int64_t bid = static_cast<int64_t>(table[row + bid_idx]);
                 out[k]            = (bid > 0) ?
                              static_cast<int32_t>(bid * swa.entries_per_block + tok % swa.entries_per_block) :
                              -1;
@@ -229,7 +263,8 @@ void invokeDsv41DecodeReplayMetadata(const Dsv41DecodeReplayMetadataPlan& plan,
             TORCH_CHECK(plan.pool_mirror_stride[p] > 0, "pool mirror stride must be positive");
         }
         TORCH_CHECK(pool.entries_per_block > 0, "pool entries per block must be positive");
-        TORCH_CHECK(pool.tokens_per_block > 0, "pool tokens per block must be positive");
+        TORCH_CHECK(pool.raw_tokens_per_block > 0, "pool raw tokens per block must be positive");
+        TORCH_CHECK(pool.tokens_per_block > 0, "pool kernel tokens per block must be positive");
         TORCH_CHECK(pool.max_blocks > 0, "pool max blocks must be positive");
     }
     for (int s = 0; s < kMaxDsv41ReplaySwaSlotSets; ++s) {

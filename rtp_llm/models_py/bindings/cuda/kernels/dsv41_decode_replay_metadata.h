@@ -19,7 +19,7 @@ namespace rtp_llm {
 //     persistent pool_block_tables buffers)
 //
 // The previous implementation entered Python per replay (GIL acquire +
-// pybind tuple + ~60 aten/Triton launches from ~1 ms of interpreter time).
+// pybind tuple + ~147 aten/Triton launches from ~1 ms of interpreter time).
 // This kernel computes the whole update in one launch.
 //
 // A Plan is built once per graph instance at capture time (see the Python
@@ -30,30 +30,36 @@ constexpr int kMaxDsv41ReplayPools      = 8;
 constexpr int kMaxDsv41ReplaySwaSlotSets = 2;
 
 // Pool role inside the fused kernel. One pool block table feeds several
-// derived buffers; the role selects which formulas apply.
+// derived buffers; the role selects which formulas apply. All formulas
+// mirror the Python chain (decode_attn_metadata.py and its fused Triton
+// kernels): block-id lookups read the metadata's own pool_block_tables
+// mirror — refreshed by this kernel from the captured source table — with
+// the mirror's width as the clamp domain, exactly like the Triton
+// BT_STRIDE constants and translate_local_to_global_slots'
+// max_num_blocks_per_req.
 enum class Dsv41ReplayPoolRole : int32_t {
-    // Sliding-window KV (ratio 1): write slots every token; global read
-    // slots derive from swa_abs_idx (the window of absolute positions).
+    // Ratio-1 ring KV (swa_kv / decoder_swa_kv): every token writes; global
+    // read slots translate swa_abs_idx through this pool's table.
     SWA_KV = 0,
     // Same formulas as SWA_KV but a physically distinct ring (decoder SWA).
     DECODER_SWA_KV = 1,
-    // Ratio-2 compressed KV (CSA): write slots only on ratio-2 boundaries.
     CSA_KV = 2,
-    // Ratio-1 compressed KV (HCA): every token writes in the compressed
-    // domain.
+    // Ratio-128 compressed KV boundary writes (HCA_KV = global_kv_1).
     HCA_KV = 3,
-    // Ratio-1 indexer KV: write slots only on ratio-2 boundaries.
+    // Ratio-4 compressed KV boundary writes (indexer_kv).
     INDEXER_KV = 4,
-    // Compressor state ring: cyclic (pos // tokens_per_block) % max_blocks.
+    // Compressor state ring: cyclic (pos // tokens_per_block) % max_blocks,
+    // driven from compressor_state_slot_mappings, not pool_write_slots.
     STATE_RING = 5,
 };
 
 struct Dsv41ReplayPoolDesc {
-    const int32_t* block_table       = nullptr;  // [B, block_stride]
+    const int32_t* block_table       = nullptr;  // [B, block_stride] (captured source)
     int64_t        block_stride      = 0;        // source row width (elements)
     int32_t        entries_per_block = 0;        // slot multiplier within one block
-    int32_t        tokens_per_block  = 0;        // raw tokens one block row covers
-    int32_t        max_blocks        = 0;        // block-table columns
+    int32_t        raw_tokens_per_block = 0;     // raw-token coverage of one table row
+    int32_t        tokens_per_block  = 0;        // kernel-domain tokens per block row
+    int32_t        max_blocks        = 0;        // mirror clamp domain (mirror columns)
     int32_t        role              = static_cast<int32_t>(Dsv41ReplayPoolRole::SWA_KV);
 };
 
@@ -70,6 +76,7 @@ struct Dsv41DecodeReplayMetadataPlan {
     int32_t* topk_buffer_compressed   = nullptr;  // [B, Q, INDEX_TOPK] i32 (-1 reset)
     int32_t* swa_topk_length          = nullptr;  // [B] i32
     int64_t* pool_write_slots[kMaxDsv41ReplayPools]        = {};  // [B * Q] i64
+    int64_t* pool_state_slots[kMaxDsv41ReplayPools]        = {};  // [B * Q] i64 (cyclic state rings)
     int32_t* pool_block_table_mirror[kMaxDsv41ReplayPools] = {};  // [B, mirror_stride] i32
     int64_t  pool_mirror_stride[kMaxDsv41ReplayPools]      = {};  // mirror row width (elements)
     // SWA read-slot translation outputs (parent SWA + bounded-replay decoder

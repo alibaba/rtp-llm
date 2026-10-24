@@ -189,14 +189,32 @@ class DSv4DecodeFmhaImplFP8:
         """Build the capture-time C++ replay plan (one fused kernel launch).
 
         The plan pins raw device pointers to this impl's persistent metadata
-        tensors and to the captured per-tag block-table mirrors that
+        tensors and to the captured per-tag block-table sources that
         ``CudaGraphRunner`` refreshes with its fused strided D2D copy before
         each replay. Replay preparation then runs entirely in C++
         (``tryRunDsv41ReplayMetadataPrep``): no GIL, no Python interpreter,
         no per-replay aten/Triton launches.
 
-        Returns ``None`` when the fused op is unavailable (non-CUDA builds,
-        older wheels) so the runner keeps the Python callback path.
+        v2 fixes the 0002 mirror-geometry defect: the captured source table
+        width (the runner's ``max_kernel_block_table_width_``) can exceed the
+        allocator-derived mirror width, because the runner sizes the capture
+        table from the widest group expansion while the metadata mirrors use
+        ``ceil(max_seq_len / kernel_seq_size_per_block) + 1``. Production
+        Python bounds the per-replay copy to the intersection
+        (``n_cols = min(src, dst)``); v2 instead widens every
+        ``pool_block_tables`` mirror to ``max(mirror, source)`` columns here
+        — before the graph bakes addresses — so the fused kernel can read
+        the mirror for every block-id lookup with the mirror width as clamp
+        domain, matching the Python chain's Triton BT_STRIDE domain.
+
+        The kernel reproduces the production Triton semantics exactly:
+        CSA/INDEXER write on ratio-4 boundaries (``(abs+1) % 4 == 0``,
+        ``cmp_idx = (abs+1)//4 - 1``) with ``raw_tokens // 4`` kernel-domain
+        tokens per block row; HCA on ratio-128 boundaries with
+        ``raw_tokens // 128``; compressor state rings through
+        ``compressor_state_slot_mappings`` (cyclic formula); block-id lookups
+        through the mirrors. Returns ``None`` on any mismatch so the runner
+        keeps the Python callback path.
         """
         from rtp_llm.models_py.modules.dsv41.kv_cache_utils import (
             as_attention_inputs_by_tag,
@@ -242,12 +260,26 @@ class DSv4DecodeFmhaImplFP8:
             HCA_STATE: "state_ring",
             INDEXER_STATE: "state_ring",
         }
+        # Kernel-domain tokens per block row: the production fused
+        # phase2b Triton kernel divides the pool's raw tokens per block by
+        # the pool's write ratio (4 for CSA/INDEXER, 128 for HCA, 1 for
+        # SWA rings), while state rings use the raw token coverage.
+        ratio_by_role = {
+            "swa_kv": 1,
+            "decoder_swa_kv": 1,
+            "csa_kv": 4,
+            "hca_kv": 128,
+            "indexer_kv": 4,
+            "state_ring": 1,
+        }
 
-        pools = []           # (table, role, entries, tokens)
-        write_slots = []     # aligned with the pools that own a slot buffer
-        mirrors = []         # meta.pool_block_tables snapshots, same order
+        pools = []           # (table, role, entries, kernel_tokens, raw_tokens)
+        write_slots = []     # pool_write_slot_mappings, aligned with pools
+        state_slots = []     # compressor_state_slot_mappings, aligned with pools
+        mirrors = []         # widened meta.pool_block_tables snapshots
         swa_outputs = []     # (tensor, pool_index)
         swa_pool_index = {}
+        dev = meta.start_pos.device
         for at, spec in self.config.paged_pool_specs.items():
             table = block_tables.get(str(at))
             mirror = meta.pool_block_tables.get(at)
@@ -256,11 +288,45 @@ class DSv4DecodeFmhaImplFP8:
             role = role_by_tag.get(at)
             if role is None:
                 continue
-            entries, tokens, _max_blocks = (int(v) for v in spec)
+            entries, raw_tokens, _max_blocks = (int(v) for v in spec)
+            ratio = ratio_by_role[role]
+            kernel_tokens = raw_tokens // ratio if ratio > 1 else raw_tokens
             pool_index = len(pools)
-            pools.append((table, role, entries, tokens))
+            # Widen the mirror to cover the captured source table so the
+            # fused kernel reads a single buffer with one clamp domain.
+            # The captured graph has not yet baked any address: this runs in
+            # __init__ before the capture harness's first warmup forward.
+            src_cols = int(table.size(1))
+            if int(mirror.size(1)) < src_cols:
+                widened = torch.zeros(
+                    (int(mirror.size(0)), src_cols), dtype=torch.int32, device=dev
+                )
+                widened[:, : mirror.size(1)].copy_(mirror)
+                mirror = widened
+                # Rebind every holder of the old narrow mirror: the parent
+                # dict, and the decoder-SWA child, whose pool_block_tables
+                # and the per-pool shallow copies still reference the old
+                # tensor. This runs in __init__ before any capture/warmup
+                # forward bakes an address, so the graph only ever sees the
+                # widened tensor.
+                meta.pool_block_tables[at] = widened
+                child = meta.decoder_swa_metadata
+                if child is not None and child.pool_block_tables.get(at) is not None:
+                    child_pool_tables = dict(child.pool_block_tables)
+                    child_pool_tables[at] = widened
+                    if at == DECODER_SWA_KV:
+                        # The child aliases its SWA_KV entry to the
+                        # decoder-SWA region table.
+                        child_pool_tables[SWA_KV] = widened
+                    child.pool_block_tables = child_pool_tables
+            pools.append((table, role, entries, kernel_tokens, raw_tokens))
             mirrors.append(mirror)
             slots = meta.pool_write_slot_mappings.get(at)
+            state = (
+                meta.compressor_state_slot_mappings.get(at)
+                if role == "state_ring"
+                else None
+            )
             if role == "decoder_swa_kv":
                 # The decoder-SWA layers read the child metadata's own slot
                 # buffer (update_decoder_swa_metadata), not the parent's
@@ -271,7 +337,12 @@ class DSv4DecodeFmhaImplFP8:
             write_slots.append(
                 slots
                 if slots is not None
-                else torch.empty(0, dtype=torch.long, device=meta.start_pos.device)
+                else torch.empty(0, dtype=torch.long, device=dev)
+            )
+            state_slots.append(
+                state
+                if state is not None
+                else torch.empty(0, dtype=torch.long, device=dev)
             )
             if role in ("swa_kv", "decoder_swa_kv") and slots is not None:
                 swa_pool_index[role] = pool_index
@@ -298,7 +369,6 @@ class DSv4DecodeFmhaImplFP8:
         q_len = int(meta.q_len_per_req)
         batch = int(meta.start_pos.numel())
         max_start = max(0, int(meta.max_seq_len) - q_len)
-        dev = meta.start_pos.device
         topk_buf = (
             meta.topk_buffer_compressed
             if meta.topk_buffer_compressed is not None
@@ -330,27 +400,34 @@ class DSv4DecodeFmhaImplFP8:
         )
         swa_abs_idx = meta.swa_abs_idx if meta.swa_abs_idx is not None else topk_window_idxs
 
-        return plan_factory(
-            block_tables=[p[0] for p in pools],
-            roles=[p[1] for p in pools],
-            entries_per_block=[p[2] for p in pools],
-            tokens_per_block=[p[3] for p in pools],
-            valid_requests=meta.valid_requests,
-            start_pos=meta.start_pos,
-            position_ids=meta.position_ids,
-            position_ids_long=position_ids_long,
-            decode_seq_start_per_req=seq_start,
-            slot_mapping_swa=slot_mapping_swa,
-            topk_window_idxs=topk_window_idxs,
-            swa_abs_idx=swa_abs_idx,
-            topk_buffer_compressed=topk_buf,
-            swa_topk_length=swa_topk_length,
-            pool_write_slots=write_slots,
-            pool_block_table_mirrors=mirrors,
-            swa_slot_outputs=slot_outputs,
-            swa_slot_pool_indices=slot_pool_indices,
-            q_len=q_len,
-            batch_size=batch,
-            window=int(meta.window_size),
-            max_start=max_start,
-        )
+        try:
+            return plan_factory(
+                block_tables=[p[0] for p in pools],
+                roles=[p[1] for p in pools],
+                entries_per_block=[p[2] for p in pools],
+                tokens_per_block=[p[3] for p in pools],
+                raw_tokens_per_block=[p[4] for p in pools],
+                valid_requests=meta.valid_requests,
+                start_pos=meta.start_pos,
+                position_ids=meta.position_ids,
+                position_ids_long=position_ids_long,
+                decode_seq_start_per_req=seq_start,
+                slot_mapping_swa=slot_mapping_swa,
+                topk_window_idxs=topk_window_idxs,
+                swa_abs_idx=swa_abs_idx,
+                topk_buffer_compressed=topk_buf,
+                swa_topk_length=swa_topk_length,
+                pool_write_slots=write_slots,
+                pool_state_slots=state_slots,
+                pool_block_table_mirrors=mirrors,
+                swa_slot_outputs=slot_outputs,
+                swa_slot_pool_indices=slot_pool_indices,
+                q_len=q_len,
+                batch_size=batch,
+                window=int(meta.window_size),
+                max_start=max_start,
+            )
+        except Exception:
+            # Geometry mismatch on a reduced/unusual configuration: keep the
+            # proven Python callback path rather than failing capture.
+            return None

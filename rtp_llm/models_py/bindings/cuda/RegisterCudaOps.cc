@@ -96,6 +96,7 @@ void registerPyModuleOps(py::module& rtp_ops_m) {
                   py::arg("roles"),
                   py::arg("entries_per_block"),
                   py::arg("tokens_per_block"),
+                  py::arg("raw_tokens_per_block"),
                   py::arg("valid_requests"),
                   py::arg("start_pos"),
                   py::arg("position_ids"),
@@ -107,6 +108,7 @@ void registerPyModuleOps(py::module& rtp_ops_m) {
                   py::arg("topk_buffer_compressed"),
                   py::arg("swa_topk_length"),
                   py::arg("pool_write_slots"),
+                  py::arg("pool_state_slots"),
                   py::arg("pool_block_table_mirrors"),
                   py::arg("swa_slot_outputs"),
                   py::arg("swa_slot_pool_indices"),
@@ -114,8 +116,6 @@ void registerPyModuleOps(py::module& rtp_ops_m) {
                   py::arg("batch_size"),
                   py::arg("window"),
                   py::arg("max_start"));
-    py::class_<rtp_llm::Dsv41DecodeReplayMetadataPlan, std::shared_ptr<rtp_llm::Dsv41DecodeReplayMetadataPlan>>(
-        rtp_ops_m, "Dsv41DecodeReplayMetadataPlan");
     registerBaseCudaBindings(rtp_ops_m);
     registerAttnOpBindings(rtp_ops_m);
 }

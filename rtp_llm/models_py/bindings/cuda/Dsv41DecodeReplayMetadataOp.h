@@ -14,11 +14,18 @@ namespace rtp_llm {
 // per-pool block-table mirrors once per graph instance; the returned plan
 // holds raw device pointers valid for as long as the impl keeps the tensors
 // alive (graph-instance lifetime).
+//
+// The Python caller is responsible for sizing every pool_block_tables mirror
+// to max(mirror width, captured source table width) before calling, so the
+// plan's mirror-cover check is an invariant assertion, not a geometry
+// constraint (the captured input table can legitimately be wider than the
+// allocator-derived mirror; the kernel then bounds the copy to the mirror).
 std::shared_ptr<Dsv41DecodeReplayMetadataPlan>
 buildDsv41DecodeReplayMetadataPlan(const std::vector<at::Tensor>& block_tables,
                                    const std::vector<std::string>& roles,
                                    const std::vector<int64_t>&     entries_per_block,
                                    const std::vector<int64_t>&     tokens_per_block,
+                                   const std::vector<int64_t>&     raw_tokens_per_block,
                                    const at::Tensor&               valid_requests,
                                    const at::Tensor&               start_pos_out,
                                    const at::Tensor&               position_ids,
@@ -30,6 +37,7 @@ buildDsv41DecodeReplayMetadataPlan(const std::vector<at::Tensor>& block_tables,
                                    const at::Tensor&               topk_buffer_compressed,
                                    const at::Tensor&               swa_topk_length,
                                    const std::vector<at::Tensor>&  pool_write_slots,
+                                   const std::vector<at::Tensor>&  pool_state_slots,
                                    const std::vector<at::Tensor>&  pool_block_table_mirrors,
                                    const std::vector<at::Tensor>&  swa_slot_outputs,
                                    const std::vector<int64_t>&     swa_slot_pool_indices,
