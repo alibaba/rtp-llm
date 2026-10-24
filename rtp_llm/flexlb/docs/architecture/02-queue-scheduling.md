@@ -25,7 +25,7 @@ Encoder 请求；队列超时和取消按 Encoder 阶段独立清理。Generatio
   发布 batch，后者将路由决策返回调用方，由调用方向引擎发请求。
 
 主要代码：`RouteService`、`PriorityScheduler`、`PriorityAdmissionScheduler`、
-`WorkerBatcher`、`DefaultBatchDispatcher` 和 `RouteDecisionDelivery`。
+`PrefillQueue`、`DefaultBatchDispatcher` 和 `RouteDecisionDelivery`。
 
 ## 提交与准入
 
@@ -57,14 +57,14 @@ Encoder 请求；队列超时和取消按 Encoder 阶段独立清理。Generatio
 3. 调度器在可能向引擎或调用方发布前装配唯一的绝对过期事件。
 4. PRIORITY ordering 进入优先级 plan/commit；FIFO ordering 先调用
    `DefaultRouter`，提交 endpoint 预留后才把请求放入目标 Prefill 的
-   `WorkerBatcher`。
+   `PrefillQueue`。
 
 路由、预留、inflight 注册和发布都属于同一 request generation。失败或
 取消只能通过调度器的单一 reducer 收敛，避免重复回滚和重复完成 future。
 
-## WorkerBatcher 与发布
+## PrefillQueue 与发布
 
-`WorkerBatcher` 是每个 Prefill endpoint 的决策组组织者。BATCH dispatcher 使用
+`PrefillQueue` 是每个 Prefill endpoint 的决策组组织者。BATCH dispatcher 使用
 `FixedWindowBatcherAlgorithm`，按 `maxRequests`、`maxCollectionWaitMs`、预测执行时间
 与 endpoint 容量触发发送；NON_BATCH dispatcher 按 `scheduler.decision.type` 使用
 `SINGLE` 或 `FIXED_WINDOW` 组织决策组，逐请求返回路由结果。

@@ -338,7 +338,7 @@ PV 顶层与嵌套 `response` 的成功标识、错误码和错误消息表达�
 路由遥测由串行处理阶段在请求独立的 `RoutingTelemetryState` 中原地累计。
 终态读取依赖处理链的完成发布，不与写入并发；字段记录和角色 Map 操作不使用同步锁。
 PV 读取时创建不可变 `RoutingTelemetry` 快照，选路中的次数与原因读取不创建快照。
-WorkerBatcher 的 `decisionGroup` 独立发布，包含提交组 ID、policy、dispatcher、
+PrefillQueue 的 `decisionGroup` 独立发布，包含提交组 ID、policy、dispatcher、
 worker、committedSize、reason、提交时间及请求等待时长；提交组大小不等于保证交付数量，
 Engine 的 `batchId` 标识交付批次。
 

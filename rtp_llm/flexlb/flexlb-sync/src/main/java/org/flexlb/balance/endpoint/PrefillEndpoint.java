@@ -12,9 +12,9 @@ import org.flexlb.balance.projection.PrefillTtftEstimate;
 import org.flexlb.balance.projection.estimator.PrefillTtftEstimator;
 import org.flexlb.balance.scheduler.EndpointEventProjector;
 import org.flexlb.balance.scheduler.PlacementAvailability;
+import org.flexlb.balance.scheduler.PrefillQueue;
 import org.flexlb.balance.scheduler.QueueCapacity;
 import org.flexlb.balance.scheduler.ScheduledRequest;
-import org.flexlb.balance.scheduler.WorkerBatcher;
 import org.flexlb.config.DispatcherConfig;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.config.RoutingConfig;
@@ -80,7 +80,7 @@ public class PrefillEndpoint extends WorkerEndpoint {
     private final Supplier<FlexlbConfig> configSupplier;
     @Getter
     private final boolean engineSubQueueMode;
-    private final WorkerBatcher runtime;
+    private final PrefillQueue runtime;
     private final PrefillState prefillState;
     private final EndpointEventProjector endpointEvents;
     private final BatchSchedulerReporter reporter;
@@ -107,7 +107,7 @@ public class PrefillEndpoint extends WorkerEndpoint {
         FlexlbConfig startupConfig = configSupplier.get();
         this.engineSubQueueMode = QueueCapacity.isEngineSubQueueMode(startupConfig);
         this.predictor = createPredictor(startupConfig);
-        this.runtime = new WorkerBatcher(
+        this.runtime = new PrefillQueue(
                 status.getLogicalIpPort(), this, configSupplier.get(),
                 deliveryStrategy, ttftEstimator, endpointEvents, queueCapacity);
         this.prefillState = runtime.ownedState();
@@ -155,7 +155,7 @@ public class PrefillEndpoint extends WorkerEndpoint {
     }
 
     /** Capture exact queued identities for eviction planning. */
-    public WorkerBatcher.QueueSnapshot captureQueueSnapshot() {
+    public PrefillQueue.QueueSnapshot captureQueueSnapshot() {
         return runtime.captureQueueSnapshot();
     }
 

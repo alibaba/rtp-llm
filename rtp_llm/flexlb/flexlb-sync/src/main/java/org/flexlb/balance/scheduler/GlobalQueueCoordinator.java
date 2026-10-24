@@ -48,7 +48,7 @@ import java.util.concurrent.locks.ReentrantLock;
  * later requests from trying the same worker with different resource demands.
  * Planning is bounded and parallel; completed plans are published without waiting
  * for earlier planners. Arrivals and wakeups do not invalidate in-flight work.
- * WorkerBatcher owns SINGLE/FIXED_WINDOW grouping.</p>
+ * PrefillQueue owns SINGLE/FIXED_WINDOW grouping.</p>
  */
 final class GlobalQueueCoordinator implements AutoCloseable {
 

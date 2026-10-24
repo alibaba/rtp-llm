@@ -19,7 +19,7 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.spy;
 import static org.mockito.Mockito.when;
 
-class WorkerBatcherStatusSnapshotTest {
+class PrefillQueueStatusSnapshotTest {
 
     @Test
     void configuredFallbackBacksUnpublishedEngineCapacities() {
@@ -31,7 +31,7 @@ class WorkerBatcherStatusSnapshotTest {
         publish(status, statusResponse(0L, 0L, 0L, 1L));
         PrefillEndpoint endpoint = mock(PrefillEndpoint.class);
         when(endpoint.getStatus()).thenReturn(status);
-        WorkerBatcher runtime = new WorkerBatcher(
+        PrefillQueue runtime = new PrefillQueue(
                 "snapshot-test", endpoint, config,
                 mock(DeliveryStrategy.class),
                 mock(PrefillTtftEstimator.class),
@@ -53,7 +53,7 @@ class WorkerBatcherStatusSnapshotTest {
 
         PrefillEndpoint endpoint = mock(PrefillEndpoint.class);
         when(endpoint.getStatus()).thenReturn(status);
-        WorkerBatcher runtime = new WorkerBatcher(
+        PrefillQueue runtime = new PrefillQueue(
                 "snapshot-test", endpoint, org.flexlb.balance.scheduler.SchedulingTestConfig.newConfig(),
                 mock(DeliveryStrategy.class),
                 mock(PrefillTtftEstimator.class),
@@ -87,7 +87,7 @@ class WorkerBatcherStatusSnapshotTest {
 
         PrefillEndpoint endpoint = mock(PrefillEndpoint.class);
         when(endpoint.getStatus()).thenReturn(status);
-        WorkerBatcher runtime = new WorkerBatcher(
+        PrefillQueue runtime = new PrefillQueue(
                 "snapshot-test",
                 endpoint,
                 org.flexlb.balance.scheduler.SchedulingTestConfig.newConfig(),

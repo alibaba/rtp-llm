@@ -53,13 +53,13 @@ import static org.mockito.Mockito.spy;
 import static org.mockito.Mockito.when;
 
 /** Concurrency contracts at the final, threaded Prefill scheduling boundary. */
-class WorkerBatcherSchedulingTest {
+class PrefillQueueSchedulingTest {
 
-    private final List<WorkerBatcher> runtimes = new ArrayList<>();
+    private final List<PrefillQueue> runtimes = new ArrayList<>();
 
     @AfterEach
     void stopRuntimes() {
-        for (WorkerBatcher runtime : runtimes) {
+        for (PrefillQueue runtime : runtimes) {
             assertNull(runtime.stopAndAwait());
         }
     }
@@ -71,7 +71,7 @@ class WorkerBatcherSchedulingTest {
         FlexlbConfig config = singleConfig();
         PrefillEndpoint endpoint = stableEndpoint(stableStatus());
         EventDrivenBlock delivery = new EventDrivenBlock();
-        WorkerBatcher runtime = runningRuntime(config, endpoint, delivery);
+        PrefillQueue runtime = runningRuntime(config, endpoint, delivery);
         ScheduledRequest head = item(
                 config, endpoint, 1L, 50, System.currentTimeMillis());
 
@@ -116,7 +116,7 @@ class WorkerBatcherSchedulingTest {
         FlexlbConfig config = singleConfig();
         PrefillEndpoint endpoint = stableEndpoint(stableStatus());
         EventDrivenBlock delivery = new EventDrivenBlock();
-        WorkerBatcher runtime = runningRuntime(config, endpoint, delivery);
+        PrefillQueue runtime = runningRuntime(config, endpoint, delivery);
         assertEquals(ACCEPTED, runtime.offerWithResult(item(
                 config, endpoint, 12L, 50, System.currentTimeMillis())));
         await(delivery.firstCapacity.subscribed);
@@ -138,7 +138,7 @@ class WorkerBatcherSchedulingTest {
         FlexlbConfig config = singleConfig();
         PrefillEndpoint endpoint = stableEndpoint(stableStatus());
         ProjectionCacheBlock delivery = new ProjectionCacheBlock();
-        WorkerBatcher runtime = runningRuntime(config, endpoint, delivery);
+        PrefillQueue runtime = runningRuntime(config, endpoint, delivery);
         ScheduledRequest head = item(
                 config, endpoint, 11L, 50, System.currentTimeMillis());
 
@@ -178,7 +178,7 @@ class WorkerBatcherSchedulingTest {
                 new PrefillState.ReservationResult<>(PrefillState.CapacityStatus.ACQUIRED,
                         mock(PrefillState.RouteReservation.class)));
         EventDrivenBlock delivery = new EventDrivenBlock();
-        WorkerBatcher runtime = runningRuntime(config, endpoint, delivery);
+        PrefillQueue runtime = runningRuntime(config, endpoint, delivery);
         long now = System.currentTimeMillis();
 
         assertEquals(ACCEPTED, runtime.offerWithResult(item(config, endpoint, 31L, 50, now)));
@@ -211,7 +211,7 @@ class WorkerBatcherSchedulingTest {
                 0L, 0L, 0L, 0L, 1_000_000L, 1_000_000L, running, waiting));
         PrefillEndpoint endpoint = stableEndpoint(status);
         EventDrivenBlock delivery = new EventDrivenBlock();
-        WorkerBatcher runtime = runningRuntime(config, endpoint, delivery);
+        PrefillQueue runtime = runningRuntime(config, endpoint, delivery);
         assertEquals(ACCEPTED, runtime.offerWithResult(
                 item(config, endpoint, 91L, 50, System.currentTimeMillis())));
         if (available < 10 && (running != 0 || waiting != 0)) {
@@ -238,7 +238,7 @@ class WorkerBatcherSchedulingTest {
                 RoleType.PREFILL, null, 0L, 100L, Map.of(), 0.0,
                 0L, 0L, 0L, 0L, 1_000_000L, 1_000_000L, 0L, 0L));
         PrefillEndpoint endpoint = stableEndpoint(status);
-        WorkerBatcher runtime = runningRuntime(config, endpoint, new EventDrivenBlock());
+        PrefillQueue runtime = runningRuntime(config, endpoint, new EventDrivenBlock());
 
         assertEquals(Long.MAX_VALUE, runtime.captureRouteProjectionInputs()
                 .queue().constraints().batchKvCapacity());
@@ -250,7 +250,7 @@ class WorkerBatcherSchedulingTest {
         FlexlbConfig config = singleConfig();
         PrefillEndpoint endpoint = stableEndpoint(stableStatus());
         EventDrivenBlock delivery = new EventDrivenBlock(true);
-        WorkerBatcher runtime = runningRuntime(config, endpoint, delivery);
+        PrefillQueue runtime = runningRuntime(config, endpoint, delivery);
         long now = System.currentTimeMillis();
         ScheduledRequest head = item(config, endpoint, 21L, 50, now);
 
@@ -281,7 +281,7 @@ class WorkerBatcherSchedulingTest {
         FlexlbConfig config = singleConfig();
         PrefillEndpoint endpoint = stableEndpoint(stableStatus());
         ProjectionCacheBlock delivery = new ProjectionCacheBlock();
-        WorkerBatcher runtime = runningRuntime(config, endpoint, delivery);
+        PrefillQueue runtime = runningRuntime(config, endpoint, delivery);
         ScheduledRequest head = spy(item(config, endpoint, 13L, 50, System.currentTimeMillis()));
         CountDownLatch materializing = new CountDownLatch(1);
         CountDownLatch finish = new CountDownLatch(1);
@@ -327,7 +327,7 @@ class WorkerBatcherSchedulingTest {
         FlexlbConfig config = singleConfig();
         PrefillEndpoint endpoint = stableEndpoint(stableStatus());
         ProjectionCacheBlock delivery = new ProjectionCacheBlock();
-        WorkerBatcher runtime = runningRuntime(config, endpoint, delivery);
+        PrefillQueue runtime = runningRuntime(config, endpoint, delivery);
         ScheduledRequest head = spy(item(
                 config, endpoint, 12L, 50, System.currentTimeMillis()));
         AtomicReference<Thread> capturingThread = new AtomicReference<>();
@@ -375,7 +375,7 @@ class WorkerBatcherSchedulingTest {
                 firstStatusRead, allowFirstStatusRead);
         PrefillEndpoint endpoint = stableEndpoint(status);
         PredictionGate delivery = new PredictionGate();
-        WorkerBatcher runtime = runningRuntime(config, endpoint, delivery);
+        PrefillQueue runtime = runningRuntime(config, endpoint, delivery);
         long now = System.currentTimeMillis();
         ScheduledRequest first = item(config, endpoint, 1L, 50, now);
         ScheduledRequest revoked = item(config, endpoint, 2L, 50, now + 1L);
@@ -450,7 +450,7 @@ class WorkerBatcherSchedulingTest {
                     org.mockito.ArgumentMatchers.any());
             return transaction;
         });
-        WorkerBatcher runtime = runningRuntime(config, endpoint, delivery, mock(PrefillTtftEstimator.class));
+        PrefillQueue runtime = runningRuntime(config, endpoint, delivery, mock(PrefillTtftEstimator.class));
         List<ScheduledRequest> requests = new ArrayList<>();
         for (int i = 0; i < count; i++) {
             ScheduledRequest request = item(config, endpoint, 100L + i, 50, System.currentTimeMillis());
@@ -502,7 +502,7 @@ class WorkerBatcherSchedulingTest {
             return transaction;
         });
         EndpointEventProjector projector = mock(EndpointEventProjector.class);
-        WorkerBatcher runtime = new WorkerBatcher(
+        PrefillQueue runtime = new PrefillQueue(
                 "retired-commit", endpoint, () -> config, delivery, mock(PrefillTtftEstimator.class), projector, new QueueCapacity());
         runtimes.add(runtime);
         runtime.start();
@@ -521,7 +521,7 @@ class WorkerBatcherSchedulingTest {
         FlexlbConfig initial = fixedConfig();
         initial.decisionPolicy().setMaxCollectionWaitMs(100L);
         AtomicReference<FlexlbConfig> current = new AtomicReference<>(initial);
-        WorkerBatcher runtime = new WorkerBatcher("hot-window-projection", stableEndpoint(stableStatus()),
+        PrefillQueue runtime = new PrefillQueue("hot-window-projection", stableEndpoint(stableStatus()),
                 current::get, mock(DeliveryStrategy.class), mock(PrefillTtftEstimator.class),
                 mock(EndpointEventProjector.class), new QueueCapacity());
         runtimes.add(runtime);
@@ -553,7 +553,7 @@ class WorkerBatcherSchedulingTest {
         AtomicReference<FlexlbConfig> current = new AtomicReference<>(initial);
         PrefillEndpoint endpoint = stableEndpoint(stableStatus());
         EventDrivenBlock delivery = new EventDrivenBlock();
-        WorkerBatcher runtime = new WorkerBatcher("hot-window-delivery", endpoint, current::get, delivery, delivery,
+        PrefillQueue runtime = new PrefillQueue("hot-window-delivery", endpoint, current::get, delivery, delivery,
                 mock(EndpointEventProjector.class), new QueueCapacity());
         runtimes.add(runtime);
         runtime.start();
@@ -574,13 +574,13 @@ class WorkerBatcherSchedulingTest {
         await(delivery.firstAttempt);
     }
 
-    private WorkerBatcher runningRuntime(FlexlbConfig config, PrefillEndpoint endpoint, BoundaryDelivery delivery) {
+    private PrefillQueue runningRuntime(FlexlbConfig config, PrefillEndpoint endpoint, BoundaryDelivery delivery) {
         return runningRuntime(config, endpoint, delivery, delivery);
     }
 
-    private WorkerBatcher runningRuntime(FlexlbConfig config, PrefillEndpoint endpoint, DeliveryStrategy delivery,
+    private PrefillQueue runningRuntime(FlexlbConfig config, PrefillEndpoint endpoint, DeliveryStrategy delivery,
                                          PrefillTtftEstimator estimator) {
-        WorkerBatcher runtime = new WorkerBatcher(
+        PrefillQueue runtime = new PrefillQueue(
                 "scheduling-test", endpoint, () -> config, delivery, estimator,
                 mock(EndpointEventProjector.class), new QueueCapacity());
         runtimes.add(runtime);
@@ -751,11 +751,11 @@ class WorkerBatcherSchedulingTest {
             int attempt = attempts.incrementAndGet();
             if (attempt == 1) {
                 firstAttempt.countDown();
-                return WorkerBatcherTestSupport.boundaryOnly(
+                return PrefillQueueTestSupport.boundaryOnly(
                         candidates.getFirst(), boundary(firstCapacity));
             }
             secondAttempt.countDown();
-            return WorkerBatcherTestSupport.boundaryOnly(
+            return PrefillQueueTestSupport.boundaryOnly(
                     candidates.getFirst(), boundary(parkedCapacity));
         }
     }
@@ -776,12 +776,12 @@ class WorkerBatcherSchedulingTest {
             if (attempts.incrementAndGet() == 1) {
                 firstPrepareEntered.countDown();
                 await(allowFirstPrepare);
-                return WorkerBatcherTestSupport.boundaryOnly(
+                return PrefillQueueTestSupport.boundaryOnly(
                         candidates.getFirst(), unavailable(firstCapacity));
             }
             secondPrepareEntered.countDown();
             await(allowSecondPrepare);
-            return WorkerBatcherTestSupport.boundaryOnly(
+            return PrefillQueueTestSupport.boundaryOnly(
                     candidates.getFirst(), unavailable(parkedCapacity));
         }
     }
@@ -802,7 +802,7 @@ class WorkerBatcherSchedulingTest {
         public DeliveryTransaction prepare(DeliveryGroup group) {
             List<ScheduledRequest> candidates = group.requests();
             prepareCalls.incrementAndGet();
-            return WorkerBatcherTestSupport.boundaryOnly(
+            return PrefillQueueTestSupport.boundaryOnly(
                     candidates.getFirst(),
                     unavailable(new TestAvailability()));
         }

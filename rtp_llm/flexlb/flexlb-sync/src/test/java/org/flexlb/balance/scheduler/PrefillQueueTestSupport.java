@@ -7,9 +7,9 @@ import org.flexlb.balance.projection.WorkSnapshot;
 
 import java.util.List;
 
-final class WorkerBatcherTestSupport {
+final class PrefillQueueTestSupport {
 
-    private WorkerBatcherTestSupport() {
+    private PrefillQueueTestSupport() {
     }
 
     static DeliveryTransaction boundaryOnly(ScheduledRequest item, DeliveryBlockReason boundary) {

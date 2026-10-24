@@ -58,7 +58,7 @@ import java.util.function.Supplier;
  * a unique monotonic enqueue sequence. A monotonic mutation generation lets
  * snapshots and diagnostics identify queue-state changes.
  */
-public final class WorkerBatcher {
+public final class PrefillQueue {
 
     /** Immutable queue state materialized under this runtime's queue lock. */
     public record QueueSnapshot(
@@ -306,7 +306,7 @@ public final class WorkerBatcher {
     /** Last waiting decision; timeout readers never acquire queueLock. */
     private volatile QueueWaitSnapshot waitSnapshot;
 
-    public WorkerBatcher(
+    public PrefillQueue(
             String key,
             PrefillEndpoint prefillEp,
             FlexlbConfig config,
@@ -317,7 +317,7 @@ public final class WorkerBatcher {
         this(key, prefillEp, () -> config, deliveryStrategy, ttftEstimator, endpointEvents, queueCapacity);
     }
 
-    public WorkerBatcher(String key,
+    public PrefillQueue(String key,
                          PrefillEndpoint prefillEp,
                          Supplier<FlexlbConfig> configSupplier,
                          DeliveryStrategy deliveryStrategy,
@@ -355,7 +355,7 @@ public final class WorkerBatcher {
         this.workerThread = Thread.ofVirtual()
                 .name("flexlb-batcher-" + key)
                 .uncaughtExceptionHandler(
-                        (thread, failure) -> Logger.error("WorkerBatcher[{}] thread died unexpectedly", key, failure))
+                        (thread, failure) -> Logger.error("PrefillQueue[{}] thread died unexpectedly", key, failure))
                 .unstarted(this::runLoop);
     }
 
@@ -661,7 +661,7 @@ public final class WorkerBatcher {
 
     private void stopAfterUnexpectedLoopFailure(Throwable loopFailure) {
         try {
-            Logger.error("WorkerBatcher[{}] stopped after an unexpected loop failure",
+            Logger.error("PrefillQueue[{}] stopped after an unexpected loop failure",
                     key, loopFailure);
         } catch (Throwable ignoredLoggingFailure) {
             // The exact stop transaction must still run.
@@ -671,7 +671,7 @@ public final class WorkerBatcher {
                 false);
         if (cleanupFailure != null) {
             try {
-                Logger.error("WorkerBatcher[{}] failure cleanup exposed invariants",
+                Logger.error("PrefillQueue[{}] failure cleanup exposed invariants",
                         key, cleanupFailure);
             } catch (Throwable ignoredLoggingFailure) {
                 // Cleanup is already complete.
@@ -772,7 +772,7 @@ public final class WorkerBatcher {
                     }
                 } catch (Throwable callbackFailure) {
                     try {
-                        Logger.error("WorkerBatcher[{}] shutdown callback failed request_id={}",
+                        Logger.error("PrefillQueue[{}] shutdown callback failed request_id={}",
                                 key, item.requestId(), callbackFailure);
                     } catch (Throwable ignoredLoggingFailure) {
                         // Cleanup ownership cannot depend on diagnostics.
@@ -1294,7 +1294,7 @@ public final class WorkerBatcher {
             }
         }
         if (deliveryFailure != null) {
-            Logger.error("WorkerBatcher[{}] committed delivery failed",
+            Logger.error("PrefillQueue[{}] committed delivery failed",
                     key, deliveryFailure);
         }
     }
@@ -1487,7 +1487,7 @@ public final class WorkerBatcher {
         try {
             endpointEvents.onPreparedDeliveryFailure(item, cause);
         } catch (Throwable callbackFailure) {
-            Logger.error("WorkerBatcher[{}] delivery-failure callback failed "
+            Logger.error("PrefillQueue[{}] delivery-failure callback failed "
                             + "request_id={}",
                     key, item.requestId(), callbackFailure);
         }
@@ -1508,7 +1508,7 @@ public final class WorkerBatcher {
         try {
             endpointEvents.onQueuedItemExpired(head);
         } catch (Throwable callbackFailure) {
-            Logger.error("WorkerBatcher[{}] ACTIVE terminal callback failed "
+            Logger.error("PrefillQueue[{}] ACTIVE terminal callback failed "
                             + "request_id={} reason={}",
                     key, head.requestId(), "request_expired",
                     callbackFailure);

@@ -28,7 +28,7 @@ public final class PriorityOrdering {
      *
      * <p>Priority descending, then enqueue-sequence ascending. This is the
      * shared ordering primitive for the canonical per-worker scheduler
-     * queues ({@code WorkerBatcher}).
+     * queues ({@code PrefillQueue}).
      */
     public static final Comparator<Prioritized> STRICT = (left, right) -> compare(
             left.priority(), left.enqueueSeq(),

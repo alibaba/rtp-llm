@@ -21,7 +21,7 @@ final class DeliveryAvailability implements DeliveryBlockReason.Availability {
 
     @Override
     public void addListener(Runnable listener) {
-        // PrefillState already notifies its WorkerBatcher when delivery capacity changes.
+        // PrefillState already notifies its PrefillQueue when delivery capacity changes.
     }
 
     @Override

@@ -21,7 +21,7 @@ import java.util.concurrent.atomic.AtomicReference;
  * A single inference request queued for a priority scheduling decision.
  *
  * <p>Extracted from {@link RequestScheduler} to reduce coupling
- * with {@link WorkerBatcher}. A decision group may be delivered through a
+ * with {@link PrefillQueue}. A decision group may be delivered through a
  * batch RPC or returned as individual route decisions.
  *
  * <p>Carries direct {@link PrefillEndpoint} / {@link DecodeEndpoint} references

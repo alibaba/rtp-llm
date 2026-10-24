@@ -60,7 +60,7 @@ management).
 |---|---|
 | [00-overview](docs/architecture/00-overview.md) | 模块划分、技术栈、请求主链路、核心不变量 |
 | [01-routing-and-balancing](docs/architecture/01-routing-and-balancing.md) | Router / LoadBalancer、角色多阶段路由、回滚、策略 |
-| [02-queue-scheduling](docs/architecture/02-queue-scheduling.md) | PriorityScheduler / WorkerBatcher 调度、请求生命周期 |
+| [02-queue-scheduling](docs/architecture/02-queue-scheduling.md) | PriorityScheduler / PrefillQueue 调度、请求生命周期 |
 | [03-resource-management](docs/architecture/03-resource-management.md) | EndpointRegistry、worker 可用性与本地资源预留 |
 | [04-worker-sync-and-cache](docs/architecture/04-worker-sync-and-cache.md) | Worker 状态同步、KV cache 索引 |
 | [05-lifecycle-and-consistency](docs/architecture/05-lifecycle-and-consistency.md) | 优雅上下线 Hook、ZooKeeper 主选举 |

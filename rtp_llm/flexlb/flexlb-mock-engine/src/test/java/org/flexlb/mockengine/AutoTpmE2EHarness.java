@@ -145,7 +145,7 @@ final class AutoTpmE2EHarness implements AutoCloseable {
     }
 
     /**
-     * @param autoTpm must be decided at construction time: {@code WorkerBatcher}
+     * @param autoTpm must be decided at construction time: {@code PrefillQueue}
      *                freezes its queue comparator from the configured ordering
      *                when the endpoint is registered — flipping the switch after
      *                construction does NOT change the batch queue ordering.
@@ -208,7 +208,7 @@ final class AutoTpmE2EHarness implements AutoCloseable {
         }
 
         // Conservative defaults; scenarios override before submitting traffic.
-        // Priority ordering must be set BEFORE registerEndpoint (WorkerBatcher freezes it).
+        // Priority ordering must be set BEFORE registerEndpoint (PrefillQueue freezes it).
         if (initialConfig == null) {
             if (autoTpm) {
                 config.queueScheduler().setOrdering(QueueOrderingConfig.priority());

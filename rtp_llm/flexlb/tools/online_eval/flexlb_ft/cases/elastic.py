@@ -595,7 +595,7 @@ def elastic_concurrent_ops(ctx: CaseContext):
 # The elastic family above only removes engines whose requests are all
 # DISPATCHED (BackgroundFlow requests are short and in flight).  The gap:
 # what happens to requests the master has already QUEUED for the victim's
-# WorkerBatcher but never EnqueueBatch'd (its inflight-batch leases are
+# PrefillQueue but never EnqueueBatch'd (its inflight-batch leases are
 # full) when the scale-in event lands?  They must not sit silently until
 # queueTimeout (Java default 1h) — that is a silent hour-long loss.
 
@@ -688,7 +688,7 @@ def elastic_remove_pending_drain(ctx: CaseContext):
 
         # -- serial wave: each request its own FIXED_WINDOW batch; the
         #    victim's first two batches take both leases, everything routed
-        #    there afterwards parks in the master-side WorkerBatcher queue.
+        #    there afterwards parks in the master-side PrefillQueue queue.
         wave = 0
         victim_routed = 0
         schedule_rejects = 0

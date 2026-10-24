@@ -54,7 +54,7 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 /** The configured limit, real worker publication lock and canonical request ledger together. */
-class WorkerBatcherRequestCapacityTest {
+class PrefillQueueRequestCapacityTest {
 
     @ParameterizedTest
     @CsvSource({"false,90,false", "true,50,false", "true,0,false", "true,90,true"})

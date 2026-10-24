@@ -137,7 +137,7 @@ python3 -m unittest discover -s tools/online_eval/tests
 
 普通 `./mvnw test` 只运行功能测试，并排除 `performance-regression` tag。性能回归分为两个显式 profile，必须分别运行：
 
-- `sync-performance-regression`：`WorkerBatcherPerformanceTest`，覆盖不同真实非空队列深度下 projection input capture 与 immutable materialization 的延迟和分配上限。
+- `sync-performance-regression`：`PrefillQueuePerformanceTest`，覆盖不同真实非空队列深度下 projection input capture 与 immutable materialization 的延迟和分配上限。
 - `api-performance-regression`：`MasterBatchEndToEndPerformanceTest`，覆盖真实 Netty client/Master gRPC、`DefaultRouter`、random prefill、cost-based decode、fixed-window batcher、engine gRPC client 和 Java mock worker ACK 链路。类内先运行单 worker 的真实 payload burst，再运行 engine-scale 矩阵，避免大规模 fixture 的回收状态污染 burst 基线。
 
 分别运行两组门禁：

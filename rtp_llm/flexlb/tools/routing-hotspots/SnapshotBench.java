@@ -19,7 +19,7 @@ import org.flexlb.config.ConfigService;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
 import org.flexlb.service.monitor.RequestSchedulerReporter;
 
-/** Same source on both revisions; includes real WorkerBatcher snapshot capture. */
+/** Same source on both revisions; includes real PrefillQueue snapshot capture. */
 public class SnapshotBench {
     static final ThreadMXBean CPU = (ThreadMXBean) ManagementFactory.getThreadMXBean();
     static volatile long sink;
@@ -30,7 +30,7 @@ public class SnapshotBench {
     static final PrefillTtftEstimate.Probe PROBE = new PrefillTtftEstimate.Probe(
             Long.MAX_VALUE, 0, 1, Long.MAX_VALUE, 2048, 0, 0);
 
-    record Endpoint(WorkerBatcher runtime, ReentrantLock lock, ScheduledRequest member) {
+    record Endpoint(PrefillQueue runtime, ReentrantLock lock, ScheduledRequest member) {
         void changeMembership() {
             lock.lock();
             try {
@@ -70,9 +70,9 @@ public class SnapshotBench {
     static Endpoint endpoint(int depth, int seed) throws Exception {
         var config = config();
         // No scheduler thread or RPCs. Mutations still use the real ownership ledger and lock.
-        var runtime = new WorkerBatcher("bench-" + seed, null, config, strategy, estimator,
+        var runtime = new PrefillQueue("bench-" + seed, null, config, strategy, estimator,
                 new EndpointEventProjector(registry), new QueueCapacity());
-        Field lockField = WorkerBatcher.class.getDeclaredField("queueLock");
+        Field lockField = PrefillQueue.class.getDeclaredField("queueLock");
         lockField.setAccessible(true);
         var lock = (ReentrantLock) lockField.get(runtime);
         var random = new Random(seed);
