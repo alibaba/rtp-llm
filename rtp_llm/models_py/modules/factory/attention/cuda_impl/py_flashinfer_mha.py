@@ -735,6 +735,7 @@ class PyFlashinferPrefillAttnOp(object):
             if self.mask_builder
             else {}
         )
+        mask_indptr = mask_args.pop("mask_indptr", None)
         plan_indptr = self.cu_seqlens_host
         if mask_args.get("custom_mask") is not None:
             # Mask packing requires CUDA indptr; reuse graph-owned storage.
@@ -757,6 +758,10 @@ class PyFlashinferPrefillAttnOp(object):
             disable_split_kv=False,
             **mask_args,
         )
+        if mask_indptr is not None:
+            # FlashInfer computes bit offsets for prepacked masks; adapters
+            # supplying byte-aligned segments also supply their byte offsets.
+            self.mask_indptr_buffer.copy_(mask_indptr)
         return self.fmha_params
 
     def __del__(self):

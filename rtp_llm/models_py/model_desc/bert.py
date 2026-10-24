@@ -146,6 +146,10 @@ class BertDecoderLayer(nn.Module):
 
 
 class BertModel(GptModelBase):
+    # Ragged graph planning and embedding handlers consume gathered host metadata.
+    # PyWrappedModel owns the device mirrors used by embedding and attention.
+    requires_host_input_metadata = True
+
     def __init__(
         self,
         config: ModelConfig,

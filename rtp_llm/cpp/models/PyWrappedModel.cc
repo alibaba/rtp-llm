@@ -255,16 +255,12 @@ torch_ext::PyAttentionInputs PyWrappedModel::buildPyAttentionInputs(const GptMod
     // cached generation/MTP retain their existing device metadata pipeline.
     const bool needs_host_graph_inputs =
         enable_cuda_graph_ && is_prefill_cuda_graph_mode_ && !kv_cache_layer_layout_.has_value();
-    auto planning_tokens = inputs.combo_tokens;
     if (needs_host_graph_inputs) {
         for (auto* tensor :
              {&py_attn_inputs.prefix_lengths, &py_attn_inputs.sequence_lengths, &py_attn_inputs.input_lengths}) {
             if (tensor->defined() && tensor->is_cuda()) {
                 *tensor = normalize_i32(tensor->cpu());
             }
-        }
-        if (planning_tokens.defined() && planning_tokens.is_cuda()) {
-            planning_tokens = normalize_i32(planning_tokens.cpu());
         }
     }
 #if !USING_CUDA
@@ -415,11 +411,11 @@ torch_ext::PyAttentionInputs PyWrappedModel::buildPyAttentionInputs(const GptMod
     // Model-specific adapters own the schema of the opaque host tensor payload.
     // The default model hook leaves the attention inputs unchanged.
     if (is_prefill_cuda_graph_mode_ && py_attn_inputs.is_prefill && !py_attn_inputs.input_lengths.is_cuda()
-        && (!planning_tokens.defined() || !planning_tokens.is_cuda())) {
+        && (!inputs.combo_tokens.defined() || !inputs.combo_tokens.is_cuda())) {
         py::gil_scoped_acquire gil;
         if (py::hasattr(py_model_, "prepare_embedding_attention_inputs")) {
             py_attn_inputs = py_model_.attr("prepare_embedding_attention_inputs")(
-                py_attn_inputs, planning_tokens, inputs.text_tokens_mask).cast<torch_ext::PyAttentionInputs>();
+                py_attn_inputs, inputs.combo_tokens, inputs.text_tokens_mask).cast<torch_ext::PyAttentionInputs>();
         }
     }
 
