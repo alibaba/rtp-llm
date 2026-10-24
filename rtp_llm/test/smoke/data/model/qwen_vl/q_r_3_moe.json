@@ -41,7 +41,7 @@
                         "index": 0,
                         "message": {
                             "role": "assistant",
-                            "content": "Of course, here is a detailed description of the image.\n\nThis is a heartwarming and serene photograph capturing a tender moment between a woman and her dog on a beach during what appears to be sunrise or sunset.\n\n- **Main Subjects and Interaction:** The central focus is a woman and a large, light-colored dog, likely a yellow Labrador Retriever, sitting on the sand. The dog is sitting upright and is extending its right paw to meet the woman's hand in a \"high-five\"",
+                            "content": "Of course, here is a detailed description of the image.\n\nThis is a heartwarming and serene photograph capturing a tender moment between a woman and her dog on a beach during what appears to be sunrise or sunset.\n\n- **Main Subjects:** The central focus is a woman and a large, light-colored dog, likely a yellow Labrador Retriever, sitting on the sand. The dog is sitting upright, facing the woman, and is extending its right paw to meet her hand in a \"high-five",
                             "partial": false
                         },
                         "finish_reason": "length"
@@ -50,7 +50,7 @@
                         "index": 1,
                         "message": {
                             "role": "assistant",
-                            "content": "Of course, here is a detailed description of the image.\n\nThis is a heartwarming and serene photograph capturing a tender moment between a woman and her dog on a beach during what appears to be sunrise or sunset.\n\n- **Main Subjects and Interaction:** The central focus is a woman and a large, light-colored dog, likely a yellow Labrador Retriever, sitting on the sand. The dog is sitting upright and is extending its right paw to meet the woman's hand in a \"high-five\"",
+                            "content": "Of course, here is a detailed description of the image.\n\nThis is a heartwarming and serene photograph capturing a tender moment between a woman and her dog on a beach during what appears to be sunrise or sunset.\n\n- **Main Subjects:** The central focus is a woman and a large, light-colored dog, likely a yellow Labrador Retriever, sitting on the sand. The dog is sitting upright, facing the woman, and is extending its right paw to meet her hand in a \"high-five",
                             "partial": false
                         },
                         "finish_reason": "length"

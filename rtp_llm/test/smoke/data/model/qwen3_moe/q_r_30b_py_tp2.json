@@ -13,7 +13,7 @@
                 }
             },
             "result": {
-                "response": " explain in simple terms\n\nSure! Let's break down the **CAP Theorem** in simple terms.\n\n---\n\n### 🌐 What is CAP Theorem?\n\nThe **CAP Theorem** (also called **Brewer’s Theorem**) says that in a **distributed",
+                "response": " explain in simple terms\n\nSure! Let's break down the **CAP Theorem** in simple terms.\n\n---\n\n### 🌐 What is the CAP Theorem?\n\nThe **CAP Theorem** (also called **Brewer’s Theorem**) says that in a **",
                 "finished": true
             }
         }
