@@ -14,6 +14,7 @@
 
 #include "rtp_llm/cpp/model_rpc/RPCPool.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
+#include "rtp_llm/cpp/utils/ErrorCode.h"
 
 namespace rtp_llm {
 
@@ -64,6 +65,25 @@ public:
 
     void waitDone() {
         (void)waitDone(/*timeout_ms=*/0);
+    }
+
+    ErrorInfo waitForCompletion() {
+        std::unique_lock<std::mutex> lock(wait_done_mutex_);
+        wait_done_cv_.wait(lock, [this] { return done(); });
+        lock.unlock();
+        return errorInfo();
+    }
+
+    ErrorInfo errorInfo() const {
+        std::lock_guard<std::mutex> lock(wait_done_mutex_);
+        if (!done()) {
+            return ErrorInfo(ErrorCode::TRANSFER_COMPLETION_UNKNOWN, "broadcast rpc is not complete");
+        }
+        if (!success()) {
+            return ErrorInfo(ErrorCode::TRANSFER_COMPLETION_UNKNOWN,
+                             fatal_error_.empty() ? "broadcast rpc failed" : fatal_error_);
+        }
+        return ErrorInfo::OkStatus();
     }
 
     bool success() const {

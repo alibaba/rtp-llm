@@ -578,6 +578,63 @@ TEST_F(BroadcastManagerTest, CqFailureStillPublishesCompletionCallback) {
     EXPECT_FALSE(result->success());
 }
 
+TEST_F(BroadcastManagerTest, WaitForCompletionReportsExecutionFailureAsCompletedTransport) {
+    auto ctx = makeIdleContext();
+    ctx->response.mutable_mem_response()->set_code(MemoryOperationResponsePB::COPY_FAILED);
+    FunctionBroadcastResult result({ctx});
+    EXPECT_EQ(result.errorInfo().code(), ErrorCode::TRANSFER_COMPLETION_UNKNOWN);
+    result.finishRank(0, true);
+    EXPECT_TRUE(result.errorInfo().ok());
+    EXPECT_TRUE(result.waitForCompletion().ok());
+    EXPECT_TRUE(result.success());
+    EXPECT_NO_THROW(result.waitDone());
+    EXPECT_EQ(result.responses().front().mem_response().code(), MemoryOperationResponsePB::COPY_FAILED);
+}
+
+TEST_F(BroadcastManagerTest, WaitForCompletionReportsDeadlineWithoutChangingLegacyWait) {
+    auto ctx    = makeIdleContext();
+    ctx->status = grpc::Status(grpc::StatusCode::DEADLINE_EXCEEDED, "deadline");
+    FunctionBroadcastResult result({ctx});
+    result.finishRank(0, true);
+    EXPECT_EQ(result.errorInfo().code(), ErrorCode::TRANSFER_COMPLETION_UNKNOWN);
+    EXPECT_EQ(result.waitForCompletion().code(), ErrorCode::TRANSFER_COMPLETION_UNKNOWN);
+    EXPECT_FALSE(result.success());
+    EXPECT_THROW(result.waitDone(), RTPException);
+}
+
+TEST_F(BroadcastManagerTest, WaitForCompletionReportsTransportErrorsWithoutThrowing) {
+    for (auto code : {grpc::StatusCode::OK,
+                      grpc::StatusCode::INTERNAL,
+                      grpc::StatusCode::UNAVAILABLE,
+                      grpc::StatusCode::CANCELLED}) {
+        auto       ctx   = makeIdleContext();
+        const bool cq_ok = code != grpc::StatusCode::OK;
+        if (cq_ok) {
+            ctx->status = grpc::Status(code, "completion confirmation lost");
+        }
+        FunctionBroadcastResult result({ctx});
+        result.finishRank(0, cq_ok);
+        EXPECT_EQ(result.errorInfo().code(), ErrorCode::TRANSFER_COMPLETION_UNKNOWN);
+        EXPECT_EQ(result.waitForCompletion().code(), ErrorCode::TRANSFER_COMPLETION_UNKNOWN);
+        EXPECT_FALSE(result.success());
+    }
+}
+
+TEST_F(BroadcastManagerTest, CompletionErrorIsUnknownForFailedRanksInEitherOrder) {
+    for (bool failure_first : {false, true}) {
+        auto failed                       = makeIdleContext();
+        failed->status                    = grpc::Status(grpc::StatusCode::UNAVAILABLE, "connection lost");
+        auto                    completed = makeIdleContext();
+        FunctionBroadcastResult result({failed, completed});
+        result.finishRank(failure_first ? 0 : 1, true);
+        EXPECT_FALSE(result.done());
+        result.finishRank(failure_first ? 1 : 0, true);
+        EXPECT_EQ(result.errorInfo().code(), ErrorCode::TRANSFER_COMPLETION_UNKNOWN);
+        EXPECT_EQ(result.waitForCompletion().code(), ErrorCode::TRANSFER_COMPLETION_UNKNOWN);
+        EXPECT_FALSE(result.success());
+    }
+}
+
 // ---------------------------- workerNum ----------------------------
 
 TEST_F(BroadcastManagerTest, WorkerNum) {

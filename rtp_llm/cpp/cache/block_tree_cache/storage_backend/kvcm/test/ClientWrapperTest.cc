@@ -7,6 +7,7 @@
 #include <future>
 #include <memory>
 #include <string>
+#include <stdexcept>
 #include <thread>
 #include <vector>
 
@@ -765,6 +766,66 @@ TEST(ClientWrapperTest, ServiceInstanceFailureReRegistersAndRoutesTheNextRequest
     EXPECT_TRUE(routed);
     wrapper.shutdown();
     EXPECT_EQ(*destruction_count, 1);
+}
+
+TEST(ClientWrapperTest, TaggedPayloadResultsAndExceptionsFollowSdk) {
+    std::array<char, 64>                  registration{};
+    kv_cache_manager::RegistSpan          span{registration.data(), registration.size()};
+    InitObservation                       observation;
+    kv_cache_manager::MockTransferClient* transfer  = nullptr;
+    auto                                  destroyed = std::make_shared<int>(0);
+    auto wrapper = initializeClient(false, "endpoint", span, observation, destroyed, nullptr, nullptr, &transfer);
+    ASSERT_NE(wrapper, nullptr);
+    ASSERT_NE(transfer, nullptr);
+    kv_cache_manager::UriStrVec    uris{"uri"};
+    kv_cache_manager::BlockBuffers buffers;
+    {
+        auto load = [&] { return wrapper->loadKvCachesForTag("default", uris, buffers, nullptr); };
+        auto save = [&] { return wrapper->saveKvCachesForTag("default", uris, buffers, nullptr); };
+        for (auto code : {kv_cache_manager::ClientErrorCode::ER_OK,
+                          kv_cache_manager::ClientErrorCode::ER_INVALID_PARAMS,
+                          kv_cache_manager::ClientErrorCode::ER_SDK_TIMEOUT,
+                          static_cast<kv_cache_manager::ClientErrorCode>(-12345)}) {
+            SCOPED_TRACE(static_cast<int>(code));
+            const bool success = code == kv_cache_manager::ClientErrorCode::ER_OK;
+            EXPECT_CALL(*transfer, LoadKvCaches(_, _, _)).WillOnce(Return(code));
+            EXPECT_EQ(load(), success);
+            // The wrapper preserves successful SDK output; the backend validates
+            // URI shape before associating it with input blocks.
+            const kv_cache_manager::UriStrVec actual{"actual", "extra"};
+            EXPECT_CALL(*transfer, SaveKvCaches(_, _, _)).WillOnce(Return(std::make_pair(code, actual)));
+            const auto saved = save();
+            EXPECT_EQ(saved.first, success);
+            EXPECT_EQ(saved.second, success ? actual : kv_cache_manager::UriStrVec{});
+        }
+        EXPECT_CALL(*transfer, LoadKvCaches(_, _, _))
+            .WillOnce(Invoke([](const auto&, const auto&, auto) -> kv_cache_manager::ClientErrorCode {
+                throw std::runtime_error("SDK load exception");
+            }));
+        EXPECT_THROW(load(), std::runtime_error);
+        EXPECT_CALL(*transfer, SaveKvCaches(_, _, _))
+            .WillOnce(Invoke([](const auto&,
+                                const auto&,
+                                auto) -> std::pair<kv_cache_manager::ClientErrorCode, kv_cache_manager::UriStrVec> {
+                throw std::runtime_error("SDK save exception");
+            }));
+        EXPECT_THROW(save(), std::runtime_error);
+        EXPECT_CALL(*transfer, LoadKvCaches(_, _, _))
+            .WillOnce(Invoke([](const auto&, const auto&, auto) -> kv_cache_manager::ClientErrorCode { throw 1; }));
+        EXPECT_THROW(load(), int);
+        EXPECT_CALL(*transfer, SaveKvCaches(_, _, _))
+            .WillOnce(
+                Invoke([](const auto&, const auto&, auto)
+                           -> std::pair<kv_cache_manager::ClientErrorCode, kv_cache_manager::UriStrVec> { throw 1; }));
+        EXPECT_THROW(save(), int);
+    }
+    EXPECT_CALL(*transfer, LoadKvCaches(_, _, _)).Times(0);
+    EXPECT_CALL(*transfer, SaveKvCaches(_, _, _)).Times(0);
+    EXPECT_FALSE(wrapper->loadKvCachesForTag("missing", uris, buffers, nullptr));
+    EXPECT_FALSE(wrapper->saveKvCachesForTag("missing", uris, buffers, nullptr).first);
+    wrapper->shutdown();
+    EXPECT_FALSE(wrapper->loadKvCachesForTag("default", uris, buffers));
+    EXPECT_FALSE(wrapper->saveKvCachesForTag("default", uris, buffers).first);
 }
 
 }  // namespace

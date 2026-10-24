@@ -131,6 +131,7 @@ public:
     const std::shared_ptr<TestMatchMeta>& readMatchMeta() const {
         return read_match_meta_;
     }
+    ErrorInfo read_result;
 
 protected:
     bool initImpl() override {
@@ -145,10 +146,11 @@ protected:
         match_local_blocks_ = request.local_matched_blocks_num;
         return pending_match_;
     }
-    void readImpl(const StorageRequest& request, const std::shared_ptr<StorageBackendMatchMeta>& match_meta) override {
+    ErrorInfo readImpl(const StorageRequest&                           request,
+                       const std::shared_ptr<StorageBackendMatchMeta>& match_meta) override {
         if (fail_read_) {
             fail_read_ = false;
-            throw std::runtime_error("read failed");
+            return ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "backend read failed");
         }
         read_match_meta_ = std::dynamic_pointer_cast<TestMatchMeta>(match_meta);
         read_keys_       = *request.keys;
@@ -160,8 +162,12 @@ protected:
             }
             read_group_tags_.push_back(std::move(group_tags));
         }
+
+        return read_result;
     }
-    void writeImpl(const StorageRequest&) override {}
+    ErrorInfo writeImpl(const StorageRequest&) override {
+        return ErrorInfo::OkStatus();
+    }
 
 private:
     explicit ManualBackend(std::shared_ptr<ManualExecutor> executor):
@@ -805,6 +811,35 @@ TEST(LoadAsyncContextTest, BackendFailureWaitsForLocalTransferBeforePublishingFa
     EXPECT_FALSE(context->success());
     EXPECT_EQ(pool->refCount(block), 1u);
     pool->decRef(block);
+    coordinator->shutdown();
+}
+
+TEST(LoadAsyncContextTest, UnknownBackendReadRetainsTargetsAfterBusinessReceiverIsDestroyed) {
+    size_t     commits     = 0;
+    size_t     aborts      = 0;
+    auto       coordinator = makeCoordinator(commits, aborts);
+    auto       backend     = std::make_shared<ManualBackend>();
+    auto       pool        = std::make_shared<TestBlockPool>();
+    const auto block       = pool->malloc().value();
+    pool->incRef(block);
+    initBackend(*backend, pool);
+    backend->read_result = ErrorInfo(ErrorCode::TRANSFER_COMPLETION_UNKNOWN, "late backend write");
+    auto context         = coordinator->create({}, {}, 0, backend, makeRequest(1));
+    ASSERT_TRUE(coordinator->registerContext(context));
+    context->setMatchCallback([block](LoadAsyncContext& current, size_t) {
+        current.setBackendTargetBlock(0, 0, block);
+        return current.commit();
+    });
+    context->startBackendMatch();
+    backend->completeMatch(1);
+    ASSERT_TRUE(backend->readPending());
+    context.reset();
+    pool->decRef(block);
+    EXPECT_EQ(pool->refCount(block), 1u);
+    backend->completeRead();
+    EXPECT_TRUE(pool->isFrozen(block));
+    EXPECT_EQ(pool->refCount(block), 1u);
+    EXPECT_EQ(pool->referencedBlocksNum(BlockTreeRefType::LOAD), 0u);
     coordinator->shutdown();
 }
 

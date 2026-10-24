@@ -640,6 +640,7 @@ bool RtpLLMCachePoolMetrics::init(kmonitor::MetricsGroupManager* manager) {
     REGISTER_GAUGE_MUTABLE_METRIC(eviction_target_ref_blocks_metric, "rtp_llm_kv_cache_eviction_target_ref_blocks");
     REGISTER_GAUGE_MUTABLE_METRIC(eviction_ref_blocks_compat_metric, "rtp_llm_kv_cache_eviction_ref_blocks");
     REGISTER_GAUGE_MUTABLE_METRIC(store_ref_blocks_metric, "rtp_llm_kv_cache_store_ref_blocks");
+    REGISTER_GAUGE_MUTABLE_METRIC(frozen_ref_blocks_metric, "rtp_llm_kv_cache_frozen_ref_blocks");
     REGISTER_GAUGE_MUTABLE_METRIC(used_ratio_metric, "rtp_llm_kv_cache_used_ratio");
     REGISTER_GAUGE_MUTABLE_METRIC(read_bytes_metric, "rtp_llm_kv_cache_disk_cache_read_bytes");
     REGISTER_GAUGE_MUTABLE_METRIC(write_bytes_metric, "rtp_llm_kv_cache_disk_cache_write_bytes");
@@ -666,6 +667,9 @@ void RtpLLMCachePoolMetrics::report(const kmonitor::MetricsTags* tags, RtpLLMCac
         REPORT_MUTABLE_METRIC(eviction_ref_blocks_compat_metric, collector->eviction_target_ref_blocks);
     }
     REPORT_MUTABLE_METRIC(store_ref_blocks_metric, collector->store_ref_blocks);
+    if (collector->report_frozen_ref_blocks) {
+        REPORT_MUTABLE_METRIC(frozen_ref_blocks_metric, collector->frozen_ref_blocks);
+    }
     REPORT_MUTABLE_METRIC(used_ratio_metric, collector->used_ratio);
     if (collector->read_bytes.has_value()) {
         REPORT_MUTABLE_METRIC(read_bytes_metric, *collector->read_bytes);

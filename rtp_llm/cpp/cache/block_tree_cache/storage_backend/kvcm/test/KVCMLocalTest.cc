@@ -1,4 +1,5 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/storage_backend/kvcm/test/KVCMMockTestBase.h"
+#include <stdexcept>
 
 #include <array>
 
@@ -292,6 +293,27 @@ TEST(KVCMLocalTest, PayloadReadFailurePropagatesToCompletion) {
     EXPECT_CALL(*client_wrapper, loadKvCachesForTag("default", kv_cache_manager::UriStrVec{"read_uri"}, _, _))
         .WillOnce(Return(false));
     EXPECT_FALSE(read(*backend.backend, makeStorageRequest(environment), std::move(observation.match_meta)));
+    EXPECT_FALSE(environment.device_pool->isFrozen(environment.block_id));
+    EXPECT_EQ(environment.device_pool->refCount(environment.block_id), 1u);
+}
+
+TEST(KVCMLocalTest, SdkExceptionDoesNotBecomeAnExecutionResult) {
+    auto environment = makeBackendEnvironment("kvcm_sdk_exception");
+    auto client      = std::make_shared<MockClientWrapper>();
+    EXPECT_CALL(*client, initForPools(_, _, _, _)).WillOnce(Return(true));
+    EXPECT_CALL(*client, shutdown()).Times(1);
+    auto backend = makeBackend(environment, singleRankConfig(), client);
+    ASSERT_TRUE(initSingleRank(*backend.backend, environment));
+    EXPECT_CALL(*client, loadKvCachesForTag("default", _, _, _))
+        .WillOnce(::testing::Throw(std::runtime_error("SDK exception")));
+    RemoteOperationRequestPB request;
+    request.set_op(REMOTE_OPERATION_READ);
+    request.add_group_tags("default");
+    request.add_block_ids(environment.block_id);
+    request.add_uris("uri");
+    RemoteOperationResponsePB response;
+    EXPECT_THROW(backend->execute(request, response), std::runtime_error);
+    EXPECT_EQ(response.actual_uris_size(), 0);
 }
 
 }  // namespace

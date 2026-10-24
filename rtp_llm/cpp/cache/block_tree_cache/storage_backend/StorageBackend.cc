@@ -39,8 +39,13 @@ struct StorageTaskState {
     StorageRequest   request;
     std::vector<Pin> pins;
     std::once_flag   finish_once;
-    void             finish() {
-        std::call_once(finish_once, [this] {
+    void             finish(bool completion_unknown) noexcept {
+        std::call_once(finish_once, [this, completion_unknown] {
+            if (completion_unknown) {
+                for (const Pin& pin : pins) {
+                    pin.pool->freezeBlock(pin.block);
+                }
+            }
             for (const Pin& pin : pins) {
                 pin.pool->decRef(pin.block);
             }
@@ -49,7 +54,15 @@ struct StorageTaskState {
     }
 
     ~StorageTaskState() {
-        finish();
+        finish(/*completion_unknown=*/false);
+    }
+};
+
+// Release task pins during exception unwinding without inventing an I/O result.
+struct StorageTaskCompletion {
+    StorageTaskState& state;
+    ~StorageTaskCompletion() {
+        state.finish(/*completion_unknown=*/false);
     }
 };
 
@@ -308,15 +321,24 @@ void StorageBackend::read(StorageRequest request, std::shared_ptr<StorageBackend
     auto state = prepare(std::move(request));
     dispatch([this, state = std::move(state), match_meta = std::move(match_meta), done = std::move(done)](
                  Lifecycle outcome) mutable {
-        bool success = outcome == Lifecycle::ACCEPTING;
-        if (success) {
+        storage_backend_detail::StorageTaskCompletion completion{*state};
+        ErrorInfo error(ErrorCode::EXECUTION_EXCEPTION, "StorageBackend read was not admitted");
+        if (outcome == Lifecycle::ACCEPTING) {
             try {
-                readImpl(state->request, match_meta);
-            } catch (...) { success = false; }
+                error = readImpl(state->request, match_meta);
+            } catch (const std::exception& exception) {
+                error = ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, exception.what());
+            } catch (...) {
+                error = ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "unknown StorageBackend read exception");
+            }
         }
-        state->finish();
+        state->finish(error.code() == ErrorCode::TRANSFER_COMPLETION_UNKNOWN);
+        if (!error.ok()) {
+            RTP_LLM_LOG_WARNING(
+                "StorageBackend read failed, code=%d: %s", static_cast<int>(error.code()), error.ToString().c_str());
+        }
         if (done) {
-            done(success);
+            done(error.ok());
         }
     });
 }
@@ -334,12 +356,16 @@ bool StorageBackend::write(StorageWriteTask task) {
     RTP_LLM_CHECK(task.state_ != nullptr);
     auto state = std::move(task.state_);
     return dispatch([this, state](Lifecycle outcome) {
+        storage_backend_detail::StorageTaskCompletion completion{*state};
+        ErrorInfo error(ErrorCode::EXECUTION_EXCEPTION, "StorageBackend write was not admitted");
         if (outcome == Lifecycle::ACCEPTING) {
-            try {
-                writeImpl(state->request);
-            } catch (...) {}
+            error = writeImpl(state->request);
         }
-        state->finish();
+        state->finish(error.code() == ErrorCode::TRANSFER_COMPLETION_UNKNOWN);
+        if (!error.ok()) {
+            RTP_LLM_LOG_WARNING(
+                "StorageBackend write failed, code=%d: %s", static_cast<int>(error.code()), error.ToString().c_str());
+        }
     });
 }
 

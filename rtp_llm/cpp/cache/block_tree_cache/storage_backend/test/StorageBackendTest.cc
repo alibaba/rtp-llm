@@ -1,6 +1,7 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/storage_backend/StorageBackend.h"
 
 #include <atomic>
+#include <algorithm>
 #include <chrono>
 #include <condition_variable>
 #include <deque>
@@ -345,6 +346,9 @@ public:
         return shutdown_called_.load();
     }
 
+    ErrorInfo read_result;
+    ErrorInfo write_result;
+
 protected:
     bool initImpl() override {
         ++init_calls_;
@@ -364,16 +368,18 @@ protected:
         return {request.handles.size(), nullptr};
     }
 
-    void readImpl(const StorageRequest&, const std::shared_ptr<StorageBackendMatchMeta>&) override {
+    ErrorInfo readImpl(const StorageRequest&, const std::shared_ptr<StorageBackendMatchMeta>&) override {
         std::lock_guard<std::mutex> lock(mutex_);
         ++read_calls_;
         if (fail_read_) {
             fail_read_ = false;
             throw std::runtime_error("read failed");
         }
+
+        return read_result;
     }
 
-    void writeImpl(const StorageRequest& request) override {
+    ErrorInfo writeImpl(const StorageRequest& request) override {
         std::lock_guard<std::mutex> lock(mutex_);
         write_handle_count_ = 0;
         for (const auto& key_handles : request.handles) {
@@ -383,6 +389,8 @@ protected:
             fail_write_ = false;
             throw std::runtime_error("write failed");
         }
+
+        return write_result;
     }
 
     void shutdownImpl() noexcept override {
@@ -725,10 +733,13 @@ TEST(StorageBackendTest, IoExceptionsPropagateFailureAndReleasePins) {
     ASSERT_TRUE(initBackend(backend, pool));
 
     backend.failNextRead();
-    bool read_success = true;
-    backend.read(makeRequest(block), nullptr, [&](bool success) { read_success = success; });
+    size_t read_completions = 0;
+    backend.read(makeRequest(block), nullptr, [&](bool success) {
+        EXPECT_FALSE(success);
+        ++read_completions;
+    });
     EXPECT_EQ(executor->runAll(), 1u);
-    EXPECT_FALSE(read_success);
+    EXPECT_EQ(read_completions, 1u);
     EXPECT_EQ(pool->refCount(block), 1u);
 
     backend.failNextWrite();
@@ -741,6 +752,7 @@ TEST(StorageBackendTest, IoExceptionsPropagateFailureAndReleasePins) {
     backend.match(makeRequest(NULL_BLOCK_IDX), [&](size_t, auto, bool success) { match_success = success; });
     EXPECT_EQ(executor->runAll(), 1u);
     EXPECT_FALSE(match_success);
+    EXPECT_EQ(pool->referencedBlocksNum(BlockTreeRefType::FROZEN), 0u);
     pool->decRef(block);
     backend.shutdown();
 }
@@ -795,6 +807,7 @@ TEST(StorageBackendTest, AsyncWriteFailuresAndRejectionReleasePins) {
     backend.shutdown();
     EXPECT_FALSE(backend.write(backend.prepareWrite(makeRequest(block))));
     EXPECT_EQ(pool->refCount(block), 1u);
+    EXPECT_EQ(pool->referencedBlocksNum(BlockTreeRefType::FROZEN), 0u);
     pool->decRef(block);
 }
 
@@ -1139,6 +1152,161 @@ TEST(StorageBackendTest, ResolvesGpuBufferAndGroupMetadataFromBoundResources) {
     ASSERT_EQ(buffers.size(), 1u);
     EXPECT_EQ(buffers.front().addr, reinterpret_cast<void*>(4));
     backend.shutdown();
+}
+
+TEST(StorageBackendTest, OrdinaryPayloadFailuresReleasePinsWithoutFreezing) {
+    auto       pool  = std::make_shared<TestBlockPool>();
+    const auto block = pool->malloc().value();
+    pool->incRef(block);
+    auto        executor = std::make_shared<HoldingExecutor>();
+    TestBackend backend(true, executor);
+    ASSERT_TRUE(initBackend(backend, pool));
+    backend.read_result  = ErrorInfo(ErrorCode::INVALID_PARAMS, "rejected before payload");
+    backend.write_result = ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "payload ended, metadata failed");
+    backend.read(makeRequest(block), nullptr, [&](bool success) { EXPECT_FALSE(success); });
+    EXPECT_TRUE(backend.write(backend.prepareWrite(makeRequest(block))));
+    EXPECT_EQ(executor->runAll(), 2u);
+    EXPECT_EQ(pool->refCount(block), 1u);
+    EXPECT_EQ(pool->referencedBlocksNum(BlockTreeRefType::FROZEN), 0u);
+    pool->decRef(block);
+    backend.shutdown();
+}
+
+TEST(StorageBackendTest, WriteCompletionReleasesPinsAndFreezesOnlyUnknownResults) {
+    for (bool single_pool : {false, true}) {
+        for (bool completion_unknown : {false, true}) {
+            SCOPED_TRACE(::testing::Message() << "single_pool=" << single_pool << " unknown=" << completion_unknown);
+            auto       first  = std::make_shared<TestBlockPool>();
+            auto       second = single_pool ? first : std::make_shared<TestBlockPool>();
+            const auto block  = first->malloc().value();
+            first->incRef(block);
+            if (!single_pool) {
+                ASSERT_EQ(second->malloc().value(), block);
+                second->incRef(block);
+            }
+            auto executor = std::make_shared<HoldingExecutor>();
+            executor->setDuplicate(true);
+            TestBackend backend(true, executor);
+            ASSERT_TRUE(backend.init(single_pool ? makeTopology() : makeSharedPoolTopology(),
+                                     single_pool ? StorageBackend::PoolsByTag{{"default", first}} :
+                                                   StorageBackend::PoolsByTag{{"group_0", first}, {"group_1", second}},
+                                     [](int, const std::string&, int) {
+                                         return std::vector<BlockInfo>{{false, 0, 0, reinterpret_cast<void*>(1), 16}};
+                                     }));
+            backend.write_result =
+                ErrorInfo(completion_unknown ? ErrorCode::TRANSFER_COMPLETION_UNKNOWN : ErrorCode::EXECUTION_EXCEPTION,
+                          "write failed");
+            StorageRequest request{
+                std::make_shared<CacheKeysType>(CacheKeysType{1, 2}),
+                {{{"group_0", block}, {"group_1", block}}, {{"group_0", block}, {"group_1", block}}}};
+            if (single_pool) {
+                request = makeRequest(block, 2);
+            }
+            ASSERT_TRUE(backend.write(backend.prepareWrite(request)));
+            EXPECT_EQ(first->refCount(block), 2u);
+            EXPECT_EQ(second->refCount(block), 2u);
+            first->decRef(block);
+            if (!single_pool) {
+                second->decRef(block);
+            }
+            EXPECT_EQ(first->refCount(block), 1u);
+            EXPECT_EQ(second->refCount(block), 1u);
+            EXPECT_EQ(executor->runAll(), 1u);
+            for (const auto& pool : {first, second}) {
+                EXPECT_EQ(pool->isFrozen(block), completion_unknown);
+                EXPECT_EQ(pool->isAllocated(block), completion_unknown);
+                EXPECT_EQ(pool->referencedBlocksNum(BlockTreeRefType::FROZEN), completion_unknown ? 1u : 0u);
+                if (completion_unknown) {
+                    EXPECT_EQ(pool->refCount(block), 1u);
+                    EXPECT_EQ(pool->treeRefCount(block), 1u);
+                    auto replacements = pool->malloc(pool->freeBlocksNum()).value();
+                    EXPECT_EQ(std::count(replacements.begin(), replacements.end(), block), 0);
+                    pool->incRef(replacements);
+                    pool->decRef(replacements);
+                }
+                EXPECT_EQ(pool->referencedBlocksNum(BlockTreeRefType::STORE), 0u);
+            }
+            backend.shutdown();
+        }
+    }
+}
+
+TEST(StorageBackendTest, UnknownReadFreezesBeforeCallbackEvenWhenOwnerReleasedAndCallbackThrows) {
+    auto       pool  = std::make_shared<TestBlockPool>();
+    const auto block = pool->malloc().value();
+    pool->incRef(block);
+    auto executor = std::make_shared<HoldingExecutor>();
+    executor->setDuplicate(true);
+    TestBackend backend(true, executor);
+    ASSERT_TRUE(initBackend(backend, pool));
+    backend.read_result = ErrorInfo(ErrorCode::TRANSFER_COMPLETION_UNKNOWN, "old load still writes");
+    size_t completions  = 0;
+    backend.read(makeRequest(block, 2), nullptr, [&](bool success) {
+        EXPECT_FALSE(success);
+        ++completions;
+        EXPECT_TRUE(pool->isFrozen(block));
+        EXPECT_EQ(pool->refCount(block), 1u);
+        throw std::runtime_error("discarded completion");
+    });
+    pool->decRef(block);
+    EXPECT_EQ(pool->refCount(block), 1u);
+    EXPECT_NO_THROW(executor->runAll());
+    EXPECT_EQ(completions, 1u);
+    EXPECT_EQ(backend.readCalls(), 1u);
+    EXPECT_EQ(pool->referencedBlocksNum(BlockTreeRefType::FROZEN), 1u);
+    auto replacement = pool->malloc(pool->freeBlocksNum()).value();
+    EXPECT_EQ(std::count(replacement.begin(), replacement.end(), block), 0);
+    pool->incRef(replacement);
+    pool->decRef(replacement);
+    backend.shutdown();
+}
+
+TEST(StorageBackendTest, UnknownReadFreezesEveryPhysicalPinAndReusesExistingFrozenReference) {
+    for (bool single_pool : {false, true}) {
+        auto       first  = std::make_shared<TestBlockPool>();
+        auto       second = single_pool ? first : std::make_shared<TestBlockPool>();
+        const auto block  = first->malloc().value();
+        first->incRef(block);
+        if (!single_pool) {
+            ASSERT_EQ(second->malloc().value(), block);
+            second->incRef(block);
+        }
+        // A BTC LOAD/EVICT may already have frozen the same block.
+        first->freezeBlock(block);
+        auto executor = std::make_shared<HoldingExecutor>();
+        executor->setDuplicate(true);
+        TestBackend backend(true, executor);
+        ASSERT_TRUE(backend.init(single_pool ? makeTopology() : makeSharedPoolTopology(),
+                                 single_pool ? StorageBackend::PoolsByTag{{"default", first}} :
+                                               StorageBackend::PoolsByTag{{"group_0", first}, {"group_1", second}},
+                                 [](int, const std::string&, int) {
+                                     return std::vector<BlockInfo>{{false, 0, 0, reinterpret_cast<void*>(1), 16}};
+                                 }));
+        backend.read_result = ErrorInfo(ErrorCode::TRANSFER_COMPLETION_UNKNOWN, "TP read completion unknown");
+        StorageRequest request{std::make_shared<CacheKeysType>(CacheKeysType{1, 2}),
+                               {{{"group_0", block}, {"group_1", block}}, {{"group_0", block}, {"group_1", block}}}};
+        if (single_pool) {
+            request = makeRequest(block, 2);
+        }
+        backend.read(request, nullptr, {});
+        first->decRef(block);
+        if (!single_pool) {
+            second->decRef(block);
+        }
+        EXPECT_EQ(executor->runAll(), 1u);
+        for (const auto& pool : {first, second}) {
+            EXPECT_TRUE(pool->isFrozen(block));
+            EXPECT_EQ(pool->refCount(block), 1u);
+            EXPECT_EQ(pool->treeRefCount(block), 1u);
+            EXPECT_EQ(pool->referencedBlocksNum(BlockTreeRefType::FROZEN), 1u);
+            EXPECT_EQ(pool->referencedBlocksNum(BlockTreeRefType::STORE), 0u);
+        }
+        // No business receiver is needed to preserve an UNKNOWN read either.
+        backend.read(std::move(request), nullptr, {});
+        EXPECT_EQ(executor->runAll(), 1u);
+        EXPECT_EQ(first->referencedBlocksNum(BlockTreeRefType::FROZEN), 1u);
+        backend.shutdown();
+    }
 }
 
 }  // namespace

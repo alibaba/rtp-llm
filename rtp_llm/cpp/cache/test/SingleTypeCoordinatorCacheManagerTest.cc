@@ -81,8 +81,12 @@ protected:
     StorageMatchResult matchImpl(const StorageRequest& request) override {
         return {request.handles.size(), nullptr};
     }
-    void readImpl(const StorageRequest&, const std::shared_ptr<StorageBackendMatchMeta>&) override {}
-    void writeImpl(const StorageRequest&) override {}
+    ErrorInfo readImpl(const StorageRequest&, const std::shared_ptr<StorageBackendMatchMeta>&) override {
+        return ErrorInfo::OkStatus();
+    }
+    ErrorInfo writeImpl(const StorageRequest&) override {
+        return ErrorInfo::OkStatus();
+    }
 };
 
 class ScopedSingleTypeDiskDirectory {

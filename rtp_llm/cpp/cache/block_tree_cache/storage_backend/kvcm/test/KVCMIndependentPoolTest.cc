@@ -1,5 +1,6 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/storage_backend/kvcm/test/KVCMMockTestBase.h"
 #include "rtp_llm/cpp/cache/CoordinatorCacheManager.h"
+#include "rtp_llm/cpp/cache/KVCacheManager.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeCacheFactory.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/storage_backend/kvcm/DirectSubscriber.h"
 #include "rtp_llm/cpp/testing/TestBase.h"
@@ -17,6 +18,8 @@ struct PoolTransferState {
     std::vector<size_t>                              reads;
     size_t                                           destroyed{0};
     int                                              fail_pool{-1};
+    kv_cache_manager::ClientErrorCode                failure_code{kv_cache_manager::ClientErrorCode::ER_INVALID_PARAMS};
+    int                                              malformed_uri_pool{-1};
     kv_cache_manager::Locations                      locations;
 };
 
@@ -32,7 +35,7 @@ public:
                                                    const kv_cache_manager::BlockBuffers& buffers,
                                                    std::shared_ptr<kv_cache_manager::TransferTraceInfo>) override {
         if (static_cast<int>(pool_) == state_->fail_pool) {
-            return kv_cache_manager::ClientErrorCode::ER_INVALID_PARAMS;
+            return state_->failure_code;
         }
         for (size_t index = 0; index < buffers.size(); ++index) {
             const auto& bytes  = state_->stored.at(uris.at(index));
@@ -56,7 +59,7 @@ public:
                  const kv_cache_manager::BlockBuffers& buffers,
                  std::shared_ptr<kv_cache_manager::TransferTraceInfo>) override {
         if (static_cast<int>(pool_) == state_->fail_pool) {
-            return {kv_cache_manager::ClientErrorCode::ER_INVALID_PARAMS, {}};
+            return {state_->failure_code, {}};
         }
         auto actual = uris;
         for (size_t index = 0; index < buffers.size(); ++index) {
@@ -78,6 +81,10 @@ public:
         // Both SDK conventions for unchanged URIs must survive batch merging.
         if (pool_ == 1) {
             actual.clear();
+        }
+        if (static_cast<int>(pool_) == state_->malformed_uri_pool) {
+            actual = uris;
+            actual.push_back("extra_uri");
         }
         return {kv_cache_manager::ClientErrorCode::ER_OK, std::move(actual)};
     }
@@ -302,7 +309,7 @@ TEST_F(KVCMIndependentPoolTest, FactoryPublishesHeterogeneousSpecsAndRoundTripsE
     EXPECT_EQ(state_->destroyed, 3u);
 }
 
-TEST_F(KVCMIndependentPoolTest, PartialWriteFailureAbortsSessionAndReleasesPins) {
+TEST_F(KVCMIndependentPoolTest, PartialWriteFailureAbortsSessionWithoutFreezingSources) {
     ASSERT_TRUE(initialize());
     kv_cache_manager::WriteLocation proposal;
     proposal.write_session_id = "failed_session";
@@ -311,21 +318,99 @@ TEST_F(KVCMIndependentPoolTest, PartialWriteFailureAbortsSessionAndReleasesPins)
     EXPECT_CALL(*meta_, StartWrite(_, _, _, _, _))
         .WillOnce(Return(std::make_pair(kv_cache_manager::ClientErrorCode::ER_OK, proposal)));
     EXPECT_CALL(*meta_,
-                FinishWrite(_,
-                            "failed_session",
-                            ::testing::VariantWith<kv_cache_manager::BlockMaskOffset>(::testing::Eq(0u)),
+                FinishWrite(::testing::StartsWith("block_tree_abort_write_"),
+                            proposal.write_session_id,
+                            kv_cache_manager::BlockMask{kv_cache_manager::BlockMaskOffset{0}},
                             ::testing::IsEmpty()))
         .WillOnce(Return(kv_cache_manager::ClientErrorCode::ER_OK));
-    state_->fail_pool = 1;
     fill(29);
-    backend_->write(backend_->prepareWrite(request()));
+    state_->fail_pool    = 1;
+    state_->failure_code = kv_cache_manager::ClientErrorCode::ER_SDK_TIMEOUT;
+    ASSERT_TRUE(backend_->write(backend_->prepareWrite(request())));
     ASSERT_TRUE(waitForBackendOperationsForTest(*backend_));
     EXPECT_EQ(state_->writes, (std::vector<size_t>{1, 0, 0}));
     for (size_t group = 0; group < pools_.size(); ++group) {
+        EXPECT_FALSE(pools_[group]->isFrozen(blocks_[group]));
+        EXPECT_EQ(pools_[group]->referencedBlocksNum(BlockTreeRefType::STORE), 0u);
         EXPECT_EQ(pools_[group]->refCount(blocks_[group]), 1u);
     }
-    backend_->shutdown();
-    EXPECT_EQ(state_->destroyed, 3u);
+}
+
+TEST_F(KVCMIndependentPoolTest, PartialReadFailureReleasesPinsWithoutFreezingTargets) {
+    ASSERT_TRUE(initialize());
+    fill(17);
+    RemoteOperationRequestPB save;
+    save.set_op(REMOTE_OPERATION_WRITE);
+    for (size_t group = 0; group < pools_.size(); ++group) {
+        save.add_group_tags(config_.groupTags()[group]);
+        save.add_block_ids(blocks_[group]);
+        save.add_uris("group_" + std::to_string(group));
+    }
+    RemoteOperationResponsePB saved;
+    ASSERT_TRUE(backend_->execute(save, saved));
+    kv_cache_manager::Locations locations{
+        {{"tp0_Ffull0", "group_0_actual"}, {"tp0_Ffull1", "group_1"}, {"tp0_Llinear0", "group_2"}}};
+    state_->fail_pool    = 1;
+    state_->failure_code = kv_cache_manager::ClientErrorCode::ER_SDK_TIMEOUT;
+    EXPECT_CALL(*meta_, MatchLocation(_, _, _, _, _, _, _))
+        .WillOnce(Return(std::make_pair(kv_cache_manager::ClientErrorCode::ER_OK, locations)));
+    auto matched = match(*backend_, request());
+    ASSERT_TRUE(matched.success);
+    EXPECT_FALSE(read(*backend_, request(), matched.match_meta));
+    EXPECT_EQ(state_->reads, (std::vector<size_t>{1, 0, 0}));
+    for (size_t group = 0; group < pools_.size(); ++group) {
+        EXPECT_FALSE(pools_[group]->isFrozen(blocks_[group]));
+        EXPECT_EQ(pools_[group]->refCount(blocks_[group]), 1u);
+    }
+}
+
+TEST_F(KVCMIndependentPoolTest, MalformedPoolUrisAbortSessionWithoutFreezingSources) {
+    ASSERT_TRUE(initialize());
+    state_->malformed_uri_pool = 1;
+    kv_cache_manager::WriteLocation proposal;
+    proposal.write_session_id = "malformed_session";
+    proposal.block_mask       = kv_cache_manager::BlockMaskOffset{0};
+    proposal.locations        = {{{"tp0_Ffull0", "full0"}, {"tp0_Ffull1", "full1"}, {"tp0_Llinear0", "linear"}}};
+    EXPECT_CALL(*meta_, StartWrite(_, _, _, _, _))
+        .WillOnce(Return(std::make_pair(kv_cache_manager::ClientErrorCode::ER_OK, proposal)));
+    EXPECT_CALL(*meta_,
+                FinishWrite(::testing::StartsWith("block_tree_abort_write_"),
+                            proposal.write_session_id,
+                            kv_cache_manager::BlockMask{kv_cache_manager::BlockMaskOffset{0}},
+                            ::testing::IsEmpty()))
+        .WillOnce(Return(kv_cache_manager::ClientErrorCode::ER_OK));
+    fill(29);
+    ASSERT_TRUE(backend_->write(backend_->prepareWrite(request())));
+    ASSERT_TRUE(waitForBackendOperationsForTest(*backend_));
+    EXPECT_EQ(state_->writes, (std::vector<size_t>{1, 1, 0}));
+    for (size_t group = 0; group < pools_.size(); ++group) {
+        EXPECT_FALSE(pools_[group]->isFrozen(blocks_[group]));
+        EXPECT_EQ(pools_[group]->refCount(blocks_[group]), 1u);
+    }
+}
+
+TEST_F(KVCMIndependentPoolTest, ExecuteFunctionReportsSdkFailureInResponse) {
+    ASSERT_TRUE(initialize());
+    auto           manager_config = test::makeSimpleMhaCacheConfig(1, 4, 2, DataType::TYPE_INT8);
+    KVCacheManager manager(manager_config, /*warmup=*/true, nullptr);
+    manager.block_tree_cache_ = cache_;
+    state_->fail_pool         = 0;
+    state_->failure_code      = kv_cache_manager::ClientErrorCode::ER_SDK_TIMEOUT;
+    for (auto op : {REMOTE_OPERATION_READ, REMOTE_OPERATION_WRITE}) {
+        FunctionRequestPB request;
+        auto*             remote = request.mutable_remote_request();
+        remote->set_op(op);
+        remote->add_group_tags(config_.groupTags()[0]);
+        remote->add_block_ids(blocks_[0]);
+        remote->add_uris("sdk_failure");
+        FunctionResponsePB response;
+        EXPECT_TRUE(manager.executeFunction(request, response));
+        ASSERT_TRUE(response.has_remote_response());
+        ASSERT_TRUE(response.remote_response().has_success());
+        EXPECT_FALSE(response.remote_response().success().value());
+        EXPECT_EQ(response.remote_response().actual_uris_size(), 0);
+        EXPECT_FALSE(pools_[0]->isFrozen(blocks_[0]));
+    }
 }
 
 TEST_F(KVCMIndependentPoolTest, FailedSecondRegistrationReleasesAcceptedClients) {

@@ -47,11 +47,13 @@ protected:
     StorageMatchResult matchImpl(const StorageRequest& request) override {
         return {request.keys->size(), nullptr};
     }
-    void readImpl(const StorageRequest&, const std::shared_ptr<StorageBackendMatchMeta>&) override {
+    ErrorInfo readImpl(const StorageRequest&, const std::shared_ptr<StorageBackendMatchMeta>&) override {
         ++read_calls;
         throw std::runtime_error("injected remote read failure");
     }
-    void writeImpl(const StorageRequest&) override {}
+    ErrorInfo writeImpl(const StorageRequest&) override {
+        return ErrorInfo::OkStatus();
+    }
 };
 
 TEST(BlockTreeLoaderTest, CrcDeviceReuseDoesNotPromoteUnprotectedBackendFailure) {
@@ -472,6 +474,12 @@ TEST(BlockTreeLoaderTest, DiskTransferFailureInstallsNoLoadTargets) {
     load_context.reset();
     environment->reclaimAll();
     environment->expectFullyReclaimed();
+    for (const auto& group : environment->groups) {
+        EXPECT_EQ(group->diskPool()->referencedBlocksNum(BlockTreeRefType::FROZEN), 0u);
+        for (const auto& pool : group->devicePools()) {
+            EXPECT_EQ(pool->referencedBlocksNum(BlockTreeRefType::FROZEN), 0u);
+        }
+    }
 }
 
 TEST(BlockTreeLoaderTest, LoadStateMachineRejectsDuplicateTransitionAndRestoresSource) {
