@@ -1,6 +1,6 @@
 package org.flexlb.balance.scheduler;
 
-import org.flexlb.balance.delivery.CapacityBoundary;
+import org.flexlb.balance.delivery.DeliveryBlockReason;
 import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.PrefillState;
 import org.flexlb.balance.projection.PrefillTtftEstimate;
@@ -48,7 +48,7 @@ final class PrefillAdmissionResources {
         }
     }
 
-    static CapacityBoundary.Attempt<Member> prepareMember(ScheduledRequest item) {
+    static DeliveryBlockReason.Attempt<Member> prepareMember(ScheduledRequest item) {
         DecodeDecideInfo decide = item.decodeDecideInfo();
         if (decide.isAbsent()) {
             // The committed topology has no independent Decode resource.
@@ -69,7 +69,7 @@ final class PrefillAdmissionResources {
             case ACQUIRED, ALREADY_ACCEPTED -> captureMember(item, acquisition.permit());
             case CAPACITY_FULL -> decodeCapacityFull(item);
             case NOT_OWNED, NOT_QUEUED -> rejected(
-                    CapacityBoundary.OWNERSHIP_LOST);
+                    DeliveryBlockReason.OWNERSHIP_LOST);
             case ENDPOINT_RETIRED -> failed(retired("Decode", item));
             case ALREADY_ACQUIRED -> failed(new IllegalStateException(
                     "Decode dispatch permit already acquired: request_id="
@@ -77,9 +77,9 @@ final class PrefillAdmissionResources {
         };
     }
 
-    private static CapacityBoundary.Attempt<Member> decodeCapacityFull(
+    private static DeliveryBlockReason.Attempt<Member> decodeCapacityFull(
             ScheduledRequest item) {
-        return rejected(CapacityBoundary.unavailable(
+        return rejected(DeliveryBlockReason.unavailable(
                 new DecodeAvailability(item),
                 DECODE_BLOCK));
     }
@@ -89,7 +89,7 @@ final class PrefillAdmissionResources {
      * {@link Member} nor the accepted-result wrapper exists before acquisition,
      * so both allocation windows are guarded by the exact permit rollback.
      */
-    private static CapacityBoundary.Attempt<Member> captureMember(
+    private static DeliveryBlockReason.Attempt<Member> captureMember(
             ScheduledRequest item,
             DecodeEndpoint.EngineDispatchPermit permit) {
         Member member = null;
@@ -104,14 +104,14 @@ final class PrefillAdmissionResources {
         }
     }
 
-    static <T> CapacityBoundary.Attempt<T> rejectedPrefill(
+    static <T> DeliveryBlockReason.Attempt<T> rejectedPrefill(
             ScheduledRequest item,
             PrefillState.CapacityStatus status,
-            CapacityBoundary capacityFull) {
+            DeliveryBlockReason capacityFull) {
         return switch (status) {
             case CAPACITY_FULL -> rejected(capacityFull);
             case REQUEST_NOT_ACTIVE -> rejected(
-                    CapacityBoundary.OWNERSHIP_LOST);
+                    DeliveryBlockReason.OWNERSHIP_LOST);
             case ENDPOINT_RETIRED -> failed(retired("Prefill", item));
             case REQUEST_ALREADY_RESERVED, BATCH_ID_ALREADY_RESERVED ->
                     failed(new IllegalStateException(
@@ -136,17 +136,17 @@ final class PrefillAdmissionResources {
         return new EndpointRetiredException(role, item);
     }
 
-    static <T> CapacityBoundary.Attempt<T> accepted(T value) {
-        return CapacityBoundary.Attempt.accepted(value);
+    static <T> DeliveryBlockReason.Attempt<T> accepted(T value) {
+        return DeliveryBlockReason.Attempt.accepted(value);
     }
 
-    static <T> CapacityBoundary.Attempt<T> rejected(
-            CapacityBoundary boundary) {
-        return CapacityBoundary.Attempt.rejected(boundary);
+    static <T> DeliveryBlockReason.Attempt<T> rejected(
+            DeliveryBlockReason boundary) {
+        return DeliveryBlockReason.Attempt.rejected(boundary);
     }
 
-    static <T> CapacityBoundary.Attempt<T> failed(Throwable cause) {
-        return rejected(CapacityBoundary.failed(cause));
+    static <T> DeliveryBlockReason.Attempt<T> failed(Throwable cause) {
+        return rejected(DeliveryBlockReason.failed(cause));
     }
 
     static Throwable rollbackReservation(
@@ -191,8 +191,8 @@ final class PrefillAdmissionResources {
 
     static void preserveRejectedCause(
             Throwable rollbackFailure,
-            CapacityBoundary boundary) {
-        if (boundary.status() == CapacityBoundary.Status.FAILED
+            DeliveryBlockReason boundary) {
+        if (boundary.status() == DeliveryBlockReason.Status.FAILED
                 && boundary.cause() != rollbackFailure) {
             rollbackFailure.addSuppressed(boundary.cause());
         }
@@ -351,7 +351,7 @@ final class PrefillAdmissionResources {
 
     /** Decode is the exact event source for its request-scoped permit. */
     private static final class DecodeAvailability
-            implements CapacityBoundary.Availability {
+            implements DeliveryBlockReason.Availability {
         private final DecodeDecideInfo decide;
         private Runnable subscribedListener;
 

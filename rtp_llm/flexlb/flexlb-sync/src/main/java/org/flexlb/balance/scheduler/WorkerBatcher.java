@@ -1,7 +1,7 @@
 package org.flexlb.balance.scheduler;
 
 import org.flexlb.balance.delivery.BlockedRequest;
-import org.flexlb.balance.delivery.CapacityBoundary;
+import org.flexlb.balance.delivery.DeliveryBlockReason;
 import org.flexlb.balance.delivery.DeliveryStrategy;
 import org.flexlb.balance.endpoint.DecodeEndpoint.DecodeRoutingView;
 import org.flexlb.balance.endpoint.PrefillActiveIndex;
@@ -144,7 +144,7 @@ public final class WorkerBatcher {
     private record BatcherCycleResult(
             boolean placementCapacityChanged,
             ScheduledRequest request,
-            CapacityBoundary unavailable,
+            DeliveryBlockReason unavailable,
             long queueVersion,
             long schedulingInputVersion,
             long wakeAtMs,
@@ -162,7 +162,7 @@ public final class WorkerBatcher {
             }
         }
 
-        private static BatcherCycleResult capacityBlocked(ScheduledRequest item, CapacityBoundary unavailable) {
+        private static BatcherCycleResult capacityBlocked(ScheduledRequest item, DeliveryBlockReason unavailable) {
             return new BatcherCycleResult(false, Objects.requireNonNull(item, "item"), unavailable, 0L, 0L, 0L,
                     unavailable.projectionSemantics() == null
                             ? "Prefill delivery capacity exhausted"
@@ -1257,7 +1257,7 @@ public final class WorkerBatcher {
             // The resources are closed, no handoff happened and the head is still queued: requeue it
             // instead of letting the exception stop the loop and fail every queued request.
             return commitBoundary(new BlockedRequest(
-                    candidates.get(0), CapacityBoundary.failed(retired)));
+                    candidates.get(0), DeliveryBlockReason.failed(retired)));
         }
     }
 
@@ -1312,7 +1312,7 @@ public final class WorkerBatcher {
             return operation.get();
         } catch (InvalidPrefillPredictionException failure) {
             return commitBoundary(new BlockedRequest(
-                    exactHead, CapacityBoundary.failed(failure)));
+                    exactHead, DeliveryBlockReason.failed(failure)));
         }
     }
 
@@ -1443,7 +1443,7 @@ public final class WorkerBatcher {
     /** Caller holds {@link #queueLock}. */
     private BatcherCycleResult resolveEmptyCapacityUnderLock(
             ScheduledRequest item,
-            CapacityBoundary unavailable,
+            DeliveryBlockReason unavailable,
             long nowMs) {
         if (activeIndex.peek() != item
                 || item.requestExpired(nowMs)
@@ -1459,7 +1459,7 @@ public final class WorkerBatcher {
             long nowMs) {
         if (blocked == null
                 || blocked.reason().unavailable()
-                || blocked.reason() == CapacityBoundary.OWNERSHIP_LOST) {
+                || blocked.reason() == DeliveryBlockReason.OWNERSHIP_LOST) {
             return false;
         }
         ScheduledRequest blockedItem = blocked.item();
@@ -1474,7 +1474,7 @@ public final class WorkerBatcher {
     private void notifyTerminalAdmissionFailure(
             boolean removed,
             BlockedRequest blocked) {
-        if (removed && blocked.reason().status() == CapacityBoundary.Status.FAILED) {
+        if (removed && blocked.reason().status() == DeliveryBlockReason.Status.FAILED) {
             notifyAdmissionFailure(blocked.item(), blocked.reason().cause());
         }
     }
@@ -1980,9 +1980,9 @@ public final class WorkerBatcher {
         if (capacityBlockedHead == blocked) {
             return;
         }
-        CapacityBoundary.Availability previousSource = capacityBlockedHead == null
+        DeliveryBlockReason.Availability previousSource = capacityBlockedHead == null
                 ? null : capacityBlockedHead.unavailable().availability();
-        CapacityBoundary.Availability nextSource = blocked == null
+        DeliveryBlockReason.Availability nextSource = blocked == null
                 ? null : blocked.unavailable().availability();
         capacityBlockedHead = blocked;
         schedulingInputsChangedUnderLock();

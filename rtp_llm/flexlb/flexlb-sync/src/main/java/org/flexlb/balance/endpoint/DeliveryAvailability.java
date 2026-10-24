@@ -1,11 +1,11 @@
 package org.flexlb.balance.endpoint;
 
-import org.flexlb.balance.delivery.CapacityBoundary;
+import org.flexlb.balance.delivery.DeliveryBlockReason;
 
 /**
  * Wait condition for one more route to use a Prefill endpoint's dispatch capacity.
  */
-final class DeliveryAvailability implements CapacityBoundary.Availability {
+final class DeliveryAvailability implements DeliveryBlockReason.Availability {
     private final PrefillState prefillState;
     private final long maxDispatchLimit;
 

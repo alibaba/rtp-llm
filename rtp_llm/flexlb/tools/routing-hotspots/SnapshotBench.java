@@ -192,7 +192,7 @@ public class SnapshotBench {
         var reporter = new BatchSchedulerReporter(null);
         registry = new RequestRegistry(service, reporter, new RequestSchedulerReporter(null));
         strategy = new BatchDeliveryStrategy(
-                () -> CapacityBoundary.Attempt.rejected(CapacityBoundary.OWNERSHIP_LOST),
+                () -> DeliveryBlockReason.Attempt.rejected(DeliveryBlockReason.OWNERSHIP_LOST),
                 () -> 1L, registry, new DeliveryMetrics(reporter));
     }
 

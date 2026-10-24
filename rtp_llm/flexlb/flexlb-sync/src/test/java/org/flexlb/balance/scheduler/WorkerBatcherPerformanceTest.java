@@ -1,6 +1,6 @@
 package org.flexlb.balance.scheduler;
 
-import org.flexlb.balance.delivery.CapacityBoundary;
+import org.flexlb.balance.delivery.DeliveryBlockReason;
 import org.flexlb.balance.delivery.DeliveryStrategy;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.planner.GroupPlanner;
@@ -298,8 +298,8 @@ class WorkerBatcherPerformanceTest {
     private static final class BlockingDeliveryStrategy
             implements DeliveryStrategy, PrefillTtftEstimator {
 
-        private final CapacityBoundary.Availability availability =
-                new CapacityBoundary.Availability() {
+        private final DeliveryBlockReason.Availability availability =
+                new DeliveryBlockReason.Availability() {
                     @Override
                     public boolean isAvailable() {
                         return false;
@@ -321,7 +321,7 @@ class WorkerBatcherPerformanceTest {
                 OptionalLong plannedPrediction) {
             return WorkerBatcherTestSupport.boundaryOnly(
                     candidates.getFirst(),
-                    CapacityBoundary.unavailable(
+                    DeliveryBlockReason.unavailable(
                             availability,
                             new PrefillTtftEstimate.AdmissionBlockSemantics(
                                     "PERF_BLOCK",

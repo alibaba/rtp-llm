@@ -9,16 +9,16 @@ import java.util.Objects;
  * A delivery wait may carry additional route-publication restrictions;
  * absent projection semantics leave routing forecasts unchanged.
  */
-public record CapacityBoundary(
+public record DeliveryBlockReason(
         Status status,
         Availability availability,
         PrefillTtftEstimate.AdmissionBlockSemantics projectionSemantics,
         Throwable cause) {
 
-    public static final CapacityBoundary OWNERSHIP_LOST =
-            new CapacityBoundary(Status.OWNERSHIP_LOST, null, null, null);
+    public static final DeliveryBlockReason OWNERSHIP_LOST =
+            new DeliveryBlockReason(Status.OWNERSHIP_LOST, null, null, null);
 
-    public CapacityBoundary {
+    public DeliveryBlockReason {
         Objects.requireNonNull(status, "status");
         boolean unavailable = status == Status.UNAVAILABLE;
         boolean failed = status == Status.FAILED;
@@ -31,10 +31,10 @@ public record CapacityBoundary(
         }
     }
 
-    public static CapacityBoundary unavailable(
+    public static DeliveryBlockReason unavailable(
             Availability availability,
             PrefillTtftEstimate.AdmissionBlockSemantics projectionSemantics) {
-        return new CapacityBoundary(Status.UNAVAILABLE,
+        return new DeliveryBlockReason(Status.UNAVAILABLE,
                 Objects.requireNonNull(availability, "availability"),
                 Objects.requireNonNull(projectionSemantics,
                         "projectionSemantics"),
@@ -42,14 +42,14 @@ public record CapacityBoundary(
     }
 
     /** Park delivery without restricting publication into the worker queue. */
-    public static CapacityBoundary deliveryUnavailable(Availability availability) {
-        return new CapacityBoundary(Status.UNAVAILABLE,
+    public static DeliveryBlockReason deliveryUnavailable(Availability availability) {
+        return new DeliveryBlockReason(Status.UNAVAILABLE,
                 Objects.requireNonNull(availability, "availability"),
                 null, null);
     }
 
-    public static CapacityBoundary failed(Throwable cause) {
-        return new CapacityBoundary(Status.FAILED, null, null,
+    public static DeliveryBlockReason failed(Throwable cause) {
+        return new DeliveryBlockReason(Status.FAILED, null, null,
                 Objects.requireNonNull(cause, "cause"));
     }
 
@@ -77,7 +77,7 @@ public record CapacityBoundary(
     }
 
     /** Either an accepted capability/value or one fully materialized boundary. */
-    public record Attempt<T>(T value, CapacityBoundary boundary) {
+    public record Attempt<T>(T value, DeliveryBlockReason boundary) {
 
         public Attempt {
             if ((value == null) == (boundary == null)) {
@@ -90,7 +90,7 @@ public record CapacityBoundary(
             return new Attempt<>(Objects.requireNonNull(value, "value"), null);
         }
 
-        public static <T> Attempt<T> rejected(CapacityBoundary boundary) {
+        public static <T> Attempt<T> rejected(DeliveryBlockReason boundary) {
             return new Attempt<>(null,
                     Objects.requireNonNull(boundary, "boundary"));
         }

@@ -1,6 +1,6 @@
 package org.flexlb.balance.scheduler;
 
-import org.flexlb.balance.delivery.CapacityBoundary;
+import org.flexlb.balance.delivery.DeliveryBlockReason;
 import org.flexlb.balance.delivery.DeliveryResult;
 import org.flexlb.balance.projection.WorkSnapshot;
 import org.flexlb.balance.scheduler.DeliveryStrategyTestSupport.TestBatchSubmission;
@@ -102,7 +102,7 @@ class BatchDeliveryStrategyTest {
     void unavailableSubmissionReturnsExactHeadBoundaryBeforeAdmission() {
         Fixture fixture = new Fixture(701L);
         ScheduledRequest head = fixture.item(1L);
-        CapacityBoundary unavailable = unavailable();
+        DeliveryBlockReason unavailable = unavailable();
         fixture.submission.prepareBoundary(unavailable);
 
         String result = fixture.context.deliver(
@@ -129,7 +129,7 @@ class BatchDeliveryStrategyTest {
 
         assertEquals("BOUNDARY", result);
         assertSame(head, fixture.context.emptyBoundary().item());
-        assertEquals(CapacityBoundary.Status.UNAVAILABLE,
+        assertEquals(DeliveryBlockReason.Status.UNAVAILABLE,
                 fixture.context.emptyBoundary().result().status());
         assertEquals(1, fixture.submission.closeCount());
         verify(fixture.capabilities.batchReservation()).close();
@@ -152,7 +152,7 @@ class BatchDeliveryStrategyTest {
                 fixture.submission.command().exactItems());
         assertEquals(100L, fixture.submission.command().predictedMs());
         assertSame(second, fixture.context.committedBoundary().item());
-        assertEquals(CapacityBoundary.Status.UNAVAILABLE,
+        assertEquals(DeliveryBlockReason.Status.UNAVAILABLE,
                 fixture.context.committedBoundary().result().status());
         assertEquals(List.of(first), fixture.slots.committed());
     }

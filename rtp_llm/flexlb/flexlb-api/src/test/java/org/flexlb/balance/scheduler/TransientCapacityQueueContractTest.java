@@ -3,7 +3,7 @@ package org.flexlb.balance.scheduler;
 import ch.qos.logback.classic.Level;
 import ch.qos.logback.classic.Logger;
 import org.flexlb.balance.PlacementResult;
-import org.flexlb.balance.delivery.CapacityBoundary;
+import org.flexlb.balance.delivery.DeliveryBlockReason;
 import org.flexlb.balance.delivery.DeliveryResult;
 import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.EndpointRegistry;
@@ -1569,7 +1569,7 @@ class TransientCapacityQueueContractTest {
         private final AtomicBoolean holdCompletions = new AtomicBoolean();
         private final AtomicBoolean blockPreparation = new AtomicBoolean();
 
-        private CapacityBoundary.Attempt<
+        private DeliveryBlockReason.Attempt<
                 BatchDeliveryStrategy.PreparedSubmission>
                 tryPrepareSubmission() {
             if (blockPreparation.get()) {
@@ -1587,7 +1587,7 @@ class TransientCapacityQueueContractTest {
                     Thread.currentThread().interrupt();
                 }
             }
-            return CapacityBoundary.Attempt.accepted(
+            return DeliveryBlockReason.Attempt.accepted(
                     new BatchDeliveryStrategy.PreparedSubmission() {
                         private boolean submitted;
 

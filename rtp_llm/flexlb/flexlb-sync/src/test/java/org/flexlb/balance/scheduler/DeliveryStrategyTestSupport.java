@@ -1,6 +1,6 @@
 package org.flexlb.balance.scheduler;
 
-import org.flexlb.balance.delivery.CapacityBoundary;
+import org.flexlb.balance.delivery.DeliveryBlockReason;
 import org.flexlb.balance.delivery.DeliveryMetrics;
 import org.flexlb.balance.delivery.DeliveryResult;
 import org.flexlb.balance.delivery.DeliveryStrategy;
@@ -96,7 +96,7 @@ public final class DeliveryStrategyTestSupport {
         return item;
     }
 
-    record TestBoundary(ScheduledRequest item, CapacityBoundary result) {
+    record TestBoundary(ScheduledRequest item, DeliveryBlockReason result) {
     }
 
     static final class TestContext {
@@ -173,7 +173,7 @@ public final class DeliveryStrategyTestSupport {
         private int rejectPermitAt = -1;
 
         TestEndpointCapabilities() {
-            CapacityBoundary.Availability unavailable = unavailable().availability();
+            DeliveryBlockReason.Availability unavailable = unavailable().availability();
             Mockito.when(prefill.batchAdmissionAvailability(Mockito.anyInt()))
                     .thenReturn(unavailable);
             Mockito.when(prefill.tryBeginRouteCommitAdmission())
@@ -310,19 +310,19 @@ public final class DeliveryStrategyTestSupport {
         TestRequestRegistry() {
             Mockito.doAnswer(invocation -> {
                 ScheduledRequest item = invocation.getArgument(0);
-                if (item == preparationLostFor) { return CapacityBoundary.Attempt.rejected(CapacityBoundary.OWNERSHIP_LOST); }
+                if (item == preparationLostFor) { return DeliveryBlockReason.Attempt.rejected(DeliveryBlockReason.OWNERSHIP_LOST); }
                 prepared.add(item);
                 return invocation.getArgument(1, BatchDeliveryStrategy.class).prepareAdmission(item);
             }).when(requests).prepareBatchDelivery(Mockito.any(), Mockito.any());
             Mockito.doAnswer(invocation -> {
                 ScheduledRequest item = invocation.getArgument(0);
-                if (item == preparationLostFor) { return CapacityBoundary.Attempt.rejected(CapacityBoundary.OWNERSHIP_LOST); }
+                if (item == preparationLostFor) { return DeliveryBlockReason.Attempt.rejected(DeliveryBlockReason.OWNERSHIP_LOST); }
                 prepared.add(item);
                 return invocation.getArgument(1, BatchDeliveryStrategy.BatchTransaction.class).append(item);
             }).when(requests).prepareBatchMember(Mockito.any(), Mockito.any());
             Mockito.doAnswer(invocation -> {
                 ScheduledRequest item = invocation.getArgument(0);
-                if (item == preparationLostFor) { return CapacityBoundary.Attempt.rejected(CapacityBoundary.OWNERSHIP_LOST); }
+                if (item == preparationLostFor) { return DeliveryBlockReason.Attempt.rejected(DeliveryBlockReason.OWNERSHIP_LOST); }
                 prepared.add(item);
                 return invocation.getArgument(1, RouteDeliveryStrategy.RouteTransaction.class).append(item, invocation.getArgument(2));
             }).when(requests).prepareRouteMember(Mockito.any(), Mockito.any(), Mockito.any());
@@ -483,7 +483,7 @@ public final class DeliveryStrategyTestSupport {
 
     static final class TestBatchSubmission {
 
-        private CapacityBoundary prepareBoundary;
+        private DeliveryBlockReason prepareBoundary;
         private int prepareCount;
         private int closeCount;
         private int totalCloseCount;
@@ -493,13 +493,13 @@ public final class DeliveryStrategyTestSupport {
                 new ArrayList<>();
         private final List<String> events = new ArrayList<>();
 
-        CapacityBoundary.Attempt<BatchDeliveryStrategy.PreparedSubmission>
+        DeliveryBlockReason.Attempt<BatchDeliveryStrategy.PreparedSubmission>
                 tryPrepareSubmission() {
             prepareCount++;
             if (prepareBoundary != null) {
-                return CapacityBoundary.Attempt.rejected(prepareBoundary);
+                return DeliveryBlockReason.Attempt.rejected(prepareBoundary);
             }
-            return CapacityBoundary.Attempt.accepted(
+            return DeliveryBlockReason.Attempt.accepted(
                     new BatchDeliveryStrategy.PreparedSubmission() {
                         private boolean submitted;
 
@@ -534,7 +534,7 @@ public final class DeliveryStrategyTestSupport {
                     });
         }
 
-        void prepareBoundary(CapacityBoundary value) {
+        void prepareBoundary(DeliveryBlockReason value) {
             prepareBoundary = value;
         }
 
@@ -644,9 +644,9 @@ public final class DeliveryStrategyTestSupport {
         }
     }
 
-    static CapacityBoundary unavailable() {
-        return CapacityBoundary.unavailable(
-                new CapacityBoundary.Availability() {
+    static DeliveryBlockReason unavailable() {
+        return DeliveryBlockReason.unavailable(
+                new DeliveryBlockReason.Availability() {
                     @Override
                     public boolean isAvailable() {
                         return false;

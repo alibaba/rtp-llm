@@ -1,6 +1,6 @@
 package org.flexlb.balance.scheduler;
 
-import org.flexlb.balance.delivery.CapacityBoundary;
+import org.flexlb.balance.delivery.DeliveryBlockReason;
 import org.flexlb.balance.delivery.DeliveryStrategy;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.endpoint.PrefillState;
@@ -699,9 +699,9 @@ class WorkerBatcherSchedulingTest {
         }
     }
 
-    private static CapacityBoundary unavailable(
-            CapacityBoundary.Availability availability) {
-        return CapacityBoundary.unavailable(
+    private static DeliveryBlockReason unavailable(
+            DeliveryBlockReason.Availability availability) {
+        return DeliveryBlockReason.unavailable(
                 availability,
                 new PrefillTtftEstimate.AdmissionBlockSemantics(
                         "TEST_CAPACITY",
@@ -741,9 +741,9 @@ class WorkerBatcherSchedulingTest {
             this.deliveryOnly = deliveryOnly;
         }
 
-        private CapacityBoundary boundary(TestAvailability availability) {
+        private DeliveryBlockReason boundary(TestAvailability availability) {
             return deliveryOnly
-                    ? CapacityBoundary.deliveryUnavailable(availability)
+                    ? DeliveryBlockReason.deliveryUnavailable(availability)
                     : unavailable(availability);
         }
 
@@ -833,7 +833,7 @@ class WorkerBatcherSchedulingTest {
     }
 
     private static final class TestAvailability
-            implements CapacityBoundary.Availability {
+            implements DeliveryBlockReason.Availability {
 
         private final AtomicBoolean available = new AtomicBoolean();
         private final CopyOnWriteArrayList<Runnable> listeners =

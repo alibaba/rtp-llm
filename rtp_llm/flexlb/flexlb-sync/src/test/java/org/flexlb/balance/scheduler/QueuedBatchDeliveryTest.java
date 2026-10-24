@@ -245,7 +245,7 @@ class QueuedBatchDeliveryTest {
         BatchDeliveryStrategy.PreparedSubmission submission = mock(BatchDeliveryStrategy.PreparedSubmission.class);
         doThrow(rejection).when(submission).submit(any());
         var rejectingStrategy = new BatchDeliveryStrategy(
-                () -> org.flexlb.balance.delivery.CapacityBoundary.Attempt.accepted(submission),
+                () -> org.flexlb.balance.delivery.DeliveryBlockReason.Attempt.accepted(submission),
                 () -> 201L, registry, new DeliveryMetrics(mock(BatchSchedulerReporter.class)));
         try (var transaction = rejectingStrategy.prepare(List.of(item), new FormulaPredictor("100"), OptionalLong.empty())) {
             var preceding = transaction.commitUnderLock();

@@ -1,7 +1,7 @@
 package org.flexlb.balance.scheduler;
 
 import org.flexlb.balance.delivery.BlockedRequest;
-import org.flexlb.balance.delivery.CapacityBoundary;
+import org.flexlb.balance.delivery.DeliveryBlockReason;
 import org.flexlb.balance.delivery.DeliveryMetrics;
 import org.flexlb.balance.delivery.DeliveryStrategy;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
@@ -57,7 +57,7 @@ public final class RouteDeliveryStrategy implements DeliveryStrategy {
         if (prefill == null) {
             return RouteTransaction.blocked(
                     this,
-                    new BlockedRequest(head, CapacityBoundary.failed(missingEndpoint("Prefill", head))));
+                    new BlockedRequest(head, DeliveryBlockReason.failed(missingEndpoint("Prefill", head))));
         }
         RouteTransaction transaction = new RouteTransaction(this, prefill);
         BlockedRequest blocked = null;
@@ -66,12 +66,12 @@ public final class RouteDeliveryStrategy implements DeliveryStrategy {
                 if (prefill.isEngineSubQueueMode()) {
                     long maxDispatchLimit = item.ctx().getConfig().getDispatcher().getMaxInflightPerPrefillWorker();
                     if (!prefill.canDeliver(maxDispatchLimit, requestsPreparedForDelivery.size() + 1)) {
-                        blocked = new BlockedRequest(item, CapacityBoundary.deliveryUnavailable(
+                        blocked = new BlockedRequest(item, DeliveryBlockReason.deliveryUnavailable(
                                 prefill.routeAdmissionAvailability(maxDispatchLimit)));
                         break;
                     }
                 }
-                CapacityBoundary.Attempt<ScheduledRequest> attempt =
+                DeliveryBlockReason.Attempt<ScheduledRequest> attempt =
                         requests.prepareRouteMember(item, transaction, evaluator);
                 if (!attempt.accepted()) {
                     blocked = new BlockedRequest(item, attempt.boundary());
@@ -230,7 +230,7 @@ public final class RouteDeliveryStrategy implements DeliveryStrategy {
             return new RouteTransaction(owner, blocked);
         }
 
-        synchronized CapacityBoundary.Attempt<ScheduledRequest> append(
+        synchronized DeliveryBlockReason.Attempt<ScheduledRequest> append(
                 ScheduledRequest exact,
                 PrefillTimePredictor.Evaluator evaluator) {
             requirePrepared("append");
@@ -238,7 +238,7 @@ public final class RouteDeliveryStrategy implements DeliveryStrategy {
                 return failed(PrefillAdmissionResources.retired("Prefill", exact));
             }
             long predictedMs = predict(evaluator, exact);
-            final CapacityBoundary.Attempt<ScheduledRequest> acceptedItem;
+            final DeliveryBlockReason.Attempt<ScheduledRequest> acceptedItem;
             try {
                 acceptedItem = accepted(exact);
                 int capacity = Math.addExact(members.size(), 1);
@@ -262,7 +262,7 @@ public final class RouteDeliveryStrategy implements DeliveryStrategy {
             }
             predictions.put(exact, predictedMs);
             PrefillState.RouteReservation reservation = published;
-            final CapacityBoundary.Attempt<PrefillAdmissionResources.Member>
+            final DeliveryBlockReason.Attempt<PrefillAdmissionResources.Member>
                     memberAttempt;
             try {
                 memberAttempt = prepareMember(exact);

@@ -1,6 +1,6 @@
 package org.flexlb.balance.scheduler;
 
-import org.flexlb.balance.delivery.CapacityBoundary;
+import org.flexlb.balance.delivery.DeliveryBlockReason;
 import org.flexlb.balance.delivery.DeliveryResult;
 import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
@@ -220,7 +220,7 @@ class QueuedDecodeWithdrawalTest {
         var dispatchPrepared = new AtomicBoolean();
         var prepared = slot.prepareDispatch(item, () -> {
             dispatchPrepared.set(true);
-            return CapacityBoundary.Attempt.accepted(dispatchPrepared);
+            return DeliveryBlockReason.Attempt.accepted(dispatchPrepared);
         });
         assertTrue(prepared.accepted());
 

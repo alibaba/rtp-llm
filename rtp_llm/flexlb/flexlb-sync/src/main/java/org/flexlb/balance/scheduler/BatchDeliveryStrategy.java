@@ -1,7 +1,7 @@
 package org.flexlb.balance.scheduler;
 
 import org.flexlb.balance.delivery.BlockedRequest;
-import org.flexlb.balance.delivery.CapacityBoundary;
+import org.flexlb.balance.delivery.DeliveryBlockReason;
 import org.flexlb.balance.delivery.DeliveryMetrics;
 import org.flexlb.balance.delivery.DeliveryResult;
 import org.flexlb.balance.delivery.DeliveryStrategy;
@@ -33,13 +33,13 @@ import static org.flexlb.balance.scheduler.PrefillAdmissionResources.rollbackRes
 /** EnqueueBatch admission, ownership, transport, telemetry, and projection. */
 public final class BatchDeliveryStrategy implements DeliveryStrategy {
 
-    private final Supplier<CapacityBoundary.Attempt<PreparedSubmission>>
+    private final Supplier<DeliveryBlockReason.Attempt<PreparedSubmission>>
             prepareSubmission;
     private final LongSupplier batchIds;
     private final RequestRegistry requests;
     private final DeliveryMetrics telemetry;
 
-    public BatchDeliveryStrategy(Supplier<CapacityBoundary.Attempt<PreparedSubmission>> prepareSubmission,
+    public BatchDeliveryStrategy(Supplier<DeliveryBlockReason.Attempt<PreparedSubmission>> prepareSubmission,
                                  LongSupplier batchIds,
                                  RequestRegistry requests,
                                  DeliveryMetrics telemetry) {
@@ -67,7 +67,7 @@ public final class BatchDeliveryStrategy implements DeliveryStrategy {
             OptionalLong plannedPredictionMs) {
         ScheduledRequest head = candidates.get(0);
 
-        CapacityBoundary.Attempt<BatchTransaction> groupAttempt =
+        DeliveryBlockReason.Attempt<BatchTransaction> groupAttempt =
                 requests.prepareBatchDelivery(head, this);
         if (!groupAttempt.accepted()) {
             return BatchTransaction.blocked(
@@ -81,7 +81,7 @@ public final class BatchDeliveryStrategy implements DeliveryStrategy {
         try {
             for (int index = 0; index < candidates.size(); index++) {
                 ScheduledRequest item = candidates.get(index);
-                CapacityBoundary.Attempt<ScheduledRequest> attempt =
+                DeliveryBlockReason.Attempt<ScheduledRequest> attempt =
                         requests.prepareBatchMember(item, transaction);
                 if (attempt.accepted()) {
                     admitted.add(item);
@@ -118,9 +118,9 @@ public final class BatchDeliveryStrategy implements DeliveryStrategy {
         }
     }
 
-    CapacityBoundary.Attempt<BatchTransaction> prepareAdmission(ScheduledRequest head) {
+    DeliveryBlockReason.Attempt<BatchTransaction> prepareAdmission(ScheduledRequest head) {
         try {
-            CapacityBoundary.Attempt<PreparedSubmission> submissionAttempt = prepareSubmission.get();
+            DeliveryBlockReason.Attempt<PreparedSubmission> submissionAttempt = prepareSubmission.get();
             if (!submissionAttempt.accepted()) {
                 return rejected(submissionAttempt.boundary());
             }
@@ -306,17 +306,17 @@ public final class BatchDeliveryStrategy implements DeliveryStrategy {
         return true;
     }
 
-    private static <T> CapacityBoundary.Attempt<T> accepted(T value) {
-        return CapacityBoundary.Attempt.accepted(value);
+    private static <T> DeliveryBlockReason.Attempt<T> accepted(T value) {
+        return DeliveryBlockReason.Attempt.accepted(value);
     }
 
-    private static <T> CapacityBoundary.Attempt<T> rejected(
-            CapacityBoundary boundary) {
-        return CapacityBoundary.Attempt.rejected(boundary);
+    private static <T> DeliveryBlockReason.Attempt<T> rejected(
+            DeliveryBlockReason boundary) {
+        return DeliveryBlockReason.Attempt.rejected(boundary);
     }
 
-    private static <T> CapacityBoundary.Attempt<T> failed(Throwable cause) {
-        return rejected(CapacityBoundary.failed(cause));
+    private static <T> DeliveryBlockReason.Attempt<T> failed(Throwable cause) {
+        return rejected(DeliveryBlockReason.failed(cause));
     }
 
     private static Throwable close(AutoCloseable capability) {
@@ -400,12 +400,12 @@ public final class BatchDeliveryStrategy implements DeliveryStrategy {
             return transaction;
         }
 
-        synchronized CapacityBoundary.Attempt<ScheduledRequest> append(
+        synchronized DeliveryBlockReason.Attempt<ScheduledRequest> append(
                 ScheduledRequest exact) {
             requirePrepared("append");
             requireAdmissionPrepared("append");
             try {
-                CapacityBoundary.Attempt<ScheduledRequest> acceptedItem =
+                DeliveryBlockReason.Attempt<ScheduledRequest> acceptedItem =
                         accepted(exact);
                 members.ensureCapacity(Math.addExact(members.size(), 1));
                 boolean first = members.isEmpty();
@@ -421,15 +421,15 @@ public final class BatchDeliveryStrategy implements DeliveryStrategy {
                         return rejectedPrefill(
                                 exact,
                                 result.status(),
-                                CapacityBoundary.deliveryUnavailable(
+                                DeliveryBlockReason.deliveryUnavailable(
                                         prefill.batchAdmissionAvailability(
                                                 exact.maxInflightBatchesPerPrefillWorker())));
                     }
                     reservation = result.reservation();
                 }
-                CapacityBoundary.Attempt<PrefillAdmissionResources.Member>
+                DeliveryBlockReason.Attempt<PrefillAdmissionResources.Member>
                         memberAttempt = prepareMember(exact);
-                CapacityBoundary.Attempt<ScheduledRequest> result;
+                DeliveryBlockReason.Attempt<ScheduledRequest> result;
                 if (memberAttempt.accepted()) {
                     members.add(memberAttempt.value());
                     result = acceptedItem;
@@ -448,8 +448,8 @@ public final class BatchDeliveryStrategy implements DeliveryStrategy {
             }
         }
 
-        private <T> CapacityBoundary.Attempt<T> abortAdmission(
-                CapacityBoundary boundary) {
+        private <T> DeliveryBlockReason.Attempt<T> abortAdmission(
+                DeliveryBlockReason boundary) {
             Throwable rollbackFailure = rollbackAdmission(null);
             if (rollbackFailure == null) {
                 return rejected(boundary);
@@ -458,7 +458,7 @@ public final class BatchDeliveryStrategy implements DeliveryStrategy {
             return failed(rollbackFailure);
         }
 
-        private <T> CapacityBoundary.Attempt<T> abortAdmission(
+        private <T> DeliveryBlockReason.Attempt<T> abortAdmission(
                 Throwable failure) {
             return failed(rollbackAdmission(failure));
         }

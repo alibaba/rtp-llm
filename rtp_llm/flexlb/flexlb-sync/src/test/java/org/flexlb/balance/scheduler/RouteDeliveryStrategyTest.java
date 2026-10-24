@@ -1,6 +1,6 @@
 package org.flexlb.balance.scheduler;
 
-import org.flexlb.balance.delivery.CapacityBoundary;
+import org.flexlb.balance.delivery.DeliveryBlockReason;
 import org.flexlb.balance.delivery.DeliveryResult;
 import org.flexlb.balance.projection.WorkSnapshot;
 import org.flexlb.balance.scheduler.DeliveryStrategyTestSupport.TestContext;
@@ -43,7 +43,7 @@ class RouteDeliveryStrategyTest {
         when(head.ctx()).thenReturn(request);
         when(fixture.capabilities.prefill().isEngineSubQueueMode()).thenReturn(true);
         when(fixture.capabilities.prefill().canDeliver(1L, 1)).thenReturn(false);
-        CapacityBoundary.Availability availability = org.mockito.Mockito.mock(CapacityBoundary.Availability.class);
+        DeliveryBlockReason.Availability availability = org.mockito.Mockito.mock(DeliveryBlockReason.Availability.class);
         when(fixture.capabilities.prefill().routeAdmissionAvailability(1L)).thenReturn(availability);
 
         String result = fixture.context.deliver(fixture.strategy, List.of(head),
@@ -183,7 +183,7 @@ class RouteDeliveryStrategyTest {
 
         assertEquals("BOUNDARY", result);
         assertSame(head, fixture.context.emptyBoundary().item());
-        assertEquals(CapacityBoundary.Status.UNAVAILABLE,
+        assertEquals(DeliveryBlockReason.Status.UNAVAILABLE,
                 fixture.context.emptyBoundary().result().status());
         assertEquals(List.of(head), fixture.slots.prepared());
         assertTrue(fixture.slots.committed().isEmpty());
@@ -202,7 +202,7 @@ class RouteDeliveryStrategyTest {
 
         assertEquals("BOUNDARY", result);
         assertSame(head, fixture.context.emptyBoundary().item());
-        assertSame(CapacityBoundary.OWNERSHIP_LOST,
+        assertSame(DeliveryBlockReason.OWNERSHIP_LOST,
                 fixture.context.emptyBoundary().result());
         assertTrue(fixture.slots.prepared().isEmpty());
     }
@@ -219,7 +219,7 @@ class RouteDeliveryStrategyTest {
 
         assertEquals("BOUNDARY", result);
         assertSame(head, fixture.context.emptyBoundary().item());
-        assertEquals(CapacityBoundary.Status.FAILED,
+        assertEquals(DeliveryBlockReason.Status.FAILED,
                 fixture.context.emptyBoundary().result().status());
         assertInstanceOf(EndpointRetiredException.class,
                 fixture.context.emptyBoundary().result().cause());
@@ -242,7 +242,7 @@ class RouteDeliveryStrategyTest {
         assertEquals(
                 List.of(first), fixture.context.preparedSelection().items());
         assertSame(second, fixture.context.committedBoundary().item());
-        assertEquals(CapacityBoundary.Status.UNAVAILABLE,
+        assertEquals(DeliveryBlockReason.Status.UNAVAILABLE,
                 fixture.context.committedBoundary().result().status());
         assertEquals(List.of(first), fixture.slots.committed());
         assertEquals(List.of(List.of(first)), fixture.telemetry.routes());

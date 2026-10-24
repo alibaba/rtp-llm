@@ -1,7 +1,7 @@
 package org.flexlb.balance.scheduler;
 
 import org.flexlb.balance.PlacementResult;
-import org.flexlb.balance.delivery.CapacityBoundary;
+import org.flexlb.balance.delivery.DeliveryBlockReason;
 import org.flexlb.balance.delivery.DeliveryResult;
 import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.EncoderEndpoint;
@@ -735,10 +735,10 @@ public final class RequestSlot {
     // ── 派发：准备 → 交接 → 预测 → 接收结果 / 发布路由 ──
 
     /** Eligibility and preparation are one transaction; the operation must not publish or call user code. */
-    synchronized <T> CapacityBoundary.Attempt<T> prepareDispatch(ScheduledRequest exact,
-            java.util.function.Supplier<CapacityBoundary.Attempt<T>> prepare) {
+    synchronized <T> DeliveryBlockReason.Attempt<T> prepareDispatch(ScheduledRequest exact,
+            java.util.function.Supplier<DeliveryBlockReason.Attempt<T>> prepare) {
         return ownsPreparedDeliveryLocked(exact) ? prepare.get()
-                : CapacityBoundary.Attempt.rejected(CapacityBoundary.OWNERSHIP_LOST);
+                : DeliveryBlockReason.Attempt.rejected(DeliveryBlockReason.OWNERSHIP_LOST);
     }
 
     /** Atomically arbitrate expiry against the one endpoint-ownership handoff. */

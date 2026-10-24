@@ -1,7 +1,7 @@
 package org.flexlb.balance.endpoint;
 
 import org.flexlb.balance.delivery.BlockedRequest;
-import org.flexlb.balance.delivery.CapacityBoundary;
+import org.flexlb.balance.delivery.DeliveryBlockReason;
 import org.flexlb.balance.delivery.DeliveryResult;
 import org.flexlb.balance.delivery.DeliveryStrategy;
 import org.flexlb.balance.projection.estimator.NonBatchTtftEstimator;
@@ -347,7 +347,7 @@ class WorkerBatcherRequestCapacityTest {
                 when(transaction.items()).thenReturn(List.of());
                 when(transaction.blocked()).thenReturn(new BlockedRequest(
                         candidates.getFirst(),
-                        CapacityBoundary.failed(new IllegalStateException("delivery preparation failed"))));
+                        DeliveryBlockReason.failed(new IllegalStateException("delivery preparation failed"))));
                 return transaction;
             }).when(fixture.delivery).prepare(anyList(), any(), any());
             doAnswer(invocation -> {

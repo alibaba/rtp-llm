@@ -1,6 +1,6 @@
 package org.flexlb.balance.endpoint;
 
-import org.flexlb.balance.delivery.CapacityBoundary;
+import org.flexlb.balance.delivery.DeliveryBlockReason;
 import org.flexlb.balance.prediction.PrefillBatchFeatures;
 import org.flexlb.balance.projection.WorkSnapshot;
 import org.flexlb.balance.projection.WorkSnapshot.Phase;
@@ -996,7 +996,7 @@ public final class PrefillState {
         }
     }
 
-    public CapacityBoundary.Availability batchAvailability(int maximum) {
+    public DeliveryBlockReason.Availability batchAvailability(int maximum) {
         requirePositiveBatchLimit(maximum);
         return new CapacityAvailability(maximum);
     }
@@ -1010,7 +1010,7 @@ public final class PrefillState {
         return dispatchedRequestCount;
     }
 
-    public CapacityBoundary.Availability routeAvailability(long maximum) {
+    public DeliveryBlockReason.Availability routeAvailability(long maximum) {
         return new DeliveryAvailability(this, maximum);
     }
 
@@ -1022,7 +1022,7 @@ public final class PrefillState {
 
     /** Exact wake capability permanently paired with this worker runtime. */
     private final class CapacityAvailability
-            implements CapacityBoundary.Availability {
+            implements DeliveryBlockReason.Availability {
         private final int maximum;
         private Runnable subscribed;
 

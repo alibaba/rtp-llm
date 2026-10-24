@@ -130,7 +130,7 @@ final class RequestLifecycleTestSupport {
     static boolean prepareMember(RequestRegistry registry, ScheduledRequest item) {
         var transaction = org.mockito.Mockito.mock(BatchDeliveryStrategy.BatchTransaction.class);
         org.mockito.Mockito.when(transaction.append(item))
-                .thenReturn(org.flexlb.balance.delivery.CapacityBoundary.Attempt.accepted(item));
+                .thenReturn(org.flexlb.balance.delivery.DeliveryBlockReason.Attempt.accepted(item));
         return registry.prepareBatchMember(item, transaction).accepted();
     }
 

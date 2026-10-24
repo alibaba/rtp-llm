@@ -1,7 +1,7 @@
 package org.flexlb.balance.endpoint;
 
 import lombok.Getter;
-import org.flexlb.balance.delivery.CapacityBoundary;
+import org.flexlb.balance.delivery.DeliveryBlockReason;
 import org.flexlb.balance.delivery.DeliveryStrategy;
 import org.flexlb.balance.prediction.FormulaPredictor;
 import org.flexlb.balance.prediction.LearningPredictor;
@@ -295,7 +295,7 @@ public class PrefillEndpoint extends WorkerEndpoint {
     }
 
     /** Exact wake source for this generation's batch admission capacity. */
-    public CapacityBoundary.Availability batchAdmissionAvailability(
+    public DeliveryBlockReason.Availability batchAdmissionAvailability(
             int maximumInflightBatches) {
         return prefillState.batchAvailability(maximumInflightBatches);
     }
@@ -324,7 +324,7 @@ public class PrefillEndpoint extends WorkerEndpoint {
         return prefillState.canDeliver(maxDispatchLimit, newReqNum);
     }
 
-    public CapacityBoundary.Availability routeAdmissionAvailability(long limit) {
+    public DeliveryBlockReason.Availability routeAdmissionAvailability(long limit) {
         return prefillState.routeAvailability(limit);
     }
 

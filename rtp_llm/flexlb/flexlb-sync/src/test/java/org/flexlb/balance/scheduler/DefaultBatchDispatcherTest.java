@@ -3,7 +3,7 @@ package org.flexlb.balance.scheduler;
 import com.google.protobuf.DescriptorProtos;
 import com.google.protobuf.Descriptors;
 import com.google.protobuf.DynamicMessage;
-import org.flexlb.balance.delivery.CapacityBoundary;
+import org.flexlb.balance.delivery.DeliveryBlockReason;
 import org.flexlb.balance.delivery.DeliveryResult;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.scheduler.BatchDeliveryStrategy.PreparedSubmission;
@@ -475,9 +475,9 @@ class DefaultBatchDispatcherTest {
     void shutdownRejectsNewReservationsWithoutInvokingRequestCallbacks() {
         dispatcher.shutdown();
 
-        CapacityBoundary.Attempt<?> rejected = dispatcher.tryPrepareSubmission();
+        DeliveryBlockReason.Attempt<?> rejected = dispatcher.tryPrepareSubmission();
         assertFalse(rejected.accepted());
-        assertEquals(CapacityBoundary.Status.FAILED,
+        assertEquals(DeliveryBlockReason.Status.FAILED,
                 rejected.boundary().status());
         assertEquals(0, callback.failureCount.get());
         assertEquals(0, callback.successCount.get());
@@ -491,7 +491,7 @@ class DefaultBatchDispatcherTest {
         dispatcher = new DefaultBatchDispatcher(grpcClient, configService, NoOpFlexMonitor.getInstance(), 1, 1);
         PreparedSubmission running = reservePermit();
         PreparedSubmission queued = reservePermit();
-        CapacityBoundary unavailable = unavailableBoundary();
+        DeliveryBlockReason unavailable = unavailableBoundary();
         assertFalse(unavailable.availability().isAvailable());
         CountDownLatch capacityChanged = new CountDownLatch(1);
         unavailable.availability().addListener(() -> {
@@ -505,9 +505,9 @@ class DefaultBatchDispatcherTest {
         assertTrue(capacityChanged.await(5, TimeUnit.SECONDS));
         assertTrue(unavailable.availability().isAvailable(),
                 "shutdown is a state transition which wakes admission waiters");
-        CapacityBoundary.Attempt<?> rejected = dispatcher.tryPrepareSubmission();
+        DeliveryBlockReason.Attempt<?> rejected = dispatcher.tryPrepareSubmission();
         assertFalse(rejected.accepted());
-        assertEquals(CapacityBoundary.Status.FAILED,
+        assertEquals(DeliveryBlockReason.Status.FAILED,
                 rejected.boundary().status());
         running.close();
         queued.close();
@@ -593,7 +593,7 @@ class DefaultBatchDispatcherTest {
                 });
 
         PreparedSubmission reservation = reservePermit();
-        CapacityBoundary unavailable = unavailableBoundary();
+        DeliveryBlockReason unavailable = unavailableBoundary();
         CountDownLatch capacityChanged = new CountDownLatch(1);
         unavailable.availability().addListener(() -> {
             if (unavailable.availability().isAvailable()) {
@@ -737,9 +737,9 @@ class DefaultBatchDispatcherTest {
         assertTrue(callback.successLatch.await(5, TimeUnit.SECONDS),
                 "shutdown must drain the accepted task and its completion callback");
         assertEquals(0, callback.failureCount.get());
-        CapacityBoundary.Attempt<?> rejected = dispatcher.tryPrepareSubmission();
+        DeliveryBlockReason.Attempt<?> rejected = dispatcher.tryPrepareSubmission();
         assertFalse(rejected.accepted());
-        assertEquals(CapacityBoundary.Status.FAILED,
+        assertEquals(DeliveryBlockReason.Status.FAILED,
                 rejected.boundary().status());
     }
 
@@ -750,7 +750,7 @@ class DefaultBatchDispatcherTest {
         dispatcher = new DefaultBatchDispatcher(grpcClient, configService, NoOpFlexMonitor.getInstance(), 1, 1);
         PreparedSubmission running = reservePermit();
         PreparedSubmission queued = reservePermit();
-        CapacityBoundary unavailable = unavailableBoundary();
+        DeliveryBlockReason unavailable = unavailableBoundary();
         assertFalse(unavailable.availability().isAvailable());
         CountDownLatch capacityChanged = new CountDownLatch(1);
         unavailable.availability().addListener(() -> {
@@ -774,7 +774,7 @@ class DefaultBatchDispatcherTest {
         dispatcher = new DefaultBatchDispatcher(grpcClient, configService, NoOpFlexMonitor.getInstance(), 1, 1);
         PreparedSubmission running = reservePermit();
         PreparedSubmission queued = reservePermit();
-        CapacityBoundary unavailable = unavailableBoundary();
+        DeliveryBlockReason unavailable = unavailableBoundary();
         assertFalse(unavailable.availability().isAvailable());
         Object capacityMonitor = new Object();
         unavailable.availability().addListener(() -> {
@@ -801,9 +801,9 @@ class DefaultBatchDispatcherTest {
         ScheduledRequest secondItem = createScheduledRequest(2L, 500, 200, endpoint);
         PreparedSubmission running = reservePermit();
         PreparedSubmission queued = reservePermit();
-        CapacityBoundary.Attempt<?> rejected = dispatcher.tryPrepareSubmission();
+        DeliveryBlockReason.Attempt<?> rejected = dispatcher.tryPrepareSubmission();
         assertFalse(rejected.accepted());
-        assertEquals(CapacityBoundary.Status.UNAVAILABLE,
+        assertEquals(DeliveryBlockReason.Status.UNAVAILABLE,
                 rejected.boundary().status());
 
         assertDoesNotThrow(() -> submit(
@@ -853,7 +853,7 @@ class DefaultBatchDispatcherTest {
                 });
 
         PreparedSubmission reservation = reservePermit();
-        CapacityBoundary unavailable = unavailableBoundary();
+        DeliveryBlockReason unavailable = unavailableBoundary();
         CountDownLatch capacityChanged = new CountDownLatch(1);
         unavailable.availability().addListener(() -> {
             if (unavailable.availability().isAvailable()) {
@@ -957,16 +957,16 @@ class DefaultBatchDispatcherTest {
     // ---- helpers ----
 
     private PreparedSubmission reservePermit() {
-        CapacityBoundary.Attempt<?> accepted = dispatcher.tryPrepareSubmission();
+        DeliveryBlockReason.Attempt<?> accepted = dispatcher.tryPrepareSubmission();
         assertTrue(accepted.accepted());
         return assertInstanceOf(
                 PreparedSubmission.class, accepted.value());
     }
 
-    private CapacityBoundary unavailableBoundary() {
-        CapacityBoundary.Attempt<?> rejected = dispatcher.tryPrepareSubmission();
+    private DeliveryBlockReason unavailableBoundary() {
+        DeliveryBlockReason.Attempt<?> rejected = dispatcher.tryPrepareSubmission();
         assertFalse(rejected.accepted());
-        assertEquals(CapacityBoundary.Status.UNAVAILABLE,
+        assertEquals(DeliveryBlockReason.Status.UNAVAILABLE,
                 rejected.boundary().status());
         return rejected.boundary();
     }
@@ -993,7 +993,7 @@ class DefaultBatchDispatcherTest {
     }
 
     private static void awaitAvailable(
-            CapacityBoundary.Availability availability,
+            DeliveryBlockReason.Availability availability,
             Object capacityMonitor) throws InterruptedException {
         long deadlineNanos = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
         synchronized (capacityMonitor) {

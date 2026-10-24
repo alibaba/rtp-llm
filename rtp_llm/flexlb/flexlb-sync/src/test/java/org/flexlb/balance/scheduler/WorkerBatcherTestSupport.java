@@ -1,7 +1,7 @@
 package org.flexlb.balance.scheduler;
 
 import org.flexlb.balance.delivery.BlockedRequest;
-import org.flexlb.balance.delivery.CapacityBoundary;
+import org.flexlb.balance.delivery.DeliveryBlockReason;
 import org.flexlb.balance.delivery.DeliveryStrategy;
 import org.flexlb.balance.projection.WorkSnapshot;
 
@@ -14,7 +14,7 @@ final class WorkerBatcherTestSupport {
 
     static DeliveryStrategy.Transaction boundaryOnly(
             ScheduledRequest item,
-            CapacityBoundary boundary) {
+            DeliveryBlockReason boundary) {
         return new DeliveryStrategy.Transaction() {
             @Override
             public List<ScheduledRequest> items() {

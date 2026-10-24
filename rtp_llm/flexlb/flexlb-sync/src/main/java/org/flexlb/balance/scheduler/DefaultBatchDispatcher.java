@@ -3,7 +3,7 @@ package org.flexlb.balance.scheduler;
 import com.google.protobuf.ByteString;
 import com.google.protobuf.InvalidProtocolBufferException;
 import io.micrometer.core.instrument.util.NamedThreadFactory;
-import org.flexlb.balance.delivery.CapacityBoundary;
+import org.flexlb.balance.delivery.DeliveryBlockReason;
 import org.flexlb.balance.delivery.DeliveryResult;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.projection.PrefillTtftEstimate;
@@ -84,8 +84,8 @@ public class DefaultBatchDispatcher {
     private final Lock admissionWriteLock = admissionLifecycle.writeLock();
     private final CopyOnWriteArraySet<Runnable> capacityListeners =
             new CopyOnWriteArraySet<>();
-    private final CapacityBoundary.Availability capacityAvailability =
-            new CapacityBoundary.Availability() {
+    private final DeliveryBlockReason.Availability capacityAvailability =
+            new DeliveryBlockReason.Availability() {
                 @Override
                 public boolean isAvailable() {
                     // "Available" means the rejecting condition changed and
@@ -174,7 +174,7 @@ public class DefaultBatchDispatcher {
         monitor.report(MetricConstant.DISPATCH_EXECUTOR_POOL_SIZE, dispatchExecutor.getPoolSize());
     }
 
-    public CapacityBoundary.Attempt<PreparedSubmission>
+    public DeliveryBlockReason.Attempt<PreparedSubmission>
             tryPrepareSubmission() {
         admissionReadLock.lock();
         try {
@@ -184,22 +184,22 @@ public class DefaultBatchDispatcher {
                                 "batch dispatcher is shut down"));
             }
             if (!admissionPermits.tryAcquire()) {
-                return CapacityBoundary.Attempt.rejected(
-                        CapacityBoundary.unavailable(
+                return DeliveryBlockReason.Attempt.rejected(
+                        DeliveryBlockReason.unavailable(
                                 capacityAvailability,
                                 CAPACITY_BLOCK_SEMANTICS));
             }
-            return CapacityBoundary.Attempt.accepted(
+            return DeliveryBlockReason.Attempt.accepted(
                     new PermitReservation());
         } finally {
             admissionReadLock.unlock();
         }
     }
 
-    private static CapacityBoundary.Attempt<PreparedSubmission> rejectedFailure(
+    private static DeliveryBlockReason.Attempt<PreparedSubmission> rejectedFailure(
             Throwable cause) {
-        return CapacityBoundary.Attempt.rejected(
-                CapacityBoundary.failed(cause));
+        return DeliveryBlockReason.Attempt.rejected(
+                DeliveryBlockReason.failed(cause));
     }
 
     @PreDestroy

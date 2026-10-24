@@ -1,7 +1,7 @@
 package org.flexlb.balance.endpoint;
 
 import org.flexlb.balance.delivery.BlockedRequest;
-import org.flexlb.balance.delivery.CapacityBoundary;
+import org.flexlb.balance.delivery.DeliveryBlockReason;
 import org.flexlb.balance.delivery.DeliveryMetrics;
 import org.flexlb.balance.delivery.DeliveryResult;
 import org.flexlb.balance.delivery.DeliveryStrategy;
@@ -201,9 +201,9 @@ public final class EndpointTestSupport {
                 runtime.requests(), NOOP_TELEMETRY);
     }
 
-    private static final CapacityBoundary PARKED_BOUNDARY =
-            CapacityBoundary.unavailable(
-                    new CapacityBoundary.Availability() {
+    private static final DeliveryBlockReason PARKED_BOUNDARY =
+            DeliveryBlockReason.unavailable(
+                    new DeliveryBlockReason.Availability() {
                         @Override
                         public boolean isAvailable() {
                             return false;

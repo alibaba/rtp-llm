@@ -1,6 +1,6 @@
 package org.flexlb.balance.scheduler;
 
-import org.flexlb.balance.delivery.CapacityBoundary;
+import org.flexlb.balance.delivery.DeliveryBlockReason;
 import org.flexlb.balance.delivery.DeliveryMetrics;
 import org.flexlb.balance.delivery.DeliveryResult;
 import org.flexlb.balance.delivery.DeliveryStrategy;
@@ -75,7 +75,7 @@ class PdfusionSchedulingTest {
         PlacementAvailability availability = new PlacementAvailability();
         QueueCapacity queueCapacity = new QueueCapacity();
         DeliveryStrategy delivery = batch
-                ? new BatchDeliveryStrategy(() -> CapacityBoundary.Attempt.accepted(
+                ? new BatchDeliveryStrategy(() -> DeliveryBlockReason.Attempt.accepted(
                         new BatchDeliveryStrategy.PreparedSubmission() {
                             public void submit(BatchDeliveryStrategy.Delivery delivery) {
                                 delivery.run((items, id, predicted, reason, observer) ->

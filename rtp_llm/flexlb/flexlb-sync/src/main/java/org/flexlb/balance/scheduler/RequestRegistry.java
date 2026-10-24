@@ -1,7 +1,7 @@
 package org.flexlb.balance.scheduler;
 
 import org.flexlb.balance.PlacementResult;
-import org.flexlb.balance.delivery.CapacityBoundary;
+import org.flexlb.balance.delivery.DeliveryBlockReason;
 import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.EncoderEndpoint;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
@@ -711,25 +711,25 @@ public class RequestRegistry {
                         + (error == null ? "endpoint publication failed" : error.getMessage())); }
     }
 
-    public CapacityBoundary.Attempt<BatchDeliveryStrategy.BatchTransaction> prepareBatchDelivery(
+    public DeliveryBlockReason.Attempt<BatchDeliveryStrategy.BatchTransaction> prepareBatchDelivery(
             ScheduledRequest item, BatchDeliveryStrategy strategy) {
         RequestSlot slot = entryFor(item);
-        return slot == null ? CapacityBoundary.Attempt.rejected(CapacityBoundary.OWNERSHIP_LOST)
+        return slot == null ? DeliveryBlockReason.Attempt.rejected(DeliveryBlockReason.OWNERSHIP_LOST)
                 : slot.prepareDispatch(item, () -> strategy.prepareAdmission(item));
     }
 
-    public CapacityBoundary.Attempt<ScheduledRequest> prepareBatchMember(
+    public DeliveryBlockReason.Attempt<ScheduledRequest> prepareBatchMember(
             ScheduledRequest item, BatchDeliveryStrategy.BatchTransaction transaction) {
         RequestSlot slot = entryFor(item);
-        return slot == null ? CapacityBoundary.Attempt.rejected(CapacityBoundary.OWNERSHIP_LOST)
+        return slot == null ? DeliveryBlockReason.Attempt.rejected(DeliveryBlockReason.OWNERSHIP_LOST)
                 : slot.prepareDispatch(item, () -> transaction.append(item));
     }
 
-    public CapacityBoundary.Attempt<ScheduledRequest> prepareRouteMember(
+    public DeliveryBlockReason.Attempt<ScheduledRequest> prepareRouteMember(
             ScheduledRequest item, RouteDeliveryStrategy.RouteTransaction transaction,
             PrefillTimePredictor.Evaluator evaluator) {
         RequestSlot slot = entryFor(item);
-        return slot == null ? CapacityBoundary.Attempt.rejected(CapacityBoundary.OWNERSHIP_LOST)
+        return slot == null ? DeliveryBlockReason.Attempt.rejected(DeliveryBlockReason.OWNERSHIP_LOST)
                 : slot.prepareDispatch(item, () -> transaction.append(item, evaluator));
     }
 
