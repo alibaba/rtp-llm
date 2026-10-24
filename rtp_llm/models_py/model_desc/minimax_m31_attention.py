@@ -61,6 +61,9 @@ class M31Attention(nn.Module):
         if config.msa_sparse_config["num_idx_heads"] != 4:
             raise ValueError("M3.1 native sparse attention requires four index Q heads")
         self.layer_idx = layer_idx
+        self.cp_size = int(parallelism_config.tp_size)
+        self.cp_rank = int(parallelism_config.tp_rank)
+        self.cp_kv_sharded = bool(parallelism_config.prefill_cp_config.kv_cache_sharded)
         self.norm_eps = config.layernorm_eps
         self.init_blocks = config.msa_sparse_config["init_blocks"]
         self.local_blocks = config.msa_sparse_config["local_blocks"]
@@ -139,7 +142,29 @@ class M31Attention(nn.Module):
         )
         fused = self.qkv_index_proj(hidden_states)
         qkv, index_q, index_k = fused.split((72 * 128, 4 * 128, 128), dim=-1)
-        if main_inputs.is_prefill:
+        if main_inputs.is_prefill and main_inputs.context_parallel_info is not None:
+            from rtp_llm.models_py.model_desc.minimax_m31_cp_prefill import (
+                m31_cp_prefill_projected_attention,
+            )
+
+            attended = m31_cp_prefill_projected_attention(
+                qkv,
+                index_q,
+                index_k,
+                self.raw_norms,
+                self.cos_sin_cache,
+                main_inputs,
+                index_inputs,
+                main_cache,
+                index_cache,
+                cp_rank=self.cp_rank,
+                cp_size=self.cp_size,
+                sharded=self.cp_kv_sharded,
+                norm_eps=self.norm_eps,
+                init_blocks=self.init_blocks,
+                local_blocks=self.local_blocks,
+            )
+        elif main_inputs.is_prefill:
             attended = m31_prefill_projected_attention(
                 qkv,
                 index_q,

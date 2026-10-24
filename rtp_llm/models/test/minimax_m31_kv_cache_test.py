@@ -28,6 +28,11 @@ from rtp_llm.models_py.model_desc.hidden_state_capture import CaptureContext
 from rtp_llm.models_py.model_desc.minimax_m31_activation import swiglu_oai
 from rtp_llm.models_py.model_desc.minimax_m31_addressing import m31_decode_addressing
 from rtp_llm.models_py.model_desc.minimax_m31_cache import m31_cache_views
+from rtp_llm.models_py.model_desc.minimax_m31_cp_prefill import (
+    _publish_local_pages,
+    _working_pages,
+    plan_m31_cp_prefill,
+)
 from rtp_llm.models_py.model_desc.minimax_m31_kv_write import write_m31_nvfp4_rows
 from rtp_llm.models_py.model_desc.minimax_m31_model import MiniMaxM31Model
 from rtp_llm.models_py.model_desc.minimax_m31_moe import (
@@ -65,6 +70,7 @@ class MiniMaxM31KVCacheTest(unittest.TestCase):
         model.norm = lambda hidden, residual: (hidden + residual, residual)
         model._mtp_aux_capture_layer_ids = (0, 2)
         model._mtp_aux_capture_layer_id_set = frozenset((0, 2))
+        self.assertTrue(model.has_mtp_hidden_buffer())
         model._mtp_target_hidden_states = None
         model._mtp_target_graph_buffer = None
         model._mtp_target_prompt_buffer = None
@@ -222,6 +228,73 @@ class MiniMaxM31KVCacheTest(unittest.TestCase):
         index.context_parallel_info = object()
         with self.assertRaisesRegex(ValueError, "CP"):
             m31_prefill_addressing(main, index, 5)
+
+    def test_cp_prefill_uses_global_zigzag_positions_and_restore(self):
+        info = SimpleNamespace(
+            prefill_actual_input_lengths_cpu=torch.tensor([5], dtype=torch.int32),
+            prefill_prefix_lengths_cpu=torch.tensor([128], dtype=torch.int32),
+            prefill_shuffle_indices=torch.tensor([0, 1, 6, 7], dtype=torch.int32),
+            prefill_qkv_padding_mask_cpu=torch.tensor(
+                [1, 1, 1, 1, 1, 0, 0, 0], dtype=torch.int32
+            ),
+            prefill_qkv_restore_indice_cpu=torch.tensor(
+                [0, 1, 4, 5, 6, 7, 2, 3], dtype=torch.int32
+            ),
+        )
+        inputs = SimpleNamespace(is_prefill=True, context_parallel_info=info)
+        plan = plan_m31_cp_prefill(inputs, inputs, 4, 2)
+        self.assertEqual(plan.local_request_ids.tolist(), [0, 0, 0, 0])
+        self.assertEqual(plan.local_positions.tolist(), [128, 129, 132, 132])
+        self.assertEqual(plan.restore_indices.tolist(), [0, 1, 4, 5, 6])
+        self.assertEqual(plan.full_lengths, (133,))
+        with self.assertRaisesRegex(ValueError, "local rows"):
+            plan_m31_cp_prefill(inputs, inputs, 3, 2)
+
+    def test_cp_prefill_multiple_requests_and_padding(self):
+        info = SimpleNamespace(
+            prefill_actual_input_lengths_cpu=torch.tensor([5, 3], dtype=torch.int32),
+            prefill_prefix_lengths_cpu=torch.tensor([0, 128], dtype=torch.int32),
+            prefill_shuffle_indices=torch.tensor([0, 1, 6, 7, 0, 3], dtype=torch.int32),
+            prefill_qkv_padding_mask_cpu=torch.tensor(
+                [1, 1, 1, 1, 1, 0, 0, 0, 1, 1, 1, 0], dtype=torch.int32
+            ),
+            prefill_qkv_restore_indice_cpu=torch.tensor(
+                [0, 1, 6, 7, 8, 9, 2, 3, 4, 10, 11, 5], dtype=torch.int32
+            ),
+        )
+        main = SimpleNamespace(is_prefill=True, context_parallel_info=info)
+        index = SimpleNamespace(
+            is_prefill=True,
+            context_parallel_info=SimpleNamespace(
+                prefill_shuffle_indices=info.prefill_shuffle_indices
+            ),
+        )
+        plan = plan_m31_cp_prefill(main, index, 6, 2)
+        self.assertEqual(plan.local_request_ids.tolist(), [0, 0, 0, 0, 1, 1])
+        self.assertEqual(plan.local_positions.tolist(), [0, 1, 4, 4, 128, 130])
+        self.assertEqual(plan.restore_indices.tolist(), [0, 1, 6, 7, 8, 4, 10, 11])
+        self.assertEqual(plan.full_lengths, (5, 131))
+
+    def test_cp_prefix_and_suffix_follow_tag_local_block_table(self):
+        # Logical prefix pages 0/1 are owned by ranks 0/1, respectively.
+        pool = torch.zeros((8, 4), dtype=torch.uint8)
+        pool[3].fill_(11)
+        table = torch.tensor([[3, 6]], dtype=torch.int32)
+        remote = torch.full((1, 4), 22, dtype=torch.uint8)
+        with patch(
+            "rtp_llm.models_py.model_desc.minimax_m31_cp_prefill.all_gather",
+            side_effect=lambda send, group: torch.cat((send, remote)),
+        ):
+            work, compact, starts = _working_pages(
+                pool, table, (384,), (256,), 0, 2, True
+            )
+        self.assertEqual(compact.tolist(), [[1, 2, 3]])
+        self.assertEqual(work[1].tolist(), [11] * 4)
+        self.assertEqual(work[2].tolist(), [22] * 4)
+        work[3].fill_(33)
+        _publish_local_pages(pool, table, work, starts, (384,), (256,), 0, 2, True)
+        self.assertEqual(pool[3].tolist(), [11] * 4)
+        self.assertEqual(pool[6].tolist(), [33] * 4)
 
     def test_writer_requires_independent_slot_vectors(self):
         views = m31_cache_views(

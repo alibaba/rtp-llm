@@ -92,6 +92,9 @@ class _M31NativeAttentionContext:
 class MiniMaxM31Model(GenericMoeModel):
     decoder_layer_cls = M31DecoderLayer
 
+    def has_mtp_hidden_buffer(self) -> bool:
+        return bool(self._mtp_aux_capture_layer_ids)
+
     def prepare_fmha_impl(
         self,
         inputs: PyModelInputs,
