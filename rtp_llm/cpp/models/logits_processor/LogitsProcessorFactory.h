@@ -22,6 +22,9 @@ public:
                      const std::string&             tree_decode_config,
                      kmonitor::MetricsReporterPtr   metrics_reporter = nullptr);
 
+    // Call after requests drain and before KMonitor shuts down.
+    static void shutdown();
+
     static ErrorResult<std::vector<BaseLogitsProcessorPtr>>
     createLogitsProcessors(std::shared_ptr<GenerateInput> generate_input,
                            int32_t                        init_batch_size,

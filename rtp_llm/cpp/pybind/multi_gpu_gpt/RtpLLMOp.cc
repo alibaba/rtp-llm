@@ -20,6 +20,7 @@
 #include "rtp_llm/cpp/telemetry/TelemetryRuntime.h"
 #include "rtp_llm/cpp/pybind/PyUtils.h"
 #include "rtp_llm/cpp/models/models_weight/W.h"
+#include "rtp_llm/cpp/models/logits_processor/LogitsProcessorFactory.h"
 
 using namespace std;
 namespace th = torch;
@@ -516,9 +517,11 @@ void RtpLLMOp::stop() {
             http_server_.reset();
         }
         is_server_shutdown_ = true;
-        // bounded flush of remaining spans; never blocks process exit
         {
             pybind11::gil_scoped_release release;
+            // Join grammar workers and release their reporter while KMonitor is alive.
+            LogitsProcessorFactory::shutdown();
+            // bounded flush of remaining spans; never blocks process exit
             telemetry::TelemetryRuntime::shutdown();
         }
         stopKmonitorFactory();
