@@ -31,6 +31,16 @@ py_library(
     visibility = ["//visibility:public"],
 )
 
+# AITER's FlyDSL runtime imports yaml, but its wheel metadata omits it.
+# The serving wheel already requires PyYAML via platform_deps().
+py_library(
+    name = "pyyaml_rocm",
+    deps = select({
+        "@rtp_llm//:using_rocm": [requirement_gpu_rocm("pyyaml")],
+        "//conditions:default": [],
+    }),
+)
+
 py_test(
     name = "test_pointer_boundaries",
     srcs = ["test_pointer_boundaries.py"],
@@ -243,6 +253,7 @@ py_test(
     deps = [
         "//rtp_llm/models_py/triton_kernels:fla",
     ] + [
+        ":pyyaml_rocm",
         ":einops",
         ":flydsl",
         ":numpy",
@@ -283,12 +294,22 @@ py_test(
     deps = [
         "//rtp_llm/models_py/triton_kernels:fla",
     ] + [
+        ":pyyaml_rocm",
         ":einops",
         ":packaging",
         ":torch",
         ":triton",
     ],
     visibility = ["//visibility:public"],
+    tags = ["rocm"],
+    exec_properties = {"gpu": "MI308X-ROCM7"},
+)
+
+py_test(
+    name = "test_qwen4_gdn_rocm_contract",
+    srcs = ["test_qwen4_gdn_rocm_contract.py"],
+    main = "test_qwen4_gdn_rocm_contract.py",
+    deps = ["//rtp_llm:testlib"],
     tags = ["rocm"],
     exec_properties = {"gpu": "MI308X-ROCM7"},
 )

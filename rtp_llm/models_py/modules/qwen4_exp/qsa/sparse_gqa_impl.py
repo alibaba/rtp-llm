@@ -75,7 +75,14 @@ class SparseGqaFmhaImpl(FMHAImplBase):
             if self.is_prefill
             else FusedRopeKVCacheDecodeOp
         )
-        self.rope_kvcache_impl = rope_writer_cls(attn_configs)
+        if torch.version.hip is not None:
+            from .rocm_rope_cache import RocmQsaRopeCache
+
+            self.rope_kvcache_impl = RocmQsaRopeCache(
+                attn_configs, is_prefill=self.is_prefill
+            )
+        else:
+            self.rope_kvcache_impl = rope_writer_cls(attn_configs)
         self.rope_params = self.rope_kvcache_impl.prepare(attn_inputs)
         self.write_cache_store_impl = common.create_write_cache_store_impl(attn_inputs)
 
@@ -133,6 +140,8 @@ class SparseGqaFmhaImpl(FMHAImplBase):
         """
         if not isinstance(enabled, bool):
             raise TypeError("qwen4_exp MTP draft mode must be a bool")
+        if enabled and torch.version.hip is not None:
+            raise NotImplementedError("ROCm QSA MTP draft writer is not supported")
         if enabled and (not self.is_prefill or self.is_target_verify):
             raise RuntimeError(
                 "qwen4_exp MTP draft mode only supports ordinary prefill"
@@ -438,6 +447,8 @@ class SparseGqaFmhaImpl(FMHAImplBase):
         tensor directly. Both forms use packed ``[total_tokens, K]`` indices;
         the legacy uniform ``[B, S, K]`` form is accepted after validation.
         """
+        if torch.version.hip is not None and self._is_mtp_draft:
+            raise NotImplementedError("ROCm QSA MTP draft writer is not supported")
         if output_gate is not None and not (
             output_gate.shape == (qkv.shape[0], self.q_width)
             and output_gate.dtype == torch.bfloat16

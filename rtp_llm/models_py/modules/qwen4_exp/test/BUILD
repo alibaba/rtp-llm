@@ -720,3 +720,10 @@ py_test(
     env = {"GPU_COUNT": "1"},
     exec_properties = {"gpu": "RTX_5000_PRO_CU13"},
 )
+py_test(
+    name = "rocm_qsa_rope_cache_test",
+    srcs = ["rocm_qsa_rope_cache_test.py"],
+    deps = ["//rtp_llm:testlib"],
+    tags = ["rocm"],
+    exec_properties = {"gpu": "MI308X-ROCM7"},
+)
