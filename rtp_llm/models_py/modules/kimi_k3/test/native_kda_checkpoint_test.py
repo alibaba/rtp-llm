@@ -1,9 +1,8 @@
-"""Pinned cuLA checkpoints versus an independent FP32 recurrent reference."""
+"""Pinned cuLA checkpoints versus an independent FP32 recurrence."""
 import unittest
 from unittest.mock import patch
 
 import torch
-import torch.nn.functional as F
 from rtp_llm.models_py.utils.cutlass import setup_cutlass_import_path
 
 setup_cutlass_import_path()
@@ -16,8 +15,17 @@ from rtp_llm.models_py.modules.factory.attention.cuda_kda_impl import (
 
 
 def recurrent_reference(q, k, v, gate, beta, state, alog, bias):
-    q = F.normalize(q.float(), dim=-1) * 128**-0.5
-    k = F.normalize(k.float(), dim=-1)
+    # cuLA's L2 normalization publishes BF16 projections before the FP32
+    # recurrence. Retaining unrounded FP32 Q/K tests a different operator.
+    def normalize(projection):
+        values = projection.float()
+        normalized = values * torch.rsqrt(
+            values.square().sum(-1, keepdim=True) + 1e-6
+        )
+        return normalized.to(projection.dtype).float()
+
+    q = normalize(q) * 128**-0.5
+    k = normalize(k)
     decay = (-5.0 * torch.sigmoid(alog.exp()[None, :, None] *
                                 (gate.float() + bias.reshape(-1, 128)))).exp()
     beta = beta.float().sigmoid()
