@@ -61,7 +61,7 @@ public class PlanningBench {
     public static void main(String[] args) throws Exception {
         model = new FormulaPredictor(Files.readString(Path.of(args[0])));
         policy = new BatchDeliveryStrategy(() -> CapacityBoundary.Attempt.rejected(CapacityBoundary.OWNERSHIP_LOST),
-                () -> 1L, mock(RequestRegistry.class), mock(DeliveryMetrics.class)).projectionPolicy();
+                () -> 1L, mock(RequestRegistry.class), mock(DeliveryMetrics.class)).ttftEstimationRule();
         for (int size : new int[]{1, 8, 32, 64}) {
             var inputs = new ArrayList<List<GroupPlanner.Item>>();
             for (int i = 0; i < 64; i++) inputs.add(items(size, i));

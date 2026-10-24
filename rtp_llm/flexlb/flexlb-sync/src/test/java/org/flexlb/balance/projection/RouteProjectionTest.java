@@ -140,7 +140,7 @@ class RouteProjectionTest {
         return new RouteDeliveryStrategy(
                 Mockito.mock(RequestRegistry.class),
                 Mockito.mock(DeliveryMetrics.class))
-                .projectionPolicy();
+                .ttftEstimationRule();
     }
 
     private static final class CountingEvaluator

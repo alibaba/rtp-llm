@@ -201,8 +201,8 @@ final class StrategyTestSupport {
         RouteDeliveryStrategy route = new RouteDeliveryStrategy(
                 requests, NOOP_METRICS);
         DeliveryStrategy delivery = Mockito.mock(DeliveryStrategy.class);
-        Mockito.when(delivery.projectionPolicy())
-                .thenReturn(route.projectionPolicy());
+        Mockito.when(delivery.ttftEstimationRule())
+                .thenReturn(route.ttftEstimationRule());
         Mockito.when(delivery.projectGroupDurationMs(
                         Mockito.anyList(), Mockito.any()))
                 .thenAnswer(invocation -> route.projectGroupDurationMs(

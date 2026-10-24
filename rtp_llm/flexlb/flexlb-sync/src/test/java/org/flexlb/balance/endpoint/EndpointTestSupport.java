@@ -171,8 +171,8 @@ public final class EndpointTestSupport {
                 runtime.requests(), NOOP_TELEMETRY);
         DeliveryStrategy delivery = org.mockito.Mockito.mock(
                 DeliveryStrategy.class);
-        org.mockito.Mockito.when(delivery.projectionPolicy())
-                .thenReturn(route.projectionPolicy());
+        org.mockito.Mockito.when(delivery.ttftEstimationRule())
+                .thenReturn(route.ttftEstimationRule());
         org.mockito.Mockito.when(delivery.projectGroupDurationMs(
                         org.mockito.Mockito.anyList(),
                         org.mockito.Mockito.any()))

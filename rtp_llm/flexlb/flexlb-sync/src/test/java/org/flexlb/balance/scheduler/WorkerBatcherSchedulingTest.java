@@ -260,7 +260,7 @@ class WorkerBatcherSchedulingTest {
         RouteProjection.DeliveryProjection projection = new BatchDeliveryStrategy(
                 () -> { throw new AssertionError("projection cannot prepare delivery"); },
                 () -> 0L, mock(RequestRegistry.class), mock(DeliveryMetrics.class))
-                .projectionPolicy();
+                .ttftEstimationRule();
         RouteProjection.Candidate candidate = RouteProjection.project(
                 inputs, new RouteProjection.Probe("22", 50, now + 1L, Long.MAX_VALUE, 10L, 0L, 0L),
                 endpoint.getPredictor().evaluator(), projection, now);
@@ -715,7 +715,7 @@ class WorkerBatcherSchedulingTest {
         }
 
         @Override
-        public RouteProjection.DeliveryProjection projectionPolicy() {
+        public RouteProjection.DeliveryProjection ttftEstimationRule() {
             return mock(RouteProjection.DeliveryProjection.class);
         }
     }

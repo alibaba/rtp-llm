@@ -197,7 +197,7 @@ public final class BatchDeliveryStrategy implements DeliveryStrategy {
     }
 
     @Override
-    public RouteProjection.DeliveryProjection projectionPolicy() {
+    public RouteProjection.DeliveryProjection ttftEstimationRule() {
         return PROJECTION;
     }
 

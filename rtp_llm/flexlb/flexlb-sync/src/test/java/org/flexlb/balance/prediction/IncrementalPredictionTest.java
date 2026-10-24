@@ -86,7 +86,7 @@ class IncrementalPredictionTest {
         var model = new FormulaPredictor(formula());
         var policy = new BatchDeliveryStrategy(
                 () -> CapacityBoundary.Attempt.rejected(CapacityBoundary.OWNERSHIP_LOST),
-                () -> 1L, mock(RequestRegistry.class), mock(DeliveryMetrics.class)).projectionPolicy();
+                () -> 1L, mock(RequestRegistry.class), mock(DeliveryMetrics.class)).ttftEstimationRule();
         var full = new PrefillTimePredictor.Evaluator() {
             public long estimateMs(long t, long h) { return model.estimateMs(t, h); }
             public double predictBatchMs(PrefillBatchFeatures f) { return model.predictBatchMs(f); }
@@ -191,7 +191,7 @@ class IncrementalPredictionTest {
             }
         };
         var items = List.of(item(1, 100, 0, 100_000), item(2, 100, 0, 100_000), item(3, 100, 0, 100_000));
-        var policy = strategy.projectionPolicy();
+        var policy = strategy.ttftEstimationRule();
         var cursor = policy.planning(predictions);
         assertEquals(200.5, cursor.durationMs(items, 1)); // only through probe, not suffix
         var plan = new GroupPlanner.Plan<>(items, new GroupPlanner.Shape(3, 300, 100, 100),
@@ -210,7 +210,7 @@ class IncrementalPredictionTest {
     void appendCursorKeepsLatestAndOvershootPredecessorAndRecomputesOlderPrefixes() {
         var policy = new BatchDeliveryStrategy(
                 () -> CapacityBoundary.Attempt.rejected(CapacityBoundary.OWNERSHIP_LOST),
-                () -> 1L, mock(RequestRegistry.class), mock(DeliveryMetrics.class)).projectionPolicy();
+                () -> 1L, mock(RequestRegistry.class), mock(DeliveryMetrics.class)).ttftEstimationRule();
         int[] appended = {0};
         int[] recomputed = {0};
         var predictions = new RouteProjection.Predictions() {

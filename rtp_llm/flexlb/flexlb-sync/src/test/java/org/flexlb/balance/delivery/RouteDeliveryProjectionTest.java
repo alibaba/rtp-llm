@@ -52,7 +52,7 @@ class RouteDeliveryProjectionTest {
         private final RouteProjection.DeliveryProjection projection =
                 new RouteDeliveryStrategy(
                         mock(RequestRegistry.class),
-                        mock(DeliveryMetrics.class)).projectionPolicy();
+                        mock(DeliveryMetrics.class)).ttftEstimationRule();
 
         @Test
         void completionOffsetIsTheCumulativePrefixSum() {
@@ -141,7 +141,7 @@ class RouteDeliveryProjectionTest {
                                 CapacityBoundary.OWNERSHIP_LOST),
                         () -> 1L,
                         mock(RequestRegistry.class),
-                        mock(DeliveryMetrics.class)).projectionPolicy();
+                        mock(DeliveryMetrics.class)).ttftEstimationRule();
 
         @Test
         void eachMemberGetsBatchDurationOfItsExactPrefix() {

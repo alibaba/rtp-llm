@@ -32,7 +32,7 @@ final class RouteProjectionTestSupport {
             new RouteDeliveryStrategy(
                     mock(RequestRegistry.class),
                     mock(DeliveryMetrics.class))
-                    .projectionPolicy();
+                    .ttftEstimationRule();
     static final RouteProjection.DeliveryProjection BATCH =
             new BatchDeliveryStrategy(
                     () -> CapacityBoundary.Attempt.rejected(
@@ -40,7 +40,7 @@ final class RouteProjectionTestSupport {
                     () -> 1L,
                     mock(RequestRegistry.class),
                     mock(DeliveryMetrics.class))
-                    .projectionPolicy();
+                    .ttftEstimationRule();
 
     static final PrefillTimePredictor.Evaluator TOKEN_EVALUATOR =
             new PrefillTimePredictor.Evaluator() {

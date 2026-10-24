@@ -96,7 +96,7 @@ public class SnapshotBench {
                 var inputs = endpoint.runtime.captureRouteProjectionInputs();
                 checksum += inputs.queue().activeItems().size();
                 if (project) checksum += RouteProjection.project(inputs, PROBE, model,
-                        strategy.projectionPolicy()).requiredProjectedTtftMs();
+                        strategy.ttftEstimationRule()).requiredProjectedTtftMs();
             }
         }
         return new Sample(System.nanoTime() - started, CPU.getCurrentThreadCpuTime() - cpu,

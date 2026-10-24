@@ -283,7 +283,7 @@ class WorkerBatcherQueueTest {
         }
 
         @Override
-        public RouteProjection.DeliveryProjection projectionPolicy() {
+        public RouteProjection.DeliveryProjection ttftEstimationRule() {
             return mock(RouteProjection.DeliveryProjection.class);
         }
     }

@@ -176,7 +176,7 @@ public final class RouteDeliveryStrategy implements DeliveryStrategy {
     }
 
     @Override
-    public RouteProjection.DeliveryProjection projectionPolicy() {
+    public RouteProjection.DeliveryProjection ttftEstimationRule() {
         return PROJECTION;
     }
 

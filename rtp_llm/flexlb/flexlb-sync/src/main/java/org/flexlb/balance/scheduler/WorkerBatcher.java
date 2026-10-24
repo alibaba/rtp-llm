@@ -595,7 +595,7 @@ public final class WorkerBatcher {
 
     /** Immutable delivery semantics used by a pure route projection. */
     public RouteProjection.DeliveryProjection deliveryProjection() {
-        return deliveryStrategy.projectionPolicy();
+        return deliveryStrategy.ttftEstimationRule();
     }
 
     /**
