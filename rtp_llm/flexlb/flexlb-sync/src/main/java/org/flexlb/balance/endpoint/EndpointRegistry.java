@@ -1,7 +1,7 @@
 package org.flexlb.balance.endpoint;
 
 import org.flexlb.balance.delivery.DeliveryStrategy;
-import org.flexlb.balance.estimate.estimator.PrefillTtftEstimator;
+import org.flexlb.balance.estimate.PrefillTtftEstimator;
 import org.flexlb.balance.scheduler.EndpointEventProjector;
 import org.flexlb.balance.scheduler.PlacementAvailability;
 import org.flexlb.balance.scheduler.QueueCapacity;

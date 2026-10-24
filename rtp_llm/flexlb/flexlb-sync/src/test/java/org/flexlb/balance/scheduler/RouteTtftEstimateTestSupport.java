@@ -1,10 +1,10 @@
 package org.flexlb.balance.scheduler;
 
+import org.flexlb.balance.estimate.BatchTtftEstimator;
+import org.flexlb.balance.estimate.NonBatchTtftEstimator;
 import org.flexlb.balance.estimate.PrefillTtftEstimate;
 import org.flexlb.balance.estimate.QueueView;
 import org.flexlb.balance.estimate.WorkView;
-import org.flexlb.balance.estimate.estimator.BatchTtftEstimator;
-import org.flexlb.balance.estimate.estimator.NonBatchTtftEstimator;
 import org.flexlb.balance.planner.GroupPlanner;
 import org.flexlb.balance.prediction.PrefillTimePredictor;
 

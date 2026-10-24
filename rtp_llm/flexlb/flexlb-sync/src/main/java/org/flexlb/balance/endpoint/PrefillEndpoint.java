@@ -4,7 +4,7 @@ import lombok.Getter;
 import org.flexlb.balance.delivery.DeliveryBlockReason;
 import org.flexlb.balance.delivery.DeliveryStrategy;
 import org.flexlb.balance.estimate.PrefillTtftEstimate;
-import org.flexlb.balance.estimate.estimator.PrefillTtftEstimator;
+import org.flexlb.balance.estimate.PrefillTtftEstimator;
 import org.flexlb.balance.prediction.FormulaPredictor;
 import org.flexlb.balance.prediction.LearningPredictor;
 import org.flexlb.balance.prediction.PrefillBatchFeatures;

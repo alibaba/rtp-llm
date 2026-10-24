@@ -1,8 +1,8 @@
 package org.flexlb.balance.delivery;
 
-import org.flexlb.balance.estimate.estimator.BatchTtftEstimator;
-import org.flexlb.balance.estimate.estimator.NonBatchTtftEstimator;
-import org.flexlb.balance.estimate.estimator.PrefillTtftEstimator;
+import org.flexlb.balance.estimate.BatchTtftEstimator;
+import org.flexlb.balance.estimate.NonBatchTtftEstimator;
+import org.flexlb.balance.estimate.PrefillTtftEstimator;
 import org.flexlb.balance.scheduler.DefaultBatchDispatcher;
 import org.flexlb.balance.scheduler.RequestRegistry;
 import org.flexlb.config.ConfigService;

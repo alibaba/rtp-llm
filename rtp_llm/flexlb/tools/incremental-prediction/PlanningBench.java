@@ -1,4 +1,4 @@
-import org.flexlb.balance.estimate.estimator.BatchTtftEstimator;
+import org.flexlb.balance.estimate.BatchTtftEstimator;
 import com.sun.management.ThreadMXBean;
 import java.lang.management.ManagementFactory;
 import java.nio.file.*;

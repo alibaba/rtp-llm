@@ -1,4 +1,4 @@
-import org.flexlb.balance.estimate.estimator.NonBatchTtftEstimator;
+import org.flexlb.balance.estimate.NonBatchTtftEstimator;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
 import java.security.MessageDigest;

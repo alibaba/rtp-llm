@@ -6,7 +6,7 @@ import org.flexlb.balance.delivery.DeliveryStrategy;
 import org.flexlb.balance.delivery.DeliveryTransaction;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.estimate.PrefillTtftEstimate;
-import org.flexlb.balance.estimate.estimator.PrefillTtftEstimator;
+import org.flexlb.balance.estimate.PrefillTtftEstimator;
 import org.flexlb.balance.planner.GroupPlanner;
 import org.flexlb.balance.prediction.PrefillTimePredictor;
 import org.flexlb.config.FlexlbConfig;

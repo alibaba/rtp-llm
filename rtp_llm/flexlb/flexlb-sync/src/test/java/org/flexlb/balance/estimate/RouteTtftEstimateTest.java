@@ -1,6 +1,5 @@
 package org.flexlb.balance.estimate;
 
-import org.flexlb.balance.estimate.estimator.NonBatchTtftEstimator;
 import org.flexlb.balance.planner.GroupPlanner;
 import org.flexlb.balance.prediction.LearningPredictor;
 import org.flexlb.balance.prediction.PrefillBatchFeatures;

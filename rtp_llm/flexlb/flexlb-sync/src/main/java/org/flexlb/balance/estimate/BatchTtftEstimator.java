@@ -1,6 +1,5 @@
-package org.flexlb.balance.estimate.estimator;
+package org.flexlb.balance.estimate;
 
-import org.flexlb.balance.estimate.PrefillTtftEstimate;
 import org.flexlb.balance.planner.GroupPlanner;
 import org.flexlb.balance.prediction.PrefillPredictionBoundary;
 import org.flexlb.balance.prediction.PrefillTimePredictor;
