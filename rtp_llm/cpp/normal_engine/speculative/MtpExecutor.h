@@ -186,7 +186,9 @@ protected:
                                       GptModelOutputs                              draft_prefill_model_output,
                                       SamplerOutput                                draft_prefill_sampler_output,
                                       std::shared_ptr<torch::Event>                rejection_event,
-                                      std::shared_ptr<torch::Event>                draft_event);
+                                      std::shared_ptr<torch::Event>                draft_event,
+                                      const torch::Tensor&                         engram_anchor,
+                                      torch::Tensor&                               engram_output);
 
     void draftModelDecode(GptModelInputs&             model_input,
                           const StreamGroups&         stream_groups,
@@ -235,7 +237,9 @@ protected:
                                      const torch::Tensor&                         kv_cache_kernel_block_id,
                                      MergedOutput                                 draft_prefill_output,
                                      std::shared_ptr<torch::Event>                rejection_event,
-                                     std::shared_ptr<torch::Event>                draft_event);
+                                     std::shared_ptr<torch::Event>                draft_event,
+                                     const torch::Tensor&                         engram_anchor,
+                                     torch::Tensor&                               engram_output);
 
     // Synchronous dispatch also publishes the same per-stream device state as
     // the async path, using the host seqLength after specUpdate as truth.

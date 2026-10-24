@@ -260,6 +260,7 @@ cc_library(
     srcs = ["attention_input_metadata.cu"],
     hdrs = ["attention_input_metadata.h"],
     deps = [
+        ":cuda_graph_prepare",
         "@local_config_cuda//cuda:cuda_headers",
         "@local_config_cuda//cuda:cudart",
     ] + torch_deps(),
@@ -344,7 +345,7 @@ cc_library(
     name = "cuda_graph_prepare",
     srcs = ["cuda_graph_prepare.cu"],
     hdrs = ["cuda_graph_prepare.h"],
-    deps = torch_deps() + select({
+    deps = ["//rtp_llm/models_py/bindings/common/kernels:fuse_copy_util"] + torch_deps() + select({
         "@//:using_cuda": [
             "@local_config_cuda//cuda:cuda_headers",
             "@local_config_cuda//cuda:cudart",

@@ -4,6 +4,9 @@
 
 #include <c10/cuda/CUDAException.h>
 #include <c10/cuda/CUDAGuard.h>
+#include <c10/cuda/CUDACachingAllocator.h>
+#include <ATen/cuda/CachingHostAllocator.h>
+#include <ATen/cuda/CUDAContext.h>
 #include <c10/macros/Macros.h>
 
 #include <algorithm>
@@ -18,10 +21,115 @@ namespace {
 constexpr int kRowsPerLaunch    = 64;
 constexpr int kPrepareBlockSize = 256;
 
+struct DSparkVerifyPrepare {
+    const int32_t *anchors, *proposals, *history, *bases;
+    int32_t *tokens, *lengths, *lm_indexes, *output_history, *positions;
+    int64_t batch, width, factor, anchor_stride, proposal_row_stride, proposal_col_stride;
+    int64_t history_row_stride, history_col_stride, base_row_stride, base_col_stride;
+    int32_t* owned_proposals = nullptr;
+};
+
+__device__ int32_t dsparkVerifyToken(const DSparkVerifyPrepare& p, int64_t row, int64_t step) {
+    return step == 0 ? p.anchors[row * p.anchor_stride] :
+                       p.proposals[row * p.proposal_row_stride + (step - 1) * p.proposal_col_stride];
+}
+
+__global__ void mtpDSparkVerifyPrepareKernel(DSparkVerifyPrepare p, int64_t work_items) {
+    const int64_t tokens = p.batch * p.width;
+    for (int64_t i = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x; i < work_items;
+         i += static_cast<int64_t>(blockDim.x) * gridDim.x) {
+        if (i < p.batch) {
+            p.lengths[i] = p.width;
+        }
+        if (i < tokens) {
+            const auto step = i % p.width;
+            const auto token = dsparkVerifyToken(p, i / p.width, step);
+            p.tokens[i] = token;
+            p.lm_indexes[i] = i;
+            if (p.owned_proposals && step != 0) {
+                p.owned_proposals[(i / p.width) * (p.width - 1) + step - 1] = token;
+            }
+        }
+        if (p.output_history && i < tokens * 4) {
+            const int64_t token = i / 4, col = i % 4, row = token / p.width, step = token % p.width;
+            p.output_history[i] = col <= step ? dsparkVerifyToken(p, row, step - col) :
+                p.history[row * p.history_row_stride + (col - step) * p.history_col_stride];
+        }
+        if (p.positions && i < tokens * p.factor) {
+            const int64_t token = i / p.factor, col = i % p.factor;
+            p.positions[i] = p.bases[(token / p.width) * p.base_row_stride + col * p.base_col_stride]
+                             + token % p.width;
+        }
+    }
+}
+
+template<typename Token, typename Length>
+__global__ void mtpAdvanceEngramTokenWindowsKernel(const Token* anchor,
+                                                   const Token* tokens,
+                                                   const Length* lengths,
+                                                   Token* output,
+                                                   int64_t count,
+                                                   int64_t width,
+                                                   int64_t anchor_row_stride,
+                                                   int64_t anchor_col_stride,
+                                                   int64_t token_row_stride,
+                                                   int64_t token_col_stride,
+                                                   int64_t length_stride) {
+    for (int64_t idx = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x; idx < count;
+         idx += static_cast<int64_t>(blockDim.x) * gridDim.x) {
+        const int64_t row = idx / 4,
+                      col = idx % 4;
+        const int64_t accepted = lengths[row * length_stride];
+        CUDA_KERNEL_ASSERT(accepted >= 0 && accepted <= width);
+        output[idx] = col < accepted ? tokens[row * token_row_stride + (accepted - 1 - col) * token_col_stride] :
+                                       anchor[row * anchor_row_stride + (col - accepted) * anchor_col_stride];
+    }
+}
+
 template<typename Row>
 struct PrepareRows {
     Row rows[kRowsPerLaunch];
 };
+
+struct PageSnapshotRow {
+    const int32_t* source[2] = {};
+    int64_t stride[2] = {};
+    int64_t width[2] = {};
+};
+
+struct PageSnapshotGather {
+    PrepareRows<PageSnapshotRow> rows;
+    const int32_t* host[2];
+    int32_t* output[2];
+    int64_t groups[2], width[2], host_group_stride[2], host_row_stride[2];
+    int64_t batch, offset;
+};
+
+struct EngramUpdate {
+    const int32_t* anchor = nullptr;
+    const int32_t* tokens = nullptr;
+    int32_t* output = nullptr;
+    int64_t anchor_row_stride = 0, anchor_col_stride = 0;
+    int64_t token_row_stride = 0, token_col_stride = 0, width = 0;
+};
+static_assert(sizeof(PageSnapshotGather) < 4096, "Keep snapshot launch parameters below the CUDA 4 KiB limit");
+
+__global__ void mtpGatherPageSnapshotsKernel(PageSnapshotGather params) {
+    const int table = blockIdx.z;
+    const int64_t group = blockIdx.x;
+    if (group >= params.groups[table]) {
+        return;
+    }
+    const auto row = params.rows.rows[blockIdx.y];
+    const auto index = params.offset + blockIdx.y;
+    const auto* source = row.source[table];
+    const auto* host = params.host[table] + group * params.host_group_stride[table]
+                       + index * params.host_row_stride[table];
+    auto* output = params.output[table] + (group * params.batch + index) * params.width[table];
+    for (int64_t col = threadIdx.x; col < params.width[table]; col += blockDim.x) {
+        output[col] = source && col < row.width[table] ? source[group * row.stride[table] + col] : host[col];
+    }
+}
 
 static_assert(std::is_trivially_copyable<MtpRoundHeadRow>::value, "CUDA launch rows must be trivially copyable");
 static_assert(sizeof(PrepareRows<MtpRoundHeadRow>) + 64 <= 4096, "Keep launch parameters below the CUDA 4 KiB limit");
@@ -64,7 +172,8 @@ __global__ void mtpDispatchStatePrepareRowsKernel(PrepareRows<MtpSequenceRow> ro
                                                   int32_t* __restrict__ prev_seq_len,
                                                   int32_t* __restrict__ next_seq_len,
                                                   int64_t* __restrict__ hidden_idx,
-                                                  int32_t batch_size) {
+                                                  int32_t batch_size,
+                                                  EngramUpdate history) {
     const int32_t idx = threadIdx.x;
     if (idx < batch_size) {
         const auto    row      = rows.rows[idx];
@@ -73,6 +182,16 @@ __global__ void mtpDispatchStatePrepareRowsKernel(PrepareRows<MtpSequenceRow> ro
         prev_seq_len[idx]      = previous;
         next_seq_len[idx]      = previous + accepted;
         hidden_idx[idx]        = static_cast<int64_t>(accepted) - 1;
+        if (history.output) {
+            CUDA_KERNEL_ASSERT(accepted >= 0 && accepted <= history.width);
+            for (int col = 0; col < 4; ++col) {
+                history.output[idx * 4 + col] =
+                    col < accepted ? history.tokens[idx * history.token_row_stride
+                                                     + (accepted - 1 - col) * history.token_col_stride] :
+                                     history.anchor[idx * history.anchor_row_stride
+                                                     + (col - accepted) * history.anchor_col_stride];
+            }
+        }
     }
 }
 
@@ -207,6 +326,159 @@ void checkCudaVector(const torch::Tensor& tensor, const char* name, int64_t batc
 
 }  // namespace
 
+MtpDSparkVerifyInputs tryMtpDSparkVerifyPrepare(const torch::Tensor& anchors,
+                                              const torch::Tensor& proposals,
+                                              const torch::Tensor& history,
+                                              const torch::Tensor& position_bases,
+                                              cudaStream_t stream,
+                                              bool copy_proposals) {
+    auto eligible = [&](const torch::Tensor& t) {
+        return t.defined() && t.is_cuda() && t.scalar_type() == torch::kInt32
+               && t.get_device() == at::cuda::current_device();
+    };
+    if (!eligible(anchors) || anchors.dim() != 1 || !eligible(proposals) || proposals.dim() != 2
+        || proposals.size(0) != anchors.numel() || proposals.size(1) >= std::numeric_limits<int32_t>::max()) {
+        return {};
+    }
+    const int64_t batch = anchors.numel(), width = proposals.size(1) + 1;
+    if (batch > std::numeric_limits<int32_t>::max() / width) {
+        return {};
+    }
+    if (history.defined() && (!eligible(history) || history.dim() != 2 || history.size(0) != batch
+                              || history.size(1) != 4)) {
+        return {};
+    }
+    const bool has_positions = position_bases.defined() && position_bases.numel() > 0;
+    if (has_positions && (!eligible(position_bases) || position_bases.dim() != 2
+                          || position_bases.size(0) != batch)) {
+        return {};
+    }
+    const int64_t factor = has_positions ? position_bases.size(1) : 0;
+    const int64_t count = batch * width;
+    if (factor > std::numeric_limits<int64_t>::max() / std::max<int64_t>(1, count)) {
+        return {};
+    }
+    MtpDSparkVerifyInputs out;
+    out.tokens = torch::empty({count}, anchors.options());
+    out.input_lengths = torch::empty({batch}, anchors.options());
+    out.lm_indexes = torch::empty({count}, anchors.options());
+    if (copy_proposals) {
+        out.proposals = torch::empty({batch, width - 1}, anchors.options());
+    }
+    if (history.defined()) {
+        out.history = torch::empty({count, 4}, anchors.options());
+    }
+    if (has_positions) {
+        out.positions = torch::empty({count * factor}, anchors.options());
+    }
+    if (batch == 0) {
+        return out;
+    }
+    DSparkVerifyPrepare params{anchors.data_ptr<int32_t>(), proposals.data_ptr<int32_t>(),
+                              history.defined() ? history.data_ptr<int32_t>() : nullptr,
+                              has_positions ? position_bases.data_ptr<int32_t>() : nullptr,
+                              out.tokens.data_ptr<int32_t>(), out.input_lengths.data_ptr<int32_t>(),
+                              out.lm_indexes.data_ptr<int32_t>(),
+                              out.history.defined() ? out.history.data_ptr<int32_t>() : nullptr,
+                              out.positions.defined() ? out.positions.data_ptr<int32_t>() : nullptr,
+                              batch, width, factor, anchors.stride(0), proposals.stride(0), proposals.stride(1),
+                              history.defined() ? history.stride(0) : 0, history.defined() ? history.stride(1) : 0,
+                              has_positions ? position_bases.stride(0) : 0,
+                              has_positions ? position_bases.stride(1) : 0};
+    params.owned_proposals = out.proposals.defined() ? out.proposals.data_ptr<int32_t>() : nullptr;
+    const int64_t work_items = count * std::max<int64_t>(history.defined() ? 4 : 1, factor);
+    mtpDSparkVerifyPrepareKernel<<<prepareGridSize(work_items), kPrepareBlockSize, 0, stream>>>(params, work_items);
+    C10_CUDA_KERNEL_LAUNCH_CHECK();
+    const auto cuda_stream = c10::cuda::getStreamFromExternal(stream, anchors.get_device());
+    for (const auto& t : {anchors, proposals, history, position_bases}) {
+        if (t.defined() && t.is_cuda()) {
+            c10::cuda::CUDACachingAllocator::recordStream(t.storage().data_ptr(), cuda_stream);
+        }
+    }
+    return out;
+}
+
+bool tryMtpGatherPageSnapshots(const torch::Tensor& physical_host,
+                               const torch::Tensor& kernel_host,
+                               const std::vector<torch::Tensor>& physical_snapshots,
+                               const std::vector<torch::Tensor>& kernel_snapshots,
+                               torch::Tensor& physical_output,
+                               torch::Tensor& kernel_output,
+                               cudaStream_t stream) {
+    const torch::Tensor hosts[2] = {physical_host, kernel_host};
+    const std::vector<torch::Tensor>* snapshots[2] = {&physical_snapshots, &kernel_snapshots};
+    for (int table = 0; table < 2; ++table) {
+        const auto& host = hosts[table];
+        if (!host.defined() || !host.device().is_cpu() || (host.numel() > 0 && !host.is_pinned())
+            || host.scalar_type() != torch::kInt32 || host.dim() != 3 || host.stride(2) != 1
+            || snapshots[table]->size() != static_cast<size_t>(host.size(1))) {
+            return false;
+        }
+    }
+    if (physical_host.size(1) != kernel_host.size(1)) {
+        return false;
+    }
+    const auto device = c10::cuda::current_device();
+    for (int table = 0; table < 2; ++table) {
+        for (const auto& snapshot : *snapshots[table]) {
+            if (snapshot.defined()
+                && (!snapshot.is_cuda() || snapshot.get_device() != device || snapshot.scalar_type() != torch::kInt32
+                    || snapshot.dim() != 3 || snapshot.size(0) != hosts[table].size(0) || snapshot.size(1) != 1
+                    || snapshot.size(2) > hosts[table].size(2) || snapshot.stride(2) != 1)) {
+                return false;
+            }
+        }
+    }
+    torch::Tensor outputs[2];
+    auto storage = torch::empty({physical_host.numel() + kernel_host.numel()},
+                                physical_host.options().device(torch::kCUDA).pinned_memory(false));
+    outputs[0] = storage.narrow(0, 0, physical_host.numel()).view(physical_host.sizes());
+    outputs[1] = storage.narrow(0, physical_host.numel(), kernel_host.numel()).view(kernel_host.sizes());
+    PageSnapshotGather params{};
+    params.batch = physical_host.size(1);
+    for (int table = 0; table < 2; ++table) {
+        const auto& host = hosts[table];
+        params.host[table] = host.data_ptr<int32_t>();
+        params.output[table] = outputs[table].data_ptr<int32_t>();
+        params.groups[table] = host.size(0);
+        params.width[table] = host.size(2);
+        params.host_group_stride[table] = host.stride(0);
+        params.host_row_stride[table] = host.stride(1);
+        for (const auto& snapshot : *snapshots[table]) {
+            if (snapshot.defined()) {
+                c10::cuda::CUDACachingAllocator::recordStream(snapshot.storage().data_ptr(),
+                                                            at::cuda::getCurrentCUDAStream());
+            }
+        }
+    }
+    const auto groups = std::max(params.groups[0], params.groups[1]);
+    if (groups > 0 && (params.width[0] > 0 || params.width[1] > 0)) {
+        for (int64_t offset = 0; offset < params.batch; offset += kRowsPerLaunch) {
+            const auto count = std::min<int64_t>(kRowsPerLaunch, params.batch - offset);
+            params.offset = offset;
+            for (int64_t row = 0; row < count; ++row) {
+                for (int table = 0; table < 2; ++table) {
+                    const auto& snapshot = (*snapshots[table])[offset + row];
+                    params.rows.rows[row].source[table] = snapshot.defined() ? snapshot.data_ptr<int32_t>() : nullptr;
+                    params.rows.rows[row].width[table] = snapshot.defined() ? snapshot.size(2) : 0;
+                    params.rows.rows[row].stride[table] = snapshot.defined() ? snapshot.stride(0) : 0;
+                }
+            }
+            mtpGatherPageSnapshotsKernel<<<dim3(groups, count, 2), kPrepareBlockSize, 0, stream>>>(params);
+            C10_CUDA_KERNEL_LAUNCH_CHECK();
+        }
+        for (const auto& host : hosts) {
+            if (host.numel()) {
+                at::cuda::CachingHostAllocator_recordEvent(host.data_ptr(), host.storage().data_ptr().get_context(),
+                                                          at::cuda::getCurrentCUDAStream());
+            }
+        }
+    }
+    physical_output = std::move(outputs[0]);
+    kernel_output = std::move(outputs[1]);
+    return true;
+}
+
 void invokeMtpDSparkRoundHeadPrepare(const std::vector<MtpRoundHeadRow>& rows,
                                      torch::Tensor&                      anchors,
                                      torch::Tensor&                      committed_ends,
@@ -261,7 +533,10 @@ void invokeMtpDispatchStatePrepareRows(const std::vector<MtpSequenceRow>& rows,
                                        torch::Tensor&                     prev_seq_len,
                                        torch::Tensor&                     next_seq_len,
                                        torch::Tensor&                     hidden_idx,
-                                       cudaStream_t                       stream) {
+                                       cudaStream_t                       stream,
+                                       const torch::Tensor&               engram_anchor,
+                                       const torch::Tensor&               accepted_tokens,
+                                       const torch::Tensor&               engram_output) {
     const int64_t batch_size = static_cast<int64_t>(rows.size());
     checkCudaVector(accept_len, "accept_len", batch_size, torch::kInt32);
     checkCudaVector(prev_seq_len, "prev_seq_len", batch_size, torch::kInt32);
@@ -274,6 +549,25 @@ void invokeMtpDispatchStatePrepareRows(const std::vector<MtpSequenceRow>& rows,
         return;
     }
     const c10::cuda::CUDAGuard guard(accept_len.device());
+    EngramUpdate history;
+    if (engram_output.defined()) {
+        RTP_LLM_CHECK_WITH_INFO(engram_anchor.defined() && accepted_tokens.defined()
+                                    && engram_anchor.device() == accept_len.device()
+                                    && accepted_tokens.device() == accept_len.device()
+                                    && engram_output.device() == accept_len.device()
+                                    && engram_anchor.scalar_type() == torch::kInt32
+                                    && accepted_tokens.scalar_type() == torch::kInt32
+                                    && engram_output.scalar_type() == torch::kInt32
+                                    && engram_anchor.dim() == 2 && engram_anchor.size(0) == batch_size
+                                    && engram_anchor.size(1) == 4 && accepted_tokens.dim() == 2
+                                    && accepted_tokens.size(0) == batch_size && engram_output.dim() == 2
+                                    && engram_output.size(0) == batch_size && engram_output.size(1) == 4
+                                    && engram_output.is_contiguous(),
+                                "dispatch Engram tensors must be CUDA int32 [B,4]/[B,W]/[B,4]");
+        history = {engram_anchor.data_ptr<int32_t>(), accepted_tokens.data_ptr<int32_t>(),
+                   engram_output.data_ptr<int32_t>(), engram_anchor.stride(0), engram_anchor.stride(1),
+                   accepted_tokens.stride(0), accepted_tokens.stride(1), accepted_tokens.size(1)};
+    }
     for (int64_t offset = 0; offset < batch_size; offset += kRowsPerLaunch) {
         const int32_t count = static_cast<int32_t>(std::min<int64_t>(kRowsPerLaunch, batch_size - offset));
         PrepareRows<MtpSequenceRow> params{};
@@ -283,8 +577,14 @@ void invokeMtpDispatchStatePrepareRows(const std::vector<MtpSequenceRow>& rows,
                                                                             prev_seq_len.data_ptr<int32_t>() + offset,
                                                                             next_seq_len.data_ptr<int32_t>() + offset,
                                                                             hidden_idx.data_ptr<int64_t>() + offset,
-                                                                            count);
+                                                                            count,
+                                                                            history);
         C10_CUDA_KERNEL_LAUNCH_CHECK();
+        if (history.output) {
+            history.anchor += count * history.anchor_row_stride;
+            history.tokens += count * history.token_row_stride;
+            history.output += count * 4;
+        }
     }
 }
 
@@ -442,6 +742,43 @@ __global__ void mtpDispatchStatePrepareKernel(const int32_t* __restrict__ accept
     const int32_t al  = accept_len[idx];
     next_seq_len[idx] = prev_seq_len[idx] + al;
     hidden_idx[idx]   = static_cast<int64_t>(al - 1);
+}
+
+torch::Tensor tryMtpAdvanceEngramTokenWindows(const torch::Tensor& anchor,
+                                             const torch::Tensor& tokens,
+                                             const torch::Tensor& lengths) {
+    if (!anchor.is_cuda() || tokens.device() != anchor.device() || lengths.device() != anchor.device()
+        || anchor.dim() != 2 || anchor.size(1) != 4 || tokens.dim() != 2 || tokens.size(0) != anchor.size(0)
+        || lengths.dim() != 1 || lengths.numel() != anchor.size(0) || tokens.scalar_type() != anchor.scalar_type()
+        || (anchor.scalar_type() != torch::kInt32 && anchor.scalar_type() != torch::kInt64)
+        || (lengths.scalar_type() != torch::kInt32 && lengths.scalar_type() != torch::kInt64)) {
+        return {};
+    }
+    const c10::cuda::CUDAGuard device_guard(anchor.device());
+    auto output = torch::empty({anchor.size(0), 4}, anchor.options());
+    if (output.numel() == 0) {
+        return output;
+    }
+    AT_DISPATCH_INDEX_TYPES(anchor.scalar_type(), "mtp_advance_engram", [&] {
+        using Token = index_t;
+        AT_DISPATCH_INDEX_TYPES(lengths.scalar_type(), "mtp_advance_engram_lengths", [&] {
+            mtpAdvanceEngramTokenWindowsKernel<Token, index_t>
+                <<<prepareGridSize(output.numel()), kPrepareBlockSize, 0, c10::cuda::getCurrentCUDAStream()>>>(
+                    anchor.data_ptr<Token>(),
+                    tokens.data_ptr<Token>(),
+                    lengths.data_ptr<index_t>(),
+                    output.data_ptr<Token>(),
+                    output.numel(),
+                    tokens.size(1),
+                    anchor.stride(0),
+                    anchor.stride(1),
+                    tokens.stride(0),
+                    tokens.stride(1),
+                    lengths.stride(0));
+        });
+    });
+    C10_CUDA_KERNEL_LAUNCH_CHECK();
+    return output;
 }
 
 void invokeMtpDispatchStatePrepare(const torch::Tensor& accept_len,

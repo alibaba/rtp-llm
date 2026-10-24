@@ -8,6 +8,7 @@
 #include <cuda_bf16.h>
 #include <cuda_fp16.h>
 #include <cstdint>
+#include <c10/macros/Macros.h>
 
 namespace rtp_llm {
 namespace {
@@ -395,14 +396,17 @@ __global__ void markovArgmaxPartialsKernel(const float* __restrict__ logits,
 }
 
 // Argmax kernel 2: combine the per-row partials and write the row token.
-// One small CTA per row; the <= kMarkovSoftmaxMaxSplits partials are a few
-// cached scalar loads, so no second sync or redundant work is warranted.
+// One small CTA per row combines the partials. An optional embedding lookup
+// shares the selected token across the CTA without another kernel launch.
+template<typename Word>
 __global__ void markovArgmaxWriteKernel(int32_t* __restrict__ tokens_out,
                                         const float* __restrict__ partials_max,
                                         const float* __restrict__ partials_idx,
                                         const int splits,
-                                        const int vocab_size) {
+                                        const int vocab_size,
+                                        MarkovArgmaxOutputParams output) {
     const int row = blockIdx.x;
+    __shared__ int32_t selected_token;
     if (threadIdx.x == 0) {
         float row_max = -INFINITY;
         int   row_arg = vocab_size;
@@ -416,7 +420,36 @@ __global__ void markovArgmaxWriteKernel(int32_t* __restrict__ tokens_out,
                 row_arg = idx;
             }
         }
-        tokens_out[row] = static_cast<int32_t>(row_arg);
+        selected_token = output.d2t_map != nullptr ?
+                             static_cast<int32_t>(output.d2t_map[static_cast<int64_t>(row_arg) * output.map_stride]) :
+                             static_cast<int32_t>(row_arg);
+        tokens_out[static_cast<int64_t>(row) * output.token_stride] = selected_token;
+    }
+    if (output.next_embedding != nullptr) {
+        __syncthreads();
+        CUDA_KERNEL_ASSERT(selected_token >= 0 && selected_token < output.embedding_rows);
+        // Copy raw bits, preserving the exact index_select result for all FP dtypes.
+        const auto* weights = static_cast<const Word*>(output.embedding_weights);
+        auto* destination = static_cast<Word*>(output.next_embedding);
+        constexpr int vector_elements = sizeof(uint4) / sizeof(Word);
+        if (output.weight_col_stride == 1 && output.embedding_width % vector_elements == 0
+            && output.weight_row_stride % vector_elements == 0
+            && reinterpret_cast<uintptr_t>(weights) % alignof(uint4) == 0
+            && reinterpret_cast<uintptr_t>(destination) % alignof(uint4) == 0) {
+            const auto* source = reinterpret_cast<const uint4*>(weights)
+                                 + static_cast<int64_t>(selected_token) * (output.weight_row_stride / vector_elements);
+            auto* target = reinterpret_cast<uint4*>(destination)
+                           + static_cast<int64_t>(row) * (output.embedding_width / vector_elements);
+            for (int64_t col = threadIdx.x; col < output.embedding_width / vector_elements; col += blockDim.x) {
+                target[col] = source[col];
+            }
+        } else {
+            for (int64_t col = threadIdx.x; col < output.embedding_width; col += blockDim.x) {
+                destination[static_cast<int64_t>(row) * output.embedding_width + col] =
+                    weights[static_cast<int64_t>(selected_token) * output.weight_row_stride
+                            + col * output.weight_col_stride];
+            }
+        }
     }
 }
 
@@ -429,7 +462,8 @@ cudaError_t launchMarkovArgmaxStep(const float* logits,
                                    int          batch_size,
                                    int          vocab_size,
                                    float*       partials,
-                                   cudaStream_t stream) {
+                                   cudaStream_t stream,
+                                   MarkovArgmaxOutputParams output) {
     const int  splits = markovSoftmaxStepSplits(batch_size, vocab_size);
     const int  units  = kVectorized ? vocab_size / 4 : vocab_size;
     const int  chunk  = (units + splits - 1) / splits;
@@ -444,7 +478,13 @@ cudaError_t launchMarkovArgmaxStep(const float* logits,
     if (status != cudaSuccess) {
         return status;
     }
-    markovArgmaxWriteKernel<<<batch_size, 32, 0, stream>>>(tokens_out, partials_max, partials_idx, splits, vocab_size);
+    if (output.embedding_element_size == sizeof(uint32_t)) {
+        markovArgmaxWriteKernel<uint32_t><<<batch_size, 32, 0, stream>>>(
+            tokens_out, partials_max, partials_idx, splits, vocab_size, output);
+    } else {
+        markovArgmaxWriteKernel<uint16_t><<<batch_size, 32, 0, stream>>>(
+            tokens_out, partials_max, partials_idx, splits, vocab_size, output);
+    }
     return cudaGetLastError();
 }
 
@@ -557,7 +597,8 @@ cudaError_t invokeMarkovArgmaxStep(const float*    logits,
                                    int             batch_size,
                                    int             vocab_size,
                                    float*          partials,
-                                   cudaStream_t    stream) {
+                                   cudaStream_t    stream,
+                                   MarkovArgmaxOutputParams output) {
     if (batch_size == 0) {
         return cudaSuccess;
     }
@@ -583,10 +624,19 @@ cudaError_t invokeMarkovArgmaxStep(const float*    logits,
                                                        batch_size,                                                     \
                                                        vocab_size,                                                     \
                                                        partials,                                                       \
-                                                       stream);                                                        \
+                                                       stream,                                                         \
+                                                       output);                                                        \
         }                                                                                                              \
-        return launchMarkovArgmaxStep<BiasT, false>(                                                                   \
-            logits, logits_row_stride, bias_typed, temperature, tokens_out, batch_size, vocab_size, partials, stream); \
+        return launchMarkovArgmaxStep<BiasT, false>(logits,                                                            \
+                                                    logits_row_stride,                                                 \
+                                                    bias_typed,                                                        \
+                                                    temperature,                                                       \
+                                                    tokens_out,                                                        \
+                                                    batch_size,                                                        \
+                                                    vocab_size,                                                        \
+                                                    partials,                                                          \
+                                                    stream,                                                            \
+                                                    output);                                                           \
     } while (0)
 
     switch (bias_dtype) {

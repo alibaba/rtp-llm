@@ -82,15 +82,29 @@ size_t markovArgmaxStepPartialsBytes(int batch_size, int vocab_size);
 // `partials` needs markovArgmaxStepPartialsBytes(batch_size, vocab_size).
 // vocab_size must stay below 2^24 so the argmax index is exact through its
 // float partial slot; callers gate larger vocabs to the dense softmax path.
-cudaError_t invokeMarkovArgmaxStep(const float*    logits,
-                                   int64_t         logits_row_stride,
-                                   const void*     markov_bias,
-                                   MarkovBiasDType bias_dtype,
-                                   const float*    temperature,
-                                   int32_t*        tokens_out,
-                                   int             batch_size,
-                                   int             vocab_size,
-                                   float*          partials,
-                                   cudaStream_t    stream);
+struct MarkovArgmaxOutputParams {
+    int64_t        token_stride           = 1;
+    const int64_t* d2t_map                = nullptr;
+    int64_t        map_stride             = 1;
+    const void*    embedding_weights      = nullptr;
+    void*          next_embedding         = nullptr;
+    int64_t        embedding_rows         = 0;
+    int64_t        embedding_width        = 0;
+    int64_t        weight_row_stride      = 0;
+    int64_t        weight_col_stride      = 0;
+    int            embedding_element_size = 0;
+};
+
+cudaError_t invokeMarkovArgmaxStep(const float*             logits,
+                                   int64_t                  logits_row_stride,
+                                   const void*              markov_bias,
+                                   MarkovBiasDType          bias_dtype,
+                                   const float*             temperature,
+                                   int32_t*                 tokens_out,
+                                   int                      batch_size,
+                                   int                      vocab_size,
+                                   float*                   partials,
+                                   cudaStream_t             stream,
+                                   MarkovArgmaxOutputParams output = {});
 
 }  // namespace rtp_llm

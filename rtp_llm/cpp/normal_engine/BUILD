@@ -37,6 +37,7 @@ cc_library(
             "//rtp_llm/models_py/bindings/cuda/ops:standalone_ops",
             "//rtp_llm/models_py/bindings/cuda/kernels:deepselect_fp32",
             "//rtp_llm/models_py/bindings/cuda/kernels:mtp_target_verify_prepare",
+            "//rtp_llm/models_py/bindings/cuda/kernels:kernels_speculative_sampling",
             "//rtp_llm/cpp/cuda_graph:cuda_graph_impl",
         ],
         "@//:using_rocm": [

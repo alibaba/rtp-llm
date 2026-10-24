@@ -55,26 +55,43 @@ void invokeFusedCopy(const FusedD2DCopyParams& params, cudaStream_t stream) {
     fusedCopyKernel<<<grid, FUSED_COPY_THREADS, 0, stream>>>(params);
 }
 
+template<typename T>
+__device__ void copyStridedRow(const char* src, char* dst, size_t bytes, size_t lane, size_t lanes) {
+    const size_t tid    = lane * blockDim.x + threadIdx.x;
+    const size_t stride = lanes * blockDim.x;
+    const size_t count  = bytes / sizeof(T);
+    for (size_t i = tid; i < count; i += stride) {
+        reinterpret_cast<T*>(dst)[i] = reinterpret_cast<const T*>(src)[i];
+    }
+    for (size_t i = count * sizeof(T) + tid; i < bytes; i += stride) {
+        dst[i] = src[i];
+    }
+}
+
 __global__ void fusedStridedCopyKernel(FusedStridedCopyParams params) {
     const int copy_idx = blockIdx.y;
     if (copy_idx >= params.num_copies)
         return;
 
-    const size_t nrows      = params.num_rows[copy_idx];
-    const size_t rbytes     = params.row_bytes[copy_idx];
-    const size_t src_stride = params.src_row_stride[copy_idx];
-    const size_t dst_stride = params.dst_row_stride[copy_idx];
-    const char*  src        = reinterpret_cast<const char*>(params.src[copy_idx]);
-    char*        dst        = reinterpret_cast<char*>(params.dst[copy_idx]);
-
-    const size_t total      = nrows * rbytes;
-    const size_t global_tid = static_cast<size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
-    const size_t stride     = static_cast<size_t>(gridDim.x) * blockDim.x;
-
-    for (size_t idx = global_tid; idx < total; idx += stride) {
-        const size_t row            = idx / rbytes;
-        const size_t col            = idx % rbytes;
-        dst[row * dst_stride + col] = src[row * src_stride + col];
+    const size_t bytes = params.row_bytes[copy_idx];
+    const size_t rows  = params.num_rows[copy_idx];
+    if (bytes == 0 || rows == 0)
+        return;
+    const size_t row_lanes = min(rows, static_cast<size_t>(gridDim.x));
+    const size_t first_row = blockIdx.x % row_lanes;
+    const size_t lane      = blockIdx.x / row_lanes;
+    const size_t lanes     = (gridDim.x - 1 - first_row) / row_lanes + 1;
+    for (size_t row = first_row; row < rows; row += row_lanes) {
+        const char*     src = static_cast<const char*>(params.src[copy_idx]) + row * params.src_row_stride[copy_idx];
+        char*           dst = static_cast<char*>(params.dst[copy_idx]) + row * params.dst_row_stride[copy_idx];
+        const uintptr_t alignment = reinterpret_cast<uintptr_t>(src) | reinterpret_cast<uintptr_t>(dst);
+        if (alignment % alignof(int4) == 0) {
+            copyStridedRow<int4>(src, dst, bytes, lane, lanes);
+        } else if (alignment % alignof(int32_t) == 0) {
+            copyStridedRow<int32_t>(src, dst, bytes, lane, lanes);
+        } else {
+            copyStridedRow<char>(src, dst, bytes, lane, lanes);
+        }
     }
 }
 

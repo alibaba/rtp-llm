@@ -78,9 +78,8 @@ class DSv4DecodeFmhaImplConfigFP8:
 class DSv4DecodeFmhaImplFP8:
     """CUDA-graph-friendly DSv4 decode "FMHA impl".
 
-    Owns persistent metadata buffers; ``prepare_cuda_graph`` updates them
-    in place across replays so the captured graph reads fresh values
-    from stable addresses.
+    Owns persistent metadata buffers. The model graph updates them from
+    stable device inputs before executing its layers.
     """
 
     # CudaGraphRunner can leave captured host mirrors untouched for this
@@ -89,6 +88,10 @@ class DSv4DecodeFmhaImplFP8:
     # preserves stream dependencies and padding of those device inputs.
     cuda_graph_uses_device_metadata = True
     cuda_graph_uses_valid_request_count = True
+
+    @property
+    def cuda_graph_preparation_in_graph(self) -> bool:
+        return self._metadata_in_graph
 
     def __init__(
         self,
@@ -115,6 +118,10 @@ class DSv4DecodeFmhaImplFP8:
         self._paged_tokens_per_block: Dict[int, int] = {
             at: spec[1] for at, spec in config.paged_pool_specs.items()
         }
+        self.cuda_graph_valid_request_count_device = torch.full(
+            (), self.metadata.start_pos.numel(), dtype=torch.int32, device=device
+        )
+        self._metadata_in_graph = False
         self.prepare(attn_inputs, forbid_realloc=True)
 
     def support_cuda_graph(self) -> bool:
@@ -155,22 +162,49 @@ class DSv4DecodeFmhaImplFP8:
             capture_full_width_lengths=True,
         )
 
-    def prepare_cuda_graph(self, attn_inputs: Any, *, valid_request_count: int | None = None) -> None:
-        """Called by ``CudaGraphRunner::prepareInputs`` between every
-        replay.
-
-        Writes the REAL per-request effective lengths
-        (``capture_full_width_lengths=False``, the default): the captured
-        FlashMLA kernel reads these for per-query masking so the sparse decode
-        only scans ``min(window, seq_len)`` / ``seq_len // ratio`` instead of
-        the full capture width, while the frozen (full-width) tile schedule from
-        :meth:`prepare` stays a safe superset. See
-        ``opt_flash_mla/design/01_cuda_graph_sched_meta_freeze.md``.
-        """
+    def prepare_cuda_graph(
+        self, attn_inputs: Any, *, valid_request_count: int | torch.Tensor | None = None
+    ) -> None:
+        """Refresh standalone metadata or the captured graph's live-row input."""
         if valid_request_count is None:
-            # An older C++ runner cannot infer live rows from padded tensor
-            # shapes. Fail rather than silently retain capture-time validity.
-            raise ValueError("CUDA Graph replay requires the live request count from the matching C++ runner")
+            raise ValueError(
+                "CUDA Graph replay requires the live request count from the matching C++ runner"
+            )
+        count = self.cuda_graph_valid_request_count_device
+        if isinstance(valid_request_count, torch.Tensor):
+            if not (
+                valid_request_count.numel() == 1
+                and valid_request_count.dtype == torch.int32
+                and valid_request_count.device == count.device
+                and valid_request_count.is_contiguous()
+            ):
+                raise ValueError(
+                    "Decode live request count must be one contiguous device int32"
+                )
+        elif not 0 <= valid_request_count <= self.metadata.start_pos.numel():
+            raise ValueError("Decode valid request count must fit the captured batch")
+        if not self._metadata_in_graph:
+            self._update_replay_metadata(attn_inputs, valid_request_count)
+        # The C++ runner passes this same storage after its fused fill, so the
+        # normal replay path needs no additional copy or kernel launch here.
+        if isinstance(valid_request_count, torch.Tensor):
+            if valid_request_count.data_ptr() != count.data_ptr():
+                count.copy_(valid_request_count.reshape(()))
+        else:
+            count.fill_(valid_request_count)
+
+    def prepare_in_graph(self, attn_inputs: Any) -> None:
+        # Keep the full-width warmup schedule; replay reads a device count
+        # written by the runner's existing preparation node before this model.
+        if torch.cuda.is_current_stream_capturing():
+            self._update_replay_metadata(
+                attn_inputs, self.cuda_graph_valid_request_count_device
+            )
+            self._metadata_in_graph = True
+
+    def _update_replay_metadata(
+        self, attn_inputs: Any, valid_request_count: int | torch.Tensor
+    ) -> None:
         paged_block_tables = self._extract_paged_block_tables(attn_inputs)
         update_decode_metadata_in_place_fp8(
             self.metadata,

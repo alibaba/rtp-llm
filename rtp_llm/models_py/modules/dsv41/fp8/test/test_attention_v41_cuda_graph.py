@@ -23,6 +23,11 @@ from rtp_llm.models_py.modules.dsv41.fp8.attention_v41 import AttentionV41FP8
 @unittest.skipUnless(torch.cuda.is_available(), "CUDA required")
 class AttentionV41CudaGraphTest(unittest.TestCase):
     def test_real_verify_metadata_construction_and_replay(self):
+        for batch, width in ((1, 1), (7, 3), (64, 6)):
+            with self.subTest(batch=batch, width=width):
+                self._check_metadata_graph(batch, width)
+
+    def _check_metadata_graph(self, batch, width):
         from rtp_llm.models_py.modules.dsv41.decode.forward import (
             build_metadata_eager,
             decode_metadata_compress_ratios,
@@ -52,10 +57,14 @@ class AttentionV41CudaGraphTest(unittest.TestCase):
         }
         inputs = SimpleNamespace(
             is_target_verify=True,
-            input_lengths=torch.tensor([6, 6]),
-            prefix_lengths=torch.tensor([1, 127], dtype=torch.int32, device=device),
+            input_lengths=torch.full((batch,), width),
+            prefix_lengths=torch.arange(batch, dtype=torch.int32, device=device) * 3
+            + 1,
             kv_cache_kernel_block_id_device_by_group=[
-                torch.tensor([[1, 2, 3], [4, 5, 6]], dtype=torch.int32, device=device)
+                torch.arange(batch * 3, dtype=torch.int32, device=device).reshape(
+                    batch, 3
+                )
+                + 1
                 for _ in specs
             ],
         )
@@ -73,10 +82,10 @@ class AttentionV41CudaGraphTest(unittest.TestCase):
             tagged.prefix_lengths_device = tagged.prefix_lengths
             # Device-only graph preparation deliberately leaves host values
             # untouched. They must not become the replay position source.
-            tagged.prefix_lengths = torch.full((2,), -123, dtype=torch.int32)
+            tagged.prefix_lengths = torch.full((batch,), -123, dtype=torch.int32)
         config = DSv4DecodeFmhaImplConfigFP8(
-            max_batch_size=2,
-            q_len=6,
+            max_batch_size=batch,
+            q_len=width,
             window_size=128,
             head_dim=512,
             max_seq_len=256,
@@ -89,24 +98,39 @@ class AttentionV41CudaGraphTest(unittest.TestCase):
         meta = impl.metadata
         self.assertEqual(meta.slot_mapping_compressed, {})
         self.assertEqual(set(meta.pool_block_tables), set(specs))
+        impl.prepare_cuda_graph(inputs, valid_request_count=1)
         graph = torch.cuda.CUDAGraph()
         with torch.cuda.graph(graph):
+            impl.prepare_in_graph(inputs)
             captured_positions = meta.position_ids.clone()
             captured_slots = meta.swa_global_slots.clone()
             captured_decoder_slots = meta.decoder_swa_metadata.swa_global_slots.clone()
             captured_valid = meta.valid_requests.clone()
+        graph.replay()
+        torch.testing.assert_close(
+            captured_valid, torch.arange(batch, device=device) < 1
+        )
         validity_ptr = meta.valid_requests.data_ptr()
         self.assertIs(meta.decoder_swa_metadata.valid_requests, meta.valid_requests)
         original_input_lengths = inputs.input_lengths.clone()
-        for starts, live_requests in (([3, 129], 2), ([250, 245], 1), ([7, 130], 0), ([9, 128], 2)):
+        cases = ((3, batch), (129, batch // 2), (256 - width, 0), (9, batch))
+        for i, (offset, live_requests) in enumerate(cases):
+            starts = [(offset + row) % (257 - width) for row in range(batch)]
             inputs.prefix_lengths_device.copy_(
                 torch.tensor(starts, dtype=torch.int32, device=device)
             )
-            impl.prepare_cuda_graph(inputs, valid_request_count=live_requests)
+            for table in tables:
+                table.add_(1)
+            count = live_requests
+            if i % 2:
+                count = impl.cuda_graph_valid_request_count_device
+                count.fill_(live_requests)
+            impl.prepare_cuda_graph(inputs, valid_request_count=count)
             graph.replay()
             self.assertEqual(meta.valid_requests.data_ptr(), validity_ptr)
             torch.testing.assert_close(
-                captured_valid, torch.arange(2, device=device) < live_requests,
+                captured_valid,
+                torch.arange(batch, device=device) < live_requests,
             )
             # Selection validity must not shorten the six-query MTP span or
             # change positions/slots for either live or padded requests.
@@ -126,9 +150,9 @@ class AttentionV41CudaGraphTest(unittest.TestCase):
             )
             self.assertFalse(torch.equal(captured_slots, captured_decoder_slots))
             torch.testing.assert_close(
-                captured_positions.view(2, 6),
+                captured_positions.view(batch, width),
                 inputs.prefix_lengths_device[:, None]
-                + torch.arange(6, device=device, dtype=torch.int32),
+                + torch.arange(width, device=device, dtype=torch.int32),
             )
 
     def test_compression_indexing_and_candidates_replay(self):

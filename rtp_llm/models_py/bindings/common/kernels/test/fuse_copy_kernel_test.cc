@@ -534,6 +534,31 @@ TEST_F(FusedStridedCopyTest, PinnedHostToDeviceCopy) {
     cudaFree(d_dst);
 }
 
+// Check vector alignment, byte tails, empty rows, and untouched destination padding.
+TEST_F(FusedStridedCopyTest, AlignmentAndTailPreservePadding) {
+    for (size_t offset : {0u, 1u, 4u}) {
+        for (size_t width : {0u, 1u, 15u, 16u, 17u, 1096u, 16385u}) {
+            const size_t         rows = 11, src_stride = width + 23, dst_stride = width + 31;
+            std::vector<uint8_t> source(offset + rows * src_stride);
+            std::vector<uint8_t> expected(offset + rows * dst_stride, 0xA5);
+            for (size_t i = 0; i < source.size(); ++i)
+                source[i] = (i * 17 + 3) & 0xFF;
+            for (size_t row = 0; row < rows; ++row)
+                std::memcpy(
+                    expected.data() + offset + row * dst_stride, source.data() + offset + row * src_stride, width);
+            auto*                           src = deviceAlloc(source);
+            auto*                           dst = deviceAlloc(std::vector<uint8_t>(expected.size(), 0xA5));
+            rtp_llm::FusedStridedCopyParams params;
+            params.add(src + offset, dst + offset, rows, width, src_stride, dst_stride);
+            rtp_llm::invokeFusedStridedCopy(params, stream_);
+            CUDA_CHECK(cudaStreamSynchronize(stream_));
+            EXPECT_EQ(deviceToHost(dst, expected.size()), expected) << "offset=" << offset << " width=" << width;
+            cudaFree(src);
+            cudaFree(dst);
+        }
+    }
+}
+
 int main(int argc, char** argv) {
     ::testing::InitGoogleTest(&argc, argv);
     return RUN_ALL_TESTS();

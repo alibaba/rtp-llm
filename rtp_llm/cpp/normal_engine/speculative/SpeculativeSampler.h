@@ -11,6 +11,8 @@
 namespace rtp_llm {
 
 namespace speculative {
+struct DSparkSamplingGraphs;
+struct RejectionSamplingGraphs;
 
 // Shared DSpARK Target/Draft setting. Zero disables fixed-width truncation.
 int dsparkForceTopK();
@@ -24,6 +26,8 @@ public:
     torch::Tensor accept_len_cpu;
 
     std::shared_ptr<torch::Event> transfer_done_event;
+    // Retain graph-owned pinned results until asynchronous bookkeeping ends.
+    std::shared_ptr<void> graph_buffers;
 
     // Per-stream verify errors from SpecLogitsVerifyRunner (main #1006 contract).
     std::vector<std::optional<ErrorInfo>> processor_errors;
@@ -64,6 +68,8 @@ public:
     // as a point mass (token_ids_are_point_mass=true, all_probs undefined).
     // This may change proposals at ties and RNG consumption. Any stochastic
     // row keeps the dense-q sampling path.
+    // With copy_token_ids=false, graph output is borrowed until the next sample;
+    // the caller must take an owned copy before publishing it to other work.
     SamplerOutput sampleDSparkDraft(const torch::Tensor& base_logits,
                                     const torch::Tensor& anchors,
                                     const torch::Tensor& temperature,
@@ -74,9 +80,37 @@ public:
                                     size_t               draft_vocab_size,
                                     bool                 batch_all_greedy,
                                     int                  force_topk      = 0,
-                                    int                  joint_max_top_k = 0) const;
+                                    int                  joint_max_top_k = 0,
+                                    bool                 copy_token_ids  = true) const;
+
+    void prepareDSparkDraftGraphs(const torch::Tensor&    logits_buffer,
+                                  const torch::Tensor&    markov_w1,
+                                  const torch::Tensor&    markov_w2,
+                                  size_t                  draft_vocab_size,
+                                  const std::vector<int>& batch_sizes);
+    void prepareRejectionGraphs(const torch::Device& device, int vocab_size, const std::vector<int>& batch_sizes);
 
 private:
+    SamplerOutput                            sampleDSparkDraftEager(const torch::Tensor& base_logits,
+                                                                    const torch::Tensor& anchors,
+                                                                    const torch::Tensor& temperature,
+                                                                    const torch::Tensor& top_k,
+                                                                    const torch::Tensor& top_p,
+                                                                    const torch::Tensor& markov_w1,
+                                                                    const torch::Tensor& markov_w2,
+                                                                    size_t               draft_vocab_size,
+                                                                    bool                 batch_all_greedy,
+                                                                    int                  force_topk,
+                                                                    int                  joint_max_top_k) const;
+    std::shared_ptr<DSparkSamplingGraphs>    dspark_graphs_;
+    std::shared_ptr<RejectionSamplingGraphs> rejection_graphs_;
+    bool                                     replayRejectionGraph(SpeculativeSamplerOutput& output,
+                                                                  const torch::Tensor&      masks,
+                                                                  const torch::Tensor&      draft_ids,
+                                                                  const torch::Tensor&      target_ids,
+                                                                  const torch::Tensor&      uniform,
+                                                                  const torch::Tensor&      target_probs,
+                                                                  bool                      point_mass) const;
     void batchSample(SpeculativeSamplerOutput&           sample_output,
                      const std::list<GenerateStreamPtr>& streams,
                      SamplerOutput&                      draft_sampler_output,
