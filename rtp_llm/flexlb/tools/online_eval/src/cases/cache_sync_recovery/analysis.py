@@ -1,7 +1,7 @@
 """Adjudicate frozen cache pressure evidence without acquisition or presentation."""
 
 from analysis.checks import CheckResult, evaluate, invalid_check
-from analysis.gates import gate_checks
+from analysis.gates import gate_result
 
 VALIDITY_CHECKS = frozenset({"actual_sync_intensity", "response_shape", "clock_input_intensity",
                              "sampling_complete", "client_complete"})
@@ -40,14 +40,6 @@ def analyze(evidence):
         else:
             checks += [CheckResult(id=k, status="SKIP", detail="steady has no withdrawal event")
                        for k in ("victims_withdrawn", "victims_rebuilt")]
-    # Insufficient offered pressure/coverage is invalid evidence, not a product failure.
-    checks = [invalid_check(c.id, detail="workload evidence requirement not satisfied", actual=c.actual,
-                            expected=c.expected) if c.id in VALIDITY_CHECKS and c.status == "FAIL" else c
-              for c in checks]
     present = {c.id for c in checks}
     checks += [CheckResult(id=key, status="SKIP", detail="observation interrupted") for key in sorted(CHECK_IDS-present)]
-    verdict, rows = gate_checks(checks, [])
-    validity = "INVALID" if any(c.status == "ERROR" for c in checks) else "VALID"
-    return dict(verdict=verdict, validity=validity, checks=rows, errors=errors,
-                functional_checks=[c for c in rows if c["id"] not in VALIDITY_CHECKS],
-                validity_checks=[c for c in rows if c["id"] in VALIDITY_CHECKS])
+    return dict(gate_result(checks, requirements=VALIDITY_CHECKS), errors=errors)

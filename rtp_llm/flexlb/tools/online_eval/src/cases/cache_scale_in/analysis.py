@@ -319,8 +319,8 @@ def analyze(evidence):
     observed = ("unknown" if not windows or any(not w["valid"] for w in windows)
                 else "collapse" if first_collapse is not None else "stable")
     from analysis.checks import evaluate
-    from analysis.gates import gate_checks
-    verdict, checks = gate_checks([
+    from analysis.gates import gate_result
+    decision = gate_result([
         evaluate("collapse_detected", int(first_collapse is not None), "eq", int(expected == "collapse"),
                  evidence=dict(op="eq", threshold=threshold, sustain_s=p["sustain_s"],
                                first_collapse_s=first_collapse)),
@@ -346,10 +346,9 @@ def analyze(evidence):
         drain_diagnostics=[dict(index=i, code="DRAIN_INCOMPLETE", remaining_work=row.get("remaining_work"))
                            for i, row in enumerate(evidence.get("removals", []))
                            if row.get("drained") is False],
-        verdict=verdict,
+        **decision,
         expected_behavior=expected,
         observed_behavior=observed,
-        checks=checks,
         errors=sorted(set(errors)),
         threshold=threshold,
         baseline=baseline,

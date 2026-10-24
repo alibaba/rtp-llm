@@ -6,7 +6,7 @@ from reporting.run_model import RunPresentation
 
 
 def write_gate_report(directory, result, presentation, spec, *, identity, producer, meta, run):
-    context = RunPresentation.read(run)
+    context = RunPresentation.read(run, directory=directory)
     spec = selected_spec(spec, run, presentation, run=context)
     return write_bundle(directory, 'run', identity, dict(result, run=run), spec,
                         meta=provenance_from(run, meta, run=context), producer=producer, role='gate')

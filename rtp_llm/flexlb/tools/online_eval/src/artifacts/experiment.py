@@ -244,6 +244,8 @@ class ExperimentReader:
 
     @contextmanager
     def open(self, name):
+        if name == "run/result.json" and name not in self.entries:
+            name = "execution.json"  # Read the historical alias without storing another entry.
         entry = self.entries[name]
         digest, size = hashlib.sha256(), 0
         # Verify while copying to a disk spool, rather than holding all bytes twice.
@@ -317,7 +319,13 @@ class ExperimentReader:
             from reporting.workload import build_spec
             definition = self.read_json('experiment.json')
             from reporting.view_model import ViewDefinition
-            spec = build_spec(self.analysis(), None, presentation=ViewDefinition.read(definition['views'][name]))
+            from reporting.run_model import RunPresentation
+            analysis = self.analysis()
+            def read_gate(name):
+                with self.open('run/' + name) as stream:
+                    return stream.read()
+            run = RunPresentation.read(analysis, read_gate=read_gate)
+            spec = build_spec(analysis, None, presentation=ViewDefinition.read(definition['views'][name]), run=run)
         else:
             raise ValueError('view was not frozen in this experiment: ' + name)
         write_text(output, render(spec))
@@ -343,11 +351,21 @@ class ExperimentReader:
 
     def analysis(self):
         document = self.read_json('analysis.json')
-        if not matches_schema(document, 'experiment_analysis_schema_version', 1):
+        if not any(matches_schema(document, 'experiment_analysis_schema_version', version) for version in (1, 2)):
             raise ValueError('invalid experiment analysis')
         from monitoring.metric_store import MetricStore
         store = MetricStore(self.read_json(document['metrics']))
-        result = dict(document['metadata'])
+        result = {}
+        if document['experiment_analysis_schema_version'] == 2:
+            if document.get('execution') != 'execution.json':
+                raise ValueError('analysis requires canonical execution')
+            execution = self.read_json('execution.json')
+            fields = document.get('execution_fields')
+            if (not isinstance(fields, list) or any(type(key) is not str or key not in execution for key in fields)
+                    or len(set(fields)) != len(fields)):
+                raise ValueError('invalid analysis execution fields')
+            result = {key: execution[key] for key in fields}
+        result.update(document['metadata'])
         result['series'], result['statistic_sources'], _, _ = store.series(document['anchor_epoch_s'])
         return result
 
@@ -385,7 +403,6 @@ def publish_run(directory, definition, execution, *, analysis=None, deadline=Non
         with raw.publication():
             primary.add_json('experiment.json', definition, ArtifactRole.DEFINITION)
             primary.add_json('execution.json', execution, ArtifactRole.EXECUTION)
-            primary.add_json('run/result.json', execution, ArtifactRole.EXECUTION)
             for path in files:
                 primary.check()
                 if path.is_symlink():
@@ -418,10 +435,15 @@ def publish_run(directory, definition, execution, *, analysis=None, deadline=Non
                 primary.add_json('datasets/metric-catalog.json', [asdict(MetricDescriptor.from_definition(k, v))
                     for k, v in store.document['definitions'].items()], ArtifactRole.OBSERVATIONS)
                 if analysis is not None:
-                    primary.add_json('analysis.json', dict(experiment_analysis_schema_version=1,
+                    shared = [key for key, value in analysis.items()
+                              if key not in {'series', 'statistic_sources'} and key in execution
+                              and json.dumps(value, sort_keys=True, allow_nan=False)
+                              == json.dumps(execution[key], sort_keys=True, allow_nan=False)]
+                    primary.add_json('analysis.json', dict(experiment_analysis_schema_version=2,
                         metadata={key: value for key, value in analysis.items()
-                                  if key not in {'series', 'statistic_sources'}},
-                        metrics='run/metrics.json', anchor_epoch_s=analysis['clock_anchor']['epoch_s']),
+                                  if key not in {'series', 'statistic_sources'} and key not in shared},
+                        execution='execution.json',
+                        execution_fields=shared, metrics='run/metrics.json', anchor_epoch_s=analysis['clock_anchor']['epoch_s']),
                         ArtifactRole.ANALYSIS)
             reports = execution.get('workload', {}).get('reports', {})
             view_names = {str(Path(path).parent.resolve()): name for name, path in reports.items()}

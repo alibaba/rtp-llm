@@ -6,7 +6,7 @@ import math
 
 from schema_contract import matches_schema
 from analysis.checks import compare, CheckResult, evaluate
-from analysis.gates import gate_checks
+from analysis.gates import gate_result
 from analysis.statistics import percentile_nr
 from input_contract import finite_number as finite
 
@@ -161,7 +161,7 @@ def analyze(evidence):
             errors.append("observer coverage gap")
     except (AttributeError, KeyError, TypeError, ValueError) as exc:
         errors.append(str(exc))
-        result["verdict"], result["checks"] = gate_checks([], errors)
+        result.update(gate_result([], errors))
         return result
 
     cohort = [b[rid] for rid, r in a.items() if lo <= r["send_start_epoch_ms"] < hi]
@@ -278,6 +278,5 @@ def analyze(evidence):
                 inflight=inflight(end),
             )
         )
-    verdict, checks = gate_checks(checks, errors)
-    result.update(metrics=m, checks=checks, verdict=verdict)
+    result.update(metrics=m, **gate_result(checks, errors))
     return result

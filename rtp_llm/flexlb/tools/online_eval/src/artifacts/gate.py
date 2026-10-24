@@ -4,18 +4,24 @@ import hashlib
 import json
 from pathlib import Path
 from analysis.checks import CheckResult
-from analysis.gates import gate_checks
+from analysis.gates import gate_result
 from artifacts.errors import ArtifactNotProduced
 from schema_contract import matches_schema
 from artifacts.json_io import write_json
 
 
+def _validate_result(result):
+    summary = gate_result([CheckResult(**row) for row in result["checks"]])
+    if result["verdict"] != summary["verdict"]:
+        raise ValueError("gate verdict disagrees with typed checks")
+    if "validity" in result and result["validity"] != summary["validity"]:
+        raise ValueError("gate validity disagrees with typed checks")
+
+
 def freeze_gate(directory, name, evidence, result):
     directory = Path(directory)
     directory.mkdir(parents=True, exist_ok=True)
-    verdict, _ = gate_checks([CheckResult(**row) for row in result["checks"]], [])
-    if verdict != result["verdict"]:
-        raise ValueError("gate verdict disagrees with typed checks")
+    _validate_result(result)
     source = directory / f"{name}-gate-evidence.json"
     target = directory / f"{name}-gate-result.json"
     write_json(source, evidence)
@@ -54,13 +60,14 @@ def load_gate(directory, name):
         if not path.is_file() or _sha(path) != entry["sha256"]:
             raise ValueError("gate artifact checksum mismatch: " + filename)
         values.append(json.loads(path.read_text(encoding='utf-8')))
+    _validate_result(values[1])
     return tuple(values)
 
 
 def gate_check(identity, result, path, expected):
     return CheckResult(identity, {"INVALID": "ERROR", "PASS": "PASS", "FAIL": "FAIL"}[result["verdict"]],
                        detail="; ".join(result.get("errors", [])), actual=result["verdict"], expected=expected,
-                       evidence=dict(result=str(path), sha256=_sha(Path(path)), checks=result["checks"]))
+                       evidence=dict(result=Path(path).name, sha256=_sha(Path(path))))
 
 
 def commit_gate(directory, name, evidence, analyze):
@@ -94,3 +101,16 @@ def publish_gate(directory, name, evidence, result, project, write_report, *, re
     if 'run' in options:
         raise ValueError('offline publication does not accept a live run')
     return write_report(directory, evidence, result, **options)
+
+
+def referenced_checks(reference, read_bytes):
+    """Verify a frozen result reference before expanding presentation-only children."""
+    name = reference["result"]
+    if not isinstance(name, str) or Path(name).name != name or not name.endswith('-gate-result.json'):
+        raise ValueError("invalid gate result reference")
+    payload = read_bytes(name)
+    if hashlib.sha256(payload).hexdigest() != reference["sha256"]:
+        raise ValueError("gate result reference checksum mismatch")
+    result = json.loads(payload)
+    _validate_result(result)
+    return result["checks"]

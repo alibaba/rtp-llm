@@ -36,7 +36,7 @@ def write_report(directory, analysis, *, name=DEFAULT_VIEW):
     payload = dict(analysis)
     payload["report_view"] = name
     identity = payload["id"]
-    run = RunPresentation.read(payload)
+    run = RunPresentation.read(payload, directory=directory)
     return write_bundle(directory, "run", identity, payload,
                         build_spec(analysis, directory, name=name, run=run),
                         meta=provenance_from(payload, run=run), producer="workload")
@@ -99,12 +99,9 @@ def analysis_document(directory, result, evidence, series, statistic_sources):
     return dict(
         workload_analysis_schema_version=1,
         traffic_manifests=traffic, iterations=[],
-        configuration=result.get("implementation", {}).get("configuration"),
         implementation=result.get("implementation", {}),
         runtime_provenance=evidence.get("runtime_provenance"),
         id=result["id"], status=result["status"], workload=result["workload"],
-        checks=[dict(stage=stage["id"], **check) for stage in result["stages"] for check in stage["checks"]],
         stages=result["stages"], clock_anchor=evidence["clock_anchor"], phases=evidence["phases"],
         events=evidence.get("events", []), report_timeline=evidence.get("report_timeline"),
-        series=series, statistic_sources=statistic_sources, request_sources=[],
-        configuration_sha256=result.get("implementation", {}).get("configuration_sha256"))
+        series=series, statistic_sources=statistic_sources, request_sources=[])

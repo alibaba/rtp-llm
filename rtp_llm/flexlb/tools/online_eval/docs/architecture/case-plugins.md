@@ -36,6 +36,8 @@ YAML 声明环境、输入、阈值和视图；Python 定义步骤与业务算�
 
 整窗测量在收齐证据后调用 `commit_gate(directory, name, evidence, analyze)`，由纯 `analyze(evidence)` 产生结果，`freeze_gate` 核对 `verdict` 与检查一致后原子发布证据、结果和 manifest，返回 `(result, path)`。业务测量失败、证据无效和交付失败分别记录。
 
+`gate_result(checks, errors, requirements=...)` 统一派生 `verdict`、`validity` 和检查明细。实验前提未满足时，将对应失败检查记为 ERROR；业务阈值未满足保持 FAIL。case 保存一份 `checks`，展示时按检查身份分组，不重复保存功能与有效性检查列表。
+
 分阶段检查可在所需阶段完成并冻结 `CheckResult`，不必等整轮结束。两种执行方式不能改变原来的 cohort、窗口和归约语义。ERROR/INVALID 表示证据不足，FAIL 表示业务阈值未达标。
 
 `project_gate(directory, name, project)` 校验冻结文件后调用数值投影。未提交的门禁不伪造指标；已存在但损坏的 manifest 必须报错。`render_gate` 只读取冻结判定并调用报告函数。`publish_gate` 供离线发布已计算的结果使用，指标投影后重新读取冻结判定，避免投影中的可变对象污染展示。

@@ -53,7 +53,7 @@ def build_spec(payload, presentation):
 
 
 def write_report(directory, payload, presentation):
-    run = RunPresentation.read(payload)
+    run = RunPresentation.read(payload, directory=directory)
     spec = canonical_spec(build_spec(payload, presentation), payload, run=run)
     bundle = write_bundle(
         directory, "run", payload["id"] + "-" + presentation.report.identity,

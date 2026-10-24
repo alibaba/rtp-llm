@@ -75,7 +75,9 @@ def write_report(directory, raw, result, *, run=None, presentation=None):
     performance_end = next((e['epoch_s'] for e in raw['events'] if e.get('name', e['id']) == 'performance_observation_finished'), frames[-1]['epoch_s'])
     rows = [r for r in frames if zero <= r['epoch_s'] <= performance_end]
     gc = [g for g in raw.get('gc', []) if zero <= g['epoch_s'] <= performance_end]
-    checks = result['functional_checks'] if 'functional_checks' in result else result['checks']
+    from cases.cache_sync_recovery.analysis import VALIDITY_CHECKS
+    checks = [c for c in result['checks'] if c['id'] not in VALIDITY_CHECKS]
+    validity_checks = [c for c in result['checks'] if c['id'] in VALIDITY_CHECKS]
     launched = raw.get('launched_artifacts', {})
     events = [dict(id=e.get('name', e['id']), name=e.get('name', e['id']), t=e['epoch_s']-zero)
               for e in raw['events'] if zero <= e['epoch_s'] <= performance_end]
@@ -84,7 +86,7 @@ def write_report(directory, raw, result, *, run=None, presentation=None):
         outcome=dict(gate=result['verdict'], validity=result['validity']),
         source_evidence_sha256=hashlib.sha256(json.dumps(raw, sort_keys=True).encode()).hexdigest(), execution_result=result,
         presentation_renderer_sha256=hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
-        workload_acceptance={c['id']: c['status'] for c in result['validity_checks']}, launched_artifacts=launched)
+        workload_acceptance={c['id']: c['status'] for c in validity_checks}, launched_artifacts=launched)
     data.update(verdict=data['outcome']['gate'], runtime_validity=data['outcome']['validity'])
     baseline_ready = any(e['id']=='cache_baseline_ready' for e in raw['events'])
     summaries = {}
@@ -148,7 +150,7 @@ def write_report(directory, raw, result, *, run=None, presentation=None):
             panel["events"] = spec["panels"][0]["events"]
         spec["panels"] = panels
     spec['sections'].insert(0, table('实验有效性', ['检查','状态','实际值'],
-        [[c['id'],c['status'],str(c['actual'])] for c in result['validity_checks']]))
+        [[c['id'],c['status'],str(c['actual'])] for c in validity_checks]))
     # Keep execution/telemetry provenance from the common runner; preserve the case's own origin.
     if run is not None:
         from reporting.run_context import canonical_spec

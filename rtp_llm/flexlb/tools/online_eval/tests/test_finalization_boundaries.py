@@ -55,7 +55,9 @@ def test_online_gate_never_calls_metric_or_html_delivery(tmp_path, kind):
             output = module.finish(ctx, dict(flow=f, evidence=h), Deadline(100, lambda: 0))
     _, frozen = load_gate(tmp_path, kind)
     assert output.checks[0].actual == frozen["verdict"]
-    assert output.checks[0].evidence["checks"] == frozen["checks"]
+    from artifacts.gate import referenced_checks
+    assert "checks" not in output.checks[0].evidence
+    assert referenced_checks(output.checks[0].evidence, lambda name: (tmp_path / name).read_bytes()) == frozen["checks"]
     assert output.checks[0].status == {"PASS": "PASS", "FAIL": "FAIL", "INVALID": "ERROR"}[frozen["verdict"]]
     assert not (tmp_path / "reports").exists()
 

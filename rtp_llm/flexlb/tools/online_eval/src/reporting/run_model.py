@@ -19,17 +19,22 @@ class CheckNode:
     children: tuple['CheckNode', ...] = ()
 
     @classmethod
-    def read(cls, data, prefix):
+    def read(cls, data, prefix, read_gate=None):
         data = _object(data, 'check')
         if type(data.get('id')) is not str or not data['id']:
             raise ValueError('check identity must be a nonempty string')
         identity = prefix + '/' + data['id']
         evidence = _object(data.get('evidence', {}), 'check.evidence')
         children = evidence.get('checks', [])
+        if 'checks' not in evidence and 'result' in evidence and 'sha256' in evidence:
+            if read_gate is None:
+                raise ValueError('gate check reference requires its experiment source')
+            from artifacts.gate import referenced_checks
+            children = referenced_checks(evidence, read_gate)
         if not isinstance(children, list):
             raise ValueError('check children must be an array')
         return cls(identity, data['status'], data.get('actual'), data.get('expected'),
-                   tuple(cls.read(child, identity) for child in children))
+                   tuple(cls.read(child, identity, read_gate) for child in children))
 
     def rows(self):
         yield [self.identity, self.status, self.actual, self.expected]
@@ -80,10 +85,23 @@ class RunPresentation:
     events: tuple[dict, ...]
 
     @classmethod
-    def read(cls, analysis):
+    def read(cls, analysis, *, directory=None, read_gate=None):
         # Copy only presentation fields; archived time series are read elsewhere.
         if not isinstance(analysis, dict):
             raise ValueError('run analysis must be an object')
+        if directory is not None:
+            from pathlib import Path
+            read_gate = lambda name: (Path(directory) / name).read_bytes()
+        implementation = analysis.get('implementation', {})
+        if not isinstance(implementation, dict):
+            raise ValueError('run.implementation must be an object')
+        checks = analysis.get('checks')
+        if checks is None:
+            checks = [dict(stage=stage['id'], **check) for stage in analysis.get('stages', [])
+                      for check in stage['checks']]
+        analysis = dict(analysis, checks=checks,
+                        configuration=analysis.get('configuration', implementation.get('configuration')),
+                        configuration_sha256=analysis.get('configuration_sha256', implementation.get('configuration_sha256')))
         fields = set(cls.__dataclass_fields__) | {'id', 'workload'}
         analysis = copy.deepcopy({key: value for key, value in analysis.items() if key in fields})
         identity = analysis.get('id')
@@ -97,7 +115,7 @@ class RunPresentation:
         for check in checks:
             if not isinstance(check, dict) or type(check.get('stage')) is not str or not check['stage']:
                 raise ValueError('run check requires a nonempty stage')
-            nodes.append(CheckNode.read(check, check['stage']))
+            nodes.append(CheckNode.read(check, check['stage'], read_gate))
         return cls(identity, analysis.get('status'), RunValidity.read(workload),
             tuple(nodes),
             analysis.get('configuration'), analysis.get('configuration_sha256'),

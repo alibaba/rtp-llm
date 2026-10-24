@@ -356,7 +356,8 @@ def test_invalid_measurement_cannot_become_valid_functional_pass(failure):
     if failure == 'client': evidence['client']['complete'] = False
     result = analyze(evidence)
     assert result['verdict'] == result['validity'] == 'INVALID'
-    assert all(c['status'] == 'PASS' for c in result['functional_checks'] if c['status'] != 'SKIP')
+    from cases.cache_sync_recovery.analysis import VALIDITY_CHECKS
+    assert all(c['status'] == 'PASS' for c in result['checks'] if c['id'] not in VALIDITY_CHECKS and c['status'] != 'SKIP')
 
 
 @pytest.mark.parametrize('recovery', [False, True])
