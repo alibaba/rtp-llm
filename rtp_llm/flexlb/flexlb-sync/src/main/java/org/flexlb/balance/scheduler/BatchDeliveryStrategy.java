@@ -1,5 +1,6 @@
 package org.flexlb.balance.scheduler;
 
+import org.flexlb.balance.delivery.BlockedRequest;
 import org.flexlb.balance.delivery.CapacityBoundary;
 import org.flexlb.balance.delivery.DeliveryMetrics;
 import org.flexlb.balance.delivery.DeliveryResult;
@@ -71,14 +72,12 @@ public final class BatchDeliveryStrategy implements DeliveryStrategy {
         if (!groupAttempt.accepted()) {
             return BatchTransaction.blocked(
                     this,
-                    head,
-                    groupAttempt.boundary());
+                    new BlockedRequest(head, groupAttempt.boundary()));
         }
 
         BatchTransaction transaction = groupAttempt.value();
         List<ScheduledRequest> admitted = new ArrayList<>(candidates.size());
-        ScheduledRequest blockedItem = null;
-        CapacityBoundary blockedResult = null;
+        BlockedRequest blocked = null;
         try {
             for (int index = 0; index < candidates.size(); index++) {
                 ScheduledRequest item = candidates.get(index);
@@ -87,14 +86,12 @@ public final class BatchDeliveryStrategy implements DeliveryStrategy {
                 if (attempt.accepted()) {
                     admitted.add(item);
                 } else {
-                    blockedItem = item;
-                    blockedResult = attempt.boundary();
+                    blocked = new BlockedRequest(item, attempt.boundary());
                     break;
                 }
             }
             if (admitted.isEmpty()) {
-                transaction.select(
-                        List.of(), 0L, null, blockedItem, blockedResult);
+                transaction.select(List.of(), 0L, null, blocked);
                 return transaction;
             }
             long predictedMs = plannedPredictionMs.isPresent()
@@ -110,8 +107,7 @@ public final class BatchDeliveryStrategy implements DeliveryStrategy {
                     admitted,
                     predictedMs,
                     evaluator,
-                    blockedItem,
-                    blockedResult);
+                    blocked);
             return transaction;
         } catch (Throwable failure) {
             Throwable cleanup = close(transaction);
@@ -376,8 +372,7 @@ public final class BatchDeliveryStrategy implements DeliveryStrategy {
         private List<ScheduledRequest> items = List.of();
         private long predictedMs;
         private PrefillTimePredictor.Evaluator evaluator;
-        private ScheduledRequest blockedItem;
-        private CapacityBoundary blockedResult;
+        private BlockedRequest blocked;
         // After SUBMITTED, only the accepted executor task advances this
         // transaction. Scheduler abort/close may observe it but cannot reclaim it.
         private volatile Phase phase;
@@ -397,12 +392,10 @@ public final class BatchDeliveryStrategy implements DeliveryStrategy {
 
         private static BatchTransaction blocked(
                 BatchDeliveryStrategy owner,
-                ScheduledRequest blockedItem,
-                CapacityBoundary blockedResult) {
+                BlockedRequest blocked) {
             BatchTransaction transaction = new BatchTransaction(
                     owner, 0L, null, null);
-            transaction.blockedItem = blockedItem;
-            transaction.blockedResult = blockedResult;
+            transaction.blocked = blocked;
             transaction.phase = Phase.TERMINAL;
             return transaction;
         }
@@ -474,14 +467,12 @@ public final class BatchDeliveryStrategy implements DeliveryStrategy {
                 List<ScheduledRequest> exactItems,
                 long exactPredictionMs,
                 PrefillTimePredictor.Evaluator exactEvaluator,
-                ScheduledRequest exactBlockedItem,
-                CapacityBoundary exactBlockedResult) {
+                BlockedRequest exactBlocked) {
             requirePrepared("select");
             items = List.copyOf(exactItems);
             predictedMs = exactPredictionMs;
             evaluator = exactEvaluator;
-            blockedItem = exactBlockedItem;
-            blockedResult = exactBlockedResult;
+            blocked = exactBlocked;
         }
 
         @Override
@@ -490,13 +481,8 @@ public final class BatchDeliveryStrategy implements DeliveryStrategy {
         }
 
         @Override
-        public ScheduledRequest blockedItem() {
-            return blockedItem;
-        }
-
-        @Override
-        public CapacityBoundary blockedResult() {
-            return blockedResult;
+        public BlockedRequest blocked() {
+            return blocked;
         }
 
         @Override

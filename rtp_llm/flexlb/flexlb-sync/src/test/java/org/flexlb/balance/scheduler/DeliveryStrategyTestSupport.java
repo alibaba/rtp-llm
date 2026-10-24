@@ -116,15 +116,15 @@ public final class DeliveryStrategyTestSupport {
                     candidates, EVALUATOR, plannedPredictionMs)) {
                 if (transaction.items().isEmpty()) {
                     emptyBoundary = new TestBoundary(
-                            transaction.blockedItem(),
-                            transaction.blockedResult());
+                            transaction.blocked().item(),
+                            transaction.blocked().reason());
                     return "BOUNDARY";
                 }
                 preparedSelection = transaction;
-                if (transaction.blockedItem() != null) {
+                if (transaction.blocked() != null) {
                     committedBoundary = new TestBoundary(
-                            transaction.blockedItem(),
-                            transaction.blockedResult());
+                            transaction.blocked().item(),
+                            transaction.blocked().reason());
                 }
                 if (!commit) {
                     return "NOT_COMMITTED";

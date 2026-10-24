@@ -1,5 +1,6 @@
 package org.flexlb.balance.scheduler;
 
+import org.flexlb.balance.delivery.BlockedRequest;
 import org.flexlb.balance.delivery.CapacityBoundary;
 import org.flexlb.balance.delivery.DeliveryStrategy;
 import org.flexlb.balance.endpoint.DecodeEndpoint.DecodeRoutingView;
@@ -1246,9 +1247,7 @@ public final class WorkerBatcher {
                         candidates, evaluator,
                         plannedCommittedPredictionMs)) {
             if (transaction.items().isEmpty()) {
-                return commitBoundary(
-                        transaction.blockedItem(),
-                        transaction.blockedResult());
+                return commitBoundary(transaction.blocked());
             }
             BatcherCycleResult admitted = commitPreparedSelection(
                     transaction, decisionReason);
@@ -1257,8 +1256,8 @@ public final class WorkerBatcher {
         } catch (EndpointRetiredException retired) {
             // The resources are closed, no handoff happened and the head is still queued: requeue it
             // instead of letting the exception stop the loop and fail every queued request.
-            return commitBoundary(
-                    candidates.get(0), CapacityBoundary.failed(retired));
+            return commitBoundary(new BlockedRequest(
+                    candidates.get(0), CapacityBoundary.failed(retired)));
         }
     }
 
@@ -1312,8 +1311,8 @@ public final class WorkerBatcher {
         try {
             return operation.get();
         } catch (InvalidPrefillPredictionException failure) {
-            return commitBoundary(
-                    exactHead, CapacityBoundary.failed(failure));
+            return commitBoundary(new BlockedRequest(
+                    exactHead, CapacityBoundary.failed(failure)));
         }
     }
 
@@ -1371,11 +1370,10 @@ public final class WorkerBatcher {
             }
             try {
                 removedTerminalBoundary = removeSelectionBoundaryUnderLock(
-                        transaction.blockedItem(),
-                        transaction.blockedResult(), nowMs);
+                        transaction.blocked(), nowMs);
                 queueVersion.incrementAndGet();
-                committedReason = transaction.blockedResult() != null
-                        && transaction.blockedResult().unavailable()
+                committedReason = transaction.blocked() != null
+                        && transaction.blocked().reason().unavailable()
                         ? "delivery_capacity_prefix" : decisionReason;
                 remainingQueueDepth = activeIndex.size();
             } catch (Throwable failure) {
@@ -1392,9 +1390,7 @@ public final class WorkerBatcher {
             }
             try {
                 notifyTerminalAdmissionFailure(
-                        removedTerminalBoundary,
-                        transaction.blockedItem(),
-                        transaction.blockedResult());
+                        removedTerminalBoundary, transaction.blocked());
             } catch (Throwable notificationFailure) {
                 failure = appendFailure(failure, notificationFailure);
             }
@@ -1409,16 +1405,12 @@ public final class WorkerBatcher {
             signalCapacityAvailable();
         }
         notifyTerminalAdmissionFailure(
-                removedTerminalBoundary,
-                transaction.blockedItem(),
-                transaction.blockedResult());
+                removedTerminalBoundary, transaction.blocked());
         handoff(transaction, committedReason, remainingQueueDepth, precedingWork);
         return BatcherCycleResult.CAPACITY_CHANGED;
     }
 
-    private BatcherCycleResult commitBoundary(
-            ScheduledRequest blockedItem,
-            CapacityBoundary blockedResult) {
+    private BatcherCycleResult commitBoundary(BlockedRequest blocked) {
         BatcherCycleResult result = BatcherCycleResult.NO_ACTION;
         boolean removedTerminalBoundary = false;
         queueLock.lock();
@@ -1427,12 +1419,12 @@ public final class WorkerBatcher {
                 return result;
             }
             long nowMs = now();
-            if (blockedResult != null && blockedResult.unavailable()) {
+            if (blocked != null && blocked.reason().unavailable()) {
                 result = resolveEmptyCapacityUnderLock(
-                        blockedItem, blockedResult, nowMs);
+                        blocked.item(), blocked.reason(), nowMs);
             } else {
                 removedTerminalBoundary = removeSelectionBoundaryUnderLock(
-                        blockedItem, blockedResult, nowMs);
+                        blocked, nowMs);
                 if (removedTerminalBoundary) {
                     queueVersion.incrementAndGet();
                     result = BatcherCycleResult.CAPACITY_CHANGED;
@@ -1444,8 +1436,7 @@ public final class WorkerBatcher {
         if (removedTerminalBoundary) {
             signalCapacityAvailable();
         }
-        notifyTerminalAdmissionFailure(
-                removedTerminalBoundary, blockedItem, blockedResult);
+        notifyTerminalAdmissionFailure(removedTerminalBoundary, blocked);
         return result;
     }
 
@@ -1464,14 +1455,14 @@ public final class WorkerBatcher {
 
     /** Caller holds {@link #queueLock}. */
     private boolean removeSelectionBoundaryUnderLock(
-            ScheduledRequest blockedItem,
-            CapacityBoundary blockedResult,
+            BlockedRequest blocked,
             long nowMs) {
-        if (blockedItem == null
-                || blockedResult.unavailable()
-                || blockedResult == CapacityBoundary.OWNERSHIP_LOST) {
+        if (blocked == null
+                || blocked.reason().unavailable()
+                || blocked.reason() == CapacityBoundary.OWNERSHIP_LOST) {
             return false;
         }
+        ScheduledRequest blockedItem = blocked.item();
         if (!containsIdentity(blockedItem)
                 || blockedItem.requestExpired(nowMs)
                 || !removeTerminalActiveUnderLock(blockedItem)) {
@@ -1482,10 +1473,9 @@ public final class WorkerBatcher {
 
     private void notifyTerminalAdmissionFailure(
             boolean removed,
-            ScheduledRequest item,
-            CapacityBoundary boundary) {
-        if (removed && boundary.status() == CapacityBoundary.Status.FAILED) {
-            notifyAdmissionFailure(item, boundary.cause());
+            BlockedRequest blocked) {
+        if (removed && blocked.reason().status() == CapacityBoundary.Status.FAILED) {
+            notifyAdmissionFailure(blocked.item(), blocked.reason().cause());
         }
     }
 

@@ -1,5 +1,6 @@
 package org.flexlb.balance.endpoint;
 
+import org.flexlb.balance.delivery.BlockedRequest;
 import org.flexlb.balance.delivery.CapacityBoundary;
 import org.flexlb.balance.delivery.DeliveryMetrics;
 import org.flexlb.balance.delivery.DeliveryResult;
@@ -188,10 +189,8 @@ public final class EndpointTestSupport {
                                     DeliveryStrategy.Transaction.class);
                     org.mockito.Mockito.when(transaction.items())
                             .thenReturn(List.of());
-                    org.mockito.Mockito.when(transaction.blockedItem())
-                            .thenReturn(candidates.getFirst());
-                    org.mockito.Mockito.when(transaction.blockedResult())
-                            .thenReturn(PARKED_BOUNDARY);
+                    org.mockito.Mockito.when(transaction.blocked())
+                            .thenReturn(new BlockedRequest(candidates.getFirst(), PARKED_BOUNDARY));
                     return transaction;
                 });
         return delivery;

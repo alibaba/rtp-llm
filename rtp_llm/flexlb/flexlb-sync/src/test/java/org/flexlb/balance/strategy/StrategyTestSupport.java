@@ -1,5 +1,6 @@
 package org.flexlb.balance.strategy;
 
+import org.flexlb.balance.delivery.BlockedRequest;
 import org.flexlb.balance.delivery.CapacityBoundary;
 import org.flexlb.balance.delivery.DeliveryMetrics;
 import org.flexlb.balance.delivery.DeliveryStrategy;
@@ -210,10 +211,8 @@ final class StrategyTestSupport {
                     DeliveryStrategy.Transaction transaction =
                             Mockito.mock(DeliveryStrategy.Transaction.class);
                     Mockito.when(transaction.items()).thenReturn(List.of());
-                    Mockito.when(transaction.blockedItem())
-                            .thenReturn(candidates.getFirst());
-                    Mockito.when(transaction.blockedResult())
-                            .thenReturn(PARKED_BOUNDARY);
+                    Mockito.when(transaction.blocked())
+                            .thenReturn(new BlockedRequest(candidates.getFirst(), PARKED_BOUNDARY));
                     return transaction;
                 });
         return delivery;

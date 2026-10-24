@@ -1,5 +1,6 @@
 package org.flexlb.balance.endpoint;
 
+import org.flexlb.balance.delivery.BlockedRequest;
 import org.flexlb.balance.delivery.CapacityBoundary;
 import org.flexlb.balance.delivery.DeliveryResult;
 import org.flexlb.balance.delivery.DeliveryStrategy;
@@ -344,9 +345,9 @@ class WorkerBatcherRequestCapacityTest {
                 List<ScheduledRequest> candidates = invocation.getArgument(0);
                 DeliveryStrategy.Transaction transaction = mock(DeliveryStrategy.Transaction.class);
                 when(transaction.items()).thenReturn(List.of());
-                when(transaction.blockedItem()).thenReturn(candidates.getFirst());
-                when(transaction.blockedResult()).thenReturn(
-                        CapacityBoundary.failed(new IllegalStateException("delivery preparation failed")));
+                when(transaction.blocked()).thenReturn(new BlockedRequest(
+                        candidates.getFirst(),
+                        CapacityBoundary.failed(new IllegalStateException("delivery preparation failed"))));
                 return transaction;
             }).when(fixture.delivery).prepare(anyList(), any(), any());
             doAnswer(invocation -> {

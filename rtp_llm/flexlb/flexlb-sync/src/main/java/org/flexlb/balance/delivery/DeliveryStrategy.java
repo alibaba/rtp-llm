@@ -29,11 +29,9 @@ public interface DeliveryStrategy {
         List<ScheduledRequest> items();
 
         /**
-         * 本事务没有覆盖到的第一个候选请求，没有则为空。
+         * 本事务没有覆盖到的第一个候选请求及其原因，没有则为 null。
          */
-        ScheduledRequest blockedItem();
-
-        CapacityBoundary blockedResult();
+        BlockedRequest blocked();
 
         /**
          * 在同一把 endpoint 锁内提交归属，并记录排在前面的工作量。

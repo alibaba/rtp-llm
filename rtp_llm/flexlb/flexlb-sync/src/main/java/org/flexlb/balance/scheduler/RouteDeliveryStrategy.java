@@ -1,5 +1,6 @@
 package org.flexlb.balance.scheduler;
 
+import org.flexlb.balance.delivery.BlockedRequest;
 import org.flexlb.balance.delivery.CapacityBoundary;
 import org.flexlb.balance.delivery.DeliveryMetrics;
 import org.flexlb.balance.delivery.DeliveryStrategy;
@@ -56,28 +57,24 @@ public final class RouteDeliveryStrategy implements DeliveryStrategy {
         if (prefill == null) {
             return RouteTransaction.blocked(
                     this,
-                    head,
-                    CapacityBoundary.failed(missingEndpoint("Prefill", head)));
+                    new BlockedRequest(head, CapacityBoundary.failed(missingEndpoint("Prefill", head))));
         }
         RouteTransaction transaction = new RouteTransaction(this, prefill);
-        ScheduledRequest blockedItem = null;
-        CapacityBoundary blockedResult = null;
+        BlockedRequest blocked = null;
         try {
             for (ScheduledRequest item : candidates) {
                 if (prefill.isEngineSubQueueMode()) {
                     long maxDispatchLimit = item.ctx().getConfig().getDispatcher().getMaxInflightPerPrefillWorker();
                     if (!prefill.canDeliver(maxDispatchLimit, requestsPreparedForDelivery.size() + 1)) {
-                        blockedItem = item;
-                        blockedResult = CapacityBoundary.deliveryUnavailable(
-                                prefill.routeAdmissionAvailability(maxDispatchLimit));
+                        blocked = new BlockedRequest(item, CapacityBoundary.deliveryUnavailable(
+                                prefill.routeAdmissionAvailability(maxDispatchLimit)));
                         break;
                     }
                 }
                 CapacityBoundary.Attempt<ScheduledRequest> attempt =
                         requests.prepareRouteMember(item, transaction, evaluator);
                 if (!attempt.accepted()) {
-                    blockedItem = item;
-                    blockedResult = attempt.boundary();
+                    blocked = new BlockedRequest(item, attempt.boundary());
                     break;
                 }
                 requestsPreparedForDelivery.add(item);
@@ -87,10 +84,9 @@ public final class RouteDeliveryStrategy implements DeliveryStrategy {
                 if (cleanup != null) {
                     throw cleanup;
                 }
-                return RouteTransaction.blocked(
-                        this, blockedItem, blockedResult);
+                return RouteTransaction.blocked(this, blocked);
             }
-            transaction.select(requestsPreparedForDelivery, blockedItem, blockedResult);
+            transaction.select(requestsPreparedForDelivery, blocked);
             return transaction;
         } catch (Throwable failure) {
             Throwable cleanup = close(transaction);
@@ -203,8 +199,7 @@ public final class RouteDeliveryStrategy implements DeliveryStrategy {
         private final RouteDeliveryStrategy owner;
         private final PrefillEndpoint prefill;
         private List<ScheduledRequest> items = List.of();
-        private ScheduledRequest blockedItem;
-        private CapacityBoundary blockedResult;
+        private BlockedRequest blocked;
         private ArrayList<PrefillState.RouteReservation> reservations;
         private ArrayList<Boolean> itemOwnedReservations;
         private final java.util.IdentityHashMap<ScheduledRequest, Long> predictions = new java.util.IdentityHashMap<>();
@@ -223,19 +218,16 @@ public final class RouteDeliveryStrategy implements DeliveryStrategy {
 
         private RouteTransaction(
                 RouteDeliveryStrategy owner,
-                ScheduledRequest blockedItem,
-                CapacityBoundary blockedResult) {
+                BlockedRequest blocked) {
             this.owner = owner;
             this.prefill = null;
-            this.blockedItem = blockedItem;
-            this.blockedResult = blockedResult;
+            this.blocked = blocked;
         }
 
         private static RouteTransaction blocked(
                 RouteDeliveryStrategy owner,
-                ScheduledRequest blockedItem,
-                CapacityBoundary blockedResult) {
-            return new RouteTransaction(owner, blockedItem, blockedResult);
+                BlockedRequest blocked) {
+            return new RouteTransaction(owner, blocked);
         }
 
         synchronized CapacityBoundary.Attempt<ScheduledRequest> append(
@@ -288,12 +280,10 @@ public final class RouteDeliveryStrategy implements DeliveryStrategy {
 
         private synchronized void select(
                 List<ScheduledRequest> exactItems,
-                ScheduledRequest exactBlockedItem,
-                CapacityBoundary exactBlockedResult) {
+                BlockedRequest exactBlocked) {
             requirePrepared("select");
             items = exactItems;
-            blockedItem = exactBlockedItem;
-            blockedResult = exactBlockedResult;
+            blocked = exactBlocked;
         }
 
         @Override
@@ -302,13 +292,8 @@ public final class RouteDeliveryStrategy implements DeliveryStrategy {
         }
 
         @Override
-        public ScheduledRequest blockedItem() {
-            return blockedItem;
-        }
-
-        @Override
-        public CapacityBoundary blockedResult() {
-            return blockedResult;
+        public BlockedRequest blocked() {
+            return blocked;
         }
 
         @Override

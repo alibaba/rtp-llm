@@ -1,5 +1,6 @@
 package org.flexlb.balance.scheduler;
 
+import org.flexlb.balance.delivery.BlockedRequest;
 import org.flexlb.balance.delivery.CapacityBoundary;
 import org.flexlb.balance.delivery.DeliveryStrategy;
 import org.flexlb.balance.projection.WorkSnapshot;
@@ -21,13 +22,8 @@ final class WorkerBatcherTestSupport {
             }
 
             @Override
-            public ScheduledRequest blockedItem() {
-                return item;
-            }
-
-            @Override
-            public CapacityBoundary blockedResult() {
-                return boundary;
+            public BlockedRequest blocked() {
+                return new BlockedRequest(item, boundary);
             }
 
             @Override
