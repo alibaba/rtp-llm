@@ -121,9 +121,9 @@ protected:
 
     /// Returns a TransferTask whose sole block has addr/size as given.
     static std::shared_ptr<TransferTask>
-    makeTask(int64_t cache_key, void* addr, size_t size_bytes, int64_t deadline_offset_ms = 5000) {
+    makeTask(int64_t cache_key, void* addr, size_t size_bytes, int64_t deadline_offset_ms = 5000, bool is_cuda = false) {
         auto kbi = std::make_shared<KeyBlockInfo>();
-        kbi->blocks.push_back(BlockInfo{false, 0, 0, addr, size_bytes});
+        kbi->blocks.push_back(BlockInfo{is_cuda, 0, 0, addr, size_bytes});
         KeyBlockInfoMap block_infos;
         block_infos[cache_key] = kbi;
         return std::make_shared<TransferTask>(std::move(block_infos), currentTimeMs() + deadline_offset_ms);
@@ -290,6 +290,114 @@ TEST_F(TcpTaskContextTest, ExecuteCopy_AllBlocksEmpty_ReturnsFalse) {
     EXPECT_FALSE(ctx->executeCopy(copy_util));
 }
 
+TEST_F(TcpTaskContextTest, ExecuteCopy_TruncatedPayloadDoesNotWriteDestination) {
+    char destination[64];
+    std::memset(destination, 'S', sizeof(destination));
+    auto req = makeSimpleRequest("short", currentTimeMs() + 5000, 1, 64, std::string(8, 'X'));
+    ::tcp_transfer::TcpLayerBlockTransferResponse resp;
+    MockClosure closure;
+    auto ctx = makeContext(&req, &resp, &closure);
+    ctx->setTask(makeTask(1, destination, sizeof(destination)));
+    CudaCopyUtil copy_util;
+    EXPECT_FALSE(ctx->executeCopy(copy_util));
+    EXPECT_EQ(std::string(destination, sizeof(destination)), std::string(64, 'S'));
+}
+
+TEST_F(TcpTaskContextTest, ExecuteCopy_DuplicateKeyDoesNotWriteDestination) {
+    char destination[4] = {'S', 'S', 'S', 'S'};
+    auto req = makeSimpleRequest("duplicate", currentTimeMs() + 5000, 1, 4, "AAAA");
+    addRequestBlock(req, 1, {{4, "BBBB"}});
+    ::tcp_transfer::TcpLayerBlockTransferResponse resp;
+    MockClosure closure;
+    auto ctx = makeContext(&req, &resp, &closure);
+    ctx->setTask(makeTask(1, destination, sizeof(destination)));
+    CudaCopyUtil copy_util;
+    EXPECT_FALSE(ctx->executeCopy(copy_util));
+    EXPECT_EQ(std::string(destination, sizeof(destination)), "SSSS");
+}
+
+TEST_F(TcpTaskContextTest, ExecuteCopy_HostDescriptorCopiesToHost) {
+    char destination[4]{};
+    auto req = makeSimpleRequest("host", currentTimeMs() + 5000, 1, 4, "DATA");
+    ::tcp_transfer::TcpLayerBlockTransferResponse resp;
+    MockClosure closure;
+    auto ctx = makeContext(&req, &resp, &closure);
+    ctx->setTask(makeTask(1, destination, sizeof(destination)));
+    CudaCopyUtil copy_util;
+    ASSERT_TRUE(ctx->executeCopy(copy_util));
+    EXPECT_EQ(std::string(destination, sizeof(destination)), "DATA");
+}
+
+TEST_F(TcpTaskContextTest, ExecuteCopy_UnsupportedDeviceDescriptorIsPreserved) {
+    char destination[4] = {'S', 'S', 'S', 'S'};
+    auto req = makeSimpleRequest("privateuse1", currentTimeMs() + 5000, 1, 4, "DATA");
+    ::tcp_transfer::TcpLayerBlockTransferResponse resp;
+    MockClosure closure;
+    auto ctx = makeContext(&req, &resp, &closure);
+    auto task = makeTask(1, destination, sizeof(destination));
+    task->getBlockInfos().at(1)->blocks[0].device_type = static_cast<int32_t>(torch::kPrivateUse1);
+    ctx->setTask(task);
+    CudaCopyUtil copy_util;
+    EXPECT_FALSE(ctx->executeCopy(copy_util));
+    EXPECT_EQ(std::string(destination, sizeof(destination)), "SSSS");
+}
+
+TEST(CudaCopyUtilTest, ExplicitPrivateUse1DoesNotFallBackToHost) {
+    char source[4] = {'D', 'A', 'T', 'A'};
+    char destination[4] = {'S', 'S', 'S', 'S'};
+    CopyTask task{source, sizeof(source), destination};
+    task.is_cuda = false;
+    task.device_type = static_cast<int32_t>(torch::kPrivateUse1);
+    std::vector<CopyTask> tasks{task};
+    CudaCopyUtil copy_util;
+    EXPECT_FALSE(copy_util.batchCopyToHost(tasks));
+    EXPECT_FALSE(copy_util.batchCopyToDevice(tasks));
+    EXPECT_EQ(std::string(destination, sizeof(destination)), "SSSS");
+}
+
+TEST(CudaCopyUtilTest, InvalidLaterTaskRejectsWholeBatchBeforeHostCopy) {
+    char source[4] = {'D', 'A', 'T', 'A'};
+    char destination[4] = {'S', 'S', 'S', 'S'};
+    CopyTask host{source, sizeof(source), destination};
+    host.is_cuda = false;
+    CopyTask invalid{nullptr, sizeof(source), destination};
+    std::vector<CopyTask> tasks{host, invalid};
+    CudaCopyUtil copy_util;
+    EXPECT_FALSE(copy_util.batchCopyToHost(tasks));
+    EXPECT_EQ(std::string(destination, sizeof(destination)), "SSSS");
+}
+
+TEST(CudaCopyUtilTest, ExplicitDeviceKindOverridesLegacyFlag) {
+    char source[4] = {'D', 'A', 'T', 'A'};
+    char destination[4]{};
+    CopyTask task{source, sizeof(source), destination};
+    task.device_type = static_cast<int32_t>(torch::kCPU);
+    std::vector<CopyTask> tasks{task};
+    CudaCopyUtil copy_util;
+    ASSERT_TRUE(copy_util.batchCopyToHost(tasks));
+    EXPECT_EQ(std::string(destination, sizeof(destination)), "DATA");
+}
+
+TEST(CudaCopyUtilTest, MultipleCudaDeviceIndicesAreKeptSeparate) {
+    if (torch::cuda::device_count() < 2) {
+        GTEST_SKIP() << "Requires two CUDA devices";
+    }
+    auto first = torch::full({4}, 7, torch::TensorOptions().dtype(torch::kUInt8).device(torch::Device(torch::kCUDA, 0)));
+    auto second = torch::full({4}, 11, torch::TensorOptions().dtype(torch::kUInt8).device(torch::Device(torch::kCUDA, 1)));
+    at::cuda::getCurrentCUDAStream(0).synchronize();
+    at::cuda::getCurrentCUDAStream(1).synchronize();
+    char first_out[4]{}, second_out[4]{};
+    CopyTask first_task{first.data_ptr(), 4, first_out};
+    first_task.device_index = 0;
+    CopyTask second_task{second.data_ptr(), 4, second_out};
+    second_task.device_index = 1;
+    std::vector<CopyTask> tasks{first_task, second_task};
+    CudaCopyUtil copy_util;
+    ASSERT_TRUE(copy_util.batchCopyToHost(tasks));
+    EXPECT_EQ(std::string(first_out, 4), std::string(4, char{7}));
+    EXPECT_EQ(std::string(second_out, 4), std::string(4, char{11}));
+}
+
 // ===========================================================================
 // Group 2: executeCopy() — success paths (real GPU memory)
 // ===========================================================================
@@ -309,7 +417,7 @@ TEST_F(TcpTaskContextTest, ExecuteCopy_ValidData_DataCopiedToDevice) {
     ::tcp_transfer::TcpLayerBlockTransferResponse resp;
     MockClosure                                   closure;
     auto                                          ctx = makeContext(&req, &resp, &closure);
-    ctx->setTask(makeTask(key, gpu_buf.data_ptr(), data_size));
+    ctx->setTask(makeTask(key, gpu_buf.data_ptr(), data_size, 5000, true));
 
     CudaCopyUtil copy_util;
     ASSERT_TRUE(ctx->executeCopy(copy_util));
@@ -342,7 +450,7 @@ TEST_F(TcpTaskContextTest, ExecuteCopy_MixedBlocks_SkipsNullAddrBlocks) {
     // Task: sub_block[0] has addr==nullptr (skipped), sub_block[1] is valid.
     auto kbi = std::make_shared<KeyBlockInfo>();
     kbi->blocks.push_back(BlockInfo{false, 0, 0, nullptr, 0});  // skipped
-    kbi->blocks.push_back(BlockInfo{false, 0, 0, gpu_buf.data_ptr(), data_size});
+    kbi->blocks.push_back(BlockInfo{true, 0, 0, gpu_buf.data_ptr(), data_size});
     KeyBlockInfoMap block_infos;
     block_infos[key] = kbi;
     auto task        = std::make_shared<TransferTask>(std::move(block_infos), currentTimeMs() + 5000);

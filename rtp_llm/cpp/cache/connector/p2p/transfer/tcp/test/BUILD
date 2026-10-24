@@ -7,6 +7,12 @@ test_copts = [
 ] + copts()
 
 cc_test(
+    name = "transfer_validation_test",
+    srcs = ["TransferValidationTest.cc"],
+    deps = ["//rtp_llm/cpp/cache/connector/p2p/transfer/tcp:transfer_validation"],
+)
+
+cc_test(
     name = "tcp_task_context_test",
     srcs = [
         "TcpTaskContextTest.cc",
