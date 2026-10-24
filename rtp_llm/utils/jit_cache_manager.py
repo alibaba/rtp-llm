@@ -181,6 +181,14 @@ def _component_scope_parts(item: Component, scopes: dict[str, str]) -> tuple[str
         except importlib.metadata.PackageNotFoundError:
             ffi = "absent"
         parts += (f"ffi-{ffi}",)
+    if item.name == "flashinfer":
+        # FMHA ninja rules include headers supplied by flashinfer-cubin. Keep
+        # snapshots generated before that provider had a stable path isolated.
+        try:
+            cubin = _distribution_version("flashinfer-cubin")
+        except importlib.metadata.PackageNotFoundError:
+            cubin = "absent"
+        parts += (f"cubin-{cubin}",)
     if item.name == "cute_dsl" and os.environ.get("MODEL_TYPE") in (
         "kimi_k3",
         "kimi_k3_mtp",
