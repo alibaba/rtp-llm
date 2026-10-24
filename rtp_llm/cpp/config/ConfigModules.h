@@ -8,6 +8,7 @@
 #include "rtp_llm/cpp/config/MMTransportMode.h"
 #include "rtp_llm/cpp/config/RoleTypes.h"
 #include "rtp_llm/cpp/config/RdmaConfig.h"
+#include "rtp_llm/cpp/config/RdmaDeviceHealthConfig.h"
 #include "rtp_llm/models_py/bindings/core/Types.h"
 
 namespace rtp_llm {
@@ -432,7 +433,17 @@ struct CacheStoreConfig {
     int     cache_store_tcp_anet_rpc_thread_num          = 3;
     int     cache_store_tcp_anet_rpc_queue_num           = 100;
 
-    std::string to_string() const;
+    // RDMA device health monitoring defaults to disabled in C++, but enabled in cache_store_group_args.py.
+    bool        rdma_device_health_enabled                  = false;
+    std::string rdma_device_health_fault_handler            = "LOG";
+    int64_t     rdma_device_health_probe_interval_ms        = 1000;
+    int64_t     rdma_device_health_device_fault_confirm_ms  = 3000;
+    int64_t     rdma_device_health_fault_window_ms          = 600000;
+    int64_t     rdma_device_health_unavailable_threshold_ms = 120000;
+    int64_t     rdma_device_health_flap_warn_threshold      = 10;
+
+    RdmaDeviceHealthConfig toRdmaDeviceHealthConfig() const;
+    std::string            to_string() const;
 };
 
 struct BatchDecodeSchedulerConfig {

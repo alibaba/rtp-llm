@@ -2,6 +2,8 @@
 
 #include <cstdint>
 
+#include "rtp_llm/cpp/config/RdmaDeviceHealthConfig.h"
+
 namespace rtp_llm {
 namespace transfer {
 
@@ -20,6 +22,8 @@ struct TransferBackendConfig {
     int64_t tcp_channel_sweep_interval_calls = 0;
     /// Tcp/Rdma TransferService::waitCheckProc 轮询间隔（微秒）；<=0 时实现侧按 1000（1ms）处理
     int64_t transfer_wait_check_interval_us = 1000;
+    /// RDMA 设备健康监控配置，仅 BarexRdma backend 使用
+    RdmaDeviceHealthConfig rdma_device_health;
 };
 
 }  // namespace transfer

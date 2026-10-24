@@ -37,6 +37,7 @@ cc_library(
 cc_library(
     name = "transfer_backend_config",
     hdrs = ["TransferBackendConfig.h"],
+    deps = ["//rtp_llm/cpp/config:rdma_device_health_config"],
     visibility = ["//visibility:public"],
 )
 
