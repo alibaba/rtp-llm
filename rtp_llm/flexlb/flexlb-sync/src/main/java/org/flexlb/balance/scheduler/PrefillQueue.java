@@ -33,7 +33,6 @@ import java.util.Comparator;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.Objects;
 import java.util.OptionalLong;
 import java.util.concurrent.TimeUnit;
 import java.util.function.Supplier;
@@ -54,60 +53,6 @@ import java.util.function.Supplier;
  * snapshots and diagnostics identify queue-state changes.
  */
 public final class PrefillQueue {
-
-    /** Exact predicate captured by one scheduling cycle. */
-    private record BatcherCycleResult(
-            boolean placementCapacityChanged,
-            ScheduledRequest request,
-            DeliveryBlockReason unavailable,
-            long queueVersion,
-            long schedulingInputVersion,
-            long wakeAtMs,
-            String waitReason) {
-
-        private static final BatcherCycleResult NO_ACTION = simple(false);
-        private static final BatcherCycleResult CAPACITY_CHANGED = simple(true);
-
-        private BatcherCycleResult {
-            boolean waiting = request != null;
-            if ((placementCapacityChanged && waiting)
-                    || (!waiting && unavailable != null)) {
-                throw new IllegalArgumentException(
-                        "worker cycle requires either a capacity change or an exact wait predicate");
-            }
-        }
-
-        private static BatcherCycleResult capacityBlocked(ScheduledRequest item, DeliveryBlockReason unavailable) {
-            return new BatcherCycleResult(false, Objects.requireNonNull(item, "item"), unavailable, 0L, 0L, 0L,
-                    unavailable.estimateSemantics() == null
-                            ? "Prefill delivery capacity exhausted"
-                            : unavailable.estimateSemantics().blockedDetail());
-        }
-
-        private static BatcherCycleResult awaitingSchedulingChange(
-                ScheduledRequest head,
-                long queueVersion,
-                long schedulingInputVersion,
-                long wakeAtMs,
-                String waitReason) {
-            return new BatcherCycleResult(false,
-                    Objects.requireNonNull(head, "head"), null,
-                    queueVersion, schedulingInputVersion, wakeAtMs, waitReason);
-        }
-
-        private static BatcherCycleResult simple(boolean capacityChanged) {
-            return new BatcherCycleResult(
-                    capacityChanged, null, null, 0L, 0L, 0L, null);
-        }
-
-        private boolean capacityBlocked() {
-            return unavailable != null;
-        }
-
-        private boolean awaitingSchedulingChange() {
-            return request != null && unavailable == null;
-        }
-    }
 
     /**
      * PRIORITY queue order: delegates to
@@ -167,7 +112,7 @@ public final class PrefillQueue {
     private final Runnable capacityAvailableSignal =
             this::signalCapacityAvailable;
     /** Exact active head for which this worker is waiting on a capacity event. */
-    private BatcherCycleResult capacityBlockedHead;
+    private ProcessQueueResult capacityBlockedHead;
 
     /** Last waiting decision; timeout readers never acquire the queue lock. */
     private volatile QueueWaitSnapshot waitSnapshot;
@@ -319,7 +264,7 @@ public final class PrefillQueue {
             throw new IllegalStateException(
                     "capacity block snapshot requires the queue lock");
         }
-        BatcherCycleResult blocked = capacityBlockedHead;
+        ProcessQueueResult blocked = capacityBlockedHead;
         if (blocked == null
                 || queueState.activeIndex().peek() != blocked.request()
                 || blocked.request().requestExpired(now())
@@ -515,22 +460,22 @@ public final class PrefillQueue {
 
     // ==================== Delivery ownership ====================
 
-    private BatcherCycleResult admitAndDeliverCapacityFeasiblePrefix(List<ScheduledRequest> candidates,
+    private ProcessQueueResult admitAndDeliverCapacityFeasiblePrefix(List<ScheduledRequest> candidates,
                                                                      String decisionReason,
                                                                      PrefillTimePredictor.Evaluator evaluator,
                                                                      OptionalLong plannedCommittedPredictionMs) {
         if (candidates.isEmpty() || !selectionStillOwned(candidates)) {
-            return BatcherCycleResult.NO_ACTION;
+            return ProcessQueueResult.NO_ACTION;
         }
         try (DeliveryTransaction transaction =
                 deliveryStrategy.prepare(new DeliveryGroup(candidates, evaluator, plannedCommittedPredictionMs))) {
             if (transaction.requests().isEmpty()) {
                 return commitBoundary(transaction.blocked());
             }
-            BatcherCycleResult admitted = commitPreparedSelection(
+            ProcessQueueResult admitted = commitPreparedSelection(
                     transaction, decisionReason);
             return admitted == null
-                    ? BatcherCycleResult.NO_ACTION : admitted;
+                    ? ProcessQueueResult.NO_ACTION : admitted;
         } catch (EndpointRetiredException retired) {
             // The resources are closed, no handoff happened and the head is still queued: requeue it
             // instead of letting the exception stop the loop and fail every queued request.
@@ -578,9 +523,9 @@ public final class PrefillQueue {
         }
     }
 
-    private BatcherCycleResult runPredictionBound(
+    private ProcessQueueResult runPredictionBound(
             ScheduledRequest exactHead,
-            Supplier<BatcherCycleResult> operation) {
+            Supplier<ProcessQueueResult> operation) {
         try {
             return operation.get();
         } catch (InvalidPrefillPredictionException failure) {
@@ -609,7 +554,7 @@ public final class PrefillQueue {
         }
     }
 
-    private BatcherCycleResult commitPreparedSelection(DeliveryTransaction transaction, String decisionReason) {
+    private ProcessQueueResult commitPreparedSelection(DeliveryTransaction transaction, String decisionReason) {
         List<ScheduledRequest> items = transaction.requests();
         if (items.isEmpty()) {
             throw new IllegalStateException(
@@ -679,11 +624,11 @@ public final class PrefillQueue {
         notifyTerminalAdmissionFailure(
                 removedTerminalBoundary, transaction.blocked());
         deliver(transaction, committedReason, remainingQueueDepth, precedingWork);
-        return BatcherCycleResult.CAPACITY_CHANGED;
+        return ProcessQueueResult.CAPACITY_CHANGED;
     }
 
-    private BatcherCycleResult commitBoundary(BlockedRequest blocked) {
-        BatcherCycleResult result = BatcherCycleResult.NO_ACTION;
+    private ProcessQueueResult commitBoundary(BlockedRequest blocked) {
+        ProcessQueueResult result = ProcessQueueResult.NO_ACTION;
         boolean removedTerminalBoundary = false;
         queueState.lock();
         try {
@@ -699,7 +644,7 @@ public final class PrefillQueue {
                         blocked, nowMs);
                 if (removedTerminalBoundary) {
                     queueState.incrementQueueVersion();
-                    result = BatcherCycleResult.CAPACITY_CHANGED;
+                    result = ProcessQueueResult.CAPACITY_CHANGED;
                 }
             }
         } finally {
@@ -713,16 +658,16 @@ public final class PrefillQueue {
     }
 
     /** Caller holds the queue lock. */
-    private BatcherCycleResult resolveEmptyCapacityUnderLock(
+    private ProcessQueueResult resolveEmptyCapacityUnderLock(
             ScheduledRequest item,
             DeliveryBlockReason unavailable,
             long nowMs) {
         if (queueState.activeIndex().peek() != item
                 || item.requestExpired(nowMs)
                 || !containsIdentity(item)) {
-            return BatcherCycleResult.NO_ACTION;
+            return ProcessQueueResult.NO_ACTION;
         }
-        return BatcherCycleResult.capacityBlocked(item, unavailable);
+        return ProcessQueueResult.capacityBlocked(item, unavailable);
     }
 
     /** Caller holds the queue lock. */
@@ -821,17 +766,17 @@ public final class PrefillQueue {
 
     // ==================== Group decisions ====================
 
-    private BatcherCycleResult processQueue() {
+    private ProcessQueueResult processQueue() {
         return singleDecision
                 ? processSingleRequest()
                 : processFixedWindow();
     }
 
-    private BatcherCycleResult processSingleRequest() {
+    private ProcessQueueResult processSingleRequest() {
         ActiveQueueSnapshot snapshot = snapshotActiveQueueHead();
         ScheduledRequest head = snapshot.head();
         if (head == null) {
-            return BatcherCycleResult.NO_ACTION;
+            return ProcessQueueResult.NO_ACTION;
         }
 
         long nowMs = now();
@@ -840,7 +785,7 @@ public final class PrefillQueue {
                             + "reason=request_expired expires_at_ms={} now_ms={}",
                     head.requestId(), head.expiresAtMs(), nowMs);
             dropHead(head);
-            return BatcherCycleResult.CAPACITY_CHANGED;
+            return ProcessQueueResult.CAPACITY_CHANGED;
         }
 
         GroupPlanner.Shape shape =
@@ -872,9 +817,9 @@ public final class PrefillQueue {
         });
     }
 
-    private BatcherCycleResult processFixedWindow() {
+    private ProcessQueueResult processFixedWindow() {
         if (queueState.activeIndex().isEmpty()) {
-            return BatcherCycleResult.NO_ACTION;
+            return ProcessQueueResult.NO_ACTION;
         }
 
         // Cheap advisory gates avoid sorting while the worker cannot dispatch.
@@ -897,7 +842,7 @@ public final class PrefillQueue {
             queueState.unlock();
         }
         if (observedHead == null) {
-            return BatcherCycleResult.NO_ACTION;
+            return ProcessQueueResult.NO_ACTION;
         }
 
         long nowMs = now();
@@ -913,7 +858,7 @@ public final class PrefillQueue {
                     observedHead.requestId(),
                     observedHead.expiresAtMs(), nowMs);
             dropHead(observedHead);
-            return BatcherCycleResult.CAPACITY_CHANGED;
+            return ProcessQueueResult.CAPACITY_CHANGED;
         }
 
         boolean fullCandidate = observedSize >= batchMaxCount;
@@ -941,7 +886,7 @@ public final class PrefillQueue {
         ActiveQueueSnapshot snapshot = snapshotActiveQueue();
         ScheduledRequest head = snapshot.head();
         if (head == null) {
-            return BatcherCycleResult.NO_ACTION;
+            return ProcessQueueResult.NO_ACTION;
         }
 
         nowMs = now();
@@ -954,7 +899,7 @@ public final class PrefillQueue {
                             + "reason=request_expired expires_at_ms={} now_ms={}",
                     head.requestId(), head.expiresAtMs(), nowMs);
             dropHead(head);
-            return BatcherCycleResult.CAPACITY_CHANGED;
+            return ProcessQueueResult.CAPACITY_CHANGED;
         }
         ScheduledRequest expiredMember = firstExpiredMember(
                 snapshot.items(), batchMaxCount, nowMs);
@@ -964,7 +909,7 @@ public final class PrefillQueue {
                     expiredMember.requestId(),
                     expiredMember.expiresAtMs(), nowMs);
             dropHead(expiredMember);
-            return BatcherCycleResult.CAPACITY_CHANGED;
+            return ProcessQueueResult.CAPACITY_CHANGED;
         }
         GroupPlanner.Shape headShape =
                 GroupPlanner.Shape.empty().add(head.seqLen());
@@ -1010,7 +955,7 @@ public final class PrefillQueue {
         });
     }
 
-    private static BatcherCycleResult awaitCollectionWindow(
+    private static ProcessQueueResult awaitCollectionWindow(
             ScheduledRequest head,
             long queueVersion,
             long schedulingInputVersion,
@@ -1018,16 +963,16 @@ public final class PrefillQueue {
             long collectionWindowMs) {
         long collectionDeadline = GroupPlanner.collectionDeadlineMs(
                 windowOpenedAtMs, collectionWindowMs);
-        return BatcherCycleResult.awaitingSchedulingChange(
+        return ProcessQueueResult.awaitingSchedulingChange(
                 head, queueVersion, schedulingInputVersion,
                 Math.min(collectionDeadline, head.expiresAtMs()), "Prefill collection window");
     }
 
-    private static BatcherCycleResult awaitPrefillKvCapacity(
+    private static ProcessQueueResult awaitPrefillKvCapacity(
             ScheduledRequest head,
             long queueVersion,
             long schedulingInputVersion) {
-        return BatcherCycleResult.awaitingSchedulingChange(
+        return ProcessQueueResult.awaitingSchedulingChange(
                 head, queueVersion, schedulingInputVersion,
                 head.expiresAtMs(), "Prefill KV capacity exhausted");
     }
@@ -1047,7 +992,7 @@ public final class PrefillQueue {
         return null;
     }
 
-    private BatcherCycleResult admitDecisionGroup(List<ScheduledRequest> picked,
+    private ProcessQueueResult admitDecisionGroup(List<ScheduledRequest> picked,
                                                   GroupPlanner.Shape shape,
                                                   String reason,
                                                   PrefillTimePredictor.Evaluator evaluator,
@@ -1055,7 +1000,7 @@ public final class PrefillQueue {
         BatchCapacityView capacity = BatchCapacityView.of(prefillEndpoint, config);
         if ((picked.size() > 1 && !shape.fitsCompute(capacity.batchTokenCapacity()))
                 || !shape.fitsKv(capacity.kvCapacityFor(shape))) {
-            return BatcherCycleResult.NO_ACTION;
+            return ProcessQueueResult.NO_ACTION;
         }
         return admitAndDeliverCapacityFeasiblePrefix(
                 picked, reason, evaluator,
@@ -1101,7 +1046,7 @@ public final class PrefillQueue {
             return;
         }
 
-        BatcherCycleResult result = processQueue();
+        ProcessQueueResult result = processQueue();
         if (result.waitReason() != null) {
             recordQueueWait(result.request(), result.waitReason());
         }
@@ -1138,7 +1083,7 @@ public final class PrefillQueue {
      * the release-before-await race without polling.
      */
     private void awaitBlockedHeadCapacity(
-            BatcherCycleResult blocked)
+            ProcessQueueResult blocked)
             throws InterruptedException {
         queueState.lockInterruptibly();
         try {
@@ -1175,7 +1120,7 @@ public final class PrefillQueue {
      * for its deadline. Every predicate and signal is serialized by the queue lock.
      */
     private void awaitSchedulingChange(
-            BatcherCycleResult waiting)
+            ProcessQueueResult waiting)
             throws InterruptedException {
         queueState.lockInterruptibly();
         try {
@@ -1220,7 +1165,7 @@ public final class PrefillQueue {
 
     /** Own the blocked head, its listener and estimate invalidation under the queue lock. */
     private void setCapacityBlockedHeadUnderLock(
-            BatcherCycleResult blocked) {
+            ProcessQueueResult blocked) {
         if (!queueState.isLockedByCurrentThread()) {
             throw new IllegalStateException(
                     "capacity block update requires the queue lock");
