@@ -6,7 +6,9 @@ import io.grpc.Status;
 import io.grpc.stub.StreamObserver;
 import io.netty.channel.EventLoopGroup;
 import io.netty.channel.nio.NioEventLoopGroup;
+import org.flexlb.cache.match.CacheAwareService;
 import org.flexlb.config.ConfigService;
+import org.flexlb.config.DispatcherConfig;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.consistency.LBStatusConsistencyService;
 import org.flexlb.dao.loadbalance.Response;
@@ -62,8 +64,8 @@ import static org.mockito.Mockito.when;
  *       MAX_FORWARD_HOPS=1 negative guards.</li>
  * </ol></p>
  *
- * <p>Unresolved delivery uses the existing terminal error (8511). Proven unsent
- * requests may route locally; ambiguous delivery is terminal.</p>
+ * <p>Transport I/O failures permit local routing. RPC failures without a
+ * transport cause retain the terminal error (8511).</p>
  */
 class ScheduleForwardMatrixTest {
 
@@ -74,7 +76,9 @@ class ScheduleForwardMatrixTest {
      * reachable without any real interface binding.
      */
     private static final String FOLLOWER_IP = "127.0.0.5";
+
     private static final String LIVE_MASTER = "10.0.0.9:7001";
+
     /**
      * Dead master for state ②: 127.0.0.1:1 refuses instantly on loopback
      * (verified on this macOS: 127.0.0.2:1 is silently dropped — SYN
@@ -83,11 +87,13 @@ class ScheduleForwardMatrixTest {
      * brief's same-machine pitfall) does not intercept before the RPC.
      */
     private static final String DEAD_MASTER = "127.0.0.1:1";
+
     private static final int TERMINAL_FORWARD_CODE =
             StrategyErrorType.BATCH_SLO_EXPIRED.getErrorCode();
 
     // ---- shared mocks for the schedule() matrix ----
     private RouteService routeService;
+    private CacheAwareService cacheAwareService;
     private LBStatusConsistencyService consistency;
     private EngineHealthReporter engineHealthReporter;
     private FlexlbGrpcForwarder grpcForwarder;
@@ -107,18 +113,21 @@ class ScheduleForwardMatrixTest {
         grpcForwarder = mock(FlexlbGrpcForwarder.class);
 
         ConfigService configService = mock(ConfigService.class);
-        when(configService.loadBalanceConfig()).thenReturn(org.flexlb.mock.TestFlexlbConfigs.create());
+        when(configService.loadBalanceConfig()).thenReturn(routingConfig());
 
+        cacheAwareService = mock(CacheAwareService.class);
 
-        service = new FlexlbServiceImpl(
-                routeService,
-                consistency,
-                engineHealthReporter,
-                grpcForwarder,
-                configService,
-                mock(BatchSchedulerReporter.class),
-                mock(ServerScheduleLatencyRecorder.class),
-                mock(RequestSchedulerReporter.class));
+        service =
+                new FlexlbServiceImpl(
+                        routeService,
+                        consistency,
+                        engineHealthReporter,
+                        grpcForwarder,
+                        configService,
+                        mock(BatchSchedulerReporter.class),
+                        mock(ServerScheduleLatencyRecorder.class),
+                        mock(RequestSchedulerReporter.class),
+                        cacheAwareService);
 
         pvLogger = (ch.qos.logback.classic.Logger) LoggerFactory.getLogger("pvLogger");
         pvAppender = new ListAppender<>();
@@ -144,7 +153,8 @@ class ScheduleForwardMatrixTest {
 
     @Test
     @Timeout(value = 10, unit = TimeUnit.SECONDS)
-    @DisplayName("state ① follower became master (ZK re-election done): LOCAL_MASTER routes locally")
+    @DisplayName(
+            "state ① follower became master (ZK re-election done): LOCAL_MASTER routes locally")
     void state1LocalMasterRoutesLocally() {
         when(consistency.isNeedConsistency()).thenReturn(true);
         when(consistency.isMaster()).thenReturn(true);
@@ -163,14 +173,16 @@ class ScheduleForwardMatrixTest {
 
     @Test
     @Timeout(value = 10, unit = TimeUnit.SECONDS)
-    @DisplayName("state ② attempted forward with unresolved owner: terminal 8511, no local dispatch")
+    @DisplayName(
+            "state ② attempted forward with unresolved owner: terminal 8511, no local dispatch")
     void state2AmbiguousForwardRemainsTerminalWithoutCancel() {
         when(consistency.isNeedConsistency()).thenReturn(true);
         when(consistency.isMaster()).thenReturn(false);
-        when(grpcForwarder.forwardScheduleToMaster(any())).thenReturn(
-                CompletableFuture.completedFuture(
-                        FlexlbGrpcForwarder.MasterForwardResult.failed(
-                                Status.UNAVAILABLE.asRuntimeException(), DEAD_MASTER)));
+        when(grpcForwarder.forwardScheduleToMaster(any()))
+                .thenReturn(
+                        CompletableFuture.completedFuture(
+                                FlexlbGrpcForwarder.MasterForwardResult.failed(
+                                        Status.UNAVAILABLE.asRuntimeException(), DEAD_MASTER)));
 
         StreamObserver<FlexlbScheduleProtocol.FlexlbScheduleResponsePB> observer =
                 mock(StreamObserver.class);
@@ -194,14 +206,43 @@ class ScheduleForwardMatrixTest {
     }
 
     @Test
+    void connectionResetRoutesLocallyWhileLeaderViewIsStale() {
+        when(consistency.isNeedConsistency()).thenReturn(true);
+        when(consistency.isMaster()).thenReturn(false);
+        when(grpcForwarder.forwardScheduleToMaster(any()))
+                .thenReturn(
+                        CompletableFuture.completedFuture(
+                                FlexlbGrpcForwarder.MasterForwardResult.failed(
+                                        Status.UNKNOWN
+                                                .withCause(
+                                                        new java.net.SocketException(
+                                                                "Connection reset by peer"))
+                                                .asRuntimeException(),
+                                        LIVE_MASTER)));
+        stubSuccessfulLocalRoute();
+        StreamObserver<FlexlbScheduleProtocol.FlexlbScheduleResponsePB> observer =
+                mock(StreamObserver.class);
+
+        service.schedule(request(90_007L), observer);
+
+        verify(routeService, times(1)).route(any());
+        verify(grpcForwarder, times(1)).forwardScheduleToMaster(any());
+        verify(grpcForwarder, never()).forwardCancelToMaster(any());
+        assertSuccessfulResponse(observer);
+        verify(cacheAwareService).updateFromRoutedRequest(any(), any());
+        assertSinglePvContains("\"scheduleOrigin\":\"LOCAL_FALLBACK\"");
+    }
+
+    @Test
     @Timeout(value = 10, unit = TimeUnit.SECONDS)
     @DisplayName("state ③ MASTER_NULL election window: LOCAL_FALLBACK routes locally, no cancel")
     void state3MasterNullFallsBackToLocalRouting() {
         when(consistency.isNeedConsistency()).thenReturn(true);
         when(consistency.isMaster()).thenReturn(false);
-        when(grpcForwarder.forwardScheduleToMaster(any())).thenReturn(
-                CompletableFuture.completedFuture(
-                        FlexlbGrpcForwarder.MasterForwardResult.noMaster()));
+        when(grpcForwarder.forwardScheduleToMaster(any()))
+                .thenReturn(
+                        CompletableFuture.completedFuture(
+                                FlexlbGrpcForwarder.MasterForwardResult.noMaster()));
         stubSuccessfulLocalRoute();
 
         StreamObserver<FlexlbScheduleProtocol.FlexlbScheduleResponsePB> observer =
@@ -211,15 +252,18 @@ class ScheduleForwardMatrixTest {
 
         verify(grpcForwarder, times(1)).forwardScheduleToMaster(any());
         verify(grpcForwarder, never())
-                .forwardCompensatingCancelToMaster(any(), any(), any(io.opentelemetry.context.Context.class));
+                .forwardCompensatingCancelToMaster(
+                        any(), any(), any(io.opentelemetry.context.Context.class));
         verify(routeService, times(1)).route(any());
         assertSuccessfulResponse(observer);
+        verify(cacheAwareService).updateFromRoutedRequest(any(), any());
         assertSinglePvContains("\"scheduleOrigin\":\"LOCAL_FALLBACK\"");
     }
 
     @Test
     @Timeout(value = 10, unit = TimeUnit.SECONDS)
-    @DisplayName("state ④ cached master alive + forward succeeds: response passed through untouched, client cannot tell")
+    @DisplayName(
+            "state ④ cached master alive + forward succeeds: response passed through untouched, client cannot tell")
     void state4LiveMasterForwardIsTransparentToClient() {
         when(consistency.isNeedConsistency()).thenReturn(true);
         when(consistency.isMaster()).thenReturn(false);
@@ -230,10 +274,11 @@ class ScheduleForwardMatrixTest {
                         .setEnqueuedByMaster(true)
                         .setRealMasterHost(LIVE_MASTER)
                         .build();
-        when(grpcForwarder.forwardScheduleToMaster(any())).thenReturn(
-                CompletableFuture.completedFuture(
-                        FlexlbGrpcForwarder.MasterForwardResult.forwarded(
-                                masterResponse, LIVE_MASTER)));
+        when(grpcForwarder.forwardScheduleToMaster(any()))
+                .thenReturn(
+                        CompletableFuture.completedFuture(
+                                FlexlbGrpcForwarder.MasterForwardResult.forwarded(
+                                        masterResponse, LIVE_MASTER)));
 
         StreamObserver<FlexlbScheduleProtocol.FlexlbScheduleResponsePB> observer =
                 mock(StreamObserver.class);
@@ -242,16 +287,18 @@ class ScheduleForwardMatrixTest {
 
         // The exact master response object is delivered — byte-for-byte
         // passthrough, the client cannot perceive it talked to a follower.
+        verify(cacheAwareService, never()).updateFromRoutedRequest(any(), any());
         verify(observer, times(1)).onNext(masterResponse);
         verify(observer, times(1)).onCompleted();
         verify(observer, never()).onError(any());
         verify(routeService, never()).route(any());
         verify(grpcForwarder, never())
-                .forwardCompensatingCancelToMaster(any(), any(), any(io.opentelemetry.context.Context.class));
+                .forwardCompensatingCancelToMaster(
+                        any(), any(), any(io.opentelemetry.context.Context.class));
 
         // The forwarding node writes no PV record: no local scheduling trace.
-        assertTrue(pvAppender.list.isEmpty(),
-                "forwarding follower must not write a local PV record");
+        assertTrue(
+                pvAppender.list.isEmpty(), "forwarding follower must not write a local PV record");
     }
 
     @Test
@@ -281,10 +328,11 @@ class ScheduleForwardMatrixTest {
         // Pathological config: cached master equals self while isMaster=false.
         // The guard rejects it before any RPC, so ownership is unambiguous and
         // no cancellation may be started.
-        when(grpcForwarder.forwardScheduleToMaster(any())).thenReturn(
-                CompletableFuture.completedFuture(
-                        FlexlbGrpcForwarder.MasterForwardResult.blocked(
-                                "SELF_FORWARD_BLOCKED", FOLLOWER_IP + ":7001")));
+        when(grpcForwarder.forwardScheduleToMaster(any()))
+                .thenReturn(
+                        CompletableFuture.completedFuture(
+                                FlexlbGrpcForwarder.MasterForwardResult.blocked(
+                                        "SELF_FORWARD_BLOCKED", FOLLOWER_IP + ":7001")));
         stubSuccessfulLocalRoute();
 
         StreamObserver<FlexlbScheduleProtocol.FlexlbScheduleResponsePB> observer =
@@ -295,6 +343,7 @@ class ScheduleForwardMatrixTest {
         verify(grpcForwarder, never()).forwardCancelToMaster(any());
         verify(routeService, times(1)).route(any());
         assertSuccessfulResponse(observer);
+        verify(cacheAwareService).updateFromRoutedRequest(any(), any());
         assertSinglePvContains("\"scheduleOrigin\":\"LOCAL_FALLBACK\"");
     }
 
@@ -309,57 +358,65 @@ class ScheduleForwardMatrixTest {
     void guardMasterNullProducesNoMasterWithoutRpc() throws Exception {
         try (RealForwarderFixture fixture = newRealForwarderFixture(null)) {
             FlexlbGrpcForwarder.MasterForwardResult result =
-                    fixture.forwarder.forwardScheduleToMaster(request(90_101L))
-                            .toCompletableFuture().get(5, TimeUnit.SECONDS);
+                    fixture.forwarder
+                            .forwardScheduleToMaster(request(90_101L))
+                            .toCompletableFuture()
+                            .get(5, TimeUnit.SECONDS);
 
             assertFalse(result.masterFound(), "no master selected");
             assertNull(result.response(), "no RPC attempted, no response");
             assertEquals("MASTER_NULL", result.failure());
-            verify(fixture.engineHealthReporter).reportForwardToMasterResult(
-                    "LOCAL", "MASTER_NULL");
+            verify(fixture.engineHealthReporter)
+                    .reportForwardToMasterResult("LOCAL", "MASTER_NULL");
         }
     }
 
     @Test
     @Timeout(value = 10, unit = TimeUnit.SECONDS)
-    @DisplayName("guard matrix: SELF_TARGET (cached master == self, isMaster=false) is blocked without any RPC")
+    @DisplayName(
+            "guard matrix: SELF_TARGET (cached master == self, isMaster=false) is blocked without any RPC")
     void guardSelfTargetIsBlockedWithoutRpc() throws Exception {
         String selfTarget = FOLLOWER_IP + ":7001";
         try (RealForwarderFixture fixture = newRealForwarderFixture(selfTarget)) {
             FlexlbGrpcForwarder.MasterForwardResult result =
-                    fixture.forwarder.forwardScheduleToMaster(request(90_102L))
-                            .toCompletableFuture().get(5, TimeUnit.SECONDS);
+                    fixture.forwarder
+                            .forwardScheduleToMaster(request(90_102L))
+                            .toCompletableFuture()
+                            .get(5, TimeUnit.SECONDS);
 
             assertTrue(result.masterFound(), "a master was selected (self) before the guard");
             assertEquals(StrategyErrorType.NOT_MASTER.getErrorCode(), result.response().getCode());
             assertEquals("SELF_FORWARD_BLOCKED", result.failure());
             assertEquals(selfTarget, result.masterHost());
-            verify(fixture.engineHealthReporter).reportForwardToMasterResult(
-                    FOLLOWER_IP, "SELF_TARGET");
+            verify(fixture.engineHealthReporter)
+                    .reportForwardToMasterResult(FOLLOWER_IP, "SELF_TARGET");
         }
     }
 
     @Test
     @Timeout(value = 10, unit = TimeUnit.SECONDS)
-    @DisplayName("guard matrix: forwardHop=1 hits MAX_FORWARD_HOPS=1 and is blocked (no forwarding storm)")
+    @DisplayName(
+            "guard matrix: forwardHop=1 hits MAX_FORWARD_HOPS=1 and is blocked (no forwarding storm)")
     void guardHopLimitBlocksSecondHop() throws Exception {
         try (RealForwarderFixture fixture = newRealForwarderFixture(LIVE_MASTER)) {
             FlexlbScheduleProtocol.FlexlbScheduleRequestPB alreadyForwardedOnce =
                     FlexlbScheduleProtocol.FlexlbScheduleRequestPB.newBuilder()
-                            .setRequestId(90_103L)
+                            .setRequestId(90103)
                             .setForwardHop(1)
                             .build();
 
             FlexlbGrpcForwarder.MasterForwardResult result =
-                    fixture.forwarder.forwardScheduleToMaster(alreadyForwardedOnce)
-                            .toCompletableFuture().get(5, TimeUnit.SECONDS);
+                    fixture.forwarder
+                            .forwardScheduleToMaster(alreadyForwardedOnce)
+                            .toCompletableFuture()
+                            .get(5, TimeUnit.SECONDS);
 
             assertTrue(result.masterFound());
             assertEquals(StrategyErrorType.NOT_MASTER.getErrorCode(), result.response().getCode());
             assertEquals("FORWARD_HOP_LIMIT", result.failure());
             assertEquals(LIVE_MASTER, result.masterHost());
-            verify(fixture.engineHealthReporter).reportForwardToMasterResult(
-                    "10.0.0.9", "HOP_LIMIT");
+            verify(fixture.engineHealthReporter)
+                    .reportForwardToMasterResult("10.0.0.9", "HOP_LIMIT");
         }
     }
 
@@ -369,21 +426,69 @@ class ScheduleForwardMatrixTest {
     void guardDeadMasterAddressYieldsUnavailableFailure() throws Exception {
         try (RealForwarderFixture fixture = newRealForwarderFixture(DEAD_MASTER)) {
             FlexlbGrpcForwarder.MasterForwardResult result =
-                    fixture.forwarder.forwardScheduleToMaster(request(90_104L))
-                            .toCompletableFuture().get(20, TimeUnit.SECONDS);
+                    fixture.forwarder
+                            .forwardScheduleToMaster(request(90_104L))
+                            .toCompletableFuture()
+                            .get(20, TimeUnit.SECONDS);
 
             assertTrue(result.masterFound(), "a master address was selected");
             assertNull(result.response(), "dead master cannot answer");
-            assertEquals("UNAVAILABLE", result.failure(),
+            assertEquals(
+                    "UNAVAILABLE",
+                    result.failure(),
                     "transport failure to the dead master must surface as UNAVAILABLE");
             assertEquals(DEAD_MASTER, result.masterHost());
             Throwable cause = result.error();
             while (cause != null && !(cause instanceof java.net.ConnectException)) {
                 cause = cause.getCause();
             }
-            assertTrue(cause instanceof java.net.ConnectException, "connection failure type must be preserved");
-            verify(fixture.engineHealthReporter).reportForwardToMasterResult(
-                    "127.0.0.1", "GRPC_FAILED");
+            assertTrue(
+                    cause instanceof java.net.ConnectException,
+                    "connection failure type must be preserved");
+            verify(fixture.engineHealthReporter)
+                    .reportForwardToMasterResult("127.0.0.1", "GRPC_FAILED");
+        }
+    }
+
+    @Test
+    @Timeout(value = 15, unit = TimeUnit.SECONDS)
+    void realConnectionResetFallsBackLocallyWithStaleMasterAddress() throws Exception {
+        try (var listener =
+                        new java.net.ServerSocket(0, 1, java.net.InetAddress.getLoopbackAddress());
+                var resetExecutor = Executors.newSingleThreadExecutor();
+                RealForwarderFixture fixture =
+                        newRealForwarderFixture("127.0.0.1:" + (listener.getLocalPort() - 2))) {
+            var reset =
+                    resetExecutor.submit(
+                            () -> {
+                                try (var socket = listener.accept()) {
+                                    socket.setSoTimeout(5000);
+                                    socket.getInputStream().read();
+                                    socket.setSoLinger(true, 0);
+                                }
+                                return null;
+                            });
+            var result =
+                    fixture.forwarder
+                            .forwardScheduleToMaster(request(90_105L))
+                            .toCompletableFuture()
+                            .get(5, TimeUnit.SECONDS);
+            reset.get(5, TimeUnit.SECONDS);
+            assertNull(result.response());
+            when(consistency.isNeedConsistency()).thenReturn(true);
+            when(consistency.isMaster()).thenReturn(false);
+            when(grpcForwarder.forwardScheduleToMaster(any()))
+                    .thenReturn(CompletableFuture.completedFuture(result));
+            stubSuccessfulLocalRoute();
+            StreamObserver<FlexlbScheduleProtocol.FlexlbScheduleResponsePB> observer =
+                    mock(StreamObserver.class);
+
+            service.schedule(request(90_105L), observer);
+
+            verify(routeService, times(1)).route(any());
+            assertSuccessfulResponse(observer);
+            verify(cacheAwareService).updateFromRoutedRequest(any(), any());
+            assertSinglePvContains("\"scheduleOrigin\":\"LOCAL_FALLBACK\"");
         }
     }
 
@@ -396,8 +501,8 @@ class ScheduleForwardMatrixTest {
         final FlexlbGrpcForwarder forwarder;
         final EngineHealthReporter engineHealthReporter;
 
-        private RealForwarderFixture(EngineHealthReporter engineHealthReporter,
-                                     FlexlbGrpcForwarder forwarder) {
+        private RealForwarderFixture(
+                EngineHealthReporter engineHealthReporter, FlexlbGrpcForwarder forwarder) {
             this.engineHealthReporter = engineHealthReporter;
             this.forwarder = forwarder;
         }
@@ -418,15 +523,25 @@ class ScheduleForwardMatrixTest {
         when(consistencyView.getMasterHostIpPort()).thenReturn(masterHostIpPort);
 
         ConfigService configService = mock(ConfigService.class);
-        when(configService.loadBalanceConfig()).thenReturn(org.flexlb.mock.TestFlexlbConfigs.create());
+        when(configService.loadBalanceConfig()).thenReturn(routingConfig());
         EngineHealthReporter healthReporter = mock(EngineHealthReporter.class);
 
         channelEventLoop = new NioEventLoopGroup(1);
         channelExecutor = Executors.newFixedThreadPool(2);
-        FlexlbGrpcForwarder forwarder = new FlexlbGrpcForwarder(
-                consistencyView, configService, healthReporter,
-                channelEventLoop, channelExecutor);
+        FlexlbGrpcForwarder forwarder =
+                new FlexlbGrpcForwarder(
+                        consistencyView,
+                        configService,
+                        healthReporter,
+                        channelEventLoop,
+                        channelExecutor);
         return new RealForwarderFixture(healthReporter, forwarder);
+    }
+
+    private static FlexlbConfig routingConfig() {
+        FlexlbConfig config = org.flexlb.mock.TestFlexlbConfigs.create();
+        config.setDispatcher(DispatcherConfig.nonBatch());
+        return config;
     }
 
     private static FlexlbScheduleProtocol.FlexlbScheduleRequestPB request(long requestId) {
@@ -440,8 +555,7 @@ class ScheduleForwardMatrixTest {
         Response response = new Response();
         response.setSuccess(true);
         response.setCode(200);
-        when(routeService.route(any())).thenReturn(
-                CompletableFuture.completedFuture(response));
+        when(routeService.route(any())).thenReturn(CompletableFuture.completedFuture(response));
     }
 
     private FlexlbScheduleProtocol.FlexlbScheduleResponsePB capturedResponse(
@@ -463,7 +577,8 @@ class ScheduleForwardMatrixTest {
 
     private void assertSinglePvContains(String expected) {
         assertEquals(1, pvAppender.list.size());
-        assertTrue(pvAppender.list.get(0).getFormattedMessage().contains(expected),
+        assertTrue(
+                pvAppender.list.get(0).getFormattedMessage().contains(expected),
                 pvAppender.list.get(0).getFormattedMessage());
     }
 }

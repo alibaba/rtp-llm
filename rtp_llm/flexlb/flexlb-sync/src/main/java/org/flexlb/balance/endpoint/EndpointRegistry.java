@@ -21,7 +21,7 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.BiFunction;
-import java.util.function.LongPredicate;
+import java.util.function.Predicate;
 
 @Component
 public class EndpointRegistry {
@@ -33,10 +33,7 @@ public class EndpointRegistry {
     }
 
     /** Result of publishing a fully initialized endpoint generation. */
-    public record EndpointPublication(
-            WorkerEndpoint endpoint,
-            Runnable statusProjection) {
-    }
+    public record EndpointPublication(WorkerEndpoint endpoint, Runnable statusProjection) {}
 
     /**
      * One non-owning Prefill generation exposed to routing.
@@ -45,9 +42,7 @@ public class EndpointRegistry {
      * and verify that the pinned endpoint is still this exact instance before
      * transferring generation ownership to a request.</p>
      */
-    public record PrefillRoutingEntry(
-            String address,
-            PrefillEndpoint endpoint) {
+    public record PrefillRoutingEntry(String address, PrefillEndpoint endpoint) {
         public PrefillRoutingEntry {
             java.util.Objects.requireNonNull(address, "address");
             java.util.Objects.requireNonNull(endpoint, "endpoint");
@@ -66,9 +61,7 @@ public class EndpointRegistry {
         private final WorkerEndpoint endpoint;
         private final AtomicBoolean retirementClaimed = new AtomicBoolean();
 
-        private DetachedGeneration(
-                EndpointRegistry registry,
-                WorkerEndpoint endpoint) {
+        private DetachedGeneration(EndpointRegistry registry, WorkerEndpoint endpoint) {
             this.registry = registry;
             this.endpoint = endpoint;
         }
@@ -83,7 +76,8 @@ public class EndpointRegistry {
             if (!retirementClaimed.compareAndSet(false, true)) {
                 throw new IllegalStateException(
                         "Detached endpoint retirement was already claimed: "
-                                + endpoint.getStatus().getIpPort() + "#"
+                                + endpoint.getStatus().getIpPort()
+                                + "#"
                                 + endpoint.getStatus().getGenerationId());
             }
             Throwable failure = null;
@@ -109,12 +103,15 @@ public class EndpointRegistry {
         }
     }
 
-    private final EnumMap<RoleType, ConcurrentHashMap<String, WorkerEndpoint>>
-            endpointsByRole = endpointMaps();
+    private final EnumMap<RoleType, ConcurrentHashMap<String, WorkerEndpoint>> endpointsByRole =
+            endpointMaps();
+
     /** Advisory Prefill generations, atomically replaced after each map write. */
     private volatile List<PrefillRoutingEntry> prefillDirectory = List.of();
+
     /** PDFusion uses the same Prefill planning path but a distinct role map. */
     private volatile List<PrefillRoutingEntry> pdFusionDirectory = List.of();
+
     /**
      * Advisory Decode routing directory. Writers publish a complete immutable
      * replacement after changing the endpoint map. A racing reader may finish
@@ -122,8 +119,8 @@ public class EndpointRegistry {
      * selected address and generation are always revalidated by
      * {@link #captureDecodeGeneration(DecodeEndpoint.DecodeRoutingView)}.
      */
-    private volatile List<Map.Entry<String, DecodeEndpoint>> decodeDirectory =
-            List.of();
+    private volatile List<Map.Entry<String, DecodeEndpoint>> decodeDirectory = List.of();
+
     private final ConfigService configService;
     private final EndpointEventProjector endpointEvents;
     private final BatchSchedulerReporter reporter;
@@ -135,15 +132,16 @@ public class EndpointRegistry {
     private int inflightDetachedRetirements;
     private Throwable closeFailure;
 
-    private static EnumMap<RoleType, ConcurrentHashMap<String, WorkerEndpoint>>
-            endpointMaps() {
+    private static EnumMap<RoleType, ConcurrentHashMap<String, WorkerEndpoint>> endpointMaps() {
         EnumMap<RoleType, ConcurrentHashMap<String, WorkerEndpoint>> maps =
                 new EnumMap<>(RoleType.class);
-        for (RoleType role : List.of(
-                RoleType.PREFILL,
-                RoleType.DECODE,
-                RoleType.PDFUSION,
-                RoleType.VIT)) {
+        for (RoleType role :
+                List.of(
+                        RoleType.PREFILL,
+                        RoleType.DECODE,
+                        RoleType.PDFUSION,
+                        RoleType.ENCODER,
+                        RoleType.VIT)) {
             maps.put(role, new ConcurrentHashMap<>());
         }
         return maps;
@@ -154,20 +152,19 @@ public class EndpointRegistry {
     }
 
     @Autowired
-    public EndpointRegistry(ConfigService configService,
-                            EndpointEventProjector endpointEvents,
-                            BatchSchedulerReporter reporter,
-                            DeliveryStrategy deliveryStrategy,
-                            PlacementAvailability placementAvailability) {
-        this.configService = java.util.Objects.requireNonNull(
-                configService, "configService");
-        this.endpointEvents = java.util.Objects.requireNonNull(
-                endpointEvents, "endpointEvents");
+    public EndpointRegistry(
+            ConfigService configService,
+            EndpointEventProjector endpointEvents,
+            BatchSchedulerReporter reporter,
+            DeliveryStrategy deliveryStrategy,
+            PlacementAvailability placementAvailability) {
+        this.configService = java.util.Objects.requireNonNull(configService, "configService");
+        this.endpointEvents = java.util.Objects.requireNonNull(endpointEvents, "endpointEvents");
         this.reporter = java.util.Objects.requireNonNull(reporter, "reporter");
-        this.deliveryStrategy = java.util.Objects.requireNonNull(
-                deliveryStrategy, "deliveryStrategy");
-        this.placementAvailability = java.util.Objects.requireNonNull(
-                placementAvailability, "placementAvailability");
+        this.deliveryStrategy =
+                java.util.Objects.requireNonNull(deliveryStrategy, "deliveryStrategy");
+        this.placementAvailability =
+                java.util.Objects.requireNonNull(placementAvailability, "placementAvailability");
     }
 
     public WorkerEndpoint get(RoleType roleType, String ipPort) {
@@ -183,11 +180,8 @@ public class EndpointRegistry {
      * retirement waits for the pin) or after detach (and returns {@code null}).
      * The returned route capability is thread-confined.</p>
      */
-    public WorkerEndpoint.GenerationPin capture(
-            RoleType roleType,
-            String ipPort) {
-        ConcurrentHashMap<String, WorkerEndpoint> endpoints =
-                endpoints(roleType);
+    public WorkerEndpoint.GenerationPin capture(RoleType roleType, String ipPort) {
+        ConcurrentHashMap<String, WorkerEndpoint> endpoints = endpoints(roleType);
         return endpoints == null ? null : capture(endpoints, ipPort);
     }
 
@@ -198,8 +192,7 @@ public class EndpointRegistry {
      */
     public List<WorkerEndpoint.GenerationPin> capture(RoleType roleType) {
         List<String> addresses = endpointAddressSnapshot(roleType);
-        List<WorkerEndpoint.GenerationPin> pins =
-                new ArrayList<>(addresses.size());
+        List<WorkerEndpoint.GenerationPin> pins = new ArrayList<>(addresses.size());
         try {
             for (String address : addresses) {
                 WorkerEndpoint.GenerationPin pin = capture(roleType, address);
@@ -244,8 +237,7 @@ public class EndpointRegistry {
             };
         }
         Map<String, WorkerEndpoint> endpoints = endpoints(roleType);
-        return endpoints == null
-                ? List.of() : List.copyOf(endpoints.keySet());
+        return endpoints == null ? List.of() : List.copyOf(endpoints.keySet());
     }
 
     /**
@@ -274,8 +266,7 @@ public class EndpointRegistry {
      */
     public List<DecodeEndpoint.DecodeRoutingView> decodeRoutingSnapshot() {
         List<Map.Entry<String, DecodeEndpoint>> directory = decodeDirectory;
-        List<DecodeEndpoint.DecodeRoutingView> snapshot =
-                new ArrayList<>(directory.size());
+        List<DecodeEndpoint.DecodeRoutingView> snapshot = new ArrayList<>(directory.size());
         for (Map.Entry<String, DecodeEndpoint> entry : directory) {
             snapshot.add(entry.getValue().routingViewSnapshot(entry.getKey()));
         }
@@ -293,8 +284,7 @@ public class EndpointRegistry {
      */
     public WorkerEndpoint.GenerationPin captureDecodeGeneration(
             DecodeEndpoint.DecodeRoutingView expected) {
-        WorkerEndpoint.GenerationPin pin =
-                capture(RoleType.DECODE, expected.address());
+        WorkerEndpoint.GenerationPin pin = capture(RoleType.DECODE, expected.address());
         if (pin == null) {
             return null;
         }
@@ -314,25 +304,21 @@ public class EndpointRegistry {
     }
 
     private static WorkerEndpoint.GenerationPin capture(
-            ConcurrentHashMap<String, WorkerEndpoint> endpoints,
-            String ipPort) {
-        AtomicReference<WorkerEndpoint.GenerationPin> captured =
-                new AtomicReference<>();
-        endpoints.computeIfPresent(ipPort, (ignored, current) -> {
-            captured.set(current.tryPinGeneration());
-            return current;
-        });
+            ConcurrentHashMap<String, WorkerEndpoint> endpoints, String ipPort) {
+        AtomicReference<WorkerEndpoint.GenerationPin> captured = new AtomicReference<>();
+        endpoints.computeIfPresent(
+                ipPort,
+                (ignored, current) -> {
+                    captured.set(current.tryPinGeneration());
+                    return current;
+                });
         return captured.get();
     }
 
     /** Return the endpoint only when it belongs to the expected status generation. */
-    public WorkerEndpoint get(
-            RoleType roleType,
-            String ipPort,
-            WorkerStatus expectedStatus) {
+    public WorkerEndpoint get(RoleType roleType, String ipPort, WorkerStatus expectedStatus) {
         WorkerEndpoint endpoint = get(roleType, ipPort);
-        return endpoint != null && endpoint.getStatus() == expectedStatus
-                ? endpoint : null;
+        return endpoint != null && endpoint.getStatus() == expectedStatus ? endpoint : null;
     }
 
     /**
@@ -347,15 +333,12 @@ public class EndpointRegistry {
      * it is never restored.</p>
      */
     public EndpointPublication publishPreparedEndpoint(
-            String address,
-            WorkerStatus status,
-            WorkerStatus.PreparedStatus prepared) {
+            String address, WorkerStatus status, WorkerStatus.PreparedStatus prepared) {
         beginCandidatePublication();
         try {
             requireGenerationLock(status);
             status.requireActiveGeneration();
-            WorkerStatus.StatusObservation observation =
-                    prepared.observation();
+            WorkerStatus.StatusObservation observation = prepared.observation();
             if (observation.owner() != status) {
                 throw new IllegalArgumentException(
                         "staged status belongs to another worker generation");
@@ -369,29 +352,23 @@ public class EndpointRegistry {
             if (status.appliedStatusCursor().statusVersion() >= 0L) {
                 throw new IllegalStateException(
                         "A committed WorkerStatus generation cannot publish a second endpoint: "
-                                + address + "#" + status.getGenerationId());
+                                + address
+                                + "#"
+                                + status.getGenerationId());
             }
             WorkerEndpoint candidate = null;
             EndpointPublication publication;
             try {
-                candidate = createEndpoint(
-                        status, role, observation.engine());
-                Runnable projection = candidate.initializeFromPreparedStatus(
-                        status, observation);
-                publication = new EndpointPublication(
-                        candidate, projection);
+                candidate = createEndpoint(status, role, observation.engine());
+                Runnable projection = candidate.initializeFromPreparedStatus(status, observation);
+                publication = new EndpointPublication(candidate, projection);
                 startCandidate(candidate);
                 status.publishPreparedStatus(prepared);
             } catch (Throwable reductionOrCommitFailure) {
                 closeCandidate(candidate, reductionOrCommitFailure);
                 throw propagate(reductionOrCommitFailure, address);
             }
-            return publishPrivateEndpoint(
-                    role,
-                    endpoints(role),
-                    address,
-                    candidate,
-                    publication);
+            return publishPrivateEndpoint(role, endpoints(role), address, candidate, publication);
         } finally {
             endCandidatePublication();
         }
@@ -400,8 +377,7 @@ public class EndpointRegistry {
     private void beginCandidatePublication() {
         synchronized (lifecycleGate) {
             if (registryPhase != RegistryPhase.OPEN) {
-                throw new IllegalStateException(
-                        "EndpointRegistry is closing");
+                throw new IllegalStateException("EndpointRegistry is closing");
             }
             inflightPublications++;
         }
@@ -410,8 +386,7 @@ public class EndpointRegistry {
     private void endCandidatePublication() {
         synchronized (lifecycleGate) {
             if (inflightPublications <= 0) {
-                throw new IllegalStateException(
-                        "EndpointRegistry publication count underflow");
+                throw new IllegalStateException("EndpointRegistry publication count underflow");
             }
             inflightPublications--;
             if (inflightPublications == 0) {
@@ -427,25 +402,26 @@ public class EndpointRegistry {
             WorkerEndpoint candidate,
             EndpointPublication publication) {
         try {
-            mutateEndpointMap(role, endpoints, ipPort, (ignored, current) -> {
-                if (current != null
-                        && current.getStatus() == candidate.getStatus()) {
-                    throw new IllegalStateException(
-                            "Endpoint generation is already published for "
-                                    + ipPort);
-                }
-                if (current != null) {
-                    throw new IllegalStateException(
-                            "Existing endpoint generation must be withdrawn before publication for "
-                                    + ipPort);
-                }
-                return candidate;
-            });
+            mutateEndpointMap(
+                    role,
+                    endpoints,
+                    ipPort,
+                    (ignored, current) -> {
+                        if (current != null && current.getStatus() == candidate.getStatus()) {
+                            throw new IllegalStateException(
+                                    "Endpoint generation is already published for " + ipPort);
+                        }
+                        if (current != null) {
+                            throw new IllegalStateException(
+                                    "Existing endpoint generation must be withdrawn before publication for "
+                                            + ipPort);
+                        }
+                        return candidate;
+                    });
             signalPublishedEndpoint(candidate);
             return publication;
         } catch (Throwable publicationFailure) {
-            withdrawAndCloseCandidate(
-                    role, endpoints, ipPort, candidate, publicationFailure);
+            withdrawAndCloseCandidate(role, endpoints, ipPort, candidate, publicationFailure);
             throw propagate(publicationFailure, ipPort);
         }
     }
@@ -461,8 +437,7 @@ public class EndpointRegistry {
                     role,
                     endpoints,
                     ipPort,
-                    (ignored, current) -> current == candidate
-                            ? null : current);
+                    (ignored, current) -> current == candidate ? null : current);
         } catch (Throwable withdrawalFailure) {
             addSuppressedNoFail(primaryFailure, withdrawalFailure);
         }
@@ -489,30 +464,30 @@ public class EndpointRegistry {
             if (next == exactCurrent) {
                 return exactCurrent;
             }
-            List<PrefillRoutingEntry> nextPrefillDirectory = updatesPrefillDirectory
-                    ? registryPhase == RegistryPhase.OPEN
-                            ? prefillDirectoryAfterMutationLocked(
-                                    prefillDirectory(role),
-                                    address,
-                                    (PrefillEndpoint) next)
-                            : List.of()
-                    : null;
+            List<PrefillRoutingEntry> nextPrefillDirectory =
+                    updatesPrefillDirectory
+                            ? registryPhase == RegistryPhase.OPEN
+                                    ? prefillDirectoryAfterMutationLocked(
+                                            prefillDirectory(role), address, (PrefillEndpoint) next)
+                                    : List.of()
+                            : null;
             List<Map.Entry<String, DecodeEndpoint>> nextDecodeDirectory =
                     updatesDecodeDirectory
                             ? decodeDirectoryAfterMutationLocked(
-                                    this.decodeDirectory,
-                                    address,
-                                    (DecodeEndpoint) next)
+                                    this.decodeDirectory, address, (DecodeEndpoint) next)
                             : null;
-            WorkerEndpoint published = endpoints.compute(
-                    address, (ignored, observed) -> {
-                if (observed != exactCurrent) {
-                    throw new IllegalStateException(
-                            role + " endpoint mapping changed outside its directory transaction: "
-                                    + address);
-                }
-                return next;
-            });
+            WorkerEndpoint published =
+                    endpoints.compute(
+                            address,
+                            (ignored, observed) -> {
+                                if (observed != exactCurrent) {
+                                    throw new IllegalStateException(
+                                            role
+                                                    + " endpoint mapping changed outside its directory transaction: "
+                                                    + address);
+                                }
+                                return next;
+                            });
             if (updatesPrefillDirectory) {
                 publishPrefillDirectory(role, nextPrefillDirectory);
             } else {
@@ -524,11 +499,9 @@ public class EndpointRegistry {
 
     /** Build the exact post-mutation Prefill directory before its CHM write. */
     private List<PrefillRoutingEntry> prefillDirectoryAfterMutationLocked(
-            List<PrefillRoutingEntry> previous,
-            String address,
-            PrefillEndpoint next) {
-        List<PrefillRoutingEntry> updated = new ArrayList<>(
-                previous.size() + (next == null ? 0 : 1));
+            List<PrefillRoutingEntry> previous, String address, PrefillEndpoint next) {
+        List<PrefillRoutingEntry> updated =
+                new ArrayList<>(previous.size() + (next == null ? 0 : 1));
         boolean replaced = false;
         for (PrefillRoutingEntry entry : previous) {
             if (!entry.address().equals(address)) {
@@ -547,34 +520,27 @@ public class EndpointRegistry {
     }
 
     private List<PrefillRoutingEntry> prefillDirectory(RoleType role) {
-        return role == RoleType.PREFILL
-                ? prefillDirectory : pdFusionDirectory;
+        return role == RoleType.PREFILL ? prefillDirectory : pdFusionDirectory;
     }
 
-    private void publishPrefillDirectory(
-            RoleType role,
-            List<PrefillRoutingEntry> directory) {
+    private void publishPrefillDirectory(RoleType role, List<PrefillRoutingEntry> directory) {
         if (role == RoleType.PREFILL) {
             prefillDirectory = directory;
         } else if (role == RoleType.PDFUSION) {
             pdFusionDirectory = directory;
         } else {
-            throw new IllegalArgumentException(
-                    "Not a Prefill routing role: " + role);
+            throw new IllegalArgumentException("Not a Prefill routing role: " + role);
         }
     }
 
     /** Build the exact post-mutation directory before the CHM write. */
-    private List<Map.Entry<String, DecodeEndpoint>>
-            decodeDirectoryAfterMutationLocked(
-            List<Map.Entry<String, DecodeEndpoint>> previous,
-            String address,
-            DecodeEndpoint next) {
+    private List<Map.Entry<String, DecodeEndpoint>> decodeDirectoryAfterMutationLocked(
+            List<Map.Entry<String, DecodeEndpoint>> previous, String address, DecodeEndpoint next) {
         if (registryPhase != RegistryPhase.OPEN) {
             return List.of();
         }
-        List<Map.Entry<String, DecodeEndpoint>> entries = new ArrayList<>(
-                previous.size() + (next == null ? 0 : 1));
+        List<Map.Entry<String, DecodeEndpoint>> entries =
+                new ArrayList<>(previous.size() + (next == null ? 0 : 1));
         for (Map.Entry<String, DecodeEndpoint> entry : previous) {
             if (!entry.getKey().equals(address)) {
                 entries.add(entry);
@@ -586,9 +552,7 @@ public class EndpointRegistry {
         return List.copyOf(entries);
     }
 
-    private static void closeCandidate(
-            WorkerEndpoint candidate,
-            Throwable primaryFailure) {
+    private static void closeCandidate(WorkerEndpoint candidate, Throwable primaryFailure) {
         if (candidate == null) {
             return;
         }
@@ -605,9 +569,7 @@ public class EndpointRegistry {
         }
     }
 
-    private static void addSuppressedNoFail(
-            Throwable primary,
-            Throwable leaf) {
+    private static void addSuppressedNoFail(Throwable primary, Throwable leaf) {
         if (primary == null || leaf == null || primary == leaf) {
             return;
         }
@@ -618,17 +580,14 @@ public class EndpointRegistry {
         }
     }
 
-    private static RuntimeException propagate(
-            Throwable failure,
-            String ipPort) {
+    private static RuntimeException propagate(Throwable failure, String ipPort) {
         if (failure instanceof RuntimeException runtimeFailure) {
             return runtimeFailure;
         }
         if (failure instanceof Error error) {
             throw error;
         }
-        return new IllegalStateException(
-                "Endpoint publication failed for " + ipPort, failure);
+        return new IllegalStateException("Endpoint publication failed for " + ipPort, failure);
     }
 
     private static void requireGenerationLock(WorkerStatus status) {
@@ -646,9 +605,7 @@ public class EndpointRegistry {
      * the caller closes the returned endpoint outside that lock.
      */
     public DetachedGeneration detachAndBeginRetirement(
-            RoleType roleType,
-            String ipPort,
-            WorkerStatus expectedStatus) {
+            RoleType roleType, String ipPort, WorkerStatus expectedStatus) {
         if (expectedStatus == null) {
             return null;
         }
@@ -656,21 +613,18 @@ public class EndpointRegistry {
         DetachedGeneration detached;
         synchronized (lifecycleGate) {
             if (registryPhase != RegistryPhase.OPEN) {
-                throw new IllegalStateException(
-                        "EndpointRegistry is closing");
+                throw new IllegalStateException("EndpointRegistry is closing");
             }
-            ConcurrentHashMap<String, WorkerEndpoint> endpoints =
-                    endpoints(roleType);
-            detached = endpoints == null
-                    ? null
-                    : detach(roleType, endpoints, ipPort, expectedStatus);
+            ConcurrentHashMap<String, WorkerEndpoint> endpoints = endpoints(roleType);
+            detached =
+                    endpoints == null ? null : detach(roleType, endpoints, ipPort, expectedStatus);
             if (detached != null) {
                 inflightDetachedRetirements++;
-                if (!expectedStatus
-                        .beginRetirementAfterEndpointGateClosed()) {
+                if (!expectedStatus.beginRetirementAfterEndpointGateClosed()) {
                     throw new IllegalStateException(
                             "WorkerStatus generation changed while its lock was held: "
-                                    + ipPort + "#"
+                                    + ipPort
+                                    + "#"
                                     + expectedStatus.getGenerationId());
                 }
             }
@@ -678,8 +632,7 @@ public class EndpointRegistry {
         if (detached != null) {
             WorkerStatus.TopologySnapshot topology =
                     detached.endpoint.getStatus().topologySnapshot();
-            placementAvailability.topologyChanged(
-                    roleType, topology.group(), ipPort);
+            placementAvailability.topologyChanged(roleType, topology.group(), ipPort);
         }
         return detached;
     }
@@ -690,11 +643,9 @@ public class EndpointRegistry {
             String ipPort,
             WorkerStatus expectedStatus) {
         if (!Thread.holdsLock(lifecycleGate)) {
-            throw new IllegalStateException(
-                    "Endpoint detach requires the registry lifecycle gate");
+            throw new IllegalStateException("Endpoint detach requires the registry lifecycle gate");
         }
-        AtomicReference<DetachedGeneration> detached =
-                new AtomicReference<>();
+        AtomicReference<DetachedGeneration> detached = new AtomicReference<>();
         mutateEndpointMap(
                 role,
                 endpoints,
@@ -724,8 +675,7 @@ public class EndpointRegistry {
                         "Detached generation belongs to another registry");
             }
             if (inflightDetachedRetirements <= 0) {
-                throw new IllegalStateException(
-                        "Detached retirement count underflow");
+                throw new IllegalStateException("Detached retirement count underflow");
             }
             inflightDetachedRetirements--;
             if (inflightDetachedRetirements == 0) {
@@ -735,31 +685,31 @@ public class EndpointRegistry {
     }
 
     private WorkerEndpoint createEndpoint(
-            WorkerStatus status,
-            RoleType role,
-            WorkerStatus.EngineObservation engineStatus) {
+            WorkerStatus status, RoleType role, WorkerStatus.EngineObservation engineStatus) {
         if (role == RoleType.FRONTEND) {
             throw new IllegalArgumentException("Unsupported role: " + role);
         }
-        boolean prefill = role == RoleType.PREFILL
-                || role == RoleType.PDFUSION;
+        boolean prefill = role == RoleType.PREFILL || role == RoleType.PDFUSION;
         if (prefill && engineStatus.dpSize() > 1) {
             throw new UnsupportedOperationException(
-                    role + " DP group endpoint not yet supported: ipPort="
-                            + status.getIpPort() + ", dp_size="
+                    role
+                            + " DP group endpoint not yet supported: ipPort="
+                            + status.getIpPort()
+                            + ", dp_size="
                             + engineStatus.dpSize());
         }
         prepareEndpointMetrics(role, status);
         return switch (role) {
-            case PREFILL, PDFUSION -> new PrefillEndpoint(
-                    status,
-                    configService.loadBalanceConfig(),
-                    deliveryStrategy,
-                    endpointEvents,
-                    reporter,
-                    placementAvailability);
-            case DECODE -> new DecodeEndpoint(
-                    status, endpointEvents, placementAvailability);
+            case PREFILL, PDFUSION ->
+                    new PrefillEndpoint(
+                            status,
+                            configService::loadBalanceConfig,
+                            deliveryStrategy,
+                            endpointEvents,
+                            reporter,
+                            placementAvailability);
+            case DECODE -> new DecodeEndpoint(status, endpointEvents, placementAvailability);
+            case ENCODER -> new EncoderEndpoint(status, endpointEvents);
             case VIT -> new WorkerEndpoint(status);
             case FRONTEND -> throw new AssertionError("validated above");
         };
@@ -767,10 +717,13 @@ public class EndpointRegistry {
 
     private void prepareEndpointMetrics(RoleType roleType, WorkerStatus status) {
         try {
-            reporter.prepareEndpointMetrics(roleType.name(), status.getIp());
+            reporter.prepareEndpointMetrics(roleType.name(), status.getMetricIpPort());
         } catch (RuntimeException telemetryFailure) {
-            Logger.warn("Endpoint metric preparation failed: role={}, engine={}",
-                    roleType, status.getIp(), telemetryFailure);
+            Logger.warn(
+                    "Endpoint metric preparation failed: role={}, engine={}",
+                    roleType,
+                    status.getMetricIpPort(),
+                    telemetryFailure);
         }
     }
 
@@ -778,11 +731,9 @@ public class EndpointRegistry {
         if (endpoint == null) {
             return;
         }
-        WorkerStatus.TopologySnapshot topology =
-                endpoint.getStatus().topologySnapshot();
+        WorkerStatus.TopologySnapshot topology = endpoint.getStatus().topologySnapshot();
         placementAvailability.topologyChanged(
-                endpoint.getStatus().getRole(), topology.group(),
-                endpoint.ipPort());
+                endpoint.getStatus().getRole(), topology.group(), endpoint.ipPort());
     }
 
     public void close() {
@@ -854,14 +805,11 @@ public class EndpointRegistry {
     }
 
     private Throwable closeEndpointGenerations() {
-        IdentityHashMap<WorkerEndpoint, Boolean> seen =
-                new IdentityHashMap<>();
+        IdentityHashMap<WorkerEndpoint, Boolean> seen = new IdentityHashMap<>();
         List<WorkerEndpoint> endpoints = new ArrayList<>();
         Throwable failure = null;
-        for (Map<String, WorkerEndpoint> roleEndpoints
-                : endpointsByRole.values()) {
-            failure = collectEndpointGenerations(
-                    roleEndpoints, seen, endpoints, failure);
+        for (Map<String, WorkerEndpoint> roleEndpoints : endpointsByRole.values()) {
+            failure = collectEndpointGenerations(roleEndpoints, seen, endpoints, failure);
         }
         // Phase 1: close admission for every exact generation before any
         // endpoint-local cleanup or callback can run.
@@ -910,9 +858,7 @@ public class EndpointRegistry {
         return failure;
     }
 
-    private static Throwable appendFailure(
-            Throwable first,
-            Throwable next) {
+    private static Throwable appendFailure(Throwable first, Throwable next) {
         if (next == null) {
             return first;
         }
@@ -933,13 +879,11 @@ public class EndpointRegistry {
             throw error;
         }
         if (failure != null) {
-            throw new IllegalStateException(
-                    "EndpointRegistry close failed", failure);
+            throw new IllegalStateException("EndpointRegistry close failed", failure);
         }
     }
 
-    private static void rethrowDetachedRetirementFailure(
-            Throwable failure) {
+    private static void rethrowDetachedRetirementFailure(Throwable failure) {
         if (failure instanceof RuntimeException runtimeFailure) {
             throw runtimeFailure;
         }
@@ -947,23 +891,20 @@ public class EndpointRegistry {
             throw error;
         }
         if (failure != null) {
-            throw new IllegalStateException(
-                    "Detached endpoint retirement failed", failure);
+            throw new IllegalStateException("Detached endpoint retirement failed", failure);
         }
     }
 
     /** Immutable point-in-time view; publication remains owned by this registry. */
     @SuppressWarnings("unchecked")
     public Map<String, PrefillEndpoint> snapshotPrefillEndpoints() {
-        return (Map<String, PrefillEndpoint>) (Map<?, ?>)
-                Map.copyOf(endpoints(RoleType.PREFILL));
+        return (Map<String, PrefillEndpoint>) (Map<?, ?>) Map.copyOf(endpoints(RoleType.PREFILL));
     }
 
     /** Immutable point-in-time view; publication remains owned by this registry. */
     @SuppressWarnings("unchecked")
     public Map<String, DecodeEndpoint> snapshotDecodeEndpoints() {
-        return (Map<String, DecodeEndpoint>) (Map<?, ?>)
-                Map.copyOf(endpoints(RoleType.DECODE));
+        return (Map<String, DecodeEndpoint>) (Map<?, ?>) Map.copyOf(endpoints(RoleType.DECODE));
     }
 
     public int getEndpointCount(RoleType roleType) {
@@ -978,25 +919,37 @@ public class EndpointRegistry {
      * @param retainForSchedulerCleanup current directory lookup, called under endpoint locks;
      *                                  must not acquire request locks or use a historical snapshot
      */
-    public void evictExpiredOrphans(long ttlMs,
-                                    LongPredicate retainForSchedulerCleanup) {
-        endpoints(RoleType.PREFILL).forEach((endpoint, worker) -> {
-            PrefillEndpoint ep = (PrefillEndpoint) worker;
-            logEndpointEviction(RoleType.PREFILL, endpoint,
-                    ep.evictExpiredInflight(
-                            ttlMs, retainForSchedulerCleanup), ttlMs);
-        });
-        endpoints(RoleType.DECODE).forEach((endpoint, worker) -> {
-            DecodeEndpoint ep = (DecodeEndpoint) worker;
-            logEndpointEviction(RoleType.DECODE, endpoint,
-                    ep.evictExpiredRequests(
-                            ttlMs, retainForSchedulerCleanup), ttlMs);
-        });
-        endpoints(RoleType.PDFUSION).forEach((endpoint, worker) -> {
-            PrefillEndpoint ep = (PrefillEndpoint) worker;
-            logEndpointEviction(RoleType.PDFUSION, endpoint,
-                    ep.evictExpiredBatches(ttlMs), ttlMs);
-        });
+    public void evictExpiredOrphans(long ttlMs, Predicate<String> retainForSchedulerCleanup) {
+        endpoints(RoleType.PREFILL)
+                .forEach(
+                        (endpoint, worker) -> {
+                            PrefillEndpoint ep = (PrefillEndpoint) worker;
+                            logEndpointEviction(
+                                    RoleType.PREFILL,
+                                    endpoint,
+                                    ep.evictExpiredInflight(ttlMs, retainForSchedulerCleanup),
+                                    ttlMs);
+                        });
+        endpoints(RoleType.DECODE)
+                .forEach(
+                        (endpoint, worker) -> {
+                            DecodeEndpoint ep = (DecodeEndpoint) worker;
+                            logEndpointEviction(
+                                    RoleType.DECODE,
+                                    endpoint,
+                                    ep.evictExpiredRequests(ttlMs, retainForSchedulerCleanup),
+                                    ttlMs);
+                        });
+        endpoints(RoleType.PDFUSION)
+                .forEach(
+                        (endpoint, worker) -> {
+                            PrefillEndpoint ep = (PrefillEndpoint) worker;
+                            logEndpointEviction(
+                                    RoleType.PDFUSION,
+                                    endpoint,
+                                    ep.evictExpiredBatches(ttlMs),
+                                    ttlMs);
+                        });
     }
 
     /**
@@ -1007,17 +960,16 @@ public class EndpointRegistry {
      * entry reports the {@code ttl} reason bucket; only non-zero counts are
      * reported, keeping the series sparse.
      */
-    private void logEndpointEviction(RoleType role,
-                                     String endpoint,
-                                     int evicted,
-                                     long ttlMs) {
+    private void logEndpointEviction(RoleType role, String endpoint, int evicted, long ttlMs) {
         if (evicted > 0) {
-            reporter.reportEndpointInflightTtlExpired(
-                    role.name(), endpoint, "ttl", evicted);
-            Logger.info("event=endpoint_inflight_ttl_eviction role={} endpoint={} "
+            reporter.reportEndpointInflightTtlExpired(role.name(), endpoint, "ttl", evicted);
+            Logger.info(
+                    "event=endpoint_inflight_ttl_eviction role={} endpoint={} "
                             + "evicted={} ttl_ms={}",
-                    role, endpoint, evicted, ttlMs);
+                    role,
+                    endpoint,
+                    evicted,
+                    ttlMs);
         }
     }
-
 }

@@ -44,37 +44,49 @@ public final class ScheduledRequest implements Prioritized {
     private final long hitCache;
     private final int maxInflightBatchesPerPrefillWorker;
     private final boolean routeDelivery;
+
     /**
      * Publish-time NON_BATCH ownership. It has exactly one downstream owner:
      * this ACTIVE item until RouteDeliveryStrategy takes it, then the route
      * transaction. ACTIVE terminal paths take and close the same capability.
      */
-    private final AtomicReference<PrefillState.RouteReservation>
-            publishedRouteReservation = new AtomicReference<>();
+    private final AtomicReference<PrefillState.RouteReservation> publishedRouteReservation =
+            new AtomicReference<>();
 
-    public ScheduledRequest(BalanceContext ctx,
-                     CompletableFuture<Response> future,
-                     Response routeResponse,
-                     ServerStatus prefill,
-                     ServerStatus decode,
-                     PrefillEndpoint prefillEp,
-                     DecodeEndpoint decodeEp,
-                     DecodeEndpoint.ReservationHandle decodeReservation,
-                     long enqueuedAtMs) {
-        this(ctx, future, routeResponse, prefill, decode, prefillEp, decodeEp, decodeReservation,
-                enqueuedAtMs, DecodeBinding.capture(ctx));
+    public ScheduledRequest(
+            BalanceContext ctx,
+            CompletableFuture<Response> future,
+            Response routeResponse,
+            ServerStatus prefill,
+            ServerStatus decode,
+            PrefillEndpoint prefillEp,
+            DecodeEndpoint decodeEp,
+            DecodeEndpoint.ReservationHandle decodeReservation,
+            long enqueuedAtMs) {
+        this(
+                ctx,
+                future,
+                routeResponse,
+                prefill,
+                decode,
+                prefillEp,
+                decodeEp,
+                decodeReservation,
+                enqueuedAtMs,
+                DecodeBinding.capture(ctx));
     }
 
-    public ScheduledRequest(BalanceContext ctx,
-                     CompletableFuture<Response> future,
-                     Response routeResponse,
-                     ServerStatus prefill,
-                     ServerStatus decode,
-                     PrefillEndpoint prefillEp,
-                     DecodeEndpoint decodeEp,
-                     DecodeEndpoint.ReservationHandle decodeReservation,
-                     long enqueuedAtMs,
-                     DecodeBinding frozenDecode) {
+    public ScheduledRequest(
+            BalanceContext ctx,
+            CompletableFuture<Response> future,
+            Response routeResponse,
+            ServerStatus prefill,
+            ServerStatus decode,
+            PrefillEndpoint prefillEp,
+            DecodeEndpoint decodeEp,
+            DecodeEndpoint.ReservationHandle decodeReservation,
+            long enqueuedAtMs,
+            DecodeBinding frozenDecode) {
         this.ctx = Objects.requireNonNull(ctx, "ctx");
         this.future = future;
         this.routeResponse = routeResponse;
@@ -89,23 +101,29 @@ public final class ScheduledRequest implements Prioritized {
         this.enqueueSequence = ctx.getWorkerEnqueueSequence();
         this.expiresAtMs = ctx.getRequestExpiresAtMs();
         this.hitCache = hitCacheOf(prefill);
-        FlexlbConfig schedulingConfig = Objects.requireNonNull(
-                ctx.getConfig(), "request scheduling config");
-        this.routeDelivery = schedulingConfig.getDispatcher().getType() == DispatcherConfig.Type.NON_BATCH;
-        this.maxInflightBatchesPerPrefillWorker = routeDelivery ? 0
-                : schedulingConfig.getDispatcher().getMaxInflightPerPrefillWorker();
+        FlexlbConfig schedulingConfig =
+                Objects.requireNonNull(ctx.getConfig(), "request scheduling config");
+        this.routeDelivery =
+                schedulingConfig.getDispatcher().getType() == DispatcherConfig.Type.NON_BATCH;
+        this.maxInflightBatchesPerPrefillWorker =
+                routeDelivery
+                        ? 0
+                        : schedulingConfig.getDispatcher().getMaxInflightPerPrefillWorker();
     }
 
     // -- accessors --
 
-    public BalanceContext ctx() { return ctx; }
+    public BalanceContext ctx() {
+        return ctx;
+    }
 
     /** O(1) wire-size bound; grouping must not parse or copy GenerateInput payloads. */
     public long batchPayloadSizeUpperBound() {
         var input = ctx().getGenerateInputPb();
         // Input/external-input/DP-slot envelopes, priority and config length growth.
         // Charge a separate DP envelope per item, which also bounds mixed-DP batches.
-        return (input == null ? 0L : input.size()) + 64L
+        return (input == null ? 0L : input.size())
+                + 64L
                 + roleAddressSizeUpperBound(prefill())
                 + roleAddressSizeUpperBound(decode());
     }
@@ -120,12 +138,30 @@ public final class ScheduledRequest implements Prioritized {
         return 64L + (ip == null ? 0L : 3L * ip.length());
     }
 
-    public CompletableFuture<Response> future() { return future; }
-    public Response routeResponse() { return routeResponse; }
-    public ServerStatus prefill() { return prefill; }
-    public ServerStatus decode() { return decodeBinding.status(); }
-    public PrefillEndpoint prefillEp() { return prefillEp; }
-    public DecodeEndpoint decodeEp() { return decodeBinding.endpoint(); }
+    public CompletableFuture<Response> future() {
+        return future;
+    }
+
+    public Response routeResponse() {
+        return routeResponse;
+    }
+
+    public ServerStatus prefill() {
+        return prefill;
+    }
+
+    public ServerStatus decode() {
+        return decodeBinding.status();
+    }
+
+    public PrefillEndpoint prefillEp() {
+        return prefillEp;
+    }
+
+    public DecodeEndpoint decodeEp() {
+        return decodeBinding.endpoint();
+    }
+
     public DecodeEndpoint.ReservationHandle decodeReservation() {
         return decodeBinding.reservation();
     }
@@ -133,11 +169,19 @@ public final class ScheduledRequest implements Prioritized {
     public DecodeBinding decodeBinding() {
         return decodeBinding;
     }
-    public long enqueuedAtMs() { return enqueuedAtMs; }
-    public long expiresAtMs() { return expiresAtMs; }
+
+    public long enqueuedAtMs() {
+        return enqueuedAtMs;
+    }
+
+    public long expiresAtMs() {
+        return expiresAtMs;
+    }
+
     public boolean requestExpired(long nowMs) {
         return expiresAtMs <= 0L || nowMs >= expiresAtMs;
     }
+
     public int maxInflightBatchesPerPrefillWorker() {
         return maxInflightBatchesPerPrefillWorker;
     }
@@ -148,8 +192,7 @@ public final class ScheduledRequest implements Prioritized {
     }
 
     /** Bind the sole publish-time route reservation before ACTIVE becomes visible. */
-    boolean bindPublishedRouteReservation(
-            PrefillState.RouteReservation reservation) {
+    boolean bindPublishedRouteReservation(PrefillState.RouteReservation reservation) {
         return publishedRouteReservation.compareAndSet(
                 null, Objects.requireNonNull(reservation, "reservation"));
     }
@@ -165,15 +208,13 @@ public final class ScheduledRequest implements Prioritized {
     }
 
     /** Transfer only the reservation validated during optimistic preparation. */
-    boolean takePublishedRouteReservation(
-            PrefillState.RouteReservation expected) {
+    boolean takePublishedRouteReservation(PrefillState.RouteReservation expected) {
         return publishedRouteReservation.compareAndSet(
                 Objects.requireNonNull(expected, "expected"), null);
     }
 
     /** Restore ownership after a pre-commit operation made no state change. */
-    boolean restorePublishedRouteReservation(
-            PrefillState.RouteReservation reservation) {
+    boolean restorePublishedRouteReservation(PrefillState.RouteReservation reservation) {
         return publishedRouteReservation.compareAndSet(
                 null, Objects.requireNonNull(reservation, "reservation"));
     }
@@ -199,13 +240,13 @@ public final class ScheduledRequest implements Prioritized {
 
     // -- derived accessors --
 
-    public long requestId() {
+    public String requestId() {
         return decodeBinding.requestId();
     }
 
     /** Total sequence length of this request. */
     public long seqLen() {
-        return decodeBinding.hardKvTokens();
+        return decodeBinding.inputKvTokens();
     }
 
     /** Cache-hit tokens on the assigned prefill endpoint. */
@@ -215,8 +256,7 @@ public final class ScheduledRequest implements Prioritized {
 
     /** Extract cache-hit length from a {@link ServerStatus} debug info. */
     private static long hitCacheOf(ServerStatus ss) {
-        return ss != null && ss.getDebugInfo() != null
-                ? ss.getDebugInfo().getHitCacheLen() : 0;
+        return ss != null && ss.getDebugInfo() != null ? ss.getDebugInfo().getHitCacheLen() : 0;
     }
 
     public enum DecodeMode {
@@ -225,21 +265,29 @@ public final class ScheduledRequest implements Prioritized {
         PREEMPT_AT_PLACEMENT;
 
         public static DecodeMode from(FlexlbConfig config) {
-            if (config.isDirect()) { return IMMEDIATE; }
+            if (config.isDirect()) {
+                return IMMEDIATE;
+            }
             return config.queueScheduler().getOrdering().preemptionPolicy().isPresent()
-                    ? PREEMPT_AT_PLACEMENT : WAIT_AT_PLACEMENT;
+                    ? PREEMPT_AT_PLACEMENT
+                    : WAIT_AT_PLACEMENT;
         }
     }
 
-    /** Request values are frozen before selection; selected ownership is attached once known. */
+    /**
+     * Request values frozen before selection.
+     * inputKvTokens is max(0, seqLen). inputAndMaxOutputKvTokens is
+     * inputKvTokens + max(0, maxNewTokens), saturated at Long.MAX_VALUE.
+     * Neither value is an estimate of the actual generated output length.
+     */
     public record DecodeBinding(
             ServerStatus status,
             DecodeEndpoint endpoint,
             DecodeEndpoint.ReservationHandle reservation,
-            long requestId,
+            String requestId,
             int priority,
-            long hardKvTokens,
-            long expectedKvTokens,
+            long inputKvTokens,
+            long inputAndMaxOutputKvTokens,
             DecodeEndpoint.AdmissionCapacity capacity,
             DecodeMode mode,
             DecodeCostFormula costFormula) {
@@ -247,7 +295,7 @@ public final class ScheduledRequest implements Prioritized {
             Objects.requireNonNull(capacity, "capacity");
             Objects.requireNonNull(mode, "mode");
             Objects.requireNonNull(costFormula, "costFormula");
-            if (reservation != null && reservation.requestId() != requestId) {
+            if (reservation != null && !Objects.equals(reservation.requestId(), requestId)) {
                 throw new IllegalArgumentException("Decode reservation belongs to another request");
             }
         }
@@ -258,21 +306,42 @@ public final class ScheduledRequest implements Prioritized {
             var decode = config.getRouter().getRoles().getDecode();
             var availability = decode.getAvailability();
             long promptTokens = Math.max(0L, request.getSeqLen());
-            long outputTokens = Math.max(0L, request.getMaxNewTokens());
-            long expectedTokens = promptTokens > Long.MAX_VALUE - outputTokens
-                    ? Long.MAX_VALUE : promptTokens + outputTokens;
-            return new DecodeBinding(null, null, null, request.getRequestId(), context.getPriority(),
-                    promptTokens, expectedTokens,
+            long maxOutputTokens = Math.max(0L, request.getMaxNewTokens());
+            long inputAndMaxOutputTokens =
+                    promptTokens > Long.MAX_VALUE - maxOutputTokens
+                            ? Long.MAX_VALUE
+                            : promptTokens + maxOutputTokens;
+            return new DecodeBinding(
+                    null,
+                    null,
+                    null,
+                    request.getRequestId(),
+                    context.getPriority(),
+                    promptTokens,
+                    inputAndMaxOutputTokens,
                     new DecodeEndpoint.AdmissionCapacity(
-                            availability.getMaxEngineRequests() == null ? 0L : availability.getMaxEngineRequests(),
-                            availability.getMaxKvUsagePercent()), DecodeMode.from(config),
+                            availability.getMaxEngineRequests() == null
+                                    ? 0L
+                                    : availability.getMaxEngineRequests(),
+                            availability.getMaxKvUsagePercent()),
+                    DecodeMode.from(config),
                     decode.getCostEstimator().compiledFormula());
         }
 
-        DecodeBinding bind(ServerStatus selectedStatus, DecodeEndpoint selectedEndpoint,
-                           DecodeEndpoint.ReservationHandle selectedReservation) {
-            return new DecodeBinding(selectedStatus, selectedEndpoint, selectedReservation,
-                    requestId, priority, hardKvTokens, expectedKvTokens, capacity, mode,
+        DecodeBinding bind(
+                ServerStatus selectedStatus,
+                DecodeEndpoint selectedEndpoint,
+                DecodeEndpoint.ReservationHandle selectedReservation) {
+            return new DecodeBinding(
+                    selectedStatus,
+                    selectedEndpoint,
+                    selectedReservation,
+                    requestId,
+                    priority,
+                    inputKvTokens,
+                    inputAndMaxOutputKvTokens,
+                    capacity,
+                    mode,
                     costFormula);
         }
 
@@ -281,5 +350,4 @@ public final class ScheduledRequest implements Prioritized {
             return status == null && endpoint == null && reservation == null;
         }
     }
-
 }

@@ -252,8 +252,13 @@ def _prefill_names(ops) -> list[str]:
 
 
 def _cache_checked_request(
-    ops, rid: int, *, input_len: int, block_keys: list,
-    expected_hit_blocks: int, expected_holders=None,
+    ops,
+    rid: int,
+    *,
+    input_len: int,
+    block_keys: list,
+    expected_hit_blocks: int,
+    expected_holders=None,
 ):
     """Compare one completed request with Master and Engine cache facts.
 
@@ -280,8 +285,11 @@ def _cache_checked_request(
         )
 
     def engine_hits():
-        rows = [row for row in ops.snapshot_by_name().values()
-                if row.get("role") == "prefill"]
+        rows = [
+            row
+            for row in ops.snapshot_by_name().values()
+            if row.get("role") == "prefill"
+        ]
         if not rows or any("cache_key_hits" not in row for row in rows):
             raise RuntimeError("Engine cache_key_hits counters unavailable")
         return sum(int(row["cache_key_hits"]) for row in rows)
@@ -289,7 +297,10 @@ def _cache_checked_request(
     before_max, before_total = master_counters()
     before_hits = engine_hits()
     addr, err = ops.run_one_request(
-        rid, input_len=input_len, output_len=2, block_keys=block_keys,
+        rid,
+        input_len=input_len,
+        output_len=2,
+        block_keys=block_keys,
         stream_timeout_s=STREAM_TIMEOUT_S,
     )
     if err:
@@ -300,12 +311,19 @@ def _cache_checked_request(
     hit_delta = engine_hits() - before_hits
     expected_tokens = min(input_len, expected_hit_blocks * BLOCK_TOKENS)
     selections = total_delta / input_len
-    matched = (selections >= 1 and selections.is_integer()
-               and max_delta == expected_tokens * selections)
+    matched = (
+        selections >= 1
+        and selections.is_integer()
+        and max_delta == expected_tokens * selections
+    )
     name = ops.addr_to_name().get(addr, addr)
-    if (not matched or total_delta < input_len
-            or hit_delta != expected_hit_blocks
-            or expected_holders is not None and name not in expected_holders):
+    if (
+        not matched
+        or total_delta < input_len
+        or hit_delta != expected_hit_blocks
+        or expected_holders is not None
+        and name not in expected_holders
+    ):
         return addr, (
             f"cache evidence mismatch: engine={name}, "
             f"Master max_hit_delta={max_delta}, input_delta={total_delta}, "
@@ -543,7 +561,8 @@ def _kv_spec(
 
 def _lru_spec(ctx: CaseContext) -> EnvSpec:
     """kv_lru_eviction_affinity env: 2P+2D with a tiny per-engine prefill
-    LRU (4 blocks)."""
+    LRU (4 blocks). The decode pool is deliberately wider because decode
+    reservation includes max-new-token headroom and is not under test here."""
     return EnvSpec(
         label=f"kv_lru_{ctx.profile}",
         n_prefill=2,
@@ -551,7 +570,7 @@ def _lru_spec(ctx: CaseContext) -> EnvSpec:
         perf=default_perf(),
         master_profile=ctx.profile,
         prefill_cache_blocks=4,
-        decode_cache_blocks=4,
+        decode_cache_blocks=12,
     )
 
 
@@ -568,20 +587,25 @@ def kv_pe_admit_isolation(ctx: CaseContext):
     """[per-engine] A's admissions never widen B's key set.
 
     Scenario: ledger-separated seeding (the kv_prefix_stickiness
-    technique) pins family-0 on engine A and family-5 on engine B; with
-    B slowed to 5s, families 1..4 are zero-hit and their ledger pricing
-    admits them on A only.  Behaviour: per-engine admit accounting in
+    technique) pins family-0 on engine A and family-5 on engine B. Engine B
+    is temporarily stopped (its in-memory LRU is retained), so zero-hit
+    families 1..4 can admit on A only. Behaviour: per-engine admit
+    accounting in
     the master's cache-status index.  Expected (contract): only A's
     cache_key_set grows with the four families — B's stays exactly its
     own seed family — and subsequent same-prefix continuations stick to
     A (P9); a global broadcast of A's admits would equalize the hit and
     dissolve the affinity into spread.  Prediction: passes.
     """
-    env = ctx.env_manager.ensure(_kv_spec(ctx))
+    # This case exercises Prefill cache-ledger isolation. Keep Decode well
+    # clear of its independent 90% expected-KV gate so that repeated 10-block
+    # families cannot park on an unrelated delivery-capacity boundary.
+    env = ctx.env_manager.ensure(_kv_spec(ctx, "_pe_isolation", decode_cache_blocks=64))
     ops = ctx.engine_ops(env)
     base = rid_base(ctx, "kv")
     report = GradeReport(run_grade=ctx.grade)
     fired, fired_handles = [], {}
+    stopped_b = None
     try:
         names = _prefill_names(ops)
         if len(names) < 2:
@@ -624,10 +648,21 @@ def kv_pe_admit_isolation(ctx: CaseContext):
             return False, f"seeding failed: {err or err_b}"
         if a_name == b_name:
             return False, f"family separation failed: both seeds on {a_name}"
+        if not _wait_cache_sync(ops, names):
+            return False, "cache sync never converged after separated seeds"
 
-        # -- B stays heavy: zero-hit families 1..4 divert onto A only.
-        ops.set_perf(b_name, prefill_fixed_ms=5000.0)
-        time.sleep(1.5)
+        # -- Remove B from the routable set while families 1..4 admit. KV
+        # pressure is only an endpoint-local delivery gate: the global route
+        # may still choose that endpoint and then park there. stop/start is the
+        # deterministic constraint, and the mock preserves B's in-memory LRU.
+        ops.stop_engine(b_name)
+        stopped_b = b_name
+        if not wait_for(
+            lambda: ops.master_alive_count("PREFILL") <= len(names) - 1,
+            30.0,
+            0.5,
+        ):
+            return False, f"master never evicted stopped prefill {b_name}"
         fams = [_fam_keys(base, i) for i in range(1, 5)]
         for keys in fams:
             rid = ops.next_request_id(base)
@@ -643,9 +678,16 @@ def kv_pe_admit_isolation(ctx: CaseContext):
             if ops.addr_to_name().get(addr, addr) != a_name:
                 return False, (
                     f"zero-hit family landed on {addr} instead of {a_name} "
-                    f"(B-slow diversion failed)"
+                    f"(stopped-B isolation failed)"
                 )
-        ops.set_perf(b_name, prefill_fixed_ms=100.0)
+        ops.start_engine(b_name)
+        stopped_b = None
+        if not wait_for(
+            lambda: ops.master_alive_count("PREFILL") >= len(names),
+            30.0,
+            0.5,
+        ):
+            return False, f"master never rediscovered restarted prefill {b_name}"
         if not _wait_cache_sync(ops, names):
             return False, "cache sync never converged after family admits"
 
@@ -702,9 +744,15 @@ def kv_pe_admit_isolation(ctx: CaseContext):
         return False, f"exception: {exc!r}"
     finally:
         _drain_fired(ops, fired, fired_handles)
+        if stopped_b is not None:
+            try:
+                ops.start_engine(stopped_b)
+            except Exception:
+                pass
         for name in _prefill_names(ops):
             try:
                 ops.set_perf(name, prefill_fixed_ms=100.0)
+                ops.set_kv_pressure(name, 0)
             except Exception:
                 pass
 
@@ -772,11 +820,18 @@ def kv_pe_evict_zero_match(ctx: CaseContext):
 
         rid = ops.next_request_id(base)
         addr, err = _cache_checked_request(
-            ops, rid, input_len=PREFIX_INPUT_LEN, block_keys=fam0,
+            ops,
+            rid,
+            input_len=PREFIX_INPUT_LEN,
+            block_keys=fam0,
             expected_hit_blocks=0,
         )
-        report.invariant("P6", evicted_ok and err is None,
-                         context="post_evict", detail=f"evicted={evicted_ok}, replay={addr}, error={err}")
+        report.invariant(
+            "P6",
+            evicted_ok and err is None,
+            context="post_evict",
+            detail=f"evicted={evicted_ok}, replay={addr}, error={err}",
+        )
         return report.finish(f"evicted_holder={x_name}, grades: {report.summary()}")
     except Exception as exc:
         return False, f"exception: {exc!r}"
@@ -898,16 +953,28 @@ def kv_g_shared_block_both_match(ctx: CaseContext):
             fam0
         ) <= _engine_cache_keys(ops, e2)
 
-        report.invariant("P6", shared_ok, context="shared_keys",
-                         detail=f"both holders contain the complete prefix: {shared_ok}")
+        report.invariant(
+            "P6",
+            shared_ok,
+            context="shared_keys",
+            detail=f"both holders contain the complete prefix: {shared_ok}",
+        )
         for _ in range(4):
             rid = ops.next_request_id(base)
             addr, err = _cache_checked_request(
-                ops, rid, input_len=PREFIX_INPUT_LEN, block_keys=fam0,
-                expected_hit_blocks=len(fam0), expected_holders={e1, e2},
+                ops,
+                rid,
+                input_len=PREFIX_INPUT_LEN,
+                block_keys=fam0,
+                expected_hit_blocks=len(fam0),
+                expected_holders={e1, e2},
             )
-            report.invariant("P6", err is None, context="shared_cache_hit",
-                             detail=f"replay={addr}, error={err}")
+            report.invariant(
+                "P6",
+                err is None,
+                context="shared_cache_hit",
+                detail=f"replay={addr}, error={err}",
+            )
             if err:
                 break
         passed, detail, rep = report.finish(
@@ -1027,11 +1094,18 @@ def kv_g_full_release_no_ghost(ctx: CaseContext):
 
         rid = ops.next_request_id(base)
         addr, err = _cache_checked_request(
-            ops, rid, input_len=PREFIX_INPUT_LEN, block_keys=fam0,
+            ops,
+            rid,
+            input_len=PREFIX_INPUT_LEN,
+            block_keys=fam0,
             expected_hit_blocks=0,
         )
-        report.invariant("P6", released_ok and err is None,
-                         context="full_release", detail=f"released={released_ok}, replay={addr}, error={err}")
+        report.invariant(
+            "P6",
+            released_ok and err is None,
+            context="full_release",
+            detail=f"released={released_ok}, replay={addr}, error={err}",
+        )
         return report.finish(f"holders={{{e1}, {e2}}}, grades: {report.summary()}")
     except Exception as exc:
         return False, f"exception: {exc!r}"
@@ -1102,11 +1176,18 @@ def kv_g_sync_convergence(ctx: CaseContext):
 
         rid = ops.next_request_id(base)
         addr, err = _cache_checked_request(
-            ops, rid, input_len=PREFIX_INPUT_LEN, block_keys=fam0,
+            ops,
+            rid,
+            input_len=PREFIX_INPUT_LEN,
+            block_keys=fam0,
             expected_hit_blocks=0,
         )
-        report.invariant("P6", err is None, context="fam0_no_holder",
-                         detail=f"replay={addr}, error={err}")
+        report.invariant(
+            "P6",
+            err is None,
+            context="fam0_no_holder",
+            detail=f"replay={addr}, error={err}",
+        )
 
         # -- fam1/fam2 (sole holders): continuations stick (P9 x2).
         for label, keys, holder in (
@@ -1776,7 +1857,10 @@ def kv_prefix_stickiness(ctx: CaseContext):
             else:
                 keys = [rid * 100 + j for j in range(8)]
                 addr, err = _cache_checked_request(
-                    ops, rid, input_len=8192, block_keys=keys,
+                    ops,
+                    rid,
+                    input_len=8192,
+                    block_keys=keys,
                     expected_hit_blocks=0,
                 )
                 if err:
@@ -1888,7 +1972,10 @@ def kv_hot_prefix_tension(ctx: CaseContext):
             else:
                 keys = [rid * 100 + j for j in range(16)]
                 addr, err = _cache_checked_request(
-                    ops, rid, input_len=input_len, block_keys=keys,
+                    ops,
+                    rid,
+                    input_len=input_len,
+                    block_keys=keys,
                     expected_hit_blocks=0,
                 )
                 if err:
@@ -1947,7 +2034,10 @@ def kv_match_mixed(ctx: CaseContext):
             for i in range(n):
                 rid = ops.next_request_id(base)
                 addr, err = _cache_checked_request(
-                    ops, rid, input_len=8192, block_keys=keys_fn(rid, i),
+                    ops,
+                    rid,
+                    input_len=8192,
+                    block_keys=keys_fn(rid, i),
                     expected_hit_blocks={"full": 8, "half": 4, "zero": 0}[label],
                 )
                 if err:
@@ -2020,9 +2110,7 @@ def kv_match_mixed(ctx: CaseContext):
             "M3",
             full_conc,
             context="full_hit",
-            detail=(
-                f"concentration on full-hit seed engine={full_conc:.2f}"
-            ),
+            detail=(f"concentration on full-hit seed engine={full_conc:.2f}"),
         )
         report.check(
             "M3",
@@ -2059,10 +2147,11 @@ def kv_lru(ctx: CaseContext):
        cache_keys >= 2 with zero evictions.
     2. R2 replays the SAME keys: master-side cache-status sync must route
        it back to X (S2-style affinity, one retry for sync lag).
-    3. R3 replays the prefix [k1,k2] plus three fresh keys: five keys
-       admitted into the capacity-4 LRU evict exactly the eldest block —
-       snapshot proves evictions >= 1 and cache_keys capped at 4, and the
-       prefix hit keeps R3 on X as well.
+    3. R3-R5 each replay [k1,k2] plus one fresh key. Five cumulative keys
+       are admitted while every request stays within the three usable blocks
+       left by the pool's one-block reserve watermark. The capacity-4 LRU
+       evicts its eldest block, while prefix affinity keeps all pressure
+       requests on X.
     """
     env = ctx.env_manager.ensure(_lru_spec(ctx))
     ops = ctx.engine_ops(env)
@@ -2106,19 +2195,23 @@ def kv_lru(ctx: CaseContext):
         keys_after_prime = snap.get(engine_x, {}).get("cache_keys", 0)
         evictions_after_prime = snap.get(engine_x, {}).get("cache_evictions", 0)
 
-        # Capacity pressure: prefix [k1,k2] + 3 fresh keys -> 5 admits into
-        # a capacity-4 LRU -> exactly the eldest block evicted.
-        keys_ext = keys_a + [base + 3, base + 4, base + 5]
-        rid3 = ops.next_request_id(base)
-        addr3, err3 = run(rid3, keys_ext, 4096)
-        if err3:
-            return False, f"R3 (pressure) failed: {err3}"
+        # Keep each request within total-reserve (4-1=3 blocks), while the
+        # completed requests cumulatively introduce enough keys to overflow
+        # the four-entry LRU. A larger request would correctly fail active-KV
+        # admission before the persistent-cache update under test.
+        pressure_addrs = []
+        for request_no, fresh_key in enumerate(range(base + 3, base + 6), start=3):
+            rid = ops.next_request_id(base)
+            addr, err = run(rid, keys_a + [fresh_key], 3072)
+            if err:
+                return False, f"R{request_no} (pressure) failed: {err}"
+            pressure_addrs.append(addr)
         time.sleep(0.5)  # admit lands at prefill completion
         snap = ops.snapshot_by_name()
-        engine_z = addr_map.get(addr3, "?")
+        engine_z = addr_map.get(pressure_addrs[-1], "?")
         keys_after_pressure = snap.get(engine_z, {}).get("cache_keys", 0)
         evictions_after_pressure = snap.get(engine_z, {}).get("cache_evictions", 0)
-        prefix_affinity = addr3 == addr1
+        prefix_affinity = all(addr == addr1 for addr in pressure_addrs)
 
         prime_ok = keys_after_prime >= 2 and evictions_after_prime == 0
         eviction_ok = evictions_after_pressure >= 1 and keys_after_pressure <= 4
@@ -2126,7 +2219,7 @@ def kv_lru(ctx: CaseContext):
         return passed, (
             f"engine_x={engine_x}, affinity_r2={affinity}, "
             f"after_prime: keys={keys_after_prime}, evictions={evictions_after_prime}, "
-            f"pressure_landed_on={engine_z}, prefix_affinity_r3={prefix_affinity}, "
+            f"pressure_landed_on={engine_z}, prefix_affinity_r3_r5={prefix_affinity}, "
             f"after_pressure: keys={keys_after_pressure} (<=4), "
             f"evictions={evictions_after_pressure} (>=1)"
         )

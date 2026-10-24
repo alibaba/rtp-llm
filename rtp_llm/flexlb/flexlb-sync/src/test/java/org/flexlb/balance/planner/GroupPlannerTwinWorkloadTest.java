@@ -19,8 +19,8 @@ class GroupPlannerTwinWorkloadTest {
     @Test
     void identicalRequestsProduceFullBatchesOrSingletonTimeoutsDependingOnArrival() {
         Constraints limits = new Constraints(8, 1_000_000L, 22_000_000L, 0L, 400L);
-        List<Item> burst = LongStream.rangeClosed(1, 16)
-                .mapToObj(id -> item(id, 0L, 128L)).toList();
+        List<Item> burst =
+                LongStream.rangeClosed(1, 16).mapToObj(id -> item(id, 0L, 128L)).toList();
         Plan<Item> first = plan(burst, limits, 0L);
         Plan<Item> second = plan(burst.subList(8, 16), limits, 0L);
         assertEquals("batch_full", first.reason());
@@ -28,7 +28,7 @@ class GroupPlannerTwinWorkloadTest {
         assertEquals(8, first.items().size());
         assertEquals(8, second.items().size());
 
-        List<Long> sparseDispatched = new ArrayList<>();
+        List<String> sparseDispatched = new ArrayList<>();
         for (long id = 1; id <= 16; id++) {
             long arrival = (id - 1) * 2_000L;
             List<Item> pending = List.of(item(id, arrival, 128L));
@@ -38,14 +38,18 @@ class GroupPlannerTwinWorkloadTest {
             assertEquals(1, timeout.items().size());
             sparseDispatched.add(timeout.items().getFirst().requestId());
         }
-        assertEquals(burst.stream().map(Item::requestId).toList(), sparseDispatched,
+        assertEquals(
+                burst.stream().map(Item::requestId).toList(),
+                sparseDispatched,
                 "both arrival profiles must dispatch the same 16 request IDs exactly once");
     }
 
     @Test
     void increasingDecisionGroupLimitChangesFullTriggerWithoutChangingRequests() {
-        List<Item> arrivals = LongStream.rangeClosed(1, 8)
-                .mapToObj(id -> item(id, (id - 1) * 50L, 128L)).toList();
+        List<Item> arrivals =
+                LongStream.rangeClosed(1, 8)
+                        .mapToObj(id -> item(id, (id - 1) * 50L, 128L))
+                        .toList();
         Constraints small = new Constraints(8, 1_000_000L, 22_000_000L, 0L, 400L);
         Constraints large = new Constraints(32, 1_000_000L, 22_000_000L, 0L, 400L);
 
@@ -61,12 +65,11 @@ class GroupPlannerTwinWorkloadTest {
     void lowKvUsageMustNotAllowHeterogeneousPrefillBatchToExceedPaddedComputeBudget() {
         // Sum(tokens)=1,100 fits easily, but a three-row padded batch costs
         // 900*3=2,700 tokens and exceeds the 2,000-token compute limit.
-        List<Item> arrivals = List.of(
-                item(1L, 0L, 100L), item(2L, 0L, 900L), item(3L, 0L, 100L));
+        List<Item> arrivals = List.of(item(1L, 0L, 100L), item(2L, 0L, 900L), item(3L, 0L, 100L));
         Constraints limits = new Constraints(8, 2_000L, 22_000_000L, 0L, 400L);
         Plan<Item> result = plan(arrivals, limits, 400L);
 
-        assertEquals(List.of(1L, 2L), result.items().stream().map(Item::requestId).toList());
+        assertEquals(List.of("1", "2"), result.items().stream().map(Item::requestId).toList());
         assertEquals(1_800L, result.shape().paddedTokens());
         assertTrue(result.shape().fitsCompute(2_000L));
         assertEquals("fixed_window_timeout", result.reason());
@@ -77,6 +80,6 @@ class GroupPlannerTwinWorkloadTest {
     }
 
     private static Item item(long id, long arrivalMs, long tokens) {
-        return new Item(id, 0, id, arrivalMs, Long.MAX_VALUE, tokens, 0L);
+        return new Item(Long.toString(id), 0, id, arrivalMs, Long.MAX_VALUE, tokens, 0L);
     }
 }

@@ -2,8 +2,8 @@ package org.flexlb.service.grpc;
 
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
-import org.flexlb.engine.grpc.EngineGrpcClient;
 import org.flexlb.engine.grpc.EngineRpcService;
+import org.flexlb.engine.grpc.client.EngineGrpcClient;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Component;
@@ -23,11 +23,15 @@ public class EngineGrpcService {
     }
 
     public CompletableFuture<EngineRpcService.WorkerStatusPB> getWorkerStatusAsync(
-            String ip, int grpcPort, long finishedTaskVersion, long requestTimeoutMs,
+            String ip,
+            int grpcPort,
+            long finishedTaskVersion,
+            long requestTimeoutMs,
             RoleType roleType) {
-        EngineRpcService.StatusVersionPB request = EngineRpcService.StatusVersionPB.newBuilder()
-                .setLatestFinishedVersion(finishedTaskVersion)
-                .build();
+        EngineRpcService.StatusVersionPB request =
+                EngineRpcService.StatusVersionPB.newBuilder()
+                        .setLatestFinishedVersion(finishedTaskVersion)
+                        .build();
 
         if (RoleType.VIT.equals(roleType)) {
             return engineGrpcClient.getMultimodalWorkerStatusAsync(
@@ -37,15 +41,23 @@ public class EngineGrpcService {
     }
 
     public CompletableFuture<EngineRpcService.CacheStatusPB> getCacheStatusAsync(
-            String ip, int grpcPort, WorkerStatus workerStatus, long cacheVersion,
-            long requestTimeoutMs, RoleType roleType) {
+            String ip,
+            int grpcPort,
+            WorkerStatus workerStatus,
+            long cacheVersion,
+            long requestTimeoutMs,
+            RoleType roleType) {
         boolean needCacheKeys = workerStatus.getRole().requiresCacheKeys();
-        EngineRpcService.CacheVersionPB request = EngineRpcService.CacheVersionPB.newBuilder()
-                .setLatestCacheVersion((int) cacheVersion)
-                .setNeedCacheKeys(needCacheKeys)
-                .build();
-        logger.debug("Get cache status Request: {}, cacheVersion: {}, needCacheKeys: {}",
-                ip, cacheVersion, needCacheKeys);
+        EngineRpcService.CacheVersionPB request =
+                EngineRpcService.CacheVersionPB.newBuilder()
+                        .setLatestCacheVersion((int) cacheVersion)
+                        .setNeedCacheKeys(needCacheKeys)
+                        .build();
+        logger.debug(
+                "Get cache status Request: {}, cacheVersion: {}, needCacheKeys: {}",
+                ip,
+                cacheVersion,
+                needCacheKeys);
 
         if (RoleType.VIT.equals(roleType)) {
             return engineGrpcClient.getMultimodalCacheStatusAsync(

@@ -1,7 +1,7 @@
 package org.flexlb.service;
 
-import org.flexlb.balance.scheduler.RequestScheduler;
 import org.flexlb.balance.scheduler.DefaultRouter;
+import org.flexlb.balance.scheduler.RequestScheduler;
 import org.flexlb.balance.scheduler.SchedulingTestConfig;
 import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.loadbalance.Request;
@@ -21,7 +21,7 @@ import static org.mockito.Mockito.when;
 
 class RouteServiceTest {
     private final RequestScheduler scheduler = mock(RequestScheduler.class);
-    private final RecentCacheKeyTraceReporter reporter = mock(RecentCacheKeyTraceReporter.class);
+    private final TheoryCacheHitReporter reporter = mock(TheoryCacheHitReporter.class);
     private final RouteService service = new RouteService(scheduler, reporter);
 
     @Test
@@ -64,7 +64,7 @@ class RouteServiceTest {
     private static BalanceContext context(boolean vitOnly) {
         BalanceContext context = new BalanceContext(SchedulingTestConfig.batchConfig());
         Request request = new Request();
-        request.setRequestId(918L);
+        request.setRequestId("918");
         request.setVitRouteOnly(vitOnly);
         context.setRequest(request);
         return context;

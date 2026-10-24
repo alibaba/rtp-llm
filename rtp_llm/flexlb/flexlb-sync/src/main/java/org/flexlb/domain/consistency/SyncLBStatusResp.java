@@ -15,5 +15,4 @@ public class SyncLBStatusResp {
     private boolean success;
     private String msg;
     private String lbStatus;
-
 }

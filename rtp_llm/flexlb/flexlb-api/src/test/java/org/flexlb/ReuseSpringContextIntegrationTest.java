@@ -22,19 +22,19 @@ import uk.org.webcompere.systemstubs.jupiter.SystemStubsExtension;
 @AutoConfigureMockMvc
 @AutoConfigureWebTestClient
 @ExtendWith({SystemStubsExtension.class})
-@SpringBootTest(args = {"--server.port=7001", "--management.server.port=8803"},
+@SpringBootTest(
+        args = {"--server.port=7001", "--management.server.port=8803"},
         webEnvironment = SpringBootTest.WebEnvironment.DEFINED_PORT)
 public class ReuseSpringContextIntegrationTest {
 
-    @SystemStub
-    private static EnvironmentVariables environmentVariables;
+    @SystemStub private static EnvironmentVariables environmentVariables;
 
-    @SpyBean
-    private ConfigService configService;
+    @SpyBean private ConfigService configService;
 
     @BeforeAll
     public static void setUp() {
-        environmentVariables.set("MODEL_SERVICE_CONFIG",
+        environmentVariables.set(
+                "MODEL_SERVICE_CONFIG",
                 """
                         {
                             "service_id": "aigc.text-generation.generation.engine_service",\s
@@ -44,21 +44,33 @@ public class ReuseSpringContextIntegrationTest {
                                     "prefill_endpoint": {
                                         "address": "com.prefill.hosts.address",\s
                                         "protocol": "http",\s
-                                        "path": "/"
+                                        "path": "/",
+                                        "discovery": {
+                                            "type": "static-env",
+                                            "hosts": ["127.0.0.100:8080", "127.0.0.101:8080"]
+                                        }
                                     },\s
                                     "decode_endpoint": {
                                         "address": "com.decode.hosts.address",\s
                                         "protocol": "http",\s
-                                        "path": "/"
+                                        "path": "/",
+                                        "discovery": {
+                                            "type": "static-env",
+                                            "hosts": ["127.0.0.102:8080", "127.0.0.103:8080"]
+                                        }
                                     }
                                 }
                             ]
                         }
+                """);
+        environmentVariables.set(
+                "FLEXLB_CONFIG",
                 """
-        );
-        environmentVariables.set("FLEXLB_CONFIG", """
                 {"schemaVersion":3,
                  "requestLifecycle":{"request":{"timeoutMs":60000},"decision":{"lifetime":2}}}
                 """);
+        environmentVariables.set("BIZ_NAME", "flexlb-test");
+        environmentVariables.set("DEPLOYMENT_NAME", "integration");
+        environmentVariables.set("ZONE_NAME", "master");
     }
 }

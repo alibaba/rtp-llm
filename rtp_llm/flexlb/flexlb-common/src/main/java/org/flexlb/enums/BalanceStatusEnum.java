@@ -19,9 +19,8 @@ public enum BalanceStatusEnum {
 
     // Worker Status related errors (3100-3199)
     WORKER_SERVICE_UNAVAILABLE(3102, "Worker service unavailable!"),
-    WORKER_STATUS_GRPC_TIMEOUT(3104, "Worker gRPC timeout!")
+    WORKER_STATUS_GRPC_TIMEOUT(3104, "Worker gRPC timeout!");
 
-    ;
     private final int code;
 
     private final String message;

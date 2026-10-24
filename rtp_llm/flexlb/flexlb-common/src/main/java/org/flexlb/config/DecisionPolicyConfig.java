@@ -20,6 +20,7 @@ public final class DecisionPolicyConfig {
     private Type type = Type.FIXED_WINDOW;
     private int maxRequests = DEFAULT_MAX_REQUESTS;
     private long maxCollectionWaitMs = DEFAULT_MAX_COLLECTION_WAIT_MS;
+
     /** Optional execution-time cap for a fixed-window group. */
     private Long maxPredictedExecutionMs;
 

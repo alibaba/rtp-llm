@@ -14,8 +14,7 @@ import java.util.List;
 import java.util.Map;
 
 /**
- * Writer-side owner of the file-based service discovery mapping consumed by
- * {@code org.flexlb.discovery.LocalServiceDiscovery} on the master side.
+ * Writes the domain-to-host mapping used by file-based discovery test fixtures.
  *
  * <p>The file is derived wholesale from the live services map on every
  * mutation (add/remove engine), so its content can never drift from the set
@@ -43,14 +42,17 @@ import java.util.Map;
 final class DiscoveryFileStore {
 
     private static final ObjectMapper MAPPER = new ObjectMapper();
+
     /** How many times a rewrite is retried before surfacing the failure to the caller. */
     private static final int WRITE_ATTEMPTS = 3;
 
     private final Path file;
     private final String prefillDomain;
     private final String decodeDomain;
+
     /** Serializes all writers within this process (cluster-single lock). */
     private final Object writeLock = new Object();
+
     private volatile boolean warnedNonAtomic = false;
 
     DiscoveryFileStore(String filePath, String prefillDomain, String decodeDomain) {
@@ -74,7 +76,8 @@ final class DiscoveryFileStore {
     }
 
     /** All engines of one role as {@code ip:httpPort} strings, ordered by gRPC port. */
-    private List<String> addressList(Map<Integer, JavaMockEngineCluster.FastRpcService> services, String role) {
+    private List<String> addressList(
+            Map<Integer, JavaMockEngineCluster.FastRpcService> services, String role) {
         List<JavaMockEngineCluster.FastRpcService> engines = new ArrayList<>();
         for (JavaMockEngineCluster.FastRpcService service : services.values()) {
             if (role.equals(service.getRoleName())) {
@@ -110,12 +113,16 @@ final class DiscoveryFileStore {
         Path tmp = file.resolveSibling(file.getFileName() + ".tmp");
         MAPPER.writerWithDefaultPrettyPrinter().writeValue(tmp.toFile(), payload);
         try {
-            Files.move(tmp, file, StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING);
+            Files.move(
+                    tmp, file, StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING);
         } catch (AtomicMoveNotSupportedException e) {
             if (!warnedNonAtomic) {
                 warnedNonAtomic = true;
-                System.out.println("WARNING: atomic move not supported for discovery file " + file
-                        + ", falling back to non-atomic replace: " + e.getMessage());
+                System.out.println(
+                        "WARNING: atomic move not supported for discovery file "
+                                + file
+                                + ", falling back to non-atomic replace: "
+                                + e.getMessage());
             }
             Files.move(tmp, file, StandardCopyOption.REPLACE_EXISTING);
         }

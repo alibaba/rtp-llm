@@ -8,6 +8,9 @@ public class CommonConstants {
 
     public static final String TIMEOUT_HANDLER = "timeoutHandler";
 
+    /** Separator between a physical {@code ip:port} address and its logical engine index. */
+    public static final String LOGICAL_WORKER_ENGINE_INDEX_SEPARATOR = "@";
+
     /**
      * gRPC timeout message
      */
@@ -17,5 +20,4 @@ public class CommonConstants {
      * Port offset between HTTP port and gRPC port = HTTP port + GRPC_PORT_OFFSET
      */
     public static final int GRPC_PORT_OFFSET = 1;
-
 }

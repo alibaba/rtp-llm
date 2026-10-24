@@ -43,8 +43,7 @@ class DecodePendingQueueHardGateTest {
 
     private static final int BASE_PORT = 63300;
 
-    @TempDir
-    Path tempDir;
+    @TempDir Path tempDir;
 
     private ScheduledExecutorService scheduler;
     private ExecutorService workerPool;
@@ -53,16 +52,21 @@ class DecodePendingQueueHardGateTest {
 
     @BeforeEach
     void setUp() {
-        scheduler = Executors.newScheduledThreadPool(4, runnable -> {
-            Thread thread = new Thread(runnable, "decode-hard-gate-scheduler");
-            thread.setDaemon(true);
-            return thread;
-        });
-        workerPool = Executors.newCachedThreadPool(r -> {
-            Thread thread = new Thread(r, "decode-hard-gate-worker");
-            thread.setDaemon(true);
-            return thread;
-        });
+        scheduler =
+                Executors.newScheduledThreadPool(
+                        4,
+                        runnable -> {
+                            Thread thread = new Thread(runnable, "decode-hard-gate-scheduler");
+                            thread.setDaemon(true);
+                            return thread;
+                        });
+        workerPool =
+                Executors.newCachedThreadPool(
+                        r -> {
+                            Thread thread = new Thread(r, "decode-hard-gate-worker");
+                            thread.setDaemon(true);
+                            return thread;
+                        });
         services = new ConcurrentHashMap<>();
         nextPortOffset = 0;
     }
@@ -91,19 +95,27 @@ class DecodePendingQueueHardGateTest {
 
         int nRequests = 10;
         for (int i = 0; i < nRequests; i++) {
-            assertTrue(scheduleDecodeCompletion(
-                            decode, requestShape(model, 100L + i, 8), -1, null),
+            assertTrue(
+                    scheduleDecodeCompletion(decode, requestShape(model, 100L + i, 8), -1, null),
                     "the hard gate must never reject a decode request — "
                             + "excess parks in the unbounded waiting queue");
         }
 
-        assertEquals(2, activeDecodeRequests(decode),
+        assertEquals(
+                2,
+                activeDecodeRequests(decode),
                 "hard gate: activeDecodeRequests capped at decodeMaxConcurrency");
-        assertEquals(nRequests - 2, decodePendingQueueSize(decode),
+        assertEquals(
+                nRequests - 2,
+                decodePendingQueueSize(decode),
                 "hard gate: excess requests must park in the decode pending queue");
-        assertEquals(nRequests, decode.getInflightCount(),
+        assertEquals(
+                nRequests,
+                decode.getInflightCount(),
                 "running + queued requests all count as in flight");
-        assertEquals(nRequests, decode.getRunningCount(),
+        assertEquals(
+                nRequests,
+                decode.getRunningCount(),
                 "queued requests keep their runningTasks claim (dedup guard)");
 
         // All requests must complete normally and drain every counter.
@@ -111,7 +123,9 @@ class DecodePendingQueueHardGateTest {
         assertEquals(0, activeDecodeRequests(decode));
         assertEquals(0, decode.getActiveKvTokens());
         assertEquals(0, decodePendingQueueSize(decode));
-        assertEquals(nRequests, decode.getCompletedCount(),
+        assertEquals(
+                nRequests,
+                decode.getCompletedCount(),
                 "every accepted request must complete (none rejected)");
         decode.checkLeakDrain(0L);
         assertFalse(decode.isLeakDetected());
@@ -129,23 +143,32 @@ class DecodePendingQueueHardGateTest {
         // First 2 fill the concurrency slots.
         assertTrue(scheduleDecodeCompletion(decode, requestShape(model, 1L, 8), -1, null));
         assertTrue(scheduleDecodeCompletion(decode, requestShape(model, 2L, 8), -1, null));
-        assertEquals(2, activeDecodeRequests(decode),
+        assertEquals(
+                2,
+                activeDecodeRequests(decode),
                 "hard gate: activeDecodeRequests capped at decodeMaxConcurrency");
         assertEquals(0, decodePendingQueueSize(decode));
 
         // Next 4 are parked in the pending queue (accepted, not running) —
         // the queue is unbounded, so there is no overflow / rejection point.
         for (long rid = 3; rid <= 6; rid++) {
-            assertTrue(scheduleDecodeCompletion(decode, requestShape(model, rid, 8), -1, null),
+            assertTrue(
+                    scheduleDecodeCompletion(decode, requestShape(model, rid, 8), -1, null),
                     "request " + rid + " must be accepted into the pending queue");
         }
-        assertEquals(2, activeDecodeRequests(decode),
+        assertEquals(
+                2,
+                activeDecodeRequests(decode),
                 "queued requests must not consume concurrency slots");
-        assertEquals(4, decodePendingQueueSize(decode),
+        assertEquals(
+                4,
+                decodePendingQueueSize(decode),
                 "requests 3..6 must be parked in the pending queue");
-        assertEquals(6, decode.getInflightCount(),
-                "running + queued requests all count as in flight");
-        assertEquals(6, decode.getRunningCount(),
+        assertEquals(
+                6, decode.getInflightCount(), "running + queued requests all count as in flight");
+        assertEquals(
+                6,
+                decode.getRunningCount(),
                 "queued requests keep their runningTasks claim (dedup guard)");
 
         // Completions hand freed slots to queued requests until fully drained.
@@ -153,7 +176,9 @@ class DecodePendingQueueHardGateTest {
         assertEquals(0, activeDecodeRequests(decode));
         assertEquals(0, decode.getActiveKvTokens());
         assertEquals(0, decodePendingQueueSize(decode));
-        assertEquals(6, decode.getCompletedCount(),
+        assertEquals(
+                6,
+                decode.getCompletedCount(),
                 "all six accepted requests must complete via the drain chain");
         decode.checkLeakDrain(0L);
         assertFalse(decode.isLeakDetected());
@@ -167,5 +192,4 @@ class DecodePendingQueueHardGateTest {
         return MockEngineTestSupport.decodeService(
                 model, port, services, scheduler, decodeMaxConcurrency);
     }
-
 }

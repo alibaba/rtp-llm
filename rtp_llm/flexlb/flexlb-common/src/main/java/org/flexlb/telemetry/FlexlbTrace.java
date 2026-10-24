@@ -28,29 +28,43 @@ import java.util.concurrent.TimeUnit;
 public final class FlexlbTrace {
 
     public static final String INSTRUMENTATION_NAME = "org.flexlb";
+
     /**
      * Platform-indexed span search key. Unitrace only indexes this unprefixed
      * string spelling of the internal ID. Mirrors kAttrRequestId / REQUEST_ID in the C++ and
      * Python registries.
      */
     public static final AttributeKey<String> REQUEST_ID = AttributeKey.stringKey("request_id");
+
     public static final AttributeKey<Long> BATCH_ID = AttributeKey.longKey("rtp_llm.batch_id");
     public static final AttributeKey<Long> BATCH_SIZE = AttributeKey.longKey("rtp_llm.batch_size");
-    public static final AttributeKey<String> PREFILL_ADDRESS = AttributeKey.stringKey("rtp_llm.prefill_address");
-    public static final AttributeKey<String> DECODE_ADDRESS = AttributeKey.stringKey("rtp_llm.decode_address");
-    public static final AttributeKey<String> DISPATCH_REASON = AttributeKey.stringKey("rtp_llm.dispatch_reason");
-    public static final AttributeKey<String> SCHEDULE_MODE = AttributeKey.stringKey("flexlb.schedule.mode");
-    public static final AttributeKey<Long> SCHEDULE_CODE = AttributeKey.longKey("flexlb.schedule.code");
-    public static final AttributeKey<Long> SCHEDULE_PRIORITY = AttributeKey.longKey("flexlb.schedule.priority");
+    public static final AttributeKey<String> PREFILL_ADDRESS =
+            AttributeKey.stringKey("rtp_llm.prefill_address");
+    public static final AttributeKey<String> DECODE_ADDRESS =
+            AttributeKey.stringKey("rtp_llm.decode_address");
+    public static final AttributeKey<String> DISPATCH_REASON =
+            AttributeKey.stringKey("rtp_llm.dispatch_reason");
+    public static final AttributeKey<String> SCHEDULE_MODE =
+            AttributeKey.stringKey("flexlb.schedule.mode");
+    public static final AttributeKey<Long> SCHEDULE_CODE =
+            AttributeKey.longKey("flexlb.schedule.code");
+    public static final AttributeKey<Long> SCHEDULE_PRIORITY =
+            AttributeKey.longKey("flexlb.schedule.priority");
     public static final AttributeKey<Boolean> ENQUEUED_BY_MASTER =
             AttributeKey.booleanKey("rtp_llm.enqueued_by_master");
-    public static final AttributeKey<Long> ROUTE_SUBMIT_MS = AttributeKey.longKey("rtp_llm.route_submit_ms");
-    public static final AttributeKey<Long> BATCH_WAIT_MS = AttributeKey.longKey("rtp_llm.batch_wait_ms");
-    public static final AttributeKey<Long> ENQUEUE_BATCH_MS = AttributeKey.longKey("rtp_llm.enqueue_batch_ms");
-    public static final AttributeKey<Long> ACK_TO_RESPONSE_MS = AttributeKey.longKey("rtp_llm.ack_to_response_ms");
-    public static final AttributeKey<Long> GRPC_STATUS_CODE = AttributeKey.longKey("rpc.grpc.status_code");
+    public static final AttributeKey<Long> ROUTE_SUBMIT_MS =
+            AttributeKey.longKey("rtp_llm.route_submit_ms");
+    public static final AttributeKey<Long> BATCH_WAIT_MS =
+            AttributeKey.longKey("rtp_llm.batch_wait_ms");
+    public static final AttributeKey<Long> ENQUEUE_BATCH_MS =
+            AttributeKey.longKey("rtp_llm.enqueue_batch_ms");
+    public static final AttributeKey<Long> ACK_TO_RESPONSE_MS =
+            AttributeKey.longKey("rtp_llm.ack_to_response_ms");
+    public static final AttributeKey<Long> GRPC_STATUS_CODE =
+            AttributeKey.longKey("rpc.grpc.status_code");
     public static final AttributeKey<Long> RTP_LLM_GRPC_STATUS_CODE =
             AttributeKey.longKey("rtp_llm.grpc_status_code");
+
     /**
      * Canonical gRPC terminal status on a SERVER span, mirroring the C++
      * kAttrRpcResponseStatusCode contract; GRPC_STATUS_CODE above carries the
@@ -58,18 +72,21 @@ public final class FlexlbTrace {
      */
     public static final AttributeKey<String> RPC_RESPONSE_STATUS_CODE =
             AttributeKey.stringKey("rpc.response.status_code");
+
     public static final AttributeKey<String> ERROR_TYPE = AttributeKey.stringKey("error.type");
+
     /**
      * OTel semantic convention for the peer endpoint on a CLIENT span. Kept next
      * to the RTP-LLM keys so both spellings are owned by this facade.
      */
-    public static final AttributeKey<String> SERVER_ADDRESS = AttributeKey.stringKey("server.address");
+    public static final AttributeKey<String> SERVER_ADDRESS =
+            AttributeKey.stringKey("server.address");
+
     public static final AttributeKey<Long> SERVER_PORT = AttributeKey.longKey("server.port");
 
     private static final TextMapSetter<Map<String, String>> MAP_SETTER =
             (carrier, key, value) -> carrier.put(key, value);
-    private static final TextMapPropagator W3C_PROPAGATOR =
-            W3CTraceContextPropagator.getInstance();
+    private static final TextMapPropagator W3C_PROPAGATOR = W3CTraceContextPropagator.getInstance();
     // Weak keys because this class does not end every span that owns a marker:
     // an upstream-owned SERVER span is finished by its own owner, so holding it
     // strongly here would retain it forever.
@@ -78,14 +95,15 @@ public final class FlexlbTrace {
     private static volatile boolean enabled;
     private static volatile Tracer tracer = OpenTelemetry.noop().getTracer(INSTRUMENTATION_NAME);
 
-    private FlexlbTrace() {
-    }
+    private FlexlbTrace() {}
 
     /** 完整初始化成功后注入 Provider；null 表示关闭。 */
     public static void configure(OpenTelemetry sdk, String scopeVersion) {
         enabled = false;
-        tracer = sdk == null ? OpenTelemetry.noop().getTracer(INSTRUMENTATION_NAME)
-                : sdk.getTracer(INSTRUMENTATION_NAME, scopeVersion);
+        tracer =
+                sdk == null
+                        ? OpenTelemetry.noop().getTracer(INSTRUMENTATION_NAME)
+                        : sdk.getTracer(INSTRUMENTATION_NAME, scopeVersion);
         enabled = sdk != null;
     }
 
@@ -161,9 +179,8 @@ public final class FlexlbTrace {
         }
     }
 
-    public static void setRequestAttributes(Span span, long requestId) {
-        // Match the C++ and Python registries without changing the business ID.
-        setAttribute(span, REQUEST_ID, Long.toString(requestId));
+    public static void setRequestAttributes(Span span, String requestId) {
+        setAttribute(span, REQUEST_ID, requestId);
     }
 
     public static <T> void setAttribute(Span span, AttributeKey<T> key, T value) {
@@ -185,11 +202,11 @@ public final class FlexlbTrace {
         setAttribute(spanFromContext(context), key, value);
     }
 
-    public static void setScheduleDuration(Context context, AttributeKey<Long> key,
-                                            long startNanos, long endNanos) {
+    public static void setScheduleDuration(
+            Context context, AttributeKey<Long> key, long startNanos, long endNanos) {
         if (startNanos > 0 && endNanos >= startNanos) {
-            setScheduleAttribute(context, key,
-                    TimeUnit.NANOSECONDS.toMillis(endNanos - startNanos));
+            setScheduleAttribute(
+                    context, key, TimeUnit.NANOSECONDS.toMillis(endNanos - startNanos));
         }
     }
 
@@ -241,7 +258,8 @@ public final class FlexlbTrace {
      * <p>Takes primitives rather than io.grpc.Status so this module stays free of
      * a gRPC dependency.
      */
-    public static void finishWithGrpcStatus(Span span, String canonicalCode, int numericCode, boolean ok) {
+    public static void finishWithGrpcStatus(
+            Span span, String canonicalCode, int numericCode, boolean ok) {
         if (!enabled || span == null) {
             return;
         }
@@ -332,6 +350,5 @@ public final class FlexlbTrace {
         span.setStatus(StatusCode.ERROR, description);
     }
 
-    private record BusinessError(long code, String type) {
-    }
+    private record BusinessError(long code, String type) {}
 }

@@ -12,9 +12,11 @@ class RequestTest {
 
     @Test
     void readsNewAndLegacyCacheAffinityRequests() throws Exception {
-        for (String payload : new String[] {
-                "{\"cache_affinity_keys\":[\"image\"],\"vit_route_only\":true}",
-                "{\"media_keys\":[\"image\"],\"vit_route_only\":true}"}) {
+        for (String payload :
+                new String[] {
+                    "{\"cache_affinity_keys\":[\"image\"],\"vit_route_only\":true}",
+                    "{\"media_keys\":[\"image\"],\"vit_route_only\":true}"
+                }) {
             Request request = objectMapper.readValue(payload, Request.class);
             assertEquals(java.util.List.of("image"), request.getCacheAffinityKeys());
             org.junit.jupiter.api.Assertions.assertTrue(request.isVitRouteOnly());
@@ -25,7 +27,9 @@ class RequestTest {
 
     @Test
     void should_deserialize_frontend_schedule_payload() throws Exception {
-        Request request = objectMapper.readValue("""
+        Request request =
+                objectMapper.readValue(
+                        """
                 {
                   "model": "engine_service",
                   "block_cache_keys": [1, 2, 3],
@@ -40,9 +44,10 @@ class RequestTest {
                   "request_id": 12345,
                   "request_time_ms": 1710000000000
                 }
-                """, Request.class);
+                """,
+                        Request.class);
 
-        assertEquals(12345L, request.getRequestId());
+        assertEquals("12345", request.getRequestId());
         assertEquals(8192L, request.getSeqLen());
         assertEquals(1024L, request.getCacheKeyBlockSize());
         assertEquals(3, request.getBlockCacheKeys().size());
@@ -55,7 +60,7 @@ class RequestTest {
     @Test
     void should_not_include_api_key_in_to_string() {
         Request request = new Request();
-        request.setRequestId(12345L);
+        request.setRequestId("12345");
         request.setApiKey("secret-api-key");
 
         assertFalse(request.toString().contains("secret-api-key"));

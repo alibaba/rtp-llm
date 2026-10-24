@@ -72,49 +72,62 @@ class MultipleWorkersTest extends FlexLBMockTestBase {
         // 2. Reconfigure DefaultRouter to alternate between worker A and B
         AtomicInteger routeCounter = new AtomicInteger(0);
         reset(router);
-        when(router.select(any(BalanceContext.class), any())).thenAnswer(inv -> {
-            BalanceContext ctx = inv.getArgument(0);
-            boolean useB = routeCounter.getAndIncrement() % 2 == 1;
-            return admittedRoute(
-                    ctx, buildRouteResponse(ctx.getRequestId(), useB));
-        });
+        when(router.select(any(BalanceContext.class), any()))
+                .thenAnswer(
+                        inv -> {
+                            BalanceContext ctx = inv.getArgument(0);
+                            boolean useB = routeCounter.getAndIncrement() % 2 == 1;
+                            return admittedRoute(ctx, buildRouteResponse(ctx.getRequestId(), useB));
+                        });
 
         // 3. Submit 4 requests — should alternate A, B, A, B
         long[] requestIds = {40001, 40002, 40003, 40004};
         CompletableFuture<Response>[] futures = new CompletableFuture[requestIds.length];
         for (int i = 0; i < requestIds.length; i++) {
-            futures[i] = submitRequest(requestIds[i]);
+            futures[i] = submitRequest(String.valueOf(requestIds[i]));
         }
 
         // 4. Wait for all requests to complete (ACK)
         for (int i = 0; i < requestIds.length; i++) {
             Response resp = futures[i].get(10, TimeUnit.SECONDS);
-            assertTrue(resp.isSuccess(),
-                    "Request " + requestIds[i] + " should succeed, got code=" + resp.getCode()
-                            + ", error=" + resp.getErrorMessage());
+            assertTrue(
+                    resp.isSuccess(),
+                    "Request "
+                            + requestIds[i]
+                            + " should succeed, got code="
+                            + resp.getCode()
+                            + ", error="
+                            + resp.getErrorMessage());
         }
 
         // 5. Verify: worker A received at least 1 EnqueueBatch
         int countA = mockPrefillWorker.getEnqueueCount();
-        assertTrue(countA >= 1,
+        assertTrue(
+                countA >= 1,
                 "Worker A should have received at least 1 EnqueueBatch, got " + countA);
 
         // 6. Verify: worker B received at least 1 EnqueueBatch
         int countB = workerB.getEnqueueCount();
-        assertTrue(countB >= 1,
+        assertTrue(
+                countB >= 1,
                 "Worker B should have received at least 1 EnqueueBatch, got " + countB);
 
         // 7. Verify: total EnqueueBatch count matches number of submitted requests
         int totalCount = countA + countB;
-        assertTrue(totalCount >= requestIds.length,
-                "Total EnqueueBatch count (" + totalCount + ") should be >= "
-                        + requestIds.length + " submitted requests");
+        assertTrue(
+                totalCount >= requestIds.length,
+                "Total EnqueueBatch count ("
+                        + totalCount
+                        + ") should be >= "
+                        + requestIds.length
+                        + " submitted requests");
 
         // 8. Verify: decode worker received no enqueue (PD-separated — decode
         //    only gets requests after prefill completes, which mock doesn't simulate)
-        assertEquals(0, mockDecodeWorker.getEnqueueCount(),
+        assertEquals(
+                0,
+                mockDecodeWorker.getEnqueueCount(),
                 "Decode worker should not have received any enqueue request");
-
     }
 
     // ==================== Helper: build routing response ====================
@@ -123,7 +136,7 @@ class MultipleWorkersTest extends FlexLBMockTestBase {
      * Build a routing response that points to either worker A or worker B
      * for the prefill role, and always to the shared decode worker.
      */
-    private Response buildRouteResponse(long requestId, boolean useWorkerB) {
+    private Response buildRouteResponse(String requestId, boolean useWorkerB) {
         Response response = new Response();
         response.setSuccess(true);
 

@@ -17,6 +17,7 @@ import java.util.OptionalLong;
 public final class WorkSnapshot {
 
     private static final long[] EMPTY_LONGS = new long[0];
+    private static final String[] EMPTY_STRINGS = new String[0];
 
     private final long capturedAtMs;
     private final List<RequestWork> requests;
@@ -24,7 +25,7 @@ public final class WorkSnapshot {
     private final long unknownRequestCount;
     private final long knownNonRunningWorkMs;
     private final long[] runningWorkMs;
-    private final long[] requestIds;
+    private final String[] requestIds;
     private final boolean unknownWork;
 
     public WorkSnapshot(
@@ -36,8 +37,7 @@ public final class WorkSnapshot {
         this.requests = List.copyOf(requests);
         this.batches = List.copyOf(batches);
         if (unknownRequestCount < 0L) {
-            throw new IllegalArgumentException(
-                    "unknownRequestCount must be non-negative");
+            throw new IllegalArgumentException("unknownRequestCount must be non-negative");
         }
         this.unknownRequestCount = unknownRequestCount;
 
@@ -49,28 +49,23 @@ public final class WorkSnapshot {
             if (request.phase() == Phase.ENGINE_RUNNING) {
                 runningCount++;
             } else {
-                nonRunningMs = saturatedAdd(
-                        nonRunningMs, request.remainingWorkMs());
+                nonRunningMs = saturatedAdd(nonRunningMs, request.remainingWorkMs());
             }
         }
         for (BatchWork batch : this.batches) {
-            requestIdCount = Math.addExact(
-                    requestIdCount, batch.requestIds().size());
+            requestIdCount = Math.addExact(requestIdCount, batch.requestIds().size());
             if (batch.remainingWorkMs().isEmpty()) {
                 hasUnknown = true;
             } else if (batch.phase() == Phase.ENGINE_RUNNING) {
                 runningCount++;
             } else {
-                nonRunningMs = saturatedAdd(
-                        nonRunningMs, batch.remainingWorkMs().getAsLong());
+                nonRunningMs = saturatedAdd(nonRunningMs, batch.remainingWorkMs().getAsLong());
             }
         }
 
         this.knownNonRunningWorkMs = nonRunningMs;
-        this.runningWorkMs = runningCount == 0
-                ? EMPTY_LONGS : new long[runningCount];
-        this.requestIds = requestIdCount == 0
-                ? EMPTY_LONGS : new long[requestIdCount];
+        this.runningWorkMs = runningCount == 0 ? EMPTY_LONGS : new long[runningCount];
+        this.requestIds = requestIdCount == 0 ? EMPTY_STRINGS : new String[requestIdCount];
         this.unknownWork = hasUnknown;
         int runningIndex = 0;
         int requestIdIndex = 0;
@@ -81,13 +76,11 @@ public final class WorkSnapshot {
             }
         }
         for (BatchWork batch : this.batches) {
-            for (long requestId : batch.requestIds()) {
+            for (String requestId : batch.requestIds()) {
                 requestIds[requestIdIndex++] = requestId;
             }
-            if (batch.phase() == Phase.ENGINE_RUNNING
-                    && batch.remainingWorkMs().isPresent()) {
-                runningWorkMs[runningIndex++] =
-                        batch.remainingWorkMs().getAsLong();
+            if (batch.phase() == Phase.ENGINE_RUNNING && batch.remainingWorkMs().isPresent()) {
+                runningWorkMs[runningIndex++] = batch.remainingWorkMs().getAsLong();
             }
         }
         Arrays.sort(requestIds);
@@ -117,38 +110,28 @@ public final class WorkSnapshot {
     }
 
     /** One individually delivered request, identified by request id. */
-    public record RequestWork(long requestId,
-                              Phase phase,
-                              long remainingWorkMs) {
+    public record RequestWork(String requestId, Phase phase, long remainingWorkMs) {
 
         public RequestWork {
             if (remainingWorkMs < 0L) {
-                throw new IllegalArgumentException(
-                        "remaining request work must be non-negative");
+                throw new IllegalArgumentException("remaining request work must be non-negative");
             }
         }
     }
 
     /** One EnqueueBatch work unit, identified by batch id and its live members. */
-    public record BatchWork(long batchId,
-                            List<Long> requestIds,
-                            Phase phase,
-                            OptionalLong remainingWorkMs) {
+    public record BatchWork(
+            long batchId, List<String> requestIds, Phase phase, OptionalLong remainingWorkMs) {
 
         public BatchWork {
             requestIds = List.copyOf(requestIds);
-            if (remainingWorkMs.isPresent()
-                    && remainingWorkMs.getAsLong() < 0L) {
-                throw new IllegalArgumentException(
-                        "remaining batch work must be non-negative");
+            if (remainingWorkMs.isPresent() && remainingWorkMs.getAsLong() < 0L) {
+                throw new IllegalArgumentException("remaining batch work must be non-negative");
             }
         }
 
         /** Convenience constructor for a batch with a known work estimate. */
-        public BatchWork(long batchId,
-                         List<Long> requestIds,
-                         Phase phase,
-                         long remainingWorkMs) {
+        public BatchWork(long batchId, List<String> requestIds, Phase phase, long remainingWorkMs) {
             this(batchId, requestIds, phase, OptionalLong.of(remainingWorkMs));
         }
     }
@@ -157,7 +140,7 @@ public final class WorkSnapshot {
         return unknownWork;
     }
 
-    public boolean containsRequest(long requestId) {
+    public boolean containsRequest(String requestId) {
         return Arrays.binarySearch(requestIds, requestId) >= 0;
     }
 
@@ -165,9 +148,7 @@ public final class WorkSnapshot {
      * Complete committed duration, absent when any work unit lacks a duration.
      */
     public OptionalLong totalRemainingWorkMs() {
-        return hasUnknownWork()
-                ? OptionalLong.empty()
-                : OptionalLong.of(knownRemainingWorkMs());
+        return hasUnknownWork() ? OptionalLong.empty() : OptionalLong.of(knownRemainingWorkMs());
     }
 
     /** Complete preceding work at a later clock; only observed running work consumes time. */
@@ -191,12 +172,10 @@ public final class WorkSnapshot {
 
     /** Known work rebased to a later planning clock without copying the snapshot. */
     public long knownRemainingWorkMsAt(long planningAtMs) {
-        long elapsedMs = planningAtMs <= capturedAtMs
-                ? 0L : planningAtMs - capturedAtMs;
+        long elapsedMs = planningAtMs <= capturedAtMs ? 0L : planningAtMs - capturedAtMs;
         long total = knownNonRunningWorkMs;
         for (long runningMs : runningWorkMs) {
-            long remaining = elapsedMs >= runningMs
-                    ? 0L : runningMs - elapsedMs;
+            long remaining = elapsedMs >= runningMs ? 0L : runningMs - elapsedMs;
             total = saturatedAdd(total, remaining);
         }
         return total;
@@ -218,16 +197,20 @@ public final class WorkSnapshot {
 
     @Override
     public int hashCode() {
-        return Objects.hash(
-                capturedAtMs, requests, batches, unknownRequestCount);
+        return Objects.hash(capturedAtMs, requests, batches, unknownRequestCount);
     }
 
     @Override
     public String toString() {
-        return "WorkSnapshot[capturedAtMs=" + capturedAtMs
-                + ", requests=" + requests
-                + ", batches=" + batches
-                + ", unknownRequestCount=" + unknownRequestCount + ']';
+        return "WorkSnapshot[capturedAtMs="
+                + capturedAtMs
+                + ", requests="
+                + requests
+                + ", batches="
+                + batches
+                + ", unknownRequestCount="
+                + unknownRequestCount
+                + ']';
     }
 
     private static long saturatedAdd(long left, long right) {

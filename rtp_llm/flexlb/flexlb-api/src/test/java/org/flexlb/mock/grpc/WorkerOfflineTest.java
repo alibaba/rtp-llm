@@ -38,8 +38,7 @@ class WorkerOfflineTest extends FlexLBMockTestBase {
         Thread.sleep(500); // Let the gRPC channel process the worker's GOAWAY.
 
         CompletableFuture<Response> offline = submitRequest(20002);
-        assertThrows(TimeoutException.class,
-                () -> offline.get(600, TimeUnit.MILLISECONDS));
+        assertThrows(TimeoutException.class, () -> offline.get(600, TimeUnit.MILLISECONDS));
         assertFalse(offline.isDone(), "post-send uncertainty stays pending before request TTL");
         assertTrue(getPrefillEndpoint().getInflightBatchCount() >= 1);
         assertTrue(getDecodeEndpoint().getInflightCount() >= 1);
@@ -49,7 +48,7 @@ class WorkerOfflineTest extends FlexLBMockTestBase {
         assertFalse(expired.isSuccess());
         assertEquals(StrategyErrorType.RESOURCE_EXHAUSTED.getErrorCode(), expired.getCode());
         assertTrue(expired.getErrorMessage().contains("REQUEST_INACTIVE"));
-        assertEquals(0, scheduler.getInflightSize());
+        assertEquals(0, scheduler.getTrackedRequestCount());
         assertEquals(0, getPrefillEndpoint().getInflightBatchCount());
         assertEquals(0, getPrefillEndpoint().getLocallyOwnedRequestCount());
         assertEquals(0, getDecodeEndpoint().getInflightCount());

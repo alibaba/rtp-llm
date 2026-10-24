@@ -1,5 +1,6 @@
 package org.flexlb.balance.endpoint;
 
+import lombok.Getter;
 import org.flexlb.dao.master.WorkerStatus;
 
 import java.util.Objects;
@@ -18,33 +19,44 @@ import java.util.concurrent.atomic.AtomicLong;
  */
 public class WorkerEndpoint {
 
-    private static final Runnable NO_STATUS_PROJECTION = () -> { };
+    private static final Runnable NO_STATUS_PROJECTION = () -> {};
 
-    private static final AtomicLong RETIREMENT_THREAD_SEQUENCE =
-            new AtomicLong();
+    private static final AtomicLong RETIREMENT_THREAD_SEQUENCE = new AtomicLong();
     private static final ExecutorService RETIREMENT_EXECUTOR =
-            Executors.newFixedThreadPool(4, task -> {
-                Thread thread = new Thread(
-                        task,
-                        "flexlb-endpoint-retirement-"
-                                + RETIREMENT_THREAD_SEQUENCE.incrementAndGet());
-                thread.setDaemon(true);
-                return thread;
-            });
+            Executors.newFixedThreadPool(
+                    4,
+                    task -> {
+                        Thread thread =
+                                new Thread(
+                                        task,
+                                        "flexlb-endpoint-retirement-"
+                                                + RETIREMENT_THREAD_SEQUENCE.incrementAndGet());
+                        thread.setDaemon(true);
+                        return thread;
+                    });
 
-    private final WorkerStatus status;
+    /**
+     * Returns the underlying {@link WorkerStatus} reference.
+     * Callers read only committed dynamic engine state from it.
+     */
+    @Getter private final WorkerStatus status;
+
     private final EndpointGenerationLifecycle generationLifecycle;
 
     public WorkerEndpoint(WorkerStatus status) {
         this.status = Objects.requireNonNull(status, "status");
-        this.generationLifecycle = new EndpointGenerationLifecycle(
-                this::continueRetirementAfterHandoff);
+        this.generationLifecycle =
+                new EndpointGenerationLifecycle(this::continueRetirementAfterHandoff);
     }
 
     // ==================== identity (delegated to status) ====================
 
+    /**
+     * Returns the logical worker identity, including the engine index.
+     * Network calls use the separate IP and transport port accessors.
+     */
     public String ipPort() {
-        return status.getIpPort();
+        return status.getLogicalIpPort();
     }
 
     public String getIp() {
@@ -62,22 +74,12 @@ public class WorkerEndpoint {
     // ==================== status ====================
 
     /**
-     * Returns the underlying {@link WorkerStatus} reference.
-     * Callers read only committed dynamic engine state from it.
-     */
-    public WorkerStatus getStatus() {
-        return status;
-    }
-
-    /**
      * Reduce one private status observation and publish it at the role's
      * consistency boundary. Any returned scheduler facts were derived from
      * exact endpoint-owned identities and are consumed only after this method
      * has released the role-local lock.
      */
-    public Runnable applyPreparedStatus(
-            WorkerStatus ws,
-            WorkerStatus.PreparedStatus prepared) {
+    public Runnable applyPreparedStatus(WorkerStatus ws, WorkerStatus.PreparedStatus prepared) {
         requireStatusGeneration(ws);
         if (!prepared.observation().alive()) {
             beginRetirement();
@@ -92,8 +94,7 @@ public class WorkerEndpoint {
      * succeed.
      */
     public Runnable initializeFromPreparedStatus(
-            WorkerStatus ws,
-            WorkerStatus.StatusObservation observation) {
+            WorkerStatus ws, WorkerStatus.StatusObservation observation) {
         requireStatusGeneration(ws);
         return NO_STATUS_PROJECTION;
     }
@@ -103,8 +104,7 @@ public class WorkerEndpoint {
      * heartbeat without replaying versioned endpoint state or terminal facts.
      */
     public Runnable observeStatusHeartbeat(
-            WorkerStatus ws,
-            WorkerStatus.StatusObservation observation) {
+            WorkerStatus ws, WorkerStatus.StatusObservation observation) {
         requireStatusGeneration(ws);
         if (observation.owner() != ws) {
             throw new IllegalArgumentException(
@@ -129,19 +129,14 @@ public class WorkerEndpoint {
      * every selected, rejected, and exceptional path.</p>
      */
     public final GenerationPin tryPinGeneration() {
-        EndpointGenerationLifecycle.HandoffPermit permit =
-                generationLifecycle.tryAcquireHandoff();
-        return permit == null
-                ? null
-                : new GenerationPin(
-                        this,
-                        status.getGenerationId(),
-                        permit);
+        EndpointGenerationLifecycle.HandoffPermit permit = generationLifecycle.tryAcquireHandoff();
+        return permit == null ? null : new GenerationPin(this, status.getGenerationId(), permit);
     }
 
     /** Validate an exact, still-open pin before consuming its admission right. */
     public final void requirePinnedGeneration(GenerationPin pin) {
-        if (pin == null || pin.endpoint != this
+        if (pin == null
+                || pin.endpoint != this
                 || pin.generationId != status.getGenerationId()
                 || !pin.permit.isOpen()) {
             throw new IllegalArgumentException(
@@ -154,8 +149,7 @@ public class WorkerEndpoint {
      * terminal callback may run on a different thread. It shares the one gate
      * with public route pins but deliberately is not exposed as a route API.
      */
-    final EndpointGenerationLifecycle.HandoffPermit
-            tryAcquireGenerationHandoff() {
+    final EndpointGenerationLifecycle.HandoffPermit tryAcquireGenerationHandoff() {
         return generationLifecycle.tryAcquireHandoff();
     }
 
@@ -265,8 +259,7 @@ public class WorkerEndpoint {
             throw error;
         }
         if (failure != null) {
-            throw new IllegalStateException(
-                    "Endpoint generation retirement failed", failure);
+            throw new IllegalStateException("Endpoint generation retirement failed", failure);
         }
     }
 
@@ -313,11 +306,8 @@ public class WorkerEndpoint {
      * <p>Decode: total active task count (confirmed running + inflight).
      */
     public OptionalLong getLoadMetric() {
-        WorkerStatus.EngineObservation engine =
-                status.committedEngineObservation();
+        WorkerStatus.EngineObservation engine = status.committedEngineObservation();
         return OptionalLong.of(
-                engine.runningTaskList() == null
-                        ? 0L : engine.runningTaskList().size());
+                engine.runningTaskList() == null ? 0L : engine.runningTaskList().size());
     }
-
 }

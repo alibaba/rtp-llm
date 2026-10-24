@@ -35,8 +35,7 @@ public final class RoutingConfig {
     @Setter
     public static final class ExecutionTimeEstimatorConfig {
         private EstimatorType type = EstimatorType.FORMULA;
-        private String expression =
-                "sum(computeTokens) + 0.3*sum(hitCacheTokens)";
+        private String expression = "sum(computeTokens) + 0.3*sum(hitCacheTokens)";
     }
 
     public enum EstimatorType {
@@ -52,14 +51,22 @@ public final class RoutingConfig {
 
         /** Minimum reusable-prefix percentage required before affinity applies. */
         private double minPrefixHitPercent = 5;
+
+        /** Credit applied to remote-source cache matches when estimating effective hit tokens. */
+        private double remoteDiscount = 0.2;
+
+        /**
+         * Optional guard for local lifecycle work plus this request's uncached tokens.
+         * Zero disables the guard.
+         */
+        private long maxOutstandingUncachedTokens;
     }
 
     @Getter
     @Setter
     public static final class DecodeConfig {
         private DecodeCostEstimatorConfig costEstimator = new DecodeCostEstimatorConfig();
-        private DecodeAvailabilityConfig availability =
-                new DecodeAvailabilityConfig();
+        private DecodeAvailabilityConfig availability = new DecodeAvailabilityConfig();
     }
 
     @Getter
@@ -100,5 +107,4 @@ public final class RoutingConfig {
         /** Master-side cap for all Engine-facing Decode ownership. */
         private Long maxEngineRequests;
     }
-
 }

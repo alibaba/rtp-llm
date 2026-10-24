@@ -11,8 +11,7 @@ import org.flexlb.dao.route.RoleType;
  */
 public final class RoleTypeProtoConverter {
 
-    private RoleTypeProtoConverter() {
-    }
+    private RoleTypeProtoConverter() {}
 
     /**
      * Convert proto enum to domain {@link RoleType}.
@@ -24,17 +23,22 @@ public final class RoleTypeProtoConverter {
             case ROLE_TYPE_DECODE -> RoleType.DECODE;
             case ROLE_TYPE_VIT -> RoleType.VIT;
             case ROLE_TYPE_FRONTEND -> RoleType.FRONTEND;
+            case ROLE_TYPE_ENCODER -> RoleType.ENCODER;
             default -> null;
         };
     }
 
-    /** Convert the domain role to the original RoleAddrPB field-1 enum. */
-    public static EngineRpcService.RoleAddrPB.RoleType toLegacyProto(RoleType role) {
+    /**
+     * Convert the domain role to the RoleAddrPB field-1 enum, including Encoder.
+     * Readers that predate Encoder cannot consume its appended value.
+     */
+    public static EngineRpcService.RoleAddrPB.RoleType toRoleAddrProto(RoleType role) {
         return switch (role) {
             case PDFUSION -> EngineRpcService.RoleAddrPB.RoleType.PDFUSION;
             case PREFILL -> EngineRpcService.RoleAddrPB.RoleType.PREFILL;
             case DECODE -> EngineRpcService.RoleAddrPB.RoleType.DECODE;
             case VIT -> EngineRpcService.RoleAddrPB.RoleType.VIT;
+            case ENCODER -> EngineRpcService.RoleAddrPB.RoleType.ENCODER;
             case FRONTEND -> EngineRpcService.RoleAddrPB.RoleType.FRONTEND;
         };
     }
@@ -43,11 +47,13 @@ public final class RoleTypeProtoConverter {
     public static RoleType fromRoleAddr(EngineRpcService.RoleAddrPB addr) {
         RoleType resolved = null;
         if (!addr.getRoleStr().isEmpty()) {
-            resolved = requireKnown(RoleType.fromString(addr.getRoleStr()),
-                    "role_str='" + addr.getRoleStr() + "'");
+            resolved =
+                    requireKnown(
+                            RoleType.fromString(addr.getRoleStr()),
+                            "role_str='" + addr.getRoleStr() + "'");
         }
         if (addr.getRole() != EngineRpcService.RoleAddrPB.RoleType.PDFUSION) {
-            resolved = merge(resolved, fromLegacyProto(addr.getRole()), "role=" + addr.getRole());
+            resolved = merge(resolved, fromRoleAddrProto(addr.getRole()), "role=" + addr.getRole());
         }
         // The original proto3 enum omitted PDFUSION=0 from the wire.
         return resolved != null ? resolved : RoleType.PDFUSION;
@@ -57,14 +63,17 @@ public final class RoleTypeProtoConverter {
     public static RoleType fromWorkerStatus(EngineRpcService.WorkerStatusPB status) {
         RoleType resolved = null;
         if (status.getRoleType() != EngineRpcService.RoleTypePB.ROLE_TYPE_PDFUSION) {
-            resolved = requireKnown(fromProto(status.getRoleType()),
-                    "role_type=" + status.getRoleType());
+            resolved =
+                    requireKnown(
+                            fromProto(status.getRoleType()), "role_type=" + status.getRoleType());
         }
         String name = status.getRole();
         if (name != null && !name.isEmpty()) {
-            resolved = merge(resolved,
-                    requireKnown(RoleType.fromString(name), "role='" + name + "'"),
-                    "role='" + name + "'");
+            resolved =
+                    merge(
+                            resolved,
+                            requireKnown(RoleType.fromString(name), "role='" + name + "'"),
+                            "role='" + name + "'");
         }
         // The original proto3 enum omitted PDFUSION=0 from the wire.
         return resolved != null ? resolved : RoleType.PDFUSION;
@@ -79,20 +88,27 @@ public final class RoleTypeProtoConverter {
 
     private static RoleType merge(RoleType resolved, RoleType candidate, String source) {
         if (resolved != null && resolved != candidate) {
-            throw new IllegalArgumentException("conflicting RoleAddrPB role from " + source
-                    + ": resolved=" + resolved + ", candidate=" + candidate);
+            throw new IllegalArgumentException(
+                    "conflicting RoleAddrPB role from "
+                            + source
+                            + ": resolved="
+                            + resolved
+                            + ", candidate="
+                            + candidate);
         }
         return candidate;
     }
 
-    private static RoleType fromLegacyProto(EngineRpcService.RoleAddrPB.RoleType role) {
+    private static RoleType fromRoleAddrProto(EngineRpcService.RoleAddrPB.RoleType role) {
         return switch (role) {
             case PDFUSION -> RoleType.PDFUSION;
             case PREFILL -> RoleType.PREFILL;
             case DECODE -> RoleType.DECODE;
             case VIT -> RoleType.VIT;
             case FRONTEND -> RoleType.FRONTEND;
-            case UNRECOGNIZED -> throw new IllegalArgumentException("unknown legacy RoleAddrPB role: " + role);
+            case ENCODER -> RoleType.ENCODER;
+            case UNRECOGNIZED ->
+                    throw new IllegalArgumentException("unknown RoleAddrPB role: " + role);
         };
     }
 }

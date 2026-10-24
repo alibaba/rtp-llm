@@ -14,10 +14,10 @@ public enum RoleType {
     PREFILL("PREFILL", "Prefill"),
     DECODE("DECODE", "Decode"),
     VIT("VIT", "Vision Transformer"),
+    ENCODER("ENCODER", "MultiModal Encoder"),
     FRONTEND("FRONTEND", "Frontend");
 
-    @JsonValue
-    private final String code;
+    @JsonValue private final String code;
     private final String description;
 
     private static final Map<String, RoleType> CODE_MAP = new HashMap<>();
@@ -92,8 +92,8 @@ public enum RoleType {
             case DECODE -> StrategyErrorType.NO_DECODE_WORKER;
             case PDFUSION -> StrategyErrorType.NO_PDFUSION_WORKER;
             case VIT -> StrategyErrorType.NO_VIT_WORKER;
+            case ENCODER -> StrategyErrorType.NO_ENCODER_WORKER;
             case FRONTEND -> StrategyErrorType.NO_FRONTEND_WORKER;
         };
     }
-
 }
