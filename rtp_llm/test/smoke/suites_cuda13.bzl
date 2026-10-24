@@ -133,6 +133,7 @@ def cuda13_suites():
     native.test_suite(
         name = "smoke_cuda13_x86",
         tests = [
+            ":deepseek_v41_flash_ced_dspark_pd_cp2_dp2_sm100_eplb",
             # Real expert migration on both P/D targets; DSpark draft stays NONE.
             smoke_test(
                 name="smoke_v4_flash_0731_pd_cp2ep2_dp2ep2_dspark_cprr_async_xgrammar_json_sm100_eplb",

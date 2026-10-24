@@ -57,6 +57,20 @@ except ImportError:
     _HAS_DEEP_GEMM_FP4_PAGED_MQA = False
 
 
+def _fp4_logits_options(operation) -> dict:
+    # Pybind exposes its signature through __doc__. The older ABI needs both
+    # options to select the compressed BF16 path used by the newer ABI.
+    if "logits_dtype:" in (getattr(operation, "__doc__", None) or ""):
+        return {"clean_logits": False, "logits_dtype": torch.bfloat16}
+    return {}
+
+
+_FP4_MQA_OPTIONS = _fp4_logits_options(getattr(_deep_gemm, "fp8_fp4_mqa_logits", None))
+_FP4_PAGED_MQA_OPTIONS = _fp4_logits_options(
+    getattr(_deep_gemm, "fp8_fp4_paged_mqa_logits", None)
+)
+
+
 def has_fp8_paged_mqa_logits() -> bool:
     return _HAS_DEEP_GEMM
 
@@ -108,9 +122,8 @@ def fp8_fp4_mqa_indexer_score(
     """
     from ._v41_mqa_layout import normalize_mqa_logits
 
-    # Upstream SM100 now consumes BF16 head weights and emits request-relative
-    # BF16 logits. Selectors keep their FP32 tensor ABI, but no longer rely on
-    # the removed clean_logits argument or uninitialized tail values.
+    # Both ABIs consume BF16 head weights and emit request-relative BF16
+    # logits. Normalize valid columns instead of relying on unwritten tails.
     width = max_seqlen_k if max_seqlen_k > 0 else k_payload.shape[0]
     scores = _deep_gemm.fp8_fp4_mqa_logits(
         (q_payload.contiguous(), q_sf.contiguous()),
@@ -118,7 +131,8 @@ def fp8_fp4_mqa_indexer_score(
         weights.to(torch.bfloat16).contiguous(),
         cu_seqlen_ks.contiguous(),
         cu_seqlen_ke.contiguous(),
-        width,
+        max_seqlen_k=width,
+        **_FP4_MQA_OPTIONS,
     )
     return normalize_mqa_logits(
         scores, cu_seqlen_ks, cu_seqlen_ke, width, relative=max_seqlen_k > 0
@@ -197,6 +211,7 @@ def fp8_fp4_paged_indexer_score(
         schedule,
         max_ctx_len,
         indices=request_ids,
+        **_FP4_PAGED_MQA_OPTIONS,
     )
     ends = lengths.view(-1)
     return normalize_mqa_logits(
