@@ -9,7 +9,9 @@ import org.flexlb.balance.endpoint.WorkerEndpoint;
 import org.flexlb.balance.projection.WorkSnapshot;
 import org.flexlb.balance.scheduler.RequestSlot.AdmissionHandle;
 import org.flexlb.balance.scheduler.RequestSlot.DeliveryClaim;
-import org.flexlb.balance.scheduler.ScheduledRequest.DecodeBinding;
+import org.flexlb.balance.scheduler.decode.DecodeDecideInfo;
+import org.flexlb.balance.scheduler.decode.DecodeRequirement;
+import org.flexlb.balance.scheduler.decode.DecodeSelection;
 import org.flexlb.balance.strategy.SelectedRole;
 import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.loadbalance.Response;
@@ -31,26 +33,24 @@ public final class RouteAdmission implements AutoCloseable {
     private final String requestId;
     private final Response response;
     private final Selection selection;
-    private DecodeBinding decodeBinding;
+    private DecodeDecideInfo decodeDecideInfo;
     private WorkerEndpoint blockedEndpoint;
     private Ownership ownership = Ownership.PROVISIONAL;
 
-    private RouteAdmission(String requestId, Response response, Selection selection,
-                           DecodeBinding decodeRequest) {
+    private RouteAdmission(String requestId, Response response, Selection selection, DecodeDecideInfo decodeRequest) {
         this.requestId = requestId;
         this.response = Objects.requireNonNull(response, "response");
         this.selection = Objects.requireNonNull(selection, "selection");
-        this.decodeBinding = Objects.requireNonNull(decodeRequest, "decodeRequest");
-        if (!Objects.equals(decodeRequest.requestId(), requestId)) {
+        this.decodeDecideInfo = Objects.requireNonNull(decodeRequest, "decodeRequest");
+        if (!Objects.equals(decodeRequest.requirement().requestId(), requestId)) {
             throw new IllegalArgumentException("Decode admission belongs to another request");
         }
     }
 
-    static RouteAdmission prepare(
-            BalanceContext context,
-            List<SelectedRole> selectedRoles,
-            Response response,
-            DecodeBinding decodeRequest) {
+    static RouteAdmission prepare(BalanceContext context,
+                                  List<SelectedRole> selectedRoles,
+                                  Response response,
+                                  DecodeDecideInfo decodeRequest) {
         String requestId = context.getRequestId();
 
         PrefillEndpoint prefillEndpoint = null;
@@ -113,19 +113,10 @@ public final class RouteAdmission implements AutoCloseable {
                 throw new IllegalStateException(
                         "route has no Prefill endpoint generation");
             }
-            return new RouteAdmission(
-                    requestId,
-                    response,
-                    new Selection(
-                            prefillEndpoint,
-                            prefillPin,
-                            prefillStatus,
-                            prefillPlacementVersion,
-                            prefillWorkMs,
-                            decodePin,
-                            decodePlacementVersion,
-                            commitTelemetry),
-                    decodeRequest.bind(decodeStatus, decodeEndpoint, null));
+            return new RouteAdmission(requestId, response,
+                    new Selection(prefillEndpoint, prefillPin, prefillStatus, prefillPlacementVersion, prefillWorkMs,
+                            decodePin, decodePlacementVersion, commitTelemetry),
+                    decodeRequest.withSelection(DecodeSelection.of(decodeStatus, decodeEndpoint, null)));
         } catch (RuntimeException | Error failure) {
             WorkerEndpoint.GenerationPin ownedPrefillPin = prefillPin;
             WorkerEndpoint.GenerationPin ownedDecodePin = decodePin;
@@ -136,7 +127,7 @@ public final class RouteAdmission implements AutoCloseable {
     }
 
     static RouteAdmission prepare(BalanceContext context, List<SelectedRole> selections, Response response) {
-        return prepare(context, selections, response, DecodeBinding.capture(context));
+        return prepare(context, selections, response, DecodeDecideInfo.capture(context));
     }
 
     WorkerEndpoint blockedEndpoint() { return blockedEndpoint; }
@@ -204,14 +195,14 @@ public final class RouteAdmission implements AutoCloseable {
 
     Response response() { return response; }
     public PrefillEndpoint prefillEndpoint() { return selection.prefillEndpoint(); }
-    public DecodeEndpoint decodeEndpoint() { return decodeBinding.endpoint(); }
+    public DecodeEndpoint decodeEndpoint() { return decodeDecideInfo.endpoint(); }
     private WorkerEndpoint.GenerationPin prefillPin() { return selection.prefillPin(); }
     private WorkerEndpoint.GenerationPin decodePin() { return selection.decodePin(); }
     private ServerStatus prefillStatus() { return selection.prefillStatus(); }
-    private ServerStatus decodeStatus() { return decodeBinding.status(); }
+    private ServerStatus decodeStatus() { return decodeDecideInfo.status(); }
     private long prefillPlacementVersion() { return selection.prefillPlacementVersion(); }
     private long decodePlacementVersion() { return selection.decodePlacementVersion(); }
-    public DecodeBinding decodeBinding() { return decodeBinding; }
+    public DecodeDecideInfo decodeDecideInfo() { return decodeDecideInfo; }
 
     /** Attach client-executed Decode cancellation instructions before publication. */
     public void setDecodePreemptRequestIds(List<String> requestIds) {
@@ -224,22 +215,22 @@ public final class RouteAdmission implements AutoCloseable {
      */
     boolean reserveDecode() {
         requireProvisional();
-        if (decodeEndpoint() == null || decodeBinding.reservation() != null) {
+        if (decodeEndpoint() == null || decodeDecideInfo.reservation() != null) {
             return true;
         }
-        DecodeEndpoint.ReservationHandle reservation = switch (decodeBinding.mode()) {
-            case IMMEDIATE -> decodeEndpoint().reserve(
-                    decodePin(), requestId, decodeBinding.inputKvTokens(),
-                    decodeBinding.inputAndMaxOutputKvTokens(), decodeBinding.priority());
-            case WAIT_AT_PLACEMENT, PREEMPT_AT_PLACEMENT -> decodeEndpoint().reserve(
-                    decodePin(), requestId, decodeBinding.inputKvTokens(),
-                    decodeBinding.inputAndMaxOutputKvTokens(), decodeBinding.priority(), null);
+        DecodeRequirement requirement = decodeDecideInfo.requirement();
+        DecodeEndpoint.ReservationHandle reservation = switch (requirement.mode()) {
+            case IMMEDIATE -> decodeEndpoint().reserve(decodePin(), requestId, requirement.inputKvTokens(),
+                    requirement.inputAndMaxOutputKvTokens(), requirement.priority());
+            case WAIT_AT_PLACEMENT, PREEMPT_AT_PLACEMENT -> decodeEndpoint().reserve(decodePin(), requestId,
+                    requirement.inputKvTokens(), requirement.inputAndMaxOutputKvTokens(), requirement.priority(), null);
         };
         if (reservation == null) {
             return false;
         }
         try {
-            decodeBinding = decodeBinding.bind(decodeStatus(), decodeEndpoint(), reservation);
+            decodeDecideInfo =
+                    decodeDecideInfo.withSelection(new DecodeSelection(decodeStatus(), decodeEndpoint(), reservation));
             return true;
         } catch (RuntimeException | Error failure) {
             decodeEndpoint().release(reservation, DecodeEndpoint.ReleaseReason.LOCAL_ROLLBACK);
@@ -250,8 +241,7 @@ public final class RouteAdmission implements AutoCloseable {
     public boolean adoptDecodeReservation(DecodeEndpoint endpoint, DecodeEndpoint.ReservationHandle reservation) {
         requireProvisional();
         if (endpoint == null || endpoint != decodeEndpoint() || reservation == null
-                || !Objects.equals(reservation.requestId(), requestId)
-                || decodeBinding.reservation() != null) {
+                || !Objects.equals(reservation.requestId(), requestId) || decodeDecideInfo.reservation() != null) {
             if (endpoint != null && reservation != null) { endpoint.release(reservation, DecodeEndpoint.ReleaseReason.LOCAL_ROLLBACK); }
             return false;
         }
@@ -261,7 +251,8 @@ public final class RouteAdmission implements AutoCloseable {
                 endpoint.release(reservation, DecodeEndpoint.ReleaseReason.LOCAL_ROLLBACK);
                 return false;
             }
-            decodeBinding = decodeBinding.bind(decodeStatus(), decodeEndpoint(), reservation);
+            decodeDecideInfo =
+                    decodeDecideInfo.withSelection(new DecodeSelection(decodeStatus(), decodeEndpoint(), reservation));
             return true;
         } catch (RuntimeException | Error failure) {
             endpoint.release(reservation, DecodeEndpoint.ReleaseReason.LOCAL_ROLLBACK);
@@ -269,14 +260,16 @@ public final class RouteAdmission implements AutoCloseable {
         }
     }
 
-    public ScheduledRequest createScheduledRequest(BalanceContext context, CompletableFuture<Response> future, long enqueuedAtMs) {
+    public ScheduledRequest createScheduledRequest(BalanceContext context,
+                                                   CompletableFuture<Response> future,
+                                                   long enqueuedAtMs) {
         requireProvisional();
         if (!Objects.equals(context.getRequestId(), requestId)) {
             throw new IllegalArgumentException("admission cannot build another request");
         }
-        return new ScheduledRequest(context, future, response,
-                ServerStatus.copyOf(prefillStatus()), ServerStatus.copyOf(decodeStatus()),
-                prefillEndpoint(), decodeEndpoint(), decodeBinding.reservation(), enqueuedAtMs, decodeBinding);
+        return new ScheduledRequest(context, future, response, ServerStatus.copyOf(prefillStatus()),
+                ServerStatus.copyOf(decodeStatus()), prefillEndpoint(), decodeEndpoint(),
+                decodeDecideInfo.reservation(), enqueuedAtMs, decodeDecideInfo);
     }
 
     /** The caller has registered the same canonical request before selecting this route. */
@@ -406,9 +399,9 @@ public final class RouteAdmission implements AutoCloseable {
         if (ownership != Ownership.PROVISIONAL) { return; }
         ownership = Ownership.CLOSED;
         try {
-            if (decodeBinding.reservation() != null) { decodeEndpoint().release(
-                    decodeBinding.reservation(),
-                    DecodeEndpoint.ReleaseReason.LOCAL_ROLLBACK); }
+            if (decodeDecideInfo.reservation() != null) {
+                decodeEndpoint().release(decodeDecideInfo.reservation(), DecodeEndpoint.ReleaseReason.LOCAL_ROLLBACK);
+            }
         } finally {
             closePins();
         }

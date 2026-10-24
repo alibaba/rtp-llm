@@ -4,7 +4,7 @@ import org.flexlb.balance.PlacementResult;
 import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.endpoint.WorkerEndpoint;
-import org.flexlb.balance.scheduler.ScheduledRequest.DecodeBinding;
+import org.flexlb.balance.scheduler.decode.DecodeRequirement;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.config.PreemptionConfig;
@@ -47,7 +47,7 @@ class DecodeSelectionAdmissionContractTest {
             var freeUsage = fixture.free.routingView().placementUsage();
 
             for (long requestId = 100L; requestId < 106L; requestId++) {
-                DecodeBinding request = fixture.request(requestId);
+                DecodeRequirement request = fixture.request(requestId);
                 PlacementResult<SelectedRole, RoleType> result = fixture.strategy.select(request, null);
                 assertEquals(PlacementResult.Status.SUCCESS, result.status());
                 try (SelectedRole selected = result.value()) {
@@ -169,7 +169,7 @@ class DecodeSelectionAdmissionContractTest {
                             RoleType.DECODE, null, ip, 8080, 9090, true, 1_000L, 1_000L));
         }
 
-        private DecodeBinding request(long requestId) {
+        private DecodeRequirement request(long requestId) {
             Request request = new Request();
             request.setRequestId(Long.toString(requestId));
             request.setSeqLen(100L);
@@ -177,7 +177,7 @@ class DecodeSelectionAdmissionContractTest {
             request.setPriority(70);
             BalanceContext context = new BalanceContext(config);
             context.setRequest(request);
-            return DecodeBinding.capture(context);
+            return DecodeRequirement.capture(context);
         }
 
         private void assertPlacementAndDispatchDisagree() {

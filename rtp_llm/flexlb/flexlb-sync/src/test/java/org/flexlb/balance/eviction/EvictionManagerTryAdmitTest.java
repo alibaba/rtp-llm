@@ -5,8 +5,9 @@ import org.flexlb.balance.endpoint.WorkerEndpoint;
 import org.flexlb.balance.scheduler.RequestRegistry;
 import org.flexlb.balance.scheduler.RequestSlot.AdmissionHandle;
 import org.flexlb.balance.scheduler.RouteAdmission;
-import org.flexlb.balance.scheduler.ScheduledRequest.DecodeBinding;
 import org.flexlb.balance.scheduler.SchedulingTestConfig;
+import org.flexlb.balance.scheduler.decode.DecodeDecideInfo;
+import org.flexlb.balance.scheduler.decode.DecodeRequirement;
 import org.flexlb.config.EngineCancellationConfig;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.config.PreemptionConfig;
@@ -79,8 +80,8 @@ class EvictionManagerTryAdmitTest {
     }
 
     @ParameterizedTest
-    @CsvSource({"1000,RPC,ACCEPTED_NOT_RUNNING", "1000,RPC,RUNNING",
-            "2750,RPC,ACCEPTED_NOT_RUNNING", "1000,RETURN,ACCEPTED_NOT_RUNNING"})
+    @CsvSource({"1000,RPC,ACCEPTED_NOT_RUNNING", "1000,RPC,RUNNING", "2750,RPC,ACCEPTED_NOT_RUNNING",
+            "1000,RETURN,ACCEPTED_NOT_RUNNING"})
     void enginePreemptionUsesFrozenAdmission(long completionTimeoutMs,
                                              EngineCancellationConfig.Mode cancellationMode,
                                              DecodeTaskPhase victimPhase) {
@@ -121,8 +122,8 @@ class EvictionManagerTryAdmitTest {
         context.setSchedulingMetadata(SchedulingMetadata.explicit(70, System.currentTimeMillis() + 60_000L));
         var future = new CompletableFuture<Response>();
         when(requests.claimAdmissionHandle("902", future)).thenReturn(mock(AdmissionHandle.class));
-        var frozenRequest = DecodeBinding.capture(context);
-        when(admission.decodeBinding()).thenReturn(frozenRequest);
+        var frozenRequest = DecodeRequirement.capture(context);
+        when(admission.decodeDecideInfo()).thenReturn(new DecodeDecideInfo(frozenRequest, null));
         config.getRouter().getRoles().getDecode().getAvailability().setMaxEngineRequests(99L);
         config.getRouter().getRoles().getDecode().getAvailability().setMaxKvUsagePercent(1L);
         incoming.setSeqLen(4_096L);
@@ -155,10 +156,9 @@ class EvictionManagerTryAdmitTest {
         verifyNoInteractions(deliveryReporter);
     }
 
-    private boolean tryAdmit(BalanceContext context,
-                             CompletableFuture<Response> future) {
-        DecodeBinding frozenRequest = DecodeBinding.capture(context);
-        when(admission.decodeBinding()).thenReturn(frozenRequest);
+    private boolean tryAdmit(BalanceContext context, CompletableFuture<Response> future) {
+        DecodeRequirement frozenRequest = DecodeRequirement.capture(context);
+        when(admission.decodeDecideInfo()).thenReturn(new DecodeDecideInfo(frozenRequest, null));
         return manager.tryAdmit(
                 context, future, admission, blockedEndpoint);
     }

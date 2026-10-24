@@ -2,7 +2,8 @@ package org.flexlb.balance.scheduler;
 
 import org.apache.commons.lang3.StringUtils;
 import org.flexlb.balance.PlacementResult;
-import org.flexlb.balance.scheduler.ScheduledRequest.DecodeBinding;
+import org.flexlb.balance.scheduler.decode.DecodeDecideInfo;
+import org.flexlb.balance.scheduler.decode.DecodeRequirement;
 import org.flexlb.balance.strategy.CostBasedPrefillStrategy;
 import org.flexlb.balance.strategy.DecodeSelector;
 import org.flexlb.balance.strategy.EncoderStrategy;
@@ -90,8 +91,8 @@ public class DefaultRouter {
     public PlacementResult<RouteAdmission, PlacementKey> select(BalanceContext context, String policyGroup) {
         Response validationFailure = validateRequest(context);
         if (validationFailure != null) { return PlacementResult.rejected(validationFailure); }
-        DecodeBinding decodeAdmission = DecodeBinding.capture(context);
-        try (PinnedRouting routing = selectAll(context, requestedRoles(context), policyGroup, decodeAdmission)) {
+        DecodeDecideInfo decodeDecideInfo = DecodeDecideInfo.capture(context);
+        try (PinnedRouting routing = selectAll(context, requestedRoles(context), policyGroup, decodeDecideInfo)) {
             if (routing.blocker() != null) {
                 return PlacementResult.blocked(routing.blocker(), routing.failure(), routing.diagnostics);
             }
@@ -99,7 +100,7 @@ public class DefaultRouter {
                 return PlacementResult.rejected(routing.failure(), routing.diagnostics);
             }
             return PlacementResult.success(RouteAdmission.prepare(context, routing.selections(),
-                    buildSuccessResponse(routing.serverStatuses()), decodeAdmission));
+                    buildSuccessResponse(routing.serverStatuses()), decodeDecideInfo));
         }
     }
 
@@ -143,8 +144,10 @@ public class DefaultRouter {
                         .collect(Collectors.toCollection(LinkedHashSet::new));
     }
 
-    private PinnedRouting selectAll(BalanceContext context, Set<RoleType> roles, String policyGroup,
-                                   DecodeBinding decodeAdmission) {
+    private PinnedRouting selectAll(BalanceContext context,
+                                    Set<RoleType> roles,
+                                    String policyGroup,
+                                    DecodeDecideInfo decodeDecideInfo) {
         List<SelectedRole> selected = new ArrayList<>(roles.size());
         String group = policyGroup;
         if (StringUtils.isNotBlank(policyGroup)) {
@@ -170,7 +173,7 @@ public class DefaultRouter {
             for (RoleType role : roles) {
                 if (role == RoleType.VIT && context.getRequest().getSelectedVit() != null) { continue; }
                 PlacementResult<SelectedRole, RoleType> result =
-                        selectRole(context, role, group, decodeAdmission);
+                        selectRole(context, role, group, decodeDecideInfo.requirement());
                 if (result.status() != PlacementResult.Status.SUCCESS) {
                     Logger.debug(
                             "Failed to select {} worker for request {}",
@@ -221,12 +224,14 @@ public class DefaultRouter {
                 .orElse(null);
     }
 
-    private PlacementResult<SelectedRole, RoleType> selectRole(
-            BalanceContext context, RoleType role, String group, DecodeBinding decodeAdmission) {
+    private PlacementResult<SelectedRole, RoleType> selectRole(BalanceContext context,
+                                                               RoleType role,
+                                                               String group,
+                                                               DecodeRequirement decodeRequirement) {
         return switch (role) {
             case PREFILL, PDFUSION ->
                     prefillSelector.select(context, role, group);
-            case DECODE -> decodeSelector.select(context, decodeAdmission, group);
+            case DECODE -> decodeSelector.select(context, decodeRequirement, group);
             case VIT -> selectedOrBlocked(
                     vitSelector.select(context, role, group), role);
             case ENCODER -> selectedOrBlocked(

@@ -13,6 +13,10 @@ import org.flexlb.balance.prediction.PrefillTimePredictor;
 import org.flexlb.balance.projection.RouteProjection;
 import org.flexlb.balance.projection.WorkSnapshot;
 import org.flexlb.balance.scheduler.RequestSlot.DeliveryClaim;
+import org.flexlb.balance.scheduler.decode.DecodeDecideInfo;
+import org.flexlb.balance.scheduler.decode.DecodeMode;
+import org.flexlb.balance.scheduler.decode.DecodeRequirement;
+import org.flexlb.balance.scheduler.decode.DecodeSelection;
 import org.flexlb.dao.route.RoleType;
 import org.mockito.Mockito;
 import org.springframework.test.util.ReflectionTestUtils;
@@ -201,12 +205,12 @@ public final class DeliveryStrategyTestSupport {
                         .thenReturn(routeReservation);
                 Mockito.when(item.takePublishedRouteReservation(routeReservation))
                         .thenReturn(true);
-                ScheduledRequest.DecodeBinding binding = new ScheduledRequest.DecodeBinding(
-                        null, decode, reservation, requestId, item.priority(), item.seqLen(), item.seqLen(),
-                        new DecodeEndpoint.AdmissionCapacity(0L, 100L),
-                        ScheduledRequest.DecodeMode.WAIT_AT_PLACEMENT,
+                DecodeRequirement requirement = new DecodeRequirement(requestId, item.priority(), item.seqLen(),
+                        item.seqLen(), new DecodeEndpoint.AdmissionCapacity(0L, 100L), DecodeMode.WAIT_AT_PLACEMENT,
                         DecodeCostFormula.parse("kvcache_used_ratio"));
-                Mockito.when(item.decodeBinding()).thenReturn(binding);
+                DecodeDecideInfo decide =
+                        new DecodeDecideInfo(requirement, new DecodeSelection(null, decode, reservation));
+                Mockito.when(item.decodeDecideInfo()).thenReturn(decide);
             }
         }
 

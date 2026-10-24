@@ -7,8 +7,8 @@ import org.flexlb.balance.scheduler.RequestRegistry;
 import org.flexlb.balance.scheduler.RequestSlot.AdmissionHandle;
 import org.flexlb.balance.scheduler.RouteAdmission;
 import org.flexlb.balance.scheduler.ScheduledRequest;
-import org.flexlb.balance.scheduler.ScheduledRequest.DecodeBinding;
-import org.flexlb.balance.scheduler.ScheduledRequest.DecodeMode;
+import org.flexlb.balance.scheduler.decode.DecodeMode;
+import org.flexlb.balance.scheduler.decode.DecodeRequirement;
 import org.flexlb.config.EngineCancellationConfig;
 import org.flexlb.config.PreemptionConfig;
 import org.flexlb.config.VictimStage;
@@ -75,13 +75,12 @@ public class EvictionManager {
      * manager; false leaves the caller responsible for parking the original
      * exact route.
      */
-    public boolean tryAdmit(
-            BalanceContext ctx,
-            CompletableFuture<Response> future,
-            RouteAdmission admission,
-            WorkerEndpoint blockedEndpoint) {
+    public boolean tryAdmit(BalanceContext ctx,
+                            CompletableFuture<Response> future,
+                            RouteAdmission admission,
+                            WorkerEndpoint blockedEndpoint) {
         Objects.requireNonNull(admission, "admission");
-        DecodeBinding request = admission.decodeBinding();
+        DecodeRequirement request = admission.decodeDecideInfo().requirement();
         if (shutdown || future.isDone()
                 || ctx.requestExpired(System.currentTimeMillis())
                 || !PriorityNormalizer.hasPriority(request.priority())
@@ -146,17 +145,15 @@ public class EvictionManager {
 
     // ==================== Decode eviction ====================
 
-    private record PlannedDecodeEviction(
-            DecodeEndpointSnapshot target,
-            DecodeEvictionProposal proposal,
-            DecodeBinding request) {
+    private record PlannedDecodeEviction(DecodeEndpointSnapshot target,
+                                         DecodeEvictionProposal proposal,
+                                         DecodeRequirement request) {
     }
 
     /** Build one side-effect-free plan from one exact cluster snapshot. */
-    private PlannedDecodeEviction planDecodeEviction(
-            DecodeBinding request,
-            PreemptionConfig preemption,
-            DecodeEndpoint selectedEndpoint) {
+    private PlannedDecodeEviction planDecodeEviction(DecodeRequirement request,
+                                                     PreemptionConfig preemption,
+                                                     DecodeEndpoint selectedEndpoint) {
         DecodeEndpointSnapshot selected = DecodeEndpointSnapshot.capture(
                 selectedEndpoint, request.capacity());
         if (selected.endpoint().isRetired()) {
@@ -192,14 +189,13 @@ public class EvictionManager {
     }
 
     /** Commit exactly the immutable plan selected before takeover. */
-    private boolean commitDecodeEviction(
-            BalanceContext ctx,
-            CompletableFuture<Response> future,
-            PlannedDecodeEviction planned,
-            PreemptionConfig preemption,
-            RouteAdmission admission) {
+    private boolean commitDecodeEviction(BalanceContext ctx,
+                                         CompletableFuture<Response> future,
+                                         PlannedDecodeEviction planned,
+                                         PreemptionConfig preemption,
+                                         RouteAdmission admission) {
         DecodeEvictionProposal proposal = planned.proposal();
-        DecodeBinding request = planned.request();
+        DecodeRequirement request = planned.request();
 
         DecodeEndpointSnapshot target = planned.target();
         DecodeEndpoint decodeEp = target.endpoint();
@@ -381,7 +377,7 @@ public class EvictionManager {
                                        PreemptionConfig preemption,
                                        DecodeEvictionProposal proposal,
                                        DecodeEndpoint decodeEp,
-                                       DecodeBinding request,
+                                       DecodeRequirement request,
                                        RouteAdmission admission) {
         String detail = RequestRegistry.PREEMPTED_BY_HIGHER_PRIORITY_MESSAGE + " " + ctx.getRequestId();
         boolean returnInstructions = preemption.getEngineCancellation().getMode()
@@ -447,15 +443,14 @@ public class EvictionManager {
     }
 
     /** Convert one typed coordinator result into commit or one terminal response. */
-    private Response enginePreemptionTerminal(
-            BalanceContext ctx,
-            CompletableFuture<Response> future,
-            DecodeEvictionProposal proposal,
-            DecodeEndpoint decodeEp,
-            DecodePreemptionCoordinator.PreemptionResult result,
-            Throwable error,
-            RouteAdmission admission,
-            boolean returnInstructions) {
+    private Response enginePreemptionTerminal(BalanceContext ctx,
+                                              CompletableFuture<Response> future,
+                                              DecodeEvictionProposal proposal,
+                                              DecodeEndpoint decodeEp,
+                                              DecodePreemptionCoordinator.PreemptionResult result,
+                                              Throwable error,
+                                              RouteAdmission admission,
+                                              boolean returnInstructions) {
         if (error != null || result == null) {
             if (!returnInstructions) {
                 reportCancelTimeout(ctx, proposal.endpointId());
@@ -471,7 +466,7 @@ public class EvictionManager {
         }
         if (result.committed()) {
             DecodeEndpoint.ReservationHandle reservation =
-                    decodeEp.reservationHandle(admission.decodeBinding().requestId());
+                    decodeEp.reservationHandle(admission.decodeDecideInfo().requirement().requestId());
             if (reservation == null) {
                 return admissionError(
                         StrategyErrorType.RESOURCE_EXHAUSTED,

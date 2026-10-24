@@ -5,8 +5,8 @@ import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.DecodeEndpoint.CapacityRelease;
 import org.flexlb.balance.endpoint.DecodeEndpoint.DecodeRoutingView;
 import org.flexlb.balance.endpoint.WorkerEndpoint;
-import org.flexlb.balance.scheduler.ScheduledRequest.DecodeBinding;
-import org.flexlb.balance.scheduler.ScheduledRequest.DecodeMode;
+import org.flexlb.balance.scheduler.decode.DecodeMode;
+import org.flexlb.balance.scheduler.decode.DecodeRequirement;
 import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.loadbalance.AdmissionRejectReason;
 import org.flexlb.dao.loadbalance.Response;
@@ -35,8 +35,7 @@ public class DecodeSelector {
         this.workerDirectory = workerDirectory;
     }
 
-    public PlacementResult<SelectedRole, RoleType> select(
-            DecodeBinding request, String group) {
+    public PlacementResult<SelectedRole, RoleType> select(DecodeRequirement request, String group) {
         return select(null, request, group);
     }
 
@@ -44,7 +43,9 @@ public class DecodeSelector {
      * Selects the least-cost available Decode endpoint and records the choice
      * reason when the caller supplies the request context.
      */
-    public PlacementResult<SelectedRole, RoleType> select(BalanceContext context, DecodeBinding request, String group) {
+    public PlacementResult<SelectedRole, RoleType> select(BalanceContext context,
+                                                          DecodeRequirement request,
+                                                          String group) {
         for (int attempt = 0; attempt < MAX_SELECTION_ATTEMPTS; attempt++) {
             List<DecodeRoutingView> decodeWorkerViews = workerDirectory.decodeRoutingSnapshot(group);
             if (decodeWorkerViews.isEmpty()) {
@@ -119,8 +120,8 @@ public class DecodeSelector {
         return PlacementResult.blocked(RoleType.DECODE);
     }
 
-    private PlacementResult<SelectedRole, RoleType> classifyCapacityFailure(
-            DecodeBinding request, List<DecodeRoutingView> views) {
+    private PlacementResult<SelectedRole, RoleType> classifyCapacityFailure(DecodeRequirement request,
+                                                                            List<DecodeRoutingView> views) {
         Response failure = null;
         boolean uniformFailure = true;
         List<Map<String, Object>> evidence = new ArrayList<>();
@@ -155,7 +156,7 @@ public class DecodeSelector {
     }
 
     /** Classify only the dimensions that prevent this request from fitting. */
-    static Response classifyCapacityFailure(DecodeBinding request, DecodeEndpoint.AdmissionSummary snapshot) {
+    static Response classifyCapacityFailure(DecodeRequirement request, DecodeEndpoint.AdmissionSummary snapshot) {
         boolean dispatch = request.mode() == DecodeMode.IMMEDIATE;
         var routing = snapshot.routing();
         var usage = dispatch ? routing.dispatchUsage() : routing.placementUsage();
@@ -196,7 +197,7 @@ public class DecodeSelector {
                 ? AdmissionRejectReason.HIGHER_PRIORITY_AHEAD : AdmissionRejectReason.SAME_PRIORITY_AHEAD);
     }
 
-    private static Availability availability(DecodeBinding request, DecodeRoutingView view) {
+    private static Availability availability(DecodeRequirement request, DecodeRoutingView view) {
         if (view.totalKv() > 0L && request.inputAndMaxOutputKvTokens() > request.capacity().kvBudget(view.totalKv())) {
             return Availability.IMPOSSIBLE;
         }

@@ -4,6 +4,8 @@ import org.flexlb.balance.delivery.CapacityBoundary;
 import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.PrefillState;
 import org.flexlb.balance.projection.RouteProjection;
+import org.flexlb.balance.scheduler.decode.DecodeDecideInfo;
+import org.flexlb.balance.scheduler.decode.DecodeRequirement;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.util.Logger;
 
@@ -50,19 +52,19 @@ final class PrefillAdmissionResources {
     }
 
     static CapacityBoundary.Attempt<Member> prepareMember(ScheduledRequest item) {
-        ScheduledRequest.DecodeBinding binding = item.decodeBinding();
-        if (binding.isAbsent()) {
+        DecodeDecideInfo decide = item.decodeDecideInfo();
+        if (decide.isAbsent()) {
             // The committed topology has no independent Decode resource.
             // Its Prefill/PDFUSION reservation still follows the same handoff.
             return captureMember(item, null);
         }
-        DecodeEndpoint decode = binding.endpoint();
-        if (decode == null || binding.reservation() == null) {
+        DecodeEndpoint decode = decide.endpoint();
+        if (decode == null || decide.reservation() == null) {
             return failed(missingEndpoint("Decode reservation", item));
         }
         DecodeEndpoint.EngineDispatchPermitAcquisition acquisition;
         try {
-            acquisition = decode.acquireDispatchPermit(binding.reservation(), binding.capacity());
+            acquisition = decode.acquireDispatchPermit(decide.reservation(), decide.requirement().capacity());
         } catch (RuntimeException | Error failure) {
             return failed(failure);
         }
@@ -353,16 +355,17 @@ final class PrefillAdmissionResources {
     /** Decode is the exact event source for its request-scoped permit. */
     private static final class DecodeAvailability
             implements CapacityBoundary.Availability {
-        private final ScheduledRequest.DecodeBinding binding;
+        private final DecodeDecideInfo decide;
         private Runnable subscribedListener;
 
         private DecodeAvailability(ScheduledRequest item) {
-            this.binding = item.decodeBinding();
+            this.decide = item.decodeDecideInfo();
         }
 
         @Override
         public boolean isAvailable() {
-            return binding.endpoint().shouldRetryDispatch(binding.requestId(), binding.capacity());
+            DecodeRequirement requirement = decide.requirement();
+            return decide.endpoint().shouldRetryDispatch(requirement.requestId(), requirement.capacity());
         }
 
         @Override
@@ -375,7 +378,7 @@ final class PrefillAdmissionResources {
                 return;
             }
             subscribedListener = listener;
-            binding.endpoint().addEngineDispatchCapacityListener(listener);
+            decide.endpoint().addEngineDispatchCapacityListener(listener);
         }
 
         @Override
@@ -383,7 +386,7 @@ final class PrefillAdmissionResources {
             if (subscribedListener != listener) {
                 return;
             }
-            binding.endpoint().removeEngineDispatchCapacityListener(listener);
+            decide.endpoint().removeEngineDispatchCapacityListener(listener);
             subscribedListener = null;
         }
     }

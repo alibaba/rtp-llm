@@ -3,7 +3,8 @@ package org.flexlb.balance.scheduler;
 import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.endpoint.PrefillState;
-import org.flexlb.balance.prediction.DecodeCostFormula;
+import org.flexlb.balance.scheduler.decode.DecodeDecideInfo;
+import org.flexlb.balance.scheduler.decode.DecodeSelection;
 import org.flexlb.config.DispatcherConfig;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.BalanceContext;
@@ -37,7 +38,7 @@ public final class ScheduledRequest implements Prioritized {
     private final Response routeResponse;
     private final ServerStatus prefill;
     private final PrefillEndpoint prefillEp;
-    private final DecodeBinding decodeBinding;
+    private final DecodeDecideInfo decodeDecideInfo;
     private final long enqueuedAtMs;
     /**
      * Monotonic entry time for the current endpoint queue visit, not the first route attempt.
@@ -57,34 +58,34 @@ public final class ScheduledRequest implements Prioritized {
             publishedRouteReservation = new AtomicReference<>();
 
     public ScheduledRequest(BalanceContext ctx,
-                     CompletableFuture<Response> future,
-                     Response routeResponse,
-                     ServerStatus prefill,
-                     ServerStatus decode,
-                     PrefillEndpoint prefillEp,
-                     DecodeEndpoint decodeEp,
-                     DecodeEndpoint.ReservationHandle decodeReservation,
-                     long enqueuedAtMs) {
-        this(ctx, future, routeResponse, prefill, decode, prefillEp, decodeEp, decodeReservation,
-                enqueuedAtMs, DecodeBinding.capture(ctx));
+                            CompletableFuture<Response> future,
+                            Response routeResponse,
+                            ServerStatus prefill,
+                            ServerStatus decode,
+                            PrefillEndpoint prefillEp,
+                            DecodeEndpoint decodeEp,
+                            DecodeEndpoint.ReservationHandle decodeReservation,
+                            long enqueuedAtMs) {
+        this(ctx, future, routeResponse, prefill, decode, prefillEp, decodeEp, decodeReservation, enqueuedAtMs,
+                DecodeDecideInfo.capture(ctx));
     }
 
     public ScheduledRequest(BalanceContext ctx,
-                     CompletableFuture<Response> future,
-                     Response routeResponse,
-                     ServerStatus prefill,
-                     ServerStatus decode,
-                     PrefillEndpoint prefillEp,
-                     DecodeEndpoint decodeEp,
-                     DecodeEndpoint.ReservationHandle decodeReservation,
-                     long enqueuedAtMs,
-                     DecodeBinding frozenDecode) {
+                            CompletableFuture<Response> future,
+                            Response routeResponse,
+                            ServerStatus prefill,
+                            ServerStatus decode,
+                            PrefillEndpoint prefillEp,
+                            DecodeEndpoint decodeEp,
+                            DecodeEndpoint.ReservationHandle decodeReservation,
+                            long enqueuedAtMs,
+                            DecodeDecideInfo frozenDecode) {
         this.ctx = Objects.requireNonNull(ctx, "ctx");
         this.future = future;
         this.routeResponse = routeResponse;
         this.prefill = prefill;
         this.prefillEp = prefillEp;
-        this.decodeBinding = frozenDecode.bind(decode, decodeEp, decodeReservation);
+        this.decodeDecideInfo = frozenDecode.withSelection(DecodeSelection.of(decode, decodeEp, decodeReservation));
         if (ctx.getWorkerEnqueueSequence() == 0L) {
             ctx.setFirstWorkerEnqueueTime(enqueuedAtMs);
             ctx.setWorkerEnqueueSequence(ENQUEUE_SEQUENCE.incrementAndGet());
@@ -106,15 +107,15 @@ public final class ScheduledRequest implements Prioritized {
     public CompletableFuture<Response> future() { return future; }
     public Response routeResponse() { return routeResponse; }
     public ServerStatus prefill() { return prefill; }
-    public ServerStatus decode() { return decodeBinding.status(); }
+    public ServerStatus decode() { return decodeDecideInfo.status(); }
     public PrefillEndpoint prefillEp() { return prefillEp; }
-    public DecodeEndpoint decodeEp() { return decodeBinding.endpoint(); }
+    public DecodeEndpoint decodeEp() { return decodeDecideInfo.endpoint(); }
     public DecodeEndpoint.ReservationHandle decodeReservation() {
-        return decodeBinding.reservation();
+        return decodeDecideInfo.reservation();
     }
 
-    public DecodeBinding decodeBinding() {
-        return decodeBinding;
+    public DecodeDecideInfo decodeDecideInfo() {
+        return decodeDecideInfo;
     }
     public long enqueuedAtMs() { return enqueuedAtMs; }
 
@@ -185,7 +186,7 @@ public final class ScheduledRequest implements Prioritized {
      */
     @Override
     public int priority() {
-        return decodeBinding.priority();
+        return decodeDecideInfo.requirement().priority();
     }
 
     /**
@@ -201,12 +202,12 @@ public final class ScheduledRequest implements Prioritized {
     // -- derived accessors --
 
     public String requestId() {
-        return decodeBinding.requestId();
+        return decodeDecideInfo.requirement().requestId();
     }
 
     /** Total sequence length of this request. */
     public long seqLen() {
-        return decodeBinding.inputKvTokens();
+        return decodeDecideInfo.requirement().inputKvTokens();
     }
 
     /** Cache-hit tokens on the assigned prefill endpoint. */
@@ -219,73 +220,4 @@ public final class ScheduledRequest implements Prioritized {
         return ss != null && ss.getDebugInfo() != null
                 ? ss.getDebugInfo().getHitCacheLen() : 0;
     }
-
-    public enum DecodeMode {
-        IMMEDIATE,
-        WAIT_AT_PLACEMENT,
-        PREEMPT_AT_PLACEMENT;
-
-        public static DecodeMode from(FlexlbConfig config) {
-            if (config.isDirect()) { return IMMEDIATE; }
-            return config.queueScheduler().getOrdering().preemptionPolicy().isPresent()
-                    ? PREEMPT_AT_PLACEMENT : WAIT_AT_PLACEMENT;
-        }
-    }
-
-    /**
-     * Request values frozen before selection.
-     * inputKvTokens is max(0, seqLen). inputAndMaxOutputKvTokens is
-     * inputKvTokens + max(0, maxNewTokens), saturated at Long.MAX_VALUE.
-     * Neither value is an estimate of the actual generated output length.
-     */
-    public record DecodeBinding(
-            ServerStatus status,
-            DecodeEndpoint endpoint,
-            DecodeEndpoint.ReservationHandle reservation,
-            String requestId,
-            int priority,
-            long inputKvTokens,
-            long inputAndMaxOutputKvTokens,
-            DecodeEndpoint.AdmissionCapacity capacity,
-            DecodeMode mode,
-            DecodeCostFormula costFormula) {
-        public DecodeBinding {
-            Objects.requireNonNull(capacity, "capacity");
-            Objects.requireNonNull(mode, "mode");
-            Objects.requireNonNull(costFormula, "costFormula");
-            if (reservation != null && !Objects.equals(reservation.requestId(), requestId)) {
-                throw new IllegalArgumentException("Decode reservation belongs to another request");
-            }
-        }
-
-        public static DecodeBinding capture(BalanceContext context) {
-            var request = Objects.requireNonNull(context.getRequest(), "request");
-            var config = Objects.requireNonNull(context.getConfig(), "request config");
-            var decode = config.getRouter().getRoles().getDecode();
-            var availability = decode.getAvailability();
-            long promptTokens = Math.max(0L, request.getSeqLen());
-            long maxOutputTokens = Math.max(0L, request.getMaxNewTokens());
-            long inputAndMaxOutputTokens = promptTokens > Long.MAX_VALUE - maxOutputTokens
-                    ? Long.MAX_VALUE : promptTokens + maxOutputTokens;
-            return new DecodeBinding(null, null, null, request.getRequestId(), context.getPriority(),
-                    promptTokens, inputAndMaxOutputTokens,
-                    new DecodeEndpoint.AdmissionCapacity(
-                            availability.getMaxEngineRequests() == null ? 0L : availability.getMaxEngineRequests(),
-                            availability.getMaxKvUsagePercent()), DecodeMode.from(config),
-                    decode.getCostEstimator().compiledFormula());
-        }
-
-        DecodeBinding bind(ServerStatus selectedStatus, DecodeEndpoint selectedEndpoint,
-                           DecodeEndpoint.ReservationHandle selectedReservation) {
-            return new DecodeBinding(selectedStatus, selectedEndpoint, selectedReservation,
-                    requestId, priority, inputKvTokens, inputAndMaxOutputKvTokens, capacity, mode,
-                    costFormula);
-        }
-
-        /** Absence is a topology choice; a partial binding is still an error. */
-        boolean isAbsent() {
-            return status == null && endpoint == null && reservation == null;
-        }
-    }
-
 }

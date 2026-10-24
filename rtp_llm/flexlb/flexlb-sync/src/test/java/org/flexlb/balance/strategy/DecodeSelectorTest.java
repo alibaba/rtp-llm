@@ -5,7 +5,7 @@ import org.flexlb.balance.PlacementResult;
 import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.endpoint.WorkerEndpoint;
-import org.flexlb.balance.scheduler.ScheduledRequest.DecodeBinding;
+import org.flexlb.balance.scheduler.decode.DecodeRequirement;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.PreemptionConfig;
 import org.flexlb.config.QueueOrderingConfig;
@@ -236,8 +236,7 @@ class DecodeSelectorTest {
                 .thenReturn(replacementPin);
 
         PlacementResult<SelectedRole, RoleType> result =
-                new DecodeSelector(racing).select(
-                        DecodeBinding.capture(context(1_000, 1_001L)), null);
+                new DecodeSelector(racing).select(DecodeRequirement.capture(context(1_000, 1_001L)), null);
 
         Assertions.assertEquals(PlacementResult.Status.SUCCESS, result.status());
         SelectedRole selected = result.value();
@@ -425,7 +424,7 @@ class DecodeSelectorTest {
         DecodeSelector strategy = availableStrategy(decodeRegistry());
 
         IllegalStateException error = Assertions.assertThrows(IllegalStateException.class,
-                () -> strategy.select(DecodeBinding.capture(context(100L, 1_001L)), null));
+                () -> strategy.select(DecodeRequirement.capture(context(100L, 1_001L)), null));
 
         Assertions.assertTrue(error.getMessage().contains("Decode cost formula produced no finite score"));
     }
@@ -560,8 +559,7 @@ class DecodeSelectorTest {
         BalanceContext context = context(257L, 3_050L);
         context.getRequest().setMaxNewTokens(1);
 
-        PlacementResult<SelectedRole, RoleType> result = strategy.select(
-                DecodeBinding.capture(context), null);
+        PlacementResult<SelectedRole, RoleType> result = strategy.select(DecodeRequirement.capture(context), null);
 
         Assertions.assertEquals(PlacementResult.Status.REJECTED, result.status());
         Assertions.assertTrue(result.failure().getErrorMessage().contains("demand=258"));
@@ -573,8 +571,8 @@ class DecodeSelectorTest {
         registerWorker("127.0.0.1", 0L, 0L);
         DecodeSelector strategy = availableStrategy(decodeRegistry());
 
-        PlacementResult<SelectedRole, RoleType> result = strategy.select(
-                DecodeBinding.capture(context(1_000_000L, 3_051L)), null);
+        PlacementResult<SelectedRole, RoleType> result =
+                strategy.select(DecodeRequirement.capture(context(1_000_000L, 3_051L)), null);
 
         Assertions.assertEquals(PlacementResult.Status.SUCCESS, result.status());
         result.value().close();
@@ -615,8 +613,8 @@ class DecodeSelectorTest {
         BalanceContext context = context(100, 3L);
         Request request = context.getRequest();
 
-        PlacementResult<SelectedRole, RoleType> fifoPlacement = strategy.select(
-                DecodeBinding.capture(context), null);
+        PlacementResult<SelectedRole, RoleType> fifoPlacement =
+                strategy.select(DecodeRequirement.capture(context), null);
         Assertions.assertEquals(
                 PlacementResult.Status.SUCCESS, fifoPlacement.status());
         SelectedRole fifoSelection = fifoPlacement.value();
@@ -634,7 +632,7 @@ class DecodeSelectorTest {
                 .setOrdering(preemptiveOrdering);
         request.setRequestId("4");
         PlacementResult<SelectedRole, RoleType> priorityPlacement =
-                strategy.select(DecodeBinding.capture(context), null);
+                strategy.select(DecodeRequirement.capture(context), null);
         Assertions.assertEquals(
                 PlacementResult.Status.SUCCESS, priorityPlacement.status());
         Assertions.assertFalse(endpoint.resourceSnapshot().isQueued("4"),
@@ -675,8 +673,8 @@ class DecodeSelectorTest {
         Map<String, Integer> counts = new HashMap<>();
         for (int index = 0; index < 10; index++) {
             long requestId = 123L + index;
-            PlacementResult<SelectedRole, RoleType> result = strategy.select(
-                    DecodeBinding.capture(context(100L, requestId)), null);
+            PlacementResult<SelectedRole, RoleType> result =
+                    strategy.select(DecodeRequirement.capture(context(100L, requestId)), null);
             Assertions.assertEquals(PlacementResult.Status.SUCCESS, result.status());
             try (SelectedRole selected = result.value()) {
                 counts.merge(selected.serverStatus().getServerIp(), 1, Integer::sum);
@@ -781,7 +779,7 @@ class DecodeSelectorTest {
         BalanceContext context = context(500L, 991L);
         context.getRequest().setMaxNewTokens(10_000);
         Assertions.assertEquals(PlacementResult.Status.REJECTED,
-                availableStrategy(decodeRegistry()).select(DecodeBinding.capture(context), null).status());
+                availableStrategy(decodeRegistry()).select(DecodeRequirement.capture(context), null).status());
     }
 
     @ParameterizedTest
@@ -789,8 +787,7 @@ class DecodeSelectorTest {
     void invalidKvPercentageFailsBeforeWorkerSelection(long percent) {
         configService.loadBalanceConfig().getRouter().getRoles().getDecode()
                 .getAvailability().setMaxKvUsagePercent(percent);
-        Assertions.assertThrows(IllegalArgumentException.class,
-                () -> DecodeBinding.capture(context(1L, 992L)));
+        Assertions.assertThrows(IllegalArgumentException.class, () -> DecodeRequirement.capture(context(1L, 992L)));
     }
 
     private void configureCost(String expression) {
@@ -842,13 +839,12 @@ class DecodeSelectorTest {
         }
     }
 
-    private static ServerStatus selectStatus(
-            DecodeSelector strategy,
-            BalanceContext context,
-            RoleType role,
-            String group) {
+    private static ServerStatus selectStatus(DecodeSelector strategy,
+                                             BalanceContext context,
+                                             RoleType role,
+                                             String group) {
         PlacementResult<SelectedRole, RoleType> result =
-                strategy.select(context, DecodeBinding.capture(context), group);
+                strategy.select(context, DecodeRequirement.capture(context), group);
         if (result.status() != PlacementResult.Status.SUCCESS) {
             return null;
         }

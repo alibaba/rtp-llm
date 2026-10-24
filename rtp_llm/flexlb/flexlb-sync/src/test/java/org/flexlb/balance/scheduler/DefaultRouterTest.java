@@ -7,8 +7,9 @@ import org.flexlb.balance.endpoint.PrefillState;
 import org.flexlb.balance.endpoint.WorkerEndpoint;
 import org.flexlb.balance.scheduler.RequestSlot.AdmissionHandle;
 import org.flexlb.balance.scheduler.RequestSlot.DeliveryClaim;
-import org.flexlb.balance.scheduler.ScheduledRequest.DecodeBinding;
-import org.flexlb.balance.scheduler.ScheduledRequest.DecodeMode;
+import org.flexlb.balance.scheduler.decode.DecodeDecideInfo;
+import org.flexlb.balance.scheduler.decode.DecodeMode;
+import org.flexlb.balance.scheduler.decode.DecodeRequirement;
 import org.flexlb.balance.strategy.CostBasedPrefillStrategy;
 import org.flexlb.balance.strategy.DecodeSelector;
 import org.flexlb.balance.strategy.EncoderStrategy;
@@ -203,7 +204,7 @@ class DefaultRouterTest {
         DecodeEndpoint.ReservationHandle reservation = new DecodeEndpoint.ReservationHandle(1L, "7", 2L);
         when(prefillSelector.select(context, RoleType.PREFILL, null))
                 .thenReturn(PlacementResult.success(prefill.selection));
-        when(decodeSelector.select(context, DecodeBinding.capture(context), "g1"))
+        when(decodeSelector.select(context, DecodeRequirement.capture(context), "g1"))
                 .thenReturn(PlacementResult.success(decode.selection));
         stubPrefillCommit((PrefillEndpoint) prefill.endpoint);
         when(((PrefillEndpoint) prefill.endpoint).reserveUnqueuedRoute(eq(prefill.pin), any(ScheduledRequest.class), eq(1L)))
@@ -239,7 +240,7 @@ class DefaultRouterTest {
         DecodeEndpoint.ReservationHandle reservation = new DecodeEndpoint.ReservationHandle(1L, "8", 2L);
         when(prefillSelector.select(context, RoleType.PREFILL, null))
                 .thenReturn(PlacementResult.success(prefill.selection));
-        when(decodeSelector.select(context, DecodeBinding.capture(context), "g1"))
+        when(decodeSelector.select(context, DecodeRequirement.capture(context), "g1"))
                 .thenReturn(PlacementResult.success(decode.selection));
         stubPrefillCommit((PrefillEndpoint) prefill.endpoint);
         when(((DecodeEndpoint) decode.endpoint).reserve(eq(decode.pin), eq("8"), eq(32L), eq(48L), eq(50)))
@@ -348,7 +349,7 @@ class DefaultRouterTest {
             var reservation = new DecodeEndpoint.ReservationHandle(1L, "9", 2L);
             when(prefillSelector.select(context, RoleType.PREFILL, null))
                     .thenReturn(PlacementResult.success(prefill.selection));
-            when(decodeSelector.select(context, DecodeBinding.capture(context), "g1"))
+            when(decodeSelector.select(context, DecodeRequirement.capture(context), "g1"))
                     .thenReturn(PlacementResult.success(decode.selection));
             stubPrefillCommit((PrefillEndpoint) prefill.endpoint);
             when(((PrefillEndpoint) prefill.endpoint).reserveUnqueuedRoute(eq(prefill.pin), any(ScheduledRequest.class), eq(1L)))
@@ -415,10 +416,9 @@ class DefaultRouterTest {
     }
 
     @ParameterizedTest
-    @CsvSource({"32,16,32,48", "500,10000,500,10500",
-            "9223372036854775806,100,9223372036854775806,9223372036854775807",
+    @CsvSource({"32,16,32,48", "500,10000,500,10500", "9223372036854775806,100,9223372036854775806,9223372036854775807",
             "-1,100,0,100", "500,-1,500,500"})
-    void queuedRouteKeepsFrozenDecodeBinding(long prompt, int output, long requiredKv, long kvBudget) {
+    void queuedRouteKeepsFrozenDecodeRequirement(long prompt, int output, long requiredKv, long kvBudget) {
         var config = SchedulingTestConfig.newConfig();
         var context = RequestLifecycleTestSupport.context(config, 701L);
         context.getRequest().setSeqLen(prompt);
@@ -429,15 +429,15 @@ class DefaultRouterTest {
         limits.setMaxKvUsagePercent(90L);
         var estimator = config.getRouter().getRoles().getDecode().getCostEstimator();
         estimator.setExpression("2 * running_size / max_running_size + 3 * kvcache_used_ratio");
-        var frozen = DecodeBinding.capture(context);
+        var frozen = DecodeDecideInfo.capture(context);
         var prefill = selection(RoleType.PREFILL, 701L, "10.0.0.1", 8080, "g1");
         var selectedDecode = selection(RoleType.DECODE, 701L, "10.0.0.2", 8080, "g1");
         var decode = (DecodeEndpoint) selectedDecode.endpoint();
         var reservation = new DecodeEndpoint.ReservationHandle(1L, "701", 1L);
         when(decode.reserve(any(), anyString(), anyLong(), anyLong(), anyInt(), isNull()))
                 .thenReturn(reservation);
-        when(decode.acquireDispatchPermit(reservation, frozen.capacity())).thenReturn(
-                new DecodeEndpoint.EngineDispatchPermitAcquisition(
+        when(decode.acquireDispatchPermit(reservation, frozen.requirement().capacity()))
+                .thenReturn(new DecodeEndpoint.EngineDispatchPermitAcquisition(
                         DecodeEndpoint.EngineDispatchPermitAcquireStatus.CAPACITY_FULL, null));
 
         // Changes after selection must not change this request's publication mode, demand or cost.
@@ -445,9 +445,9 @@ class DefaultRouterTest {
         limits.setMaxEngineRequests(99L);
         limits.setMaxKvUsagePercent(1L);
         estimator.setExpression("7 * running_size / max_running_size + 11 * kvcache_used_ratio");
-        assertNotSame(estimator.compiledFormula(), frozen.costFormula());
+        assertNotSame(estimator.compiledFormula(), frozen.requirement().costFormula());
         assertEquals("2 * running_size / max_running_size + 3 * kvcache_used_ratio",
-                frozen.costFormula().expression());
+                frozen.requirement().costFormula().expression());
         context.getRequest().setSeqLen(4_096L);
         context.getRequest().setMaxNewTokens(1_024);
         context.setSchedulingMetadata(SchedulingMetadata.explicit(4, Long.MAX_VALUE));
@@ -456,21 +456,21 @@ class DefaultRouterTest {
                 List.of(prefill.selection(), selectedDecode.selection()), new Response(), frozen)) {
             assertTrue(route.reserveDecode());
             var item = route.createScheduledRequest(context, new CompletableFuture<>(), System.currentTimeMillis());
-            assertSame(frozen.capacity(), route.decodeBinding().capacity());
-            assertSame(frozen.capacity(), item.decodeBinding().capacity());
-            assertSame(frozen.costFormula(), route.decodeBinding().costFormula());
-            assertSame(frozen.costFormula(), item.decodeBinding().costFormula());
-            assertSame(reservation, item.decodeBinding().reservation());
-            assertSame(decode, item.decodeBinding().endpoint());
+            assertSame(frozen.requirement().capacity(), route.decodeDecideInfo().requirement().capacity());
+            assertSame(frozen.requirement().capacity(), item.decodeDecideInfo().requirement().capacity());
+            assertSame(frozen.requirement().costFormula(), route.decodeDecideInfo().requirement().costFormula());
+            assertSame(frozen.requirement().costFormula(), item.decodeDecideInfo().requirement().costFormula());
+            assertSame(reservation, item.decodeDecideInfo().reservation());
+            assertSame(decode, item.decodeDecideInfo().endpoint());
             assertEquals(requiredKv, item.seqLen());
-            assertEquals(DecodeMode.WAIT_AT_PLACEMENT, frozen.mode());
+            assertEquals(DecodeMode.WAIT_AT_PLACEMENT, frozen.requirement().mode());
 
             var delivery = PrefillAdmissionResources.prepareMember(item);
             assertFalse(delivery.accepted());
             assertTrue(delivery.boundary().unavailable());
             assertFalse(delivery.boundary().availability().isAvailable());
-            verify(decode).shouldRetryDispatch("701", frozen.capacity());
-            verify(decode).acquireDispatchPermit(reservation, frozen.capacity());
+            verify(decode).shouldRetryDispatch("701", frozen.requirement().capacity());
+            verify(decode).acquireDispatchPermit(reservation, frozen.requirement().capacity());
             verify(decode).reserve(any(), eq("701"), eq(requiredKv), eq(kvBudget), eq(73), isNull());
             verify(decode, never()).reserve(any(), anyString(), anyLong(), anyLong(), anyInt());
         }
@@ -484,14 +484,15 @@ class DefaultRouterTest {
         AtomicReference<FlexlbConfig> current = new AtomicReference<>(initial);
         BalanceContext waiting = RequestLifecycleTestSupport.context(current.get(), 701L);
         var usage = new DecodeEndpoint.CapacityUsage(2L, 1_000L, 1_000L, 0L, 0L);
-        DecodeBinding firstAttempt = DecodeBinding.capture(waiting);
+        DecodeRequirement firstAttempt = DecodeRequirement.capture(waiting);
         assertFalse(firstAttempt.capacity().evaluate(usage, 10L, 10L).fits());
 
         FlexlbConfig increased = SchedulingTestConfig.newConfig();
         increased.getRouter().getRoles().getDecode().getAvailability().setMaxEngineRequests(4L);
         current.set(increased);
-        DecodeBinding retried = DecodeBinding.capture(waiting);
-        DecodeBinding newRequest = DecodeBinding.capture(RequestLifecycleTestSupport.context(current.get(), 702L));
+        DecodeRequirement retried = DecodeRequirement.capture(waiting);
+        DecodeRequirement newRequest =
+                DecodeRequirement.capture(RequestLifecycleTestSupport.context(current.get(), 702L));
         assertEquals(1L, firstAttempt.capacity().maxEngineRequests());
         assertEquals(1L, retried.capacity().maxEngineRequests());
         assertFalse(retried.capacity().evaluate(usage, 10L, 10L).fits());
@@ -501,9 +502,10 @@ class DefaultRouterTest {
         FlexlbConfig reduced = SchedulingTestConfig.newConfig();
         reduced.getRouter().getRoles().getDecode().getAvailability().setMaxEngineRequests(2L);
         current.set(reduced);
-        assertEquals(1L, DecodeBinding.capture(waiting).capacity().maxEngineRequests());
+        assertEquals(1L, DecodeRequirement.capture(waiting).capacity().maxEngineRequests());
         assertEquals(4L, newRequest.capacity().maxEngineRequests());
-        DecodeBinding nextAttempt = DecodeBinding.capture(RequestLifecycleTestSupport.context(current.get(), 703L));
+        DecodeRequirement nextAttempt =
+                DecodeRequirement.capture(RequestLifecycleTestSupport.context(current.get(), 703L));
         assertEquals(2L, nextAttempt.capacity().maxEngineRequests());
         assertFalse(nextAttempt.capacity().evaluate(usage, 10L, 10L).fits());
     }
@@ -517,14 +519,15 @@ class DefaultRouterTest {
         waiting.getRequest().setSeqLen(10L);
         waiting.getRequest().setMaxNewTokens(20);
         var usage = new DecodeEndpoint.CapacityUsage(0L, 1_000L, 120L, 0L, 880L);
-        DecodeBinding firstAttempt = DecodeBinding.capture(waiting);
+        DecodeRequirement firstAttempt = DecodeRequirement.capture(waiting);
         assertFalse(firstAttempt.capacity().evaluate(usage, 10L, 30L).fits());
 
         FlexlbConfig increased = SchedulingTestConfig.newConfig();
         increased.getRouter().getRoles().getDecode().getAvailability().setMaxKvUsagePercent(95L);
         current.set(increased);
-        DecodeBinding retried = DecodeBinding.capture(waiting);
-        DecodeBinding newRequest = DecodeBinding.capture(RequestLifecycleTestSupport.context(current.get(), 705L));
+        DecodeRequirement retried = DecodeRequirement.capture(waiting);
+        DecodeRequirement newRequest =
+                DecodeRequirement.capture(RequestLifecycleTestSupport.context(current.get(), 705L));
         assertEquals(90L, retried.capacity().maxKvUsagePercent());
         assertFalse(retried.capacity().evaluate(usage, 10L, 30L).fits());
         assertEquals(95L, newRequest.capacity().maxKvUsagePercent());
@@ -533,10 +536,12 @@ class DefaultRouterTest {
         FlexlbConfig reduced = SchedulingTestConfig.newConfig();
         reduced.getRouter().getRoles().getDecode().getAvailability().setMaxKvUsagePercent(80L);
         current.set(reduced);
-        assertEquals(90L, DecodeBinding.capture(waiting).capacity().maxKvUsagePercent());
+        assertEquals(90L, DecodeRequirement.capture(waiting).capacity().maxKvUsagePercent());
         assertEquals(95L, newRequest.capacity().maxKvUsagePercent());
-        assertEquals(80L, DecodeBinding.capture(RequestLifecycleTestSupport.context(current.get(), 706L))
-                .capacity().maxKvUsagePercent());
+        assertEquals(80L,
+                DecodeRequirement.capture(RequestLifecycleTestSupport.context(current.get(), 706L))
+                        .capacity()
+                        .maxKvUsagePercent());
     }
 
     private static void stubPrefillCommit(PrefillEndpoint prefill) {
@@ -606,10 +611,8 @@ class DefaultRouterTest {
         when(prefillSelector.select(
                 context, RoleType.PREFILL, null))
                 .thenReturn(PlacementResult.success(prefill.selection));
-        when(decodeSelector.select(context,
-                DecodeBinding.capture(context), "g1"))
-                .thenReturn(PlacementResult.rejected(
-                        Response.error(StrategyErrorType.RESOURCE_EXHAUSTED)));
+        when(decodeSelector.select(context, DecodeRequirement.capture(context), "g1"))
+                .thenReturn(PlacementResult.rejected(Response.error(StrategyErrorType.RESOURCE_EXHAUSTED)));
 
         PlacementResult<RouteAdmission, PlacementKey> rejected = router.select(context);
         assertEquals(PlacementResult.Status.REJECTED, rejected.status());
@@ -733,8 +736,7 @@ class DefaultRouterTest {
         when(prefillSelector.select(
                 context, RoleType.PREFILL, null))
                 .thenReturn(PlacementResult.success(prefill.selection));
-        when(decodeSelector.select(context,
-                DecodeBinding.capture(context), "g1"))
+        when(decodeSelector.select(context, DecodeRequirement.capture(context), "g1"))
                 .thenReturn(PlacementResult.blocked(RoleType.DECODE));
 
         PlacementResult<RouteAdmission, PlacementKey> blocked = router.select(context);
@@ -805,16 +807,15 @@ class DefaultRouterTest {
                 modelMeta);
     }
 
-    private void stubQueueSelection(
-            BalanceContext context,
-            RoleType role,
-            String group,
-            PlacementResult<SelectedRole, RoleType> result) {
+    private void stubQueueSelection(BalanceContext context,
+                                    RoleType role,
+                                    String group,
+                                    PlacementResult<SelectedRole, RoleType> result) {
         switch (role) {
             case PREFILL, PDFUSION -> when(prefillSelector.select(
                     context, role, group)).thenReturn(result);
-            case DECODE -> when(decodeSelector.select(context,
-                    DecodeBinding.capture(context), group)).thenReturn(result);
+            case DECODE ->
+                when(decodeSelector.select(context, DecodeRequirement.capture(context), group)).thenReturn(result);
             case VIT -> when(vitSelector.select(context, role, group))
                     .thenReturn(result.value());
             case FRONTEND -> throw new IllegalArgumentException();

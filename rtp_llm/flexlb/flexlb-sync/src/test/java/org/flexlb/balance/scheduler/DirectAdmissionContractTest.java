@@ -7,6 +7,7 @@ import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.endpoint.WorkerEndpoint;
 import org.flexlb.balance.eviction.EvictionManager;
+import org.flexlb.balance.scheduler.decode.DecodeRequirement;
 import org.flexlb.balance.strategy.CostBasedPrefillStrategy;
 import org.flexlb.balance.strategy.DecodeSelector;
 import org.flexlb.balance.strategy.EncoderStrategy;
@@ -245,7 +246,7 @@ class DirectAdmissionContractTest {
                         metadata(prefill, context.getRequestId()), 30_000L, prefill.placementVersion()));
             });
             when(decodeSelector.select(any(), any(), any())).thenAnswer(call -> {
-                var request = call.getArgument(1, ScheduledRequest.DecodeBinding.class);
+                var request = call.getArgument(1, DecodeRequirement.class);
                 var pin = decode.tryPinGeneration();
                 assertNotNull(pin);
                 return PlacementResult.success(SelectedRole.decode(pin,
