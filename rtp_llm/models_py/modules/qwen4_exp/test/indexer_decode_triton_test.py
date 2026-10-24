@@ -18,6 +18,10 @@ from rtp_llm.models_py.modules.qwen4_exp.qsa.indexer_decode_triton import (
 class IndexerDecodeTritonTest(unittest.TestCase):
     PAGE_SIZE = 128
 
+    @unittest.skipIf(
+        torch.version.hip is not None,
+        "ROCm multi-token target/draft writers are unsupported",
+    )
     def test_ragged_draft_window_graph_replay_and_rollback(self):
         raw, prefixes, cos, sin, gamma, kv, kt, state, st = self._target_case(
             [7, self.PAGE_SIZE - 1]
@@ -131,6 +135,10 @@ class IndexerDecodeTritonTest(unittest.TestCase):
         )
         return raw, starts, cosine, sine, gamma, kv, table, state, table.clone()
 
+    @unittest.skipIf(
+        torch.version.hip is not None,
+        "ROCm multi-token target/draft writers are unsupported",
+    )
     def test_target_window_parity_and_rollback(self):
         for query_len in (1, 2, 3, 4):
             for prefixes in (
@@ -207,6 +215,10 @@ class IndexerDecodeTritonTest(unittest.TestCase):
                     torch.testing.assert_close(state, original_state, rtol=0, atol=0)
                     torch.testing.assert_close(kv, original_kv, rtol=0, atol=0)
 
+    @unittest.skipIf(
+        torch.version.hip is not None,
+        "ROCm multi-token target/draft writers are unsupported",
+    )
     def test_target_window_graph_replay_reads_updated_prefix(self):
         for query_len in (1, 2, 3, 4):
             with self.subTest(query_len=query_len):
@@ -471,7 +483,159 @@ class IndexerDecodeTritonTest(unittest.TestCase):
         torch.testing.assert_close(state, initial_state, rtol=0, atol=0)
         torch.testing.assert_close(kv, initial_kv, rtol=0, atol=0)
 
+    @unittest.skipUnless(torch.version.hip is not None, "ROCm contract")
+    def test_rocm_single_token_graph_mask_page_and_undo(self):
+        from types import SimpleNamespace
+        from unittest.mock import patch
 
+        from rtp_llm.models_py.modules.qwen4_exp.qsa.indexer_decode_triton import (
+            is_supported,
+        )
+
+        for batch in (1, 16):
+            with self.subTest(batch=batch):
+                tensors = self._case([127] * batch)
+                raw, starts, cos, sin, gamma, kv, kt, state, st = tensors
+                kv.normal_()
+                state.normal_()
+                old_kv, old_state = kv.clone(), state.clone()
+                valid = torch.ones(batch, dtype=torch.bool, device=raw.device)
+                if batch > 1:
+                    valid[-1] = False
+                    kt[-2].zero_()
+                    st[-2].zero_()
+                # The real device passes; an unvalidated architecture/page
+                # must not be opened by this qualified ROCm path.
+                args = (*tensors[:5], kv, kt, state, st)
+                self.assertTrue(
+                    is_supported(
+                        *args,
+                        kv_tokens_per_block=128,
+                        state_tokens_per_block=128,
+                        ratio=4
+                    )
+                )
+                self.assertFalse(
+                    is_supported(
+                        *args,
+                        kv_tokens_per_block=64,
+                        state_tokens_per_block=64,
+                        ratio=4
+                    )
+                )
+                with patch.object(
+                    torch.cuda,
+                    "get_device_properties",
+                    return_value=SimpleNamespace(gcnArchName="gfx950"),
+                ):
+                    self.assertFalse(
+                        is_supported(
+                            *args,
+                            kv_tokens_per_block=128,
+                            state_tokens_per_block=128,
+                            ratio=4
+                        )
+                    )
+
+                def write():
+                    write_decode_key_(
+                        raw,
+                        starts,
+                        cos,
+                        sin,
+                        gamma,
+                        kv,
+                        kt,
+                        state,
+                        st,
+                        norm_eps=1e-6,
+                        valid=valid,
+                    )
+
+                write()
+                kv.copy_(old_kv)
+                state.copy_(old_state)
+                graph = torch.cuda.CUDAGraph()
+                with torch.cuda.graph(graph):
+                    write()
+                for position in (127, 128, 131):
+                    kv.copy_(old_kv)
+                    state.copy_(old_state)
+                    starts.fill_(position)
+                    raw.normal_()
+                    cos.normal_()
+                    sin.normal_()
+                    kt.copy_(kt.flip(1))
+                    st.copy_(st.flip(1))
+                    graph.replay()
+                    expected_kv, expected_state = old_kv.clone(), old_state.clone()
+                    for row in range(batch):
+                        if not bool(valid[row]) or not bool(kt[row].any()):
+                            continue
+                        write_indexer_cache(
+                            raw[row : row + 1],
+                            torch.tensor([0, 1], device=raw.device, dtype=torch.int32),
+                            starts[row : row + 1],
+                            cos[row : row + 1],
+                            sin[row : row + 1],
+                            gamma,
+                            expected_kv,
+                            kt[row : row + 1],
+                            expected_state,
+                            st[row : row + 1],
+                            ratio=4,
+                            kv_tokens_per_block=128,
+                            state_tokens_per_block=128,
+                            norm_eps=1e-6,
+                            rope_is_token_aligned=True,
+                        )
+                    torch.testing.assert_close(state, expected_state, rtol=0, atol=0)
+                    torch.testing.assert_close(kv, expected_kv, rtol=0.01, atol=0.016)
+                    state_changed = (expected_state != old_state).any(-1)
+                    kv_changed = (expected_kv != old_kv).any(-1)
+                    torch.testing.assert_close(
+                        state[~state_changed], old_state[~state_changed], rtol=0, atol=0
+                    )
+                    torch.testing.assert_close(
+                        kv[~kv_changed], old_kv[~kv_changed], rtol=0, atol=0
+                    )
+                # Transactional entry point uses fixed-size Torch snapshots on
+                # HIP; capture/replay/rollback must preserve the same slots.
+                if batch > 1:
+                    kt[-2] = torch.tensor(
+                        [batch * 2 - 3, batch * 2 - 2], device=kt.device
+                    )
+                    st[-2].copy_(kt[-2])
+                kv.copy_(old_kv)
+                state.copy_(old_state)
+
+                def transactional():
+                    return write_decode_key_with_undo_(
+                        raw, starts, cos, sin, gamma, kv, kt, state, st, norm_eps=1e-6
+                    )
+
+                transactional()
+                kv.copy_(old_kv)
+                state.copy_(old_state)
+                undo_graph = torch.cuda.CUDAGraph()
+                with torch.cuda.graph(undo_graph):
+                    undo = transactional()
+                kv.copy_(old_kv)
+                state.copy_(old_state)
+                starts.fill_(127)
+                raw.normal_()
+                kt.copy_(kt.flip(1))
+                st.copy_(st.flip(1))
+                undo_graph.replay()
+                restore_indexer_cache(undo)
+                torch.testing.assert_close(state, old_state, rtol=0, atol=0)
+                torch.testing.assert_close(kv, old_kv, rtol=0, atol=0)
+
+
+@unittest.skipIf(
+    torch.version.hip is not None,
+    "ROCm side-cache writer is qualified only for page128",
+)
 class IndexerDecode64TokenTritonTest(IndexerDecodeTritonTest):
     PAGE_SIZE = 64
 
