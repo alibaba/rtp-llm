@@ -262,7 +262,7 @@ def h20_oss_suites():
             smoke_test(
                 name = "qwen35_grammar_concurrent_no_mtp",
                 task_info = "data/model/qwen35/q_r_mtp_grammar.json",
-                smoke_args = "--act_type BF16 --seq_size_per_block 2048 --tp_size 2 --max_seq_len 12800 --reserver_runtime_mem_mb 10000 --warm_up 0 --think_mode 0 --load_method scratch --concurrency_limit 8",
+                smoke_args = "--act_type BF16 --seq_size_per_block 2048 --tp_size 2 --max_seq_len 12800 --reserver_runtime_mem_mb 10000 --warm_up 0 --think_mode 0 --concurrency_limit 8",
                 envs = ["NCCL_DISABLE_ABORT=1", "NCCL_DEBUG=INFO", "LOG_LEVEL=INFO", "PYTHONUNBUFFERED=TRUE"],
                 gpu_type = ["H20_CU13"],
                 concurrency_test = True,
@@ -272,8 +272,8 @@ def h20_oss_suites():
                 name = "qwen35_grammar_pd_mtp_reasoning",
                 task_info = "data/model/qwen35/q_r_mtp_grammar_reasoning.json",
                 smoke_args = {
-                    "prefill": "--act_type BF16 --warm_up 0 --seq_size_per_block 2048 --role_type PREFILL --cache_store_rdma_mode 0 --use_local 1 --tp_size 1 --max_seq_len 12800 --reserver_runtime_mem_mb 10000 --sp_model_type qwen35_moe_mtp --gen_num_per_cycle 4 --sp_type eagle --sp_checkpoint_path /mnt/nas1/hf/Qwen3.5-35B-A3B-FP8 --sp_act_type bf16 --think_mode 1 --load_method scratch",
-                    "decode": "--load_cache_timeout_ms 120000 --act_type BF16 --warm_up 0 --seq_size_per_block 2048 --role_type DECODE --cache_store_rdma_mode 0 --use_local 1 --tp_size 1 --max_seq_len 12800 --reserver_runtime_mem_mb 10000 --sp_model_type qwen35_moe_mtp --gen_num_per_cycle 4 --sp_type eagle --sp_checkpoint_path /mnt/nas1/hf/Qwen3.5-35B-A3B-FP8 --sp_act_type bf16 --think_mode 1 --load_method scratch",
+                    "prefill": "--act_type BF16 --warm_up 0 --seq_size_per_block 2048 --role_type PREFILL --cache_store_rdma_mode 0 --use_local 1 --tp_size 1 --max_seq_len 12800 --reserver_runtime_mem_mb 10000 --sp_model_type qwen35_moe_mtp --gen_num_per_cycle 4 --sp_type eagle --sp_checkpoint_path /mnt/nas1/hf/Qwen3.5-35B-A3B-FP8 --sp_act_type bf16 --think_mode 1",
+                    "decode": "--load_cache_timeout_ms 120000 --act_type BF16 --warm_up 0 --seq_size_per_block 2048 --role_type DECODE --cache_store_rdma_mode 0 --use_local 1 --tp_size 1 --max_seq_len 12800 --reserver_runtime_mem_mb 10000 --sp_model_type qwen35_moe_mtp --gen_num_per_cycle 4 --sp_type eagle --sp_checkpoint_path /mnt/nas1/hf/Qwen3.5-35B-A3B-FP8 --sp_act_type bf16 --think_mode 1",
                 },
                 gpu_type = ["H20_CU13"],
                 envs = {
@@ -422,13 +422,13 @@ def h20_oss_suites():
             smoke_test(
                 name = "next_dash_basic",
                 task_info = "data/model/qwen3_next/dash_basic.json",
-                smoke_args = "--load_method scratch --act_type BF16 --seq_size_per_block 2048 --tp_size 2",
+                smoke_args = "--act_type BF16 --seq_size_per_block 2048 --tp_size 2",
                 gpu_type = ["H20_CU13"],
             ),
             smoke_test(
                 name = "next_dash_structural_tag_think",
                 task_info = "data/model/qwen3_next/dash_structural_tag_think.json",
-                smoke_args = "--load_method scratch --act_type BF16 --seq_size_per_block 2048 --tp_size 2 --think_mode 1",
+                smoke_args = "--act_type BF16 --seq_size_per_block 2048 --tp_size 2 --think_mode 1",
                 gpu_type = ["H20_CU13"],
             ),
         ],
