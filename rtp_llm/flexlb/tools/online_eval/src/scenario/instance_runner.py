@@ -349,6 +349,49 @@ def run_structured(args: argparse.Namespace) -> int:
             return _run_admitted(args, out, admission)
 
 
+def _execute_lanes(lanes, leases, args, out, ordered, scheduling):
+    """Own child shutdown, executor lifetime and undispatched-instance accounting."""
+    children = ChildProcesses()
+    pool = ThreadPoolExecutor(max_workers=len(lanes))
+    dispatch = queue.Queue() if scheduling == "dynamic" else None
+    if dispatch is not None:
+        for instance in ordered:
+            dispatch.put(instance)
+    futures = [pool.submit(_run_lane, i, lane, leases[i], args, out, children, dispatch) for (i, lane) in enumerate(lanes)]
+    interrupted = False
+
+    def terminate(signum, frame):
+        if not children.stopping:
+            raise KeyboardInterrupt("suite terminated")
+
+    previous_term = None
+    if threading.current_thread() is threading.main_thread():
+        previous_term = signal.signal(signal.SIGTERM, terminate)
+    try:
+        results = [future.result() for future in futures]
+    except KeyboardInterrupt:
+        interrupted = True
+        children.stop()
+        results = [future.result() for future in futures]
+    finally:
+        try:
+            children.stop()
+        finally:
+            pool.shutdown(wait=True)
+            if previous_term is not None:
+                signal.signal(signal.SIGTERM, previous_term)
+    if dispatch is not None:
+        reasons = "; ".join(row["retirement_reason"] for row in results if row.get("retirement_reason"))
+        while True:
+            try:
+                instance = dispatch.get_nowait()
+            except queue.Empty:
+                break
+            blocked = error_result(instance, "no reusable lane remains: " + reasons)
+            results[0]["instances"].append(dict(blocked, not_started=True, lane=None))
+    return results, interrupted
+
+
 def _run_admitted(args, out, admission):
     try:
         instances = select_instances(_catalog(args), exact_ids=args.instances, categories=args.categories)
@@ -405,44 +448,7 @@ def _run_admitted(args, out, admission):
         return 0
     write_json(out / "manifest.json", manifest)
     started = time.monotonic()
-    children = ChildProcesses()
-    pool = ThreadPoolExecutor(max_workers=len(lanes))
-    dispatch = queue.Queue() if scheduling == "dynamic" else None
-    if dispatch is not None:
-        for instance in ordered:
-            dispatch.put(instance)
-    futures = [pool.submit(_run_lane, i, lane, leases[i], args, out, children, dispatch) for (i, lane) in enumerate(lanes)]
-    interrupted = False
-
-    def terminate(signum, frame):
-        if not children.stopping:
-            raise KeyboardInterrupt("suite terminated")
-
-    previous_term = None
-    if threading.current_thread() is threading.main_thread():
-        previous_term = signal.signal(signal.SIGTERM, terminate)
-    try:
-        results = [future.result() for future in futures]
-    except KeyboardInterrupt:
-        interrupted = True
-        children.stop()
-        results = [future.result() for future in futures]
-    finally:
-        try:
-            children.stop()
-        finally:
-            pool.shutdown(wait=True)
-            if previous_term is not None:
-                signal.signal(signal.SIGTERM, previous_term)
-    if dispatch is not None:
-        reasons = "; ".join(row["retirement_reason"] for row in results if row.get("retirement_reason"))
-        while True:
-            try:
-                instance = dispatch.get_nowait()
-            except queue.Empty:
-                break
-            blocked = error_result(instance, "no reusable lane remains: " + reasons)
-            results[0]["instances"].append(dict(blocked, not_started=True, lane=None))
+    results, interrupted = _execute_lanes(lanes, leases, args, out, ordered, scheduling)
     payload = _aggregate(results, instances, args, time.monotonic() - started)
     payload["scheduling"] = scheduling
     payload["runtime_plan"] = runtime_plan

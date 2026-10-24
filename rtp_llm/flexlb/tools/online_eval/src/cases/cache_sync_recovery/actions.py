@@ -2,6 +2,7 @@
 
 import copy
 import json
+from functools import partial
 from pathlib import Path
 
 import grpc
@@ -62,13 +63,33 @@ def drain_flow(flow, deadline, sample, interval_s, event):
     event("drain_finished")
 
 
+def _cache_fixture(ops, deadline, engine: dict, operation: str, **options) -> dict:
+    result = control_json(ops, "cache_fixture", deadline, dict(engine=engine["name"], operation=operation, **options))
+    if result.get("engine") != engine["name"] or result.get("status") != "ok":
+        raise ValueError("fixture identity mismatch")
+    return result["fixture"]
+
+
+def _probe_alive(ctx, deadline, entries: list[dict]) -> list[dict]:
+    results = []
+    for e in entries:
+        with grpc.insecure_channel(e["grpc_addr"]) as channel:
+            response = ctx.ops.pb2_grpc.RpcServiceStub(channel).GetWorkerStatus(
+                ctx.ops.pb2.StatusVersionPB(), timeout=min(2, deadline.remaining())
+            )
+        results.append(dict(worker=e["http_addr"], alive=response.alive, epoch_s=ctx.wall_clock()))
+        if not response.alive:
+            raise ValueError("selected Worker is not independently alive")
+    return results
+
+
 def execute(ctx, params, deadline):
     from adapters.java_flow import JavaFlowGroup
     from adapters.resource_evidence import flow_evidence
     from cases.cache_sync_recovery.telemetry import interval_rates, worker_rows
     from traffic.traffic_source import materialize
 
-    p, o, limits = (params[k] for k in ("procedure", "observation", "checks"))
+    procedure, observation, acceptance_limits = (params[k] for k in ("procedure", "observation", "checks"))
     intervention = params["intervention"]
     directory = ctx.artifact_dir / "cache-stability"
     directory.mkdir()
@@ -90,7 +111,7 @@ def execute(ctx, params, deadline):
     prefill = sorted((e for e in engines if e["role"] == "prefill"), key=lambda e: int(e["name"].rsplit("-", 1)[1]))
     if len(prefill) != ctx.env.spec.n_prefill or len(engines) != ctx.env.spec.n_prefill + ctx.env.spec.n_decode:
         raise ValueError("Mock topology differs from frozen case")
-    chosen = [prefill[i * len(prefill) // p["expired_workers"]] for i in range(p["expired_workers"])]
+    chosen = [prefill[i * len(prefill) // procedure["expired_workers"]] for i in range(procedure["expired_workers"])]
     victims = {e["http_addr"] for e in chosen} if intervention else set()
     names = {e["http_addr"] for e in engines}
     evidence["worker_addresses"] = sorted(names)
@@ -98,7 +119,7 @@ def execute(ctx, params, deadline):
     original = path.read_text()
     ctx.add_cleanup("restore_cache_discovery", lambda d: atomic_write(path, original))
     evidence["victims"] = sorted(victims)
-    baseline, flow, last_sample = None, None, None
+    baseline, last_sample = None, None
     affected, absent, rebuilt = set(), set(), set()
     maximum_gap = 0
     diagnostics = MasterDiagnosticsClient(f"http://127.0.0.1:{ctx.ops.master_http_port}", timeout_s=min(5, deadline.remaining()))
@@ -107,13 +128,9 @@ def execute(ctx, params, deadline):
     worker_rows(preflight)
     instance_id = preflight.payload["instance_id"]
     evidence["provenance"].update(master_instance_id=instance_id, diagnostic_schema=2)
-    sample_budget = SampleBudget(o["capture"])
+    sample_budget = SampleBudget(observation["capture"])
 
-    def fixture(e, operation, **options):
-        result = control_json(ctx.ops, "cache_fixture", deadline, dict(engine=e["name"], operation=operation, **options))
-        if result.get("engine") != e["name"] or result.get("status") != "ok":
-            raise ValueError("fixture identity mismatch")
-        return result["fixture"]
+    fixture = partial(_cache_fixture, ctx.ops, deadline)
 
     def stats():
         return {e["http_addr"]: fixture(e, "inspect") for e in prefill}
@@ -124,17 +141,7 @@ def execute(ctx, params, deadline):
         (directory / "events.json").write_text(json.dumps(evidence["events"]))
         print("CACHE_EVENT", name, flush=True)
 
-    def alive(entries):
-        results = []
-        for e in entries:
-            with grpc.insecure_channel(e["grpc_addr"]) as channel:
-                response = ctx.ops.pb2_grpc.RpcServiceStub(channel).GetWorkerStatus(
-                    ctx.ops.pb2.StatusVersionPB(), timeout=min(2, deadline.remaining())
-                )
-            results.append(dict(worker=e["http_addr"], alive=response.alive, epoch_s=ctx.wall_clock()))
-            if not response.alive:
-                raise ValueError("selected Worker is not independently alive")
-        return results
+    alive = partial(_probe_alive, ctx, deadline)
 
     def sample(phase):
         nonlocal last_sample, maximum_gap
@@ -151,7 +158,7 @@ def execute(ctx, params, deadline):
         last_sample = now
         if baseline is not None:
             excluded = victims if phase in {"intervention", "post", "drain", "cache_settle"} else set()
-            newly = set(collateral(rows, baseline, excluded, limits["max_status_age_ms"])) - affected
+            newly = set(collateral(rows, baseline, excluded, acceptance_limits["max_status_age_ms"])) - affected
             affected.update(newly)
             if newly:
                 proof = dict(phase=phase, epoch_s=ctx.wall_clock(), workers=sorted(newly))
@@ -201,28 +208,28 @@ def execute(ctx, params, deadline):
         before = stats()
         event(phase + "_started")
         until = start + seconds
-        for _ in poll_samples(deadline, o["sample_s"], lambda: sample(phase), until=until, immediate=True, boundary_sample=False):
+        for _ in poll_samples(deadline, observation["sample_s"], lambda: sample(phase), until=until, immediate=True, boundary_sample=False):
             pass
         after = stats()
         evidence["intensity"][phase] = interval_rates(before, after, ctx.clock() - start)
         return after
 
     try:
-        t = params["traffic"]
+        traffic = params["traffic"]
         trace = materialize(
             directory / "traffic.jsonl",
-            t["source"],
+            traffic["source"],
             "cache-sync-shared-background",
             Path(ctx.instance["source_path"]).parent,
-            max_requests=int(t["client"]["playback"]["duration_s"] * t["client"]["playback"]["qps"] * 1.02),
+            max_requests=int(traffic["client"]["playback"]["duration_s"] * traffic["client"]["playback"]["qps"] * 1.02),
         )
         initial_until = ctx.clock() + 60
         while ctx.clock() < initial_until:
             rows = sample("initial_health")
-            if set(rows) == names and all(healthy(w, limits["max_status_age_ms"]) for w in rows.values()):
+            if set(rows) == names and all(healthy(w, acceptance_limits["max_status_age_ms"]) for w in rows.values()):
                 baseline = rows
                 break
-            deadline.sleep(o["sample_s"])
+            deadline.sleep(observation["sample_s"])
         if baseline is None:
             raise ValueError("initial healthy Worker population unavailable")
         event("cache_seed_started")
@@ -233,10 +240,10 @@ def execute(ctx, params, deadline):
                 enabled=True,
                 worker=i,
                 workers=len(prefill),
-                unique=p["unique_keys"],
-                shared=p["shared_keys"],
+                unique=procedure["unique_keys"],
+                shared=procedure["shared_keys"],
                 delta=0,
-                interval_ms=p["churn_interval_ms"],
+                interval_ms=procedure["churn_interval_ms"],
             )
             sample("cache_construction")
         event("cache_seed_finished")
@@ -244,15 +251,17 @@ def execute(ctx, params, deadline):
         baseline_keys = {a: f["reported_keys"] for a, f in frozen.items()}
         baseline = None
         ready = 0
-        until = ctx.clock() + p["warmup_timeout_s"]
+        until = ctx.clock() + procedure["warmup_timeout_s"]
         while ctx.clock() < until:
             rows = sample("warmup")
-            good = converged(rows, names, baseline_keys, {a: f["version"] for a, f in frozen.items()}, limits["max_status_age_ms"])
+            good = converged(
+                rows, names, baseline_keys, {a: f["version"] for a, f in frozen.items()}, acceptance_limits["max_status_age_ms"]
+            )
             ready = ready + 1 if good else 0
-            if ready >= o["converged_samples"]:
+            if ready >= observation["converged_samples"]:
                 baseline = rows
                 break
-            deadline.sleep(o["sample_s"])
+            deadline.sleep(observation["sample_s"])
         if baseline is None:
             raise ValueError("shared cache baseline failed to converge")
         last_sample = None
@@ -260,21 +269,21 @@ def execute(ctx, params, deadline):
         evidence["cache_baseline"] = dict(
             workers=rows,
             expected_keys=baseline_keys,
-            expected_global_keys=len(prefill) * p["unique_keys"] + p["shared_keys"],
+            expected_global_keys=len(prefill) * procedure["unique_keys"] + procedure["shared_keys"],
             expected_versions={a: f["version"] for a, f in frozen.items()},
         )
         event("cache_baseline_ready")
         for e in prefill:
-            fixture(e, "churn", delta=p["delta_keys"], interval_ms=p["churn_interval_ms"])
-        hold("cache_only", p["cache_only_s"])
-        client = ctx.services.environment.client_operations(t["jvm_xms"], t["jvm_xmx"])
+            fixture(e, "churn", delta=procedure["delta_keys"], interval_ms=procedure["churn_interval_ms"])
+        hold("cache_only", procedure["cache_only_s"])
+        client = ctx.services.environment.client_operations(traffic["jvm_xms"], traffic["jvm_xmx"])
         flow = JavaFlowGroup(
             client,
             directory / "flow",
             run_id=str(ctx.artifact_dir),
-            group_id=t["group_id"],
-            phase_id=t["phase_id"],
-            poll_s=t["poll_s"],
+            group_id=traffic["group_id"],
+            phase_id=traffic["phase_id"],
+            poll_s=traffic["poll_s"],
             collection_profile="aggregate",
         )
 
@@ -287,46 +296,45 @@ def execute(ctx, params, deadline):
         from concurrent.futures import ThreadPoolExecutor
 
         with ThreadPoolExecutor(max_workers=1) as startup:
-            pending = startup.submit(flow.start, trace, t["client"], deadline, target=f"127.0.0.1:{ctx.env.master_http_port + 2}")
+            pending = startup.submit(flow.start, trace, traffic["client"], deadline, target=f"127.0.0.1:{ctx.env.master_http_port + 2}")
             while not pending.done():
                 sample("traffic_startup")
-                deadline.sleep(o["sample_s"])
+                deadline.sleep(observation["sample_s"])
             pending.result()
-        hold("traffic_warmup", p["traffic_warmup_s"])
-        hold("measurement", p["measurement_s"])
+        hold("traffic_warmup", procedure["traffic_warmup_s"])
+        hold("measurement", procedure["measurement_s"])
         event("measurement_finished")
         if intervention:
             evidence["victim_alive_before"] = alive(chosen)
             atomic_write(path, withdraw(original, victims))
             event("partial_workers_withdrawn")
-            hold("intervention", p["withdraw_s"])
+            hold("intervention", procedure["withdraw_s"])
             evidence["victim_alive_withdrawn"] = alive(chosen)
             atomic_write(path, original)
             event("partial_workers_restored")
         # Identical post duration and unchanged background; do not stop at first convergence.
-        hold("post", p["post_s"])
+        hold("post", procedure["post_s"])
         event("post_finished")
-        drain_flow(flow, deadline, sample, o["sample_s"], event)
+        drain_flow(flow, deadline, sample, observation["sample_s"], event)
         evidence["client"] = flow.evidence_snapshot()
         event("performance_observation_finished")
         for e in prefill:
-            fixture(e, "churn", delta=0, interval_ms=p["churn_interval_ms"])
+            fixture(e, "churn", delta=0, interval_ms=procedure["churn_interval_ms"])
         expected = stats()
         versions = {a: f["version"] for a, f in expected.items()}
         reported_keys = {a: f["reported_keys"] for a, f in expected.items()}
         until = ctx.clock() + 120
-        evidence["convergence_samples"] = 0
         while ctx.clock() < until:
             rows = sample("cache_settle")
-            good = converged(rows, names, reported_keys, versions, limits["max_status_age_ms"])
+            good = converged(rows, names, reported_keys, versions, acceptance_limits["max_status_age_ms"])
             evidence["convergence_samples"] = evidence["convergence_samples"] + 1 if good else 0
-            if evidence["convergence_samples"] >= o["converged_samples"]:
+            if evidence["convergence_samples"] >= observation["converged_samples"]:
                 break
-            deadline.sleep(o["sample_s"])
+            deadline.sleep(observation["sample_s"])
         evidence["cache_progress"] = dict(
             expected_versions=versions,
             expected_keys=reported_keys,
-            converged=evidence["convergence_samples"] >= o["converged_samples"],
+            converged=evidence["convergence_samples"] >= observation["converged_samples"],
             scope="cache versions, index initialization and counts; no key membership proof",
         )
         event("cache_progress_finished")

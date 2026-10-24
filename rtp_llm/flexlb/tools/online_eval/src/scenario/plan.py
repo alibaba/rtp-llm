@@ -162,6 +162,58 @@ class EnvironmentPlan:
         )
 
 
+def _read_frozen_stages(value: dict) -> tuple[StagePlan, ...]:
+    """Admit frozen stages with the same lifecycle and reference rules as compilation."""
+    if not isinstance(value["stages"], list) or not value["stages"]:
+        raise ScenarioError("compiled instance requires stages")
+    stages = tuple(StagePlan.read(stage) for stage in value["stages"])
+    if len({stage.id for stage in stages}) != len(stages):
+        raise ScenarioError("duplicate compiled stage identity")
+    # Frozen references are structural dependencies, never arbitrary JSON paths.
+    from scenario.stage_compiler import OUTPUTS
+
+    seen: dict = {}
+    setup_seen, torn_down = False, False
+    for index, stage in enumerate(stages):
+        setup_seen = enter_stage(stage.action, index, setup_seen, torn_down, "frozen stage")
+        validate_references(stage.parameters.to_dict(), "frozen stage.params", seen)
+        seen[stage.id] = OUTPUTS.get(stage.action)
+        torn_down = stage.action == "teardown"
+    return stages
+
+
+def _read_frozen_policy(value: dict, stages: tuple[StagePlan, ...]) -> tuple[dict, dict]:
+    """Validate prerequisites and reject projections that disagree with canonical policy."""
+    from scenario.execution_policy import normalize_execution, normalize_metadata
+
+    metadata = normalize_metadata(value.get("metadata", {"kind": "functional", "description": value["description"]}))
+    policy = normalize_execution(
+        dict(value["execution"], collection=value["execution"].get("collection", "diagnostic")), kind=metadata["kind"]
+    )
+    from scenario.catalog import handlers
+    from scenario.registry import registry
+
+    registered = registry().cases.get(value.get("implementation", {}).get("program"))
+    try:
+        if registered is not None:
+            registered.definition.execution_requirements.validate(policy)
+        descriptors = handlers()
+        for stage in stages:
+            if stage.action in descriptors:
+                descriptors[stage.action].execution_requirements.validate(policy)
+    except ValueError as exc:
+        raise ScenarioError("frozen execution prerequisites: " + str(exc)) from exc
+    projections = dict(
+        test_kind=metadata["kind"],
+        collection_profile=policy["collection"],
+        workload_runtime=policy["monitoring"] if metadata["kind"] == "workload" else {},
+    )
+    for key, expected in projections.items():
+        if key in value and value[key] != expected:
+            raise ScenarioError("instance policy projection disagrees with canonical policy: " + key)
+    return metadata, policy
+
+
 @dataclass(frozen=True)
 class CompiledInstance:
     id: str
@@ -207,21 +259,7 @@ class CompiledInstance:
                 raise ScenarioError("inconsistent frozen instance identity")
         if value["grade"] not in {"strict", "normal", "loose"}:
             raise ScenarioError("invalid frozen grade")
-        if not isinstance(value["stages"], list) or not value["stages"]:
-            raise ScenarioError("compiled instance requires stages")
-        stages = tuple(StagePlan.read(stage) for stage in value["stages"])
-        if len({stage.id for stage in stages}) != len(stages):
-            raise ScenarioError("duplicate compiled stage identity")
-        # Frozen references are structural dependencies, never arbitrary JSON paths.
-        from scenario.stage_compiler import OUTPUTS
-
-        seen = {}
-        setup_seen, torn_down = False, False
-        for index, stage in enumerate(stages):
-            setup_seen = enter_stage(stage.action, index, setup_seen, torn_down, "frozen stage")
-            validate_references(stage.parameters.to_dict(), "frozen stage.params", seen)
-            seen[stage.id] = OUTPUTS.get(stage.action)
-            torn_down = stage.action == "teardown"
+        stages = _read_frozen_stages(value)
         for name in ("findings", "requires", "tags"):
             items = value[name]
             if not isinstance(items, list) or any(type(item) is not str for item in items) or len(set(items)) != len(items):
@@ -233,33 +271,7 @@ class CompiledInstance:
         for name, expected in (("effective_axes", dict(environment.axes)), ("effective_capabilities", list(environment.capabilities))):
             if name in value and value[name] != expected:
                 raise ScenarioError("instance capability projection disagrees with environment")
-        from scenario.execution_policy import normalize_execution, normalize_metadata
-
-        metadata = normalize_metadata(value.get("metadata", {"kind": "functional", "description": value["description"]}))
-        policy = normalize_execution(
-            dict(value["execution"], collection=value["execution"].get("collection", "diagnostic")), kind=metadata["kind"]
-        )
-        from scenario.catalog import handlers
-        from scenario.registry import registry
-
-        registered = registry().cases.get(value.get("implementation", {}).get("program"))
-        try:
-            if registered is not None:
-                registered.definition.execution_requirements.validate(policy)
-            descriptors = handlers()
-            for stage in stages:
-                if stage.action in descriptors:
-                    descriptors[stage.action].execution_requirements.validate(policy)
-        except ValueError as exc:
-            raise ScenarioError("frozen execution prerequisites: " + str(exc)) from exc
-        projections = dict(
-            test_kind=metadata["kind"],
-            collection_profile=policy["collection"],
-            workload_runtime=policy["monitoring"] if metadata["kind"] == "workload" else {},
-        )
-        for key, expected in projections.items():
-            if key in value and value[key] != expected:
-                raise ScenarioError("instance policy projection disagrees with canonical policy: " + key)
+        metadata, policy = _read_frozen_policy(value, stages)
         resource_budget = JavaMockBudget.from_metadata(value["resource_budget"])
         scalar = {
             key: value[key]
