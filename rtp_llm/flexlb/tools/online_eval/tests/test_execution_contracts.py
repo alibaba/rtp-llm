@@ -1,3 +1,5 @@
+from scenario.registry import registry
+
 """Input mutations, clock jumps and acquisition failures must remain visible."""
 
 import json
@@ -6,6 +8,7 @@ from types import SimpleNamespace as NS
 from unittest.mock import Mock, patch
 
 import pytest
+
 from artifacts.gate_inputs import evidence_origin
 from document_io import DocumentError as ScenarioError
 from document_io import load_document
@@ -62,7 +65,7 @@ def test_cache_action_cannot_supply_a_hidden_removal_mode():
 @pytest.mark.parametrize("name", ["cache_scale_in", "master_performance"])
 @pytest.mark.parametrize("field,value", [("unit", "wrong"), ("mode", "evaluated"), ("labels", [])])
 def test_authoritative_metric_metadata_is_checked_against_consumer_dimensions(name, field, value):
-    from monitoring.query_plan import load_plan
+    from scenario.registry import load_metric_plan as load_plan
 
     plan = load_plan(name + ".yaml")
     metric = "running" if name == "cache_scale_in" else "rtp_llm_context_tps"
@@ -74,7 +77,7 @@ def test_authoritative_metric_metadata_is_checked_against_consumer_dimensions(na
 
 
 def test_extra_identity_labels_are_allowed_but_minimum_identity_is_mandatory():
-    from monitoring.query_plan import load_plan
+    from scenario.registry import load_metric_plan as load_plan
 
     plan = load_plan("cache_scale_in.yaml")
     plan["sources"]["mock"]["running"]["labels"].append("engine_ip")
@@ -191,7 +194,7 @@ def test_performance_stop_and_drain_are_explicit_program_stages():
 
 def test_ha_sampler_budget_failure_is_reported_at_join(tmp_path):
     from monitoring.probe import evidence_collector
-    from monitoring.query_plan import load_plan
+    from scenario.registry import load_metric_plan as load_plan
 
     env = NS(master_specs=dict(A=NS(bind_ip="127.0.0.1", http_port=1)))
     sampler = evidence_collector(
@@ -199,7 +202,7 @@ def test_ha_sampler_budget_failure_is_reported_at_join(tmp_path):
         "master_inflight",
         env,
         tmp_path / "states.jsonl",
-        session=NS(interval=0.1, client=NS()),
+        session=NS(sources=registry().sources, interval=0.1, client=NS()),
         limits=dict(max_samples=1, max_bytes=10000),
     )
     with patch("adapters.http_json.urllib.request.urlopen", side_effect=OSError("offline")):

@@ -46,7 +46,7 @@ def create_archive(
     output.parent.mkdir(parents=True, exist_ok=True)
     if status not in {"complete", "incomplete"}:
         raise ValueError("status must be complete or incomplete")
-    manifest = {
+    manifest: dict = {
         "archive_manifest_schema_version": ARCHIVE_MANIFEST_SCHEMA_VERSION,
         "kind": kind,
         "status": status,

@@ -2,8 +2,6 @@
 
 from artifacts.errors import ArtifactNotProduced
 from file_io import read_json
-from scenario.registry import view_capabilities
-
 from reporting import details, write_bundle
 from reporting.events import attach_events
 from reporting.evidence_archive import archive_session
@@ -36,7 +34,7 @@ def build_spec(payload, directory, *, name=DEFAULT_VIEW, presentation=None, run=
     return canonical_spec(spec, payload, run=run)
 
 
-def write_report(directory, analysis, *, name=DEFAULT_VIEW):
+def write_report(directory, analysis, *, name=DEFAULT_VIEW, presentation=None):
     payload = dict(analysis)
     payload["report_view"] = name
     identity = payload["id"]
@@ -46,13 +44,13 @@ def write_report(directory, analysis, *, name=DEFAULT_VIEW):
         "run",
         identity,
         payload,
-        build_spec(analysis, directory, name=name, run=run),
+        build_spec(analysis, directory, name=name, run=run, presentation=presentation),
         meta=provenance_from(payload, run=run),
         producer="workload",
     )
 
 
-def _write_views(directory, analysis, names=None, *, deadline=None):
+def _write_views(directory, analysis, names=None, *, deadline=None, selected=None):
     """One canonical selected report, with optional explicit additional views."""
     analysis = dict(analysis)
     if "unavailable_report_views" in analysis:
@@ -62,8 +60,7 @@ def _write_views(directory, analysis, names=None, *, deadline=None):
     for name in names:
         if name == DEFAULT_VIEW:
             continue
-        presentation = view(name)
-        capability = view_capabilities().get(name)
+        presentation, capability = (selected or {}).get(name, (None, None))
         if capability is None or capability.renderer is None:
             raise ValueError("selected view has no registered renderer: " + name)
         try:
@@ -85,7 +82,10 @@ def _write_views(directory, analysis, names=None, *, deadline=None):
             )
     for name in names:
         if name == DEFAULT_VIEW:
-            paths[name] = write_report(directory, analysis, name=name) / "report.html"
+            paths[name] = (
+                write_report(directory, analysis, name=name, presentation=(selected or {}).get(name, (None, None))[0])
+                / "report.html"
+            )
     if not paths:
         paths[DEFAULT_VIEW] = write_report(directory, analysis) / "report.html"
     # A selected report remains primary when the default metric view is also requested.
@@ -95,11 +95,11 @@ def _write_views(directory, analysis, names=None, *, deadline=None):
     return {name: paths[name] for name in ordered}
 
 
-def write_views(directory, analysis, names=None, *, deadline=None):
+def write_views(directory, analysis, names=None, *, deadline=None, selected=None):
     from monitoring.metric_store import frozen_metric_reads
 
     with frozen_metric_reads(), archive_session():
-        return _write_views(directory, analysis, names, deadline=deadline)
+        return _write_views(directory, analysis, names, deadline=deadline, selected=selected)
 
 
 def analysis_document(directory, result, evidence, series, statistic_sources):

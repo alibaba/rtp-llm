@@ -5,10 +5,11 @@ import json
 from unittest.mock import patch
 
 import pytest
+
 from adapters.load_client import client_environment
 from document_io import DocumentError as ScenarioError
-from reporting.view_config import view
 from reporting.view_model import SubtitleTemplate
+from scenario.registry import view as view
 from traffic.playback.configuration import PlaybackConfigurationCodec
 from traffic.synthetic.configuration import IndependentShape, SyntheticWorkload, resolve
 from traffic.synthetic.generator import iter_requests

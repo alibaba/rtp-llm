@@ -11,14 +11,14 @@ from analysis.time_buckets import TimeBuckets
 def row_ts_ms(row: dict) -> float:
     """Cohorts require the issue timestamp, never a terminal wall-clock fallback."""
     value = row.get("send_start_epoch_ms")
-    if type(value) not in (int, float) or not math.isfinite(value) or value <= 0:
+    if not isinstance(value, (int, float)) or type(value) not in (int, float) or not math.isfinite(value) or value <= 0:
         raise ValueError("HA request requires finite positive send_start_epoch_ms")
     return float(value)
 
 
 def prefill_assignment_buckets(rows: list) -> dict:
     """Count assigned Prefill endpoints by send second, including failed requests."""
-    buckets = defaultdict(Counter)
+    buckets: dict[int, Counter] = defaultdict(Counter)
     grid = TimeBuckets(0, 1)
     for row in rows:
         address = row.get("prefill")

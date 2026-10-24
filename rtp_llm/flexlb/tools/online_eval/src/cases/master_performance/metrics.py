@@ -1,11 +1,10 @@
 """Request-cohort projections published by the performance case."""
 
 from analysis.request_metrics import RequestLedger, describe_calculation
+from cases.master_performance.analysis import analyze, engine_tps_checks
 from implementation_identity import implementation_identity
 from monitoring.contracts import implementation_measurement
 from monitoring.metric_store import series_row
-
-from cases.master_performance.analysis import analyze, engine_tps_checks
 
 GATE_POPULATIONS = {
     "arrival_cohort": frozenset(
@@ -58,7 +57,7 @@ def metric_contract(producer, identity, calculation):
 def values(evidence, definitions=None):
     if definitions is None:
         from monitoring.query_plan import definitions as expand
-        from monitoring.query_plan import load_plan
+        from scenario.registry import load_metric_plan as load_plan
 
         definitions = expand(load_plan("master_performance.yaml"))
     ledger = RequestLedger(evidence["flow"]["records"])
@@ -112,6 +111,7 @@ def produce(directory, evidence, result):
                 window=evidence.get("window"),
                 calculation=store.document["definitions"][identity]["calculation"],
             ),
+            describe=CONTRACTS["performance_requests"],
         )
 
     # Analysis retains its explanatory intermediates; publish only declared
@@ -154,6 +154,7 @@ def produce(directory, evidence, result):
                     measurement_validity="INVALID" if result["verdict"] == "INVALID" else "VALID",
                     algorithm="absolute_performance_gate",
                 ),
+                describe=CONTRACTS["performance_requests"],
             )
     store.save(directory)
 

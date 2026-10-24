@@ -12,11 +12,10 @@ from pathlib import Path
 from unittest.mock import patch
 
 from document_io import DocumentError as ScenarioError
+from metric_fixtures import PrometheusSession
 from monitoring.metric_store import MetricStore
-from monitoring.query_plan import load_plan, queries_for_targets
-from monitoring.session import (
-    PrometheusSession,
-)
+from monitoring.query_plan import queries_for_targets
+from scenario.registry import load_metric_plan as load_plan
 
 
 class ContractTest(unittest.TestCase):

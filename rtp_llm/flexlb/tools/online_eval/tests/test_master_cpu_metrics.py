@@ -1,9 +1,10 @@
 """CPU diagnostics reuse actual JVM meters and remain outside case gates."""
 
 from monitoring.collection_plan import physical_metrics
-from monitoring.query_plan import load_plan, queries_for_targets
+from monitoring.query_plan import queries_for_targets
 from reporting.curves import project_panels
-from reporting.view_config import view
+from scenario.registry import load_metric_plan as load_plan
+from scenario.registry import view as view
 
 
 def test_cpu_export_inputs_and_per_master_queries():

@@ -28,7 +28,7 @@ class IndependentSampler:
         self.pinned = [list(block) for block in shape.pinned_blocks]
         shared = self.pinned + allocator.fresh(shape.shared_blocks)
         self.prefixes = [shared + allocator.fresh(shape.prefix_blocks) for _ in range(workload.families)]
-        self.sessions = [[] for _ in self.prefixes]
+        self.sessions: list[list[int]] = [[] for _ in self.prefixes]
         self.rounds = [0 for _ in self.prefixes]
 
     def sample(self, rng, cold, family):
@@ -55,7 +55,7 @@ class IndependentSampler:
 class JointSampler:
     def __init__(self, shape: JointShape, workload: SyntheticWorkload, allocator: LabelAllocator):
         self.shape, self.workload, self.allocator = shape, workload, allocator
-        self.prefixes = [[] for _ in range(workload.families)]
+        self.prefixes: list[list[int]] = [[] for _ in range(workload.families)]
 
     def sample(self, rng, cold, family):
         if cold:

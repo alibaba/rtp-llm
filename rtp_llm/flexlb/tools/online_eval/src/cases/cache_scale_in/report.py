@@ -8,8 +8,8 @@ from reporting import run_meta
 from reporting.curves import materialize, project_panels
 from reporting.gate_report import write_archived_gate_report, write_gate_report
 from reporting.run_context import KPI_LABELS, title
-from reporting.view_config import view
 from reporting.view_sections import view_details, view_table
+from scenario.registry import view as view
 
 
 def request_outcomes(evidence):

@@ -2,7 +2,6 @@
 
 from monitoring.collection_plan import instance_plan
 from monitoring.run_monitor import RunMonitor
-
 from scenario.run_result import EvidenceResult, ReportResult, WorkloadResult
 from scenario.runtime import execute_instance
 
@@ -106,7 +105,7 @@ class WorkloadPolicy:
         workload.details["monitor_backend"] = "prometheus"
         from monitoring.archive import export_metrics
 
-        metric_plan = instance_plan(ctx.instance)
+        metric_plan = instance_plan(ctx.instance, ctx.case_sources)
         metric_store = export_metrics(ctx.artifact_dir, metric_plan)
         metric_store.document["run"] = dict(
             id=result["id"],
@@ -150,7 +149,7 @@ class WorkloadPolicy:
         return finalized
 
     def render(self, ctx, analysis, deadline):
-        from reporting.workload import write_views
+        from scenario.registry import write_views as write_views
 
         deadline.check()
         links = write_views(ctx.artifact_dir, analysis, self.reports, deadline=deadline)
@@ -167,7 +166,6 @@ def analyze_evidence(directory, result, evidence, workload):
     from monitoring.metric_store import MetricStore
     from monitoring.quality import assess_collection
     from reporting.workload import analysis_document
-
     from scenario.outcome import apply_outcome
 
     series, sources, gaps, errors = MetricStore.read(directory).series(evidence["clock_anchor"]["epoch_s"])

@@ -1,11 +1,10 @@
 """Publish the cache gate's frozen survivor-window measurements."""
 
 from artifacts.gate_inputs import evidence_origin
+from cases.cache_scale_in.analysis import analyze
 from monitoring.archive import export_metrics
 from monitoring.metric_store import MetricStore, series_row
 from monitoring.publication import publish
-
-from cases.cache_scale_in.analysis import analyze
 
 
 def metric_contract(producer, identity, calculation):
@@ -63,6 +62,7 @@ def produce(directory, evidence, result):
                 survivors=evidence.get("survivors", []),
                 measurement_validity="INVALID" if result["verdict"] == "INVALID" else "VALID",
             ),
+            describe=CONTRACTS["cache_windows"],
         )
 
     for metric, value in result["gate_metrics"].items():
@@ -81,6 +81,7 @@ def produce(directory, evidence, result):
                 scope=result["measurement_scope"],
                 measurement_validity="INVALID" if result["verdict"] == "INVALID" else "VALID",
             ),
+            describe=CONTRACTS["cache_windows"],
         )
     store.save(directory)
 

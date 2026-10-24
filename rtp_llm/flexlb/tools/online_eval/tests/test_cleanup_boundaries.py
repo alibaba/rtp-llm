@@ -7,9 +7,10 @@ from types import SimpleNamespace as NS
 from unittest.mock import Mock
 
 import pytest
+
+from ha_fixtures import client_resource
 from runtime.cleanup import cleanup_all
 from scenario.runtime import Deadline
-from tests.ha_fixtures import client_resource
 
 
 def test_sampler_failure_still_reaps_a_real_client():

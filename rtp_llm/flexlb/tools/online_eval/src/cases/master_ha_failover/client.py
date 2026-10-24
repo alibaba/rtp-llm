@@ -7,12 +7,11 @@ import uuid
 from pathlib import Path
 
 from adapters.java_client import ClientOps
+from cases.master_ha_failover.analysis import row_ts_ms
 from file_io import read_json
 from monitoring.probe import evidence_collector
 from monitoring.sources import selected_sources
 from traffic.contracts import source_priority
-
-from cases.master_ha_failover.analysis import row_ts_ms
 
 
 class HaReplayClient:
@@ -50,7 +49,7 @@ class HaReplayClient:
         self.out_dir = case_dir / f"{name}_out"
         self.log_file = case_dir / f"{name}.log"
         self.state_sampler = None
-        if "master_inflight" in selected_sources(monitor.query_plan):
+        if "master_inflight" in selected_sources(monitor.query_plan, monitor.sources):
             self.state_sampler = evidence_collector(
                 monitor.query_plan,
                 "master_inflight",

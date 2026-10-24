@@ -17,9 +17,7 @@ def metric_classification(identity, definition, presentation):
     if identity in presentation.metrics.diagnostic_only:
         return "DIAGNOSTIC_ONLY"
     if definition.get("producer") and definition.get("value_kind") == "scalar":
-        from scenario.registry import registry
-
-        if definition["producer"] in registry().metric_contracts:
+        if isinstance(definition.get("implementation"), dict):
             return "GATE_EVIDENCE"
     return None
 

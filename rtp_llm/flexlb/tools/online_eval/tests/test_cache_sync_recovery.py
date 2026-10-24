@@ -7,6 +7,7 @@ import json
 from pathlib import Path
 
 import pytest
+
 from cases.cache_sync_recovery.actions import atomic_write, withdraw
 from cases.cache_sync_recovery.health import collateral, converged
 from document_io import load_document
@@ -517,9 +518,10 @@ def test_invalid_measurement_cannot_become_valid_functional_pass(failure):
 @pytest.mark.parametrize("recovery", [False, True])
 def test_shared_producer_and_automatic_report_render_frozen_gate(tmp_path, monkeypatch, recovery):
     from monitoring.metric_store import MetricStore
-    from monitoring.query_plan import definitions, load_plan
+    from monitoring.query_plan import definitions
     from reporting.core import load_analysis, read_bundle
-    from reporting.workload import write_views
+    from scenario.registry import load_metric_plan as load_plan
+    from scenario.registry import write_views as write_views
     from test_workload_report_views import payload
 
     evidence = pressure_evidence(recovery)

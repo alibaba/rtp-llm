@@ -8,13 +8,14 @@ from pathlib import Path
 from unittest import mock
 
 import pytest
+
 from cases.master_performance.analysis import analyze
 from cases.master_performance.program import VIEW
 from cases.master_performance.replay import performance_main
 from delivery_fixtures import publish_performance
 
 render_view = VIEW.renderer
-from reporting.view_config import view
+from scenario.registry import view as view
 from test_performance_gate import evidence
 
 

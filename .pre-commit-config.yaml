@@ -13,12 +13,14 @@ repos:
     rev: 24.8.0
     hooks:
       - id: black
+        exclude: ^rtp_llm/flexlb/tools/online_eval/
         types_or: [python]
 
   - repo: https://github.com/pycqa/isort
     rev: 5.13.2
     hooks:
       - id: isort
+        exclude: ^rtp_llm/flexlb/tools/online_eval/
         args: ["--profile=black"]
 
   - repo: https://github.com/pre-commit/mirrors-clang-format
@@ -27,5 +29,14 @@ repos:
       - id: clang-format
         types_or: [c++, c, cuda]
         exclude: ^rtp_llm/cpp/cutlass/
+
+  - repo: local
+    hooks:
+      - id: online-eval-quality
+        name: online_eval quality
+        entry: python rtp_llm/flexlb/tools/online_eval/scripts/commands/check_quality.py
+        language: system
+        pass_filenames: false
+        files: ^rtp_llm/flexlb/tools/online_eval/
 
 exclude: ^rtp_llm/ops|^3rdparty

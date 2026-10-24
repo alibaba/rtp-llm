@@ -28,16 +28,16 @@ def write_report(directory, evidence, result, prepared=None):
 
 
 from program_fixtures import compile_scenarios
-from reporting.view_config import view
 from scenario import load_scenarios
 from scenario.catalog import handlers
+from scenario.registry import view as view
 
 ROOT = Path(__file__).resolve().parents[1]
 
 
 def prepare_report(directory, evidence):
     from monitoring.archive import export_metrics
-    from monitoring.query_plan import load_plan
+    from scenario.registry import load_metric_plan as load_plan
 
     export_metrics(directory, load_plan("cache_scale_in.yaml"))
     return read_report(directory, evidence)
@@ -507,6 +507,7 @@ class CacheGateTest(unittest.TestCase):
 
     def test_topology_budget_is_independent_of_drain(self):
         import yaml
+
         from scenario.program_compiler import configure_program
 
         case = yaml.safe_load((ROOT / "config/scenarios/cache_scale_in.yaml").read_text())

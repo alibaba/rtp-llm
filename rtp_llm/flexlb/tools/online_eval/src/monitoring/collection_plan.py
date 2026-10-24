@@ -16,7 +16,7 @@ def physical_metrics(plan, kind):
     return sorted({name for spec in plan["sources"][kind].values() for name in spec["exported_metrics"]})
 
 
-def collection_plan(plan):
+def collection_plan(plan, sources=None):
     return dict(
         prometheus={
             kind: dict(
@@ -25,7 +25,7 @@ def collection_plan(plan):
             for kind, queries in plan["sources"].items()
             if queries
         },
-        evidence=selected_sources(plan),
+        evidence=selected_sources(plan, sources),
     )
 
 
@@ -56,17 +56,17 @@ def select_plan(plan, requirements, presentations):
     return selected
 
 
-def frozen_plan(name, plan):
-    return dict(name=name, sha256=plan_hash(plan), definition=plan, collection=collection_plan(plan))
+def frozen_plan(name, plan, sources=None):
+    return dict(name=name, sha256=plan_hash(plan), definition=plan, collection=collection_plan(plan, sources))
 
 
-def instance_plan(instance):
+def instance_plan(instance, sources=None):
     """Execution uses the compiled selection, never reloads a larger catalog."""
     frozen = instance.get("implementation", {}).get("monitoring_query_plan")
     if frozen is not None:
         if frozen["sha256"] != plan_hash(frozen["definition"]):
             raise ValueError("frozen monitoring plan hash mismatch")
-        if frozen["collection"] != collection_plan(frozen["definition"]):
+        if frozen["collection"] != collection_plan(frozen["definition"], sources):
             raise ValueError("frozen collection implementation mismatch")
         return frozen["definition"]
     if instance.get("implementation", {}).get("program") is not None:

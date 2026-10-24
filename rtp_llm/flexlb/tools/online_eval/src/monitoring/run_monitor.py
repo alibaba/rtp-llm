@@ -117,7 +117,8 @@ class RunMonitor:
             self.options["sample_interval_s"],
             self.options.get("max_sample_gap_s", 5),
             query_plan=ctx.instance["execution"]["monitoring"].get("query_plan", DEFAULT_PLAN),
-            metric_plan=instance_plan(ctx.instance),
+            metric_plan=instance_plan(ctx.instance, ctx.case_sources),
+            sources=ctx.case_sources,
             target_kinds={name: "mock" if name == "mock" else "master" for name in targets},
         )
         window = dict(started_epoch_s=time.time(), ended_epoch_s=None)

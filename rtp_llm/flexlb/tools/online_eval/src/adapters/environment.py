@@ -11,15 +11,6 @@ import time
 from pathlib import Path
 from typing import Optional
 
-from artifacts.startup import startup_phase
-from flexlb_cfg import render_process_config
-from mode_profiles import resolve_address_plan
-from runtime.java_runtime import resolve_java21
-from runtime.network import PROBE_BIND_HOST, port_accepting, port_in_use, wait_for, wait_for_port
-from runtime.paths import FLEXLB_DIR, MOCK_JAR
-from runtime.process import ManagedProcess, ProcessOps
-from runtime.startup import startup_deadline, wait_ready
-
 from adapters.environment_config import (
     DEFAULT_MASTER_HTTP_PORT,
     MASTER_PORT_MAX_SHIFTS,
@@ -35,6 +26,14 @@ from adapters.zk_helper import (
     ZK_READY_TIMEOUT_S,
     ZkHelperOps,
 )
+from artifacts.startup import startup_phase
+from flexlb_cfg import render_process_config
+from mode_profiles import resolve_address_plan
+from runtime.java_runtime import resolve_java21
+from runtime.network import PROBE_BIND_HOST, port_accepting, port_in_use, wait_for, wait_for_port
+from runtime.paths import FLEXLB_DIR, MOCK_JAR
+from runtime.process import ManagedProcess, ProcessOps
+from runtime.startup import startup_deadline, wait_ready
 
 
 def _pick_master_http_port() -> tuple[int, str]:
@@ -100,6 +99,8 @@ def _write_master_config(env: "FlexEnv", spec=None) -> Path:
 
 
 class FlexEnv:
+    zk_launch_argv: list[str]
+
     """A live environment: one mock cluster + one master (+ optional victims)."""
 
     def __init__(self, spec: EnvSpec, run_dir: Path, base_grpc_port: int):
@@ -123,7 +124,7 @@ class FlexEnv:
         self.victims: dict[str, ManagedProcess] = {}  # name -> process
         self.load_clients: list[ManagedProcess] = []
         self.master_start_count = 0
-        self.master_incarnations = []
+        self.master_incarnations: list[dict] = []
         # HA dual-master registry (empty on the legacy single-master path —
         # env.master stays the single source of truth there).  A value of
         # None means "slot exists, process dead" (post-kill, pre-restart).

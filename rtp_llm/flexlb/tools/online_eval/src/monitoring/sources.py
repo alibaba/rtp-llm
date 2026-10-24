@@ -4,10 +4,9 @@ import hashlib
 import inspect
 from pathlib import Path
 
-from scenario.registry import registry
 
-
-def selected_sources(plan):
+def selected_sources(plan, sources=None):
+    sources = {} if sources is None else sources
     selected = {}
     for identity, spec in plan["produced"].items():
         dependency = spec.get("collection")
@@ -16,12 +15,12 @@ def selected_sources(plan):
         if (
             not isinstance(dependency, dict)
             or set(dependency) != {"source", "field"}
-            or dependency["source"] not in registry().sources
+            or dependency["source"] not in sources
             or type(dependency["field"]) is not str
             or not dependency["field"]
         ):
             raise ValueError("invalid collection dependency: " + identity)
-        capability = registry().sources[dependency["source"]]
+        capability = sources[dependency["source"]]
         allowed = capability.fields
         if not capability.required_fields <= allowed or dependency["field"] not in allowed:
             raise ValueError("unknown collection field: " + identity)
@@ -34,7 +33,7 @@ def selected_sources(plan):
     for name, spec in selected.items():
         spec["fields"] = sorted(spec["fields"])
         spec["metric_ids"] = sorted(spec["metric_ids"])
-        capability = registry().sources[name]
+        capability = sources[name]
         path = Path(inspect.getfile(capability.factory))
         spec["implementation"] = dict(
             module=capability.factory.__module__,

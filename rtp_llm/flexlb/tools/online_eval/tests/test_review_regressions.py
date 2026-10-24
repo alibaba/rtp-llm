@@ -3,6 +3,7 @@
 from pathlib import Path
 
 import pytest
+
 from analysis.statistics import percentile_nr as report_percentile
 from flexlb_cfg import ConfigOverride, _retype_ordering, render_env
 
@@ -130,7 +131,7 @@ def test_https_probe_keeps_scheme_host_port_and_path(tmp_path, monkeypatch):
     from types import SimpleNamespace
     from unittest.mock import MagicMock, Mock
 
-    from monitoring.session import PrometheusSession
+    from metric_fixtures import PrometheusSession
 
     session = PrometheusSession(tmp_path, {})
     session.client.url = "http://prometheus"
@@ -167,9 +168,8 @@ def test_producer_source_without_file_has_clear_error(tmp_path, monkeypatch, spe
     from importlib.util import find_spec
     from types import SimpleNamespace
 
-    from metric_fixtures import freeze_metrics
+    from metric_fixtures import freeze_metrics, publish
     from monitoring.contracts import MetricContractError
-    from monitoring.publication import publish
     from scenario.registry import registry
 
     store = freeze_metrics(tmp_path, "cache_scale_in")
@@ -296,9 +296,8 @@ def test_metric_store_preserves_and_copies_recorded_diagnostics():
 
 @pytest.mark.parametrize("kind", ["mismatch", "value_error", "contract_error"])
 def test_published_contract_errors_keep_the_original_cause(tmp_path, monkeypatch, kind):
-    from metric_fixtures import freeze_metrics
+    from metric_fixtures import freeze_metrics, publish
     from monitoring.contracts import MetricContractError
-    from monitoring.publication import publish
 
     store = freeze_metrics(tmp_path, "cache_scale_in")
     definition = store.document["definitions"]["derived/survivor_hit_ratio"]

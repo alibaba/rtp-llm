@@ -70,14 +70,17 @@ def parse_catalog(payload: dict, *, source: str, profile: str) -> list[Instance]
             if not isinstance(row.get(key), list) or any(not isinstance(item, str) for item in row[key]):
                 raise InstancePlanError(f"instance {identity} requires a string list for {key}")
         duration = row.get("estimated_duration_s")
-        if type(duration) not in (int, float) or not math.isfinite(duration) or duration <= 0:
+        if (
+            not isinstance(duration, (int, float))
+            or type(duration) not in (int, float)
+            or not math.isfinite(duration)
+            or duration <= 0
+        ):
             raise InstancePlanError(f"instance {identity} has invalid estimated_duration_s")
         if source == "yaml":
             budget = JavaMockBudget.from_metadata(row.get("resource_budget"))
             from document_io import DocumentError as ScenarioError
-
             from scenario.execution_policy import (
-                EXECUTION_BUDGETS,
                 normalize_execution,
                 normalize_metadata,
             )
@@ -87,13 +90,13 @@ def parse_catalog(payload: dict, *, source: str, profile: str) -> list[Instance]
                 execution = normalize_execution(row.get("execution"), kind=metadata["kind"])
             except ScenarioError as exc:
                 raise InstancePlanError(f"instance {identity}: {exc}") from exc
-            if not EXECUTION_BUDGETS <= set(execution):
-                raise InstancePlanError(f"instance {identity} requires execution time budgets")
-            if any(
-                type(execution[key]) not in (int, float) or not math.isfinite(execution[key]) or execution[key] <= 0
-                for key in EXECUTION_BUDGETS
-            ):
-                raise InstancePlanError(f"instance {identity} has invalid execution time budgets")
+            from scenario.execution_policy import validate_budgets
+
+            try:
+                validate_budgets(execution, required=True, minimum=0)
+            except ScenarioError as exc:
+                raise InstancePlanError(f"instance {identity} has invalid execution time budgets: {exc}") from exc
+
         else:
             raise InstancePlanError(f"unsupported instance source: {source}")
         instances.append(
@@ -178,8 +181,8 @@ def plan_instances(
         lanes[lane].append(row)
         loads[lane] += costs[row.id]
     order = {row.id: i for i, row in enumerate(instances)}
-    for lane in lanes:
-        lane.sort(key=lambda row: order[row.id])
+    for rows in lanes:
+        rows.sort(key=lambda row: order[row.id])
     return lanes
 
 

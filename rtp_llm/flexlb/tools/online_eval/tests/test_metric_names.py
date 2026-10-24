@@ -2,8 +2,9 @@
 
 from pathlib import Path
 
-from monitoring.query_plan import DEFAULT_PLAN, definitions, load_plan, plan_hash
-from monitoring.session import PrometheusSession
+from metric_fixtures import PrometheusSession
+from monitoring.query_plan import DEFAULT_PLAN, definitions, plan_hash
+from scenario.registry import load_metric_plan as load_plan
 
 ROOT = Path(__file__).resolve().parents[1]
 

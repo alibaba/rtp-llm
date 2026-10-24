@@ -3,10 +3,9 @@
 import math
 
 from adapters.master_control import master_url
+from cases.master_ha_failover.state_contract import STATE_FIELDS as _STATE_FIELDS
 
-from cases.master_ha_failover.state_contract import STATE_FIELDS
-
-STATE_FIELDS = frozenset(STATE_FIELDS)
+STATE_FIELDS = frozenset(_STATE_FIELDS)
 
 
 def master_state_fields(data, fields=STATE_FIELDS - {"http_up"}):

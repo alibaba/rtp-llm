@@ -7,26 +7,19 @@ import math
 from importlib.util import find_spec
 from pathlib import Path
 
-from scenario.registry import registry
-
 from monitoring.contracts import MetricContractError, validate_definition, validate_observation
 from monitoring.measurement_contract import output_contract
 
 
-def publish(store, metric_id, definition, rows, *, producer, evidence):
+def publish(store, metric_id, definition, rows, *, producer, evidence, describe):
     """A declared Python producer publishes numeric data with explicit provenance."""
 
     validate_definition(definition, metric_id, publication=True)
     declared = store.document["definitions"].get(metric_id)
-    if (
-        declared is None
-        or declared != definition
-        or declared.get("producer") != producer
-        or producer not in registry().metric_contracts
-    ):
+    if declared is None or declared != definition or declared.get("producer") != producer or not callable(describe):
         raise MetricContractError("undeclared producer or definition mismatch: " + metric_id)
     try:
-        contract = output_contract(metric_id, definition)
+        contract = output_contract(metric_id, definition, {producer: describe})
     except MetricContractError:
         raise
     except ValueError as exc:
@@ -47,7 +40,7 @@ def publish(store, metric_id, definition, rows, *, producer, evidence):
             raise MetricContractError("cannot read producer module: " + name) from exc
 
     calculation_sha256 = module_digest(calculation_module)
-    module = registry().metric_contracts[producer].__module__
+    module = describe.__module__
     producer_sha256 = module_digest(module)
     result, identities = [], set()
     for row in rows:

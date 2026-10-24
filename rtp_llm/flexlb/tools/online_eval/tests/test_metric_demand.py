@@ -5,13 +5,16 @@ from pathlib import Path
 from unittest.mock import patch
 
 import pytest
+
 from document_io import load_document
-from monitoring.collection_plan import instance_plan, physical_metrics, select_plan
-from monitoring.query_plan import load_plan, plan_hash
+from metric_fixtures import instance_plan
+from monitoring.collection_plan import physical_metrics, select_plan
+from monitoring.query_plan import plan_hash
 from program_fixtures import compile_scenarios
-from reporting.view_config import view
 from scenario.catalog import handlers
 from scenario.program_compiler import configure_program
+from scenario.registry import load_metric_plan as load_plan
+from scenario.registry import view as view
 
 ROOT = Path(__file__).resolve().parents[1]
 

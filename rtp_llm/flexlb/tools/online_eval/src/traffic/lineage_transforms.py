@@ -44,7 +44,7 @@ class LineageProjection:
         return result
 
     def to_dict(self):
-        result = dict(path=self.path, count=self.count, output_tokens=self.output_tokens, priority=self.priority)
+        result: dict = dict(path=self.path, count=self.count, output_tokens=self.output_tokens, priority=self.priority)
         if self.max_input_tokens is not None:
             result["max_input_tokens"] = self.max_input_tokens
         if self.output_distribution is not None:
@@ -138,7 +138,7 @@ class LineageProjector:
                     excluded_after_limit=max(0, len(model.events) - selected - excluded),
                 )
             )
-        result = dict(
+        result: dict = dict(
             source_codec=dict(name="prefix_lineage", version=metadata.version),
             realism=metadata.realism,
             tail=metadata.tail.value,

@@ -7,7 +7,7 @@ from unittest import mock
 from artifacts.provenance import collect
 from reporting import discover_reports, load_analysis, read_bundle, render, table
 from reporting.run_context import canonical_spec, provenance_from
-from reporting.workload import write_views
+from scenario.registry import write_views as write_views
 
 
 def analysis():

@@ -3,6 +3,7 @@
 import math
 
 import pytest
+
 from analysis.statistics import percentile_nr
 from analysis.time_buckets import TimeBuckets
 from cases.master_ha_failover.analysis import row_ts_ms
@@ -10,11 +11,12 @@ from cases.master_ha_failover.metrics import _request_series
 from cases.master_ha_failover.metrics import produce as produce_ha
 from cases.master_performance.metrics import produce as produce_performance
 from cases.master_performance.metrics import values
+from metric_fixtures import publish
 from monitoring.archive import export_metrics
 from monitoring.contracts import MetricContractError, MetricUnavailable
 from monitoring.metric_store import MetricStore, series_row
-from monitoring.publication import publish
-from monitoring.query_plan import definitions, load_plan, queries_for_targets
+from monitoring.query_plan import definitions, queries_for_targets
+from scenario.registry import load_metric_plan as load_plan
 
 
 def test_nearest_rank_preserves_precision_zero_and_missing_distinctions():

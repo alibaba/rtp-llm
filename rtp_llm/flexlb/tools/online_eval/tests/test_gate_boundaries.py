@@ -9,6 +9,7 @@ from pathlib import Path
 from unittest import mock
 
 import pytest
+
 import test_cache_scale_gate as cache_fixtures
 from cases.cache_scale_in.analysis import analyze as analyze_cache
 from cases.cache_scale_in.report import write_report as cache_report
@@ -160,15 +161,16 @@ def test_performance_cli_replays_evidence_explicitly():
 def test_registered_view_extension_needs_no_workload_case_branch():
     from types import SimpleNamespace
 
-    from reporting.workload import write_views
     from scenario import registry
+    from scenario.registry import write_views as write_views
 
     render = mock.Mock(return_value=Path("/unused/new/report.html"))
     validator = mock.Mock()
     with tempfile.TemporaryDirectory() as directory:
         root = Path(directory)
         import yaml
-        from reporting.view_config import view
+
+        from scenario.registry import view as view
 
         definition = view("master_ha_failover.yaml").to_dict()
         (root / "another.yaml").write_text(yaml.safe_dump(definition))

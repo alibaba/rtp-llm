@@ -10,9 +10,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import IO
 
-from runtime.network import PROBE_BIND_HOST, port_in_use
-
 from adapters.java_mock_resources import MOCK_WINDOW_LAST, child_port_env, port_intervals
+from runtime.network import PROBE_BIND_HOST, port_in_use
 
 MASTER_HTTP_BASE = 18080
 MASTER_PORT_STRIDE = 10
@@ -224,7 +223,12 @@ def _try_window_lock(master_base: int, mock_base: int, mock_stride: int, n_lanes
         except OSError:
             pass  # pre-existing directory owned by another uid
         paths = _window_lock_paths(master_base, mock_base, mock_stride, n_lanes)
-        intervals = [_lock_interval(path) for path in paths]
+        intervals = []
+        for owned_path in paths:
+            owned = _lock_interval(owned_path)
+            if owned is None:
+                raise ValueError("invalid owned window lock filename: " + owned_path.name)
+            intervals.append(owned)
         for i, (lo, hi) in enumerate(intervals):
             for j in range(i):
                 start, end = intervals[j]
@@ -399,7 +403,7 @@ def admit_port_window(
             )
         return _admission(master, mock, provenance, holders, probe, warnings, dry_run=dry_run, admitted=detail is None)
 
-    rejections = []
+    rejections: list[str] = []
     for shift in range(PORT_SCAN_MAX_SHIFTS + 1):
         m = master - MASTER_PORT_STRIDE * lanes * shift
         b = mock - stride * lanes * shift

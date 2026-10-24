@@ -65,6 +65,7 @@ def produce(directory, evidence, result):
             [series_row(points, epoch=evidence["provenance"]["env_epoch"], source="cache_stability", labels={})],
             producer="cache_stability",
             evidence=dict(path=str(directory) + "/cache_stability-gate-evidence.json", validity=result["validity"]),
+            describe=CONTRACTS["cache_stability"],
         )
     store.save(directory)
 

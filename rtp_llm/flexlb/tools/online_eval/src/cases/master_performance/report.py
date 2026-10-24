@@ -9,7 +9,7 @@ from reporting.view_sections import view_details, view_table
 
 
 def write_report(directory, evidence, result, *, run=None, presentation=None):
-    from reporting.view_config import view
+    from scenario.registry import view as view
 
     presentation = presentation if presentation is not None else view("master_performance.yaml")
     directory = Path(directory)

@@ -12,11 +12,9 @@ import time
 from pathlib import Path
 
 from file_io import write_json
+from monitoring.sources import selected_sources
 from runtime.deadline import Deadline
 from runtime.observation import SampleBudget
-from scenario.registry import registry
-
-from monitoring.sources import selected_sources
 
 
 class PrometheusEvidence:
@@ -203,10 +201,10 @@ class PrometheusEvidence:
 
 
 def evidence_collector(plan, source, environment, path, **options):
-    selected = selected_sources(plan)
+    selected = selected_sources(plan, options["session"].sources)
     if source not in selected:
         raise ValueError("evidence source is not selected: " + source)
-    capability = registry().sources[source]
+    capability = options["session"].sources[source]
     adapters = capability.factory(environment, set(selected[source]["fields"]))
     return PrometheusEvidence(
         path,

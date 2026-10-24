@@ -5,10 +5,11 @@ from types import SimpleNamespace
 from unittest.mock import Mock
 
 import pytest
+
 from adapters.flow_control import read_status, stop_sending, validate_drain
 from artifacts.provenance import validate_gate_provenance
-from tests.ha_fixtures import client_resource
-from tests.test_performance_gate import evidence
+from ha_fixtures import client_resource
+from test_performance_gate import evidence
 
 
 @pytest.mark.parametrize(

@@ -6,13 +6,14 @@ import json
 from unittest.mock import patch
 
 import pytest
+
 from cases.cache_scale_in.analysis import analyze
 from delivery_fixtures import publish_cache
 from document_io import DocumentError as ScenarioError
 from monitoring.metric_store import MetricStore
 from reporting.events import attach_events, project_events
-from reporting.view_config import view
-from reporting.workload import write_views
+from scenario.registry import view as view
+from scenario.registry import write_views as write_views
 from scenario.runtime import RuntimeContext
 from test_cache_scale_gate import CacheGateTest
 from test_workload_report_views import payload

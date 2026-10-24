@@ -5,9 +5,10 @@ from pathlib import Path
 from unittest.mock import patch
 
 import pytest
+
 from reporting.report_model import ExperimentConditions, MeasurementIdentity
-from reporting.view_config import view
 from reporting.view_model import ViewDefinition
+from scenario.registry import view as view
 
 
 def test_subtitle_fields_are_registered_not_inferred_from_producer():
@@ -16,11 +17,12 @@ def test_subtitle_fields_are_registered_not_inferred_from_producer():
     raw = view("master_ha_failover.yaml").to_dict()
     raw["report"].update(producer="arbitrary", subtitle="{verdict} / {trial}")
     capability = ReportView(lambda *args: None, lambda *args: None, {"trial"})
-    with (
-        patch("reporting.view_config.load_document", return_value=raw),
-        patch("reporting.view_config.view_capabilities", return_value={"master_ha_failover.yaml": capability}),
-    ):
-        assert view("master_ha_failover.yaml").subtitle.render(verdict="PASS", trial="A") == "PASS / A"
+    from reporting.view_config import view as read_view
+    from scenario.registry import load_metric_plan
+
+    with patch("reporting.view_config.load_document", return_value=raw):
+        config = read_view("master_ha_failover.yaml", capability=capability, plan_loader=load_metric_plan)
+        assert config.subtitle.render(verdict="PASS", trial="A") == "PASS / A"
     raw["report"]["producer"] = "cache-gate"
     with pytest.raises(ValueError, match="unknown subtitle"):
         ViewDefinition.read(raw)
@@ -58,7 +60,7 @@ def test_measurement_and_conditions_do_not_alias_mutable_inputs():
         conditions.configuration["settings"][0]["cap"] = 99
 
 
-def test_report_schema_only_uses_shared_registry_from_scenario():
+def test_report_schema_does_not_import_execution():
     root = Path(__file__).parents[1] / "src"
     for name in ("reporting/view_config.py", "reporting/events.py", "reporting/view_schema.py"):
         imports = [
@@ -66,7 +68,7 @@ def test_report_schema_only_uses_shared_registry_from_scenario():
             for node in ast.walk(ast.parse((root / name).read_text()))
             if isinstance(node, ast.ImportFrom) and node.module
         ]
-        assert not any(module.startswith("scenario") and module != "scenario.registry" for module in imports)
+        assert not any(module.startswith("scenario") for module in imports)
         if name.endswith("view_schema.py"):
             assert not any(module.startswith("monitoring") for module in imports)
     for name in ("reporting/components.py", "reporting/report_model.py"):

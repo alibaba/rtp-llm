@@ -28,16 +28,9 @@ def main():
                 print(f"{path}:{node.lineno}: shared leaf must not import a business package", file=sys.stderr)
                 return 1
     commands = (
-        [
-            sys.executable,
-            "-m",
-            "ruff",
-            "check",
-            "src",
-            "scripts",
-            "tests",
-            *sorted(path.name for path in root.glob("*.py")),
-        ],
+        [sys.executable, "-m", "ruff", "check", "."],
+        [sys.executable, "-m", "ruff", "format", "--check", "."],
+        [sys.executable, "-m", "mypy"],
         [
             sys.executable,
             "-c",

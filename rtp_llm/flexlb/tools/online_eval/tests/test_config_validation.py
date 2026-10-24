@@ -5,15 +5,18 @@ import json
 from unittest.mock import patch
 
 import pytest
+
 from cases.master_ha_failover.analysis import HA_METRICS, measure_client_metric
 from document_io import DocumentError as ScenarioError
-from monitoring.query_plan import load_plan
-from reporting.view_config import view
+from scenario.registry import load_metric_plan as load_plan
+from scenario.registry import view as view
 
 
 @pytest.mark.parametrize("filename", ["cache_scale_in.yaml", "master_ha_failover.yaml"])
 def test_view_loads_its_metric_plan_once(filename):
-    with patch("monitoring.query_plan.load_plan", wraps=load_plan) as loader:
+    from monitoring.query_plan import load_plan as read_plan
+
+    with patch("monitoring.query_plan.load_plan", wraps=read_plan) as loader:
         view(filename)
     # Recursive include loads are separate files; each file is read once.
     names = [call.args[0] for call in loader.call_args_list]

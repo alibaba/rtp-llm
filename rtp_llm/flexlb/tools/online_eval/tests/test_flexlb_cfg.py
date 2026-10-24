@@ -103,7 +103,7 @@ class LayeringTest(unittest.TestCase):
 
     def test_omit_on_always_present_field_raises(self) -> None:
         with self.assertRaises(ValueError):
-            render_env("batch-window", ConfigOverride(request_timeout_ms=OMIT))
+            render_env("batch-window", ConfigOverride(request_timeout_ms=OMIT))  # type: ignore[arg-type]  # Deliberate invalid input.
 
     def test_priority_axes(self) -> None:
         doc = json.loads(
@@ -267,12 +267,13 @@ class VocabTest(unittest.TestCase):
 
     def test_unknown_field_typeerror(self) -> None:
         with self.assertRaises(TypeError):
-            ConfigOverride(bogus=1)
+            invalid: dict = {"bogus": 1}
+            ConfigOverride(**invalid)
 
     def test_frozen(self) -> None:
         ov = ConfigOverride(request_timeout_ms=2)
         with self.assertRaises(Exception):
-            ov.max_outstanding = 3
+            setattr(ov, "max_outstanding", 3)
 
 
 class JavaFixtureLockstepTest(unittest.TestCase):

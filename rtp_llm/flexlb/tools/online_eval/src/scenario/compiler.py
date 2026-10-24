@@ -7,12 +7,17 @@ from dataclasses import dataclass, replace
 
 from adapters.java_mock_resources import VICTIM_OFFSETS, JavaMockBudget
 from flexlb_cfg import PROFILES
-
 from scenario.environment_config import environment as _environment
 from scenario.environment_config import read_environment
 from scenario.environment_declaration import EnvironmentDeclaration, variant_environment_fields
 from scenario.environment_resolver import CAPABILITIES, EnvironmentResolver
-from scenario.execution_policy import EXECUTION_BUDGETS, EXECUTION_FIELDS, normalize_execution, normalize_metadata
+from scenario.execution_policy import (
+    DEFAULT_BUDGETS,
+    EXECUTION_BUDGETS,
+    EXECUTION_FIELDS,
+    normalize_execution,
+    normalize_metadata,
+)
 from scenario.plan import CompiledInstance, EnvironmentPlan, ExecutionBudgets, StagePlan, json_document
 from scenario.program import ProgramPlan, VariantPlan
 from scenario.stage_compiler import OUTPUTS, stages
@@ -125,14 +130,7 @@ def _compile_document(source, doc, profile, handlers, grade, seen):
     )
     budgets = {
         key: number(execution.get(key, default), source + ".execution." + key, minimum=0.001)
-        for key, default in (
-            ("timeout_s", 600),
-            ("stage_timeout_s", 60),
-            ("cleanup_timeout_s", 120),
-            ("finalize_timeout_s", 120),
-            ("report_timeout_s", 60),
-            ("archive_timeout_s", 120),
-        )
+        for key, default in DEFAULT_BUDGETS.items()
     }
     variants = doc.variants
     if not isinstance(variants, tuple) or not variants:

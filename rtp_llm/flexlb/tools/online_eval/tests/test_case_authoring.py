@@ -7,6 +7,7 @@ import sys
 from pathlib import Path
 
 import pytest
+
 from scenario import registry as module
 from scenario.case_validation import validate_cases
 from scenario.registry import CaseDefinition, CaseRegistry, RegisteredCase
@@ -21,7 +22,7 @@ def entry(definition):
 @pytest.mark.parametrize(
     "definition, location",
     [
-        (CaseDefinition(builders={"default": lambda: None}), "builders.default"),
+        (CaseDefinition(builders={"default": lambda: None}), "builders.default"),  # type: ignore[dict-item]  # Wrong arity.
         (CaseDefinition(builders={"default": lambda case: None}, actions=(object(),)), "actions"),
     ],
 )

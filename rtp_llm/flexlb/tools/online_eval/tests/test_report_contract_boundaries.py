@@ -4,8 +4,9 @@ from unittest.mock import patch
 
 from reporting.comparison import _series_key
 from reporting.report_model import MeasurementIdentity
-from reporting.view_config import DEFAULT_VIEW, view
+from reporting.view_config import DEFAULT_VIEW
 from reporting.workload_panels import build_panels
+from scenario.registry import view as view
 
 
 def test_pairing_identity_does_not_iterate_point_arrays():

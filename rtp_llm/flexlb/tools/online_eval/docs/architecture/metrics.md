@@ -137,7 +137,7 @@ calculation:
 
 只有 `sources` 展开为真实查询，`produced` 即使标为 `source_type: prometheus` 也不会新增查询。`export_metrics` 只转换已归档的查询结果并保留 producer 输出，不发起抓取。查询展开可用 `queries_for_targets` 核对，实际采集清单保存在 `telemetry/<epoch>/queries.json`；报告分类审计区分已展示、门禁证据及显式诊断指标，未分类指标报错。
 
-声明层的 `monitoring.contracts` 提供测量元数据校验和指标异常，`monitoring.measurement_contract` 解析注册能力的输出契约，不执行 producer 或导入指标存储。`monitoring.producers` 只负责收尾阶段的执行调度，`monitoring.publication` 校验 producer 输出并附加实现来源。`MetricStore` 负责冻结存储、选择和归约，不解析注册能力。`monitoring.archive` 只将查询归档转换成完整的 `MetricStore`，校验成功后才通过 `file_io.write_json` 原子替换 `metrics.json`；转换失败保留上一份有效产物。报告通过 `MetricStore.project(anchor)` 直接读取带身份、标签、来源和相对时间的结构化序列，不从字符串键反解析身份。有效性检查与既有分析格式继续使用 `series(anchor)` 的映射视图，两者共享样本校验和时间转换。收尾只在 case 回调新增指标后刷新分析序列。
+声明层的 `monitoring.contracts` 提供测量元数据校验和指标异常，`monitoring.measurement_contract` 校验调用方显式提供的输出契约，不执行 producer 或导入指标存储。case 指标模块负责收尾投影，`monitoring.publication` 接收所属 case 的 describe 函数，校验 producer 输出并附加实现来源。`MetricStore` 负责冻结存储、选择和归约，不解析注册能力。`monitoring.archive` 只将查询归档转换成完整的 `MetricStore`，校验成功后才通过 `file_io.write_json` 原子替换 `metrics.json`；转换失败保留上一份有效产物。报告通过 `MetricStore.project(anchor)` 直接读取带身份、标签、来源和相对时间的结构化序列，不从字符串键反解析身份。有效性检查与既有分析格式继续使用 `series(anchor)` 的映射视图，两者共享样本校验和时间转换。收尾只在 case 回调新增指标后刷新分析序列。
 
 新建 session 和展开查询时必须显式提供每个 target 的来源种类，不能通过实例名称猜测。旧归档缺少 `target_kinds` 时，名称推断仅保留在归档转换边界。`monitoring.client.PrometheusClient` 显式接收 URL、冻结计划、来源种类清单及最大采集间隔；清单与资源所有者共享，动态客户端注册后立即可查询。`monitoring.session` 管理进程、配置和资源注册，通过组合持有 `client`；调用方使用 `monitor.client` 读取 TSDB。动态 client 入口为 `add_client_target(s)`，不接受隐式的其他来源种类。
 
@@ -161,7 +161,7 @@ calculation:
 
 入库过滤减少序列和存储量，不减少 exporter HTTP 响应生成或网络传输；只减少查询或图表也不会减少 scrape。Master 不增加生产指标、接口或日志。现有 Java 暴露白名单仍受编译校验；client、engine 的源端导出能力可按其自身合同扩展，不把服务端成本下降当成入库过滤的既有效果。
 
-case 的 `CaseDefinition.sources` 声明额外数据源能力，由自动发现的公共注册快照收集，选中的指标决定启动哪些能力和字段。源协议可声明必需的完整性字段，例如 Master 状态需要同时保留 HTTP 可回读状态。普通时序复用 exporter；现有只读 HTTP 接口通过 `monitoring.probe.PrometheusEvidence` 接入官方 `prometheus_client` custom collector。SDK 只负责本地 exposition 服务，Prometheus 触发 scrape 时才调用有超时和响应字节上限的适配器，没有 Python 定时采集线程，也不新建第二套 TSDB。每个 probe 与原生 exporter 使用同一个 run 所有的 Prometheus；没有原生查询但选中 probe 时仍启动 Prometheus，只有请求流水等无需 scrape 的计划才不启动它。
+case 的 `CaseDefinition.sources` 声明额外数据源能力。scenario 组合入口解析注册快照，将 producer 契约和 source 描述符显式交给计划读取器、session 与 collector；monitoring 不导入 scenario 或 case。选中的指标决定启动哪些能力和字段。源协议可声明必需的完整性字段，例如 Master 状态需要同时保留 HTTP 可回读状态。普通时序复用 exporter；现有只读 HTTP 接口通过 `monitoring.probe.PrometheusEvidence` 接入官方 `prometheus_client` custom collector。SDK 只负责本地 exposition 服务，Prometheus 触发 scrape 时才调用有超时和响应字节上限的适配器，没有 Python 定时采集线程，也不新建第二套 TSDB。每个 probe 与原生 exporter 使用同一个 run 所有的 Prometheus；没有原生查询但选中 probe 时仍启动 Prometheus，只有请求流水等无需 scrape 的计划才不启动它。
 
 通用 HTTP JSON 读取放在 `adapters.http_json`。适配器只执行一次严格字段投影，不创建线程、写文件或回退到日志。接口不可达本身是观测时，可以显式产出可达性 0，其余字段缺失；成功响应的坏 JSON、缺字段、非有限数报错。probe 启动必须完成一次成功 scrape 才开始发流。SDK 的 `up` 表示适配器 exporter 是否成功，Master 的 HTTP 可回读是另一条源端观测，不能混淆；坏响应和样本/字节预算超限会在启动或收尾显式失败。
 

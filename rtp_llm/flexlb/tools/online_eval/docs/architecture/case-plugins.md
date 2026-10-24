@@ -52,7 +52,7 @@ YAML 声明环境、输入、阈值和视图；Python 定义步骤与业务算�
 
 统一的 `monitoring.publication.publish` 校验定义、序列身份、来源和实现口径，再更新 `MetricStore`。缺失来源不回退到其他文件或 debug API。指标和图表需求的选择发生在编译期，运行投影不能扩大采集计划。
 
-视图由 `CASE.report_views` 声明 `ReportView`。报告配置只通过 `scenario.registry` 读取共享视图声明，不调用编译器或执行器。renderer 接收目录、运行分析、视图定义和可选 deadline，返回 HTML 路径；只展示既定判定，不分析或重新发布指标。离线 renderer 校验归档格式与摘要。
+视图由 `CASE.report_views` 声明 `ReportView`。`scenario.registry.view/write_views` 在组合入口解析视图与指标计划，把已选择的描述符交给通用读取和发布函数。`reporting` 不导入执行注册表，也不查找 case；离线报告按冻结定义分类指标，不要求安装当时的注册快照。renderer 接收目录、运行分析、视图定义和可选 deadline，返回 HTML 路径；只展示既定判定，不分析或重新发布指标。离线 renderer 校验归档格式与摘要。
 
 ## 来源与资源边界
 

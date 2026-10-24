@@ -7,7 +7,6 @@ import time
 from runtime.deadline import Deadline as Deadline
 from runtime.deadline import StageTimeout as StageTimeout
 from runtime.deadline import interruptible as interruptible
-
 from scenario.context import RuntimeContext
 from scenario.finalization import RunFinalizer
 from scenario.plan import CompiledInstance
@@ -33,9 +32,9 @@ class ScenarioRunner:
         ctx.plan = plan
         ctx.artifact_dir.mkdir(parents=True, exist_ok=True)
         from file_io import write_json
-        from reporting.view_config import DEFAULT_VIEW, view
-
+        from reporting.view_config import DEFAULT_VIEW
         from scenario.execution_plan import dependency_files
+        from scenario.registry import view as view
 
         ctx.experiment_definition = dict(
             experiment_definition_schema_version=1,

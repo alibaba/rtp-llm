@@ -7,10 +7,10 @@ from dataclasses import asdict
 
 from document_io import DocumentError as ScenarioError
 from monitoring.identity import NAME
-
 from scenario.builder import CaseBuilder
 from scenario.config_data import leaf_paths, merge_data, merge_environment, path_in_scope
 from scenario.declarations import CaseDeclaration, VariantDeclaration
+from scenario.execution_policy import DEFAULT_BUDGETS
 from scenario.program import ProgramPlan, VariantPlan
 
 
@@ -37,7 +37,7 @@ def configure_program(config, source) -> ProgramPlan:
         validate_environment(config.environment, source + ".environment", profile)
     variants = []
     seen = set()
-    numeric_contracts = {}
+    numeric_contracts: dict = {}
     default = VariantDeclaration.read({"id": config.default_variant}, source)
     from scenario.data_archives import archive_variants
 
@@ -111,7 +111,7 @@ def _build_variant(config, row, identity, module, selected_profiles, source, num
         merge_data(parameters, variant_parameters),
         number_rules=narrow_parameters(base_rules, row.parameter_schema),
         profiles=profiles,
-        stage_timeout_s=config.execution.stage_timeout_s or 60,
+        stage_timeout_s=config.execution.stage_timeout_s or DEFAULT_BUDGETS["stage_timeout_s"],
         optional_numbers=(schema.optional_numbers if schema is not None else ()),
     )
     if schema is not None:
@@ -170,15 +170,15 @@ def _variant_contract(config, builder, source):
             raise ScenarioError(f"{source}.reporting: {exc}") from exc
     if metadata["kind"] == "workload":
         from monitoring.collection_plan import frozen_plan, select_plan
-        from monitoring.query_plan import DEFAULT_PLAN, load_plan, validate_export_filter
-        from reporting.view_config import view
+        from monitoring.query_plan import DEFAULT_PLAN, validate_export_filter
+        from scenario.registry import load_metric_plan as load_plan
+        from scenario.registry import view as view
 
         name = execution["monitoring"].get("query_plan", DEFAULT_PLAN)
         selected = select_plan(
             load_plan(name), builder.metric_dependencies, [view(report) for report in variant.get("reports", [])]
         )
         from monitoring.query_plan import definitions
-
         from scenario.registry import registry
 
         for definition in definitions(selected).values():
@@ -191,12 +191,13 @@ def _variant_contract(config, builder, source):
             if collection.get("source"):
                 registry().capability("source", collection["source"], case=config.case)
         validate_export_filter(selected, builder.env)
-        variant["monitoring_query_plan"] = frozen_plan(name, selected)
+        variant["monitoring_query_plan"] = frozen_plan(name, selected, registry().sources)
     return variant
 
 
 def _bind_metric_dependencies(requirements, execution):
-    from monitoring.query_plan import DEFAULT_PLAN, definitions, load_plan
+    from monitoring.query_plan import DEFAULT_PLAN, definitions
+    from scenario.registry import load_metric_plan as load_plan
 
     plan = load_plan(execution["monitoring"].get("query_plan", DEFAULT_PLAN))
     declared = definitions(plan)
@@ -214,17 +215,17 @@ def _bind_metric_dependencies(requirements, execution):
 
 
 def _bind_reports(config, variant, source, stages):
-    from reporting.view_config import declaration
+    from scenario.registry import report_declaration as declaration
+    from scenario.registry import view
 
     reports = list(config.reports) if config.reports is not None else None
     kind = variant["metadata"]["kind"]
     if reports is not None:
         variant["reports"] = declaration(reports, kind=kind, path=source + ".reports")
-        from reporting.view_config import view
+        from scenario.registry import view as view
 
         for report_name in reports:
             from reporting.view_config import DEFAULT_VIEW
-
             from scenario.registry import registry
 
             if report_name != DEFAULT_VIEW:

@@ -7,15 +7,13 @@ from dataclasses import dataclass, field, fields
 from typing import TYPE_CHECKING, Optional
 
 if TYPE_CHECKING:
-    from scenario.declarations import MonitoringPolicy
     from scenario.environment_declaration import EnvironmentDeclaration
 
 from adapters.java_mock_resources import JavaMockBudget
 from document_io import DocumentError as ScenarioError
 from flexlb_cfg import PROFILES
-
 from scenario.environment_snapshot import EnvironmentSnapshot
-from scenario.execution_policy import EXECUTION_BUDGETS
+from scenario.execution_policy import EXECUTION_BUDGETS, MonitoringPolicy, validate_budgets
 from scenario.references import enter_stage, validate_references
 from scenario.stage_parameters import AdapterParameters, StageParameters, decode_parameters
 from scenario.validation import identifier, mapping, number
@@ -36,30 +34,27 @@ class ExecutionBudgets:
     collection: Optional[str] = None
     monitoring: Optional[MonitoringPolicy] = None
 
-    def __post_init__(self):
-        for name in EXECUTION_BUDGETS:
-            number(getattr(self, name), "execution." + name, minimum=0.001)
+    def __post_init__(self) -> None:
+        validate_budgets({name: getattr(self, name) for name in EXECUTION_BUDGETS}, required=True)
 
     @classmethod
-    def read(cls, value):
+    def read(cls, value: dict) -> ExecutionBudgets:
         required = {item.name for item in fields(cls)} - {"collection", "monitoring"}
         mapping(value, "execution", required | {"collection", "monitoring"}, required)
-        budgets = {key: number(value[key], "execution." + key, minimum=0.001) for key in required}
+        budgets = {key: value[key] for key in required}
         collection = value.get("collection")
         if collection is not None and collection not in {"aggregate", "request", "diagnostic"}:
             raise ScenarioError("invalid execution collection")
         monitoring = value.get("monitoring")
         if monitoring is not None and not isinstance(monitoring, dict):
             raise ScenarioError("execution monitoring requires a mapping")
-        from scenario.declarations import MonitoringPolicy
-
         return cls(
             **budgets,
             collection=collection,
             monitoring=MonitoringPolicy.read(monitoring) if monitoring is not None else None,
         )
 
-    def to_dict(self):
+    def to_dict(self) -> dict:
         result = {
             item.name: getattr(self, item.name)
             for item in fields(self)

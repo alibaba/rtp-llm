@@ -5,6 +5,7 @@ import time
 from unittest import mock
 
 import pytest
+
 from adapters.resource_evidence import ResourceEvidence
 from program_fixtures import compile_scenarios
 from scenario.measurement import WorkloadPolicy, execute_workload
@@ -196,7 +197,7 @@ def test_report_budget_is_separate_and_included_in_elapsed_time(tmp_path):
 def test_committed_gate_corruption_never_falls_back_to_default(tmp_path, damage):
     from artifacts.gate import freeze_gate
     from cases.cache_scale_in.analysis import analyze
-    from reporting.workload import write_views
+    from scenario.registry import write_views as write_views
 
     e = CacheGateTest().evidence(0.8)
     result_path = freeze_gate(tmp_path, "cache", e, analyze(e))

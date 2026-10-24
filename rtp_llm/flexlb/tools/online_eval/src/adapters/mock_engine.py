@@ -6,6 +6,8 @@ from runtime.network import http_get_json, http_post_json
 
 
 class MockEngineControl:
+    mock_http_port: int
+
     def snapshot(self) -> dict:
         data = http_get_json(f"http://127.0.0.1:{self.mock_http_port}/snapshot")
         if data is None:

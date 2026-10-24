@@ -4,6 +4,7 @@ import configparser
 import os
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -25,7 +26,7 @@ def test_ruff_rejects_undefined_names_with_project_configuration(tmp_path):
     source = tmp_path / "broken.py"
     source.write_text("def execute():\n    return missing_backend\n")
     result = subprocess.run(
-        [command, "check", "--config", str(ROOT / "ruff.toml"), str(source)], capture_output=True, text=True
+        [command, "check", "--config", str(ROOT / "pyproject.toml"), str(source)], capture_output=True, text=True
     )
     assert result.returncode != 0
     assert "F821" in result.stdout
@@ -57,6 +58,7 @@ def architecture(tmp_path):
         "inputs",
         "gates",
         "measurement",
+        "registry",
     ):
         (tmp_path / "scenario" / (name + ".py")).write_text("")
     (tmp_path / ".importlinter").write_text((ROOT / ".importlinter").read_text())
@@ -91,6 +93,8 @@ def test_pure_new_case_passes_all_contracts(architecture):
         ("scenario/__init__.py", "scripts", "场景库不依赖命令脚本"),
         ("artifacts/experiment_store.py", "reporting", "制品存储不依赖展示和执行"),
         ("runtime/__init__.py", "scenario", "运行底座和文件读写不依赖业务层"),
+        ("monitoring/__init__.py", "scenario.registry", "采集与报告不查执行注册表"),
+        ("reporting/__init__.py", "scenario.registry", "采集与报告不查执行注册表"),
     ],
 )
 def test_new_case_cannot_break_a_boundary(architecture, source, target, contract):
@@ -108,3 +112,16 @@ def test_indirect_compiler_dependency_is_rejected(architecture):
     result = run()
     assert result.returncode != 0
     assert "adapters.helper" in result.stdout and "scenario.compiler" in result.stdout
+
+
+def test_type_checker_rejects_bad_calls_with_project_configuration(tmp_path):
+    source = tmp_path / "bad_call.py"
+    source.write_text('def identity(value: int) -> int:\n    return value\nidentity("wrong")\n')
+    result = subprocess.run(
+        [sys.executable, "-m", "mypy", "--config-file", str(ROOT / "pyproject.toml"), str(source)],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode != 0
+    assert "arg-type" in result.stdout

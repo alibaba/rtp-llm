@@ -6,12 +6,11 @@ from collections import defaultdict
 from pathlib import Path
 
 from analysis.time_buckets import TimeBuckets
+from cases.master_ha_failover.analysis import prefill_assignment_windows
+from cases.master_ha_failover.state_contract import STATE_FIELDS
 from file_io import read_json
 from monitoring.contracts import MetricUnavailable
 from monitoring.metric_store import series_row
-
-from cases.master_ha_failover.analysis import prefill_assignment_windows
-from cases.master_ha_failover.state_contract import STATE_FIELDS
 
 
 def _artifacts(payload, *, require_states=True):
@@ -84,9 +83,8 @@ def _prefill_balance_series(rows, anchor, fleet_size):
     return values
 
 
-from monitoring.measurement_descriptions import MeasurementDescription, MeasurementDescriptions
-
 from cases.master_ha_failover.analysis import HA_METRICS, measure_client_metric
+from monitoring.measurement_descriptions import MeasurementDescription, MeasurementDescriptions
 
 _DESCRIPTIONS = MeasurementDescriptions(
     {
@@ -178,6 +176,7 @@ def produce(directory, payload):
                 else None,
                 fleet_size=fleet_size or None,
             ),
+            describe=CONTRACTS["ha_evidence"],
         )
     store.save(directory)
     return dict(
@@ -216,6 +215,7 @@ def _project_gate(store, stage, check):
         [current],
         producer="ha_gates",
         evidence=dict(evidence, check=stage["id"] + "." + check["id"]),
+        describe=CONTRACTS["ha_gates"],
     )
     store.document["metrics"][identity] = observations + store.document["metrics"][identity]
 

@@ -34,7 +34,7 @@ def metric_curves(directory, evidence, result, presentation=None):
 
     freeze_metrics(directory, "master_performance")
     produce(directory, evidence, result)
-    from reporting.view_config import view
+    from scenario.registry import view as view
 
     return prepare_curves(directory, evidence, presentation or view("master_performance.yaml"))
 
@@ -306,7 +306,7 @@ class PerformanceGateTest(unittest.TestCase):
             curves, audit = prepare(d, e, analyze(e))
             self.assertTrue(audit["available"])
             from cases.master_performance.panels import report_panels
-            from reporting.view_config import view
+            from scenario.registry import view as view
 
             panels = report_panels(curves, e["criteria"], view("master_performance.yaml"))
             engine = next(p for p in panels if p["id"] == "engine-tps")
@@ -336,7 +336,7 @@ class PerformanceGateTest(unittest.TestCase):
         from cases.master_performance.panels import report_panels
 
         prepare = metric_curves
-        from reporting.view_config import view
+        from scenario.registry import view as view
 
         e = evidence()
         with tempfile.TemporaryDirectory() as d:
@@ -369,7 +369,7 @@ class PerformanceGateTest(unittest.TestCase):
         from cases.master_performance.panels import report_panels
 
         prepare = metric_curves
-        from reporting.view_config import view
+        from scenario.registry import view as view
 
         e = evidence()
         with tempfile.TemporaryDirectory() as d:
@@ -451,7 +451,7 @@ class PerformanceGateTest(unittest.TestCase):
 
     def test_request_curve_label_comes_from_yaml_presentation(self):
         from cases.master_performance.panels import report_panels
-        from reporting.view_config import view
+        from scenario.registry import view as view
 
         prepare = metric_curves
 
@@ -556,7 +556,7 @@ class PerformanceGateTest(unittest.TestCase):
             curves, audit = prepare(root, e, analyze(e))
             self.assertTrue(audit["available"])
             from cases.master_performance.panels import report_panels
-            from reporting.view_config import view
+            from scenario.registry import view as view
 
             panels = report_panels(curves, e["criteria"], view("master_performance.yaml"))
             self.assertTrue(all(not c["hidden"] for p in panels for c in p["series"]))

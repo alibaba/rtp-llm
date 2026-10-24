@@ -5,11 +5,12 @@ from pathlib import Path
 from unittest.mock import patch
 
 import pytest
+
 from reporting import read_bundle, run_meta, write_bundle
 from reporting.comparison import compare
 from reporting.curves import materialize, project_panels
 from reporting.gate_lines import Threshold, apply_gate_lines
-from reporting.view_config import view
+from scenario.registry import view as view
 
 CURVE = "mock/rtp_llm_context_tps_engine_mean/P"
 REFERENCE = "mock/rtp_llm_context_tps"

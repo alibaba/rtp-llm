@@ -11,12 +11,12 @@ from unittest.mock import Mock, patch
 from adapters.master_evidence import endpoint_loads
 from cases.master_ha_failover import actions as ha
 from cases.master_ha_failover.client import HaReplayClient
+from ha_fixtures import client_resource, replay_source, replay_trace
 from monitoring.probe import evidence_collector
-from monitoring.query_plan import load_plan
 from scenario.actions import master
 from scenario.contracts import PlanContext
+from scenario.registry import load_metric_plan as load_plan
 from scenario.runtime import Deadline, RuntimeContext
-from tests.ha_fixtures import client_resource, replay_source, replay_trace
 
 
 class MasterActionsTest(unittest.TestCase):
@@ -249,7 +249,7 @@ class MasterActionsTest(unittest.TestCase):
             time.monotonic,
             time.sleep,
         )
-        from monitoring.session import PrometheusSession
+        from metric_fixtures import PrometheusSession
 
         self.ctx.monitor = PrometheusSession(
             self.tmp.name,

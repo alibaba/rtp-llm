@@ -7,14 +7,15 @@ from pathlib import Path
 from unittest.mock import patch
 
 import pytest
+
 from analysis.request_metrics import RequestLedger, describe_calculation
 from cases.master_performance.analysis import analyze
 from cases.master_performance.metrics import produce, values
 from document_io import DocumentError as ScenarioError
+from metric_fixtures import publish
 from monitoring.contracts import MetricContractError
 from monitoring.metric_store import MetricStore, series_row
-from monitoring.publication import publish
-from monitoring.query_plan import load_plan
+from scenario.registry import load_metric_plan as load_plan
 
 ROOT = Path(__file__).resolve().parents[1]
 

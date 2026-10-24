@@ -1,7 +1,6 @@
 """Bind report views to declared monitoring metrics at the integration boundary."""
 
 from input_contract import fail
-
 from monitoring import query_plan
 
 
@@ -34,8 +33,8 @@ def validate_monitoring_policy(path, data, plan, fail):
         fail(path, "invalid diagnostic_only metrics")
 
 
-def validate_view_metrics(path, data, definition):
-    plan = query_plan.load_plan(data["metrics"]["query_plan"]) if "metrics" in data else None
+def validate_view_metrics(path, data, definition, *, plan_loader=None):
+    plan = (plan_loader or query_plan.load_plan)(data["metrics"]["query_plan"]) if "metrics" in data else None
     if "curves" in data.get("charts", {}):
         if plan is None:
             fail(path, "curves require metrics.query_plan")

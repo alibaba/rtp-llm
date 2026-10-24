@@ -19,15 +19,14 @@ import uuid
 from pathlib import Path
 
 from file_io import read_json, write_json
-from runtime.cleanup import cleanup_all
-from runtime.deadline import Deadline
-from runtime.startup import startup_deadline, wait_ready
-
 from monitoring.archive import export_metrics
 from monitoring.client import PrometheusClient
 from monitoring.collection_plan import collection_plan, scrape_job
 from monitoring.query_plan import DEFAULT_PLAN, load_plan, plan_hash
 from monitoring.recording import ArchiveWindow, record_queries
+from runtime.cleanup import cleanup_all
+from runtime.deadline import Deadline
+from runtime.startup import startup_deadline, wait_ready
 
 
 def _available_port():
@@ -47,7 +46,9 @@ class PrometheusSession:
         query_plan=DEFAULT_PLAN,
         target_kinds=None,
         metric_plan=None,
+        sources=None,
     ):
+        self.sources = {} if sources is None else sources
         self.directory = Path(directory).resolve()
         self.query_plan_name = query_plan
         self.query_plan = metric_plan if metric_plan is not None else load_plan(query_plan)
@@ -56,7 +57,7 @@ class PrometheusSession:
             raise ValueError("target kinds must identify every Prometheus target")
         self.targets = {name: url for name, url in targets.items() if self.collects(kinds[name])}
         self.target_kinds = {name: kinds[name] for name in self.targets}
-        self.collection_plan = collection_plan(self.query_plan)
+        self.collection_plan = collection_plan(self.query_plan, self.sources)
         self.query_plan_sha256 = plan_hash(self.query_plan)
         self.interval, self.max_gap = float(interval_s), float(max_gap_s)
         if not math.isfinite(self.max_gap) or not 0.001 <= self.interval <= self.max_gap:

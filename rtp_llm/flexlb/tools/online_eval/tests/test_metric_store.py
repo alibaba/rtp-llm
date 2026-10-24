@@ -7,12 +7,13 @@ from pathlib import Path
 from unittest.mock import patch
 
 from document_io import DocumentError as ScenarioError
+from metric_fixtures import publish
 from monitoring.archive import export_metrics
 from monitoring.contracts import MetricContractError, MetricUnavailable
 from monitoring.metric_store import MetricStore
-from monitoring.publication import publish
-from monitoring.query_plan import load_plan, plan_hash
+from monitoring.query_plan import plan_hash
 from reporting.metric_binding import bindings
+from scenario.registry import load_metric_plan as load_plan
 
 
 def definition(**kwargs):
@@ -132,7 +133,7 @@ class MetricPlanTest(unittest.TestCase):
                     load_plan("case.yaml")
 
     def test_live_raw_reader_preserves_scrape_clock_and_checks_labels(self):
-        from monitoring.session import PrometheusSession
+        from metric_fixtures import PrometheusSession
 
         session = PrometheusSession(
             "unused",

@@ -7,6 +7,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 import pytest
+
 from artifacts.archive import create_archive
 from monitoring.metric_store import MetricStore
 from program_fixtures import compile_scenarios
@@ -218,8 +219,8 @@ def test_failed_publication_preserves_existing_primary_and_removes_temporary(tmp
 
 
 def test_unrendered_default_view_uses_frozen_declaration_and_metrics(tmp_path):
-    from reporting.view_config import view
     from reporting.workload import build_spec
+    from scenario.registry import view as view
     from test_workload_report_views import payload
 
     key = "1/mock/count/{}"

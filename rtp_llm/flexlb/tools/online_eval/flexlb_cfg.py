@@ -213,7 +213,9 @@ class PreemptionPolicy:
                 raise ValueError("preemption.timeout_ms must be a positive integer")
 
     @classmethod
-    def from_input(cls, value: dict) -> PreemptionPolicy:
+    def from_input(cls, value: object) -> PreemptionPolicy:
+        if not isinstance(value, dict):
+            raise TypeError("preemption must be a mapping")
         unknown = set(value) - {"allowed_victim_stages", "timeout_ms"}
         if unknown:
             raise ValueError(f"unknown preemption keys: {sorted(unknown)}")
@@ -227,7 +229,7 @@ class PreemptionPolicy:
         return cls(tuple(value.get("allowedVictimStages") or ()), value.get("timeoutMs"))
 
     def to_json(self) -> dict:
-        result = {"allowedVictimStages": list(self.allowed_victim_stages)}
+        result: dict = {"allowedVictimStages": list(self.allowed_victim_stages)}
         if self.timeout_ms is not None:
             result["timeoutMs"] = self.timeout_ms
         return result
@@ -253,7 +255,7 @@ class PriorityOrdering:
             raise TypeError("preemption must be a PreemptionPolicy")
 
     def to_json(self) -> dict:
-        result = {"type": "PRIORITY"}
+        result: dict = {"type": "PRIORITY"}
         if self.default_priority is not None:
             result["defaultPriority"] = self.default_priority
         if self.preemption is not None:

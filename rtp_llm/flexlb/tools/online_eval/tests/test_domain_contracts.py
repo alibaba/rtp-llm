@@ -5,6 +5,7 @@ from dataclasses import FrozenInstanceError
 from unittest.mock import patch
 
 import pytest
+
 from document_io import DocumentError as ScenarioError
 from program_fixtures import ScenarioCompiler
 from scenario.backend_spec import make_env_spec
@@ -121,7 +122,7 @@ def test_freezing_preserves_collection_definition_order(tmp_path):
     from pathlib import Path
 
     from document_io import load_document
-    from monitoring.collection_plan import instance_plan
+    from metric_fixtures import instance_plan
     from scenario.catalog import handlers
     from scenario.program_compiler import configure_program
 

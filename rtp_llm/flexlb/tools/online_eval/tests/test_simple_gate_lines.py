@@ -3,10 +3,11 @@
 import copy
 
 import pytest
+
 from reporting.curves import materialize, project_panels
 from reporting.gate_lines import Threshold, apply_gate_lines
-from reporting.view_config import view
 from reporting.view_model import ViewDefinition
+from scenario.registry import view as view
 
 
 def test_overlay_preserves_observations_clock_and_scales_threshold_once():

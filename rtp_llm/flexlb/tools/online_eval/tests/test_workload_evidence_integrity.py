@@ -3,10 +3,10 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from ha_fixtures import client_resource
 from scenario.measurement import analyze_evidence
 from scenario.outcome import apply_outcome
 from scenario.run_result import WorkloadResult
-from tests.ha_fixtures import client_resource
 
 
 def analyze_report(directory, result, evidence):

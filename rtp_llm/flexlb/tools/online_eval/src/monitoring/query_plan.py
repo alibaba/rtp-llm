@@ -5,12 +5,11 @@ from pathlib import Path
 
 from document_io import DocumentError as ScenarioError
 from document_io import load_document
-from schema_contract import matches_schema
-
 from monitoring.contracts import validate_measurement
 from monitoring.identity import METRIC_ID, NAME, SOURCE_KINDS
 from monitoring.measurement_contract import output_contract
 from monitoring.sources import selected_sources
+from schema_contract import matches_schema
 
 CATALOG = Path(__file__).resolve().parents[2] / "config/monitoring"
 DEFAULT_PLAN = "default.yaml"
@@ -20,7 +19,7 @@ _TOKENS = re.compile(r"\$\{([^}]+)\}")
 PLAN_VERSION = 5
 
 
-def load_plan(name, _stack=()):
+def load_plan(name, _stack=(), *, contracts=None, sources=None):
     """Compose data-only metric sets; duplicate IDs and include cycles are errors."""
     if not isinstance(name, str) or not _PLAN.fullmatch(name):
         raise ScenarioError("monitoring.query_plan must name a file in config/monitoring")
@@ -32,23 +31,24 @@ def load_plan(name, _stack=()):
         data, "metric_plan_schema_version", PLAN_VERSION
     ):
         raise ScenarioError(f"{path}: invalid query plan header")
+    source_bindings = sources
     sources = {kind: {} for kind in SOURCE_KINDS}
     produced = {}
     includes = _unique_strings(data.get("include", []), path, "include must contain unique metric set filenames")
     for included in includes:
-        plan = load_plan(included, (*_stack, name))
+        plan = load_plan(included, (*_stack, name), contracts=contracts, sources=source_bindings)
         for kind in SOURCE_KINDS:
             _merge(sources[kind], plan["sources"][kind], path, f"metric id {kind}/")
         _merge(produced, plan["produced"], path, "produced metric id ")
     _add_sources(sources, data.get("sources", {}), path)
-    _add_produced(produced, data.get("produced", {}), path)
+    _add_produced(produced, data.get("produced", {}), path, contracts)
     _exclude(sources, produced, data.get("exclude", []), path)
     if not any(sources.values()) and not produced:
         raise ScenarioError(f"{path}: metric plan is empty")
     plan = dict(metric_plan_schema_version=PLAN_VERSION, sources=sources, produced=produced)
     definitions(plan)
     try:
-        selected_sources(plan)
+        selected_sources(plan, source_bindings)
     except ValueError as exc:
         raise ScenarioError(f"{path}: {exc}") from exc
     return plan
@@ -128,16 +128,16 @@ def _validate_query(spec, kind, metric, path):
     return spec
 
 
-def _add_produced(produced, own, path):
+def _add_produced(produced, own, path, contracts):
     if not isinstance(own, dict):
         raise ScenarioError(f"{path}: produced must be a mapping")
     for metric, spec in own.items():
         if metric in produced:
             raise ScenarioError(f"{path}: invalid produced metric {metric}")
-        produced[metric] = _validate_produced(spec, metric, path)
+        produced[metric] = _validate_produced(spec, metric, path, contracts)
 
 
-def _validate_produced(spec, metric, path):
+def _validate_produced(spec, metric, path, contracts):
     if isinstance(spec, dict):
         spec = dict(spec, labels=spec.get("labels", []))
     if (
@@ -153,7 +153,7 @@ def _validate_produced(spec, metric, path):
         raise ScenarioError(f"{path}: invalid produced metric {metric}")
     _metadata(spec, path)
     try:
-        contract = output_contract(metric, spec)
+        contract = output_contract(metric, spec, contracts or {})
     except ValueError as exc:
         raise ScenarioError(f"{path}: {exc}") from exc
     return dict(

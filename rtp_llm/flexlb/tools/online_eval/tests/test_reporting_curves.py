@@ -1,9 +1,11 @@
 """Selected reports preserve missing-data semantics independently of case logic."""
 
 import copy
+from pathlib import Path
 from unittest import mock
 
 import pytest
+
 from reporting.curves import materialize, project_panels
 from reporting.view_model import CurvePresentation, ViewDefinition
 from scenario import registry
@@ -78,7 +80,7 @@ def test_materialization_and_projection_keep_labels_scaling_provenance_and_order
 
 def test_configuration_gate_lines_do_not_hide_missing_measurements():
     from cases.master_performance.panels import report_panels
-    from reporting.view_config import view
+    from scenario.registry import view as view
 
     config = view("master_performance.yaml")
     raw = config.to_dict()
@@ -95,11 +97,11 @@ def test_configuration_gate_lines_do_not_hide_missing_measurements():
 @pytest.mark.parametrize(
     "declaration",
     [
-        {"default.yaml": registry.ReportView(lambda *args: None, lambda *args: None)},
-        {"bad/path.yaml": registry.ReportView(lambda *args: None, lambda *args: None)},
-        {"extra.yaml": registry.ReportView("invalid", lambda *args: None)},
-        {"extra.yaml": registry.ReportView(lambda *args: None, "invalid")},
-        {"extra.yaml": registry.ReportView(lambda *args: None, None)},
+        {"default.yaml": registry.ReportView(lambda *args: None, lambda *args: Path("unused"))},
+        {"bad/path.yaml": registry.ReportView(lambda *args: None, lambda *args: Path("unused"))},
+        {"extra.yaml": registry.ReportView("invalid", lambda *args: None)},  # type: ignore[arg-type]  # Deliberately malformed capability.
+        {"extra.yaml": registry.ReportView(lambda *args: None, "invalid")},  # type: ignore[arg-type]  # Deliberately malformed capability.
+        {"extra.yaml": registry.ReportView(lambda *args: None, None)},  # type: ignore[arg-type]  # Deliberately malformed capability.
         [],
     ],
 )
@@ -117,7 +119,7 @@ def test_two_registered_programs_cannot_assign_conflicting_view_capabilities():
     definitions = [
         registry.CaseDefinition(
             {"default": lambda case: None},
-            report_views={"extra.yaml": registry.ReportView(lambda *args: None, lambda *args: None)},
+            report_views={"extra.yaml": registry.ReportView(lambda *args: None, lambda *args: Path("unused"))},
         )
         for _ in range(2)
     ]
@@ -130,7 +132,7 @@ def test_shared_capability_can_be_reused_by_registered_programs():
 
     definition = registry.CaseDefinition(
         {"default": lambda case: None},
-        report_views={"extra.yaml": registry.ReportView(lambda *args: None, lambda *args: None)},
+        report_views={"extra.yaml": registry.ReportView(lambda *args: None, lambda *args: Path("unused"))},
     )
     with mock.patch.object(registry, "_snapshot", snapshot(entry("a", definition), entry("b", definition))):
         assert registry.view_capabilities() == definition.report_views
@@ -171,8 +173,8 @@ def test_selected_presets_and_visibility_reach_the_html(tmp_path):
 @pytest.mark.parametrize("name", ["cache_scale_in", "master_performance", "master_ha_failover"])
 def test_catalog_additions_do_not_force_unused_collection(name):
     from document_io import DocumentError as ScenarioError
-    from monitoring.query_plan import load_plan
-    from reporting.view_config import view
+    from scenario.registry import load_metric_plan as load_plan
+    from scenario.registry import view as view
 
     data = view(name + ".yaml").to_dict()
     plan = load_plan(name + ".yaml")
@@ -191,7 +193,7 @@ def test_catalog_additions_do_not_force_unused_collection(name):
 @pytest.mark.parametrize("name", ["cache_scale_in", "master_performance", "master_ha_failover"])
 def test_frozen_archive_cannot_silently_discard_unclassified_queries(name, tmp_path):
     from reporting.metric_binding import monitoring_audit
-    from reporting.view_config import view
+    from scenario.registry import view as view
 
     config = view(name + ".yaml")
     from metric_fixtures import freeze_metrics
@@ -207,7 +209,7 @@ def test_frozen_archive_cannot_silently_discard_unclassified_queries(name, tmp_p
 
 
 def test_ha_removes_queries_without_consumers_but_keeps_produced_measurements():
-    from monitoring.query_plan import load_plan
+    from scenario.registry import load_metric_plan as load_plan
 
     plan = load_plan("master_ha_failover.yaml")
     removed = {"arrivals_qps", "dispatch_qps", "schedule_responses_qps", "flexlb_app_flexlb_batcher_queue_size"}
@@ -218,7 +220,7 @@ def test_ha_removes_queries_without_consumers_but_keeps_produced_measurements():
 
 def test_unused_curve_declaration_cannot_masquerade_as_presentation():
     from document_io import DocumentError as ScenarioError
-    from reporting.view_config import view
+    from scenario.registry import view as view
 
     data = view("master_performance.yaml").to_dict()
     data["charts"]["curves"]["unused"] = dict(next(iter(data["charts"]["curves"].values())))
@@ -229,7 +231,7 @@ def test_unused_curve_declaration_cannot_masquerade_as_presentation():
 
 def test_performance_presets_include_configuration_lines_without_validating_missing_data():
     from cases.master_performance.panels import report_panels
-    from reporting.view_config import view
+    from scenario.registry import view as view
 
     config = view("master_performance.yaml").to_dict()
     descriptor = next(p for p in config["charts"]["panels"] if p["id"] == "engine-tps")
@@ -247,8 +249,8 @@ def test_performance_presets_include_configuration_lines_without_validating_miss
 
 @pytest.mark.parametrize("name", ["cache_scale_in", "master_performance", "master_ha_failover"])
 def test_unused_produced_capability_is_omitted_and_frozen_unclassified_output_rejected(name, tmp_path):
-    from monitoring.query_plan import load_plan
-    from reporting.view_config import view
+    from scenario.registry import load_metric_plan as load_plan
+    from scenario.registry import view as view
 
     plan = load_plan(name + ".yaml")
     definition = next(d for d in plan["produced"].values() if d["value_kind"] == "gauge")

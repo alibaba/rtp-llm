@@ -107,7 +107,7 @@ class JavaMockBudget:
         )
 
     @classmethod
-    def from_metadata(cls, raw: dict) -> JavaMockBudget:
+    def from_metadata(cls, raw: object) -> JavaMockBudget:
         """Validate compiler resource_budget v1 before opening any lease."""
         fixed = {
             "backend": "java_mock",

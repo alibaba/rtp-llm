@@ -7,14 +7,15 @@ from pathlib import Path
 
 import pytest
 import yaml
+
 from monitoring.contracts import MetricContractError
 from monitoring.metric_store import MetricStore
-from monitoring.query_plan import load_plan
 from reporting import load_analysis, read_bundle, write_bundle
 from reporting.spec import validate
 from scenario import ScenarioError
 from scenario.instance_plan import InstancePlanError, parse_catalog
 from scenario.program_compiler import configure_program
+from scenario.registry import load_metric_plan as load_plan
 
 ROOT = Path(__file__).resolve().parents[1]
 

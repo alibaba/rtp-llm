@@ -51,10 +51,10 @@ def test_real_prometheus_retries_an_occupied_port_within_the_same_budget(tmp_pat
         thread.join(timeout=2)
 
 
+from metric_fixtures import PrometheusSession
 from monitoring.collection_plan import select_plan
 from monitoring.probe import evidence_collector
-from monitoring.query_plan import load_plan
-from monitoring.session import PrometheusSession
+from scenario.registry import load_metric_plan as load_plan
 
 
 def wait_for(predicate):

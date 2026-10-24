@@ -1,16 +1,14 @@
 """Resolve registered metric contracts without loading stores or running producers."""
 
-from scenario.registry import registry
-
 from monitoring.contracts import validate_measurement
 
 
-def output_contract(metric_id, spec):
+def output_contract(metric_id, spec, contracts):
     """Resolve executable capabilities, not user-provided measurement labels."""
     producer = spec["producer"]
-    if producer not in registry().metric_contracts:
+    if producer not in contracts:
         raise ValueError("unknown metric producer " + str(producer))
-    describe = registry().metric_contracts[producer]
+    describe = contracts[producer]
     contract = describe(producer, metric_id, spec.get("calculation"))
     for key, value in contract.items():
         if key not in {"measurement", "collection", "implementation"} and spec.get(key) != value:

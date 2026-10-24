@@ -76,3 +76,13 @@ forbidden_modules =
     adapters
     analysis
     traffic
+
+[importlinter:contract:capabilities]
+name = 采集与报告不查执行注册表
+type = forbidden
+source_modules =
+    monitoring
+    reporting
+forbidden_modules =
+    scenario
+    cases

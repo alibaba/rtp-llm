@@ -1,4 +1,0 @@
-target-version = "py39"
-
-[lint]
-select = ["F", "E9"]

@@ -7,13 +7,15 @@ from io import BytesIO
 from unittest.mock import Mock, patch
 
 import pytest
+
 from file_io import write_json
+from metric_fixtures import PrometheusSession
 from monitoring.archive import export_metrics
 from monitoring.contracts import MetricContractError
 from monitoring.metric_store import MetricStore
-from monitoring.query_plan import load_plan, queries_for_targets
-from monitoring.session import PrometheusSession
+from monitoring.query_plan import queries_for_targets
 from runtime.deadline import Deadline
+from scenario.registry import load_metric_plan as load_plan
 
 
 def test_declaration_and_frozen_reader_imports_do_not_load_runtime():
@@ -65,7 +67,7 @@ def test_query_client_is_independent_and_sees_registered_sources():
 
 
 def test_source_selection_is_independent_of_definition_order():
-    from monitoring.sources import selected_sources
+    from metric_fixtures import selected_sources
 
     plan = load_plan("master_ha_failover.yaml")
     before = selected_sources(plan)
@@ -302,7 +304,7 @@ def publication_store(tmp_path):
     ],
 )
 def test_invalid_published_identity_preserves_store_and_artifact(tmp_path, change):
-    from monitoring.publication import publish
+    from metric_fixtures import publish
 
     store, spec = publication_store(tmp_path)
     previous = (tmp_path / "metrics.json").read_bytes()
@@ -317,7 +319,7 @@ def test_invalid_published_identity_preserves_store_and_artifact(tmp_path, chang
 
 
 def test_invalid_publication_evidence_is_rejected_before_mutation(tmp_path):
-    from monitoring.publication import publish
+    from metric_fixtures import publish
 
     store, spec = publication_store(tmp_path)
     with pytest.raises(MetricContractError, match="metadata"):
@@ -333,8 +335,8 @@ def test_invalid_publication_evidence_is_rejected_before_mutation(tmp_path):
 
 
 def test_save_revalidates_mutated_document_before_replacing_artifact(tmp_path):
+    from metric_fixtures import publish
     from monitoring.metric_store import frozen_metric_reads
-    from monitoring.publication import publish
 
     store, spec = publication_store(tmp_path)
     publish(

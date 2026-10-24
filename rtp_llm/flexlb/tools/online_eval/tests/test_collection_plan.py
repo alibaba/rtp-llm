@@ -1,3 +1,5 @@
+from scenario.registry import registry
+
 """Physical filtering and exceptional-source lifecycle are independent of cases."""
 
 import json
@@ -6,12 +8,13 @@ from types import SimpleNamespace as NS
 from unittest.mock import Mock, patch
 
 import pytest
+
 from adapters.http_json import HttpJsonAdapter
 from document_io import DocumentError as ScenarioError
-from monitoring.collection_plan import collection_plan, physical_metrics, scrape_job
+from metric_fixtures import PrometheusSession, collection_plan
+from monitoring.collection_plan import physical_metrics, scrape_job
 from monitoring.probe import PrometheusEvidence, evidence_collector
-from monitoring.query_plan import load_plan
-from monitoring.session import PrometheusSession
+from scenario.registry import load_metric_plan as load_plan
 
 
 @pytest.mark.parametrize("name", ["cache_scale_in.yaml", "master_ha_failover.yaml", "master_performance.yaml"])
@@ -130,7 +133,7 @@ def test_registered_projection_reads_only_selected_fields(tmp_path):
         "master_inflight",
         env,
         tmp_path / "states.jsonl",
-        session=NS(interval=1, client=Mock()),
+        session=NS(sources=registry().sources, interval=1, client=Mock()),
         limits=dict(max_samples=10, max_bytes=10000),
     )
     with patch("urllib.request.urlopen", return_value=BytesIO(b"{}")):
@@ -143,7 +146,7 @@ def test_registered_projection_reads_only_selected_fields(tmp_path):
         "master_inflight",
         env,
         tmp_path / "states.jsonl",
-        session=NS(interval=1, client=Mock()),
+        session=NS(sources=registry().sources, interval=1, client=Mock()),
         limits=dict(max_samples=10, max_bytes=10000),
     )
     with patch("urllib.request.urlopen", return_value=BytesIO(b"{}")):
@@ -158,7 +161,7 @@ def test_unselected_adapter_cannot_start(tmp_path):
             "master_inflight",
             object(),
             tmp_path / "states.jsonl",
-            session=NS(interval=1, client=Mock()),
+            session=NS(sources=registry().sources, interval=1, client=Mock()),
             limits=dict(max_samples=10, max_bytes=10000),
         )
     assert not list(tmp_path.iterdir())
@@ -172,7 +175,7 @@ def test_probe_registration_does_not_read_and_only_scrapes_collect():
         fields={"queue"},
         label="target",
         source="example",
-        session=NS(interval=1, client=Mock()),
+        session=NS(sources=registry().sources, interval=1, client=Mock()),
         limits=dict(max_samples=1, max_bytes=1000),
         client=NS(interval=1, client=Mock()).client,
     )
@@ -193,7 +196,7 @@ def test_bad_probe_data_is_not_published_as_partial_or_zero(row):
         fields={"queue"},
         label="target",
         source="example",
-        session=NS(interval=1, client=Mock()),
+        session=NS(sources=registry().sources, interval=1, client=Mock()),
         limits=dict(max_samples=1, max_bytes=1000),
         client=NS(interval=1, client=Mock()).client,
     )

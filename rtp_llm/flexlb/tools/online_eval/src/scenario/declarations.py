@@ -8,9 +8,10 @@ from typing import Optional
 
 from document_io import DocumentError as ScenarioError
 from flexlb_cfg import PROFILES
-
 from scenario.config_data import data_only, mapping
-from scenario.execution_policy import DEFAULT_MONITORING, normalize_execution, normalize_metadata
+from scenario.execution_policy import ExecutionPolicy as ExecutionPolicy
+from scenario.execution_policy import MonitoringPolicy as MonitoringPolicy
+from scenario.execution_policy import normalize_metadata
 from scenario.validation import names
 
 
@@ -33,91 +34,6 @@ class VariantDeclaration:
                 raise ScenarioError(source + "." + name + ": expected mapping")
             groups[name] = copy.deepcopy(group)
         return cls(value.get("id"), value.get("program"), **groups, declaration=copy.deepcopy(value))
-
-
-@dataclass(frozen=True)
-class MonitoringPolicy:
-    capture_metrics: bool
-    sample_interval_s: float
-    max_sample_gap_s: float
-    collector_shutdown_s: float
-    query_plan: Optional[str]
-
-    @classmethod
-    def read(cls, value):
-        from scenario.validation import mapping
-
-        mapping(value, "execution.monitoring", set(DEFAULT_MONITORING) | {"query_plan"})
-        normalized = {**DEFAULT_MONITORING, **value}
-        return cls(
-            normalized["capture_metrics"],
-            normalized["sample_interval_s"],
-            normalized["max_sample_gap_s"],
-            normalized["collector_shutdown_s"],
-            normalized.get("query_plan"),
-        )
-
-    def __post_init__(self):
-        from scenario.validation import number
-
-        if type(self.capture_metrics) is not bool:
-            raise ScenarioError("execution.monitoring.capture_metrics must be boolean")
-        for name in ("sample_interval_s", "max_sample_gap_s", "collector_shutdown_s"):
-            value = number(getattr(self, name), "execution.monitoring." + name)
-            if value <= 0:
-                raise ScenarioError("invalid execution.monitoring budget: " + name)
-        if self.max_sample_gap_s < self.sample_interval_s:
-            raise ScenarioError("maximum sample gap is shorter than sampling interval")
-        if self.query_plan is not None and (type(self.query_plan) is not str or not self.query_plan):
-            raise ScenarioError("monitoring query plan must be a nonempty name")
-
-    def to_dict(self):
-        result = {name: getattr(self, name) for name in self.__dataclass_fields__ if name != "query_plan"}
-        if self.query_plan is not None:
-            result["query_plan"] = self.query_plan
-        return result
-
-
-@dataclass(frozen=True)
-class ExecutionPolicy:
-    collection: str
-    monitoring: MonitoringPolicy
-    timeout_s: Optional[float]
-    stage_timeout_s: Optional[float]
-    cleanup_timeout_s: Optional[float]
-    finalize_timeout_s: Optional[float]
-    report_timeout_s: Optional[float]
-    archive_timeout_s: Optional[float]
-
-    @classmethod
-    def read(cls, value, kind):
-        normalized = normalize_execution(value, kind=kind)
-        return cls(
-            normalized["collection"],
-            MonitoringPolicy.read(normalized["monitoring"]),
-            *(
-                normalized.get(name)
-                for name in (
-                    "timeout_s",
-                    "stage_timeout_s",
-                    "cleanup_timeout_s",
-                    "finalize_timeout_s",
-                    "report_timeout_s",
-                    "archive_timeout_s",
-                )
-            ),
-        )
-
-    def to_dict(self):
-        return {
-            "collection": self.collection,
-            "monitoring": self.monitoring.to_dict(),
-            **{
-                name: getattr(self, name)
-                for name in self.__dataclass_fields__
-                if name not in {"collection", "monitoring"} and getattr(self, name) is not None
-            },
-        }
 
 
 @dataclass(frozen=True)

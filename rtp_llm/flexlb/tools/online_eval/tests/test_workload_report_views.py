@@ -8,10 +8,13 @@ from cases.master_ha_failover.metrics import _prefill_balance_series
 from document_io import DocumentError as ScenarioError
 from document_io import load_document
 from reporting import load_analysis, read_bundle
-from reporting.view_config import DEFAULT_VIEW, declaration, view
-from reporting.workload import write_report, write_views
+from reporting.view_config import DEFAULT_VIEW
+from reporting.workload import write_report
 from reporting.workload_panels import build_panels
 from scenario.program_compiler import configure_program
+from scenario.registry import report_declaration as declaration
+from scenario.registry import view as view
+from scenario.registry import write_views as write_views
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -47,7 +50,7 @@ class WorkloadReportViewsTest(unittest.TestCase):
                 view("cache_scale_in.yaml")
 
     def test_unused_catalog_query_does_not_force_collection_or_presentation(self):
-        from monitoring.query_plan import load_plan
+        from scenario.registry import load_metric_plan as load_plan
 
         plan = load_plan("cache_scale_in.yaml")
         plan["sources"]["master"]["new_metric"] = {"promql": "new_metric${selector}"}

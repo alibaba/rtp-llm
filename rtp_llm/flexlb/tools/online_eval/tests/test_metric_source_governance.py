@@ -8,14 +8,16 @@ from pathlib import Path
 
 import pytest
 import yaml
+
 from cases.master_ha_failover.analysis import HA_METRICS, measure_client_metric
 from cases.master_performance.analysis import analyze
 from cases.master_performance.metrics import produce
 from cases.master_performance.panels import prepare_curves, report_panels
 from document_io import DocumentError as ScenarioError
 from monitoring.contracts import MetricContractError
-from monitoring.query_plan import load_plan, queries_for_targets
-from reporting.view_config import view
+from monitoring.query_plan import queries_for_targets
+from scenario.registry import load_metric_plan as load_plan
+from scenario.registry import view as view
 from test_performance_gate import evidence
 
 ROOT = Path(__file__).resolve().parents[1]

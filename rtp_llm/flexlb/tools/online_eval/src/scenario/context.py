@@ -1,12 +1,22 @@
 """Execution context binds a compiled instance to owned resources and stage outputs."""
 
+from __future__ import annotations
+
 import time
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from scenario.plan import CompiledInstance
 from pathlib import Path
 
 from scenario.resources import ResourceScope
 
 
 class RuntimeContext(ResourceScope):
+    plan: CompiledInstance
+    experiment_definition: dict
+    instance_deadline_s: float
+
     def __init__(
         self,
         instance,
@@ -17,6 +27,9 @@ class RuntimeContext(ResourceScope):
         enforce_deadlines=False,
         wall_clock=None,
     ):
+        from scenario.registry import registry
+
+        self.case_sources = registry().sources
         self.instance = instance
         self.backend = backend
         self.artifact_dir = Path(artifact_dir)

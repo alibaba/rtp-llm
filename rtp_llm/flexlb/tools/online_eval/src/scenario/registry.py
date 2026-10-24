@@ -11,7 +11,6 @@ from types import MappingProxyType
 from typing import Mapping
 
 from input_contract import validate_call
-
 from scenario.contracts import ExecutionRequirements, ProgramBuilder, SourceFactory, ViewRenderer, ViewValidator
 
 
@@ -217,3 +216,44 @@ def using_cases(names):
         yield
     finally:
         _snapshot = available
+
+
+def load_metric_plan(name, *, capabilities=None):
+    """Bind a declarative plan to the currently admitted case capabilities."""
+    from monitoring.query_plan import load_plan
+
+    current = registry() if capabilities is None else capabilities
+    return load_plan(name, contracts=current.metric_contracts, sources=current.sources)
+
+
+def view(name, *, capabilities=None):
+    """Compose case-owned validation with the generic presentation reader."""
+    from functools import partial
+
+    from reporting.view_config import view as read_view
+
+    current = registry() if capabilities is None else capabilities
+    return read_view(
+        name, capability=current.views.get(name), plan_loader=partial(load_metric_plan, capabilities=current)
+    )
+
+
+def _selected_views(names):
+    current = registry()
+    return {name: (view(name, capabilities=current), current.views.get(name)) for name in names}
+
+
+def write_views(directory, analysis, names=None, *, deadline=None, selected=None):
+    """Compose selected case views before entering the generic delivery layer."""
+    from reporting.workload import write_views as render
+
+    names = names or ["default.yaml"]
+    return render(
+        directory, analysis, names, deadline=deadline, selected=_selected_views(names) if selected is None else selected
+    )
+
+
+def report_declaration(value, *, kind, path="reports"):
+    from reporting.view_config import declaration
+
+    return declaration(value, kind=kind, path=path, view_loader=view)
