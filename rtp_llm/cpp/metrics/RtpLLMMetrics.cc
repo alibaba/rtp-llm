@@ -469,8 +469,6 @@ bool RtpLLMExecutorMetrics::init(kmonitor::MetricsGroupManager* manager) {
     REGISTER_GAUGE_MUTABLE_METRIC(sample_input_us_metric, "rtp_llm_sample_input_us");
     REGISTER_GAUGE_MUTABLE_METRIC(dispatch_output_us_metric, "rtp_llm_dispatch_output_us_metric");
 
-    REGISTER_GAUGE_MUTABLE_METRIC(eplb_step_latency_us_metric, "rtp_llm_eplb_step_latency_us");
-
     return true;
 }
 
@@ -491,7 +489,6 @@ void RtpLLMExecutorMetrics::report(const kmonitor::MetricsTags* tags, RtpLLMExec
     REPORT_GAUGE(model_forward_us);
     REPORT_GAUGE(sample_input_us);
     REPORT_GAUGE(dispatch_output_us);
-    REPORT_GAUGE(eplb_step_latency_us);
 }
 
 bool RtpLLMSpeculativeEngineMetrics::init(kmonitor::MetricsGroupManager* manager) {
@@ -962,10 +959,19 @@ bool RtpLLmEplbMetrics::init(kmonitor::MetricsGroupManager* manager) {
     REGISTER_QPS_MUTABLE_METRIC(update_layer_weights_qps_metric, "rtp_llm_update_layer_weights_qps");
     REGISTER_GAUGE_MUTABLE_METRIC(update_weights_latency_ms_metric, "rtp_llm_update_weights_latency_ms");
     REGISTER_GAUGE_MUTABLE_METRIC(gpu_loads_metric, "rtp_llm_gpu_loads");
+    REGISTER_GAUGE_MUTABLE_METRIC(step_latency_us_metric, "rtp_llm_eplb_step_latency_us");
+    REGISTER_GAUGE_MUTABLE_METRIC(moe_lb_metric, "rtp_llm_moe_lb");
     return true;
 }
 
 void RtpLLmEplbMetrics::report(const kmonitor::MetricsTags* tags, RtpLLmEplbMetricsCollector* collector) {
+    if (collector->step_latency_us >= 0) {
+        REPORT_MUTABLE_METRIC(step_latency_us_metric, collector->step_latency_us);
+    }
+    if (collector->moe_lb >= 0) {
+        REPORT_MUTABLE_METRIC(moe_lb_metric, collector->moe_lb);
+    }
+
     // ep stats metrics
     int  num_layer = collector->gpu_loads.size();
     auto ep_tag    = kmonitor::MetricsTags("ep_rank", std::to_string(collector->ep_rank));

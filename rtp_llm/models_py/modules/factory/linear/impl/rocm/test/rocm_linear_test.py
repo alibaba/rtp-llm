@@ -46,7 +46,7 @@ class FakeFusedMoe(nn.Module):
         tp_collective_size=1,
     )
 
-    def forward(self, hidden_states, **kwargs):
+    def forward(self, hidden_states, expert_load, **kwargs):
         return torch.zeros_like(hidden_states)
 
 
@@ -305,7 +305,7 @@ class LinearTest(TestCase):
             torch.allclose(actual_gate, expected_gate, atol=atol, rtol=rtol)
         )
 
-        actual = layer(hidden_states)
+        actual = layer(hidden_states, expert_load=None)
         expected = torch.sigmoid(expected_gate) * (hidden_states * 2)
         self.assertTrue(torch.allclose(actual, expected, atol=atol, rtol=rtol))
 

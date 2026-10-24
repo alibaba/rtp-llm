@@ -14,7 +14,9 @@
 namespace rtp_llm {
 
 // Forward declarations
-class ModelBase;
+class ExpertLoadMonitor;
+struct GptModelInitParams;
+struct Weights;
 
 struct EplbPlanBuffers {
     int           layer_id = -1;
@@ -89,29 +91,24 @@ public:
 
 class ExpertBalancer {
 public:
-    __attribute__((visibility("default"))) ExpertBalancer(size_t                       log_exp_num,
-                                                          size_t                       phy_exp_num,
-                                                          size_t                       num_layers,
-                                                          size_t                       moe_size,
-                                                          size_t                       hidden_size,
-                                                          size_t                       ep_rank,
-                                                          size_t                       ep_size,
-                                                          size_t                       world_size,
-                                                          py::object                   py_eplb,
-                                                          DataType                     dtype,
-                                                          QuantAlgo                    quant_algo,
-                                                          kmonitor::MetricsReporterPtr metrics_reporter,
-                                                          const EPLBConfig&            eplb_config);
+    __attribute__((visibility("default"))) ExpertBalancer(const std::optional<MoeConfigs>& moe,
+                                                          const GptModelInitParams&        params,
+                                                          Weights&                         weights,
+                                                          OverallExpertStats&              expert_stats);
     ~ExpertBalancer();
 
-    void stepForward(ModelBase& model, RtpLLMExecutorMetricsCollector& executor_collector);
+    void step(bool warmup = false);
 
     bool updateEplbConfig(const EPLBConfig& config);
+
+    const torch::Tensor& stable_expert_token_counts() const {
+        return expert_token_counts_;
+    }
 
 private:
     void syncController();
     void reportStats(OverallExpertStats& stats);
-    void excuteEplbPlan(OverallExpertStats& stats, ModelBase& model);
+    void excuteEplbPlan(OverallExpertStats& stats);
 
     void           setPlanStatus(EplbPlanStatus status);
     EplbPlanStatus getPlanStatus() const;
@@ -122,15 +119,20 @@ private:
     void loadPlanWeights();
     bool syncPlanWeightsLoadStatus();
     void processPlanWeights();
-    void applyPlanWeights(ModelBase& model);
+    void applyPlanWeights();
 
     // helpful functions
     void copyFromTensor(const torch::Tensor& src, torch::Tensor& dst);
     void copyToTensor(const torch::Tensor& src, torch::Tensor& dst);
 
 private:
-    size_t num_logic_experts_;
-    size_t num_physic_experts_;
+    Weights&                           weights_;
+    OverallExpertStats&                expert_stats_;
+    size_t                             num_logic_experts_   = 0;
+    size_t                             num_physic_experts_  = 0;
+    bool                               planner_initialized_ = false;
+    std::unique_ptr<ExpertLoadMonitor> load_monitor_;
+    torch::Tensor                      expert_token_counts_;
 
     EplbPlanStatus eplb_plan_status_ = EplbPlanStatus::INIT;
 
@@ -153,7 +155,7 @@ private:
     EplbController eplb_controller_;
     EPLBConfig     eplb_control_data_;
 
-    RtpLLmEplbMetricsCollector   executor_collector_;
+    RtpLLmEplbMetricsCollector   executor_collector_{};
     kmonitor::MetricsReporterPtr metrics_reporter_;
     ExpertBalancerPythonWrapper  eplb_python_wrapper_;
 

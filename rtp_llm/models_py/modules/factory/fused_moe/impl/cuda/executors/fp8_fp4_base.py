@@ -19,6 +19,7 @@ from rtp_llm.models_py.modules.factory.fused_moe.defs.quant_config import (
     FusedMoEQuantConfig,
 )
 from rtp_llm.models_py.modules.factory.fused_moe.defs.type import ExecutorType
+from rtp_llm.models_py.utils.expert_load_monitor import ExpertLoadContext
 
 
 def split_moe_w13_gate_up(
@@ -96,6 +97,7 @@ class Fp8Fp4ExecutorBase(FusedMoeExpertExecutor, torch.nn.Module):
         x: torch.Tensor,
         topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,
+        expert_load: Optional[ExpertLoadContext],
     ) -> torch.Tensor:
         raise NotImplementedError
 
@@ -103,6 +105,7 @@ class Fp8Fp4ExecutorBase(FusedMoeExpertExecutor, torch.nn.Module):
         self,
         x: torch.Tensor,
         gate_payload: ExpertGatePayload,
+        expert_load: Optional[ExpertLoadContext],
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """Return output plus the packed top-k weights and ids."""
 
@@ -142,6 +145,7 @@ class Fp8Fp4ExecutorBase(FusedMoeExpertExecutor, torch.nn.Module):
             output, topk_weights, topk_ids = self.forward_gate_pack(
                 payload.expert_x,
                 payload.gate_payload,
+                expert_load=payload.expert_load,
             )
             payload.expert_topk_weights = topk_weights
             payload.expert_topk_ids = topk_ids
@@ -155,6 +159,11 @@ class Fp8Fp4ExecutorBase(FusedMoeExpertExecutor, torch.nn.Module):
         return CombineForwardPayload(
             fused_expert_output=self._restore_output_dtype(
                 payload,
-                self.forward(payload.expert_x, topk_weights, topk_ids),
+                self.forward(
+                    payload.expert_x,
+                    topk_weights,
+                    topk_ids,
+                    expert_load=payload.expert_load,
+                ),
             )
         )

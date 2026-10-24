@@ -43,6 +43,7 @@ class ExpertBalancerPythonWrapper {
 public:
     ExpertBalancerPythonWrapper() = default;
     ExpertBalancerPythonWrapper(py::object py_eplb);
+    ~ExpertBalancerPythonWrapper();
 
     void createBalancePlan(torch::Tensor& log_stats, torch::Tensor& gpu_loads, EplbPlanTensors& eplb_plan);
 

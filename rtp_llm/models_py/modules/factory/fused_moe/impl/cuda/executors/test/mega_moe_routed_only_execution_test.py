@@ -305,9 +305,13 @@ def _worker(
                     # avoiding meaningless error amplification when tiny FP4
                     # differences select a different next-layer expert.
                     layer_input = actual
-                    expected = reference_layer(layer_input, input_ids).clone()
+                    expected = reference_layer(
+                        layer_input, input_ids=input_ids, expert_load=None
+                    ).clone()
                     _sync_ranks_for_mega(device)
-                    actual = mega_layer(layer_input, input_ids).clone()
+                    actual = mega_layer(
+                        layer_input, input_ids=input_ids, expert_load=None
+                    ).clone()
         torch.cuda.synchronize(device)
         dist.barrier()
 
@@ -333,19 +337,21 @@ def _worker(
         graph_x = torch.randn(2, _DIM, dtype=torch.bfloat16, device=device)
         graph_ids = torch.arange(2, dtype=torch.long, device=device)
         with torch.inference_mode():
-            reference(graph_x, graph_ids)
+            reference(graph_x, input_ids=graph_ids, expert_load=None)
             _sync_ranks_for_mega(device)
-            mega(graph_x, graph_ids)
+            mega(graph_x, input_ids=graph_ids, expert_load=None)
         torch.cuda.synchronize(device)
         _sync_ranks_for_mega(device)
         graph = torch.cuda.CUDAGraph()
         with torch.inference_mode(), torch.cuda.graph(graph):
-            graph_actual = mega(graph_x, graph_ids)
+            graph_actual = mega(graph_x, input_ids=graph_ids, expert_load=None)
         torch.manual_seed(20261200 + rank)
         graph_x.copy_(torch.randn_like(graph_x))
         graph_ids.copy_(torch.arange(1, -1, -1, dtype=torch.long, device=device))
         with torch.inference_mode():
-            graph_expected = reference(graph_x, graph_ids).clone()
+            graph_expected = reference(
+                graph_x, input_ids=graph_ids, expert_load=None
+            ).clone()
             graph_actual.fill_(float("nan"))
         assert torch.isnan(graph_actual).all()
         _sync_ranks_for_mega(device)
@@ -465,10 +471,10 @@ def _se_worker(
         x = torch.randn(tokens, _DIM, dtype=torch.bfloat16, device=device)
         input_ids = torch.arange(tokens, dtype=torch.long, device=device)
         with torch.inference_mode():
-            expected = reference(x, input_ids).clone()
+            expected = reference(x, input_ids=input_ids, expert_load=None).clone()
         _sync_ranks_for_mega(device)
         with torch.inference_mode():
-            actual = mega_se(x, input_ids)
+            actual = mega_se(x, input_ids=input_ids, expert_load=None)
         torch.cuda.synchronize(device)
         dist.barrier()
 
@@ -490,19 +496,21 @@ def _se_worker(
         graph_x = torch.randn(2, _DIM, dtype=torch.bfloat16, device=device)
         graph_ids = torch.arange(2, dtype=torch.long, device=device)
         with torch.inference_mode():
-            reference(graph_x, graph_ids)
+            reference(graph_x, input_ids=graph_ids, expert_load=None)
             _sync_ranks_for_mega(device)
-            mega_se(graph_x, graph_ids)
+            mega_se(graph_x, input_ids=graph_ids, expert_load=None)
         torch.cuda.synchronize(device)
         _sync_ranks_for_mega(device)
         graph = torch.cuda.CUDAGraph()
         with torch.inference_mode(), torch.cuda.graph(graph):
-            graph_actual = mega_se(graph_x, graph_ids)
+            graph_actual = mega_se(graph_x, input_ids=graph_ids, expert_load=None)
         torch.manual_seed(20263300 + rank)
         graph_x.copy_(torch.randn_like(graph_x))
         graph_ids.copy_(torch.arange(1, -1, -1, dtype=torch.long, device=device))
         with torch.inference_mode():
-            graph_expected = reference(graph_x, graph_ids).clone()
+            graph_expected = reference(
+                graph_x, input_ids=graph_ids, expert_load=None
+            ).clone()
             graph_actual.fill_(float("nan"))
         assert torch.isnan(graph_actual).all()
         _sync_ranks_for_mega(device)

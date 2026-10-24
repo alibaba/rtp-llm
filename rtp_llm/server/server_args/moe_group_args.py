@@ -172,6 +172,31 @@ def init_moe_group_args(parser, moe_config, eplb_config, deep_ep_config):
         help="负载均衡的统计窗口大小",
     )
     moe_group.add_argument(
+        "--eplb_metrics_report_interval",
+        env_name="EPLB_METRICS_REPORT_INTERVAL",
+        bind_to=(eplb_config, "eplb_metrics_report_interval"),
+        type=int,
+        default=-1,
+        help=(
+            "每 W 次大模型 prefill/decode forward 同步汇报 DeepInfer 口径的 moe_lb；"
+            "投机解码仅统计 target verify，不统计 draft；"
+            "默认 -1 按角色选择 prefill 100 步、decode/fusion 1000 步，"
+            "0 关闭，其他值必须大于 0；独立于 EPLB_MODE。"
+            "不支持的设备或并行拓扑会告警并跳过监控；dense 保留空窗口 moe_lb=1。"
+        ),
+    )
+    moe_group.add_argument(
+        "--eplb_metrics_snapshot_max_files",
+        env_name="EPLB_METRICS_SNAPSHOT_MAX_FILES",
+        bind_to=(eplb_config, "eplb_metrics_snapshot_max_files"),
+        type=int,
+        default=0,
+        help=(
+            "每个模型实例循环覆盖保留的专家激活量窗口快照数；0 关闭（默认），"
+            "开启后写入 LOG_PATH/eplb_snapshot，LOG_PATH 默认 logs。"
+        ),
+    )
+    moe_group.add_argument(
         "--masked_max_token_num",
         env_name="MASKED_MAX_TOKEN_NUM",
         bind_to=(moe_config, "masked_max_token_num"),

@@ -1115,7 +1115,11 @@ class TrtllmFp4ExecutorTest(unittest.TestCase):
                                 0, 256, cols // 2, dtype=torch.uint8, device=device
                             ),
                             torch.empty(
-                                0, 256, cols // 16, dtype=torch.float8_e4m3fn, device=device
+                                0,
+                                256,
+                                cols // 16,
+                                dtype=torch.float8_e4m3fn,
+                                device=device,
                             ),
                             (0, 256, cols),
                             findices,

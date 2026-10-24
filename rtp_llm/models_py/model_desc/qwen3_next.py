@@ -1473,7 +1473,10 @@ class Qwen3NextDecoderLayer(nn.Module):
 
         hidden_states, residual = self.post_attention_layernorm(hidden_states, residual)
 
-        hidden_states = self.mlp(hidden_states)
+        if isinstance(self.mlp, GenericMoeLayer):
+            hidden_states = self.mlp(hidden_states, expert_load=None)
+        else:
+            hidden_states = self.mlp(hidden_states)
 
         return hidden_states, residual
 

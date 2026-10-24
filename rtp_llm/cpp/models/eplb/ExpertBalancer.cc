@@ -1,7 +1,11 @@
 #include "rtp_llm/cpp/models/eplb/ExpertBalancer.h"
+#include "rtp_llm/cpp/models/eplb/ExpertLoadMonitor.h"
+#include <algorithm>
 #include <thread>
+#include <c10/core/InferenceMode.h>
 #include "rtp_llm/cpp/models/ModelTypes.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
+#include "rtp_llm/cpp/utils/ProfilingScope.h"
 #include "rtp_llm/models_py/bindings/core/torch_utils/TypeConvert.h"
 #include "rtp_llm/models_py/bindings/core/ExecOps.h"
 
@@ -150,64 +154,117 @@ EPLBConfig EplbController::getAndSyncData(size_t world_size) {
     return eplb_control_data;
 }
 
-ExpertBalancer::ExpertBalancer(size_t                       log_exp_num,
-                               size_t                       phy_exp_num,
-                               size_t                       num_layers,
-                               size_t                       moe_size,
-                               size_t                       hidden_size,
-                               size_t                       ep_rank,
-                               size_t                       ep_size,
-                               size_t                       world_size,
-                               py::object                   py_eplb,
-                               DataType                     dtype,
-                               QuantAlgo                    quant_algo,
-                               kmonitor::MetricsReporterPtr metrics_reporter,
-                               const EPLBConfig&            eplb_config):
-    num_logic_experts_(log_exp_num),
-    num_physic_experts_(phy_exp_num),
-    ep_rank_(ep_rank),
-    ep_size_(ep_size),
-    world_size_(world_size),
-    metrics_reporter_(metrics_reporter),
-    eplb_python_wrapper_(py_eplb) {
-    cout << "ExpertBalancer constructed with " << log_exp_num << " logical experts" << endl;
-    printf("DEBUG: ExpertBalancer constructor called for linker debug\n");
-    eplb_control_data_ = eplb_config;
+ExpertBalancer::ExpertBalancer(const std::optional<MoeConfigs>& moe,
+                               const GptModelInitParams&        params,
+                               Weights&                         weights,
+                               OverallExpertStats&              expert_stats):
+    weights_(weights),
+    expert_stats_(expert_stats),
+    ep_rank_(params.parallelism_config.ep_rank),
+    ep_size_(params.parallelism_config.ep_size),
+    world_size_(params.parallelism_config.world_size),
+    metrics_reporter_(params.metrics_reporter) {
+    c10::InferenceMode inference_guard(true);
+    const auto&        config      = params.eplb_config;
+    const auto         layer_count = params.weights.layers.size();
+    RTP_LLM_CHECK_WITH_INFO(config.eplb_metrics_report_interval >= 0,
+                            "EPLB_METRICS_REPORT_INTERVAL must be non-negative");
 
-    // init memory
-    stats_.init(num_layers, log_exp_num, ep_size_);
-    eplb_plan_buffers_.init(log_exp_num, phy_exp_num, hidden_size, moe_size, ep_size, dtype, quant_algo);
-    eplb_plan_tensors_.init(log_exp_num, phy_exp_num);
-    load_flags_.init();
-    load_flags_.setReady(false);
-    eplb_controller_.init(eplb_control_data_, eplb_config);
+    if (config.enable_eplb() && moe) {
+        RTP_LLM_CHECK_WITH_INFO(!params.parallelism_config.ffn_disaggregate_config.enable_ffn_disaggregate,
+                                "EPLB planner does not support FFN disaggregate/alignment-only steps");
+        RTP_LLM_CHECK_WITH_INFO(params.py_eplb && !params.py_eplb.is_none(),
+                                "EPLB planner requires a Python EPLB instance");
+        const auto first_moe_layer =
+            std::find_if(params.weights.layers.begin(), params.weights.layers.end(), [](const auto& layer) {
+                return layer.ffn_weights.moe_gate_weight != nullptr;
+            });
+        RTP_LLM_CHECK_WITH_INFO(first_moe_layer != params.weights.layers.end(),
+                                "EPLB requires at least one MoE layer with moe_gate_weight");
+        const auto& kernel = first_moe_layer->ffn_weights.moe_gate_weight->kernel;
+        const auto  moe_size =
+            isGatedActivation(params.description.ffn_conf.activation_type) ? kernel.size(1) / 2 : kernel.size(1);
+        num_logic_experts_  = moe->expert_num;
+        num_physic_experts_ = moe->expert_num + moe->extra_expert_num;
+        eplb_control_data_  = config;
 
-    test_mode_ = eplb_config.eplb_test_mode;
+        // Keep planner allocations in the warmup peak-memory budget; step() skips execution.
+        stats_.init(layer_count, num_logic_experts_, ep_size_);
+        eplb_plan_buffers_.init(num_logic_experts_,
+                                num_physic_experts_,
+                                params.hidden_size,
+                                moe_size,
+                                ep_size_,
+                                torchDTypeToDataType(kernel.dtype()),
+                                params.quant_algo);
+        eplb_plan_tensors_.init(num_logic_experts_, num_physic_experts_);
+        load_flags_.init();
+        load_flags_.setReady(false);
+        eplb_controller_.init(eplb_control_data_, config);
+        test_mode_              = config.eplb_test_mode;
+        balance_layer_per_step_ = config.eplb_balance_layer_per_step;
+        resetPlan(true);
+        planner_initialized_ = true;
+    }
 
-    balance_layer_per_step_ = eplb_config.eplb_balance_layer_per_step;
+    if (config.eplb_metrics_report_interval > 0) {
+        load_monitor_ = ExpertLoadMonitor::create(layer_count,
+                                                            moe ? moe->expert_num + moe->extra_expert_num : 0,
+                                                            params.parallelism_config,
+                                                            config,
+                                                            params.model_id,
+                                                            params.metrics_reporter,
+                                                            params.model_id == 0 ? "target" : "draft");
+    }
+    if (load_monitor_) {
+        // EP ranks own distinct experts. Replicated TP experts only write on TP0;
+        // the other ranks still participate in step() with zero counts.
+        if (moe && (ep_size_ > 1 || params.parallelism_config.tp_rank == 0)) {
+            expert_token_counts_ = load_monitor_->stepCountsBuffer();
+        }
+    }
 
-    resetPlan(true);
+    if (planner_initialized_) {
+        py::gil_scoped_acquire acquire;
+        eplb_python_wrapper_ = ExpertBalancerPythonWrapper(py::reinterpret_borrow<py::object>(params.py_eplb));
+    }
 }
 
-ExpertBalancer::~ExpertBalancer() {}
+ExpertBalancer::~ExpertBalancer() = default;
 
-void ExpertBalancer::stepForward(ModelBase& model, RtpLLMExecutorMetricsCollector& executor_collector) {
-    syncController();
-
-    if (eplb_control_data_.checkEplbMode(eplb_control_data_.eplb_mode, EplbMode::NONE)) {
+void ExpertBalancer::step(bool warmup) {
+    if (load_monitor_) {
+        if (!warmup) {
+            load_monitor_->recordStep();
+        } else {
+            load_monitor_->clearRecordBuffer();
+        }
+    }
+    if (warmup || !planner_initialized_) {
         return;
     }
 
-    OverallExpertStats& stats = model.overall_expert_stats_;
-
-    // report stats
-    reportStats(stats);
-
-    // eplb plan
-    excuteEplbPlan(stats, model);
+    RTP_LLM_PROFILE_SCOPE("py_model.eplb_step");
+    const auto start_us = autil::TimeUtility::currentTimeInMicroSeconds();
+    syncController();
+    int64_t latency_us = 0;
+    if (!eplb_control_data_.checkEplbMode(eplb_control_data_.eplb_mode, EplbMode::NONE)) {
+        reportStats(expert_stats_);
+        excuteEplbPlan(expert_stats_);
+        latency_us = autil::TimeUtility::currentTimeInMicroSeconds() - start_us;
+    }
+    // Keep the planner metric independent of monitor work and monitor-only models.
+    if (metrics_reporter_) {
+        RtpLLmEplbMetricsCollector collector;
+        collector.step_latency_us = latency_us;
+        metrics_reporter_->report<RtpLLmEplbMetrics, RtpLLmEplbMetricsCollector>(nullptr, &collector);
+    }
 }
 
 bool ExpertBalancer::updateEplbConfig(const EPLBConfig& config) {
+    if (!planner_initialized_) {
+        return !load_monitor_;
+    }
     eplb_controller_.setData(config);
     return true;
 }
@@ -225,11 +282,21 @@ void ExpertBalancer::syncController() {
 }
 
 void ExpertBalancer::reportStats(OverallExpertStats& stats) {
+    executor_collector_.ep_rank = ep_rank_;
+    if (load_monitor_) {
+        // The independent monitor owns load reporting and its window D2H.
+        // Keep weight-update events without the legacy per-forward load copy.
+        if (metrics_reporter_ && executor_collector_.update_weights_qps
+            && eplb_control_data_.checkEplbMode(eplb_control_data_.eplb_mode, EplbMode::STATS, EplbMode::ALL)) {
+            executor_collector_.gpu_loads.clear();
+            metrics_reporter_->report<RtpLLmEplbMetrics, RtpLLmEplbMetricsCollector>(nullptr, &executor_collector_);
+        }
+        return;
+    }
     if (metrics_reporter_
         && eplb_control_data_.checkEplbMode(eplb_control_data_.eplb_mode, EplbMode::STATS, EplbMode::ALL)) {
         int layer_num = stats.layer_num;
         executor_collector_.gpu_loads.resize(layer_num);
-        executor_collector_.ep_rank = ep_rank_;
 
         auto gpu_loads_tensor = stats.stats_buf.gpu_loads_buf.cpu();
         int* gpu_loads        = gpu_loads_tensor.data_ptr<int>();
@@ -253,7 +320,7 @@ EplbPlanStatus ExpertBalancer::getPlanStatus() const {
     return status;
 }
 
-void ExpertBalancer::excuteEplbPlan(OverallExpertStats& stats, ModelBase& model) {
+void ExpertBalancer::excuteEplbPlan(OverallExpertStats& stats) {
     if (eplb_control_data_.checkEplbMode(eplb_control_data_.eplb_mode, EplbMode::EPLB, EplbMode::ALL)) {
         EplbPlanStatus status = getPlanStatus();
         switch (status) {
@@ -285,7 +352,7 @@ void ExpertBalancer::excuteEplbPlan(OverallExpertStats& stats, ModelBase& model)
                 load_flags_.setReady(true);
                 if (syncPlanWeightsLoadStatus()) {
                     processPlanWeights();
-                    applyPlanWeights(model);
+                    applyPlanWeights();
                     load_flags_.setReady(false);
                     balance_layer_cnt_++;
 
@@ -379,9 +446,13 @@ void ExpertBalancer::loadPlanWeights() {
     executor_collector_.update_weights_latency_ms = autil::TimeUtility::currentTimeInMilliSeconds() - start_time_ms;
 }
 
-void ExpertBalancer::applyPlanWeights(ModelBase& model) {
+void ExpertBalancer::applyPlanWeights() {
+    // applyPlanWeights is reached after the existing all-rank readiness check.
+    if (load_monitor_) {
+        load_monitor_->beforeMappingChange();
+    }
     auto& result         = eplb_plan_buffers_;
-    auto& balanced_layer = model.weights_.layers[result.layer_id].ffn_weights;
+    auto& balanced_layer = weights_.layers[result.layer_id].ffn_weights;
 
     // Exchange DenseWeights kernel/scales/zeros with eplb plan tensors.
     auto exchange_dense_weight = [&result](DenseWeights& dense, torch::Tensor& plan_weight, torch::Tensor& plan_scale) {

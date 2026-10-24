@@ -155,7 +155,7 @@ class GenericMoeUnifiedAllreduceTest(TestCase):
         expected_input = routed_output + shared_output
         mock_all_reduce.side_effect = lambda tensor, group: tensor * 2
 
-        result = layer(hidden_states)
+        result = layer(hidden_states, expert_load=None)
 
         mock_all_reduce.assert_called_once()
         reduce_input = mock_all_reduce.call_args.args[0]
@@ -175,7 +175,7 @@ class GenericMoeUnifiedAllreduceTest(TestCase):
         expected_input.add_(torch.sigmoid(gate_output) * shared_output)
         mock_all_reduce.side_effect = lambda tensor, group: tensor * 2
 
-        result = layer(hidden_states)
+        result = layer(hidden_states, expert_load=None)
 
         reduce_input = mock_all_reduce.call_args.args[0]
         self.assertIs(reduce_input, routed_output)
@@ -192,7 +192,7 @@ class GenericMoeUnifiedAllreduceTest(TestCase):
         )
         mock_all_reduce.side_effect = lambda tensor, group: tensor * 2
 
-        result = layer(hidden_states)
+        result = layer(hidden_states, expert_load=None)
 
         reduce_input = mock_all_reduce.call_args.args[0]
         torch.testing.assert_close(reduce_input, shared_output)
@@ -209,7 +209,7 @@ class GenericMoeUnifiedAllreduceTest(TestCase):
         expected_shared = torch.sigmoid(gate_output) * shared_output
         mock_all_reduce.side_effect = lambda tensor, group: tensor * 2
 
-        result = layer(hidden_states)
+        result = layer(hidden_states, expert_load=None)
 
         reduce_input = mock_all_reduce.call_args.args[0]
         self.assertIsNot(reduce_input, routed_output)
@@ -224,7 +224,7 @@ class GenericMoeUnifiedAllreduceTest(TestCase):
             layer
         )
 
-        result = layer(hidden_states)
+        result = layer(hidden_states, expert_load=None)
 
         mock_all_reduce.assert_not_called()
         torch.testing.assert_close(result, routed_output + shared_output)

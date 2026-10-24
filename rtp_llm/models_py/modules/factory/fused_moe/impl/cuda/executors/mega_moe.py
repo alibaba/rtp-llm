@@ -43,6 +43,7 @@ from rtp_llm.models_py.modules.factory.fused_moe.utils.mega_moe.jit_warmup impor
 from rtp_llm.models_py.modules.factory.fused_moe.utils.mega_moe.warmup_sync import (
     sync_cuda_graph_warmup_ranks,
 )
+from rtp_llm.models_py.utils.expert_load_monitor import ExpertLoadContext
 
 from .fp8_fp4_base import Fp8Fp4ExecutorBase, normalize_moe_w13_gate_up
 
@@ -406,6 +407,7 @@ class MegaMoeExecutor(Fp8Fp4ExecutorBase):
                 x[:token_count],
                 weights[:token_count],
                 indices[:token_count],
+                expert_load=None,
             )
             torch.cuda.synchronize(device)
             if self.supports_gate_pack:
@@ -418,6 +420,7 @@ class MegaMoeExecutor(Fp8Fp4ExecutorBase):
                         route_scale=cfg.route_scale,
                         bias=bias,
                     ),
+                    expert_load=None,
                 )
                 torch.cuda.synchronize(device)
                 self.forward_gate_pack(
@@ -430,6 +433,7 @@ class MegaMoeExecutor(Fp8Fp4ExecutorBase):
                         input_ids=input_ids[:token_count],
                         tid2eid=tid2eid,
                     ),
+                    expert_load=None,
                 )
                 torch.cuda.synchronize(device)
         dist.barrier()
@@ -449,7 +453,13 @@ class MegaMoeExecutor(Fp8Fp4ExecutorBase):
                 "MegaMoE buffer sizing."
             )
 
-    def _launch(self, y: torch.Tensor, tokens: int, device: torch.device) -> None:
+    def _launch(
+        self,
+        y: torch.Tensor,
+        tokens: int,
+        device: torch.device,
+        expert_load: Optional[ExpertLoadContext],
+    ) -> None:
         import deep_gemm
 
         self._maybe_pre_kernel_barrier(tokens)
@@ -468,13 +478,17 @@ class MegaMoeExecutor(Fp8Fp4ExecutorBase):
                 self.cfg.swiglu_limit if self.cfg.swiglu_limit > 0 else None
             ),
             fast_math=True,
+            cumulative_local_expert_recv_stats=(
+                expert_load.expert_token_counts if expert_load is not None else None
+            ),
         )
 
     def forward(
         self,
-        x: torch.Tensor,  # [T, D] BF16 local-rank tokens
-        weights: torch.Tensor,  # [T, topk] FP32 router weights
-        indices: torch.Tensor,  # [T, topk] int64 GLOBAL expert IDs
+        x: torch.Tensor,
+        weights: torch.Tensor,
+        indices: torch.Tensor,
+        expert_load: Optional[ExpertLoadContext],
     ) -> torch.Tensor:
         """Run the fused DeepGEMM Mega MoE kernel: dispatch + L1 GEMM +
         SwiGLU + L2 GEMM + combine — all fused, symm-mem backed.
@@ -509,13 +523,14 @@ class MegaMoeExecutor(Fp8Fp4ExecutorBase):
         # flow depending on a GPU-side scalar -> CUDA-graph-capture safe.
         self._input_packer.pack(x, weights, indices, buf, T)
         y = self._mega_y[:T]
-        self._launch(y, T, x.device)
+        self._launch(y, T, x.device, expert_load)
         return y
 
     def forward_gate_pack(
         self,
         x: torch.Tensor,
         gate_payload: ExpertGatePayload,
+        expert_load: Optional[ExpertLoadContext],
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """Route and pack directly into the MegaMoE symmetric buffer."""
 
@@ -544,7 +559,7 @@ class MegaMoeExecutor(Fp8Fp4ExecutorBase):
             tid2eid=gate_payload.tid2eid,
         )
         y = self._mega_y[:tokens]
-        self._launch(y, tokens, x.device)
+        self._launch(y, tokens, x.device, expert_load)
         return y, buf.topk_weights[:tokens], buf.topk_idx[:tokens]
 
     def _maybe_pre_kernel_barrier(self, tokens: int) -> None:
