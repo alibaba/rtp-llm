@@ -7,9 +7,10 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from runtime.java_runtime import resolve_java21
-from adapters.load_client import LOAD_CLIENT_ENV_VARS, validate_environment, validate_flow_environment
 from runtime.paths import MOCK_JAR
 from runtime.process import ManagedProcess, ProcessOps
+
+from adapters.load_client import LOAD_CLIENT_ENV_VARS, validate_environment, validate_flow_environment
 
 if TYPE_CHECKING:
     from adapters.environment import EnvManager
@@ -18,9 +19,7 @@ if TYPE_CHECKING:
 class ClientOps:
     """Drives JavaLoadClient as a subprocess with fully explicit env."""
 
-    def __init__(
-        self, env_manager: EnvManager, jvm_xms: str = "4g", jvm_xmx: str = "4g"
-    ):
+    def __init__(self, env_manager: EnvManager, jvm_xms: str = "4g", jvm_xmx: str = "4g"):
         self.env_manager = env_manager
         self.jvm_xms = jvm_xms
         self.jvm_xmx = jvm_xmx

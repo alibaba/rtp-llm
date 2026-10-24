@@ -3,8 +3,15 @@
 保留完整块共享、真实到达时间与精确总长度；残缺尾块不参与匹配。
 """
 
-import argparse, collections, gzip, lzma, hashlib, json, sys
+import argparse
+import collections
+import gzip
+import hashlib
+import json
+import lzma
+import sys
 from pathlib import Path
+
 if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src"))
 from traffic.capture_model import CaptureMetadata, CaptureRecord
@@ -28,8 +35,7 @@ def main():
     try:
         fit(a)
     except Exception as exc:
-        (a.out / "fit.summary.json").write_text(json.dumps(dict(
-            complete=False, errors=[str(exc)]), indent=2) + "\n")
+        (a.out / "fit.summary.json").write_text(json.dumps(dict(complete=False, errors=[str(exc)]), indent=2) + "\n")
         raise
     (a.out / "fit.summary.json").write_text(json.dumps(dict(complete=True, errors=[])) + "\n")
 
@@ -45,7 +51,9 @@ def fit(a):
     metadata = None
     for path in sorted(list(a.source.glob("*.jsonl.gz")) + list(a.source.glob("*.jsonl.xz"))):
         summary = json.loads(
-            path.with_name(path.name.replace(".jsonl.gz", ".summary.json").replace(".jsonl.xz", ".summary.json")).read_text()
+            path.with_name(
+                path.name.replace(".jsonl.gz", ".summary.json").replace(".jsonl.xz", ".summary.json")
+            ).read_text()
         )
         if hashlib.sha256(path.read_bytes()).hexdigest() != summary["sha256"]:
             raise ValueError("capture checksum mismatch: " + str(path))
@@ -76,7 +84,8 @@ def fit(a):
         capture_end <= capture_start
         or a.expected_shards <= 0
         or len(sources) > a.expected_shards
-        or not isinstance(a.namespace, str) or not a.namespace
+        or not isinstance(a.namespace, str)
+        or not a.namespace
         or a.output_tokens <= 0
     ):
         raise ValueError("invalid capture/workload parameters")
@@ -121,9 +130,7 @@ def fit(a):
             families[keys[4096 // block_size - 1] if len(keys) >= 4096 // block_size else ("short", row.tail_hash)] += 1
             duplicate_counts[(row.rid, row.ts)] += 1
             t = int((row.ts - source_origin) // 60000)
-            w = windows.setdefault(
-                t, dict(requests=0, tokens=0, potential_tokens=0, errors=0)
-            )
+            w = windows.setdefault(t, dict(requests=0, tokens=0, potential_tokens=0, errors=0))
             w["requests"] += 1
             w["tokens"] += row.il
             w["potential_tokens"] += shared * block_size
@@ -135,16 +142,29 @@ def fit(a):
     gaps.sort()
     total = sum(lengths)
     model_path = a.out / "lineage-model.xz"
-    raw = encode(model, dict(missing_shard_count=missing_count,source_start=rows[0].ts,
-        source_end=rows[-1].ts,capture_start=capture_start,capture_end=capture_end,
-        source_shards=len(sources),expected_shards=a.expected_shards,
-        **(dict(v2_reason=a.v2_reason) if a.model_version == "2" else {})), block_size=block_size)
+    raw = encode(
+        model,
+        dict(
+            missing_shard_count=missing_count,
+            source_start=rows[0].ts,
+            source_end=rows[-1].ts,
+            capture_start=capture_start,
+            capture_end=capture_end,
+            source_shards=len(sources),
+            expected_shards=a.expected_shards,
+            **(dict(v2_reason=a.v2_reason) if a.model_version == "2" else {}),
+        ),
+        block_size=block_size,
+    )
     model_path.write_bytes(raw)
     source = json.loads(a.source_info.read_text()) if a.source_info else None
-    model_path.with_suffix('.manifest.json').write_text(
-        json.dumps(build_manifest(model_path, source), indent=2) + '\n')
-    write_trace(plan, dict(path=str(model_path.resolve()),
-        count=len(model),output_tokens=a.output_tokens,priority=50),a.namespace,a.out)
+    model_path.with_suffix(".manifest.json").write_text(json.dumps(build_manifest(model_path, source), indent=2) + "\n")
+    write_trace(
+        plan,
+        dict(path=str(model_path.resolve()), count=len(model), output_tokens=a.output_tokens, priority=50),
+        a.namespace,
+        a.out,
+    )
     digest = hashlib.sha256()
     with plan.open("rb") as f:
         for chunk in iter(lambda: f.read(1048576), b""):
@@ -159,18 +179,14 @@ def fit(a):
         source_end=rows[-1].ts,
         source_qps=len(rows) * 1000 / (capture_end - capture_start),
         mean_input_tokens=total / len(rows),
-        input_quantiles={
-            str(q): lengths[int(q * (len(lengths) - 1))]
-            for q in [0, 0.5, 0.9, 0.95, 0.99, 1]
-        },
+        input_quantiles={str(q): lengths[int(q * (len(lengths) - 1))] for q in [0, 0.5, 0.9, 0.95, 0.99, 1]},
         status=dict(status),
         infinite_history_token_reuse=potential / total,
         distinct_prefix_blocks=len(seen),
         family_4k_count=len(families),
         family_4k_top5_share=sum(v for _, v in families.most_common(5)) / len(rows),
         nearest_prefix_repeat_gap_ms={
-            str(q): gaps[int(q * (len(gaps) - 1))] if gaps else None
-            for q in [0.5, 0.9, 0.99]
+            str(q): gaps[int(q * (len(gaps) - 1))] if gaps else None for q in [0.5, 0.9, 0.99]
         },
         source_minute_windows=windows,
         duplicate_identity_count=sum(v - 1 for v in duplicate_counts.values() if v > 1),
@@ -190,11 +206,7 @@ def fit(a):
     (a.out / "fit-report.json").write_text(json.dumps(report, indent=2))
     print(
         json.dumps(
-            {
-                k: v
-                for k, v in report.items()
-                if k not in ["sources", "source_minute_windows"]
-            },
+            {k: v for k, v in report.items() if k not in ["sources", "source_minute_windows"]},
             indent=2,
         ),
         flush=True,

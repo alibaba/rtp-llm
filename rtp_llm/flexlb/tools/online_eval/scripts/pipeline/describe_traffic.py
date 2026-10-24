@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Recompute a real capture's sidecar statistics, preserving manual source metadata."""
+
 import argparse
 import json
 import sys
@@ -14,8 +15,7 @@ from traffic.datasets import build_manifest
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("model", type=Path)
-    parser.add_argument("--source-info", type=Path,
-                        help="JSON source object with confirmed Spectrum/model information")
+    parser.add_argument("--source-info", type=Path, help="JSON source object with confirmed Spectrum/model information")
     args = parser.parse_args(argv)
     sidecar = args.model.with_suffix(".manifest.json")
     existing = json.loads(sidecar.read_text()) if sidecar.exists() else {}

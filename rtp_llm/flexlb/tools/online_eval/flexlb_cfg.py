@@ -48,15 +48,19 @@ from typing import Mapping, Optional, Union
 
 from flexlb_profile_data import (
     DSV4_PREFILL_EXPRESSION as DSV4_PREFILL_EXPRESSION,
-    PROFILE_CAPS as PROFILE_CAPS,
+)
+from flexlb_profile_data import (
     FUNCTIONAL_DEFAULTS,
-    GENERATOR_DEFAULTS,
-    STRESS_BASE,
-    PROFILES,
-    PROFILE_SPECS,
-    STRESS_PROFILE,
     FUNCTIONAL_PROFILE_KWARGS,
+    GENERATOR_DEFAULTS,
+    PROFILE_SPECS,
+    PROFILES,
+    STRESS_BASE,
     STRESS_DECISION_RETYPE_DEFAULTS,
+    STRESS_PROFILE,
+)
+from flexlb_profile_data import (
+    PROFILE_CAPS as PROFILE_CAPS,
 )
 
 # scheduler.ordering.preemption.allowedVictimStages enum values
@@ -64,6 +68,7 @@ from flexlb_profile_data import (
 VICTIM_STAGES = ("PREFILL_QUEUED", "DECODE_RESERVED", "DECODE_ENGINE_OWNED")
 
 _RENDER_PROFILES = PROFILES + (STRESS_PROFILE,)
+
 
 class ProfileIdentityError(ValueError):
     """A functional profile's decision or dispatcher was changed."""
@@ -110,20 +115,19 @@ _OMITTABLE = frozenset({"queue_timeout_ms", "preemption"})
 
 def _validate_affinity(extra_ms, percent):
     import math
+
     if extra_ms is not None and (type(extra_ms) is not int or not 0 <= extra_ms <= 9223372036854775807):
         raise ValueError("cache_affinity_max_extra_ttft_ms must be a nonnegative Java long")
-    if percent is not None and (type(percent) not in (int, float) or not math.isfinite(percent) or not 0 <= percent <= 100):
+    if percent is not None and (
+        type(percent) not in (int, float) or not math.isfinite(percent) or not 0 <= percent <= 100
+    ):
         raise ValueError("cache_affinity_min_prefix_hit_percent must be finite and in [0, 100]")
 
 
 def _validate_decode_availability(max_requests, kv_percent):
-    if max_requests is not None and (
-        type(max_requests) is not int or not 1 <= max_requests <= 2_147_483_647
-    ):
+    if max_requests is not None and (type(max_requests) is not int or not 1 <= max_requests <= 2_147_483_647):
         raise ValueError("decode_max_engine_requests must be a positive Java integer")
-    if kv_percent is not None and (
-        type(kv_percent) is not int or not 1 <= kv_percent <= 100
-    ):
+    if kv_percent is not None and (type(kv_percent) is not int or not 1 <= kv_percent <= 100):
         raise ValueError("decode_max_kv_usage_percent must be an integer in [1, 100]")
 
 
@@ -165,8 +169,7 @@ class ConfigOverride:
     strip_preemption: bool = False
 
     def __post_init__(self):
-        _validate_decode_availability(self.decode_max_engine_requests,
-                                      self.decode_max_kv_usage_percent)
+        _validate_decode_availability(self.decode_max_engine_requests, self.decode_max_kv_usage_percent)
         if self.decision_lifetime is not None and (
             type(self.decision_lifetime) not in (int, float)
             or not math.isfinite(self.decision_lifetime)
@@ -175,10 +178,11 @@ class ConfigOverride:
             raise ValueError("decision_lifetime must be finite and >= 1")
         if self.cache_min_refresh_ms is not None or self.cache_max_refresh_ms is not None:
             _cache_refresh_bounds(self.cache_min_refresh_ms, self.cache_max_refresh_ms)
-        if self.status_poll_interval_ms is not None and (type(self.status_poll_interval_ms) is not int or self.status_poll_interval_ms <= 0):
+        if self.status_poll_interval_ms is not None and (
+            type(self.status_poll_interval_ms) is not int or self.status_poll_interval_ms <= 0
+        ):
             raise ValueError("status_poll_interval_ms must be a positive integer")
-        _validate_affinity(self.cache_affinity_max_extra_ttft_ms,
-                           self.cache_affinity_min_prefix_hit_percent)
+        _validate_affinity(self.cache_affinity_max_extra_ttft_ms, self.cache_affinity_min_prefix_hit_percent)
 
     def omit_map(self) -> dict:
         return {f.name: getattr(self, f.name) is OMIT for f in fields(self)}
@@ -196,12 +200,12 @@ class PreemptionPolicy:
     timeout_ms: Optional[int] = None
 
     def __post_init__(self):
-        if (type(self.allowed_victim_stages) is not tuple
-                or not self.allowed_victim_stages
-                or any(stage not in VICTIM_STAGES for stage in self.allowed_victim_stages)):
-            raise ValueError(
-                f"allowed_victim_stages must be a non-empty subset of {VICTIM_STAGES}"
-            )
+        if (
+            type(self.allowed_victim_stages) is not tuple
+            or not self.allowed_victim_stages
+            or any(stage not in VICTIM_STAGES for stage in self.allowed_victim_stages)
+        ):
+            raise ValueError(f"allowed_victim_stages must be a non-empty subset of {VICTIM_STAGES}")
         if self.timeout_ms is not None:
             if "DECODE_ENGINE_OWNED" not in self.allowed_victim_stages:
                 raise ValueError("timeout_ms requires DECODE_ENGINE_OWNED")
@@ -244,9 +248,7 @@ class PriorityOrdering:
         if self.default_priority is not None and (
             type(self.default_priority) is not int or not 1 <= self.default_priority <= 100
         ):
-            raise ValueError(
-                f"default_priority must be in [1, 100], got {self.default_priority}"
-            )
+            raise ValueError(f"default_priority must be in [1, 100], got {self.default_priority}")
         if self.preemption is not None and not isinstance(self.preemption, PreemptionPolicy):
             raise TypeError("preemption must be a PreemptionPolicy")
 
@@ -297,8 +299,10 @@ class DispatcherPolicy:
     def __post_init__(self):
         if self.kind not in ("batch", "non_batch"):
             raise ValueError("dispatcher must be batch or non_batch")
-        if (type(self.max_inflight_per_prefill_worker) is not int
-                or not 1 <= self.max_inflight_per_prefill_worker <= 2_147_483_647):
+        if (
+            type(self.max_inflight_per_prefill_worker) is not int
+            or not 1 <= self.max_inflight_per_prefill_worker <= 2_147_483_647
+        ):
             raise ValueError("max_inflight_per_prefill_worker must be a positive Java integer")
 
     def to_json(self) -> dict:
@@ -320,8 +324,9 @@ def _ordering_policy(ordering, default_priority, preemption):
                 "(the strict FLEXLB_CONFIG parser rejects them under FIFO)"
             )
         return FifoOrdering()
-    return PriorityOrdering(default_priority,
-                            PreemptionPolicy.from_input(preemption) if preemption is not None else None)
+    return PriorityOrdering(
+        default_priority, PreemptionPolicy.from_input(preemption) if preemption is not None else None
+    )
 
 
 # ===========================================================================
@@ -334,8 +339,7 @@ def _ordering_policy(ordering, default_priority, preemption):
 
 
 def _validate_health(rpc, stale, cleanup):
-    for name, value in (("status_rpc_ms", rpc), ("status_stale_after_ms", stale),
-                        ("cleanup_interval_ms", cleanup)):
+    for name, value in (("status_rpc_ms", rpc), ("status_stale_after_ms", stale), ("cleanup_interval_ms", cleanup)):
         if type(value) is not int or not 1 <= value <= 2_147_483_647:
             raise ValueError(name + " must be a positive Java integer")
     if stale < 2 * rpc:
@@ -373,12 +377,12 @@ def build_flexlb_config(
     _validate_affinity(cache_affinity_max_extra_ttft_ms, cache_affinity_min_prefix_hit_percent)
     if type(status_poll_interval_ms) is not int or status_poll_interval_ms <= 0:
         raise ValueError("status_poll_interval_ms must be a positive integer")
-    _validate_health(status_rpc_ms, max(10_000, status_rpc_ms * 2)
-                     if status_stale_after_ms is None else status_stale_after_ms,
-                     cleanup_interval_ms)
-    if decision not in ("single", "fixed_window") or dispatcher not in (
-        "batch", "non_batch"
-    ):
+    _validate_health(
+        status_rpc_ms,
+        max(10_000, status_rpc_ms * 2) if status_stale_after_ms is None else status_stale_after_ms,
+        cleanup_interval_ms,
+    )
+    if decision not in ("single", "fixed_window") or dispatcher not in ("batch", "non_batch"):
         raise ValueError("unsupported decision or dispatcher")
     for name, value in (
         ("max_inflight_per_prefill_worker", max_inflight_per_prefill_worker),
@@ -392,18 +396,13 @@ def build_flexlb_config(
     import math
 
     if max_inflight_per_prefill_worker > 2_147_483_647:
-        raise ValueError(
-            "max_inflight_per_prefill_worker exceeds the Java integer limit"
-        )
-    if (
-        isinstance(decision_lifetime, bool)
-        or not math.isfinite(decision_lifetime)
-        or decision_lifetime < 1
-    ):
+        raise ValueError("max_inflight_per_prefill_worker exceeds the Java integer limit")
+    if isinstance(decision_lifetime, bool) or not math.isfinite(decision_lifetime) or decision_lifetime < 1:
         raise ValueError("decision_lifetime must be finite and at least 1")
     decision_policy = (
         FixedWindowDecision(max_requests, max_collection_wait_ms, max_predicted_execution_ms)
-        if decision == "fixed_window" else SingleDecision()
+        if decision == "fixed_window"
+        else SingleDecision()
     )
     scheduler_cfg: dict = {
         "type": "QUEUE",
@@ -446,9 +445,7 @@ def build_flexlb_config(
                     "statusPollIntervalMs": status_poll_interval_ms,
                     "statusRpcTimeoutMs": status_rpc_ms,
                     "statusStaleAfterMs": (
-                        max(10_000, status_rpc_ms * 2)
-                        if status_stale_after_ms is None
-                        else status_stale_after_ms
+                        max(10_000, status_rpc_ms * 2) if status_stale_after_ms is None else status_stale_after_ms
                     ),
                     "cleanupIntervalMs": cleanup_interval_ms,
                 }
@@ -459,8 +456,7 @@ def build_flexlb_config(
     if cache_min_refresh_ms is not None or cache_max_refresh_ms is not None:
         lower, upper = _cache_refresh_bounds(cache_min_refresh_ms, cache_max_refresh_ms)
         doc = json.loads(rendered)
-        doc["workerRegistry"]["cacheStatus"] = {
-            "minRefreshIntervalMs": lower, "maxRefreshIntervalMs": upper}
+        doc["workerRegistry"]["cacheStatus"] = {"minRefreshIntervalMs": lower, "maxRefreshIntervalMs": upper}
         return json.dumps(doc, separators=(",", ":"))
     return rendered
 
@@ -531,19 +527,21 @@ def _retype_ordering(doc: dict, overrides: ConfigOverride) -> None:
     if overrides.ordering is not None:
         new_type = overrides.ordering.lower()
         if new_type not in ("fifo", "priority"):
-            raise ValueError(
-                f"ordering must be 'fifo' or 'priority', got {overrides.ordering!r}"
+            raise ValueError(f"ordering must be 'fifo' or 'priority', got {overrides.ordering!r}")
+        policy = (
+            FifoOrdering()
+            if new_type == "fifo"
+            else PriorityOrdering(
+                current.get("defaultPriority") if current_type == "priority" else None,
+                PreemptionPolicy.from_json(current["preemption"])
+                if current_type == "priority" and "preemption" in current
+                else None,
             )
-        policy = FifoOrdering() if new_type == "fifo" else PriorityOrdering(
-            current.get("defaultPriority") if current_type == "priority" else None,
-            PreemptionPolicy.from_json(current["preemption"])
-            if current_type == "priority" and "preemption" in current else None,
         )
     elif current_type == "priority":
         policy = PriorityOrdering(
             current.get("defaultPriority"),
-            PreemptionPolicy.from_json(current["preemption"])
-            if "preemption" in current else None,
+            PreemptionPolicy.from_json(current["preemption"]) if "preemption" in current else None,
         )
     else:
         policy = FifoOrdering()
@@ -557,15 +555,15 @@ def _retype_ordering(doc: dict, overrides: ConfigOverride) -> None:
             )
         scheduler["ordering"] = policy.to_json()
         return
-    priority = (policy.default_priority if overrides.default_priority is None
-                else overrides.default_priority)
+    priority = policy.default_priority if overrides.default_priority is None else overrides.default_priority
     preemption = policy.preemption
     if overrides.preemption is not None and overrides.preemption is not OMIT:
         preemption = PreemptionPolicy.from_input(overrides.preemption)
     if overrides.strip_preemption:
         preemption = None
     scheduler["ordering"] = PriorityOrdering(
-        priority, preemption,
+        priority,
+        preemption,
     ).to_json()
 
 
@@ -578,10 +576,7 @@ def _retype_decision(doc: dict, overrides: ConfigOverride) -> None:
         return
     new_type = overrides.decision.lower() if overrides.decision is not None else decision["type"].lower()
     if new_type not in ("single", "fixed_window"):
-        raise ValueError(
-            "decision must be 'fixed_window' or 'single', got "
-            f"{overrides.decision!r}"
-        )
+        raise ValueError(f"decision must be 'fixed_window' or 'single', got {overrides.decision!r}")
     if new_type == "single":
         for field in ("max_requests", "max_collection_wait_ms", "max_predicted_execution_ms"):
             value = getattr(overrides, field)
@@ -590,16 +585,16 @@ def _retype_decision(doc: dict, overrides: ConfigOverride) -> None:
         doc["scheduler"]["decision"] = SingleDecision().to_json()
         return
     values = {}
-    for field, key in (("max_requests", "maxRequests"),
-                       ("max_collection_wait_ms", "maxCollectionWaitMs"),
-                       ("max_predicted_execution_ms", "maxPredictedExecutionMs")):
+    for field, key in (
+        ("max_requests", "maxRequests"),
+        ("max_collection_wait_ms", "maxCollectionWaitMs"),
+        ("max_predicted_execution_ms", "maxPredictedExecutionMs"),
+    ):
         value = getattr(overrides, field)
-        values[key] = (
-            decision.get(key, STRESS_DECISION_RETYPE_DEFAULTS[key])
-            if value is None else value
-        )
+        values[key] = decision.get(key, STRESS_DECISION_RETYPE_DEFAULTS[key]) if value is None else value
     doc["scheduler"]["decision"] = FixedWindowDecision(
-        values["maxRequests"], values["maxCollectionWaitMs"],
+        values["maxRequests"],
+        values["maxCollectionWaitMs"],
         values["maxPredictedExecutionMs"],
     ).to_json()
 
@@ -612,7 +607,8 @@ def _retype_dispatcher(doc: dict, overrides: ConfigOverride) -> None:
         cap = doc["dispatcher"]["maxInflightPerPrefillWorker"]
     kind = overrides.dispatcher or doc["dispatcher"]["type"]
     doc["dispatcher"] = DispatcherPolicy(
-        kind.lower() if type(kind) is str else kind, cap,
+        kind.lower() if type(kind) is str else kind,
+        cap,
     ).to_json()
 
 
@@ -648,16 +644,12 @@ def render_env(profile: str, overrides: Optional[ConfigOverride] = None) -> str:
     carries (unknown-for-profile fields raise ValueError).
     """
     if profile not in _RENDER_PROFILES:
-        raise ValueError(
-            f"unknown profile {profile!r}; valid: {list(_RENDER_PROFILES)}"
-        )
+        raise ValueError(f"unknown profile {profile!r}; valid: {list(_RENDER_PROFILES)}")
     if profile == STRESS_PROFILE:
         return _render_stress(overrides)
     kwargs = {**FUNCTIONAL_DEFAULTS, **FUNCTIONAL_PROFILE_KWARGS[profile]}
     if overrides is not None:
-        validate_profile_identity(profile, {
-            axis: getattr(overrides, axis) for axis in PROFILE_SPECS[profile]
-        })
+        validate_profile_identity(profile, {axis: getattr(overrides, axis) for axis in PROFILE_SPECS[profile]})
         if kwargs["decision"] == "single":
             for name in ("max_requests", "max_collection_wait_ms", "max_predicted_execution_ms"):
                 if getattr(overrides, name) is not None:
@@ -718,13 +710,7 @@ def render_process_config(
         "zone_process_setting": {
             "global": {},
             "resource_plan": {
-                "resources": [
-                    {
-                        "slot_resources": [
-                            {"name": "mem", "type": "SCALAR", "amount": 57344}
-                        ]
-                    }
-                ],
+                "resources": [{"slot_resources": [{"name": "mem", "type": "SCALAR", "amount": 57344}]}],
                 "meta_tag_list": [],
             },
             "process_info": {

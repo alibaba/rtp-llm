@@ -1,5 +1,7 @@
 """Explicit adaptation to client-record v1; raw Java rows are never relabeled."""
+
 from copy import deepcopy
+
 from schema_contract import matches_schema
 
 
@@ -19,7 +21,8 @@ def read_records(reader, deadline, epoch):
         or not matches_schema(row, "client_record_schema_version", 1)
         or row.get("env_epoch") != epoch
         or type(row.get("wire_request_id")) is not int
-        or type(row.get("attempt")) is not int for row in rows
+        or type(row.get("attempt")) is not int
+        for row in rows
     ):
         raise ValueError("invalid or stale client_records v1")
     deadline.check()

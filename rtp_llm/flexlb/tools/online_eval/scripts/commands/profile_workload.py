@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Offline prefix and LRU diagnostics for a token plan."""
+
 import argparse
 import json
 import sys

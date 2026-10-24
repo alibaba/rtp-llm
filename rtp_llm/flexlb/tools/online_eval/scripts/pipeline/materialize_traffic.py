@@ -9,8 +9,8 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "src"))
 
-from traffic.traffic_source import materialize
 from traffic.datasets import CapturedDataset
+from traffic.traffic_source import materialize
 
 
 def main(argv=None):
@@ -32,10 +32,16 @@ def main(argv=None):
         model = args.lineage_model.resolve()
         captured = CapturedDataset.read(model)
         manifest = captured.manifest
-        spec = dict(kind="trace", model="prefix_lineage", parameters=dict(
-            path=model.name,  count=manifest["count"],
-            output_tokens=args.output_tokens, priority=args.priority,
-        ))
+        spec = dict(
+            kind="trace",
+            model="prefix_lineage",
+            parameters=dict(
+                path=model.name,
+                count=manifest["count"],
+                output_tokens=args.output_tokens,
+                priority=args.priority,
+            ),
+        )
         base_dir = model.parent
     materialize(args.out, spec, args.namespace, base_dir, max_requests=args.max_requests, captured=captured)
     print(args.out.with_suffix(".manifest.json"))

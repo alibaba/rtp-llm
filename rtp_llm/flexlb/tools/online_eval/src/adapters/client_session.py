@@ -9,6 +9,7 @@ def launch_client(operations, environment, directory, log_file, deadline, *, lab
         deadline.check()
     except BaseException:
         from runtime.cleanup import stop_process
+
         stop_process(process, deadline)
         raise
     return process, output

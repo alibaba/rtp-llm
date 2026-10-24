@@ -10,7 +10,6 @@ from typing import Optional
 
 from flexlb_cfg import OMIT, ConfigOverride
 
-
 DEFAULT_MOCK_HEAP = os.environ.get("FLEXLB_FT_MOCK_HEAP", "2g")
 
 DEFAULT_MOCK_EVENT_LOOP_THREADS = 8
@@ -24,9 +23,7 @@ DEFAULT_DECODE_CACHE_BLOCKS = 3000
 DEFAULT_MASTER_HTTP_PORT = int(os.environ.get("FLEXLB_FT_MASTER_HTTP_PORT", "18080"))
 
 DEFAULT_MASTER_MANAGEMENT_PORT = int(
-    os.environ.get(
-        "FLEXLB_FT_MASTER_MANAGEMENT_PORT", str(DEFAULT_MASTER_HTTP_PORT + 1)
-    )
+    os.environ.get("FLEXLB_FT_MASTER_MANAGEMENT_PORT", str(DEFAULT_MASTER_HTTP_PORT + 1))
 )
 
 MASTER_PORT_STRIDE = 10
@@ -43,6 +40,7 @@ def default_perf() -> dict:
     flexlb_cfg unless the scenario declares a model-specific override.
     """
     from adapters.perf_presets import load_preset
+
     return load_preset("default")[0]
 
 
@@ -76,11 +74,7 @@ class MasterSpec:
         return self.http_port + 2
 
     def management(self) -> int:
-        return (
-            self.management_port
-            if self.management_port is not None
-            else self.http_port + 1
-        )
+        return self.management_port if self.management_port is not None else self.http_port + 1
 
     def fingerprint(self) -> dict:
         result = _fingerprint_value(self)
@@ -177,7 +171,9 @@ class EnvSpec:
 
     def __post_init__(self):
         if self.master_profile == "none" and self.raw_config is None:
-            raise ValueError("master_profile='none' disables Master; raw_config is required for mock scheduler configuration")
+            raise ValueError(
+                "master_profile='none' disables Master; raw_config is required for mock scheduler configuration"
+            )
 
     def fingerprint(self) -> str:
         result = _fingerprint_value(self)

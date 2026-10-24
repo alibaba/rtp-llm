@@ -11,24 +11,25 @@ import time
 from pathlib import Path
 from typing import Optional
 
+from artifacts.startup import startup_phase
 from flexlb_cfg import render_process_config
 from mode_profiles import resolve_address_plan
-from adapters.environment_config import (
-    DEFAULT_MASTER_HTTP_PORT,
-    MASTER_PORT_STRIDE,
-    MASTER_PORT_MAX_SHIFTS,
-    EnvSpec,
-    MasterSpec,
-)
 from runtime.java_runtime import resolve_java21
-from adapters.mock_launch import MockLaunchSpec
-from runtime.startup import startup_deadline, wait_ready
-from artifacts.startup import startup_phase
-from adapters.master_lifecycle import MasterLifecycle
 from runtime.network import PROBE_BIND_HOST, port_accepting, port_in_use, wait_for, wait_for_port
 from runtime.paths import FLEXLB_DIR, MOCK_JAR
 from runtime.process import ManagedProcess, ProcessOps
+from runtime.startup import startup_deadline, wait_ready
+
+from adapters.environment_config import (
+    DEFAULT_MASTER_HTTP_PORT,
+    MASTER_PORT_MAX_SHIFTS,
+    MASTER_PORT_STRIDE,
+    EnvSpec,
+    MasterSpec,
+)
 from adapters.java_mock_resources import VICTIM_OFFSETS
+from adapters.master_lifecycle import MasterLifecycle
+from adapters.mock_launch import MockLaunchSpec
 from adapters.zk_helper import (
     ZK_LAUNCH_CMD_ENV,
     ZK_READY_TIMEOUT_S,
@@ -113,9 +114,7 @@ class FlexEnv:
         # its pinned axis; only the UNPINNED http block auto-shifts).
         self.master_http_port, self.master_port_note = _pick_master_http_port()
         explicit_mgmt = os.environ.get("FLEXLB_FT_MASTER_MANAGEMENT_PORT")
-        self.master_management_port = (
-            int(explicit_mgmt) if explicit_mgmt else self.master_http_port + 1
-        )
+        self.master_management_port = int(explicit_mgmt) if explicit_mgmt else self.master_http_port + 1
         self.endpoint_file = run_dir / "endpoints.json"
         self.discovery_file = run_dir / "discovery.json"  # dynamic file discovery
         self.perf_file = run_dir / "perf.json"
@@ -144,8 +143,17 @@ class FlexEnv:
 class EnvManager:
     """Owns the lifecycle of mock/master/victim JVMs; reuses env per spec."""
 
-    def __init__(self, run_root: Path, keep: bool = False, verbose: bool = True, *,
-                 on_environment=None, on_processes=None, defer_cleanup=False, mock_spec=None):
+    def __init__(
+        self,
+        run_root: Path,
+        keep: bool = False,
+        verbose: bool = True,
+        *,
+        on_environment=None,
+        on_processes=None,
+        defer_cleanup=False,
+        mock_spec=None,
+    ):
         if defer_cleanup and (on_environment is None or on_processes is None):
             raise ValueError("deferred cleanup requires an explicit environment and process owner")
         self.on_environment = on_environment
@@ -181,10 +189,7 @@ class EnvManager:
 
     def ensure(self, spec: EnvSpec, *, deadline=None) -> FlexEnv:
         """Return a live env for *spec*; rebuild only when the spec changed."""
-        if (
-            self.current is not None
-            and self.current.startup_fingerprint == spec.fingerprint()
-        ):
+        if self.current is not None and self.current.startup_fingerprint == spec.fingerprint():
             return self.current
         if self.current is not None:
             self.teardown()
@@ -214,14 +219,16 @@ class EnvManager:
             # its own separately budgeted teardown; do not clear these refs.
             return
         from runtime.cleanup import cleanup_all
-        owned = [*env.load_clients, *env.victims.values(), *env.masters.values(),
-                 env.zk_helper, env.master, env.mock]
+
+        owned = [*env.load_clients, *env.victims.values(), *env.masters.values(), env.zk_helper, env.master, env.mock]
+
         def stop(mp):
             try:
                 mp.unfreeze()
             except ProcessLookupError:
                 pass
             mp.terminate()
+
         cleanup_all([(str(mp.pid), lambda mp=mp: stop(mp)) for mp in owned if mp is not None])
         # Retain references if any close failed, so an owner can retry.
         env.load_clients.clear()
@@ -265,11 +272,12 @@ class EnvManager:
         )
 
         # Resolve all required ZK artifacts before launching the mock cluster.
-        if spec.masters and spec.zk_consistency is not None and spec.zk_consistency.mode == 'helper':
-            with startup_phase(env.run_dir, 'zookeeper/artifacts', deadline):
+        if spec.masters and spec.zk_consistency is not None and spec.zk_consistency.mode == "helper":
+            with startup_phase(env.run_dir, "zookeeper/artifacts", deadline):
                 override = os.environ.get(ZK_LAUNCH_CMD_ENV)
-                env.zk_launch_argv = (shlex.split(override) if override else
-                                     ZkHelperOps.default_launch_argv(resolve_java21()))
+                env.zk_launch_argv = (
+                    shlex.split(override) if override else ZkHelperOps.default_launch_argv(resolve_java21())
+                )
 
         # perf config
         env.perf_file.write_text(json.dumps(spec.perf, indent=2))
@@ -284,7 +292,7 @@ class EnvManager:
                 # masters can grab the election lock at startup; Tier-1
                 # (zk_consistency=None) skips it entirely.
                 if spec.zk_consistency is not None:
-                    if spec.zk_consistency.mode == 'helper':
+                    if spec.zk_consistency.mode == "helper":
                         self.start_zk_helper(env, deadline=deadline)
                     else:
                         env.zk_connect_string = spec.zk_consistency.address
@@ -308,44 +316,60 @@ class EnvManager:
     def _start_mock(self, env: FlexEnv, *, deadline=None) -> None:
         spec = self.mock_spec if self.mock_spec is not None else env.spec
         if not MOCK_JAR.is_file():
-            raise RuntimeError(
-                f"mock engine jar not found: {MOCK_JAR} (build it first)"
-            )
+            raise RuntimeError(f"mock engine jar not found: {MOCK_JAR} (build it first)")
         argv = MockLaunchSpec(
-            java=resolve_java21(), jar=MOCK_JAR,
-            jvm_options=(f"-Xms{spec.mock_heap}", f"-Xmx{spec.mock_heap}",
-                         "-XX:+ExitOnOutOfMemoryError",
-                         f"-Xlog:gc*,safepoint:{env.run_dir / 'mock_engine_gc.log'}:time,uptime,level,tags:filecount=3,filesize=20m"),
-            n_prefill=spec.n_prefill, n_decode=spec.n_decode, base_grpc_port=env.base_grpc_port,
+            java=resolve_java21(),
+            jar=MOCK_JAR,
+            jvm_options=(
+                f"-Xms{spec.mock_heap}",
+                f"-Xmx{spec.mock_heap}",
+                "-XX:+ExitOnOutOfMemoryError",
+                f"-Xlog:gc*,safepoint:{env.run_dir / 'mock_engine_gc.log'}:time,uptime,level,tags:filecount=3,filesize=20m",
+            ),
+            n_prefill=spec.n_prefill,
+            n_decode=spec.n_decode,
+            base_grpc_port=env.base_grpc_port,
             unique_engine_ips=resolve_address_plan(
-                spec.runtime_mode, unique_loopback_supported=sys.platform != "darwin")["unique_engine_ips"],
-            event_loop_threads=spec.event_loop_threads, completion_threads=spec.completion_threads,
-            rpc_threads=spec.rpc_threads, rpc_max_calls=spec.rpc_max_calls,
-            auto_fetch=spec.mock_auto_fetch, fetch_attach_timeout_ms=spec.mock_fetch_attach_timeout_ms,
-            performance=env.perf_file, master_config=_write_master_config(env, spec),
+                spec.runtime_mode, unique_loopback_supported=sys.platform != "darwin"
+            )["unique_engine_ips"],
+            event_loop_threads=spec.event_loop_threads,
+            completion_threads=spec.completion_threads,
+            rpc_threads=spec.rpc_threads,
+            rpc_max_calls=spec.rpc_max_calls,
+            auto_fetch=spec.mock_auto_fetch,
+            fetch_attach_timeout_ms=spec.mock_fetch_attach_timeout_ms,
+            performance=env.perf_file,
+            master_config=_write_master_config(env, spec),
             stats_stdout=spec.diagnostic_events,
             events_file=env.run_dir / "engine_events.jsonl" if spec.diagnostic_events else "",
-            prefill_kv_pool_blocks=spec.prefill_cache_blocks, decode_kv_pool_blocks=spec.decode_cache_blocks,
-            endpoint_file=env.endpoint_file, env_file=env.run_dir / "flexlb_env.txt",
-            extra_args=tuple(spec.mock_extra_args), discovery_file=env.discovery_file,
+            prefill_kv_pool_blocks=spec.prefill_cache_blocks,
+            decode_kv_pool_blocks=spec.decode_cache_blocks,
+            endpoint_file=env.endpoint_file,
+            env_file=env.run_dir / "flexlb_env.txt",
+            extra_args=tuple(spec.mock_extra_args),
+            discovery_file=env.discovery_file,
         ).argv()
         proc = ProcessOps.start(argv, dict(os.environ), env.run_dir / "mock_engine.log")
         env.mock = proc
         deadline = startup_deadline(deadline, 80)
-        with startup_phase(env.run_dir, 'mock', deadline):
-            wait_ready(deadline, 'mock/http', lambda: port_accepting(env.mock_http_port), process=proc)
-            for label, path in [('endpoints', env.endpoint_file), ('discovery', env.discovery_file)]:
-                wait_ready(deadline, 'mock/' + label,
-                           lambda: path.exists() and path.stat().st_size > 0, process=proc, interval_s=0.1)
+        with startup_phase(env.run_dir, "mock", deadline):
+            wait_ready(deadline, "mock/http", lambda: port_accepting(env.mock_http_port), process=proc)
+            for label, path in [("endpoints", env.endpoint_file), ("discovery", env.discovery_file)]:
+                wait_ready(
+                    deadline,
+                    "mock/" + label,
+                    lambda: path.exists() and path.stat().st_size > 0,
+                    process=proc,
+                    interval_s=0.1,
+                )
         self._log(f"mock cluster up (pid={proc.pid}, http={env.mock_http_port})")
 
     # -- master ------------------------------------------------------------
 
-
-    def start_master(self, env: FlexEnv, log_name: Optional[str]=None, *, deadline=None) -> ManagedProcess:
+    def start_master(self, env: FlexEnv, log_name: Optional[str] = None, *, deadline=None) -> ManagedProcess:
         return self._master_operation(self.master_lifecycle.start_master, env, log_name, deadline=deadline)
 
-    def stop_master(self, env: FlexEnv, settle_s: float=2.0) -> None:
+    def stop_master(self, env: FlexEnv, settle_s: float = 2.0) -> None:
         return self._master_operation(self.master_lifecycle.stop_master, env, settle_s)
 
     def kill_master9(self, env: FlexEnv) -> None:
@@ -353,10 +377,12 @@ class EnvManager:
 
     # -- HA dual-master orchestration (gated on spec.masters) --------------
 
-
-    def start_master_instance(self, env: FlexEnv, mspec: MasterSpec, log_name: Optional[str]=None, *, deadline=None) -> ManagedProcess:
-        return self._master_operation(self.master_lifecycle.start_master_instance, env, mspec, log_name, deadline=deadline)
-
+    def start_master_instance(
+        self, env: FlexEnv, mspec: MasterSpec, log_name: Optional[str] = None, *, deadline=None
+    ) -> ManagedProcess:
+        return self._master_operation(
+            self.master_lifecycle.start_master_instance, env, mspec, log_name, deadline=deadline
+        )
 
     def master_instance_target(self, env: FlexEnv, name: str) -> str:
         return self.master_lifecycle.master_instance_target(env, name)
@@ -380,7 +406,7 @@ class EnvManager:
             raise RuntimeError("ZK helper already running")
         deadline = startup_deadline(deadline, ZK_READY_TIMEOUT_S)
         deadline.check()
-        argv = getattr(env, 'zk_launch_argv', None)
+        argv = getattr(env, "zk_launch_argv", None)
         if argv is None:
             override = os.environ.get(ZK_LAUNCH_CMD_ENV)
             argv = shlex.split(override) if override else ZkHelperOps.default_launch_argv(resolve_java21())
@@ -388,9 +414,14 @@ class EnvManager:
         proc = ProcessOps.start(argv, dict(os.environ), log_file, cwd=FLEXLB_DIR, keep_stdin=True)
         env.zk_helper = proc
         deadline = startup_deadline(deadline, ZK_READY_TIMEOUT_S)
-        with startup_phase(env.run_dir, 'zookeeper', deadline):
-            connect = wait_ready(deadline, 'zookeeper/ready',
-                lambda: ZkHelperOps.find_ready_connect_string(log_file), process=proc, interval_s=0.2)
+        with startup_phase(env.run_dir, "zookeeper", deadline):
+            connect = wait_ready(
+                deadline,
+                "zookeeper/ready",
+                lambda: ZkHelperOps.find_ready_connect_string(log_file),
+                process=proc,
+                interval_s=0.2,
+            )
         env.zk_connect_string = connect
         self._log(f"ZK helper up (pid={proc.pid}, connectString={connect})")
 
@@ -414,23 +445,23 @@ class EnvManager:
             time.sleep(0.5)
         endpoint_file = env.run_dir / f"victim_endpoints_{role}.json"
         argv = MockLaunchSpec(
-            java=resolve_java21(), jar=MOCK_JAR,
+            java=resolve_java21(),
+            jar=MOCK_JAR,
             jvm_options=(f"-Xms{heap}", f"-Xmx{heap}", "-XX:+ExitOnOutOfMemoryError"),
-            n_prefill=int(role == "prefill"), n_decode=int(role == "decode"), base_grpc_port=grpc_port,
-            performance=perf_file or env.perf_file, master_config=_write_master_config(env),
+            n_prefill=int(role == "prefill"),
+            n_decode=int(role == "decode"),
+            base_grpc_port=grpc_port,
+            performance=perf_file or env.perf_file,
+            master_config=_write_master_config(env),
             prefill_kv_pool_blocks=env.spec.prefill_cache_blocks if role == "prefill" else 0,
             decode_kv_pool_blocks=env.spec.decode_cache_blocks if role == "decode" else 0,
             endpoint_file=endpoint_file,
         ).argv()
-        proc = ProcessOps.start(
-            argv, dict(os.environ), env.run_dir / f"victim_{role}.log"
-        )
+        proc = ProcessOps.start(argv, dict(os.environ), env.run_dir / f"victim_{role}.log")
         env.victims[f"victim-{role}"] = proc
         if not wait_for_port("127.0.0.1", http_port, 30):
             raise RuntimeError(f"victim {role} failed to start:\n{proc.tail_log()}")
-        if not wait_for(
-            lambda: endpoint_file.exists() and endpoint_file.stat().st_size > 0, 10, 0.1
-        ):
+        if not wait_for(lambda: endpoint_file.exists() and endpoint_file.stat().st_size > 0, 10, 0.1):
             raise RuntimeError(f"victim {role} did not write endpoint file")
         self._log(f"victim {role} up (pid={proc.pid}, grpc={grpc_port})")
         return proc

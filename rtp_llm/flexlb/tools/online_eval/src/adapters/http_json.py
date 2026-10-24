@@ -8,7 +8,6 @@ import json
 import urllib.request
 
 
-
 class HttpJsonAdapter:
     """One bounded read; transport outages and malformed payloads are distinct.
 

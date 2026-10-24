@@ -15,23 +15,33 @@ _CALIBRATION_PATH = Path(__file__).resolve().parent / "data/performance/dsv4_l20
 def load_mock_calibration(path=_CALIBRATION_PATH):
     """Read the auditable test calibration; no measured values live in code."""
     data = json.loads(Path(path).read_text(encoding="utf-8"))
-    if (data.get("schema_version") != 1 or data.get("id") != "dsv4_l20_legacy_mock"
-            or type(data.get("block_size")) is not int or data["block_size"] <= 0
-            or type(data.get("sleep_scale")) not in (int, float)
-            or not math.isfinite(data["sleep_scale"]) or data["sleep_scale"] <= 0
-            or data.get("status") != "legacy_unverified"
-            or not isinstance(data.get("model"), str) or not data["model"].strip()
-            or not isinstance(data.get("hardware"), str) or not data["hardware"].strip()
-            or not isinstance(data.get("source"), str) or not data["source"].strip()
-            or not isinstance(data.get("prefill_expression"), str)
-            or not data["prefill_expression"].strip()):
+    if (
+        data.get("schema_version") != 1
+        or data.get("id") != "dsv4_l20_legacy_mock"
+        or type(data.get("block_size")) is not int
+        or data["block_size"] <= 0
+        or type(data.get("sleep_scale")) not in (int, float)
+        or not math.isfinite(data["sleep_scale"])
+        or data["sleep_scale"] <= 0
+        or data.get("status") != "legacy_unverified"
+        or not isinstance(data.get("model"), str)
+        or not data["model"].strip()
+        or not isinstance(data.get("hardware"), str)
+        or not data["hardware"].strip()
+        or not isinstance(data.get("source"), str)
+        or not data["source"].strip()
+        or not isinstance(data.get("prefill_expression"), str)
+        or not data["prefill_expression"].strip()
+    ):
         raise ValueError(f"invalid mock calibration: {path}")
     decode = data.get("decode")
-    if (not isinstance(decode, dict)
-            or set(decode) != {"scale", "step_base_ms", "step_per_running_ms", "tokens_per_step"}
-            or any(type(value) not in (int, float) or not math.isfinite(value)
-                   or value < 0 for value in decode.values())
-            or decode["tokens_per_step"] == 0 or decode["scale"] == 0):
+    if (
+        not isinstance(decode, dict)
+        or set(decode) != {"scale", "step_base_ms", "step_per_running_ms", "tokens_per_step"}
+        or any(type(value) not in (int, float) or not math.isfinite(value) or value < 0 for value in decode.values())
+        or decode["tokens_per_step"] == 0
+        or decode["scale"] == 0
+    ):
         raise ValueError(f"invalid mock decode calibration: {path}")
     return data
 
@@ -99,8 +109,6 @@ PROFILE_CAPS = {
 STRESS_PROFILE = "stress-na130"
 
 
-
-
 FUNCTIONAL_PROFILE_QUEUE_TIMEOUT_MS = 60_000
 
 # Functional-test workload defaults, not Java schema defaults.
@@ -157,9 +165,7 @@ STRESS_BASE: dict = {
         "ordering": {
             "type": "PRIORITY",
             "defaultPriority": 50,
-            "preemption": {
-                "allowedVictimStages": ["PREFILL_QUEUED", "DECODE_RESERVED"]
-            },
+            "preemption": {"allowedVictimStages": ["PREFILL_QUEUED", "DECODE_RESERVED"]},
         },
         "queueTimeoutMs": 60000,
         "decision": {
@@ -179,9 +185,7 @@ STRESS_BASE: dict = {
                 },
                 "cacheAffinity": {"maxExtraTtftMs": 20, "minPrefixHitPercent": 20},
             },
-            "decode": {
-                "availability": {"maxKvUsagePercent": 95, "maxEngineRequests": 384}
-            },
+            "decode": {"availability": {"maxKvUsagePercent": 95, "maxEngineRequests": 384}},
         }
     },
     "workerRegistry": {
@@ -215,8 +219,10 @@ STRESS_BASE: dict = {
     },
 }
 
-STRESS_DECISION_RETYPE_DEFAULTS = {key: STRESS_BASE["scheduler"]["decision"][key]
-                                  for key in ("maxRequests", "maxCollectionWaitMs", "maxPredictedExecutionMs")}
+STRESS_DECISION_RETYPE_DEFAULTS = {
+    key: STRESS_BASE["scheduler"]["decision"][key]
+    for key in ("maxRequests", "maxCollectionWaitMs", "maxPredictedExecutionMs")
+}
 
 # All renderable profiles, including workload defaults, share axis metadata.
 REGISTERED_PROFILE_SPECS = {

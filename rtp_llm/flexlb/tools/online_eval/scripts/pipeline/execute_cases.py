@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Parallel execution of YAML-configured Python cases with owned port windows."""
+
 import argparse
 import sys
 from pathlib import Path
@@ -10,10 +11,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from adapters import port_windows
 from scenario.selection_cli import add_selection_arguments, resolve_selection
 
+
 def main() -> int:
-    parser = argparse.ArgumentParser(
-        description="FlexLB case-test parallel orchestrator (lane parallelism)"
-    )
+    parser = argparse.ArgumentParser(description="FlexLB case-test parallel orchestrator (lane parallelism)")
     parser.add_argument(
         "--parallel",
         type=int,
@@ -24,9 +24,15 @@ def main() -> int:
             "2000)"
         ),
     )
-    parser.add_argument("--retain-tsdb", action="store_true", help="keep stopped TSDB after verified experiment archiving")
-    parser.add_argument("--scheduling", choices=("dynamic", "static"), default="dynamic",
-                        help="dynamic: idle lanes claim the next run; static: fixed lane lists")
+    parser.add_argument(
+        "--retain-tsdb", action="store_true", help="keep stopped TSDB after verified experiment archiving"
+    )
+    parser.add_argument(
+        "--scheduling",
+        choices=("dynamic", "static"),
+        default="dynamic",
+        help="dynamic: idle lanes claim the next run; static: fixed lane lists",
+    )
     add_selection_arguments(parser, allow_all_profiles=False)
     parser.add_argument(
         "--grade",
@@ -45,7 +51,8 @@ def main() -> int:
         help="lane artifacts dir (default /tmp/flexlb_ft_parallel_<ts>)",
     )
     parser.add_argument(
-        "--archive", default=None,
+        "--archive",
+        default=None,
         help="optional single experiment ZIP; includes run plan, results and bounded evidence",
     )
     parser.add_argument(
@@ -142,8 +149,7 @@ def main() -> int:
     )
     if not 1 <= args.parallel <= cap:
         parser.error(
-            f"--parallel must be 1..{cap} (mock stride {mock_stride}, "
-            f"mock base {mbase}, master base {mabase})"
+            f"--parallel must be 1..{cap} (mock stride {mock_stride}, mock base {mbase}, master base {mabase})"
         )
 
     from scenario.instance_runner import run_structured

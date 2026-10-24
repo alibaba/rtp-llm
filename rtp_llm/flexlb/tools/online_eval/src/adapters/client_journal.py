@@ -3,7 +3,6 @@
 import json
 from pathlib import Path
 
-
 MAX_EVIDENCE_EVENTS = 2_000_000
 
 
@@ -58,11 +57,7 @@ class LiveClientEvents:
                 raise ValueError("live client identity or sequence gap")
             for field in ("send_start_epoch_ms", "recorded_epoch_ms"):
                 value = row.get(field)
-                if (
-                    type(value) not in (int, float)
-                    or not math.isfinite(value)
-                    or value <= 0
-                ):
+                if type(value) not in (int, float) or not math.isfinite(value) or value <= 0:
                     raise ValueError("live client timestamp is missing or invalid")
             event = row.get("event")
             if event == "issued":
@@ -72,10 +67,7 @@ class LiveClientEvents:
             elif event == "terminal":
                 if rid not in self.issued or rid in self.terminal:
                     raise ValueError("orphan or duplicate live terminal")
-                if (
-                    row["send_start_epoch_ms"]
-                    != self.issued[rid]["send_start_epoch_ms"]
-                ):
+                if row["send_start_epoch_ms"] != self.issued[rid]["send_start_epoch_ms"]:
                     raise ValueError("live terminal does not match issue")
                 if row.get("status") not in {
                     "ok",
@@ -107,8 +99,7 @@ class LiveClientEvents:
                 continue
             terminal = self.terminal.get(rid)
             if row["send_start_epoch_ms"] < lower_ms and not (
-                transition
-                and (terminal is None or terminal["recorded_epoch_ms"] >= lower_ms)
+                transition and (terminal is None or terminal["recorded_epoch_ms"] >= lower_ms)
             ):
                 continue
             selected[rid] = row
@@ -118,6 +109,7 @@ class LiveClientEvents:
 def first_request(rows):
     """Freeze actual send onset from issued requests, never successful terminals only."""
     import math
+
     stamps = []
     for row in rows:
         value = row.get("send_start_epoch_ms")

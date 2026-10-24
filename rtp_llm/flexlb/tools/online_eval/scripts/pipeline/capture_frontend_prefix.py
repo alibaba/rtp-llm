@@ -3,8 +3,20 @@
 运行环境与部署定位由调用方负责。本模块只读取已可访问的日志文件。
 """
 
-import argparse, array, collections, glob, gzip, hashlib, json, lzma, os, socket, time, sys
+import argparse
+import array
+import collections
+import glob
+import gzip
+import hashlib
+import json
+import lzma
+import os
+import socket
+import sys
+import time
 from pathlib import Path
+
 if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src"))
 from file_digest import sha256_file
@@ -52,8 +64,11 @@ def capture(a, *, clock=time.monotonic):
     output_path = a.out + (".jsonl.xz" if a.format == "xz" else ".jsonl.gz")
     out = lzma.open(output_path, "wt", preset=3) if a.format == "xz" else gzip.open(output_path, "wt", compresslevel=1)
     try:
-        paths = [path for path in sorted(glob.glob(str(a.log_dir / a.log_glob)))
-                 if os.path.isfile(path) and not path.endswith((".gz", ".bz2", ".xz", ".zst", ".zip", ".lz4"))]
+        paths = [
+            path
+            for path in sorted(glob.glob(str(a.log_dir / a.log_glob)))
+            if os.path.isfile(path) and not path.endswith((".gz", ".bz2", ".xz", ".zst", ".zip", ".lz4"))
+        ]
         if not paths:
             errors.append("no supported log files matched")
             failure = ValueError("no supported log files matched")
@@ -65,8 +80,11 @@ def capture(a, *, clock=time.monotonic):
                 if not size:
                     continue
                 file_coverage = {
-                    "path": path, "inode": os.fstat(f.fileno()).st_ino,
-                    "bytes": size, "first_completion": None, "last_completion": None,
+                    "path": path,
+                    "inode": os.fstat(f.fileno()).st_ino,
+                    "bytes": size,
+                    "first_completion": None,
+                    "last_completion": None,
                 }
                 coverage.append(file_coverage)
                 line_number = 0
@@ -126,14 +144,23 @@ def capture(a, *, clock=time.monotonic):
                     aux = r.get("aux_info") or {}
                     try:
                         record = CaptureRecord(
-                            schema_version=metadata.schema_version, block_size=metadata.block_size,
-                            ts=ts, il=len(ids), ol=r.get("output_token_len"), keys=tuple(keys),
+                            schema_version=metadata.schema_version,
+                            block_size=metadata.block_size,
+                            ts=ts,
+                            il=len(ids),
+                            ol=r.get("output_token_len"),
+                            keys=tuple(keys),
                             tail_hash=hashlib.sha256(raw).hexdigest()[:32],
                             rid=hashlib.sha256(rid.encode()).hexdigest()[:32],
-                            status=r.get("status"), error=r.get("backend_error_code"),
-                            cached=r.get("prompt_cached_token_num"), aux_reuse=aux.get("reuse_len"),
-                            latency_ms=r.get("latency_total_ms"), priority=cfg.get("traffic_reject_priority"),
-                            max_new_tokens=cfg.get("max_new_tokens"), timeout_ms=cfg.get("timeout_ms"))
+                            status=r.get("status"),
+                            error=r.get("backend_error_code"),
+                            cached=r.get("prompt_cached_token_num"),
+                            aux_reuse=aux.get("reuse_len"),
+                            latency_ms=r.get("latency_total_ms"),
+                            priority=cfg.get("traffic_reject_priority"),
+                            max_new_tokens=cfg.get("max_new_tokens"),
+                            timeout_ms=cfg.get("timeout_ms"),
+                        )
                     except ValueError:
                         stats["contract_errors"] += 1
                         raise
@@ -151,9 +178,7 @@ def capture(a, *, clock=time.monotonic):
     except Exception as exc:
         # 不写日志原文或原始 token 到错误产物。
         stats["fatal_errors"] += 1
-        safe_reason = isinstance(exc, CaptureInputError) or (
-            isinstance(exc, ValueError) and "contract_errors" in stats
-        )
+        safe_reason = isinstance(exc, CaptureInputError) or (isinstance(exc, ValueError) and "contract_errors" in stats)
         errors.append(str(exc) if safe_reason else type(exc).__name__)
         failure = exc
     finally:
@@ -166,9 +191,13 @@ def capture(a, *, clock=time.monotonic):
         "complete": not truncated and failure is None,
         "truncated": truncated,
         "errors": errors,
-        "parameters": dict(log_dir=str(a.log_dir), log_glob=a.log_glob,
-                           time_budget_s=a.time_budget_s, block_size=block_size,
-                           on_budget=a.on_budget),
+        "parameters": dict(
+            log_dir=str(a.log_dir),
+            log_glob=a.log_glob,
+            time_budget_s=a.time_budget_s,
+            block_size=block_size,
+            on_budget=a.on_budget,
+        ),
         "hostname": socket.gethostname(),
         "start": a.start,
         "end": a.end,

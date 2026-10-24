@@ -1,12 +1,13 @@
 """Java producer control protocol, independent of discovery and traffic source."""
-from file_io import read_json
 
 import json
 import uuid
-from pathlib import Path
-from dataclasses import dataclass, asdict
+from dataclasses import asdict, dataclass
 from enum import Enum
+from pathlib import Path
 from typing import Optional
+
+from file_io import read_json
 
 
 class FlowState(str, Enum):
@@ -49,17 +50,27 @@ class FlowStatus:
         try:
             result = cls(
                 state=FlowState(row["state"]),
-                submitted=row["submitted"], started=row["started"],
-                terminal=row["terminal"], outstanding=row["outstanding"],
-                sending_end_reason=(SendingEndReason(row["sending_end_reason"])
-                                    if "sending_end_reason" in row else None),
+                submitted=row["submitted"],
+                started=row["started"],
+                terminal=row["terminal"],
+                outstanding=row["outstanding"],
+                sending_end_reason=(
+                    SendingEndReason(row["sending_end_reason"]) if "sending_end_reason" in row else None
+                ),
                 applied_command_id=row.get("applied_command_id"),
-                revision=row["revision"], recorded_epoch_ms=row["recorded_epoch_ms"],
+                revision=row["revision"],
+                recorded_epoch_ms=row["recorded_epoch_ms"],
             )
         except (KeyError, TypeError, ValueError) as exc:
             raise ValueError("invalid flow control status") from exc
-        for value in (result.submitted, result.started, result.terminal,
-                      result.outstanding, result.revision, result.recorded_epoch_ms):
+        for value in (
+            result.submitted,
+            result.started,
+            result.terminal,
+            result.outstanding,
+            result.revision,
+            result.recorded_epoch_ms,
+        ):
             if type(value) is not int or value < 0:
                 raise ValueError("invalid flow control counter")
         if result.terminal > result.submitted or result.started > result.submitted:
@@ -81,9 +92,13 @@ class FlowStatus:
         return result
 
     def validate_completion(self, terminal_count, command_id):
-        if (self.state != FlowState.DRAINED or type(terminal_count) is not int
-                or terminal_count < 0 or self.submitted != self.terminal
-                or self.terminal != terminal_count):
+        if (
+            self.state != FlowState.DRAINED
+            or type(terminal_count) is not int
+            or terminal_count < 0
+            or self.submitted != self.terminal
+            or self.terminal != terminal_count
+        ):
             raise ValueError("flow did not retain every submitted terminal result")
         if command_id is not None and self.applied_command_id != command_id:
             if self.sending_end_reason != SendingEndReason.NATURAL or self.applied_command_id is not None:
@@ -119,17 +134,23 @@ class DrainResult:
     def validate(self, command_id):
         if self.process_returncode != 0 or self.status.state != FlowState.DRAINED:
             raise RuntimeError("flow drain incomplete")
-        if (self.observed_started != self.status.submitted
-                or self.observed_terminal != self.status.terminal or self.unfinished_ids):
+        if (
+            self.observed_started != self.status.submitted
+            or self.observed_terminal != self.status.terminal
+            or self.unfinished_ids
+        ):
             raise RuntimeError("flow drain journal does not account for every submission")
         self.status.validate_completion(self.observed_terminal, command_id)
 
     def encode(self, identity):
-        return dict(identity, **self.status.encode(),
-                    process_returncode=self.process_returncode,
-                    observed_started=self.observed_started,
-                    observed_terminal=self.observed_terminal,
-                    unfinished_ids=list(self.unfinished_ids))
+        return dict(
+            identity,
+            **self.status.encode(),
+            process_returncode=self.process_returncode,
+            observed_started=self.observed_started,
+            observed_terminal=self.observed_terminal,
+            unfinished_ids=list(self.unfinished_ids),
+        )
 
 
 class FlowControlProtocol:
@@ -182,11 +203,12 @@ def validate_drain(state, identity, *, terminal_count, command_id):
 
 def wait_flow_started(control, identity, process, deadline):
     from runtime.startup import wait_ready
+
     def acknowledged():
         state = read_status(control, identity)
         if not process.alive():
-            if state.get('state') != 'DRAINED' or process.proc.poll() != 0:
-                raise RuntimeError('client exited before sending acknowledgement\n' + process.tail_log())
-        return state if state.get('state') in {'SENDING', 'DRAINING', 'DRAINED', 'INCOMPLETE'} else None
-    return wait_ready(deadline, 'client/sending acknowledgement', acknowledged,
-                      interval_s=0.1)
+            if state.get("state") != "DRAINED" or process.proc.poll() != 0:
+                raise RuntimeError("client exited before sending acknowledgement\n" + process.tail_log())
+        return state if state.get("state") in {"SENDING", "DRAINING", "DRAINED", "INCOMPLETE"} else None
+
+    return wait_ready(deadline, "client/sending acknowledgement", acknowledged, interval_s=0.1)

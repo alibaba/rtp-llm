@@ -6,14 +6,13 @@ identity is the stable (role, engine index, generation), independent of IP.
 
 from __future__ import annotations
 
-import ipaddress
 import argparse
+import ipaddress
 import json
 import shlex
 from pathlib import Path
 
 import yaml
-
 from flexlb_profile_data import REGISTERED_PROFILE_SPECS as PROFILE_SPECS
 
 _ROOT = Path(__file__).resolve().parent
@@ -27,12 +26,13 @@ TABLE_PATH = (
 
 def load_mode_tables(path: Path = TABLE_PATH) -> dict:
     doc = yaml.safe_load(path.read_text(encoding="utf-8"))
-    if (not isinstance(doc, dict)
-            or {key for key in doc if isinstance(key, str)
-                and (key == "schema_version" or key.endswith("_schema_version"))}
-               != {"mode_profiles_schema_version"}
-            or type(doc.get("mode_profiles_schema_version")) is not int
-            or doc["mode_profiles_schema_version"] != 1):
+    if (
+        not isinstance(doc, dict)
+        or {key for key in doc if isinstance(key, str) and (key == "schema_version" or key.endswith("_schema_version"))}
+        != {"mode_profiles_schema_version"}
+        or type(doc.get("mode_profiles_schema_version")) is not int
+        or doc["mode_profiles_schema_version"] != 1
+    ):
         raise ValueError("unsupported mode table schema")
     runtime = doc.get("runtime_modes")
     master = doc.get("master_modes")
@@ -45,30 +45,29 @@ def load_mode_tables(path: Path = TABLE_PATH) -> dict:
         if profile not in PROFILE_SPECS:
             raise ValueError(f"{name}: unknown master profile {profile}")
         spec = PROFILE_SPECS[profile]
-        if mode.get("decision", "").lower() != spec["decision"] or mode.get(
-            "dispatcher", ""
-        ).lower() != spec["dispatcher"]:
+        if (
+            mode.get("decision", "").lower() != spec["decision"]
+            or mode.get("dispatcher", "").lower() != spec["dispatcher"]
+        ):
             raise ValueError(f"{name}: profile axes disagree with flexlb_cfg")
     for name, mode in runtime.items():
-        if mode.get("address") not in {
-            "loopback_per_engine", "pod_when_external", "pod_per_engine"
-        }:
+        if mode.get("address") not in {"loopback_per_engine", "pod_when_external", "pod_per_engine"}:
             raise ValueError(f"{name}: invalid address policy")
         obs = mode.get("observation")
         if not isinstance(obs, dict) or set(obs) != {"jsonl", "kmonitor", "report"}:
             raise ValueError(f"{name}: incomplete observation defaults")
         features = mode.get("features")
-        if not isinstance(features, dict) or set(features) != {
-            "workload", "orchestration", "collector", "assertion"
-        }:
+        if not isinstance(features, dict) or set(features) != {"workload", "orchestration", "collector", "assertion"}:
             raise ValueError(f"{name}: incomplete feature table")
         if "default_profile" in mode or "default_master_mode" in mode:
             default_mode = mode.get("default_master_mode")
             profile = mode.get("default_profile")
             if profile not in PROFILE_SPECS or default_mode not in master:
                 raise ValueError(f"{name}: unknown default profile/master mode")
-            if any(PROFILE_SPECS[profile][axis] != master[default_mode][axis].lower()
-                   for axis in ("decision", "dispatcher")):
+            if any(
+                PROFILE_SPECS[profile][axis] != master[default_mode][axis].lower()
+                for axis in ("decision", "dispatcher")
+            ):
                 raise ValueError(f"{name}: default profile axes disagree with master mode")
     return doc
 
@@ -89,13 +88,17 @@ def resolve_mode(
     runtime_cfg = tables["runtime_modes"][runtime]
     master_cfg = tables["master_modes"][master]
     address_plan = resolve_address_plan(
-        runtime, external_engine_clients=external_engine_clients,
-        pod_ip=pod_ip, tables=tables,
+        runtime,
+        external_engine_clients=external_engine_clients,
+        pod_ip=pod_ip,
+        tables=tables,
         unique_loopback_supported=unique_loopback_supported,
     )
-    selected_profile = (runtime_cfg.get("default_profile")
-                        if runtime_cfg.get("default_master_mode") == master
-                        else master_cfg["profile"])
+    selected_profile = (
+        runtime_cfg.get("default_profile")
+        if runtime_cfg.get("default_master_mode") == master
+        else master_cfg["profile"]
+    )
     return {
         "runtime": runtime,
         "master_mode": master,
@@ -122,9 +125,7 @@ def resolve_address_plan(
         raise ValueError(f"unknown runtime mode: {runtime}")
     runtime_cfg = tables["runtime_modes"][runtime]
     address = runtime_cfg["address"]
-    use_pod = address == "pod_per_engine" or (
-        address == "pod_when_external" and external_engine_clients
-    )
+    use_pod = address == "pod_per_engine" or (address == "pod_when_external" and external_engine_clients)
     if external_engine_clients and not use_pod:
         raise ValueError("external engine clients require a routable engine address")
     if use_pod:
@@ -164,9 +165,11 @@ def render_shell_defaults(runtime: str) -> str:
 
 def master_mode_for_profile(profile: str) -> str:
     spec = PROFILE_SPECS.get(profile)
-    matches = [name for name, mode in load_mode_tables()["master_modes"].items()
-               if spec and all(mode[axis].lower() == spec[axis]
-                               for axis in ("decision", "dispatcher"))]
+    matches = [
+        name
+        for name, mode in load_mode_tables()["master_modes"].items()
+        if spec and all(mode[axis].lower() == spec[axis] for axis in ("decision", "dispatcher"))
+    ]
     if len(matches) != 1:
         raise ValueError(f"profile has no unique master mode: {profile}")
     return matches[0]
@@ -193,8 +196,9 @@ def main(argv=None):
             return
         if not args.master:
             parser.error("--master is required unless --render-shell is used")
-        plan = resolve_mode(args.runtime, args.master, pod_ip=args.pod_ip,
-                            external_engine_clients=args.external_engine_clients)
+        plan = resolve_mode(
+            args.runtime, args.master, pod_ip=args.pod_ip, external_engine_clients=args.external_engine_clients
+        )
     except ValueError as exc:
         parser.error(str(exc))
     print(plan[args.field] if args.field else json.dumps(plan, sort_keys=True))

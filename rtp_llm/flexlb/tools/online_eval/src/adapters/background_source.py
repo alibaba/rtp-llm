@@ -1,4 +1,5 @@
 """Independent structured evidence source with bounded storage and joined shutdown."""
+
 import json
 from pathlib import Path
 
@@ -18,7 +19,7 @@ class BackgroundSource(SampleWorker):
         self.name, self.read = name, read
         self.identity = json.loads(json.dumps(identity, allow_nan=False))
         if not isinstance(self.identity, dict) or not self.identity:
-            raise ValueError('background source requires an explicit identity')
+            raise ValueError("background source requires an explicit identity")
         self.path, self.wall_clock = Path(path), wall_clock
         self.latest_sample = None
         self.attached = False
@@ -27,7 +28,7 @@ class BackgroundSource(SampleWorker):
     def attach(self, scope, deadline):
         """Own the stop-hook signature and register recovery before starting."""
         if self.attached:
-            raise ValueError('background source already has an owner')
+            raise ValueError("background source already has an owner")
         self.attached = True
         scope.add_cleanup(self.name, self.stop_sampling, request_stop=self.stop_event.set)
         self.start(deadline)
@@ -37,15 +38,27 @@ class BackgroundSource(SampleWorker):
         started, epoch = self.clock(), self.wall_clock()
         data = self.read(deadline)
         deadline.check()
-        return FrozenSnapshot(json.dumps(dict(source=self.name, identity=self.identity, started_mono=started,
-            started_epoch_s=epoch, finished_mono=self.clock(), finished_epoch_s=self.wall_clock(),
-            status="ok", data=data), allow_nan=False))
+        return FrozenSnapshot(
+            json.dumps(
+                dict(
+                    source=self.name,
+                    identity=self.identity,
+                    started_mono=started,
+                    started_epoch_s=epoch,
+                    finished_mono=self.clock(),
+                    finished_epoch_s=self.wall_clock(),
+                    status="ok",
+                    data=data,
+                ),
+                allow_nan=False,
+            )
+        )
 
     def append(self, sample):
         if not super().append(sample):
             return False
-        with self.path.open('a') as stream:
-            stream.write(sample.encoded + '\n')
+        with self.path.open("a") as stream:
+            stream.write(sample.encoded + "\n")
         self.latest_sample = sample
         return True
 
@@ -63,7 +76,14 @@ class BackgroundSource(SampleWorker):
         try:
             super().stop_sampling(deadline)
         finally:
-            write_json(self.path.with_suffix('.status.json'), dict(source=self.name,
-                error=self.error, samples=self.budget.count, bytes=self.budget.bytes,
-                worker_exit_mono=self.worker_exit_mono, joined=bool(self.thread)
-                    and self.done_event.is_set() and not self.thread.is_alive()))
+            write_json(
+                self.path.with_suffix(".status.json"),
+                dict(
+                    source=self.name,
+                    error=self.error,
+                    samples=self.budget.count,
+                    bytes=self.budget.bytes,
+                    worker_exit_mono=self.worker_exit_mono,
+                    joined=bool(self.thread) and self.done_event.is_set() and not self.thread.is_alive(),
+                ),
+            )

@@ -12,12 +12,12 @@ import time
 from typing import List, Optional
 
 import grpc
+from runtime.network import http_get_json
 
 from adapters.environment_config import DEFAULT_MASTER_MANAGEMENT_PORT
-from adapters.proto_utils import encode_unique_key, ensure_proto_modules, ensure_schedule_proto_modules
-from runtime.network import http_get_json
 from adapters.master_control import master_url
 from adapters.mock_engine import MockEngineControl
+from adapters.proto_utils import encode_unique_key, ensure_proto_modules, ensure_schedule_proto_modules
 from adapters.stream import StreamHandle, StreamSnapshot
 
 DEFAULT_INPUT_LEN = 2048
@@ -54,9 +54,7 @@ class EngineOps(MockEngineControl):
         # env, falling back to http+1) — the port start_master actually binds
         # via --management.server.port.
         self.master_management_port = (
-            master_management_port
-            if master_management_port is not None
-            else DEFAULT_MASTER_MANAGEMENT_PORT
+            master_management_port if master_management_port is not None else DEFAULT_MASTER_MANAGEMENT_PORT
         )
         self.pb2, self.pb2_grpc = ensure_proto_modules()
         self.schedule_pb2, self.schedule_pb2_grpc = ensure_schedule_proto_modules()
@@ -82,9 +80,7 @@ class EngineOps(MockEngineControl):
 
     def _channel(self, target: str):
         if target not in self._channels:
-            self._channels[target] = grpc.insecure_channel(
-                target, options=CHANNEL_OPTIONS
-            )
+            self._channels[target] = grpc.insecure_channel(target, options=CHANNEL_OPTIONS)
         return self._channels[target]
 
     def next_request_id(self, base: Optional[int] = None) -> int:
@@ -214,9 +210,7 @@ class EngineOps(MockEngineControl):
         precedence over it during master-side normalization
         (PriorityNormalizer: proto value > header > defaultPriority).
         """
-        stub = self.schedule_pb2_grpc.FlexlbServiceStub(
-            self._channel(self.master_target())
-        )
+        stub = self.schedule_pb2_grpc.FlexlbServiceStub(self._channel(self.master_target()))
         req = self.build_schedule_request(request_id, **kwargs)
         if qos_level is not None:
             return stub.Schedule(
@@ -237,9 +231,7 @@ class EngineOps(MockEngineControl):
         return ""
 
     def prefill_addr(self, response) -> str:
-        return self.role_addr(response, "PREFILL") or self.role_addr(
-            response, "PDFUSION"
-        )
+        return self.role_addr(response, "PREFILL") or self.role_addr(response, "PDFUSION")
 
     # -- dual-path stream ---------------------------------------------------
 
@@ -262,9 +254,7 @@ class EngineOps(MockEngineControl):
             raise RuntimeError("schedule response has no PREFILL/PDFUSION address")
         stub = self.pb2_grpc.RpcServiceStub(self._channel(target))
         if response.enqueued_by_master:
-            call = stub.FetchResponse(
-                self.pb2.FetchRequestPB(request_id=request_id), timeout=60.0
-            )
+            call = stub.FetchResponse(self.pb2.FetchRequestPB(request_id=request_id), timeout=60.0)
         else:
             if input_pb is None:
                 # Default-shape fallback: callers that scheduled with a
@@ -278,9 +268,7 @@ class EngineOps(MockEngineControl):
 
     def cancel(self, request_id: int, response=None) -> None:
         """Cancel via master (always) + worker (NON_BATCH/frontend path only)."""
-        stub = self.schedule_pb2_grpc.FlexlbServiceStub(
-            self._channel(self.master_target())
-        )
+        stub = self.schedule_pb2_grpc.FlexlbServiceStub(self._channel(self.master_target()))
         cancel_request = self.schedule_pb2.FlexlbCancelRequestPB(
             request_id=request_id,
             reason=self.schedule_pb2.CANCEL_REASON_CLIENT_CANCELLED,
@@ -317,9 +305,7 @@ class EngineOps(MockEngineControl):
             input_pb = (
                 None
                 if response.enqueued_by_master
-                else self.build_generate_input(
-                    rid, output_len=output_len, block_keys=block_keys
-                )
+                else self.build_generate_input(rid, output_len=output_len, block_keys=block_keys)
             )
             handle = self.start_stream(response, rid, input_pb=input_pb)
             handle.thread.join(RECOVERY_TIMEOUT_S)
