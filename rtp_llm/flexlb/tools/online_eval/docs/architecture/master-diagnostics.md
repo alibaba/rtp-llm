@@ -28,6 +28,6 @@ Worker 身份由 `(instance_id, worker_id, generation)` 组成。`worker_id` 为
 
 ## 框架消费
 
-`adapters.master_diagnostics.MasterDiagnosticsClient` 校验 schema、组件版本、时钟、身份与字段类型。通过 `component()` 读取所需组件；缺失、partial、截断和不支持都显式失败。旧版 `DebugClient` 的请求行 schema 不用于 Worker 快照。
+`adapters.master_diagnostics.MasterDiagnosticsClient` 校验 schema、组件版本、时钟、身份与字段类型。通过 `component()` 读取所需组件；缺失、partial、截断和不支持都显式失败。请求行与 Worker 快照分别按对应协议校验。
 
 能力检查应在大规模注入和发流前完成。不支持的能力不能回退为成功轮询年龄、零计数或默认健康。Master 重启后 instance 变化，不能继续用前一进程的 generation 和累计计数判定恢复。原始证据与功能结果分别保留，后续采集失败不能覆盖已经证实的异常。

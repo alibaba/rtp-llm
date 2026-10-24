@@ -3,16 +3,12 @@
 from dataclasses import replace
 
 from scenario.registry import registry
-from scenario.actions.engine_control import HANDLERS as ENGINE_CONTROL_HANDLERS
-from scenario.actions.engine_fault import HANDLERS as ENGINE_FAULT_HANDLERS
 from scenario.actions.environment import HANDLERS as ENVIRONMENT_HANDLERS
 from scenario.actions.java_flow import HANDLERS as JAVA_FLOW_HANDLERS
 from scenario.actions.master import HANDLERS as MASTER_HANDLERS
 from scenario.actions.observation import HANDLERS as OBSERVATION_HANDLERS
 
 FOUNDATION_HANDLERS = (
-    *ENGINE_CONTROL_HANDLERS,
-    *ENGINE_FAULT_HANDLERS,
     *ENVIRONMENT_HANDLERS,
     *JAVA_FLOW_HANDLERS,
     *MASTER_HANDLERS,

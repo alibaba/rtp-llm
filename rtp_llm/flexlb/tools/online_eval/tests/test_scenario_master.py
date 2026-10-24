@@ -482,20 +482,13 @@ class MasterActionsTest(unittest.TestCase):
     def test_master_programs_compile_with_explicit_registered_actions(self):
         from scenario import load_scenarios
         from program_fixtures import compile_scenarios
-        from scenario.actions.engine_control import (
-            HANDLERS as controls,
-        )
-        from scenario.actions.engine_fault import (
-            HANDLERS as faults,
-        )
-
         root = Path(__file__).resolve().parents[1] / "config/scenarios"
         with patch("scenario.compiler.VICTIM_OFFSETS", (700, 701, 702)), \
              patch("adapters.java_mock_resources.VICTIM_OFFSETS", (700, 701, 702)):
             plans = compile_scenarios(
                 load_scenarios(root / "master_ha_failover.yaml"),
                 handlers={
-                    h.name: h for h in master.HANDLERS + ha.HANDLERS + controls + faults
+                    h.name: h for h in master.HANDLERS + ha.HANDLERS
                 },
             )
         self.assertEqual(4, len(plans))

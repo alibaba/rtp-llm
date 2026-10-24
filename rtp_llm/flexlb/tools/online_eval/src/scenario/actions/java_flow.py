@@ -1,7 +1,6 @@
 """Java-generated traffic groups with Python-owned preconditions and checkpoints."""
 
 import json
-import time
 from pathlib import Path
 
 from adapters.client_journal import MAX_EVIDENCE_EVENTS
@@ -10,10 +9,8 @@ from adapters.java_flow_spec import JavaFlowSpec
 from traffic.traffic_source import materialize
 from traffic.contracts import source_priority
 
-from scenario.contracts import CheckResult, StageHandler, StageOutput
-from scenario.contracts import ExecutionRequirements
+from scenario.contracts import StageHandler, StageOutput
 from scenario.parameters import validate_fields
-from adapters.mock_control import engine_snapshot
 
 def _start_validate(params, plan):
     if isinstance(params, dict) and "trace" in params:
@@ -93,125 +90,9 @@ def _drain(ctx, p, deadline):
     )
 
 
-def _checkpoint_validate(params, plan):
-    fields = {"flow", "min_started", "min_terminal", "min_decode_inflight", "engine"}
-    p = validate_fields(params, plan, fields, fields - {"engine"})
-    plan.reference(p["flow"], "java_flow")
-    for k in fields - {"flow", "engine"}:
-        if type(p[k]) is not int or p[k] < 0:
-            raise ValueError("checkpoint bounds must be explicit nonnegative integers")
-    if "engine" in p:
-        if isinstance(p["engine"], dict):
-            plan.reference(p["engine"], "string")
-        elif not isinstance(p["engine"], str) or not p["engine"]:
-            raise ValueError("engine must be a name or string output reference")
-    return p
-
-
-def _checkpoint(ctx, p, deadline):
-    flow = ctx.resource(p["flow"], "java_flow")
-    samples = []
-    path = ctx.artifact_dir / f"flow-checkpoint-{time.time_ns()}.json"
-    try:
-        while True:
-            deadline.check()
-            state = flow.status()
-            engines = engine_snapshot(ctx, deadline)
-            inflight = sum(
-                e["running"] + e["waiting"]
-                for e in engines.values()
-                if e["role"] == "decode"
-            )
-            engine = ctx.resolve(p["engine"]) if "engine" in p else None
-            accepted = engines.get(engine, {}).get("accepted") if engine else None
-            actual = dict(
-                epoch_s=time.time(),
-                state=state,
-                decode_inflight=inflight,
-                engine=engine,
-                accepted=accepted,
-            )
-            samples.append(actual)
-            good = (
-                state["observed_started"] >= p["min_started"]
-                and state["observed_terminal"] >= p["min_terminal"]
-                and inflight >= p["min_decode_inflight"]
-                and (engine is None or (type(accepted) is int and accepted > 0))
-            )
-            if good:
-                break
-            if state["process_returncode"] is not None:
-                raise RuntimeError("flow ended before checkpoint precondition")
-            deadline.sleep(flow.poll_s)
-    finally:
-        path.write_text(json.dumps(samples, indent=2))
-    return StageOutput(
-        {"snapshot": ctx.register_resource("snapshot", actual, historical=True)},
-        [CheckResult("precondition", "PASS", actual=actual)],
-        [str(path)],
-    )
-
-
-def _check_validate(params, plan):
-    p = validate_fields(
-        params, plan, {"flow", "min_success_rate"}, {"flow", "min_success_rate"}
-    )
-    plan.reference(p["flow"], "java_flow")
-    if (
-        type(p["min_success_rate"]) not in (int, float)
-        or not 0 <= p["min_success_rate"] <= 1
-    ):
-        raise ValueError("invalid explicit success rate")
-    return p
-
-
-def _check(ctx, p, deadline):
-    flow = ctx.resource(p["flow"], "java_flow")
-    snapshot = flow.evidence_snapshot()
-    rows = snapshot["records"]
-    good = sum(row.get("status") == "ok" for row in rows)
-    rate = good / len(rows) if rows else None
-    path = flow.directory / "verified-evidence.json"
-    path.write_text(json.dumps(snapshot, indent=2))
-    return StageOutput(
-        checks=[
-            CheckResult(
-                "complete",
-                "PASS" if snapshot["complete"] else "FAIL",
-                actual=snapshot["errors"],
-            ),
-            CheckResult(
-                "success_rate",
-                (
-                    "PASS"
-                    if rate is not None and rate >= p["min_success_rate"]
-                    else "FAIL"
-                ),
-                actual=rate,
-                expected=p["min_success_rate"],
-            ),
-        ],
-        artifacts=[str(path)],
-    )
-
 
 HANDLERS = [
     StageHandler("java_flow_start", _start_validate, _start, {"flow": "java_flow"}),
     StageHandler("java_flow_stop", _flow_validate, _stop, {"snapshot": "snapshot"}),
     StageHandler("java_flow_drain", _flow_validate, _drain, {"snapshot": "snapshot"}),
-    StageHandler(
-        "java_flow_checkpoint",
-        _checkpoint_validate,
-        _checkpoint,
-        {"snapshot": "snapshot"},
-        checks=frozenset({"precondition"}),
-    ),
-    StageHandler(
-        "java_flow_check",
-        _check_validate,
-        _check,
-        {},
-        checks=frozenset({"complete", "success_rate"}),
-        execution_requirements=ExecutionRequirements(request_evidence=True),
-    ),
 ]
