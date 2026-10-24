@@ -137,7 +137,8 @@ public:
     size_t insert(const CacheKeysType&                              cache_keys,
                   const std::vector<std::vector<GroupSetResource>>& resources,
                   Tier                                              target_tier,
-                  bool                                              is_resident);
+                  bool                                              is_resident,
+                  bool                                              account_for_prefill = false);
     // Directly reclaim up to num_blocks device blocks belonging to one group set
     // (target_tier = NONE, content dropped). Returns the number actually freed.
     int evictForGroup(std::string_view group_tag, size_t num_blocks);

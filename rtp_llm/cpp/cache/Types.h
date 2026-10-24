@@ -1,5 +1,6 @@
 #pragma once
 
+#include <algorithm>
 #include <cstddef>
 #include <memory>
 #include <string>
@@ -85,13 +86,19 @@ enum class MallocStatus : uint8_t {
     INTERNAL_ERROR,
 };
 
+struct ReuseAccounting {
+    std::vector<size_t> unaccounted_block_indices;
+
+    size_t unaccountedBlocks(size_t reused_blocks) const {
+        return std::lower_bound(unaccounted_block_indices.begin(), unaccounted_block_indices.end(), reused_blocks)
+               - unaccounted_block_indices.begin();
+    }
+};
+
 struct MallocResult {
     MallocResult() = default;
 
-    constexpr MallocResult(bool         success,
-                           int          reuse_len,
-                           int64_t      match_cost_time_us = 0,
-                           MallocStatus status             = MallocStatus::NONE):
+    MallocResult(bool success, int reuse_len, int64_t match_cost_time_us = 0, MallocStatus status = MallocStatus::NONE):
         success(success),
         reuse_len(reuse_len),
         match_cost_time_us(match_cost_time_us),
@@ -114,6 +121,7 @@ struct MallocResult {
     MallocStatus status             = MallocStatus::INTERNAL_ERROR;
 
     std::shared_ptr<AsyncContext> async_context = nullptr;
+    ReuseAccounting               reuse_accounting;
 
     // Lower-tier reuse is published only after async_context completes.
 
@@ -136,6 +144,7 @@ struct InsertInfo {
     CompleteTokenIdsPtr     complete_token_ids;
     bool                    is_resident;
     Tier                    target_tier{Tier::DEVICE};
+    bool                    account_for_prefill{false};
 };
 
 }  // namespace rtp_llm

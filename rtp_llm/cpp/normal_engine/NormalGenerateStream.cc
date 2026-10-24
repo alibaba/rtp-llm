@@ -158,7 +158,10 @@ GenerateOutputs NormalGenerateStream::prepareGenerateOutput(const StreamUpdateIn
             // TODO(xinfei.sxf) 提前结束的query，output len要设置正确
             generate_output.aux_info.output_len       = seqLength() - generate_input_->inputLength();
             generate_output.aux_info.step_output_len  = output_len;
-            generate_output.aux_info.reuse_len        = initial_reuse_length_;
+            generate_output.aux_info.writeback_first_use_len =
+                std::min(initial_reuse_length_, writeback_first_use_length_);
+            generate_output.aux_info.reuse_len =
+                initial_reuse_length_ - generate_output.aux_info.writeback_first_use_len;
             generate_output.aux_info.pd_sep           = queryPdSep();
             generate_output.aux_info.local_reuse_len  = local_reuse_length_;
             generate_output.aux_info.remote_reuse_len = remote_reuse_length_;
@@ -286,6 +289,7 @@ void NormalGenerateStream::updateOutput(const StreamUpdateInfo& update_info) {
             // the longer proven Decode reuse phase.
             side_data.prefill_use_independent_block_pools = rc.cache_manager->cacheConfig().groupNums() > 1;
             side_data.total_reuse_len  = reuseLength();
+            side_data.writeback_first_use_len             = writebackFirstUseLength();
             side_data.local_reuse_len  = localReuseLength();
             side_data.remote_reuse_len = remoteReuseLength();
             side_data.memory_reuse_len = hostReuseLength();

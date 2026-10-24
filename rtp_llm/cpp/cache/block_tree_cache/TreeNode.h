@@ -17,6 +17,7 @@ struct TreeNode {
     std::unordered_map<CacheKeyType, TreeNode*> children;
     TreeNode*                                   parent{nullptr};
     std::vector<GroupSetResource>               group_set_resources;
+    bool                                        is_accounted{true};
     bool                                        is_resident{false};  // Must never change from true to false.
 };
 

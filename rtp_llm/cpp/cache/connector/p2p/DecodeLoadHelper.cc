@@ -318,6 +318,7 @@ void DecodeLoadHelper::Result::updateStreamFromResponse() {
         side_channel_payload.generation_prefill_cuda_graph_status = payload.generation_prefill_cuda_graph_status();
         side_channel_payload.prefill_use_independent_block_pools  = payload.prefill_use_independent_block_pools();
         side_channel_payload.total_reuse_len  = payload.total_reuse_len();
+        side_channel_payload.writeback_first_use_len              = payload.writeback_first_use_len();
         side_channel_payload.local_reuse_len  = payload.local_reuse_len();
         side_channel_payload.remote_reuse_len = payload.remote_reuse_len();
         side_channel_payload.memory_reuse_len = payload.memory_reuse_len();

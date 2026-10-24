@@ -135,6 +135,7 @@ struct AuxInfo {
     int32_t                      input_len                = 0;
     int32_t                      total_reuse_len          = 0;
     int32_t                      reuse_len                = 0;
+    int32_t                      writeback_first_use_len  = 0;
     int32_t                      prefix_len               = 0;
     int32_t                      output_len               = 0;
     int32_t                      step_output_len          = 0;

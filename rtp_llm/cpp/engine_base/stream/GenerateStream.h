@@ -255,9 +255,17 @@ public:
     void    setDiskReuseLength(int length);
     int     diskReuseLength() const;
     void    setInitialReuseLength(int initial_reuse_length);
+    void    setWritebackFirstUseLength(int length);
+    int     writebackFirstUseLength() const;
     void    incLastOutputPos();
-    void    setPrefillReuseLength(
-           int64_t total, int64_t local, int64_t remote, int64_t memory, int64_t disk, bool independent_pools);
+    void    setPrefillReuseLength(int64_t total,
+                                  int64_t local,
+                                  int64_t remote,
+                                  int64_t memory,
+                                  int64_t disk,
+                                  bool    independent_pools,
+                                  int     writeback_first_use_len = 0);
+    int     prefillWritebackFirstUseLength() const;
     int64_t prefillTotalReuseLen() const;
     int64_t prefillLocalReuseLen() const;
     int64_t prefillRemoteReuseLen() const;
@@ -936,6 +944,7 @@ protected:
     std::vector<int32_t>               speculative_accepted_tokens_per_pos_;
     size_t                             last_output_pos_      = 0;
     int                                initial_reuse_length_ = 0;
+    int                                writeback_first_use_length_ = 0;
     int                                reuse_length_         = 0;
     int                                local_reuse_length_   = 0;
     int                                device_reuse_length_  = 0;
@@ -944,6 +953,7 @@ protected:
     int                                disk_reuse_length_    = 0;
     // prefill reuse info (PD-sep); read/write only under output_mutex_
     bool    prefill_independent_block_pools_ = false;
+    int     prefill_writeback_first_use_length_ = 0;
     int64_t prefill_total_reuse_len_  = 0;
     int64_t prefill_local_reuse_len_  = 0;
     int64_t prefill_remote_reuse_len_ = 0;

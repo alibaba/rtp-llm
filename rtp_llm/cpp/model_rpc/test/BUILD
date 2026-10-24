@@ -205,6 +205,20 @@ cc_test(
 )
 
 cc_test(
+    name = "decode_rpc_server_test",
+    srcs = ["DecodeRpcServerTest.cc"],
+    copts = test_copts,
+    deps = test_deps + [
+        "//rtp_llm/cpp/cache:cache",
+        "//rtp_llm/cpp/engine_base/schedulers",
+        "//rtp_llm/cpp/engine_base/stream:stream",
+        "@havenask//aios/autil:net",
+    ],
+    env = {"TEST_USING_DEVICE": "CUDA"},
+    exec_properties = {"gpu": "H20"},
+)
+
+cc_test(
     name = "p2p_model_rpc_test",
     srcs = [
         "DecodeRpcServerTest.cc",

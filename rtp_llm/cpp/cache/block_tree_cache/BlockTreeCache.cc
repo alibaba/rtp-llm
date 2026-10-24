@@ -223,7 +223,7 @@ ErrorInfo BlockTreeCache::insertExternalBlocks(const CacheKeysType&             
         // Assume that any returned KV blocks already inserted into the BlockTree remain on DEVICE during this short
         // settle window; immediate demotion to HOST is unlikely, so writeback does not handle it specially.
         size_t resident_prefix_length = 0;
-        storage_write = storer_.storeLocked(cache_keys, resources, Tier::DEVICE, false, resident_prefix_length);
+        storage_write = storer_.storeLocked(cache_keys, resources, Tier::DEVICE, false, resident_prefix_length, true);
     }
     // Persist the published blocks when a storage backend is configured.
     if (storage_write) {
@@ -241,12 +241,14 @@ void BlockTreeCache::insert(const CacheKeysType&                              ca
 size_t BlockTreeCache::insert(const CacheKeysType&                              cache_keys,
                               const std::vector<std::vector<GroupSetResource>>& resources,
                               Tier                                              target_tier,
-                              bool                                              is_resident) {
+                              bool                                              is_resident,
+                              bool                                              account_for_prefill) {
     size_t           resident_prefix_length = 0;
     StorageWriteTask storage_write;
     {
         std::lock_guard<std::mutex> lock(mutex_);
-        storage_write = storer_.storeLocked(cache_keys, resources, target_tier, is_resident, resident_prefix_length);
+        storage_write = storer_.storeLocked(
+            cache_keys, resources, target_tier, is_resident, resident_prefix_length, false, account_for_prefill);
     }
     if (storage_write) {
         storage_backend_->write(std::move(storage_write));
