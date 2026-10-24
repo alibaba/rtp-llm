@@ -8,7 +8,7 @@ import java.util.OptionalLong;
 
 /**
  * 投递方式中与模式相关的部分。分组负责选出一个有序的候选组；
- * 调度器负责协调 prepare、入队提交和 handoff 三个阶段；
+ * 调度器负责协调 prepare、入队提交和 deliver 三个阶段；
  * 具体的投递模式只管理自己的精确容量和传输资源。
  */
 public interface DeliveryStrategy {

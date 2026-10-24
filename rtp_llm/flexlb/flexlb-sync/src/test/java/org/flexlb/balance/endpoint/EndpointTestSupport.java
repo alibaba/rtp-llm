@@ -186,7 +186,7 @@ public final class EndpointTestSupport {
                 .thenAnswer(invocation -> {
                     List<ScheduledRequest> candidates = invocation.getArgument(0);
                     DeliveryTransaction transaction = org.mockito.Mockito.mock(DeliveryTransaction.class);
-                    org.mockito.Mockito.when(transaction.items()).thenReturn(List.of());
+                    org.mockito.Mockito.when(transaction.requests()).thenReturn(List.of());
                     org.mockito.Mockito.when(transaction.blocked())
                             .thenReturn(new BlockedRequest(candidates.getFirst(), PARKED_BOUNDARY));
                     return transaction;

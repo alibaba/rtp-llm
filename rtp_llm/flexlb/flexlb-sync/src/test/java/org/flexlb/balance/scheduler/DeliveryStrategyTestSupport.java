@@ -113,7 +113,7 @@ public final class DeliveryStrategyTestSupport {
                        int remainingQueueDepth,
                        OptionalLong plannedPredictionMs) {
             try (DeliveryTransaction transaction = strategy.prepare(candidates, EVALUATOR, plannedPredictionMs)) {
-                if (transaction.items().isEmpty()) {
+                if (transaction.requests().isEmpty()) {
                     emptyBoundary = new TestBoundary(
                             transaction.blocked().item(),
                             transaction.blocked().reason());
@@ -128,8 +128,8 @@ public final class DeliveryStrategyTestSupport {
                 if (!commit) {
                     return "NOT_COMMITTED";
                 }
-                WorkSnapshot precedingWork = transaction.commitUnderLock();
-                transaction.handoff(decisionReason, remainingQueueDepth, precedingWork);
+                WorkSnapshot precedingWork = transaction.commit();
+                transaction.deliver(decisionReason, remainingQueueDepth, precedingWork);
                 return "COMMITTED";
             }
         }

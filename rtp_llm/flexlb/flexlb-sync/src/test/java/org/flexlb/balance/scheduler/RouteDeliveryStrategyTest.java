@@ -240,7 +240,7 @@ class RouteDeliveryStrategyTest {
 
         assertEquals("COMMITTED", result);
         assertEquals(
-                List.of(first), fixture.context.preparedSelection().items());
+                List.of(first), fixture.context.preparedSelection().requests());
         assertSame(second, fixture.context.committedBoundary().item());
         assertEquals(DeliveryBlockReason.Status.UNAVAILABLE,
                 fixture.context.committedBoundary().result().status());

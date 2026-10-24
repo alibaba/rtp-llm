@@ -172,7 +172,7 @@ public final class BatchDeliveryStrategy implements DeliveryStrategy {
             int remainingQueueDepth,
             WorkSnapshot precedingWork,
             BatchSender sender) {
-        List<ScheduledRequest> original = batch.items();
+        List<ScheduledRequest> original = batch.requests();
         List<ClaimedMember> claimed = new ArrayList<>(original.size());
         DispatchGate gate = null;
         Throwable handoffFailure = null;
@@ -277,7 +277,7 @@ public final class BatchDeliveryStrategy implements DeliveryStrategy {
         } catch (Throwable failure) {
             cleanup = append(cleanup, failure);
         }
-        for (ScheduledRequest item : batch.items()) {
+        for (ScheduledRequest item : batch.requests()) {
             try {
                 requests.failDeliveryPreparation(item, cause);
             } catch (Throwable failure) {
@@ -373,8 +373,8 @@ public final class BatchDeliveryStrategy implements DeliveryStrategy {
         private long predictedMs;
         private PrefillTimePredictor.Evaluator evaluator;
         private BlockedRequest blocked;
-        // After SUBMITTED, only the accepted executor task advances this
-        // transaction. Scheduler abort/close may observe it but cannot reclaim it.
+        // 进入 SUBMITTED 后，只有已被执行器接收的任务才能推进本事务；
+        // 调度器的 rollbackCommitted 和 close 只能观察它的状态，不能回收其中的归属。
         private volatile Phase phase;
 
         private BatchTransaction(
@@ -476,7 +476,7 @@ public final class BatchDeliveryStrategy implements DeliveryStrategy {
         }
 
         @Override
-        public List<ScheduledRequest> items() {
+        public List<ScheduledRequest> requests() {
             return items;
         }
 
@@ -486,7 +486,7 @@ public final class BatchDeliveryStrategy implements DeliveryStrategy {
         }
 
         @Override
-        public synchronized WorkSnapshot commitUnderLock() {
+        public synchronized WorkSnapshot commit() {
             requirePrepared("commit");
             requireAdmissionPrepared("commit");
             if (items.isEmpty()) {
@@ -515,24 +515,24 @@ public final class BatchDeliveryStrategy implements DeliveryStrategy {
         }
 
         @Override
-        public synchronized void handoff(String decisionReason, int remainingQueueDepth, WorkSnapshot precedingWork) {
+        public synchronized void deliver(String decisionReason, int remainingQueueDepth, WorkSnapshot precedingWork) {
             requirePhase(Phase.COMMITTED, "submit delivery");
             phase = Phase.SUBMITTED;
             try {
                 // The strategy retains admission ownership while waiting for
                 // an executor. Request claims are acquired only when it runs.
-                submission.submit(sender -> deliver(decisionReason, remainingQueueDepth, precedingWork, sender));
+                submission.submit(sender -> sendInExecutor(decisionReason, remainingQueueDepth, precedingWork, sender));
             } catch (Throwable failure) {
                 failUnsentDelivery(failure);
                 throw propagate(failure);
             }
         }
 
-        private void deliver(String decisionReason,
+        private void sendInExecutor(String decisionReason,
                                     int remainingQueueDepth,
                                     WorkSnapshot precedingWork,
                                     BatchSender sender) {
-            requirePhase(Phase.SUBMITTED, "deliver");
+            requirePhase(Phase.SUBMITTED, "sendInExecutor");
             try {
                 owner.deliverCommitted(this, decisionReason, remainingQueueDepth,
                         precedingWork, sender);
@@ -557,7 +557,7 @@ public final class BatchDeliveryStrategy implements DeliveryStrategy {
         }
 
         @Override
-        public synchronized void abort(Throwable cause) {
+        public synchronized void rollbackCommitted(Throwable cause) {
             if (phase != Phase.COMMITTED) {
                 return;
             }

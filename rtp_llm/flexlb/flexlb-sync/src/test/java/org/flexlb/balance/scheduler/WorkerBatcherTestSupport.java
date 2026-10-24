@@ -15,7 +15,7 @@ final class WorkerBatcherTestSupport {
     static DeliveryTransaction boundaryOnly(ScheduledRequest item, DeliveryBlockReason boundary) {
         return new DeliveryTransaction() {
             @Override
-            public List<ScheduledRequest> items() {
+            public List<ScheduledRequest> requests() {
                 return List.of();
             }
 
@@ -25,19 +25,19 @@ final class WorkerBatcherTestSupport {
             }
 
             @Override
-            public WorkSnapshot commitUnderLock() {
+            public WorkSnapshot commit() {
                 throw new IllegalStateException(
                         "boundary-only preparation cannot commit");
             }
 
             @Override
-            public void handoff(String decisionReason, int remainingQueueDepth, WorkSnapshot precedingWork) {
+            public void deliver(String decisionReason, int remainingQueueDepth, WorkSnapshot precedingWork) {
                 throw new IllegalStateException(
                         "boundary-only preparation cannot hand off");
             }
 
             @Override
-            public void abort(Throwable cause) {
+            public void rollbackCommitted(Throwable cause) {
             }
 
             @Override

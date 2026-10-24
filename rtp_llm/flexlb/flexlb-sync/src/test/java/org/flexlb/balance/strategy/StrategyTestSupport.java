@@ -210,7 +210,7 @@ final class StrategyTestSupport {
                 .thenAnswer(invocation -> {
                     List<ScheduledRequest> candidates = invocation.getArgument(0);
             DeliveryTransaction transaction = Mockito.mock(DeliveryTransaction.class);
-            Mockito.when(transaction.items()).thenReturn(List.of());
+            Mockito.when(transaction.requests()).thenReturn(List.of());
                     Mockito.when(transaction.blocked())
                             .thenReturn(new BlockedRequest(candidates.getFirst(), PARKED_BOUNDARY));
                     return transaction;

@@ -436,7 +436,7 @@ class WorkerBatcherSchedulingTest {
                 org.mockito.ArgumentMatchers.any())).thenAnswer(invocation -> {
             List<ScheduledRequest> members = List.copyOf(invocation.getArgument(0));
                     var transaction = mock(DeliveryTransaction.class);
-                    when(transaction.items()).thenReturn(members);
+                    when(transaction.requests()).thenReturn(members);
                     org.mockito.Mockito.doAnswer(ignored -> {
                         for (ScheduledRequest member : members) {
                             published.add(member.ctx().getDecisionGroup());
@@ -445,7 +445,7 @@ class WorkerBatcherSchedulingTest {
                         return null;
                     })
                             .when(transaction)
-                            .handoff(
+                            .deliver(
                     org.mockito.ArgumentMatchers.anyString(),
                     org.mockito.ArgumentMatchers.anyInt(),
                     org.mockito.ArgumentMatchers.any());
@@ -487,16 +487,16 @@ class WorkerBatcherSchedulingTest {
                 org.mockito.ArgumentMatchers.any())).thenAnswer(invocation -> {
             List<ScheduledRequest> members = List.copyOf(invocation.getArgument(0));
                     var transaction = mock(DeliveryTransaction.class);
-                    when(transaction.items()).thenReturn(members);
+                    when(transaction.requests()).thenReturn(members);
             if (members.get(0) == retiredItem) {
-                        when(transaction.commitUnderLock()).thenThrow(new EndpointRetiredException("Prefill", retiredItem));
+                        when(transaction.commit()).thenThrow(new EndpointRetiredException("Prefill", retiredItem));
             } else {
                         org.mockito.Mockito.doAnswer(ignored -> {
                             members.forEach(member -> member.future().complete(new Response()));
                             return null;
                         })
                                 .when(transaction)
-                                .handoff(
+                                .deliver(
                         org.mockito.ArgumentMatchers.anyString(),
                         org.mockito.ArgumentMatchers.anyInt(),
                         org.mockito.ArgumentMatchers.any());

@@ -133,7 +133,7 @@ class WorkerBatcherRequestCapacityTest {
                 if (candidates.getFirst().requestId().equals("1")) {
                     DeliveryTransaction transaction =
                             live.prepare(candidates, invocation.getArgument(1), invocation.getArgument(2));
-                    assertEquals(1, transaction.items().size());
+                    assertEquals(1, transaction.requests().size());
                     prepared.countDown();
                     assertTrue(resume.await(5, TimeUnit.SECONDS));
                     return transaction;
@@ -345,7 +345,7 @@ class WorkerBatcherRequestCapacityTest {
             doAnswer(invocation -> {
                 List<ScheduledRequest> candidates = invocation.getArgument(0);
                 DeliveryTransaction transaction = mock(DeliveryTransaction.class);
-                when(transaction.items()).thenReturn(List.of());
+                when(transaction.requests()).thenReturn(List.of());
                 when(transaction.blocked()).thenReturn(new BlockedRequest(
                         candidates.getFirst(),
                         DeliveryBlockReason.failed(new IllegalStateException("delivery preparation failed"))));

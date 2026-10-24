@@ -1244,7 +1244,7 @@ public final class WorkerBatcher {
         }
         try (DeliveryTransaction transaction =
                 deliveryStrategy.prepare(candidates, evaluator, plannedCommittedPredictionMs)) {
-            if (transaction.items().isEmpty()) {
+            if (transaction.requests().isEmpty()) {
                 return commitBoundary(transaction.blocked());
             }
             BatcherCycleResult admitted = commitPreparedSelection(
@@ -1259,7 +1259,7 @@ public final class WorkerBatcher {
         }
     }
 
-    private void handoff(DeliveryTransaction transaction,
+    private void deliver(DeliveryTransaction transaction,
                          String decisionReason,
                          int remainingQueueDepth,
                          WorkSnapshot precedingWork) {
@@ -1267,15 +1267,15 @@ public final class WorkerBatcher {
         try {
             String groupId = java.util.UUID.randomUUID().toString();
             long committedAtMs = System.currentTimeMillis();
-            for (ScheduledRequest item : transaction.items()) {
+            for (ScheduledRequest item : transaction.requests()) {
                 var context = item.ctx();
                 context.setDecisionGroup(new org.flexlb.dao.pv.DecisionGroup(groupId,
                         context.getConfig().decisionPolicy().getType().name(),
                         context.getConfig().getDispatcher().getType().name(),
-                        item.prefillEp().getStatus().getMetricIpPort(), transaction.items().size(), decisionReason,
+                        item.prefillEp().getStatus().getMetricIpPort(), transaction.requests().size(), decisionReason,
                         committedAtMs, Math.max(0L, committedAtMs - item.enqueuedAtMs())));
             }
-            transaction.handoff(decisionReason, remainingQueueDepth, precedingWork);
+            transaction.deliver(decisionReason, remainingQueueDepth, precedingWork);
         } catch (Throwable failure) {
             deliveryFailure = failure;
         }
@@ -1284,7 +1284,7 @@ public final class WorkerBatcher {
                 : new IllegalStateException(
                         "delivery returned without resolving owner");
         try {
-            transaction.abort(unresolved);
+            transaction.rollbackCommitted(unresolved);
         } catch (Throwable cleanupFailure) {
             if (deliveryFailure == null) {
                 deliveryFailure = cleanupFailure;
@@ -1330,7 +1330,7 @@ public final class WorkerBatcher {
     }
 
     private BatcherCycleResult commitPreparedSelection(DeliveryTransaction transaction, String decisionReason) {
-        List<ScheduledRequest> items = transaction.items();
+        List<ScheduledRequest> items = transaction.requests();
         if (items.isEmpty()) {
             throw new IllegalStateException(
                     "prepared selection commit requires a non-empty selection");
@@ -1352,7 +1352,7 @@ public final class WorkerBatcher {
                     return null;
                 }
             }
-            precedingWork = transaction.commitUnderLock();
+            precedingWork = transaction.commit();
             // Committed requests no longer count toward either waiting limit.
             var routingRole = prefillEndpoint.getStatus().getRole();
             for (ScheduledRequest item : items) {
@@ -1387,7 +1387,7 @@ public final class WorkerBatcher {
                 failure = appendFailure(failure, notificationFailure);
             }
             try {
-                transaction.abort(failure);
+                transaction.rollbackCommitted(failure);
             } catch (Throwable ownerFailure) {
                 failure = appendFailure(failure, ownerFailure);
             }
@@ -1398,7 +1398,7 @@ public final class WorkerBatcher {
         }
         notifyTerminalAdmissionFailure(
                 removedTerminalBoundary, transaction.blocked());
-        handoff(transaction, committedReason, remainingQueueDepth, precedingWork);
+        deliver(transaction, committedReason, remainingQueueDepth, precedingWork);
         return BatcherCycleResult.CAPACITY_CHANGED;
     }
 

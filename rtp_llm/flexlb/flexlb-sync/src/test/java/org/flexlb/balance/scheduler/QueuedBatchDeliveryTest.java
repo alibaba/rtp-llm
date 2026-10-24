@@ -219,13 +219,13 @@ class QueuedBatchDeliveryTest {
         });
         try (var transaction = strategy.prepare(List.of(item), new FormulaPredictor("100"), OptionalLong.empty());
              var contender = java.util.concurrent.Executors.newSingleThreadExecutor()) {
-            var preceding = transaction.commitUnderLock();
-            transaction.handoff("blocked-rpc", 0, preceding);
+            var preceding = transaction.commit();
+            transaction.deliver("blocked-rpc", 0, preceding);
             releaseExecutor.countDown();
             try {
                 await(rpcEntered);
                 contender.submit(() -> {
-                    transaction.abort(new IllegalStateException("scheduler cleanup"));
+                    transaction.rollbackCommitted(new IllegalStateException("scheduler cleanup"));
                     transaction.close();
                     synchronized (slot) {
                         assertEquals(DeliveryClaimKind.BATCH_ENQUEUE, slot.snapshot().deliveryClaimKind());
@@ -248,10 +248,10 @@ class QueuedBatchDeliveryTest {
                 () -> org.flexlb.balance.delivery.DeliveryBlockReason.Attempt.accepted(submission),
                 () -> 201L, registry, new DeliveryMetrics(mock(BatchSchedulerReporter.class)));
         try (var transaction = rejectingStrategy.prepare(List.of(item), new FormulaPredictor("100"), OptionalLong.empty())) {
-            var preceding = transaction.commitUnderLock();
+            var preceding = transaction.commit();
             assertSame(rejection, assertThrows(java.util.concurrent.RejectedExecutionException.class,
-                    () -> transaction.handoff("rejected", 0, preceding)));
-            transaction.abort(rejection);
+                    () -> transaction.deliver("rejected", 0, preceding)));
+            transaction.rollbackCommitted(rejection);
         }
         assertFalse(item.future().get(5, TimeUnit.SECONDS).isSuccess());
         verify(submission, times(1)).close();
@@ -302,9 +302,9 @@ class QueuedBatchDeliveryTest {
 
     private void submit(List<ScheduledRequest> items) {
         try (var transaction = strategy.prepare(items, new FormulaPredictor("100 * batchSize"), OptionalLong.empty())) {
-            assertEquals(items, transaction.items());
-            var preceding = transaction.commitUnderLock();
-            transaction.handoff("queued-race", 0, preceding);
+            assertEquals(items, transaction.requests());
+            var preceding = transaction.commit();
+            transaction.deliver("queued-race", 0, preceding);
         }
     }
 

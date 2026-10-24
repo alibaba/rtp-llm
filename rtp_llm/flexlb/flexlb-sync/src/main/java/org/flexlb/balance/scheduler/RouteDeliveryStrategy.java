@@ -101,7 +101,7 @@ public final class RouteDeliveryStrategy implements DeliveryStrategy {
                          PrefillAdmissionResources.CommittedAdmissionOwner admission,
                          int remainingQueueDepth,
                          WorkSnapshot precedingWork) {
-        List<ScheduledRequest> items = transaction.items();
+        List<ScheduledRequest> items = transaction.requests();
         Throwable deliveryFailure = null;
         List<ScheduledRequest> delivered = new ArrayList<>(items.size());
         List<ClaimedRoute> claimed = new ArrayList<>(items.size());
@@ -286,7 +286,7 @@ public final class RouteDeliveryStrategy implements DeliveryStrategy {
         }
 
         @Override
-        public List<ScheduledRequest> items() {
+        public List<ScheduledRequest> requests() {
             return items;
         }
 
@@ -296,7 +296,7 @@ public final class RouteDeliveryStrategy implements DeliveryStrategy {
         }
 
         @Override
-        public synchronized WorkSnapshot commitUnderLock() {
+        public synchronized WorkSnapshot commit() {
             requirePrepared("commit");
             if (!sameIdentitySequence(members, items)) {
                 throw new IllegalArgumentException(
@@ -359,14 +359,14 @@ public final class RouteDeliveryStrategy implements DeliveryStrategy {
         }
 
         @Override
-        public void handoff(String decisionReason, int remainingQueueDepth, WorkSnapshot precedingWork) {
+        public void deliver(String decisionReason, int remainingQueueDepth, WorkSnapshot precedingWork) {
             PrefillAdmissionResources.CommittedAdmissionOwner exactCommitted =
                     takeCommitted();
             owner.deliver(this, exactCommitted, remainingQueueDepth, precedingWork);
         }
 
         @Override
-        public void abort(Throwable cause) {
+        public void rollbackCommitted(Throwable cause) {
             PrefillAdmissionResources.CommittedAdmissionOwner exactCommitted;
             synchronized (this) {
                 if (reservations == null && committed == null) {
