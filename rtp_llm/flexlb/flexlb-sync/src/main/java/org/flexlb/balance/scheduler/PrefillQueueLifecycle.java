@@ -44,14 +44,7 @@ final class PrefillQueueLifecycle {
     private final PrefillEndpoint prefillEndpoint;
     private final QueueCapacity queueCapacity;
     private final EndpointEventHandler endpointEvents;
-    /**
-     * 清掉"队首因投递容量不足而阻塞"的记录并取消容量监听。调用方持有队列锁。
-     */
-    private final Runnable clearCapacityBlockUnderLock;
-    /**
-     * 通知本队列和全局选路：Prefill 有容量空出来了。
-     */
-    private final Runnable signalCapacityAvailable;
+    private final CapacityBlockedHead capacityBlockedHead;
 
     PrefillQueueLifecycle(String key,
                           QueueState queueState,
@@ -59,8 +52,7 @@ final class PrefillQueueLifecycle {
                           PrefillEndpoint prefillEndpoint,
                           QueueCapacity queueCapacity,
                           EndpointEventHandler endpointEvents,
-                          Runnable clearCapacityBlockUnderLock,
-                          Runnable signalCapacityAvailable,
+                          CapacityBlockedHead capacityBlockedHead,
                           Runnable schedulingLoop) {
         this.key = key;
         this.queueState = queueState;
@@ -68,8 +60,7 @@ final class PrefillQueueLifecycle {
         this.prefillEndpoint = prefillEndpoint;
         this.queueCapacity = queueCapacity;
         this.endpointEvents = endpointEvents;
-        this.clearCapacityBlockUnderLock = clearCapacityBlockUnderLock;
-        this.signalCapacityAvailable = signalCapacityAvailable;
+        this.capacityBlockedHead = capacityBlockedHead;
         this.normalStopFailure = new CancellationException(
                 "FlexLB worker scheduling queue stopped: " + key);
         this.stopAcknowledgementFailure = new IllegalStateException(
@@ -202,7 +193,7 @@ final class PrefillQueueLifecycle {
                 queueLocked = true;
                 stopAcceptingUnderLock();
                 try {
-                    clearCapacityBlockUnderLock.run();
+                    capacityBlockedHead.setUnderLock(null);
                 } catch (Throwable subscriptionFailure) {
                     cleanupFailure = appendCleanupFailure(
                             cleanupFailure, subscriptionFailure);
@@ -315,7 +306,7 @@ final class PrefillQueueLifecycle {
             prefillEndpoint.reportSubQueueResidence(item);
         }
         if (item != null && prefillEndpoint.isEngineSubQueueMode()) {
-            signalCapacityAvailable.run();
+            capacityBlockedHead.signalCapacityAvailable();
         }
         return item;
     }

@@ -11,7 +11,6 @@ import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.endpoint.PrefillState;
 import org.flexlb.balance.estimate.PrefillTtftEstimate;
 import org.flexlb.balance.estimate.PrefillTtftEstimator;
-import org.flexlb.balance.estimate.QueueView.AdmissionBlock;
 import org.flexlb.balance.estimate.WorkView;
 import org.flexlb.balance.planner.GroupPlanner;
 import org.flexlb.balance.prediction.InvalidPrefillPredictionException;
@@ -109,10 +108,7 @@ public final class PrefillQueue {
     private final PrefillState prefillState;
     private final PrefillQueueLifecycle lifecycle;
     private final PrefillQueueEnqueuer enqueuer;
-    private final Runnable capacityAvailableSignal =
-            this::signalCapacityAvailable;
-    /** Exact active head for which this worker is waiting on a capacity event. */
-    private ProcessQueueResult capacityBlockedHead;
+    private final CapacityBlockedHead capacityBlockedHead;
 
     /** Last waiting decision; timeout readers never acquire the queue lock. */
     private volatile QueueWaitSnapshot waitSnapshot;
@@ -150,24 +146,24 @@ public final class PrefillQueue {
                 ? PRIORITY_QUEUE_ORDER : FIFO_QUEUE_ORDER;
         Comparator<GroupPlanner.Item> estimateOrder = priorityOrdering ? PRIORITY_ESTIMATE_ORDER : FIFO_ESTIMATE_ORDER;
         this.queueState = new QueueState(PrefillActiveIndex.ordered(INITIAL_QUEUE_ALLOCATION, queueOrder));
+        this.capacityBlockedHead = new CapacityBlockedHead(queueState, prefillEp);
         this.prefillState = new PrefillState(queueState.reentrantLock(),
                                              queueState.activeIndex(),
-                                             capacityAvailableSignal);
+                                             capacityBlockedHead.capacityAvailableSignal());
         this.loadViewCache = new LoadViewCache(queueState,
                                                prefillState,
                                                prefillEp,
                                                config,
                                                groupingLimits,
                                                estimateOrder,
-                                               this::admissionBlockUnderLock);
+                                               capacityBlockedHead::admissionBlockUnderLock);
         this.lifecycle = new PrefillQueueLifecycle(key,
                                                    queueState,
                                                    prefillState,
                                                    prefillEp,
                                                    queueCapacity,
                                                    endpointEvents,
-                                                   () -> setCapacityBlockedHeadUnderLock(null),
-                                                   this::signalCapacityAvailable,
+                                                   capacityBlockedHead,
                                                    this::runLoop);
         this.enqueuer = new PrefillQueueEnqueuer(queueState,
                                                  prefillState,
@@ -252,31 +248,6 @@ public final class PrefillQueue {
         return ttftEstimator.ttftEstimationRule();
     }
 
-    /**
-     * Capture the exact active head whose worker wait predicate still holds.
-     * Delivery-only waits retain null semantics so publication can continue.
-     *
-     * <p>The availability read is the already-subscribed wait predicate; it
-     * neither previews nor reserves capacity. Caller holds the queue lock.
-     */
-    private AdmissionBlock admissionBlockUnderLock() {
-        if (!queueState.isLockedByCurrentThread()) {
-            throw new IllegalStateException(
-                    "capacity block snapshot requires the queue lock");
-        }
-        ProcessQueueResult blocked = capacityBlockedHead;
-        if (blocked == null
-                || queueState.activeIndex().peek() != blocked.request()
-                || blocked.request().requestExpired(now())
-                || blocked.unavailable().availability().isAvailable()) {
-            return null;
-        }
-        return new AdmissionBlock(
-                blocked.request().requestId(),
-                blocked.request().enqueueSeq(),
-                blocked.unavailable().estimateSemantics());
-    }
-
     // ==================== endpoint queue operations ====================
 
     public boolean removeQueued(
@@ -297,7 +268,7 @@ public final class PrefillQueue {
             queueState.unlock();
         }
         if (removed) {
-            signalCapacityAvailable();
+            capacityBlockedHead.signalCapacityAvailable();
             try {
                 Logger.debug(
                         "[request-scheduler] exact queue remove: worker={} reason={} request_id={}",
@@ -603,7 +574,7 @@ public final class PrefillQueue {
         if (postCommitFailure != null) {
             Throwable failure = postCommitFailure;
             if (removedTerminalBoundary) {
-                signalCapacityAvailable();
+                capacityBlockedHead.signalCapacityAvailable();
             }
             try {
                 notifyTerminalAdmissionFailure(
@@ -619,7 +590,7 @@ public final class PrefillQueue {
             throw propagateCommitFailure(failure);
         }
         if (removedTerminalBoundary) {
-            signalCapacityAvailable();
+            capacityBlockedHead.signalCapacityAvailable();
         }
         notifyTerminalAdmissionFailure(
                 removedTerminalBoundary, transaction.blocked());
@@ -651,7 +622,7 @@ public final class PrefillQueue {
             queueState.unlock();
         }
         if (removedTerminalBoundary) {
-            signalCapacityAvailable();
+            capacityBlockedHead.signalCapacityAvailable();
         }
         notifyTerminalAdmissionFailure(removedTerminalBoundary, blocked);
         return result;
@@ -728,7 +699,7 @@ public final class PrefillQueue {
         if (!removed) {
             return;
         }
-        signalCapacityAvailable();
+        capacityBlockedHead.signalCapacityAvailable();
         try {
             endpointEvents.onQueuedItemExpired(head);
         } catch (Throwable callbackFailure) {
@@ -1067,7 +1038,7 @@ public final class PrefillQueue {
         queueState.lockInterruptibly();
         try {
             while (!queueState.isStopped() && queueState.activeIndex().isEmpty()) {
-                setCapacityBlockedHeadUnderLock(null);
+                capacityBlockedHead.setUnderLock(null);
                 queueState.awaitChange();
             }
         } finally {
@@ -1090,7 +1061,7 @@ public final class PrefillQueue {
             if (queueState.isStopped()) {
                 return;
             }
-            setCapacityBlockedHeadUnderLock(blocked);
+            capacityBlockedHead.setUnderLock(blocked);
             while (!queueState.isStopped()
                     && queueState.activeIndex().peek() == blocked.request()
                     && !blocked.request().requestExpired(System.currentTimeMillis())
@@ -1108,7 +1079,7 @@ public final class PrefillQueue {
             }
         } finally {
             try {
-                setCapacityBlockedHeadUnderLock(null);
+                capacityBlockedHead.setUnderLock(null);
             } finally {
                 queueState.unlock();
             }
@@ -1141,54 +1112,6 @@ public final class PrefillQueue {
             }
         } finally {
             queueState.unlock();
-        }
-    }
-
-    /** Called after Prefill or Decode capacity changes, outside endpoint locks. */
-    public void signalDeliveryCapacityAvailable() {
-        queueState.lock();
-        try {
-            if (capacityBlockedHead != null) {
-                queueState.incrementSchedulingInputVersionUnderLock();
-                queueState.signalChange();
-            }
-        } finally {
-            queueState.unlock();
-        }
-    }
-
-    /** Publish a real Prefill ownership or batch capacity change to local and global waiters. */
-    private void signalCapacityAvailable() {
-        signalDeliveryCapacityAvailable();
-        prefillEndpoint.signalPlacementCapacityChanged();
-    }
-
-    /** Own the blocked head, its listener and estimate invalidation under the queue lock. */
-    private void setCapacityBlockedHeadUnderLock(
-            ProcessQueueResult blocked) {
-        if (!queueState.isLockedByCurrentThread()) {
-            throw new IllegalStateException(
-                    "capacity block update requires the queue lock");
-        }
-        if (capacityBlockedHead == blocked) {
-            return;
-        }
-        DeliveryBlockReason.Availability previousSource = capacityBlockedHead == null
-                ? null : capacityBlockedHead.unavailable().availability();
-        DeliveryBlockReason.Availability nextSource = blocked == null
-                ? null : blocked.unavailable().availability();
-        capacityBlockedHead = blocked;
-        queueState.incrementSchedulingInputVersionUnderLock();
-        if (previousSource != nextSource) {
-            try {
-                if (previousSource != null) {
-                    previousSource.removeListener(capacityAvailableSignal);
-                }
-            } finally {
-                if (nextSource != null) {
-                    nextSource.addListener(capacityAvailableSignal);
-                }
-            }
         }
     }
 
