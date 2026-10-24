@@ -1022,7 +1022,7 @@ public:
     }
 
     void runSingleBatchPrefillScenario(bool simulate_cp_mutation, bool with_cp_hidden_buffers = true);
-    void runSingleBatchDecodeScenario(bool with_prefill_only);
+    void runSingleBatchDecodeScenario(bool with_prefill_only, bool stale_python_hidden = false);
 
     void setupAlignmentModel(FakeModel*          model,
                              vector<string>&     forward_trace,
@@ -1228,6 +1228,19 @@ TEST_F(MtpExecutorTest, testMtpConstructorRejectsZeroProposalWidth) {
     } catch (const std::exception& e) {
         EXPECT_NE(std::string(e.what()).find("proposal width/gen_num_per_cycle must be positive"), std::string::npos);
     }
+}
+
+TEST_F(MtpExecutorTest, testMtpTargetHiddenRowsZeroUsesTensorRows) {
+    auto components = createMtpExecutorComponents(MtpExecutorTestConfig{});
+    GptModelOutputs output;
+    output.mtp_target_hidden_states = torch::ones({3, 8}, torch::kFloat);
+
+    // Prefill can pass zero as an unspecified row hint. The explicit MTP
+    // tensor follows the same contract as getMtpTargetHiddenStates below.
+    components.executor->maybeOverrideLastHiddenWithMtpBuffer(output, *components.fake_target_model, 0);
+    ASSERT_TRUE(output.all_hidden_states.defined());
+    EXPECT_EQ(output.all_hidden_states.data_ptr(), output.mtp_target_hidden_states.data_ptr());
+    EXPECT_EQ(output.all_hidden_states.size(0), 3);
 }
 
 void MtpExecutorTest::runSingleBatchPrefillScenario(bool simulate_cp_mutation, bool with_cp_hidden_buffers) {
@@ -1917,7 +1930,7 @@ TEST_F(MtpExecutorTest, testMultiBatchPrefill) {
     checkOutput(stream2, {2, 3, 0}, {0, 1}, {0.0, 0.0, 1.0, 0.0}, {1.13, 1.14});
 }
 
-void MtpExecutorTest::runSingleBatchDecodeScenario(bool with_prefill_only) {
+void MtpExecutorTest::runSingleBatchDecodeScenario(bool with_prefill_only, bool stale_python_hidden) {
     // test single batch decode accept partial
     // input [0, 1, 2] + [3]
     // darft [3] + [2, 1, 3]
@@ -2022,6 +2035,15 @@ void MtpExecutorTest::runSingleBatchDecodeScenario(bool with_prefill_only) {
             .reshape({(int64_t)(propose_step + 1), 2});
 
     next_draft_input.last_hidden_states = target_output.all_hidden_states.narrow(0, 0, 3);
+
+    if (stale_python_hidden) {
+        // Graph replay publishes live HC rows through the forward result, but
+        // does not refresh the Python attribute left by capture. The commit
+        // input must retain the three accepted rows, never this stale buffer.
+        target_output.mtp_target_hidden_states = target_output.all_hidden_states;
+        components.fake_target_model->setMtpTargetHiddenStates(
+            torch::full_like(target_output.all_hidden_states, -99.0f));
+    }
 
     components.fake_draft_model->setInputs({draft_input_1, draft_input_2, draft_input_3});
     components.fake_draft_model->setOutputs({draft_output_1, draft_output_2, draft_output_3});
@@ -2133,6 +2155,10 @@ void MtpExecutorTest::runSingleBatchDecodeScenario(bool with_prefill_only) {
 
 TEST_F(MtpExecutorTest, testSingleBatchDecode) {
     runSingleBatchDecodeScenario(/*with_prefill_only=*/false);
+}
+
+TEST_F(MtpExecutorTest, testDecodePreservesAcceptedGraphHiddenRowsWithStalePythonBuffer) {
+    runSingleBatchDecodeScenario(/*with_prefill_only=*/false, /*stale_python_hidden=*/true);
 }
 
 TEST_F(MtpExecutorTest, testPdfusionPrefillOnlyDoesNotSkipSingleBatchDecode) {
@@ -2292,6 +2318,7 @@ TEST_F(MtpExecutorTest, testDSparkGammaThreeSpecLogitsVerifyRunsOnAsyncWorker) {
     EXPECT_FALSE(stream->getProposeTokensGpu().defined());
 
     auto processor = std::make_shared<RejectDraftTokenSpecProcessor>(3, stream->outputTokenLen());
+    EXPECT_FALSE(processor->mtpCapability().requires_executor_thread);
     stream->logits_processor_list_.push_back(processor);
     const auto main_thread_id = std::this_thread::get_id();
 
@@ -2760,6 +2787,13 @@ TEST_F(MtpExecutorTest, testMultiBatchDecode) {
     next_draft_input.last_hidden_states =
         torch::cat({target_output.all_hidden_states.narrow(0, 0, 1), target_output.all_hidden_states.narrow(0, 5, 5)});
 
+    // Different accept lengths select rows [0, 5, 6, 7, 8, 9], not a prefix
+    // of the dense verify result. A stale capture-time Python buffer must not
+    // replace either the live forward output or these compacted commit rows.
+    target_output.mtp_target_hidden_states = target_output.all_hidden_states;
+    components.fake_target_model->setMtpTargetHiddenStates(
+        torch::full_like(target_output.all_hidden_states, -99.0f));
+
     components.fake_draft_model->setInputs({draft_input_1, draft_input_2, draft_input_3, next_draft_input});
     components.fake_draft_model->setOutputs({draft_output_1, draft_output_2, draft_output_3, next_draft_output});
 
@@ -3024,6 +3058,7 @@ TEST_F(MtpExecutorTest, testDSparkFakeDecodeStartsWithoutProposalState) {
     EXPECT_EQ((std::vector<int32_t>{1, 1, 0}), stream->speculativeAcceptedTokensPerPos());
 }
 
+#if USING_CUDA
 TEST_F(MtpExecutorTest, testDispatchStatePrepareKernel) {
     // Test invokeMtpDispatchStatePrepare correctness
     const int64_t batch_size = 8;
@@ -3035,11 +3070,9 @@ TEST_F(MtpExecutorTest, testDispatchStatePrepareKernel) {
     auto next_seq_len = torch::empty({batch_size}, cuda_i32);
     auto hidden_idx   = torch::empty({batch_size}, cuda_i64);
 
-#if USING_CUDA
     invokeMtpDispatchStatePrepare(
         accept_len, prev_seq_len, next_seq_len, hidden_idx, batch_size, at::cuda::getCurrentCUDAStream().stream());
     cudaDeviceSynchronize();
-#endif
 
     // Verify next_seq_len = prev_seq_len + accept_len
     auto expected_next = (prev_seq_len + accept_len).cpu();
@@ -3072,20 +3105,16 @@ TEST_F(MtpExecutorTest, testDispatchStatePrepareBenchmark) {
 
     // Warm up
     for (int i = 0; i < 10; i++) {
-#if USING_CUDA
         invokeMtpDispatchStatePrepare(
             accept_len, prev_seq_len, next_seq_len, hidden_idx, batch_size, at::cuda::getCurrentCUDAStream().stream());
-#endif
     }
     cudaDeviceSynchronize();
 
     // Benchmark batched approach (fused kernel)
     auto start_batched = std::chrono::high_resolution_clock::now();
     for (int i = 0; i < iterations; i++) {
-#if USING_CUDA
         invokeMtpDispatchStatePrepare(
             accept_len, prev_seq_len, next_seq_len, hidden_idx, batch_size, at::cuda::getCurrentCUDAStream().stream());
-#endif
     }
     cudaDeviceSynchronize();
     auto end_batched = std::chrono::high_resolution_clock::now();
@@ -3114,6 +3143,7 @@ TEST_F(MtpExecutorTest, testDispatchStatePrepareBenchmark) {
     RTP_LLM_LOG_INFO("[dispatch-bench] scalar:  %ld us total, %.2f us/iter", us_scalar, (double)us_scalar / iterations);
     RTP_LLM_LOG_INFO("[dispatch-bench] speedup: %.1fx", speedup);
 }
+#endif  // USING_CUDA
 
 // MTP-incompatible stateful processor: main's capability contract makes the
 // stream (not the whole engine step) fail, so decodeStep must keep running.

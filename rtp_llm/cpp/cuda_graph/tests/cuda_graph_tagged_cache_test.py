@@ -298,6 +298,26 @@ class TaggedBlockRowModel:
         return PyModelOutputs(inputs.input_hiddens + signature.unsqueeze(1))
 
 
+class TaggedHostBlockMirrorModel(TaggedBlockRowModel):
+    """Record the host page-table mirrors seen by replay preparation."""
+
+    def __init__(self) -> None:
+        self.host_tables: dict[str, torch.Tensor] = {}
+
+    def prepare_fmha_impl(self, inputs: PyModelInputs, is_cuda_graph: bool = False):
+        return self
+
+    def prepare_cuda_graph(self, attention_inputs) -> None:
+        self.host_tables = {
+            tag: value.kv_cache_kernel_block_id.clone()
+            for tag, value in attention_inputs.items()
+        }
+
+
+class DeviceOnlyTaggedBlockRowModel(TaggedHostBlockMirrorModel):
+    requires_host_block_table_mirror = False
+
+
 class DraftBlockTableModel:
     """Only draft owns layers; compatibility tags must not become consumers."""
 
@@ -616,6 +636,74 @@ class TestCudaGraphTaggedCache(unittest.TestCase):
                     torch.cuda.synchronize()
                     expected = torch.full_like(output.hidden_states, bpk + 16)
                     torch.testing.assert_close(output.hidden_states, expected)
+
+    def test_rocm_host_block_mirror_clears_only_uncopied_region(self) -> None:
+        if torch.version.hip is None:
+            self.skipTest("ROCm-only host block-table replay optimization")
+
+        model = TaggedHostBlockMirrorModel()
+        runner = CudaGraphRunner()
+        runner.init_decode(
+            model,
+            HIDDEN_SIZE,
+            TOKENS_PER_BLOCK,
+            KERNEL_BLOCK_TABLE_WIDTH,
+            [2],
+            GROUP_TAGS,
+        )
+        for batch_size, block_count, value in ((2, 3, 7), (1, 1, 5)):
+            inputs = _build_decode_inputs(
+                GROUP_TAGS,
+                {"full": value, "aux": value + 1},
+                batch_size=batch_size,
+                block_count=block_count,
+            )
+            self.assertTrue(runner.canRun(inputs))
+            runner.forward(inputs)
+            torch.cuda.synchronize()
+            for tag, tag_value in (("full", value), ("aux", value + 1)):
+                expected = torch.zeros_like(model.host_tables[tag])
+                expected[:batch_size, :block_count] = tag_value
+                torch.testing.assert_close(model.host_tables[tag], expected)
+
+    def test_rocm_device_only_tagged_cache_skips_host_mirror(self) -> None:
+        if torch.version.hip is None:
+            self.skipTest("ROCm-only device block-table replay capability")
+
+        model = DeviceOnlyTaggedBlockRowModel()
+        runner = CudaGraphRunner()
+        runner.init_decode(
+            model,
+            HIDDEN_SIZE,
+            TOKENS_PER_BLOCK,
+            KERNEL_BLOCK_TABLE_WIDTH,
+            [2],
+            GROUP_TAGS,
+        )
+        captured_host_tables = None
+        for batch_size, block_count, value in ((2, 3, 7), (1, 1, 5)):
+            inputs = _build_decode_inputs(
+                GROUP_TAGS,
+                {"full": value, "aux": value + 1},
+                batch_size=batch_size,
+                block_count=block_count,
+            )
+            self.assertTrue(runner.canRun(inputs))
+            output = runner.forward(inputs)
+            torch.cuda.synchronize()
+            expected = torch.full_like(
+                output.hidden_states, block_count * (value + 16 * (value + 1))
+            )
+            torch.testing.assert_close(output.hidden_states, expected)
+            if captured_host_tables is None:
+                captured_host_tables = {
+                    tag: table.clone() for tag, table in model.host_tables.items()
+                }
+            else:
+                for tag in GROUP_TAGS:
+                    torch.testing.assert_close(
+                        model.host_tables[tag], captured_host_tables[tag]
+                    )
 
     def _assert_replay_signature(
         self, runner: CudaGraphRunner, inputs: PyModelInputs, expected: int

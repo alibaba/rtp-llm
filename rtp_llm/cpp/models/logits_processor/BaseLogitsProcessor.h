@@ -23,6 +23,9 @@ enum class MtpProcessorMode : uint8_t {
 struct MtpProcessorCapability {
     MtpProcessorMode mode   = MtpProcessorMode::UNSUPPORTED;
     std::string_view reason = "processor supports normal decoding only";
+    // Mutable matchers that require ordered access from the executor thread
+    // opt out of speculative-mask preparation on the async worker.
+    bool requires_executor_thread = false;
 };
 
 class BaseLogitsProcessor {

@@ -121,6 +121,17 @@ bool hasSpecLogitsProcessor(const std::list<GenerateStreamPtr>& streams) {
     return false;
 }
 
+bool hasExecutorThreadSpecLogitsProcessor(const std::list<GenerateStreamPtr>& streams) {
+    for (const auto& stream : streams) {
+        for (const auto& processor : stream->getAllLogitsProcessorPtr()) {
+            if (processor && processor->mtpCapability().requires_executor_thread) {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
 bool hasLinearCacheSnapshotCapacity(const std::list<GenerateStreamPtr>& streams,
                                     int64_t                             table_width,
                                     int                                 max_accept_length,
@@ -351,24 +362,13 @@ bool MtpExecutor::finishDSparkPrefillCachePublication(const GptModelInputs&     
     return global_ok;
 }
 
-void MtpExecutor::maybeOverrideLastHiddenWithMtpBuffer(GptModelInputs& model_input,
-                                                       ModelBase&      source,
-                                                       bool            request_actual_rows) {
-    if (!model_input.combo_tokens.defined() || model_input.combo_tokens.numel() == 0) {
-        return;
-    }
-    const auto rows   = request_actual_rows ? -1 : model_input.combo_tokens.numel();
-    auto       pre_hc = source.getMtpTargetHiddenStates(rows);
-    if (pre_hc.defined() && pre_hc.numel() > 0) {
-        model_input.last_hidden_states = pre_hc;
-    }
-}
-
 void MtpExecutor::maybeOverrideLastHiddenWithMtpBuffer(GptModelOutputs& model_output,
                                                        ModelBase&       source,
                                                        int64_t          hidden_rows) {
     if (model_output.mtp_target_hidden_states.defined()) {
-        RTP_LLM_CHECK_WITH_INFO(hidden_rows < 0 || model_output.mtp_target_hidden_states.size(0) == hidden_rows,
+        // A zero row hint means the caller did not provide a count (the
+        // fallback getMtpTargetHiddenStates path below treats it the same way).
+        RTP_LLM_CHECK_WITH_INFO(hidden_rows <= 0 || model_output.mtp_target_hidden_states.size(0) == hidden_rows,
                                 "MTP target hidden output rows mismatch: got %ld, expected %ld",
                                 model_output.mtp_target_hidden_states.size(0),
                                 hidden_rows);
@@ -1650,7 +1650,11 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
 
     // Both proposal implementations have now produced the same target-verify
     // rows. Launch once here so spec-logits D2H/CPU work overlaps target verify.
-    if (spec_logits_processor_present && propose_step_ > 1 && draft_token_ids_t.defined()) {
+    // XGrammar's mutable matcher prepares its speculative mask in the same
+    // executor-thread order as committed-token updates. Processors without
+    // this requirement (including think mode's snapshot) retain overlap.
+    if (spec_logits_processor_present && !hasExecutorThreadSpecLogitsProcessor(streams) && propose_step_ > 1
+        && draft_token_ids_t.defined()) {
         RTP_LLM_PROFILE_SCOPE("executor.mtp.decode_step(launch_spec_logits_verify_async)");
         const int64_t expected_verify_tokens =
             static_cast<int64_t>(batch_size) * static_cast<int64_t>(propose_step_ + 1);
@@ -1803,12 +1807,9 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
         rejection_event->record(cuda_graph::graphGetCurrentStream());
     }
 
-    // DSpARK commit input was bound from the explicit target-forward output
-    // above. Re-reading mutable Python model state here is both redundant and
-    // invalid for CUDA graph replay, where Python is not executed.
-    if (!is_dspark_) {
-        maybeOverrideLastHiddenWithMtpBuffer(model_input, *model_);
-    }
+    // Keep the hidden rows selected from this round's target-forward result.
+    // A Python-side hidden buffer is stale after Graph replay, and replacing
+    // last_hidden_states here would also undo rejection sampling's compaction.
     broadcastPostRejectionInputs(model_input);
 
     draft_prefill_prepare_runner_.sync(cuda_graph::graphGetCurrentStream());

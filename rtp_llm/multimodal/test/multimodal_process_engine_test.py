@@ -1151,18 +1151,24 @@ class EmptyEmbeddingResultTest(TestCase):
             [torch.ones((2, 4)), torch.empty((0, 4))],
         )
         for output in outputs:
-            with self.subTest(output=output), patch(
-                "rtp_llm.multimodal.mm_process_engine.get_multimodal_feature_hash"
-            ) as hash_op:
+            with (
+                self.subTest(output=output),
+                patch(
+                    "rtp_llm.multimodal.mm_process_engine.get_multimodal_feature_hash"
+                ) as hash_op,
+            ):
                 with self.assertRaisesRegex(ValueError, "ViT returned empty embedding"):
                     _feature_hashes_from_result((output, None))
                 hash_op.assert_not_called()
 
     def test_scalar_tensor_fails_before_any_hash_is_computed(self):
         for output in (torch.tensor(1), [torch.ones((2, 4)), torch.tensor(1)]):
-            with self.subTest(output=output), patch(
-                "rtp_llm.multimodal.mm_process_engine.get_multimodal_feature_hash"
-            ) as hash_op:
+            with (
+                self.subTest(output=output),
+                patch(
+                    "rtp_llm.multimodal.mm_process_engine.get_multimodal_feature_hash"
+                ) as hash_op,
+            ):
                 with self.assertRaisesRegex(
                     ValueError, "ViT returned scalar embedding"
                 ):
@@ -1181,13 +1187,16 @@ class AsyncSubmitGetEmbeddingTest(TestCase):
                         engine._hash_key_cache.resize(0)
                     inp = self._make_input("fake://empty-embedding")
                     try:
-                        with patch.object(
-                            engine.mm_part,
-                            "batched_embedding",
-                            return_value=[(torch.empty((0, 4)), None)],
-                        ), patch(
-                            "rtp_llm.multimodal.mm_process_engine.get_multimodal_feature_hash"
-                        ) as hash_op:
+                        with (
+                            patch.object(
+                                engine.mm_part,
+                                "batched_embedding",
+                                return_value=[(torch.empty((0, 4)), None)],
+                            ),
+                            patch(
+                                "rtp_llm.multimodal.mm_process_engine.get_multimodal_feature_hash"
+                            ) as hash_op,
+                        ):
                             with self.assertRaisesRegex(
                                 Exception, "ViT returned empty embedding"
                             ):
@@ -1237,10 +1246,13 @@ class AsyncSubmitGetEmbeddingTest(TestCase):
             max_workers=1, thread_name_prefix="result-consumer"
         )
         try:
-            with patch.object(engine, "_async_compute", side_effect=compute), patch(
-                "rtp_llm.multimodal.mm_process_engine._feature_hashes_from_result",
-                side_effect=hash_result,
-            ) as hash_op:
+            with (
+                patch.object(engine, "_async_compute", side_effect=compute),
+                patch(
+                    "rtp_llm.multimodal.mm_process_engine._feature_hashes_from_result",
+                    side_effect=hash_result,
+                ) as hash_op,
+            ):
                 future = pool.submit(engine.get_embedding_result, [first])
                 self.assertTrue(hashing.wait(timeout=2))
                 engine.async_submit([second])
@@ -1288,15 +1300,17 @@ class AsyncSubmitGetEmbeddingTest(TestCase):
                 producer.synchronize.side_effect = wait_for_gpu
                 consumer.wait_stream.side_effect = depend_on_gpu
                 try:
-                    with patch(
-                        "rtp_llm.multimodal.mm_process_engine._current_cuda_streams",
-                        return_value=[producer],
-                    ) as record, patch(
-                        "torch.cuda.current_stream", return_value=consumer
-                    ), patch(
-                        "rtp_llm.multimodal.mm_process_engine._feature_hashes_from_result",
-                        side_effect=hash_result,
-                    ) as hash_op:
+                    with (
+                        patch(
+                            "rtp_llm.multimodal.mm_process_engine._current_cuda_streams",
+                            return_value=[producer],
+                        ) as record,
+                        patch("torch.cuda.current_stream", return_value=consumer),
+                        patch(
+                            "rtp_llm.multimodal.mm_process_engine._feature_hashes_from_result",
+                            side_effect=hash_result,
+                        ) as hash_op,
+                    ):
                         result = engine.get_embedding_result(
                             [inp], hashes_only=hashes_only
                         )[0]
@@ -1956,15 +1970,20 @@ class MMProcessEngineGreenNetTest(TestCase):
             stopping.set()
             return original_shutdown(*args, **kwargs)
 
-        with patch.object(engine, "_async_compute", side_effect=compute), patch.object(
-            engine._async_compute_executor, "shutdown", side_effect=shutdown
-        ), patch.object(
-            engine.preprocess_executor,
-            "shutdown",
-            wraps=engine.preprocess_executor.shutdown,
-        ) as close_preprocess, patch.object(
-            engine._scheduler, "close", wraps=engine._scheduler.close
-        ) as close_scheduler:
+        with (
+            patch.object(engine, "_async_compute", side_effect=compute),
+            patch.object(
+                engine._async_compute_executor, "shutdown", side_effect=shutdown
+            ),
+            patch.object(
+                engine.preprocess_executor,
+                "shutdown",
+                wraps=engine.preprocess_executor.shutdown,
+            ) as close_preprocess,
+            patch.object(
+                engine._scheduler, "close", wraps=engine._scheduler.close
+            ) as close_scheduler,
+        ):
             engine.async_submit([inp])
             self.assertTrue(entered.wait(timeout=2))
             entry = engine._embedding_cache.peek(inp.cache_key())
@@ -2051,12 +2070,15 @@ class MMProcessEngineGreenNetTest(TestCase):
             engine.stop()
 
     def test_provider_failure_does_not_allocate_engine_resources(self):
-        with patch(
-            "rtp_llm.multimodal.mm_process_engine.get_greennet_provider",
-            side_effect=RuntimeError("provider init failed"),
-        ), patch(
-            "rtp_llm.multimodal.mm_process_engine.concurrent.futures.ThreadPoolExecutor"
-        ) as executor:
+        with (
+            patch(
+                "rtp_llm.multimodal.mm_process_engine.get_greennet_provider",
+                side_effect=RuntimeError("provider init failed"),
+            ),
+            patch(
+                "rtp_llm.multimodal.mm_process_engine.concurrent.futures.ThreadPoolExecutor"
+            ) as executor,
+        ):
             with self.assertRaisesRegex(RuntimeError, "provider init failed"):
                 self._make_engine()
             executor.assert_not_called()
@@ -2070,12 +2092,25 @@ class MMProcessEngineGreenNetTest(TestCase):
         provider.InternalGreenNetProvider = MagicMock(
             side_effect=RuntimeError("bad config")
         )
-        with patch.object(greennet_hook, "_PROVIDER", None), patch(
-            "rtp_llm.utils.import_util.has_internal_source", return_value=True
-        ), patch.dict(sys.modules, {provider.__name__: provider}):
+        with (
+            patch.object(greennet_hook, "_PROVIDER", None),
+            patch("rtp_llm.utils.import_util.has_internal_source", return_value=True),
+            patch.dict(sys.modules, {provider.__name__: provider}),
+        ):
             with self.assertRaisesRegex(RuntimeError, "bad config"):
                 greennet_hook.get_greennet_provider()
             self.assertIsNone(greennet_hook._PROVIDER)
+
+    def test_partial_internal_namespace_uses_noop_provider(self):
+        from rtp_llm.multimodal import greennet_hook
+
+        with (
+            patch.object(greennet_hook, "_PROVIDER", None),
+            patch("rtp_llm.utils.import_util.has_internal_source", return_value=True),
+            patch.dict(sys.modules, {"internal_source.rtp_llm.multimodal": None}),
+        ):
+            provider = greennet_hook.get_greennet_provider()
+            self.assertIsInstance(provider, greennet_hook.NoopGreenNetProvider)
 
     def test_cache_free_rejection_never_publishes_hashes(self):
         engine = self._make_engine(FakeEmbeddingLengthInterface())

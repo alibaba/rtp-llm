@@ -484,6 +484,16 @@ void CudaGraphRunner::prepareAttentionInputs(const PyModelInputs& inputs,
     auto&      py_model_inputs_ = graph_instances_[graph_idx].mem_hold_.py_model_inputs_;
     auto       attn_pyobj       = graph_instances_[graph_idx].mem_hold_.attn_pyobj_;
     const bool has_tagged_cache = !inputs.attention_inputs_by_tag.empty();
+    bool       refresh_host_block_table_mirror = true;
+#if USING_ROCM
+    if (has_tagged_cache && attn_pyobj && !attn_pyobj.is_none()) {
+        py::gil_scoped_acquire gil;
+        if (py::hasattr(attn_pyobj, "requires_host_block_table_mirror")) {
+            refresh_host_block_table_mirror =
+                py::cast<bool>(attn_pyobj.attr("requires_host_block_table_mirror"));
+        }
+    }
+#endif
     const int  selected_graph_batch_size =
         is_prefill_cuda_graph_mode_ ? static_cast<int>(max_bs_) : state.current_real_graph_bs;
     const bool has_padded_rows = state.current_batch_size < selected_graph_batch_size;
@@ -824,9 +834,14 @@ void CudaGraphRunner::prepareAttentionInputs(const PyModelInputs& inputs,
                                     "CUDA graph capture has no attention input for tag=%s",
                                     tag.c_str());
             auto& dst_inputs = dst_it->second;
+            // On ROCm, stridedCopyHost below clears the uncopied rows and
+            // columns before refreshing the live region. Avoid clearing the
+            // entire pinned host table here on every graph replay.
+#if !USING_ROCM
             if (dst_inputs.kv_cache_kernel_block_id.defined() && !dst_inputs.kv_cache_kernel_block_id.is_cuda()) {
                 dst_inputs.kv_cache_kernel_block_id.zero_();
             }
+#endif
             tryAddStridedD2DCopy(src_inputs.kv_cache_kernel_block_id_device,
                                  dst_inputs.kv_cache_kernel_block_id_device);
         }
@@ -968,7 +983,11 @@ void CudaGraphRunner::prepareAttentionInputs(const PyModelInputs& inputs,
         if (has_tagged_cache) {
             for (const auto& [tag, src_inputs] : inputs.attention_inputs_by_tag) {
                 auto& dst_inputs = py_model_inputs_.attention_inputs_by_tag.at(tag);
-                stridedCopyHost(src_inputs.kv_cache_kernel_block_id, dst_inputs.kv_cache_kernel_block_id);
+                // A device-only attention backend can opt out of the pinned
+                // host mirror. Its live device table is refreshed above.
+                if (refresh_host_block_table_mirror) {
+                    stridedCopyHost(src_inputs.kv_cache_kernel_block_id, dst_inputs.kv_cache_kernel_block_id);
+                }
             }
         }
     }
