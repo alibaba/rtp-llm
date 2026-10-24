@@ -38,7 +38,7 @@ public class DefaultRouter {
     private final RandomStrategy vitSelector;
     private final EncoderStrategy encoderSelector;
     private final ConfigService configService;
-    private final Set<RoleType> requiredRoles;
+    private final Set<RoleType> deployedRoles;
     @Autowired
     private VitCacheSelector vitCacheSelector;
 
@@ -54,7 +54,7 @@ public class DefaultRouter {
         this.vitSelector = vitSelector;
         this.encoderSelector = encoderSelector;
         this.configService = configService;
-        this.requiredRoles = Collections.unmodifiableSet(new LinkedHashSet<>(modelMetaConfig.requiredRoles()));
+        this.deployedRoles = Collections.unmodifiableSet(new LinkedHashSet<>(modelMetaConfig.requiredRoles()));
     }
 
     boolean isEncoderOnly(BalanceContext context) {
@@ -62,7 +62,7 @@ public class DefaultRouter {
     }
 
     boolean hasEncoderRole() {
-        return requiredRoles.contains(RoleType.ENCODER);
+        return deployedRoles.contains(RoleType.ENCODER);
     }
 
     PlacementResult<SelectedRole, PlacementKey> selectEncoder(BalanceContext context) {
@@ -104,7 +104,7 @@ public class DefaultRouter {
     public Response routeVit(BalanceContext context) {
         Response invalid = validateRequest(context);
         if (invalid != null) { return invalid; }
-        if (!requiredRoles.contains(RoleType.VIT) || vitCacheSelector == null) {
+        if (!deployedRoles.contains(RoleType.VIT) || vitCacheSelector == null) {
             return Response.error(StrategyErrorType.NO_VIT_WORKER);
         }
         ServerStatus vit = vitCacheSelector.select(context, resolvePolicyGroup(context));
@@ -118,7 +118,7 @@ public class DefaultRouter {
 
     public boolean selectedVitIsValid(BalanceContext context) {
         if (context.getRequest() == null || context.getRequest().getSelectedVit() == null) { return true; }
-        return vitCacheSelector != null && requiredRoles.contains(RoleType.VIT)
+        return vitCacheSelector != null && deployedRoles.contains(RoleType.VIT)
                 && vitCacheSelector.validate(context, resolvePolicyGroup(context)).isSuccess();
     }
 
@@ -128,7 +128,7 @@ public class DefaultRouter {
             return Response.error(StrategyErrorType.INVALID_REQUEST);
         }
         Set<RoleType> requested = context.getRequestedRoles();
-        if (requested != null && !requiredRoles.containsAll(requested)) {
+        if (requested != null && !deployedRoles.containsAll(requested)) {
             return Response.error(StrategyErrorType.INVALID_REQUEST);
         }
         return null;
@@ -136,8 +136,8 @@ public class DefaultRouter {
 
     private Set<RoleType> requestedRoles(BalanceContext context) {
         Set<RoleType> requested = context.getRequestedRoles();
-        return requested == null ? requiredRoles
-                : requiredRoles.stream().filter(requested::contains)
+        return requested == null ? deployedRoles
+                : deployedRoles.stream().filter(requested::contains)
                         .collect(Collectors.toCollection(LinkedHashSet::new));
     }
 
