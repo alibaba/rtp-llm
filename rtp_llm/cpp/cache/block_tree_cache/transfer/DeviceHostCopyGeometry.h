@@ -23,7 +23,7 @@ struct DeviceHostCopyTileGeometry {
 // Enumerate one backing before copy plans are merged by device. Production
 // GroupSets use the pool's per-layer physical geometry, including MTP layers
 // whose strides differ from the logical tag's spec. GroupSets without an explicit
-// physical payload keep their logical strides and exclude extra pool padding.
+// physical payload require each buffer to match its logical full-block stride.
 inline std::vector<DeviceHostCopyTileGeometry> getDeviceHostCopyTiles(const GroupSet&                  group,
                                                                       const std::vector<BlockIdxType>& blocks) {
     const auto& tags  = group.groupTags();
@@ -49,7 +49,7 @@ inline std::vector<DeviceHostCopyTileGeometry> getDeviceHostCopyTiles(const Grou
                 if (!bytes) {
                     return;
                 }
-                if (index >= buffers.size() || !buffers[index].addr || buffers[index].size_bytes < bytes
+                if (index >= buffers.size() || !buffers[index].addr || buffers[index].size_bytes != bytes
                     || offset > group.payloadBytes() || bytes > group.payloadBytes() - offset) {
                     throw std::invalid_argument("device-host backing tile exceeds its buffer or payload");
                 }

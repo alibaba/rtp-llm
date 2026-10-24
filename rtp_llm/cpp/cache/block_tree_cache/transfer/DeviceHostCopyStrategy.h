@@ -13,6 +13,7 @@
 namespace rtp_llm {
 
 struct StagedMemoryCopyScratch;
+class GroupSet;
 
 // --- Copy Plan types ---
 
@@ -55,10 +56,31 @@ struct StrategyResult {
 
 class DeviceHostCopyStrategy {
 public:
-    virtual ~DeviceHostCopyStrategy()                                                                       = default;
+    virtual ~DeviceHostCopyStrategy()                                                = default;
     virtual StrategyResult tryExecute(const DeviceHostCopyPlan&             plan,
                                       const DeviceHostCopyOptions&          options,
-                                      const DeviceHostCopyExecutionContext& context)                        = 0;
+                                      const DeviceHostCopyExecutionContext& context) = 0;
+};
+
+class Cuda3DBatchDeviceHostCopyStrategy: public DeviceHostCopyStrategy {
+public:
+    explicit Cuda3DBatchDeviceHostCopyStrategy(const std::vector<std::shared_ptr<GroupSet>>& group_sets = {},
+                                               bool                                          enabled    = true);
+
+    // The template path consumes the original batch, never a tile plan.
+    StrategyResult tryExecute(const DeviceHostCopyPlan&,
+                              const DeviceHostCopyOptions&,
+                              const DeviceHostCopyExecutionContext&) override {
+        return StrategyResult::notApplicable();
+    }
+    virtual StrategyResult tryExecute(const std::vector<HostBufferView>&     hosts,
+                                      const std::vector<TransferDescriptor>& descriptors,
+                                      const std::vector<const GroupSet*>&    group_sets,
+                                      const DeviceHostCopyExecutionContext&  context);
+
+private:
+    static std::vector<DeviceHostCopyTemplate>                     initializeCopy3DTemplates(const GroupSet& group);
+    std::map<const GroupSet*, std::vector<DeviceHostCopyTemplate>> templates_;
 };
 
 class StagedSmDeviceHostCopyStrategy: public DeviceHostCopyStrategy {

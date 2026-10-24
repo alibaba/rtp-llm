@@ -151,11 +151,21 @@ struct TransferResult {
     std::vector<CacheCopyError> block_errors;
 };
 
+struct DeviceHostCopyTemplate {
+    size_t member_index;
+    void*  device_base;
+    size_t host_offset;
+    size_t width_bytes;
+    size_t layer_count;
+    size_t device_pitch;
+};
+
 struct DeviceHostCopyOptions {
     size_t staged_sm_min_tile_count{16};
     size_t staged_sm_min_bytes{64 * 1024};
     bool   staged_sm_copy_enabled{true};
     bool   cuda_batch_copy_enabled{true};
+    bool   cuda_3d_batch_copy_enabled{true};
 };
 
 struct HostBufferView {

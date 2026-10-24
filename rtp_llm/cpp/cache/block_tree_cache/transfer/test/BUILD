@@ -180,3 +180,17 @@ cc_test(
         "@com_google_googletest//:gtest_main",
     ],
 )
+
+cc_test(
+    name = "device_host_copy_template_test",
+    exec_properties = {"gpu": "L20_CU13"},
+    testonly = True,
+    srcs = ["DeviceHostCopyTemplateTest.cc"],
+    copts = test_copts,
+    tags = [
+        "L20_CU13",
+        "exclusive-if-local",
+    ],
+    deps = test_deps + [":block_transfer_engine_test_utils"],
+    env = {},
+)

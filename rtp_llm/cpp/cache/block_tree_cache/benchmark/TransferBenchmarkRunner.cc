@@ -79,11 +79,39 @@ private:
     BenchmarkDeviceHostCopyStats*           stats_;
 };
 
+class RecordingCuda3DBatchDeviceHostCopyStrategy final: public Cuda3DBatchDeviceHostCopyStrategy {
+public:
+    RecordingCuda3DBatchDeviceHostCopyStrategy(Cuda3DBatchDeviceHostCopyStrategy&& strategy,
+                                               BenchmarkDeviceHostCopyStats*       stats):
+        Cuda3DBatchDeviceHostCopyStrategy(std::move(strategy)), stats_(stats) {}
+
+    StrategyResult tryExecute(const std::vector<HostBufferView>&     hosts,
+                              const std::vector<TransferDescriptor>& descriptors,
+                              const std::vector<const GroupSet*>&    group_sets,
+                              const DeviceHostCopyExecutionContext&  context) override {
+        const auto start   = Clock::now();
+        auto       result  = Cuda3DBatchDeviceHostCopyStrategy::tryExecute(hosts, descriptors, group_sets, context);
+        const auto elapsed = elapsedNs(start, Clock::now());
+        if (result.status == StrategyStatus::DONE) {
+            stats_->cuda_3d_batch.fetch_add(1, std::memory_order_relaxed);
+            stats_->lowest_api_ns.fetch_add(elapsed, std::memory_order_relaxed);
+            stats_->lowest_api_calls.fetch_add(1, std::memory_order_relaxed);
+        }
+        return result;
+    }
+
+private:
+    BenchmarkDeviceHostCopyStats* stats_;
+};
+
 void installStrategyRecorders(PerRankBlockTransferEngine&                          engine,
                               const std::shared_ptr<BenchmarkDeviceHostCopyStats>& stats) {
     auto& strategies = engine.device_host_executor_->strategies_;
-    RTP_LLM_CHECK(strategies.size() == 3);
     for (auto& strategy : strategies) {
+        if (auto* copy3d = dynamic_cast<Cuda3DBatchDeviceHostCopyStrategy*>(strategy.get())) {
+            strategy = std::make_unique<RecordingCuda3DBatchDeviceHostCopyStrategy>(std::move(*copy3d), stats.get());
+            continue;
+        }
         std::atomic<size_t>* completed = nullptr;
         if (dynamic_cast<StagedSmDeviceHostCopyStrategy*>(strategy.get()) != nullptr) {
             completed = &stats->staged_sm;
@@ -354,13 +382,18 @@ TransferBenchmarkRunner::buildTransferSetup(const GroupSetInfo&            gs_in
     setup.copy_stats                    = std::make_shared<BenchmarkDeviceHostCopyStats>();
     DeviceHostCopyOptions copy_options;
     if (options_.copy_strategy == "staged-sm") {
-        copy_options.staged_sm_copy_enabled   = true;
-        copy_options.staged_sm_min_tile_count = 0;
-        copy_options.staged_sm_min_bytes      = 0;
-        copy_options.cuda_batch_copy_enabled  = false;
+        copy_options.staged_sm_copy_enabled     = true;
+        copy_options.staged_sm_min_tile_count   = 0;
+        copy_options.staged_sm_min_bytes        = 0;
+        copy_options.cuda_batch_copy_enabled    = false;
+        copy_options.cuda_3d_batch_copy_enabled = false;
     } else if (options_.copy_strategy == "batch") {
+        copy_options.staged_sm_copy_enabled     = false;
+        copy_options.cuda_batch_copy_enabled    = true;
+        copy_options.cuda_3d_batch_copy_enabled = false;
+    } else if (options_.copy_strategy == "cuda-3d-batch") {
         copy_options.staged_sm_copy_enabled  = false;
-        copy_options.cuda_batch_copy_enabled = true;
+        copy_options.cuda_batch_copy_enabled = false;
     }
     const size_t max_descriptors_per_task = options_.transfer_descriptor_batch_size == 0 ?
                                                 kBenchmarkMaxDescriptorsPerTask :
@@ -671,6 +704,8 @@ bool TransferBenchmarkRunner::runPurePathTransfer() {
     const bool   wrapped = ((final_operations + direction_count - 1) / direction_count) > working_set_blocks;
 
     std::vector<std::string> actual_strategies;
+    if (setup.copy_stats->cuda_3d_batch.load(std::memory_order_relaxed) > 0)
+        actual_strategies.push_back("cuda-3d-batch");
     if (setup.copy_stats->staged_sm.load(std::memory_order_relaxed) > 0)
         actual_strategies.push_back("staged-sm");
     if (setup.copy_stats->cuda_batch.load(std::memory_order_relaxed) > 0)
