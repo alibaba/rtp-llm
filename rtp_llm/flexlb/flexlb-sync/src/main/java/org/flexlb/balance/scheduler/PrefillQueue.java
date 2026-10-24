@@ -17,13 +17,13 @@ import org.flexlb.balance.planner.GroupPlanner;
 import org.flexlb.balance.prediction.InvalidPrefillPredictionException;
 import org.flexlb.balance.prediction.PrefillPredictionBoundary;
 import org.flexlb.balance.prediction.PrefillTimePredictor;
+import org.flexlb.balance.queue.BatchCapacityView;
 import org.flexlb.balance.queue.QueueWaitSnapshot;
 import org.flexlb.balance.queue.QueuedRequestsSnapshot;
 import org.flexlb.config.DecisionPolicyConfig;
 import org.flexlb.config.DispatcherConfig;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.config.VictimStage;
-import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.enums.PrefillQueueEnqueueResult;
 import org.flexlb.util.Logger;
 import org.flexlb.util.PriorityNormalizer;
@@ -1109,7 +1109,7 @@ public final class PrefillQueue {
         LoadViewVersion version = new LoadViewVersion(
                 queueVersion.get(), schedulingInputVersion,
                 prefillState.mutationVersionUnderLock(), fixedWaitMs);
-        BatchCapacitySnapshot capacity = batchCapacitySnapshot();
+        BatchCapacityView capacity = BatchCapacityView.of(prefillEndpoint, config);
         PrefillState.Snapshot ownership = prefillState.snapshotUnderLock();
         return new LoadViewCache(
                 version, ownership,
@@ -1118,51 +1118,6 @@ public final class PrefillQueue {
                         Long.MAX_VALUE, predictedExecutionBudgetMs(),
                         fixedWaitMs),
                 ownership.activeItems().isEmpty() ? null : admissionBlockUnderLock());
-    }
-
-    private BatchCapacitySnapshot batchCapacitySnapshot() {
-        WorkerStatus status = prefillEndpoint != null
-                ? prefillEndpoint.getStatus() : null;
-        if (status == null) {
-            return new BatchCapacitySnapshot(Long.MAX_VALUE, Long.MAX_VALUE, -1, -1);
-        }
-        WorkerStatus.EngineObservation engineStatus =
-                status.committedEngineObservation();
-        long engineCapacity = engineStatus.maxBatchTokensSize();
-        if (engineCapacity <= 0) {
-            engineCapacity = engineStatus.maxSeqLen();
-        }
-        if (engineCapacity <= 0) {
-            engineCapacity = config.getFallbackBatchTokenCapacity();
-        }
-        long batchTokenCapacity = positiveOrUnlimited(engineCapacity);
-        long total = engineStatus.totalKvCacheTokens();
-        if (total <= 0) {
-            return new BatchCapacitySnapshot(
-                    batchTokenCapacity, Long.MAX_VALUE, engineStatus.runningQueryLen(), engineStatus.waitingQueryLen());
-        }
-        long available = Math.max(
-                0, engineStatus.availableKvCacheTokens());
-        return new BatchCapacitySnapshot(
-                batchTokenCapacity, Math.min(total, available),
-                engineStatus.runningQueryLen(), engineStatus.waitingQueryLen());
-    }
-
-    private record BatchCapacitySnapshot(
-            long batchTokenCapacity,
-            long batchKvCapacity,
-            long runningQueryLen,
-            long waitingQueryLen) {
-        private long kvCapacityFor(GroupPlanner.Shape shape) {
-            if (!shape.fitsKv(batchKvCapacity) && runningQueryLen == 0 && waitingQueryLen == 0) {
-                return Long.MAX_VALUE;
-            }
-            return batchKvCapacity;
-        }
-    }
-
-    private static long positiveOrUnlimited(long value) {
-        return value > 0 ? value : Long.MAX_VALUE;
     }
 
     // ==================== Delivery ownership ====================
@@ -1509,7 +1464,7 @@ public final class PrefillQueue {
 
         GroupPlanner.Shape shape =
                 GroupPlanner.Shape.empty().add(head.seqLen());
-        BatchCapacitySnapshot capacity = batchCapacitySnapshot();
+        BatchCapacityView capacity = BatchCapacityView.of(prefillEndpoint, config);
         if (!shape.fitsKv(capacity.kvCapacityFor(shape))) {
             return awaitPrefillKvCapacity(
                     head, snapshot.queueVersion(),
@@ -1518,7 +1473,7 @@ public final class PrefillQueue {
 
         // Worker status and delivery ledgers advance independently. Re-read
         // the advisory gate immediately before hard-capacity admission.
-        capacity = batchCapacitySnapshot();
+        capacity = BatchCapacityView.of(prefillEndpoint, config);
         if (!shape.fitsKv(capacity.kvCapacityFor(shape))) {
             return awaitPrefillKvCapacity(
                     head, snapshot.queueVersion(),
@@ -1566,7 +1521,7 @@ public final class PrefillQueue {
 
         long nowMs = now();
         long fixedWaitMs = collectionWindowMs();
-        BatchCapacitySnapshot capacity = batchCapacitySnapshot();
+        BatchCapacityView capacity = BatchCapacityView.of(prefillEndpoint, config);
         int batchMaxCount = maxDecisionRequests();
         long predictThresholdMs = predictedExecutionBudgetMs();
         long batchMaxTokens = capacity.batchTokenCapacity();
@@ -1609,7 +1564,7 @@ public final class PrefillQueue {
         }
 
         nowMs = now();
-        capacity = batchCapacitySnapshot();
+        capacity = BatchCapacityView.of(prefillEndpoint, config);
         batchMaxCount = maxDecisionRequests();
         predictThresholdMs = predictedExecutionBudgetMs();
         batchMaxTokens = capacity.batchTokenCapacity();
@@ -1716,7 +1671,7 @@ public final class PrefillQueue {
                                                   String reason,
                                                   PrefillTimePredictor.Evaluator evaluator,
                                                   OptionalLong plannedCommittedPredictionMs) {
-        BatchCapacitySnapshot capacity = batchCapacitySnapshot();
+        BatchCapacityView capacity = BatchCapacityView.of(prefillEndpoint, config);
         if ((picked.size() > 1 && !shape.fitsCompute(capacity.batchTokenCapacity()))
                 || !shape.fitsKv(capacity.kvCapacityFor(shape))) {
             return BatcherCycleResult.NO_ACTION;
