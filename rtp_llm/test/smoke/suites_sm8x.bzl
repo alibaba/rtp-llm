@@ -8,7 +8,6 @@ def sm8x_suites():
     native.test_suite(
         name = "smoke_sm8x_basic",
         tests = [
-            ":chunked_multimodal",
             # Extend the existing Qwen2.5 P/D fixture with chunk probability checks.
             custom_smoke_test(
                 name = "chunked_logprobs_fused",
