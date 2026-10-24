@@ -15,7 +15,7 @@ import java.util.OptionalLong;
 /**
  * FIXED_WINDOW 模式：队首最多等一个凑组窗口，把排在后面的请求按数量、token、KV 容量和预测耗时上限凑成一组再交付。
  */
-final class FixedWindowPicker implements QueuePicker {
+public final class FixedWindowPicker implements QueuePicker {
 
     private static final GroupPlanner.ItemAccess<ScheduledRequest>
             PLANNER_ITEM_ACCESS = new GroupPlanner.ItemAccess<>() {
@@ -37,7 +37,7 @@ final class FixedWindowPicker implements QueuePicker {
     private final PrefillTtftEstimator ttftEstimator;
     private final GroupCommitter groupCommitter;
 
-    FixedWindowPicker(QueueState queueState,
+    public FixedWindowPicker(QueueState queueState,
                       PrefillEndpoint prefillEndpoint,
                       FlexlbConfig config,
                       GroupingLimits groupingLimits,

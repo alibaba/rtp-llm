@@ -5,7 +5,7 @@ package org.flexlb.balance.queue;
  * <p>
  * 单请求模式一次只取队首；FIXED_WINDOW 模式会等一小段时间，把多个请求凑成一组再交付。
  */
-interface QueuePicker {
+public interface QueuePicker {
 
     /**
      * 跑一轮：选请求、交付，或者告诉调度线程接下来要等什么。

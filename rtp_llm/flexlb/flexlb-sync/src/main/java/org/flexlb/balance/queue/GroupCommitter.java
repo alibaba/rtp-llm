@@ -27,7 +27,7 @@ import java.util.function.Supplier;
  * 容量不足就让队首等容量，交付失败就把队首移出队列并通知请求调度器。
  * 队首超时也由这里移出队列。
  */
-final class GroupCommitter {
+public final class GroupCommitter {
 
     private final String key;
     private final QueueState queueState;
@@ -38,7 +38,7 @@ final class GroupCommitter {
     private final CapacityBlockedHead capacityBlockedHead;
     private final QueuedRequestRemover queuedRequestRemover;
 
-    GroupCommitter(String key,
+    public GroupCommitter(String key,
                    QueueState queueState,
                    PrefillEndpoint prefillEndpoint,
                    QueueCapacity queueCapacity,
@@ -339,7 +339,7 @@ final class GroupCommitter {
         }
     }
 
-    static Throwable appendFailure(
+    public static Throwable appendFailure(
             Throwable first,
             Throwable next) {
         if (first == null) {
@@ -352,7 +352,7 @@ final class GroupCommitter {
     }
 
     /** Release the publish-time reservation only while it is still item-owned. */
-    static RuntimeException propagateCommitFailure(
+    public static RuntimeException propagateCommitFailure(
             Throwable failure) {
         if (failure instanceof RuntimeException runtimeFailure) {
             return runtimeFailure;

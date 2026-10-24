@@ -16,7 +16,7 @@ import java.util.concurrent.CancellationException;
  * 释放预留的 Prefill 资源，交还给请求调度器处理；最后等调度线程退出。
  * 多个线程同时停止时，只有第一个真正执行清理，其余的等它做完并拿到同一个结果。
  */
-final class PrefillQueueLifecycle {
+public final class PrefillQueueLifecycle {
 
     private enum RuntimeState {
         NEW,
@@ -48,7 +48,7 @@ final class PrefillQueueLifecycle {
     private final EndpointEventHandler endpointEvents;
     private final CapacityBlockedHead capacityBlockedHead;
 
-    PrefillQueueLifecycle(String key,
+    public PrefillQueueLifecycle(String key,
                           QueueState queueState,
                           PrefillState prefillState,
                           PrefillEndpoint prefillEndpoint,
@@ -77,7 +77,7 @@ final class PrefillQueueLifecycle {
                 .unstarted(schedulingLoop);
     }
 
-    synchronized void start() {
+    public synchronized void start() {
         if (runtimeState != RuntimeState.NEW) {
             throw new IllegalStateException(
                     "Worker batcher cannot start from "
@@ -98,7 +98,7 @@ final class PrefillQueueLifecycle {
         }
     }
 
-    boolean isRunning() {
+    public boolean isRunning() {
         return runtimeState == RuntimeState.RUNNING;
     }
 
@@ -110,7 +110,7 @@ final class PrefillQueueLifecycle {
         notifyAll();
     }
 
-    Throwable stopAndAwait() {
+    public Throwable stopAndAwait() {
         if (Thread.currentThread() == workerThread) {
             throw new IllegalStateException(
                     "Prefill runtime cannot await its own worker thread");

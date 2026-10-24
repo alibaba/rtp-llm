@@ -10,7 +10,7 @@ import org.flexlb.balance.scheduler.ScheduledRequest;
  * <p>
  * 请求取消、超时、交付失败被丢弃时都走这里。
  */
-final class QueuedRequestRemover {
+public final class QueuedRequestRemover {
 
     private final QueueState queueState;
     private final PrefillState prefillState;
@@ -31,7 +31,7 @@ final class QueuedRequestRemover {
      * 移除请求，但不推进队列版本，由调用方在一批改动做完后统一推进。请求已不在队列里时返回 false。
      * 调用方持有队列锁。
      */
-    boolean removeTerminalActiveUnderLock(ScheduledRequest item) {
+    public boolean removeTerminalActiveUnderLock(ScheduledRequest item) {
         boolean removed;
         if (!item.requiresRouteReservation()) {
             removed = prefillState.terminalizeActiveUnderLock(item);
@@ -62,7 +62,7 @@ final class QueuedRequestRemover {
     /**
      * 把取下来的 Prefill 资源预留放回请求上。用于移除没成功时撤回。
      */
-    static void restoreRouteReservation(
+    public static void restoreRouteReservation(
             ScheduledRequest item,
             PrefillState.RouteReservation reservation) {
         if (!item.restorePublishedRouteReservation(reservation)) {
@@ -75,7 +75,7 @@ final class QueuedRequestRemover {
     /**
      * 移除请求并推进队列版本。请求已不在队列里时返回 false。调用方持有队列锁。
      */
-    boolean removeUnderLock(ScheduledRequest item) {
+    public boolean removeUnderLock(ScheduledRequest item) {
         boolean removed = removeTerminalActiveUnderLock(item);
         if (removed) {
             queueState.incrementQueueVersion();

@@ -11,7 +11,7 @@ import org.flexlb.balance.estimate.QueueView.AdmissionBlock;
  * 推进调度输入版本并唤醒调度线程重试。选路预估 TTFT 时也会读这份记录，知道队首正被挡住。
  * 所有读写都在队列锁内进行。
  */
-final class CapacityBlockedHead {
+public final class CapacityBlockedHead {
 
     private final QueueState queueState;
     private final PrefillEndpoint prefillEndpoint;
@@ -74,7 +74,7 @@ final class CapacityBlockedHead {
     /**
      * Prefill 资源预留或 batch 容量真的释放后调用：唤醒本队列被挡住的队首，并通知全局选路有容量空出来。
      */
-    void signalCapacityAvailable() {
+    public void signalCapacityAvailable() {
         signalDeliveryCapacityAvailable();
         prefillEndpoint.signalPlacementCapacityChanged();
     }
@@ -83,7 +83,7 @@ final class CapacityBlockedHead {
      * 记下新的被挡队首，传 null 表示清除。挡住它的容量变了时，把监听从旧容量挪到新容量上；
      * 同时推进调度输入版本，让缓存的负载视图失效。调用方持有队列锁。
      */
-    void setUnderLock(ProcessQueueResult blocked) {
+    public void setUnderLock(ProcessQueueResult blocked) {
         if (!queueState.isLockedByCurrentThread()) {
             throw new IllegalStateException(
                     "capacity block update requires the queue lock");

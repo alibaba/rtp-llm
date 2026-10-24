@@ -12,7 +12,7 @@ import java.util.Map;
  * <p>
  * 只保存最近一次。诊断接口读的时候不加队列锁，也不在调度线程上拼装输出。
  */
-final class QueueWaitRecorder {
+public final class QueueWaitRecorder {
 
     private final String key;
     private final QueueState queueState;
@@ -22,7 +22,7 @@ final class QueueWaitRecorder {
      */
     private volatile QueueWaitSnapshot latest;
 
-    QueueWaitRecorder(String key, QueueState queueState, PrefillState prefillState) {
+    public QueueWaitRecorder(String key, QueueState queueState, PrefillState prefillState) {
         this.key = key;
         this.queueState = queueState;
         this.prefillState = prefillState;
@@ -53,7 +53,7 @@ final class QueueWaitRecorder {
                 prefillRequests, prefillBatchSlots, decode);
     }
 
-    Map<String, Object> diagnostics() {
+    public Map<String, Object> diagnostics() {
         QueueWaitSnapshot snapshot = latest;
         return snapshot == null ? QueueWaitSnapshot.INITIAL_DIAGNOSTICS : snapshot.diagnostics();
     }

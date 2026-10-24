@@ -19,7 +19,7 @@ import java.util.List;
  * 入队时先占引擎排队名额，再登记到队列并预留 Prefill 资源；任一步失败都撤回已做的部分。
  * 队列满时，可以挤掉一个优先级更低的排队请求，让新请求顶替它的位置和预留。
  */
-final class PrefillQueueEnqueuer {
+public final class PrefillQueueEnqueuer {
 
     private final QueueState queueState;
     private final PrefillState prefillState;
@@ -28,7 +28,7 @@ final class PrefillQueueEnqueuer {
     private final EndpointEventHandler endpointEvents;
     private final FlexlbConfig config;
 
-    PrefillQueueEnqueuer(QueueState queueState,
+    public PrefillQueueEnqueuer(QueueState queueState,
                          PrefillState prefillState,
                          PrefillEndpoint prefillEndpoint,
                          QueueCapacity queueCapacity,
@@ -42,7 +42,7 @@ final class PrefillQueueEnqueuer {
         this.config = config;
     }
 
-    PrefillQueueEnqueueResult enqueue(ScheduledRequest item) {
+    public PrefillQueueEnqueueResult enqueue(ScheduledRequest item) {
         EnqueueAttempt attempt;
         List<ScheduledRequest> victims = List.of();
         boolean subQueueCountAdded = false;

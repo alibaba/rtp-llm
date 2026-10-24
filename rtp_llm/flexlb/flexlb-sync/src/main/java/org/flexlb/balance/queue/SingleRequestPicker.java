@@ -13,7 +13,7 @@ import java.util.OptionalLong;
 /**
  * 单请求模式：每一轮只看队首，Prefill KV 容量够就单独交付，不和其他请求凑组。
  */
-final class SingleRequestPicker implements QueuePicker {
+public final class SingleRequestPicker implements QueuePicker {
 
     private static final String SINGLE_DECISION_REASON = "single_request";
 
@@ -22,7 +22,7 @@ final class SingleRequestPicker implements QueuePicker {
     private final FlexlbConfig config;
     private final GroupCommitter groupCommitter;
 
-    SingleRequestPicker(QueueState queueState,
+    public SingleRequestPicker(QueueState queueState,
                         PrefillEndpoint prefillEndpoint,
                         FlexlbConfig config,
                         GroupCommitter groupCommitter) {

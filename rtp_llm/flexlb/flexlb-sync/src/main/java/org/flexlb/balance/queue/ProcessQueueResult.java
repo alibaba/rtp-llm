@@ -12,7 +12,7 @@ import org.flexlb.balance.scheduler.ScheduledRequest;
  *   <li>{@link #awaitingSchedulingChange}：队首在等凑组或 Prefill KV 容量，等队列、调度输入变化或到点。</li>
  * </ul>
  */
-record ProcessQueueResult(
+public record ProcessQueueResult(
         boolean placementCapacityChanged,
         ScheduledRequest request,
         DeliveryBlockReason unavailable,
@@ -21,10 +21,10 @@ record ProcessQueueResult(
         long wakeAtMs,
         String waitReason) {
 
-    static final ProcessQueueResult NO_ACTION = simple(false);
-    static final ProcessQueueResult CAPACITY_CHANGED = simple(true);
+    public static final ProcessQueueResult NO_ACTION = simple(false);
+    public static final ProcessQueueResult CAPACITY_CHANGED = simple(true);
 
-    ProcessQueueResult {
+    public ProcessQueueResult {
         boolean waiting = request != null;
         if ((placementCapacityChanged && waiting)
                 || (!waiting && unavailable != null)) {
@@ -33,14 +33,14 @@ record ProcessQueueResult(
         }
     }
 
-    static ProcessQueueResult capacityBlocked(ScheduledRequest item, DeliveryBlockReason unavailable) {
+    public static ProcessQueueResult capacityBlocked(ScheduledRequest item, DeliveryBlockReason unavailable) {
         return new ProcessQueueResult(false, item, unavailable, 0L, 0L, 0L,
                 unavailable.estimateSemantics() == null
                         ? "Prefill delivery capacity exhausted"
                         : unavailable.estimateSemantics().blockedDetail());
     }
 
-    static ProcessQueueResult awaitingSchedulingChange(
+    public static ProcessQueueResult awaitingSchedulingChange(
             ScheduledRequest head,
             long queueVersion,
             long schedulingInputVersion,
@@ -54,7 +54,7 @@ record ProcessQueueResult(
     /**
      * 队首在等 Prefill 的 KV 容量，等到队列或调度输入变化、或请求超时再进下一轮。
      */
-    static ProcessQueueResult awaitingPrefillKvCapacity(
+    public static ProcessQueueResult awaitingPrefillKvCapacity(
             ScheduledRequest head,
             long queueVersion,
             long schedulingInputVersion) {
@@ -68,11 +68,11 @@ record ProcessQueueResult(
                 capacityChanged, null, null, 0L, 0L, 0L, null);
     }
 
-    boolean capacityBlocked() {
+    public boolean capacityBlocked() {
         return unavailable != null;
     }
 
-    boolean awaitingSchedulingChange() {
+    public boolean awaitingSchedulingChange() {
         return request != null && unavailable == null;
     }
 }

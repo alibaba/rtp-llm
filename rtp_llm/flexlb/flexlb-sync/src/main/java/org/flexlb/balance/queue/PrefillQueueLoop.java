@@ -10,7 +10,7 @@ import org.flexlb.balance.endpoint.PrefillEndpoint;
  * 在等凑组或 Prefill KV 容量时等队列或调度输入变化、或者到点。
  * 循环中抛出意外异常时停止整个队列。
  */
-final class PrefillQueueLoop {
+public final class PrefillQueueLoop {
 
     private final QueueState queueState;
     private final PrefillEndpoint prefillEndpoint;
@@ -19,7 +19,7 @@ final class PrefillQueueLoop {
     private final PrefillQueueLifecycle lifecycle;
     private final QueuePicker queuePicker;
 
-    PrefillQueueLoop(QueueState queueState,
+    public PrefillQueueLoop(QueueState queueState,
                      PrefillEndpoint prefillEndpoint,
                      CapacityBlockedHead capacityBlockedHead,
                      QueueWaitRecorder queueWaitRecorder,
@@ -33,7 +33,7 @@ final class PrefillQueueLoop {
         this.queuePicker = queuePicker;
     }
 
-    void run() {
+    public void run() {
         try {
             while (!queueState.isStopped() && !Thread.currentThread().isInterrupted()) {
                 try {
