@@ -108,6 +108,9 @@ struct GptModelInputs {
 
     // not sync to other tp rank
     std::vector<std::string> trace_ids;
+    // Logging-only full prefill sequences, including cached prefixes; aligned with request_id.
+    std::optional<std::vector<torch::Tensor>> all_input_token_ids;
+    std::optional<std::vector<bool>>          request_is_multimodal;
 
 public:
     std::string debugString(bool force = false) const;

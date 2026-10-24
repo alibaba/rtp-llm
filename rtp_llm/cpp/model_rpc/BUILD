@@ -60,6 +60,19 @@ cc_library(
 
 
 cc_library(
+    name = "prefill_request_logger",
+    srcs = ["PrefillRequestLogger.cc"],
+    hdrs = ["PrefillRequestLogger.h"],
+    copts = copts(),
+    deps = [
+        "//rtp_llm/cpp/model_rpc/proto:model_rpc_service_cc_proto",
+        "//rtp_llm/cpp/utils:core_utils",
+        "@com_google_protobuf//:protobuf",
+    ],
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
     name = "model_rpc_server",
     srcs = glob(
         ["*.cc"],
@@ -67,12 +80,14 @@ cc_library(
             "TensorPbConvert.cc",
             "MultimodalPbConverter.cc",
             "ResponseBuffer.cc",
+            "PrefillRequestLogger.cc",
         ],
     ),
     hdrs = glob(
         ["*.h"],
         exclude = [
             "RPCPool.h",
+            "PrefillRequestLogger.h",
             # Owned by :response_buffer so its public header has a single cc_library.
             "ResponseBuffer.h",
         ],
@@ -82,6 +97,7 @@ cc_library(
         ":embedding_arpc_deps",
         ":model_rpc_pool",
         ":response_buffer",
+        ":prefill_request_logger",
         ":rpc_error_code",
         ":tensor_pb_convert",
         "//rtp_llm/cpp/cache:cache_types",
@@ -113,11 +129,24 @@ py_library(
     visibility = ["//visibility:public"],
     deps = [
         ":grpcio",
+        ":replay_request_lib",
         # model_rpc_client.py top-level hard-imports rtp_llm.telemetry; do not
         # rely on consumers' transitive closures to provide it.
         "//rtp_llm:telemetry",
         "//rtp_llm/cpp/model_rpc/proto:model_rpc_service_py_proto",
         "//rtp_llm/server:request_headers",
+    ],
+)
+
+py_library(
+    name = "replay_request_lib",
+    srcs = ["replay_request.py"],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":grpcio",
+        "//rtp_llm:protobuf",
+        "//rtp_llm:torch",
+        "//rtp_llm/cpp/model_rpc/proto:model_rpc_service_py_proto",
     ],
 )
 

@@ -127,7 +127,8 @@ def init_profile_debug_logging_group_args(parser, profiling_debug_config):
         type=str2bool,
         default=False,
         help=(
-            "保存每次模型 forward 的输入到 LOG_PATH/model_inputs，用于问题排查。输入中可能包含 token、embedding "
+            "保存每次模型 forward 的输入到 LOG_PATH/model_inputs，prefill 包含完整 all_input_token_ids（含缓存前缀）。"
+            "输入中可能包含 token、embedding "
             "和请求标识，写入繁忙时可能丢失部分记录。默认为 False"
         ),
     )
