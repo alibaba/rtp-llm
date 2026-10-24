@@ -177,12 +177,11 @@ final class GlobalQueueCoordinator implements AutoCloseable {
                     return OfferResult.QUEUE_FULL;
                 }
                 highPriorityThreshold = config.priorityOrdering().getHighPriorityThreshold();
-                if (entry.priority < highPriorityThreshold) {
-                    return OfferResult.QUEUE_FULL_LOW_PRIORITY_REJECTED;
-                }
                 victim = orderedQueue.findQueuedRequestToPreempt(entry.priority, inFlight);
                 if (victim == null) {
-                    return OfferResult.QUEUE_FULL_HIGH_PRIORITY_REJECTED;
+                    return entry.priority < highPriorityThreshold
+                            ? OfferResult.QUEUE_FULL_LOW_PRIORITY_REJECTED
+                            : OfferResult.QUEUE_FULL_HIGH_PRIORITY_REJECTED;
                 }
                 removeRequestUnderLock(victim);
                 queueCapacity.decreaseTotalQueueCount(victim.future);

@@ -349,7 +349,7 @@ class GlobalQueueProgressTest {
     }
 
     @ParameterizedTest
-    @CsvSource({"40,50", "49,50", "60,61", "99,100"})
+    @CsvSource({"30,40", "40,50", "49,50", "50,60", "60,61", "99,100"})
     void eligibleRequestCanReplaceAnyLowerPriority(int waitingPriority, int incomingPriority) throws Exception {
         try (Fixture f = new Fixture(RoleType.PREFILL, true)) {
             f.config.getScheduler().setMaxQueuedRequests(1);
@@ -395,19 +395,17 @@ class GlobalQueueProgressTest {
         }
     }
 
-    @Test
-    void requestBelowThresholdDoesNotReplaceEvenLowerQueuedPriority() throws Exception {
+    @ParameterizedTest
+    @CsvSource({"30,30", "40,30", "40,40"})
+    void lowPriorityCannotReplaceEqualOrHigherPriority(int waitingPriority, int incomingPriority) throws Exception {
         try (Fixture f = new Fixture(RoleType.PREFILL, true)) {
             f.config.getScheduler().setMaxQueuedRequests(1);
             f.decodeBlocked.add(1L);
-            f.submit(1, "a", 20);
+            f.submit(1, "a", waitingPriority);
             awaitCondition(() -> f.scheduler.getBlockedRequestCount() == 1);
 
-            f.submit(2, "a", 40);
-            Response rejected = f.requests.get(2L).join();
-            assertEquals(8433, rejected.getCode());
-            assertEquals("Too many requests. Your requests are being throttled "
-                    + "due to system capacity limits. Please try again later.", rejected.getErrorMessage());
+            f.submit(2, "a", incomingPriority);
+            assertEquals(8433, f.requests.get(2L).join().getCode());
             assertFalse(f.requests.get(1L).isDone());
             assertEquals(1, f.scheduler.getQueuedRequestCount());
         }
@@ -418,7 +416,7 @@ class GlobalQueueProgressTest {
         try (Fixture f = new Fixture(RoleType.PREFILL, true)) {
             f.config.getScheduler().setMaxQueuedRequests(1);
             f.decodeBlocked.add(1L);
-            f.submit(1, "a", 40);
+            f.submit(1, "a", 60);
             awaitCondition(() -> f.scheduler.getBlockedRequestCount() == 1);
 
             FlexlbConfig updated = SchedulingTestConfig.batchConfig();
@@ -431,14 +429,16 @@ class GlobalQueueProgressTest {
             assertEquals(8433, f.requests.get(2L).join().getCode());
             assertFalse(f.requests.get(1L).isDone());
 
-            f.submit(3, "a", 70);
+            f.submit(3, "a", 65);
             assertEquals(8433, f.requests.get(1L).get(5, TimeUnit.SECONDS).getCode());
             awaitCondition(() -> f.admitted.contains(3L));
         }
     }
 
-    @Test
-    void fullQueueDoesNotReplaceLowerPriorityRequestDuringPlanning() throws Exception {
+    @ParameterizedTest
+    @CsvSource({"30,40,8433", "40,50,8434", "50,60,8434"})
+    void fullQueueDoesNotReplaceLowerPriorityRequestDuringPlanning(int waitingPriority, int incomingPriority,
+                                                                 int rejectionCode) throws Exception {
         try (Fixture f = new Fixture(RoleType.PREFILL, true)) {
             f.config.getScheduler().setMaxQueuedRequests(1);
             CountDownLatch planning = new CountDownLatch(1);
@@ -450,11 +450,10 @@ class GlobalQueueProgressTest {
                 }
             };
             try {
-                f.submit(1, "a", 20);
+                f.submit(1, "a", waitingPriority);
                 await(planning);
-                f.submit(2, "a", 90);
-                assertEquals(StrategyErrorType.QUEUE_FULL_HIGH_PRIORITY_REJECTED.getErrorCode(),
-                        f.requests.get(2L).join().getCode());
+                f.submit(2, "a", incomingPriority);
+                assertEquals(rejectionCode, f.requests.get(2L).join().getCode());
                 assertFalse(f.requests.get(1L).isDone());
             } finally {
                 finishPlanning.countDown();

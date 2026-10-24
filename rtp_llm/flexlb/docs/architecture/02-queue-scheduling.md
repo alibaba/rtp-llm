@@ -44,14 +44,13 @@ QUEUE 模式下，`ordering.type` 和 `dispatcher.type` 是两个正交维度：
    `min(scheduler.maxQueuedRequests, 当前形态的逻辑端点数 × dispatcher.maxInflightPerPrefillWorker × dispatcher.prefillSubqueueLimitMultiplier)`
    （倍数默认 4）。端点数直接读取 `EndpointRegistry.getEndpointCount(当前形态)`，
    不逐台遍历；全局入口按总排队请求数判断是否达到配置的总上限；
-   从全局队列进入 Prefill 子队列不重复占总名额。队列满时，PRIORITY 模式下低于
-   `scheduler.ordering.highPriorityThreshold`（默认 50）的
-   新请求直接返回 `QUEUE_FULL_LOW_PRIORITY_REJECTED`（8433）。
-   达到阈值的新请求只从全局队列中选择优先级严格低于自己的可抢占请求，先选择优先级最低的
+   从全局队列进入 Prefill 子队列不重复占总名额。队列满时，PRIORITY 模式下的新请求
+   从全局队列中选择优先级严格低于自己的可抢占请求，先选择优先级最低的
    一档；如果这一档有多个请求，就抢占最晚入队的一个，保留更早入队的请求。
+   `scheduler.ordering.highPriorityThreshold`（默认 50）用于区分被终结请求的错误码。
    被挤出队列的请求按自己的优先级返回错误码：低于阈值返回 `QUEUE_FULL_LOW_PRIORITY_REJECTED`（8433），
-   达到阈值返回 `QUEUE_FULL_HIGH_PRIORITY_REJECTED`（8434）。没有可抢占请求时，高优新请求返回
-   `QUEUE_FULL_HIGH_PRIORITY_REJECTED`（8434）；FIFO 模式满队列时返回 `QUEUE_FULL`（8502）。
+   达到阈值返回 `QUEUE_FULL_HIGH_PRIORITY_REJECTED`（8434）。没有可抢占请求时，新请求同样按
+   自己的优先级返回 8433 或 8434；FIFO 模式满队列时返回 `QUEUE_FULL`（8502）。
    调度器已选中、正在选 worker
    或处理选路结果的请求仍占队列名额，处理结束前不参与队列抢占；因资源不足继续排队的
    请求可以参与。请求移交 Prefill 后退出全局队列，但保留总排队名额直到路由交付；
