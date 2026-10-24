@@ -57,19 +57,6 @@ class ArtifactEntry:
 
 
 @dataclass(frozen=True)
-class MetricDescriptor:
-    identity: str
-    kind: str
-    definition: dict
-
-    @classmethod
-    def from_definition(cls, identity, definition):
-        kind = ('derived' if 'producer' in definition else
-                'raw_observation' if definition.get('mode') == 'scrape' else 'query_result')
-        return cls(identity, kind, definition)
-
-
-@dataclass(frozen=True)
 class ViewDescriptor:
     layout: str
     declaration: dict | None
@@ -431,9 +418,7 @@ def publish_run(directory, definition, execution, *, analysis=None, deadline=Non
             metrics = directory / 'metrics.json'
             if metrics.is_file():
                 from monitoring.metric_store import MetricStore
-                store = MetricStore.read(directory)
-                primary.add_json('datasets/metric-catalog.json', [asdict(MetricDescriptor.from_definition(k, v))
-                    for k, v in store.document['definitions'].items()], ArtifactRole.OBSERVATIONS)
+                MetricStore.read(directory)  # Validate the canonical definitions and observations.
                 if analysis is not None:
                     shared = [key for key, value in analysis.items()
                               if key not in {'series', 'statistic_sources'} and key in execution

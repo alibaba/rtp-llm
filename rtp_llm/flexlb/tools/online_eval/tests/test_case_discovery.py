@@ -12,7 +12,7 @@ from scenario.backend_spec import make_env_spec
 from scenario.environment_snapshot import EnvironmentSnapshot
 from scenario.config_data import merge_environment
 from reporting.run_context import checks_section, provenance_from
-from reporting.comparison_model import measurement_signature
+from reporting.comparison import _series_key
 
 
 def test_new_directory_is_discovered_without_framework_registration(tmp_path):
@@ -89,5 +89,5 @@ def test_pairing_uses_measurement_not_display_names():
                      provenance={'measurement': {'population': 'arrival:ok'}})])
     renamed = dict(panel, series=[dict(panel['series'][0], name='显示名称变化')])
     completion = dict(panel, series=[dict(panel['series'][0], provenance={'measurement': {'population': 'completion:ok'}})])
-    assert measurement_signature(panel) == measurement_signature(renamed)
-    assert measurement_signature(panel) != measurement_signature(completion)
+    assert _series_key(panel, panel['series'][0], 'same-origin') == _series_key(renamed, renamed['series'][0], 'same-origin')
+    assert _series_key(panel, panel['series'][0], 'same-origin') != _series_key(completion, completion['series'][0], 'same-origin')

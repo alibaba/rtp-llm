@@ -125,7 +125,7 @@ HA 的逐阶段检查直接根据已选请求证据产生 `CheckResult`，其输
 
 每个实例统一交付 `experiment.eval.zip` 主工件与 `experiment-<sha256>.raw.zip` 原始附件，由 `result.json.artifacts` 定位。主工件冻结编译计划、代码与配置依赖摘要、视图声明、执行与清理记录、请求流水、门禁输入及结果、指标定义和全量序列。原始附件保存日志及其他非结构化文件；主工件记录附件整体摘要与文件清单。工作目录保留用于即时诊断，ZIP 是可独立搬迁的交付格式，HTML 是可再生的展示产物。
 
-容器索引使用 `ArtifactEntry`、`ArtifactRole`、`MetricDescriptor` 和 `ViewDescriptor`。文件按内容 SHA 存储，相同内容的多个逻辑路径引用同一个 blob；物理来源路径只作为 provenance，`ExperimentReader.resolve_source` 在包内解析，不访问原机器。视图布局和点数组分开保存，多个视图重复选择的数据按内容复用。主工件不重复收录工作目录中的整套报告 bundle 和 HTML。已有报告仍保留其独立的目录协议。
+容器索引使用 `ArtifactEntry`、`ArtifactRole` 和 `ViewDescriptor`。文件按内容 SHA 存储，相同内容的多个逻辑路径引用同一个 blob；物理来源路径只作为 provenance，`ExperimentReader.resolve_source` 在包内解析，不访问原机器。视图布局和点数组分开保存，多个视图重复选择的数据按内容复用。主工件不重复收录工作目录中的整套报告 bundle 和 HTML。已有报告仍保留其独立的目录协议。
 
 指标目录区分 `raw_observation`、`query_result`、`derived`：原始采样保留实际时间、值、身份和缺采；查询结果保留 PromQL 与查询定义；Python 加工结果保留 producer、计算声明及逐序列来源。门禁输入独立冻结，不用最终指标序列替代较早窗口的输入快照。主分析结果引用唯一的 `metrics.json`，读取时按冻结零点还原展示序列；时间变换不改变原始采样。未知 case 数据作为有角色的扩展文件保留，不按文件后缀推断业务指标含义。
 
@@ -139,7 +139,7 @@ ZIP 使用 Deflate level 3，已压缩文件直接存储；请求流水、日志
 
 一次多视图发布通过 `frozen_metric_reads` 复用已解析的 `metrics.json`。缓存使用绝对路径与文件设备、inode、大小和修改时间识别工件，原子替换后重新读取；发布结束或异常退出时释放缓存。该范围从报告生成开始，不覆盖采集、指标生产或门禁阶段。视图只读冻结指标，不修改共享的 `MetricStore`；原始归档与门禁判定保持独立。
 
-`RunPresentation` 在运行分析进入展示层时解析 identity、validity、检查树和 provenance；内部通过属性访问。公共 `ExperimentConditions` 和 `MeasurementIdentity` 位于 `report_model.py`，发布层不依赖对照模块；测量身份包含指标、标签、单位、缩放、计算口径和来源，计算身份不访问点数组。`FrozenReport` 与 `ChartPanel` 在归档进入对照时解析报告契约，原始 case analysis 只作为附件展示。外部 YAML/JSON 在入口严格校验，序列化保持 JSON 工件格式。
+`RunPresentation` 在运行分析进入展示层时解析 identity、validity、检查树和 provenance；内部通过属性访问。公共 `ExperimentConditions` 和 `MeasurementIdentity` 位于 `report_model.py`，发布层不依赖对照模块；测量身份包含指标、标签、单位、缩放、计算口径和来源，计算身份不访问点数组。`FrozenReport` 在归档进入对照时校验报告契约并保存独立的面板快照，原始 case analysis 只作为附件展示。外部 YAML/JSON 在入口严格校验，序列化保持 JSON 工件格式。
 
 `view_config.view()` 在加载边界校验并一次解码为 `ViewDefinition`，生产器通过 `presentation.report`、`presentation.charts`、`presentation.metrics` 和 `presentation.sections` 访问已解析对象。曲线、面板、章节和字幕不在投影或渲染中重复解码；`to_dict()` 只用于工件冻结或显式编辑配置。`view_model.py` 定义曲线、面板、坐标轴、预设选择、章节和字幕模板对象，渲染组件通过这些对象访问展示字段。坐标轴上下界必须有限且 `min < max`，一个面板不能重复选择同一曲线；字幕内建 `{verdict}`、`{monitoring_status}` 普通占位符，其他字段由 `ReportView.subtitle_fields` 显式注册；通用模型不按 producer 名称推断业务字段，不接受格式规格或转换。视图文件和报告产物仍采用数据格式，测量值与门禁结论不由展示模型改变。
 

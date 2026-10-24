@@ -246,7 +246,7 @@ def compare(paths, output, *, alignment_event=None, labels=None, baseline=None, 
         overview.append([label, spec.run_meta.get('identity'), run.input_kind, run.view,
                          original['verdict'], original['validity'], original['status'],
                          run.execution.get('duration_ms'), run.execution.get('cleanup'), list(spec.kpis)])
-        panels = [shifted_panel(panel.to_dict(), shift) for panel in spec.panels]
+        panels = [shifted_panel(panel, shift) for panel in spec.panels]
         display = dict(min=spec.time_min - (shift or 0), max=spec.time_max - (shift or 0)) if (
             spec.time_min is not None and spec.time_max is not None) else None
         ranges.append(display)

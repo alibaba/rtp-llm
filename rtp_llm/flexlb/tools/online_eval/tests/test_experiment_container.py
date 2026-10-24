@@ -9,7 +9,7 @@ from pathlib import Path
 
 import pytest
 
-from artifacts.experiment import ArtifactRole, ExperimentReader, MetricDescriptor, publish_run
+from artifacts.experiment import ArtifactRole, ExperimentReader, publish_run
 from artifacts.archive import create_archive
 from monitoring.metric_store import MetricStore
 from reporting import write_bundle, render
@@ -120,14 +120,6 @@ def test_checksum_invalid_inventory_and_paths_rejected(tmp_path):
         ExperimentReader(path)
 
 
-def test_metric_classification_keeps_processing_definitions():
-    for definition_value, expected in [({'mode': 'scrape'}, 'raw_observation'),
-                                      ({'promql': 'rate(counter[1m])'}, 'query_result'),
-                                      ({'producer': 'case', 'calculation': {'op': 'quantile'}}, 'derived')]:
-        descriptor = MetricDescriptor.from_definition('id', definition_value)
-        assert descriptor.kind == expected and descriptor.definition == definition_value
-
-
 def test_analysis_restored_from_canonical_metrics_without_duplicate_series(tmp_path):
     key = '1/mock/count/{}'
     document = dict(metrics_schema_version=1, definitions={'mock/count': {'unit': 'count', 'mode': 'scrape'}},
@@ -144,7 +136,8 @@ def test_analysis_restored_from_canonical_metrics_without_duplicate_series(tmp_p
         reader.verify()
         assert reader.analysis() == original == analysis
         assert 'series' not in reader.read_json('analysis.json')['metadata']
-        assert reader.read_json('datasets/metric-catalog.json')[0]['kind'] == 'raw_observation'
+        assert 'datasets/metric-catalog.json' not in reader.entries
+        assert reader.read_json('run/metrics.json') == document
 
 
 def test_automatic_archive_freezes_plan_and_preserves_failed_execution(tmp_path):
