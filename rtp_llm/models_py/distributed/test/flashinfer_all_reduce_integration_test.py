@@ -2,6 +2,7 @@
 
 import multiprocessing as mp
 import os
+import time
 import unittest
 
 import torch
@@ -84,7 +85,18 @@ class FlashInferAllReduceIntegrationTest(unittest.TestCase):
             for process in processes:
                 process.start()
             for process in processes:
-                process.join(timeout=120)
+                # A cold flashinfer trtllm_comm JIT cache costs ~200s (three
+                # .cu files compiled under a cross-process FileLock) versus
+                # ~20s warm; budget for the cold case.
+                process.join(timeout=480)
+            # A surviving peer may merely be seconds behind in teardown (rank
+            # 0 owns the TCPStore and exits last). Grant a shared grace period
+            # before snapshotting exitcodes so a slow-but-healthy rank is not
+            # recorded as None and misreported as a hang.
+            grace_deadline = time.monotonic() + 90
+            for process in processes:
+                if process.is_alive():
+                    process.join(timeout=max(0.0, grace_deadline - time.monotonic()))
             exitcodes = [process.exitcode for process in processes]
         finally:
             # A failed rank can leave its peer blocked in a collective. Always

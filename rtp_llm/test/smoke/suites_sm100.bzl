@@ -41,10 +41,19 @@ def sm100_suites():
             # REMOVED: moe_deepep_ll_dp2_sm100 (FP8_PER_BLOCK + DeepEP LL + DP2)
             # Reason: DeepEP LL path already covered by 5 NVFP4 LL cases; UE8M0 scale path
             # covered by moe_deepep_normal_tp2_sm100; H20 has moe_deepep_ll_tp2 for LL+FP8.
+            #
+            # DeepEP normal-mode cases must run with --warm_up 1: the legacy
+            # Buffer spin-waits a hardcoded 100s for EP peers at the first
+            # dispatch collective ("CPU recv timeout"), and cold-JIT compile
+            # skew across dp ranks (~13min on a fresh machine) exceeds it,
+            # aborting a rank mid-request (moe_nvfp4_deepep_normal_dp2_sm100
+            # flake, 2026-10). Warmup runs the fake prefill inside engine
+            # construction — before /health reports ready — so all ranks
+            # compile symmetrically ahead of serving.
             smoke_test(
                 name = "moe_deepep_normal_tp2_sm100",
                 task_info = "data/model/qwen3_moe/q_r_30b_py_tp2_sm100.json",
-                smoke_args = "--warm_up 0 --act_type BF16 --reserver_runtime_mem_mb 8192 --fp8_kv_cache 1 --seq_size_per_block 64 --concurrency_limit 64 --quantization FP8_PER_BLOCK --blockwise_use_fp8_kv_cache 1 --use_deepep_moe 1 --use_deepep_low_latency 0 --tp_size 2 --world_size 2",
+                smoke_args = "--warm_up 1 --act_type BF16 --reserver_runtime_mem_mb 8192 --fp8_kv_cache 1 --seq_size_per_block 64 --concurrency_limit 64 --quantization FP8_PER_BLOCK --blockwise_use_fp8_kv_cache 1 --use_deepep_moe 1 --use_deepep_low_latency 0 --tp_size 2 --world_size 2",
                 gpu_type = ["SM100_ARM_CU13"],
             ),
             # REMOVED: moe_nvfp4_deepep_ll_dp2_sm100 (NVFP4 + DeepEP LL + DP2, no CudaGraph)
@@ -65,13 +74,13 @@ def sm100_suites():
             smoke_test(
                 name = "moe_nvfp4_deepep_normal_dp2_sm100",
                 task_info = "data/model/qwen3_moe/q_r_coder_30b_nvfp4_py_dp2_normal_sm100_arm.json",
-                smoke_args = "--warm_up 0 --act_type BF16 --dp_size 2 --world_size 2 --ep_size 2 --reserver_runtime_mem_mb 8192 --fp8_kv_cache 1 --seq_size_per_block 64 --concurrency_limit 64 --blockwise_use_fp8_kv_cache 1 --use_deepep_moe 1 --use_deepep_low_latency 0 --use_all_gather 0",
+                smoke_args = "--warm_up 1 --act_type BF16 --dp_size 2 --world_size 2 --ep_size 2 --reserver_runtime_mem_mb 8192 --fp8_kv_cache 1 --seq_size_per_block 64 --concurrency_limit 64 --blockwise_use_fp8_kv_cache 1 --use_deepep_moe 1 --use_deepep_low_latency 0 --use_all_gather 0",
                 gpu_type = ["SM100_ARM_CU13"],
             ),
             smoke_test(
                 name = "moe_nvfp4_deepep_normal_tp2_sm100",
                 task_info = "data/model/qwen3_moe/q_r_coder_30b_nvfp4_py_tp2_normal_sm100_arm.json",
-                smoke_args = "--warm_up 0 --act_type BF16 --tp_size 2 --world_size 2 --ep_size 2 --reserver_runtime_mem_mb 8192 --fp8_kv_cache 1 --seq_size_per_block 64 --concurrency_limit 64 --blockwise_use_fp8_kv_cache 1 --use_deepep_moe 1 --use_deepep_low_latency 0 --use_all_gather 0",
+                smoke_args = "--warm_up 1 --act_type BF16 --tp_size 2 --world_size 2 --ep_size 2 --reserver_runtime_mem_mb 8192 --fp8_kv_cache 1 --seq_size_per_block 64 --concurrency_limit 64 --blockwise_use_fp8_kv_cache 1 --use_deepep_moe 1 --use_deepep_low_latency 0 --use_all_gather 0",
                 gpu_type = ["SM100_ARM_CU13"],
             ),
             smoke_test(
@@ -83,7 +92,7 @@ def sm100_suites():
             smoke_test(
                 name = "moe_nvfp4_online_deepep_normal_dp2_sm100",
                 task_info = "data/model/qwen3_moe/q_r_30b_nvfp4_online_py_dp2_normal_sm100_arm.json",
-                smoke_args = "--warm_up 0 --act_type BF16 --dp_size 2 --world_size 2 --ep_size 2 --reserver_runtime_mem_mb 8192 --fp8_kv_cache 1 --seq_size_per_block 64 --concurrency_limit 64 --blockwise_use_fp8_kv_cache 1 --use_deepep_moe 1 --use_deepep_low_latency 0 --use_all_gather 0 --quantization MODELOPT_FP4",
+                smoke_args = "--warm_up 1 --act_type BF16 --dp_size 2 --world_size 2 --ep_size 2 --reserver_runtime_mem_mb 8192 --fp8_kv_cache 1 --seq_size_per_block 64 --concurrency_limit 64 --blockwise_use_fp8_kv_cache 1 --use_deepep_moe 1 --use_deepep_low_latency 0 --use_all_gather 0 --quantization MODELOPT_FP4",
                 gpu_type = ["SM100_ARM_CU13"],
             ),
             smoke_test(

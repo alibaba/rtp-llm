@@ -7,8 +7,8 @@
 
 # Core torch stack — wheels mirrored to OSS by us; upstream is
 # https://download.pytorch.org/whl/cu130/.
-https://rtp-maga.cn-zhangjiakou.oss.aliyuncs.com/miji/0430/torch-2.11.0%2Bcu130-cp310-cp310-manylinux_2_28_x86_64.whl
-https://rtp-maga.cn-zhangjiakou.oss.aliyuncs.com/miji/0430/torchvision-0.26.0%2Bcu130-cp310-cp310-manylinux_2_28_x86_64.whl
+https://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/miji/0430/torch-2.11.0%2Bcu130-cp310-cp310-manylinux_2_28_x86_64.whl
+https://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/miji/0430/torchvision-0.26.0%2Bcu130-cp310-cp310-manylinux_2_28_x86_64.whl
 nvidia-nccl-cu13==2.30.4
 nvidia-nvshmem-cu13==3.5.19
 nvidia-cuda-cccl==13.2.86
@@ -36,7 +36,7 @@ tilelang==0.1.15
 # Self-built wheels against torch 2.11+cu130 with gcc-toolset-12.
 # DeepGEMM 122e18b provides opt_glm5 and isolated SM120 GEMMs.
 http://artlab.alibaba-inc.com/1/pypi/rtp_llm/deep_gemm/deep_gemm-2.8.0%2B122e18b.cu132-cp310-cp310-linux_x86_64.whl
-https://rtp-maga.cn-zhangjiakou.oss.aliyuncs.com/miji/0430/flash_mla-1.0.0%2B9241ae3-cp310-cp310-linux_x86_64.whl
+https://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/miji/0430/flash_mla-1.0.0%2B9241ae3-cp310-cp310-linux_x86_64.whl
 # Official DeepEP main@a56d6156 with legacy Buffer and V2 APIs.
 http://artlab.alibaba-inc.com/1/pypi/rtp_llm/deep-ep/deep_ep-2.1.0%2Ba56d615-cp310-cp310-linux_x86_64.whl
 
@@ -48,8 +48,8 @@ http://artlab.alibaba-inc.com/1/pypi/rtp_llm/rtp-kernel/rtp_kernel-0.1.0%2B94fd2
 # (originals were torch 2.1.2 + cu121).  Project name is `fast-safetensors`
 # on PyPI but the import is `fast_safetensors`; both wheels installed.
 # Required by --load_method fastsafetensors smoke targets.
-https://rtp-maga.cn-zhangjiakou.oss.aliyuncs.com/0507/fast_safetensors-0.7.3%2Btorch2.11.cu130-cp310-cp310-linux_x86_64.whl
-https://rtp-maga.cn-zhangjiakou.oss.aliyuncs.com/0502/fastsafetensors-0.1.20%2Bali-cp310-cp310-linux_x86_64.whl
+https://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/0507/fast_safetensors-0.7.3%2Btorch2.11.cu130-cp310-cp310-linux_x86_64.whl
+https://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/0502/fastsafetensors-0.1.20%2Bali-cp310-cp310-linux_x86_64.whl
 # fast_safetensors rebuilt against torch 2.11+cu130.
 
 # Pin safetensors and tabulate for parity with cu12_9 lock.

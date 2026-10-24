@@ -19,12 +19,22 @@ fields:
 from __future__ import annotations
 
 import json
+import logging
 import struct
+import time
 from typing import Any, Dict, List, Optional
 
 import grpc
 from pydantic import BaseModel
-from smoke.base_comparer import BaseComparer
+from smoke.base_comparer import BaseComparer, _asserts_cold_cache
+from smoke.dash_error_policy import (
+    DASH_MAX_ATTEMPTS,
+    DASH_RETRY_BUDGET_S,
+    DASH_RETRY_INTERVAL_S,
+    DASH_TRANSIENT_STATUS_CODES,
+    dash_error_spec,
+    should_retry_transient,
+)
 from smoke.common_def import QueryStatus, SmokeException
 from smoke.dash_cancel_state import classify_dash_cancel
 from smoke.grammar_constraint_validator import validate_constraint
@@ -35,7 +45,7 @@ from rtp_llm.dash_sc.client import (
     dash_sc_grpc_client_channel_options,
     decode_finish_reason,
 )
-from rtp_llm.dash_sc.codec import SamplingParams
+from rtp_llm.dash_sc.codec import LLMFinishReason, SamplingParams
 from rtp_llm.dash_sc.proto import predict_v2_pb2, predict_v2_pb2_grpc
 from rtp_llm.frontend.tokenizer_factory.tokenizer_factory import TokenizerFactory
 
@@ -66,6 +76,9 @@ class DashSmokeResponse(BaseModel):
     prompt_token_ids: List[int] = []
     prompt_token_num: Optional[int] = None
     prompt_cached_token_num: Optional[int] = None
+    dash_error_code: Optional[int] = None
+    dash_status_name: Optional[str] = None
+    dash_status_message: Optional[str] = None
 
 
 def _int32_values(out: Any, raw: bytes) -> List[int]:
@@ -82,6 +95,11 @@ def _int32_values(out: Any, raw: bytes) -> List[int]:
     if count <= 0:
         return []
     return list(struct.unpack("<%di" % count, raw[: count * 4]))
+
+
+# Error-spec reader and retry policy are shared with the DashSc-channel
+# comparer (see smoke.dash_error_policy).
+_dash_error_spec = dash_error_spec
 
 
 def _build_sampling_params(gc: Dict[str, Any]) -> SamplingParams:
@@ -198,6 +216,175 @@ class DashGrpcComparer(BaseComparer):
         super().__init__(*args, **kwargs)
         self._tokenizer: Any = None
 
+    _DASH_TRANSIENT_STATUS_CODES = DASH_TRANSIENT_STATUS_CODES
+    _DASH_MAX_ATTEMPTS = DASH_MAX_ATTEMPTS
+    _DASH_RETRY_INTERVAL_S = DASH_RETRY_INTERVAL_S
+    _DASH_RETRY_BUDGET_S = DASH_RETRY_BUDGET_S
+
+    def _infer_once(
+        self, query_info: DashQueryInfo, tokenizer: Any, request: Any
+    ) -> DashSmokeResponse:
+        port = self._dash_port()
+        target = f"127.0.0.1:{port}"
+        channel = grpc.insecure_channel(
+            target, options=dash_sc_grpc_client_channel_options()
+        )
+        try:
+            stub = predict_v2_pb2_grpc.GRPCInferenceServiceStub(channel)
+            generated_ids: List[int] = []
+            last_finish: Optional[int] = None
+            prompt_token_num: Optional[int] = None
+            prompt_cached_token_num: Optional[int] = None
+            prompt_token_ids: Optional[List[int]] = None
+            cancelled = False
+            cancel_requested = False
+            cancel_exercised = False
+            completed_before_cancel = False
+            response_count = 0
+            dash_error: Optional[Dict[str, Any]] = None
+            call = stub.ModelStreamInfer(
+                iter([request]), timeout=DASH_GRPC_TIMEOUT_SECONDS
+            )
+            for resp in call:
+                response_count += 1
+                if resp.error_message:
+                    raise SmokeException(
+                        QueryStatus.VISIT_FAILED,
+                        f"dash server error: {resp.error_message}",
+                    )
+                if not resp.HasField("infer_response"):
+                    continue
+                infer = resp.infer_response
+                dash_error = _dash_error_spec(resp) or dash_error
+                for i, out in enumerate(infer.outputs):
+                    if i >= len(infer.raw_output_contents):
+                        continue
+                    raw = infer.raw_output_contents[i]
+                    if out.name == "generated_ids" and out.datatype == "INT32":
+                        generated_ids.extend(_int32_values(out, raw))
+                    elif out.name == "prompt_token_ids" and out.datatype == "INT32":
+                        ids = _int32_values(out, raw)
+                        if prompt_token_ids is None:
+                            prompt_token_ids = ids
+                        elif ids and ids != prompt_token_ids:
+                            raise SmokeException(
+                                QueryStatus.COMPARE_FAILED,
+                                "dash prompt_token_ids changed across stream chunks: "
+                                f"first={prompt_token_ids} current={ids}",
+                            )
+                    elif out.name == "finish_reason":
+                        last_finish = decode_finish_reason(out, raw)
+                    elif (
+                        out.name == "prompt_token_num"
+                        and out.datatype == "INT32"
+                        and len(raw) >= 4
+                    ):
+                        values = _int32_values(out, raw)
+                        prompt_token_num = values[0] if values else None
+                    elif (
+                        out.name == "prompt_cached_token_num"
+                        and out.datatype == "INT32"
+                        and len(raw) >= 4
+                    ):
+                        values = _int32_values(out, raw)
+                        prompt_cached_token_num = values[0] if values else None
+                if (
+                    query_info.cancel_after_response_count is not None
+                    and response_count >= query_info.cancel_after_response_count
+                ):
+                    cancel_requested = True
+                    cancel_exercised = bool(call.cancel())
+                    terminal_code = call.code()
+                    try:
+                        cancel_state = classify_dash_cancel(
+                            cancel_exercised=cancel_exercised,
+                            terminal_code=terminal_code,
+                            cancelled_code=grpc.StatusCode.CANCELLED,
+                            ok_code=grpc.StatusCode.OK,
+                        )
+                    except ValueError as exc:
+                        raise SmokeException(
+                            QueryStatus.VISIT_FAILED,
+                            str(exc),
+                        ) from exc
+                    cancel_requested = cancel_state.cancel_requested
+                    cancel_exercised = cancel_state.cancel_exercised
+                    cancelled = cancel_state.cancelled
+                    completed_before_cancel = cancel_state.completed_before_cancel
+                    break
+        finally:
+            channel.close()
+
+        if generated_ids:
+            response_text = _decode_visible_generated_ids(tokenizer, generated_ids)
+        else:
+            response_text = ""
+        actual = DashSmokeResponse(
+            response=response_text,
+            cancelled=cancelled,
+            cancel_requested=cancel_requested,
+            cancel_exercised=cancel_exercised,
+            completed_before_cancel=completed_before_cancel,
+            finish_reason=last_finish,
+            generated_ids=generated_ids,
+            prompt_token_ids=prompt_token_ids or [],
+            prompt_token_num=prompt_token_num,
+            prompt_cached_token_num=prompt_cached_token_num,
+            dash_error_code=(dash_error or {}).get("status_code"),
+            dash_status_name=(dash_error or {}).get("status_name"),
+            dash_status_message=(dash_error or {}).get("status_message"),
+        )
+        return actual
+
+    def _infer_with_transient_retry(
+        self, query_info: DashQueryInfo, tokenizer: Any, request: Any
+    ) -> DashSmokeResponse:
+        # A cold-cache golden can never match on a retry: the first attempt's
+        # prefill publishes its blocks into the reuse cache even when the
+        # request later fails, so the resend legitimately reports non-zero
+        # reuse and the cold-start golden is unreachable. Surface the first
+        # failure instead of retrying (and hiding) it.
+        retryable = not _asserts_cold_cache(self.qr_info)
+        if not retryable:
+            logging.info(
+                "dash transient-retry disabled: golden asserts a cold prefix cache"
+            )
+        deadline = time.monotonic() + self._DASH_RETRY_BUDGET_S
+        attempts = 0
+        actual = None
+        for attempt in range(1, self._DASH_MAX_ATTEMPTS + 1):
+            actual = self._infer_once(query_info, tokenizer, request)
+            attempts = attempt
+            if not should_retry_transient(
+                retryable=retryable and not actual.generated_ids,
+                status_code=actual.dash_error_code,
+                attempts=attempt,
+                deadline=deadline,
+            ):
+                if attempts > 1:
+                    logging.warning(
+                        "dash transient-retry finished after %d/%d attempts "
+                        "(status_code=%s status_name=%s status_message=%s)",
+                        attempts,
+                        self._DASH_MAX_ATTEMPTS,
+                        actual.dash_error_code,
+                        actual.dash_status_name,
+                        actual.dash_status_message,
+                    )
+                return actual
+            logging.warning(
+                "dash transient error spec on attempt %d/%d: status_code=%s "
+                "status_name=%s status_message=%s; retrying in %.0fs",
+                attempt,
+                self._DASH_MAX_ATTEMPTS,
+                actual.dash_error_code,
+                actual.dash_status_name,
+                actual.dash_status_message,
+                self._DASH_RETRY_INTERVAL_S,
+            )
+            time.sleep(self._DASH_RETRY_INTERVAL_S)
+        return actual
+
     def _tokenizer_for(self, model_path: str, model_type: str) -> Any:
         if self._tokenizer is None:
             # TokenizerFactory.create(ckpt_path, tokenizer_path, model_type).
@@ -223,6 +410,19 @@ class DashGrpcComparer(BaseComparer):
     def compare_result(
         self, expect: DashSmokeResponse, actual: DashSmokeResponse
     ) -> None:
+        if (
+            not actual.generated_ids
+            and actual.finish_reason == LLMFinishReason.USE_PARAMETER_STATUS
+            and actual.dash_error_code is not None
+        ):
+            raise SmokeException(
+                QueryStatus.VISIT_FAILED,
+                "dash error spec: "
+                f"status_code={actual.dash_error_code} "
+                f"status_name={actual.dash_status_name} "
+                f"status_message={actual.dash_status_message} "
+                f"finish_reason={actual.finish_reason}",
+            )
         if self.qr_info.get("grammar_constraint_only"):
             response_format = _grammar_response_format(
                 self.qr_info["query"].get("generate_config") or {}
@@ -342,111 +542,7 @@ class DashGrpcComparer(BaseComparer):
             enable_thinking=query_info.enable_thinking,
         )
 
-        port = self._dash_port()
-        target = f"127.0.0.1:{port}"
-        channel = grpc.insecure_channel(
-            target, options=dash_sc_grpc_client_channel_options()
-        )
-        try:
-            stub = predict_v2_pb2_grpc.GRPCInferenceServiceStub(channel)
-            generated_ids: List[int] = []
-            last_finish: Optional[int] = None
-            prompt_token_num: Optional[int] = None
-            prompt_cached_token_num: Optional[int] = None
-            prompt_token_ids: Optional[List[int]] = None
-            cancelled = False
-            cancel_requested = False
-            cancel_exercised = False
-            completed_before_cancel = False
-            response_count = 0
-            call = stub.ModelStreamInfer(
-                iter([request]), timeout=DASH_GRPC_TIMEOUT_SECONDS
-            )
-            for resp in call:
-                response_count += 1
-                if resp.error_message:
-                    raise SmokeException(
-                        QueryStatus.VISIT_FAILED,
-                        f"dash server error: {resp.error_message}",
-                    )
-                if not resp.HasField("infer_response"):
-                    continue
-                infer = resp.infer_response
-                for i, out in enumerate(infer.outputs):
-                    if i >= len(infer.raw_output_contents):
-                        continue
-                    raw = infer.raw_output_contents[i]
-                    if out.name == "generated_ids" and out.datatype == "INT32":
-                        generated_ids.extend(_int32_values(out, raw))
-                    elif out.name == "prompt_token_ids" and out.datatype == "INT32":
-                        ids = _int32_values(out, raw)
-                        if prompt_token_ids is None:
-                            prompt_token_ids = ids
-                        elif ids and ids != prompt_token_ids:
-                            raise SmokeException(
-                                QueryStatus.COMPARE_FAILED,
-                                "dash prompt_token_ids changed across stream chunks: "
-                                f"first={prompt_token_ids} current={ids}",
-                            )
-                    elif out.name == "finish_reason":
-                        last_finish = decode_finish_reason(out, raw)
-                    elif (
-                        out.name == "prompt_token_num"
-                        and out.datatype == "INT32"
-                        and len(raw) >= 4
-                    ):
-                        values = _int32_values(out, raw)
-                        prompt_token_num = values[0] if values else None
-                    elif (
-                        out.name == "prompt_cached_token_num"
-                        and out.datatype == "INT32"
-                        and len(raw) >= 4
-                    ):
-                        values = _int32_values(out, raw)
-                        prompt_cached_token_num = values[0] if values else None
-                if (
-                    query_info.cancel_after_response_count is not None
-                    and response_count >= query_info.cancel_after_response_count
-                ):
-                    cancel_requested = True
-                    cancel_exercised = bool(call.cancel())
-                    terminal_code = call.code()
-                    try:
-                        cancel_state = classify_dash_cancel(
-                            cancel_exercised=cancel_exercised,
-                            terminal_code=terminal_code,
-                            cancelled_code=grpc.StatusCode.CANCELLED,
-                            ok_code=grpc.StatusCode.OK,
-                        )
-                    except ValueError as exc:
-                        raise SmokeException(
-                            QueryStatus.VISIT_FAILED,
-                            str(exc),
-                        ) from exc
-                    cancel_requested = cancel_state.cancel_requested
-                    cancel_exercised = cancel_state.cancel_exercised
-                    cancelled = cancel_state.cancelled
-                    completed_before_cancel = cancel_state.completed_before_cancel
-                    break
-        finally:
-            channel.close()
-
-        if generated_ids:
-            response_text = _decode_visible_generated_ids(tokenizer, generated_ids)
-        else:
-            response_text = ""
-        actual = DashSmokeResponse(
-            response=response_text,
-            cancelled=cancelled,
-            cancel_requested=cancel_requested,
-            cancel_exercised=cancel_exercised,
-            completed_before_cancel=completed_before_cancel,
-            finish_reason=last_finish,
-            generated_ids=generated_ids,
-            prompt_token_ids=prompt_token_ids or [],
-            prompt_token_num=prompt_token_num,
-            prompt_cached_token_num=prompt_cached_token_num,
-        )
+        actual = self._infer_with_transient_retry(query_info, tokenizer, request)
         self.tracer.actual_result = actual
 
         if query_info.return_input_ids and actual.prompt_token_ids != input_ids:

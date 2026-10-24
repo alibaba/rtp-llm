@@ -15,6 +15,23 @@ from rtp_llm.utils.time_util import Timer
 # ROCm DMA pinning COWs MAP_PRIVATE pages; copying out keeps them file-backed.
 ROCM_COPY_OUT = torch.version.hip is not None
 
+# Scratch-mode loads mmap every shard and fault the checkpoint into page
+# cache, which stays charged to the pod/job memcg until reclaim; under
+# shared-worker memory pressure that OOM-kills ranks mid-load (v4_pro smoke
+# case, ~865GB checkpoint, 2026-10). Shed clean file pages once a shard has
+# supplied this many bytes of reads. POSIX_FADV_DONTNEED is advisory and only
+# evicts clean pages, so a co-located rank that still needs a page simply
+# re-faults it from backing store; correctness is unaffected. The env vars
+# are an emergency killswitch / tuning knob, not required configuration.
+_DROP_PAGE_CACHE_THRESHOLD = (
+    int(os.environ.get("LOADER_DROP_PAGE_CACHE_THRESHOLD_MB", "2048")) * 1024 * 1024
+)
+_DROP_PAGE_CACHE = (
+    os.environ.get("LOADER_DROP_PAGE_CACHE", "1") == "1"
+    and getattr(os, "posix_fadvise", None) is not None
+    and getattr(os, "POSIX_FADV_DONTNEED", None) is not None
+)
+
 
 class CkptType(enum.Enum):
     torch = "torch"
@@ -49,6 +66,8 @@ class CkptFileInfo:
 
         self.file_name = file_name
         self.finetune_type = finetune_type
+        self._unadvised_read_bytes = 0
+        self._fadvise_broken = False
         self._load_meta(self.file_name)
 
     def get_tensor_names(self) -> List[str]:
@@ -146,10 +165,38 @@ class CkptFileInfo:
             self._st_handle = safe_open(self.file_name, framework="pt")
         return self._st_handle
 
+    def _drop_page_cache(self) -> None:
+        # fadvise acts on the file's page cache; a throwaway read-only fd is
+        # enough (safetensors does not expose its internal fd).
+        try:
+            fd = os.open(self.file_name, os.O_RDONLY)
+            try:
+                os.posix_fadvise(fd, 0, 0, os.POSIX_FADV_DONTNEED)
+            finally:
+                os.close(fd)
+        except OSError as e:
+            # e.g. a filesystem that rejects fadvise; disable rather than spam.
+            self._fadvise_broken = True
+            logging.warning(
+                f"drop page cache failed for {self.file_name}: {e}; disabled for this shard"
+            )
+
+    def _note_bytes_read(self, nbytes: int) -> None:
+        if not _DROP_PAGE_CACHE or self._fadvise_broken or nbytes <= 0:
+            return
+        self._unadvised_read_bytes += nbytes
+        if self._unadvised_read_bytes >= _DROP_PAGE_CACHE_THRESHOLD:
+            self._unadvised_read_bytes = 0
+            self._drop_page_cache()
+
     def close_safetensor_handle(self):
         if hasattr(self, "_st_handle") and self._st_handle is not None:
             self._st_handle.__exit__(None, None, None)
             self._st_handle = None
+            if _DROP_PAGE_CACHE and not self._fadvise_broken:
+                # Final shed: this shard's pages are no longer needed by us.
+                self._unadvised_read_bytes = 0
+                self._drop_page_cache()
 
     def get_tensor_shape(self, name: str) -> torch.Size:
         return torch.Size(self._get_safetensor_handle().get_slice(name).get_shape())
@@ -161,6 +208,7 @@ class CkptFileInfo:
         datatype: torch.dtype,
     ) -> torch.Tensor:
         tensor = self._get_safetensor_handle().get_slice(name)[tensor_slice]
+        self._note_bytes_read(tensor.numel() * tensor.element_size())
         return tensor.to(datatype, copy=ROCM_COPY_OUT)
 
     def load_tensor(self, name: str, datatype: str = torch.float16) -> torch.Tensor:
@@ -172,7 +220,11 @@ class CkptFileInfo:
         path: str = self.file_name
         if self.is_safetensor():
             f = self._get_safetensor_handle()
-            return f.get_tensor(name).to(datatype, copy=ROCM_COPY_OUT)
+            # Count the as-read tensor, before dtype conversion: its bytes are
+            # what the mmap faulted into page cache.
+            tensor = f.get_tensor(name)
+            self._note_bytes_read(tensor.numel() * tensor.element_size())
+            return tensor.to(datatype, copy=ROCM_COPY_OUT)
         else:
             meta = self.metadata[name]
 
