@@ -5,9 +5,9 @@ from unittest.mock import patch
 
 import pytest
 
-from case_api.builder import CaseBuilder
-from case_api.gate_plugin import GatePlugin
-from case_api.registry import CaseDefinition, MetricProducer, ProducerPhase, ReportView
+from scenario.builder import CaseBuilder
+from scenario.gates import GatePlugin
+from scenario.registry import CaseDefinition, MetricProducer, ProducerPhase, ReportView
 from document_io import DocumentError
 from scenario.catalog import handlers
 from scenario.compiler import ScenarioCompiler

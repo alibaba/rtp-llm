@@ -7,7 +7,7 @@ from unittest.mock import patch
 import pytest
 
 from scenario.program_compiler import configure_program
-from case_api.metric_inputs import metric_fields
+from scenario.metric_inputs import metric_fields
 from monitoring.metric_store import MetricStore
 from monitoring.publication import publish
 from monitoring.archive import export_metrics
@@ -144,7 +144,7 @@ def test_origin_does_not_control_producer_execution_or_retention(tmp_path):
         spec['source_type'] = 'prometheus'
     export_metrics(tmp_path / 'ha', ha)
     from dataclasses import replace
-    from case_api import registry
+    from scenario import registry
     from case_registry_fixtures import snapshot
     from unittest.mock import Mock
     producer = Mock(return_value={})

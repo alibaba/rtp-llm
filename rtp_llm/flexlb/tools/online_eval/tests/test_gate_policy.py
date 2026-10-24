@@ -2,9 +2,55 @@ import unittest
 from types import SimpleNamespace
 
 from cases.master_ha_failover.actions import _client_check
-from workload.validity import bounded_collection_gaps
+from monitoring.quality import bounded_collection_gaps
 from cases.master_performance.inputs import for_profile
 from test_performance_gate import evidence
+
+
+def test_collection_quality_projects_mixed_gap_classes_without_losing_order():
+    from monitoring.quality import assess_collection
+    source = '1/master-A/collection'
+    series = {'1/master-A/up/{}': [[0, 1], [2, 1], [10, 1], [12, 1]],
+              '1/master-A/optional/{}': [[1, None]]}
+    quality = assess_collection(series, {source: [1, 4, 7, 11, 30]}, [], dict(
+        clock_anchor={'epoch_s': 100}, expected_telemetry=['1/master-A'],
+        expected_outages=[dict(source='1/master-A', started_epoch_s=130, ended_epoch_s=140)]),
+        capture_metrics=True, max_gap_s=3)
+    projected = quality.to_dict()
+    assert not quality.valid and quality.completeness == 'PARTIAL'
+    assert projected['unexpected_telemetry_gaps'] == {source: [1, 4, 7, 11]}
+    assert projected['expected_telemetry_gaps'] == {source: [30]}
+    assert projected['tolerated_telemetry_gaps'] == {source: [1, 11]}
+    assert projected['fatal_telemetry_gaps'] == {source: [4, 7]}
+    assert projected['telemetry_gaps'] == {'1/master-A/optional/{}': [1]}
+
+
+def test_collection_quality_keeps_advisories_separate_from_missing_sources():
+    from monitoring.quality import assess_collection
+    evidence = dict(clock_anchor={'epoch_s': 0}, expected_telemetry=['1/mock'])
+    advisory = dict(severity='diagnostic', error='optional curve absent')
+    healthy = {'1/mock/up/{}': [[0, 1]]}
+    quality = assess_collection(healthy, {}, [advisory], evidence,
+                                capture_metrics=True, max_gap_s=5)
+    assert quality.valid and quality.completeness == 'PARTIAL'
+    assert quality.to_dict()['telemetry_diagnostics'] == [advisory]
+    missing = assess_collection({}, {}, [advisory], evidence,
+                                capture_metrics=True, max_gap_s=5)
+    assert not missing.valid and missing.to_dict()['missing_telemetry'] == ['1/mock']
+
+
+def test_workload_projection_cannot_clear_quality_failure_or_change_owned_details():
+    from monitoring.quality import CollectionQuality, CollectionIssue
+    from scenario.run_result import WorkloadResult
+    quality = CollectionQuality(issues=(CollectionIssue('missing', None, '1/mock'),))
+    result = WorkloadResult(details={'request': {'count': 1}}, quality=quality)
+    projection = result.to_dict()
+    projection['runtime_validity'] = 'VALID'
+    projection['request']['count'] = 99
+    projection['missing_telemetry'].clear()
+    assert result.validity == 'INVALID'
+    assert result.to_dict()['request'] == {'count': 1}
+    assert result.to_dict()['missing_telemetry'] == ['1/mock']
 
 
 class GatePolicyTest(unittest.TestCase):

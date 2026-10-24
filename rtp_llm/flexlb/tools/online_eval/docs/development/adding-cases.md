@@ -15,11 +15,11 @@ YAML 定义输入，注册的 Python program 定义流程。只改变拓扑、�
 下面的最小例子验证请求终态。创建 `src/cases/protocol_terminal/`，加入空的 `__init__.py` 和下列 `program.py`，再创建 `config/scenarios/protocol_terminal.yaml`。名称仅用于演示新增目录的接入方式；所有取值由示例 YAML 明确给出，预算和阈值不是框架默认值。小型 case 不需要专属采集器、producer、报告或重判入口。
 
 ```python
-from case_api.builder import output
-from case_api.inputs import fields
-from case_api.input_contract import InputContract
-from case_api.numeric_parameters import JAVA_LENGTH, POSITIVE_COUNT, NONNEGATIVE, COUNT
-from case_api.registry import CaseDefinition
+from scenario.builder import output
+from scenario.inputs import fields
+from scenario.inputs import InputContract
+from scenario.numeric_parameters import JAVA_LENGTH, POSITIVE_COUNT, NONNEGATIVE, COUNT
+from scenario.registry import CaseDefinition
 from traffic.contracts import driver
 
 INPUTS = InputContract.from_fields({
@@ -169,7 +169,7 @@ program 用 `InputContract.from_fields(...)` 声明输入分组和字段，再�
 
 运行身份使用 `case::variant::profile`，配置、制品和实际流量用冻结的 SHA 与运行配置追溯。观测参数不另声明手工实验身份；性能证据必须保留实例身份、配置 SHA、制品和流量 SHA，缺失或损坏的证据不能通过门禁。
 
-输入合同从 `from_fields` 的字段声明派生数值规则，将 dotted path 绑定到 `case_api.numeric_parameters` 中的语义类型：计数、正整数、非负实数、`FRACTION`、有符号偏移、priority 和 Java 请求长度。类型和协议范围只在公共类型中定义，公共字段组直接复用；program 可以进一步收紧运行预算，但不能改变公共字段类型或放宽通用范围。`unit: ratio` 不是类型约束，倾斜比等比值可以大于 1；只有明确绑定 `FRACTION` 的比例限制在 `[0,1]`。
+输入合同从 `from_fields` 的字段声明派生数值规则，将 dotted path 绑定到 `scenario.numeric_parameters` 中的语义类型：计数、正整数、非负实数、`FRACTION`、有符号偏移、priority 和 Java 请求长度。类型和协议范围只在公共类型中定义，公共字段组直接复用；program 可以进一步收紧运行预算，但不能改变公共字段类型或放宽通用范围。`unit: ratio` 不是类型约束，倾斜比等比值可以大于 1；只有明确绑定 `FRACTION` 的比例限制在 `[0,1]`。
 
 `parameter_schema` 可省略，只声明场景自己的 `minimum`、`maximum`，不能改变整数类型或放宽 program 契约。variant 的范围只能在场景范围上继续收紧。所有字段在 program 构建前校验，包括 variant 合并后的值；未绑定字段、缺字段、错误类型、非有限或越界值失败。展开后的每个 variant 数值契约写入 `implementation.numeric_parameters`，供编译结果与运行证据核对。
 
@@ -177,9 +177,9 @@ program 用 `InputContract.from_fields(...)` 声明输入分组和字段，再�
 
 观测输入统一使用 `fields: {本地字段: {metric: namespace/name, labels: {...}}}`；输入组只绑定指标，不声明固定的存储后端。绑定方向不因 case 改变；同一物理指标的不同标签投影可以共存，同一 ID 和标签选择重复绑定时报错。读取能力由 Python program 提供，实时观测可通过 monitoring session 读取 Prometheus，离线分析消费冻结证据；运行时来源实例由采集目标决定。query plan 是实际单位、标签与采样模式的权威定义；Python 消费合同声明所需维度，绑定时比对，防止定义被误标。身份标签按必需子集校验，允许 exporter 附加标签；测量能力另行校验角色、基数、允许字段和必需字段。
 
-共享 Java 发流输入通过 `case_api.traffic_inputs.java_flow_inputs()` 组合，字段与基本数值规则来自 `adapters.java_flow_spec.JavaFlowSpec`。case 只补充自己的来源约束；action 通过同一规格解码，避免在 program、action 中分别维护允许字段名单。
+共享 Java 发流输入通过 `scenario.traffic_inputs.java_flow_inputs()` 组合，字段与基本数值规则来自 `adapters.java_flow_spec.JavaFlowSpec`。case 只补充自己的来源约束；action 通过同一规格解码，避免在 program、action 中分别维护允许字段名单。
 
-内部 criteria 使用 `case_api.criteria.CriteriaContract` 声明投影分组。直接传递的字段复用输入声明，检查字段取 `CheckSet.criteria_fields`；`project()` 负责按合同选取已解释的数据，`read()` 复核冻结参数及离线证据。窗口换算、profile 阈值选择和跨字段业务约束仍由 case 显式实现。新增普通字段或检查不再同步修改 program 的字段筛选、action 的白名单和通用数值检查循环；新增业务算法仍需实现并验证其消费逻辑。
+内部 criteria 使用 `scenario.criteria.CriteriaContract` 声明投影分组。直接传递的字段复用输入声明，检查字段取 `CheckSet.criteria_fields`；`project()` 负责按合同选取已解释的数据，`read()` 复核冻结参数及离线证据。窗口换算、profile 阈值选择和跨字段业务约束仍由 case 显式实现。新增普通字段或检查不再同步修改 program 的字段筛选、action 的白名单和通用数值检查循环；新增业务算法仍需实现并验证其消费逻辑。
 
 字段集合校验统一由 `input_contract.mapping_fields` 实现；case 与 action 提供字段集和定位路径。配置入口将输入错误包装为带来源路径的 `ScenarioError`，运行时协议或执行错误保持原始异常类型。分组由 case 的输入合同声明，内部分析器可以接收经编译的数值投影；投影不得提供缺省值，也不得成为第二份配置来源。历史证据的数值 criteria 字段保持其重判含义。
 
@@ -213,7 +213,7 @@ Prometheus 优先适用于监控指标；请求是否完成、RPC 是否符合�
 
 先阅读[case 插件结构](../architecture/case-plugins.md)，理解编译、取证、测量、判定和交付的生命周期。目录按职责拆分，不要求每个 case 搭齐所有模块。
 
-`src/case_api/builder.py` 和 `src/case_api/registry.py` 是公共构建、能力注册接口；业务代码集中在 `src/cases/<case>/`：
+`src/scenario/builder.py` 和 `src/scenario/registry.py` 是公共构建、能力注册接口；业务代码集中在 `src/cases/<case>/`：
 
 | 文件 | 职责 |
 |---|---|
@@ -228,14 +228,14 @@ Prometheus 优先适用于监控指标；请求是否完成、RPC 是否符合�
 
 按实际需要建文件，小型 case 只需 `program.py`，不创建空的层次。这里的归属表示业务合同由谁维护，不表示代码永远不可复用：同类 program 可显式注册同一实现；跨业务一致的统计、协议、采集或渲染功能才提到公共组件。不能因文件名同为 `analysis.py` 或 `metrics.py` 就把不同业务口径合并。
 
-`case_api.registry` 自动发现 `cases` 下包含 `program.py` 的直接子目录。program 导出 `CASE: CaseDefinition`，明确声明构建器、参数约束、动作、报告、指标生产者和采集源。目录名就是稳定 case 名；新增 case 不修改公共名单。注册快照校验能力冲突并保持不可变，YAML 只能选择已发现入口，不能导入代码。通用构建接口是 `case_api.builder.CaseBuilder`；`output(stage, name)` 声明有类型的前序输出引用。
+`scenario.registry` 自动发现 `cases` 下包含 `program.py` 的直接子目录。program 导出 `CASE: CaseDefinition`，明确声明构建器、参数约束、动作、报告、指标生产者和采集源。目录名就是稳定 case 名；新增 case 不修改公共名单。注册快照校验能力冲突并保持不可变，YAML 只能选择已发现入口，不能导入代码。通用构建接口是 `scenario.builder.CaseBuilder`；`output(stage, name)` 声明有类型的前序输出引用。
 
 `CASE.actions` 声明所属能力；单次运行的分析参数由所属 program 校验。指标用 `case.metric(id, ...)` 声明所有门禁及 producer 的采样输入依赖，编译检查 ID、单位与身份标签。采集清单来自这些依赖、报告曲线与显式诊断项的并集；目录中无人消费的能力不采集，不能靠 producer 运行时加载整份 plan 扩大清单。复杂指标的 producer 注册到 `CASE.producers`，`monitoring/producers.py` 负责调用这些能力；定义数据放在 `config/monitoring/`，规则见[指标配置](../../config/monitoring/README.md)。
 
 `CASE.producers` 注册 `MetricProducer(describe, execute, phase)`。GATE 的 `execute(directory)` 在最终遥测导出后投影已冻结的门禁数值，FINALIZE 的 `execute(directory, context)` 发布收尾证据；函数名没有自动注册含义。报告通过 `CASE.report_views` 注册 `ReportView(validator, renderer)`；renderer 接收目录、运行分析和视图定义，读取校验后的冻结判定，在统一报告阶段生成 bundle，返回 HTML 路径，不重判或重新发布指标。门禁 bundle 声明 `role="gate"`，发现与汇总通过 manifest 校验，不根据目录名猜测。报告协议见[报告契约](../architecture/reporting.md)。
 
 
-注册接口的参数契约定义在 `case_api.extension_contracts`，发现阶段检查可调用参数，不执行能力函数：
+注册接口的参数契约定义在 `scenario.contracts`，发现阶段检查可调用参数，不执行能力函数：
 
 | 能力 | 调用约定 |
 |---|---|
@@ -312,8 +312,8 @@ handler 的错误路径同样遵守输出合同。数值在证据不足时可以
 先区分新增配置、业务算法与新协议，不把这些独立事实合并成一段隐式推导。新增数值字段优先用 `InputContract.from_fields` 单点声明类型、必填性与准入字段；新增指标检查用 `CheckSpec` 单点声明绑定和数值规则。YAML 负责具体取值，指标定义负责来源口径，纯分析负责业务算法。它们是必要的修改点；不要再手工重复维护 RULES、数字路径及分析字段集合。
 
 ```python
-from case_api.input_contract import InputContract
-from case_api.numeric_parameters import NONNEGATIVE
+from scenario.inputs import InputContract
+from scenario.numeric_parameters import NONNEGATIVE
 
 INPUTS = InputContract.from_fields(
     {"custom": {"name": None, "threshold": NONNEGATIVE}},

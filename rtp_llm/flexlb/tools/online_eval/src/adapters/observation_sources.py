@@ -65,7 +65,7 @@ class Sources:
                         "environment changed; old cohort is not sampled from the new environment"
                     )
                 if name == "client_records":
-                    from case_api.client_records import read_records
+                    from adapters.client_records import read_records
                     records = read_records(self.records, deadline, self.epoch)
                     sample["data"] = records  # Includes every nonterminal attempt.
                 else:

@@ -1,6 +1,7 @@
 """Strict field and numeric contracts shared by configuration and execution."""
 
 import math
+from inspect import signature
 from dataclasses import dataclass, replace
 from typing import Optional
 from document_io import DocumentError
@@ -73,3 +74,11 @@ class NumberRule:
             return replace(self, **spec)
         except ValueError as exc:
             raise ValueError("parameter_schema requires finite, increasing bounds") from exc
+
+
+def validate_call(function, argument_count, path):
+    """Reject incompatible positional calls at discovery, never run user code."""
+    try:
+        signature(function).bind(*(object() for _ in range(argument_count)))
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{path}: callable must accept {argument_count} positional arguments: {exc}") from exc

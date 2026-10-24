@@ -5,9 +5,10 @@
 | 目录 | 职责 |
 |---|---|
 | `config/` | 场景、指标集合、报告视图及运行配置 |
-| `src/cases/` | case 配置接口、注册表及各 case 的流程、门禁、指标与报告 |
-| `src/scenario/`、`src/runtime/` | 通用编译执行、基础 action、进程与协议操作 |
-| `src/workload/`、`src/monitoring/` | 持续负载的证据生命周期、采集与归档 |
+| `src/cases/` | 各 case 的输入、流程、门禁、指标与报告 |
+| `src/scenario/` | 用例构建、注册与合同，通用编译、执行及收尾 |
+| `src/runtime/`、`src/adapters/` | 通用进程与采样机制，以及服务协议和环境适配 |
+| `src/monitoring/` | 持续监控、采集质量评估与指标归档 |
 | `src/analysis/`、`src/reporting/` | 可复用统计、输入保真度分析、图表和 bundle |
 | `src/traffic/`、`src/artifacts/` | 输入生成、播放与制品归档 |
 | `scripts/`、`tests/` | 命令入口、内部管线与回归测试 |

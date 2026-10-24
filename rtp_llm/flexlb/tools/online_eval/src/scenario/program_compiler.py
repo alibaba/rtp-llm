@@ -16,11 +16,11 @@ from scenario.declarations import CaseDeclaration
 from scenario.declarations import VariantDeclaration
 
 
-from case_api.builder import CaseBuilder
+from scenario.builder import CaseBuilder
 
 
 def program_module(name, source):
-    from case_api.registry import registry
+    from scenario.registry import registry
     if not isinstance(name, str) or name not in registry().cases:
         raise ScenarioError(f"{source}: unknown registered Python case {name!r}")
     return registry().cases[name]
@@ -97,8 +97,8 @@ def _build_variant(config, row, identity, module, selected_profiles, source, num
         )
     variant_parameters = row.parameters
     patch = row.environment
-    from case_api.numeric_parameters import parameter_rules
-    from case_api.numeric_parameters import narrow_parameters
+    from scenario.numeric_parameters import parameter_rules
+    from scenario.numeric_parameters import narrow_parameters
     defaults = parameter_rules(module.definition.numeric_parameters)
     base_rules = narrow_parameters(defaults, config.parameter_schema)
     builder = CaseBuilder(
@@ -128,7 +128,7 @@ def _build_variant(config, row, identity, module, selected_profiles, source, num
 def _variant_contract(config, builder, source):
     metadata = config.metadata
     execution = config.execution.to_dict()
-    from case_api.registry import registry
+    from scenario.registry import registry
     try:
         registry().cases[config.case].definition.execution_requirements.validate(execution)
     except ValueError as exc:
@@ -153,7 +153,7 @@ def _variant_contract(config, builder, source):
         name = execution["monitoring"].get("query_plan", DEFAULT_PLAN)
         selected = select_plan(load_plan(name), builder.metric_dependencies,
                                [view(report) for report in variant.get("reports", [])])
-        from case_api.registry import registry
+        from scenario.registry import registry
         from monitoring.query_plan import definitions
         for definition in definitions(selected).values():
             if definition.get("producer"):
@@ -193,7 +193,7 @@ def _bind_reports(config, variant, source, stages):
         from reporting.view_config import view
 
         for report_name in reports:
-            from case_api.registry import registry
+            from scenario.registry import registry
             from reporting.view_config import DEFAULT_VIEW
             if report_name != DEFAULT_VIEW:
                 registry().capability("view", report_name, case=config.case)

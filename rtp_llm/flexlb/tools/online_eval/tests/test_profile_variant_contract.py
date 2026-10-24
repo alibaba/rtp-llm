@@ -66,7 +66,7 @@ def test_every_case_requires_root_default_even_with_variants(program):
 def test_variants_cannot_replace_a_missing_python_default(monkeypatch):
     from cases.master_ha_failover import program as master_ha_failover
     from dataclasses import replace
-    from case_api import registry
+    from scenario import registry
     case = registry.registry().cases['master_ha_failover']
     invalid = replace(case, definition=replace(case.definition, builders={'non_rolling': master_ha_failover.non_rolling}))
     with pytest.raises(ValueError, match='invalid case builders'):

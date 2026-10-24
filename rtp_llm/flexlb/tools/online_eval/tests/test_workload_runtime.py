@@ -11,7 +11,7 @@ from program_fixtures import compile_scenarios
 from scenario.catalog import handlers
 from scenario.runtime import execute_instance
 from scenario.suites import classify, preselect_documents
-from workload.policy import execute_workload
+from scenario.measurement import execute_workload
 from test_scenario_runtime import Backend, Clock, source
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -134,8 +134,8 @@ class WorkloadRuntimeTests(unittest.TestCase):
 
 def test_teardown_collects_queries_without_materializing_metrics():
     from types import SimpleNamespace
-    from workload.policy import WorkloadPolicy
-    policy = WorkloadPolicy()
+    from monitoring.run_monitor import RunMonitor
+    policy = RunMonitor()
     monitor = mock.Mock()
     policy.monitors = {1: monitor}
     policy.options = {"capture_metrics": False, "collector_shutdown_s": 5}

@@ -65,14 +65,11 @@ case YAML 通过 `program: default` 调用 Python 构建器，生成 `ProgramPla
 | 目录 | 内容 |
 |---|---|
 | `cases/<case>/` | 该 case 的 program、action、输入合同、纯分析、指标生产、报告与离线重判 |
-| `case_api/` | 作者使用的构建、注册、输入与取证扩展合同、门禁插件 |
-| `scenario/` | YAML 声明与编译、静态校验、实例调度、基础 action、资源句柄与取证作用域、阶段执行、清理及最终状态裁决 |
+| `scenario/` | 用例构建、注册与合同，YAML 编译、实例调度、阶段执行、资源清理、证据收尾及最终状态裁决 |
 | `runtime/` | deadline、进程、网络、通用端口区间检查、有界采样与时钟计算 |
 | `adapters/` | 服务与客户端协议、请求账本、Fetch 流消费、环境生命周期、Java mock 资源布局及具体取证适配 |
-| `workload/` | 持续测量策略、请求与 engine 证据关联、采集有效性 |
-| `analysis/` | 可复用统计、标量裁决、冻结指标检查桥接及输入保真度计算，不定义某个 case 的门槛 |
-| `diagnostics/` | 离线诊断的文件发现、输入审计、拟合与生产生成器编排 |
-| `monitoring/`、`reporting/` | 指标查询/归档与图表/spec/bundle 的公共能力 |
+| `analysis/` | 可复用统计、请求与 engine 证据关联、标量裁决及输入保真度计算，不定义某个 case 的门槛 |
+| `monitoring/`、`reporting/` | 监控生命周期、采集质量、指标归档，以及冻结结果到图表/spec/bundle 的公共能力 |
 | `traffic/`、`artifacts/` | 流量构造与播放；制品管理、启动记录及冻结证据格式读写 |
 
 归属由语义决定，不由文件名或当前调用数决定：包含特定阶段、门槛、指标输出或报告身份的代码属于 case；同一合同能被不同 case 使用的能力才放在公共组件。注册表可以指向专属实现，公共执行器不按 case 名分支。
@@ -83,13 +80,17 @@ case YAML 通过 `program: default` 调用 Python 构建器，生成 `ProgramPla
 
 集中归属不合并职责。`analysis.py` 根据显式输入计算，不访问网络、进程或报告；`actions.py` 操作现场并取证；`metrics.py` 发布声明的指标；`report.py` 展示既定结论，不能隐式重判。门禁动作先冻结独立 result 和校验 manifest，再返回共用的 `CheckResult`。数值投影在最终遥测导出后执行，报告在统一的 renderer 阶段生成一次，不重新裁决或改写冻结判定。bundle 写入器在写入任何文件前校验图表，内部渲染复用该校验结果；公开离线 renderer 仍独立校验输入，bundle 读取仍校验格式与摘要。附件名称和内容在写入前一次准入，发布时保留与归档证据文件的冲突检查。
 
+采集质量由 `monitoring.quality.CollectionQuality` 统一表示，问题记录区分预期故障缺口、可容忍短缺口、致命缺口、可选诊断、完整性错误与缺失来源。有效性、完整性和兼容的报告字段从同一对象派生，不单独维护多份判定状态。`scenario.measurement` 将冻结指标与执行快照组合为分析输入；`reporting` 只装配和展示既定结论。
+
+收尾回调返回 `EvidenceResult` 或 `ReportResult`，执行器明确接收证据、采集质量和报告路径。传给回调的执行快照仅作为输入，修改它不会回写检查或主结果；内部不使用 JSON 字符串保存可变证据状态。证据、报告、归档各自保留预算、失败记录和原子检查点。
+
 ## 执行与资源契约
 
 每个 case 有 `default` program，变体只追加测试点。YAML 保存数据，不能写 action、通用 `$ref` 或任意表达式；具名观测窗口只能选择 program 声明的时间输出，不能编排步骤。配置层次和 action 边界见[新增 case](../development/adding-cases.md)。
 
 资源句柄绑定环境代次。重建环境前清理旧消费者及进程，旧句柄只能显式作为历史证据读取。动态 worker 添加保留尝试预算；移除不返还容量预算。端口租约由父 runner 拥有，子执行器启动前核对范围与最大拓扑。父 runner 将完整 compiled instances 写入 `execution-plan.json`，记录规范化内容摘要、所选 case 源码及公共底座和运行配置的文件摘要。子执行器使用父进程提供的摘要验证计划，再验证当前依赖与租约，直接执行冻结步骤，不重新编译场景 YAML。规划后改变场景文件不改变已经冻结的参数；所选 case、公共底座或运行配置变化使启动失败，必须重新规划；未选中 case 的源码和未选择的报告视图不进入该计划的依赖集合；功能用例不依赖报告展示资源。子执行器在验证计划信封和摘要后，只注册、导入计划选择的 case，执行结束后恢复调用方的注册作用域。
 
-`ResourceScope` 持有句柄、环境代次、取证适配器和清理栈；`RuntimeContext` 绑定输出引用及实际事件；`StageExecutor` 负责阶段分发与输出检查；`RunFinalizer` 负责证据和报告预算、检查点与结果提交。取证 exporter 返回 `case_api.extension_contracts.ResourceEvidence`，客户端的具体转换位于 `adapters.resource_evidence`，公共资源作用域只校验合同。deadline 位于运行底座。gRPC 客户端持有 channel，stream 持有消费线程，Mock 控制能力只使用所属环境的 HTTP 地址，不另建资源所有者。
+`ResourceScope` 持有句柄、环境代次、取证适配器和清理栈；`RuntimeContext` 绑定输出引用及实际事件；`StageExecutor` 负责阶段分发与输出检查；`RunFinalizer` 负责证据和报告预算、检查点与结果提交。取证 exporter 返回 `adapters.resource_evidence.ResourceEvidence`，客户端的具体转换也位于该模块，公共资源作用域只校验合同。deadline 位于运行底座。gRPC 客户端持有 channel，stream 持有消费线程，Mock 控制能力只使用所属环境的 HTTP 地址，不另建资源所有者。
 
 阶段使用剩余 deadline，清理使用独立预算并逆序执行。同一资源回调内的独立清理操作使用 `cleanup_all`，逐项尝试并汇总错误，诊断采样器失败不得阻断进程回收。启动部分失败也要回收已登记资源；未退出线程、未回收进程或清理异常不能成为 PASS。普通失败阻断依赖步骤，独立观察应放在最终判定之前。finding 只能声明具体检查，不豁免证据、超时和清理。
 

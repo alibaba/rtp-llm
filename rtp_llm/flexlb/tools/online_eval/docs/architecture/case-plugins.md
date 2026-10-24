@@ -31,7 +31,7 @@
 
 ## 整窗门禁能力
 
-`case_api.gate_plugin.GatePlugin` 组合三种业务函数：
+`scenario.gates.GatePlugin` 组合三种业务函数：
 
 ```python
 GATE = GatePlugin(
@@ -79,26 +79,24 @@ GATE = GatePlugin(
 |---|---|---|
 | `runtime` | deadline、进程、网络、通用请求记录、观察预算与资源合同 | 实例调度、服务协议、case 步骤、HTML 发布 |
 | `adapters` | mock/master HTTP 与 gRPC、Java 客户端会话、环境与服务生命周期、启动配置 | 选择 case、声明阶段、业务门禁与报告 |
-| `scenario` | 配置编译、实例选择与调度、阶段执行、资源登记、收尾 | 实现 RPC 协议、业务测量与 HTML 渲染 |
+| `scenario` | 用例构建与注册、输入与执行合同、配置编译、阶段执行、资源登记与收尾 | 实现 RPC 协议、业务测量与 HTML 渲染 |
 | `scenario/actions` | 将现场能力适配为校验参数、有预算、有输出和资源归属的步骤 | 复制 adapter 的协议和进程实现 |
 | `traffic` | 流量采集与拟合、数据格式、长度与 prefix 语义、输入生成及 pacing 合同 | 启停客户端进程、现场缩容与门禁 |
-| `workload` | 持续测量的执行策略、请求与 engine 证据关联、整轮采集有效性 | 公共门禁存储、报告发布、实例并行调度 |
 | `analysis` | 显式输入上的统计与检查 | 启动服务、采集、发布报告 |
 | `monitoring` | 采集计划、来源、Prometheus 生命周期与冻结指标 | case 流程及业务门槛 |
 | `artifacts` | 证据/判定冻结、归档、来源校验、离线读取与安全保留 | 重新决定业务判定、执行 case 步骤 |
 | `reporting` | 冻结结果到视图、公共图表、HTML 与报告 bundle | 现场操作、重判与隐藏缺采 |
-| `case_api` | 作者的构建、注册、输入约束、门禁扩展合同 | 具体实验参数、流程或业务算法 |
 | `cases/<case>` | 该业务的输入、步骤组合、测量和专属展示 | 复制公共执行、采集和报告基础设施 |
 
-`scenario/actions/java_flow.py` 定义阶段合同，`adapters/java_flow.py` 管理客户端会话；`engine_control` action 依赖 `adapters/mock_control.py` 的协议访问。名字相近不表示冗余。新步骤先组合 adapter；只有出现新的现场协议才扩展 adapter。`runtime` 和 `adapters` 不依赖 `scenario`、`cases`、`workload` 或 `reporting`，避免基础能力反向调用业务和调度层。
+`scenario/actions/java_flow.py` 定义阶段合同，`adapters/java_flow.py` 管理客户端会话；`engine_control` action 依赖 `adapters/mock_control.py` 的协议访问。名字相近不表示冗余。新步骤先组合 adapter；只有出现新的现场协议才扩展 adapter。`runtime` 和 `adapters` 不依赖 `scenario`、`cases` 或 `reporting`，避免基础能力反向调用业务和调度层。
 
 新增参数组合复用现有 program，仅新增 YAML；新增流程从 `program.py` 开始，按需注册 action；新增测量才增加 analysis 或 producer。无需了解实例调度、归档或 HTML 内部实现。删除能力前检查注册发现、命令入口、配置引用、延迟导入与测试；缺少普通 import 不能单独证明无用。
 
 ## 扩展调用边界
 
-`case_api.extension_contracts` 定义作者侧回调 Protocol。builder 接收 `CaseBuilder`；action 的参数校验接收 `PlanContext`，执行接收 `RuntimeContext` 与 `Deadline`，返回 `StageOutput`。领域参数和证据结构由所属 case 校验，Protocol 不代替运行时数据校验。`EvidenceSource` 当前是 Prometheus 证据适配配置工厂，不是任意文件或协议的通用采集插件。
+`scenario.contracts` 定义作者侧回调 Protocol。builder 接收 `CaseBuilder`；action 的参数校验接收 `PlanContext`，执行接收 `RuntimeContext` 与 `Deadline`，返回 `StageOutput`。领域参数和证据结构由所属 case 校验，Protocol 不代替运行时数据校验。`EvidenceSource` 当前是 Prometheus 证据适配配置工厂，不是任意文件或协议的通用采集插件。
 
-专属视图、检查依赖的 producer 和证据来源必须由消费 case 的 `CASE` 显式声明。共享能力由各使用方声明同一实现；全局发现不是跨 case 的调用授权。默认报告和公共 action 由框架提供。
+专属视图、检查依赖的 producer 和证据来源必须由消费 case 的 `CASE` 显式声明。共享能力由各使用方声明同一实现；全局发现不是跨 case 的调用授权。默认报告和公共 action 由框架提供。报告配置通过 `scenario.registry` 读取共享的视图声明，不调用场景编译器或执行器。资源取证的数据合同和现场投影位于 `adapters.resource_evidence`，适配层不反向依赖场景执行。
 
 FINALIZE producer 接收 `FinalizationContext(directory, run)`，而非可写的主分析结果。`run` 顶层只读，嵌套数据是该次调用独立的深拷贝；修改嵌套数据不会影响主结果。producer 返回可 JSON 序列化且不含非有限数值的 metadata mapping，公共层将其写入 `producer_results`。指标发布仍走 `MetricStore`，不能通过返回 metadata 覆盖检查或判定。
 

@@ -3,22 +3,22 @@
 import copy
 import math
 
-from case_api.inputs import fields
+from scenario.inputs import fields
 from cases.master_ha_failover.analysis import HA_METRICS
 from analysis.checks import validate_comparison
 from document_io import DocumentError as ScenarioError
-from case_api.numeric_parameters import SOURCE_NUMBERS
-from case_api.numeric_parameters import OUTPUT_DISTRIBUTION_NUMBERS
-from case_api.numeric_parameters import CAPTURE_NUMBERS
-from case_api.numeric_parameters import FRACTION
-from case_api.numeric_parameters import POSITIVE_COUNT
-from case_api.numeric_parameters import COUNT
-from case_api.numeric_parameters import OFFSET
-from case_api.numeric_parameters import NONNEGATIVE
-from case_api.numeric_parameters import number_fields
+from scenario.numeric_parameters import SOURCE_NUMBERS
+from scenario.numeric_parameters import OUTPUT_DISTRIBUTION_NUMBERS
+from scenario.numeric_parameters import CAPTURE_NUMBERS
+from scenario.numeric_parameters import FRACTION
+from scenario.numeric_parameters import POSITIVE_COUNT
+from scenario.numeric_parameters import COUNT
+from scenario.numeric_parameters import OFFSET
+from scenario.numeric_parameters import NONNEGATIVE
+from scenario.numeric_parameters import number_fields
 
 
-from case_api.input_contract import InputContract, section_fields
+from scenario.inputs import InputContract, section_fields
 
 # Each check declares its numeric leaves once. Adding a check derives both
 # section admission and numeric validation, including the common sample floor.
@@ -87,8 +87,8 @@ def validate_client_criterion(params, *, path="client criterion"):
 
 
 def read_cycle(case):
-    from case_api.windows import ObservationWindow
-    from case_api.windows import check_windows
+    from scenario.windows import ObservationWindow
+    from scenario.windows import check_windows
 
     if isinstance(case.parameters.get("procedure"), dict) and "restart_mode" in case.parameters["procedure"]:
         raise ScenarioError("restart_mode is owned by flow identity, not parameters")

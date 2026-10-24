@@ -1,15 +1,12 @@
 [importlinter]
 root_packages =
     analysis
-    case_api
     cases
     scenario
     reporting
-    workload
     scripts
     monitoring
     runtime
-    diagnostics
     artifacts
     adapters
     traffic
@@ -35,14 +32,17 @@ forbidden_modules =
     scenario.program_compiler
     scenario.stage_compiler
 
-[importlinter:contract:case-api]
-name = 公共 case 接口不依赖业务实现
+[importlinter:contract:authoring]
+name = 用例构建合同不依赖业务实现
 type = forbidden
 source_modules =
-    case_api
+    scenario.builder
+    scenario.contracts
+    scenario.inputs
+    scenario.gates
 forbidden_modules =
     cases
-    workload
+    scenario.measurement
 
 [importlinter:contract:scenario]
 name = 场景库不依赖命令脚本

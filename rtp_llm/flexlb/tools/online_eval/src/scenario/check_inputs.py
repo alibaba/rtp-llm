@@ -1,8 +1,8 @@
 """Compile declared comparisons into case-owned measurement contracts."""
 
 from analysis.checks import validate_comparison
-from case_api.inputs import fields
-from case_api.windows import check_windows
+from scenario.inputs import fields
+from scenario.windows import check_windows
 
 
 def metric_criterion(case, spec, *, metric, unit, windows, op, path,
@@ -42,7 +42,7 @@ def compile_metric_checks(case, checks, rules, *, namespace, path="parameters.ch
 
 
 from dataclasses import dataclass
-from case_api.numeric_parameters import NONNEGATIVE
+from scenario.numeric_parameters import NONNEGATIVE
 
 
 @dataclass(frozen=True)
@@ -55,7 +55,7 @@ class CheckSpec:
     number: object = NONNEGATIVE
 
     def __post_init__(self):
-        from case_api.numeric_parameters import parameter_rules
+        from scenario.numeric_parameters import parameter_rules
         parameter_rules({"checks.threshold.expected": self.number})
         if self.op not in {"eq", "ne", "gt", "ge", "lt", "le"}:
             raise ValueError("invalid check comparison")

@@ -1,8 +1,8 @@
 """Compose the complete shared Java flow contract into authored case inputs."""
 
 from adapters.java_flow_spec import JavaFlowSpec
-from case_api.input_contract import section_fields
-from case_api.numeric_parameters import SOURCE_NUMBERS, JAVA_FLOW_NUMBERS
+from scenario.inputs import section_fields
+from scenario.numeric_parameters import SOURCE_NUMBERS, JAVA_FLOW_NUMBERS
 
 
 def java_flow_inputs(*, max_requests=False, numbers=None):

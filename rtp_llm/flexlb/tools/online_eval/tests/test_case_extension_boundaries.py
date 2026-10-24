@@ -5,8 +5,8 @@ import json
 
 import pytest
 
-from case_api.extension_contracts import FinalizationContext
-from case_api.registry import MetricProducer, ProducerPhase
+from scenario.contracts import FinalizationContext
+from scenario.registry import MetricProducer, ProducerPhase
 from monitoring import producers
 from monitoring.contracts import MetricContractError
 from scenario.program_compiler import _implementation
@@ -96,7 +96,7 @@ def test_case_fingerprint_covers_business_modules_and_is_deterministic(tmp_path)
 
 
 def test_capability_sharing_requires_explicit_declaration():
-    from case_api.registry import CaseDefinition, CaseRegistry, RegisteredCase, ReportView
+    from scenario.registry import CaseDefinition, CaseRegistry, RegisteredCase, ReportView
     view = ReportView(lambda path, data, fail: None, lambda directory, analysis, presentation: directory)
     def entry(name, views):
         return RegisteredCase(name, name + '.program', Path(__file__),

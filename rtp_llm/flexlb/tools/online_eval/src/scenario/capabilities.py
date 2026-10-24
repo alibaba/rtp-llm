@@ -41,14 +41,14 @@ class RuntimeCapabilities:
         return self._context.artifact_dir
 
     def capability(self, kind, name):
-        from case_api.registry import registry
+        from scenario.registry import registry
         return registry().capability(kind, name, case=self.case)
 
     def gate(self, name):
         return self.capability("gate", name)
 
     def records(self, handle, kind, deadline):
-        from case_api.client_records import read_records
+        from adapters.client_records import read_records
         return read_records(self._context.resource(handle, kind), deadline, self._context.env_epoch)
 
     def event(self, identity, **kwargs):
@@ -56,6 +56,6 @@ class RuntimeCapabilities:
 
     def source_files(self):
         """Use the declared case source inventory; actions do not import program."""
-        from case_api.registry import registry
+        from scenario.registry import registry
         owner = registry().cases[self.case].path.parent
         return tuple(owner / name for name in self._context.instance["implementation"]["case_sources"])

@@ -115,7 +115,7 @@ def _ha_start(ctx, params, deadline):
         )
     def export_client(value, profile, deadline):
         deadline.check()
-        from case_api.extension_contracts import ResourceEvidence
+        from adapters.resource_evidence import ResourceEvidence
         snapshot = value.evidence_snapshot()
         manifest = snapshot if profile == "diagnostic" else {
             k: v for k, v in snapshot.items() if k != "records"}
@@ -216,7 +216,7 @@ def _window(ctx, params, deadline):
     rows = ctx.resource(params["rows"], "ha_rows")
     lower = ctx.resolve(params["from"]) if "from" in params else None
     upper = ctx.resolve(params["until"]) if "until" in params else None
-    from case_api.windows import resolve_window
+    from scenario.windows import resolve_window
     lower, upper = resolve_window(lower, upper,
         lower_offset_s=params.get("from_offset_s", 0), upper_offset_s=params.get("until_offset_s", 0))
     selected = select_window(rows, -math.inf if lower is None else lower,

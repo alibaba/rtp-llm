@@ -7,7 +7,7 @@ import hashlib
 from pathlib import Path
 from importlib.util import find_spec
 
-from case_api.registry import registry
+from scenario.registry import registry
 from monitoring.contracts import MetricContractError, validate_observation, validate_definition
 from monitoring.producer_contract import output_contract
 

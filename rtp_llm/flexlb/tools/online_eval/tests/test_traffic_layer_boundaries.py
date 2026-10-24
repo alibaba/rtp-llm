@@ -8,7 +8,7 @@ from traffic.codecs import decode_model, codec_for_version
 from traffic.lineage_model import LineageExpander
 from traffic.structure import model_shape
 from traffic.catalog import trace_models
-from diagnostics.traffic_fidelity import load_capture
+from traffic.fidelity_audit import load_capture
 from adapters.playback_evidence import PlaybackEvidence
 
 
@@ -49,7 +49,7 @@ def test_java_playback_evidence_checks_launch_and_preserves_reproduction_fields(
 
 
 def test_fidelity_refits_the_loaded_snapshot_after_capture_changes(tmp_path):
-    from diagnostics.traffic_fidelity import calibrate_capture
+    from traffic.fidelity_audit import calibrate_capture
     from traffic.prefix_lineage import encode
     path = tmp_path / 'capture.xz'
     path.write_bytes(encode([[0, 512, -1, 0], [1, 1024, -1, 0]], {}))

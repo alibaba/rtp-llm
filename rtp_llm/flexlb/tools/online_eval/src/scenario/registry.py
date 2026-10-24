@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from case_api.execution_contract import ExecutionRequirements
+from scenario.contracts import ExecutionRequirements
 from enum import Enum
 from importlib import import_module
 from contextlib import contextmanager
@@ -12,14 +12,14 @@ import re
 from types import MappingProxyType
 from typing import Mapping
 
-from case_api.extension_contracts import ProgramBuilder
-from case_api.extension_contracts import ViewValidator
-from case_api.extension_contracts import ViewRenderer
-from case_api.extension_contracts import ProducerDescription
-from case_api.extension_contracts import GateProducer
-from case_api.extension_contracts import FinalizeProducer
-from case_api.extension_contracts import SourceFactory
-from case_api.extension_contracts import validate_call
+from scenario.contracts import ProgramBuilder
+from scenario.contracts import ViewValidator
+from scenario.contracts import ViewRenderer
+from scenario.contracts import ProducerDescription
+from scenario.contracts import GateProducer
+from scenario.contracts import FinalizeProducer
+from scenario.contracts import SourceFactory
+from input_contract import validate_call
 
 
 class ProducerPhase(str, Enum):
@@ -79,7 +79,7 @@ class CaseDefinition:
         if not isinstance(self.execution_requirements, ExecutionRequirements):
             raise ValueError('execution_requirements must be an ExecutionRequirements')
         if self.input_contract is not None:
-            from case_api.input_contract import InputContract
+            from scenario.inputs import InputContract
             if not isinstance(self.input_contract, InputContract):
                 raise ValueError("input_contract must be an InputContract")
             merged = dict(self.numeric_parameters)
@@ -91,7 +91,7 @@ class CaseDefinition:
         for name in ('builders', 'numeric_parameters', 'report_views', 'producers', 'sources', 'gates'):
             if not isinstance(getattr(self, name), Mapping):
                 raise ValueError('case ' + name + ' must be a mapping')
-        from case_api.gate_plugin import GatePlugin
+        from scenario.gates import GatePlugin
         producers, views = dict(self.producers), dict(self.report_views)
         for name, gate in self.gates.items():
             if not isinstance(gate, GatePlugin):
@@ -168,7 +168,7 @@ class CaseRegistry:
                     raise ValueError(case.module + ': actions must contain StageHandler capabilities')
                 validate_call(action.validate, 2, case.module + '.actions.' + action.name + '.validate')
                 validate_call(action.execute, 3, case.module + '.actions.' + action.name + '.execute')
-            from case_api.gate_plugin import GatePlugin
+            from scenario.gates import GatePlugin
             for name, capability in definition.gates.items():
                 if not re.fullmatch(r'[a-z][a-z0-9_]*', name) or not isinstance(capability, GatePlugin):
                     raise ValueError("invalid gate capability: " + name)

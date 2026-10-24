@@ -29,7 +29,7 @@ assert 'monitoring.session' not in sys.modules
     subprocess.run([sys.executable, '-c', script], check=True)
     subprocess.run([sys.executable, '-c',
                     "import sys; import monitoring.metric_store; "
-                    "assert 'case_api.registry' not in sys.modules; "
+                    "assert 'scenario.registry' not in sys.modules; "
                     "assert 'monitoring.query_plan' not in sys.modules"], check=True)
     subprocess.run([sys.executable, '-c',
                     "import sys; import monitoring.client; "

@@ -86,7 +86,7 @@ def test_capture_budget_is_explicit_and_bounded(name):
 
 
 def test_shared_field_guard_keeps_detail_with_adapter_exception_boundary():
-    from case_api.inputs import fields
+    from scenario.inputs import fields
     from scenario.parameters import validate_fields
     for read in (lambda data: mapping_fields(data, {"a"}, "input", required={"a"}),
                  lambda data: fields(data, {"a"}, "input"),

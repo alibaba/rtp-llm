@@ -15,7 +15,7 @@ from runtime.observation import SampleBudget
 from runtime.deadline import Deadline
 from artifacts.json_io import write_json
 from monitoring.sources import selected_sources
-from case_api.registry import registry
+from scenario.registry import registry
 
 
 class PrometheusEvidence:

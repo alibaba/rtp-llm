@@ -6,8 +6,9 @@ from unittest import mock
 import pytest
 from program_fixtures import compile_scenarios
 from scenario.runtime import RuntimeContext, Deadline
-from workload.policy import execute_workload, WorkloadPolicy
-from case_api.extension_contracts import ResourceEvidence
+from scenario.measurement import execute_workload, WorkloadPolicy
+from adapters.resource_evidence import ResourceEvidence
+from scenario.run_result import EvidenceResult
 from test_scenario_runtime import Clock, Backend, source
 from test_performance_gate import evidence as performance_evidence
 from test_cache_scale_gate import CacheGateTest
@@ -78,7 +79,7 @@ def test_virtual_deadline_includes_finalization_and_persists_base_result(tmp_pat
     clock = Clock()
     instance = plan()
     instance["execution"]["finalize_timeout_s"] = 2
-    def slow(self, ctx, result, deadline):
+    def slow(self, ctx, result, deadline, *, workload):
         saved = json.loads((tmp_path / "result.json").read_text())
         assert saved["execution_status"] == "PASS"
         assert saved["status"] == "FINALIZING"
@@ -104,7 +105,7 @@ def test_uncooperative_finalization_is_interrupted(tmp_path):
         def teardown(self, ctx, deadline):
             pass
     started = time.monotonic()
-    with mock.patch.object(WorkloadPolicy, "finalize", side_effect=lambda *args: time.sleep(5)):
+    with mock.patch.object(WorkloadPolicy, "finalize", side_effect=lambda *args, **kwargs: time.sleep(5)):
         result = execute_workload(instance, NoWaitBackend(time.monotonic),
                                   artifact_dir=tmp_path, enforce_deadlines=True)
     assert time.monotonic() - started < 1
@@ -140,7 +141,7 @@ def test_report_budget_is_separate_and_included_in_elapsed_time(tmp_path):
     clock = Clock()
     instance = plan()
     instance["execution"]["report_timeout_s"] = .5
-    def slow(self, ctx, result, analysis, deadline):
+    def slow(self, ctx, analysis, deadline):
         deadline.sleep(10)
     with mock.patch.object(WorkloadPolicy, "render", slow):
         result = execute_workload(instance, Backend(clock), artifact_dir=tmp_path,
@@ -180,12 +181,41 @@ def test_atomic_result_writer_preserves_previous_checkpoint_on_serialization_fai
 
 def test_malformed_analysis_is_a_persisted_delivery_error(tmp_path):
     clock = Clock()
-    def invalid_analysis(self, ctx, result, deadline):
-        result["workload"] = dict(runtime_validity="VALID")
-        return None
+    def invalid_analysis(self, ctx, result, deadline, *, workload):
+        return EvidenceResult(workload, None)
     with mock.patch.object(WorkloadPolicy, "finalize", invalid_analysis):
         result = execute_workload(plan(), Backend(clock), artifact_dir=tmp_path,
                                   clock=clock, sleeper=clock.sleep)
     assert result["outcome"] == dict(execution="PASS", gate="PASS", validity="VALID", delivery="ERROR")
     assert result["finalization"][1]["status"] == "ERROR"
     assert json.loads((tmp_path / "result.json").read_text()) == result
+
+
+def test_failed_evidence_export_keeps_typed_metadata_without_absorbing_snapshot_mutations(tmp_path):
+    clock = Clock()
+    def fail(self, ctx, snapshot, deadline, *, workload):
+        workload.details["evidence"] = "partial-evidence.json"
+        snapshot["stages"][-1]["checks"][0]["status"] = "FAIL"
+        snapshot["workload"] = {"runtime_validity": "VALID", "unexpected": True}
+        raise RuntimeError("query archive failed")
+    with mock.patch.object(WorkloadPolicy, "finalize", fail):
+        result = execute_workload(plan(), Backend(clock), artifact_dir=tmp_path,
+                                  clock=clock, sleeper=clock.sleep)
+    assert result["workload"]["evidence"] == "partial-evidence.json"
+    assert result["workload"]["runtime_validity"] == "INVALID"
+    assert "unexpected" not in result["workload"]
+    assert result["stages"][-1]["checks"][0]["status"] == "PASS"
+    assert [row["status"] for row in result["finalization"]] == ["ERROR", "BLOCKED", "PASS"]
+    assert json.loads((tmp_path / "result.json").read_text()) == result
+
+
+def test_typed_report_delivery_keeps_archive_analysis_links(tmp_path):
+    from artifacts.experiment import ExperimentReader
+    clock = Clock()
+    result = execute_workload(plan(), Backend(clock), artifact_dir=tmp_path,
+                              clock=clock, sleeper=clock.sleep)
+    assert result["status"] == "PASS"
+    with ExperimentReader(result["artifacts"]["experiment"]) as archive:
+        workload = archive.read_json("analysis.json")["metadata"]["workload"]
+    assert workload["report"] == result["workload"]["report"]
+    assert workload["reports"] == result["workload"]["reports"]

@@ -6,7 +6,7 @@ from runtime.deadline import Deadline
 
 
 def test_client_record_decoder_does_not_relabel_invalid_or_stale_rows():
-    from case_api.client_records import ClientRecordAdapter, read_records
+    from adapters.client_records import ClientRecordAdapter, read_records
     adapter = ClientRecordAdapter(lambda: [{'raw': 1}], lambda row: {
         'client_record_schema_version': 1, 'env_epoch': 2, 'wire_request_id': row['raw'], 'attempt': 1})
     deadline = Deadline(time.monotonic() + 5)
@@ -17,7 +17,7 @@ def test_client_record_decoder_does_not_relabel_invalid_or_stale_rows():
 
 def test_selected_report_receives_the_live_render_budget(tmp_path):
     from reporting.workload import write_views
-    from case_api.registry import ReportView
+    from scenario.registry import ReportView
     deadline = Deadline(time.monotonic() + 5)
     seen = []
     def render(directory, analysis, presentation, budget):

@@ -5,7 +5,7 @@ from unittest import mock
 
 import pytest
 
-from case_api import registry
+from scenario import registry
 from reporting.curves import materialize, project_panels
 from reporting.view_model import ViewDefinition, CurvePresentation
 

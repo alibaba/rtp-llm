@@ -10,8 +10,8 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 CALLERS = {
-    "adapters", "analysis", "artifacts", "case_api", "cases", "input_contract",
-    "monitoring", "reporting", "scenario", "traffic", "workload",
+    "adapters", "analysis", "artifacts", "cases", "input_contract",
+    "monitoring", "reporting", "scenario", "traffic",
 }
 
 
@@ -44,8 +44,8 @@ import builtins
 import importlib
 from pathlib import Path
 import runtime
-blocked = {'adapters', 'analysis', 'artifacts', 'case_api', 'cases', 'input_contract',
-           'monitoring', 'reporting', 'scenario', 'traffic', 'workload', 'grpc'}
+blocked = {'adapters', 'analysis', 'artifacts', 'cases', 'input_contract',
+           'monitoring', 'reporting', 'scenario', 'traffic', 'grpc'}
 original = builtins.__import__
 def guarded(name, *args, **kwargs):
     if name.split('.')[0] in blocked:

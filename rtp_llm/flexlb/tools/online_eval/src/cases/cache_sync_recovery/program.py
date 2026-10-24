@@ -1,15 +1,15 @@
 """Shared pressure background; only the intervention and its checks vary."""
 
-from case_api.input_contract import InputContract
-from case_api.numeric_parameters import COUNT, POSITIVE_COUNT, NONNEGATIVE
-from case_api.registry import CaseDefinition
+from scenario.inputs import InputContract
+from scenario.numeric_parameters import COUNT, POSITIVE_COUNT, NONNEGATIVE
+from scenario.registry import CaseDefinition
 from adapters.java_flow_spec import JavaFlowSpec
 from cases.cache_sync_recovery.actions import HANDLERS
 from cases.cache_sync_recovery.analysis import analyze
 from cases.cache_sync_recovery.report import write_report, validate_view
 from cases.cache_sync_recovery.metrics import produce, metric_contract
-from case_api.gate_plugin import GatePlugin
-from case_api.execution_contract import ExecutionRequirements
+from scenario.gates import GatePlugin
+from scenario.contracts import ExecutionRequirements
 
 INPUTS = InputContract.from_fields({
     "procedure": dict.fromkeys(("setup_timeout_s", "warmup_timeout_s", "cache_only_s",

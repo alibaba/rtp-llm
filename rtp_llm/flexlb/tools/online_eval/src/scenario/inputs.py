@@ -5,8 +5,13 @@ from dataclasses import dataclass
 from types import MappingProxyType
 from collections.abc import Mapping
 
-from case_api.inputs import fields
-from case_api.numeric_parameters import parameter_rules
+from scenario.config_data import mapping
+from scenario.numeric_parameters import parameter_rules
+
+
+def fields(data, required, path, *, optional=()):
+    """Validate case-owned nested mappings with the same strict field semantics."""
+    return mapping(data, set(required) | set(optional), path, required=required)
 
 
 @dataclass(frozen=True)
@@ -59,10 +64,10 @@ class InputContract:
 
     def __post_init__(self):
         if self.decode is not None:
-            from case_api.call_contract import validate_call
+            from input_contract import validate_call
             validate_call(self.decode, 1, "input_contract.decode")
         if self.projection is not None:
-            from case_api.call_contract import validate_call
+            from input_contract import validate_call
             validate_call(self.projection, 2, "input_contract.projection")
         groups = dict(self.groups)
         if any(type(name) is not str or not name.isidentifier() or

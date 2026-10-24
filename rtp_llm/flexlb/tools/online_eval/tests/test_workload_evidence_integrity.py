@@ -4,12 +4,20 @@ import unittest
 from pathlib import Path
 
 from tests.ha_fixtures import client_resource
-from workload.validity import analyze_report as read_analysis
+from scenario.measurement import analyze_evidence
+from scenario.run_result import WorkloadResult
+from scenario.outcome import apply_outcome
 
 def analyze_report(directory, result, evidence):
     from monitoring.archive import export_metrics
     export_metrics(directory)
-    return read_analysis(directory, result, evidence)
+    metadata = result.get("workload", {})
+    workload = WorkloadResult(runtime_validity=metadata.get("runtime_validity", "VALID"),
+        details={key: value for key, value in metadata.items() if key != "runtime_validity"})
+    finalized = analyze_evidence(directory, result, evidence, workload)
+    result["workload"] = finalized.workload.to_dict()
+    apply_outcome(result)
+    return finalized.analysis
 
 
 def executed_result(status="PASS", **values):
@@ -57,36 +65,6 @@ class EvidenceIntegrityTest(unittest.TestCase):
             analyze_report(d, report, evidence)
             self.assertEqual(report["status"], "ERROR")
             self.assertEqual(report["workload"]["runtime_validity"], "INVALID")
-
-    def test_failed_scrape_is_attributed_at_observed_completion(self):
-        from workload.validity import (
-            classify_gaps,
-            collection_gaps,
-            journal_rows,
-        )
-
-        with tempfile.TemporaryDirectory() as d:
-            p = Path(d) / "telemetry/1/master-A.prom.samples.jsonl"
-            p.parent.mkdir(parents=True)
-            rows = [
-                dict(epoch_s=9.995, ended_epoch_s=10.01, error="reset"),
-                dict(epoch_s=9.8, ended_epoch_s=9.9, error="refused"),
-            ]
-            p.write_text("".join(json.dumps(r) + "\n" for r in rows))
-            gaps = collection_gaps(d, 0, 5)
-            expected, unexpected = classify_gaps(
-                gaps,
-                dict(
-                    clock_anchor=dict(epoch_s=0),
-                    expected_outages=[
-                        dict(source="1/master-A", started_epoch_s=10, ended_epoch_s=20)
-                    ],
-                ),
-            )
-            self.assertEqual(expected, {"1/master-A/collection": [10.01]})
-            self.assertEqual(unexpected, {"1/master-A/collection": [9.9]})
-            p.write_text(json.dumps(dict(epoch_s=10, ended_epoch_s=9)))
-            self.assertTrue(journal_rows(p)[1])
 
     def test_sparse_metric_does_not_claim_source_outage(self):
         with tempfile.TemporaryDirectory() as d:
@@ -237,7 +215,7 @@ class EvidenceIntegrityTest(unittest.TestCase):
             self.assertEqual(r["workload"]["runtime_validity"], "INVALID")
 
     def test_outage_exemption_is_source_and_window_specific(self):
-        from workload.validity import classify_gaps
+        from monitoring.quality import classify_gaps
 
         evidence = dict(
             clock_anchor={"epoch_s": 100},

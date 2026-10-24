@@ -9,7 +9,7 @@ from unittest.mock import Mock, patch
 
 from scenario.program_compiler import configure_program
 from cases.master_ha_failover import actions as master_ha
-from case_api import registry
+from scenario import registry
 from case_registry_fixtures import entry, snapshot
 from cases.master_performance import program as master_performance
 from scenario import ScenarioError

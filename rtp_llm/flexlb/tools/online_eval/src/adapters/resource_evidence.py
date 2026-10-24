@@ -1,6 +1,14 @@
 """Project client resources to the execution evidence contract."""
 
-from case_api.extension_contracts import ResourceEvidence
+from dataclasses import dataclass, field
+
+
+@dataclass(frozen=True)
+class ResourceEvidence:
+    requests: dict = field(default_factory=dict)
+    outages: tuple = ()
+    producer: object = None
+    errors: tuple = ()
 
 
 def flow_evidence(value, profile, deadline):

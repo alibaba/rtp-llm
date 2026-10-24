@@ -1,9 +1,9 @@
 import pytest
-from case_api.builder import CaseBuilder
-from case_api.input_contract import InputContract, InputGroup, InputField
-from case_api.numeric_parameters import NONNEGATIVE
-from case_api.registry import CaseDefinition
-from case_api.check_inputs import CheckSet, CheckSpec
+from scenario.builder import CaseBuilder
+from scenario.inputs import InputContract, InputGroup, InputField
+from scenario.numeric_parameters import NONNEGATIVE
+from scenario.registry import CaseDefinition
+from scenario.check_inputs import CheckSet, CheckSpec
 
 
 def test_optional_number_is_explicit_and_does_not_consume_inputs():
@@ -52,8 +52,8 @@ def test_single_field_contract_decodes_case_owned_frozen_data():
 
 
 def test_generic_binding_and_explicit_threshold_dimension():
-    from case_api.metric_inputs import bind_metrics
-    from case_api.check_inputs import metric_criterion
+    from scenario.metric_inputs import bind_metrics
+    from scenario.check_inputs import metric_criterion
     case = CaseBuilder({}, {}, number_rules={})
     bind_metrics(case, {'fields': {'latency': {'metric': 'hardware/latency', 'labels': {}}}},
                  {'latency': 'ms'}, labels=('machine',), mode='scrape')
@@ -66,7 +66,7 @@ def test_generic_binding_and_explicit_threshold_dimension():
 
 
 def test_case_owned_timestamp_field_is_explicitly_epoch_seconds():
-    from case_api.windows import TimestampOutput, ObservationWindow
+    from scenario.windows import TimestampOutput, ObservationWindow
     window = ObservationWindow.read({'from': {'stage': 'ready', 'field': 'ready_at'}},
         'window', timestamp_stages={'ready': TimestampOutput('ready', 'ready_at')})
     assert window.boundaries['from'] == {'$ref': 'stages.ready.output.ready_at'}

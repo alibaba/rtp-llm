@@ -100,7 +100,7 @@ def test_directory_analysis_verifies_bundle_once(tmp_path,monkeypatch):
 def test_uncalibrated_fidelity_profile_retains_unavailable_identity(tmp_path):
     import json
     from test_traffic_fidelity import fixture
-    from diagnostics.traffic_fidelity import run
+    from traffic.fidelity_audit import run
     raw,profile=fixture();profile["calibration"]={}
     source=tmp_path/"source.xz";source.write_bytes(raw)
     path=tmp_path/"profile.json";path.write_text(json.dumps(profile))
@@ -143,7 +143,7 @@ def test_invalid_survivor_measurement_cannot_be_selected(tmp_path):
 def test_producer_source_without_file_has_clear_error(tmp_path,monkeypatch,spec):
     from importlib.util import find_spec
     from types import SimpleNamespace
-    from case_api.registry import registry
+    from scenario.registry import registry
     from metric_fixtures import freeze_metrics
     from monitoring.publication import publish
     from monitoring.contracts import MetricContractError

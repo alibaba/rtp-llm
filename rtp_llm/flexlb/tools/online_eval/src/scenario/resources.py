@@ -3,7 +3,7 @@
 from dataclasses import dataclass
 
 from scenario.contracts import ResourceHandle
-from case_api.call_contract import validate_call
+from input_contract import validate_call
 from runtime.deadline import Deadline, interruptible
 
 
@@ -43,7 +43,7 @@ class ResourceScope:
         return len(self._resources)
 
     def export_evidence(self, profile, deadline):
-        from case_api.extension_contracts import ResourceEvidence
+        from adapters.resource_evidence import ResourceEvidence
         for identity, exporter in self._evidence_exporters.items():
             deadline.check()
             handle, value, _ = self._resources[identity]

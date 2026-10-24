@@ -47,7 +47,7 @@ def architecture(tmp_path):
     (case / '__init__.py').write_text('')
     for name in ('analysis', 'inputs', 'report', 'panels'):
         (case / (name + '.py')).write_text('')
-    for name in ('compiler', 'program_compiler', 'stage_compiler'):
+    for name in ('compiler', 'program_compiler', 'stage_compiler', 'builder', 'contracts', 'inputs', 'gates', 'measurement'):
         (tmp_path / 'scenario' / (name + '.py')).write_text('')
     (tmp_path / '.importlinter').write_text((ROOT / '.importlinter').read_text())
 
@@ -69,8 +69,8 @@ def test_pure_new_case_passes_all_four_contracts(architecture):
     ('cases/future_case/analysis.py', 'reporting', '分析不依赖报表'),
     ('cases/future_case/analysis.py', 'cases.future_case.report', '分析不依赖报表'),
     ('cases/future_case/inputs.py', 'scenario.compiler', '输入契约不依赖编译器'),
-    ('case_api/__init__.py', 'cases.future_case.inputs', '公共 case 接口不依赖业务实现'),
-    ('case_api/__init__.py', 'workload', '公共 case 接口不依赖业务实现'),
+    ('scenario/builder.py', 'cases.future_case.inputs', '用例构建合同不依赖业务实现'),
+    ('scenario/contracts.py', 'scenario.measurement', '用例构建合同不依赖业务实现'),
     ('scenario/__init__.py', 'scripts', '场景库不依赖命令脚本'),
 ])
 def test_new_case_cannot_break_a_boundary(architecture, source, target, contract):

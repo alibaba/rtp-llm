@@ -28,7 +28,7 @@ def test_primitive_import_and_parsing_do_not_load_compiler_or_programs(tmp_path)
     script = '''
 import builtins
 original = builtins.__import__
-blocked = {'scenario.compiler', 'scenario.loader', 'scenario.program_compiler', 'case_api', 'adapters'}
+blocked = {'scenario.compiler', 'scenario.loader', 'scenario.program_compiler', 'adapters'}
 def guard(name, *args, **kwargs):
     if name in blocked or name.split('.')[0] in blocked:
         raise AssertionError('primitive imported orchestration: ' + name)

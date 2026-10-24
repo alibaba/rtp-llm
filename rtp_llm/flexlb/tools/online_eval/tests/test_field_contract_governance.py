@@ -10,12 +10,12 @@ import pytest
 
 from adapters.environment import EnvManager, FlexEnv
 from adapters.environment_config import EnvSpec, MasterSpec
-from case_api.builder import CaseBuilder
-from case_api.criteria import CriteriaContract
-from case_api.input_contract import InputContract
-from case_api.numeric_parameters import NONNEGATIVE
-from case_api.check_inputs import CheckSet, CheckSpec
-from case_api.traffic_inputs import java_flow_inputs
+from scenario.builder import CaseBuilder
+from scenario.criteria import CriteriaContract
+from scenario.inputs import InputContract
+from scenario.numeric_parameters import NONNEGATIVE
+from scenario.check_inputs import CheckSet, CheckSpec
+from scenario.traffic_inputs import java_flow_inputs
 from adapters.java_flow_spec import JavaFlowSpec
 from scenario.environment_config import environment
 from scenario.environment_declaration import EnvironmentDeclaration, startup_options, reconfigurable_fields
@@ -136,7 +136,7 @@ def test_capability_scalar_addition_derives_case_numeric_admission(monkeypatch):
     # Model a real extra capability field by extending the owner type only.
     extended = make_dataclass('ExtendedFlow', [('probe_budget', int,
         field(default=2, metadata={'number': NumberRule(True, 1, 10)}))], bases=(JavaFlowSpec,), frozen=True)
-    monkeypatch.setattr('case_api.traffic_inputs.JavaFlowSpec', extended)
+    monkeypatch.setattr('scenario.traffic_inputs.JavaFlowSpec', extended)
     declarations = java_flow_inputs()
     assert declarations['probe_budget'] == NumberRule(True, 1, 10)
     inputs = InputContract.from_fields({'traffic': declarations})

@@ -68,7 +68,7 @@ def test_variant_parameter_guard_runs_before_the_variant_program():
     from pathlib import Path
     from cases.request_completion import program
     from dataclasses import replace
-    from case_api import registry
+    from scenario import registry
     from case_registry_fixtures import snapshot
     from unittest.mock import Mock
     root = Path(__file__).resolve().parents[1]

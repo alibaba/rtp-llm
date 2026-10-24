@@ -142,13 +142,14 @@ def test_report_adapter_cannot_rewrite_frozen_gate_verdict(tmp_path, fails):
         def before_stage(self, ctx, stage): pass
         def after_stage(self, ctx, stage, row): pass
         def continue_after_failure(self, stage): return False
-        def finalize(self, ctx, result, deadline):
+        def finalize(self, ctx, result, deadline, *, workload):
             for stage in result["stages"]:
                 for check in stage["checks"]:
                     check["status"] = "PASS" if fails else "FAIL"
             result["workload"] = {"runtime_validity": "VALID"}
-            return {}
-        def render(self, ctx, result, analysis, deadline):
+            from scenario.run_result import EvidenceResult
+            return EvidenceResult(workload, {})
+        def render(self, ctx, analysis, deadline):
             raise RuntimeError("report unavailable")
     clock = Clock()
     result = ScenarioRunner().run(instance, Backend(clock), artifact_dir=tmp_path,

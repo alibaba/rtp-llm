@@ -7,7 +7,12 @@ from pathlib import Path
 from unittest import mock
 
 from traffic.synthetic.generator import materialize
-from diagnostics.workload_profile import run as profile
+from analysis.workload_profile import profile as analyze_profile
+from traffic.token_plan import read_token_plan
+
+def profile(path, capacities=(128, 256, 512, 1024)):
+    return analyze_profile(read_token_plan(path), capacities)
+
 from cases.cache_scale_in.analysis import align_send_counters, analyze
 from cases.cache_scale_in.report import prepare_report as read_report
 from cases.cache_scale_in.program import GATE as CACHE_GATE

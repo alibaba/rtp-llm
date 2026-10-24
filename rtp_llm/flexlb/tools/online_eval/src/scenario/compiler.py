@@ -332,7 +332,7 @@ def _compile_profile(context, p):
                                        if key not in budgets}}
     policy_data.setdefault("collection", "diagnostic")
     policy = normalize_execution(policy_data, kind=metadata["kind"])
-    from case_api.registry import registry
+    from scenario.registry import registry
     registered = registry().cases.get(doc.implementation.get("program"))
     try:
         if registered is not None:

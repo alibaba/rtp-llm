@@ -60,7 +60,7 @@ def _fault(ctx, params, deadline):
     epoch = ctx.env_epoch
     def export_fault(value, profile, deadline):
         deadline.check()
-        from case_api.extension_contracts import ResourceEvidence
+        from adapters.resource_evidence import ResourceEvidence
         if not value.injected:
             return ResourceEvidence()
         return ResourceEvidence(outages=(dict(

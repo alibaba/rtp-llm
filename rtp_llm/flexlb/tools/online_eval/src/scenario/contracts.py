@@ -1,14 +1,81 @@
-"""Shared extension contracts for scenario adapters and child-runner integration.
+"""Shared authoring, execution and evidence contracts."""
+from __future__ import annotations
 
-Foundations export HANDLERS from scenario/actions. Case programs declare
-ACTION_HANDLERS from cases/<case>/actions.py. The catalog collects descriptors explicitly;
-modules do not mutate a registry at import time.
-"""
-
+from copy import deepcopy
 from dataclasses import dataclass, field
-from case_api.execution_contract import ExecutionRequirements
-from case_api.extension_contracts import StageValidator, StageExecutor
+from pathlib import Path
+from types import MappingProxyType
+from typing import TYPE_CHECKING, Callable, Mapping, Protocol
+
 from analysis.checks import CheckResult
+
+if TYPE_CHECKING:
+    from scenario.builder import CaseBuilder
+    from scenario.context import RuntimeContext
+    from runtime.deadline import Deadline
+
+@dataclass(frozen=True)
+class ExecutionRequirements:
+    request_evidence: bool = False
+    monitoring: bool = False
+
+    def __post_init__(self):
+        if type(self.request_evidence) is not bool or type(self.monitoring) is not bool:
+            raise ValueError('execution requirements must be boolean')
+
+    def validate(self, execution):
+        if self.request_evidence and execution.get('collection', 'request') == 'aggregate':
+            raise ValueError('execution.collection requires request or diagnostic evidence')
+        if self.monitoring and (not isinstance(execution.get('monitoring'), dict) or execution['monitoring'].get('capture_metrics', True) is False):
+            raise ValueError('execution.monitoring.capture_metrics must be true for this consumer')
+
+
+@dataclass(frozen=True)
+class FinalizationContext:
+    """One producer's isolated snapshot; returned metadata is published by the caller."""
+    directory: Path
+    run: Mapping[str, object]
+    deadline: object = None
+
+    @classmethod
+    def snapshot(cls, directory, run, deadline=None):
+        return cls(Path(directory), MappingProxyType(deepcopy(run)), deadline)
+
+
+class StageValidator(Protocol):
+    def __call__(self, params: dict, plan: PlanContext) -> dict: ...
+
+
+class StageExecutor(Protocol):
+    def __call__(self, context: RuntimeContext, params: dict, deadline: Deadline) -> StageOutput: ...
+
+
+class ProgramBuilder(Protocol):
+    def __call__(self, case: CaseBuilder) -> None: ...
+
+
+class ViewValidator(Protocol):
+    def __call__(self, path: str, data: dict, fail: Callable[[str, str], None]) -> None: ...
+
+
+class ViewRenderer(Protocol):
+    def __call__(self, directory: Path, analysis: dict, presentation: dict) -> Path: ...
+
+
+class ProducerDescription(Protocol):
+    def __call__(self, producer: str, metric_id: str, calculation: dict | None) -> dict: ...
+
+
+class GateProducer(Protocol):
+    def __call__(self, directory: Path) -> None: ...
+
+
+class FinalizeProducer(Protocol):
+    def __call__(self, directory: Path, context: FinalizationContext) -> dict: ...
+
+
+class SourceFactory(Protocol):
+    def __call__(self, environment: object, fields: set[str]) -> dict: ...
 
 
 @dataclass(frozen=True)
@@ -66,7 +133,7 @@ class PlanContext:
 
     @property
     def env(self):
-        from case_api.environment import EnvironmentView
+        from scenario.environment_view import EnvironmentView
         if not hasattr(self, "_environment_view"):
             self._environment_view = EnvironmentView(self.environment, self.profiles, path=self.path)
         return self._environment_view

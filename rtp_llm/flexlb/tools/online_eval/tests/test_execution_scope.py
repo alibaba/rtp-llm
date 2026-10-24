@@ -3,7 +3,7 @@ import json
 
 import pytest
 
-from case_api.registry import discover, registry, using_cases
+from scenario.registry import discover, registry, using_cases
 from program_fixtures import ScenarioCompiler
 from scenario.execution_plan import freeze_plan, load_plan
 from test_scenario_runtime import source
@@ -68,7 +68,7 @@ def test_selected_discovery_does_not_import_a_broken_unrelated_case(tmp_path, mo
         path.mkdir()
         (path / '__init__.py').write_text('')
         (path / 'program.py').write_text(
-            'from case_api.registry import CaseDefinition\nCASE = CaseDefinition({"default": lambda case: None})\n'
+            'from scenario.registry import CaseDefinition\nCASE = CaseDefinition({"default": lambda case: None})\n'
             if name == 'selected' else 'raise RuntimeError("unrelated import must not execute")\n')
     monkeypatch.syspath_prepend(str(tmp_path))
     result = discover(package, package='scope_fixture', names={'selected'})

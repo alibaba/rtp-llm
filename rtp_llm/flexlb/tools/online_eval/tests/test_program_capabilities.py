@@ -11,14 +11,15 @@ from unittest import mock
 import yaml
 
 from scenario.program_compiler import configure_program
-from case_api import registry
+from scenario import registry
 from case_registry_fixtures import entry, snapshot
 from reporting import discover_reports, write_bundle
 from scenario import ScenarioError
 from program_fixtures import compile_scenarios
 from scenario.catalog import handlers
 from reporting.comparison import compare
-from workload.validity import analyze_report
+from scenario.measurement import analyze_evidence
+from scenario.run_result import WorkloadResult
 from reporting.workload import build_spec
 import mode_profiles
 from flexlb_profile_data import REGISTERED_PROFILE_SPECS
@@ -64,7 +65,7 @@ class ProgramCapabilitiesTest(unittest.TestCase):
             result = dict(id='fixture', status='PASS', cleanup=[], stages=[dict(id='check', checks=[dict(id='ok', status='PASS')])], workload=dict(runtime_validity='VALID'))
             evidence = dict(clock_anchor=dict(epoch_s=0), phases=[])
             with mock.patch('monitoring.metric_store.MetricStore.read', return_value=mock.Mock(series=mock.Mock(return_value=({}, {}, {}, [])))):
-                payload = analyze_report(root, result, evidence)
+                payload = analyze_evidence(root, result, evidence, WorkloadResult()).analysis
             self.assertNotIn('gate_reports', payload)
             self.assertNotIn('gate_report', payload)
             report = build_spec(payload, root)

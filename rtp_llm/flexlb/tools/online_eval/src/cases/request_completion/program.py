@@ -2,18 +2,18 @@
 
 from dataclasses import replace
 
-from case_api.builder import output
-from case_api.inputs import fields
-from case_api.windows import check_windows
+from scenario.builder import output
+from scenario.inputs import fields
+from scenario.windows import check_windows
 from traffic.contracts import driver
-from case_api.numeric_parameters import COUNT
-from case_api.numeric_parameters import NONNEGATIVE
-from case_api.numeric_parameters import POSITIVE_COUNT
-from case_api.numeric_parameters import JAVA_LENGTH
+from scenario.numeric_parameters import COUNT
+from scenario.numeric_parameters import NONNEGATIVE
+from scenario.numeric_parameters import POSITIVE_COUNT
+from scenario.numeric_parameters import JAVA_LENGTH
 
 
 
-from case_api.input_contract import InputContract
+from scenario.inputs import InputContract
 
 INPUTS = InputContract.from_fields({
     'traffic': {'kind': None, 'count': replace(POSITIVE_COUNT, maximum=10000),
@@ -51,7 +51,7 @@ def default(case):
     case.step("cleanup", "teardown")
 
 
-from case_api.registry import CaseDefinition
+from scenario.registry import CaseDefinition
 
 CASE = CaseDefinition(
     builders={"default": default},

@@ -81,8 +81,8 @@ def test_channel_failure_does_not_prevent_pid_reclamation(tmp_path):
     assert json.loads((tmp_path/'process-cleanup.json').read_text())['remaining_pids'] == []
 
 
-def test_retired_case_api_is_not_public():
-    from case_api.builder import CaseBuilder
+def test_builder_does_not_expose_retired_facades():
+    from scenario.builder import CaseBuilder
     from scenario import compiler
     builder = CaseBuilder({}, {}, number_rules={})
     assert not hasattr(builder, 'inputs') and not hasattr(builder, 'environment')

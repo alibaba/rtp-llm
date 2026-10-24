@@ -233,7 +233,7 @@ class CompiledInstance:
             dict(value["execution"], collection=value["execution"].get("collection", "diagnostic")),
             kind=metadata["kind"],
         )
-        from case_api.registry import registry
+        from scenario.registry import registry
         from scenario.catalog import handlers
         registered = registry().cases.get(value.get("implementation", {}).get("program"))
         try:

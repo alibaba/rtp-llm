@@ -3,10 +3,11 @@
 from dataclasses import dataclass
 from pathlib import Path
 import re
+import json
 from inspect import signature
 from typing import Callable, Optional
 
-from case_api.extension_contracts import validate_call
+from input_contract import validate_call
 from artifacts.gate import freeze_gate, load_gate
 
 
@@ -102,3 +103,24 @@ class GatePlugin:
         if 'run' in options:
             raise ValueError('offline publication does not accept a live run')
         return self.write_report(directory, frozen_evidence, frozen_result, **options)
+
+
+@dataclass(frozen=True)
+class StagedGateProjection:
+    action: str
+    project: object
+
+    def __post_init__(self):
+        validate_call(self.project, 3, "staged_gate.project")
+
+    def __call__(self, directory):
+        from monitoring.metric_store import MetricStore
+        directory = Path(directory)
+        result = json.loads((directory / "result.json").read_text())
+        store = MetricStore.read(directory)
+        for stage in result["stages"]:
+            if stage["action"] == self.action:
+                for check in stage["checks"]:
+                    if check["status"] in {"PASS", "FAIL", "WARNING"}:
+                        self.project(store, stage, check)
+        store.save(directory)

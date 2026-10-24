@@ -20,7 +20,7 @@ class CaseBuilder:
         self.number_rules = dict(number_rules)
         self.profiles = tuple(profiles)
         self.optional_numbers = frozenset(optional_numbers)
-        from case_api.environment import EnvironmentView
+        from scenario.environment_view import EnvironmentView
         self.env = EnvironmentView(environment, self.profiles)
         self.steps: list[StageDefinition] = []
         self.read_parameters = set()

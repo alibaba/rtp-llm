@@ -84,7 +84,7 @@ def _prefill_balance_series(rows, anchor, fleet_size):
     return values
 
 
-from case_api.producer_descriptions import MeasurementDescription, ProducerDescriptions
+from monitoring.producer_descriptions import MeasurementDescription, ProducerDescriptions
 from cases.master_ha_failover.analysis import HA_METRICS, measure_client_metric
 
 _DESCRIPTIONS = ProducerDescriptions({
@@ -169,5 +169,5 @@ def _project_gate(store, stage, check):
     store.document["metrics"][identity] = observations + store.document["metrics"][identity]
 
 
-from case_api.staged_gate import StagedGateProjection
+from scenario.gates import StagedGateProjection
 produce_gates = StagedGateProjection('master_client_check', _project_gate)

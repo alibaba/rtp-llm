@@ -6,7 +6,7 @@ from pathlib import Path
 import pytest
 import yaml
 
-from case_api.builder import CaseBuilder
+from scenario.builder import CaseBuilder
 from cases.master_performance.program import default
 from cases.master_performance.inputs import INPUTS
 from cases.cache_scale_in.inputs import validate_criteria

@@ -4,7 +4,7 @@ from reporting.evidence_archive import archive_session
 
 
 
-from case_api.registry import view_capabilities
+from scenario.registry import view_capabilities
 from artifacts.errors import ArtifactNotProduced
 from reporting import details, write_bundle
 from reporting.run_context import canonical_spec, provenance_from
@@ -88,3 +88,23 @@ def write_views(directory, analysis, names=None, *, deadline=None):
     from monitoring.metric_store import frozen_metric_reads
     with frozen_metric_reads(), archive_session():
         return _write_views(directory, analysis, names, deadline=deadline)
+
+
+def analysis_document(directory, result, evidence, series, statistic_sources):
+    """Assemble presentation input from settled decisions and frozen evidence."""
+    import json
+    from pathlib import Path
+    traffic = [json.loads(path.read_text()).get("trace", {})
+               for path in sorted(Path(directory).glob("flows/*/flow-input.json"))]
+    return dict(
+        workload_analysis_schema_version=1,
+        traffic_manifests=traffic, iterations=[],
+        configuration=result.get("implementation", {}).get("configuration"),
+        implementation=result.get("implementation", {}),
+        runtime_provenance=evidence.get("runtime_provenance"),
+        id=result["id"], status=result["status"], workload=result["workload"],
+        checks=[dict(stage=stage["id"], **check) for stage in result["stages"] for check in stage["checks"]],
+        stages=result["stages"], clock_anchor=evidence["clock_anchor"], phases=evidence["phases"],
+        events=evidence.get("events", []), report_timeline=evidence.get("report_timeline"),
+        series=series, statistic_sources=statistic_sources, request_sources=[],
+        configuration_sha256=result.get("implementation", {}).get("configuration_sha256"))

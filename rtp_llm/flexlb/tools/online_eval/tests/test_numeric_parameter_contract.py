@@ -9,15 +9,15 @@ import pytest
 
 from scenario.program_compiler import configure_program
 from scenario.program_compiler import program_module
-from case_api.numeric_parameters import COUNT
-from case_api.numeric_parameters import FRACTION
-from case_api.numeric_parameters import JAVA_LENGTH
-from case_api.numeric_parameters import NONNEGATIVE
-from case_api.numeric_parameters import OFFSET
-from case_api.numeric_parameters import POSITIVE_COUNT
-from case_api.numeric_parameters import PRIORITY
-from case_api.numeric_parameters import narrow_parameters
-from case_api.numeric_parameters import parameter_rules
+from scenario.numeric_parameters import COUNT
+from scenario.numeric_parameters import FRACTION
+from scenario.numeric_parameters import JAVA_LENGTH
+from scenario.numeric_parameters import NONNEGATIVE
+from scenario.numeric_parameters import OFFSET
+from scenario.numeric_parameters import POSITIVE_COUNT
+from scenario.numeric_parameters import PRIORITY
+from scenario.numeric_parameters import narrow_parameters
+from scenario.numeric_parameters import parameter_rules
 from document_io import DocumentError as ScenarioError
 from document_io import load_document
 
@@ -117,7 +117,7 @@ def test_declared_fields_are_required_without_yaml_schema():
 
 @pytest.mark.parametrize('name', CASES)
 def test_every_declared_field_rejects_bool_before_program_build(name):
-    from case_api.builder import CaseBuilder
+    from scenario.builder import CaseBuilder
     data = config(name)
     module = program_module(name, 'fixture')
     rules = narrow_parameters(parameter_rules(module.definition.numeric_parameters), data.get('parameter_schema', {}))

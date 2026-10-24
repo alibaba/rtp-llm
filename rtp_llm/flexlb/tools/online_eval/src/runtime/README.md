@@ -11,6 +11,6 @@
 | `observation.py`、`sample_worker.py` | 采样预算、双时钟锚点计算、轮询及后台采样取消与线程退出 |
 | `paths.py`、`java_runtime.py` | 当前仓库制品位置与 Java 21 执行环境支持 |
 
-Master 控制路由由 `../adapters/master_control.py` 定义，通用网络传输不包含服务专用路径。客户端协议和 Java mock 资源布局位于 `../adapters/`；资源作用域与最终状态裁决位于 `../scenario/`；取证扩展合同位于 `../case_api/`；启动记录及证据格式读写位于 `../artifacts/`。本包只依赖标准库及包内机制，不导入这些调用方。
+Master 控制路由由 `../adapters/master_control.py` 定义，通用网络传输不包含服务专用路径。客户端协议和 Java mock 资源布局位于 `../adapters/`；资源作用域与最终状态裁决位于 `../scenario/`；取证与执行合同位于 `../scenario/contracts.py`；启动记录及证据格式读写位于 `../artifacts/`。本包只依赖标准库及包内机制，不导入这些调用方。
 
 运行前置见[编译与运行](../../docs/development/build-and-runtime.md)，职责与执行契约见[框架结构](../../docs/architecture/framework.md)。

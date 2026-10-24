@@ -11,7 +11,7 @@ from traffic.traffic_source import materialize
 from traffic.contracts import source_priority
 
 from scenario.contracts import CheckResult, StageHandler, StageOutput
-from case_api.execution_contract import ExecutionRequirements
+from scenario.contracts import ExecutionRequirements
 from scenario.parameters import validate_fields
 from adapters.mock_control import engine_snapshot
 

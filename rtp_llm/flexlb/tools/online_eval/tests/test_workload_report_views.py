@@ -202,7 +202,7 @@ class WorkloadReportViewsTest(unittest.TestCase):
             freeze_metrics(d, "cache_scale_in")
             before = (Path(d) / "cache-gate-result.json").read_bytes()
             from dataclasses import replace
-            from case_api import registry
+            from scenario import registry
             from cases.cache_scale_in.program import GATE
             from case_registry_fixtures import entry, snapshot
             render = mock.Mock(wraps=GATE.write_report)

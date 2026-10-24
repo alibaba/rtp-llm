@@ -1,6 +1,6 @@
 """Resolve registered metric contracts without loading stores or running producers."""
 
-from case_api.registry import registry
+from scenario.registry import registry
 from monitoring.contracts import validate_measurement
 
 

@@ -117,7 +117,7 @@ def main(argv=None):
     args = parser.parse_args(argv)
     resolve_selection(args, parser)
     from contextlib import nullcontext
-    from case_api.registry import using_cases
+    from scenario.registry import using_cases
     from scenario.execution_plan import ExecutionPlanCodec, selected_cases
     try:
         if args.plan:
@@ -179,7 +179,7 @@ def run_selected(args):
     from scenario.backend import JavaMockBackend
     from scenario.runtime import StageTimeout, execute_instance
 
-    from workload.policy import execute_workload
+    from scenario.measurement import execute_workload
 
     cancelled = threading.Event()
 

@@ -7,7 +7,9 @@ import json
 
 from analysis.checks import CheckResult
 from scenario.outcome import RunOutcome, OutcomeEvidence
-from scenario.plan import CompiledInstance, json_document
+from scenario.plan import CompiledInstance
+from monitoring.quality import CollectionQuality
+from copy import deepcopy
 
 
 class StageStatus(str, Enum):
@@ -95,21 +97,40 @@ class FinalizationResult:
 class WorkloadResult:
     runtime_validity: str = "VALID"
     report_status: str | None = None
-    evidence_json: str = "{}"
+    details: dict = field(default_factory=dict)
+    quality: CollectionQuality | None = None
 
-    @classmethod
-    def read(cls, value):
-        validity = value.get("runtime_validity", "VALID")
-        if validity not in {"VALID", "INVALID"}:
+    def __post_init__(self):
+        if self.runtime_validity not in {"VALID", "INVALID"}:
             raise ValueError("invalid workload runtime validity")
-        return cls(validity, value.get("report_status"), json_document({key: val for key, val in value.items()
-                   if key not in {"runtime_validity", "report_status"}}))
+
+    @property
+    def validity(self):
+        return "INVALID" if self.runtime_validity == "INVALID" or self.quality is not None and not self.quality.valid else "VALID"
 
     def to_dict(self):
-        result = dict(json.loads(self.evidence_json), runtime_validity=self.runtime_validity)
+        result = deepcopy(self.details)
+        if self.quality is not None:
+            result.update(deepcopy(self.quality.to_dict()))
+        result["runtime_validity"] = self.validity
         if self.report_status is not None:
             result["report_status"] = self.report_status
         return result
+
+
+@dataclass(frozen=True)
+class EvidenceResult:
+    workload: WorkloadResult
+    analysis: dict
+
+
+@dataclass(frozen=True)
+class ReportResult:
+    reports: dict
+
+    def to_dict(self):
+        return dict(report=str(next(iter(self.reports.values()))),
+                    reports={name: str(path) for name, path in self.reports.items()})
 
 
 @dataclass
@@ -136,7 +157,7 @@ class RunResult:
             error_statuses=tuple(stage.status.value for stage in stages if stage.error),
             cleanup_ok=all(row.status == StageStatus.PASS for row in cleanup),
             empty_execution_status=self.execution.status if not stages else "PASS",
-            runtime_validity=self.workload.runtime_validity if self.workload else "VALID",
+            runtime_validity=self.workload.validity if self.workload else "VALID",
             delivery_statuses=tuple(row.status.value for row in self.finalization),
         ))
         if not self.error:
@@ -144,11 +165,6 @@ class RunResult:
             if detail is not None:
                 self.error = detail
         return self.outcome
-
-    def absorb_policy_result(self, value):
-        # Policy adapters may add evidence/delivery metadata; frozen checks stay owned by execution.
-        if "workload" in value:
-            self.workload = WorkloadResult.read(value["workload"])
 
     def to_dict(self):
         outcome = self.adjudicate()

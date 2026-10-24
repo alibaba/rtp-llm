@@ -1,14 +1,14 @@
 """Validate the case gate inputs and their declared metric bindings."""
 
-from case_api.metric_inputs import metric_fields
-from case_api.criteria import CriteriaContract
+from scenario.metric_inputs import metric_fields
+from scenario.criteria import CriteriaContract
 from input_contract import finite_number as finite
-from case_api.numeric_parameters import OUTPUT_DISTRIBUTION_NUMBERS
-from case_api.numeric_parameters import CAPTURE_NUMBERS
-from case_api.numeric_parameters import NONNEGATIVE
-from case_api.numeric_parameters import FRACTION
-from case_api.numeric_parameters import COUNT
-from case_api.numeric_parameters import OFFSET
+from scenario.numeric_parameters import OUTPUT_DISTRIBUTION_NUMBERS
+from scenario.numeric_parameters import CAPTURE_NUMBERS
+from scenario.numeric_parameters import NONNEGATIVE
+from scenario.numeric_parameters import FRACTION
+from scenario.numeric_parameters import COUNT
+from scenario.numeric_parameters import OFFSET
 
 OBSERVATION_INPUTS = {'sample_s': NONNEGATIVE, 'max_gap_s': NONNEGATIVE}
 SLO_INPUTS = dict.fromkeys(('ttft_ms', 'e2e_ms', 'tpot_ms'), COUNT)
@@ -40,7 +40,7 @@ def engine_roles(spec, bounds=None):
 
 # Public comparisons bind exact metrics, units and cohorts. The analyzer keeps
 # its compact numerical criteria; compilation owns this projection.
-from case_api.check_inputs import CheckSet, CheckSpec
+from scenario.check_inputs import CheckSet, CheckSpec
 
 CHECKS = CheckSet('performance_gate', {
     'offered_load': CheckSpec('qps_tolerance', 'offered_qps_deviation', 'le', 'ratio', ('measurement',), number=FRACTION),
@@ -68,8 +68,8 @@ CRITERIA = CriteriaContract({
 
 
 def compile_checks(case, checks, inputs):
-    from case_api.inputs import fields
-    from case_api.check_inputs import metric_criterion
+    from scenario.inputs import fields
+    from scenario.check_inputs import metric_criterion
 
     bindings = metric_fields(engine_tps(inputs))
     fields(checks, set(RULES) | {'engine_tps'}, 'parameters.checks')
@@ -93,7 +93,7 @@ def compile_checks(case, checks, inputs):
 
 
 def observation_contract(data):
-    from case_api.windows import anchored_windows
+    from scenario.windows import anchored_windows
     from runtime.observation import capture_limits
     bounds = anchored_windows(data["windows"], {
         "measurement": "observation_start",
@@ -166,8 +166,8 @@ def effective_profile(criteria, profile):
     return result
 
 
-from case_api.input_contract import InputContract, section_fields
-from case_api.traffic_inputs import java_flow_inputs
+from scenario.inputs import InputContract, section_fields
+from scenario.traffic_inputs import java_flow_inputs
 
 INPUTS = InputContract.from_fields({
     'traffic': java_flow_inputs(numbers={

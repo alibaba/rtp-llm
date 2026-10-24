@@ -1,6 +1,6 @@
 """Inject immutable registries without maintaining a framework case-name list."""
 from pathlib import Path
-from case_api import registry
+from scenario import registry
 
 
 def entry(name, definition, module='fixture.program', path=None):

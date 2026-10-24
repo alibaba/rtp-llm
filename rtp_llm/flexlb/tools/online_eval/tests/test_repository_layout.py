@@ -108,7 +108,7 @@ class RepositoryLayoutTest(unittest.TestCase):
     def test_source_components_are_unified(self):
         expected = {
             "monitoring", "traffic", "runtime", "cases", "scenario", "adapters",
-            "workload", "analysis", "reporting", "artifacts", "case_api", "diagnostics",
+            "analysis", "reporting", "artifacts",
         }
         self.assertEqual(expected, {p.name for p in (ROOT / "src").iterdir() if p.is_dir() and p.name != "__pycache__"})
         for old_package in ("online_eval", "flexlb_test_framework", "stress", "flexlb_eval"):

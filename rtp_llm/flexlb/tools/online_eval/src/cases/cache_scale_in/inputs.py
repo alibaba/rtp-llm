@@ -3,14 +3,14 @@
 from cases.cache_scale_in.constants import SHARED_WARMUP_AFFINITY_MS
 
 from input_contract import NumberRule
-from case_api.numeric_parameters import CAPTURE_NUMBERS
-from case_api.numeric_parameters import FRACTION
-from case_api.numeric_parameters import NONNEGATIVE
-from case_api.numeric_parameters import COUNT
-from case_api.numeric_parameters import OFFSET
+from scenario.numeric_parameters import CAPTURE_NUMBERS
+from scenario.numeric_parameters import FRACTION
+from scenario.numeric_parameters import NONNEGATIVE
+from scenario.numeric_parameters import COUNT
+from scenario.numeric_parameters import OFFSET
 from scenario.parameters import validate_fields
-from case_api.metric_inputs import metric_fields
-from case_api.criteria import CriteriaContract
+from scenario.metric_inputs import metric_fields
+from scenario.criteria import CriteriaContract
 
 PROCEDURE_INPUTS = {
     'target_p': COUNT, 'removal_mode': None, 'drain_timeout_ms': COUNT,
@@ -51,7 +51,7 @@ def engine_counters(spec):
     return spec
 
 
-from case_api.check_inputs import CheckSet, CheckSpec
+from scenario.check_inputs import CheckSet, CheckSpec
 
 CHECKS = CheckSet('cache_gate', {
     'offered_load': CheckSpec('qps_tolerance', 'offered_qps_deviation', 'le', 'ratio', ('baseline', 'post'), number=FRACTION),
@@ -71,8 +71,8 @@ CRITERIA = CriteriaContract({
 
 
 def compile_checks(case, checks, policy):
-    from case_api.inputs import fields
-    from case_api.check_inputs import metric_criterion
+    from scenario.inputs import fields
+    from scenario.check_inputs import metric_criterion
 
     fields(checks, set(RULES) | {'collapse'}, 'parameters.checks')
     fields(policy, {'absolute_min_hit', 'max_drop', 'sustain_s'}, 'parameters.analysis.collapse')
@@ -87,7 +87,7 @@ def compile_checks(case, checks, policy):
 
 
 def observation_contract(data):
-    from case_api.windows import anchored_windows
+    from scenario.windows import anchored_windows
     from runtime.observation import capture_limits
     windows = anchored_windows(data["windows"], {
         "baseline": "baseline_ready", "post": "target_topology_observed",
@@ -162,8 +162,8 @@ def validate_criteria(params, plan):
     return p
 
 
-from case_api.input_contract import InputContract, section_fields
-from case_api.traffic_inputs import java_flow_inputs
+from scenario.inputs import InputContract, section_fields
+from scenario.traffic_inputs import java_flow_inputs
 
 INPUTS = InputContract.from_fields({
     'traffic': java_flow_inputs(max_requests=True),
