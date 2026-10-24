@@ -2,6 +2,7 @@ package org.flexlb.balance.scheduler;
 
 import org.flexlb.balance.delivery.BatchDeliveryStrategy;
 import org.flexlb.balance.delivery.DeliveryBlockReason;
+import org.flexlb.balance.delivery.DeliveryGroup;
 import org.flexlb.balance.delivery.DeliveryMetrics;
 import org.flexlb.balance.delivery.DeliveryResult;
 import org.flexlb.balance.delivery.DeliveryStrategy;
@@ -114,7 +115,7 @@ public final class DeliveryStrategyTestSupport {
                        String decisionReason,
                        int remainingQueueDepth,
                        OptionalLong plannedPredictionMs) {
-            try (DeliveryTransaction transaction = strategy.prepare(candidates, EVALUATOR, plannedPredictionMs)) {
+            try (DeliveryTransaction transaction = strategy.prepare(new DeliveryGroup(candidates, EVALUATOR, plannedPredictionMs))) {
                 if (transaction.requests().isEmpty()) {
                     emptyBoundary = new TestBoundary(
                             transaction.blocked().item(),

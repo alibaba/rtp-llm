@@ -2,6 +2,7 @@ package org.flexlb.balance.endpoint;
 
 import org.flexlb.balance.delivery.BlockedRequest;
 import org.flexlb.balance.delivery.DeliveryBlockReason;
+import org.flexlb.balance.delivery.DeliveryGroup;
 import org.flexlb.balance.delivery.DeliveryResult;
 import org.flexlb.balance.delivery.DeliveryStrategy;
 import org.flexlb.balance.delivery.DeliveryTransaction;
@@ -42,7 +43,6 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.AdditionalAnswers.delegatesTo;
 import static org.mockito.ArgumentMatchers.any;
-import static org.mockito.ArgumentMatchers.anyList;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doAnswer;
@@ -129,18 +129,18 @@ class WorkerBatcherRequestCapacityTest {
         try (Fixture fixture = fixture(config)) {
             DeliveryStrategy live = EndpointTestSupport.liveRouteStrategy(fixture.runtime);
             doAnswer(invocation -> {
-                List<ScheduledRequest> candidates = invocation.getArgument(0);
+                List<ScheduledRequest> candidates = ((DeliveryGroup) invocation.getArgument(0)).requests();
                 if (candidates.getFirst().requestId().equals("1")) {
                     DeliveryTransaction transaction =
-                            live.prepare(candidates, invocation.getArgument(1), invocation.getArgument(2));
+                            live.prepare(invocation.getArgument(0));
                     assertEquals(1, transaction.requests().size());
                     prepared.countDown();
                     assertTrue(resume.await(5, TimeUnit.SECONDS));
                     return transaction;
                 }
                 replacementSelected.countDown();
-                return fixture.parked.prepare(candidates, invocation.getArgument(1), invocation.getArgument(2));
-            }).when(fixture.delivery).prepare(anyList(), any(), any());
+                return fixture.parked.prepare(invocation.getArgument(0));
+            }).when(fixture.delivery).prepare(any());
             ScheduledRequest victim = item(config, fixture.endpoint, 1L);
             ScheduledRequest incoming = item(config, fixture.endpoint, 2L, 90);
             try {
@@ -315,9 +315,8 @@ class WorkerBatcherRequestCapacityTest {
         };
         try (Fixture fixture = fixture(() -> config, availability, "127.0.0.1", runtime)) {
             DeliveryStrategy live = EndpointTestSupport.liveRouteStrategy(fixture.runtime);
-            doAnswer(invocation -> live.prepare(invocation.getArgument(0),
-                    invocation.getArgument(1), invocation.getArgument(2)))
-                    .when(fixture.delivery).prepare(anyList(), any(), any());
+            doAnswer(invocation -> live.prepare(invocation.getArgument(0)))
+                    .when(fixture.delivery).prepare(any());
             ScheduledRequest delivered = item(config, fixture.endpoint, 1L);
             fixture.queueCapacity.increaseTotalQueueCount(delivered.future());
             assertTrue(EndpointTestSupport.offer(fixture.endpoint, delivered));
@@ -343,14 +342,14 @@ class WorkerBatcherRequestCapacityTest {
         try (Fixture fixture = fixture(config)) {
             CountDownLatch failed = new CountDownLatch(1);
             doAnswer(invocation -> {
-                List<ScheduledRequest> candidates = invocation.getArgument(0);
+                List<ScheduledRequest> candidates = ((DeliveryGroup) invocation.getArgument(0)).requests();
                 DeliveryTransaction transaction = mock(DeliveryTransaction.class);
                 when(transaction.requests()).thenReturn(List.of());
                 when(transaction.blocked()).thenReturn(new BlockedRequest(
                         candidates.getFirst(),
                         DeliveryBlockReason.failed(new IllegalStateException("delivery preparation failed"))));
                 return transaction;
-            }).when(fixture.delivery).prepare(anyList(), any(), any());
+            }).when(fixture.delivery).prepare(any());
             doAnswer(invocation -> {
                 failed.countDown();
                 return null;
@@ -494,11 +493,11 @@ class WorkerBatcherRequestCapacityTest {
             CountDownLatch prepared = new CountDownLatch(1);
             AtomicInteger groupSize = new AtomicInteger();
             doAnswer(invocation -> {
-                List<ScheduledRequest> items = invocation.getArgument(0);
+                List<ScheduledRequest> items = ((DeliveryGroup) invocation.getArgument(0)).requests();
                 groupSize.set(items.size());
                 prepared.countDown();
-                return fixture.parked.prepare(items, invocation.getArgument(1), invocation.getArgument(2));
-            }).when(fixture.delivery).prepare(anyList(), any(), any());
+                return fixture.parked.prepare(invocation.getArgument(0));
+            }).when(fixture.delivery).prepare(any());
             assertEquals(2, fixture.endpoint.captureRouteProjectionInputs().queue().constraints().maxRequests());
             assertTrue(EndpointTestSupport.offer(fixture.endpoint, item(config, fixture.endpoint, 1L)));
             assertFalse(prepared.await(100L, TimeUnit.MILLISECONDS));

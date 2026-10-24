@@ -1542,8 +1542,7 @@ class PrefillEndpointTest {
             Object transaction = invocation.callRealMethod();
             firstPreparation.countDown();
             return transaction;
-        }).when(strategy).prepare(org.mockito.Mockito.anyList(),
-                org.mockito.Mockito.any(), org.mockito.Mockito.any());
+        }).when(strategy).prepare(org.mockito.Mockito.any());
         PrefillEndpoint routeEndpoint = EndpointTestSupport.standalonePrefillEndpoint(
                 EndpointTestSupport.workerStatus(RoleType.PREFILL, "127.0.0.10", 8080, 8090),
                 routeConfig, strategy, runtime.events(), endpointReporter);
@@ -1584,8 +1583,7 @@ class PrefillEndpointTest {
             preparationCount.incrementAndGet();
             firstPreparation.countDown();
             return transaction;
-        }).when(strategy).prepare(org.mockito.Mockito.anyList(),
-                org.mockito.Mockito.any(), org.mockito.Mockito.any());
+        }).when(strategy).prepare(org.mockito.Mockito.any());
         PrefillEndpoint routeEndpoint = EndpointTestSupport.standalonePrefillEndpoint(
                 EndpointTestSupport.workerStatus(RoleType.PREFILL, "127.0.0.11", 8080, 8090),
                 routeConfig, strategy, runtime.events(), endpointReporter);

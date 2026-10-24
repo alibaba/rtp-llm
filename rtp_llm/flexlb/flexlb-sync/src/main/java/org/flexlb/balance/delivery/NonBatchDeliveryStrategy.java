@@ -11,7 +11,6 @@ import org.flexlb.balance.scheduler.ScheduledRequest;
 
 import java.util.ArrayList;
 import java.util.List;
-import java.util.OptionalLong;
 
 import static org.flexlb.balance.scheduler.PrefillAdmissionResources.missingEndpoint;
 
@@ -30,18 +29,9 @@ public final class NonBatchDeliveryStrategy implements DeliveryStrategy {
     }
 
     @Override
-    public DeliveryTransaction prepare(List<ScheduledRequest> candidates,
-                                       PrefillTimePredictor.Evaluator evaluator,
-                                       OptionalLong plannedPredictionMs) {
-        if (candidates.isEmpty()) {
-            throw new IllegalArgumentException(
-                    "route delivery requires at least one candidate");
-        }
-        return prepareTransaction(candidates, evaluator);
-    }
-
-    private NonBatchTransaction prepareTransaction(List<ScheduledRequest> candidates,
-                                                PrefillTimePredictor.Evaluator evaluator) {
+    public DeliveryTransaction prepare(DeliveryGroup group) {
+        List<ScheduledRequest> candidates = group.requests();
+        PrefillTimePredictor.Evaluator evaluator = group.evaluator();
         ScheduledRequest head = candidates.get(0);
         List<ScheduledRequest> requestsPreparedForDelivery = new ArrayList<>(candidates.size());
         PrefillEndpoint prefill = head.prefillEp();

@@ -1,6 +1,7 @@
 package org.flexlb.balance.scheduler;
 
 import org.flexlb.balance.delivery.DeliveryBlockReason;
+import org.flexlb.balance.delivery.DeliveryGroup;
 import org.flexlb.balance.delivery.DeliveryStrategy;
 import org.flexlb.balance.delivery.DeliveryTransaction;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
@@ -21,7 +22,6 @@ import org.junit.jupiter.api.Test;
 
 import java.util.ArrayList;
 import java.util.List;
-import java.util.OptionalLong;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.atomic.AtomicInteger;
 
@@ -263,9 +263,8 @@ class WorkerBatcherQueueTest {
                 };
 
         @Override
-        public DeliveryTransaction prepare(List<ScheduledRequest> candidates,
-                                           PrefillTimePredictor.Evaluator evaluator,
-                                           OptionalLong plannedPrediction) {
+        public DeliveryTransaction prepare(DeliveryGroup group) {
+            List<ScheduledRequest> candidates = group.requests();
             attempts.incrementAndGet();
             return WorkerBatcherTestSupport.boundaryOnly(
                     candidates.getFirst(),

@@ -1,6 +1,7 @@
 package org.flexlb.balance.scheduler;
 
 import org.flexlb.balance.delivery.BatchDeliveryStrategy;
+import org.flexlb.balance.delivery.DeliveryGroup;
 import org.flexlb.balance.delivery.DeliveryMetrics;
 import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.DeliverySettlementTestSupport;
@@ -218,7 +219,7 @@ class QueuedBatchDeliveryTest {
             await(releaseRpc);
             return reply;
         });
-        try (var transaction = strategy.prepare(List.of(item), new FormulaPredictor("100"), OptionalLong.empty());
+        try (var transaction = strategy.prepare(new DeliveryGroup(List.of(item), new FormulaPredictor("100"), OptionalLong.empty()));
              var contender = java.util.concurrent.Executors.newSingleThreadExecutor()) {
             var preceding = transaction.commit();
             transaction.deliver("blocked-rpc", 0, preceding);
@@ -248,7 +249,7 @@ class QueuedBatchDeliveryTest {
         var rejectingStrategy = new BatchDeliveryStrategy(
                 () -> org.flexlb.balance.delivery.DeliveryBlockReason.Attempt.accepted(submission),
                 () -> 201L, registry, new DeliveryMetrics(mock(BatchSchedulerReporter.class)));
-        try (var transaction = rejectingStrategy.prepare(List.of(item), new FormulaPredictor("100"), OptionalLong.empty())) {
+        try (var transaction = rejectingStrategy.prepare(new DeliveryGroup(List.of(item), new FormulaPredictor("100"), OptionalLong.empty()))) {
             var preceding = transaction.commit();
             assertSame(rejection, assertThrows(java.util.concurrent.RejectedExecutionException.class,
                     () -> transaction.deliver("rejected", 0, preceding)));
@@ -302,7 +303,7 @@ class QueuedBatchDeliveryTest {
     }
 
     private void submit(List<ScheduledRequest> items) {
-        try (var transaction = strategy.prepare(items, new FormulaPredictor("100 * batchSize"), OptionalLong.empty())) {
+        try (var transaction = strategy.prepare(new DeliveryGroup(items, new FormulaPredictor("100 * batchSize"), OptionalLong.empty()))) {
             assertEquals(items, transaction.requests());
             var preceding = transaction.commit();
             transaction.deliver("queued-race", 0, preceding);

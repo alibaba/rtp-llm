@@ -48,20 +48,10 @@ public final class BatchDeliveryStrategy implements DeliveryStrategy {
     }
 
     @Override
-    public DeliveryTransaction prepare(List<ScheduledRequest> candidates,
-                                       PrefillTimePredictor.Evaluator evaluator,
-                                       OptionalLong plannedPredictionMs) {
-        if (candidates.isEmpty()) {
-            throw new IllegalArgumentException(
-                    "batch delivery requires at least one candidate");
-        }
-        return admit(candidates, evaluator, plannedPredictionMs);
-    }
-
-    private BatchTransaction admit(
-            List<ScheduledRequest> candidates,
-            PrefillTimePredictor.Evaluator evaluator,
-            OptionalLong plannedPredictionMs) {
+    public DeliveryTransaction prepare(DeliveryGroup group) {
+        List<ScheduledRequest> candidates = group.requests();
+        PrefillTimePredictor.Evaluator evaluator = group.evaluator();
+        OptionalLong plannedPredictionMs = group.plannedPredictionMs();
         ScheduledRequest head = candidates.get(0);
 
         DeliveryBlockReason.Attempt<BatchTransaction> groupAttempt =

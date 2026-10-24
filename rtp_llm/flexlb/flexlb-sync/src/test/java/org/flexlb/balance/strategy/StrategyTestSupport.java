@@ -2,6 +2,7 @@ package org.flexlb.balance.strategy;
 
 import org.flexlb.balance.delivery.BlockedRequest;
 import org.flexlb.balance.delivery.DeliveryBlockReason;
+import org.flexlb.balance.delivery.DeliveryGroup;
 import org.flexlb.balance.delivery.DeliveryMetrics;
 import org.flexlb.balance.delivery.DeliveryStrategy;
 import org.flexlb.balance.delivery.DeliveryTransaction;
@@ -206,9 +207,9 @@ final class StrategyTestSupport {
                 requests, NOOP_METRICS);
         DeliveryStrategy delivery = Mockito.mock(DeliveryStrategy.class);
         Mockito.when(delivery.prepare(
-                        Mockito.anyList(), Mockito.any(), Mockito.any()))
+                        Mockito.any()))
                 .thenAnswer(invocation -> {
-                    List<ScheduledRequest> candidates = invocation.getArgument(0);
+                    List<ScheduledRequest> candidates = ((DeliveryGroup) invocation.getArgument(0)).requests();
             DeliveryTransaction transaction = Mockito.mock(DeliveryTransaction.class);
             Mockito.when(transaction.requests()).thenReturn(List.of());
                     Mockito.when(transaction.blocked())

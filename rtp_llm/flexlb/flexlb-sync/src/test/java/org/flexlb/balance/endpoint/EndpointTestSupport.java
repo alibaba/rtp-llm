@@ -3,6 +3,7 @@ package org.flexlb.balance.endpoint;
 import org.flexlb.balance.delivery.BatchDeliveryStrategy;
 import org.flexlb.balance.delivery.BlockedRequest;
 import org.flexlb.balance.delivery.DeliveryBlockReason;
+import org.flexlb.balance.delivery.DeliveryGroup;
 import org.flexlb.balance.delivery.DeliveryMetrics;
 import org.flexlb.balance.delivery.DeliveryResult;
 import org.flexlb.balance.delivery.DeliveryStrategy;
@@ -180,11 +181,9 @@ public final class EndpointTestSupport {
         DeliveryStrategy delivery = org.mockito.Mockito.mock(
                 DeliveryStrategy.class);
         org.mockito.Mockito.when(delivery.prepare(
-                        org.mockito.Mockito.anyList(),
-                        org.mockito.Mockito.any(),
                         org.mockito.Mockito.any()))
                 .thenAnswer(invocation -> {
-                    List<ScheduledRequest> candidates = invocation.getArgument(0);
+                    List<ScheduledRequest> candidates = ((DeliveryGroup) invocation.getArgument(0)).requests();
                     DeliveryTransaction transaction = org.mockito.Mockito.mock(DeliveryTransaction.class);
                     org.mockito.Mockito.when(transaction.requests()).thenReturn(List.of());
                     org.mockito.Mockito.when(transaction.blocked())

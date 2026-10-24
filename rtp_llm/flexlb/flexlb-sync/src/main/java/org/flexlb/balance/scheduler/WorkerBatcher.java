@@ -2,6 +2,7 @@ package org.flexlb.balance.scheduler;
 
 import org.flexlb.balance.delivery.BlockedRequest;
 import org.flexlb.balance.delivery.DeliveryBlockReason;
+import org.flexlb.balance.delivery.DeliveryGroup;
 import org.flexlb.balance.delivery.DeliveryStrategy;
 import org.flexlb.balance.delivery.DeliveryTransaction;
 import org.flexlb.balance.endpoint.DecodeEndpoint.DecodeRoutingView;
@@ -1243,7 +1244,7 @@ public final class WorkerBatcher {
             return BatcherCycleResult.NO_ACTION;
         }
         try (DeliveryTransaction transaction =
-                deliveryStrategy.prepare(candidates, evaluator, plannedCommittedPredictionMs)) {
+                deliveryStrategy.prepare(new DeliveryGroup(candidates, evaluator, plannedCommittedPredictionMs))) {
             if (transaction.requests().isEmpty()) {
                 return commitBoundary(transaction.blocked());
             }
