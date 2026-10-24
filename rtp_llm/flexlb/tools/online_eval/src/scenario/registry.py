@@ -7,11 +7,16 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field
 from importlib import import_module
 from pathlib import Path
-from types import MappingProxyType
-from typing import Mapping
+from types import MappingProxyType, ModuleType
+from typing import TYPE_CHECKING, Callable, Mapping
+
+if TYPE_CHECKING:
+    from reporting.view_model import ViewDefinition
+    from scenario.inputs import InputSchema
 
 from input_contract import validate_call
-from scenario.contracts import ExecutionRequirements, ProgramBuilder, SourceFactory, ViewRenderer, ViewValidator
+from monitoring.sources import EvidenceSource
+from scenario.contracts import ExecutionRequirements, ProgramBuilder, ViewRenderer, ViewValidator
 
 
 @dataclass(frozen=True)
@@ -30,23 +35,15 @@ class ReportView:
 
 
 @dataclass(frozen=True)
-class EvidenceSource:
-    factory: SourceFactory
-    fields: frozenset[str]
-    label: str
-    required_fields: frozenset[str] = frozenset()
-
-
-@dataclass(frozen=True)
 class CaseDefinition:
     builders: Mapping[str, ProgramBuilder]
     actions: tuple = ()
     report_views: Mapping[str, ReportView] = field(default_factory=dict)
-    metrics: object = None
+    metrics: ModuleType | None = None
     sources: Mapping[str, EvidenceSource] = field(default_factory=dict)
 
     execution_requirements: ExecutionRequirements = field(default_factory=ExecutionRequirements)
-    input_schema: object = None
+    input_schema: InputSchema | None = None
 
     def __post_init__(self):
         if not isinstance(self.execution_requirements, ExecutionRequirements):
@@ -77,7 +74,7 @@ class RegisteredCase:
 class CaseRegistry:
     cases: Mapping[str, RegisteredCase]
     views: Mapping[str, ReportView]
-    metric_contracts: Mapping
+    metric_contracts: Mapping[str, Callable[[str, str, dict | None], dict]]
     sources: Mapping[str, EvidenceSource]
 
     def capability(self, kind, name, *, case):
@@ -185,7 +182,7 @@ def discover(root=None, *, package="cases", names=None):
 _snapshot = None
 
 
-def registry():
+def registry() -> CaseRegistry:
     global _snapshot
     if _snapshot is None:
         _snapshot = discover()
@@ -217,15 +214,16 @@ def using_cases(names):
         _snapshot = available
 
 
-def load_metric_plan(name, *, capabilities=None):
+def load_metric_plan(name: str, *, capabilities: CaseRegistry | None = None) -> dict:
     """Bind a declarative plan to the currently admitted case capabilities."""
+    # Bind after case discovery; case programs import this composition module.
     from monitoring.query_plan import load_plan
 
     current = registry() if capabilities is None else capabilities
     return load_plan(name, contracts=current.metric_contracts, sources=current.sources)
 
 
-def view(name, *, capabilities=None):
+def view(name: str, *, capabilities: CaseRegistry | None = None) -> ViewDefinition:
     """Compose case-owned validation with the generic presentation reader."""
     from functools import partial
 

@@ -3,12 +3,12 @@
 import math
 from dataclasses import dataclass, replace
 from inspect import signature
-from typing import Optional
+from typing import NoReturn, Optional
 
 from document_io import DocumentError
 
 
-def fail(path, message):
+def fail(path: object, message: str) -> NoReturn:
     raise DocumentError(f"{path}: {message}")
 
 

@@ -34,6 +34,8 @@ class LineageProjection:
         cap = result.max_input_tokens
         if cap is not None and (type(cap) is not int or not 1 <= cap <= 2147483647):
             raise ValueError("invalid input length filter")
+        assert JAVA_LENGTH.minimum is not None and JAVA_LENGTH.maximum is not None
+        assert PRIORITY.minimum is not None and PRIORITY.maximum is not None
         if (
             type(result.output_tokens) is not int
             or not JAVA_LENGTH.minimum <= result.output_tokens <= JAVA_LENGTH.maximum

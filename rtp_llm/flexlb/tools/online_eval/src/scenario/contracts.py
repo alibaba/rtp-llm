@@ -52,10 +52,6 @@ class ViewRenderer(Protocol):
     def __call__(self, directory: Path, analysis: dict, presentation: dict, deadline: Deadline | None = None) -> Path: ...
 
 
-class SourceFactory(Protocol):
-    def __call__(self, environment: object, fields: set[str]) -> dict: ...
-
-
 @dataclass(frozen=True)
 class StageHandler:
     """validate(params, plan) -> normalized params; execute(ctx, params, deadline).
@@ -71,11 +67,11 @@ class StageHandler:
     outputs: dict[str, str]
     requires: frozenset[str] = frozenset()
     checks: frozenset[str] | Callable[[dict], frozenset[str]] = frozenset()
-    max_dynamic_additions: object = 0  # nonnegative int or normalized-params -> int
+    max_dynamic_additions: int | Callable[[dict], int] = 0  # nonnegative int or normalized-params -> int
     # Maximum fresh worker population requested by this stage (not additions).
     # Callable receives normalized params and the selected profile.
-    max_environment_workers: object = 0
-    next_environment: object = None  # normalized params -> next raw environment
+    max_environment_workers: int | Callable[[dict, str], int] = 0
+    next_environment: Callable[[dict], dict] | None = None  # normalized params -> next raw environment
     execution_requirements: ExecutionRequirements = field(default_factory=ExecutionRequirements)
     owners: frozenset[str] = frozenset()  # empty means foundational
 

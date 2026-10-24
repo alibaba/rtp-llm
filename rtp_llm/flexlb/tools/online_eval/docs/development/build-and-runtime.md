@@ -22,7 +22,7 @@ python3 scripts/commands/check_quality.py
 python3 -m pytest -q -ra
 ```
 
-`pyproject.toml` 统一 Ruff 与 mypy 配置。Ruff 检查源码、脚本、根模块及测试的语法、未定义名称、未使用导入和变量，执行 import 排序及格式检查。mypy 扫描同一全库范围，采用基础渐进检查：检查已有注解与类型边界，未注解的函数体仍由运行回归验证；这不是全库 strict 标注覆盖。类型错误直接阻断，不维护业务错误白名单或源码排除目录；缺失 stub 的豁免仅限第三方 gRPC/Protobuf 模块，项目内部导入错误不豁免。根模块另经 AST 检查，包含函数内部导入，不得依赖业务包。`.importlinter` 检查直接及间接依赖边界：分析不得依赖报表；case 输入不得依赖编译器；`scenario` 的 builder、输入、执行和门禁合同不得依赖业务 case 或测量编排；scenario 库不得依赖命令脚本；制品存储不得依赖展示和执行；运行底座不得依赖业务层；采集与报告不得反向依赖执行注册表或 case。case 模块使用通配匹配，新增 case 不修改边界名单。`online-eval-quality` 工作流在相关 push、PR 和手动触发时执行这些检查。pytest 配置统一设置项目导入路径，测试入口将该路径传给真实子解释器。工作流安装 Prometheus 并运行完整 Python 测试集；本地运行同样需要 Prometheus 和质量检查依赖。根仓库的 pre-commit 对本目录调用同一个质量入口，其他组件保留原 Black/isort 钩子。运行场景 CI 之前也应执行同一入口。
+`pyproject.toml` 统一 Ruff 与 mypy 配置。 排版采用 140 列并跳过尾逗号强制展开；不按行长拆分静态表和诊断字符串。语法目标保持 Python 3.9，CI 使用 Python 3.11 验证，不因注解改写提高运行版本要求。Ruff 检查源码、脚本、根模块及测试的语法、未定义名称、未使用导入和变量，执行 import 排序及格式检查。mypy 扫描同一全库范围，采用基础渐进检查：检查已有注解与类型边界，runtime/adapters 也检查无注解函数体；其他包未注解的函数体仍由运行回归验证；这不是全库 strict 标注覆盖。类型错误直接阻断，不维护业务错误白名单或源码排除目录；缺失 stub 的豁免仅限第三方 gRPC/Protobuf 模块，项目内部导入错误不豁免。根模块另经 AST 检查，包含函数内部导入，不得依赖业务包。`.importlinter` 检查直接及间接依赖边界：分析不得依赖报表；case 输入不得依赖编译器；`scenario` 的 builder、输入、执行和门禁合同不得依赖业务 case 或测量编排；scenario 库不得依赖命令脚本；制品存储不得依赖展示和执行；运行底座不得依赖业务层；采集与报告不得反向依赖执行注册表或 case。case 模块使用通配匹配，新增 case 不修改边界名单。`online-eval-quality` 工作流在相关 push、PR 和手动触发时执行这些检查。pytest 配置统一设置项目导入路径，测试入口将该路径传给真实子解释器。工作流安装 Prometheus 并运行完整 Python 测试集；本地运行同样需要 Prometheus 和质量检查依赖。根仓库的 pre-commit 对本目录调用同一个质量入口，其他组件保留原 Black/isort 钩子。运行场景 CI 之前也应执行同一入口。
 
 ```bash
 ./mvnw -P'opensource,!internal' \
@@ -126,3 +126,6 @@ python3 tools/online_eval/scripts/commands/list_cases.py \
 `environment.zookeeper` 仅用于 `dual_zookeeper`，可声明 `mode: helper` 和 `session_timeout_ms`，或声明 `mode: external`、`address`（host:port 列表，可带 chroot）与会话超时。helper 是测试依赖，独占启动并随环境回收；external 不启动或停止外部服务。每个运行使用独立的选举 role，避免不同实验共用外部 ZK 时互相选举。未配置 ZK 的普通用例不准备或启动 helper；CI 根据编译选择自动准备所需运行时。
 
 HA 的选举门禁检查唯一 leader、所有存活 Master 的领导权视图收敛、存活节点接管及重启节点回归；快照进入实验产物。独立 Master 重启验证不覆盖这些语义。测试 helper 不代表生产 ZK 集群的 quorum、网络分区或集群容灾；这些目标需要外部 ZK 环境与相应故障步骤。
+
+
+公开边界优先复用已有领域类型、内置容器和 Callable；JSON 在文件及进程边界转换，不为消除 dict 再建平行模型。修改公共接口时补充参数和返回类型；函数说明保留非显然的约束与原因，不以 docstring 覆盖率为目标。整数准入可以用精确类型判断拒绝 bool，不机械替换为 isinstance。作者态契约校验可以使用 fail 回调，运行态抛出现有领域异常；错误包含字段位置、实际值和约束，不为统一名称修改异常捕获关系。函数内 import 仅在避免初始化递归、保持加载边界或可选依赖时保留，并说明关键原因。新测试默认 pytest；共享数据放入测试支持模块，不能从测试类实例取得。资源句柄只在明确转移所有权时跨函数返回。

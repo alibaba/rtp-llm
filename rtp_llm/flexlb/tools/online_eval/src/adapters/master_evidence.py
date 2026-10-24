@@ -1,5 +1,7 @@
 """Decode Master owner ledgers without readiness, polling or case policy."""
 
+from __future__ import annotations
+
 
 def scheduler_inflight(data):
     value = data["scheduler_inflight"]
@@ -49,7 +51,7 @@ def worker_counts(info, roles):
         summary = {}
     if not isinstance(summary, dict):
         raise ValueError("invalid worker summary")
-    counts = {}
+    counts: dict[str, tuple[int, int] | None] = {}
     for role in roles:
         row = summary.get(role)
         if row is None:

@@ -22,5 +22,9 @@ ignore_missing_imports = false
 warn_unused_ignores = true
 
 [[tool.mypy.overrides]]
+module = ["runtime", "runtime.*", "adapters", "adapters.*"]
+check_untyped_defs = true
+
+[[tool.mypy.overrides]]
 module = ["grpc", "grpc.*", "grpc_tools", "grpc_tools.*", "google.protobuf", "google.protobuf.*"]
 ignore_missing_imports = true

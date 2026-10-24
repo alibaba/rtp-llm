@@ -110,3 +110,20 @@ def test_type_checker_rejects_bad_calls_with_project_configuration(tmp_path):
     )
     assert result.returncode != 0
     assert "arg-type" in result.stdout
+
+
+@pytest.mark.parametrize("package", ["runtime", "adapters"])
+def test_unannotated_function_bodies_are_checked_in_foundation_packages(tmp_path, package):
+    root = tmp_path / package
+    root.mkdir()
+    (root / "__init__.py").write_text("")
+    source = root / "bad_body.py"
+    source.write_text('def operation():\n    count: int = "wrong"\n')
+    result = subprocess.run(
+        [sys.executable, "-m", "mypy", "--config-file", str(ROOT / "pyproject.toml"), str(root)],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode != 0
+    assert "assignment" in result.stdout

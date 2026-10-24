@@ -1,14 +1,17 @@
 """Validated, declarative Prometheus queries for a case's monitoring plan."""
 
+from __future__ import annotations
+
 import re
 from pathlib import Path
+from typing import Callable, Mapping
 
 from document_io import DocumentError as ScenarioError
 from document_io import load_document
 from monitoring.contracts import validate_measurement
 from monitoring.identity import METRIC_ID, NAME, SOURCE_KINDS
 from monitoring.measurement_contract import output_contract
-from monitoring.sources import selected_sources
+from monitoring.sources import EvidenceSource, selected_sources
 from schema_contract import matches_schema
 
 CATALOG = Path(__file__).resolve().parents[2] / "config/monitoring"
@@ -19,7 +22,13 @@ _TOKENS = re.compile(r"\$\{([^}]+)\}")
 PLAN_VERSION = 5
 
 
-def load_plan(name, _stack=(), *, contracts=None, sources=None):
+def load_plan(
+    name: str,
+    _stack: tuple[str, ...] = (),
+    *,
+    contracts: Mapping[str, Callable[[str, str, dict | None], dict]] | None = None,
+    sources: Mapping[str, EvidenceSource] | None = None,
+) -> dict:
     """Compose data-only metric sets; duplicate IDs and include cycles are errors."""
     if not isinstance(name, str) or not _PLAN.fullmatch(name):
         raise ScenarioError("monitoring.query_plan must name a file in config/monitoring")
@@ -32,20 +41,20 @@ def load_plan(name, _stack=(), *, contracts=None, sources=None):
     ):
         raise ScenarioError(f"{path}: invalid query plan header")
     source_bindings = sources
-    sources = {kind: {} for kind in SOURCE_KINDS}
-    produced = {}
+    source_specs: dict = {kind: {} for kind in SOURCE_KINDS}
+    produced: dict = {}
     includes = _unique_strings(data.get("include", []), path, "include must contain unique metric set filenames")
     for included in includes:
         plan = load_plan(included, (*_stack, name), contracts=contracts, sources=source_bindings)
         for kind in SOURCE_KINDS:
-            _merge(sources[kind], plan["sources"][kind], path, f"metric id {kind}/")
+            _merge(source_specs[kind], plan["sources"][kind], path, f"metric id {kind}/")
         _merge(produced, plan["produced"], path, "produced metric id ")
-    _add_sources(sources, data.get("sources", {}), path)
+    _add_sources(source_specs, data.get("sources", {}), path)
     _add_produced(produced, data.get("produced", {}), path, contracts)
-    _exclude(sources, produced, data.get("exclude", []), path)
-    if not any(sources.values()) and not produced:
+    _exclude(source_specs, produced, data.get("exclude", []), path)
+    if not any(source_specs.values()) and not produced:
         raise ScenarioError(f"{path}: metric plan is empty")
-    plan = dict(metric_plan_schema_version=PLAN_VERSION, sources=sources, produced=produced)
+    plan = dict(metric_plan_schema_version=PLAN_VERSION, sources=source_specs, produced=produced)
     definitions(plan)
     try:
         selected_sources(plan, source_bindings)

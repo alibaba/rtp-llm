@@ -4,6 +4,8 @@ No raw text is stored. Token lengths are block aligned; arrival timestamps are
 never paced here. The allocation bitmap preserves v1 complete-block labels.
 """
 
+from __future__ import annotations
+
 import json
 import lzma
 
@@ -46,7 +48,7 @@ def encode(events, provenance=None, *, block_size=DEFAULT_PREFIX_BLOCK_SIZE):
     allocation = bytearray((len(events) + 7) // 8)
     total = aligned = short_count = removed = added = 0
     last = 0
-    lengths = []
+    lengths: list[int] = []
     if not 1 <= len(events) <= MAX_EVENTS:
         raise ValueError("invalid lineage event count")
     for i, event in enumerate(events):
@@ -119,7 +121,7 @@ def _parse_payload(data):
     allocation = data[offset:]
     if len(allocation) != (count + 7) // 8:
         raise ValueError("invalid lineage allocation bitmap")
-    events = []
+    events: list[tuple[int, int, int, int, int]] = []
     ts = 0
     for i, (delta, blocks, distance, shared) in enumerate(zip(*columns)):
         ts += (delta >> 1) ^ -(delta & 1)

@@ -11,8 +11,8 @@ def error_trailer_evidence(exc, pb2):
     Keep at most 64 KiB of each of the first two matching values; retain length
     and SHA256 for oversized values. gRPC itself bounds received metadata.
     """
-    result = dict(trailer_error_code=None, trailer_error_message=None)
-    evidence = dict(status="absent", values=[])
+    result: dict = dict(trailer_error_code=None, trailer_error_message=None)
+    evidence: dict = dict(status="absent", values=[])
     result["error_trailer"] = evidence
     try:
         read = getattr(exc, "trailing_metadata", None)

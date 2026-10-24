@@ -6,12 +6,23 @@ import json
 import math
 from importlib.util import find_spec
 from pathlib import Path
+from typing import Callable
 
 from monitoring.contracts import MetricContractError, validate_definition, validate_observation
 from monitoring.measurement_contract import output_contract
+from monitoring.metric_store import MetricStore
 
 
-def publish(store, metric_id, definition, rows, *, producer, evidence, describe):
+def publish(
+    store: MetricStore,
+    metric_id: str,
+    definition: dict,
+    rows: list[dict],
+    *,
+    producer: str,
+    evidence: str,
+    describe: Callable[[str, str, dict | None], dict],
+) -> None:
     """A declared Python producer publishes numeric data with explicit provenance."""
 
     validate_definition(definition, metric_id, publication=True)
@@ -47,7 +58,7 @@ def publish(store, metric_id, definition, rows, *, producer, evidence, describe)
         if not isinstance(row, dict):
             raise MetricContractError("invalid produced observation")
         epoch = row.get("epoch")
-        if type(epoch) not in (int, str) or not str(epoch).isdecimal() or int(epoch) < 1:
+        if type(epoch) not in (int, str) or not str(epoch).isdecimal() or int(str(epoch)) < 1:
             raise MetricContractError("produced series requires a positive environment epoch")
         observation = dict(
             metric_id=metric_id,

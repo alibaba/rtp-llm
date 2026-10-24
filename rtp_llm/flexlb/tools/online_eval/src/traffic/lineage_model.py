@@ -133,7 +133,7 @@ class LineageModel:
 
     def to_wire(self):
         if self.metadata.version == 2:
-            events = [
+            aligned_events = [
                 (
                     event.timestamp_ms,
                     event.input_tokens // self.metadata.block_size,
@@ -144,8 +144,9 @@ class LineageModel:
                 for event in self.events
             ]
         else:
-            events = [[event.timestamp_ms, event.input_tokens, event.parent_index, event.shared_full_blocks] for event in self.events]
-        return self.metadata.to_dict(), events
+            exact_events = [[event.timestamp_ms, event.input_tokens, event.parent_index, event.shared_full_blocks] for event in self.events]
+            return self.metadata.to_dict(), exact_events
+        return self.metadata.to_dict(), aligned_events
 
 
 @dataclass(frozen=True)

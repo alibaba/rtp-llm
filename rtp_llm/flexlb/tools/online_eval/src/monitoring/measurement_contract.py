@@ -1,9 +1,11 @@
 """Resolve registered metric contracts without loading stores or running producers."""
 
+from typing import Callable, Mapping
+
 from monitoring.contracts import validate_measurement
 
 
-def output_contract(metric_id, spec, contracts):
+def output_contract(metric_id: str, spec: dict, contracts: Mapping[str, Callable[[str, str, dict | None], dict]]) -> dict:
     """Resolve executable capabilities, not user-provided measurement labels."""
     producer = spec["producer"]
     if producer not in contracts:

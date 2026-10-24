@@ -1,7 +1,10 @@
 """Load case-selected views; YAML controls presentation, not analysis."""
 
+from __future__ import annotations
+
 import re
 from pathlib import Path
+from typing import Callable
 
 from document_io import load_document
 from input_contract import fail
@@ -14,7 +17,7 @@ DEFAULT_VIEW = "default.yaml"
 _VALIDATORS = {"default": validate_default, "selected": validate_selected}
 
 
-def view(name, *, capability=None, plan_loader=None):
+def view(name: str, *, capability=None, plan_loader: Callable[[str], dict] | None = None) -> ViewDefinition:
     if type(name) is not str or not re.fullmatch(r"[a-z][a-z0-9_]*\.yaml", name):
         fail("reports", "view must be a filename under config/report_views")
     path = VIEWS / name
@@ -43,7 +46,7 @@ def view(name, *, capability=None, plan_loader=None):
     return definition
 
 
-def declaration(value, *, kind, path="reports", view_loader=view):
+def declaration(value: object, *, kind: str, path: str = "reports", view_loader: Callable[[str], ViewDefinition] = view) -> list[str]:
     if kind != "workload":
         fail(path, "report views require metadata.kind=workload")
     if not isinstance(value, list) or not value or any(type(name) is not str for name in value):

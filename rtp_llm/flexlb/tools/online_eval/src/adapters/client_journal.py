@@ -52,7 +52,9 @@ class LiveClientEvents:
                 raise ValueError("live client identity or sequence gap")
             for field in ("send_start_epoch_ms", "recorded_epoch_ms"):
                 value = row.get(field)
-                if type(value) not in (int, float) or not math.isfinite(value) or value <= 0:
+                if type(value) not in (int, float):
+                    raise ValueError("live client timestamp is missing or invalid")
+                if not math.isfinite(row[field]) or row[field] <= 0:
                     raise ValueError("live client timestamp is missing or invalid")
             event = row.get("event")
             if event == "issued":

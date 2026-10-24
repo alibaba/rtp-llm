@@ -100,7 +100,9 @@ class PlaybackConfigurationCodec:
             raise ValueError("invalid Java client pacing")
         if "LOOP" in env and env["LOOP"] not in ("true", "false"):
             raise ValueError("LOOP must be true or false")
-        values = {key: (int if key in ("max_laps", "duration_s") else float)(env[raw]) for key, raw in ENV_FIELDS.items() if raw in env}
+        values: dict = {
+            key: (int if key in ("max_laps", "duration_s") else float)(env[raw]) for key, raw in ENV_FIELDS.items() if raw in env
+        }
         values.setdefault("max_laps", 0 if env.get("LOOP") == "true" else int(DEFAULTS["MAX_LAPS"]))
         if "LOOP" in env and (env["LOOP"] == "true") != (values["max_laps"] != 1):
             raise ValueError("LOOP conflicts with MAX_LAPS")

@@ -84,6 +84,6 @@ class BackgroundSource(SampleWorker):
                     samples=self.budget.count,
                     bytes=self.budget.bytes,
                     worker_exit_mono=self.worker_exit_mono,
-                    joined=bool(self.thread) and self.done_event.is_set() and not self.thread.is_alive(),
+                    joined=self.thread is not None and self.done_event.is_set() and not self.thread.is_alive(),
                 ),
             )

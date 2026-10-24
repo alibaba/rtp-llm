@@ -1,13 +1,25 @@
 """Registered evidence capabilities; definitions select them, not case names."""
 
+from __future__ import annotations
+
 import hashlib
 import inspect
+from dataclasses import dataclass
 from pathlib import Path
+from typing import Callable, Mapping
 
 
-def selected_sources(plan, sources=None):
+@dataclass(frozen=True)
+class EvidenceSource:
+    factory: Callable[[object, set[str]], dict]
+    fields: frozenset[str]
+    label: str
+    required_fields: frozenset[str] = frozenset()
+
+
+def selected_sources(plan: dict, sources: Mapping[str, EvidenceSource] | None = None) -> dict:
     sources = {} if sources is None else sources
-    selected = {}
+    selected: dict = {}
     for identity, spec in plan["produced"].items():
         dependency = spec.get("collection")
         if dependency is None:
