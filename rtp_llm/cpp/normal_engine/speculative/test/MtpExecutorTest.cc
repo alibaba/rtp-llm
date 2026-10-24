@@ -6,6 +6,7 @@
 #include <limits>
 #include <memory>
 #include <mutex>
+#include <pybind11/embed.h>
 #include <thread>
 #include "torch/all.h"
 #include "gtest/gtest.h"
@@ -25,6 +26,7 @@
 #include "rtp_llm/cpp/normal_engine/speculative/MtpExecutor.h"
 #include "rtp_llm/cpp/models/SampleInfos.h"
 #include "rtp_llm/cpp/models/ModelTypes.h"
+#include "rtp_llm/cpp/models/PyWrappedModel.h"
 #include "rtp_llm/models_py/bindings/core/Types.h"
 #include "rtp_llm/cpp/testing/TestBase.h"
 #include "rtp_llm/models_py/bindings/core/ExecOps.h"
@@ -40,6 +42,20 @@ namespace rtp_llm {
 
 using namespace std;
 namespace spec = speculative;
+
+TEST(MtpExecutorPolicyTest, DraftInitKeepsEplbSeparateFromWeightManager) {
+    py::scoped_interpreter       interpreter;
+    EngineInitParams             base_params;
+    py::dict                     py_model;
+    py::dict                     py_eplb;
+    ProposeModelEngineInitParams params(
+        1, SP_TYPE_VANILLA, 3, base_params.model_config_, base_params, Weights{}, py_model, py_eplb);
+
+    const auto& draft = params.getEngineInitParams();
+    EXPECT_TRUE(draft.py_model.is(py_model));
+    EXPECT_TRUE(draft.py_eplb.is(py_eplb));
+    EXPECT_TRUE(draft.weight_manager.is_none());
+}
 
 TEST(MtpExecutorPolicyTest, DSparkPrefillCPRequiresPrefillRole) {
     PrefillCPConfig prefill_cp_config;
@@ -1236,6 +1252,78 @@ TEST_F(MtpExecutorTest, testMtpConstructorRejectsZeroProposalWidth) {
         FAIL() << "expected ordinary MTP construction to reject zero proposal width";
     } catch (const std::exception& e) {
         EXPECT_NE(std::string(e.what()).find("proposal width/gen_num_per_cycle must be positive"), std::string::npos);
+    }
+}
+
+TEST_F(MtpExecutorTest, testRealModelWrappersOnlyEnableTargetExpertLoadMonitoring) {
+    py::scoped_interpreter interpreter;
+    auto                   module = py::module_::import("__main__");
+    py::class_<torch_ext::PyModelInitResources>(module, "TestModelInitResources");
+    auto py_model               = py::module_::import("types").attr("SimpleNamespace")();
+    py_model.attr("initialize") = py::cpp_function([](py::object) { return true; });
+    auto forward = py::cpp_function([](py::args) { ADD_FAILURE() << "construction must not run model forward"; });
+    py_model.attr("forward")         = forward;
+    py_model.attr("forward_propose") = forward;
+    py_model.attr("forward_commit")  = forward;
+
+    ModelConfig   model_config;
+    RuntimeConfig runtime_config;
+    KVCacheConfig kv_cache_config;
+    auto          params = createEngineInitParams(CustomConfig{}, model_config, runtime_config, kv_cache_config);
+    params.model_config_.moe_style                         = 1;
+    params.model_config_.expert_num                        = 2;
+    params.model_config_.moe_k                             = 1;
+    params.eplb_config.eplb_metrics_report_interval        = 2;
+    params.device_resource_config.enable_layer_micro_batch = 0;
+    params.sp_config.gen_num_per_cycle                     = 1;
+    params.sp_config.sp_dspark_mask_token_id               = 0;
+    params.py_model                                        = py_model;
+    params.py_sp_model                                     = py_model;
+
+    for (auto sp_type : {SP_TYPE_MTP, SP_TYPE_DSPARK}) {
+        for (auto role : {RoleType::PREFILL, RoleType::DECODE}) {
+            for (bool enable_graph : {false, true}) {
+                SCOPED_TRACE(::testing::Message() << "sp_type=" << static_cast<int>(sp_type) << " role="
+                                                  << static_cast<int>(role) << " enable_graph=" << enable_graph);
+                params.sp_config.type                     = sp_type;
+                params.pd_sep_config.role_type            = role;
+                params.parallelism_config.role_type       = role;
+                params.hw_kernel_config.enable_cuda_graph = enable_graph;
+                auto draft_params                         = std::make_unique<EngineInitParams>(params);
+                draft_params->model_id                    = 1;
+                if (sp_type == SP_TYPE_DSPARK) {
+                    const auto options = torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA);
+                    draft_params->gpt_weights.dspark_markov_w1 =
+                        torch::zeros({params.model_config_.vocab_size, 1}, options);
+                    draft_params->gpt_weights.dspark_markov_w2 =
+                        torch::zeros({params.model_config_.vocab_size, 1}, options);
+                }
+                auto draft_models = std::make_unique<std::vector<std::unique_ptr<EngineInitParams>>>();
+                draft_models->push_back(std::move(draft_params));
+                auto propose_params = std::make_unique<ProposeModelEngineInitParams>(
+                    sp_type, params.sp_config.gen_num_per_cycle, std::move(draft_models));
+
+                // The graph flag selects production wrapper combinations; no cache means no graph capture.
+                MtpExecutor executor(params, propose_params, nullptr);
+                auto*       target = dynamic_cast<PyWrappedModel*>(executor.model_.get());
+                ASSERT_NE(target, nullptr);
+                const auto& target_counts = target->expert_balancer_.stable_expert_token_counts();
+                ASSERT_TRUE(target_counts.defined());
+                EXPECT_EQ(target_counts.sizes(), (torch::IntArrayRef{2, 2}));
+
+                const bool expect_propose = sp_type != SP_TYPE_DSPARK || role != RoleType::PREFILL;
+                const bool expect_commit  = enable_graph || sp_type == SP_TYPE_DSPARK;
+                EXPECT_EQ(executor.draft_model_ != nullptr, expect_propose);
+                EXPECT_EQ(executor.sp_prefill_draft_model_ != nullptr, expect_commit);
+                for (auto* model : {executor.draft_model_.get(), executor.sp_prefill_draft_model_.get()}) {
+                    if (model) {
+                        auto* draft = dynamic_cast<PyWrappedModel*>(model);
+                        ASSERT_NE(draft, nullptr);
+                        EXPECT_FALSE(draft->expert_balancer_.stable_expert_token_counts().defined());
+                    }
+                }
+            }
+        }
     }
 }
 

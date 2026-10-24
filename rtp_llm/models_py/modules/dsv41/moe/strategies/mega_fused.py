@@ -202,7 +202,11 @@ class MegaMoEFusedStrategy(MegaMoEStrategy):
         )
 
     def forward(
-        self, x: torch.Tensor, weights: torch.Tensor, indices: torch.Tensor
+        self,
+        x: torch.Tensor,
+        weights: torch.Tensor,
+        indices: torch.Tensor,
+        expert_load,
     ) -> torch.Tensor:
         """Run ``fp8_fp4_mega_moe_fused`` (routed + shared, single kernel).
 
@@ -240,7 +244,7 @@ class MegaMoEFusedStrategy(MegaMoEStrategy):
         return y
 
     def forward_with_gate_pack(
-        self, x: torch.Tensor, gate, input_ids: torch.Tensor | None
+        self, x: torch.Tensor, gate, input_ids: torch.Tensor | None, expert_load
     ) -> torch.Tensor:
         """Run MegaMoE fused with router gate + input pack fused together."""
         kernels = _get_gate_pack_kernels()

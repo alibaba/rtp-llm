@@ -12,7 +12,6 @@
 #include "rtp_llm/models_py/bindings/core/Types.h"
 #include "rtp_llm/models_py/bindings/core/DeviceData.h"
 #include "rtp_llm/cpp/metrics/RtpLLMMetrics.h"
-#include "rtp_llm/cpp/models/eplb/ExpertBalancer.h"
 #include "rtp_llm/cpp/normal_engine/speculative/MtpBatchStreamProcessor.h"
 #include "rtp_llm/cpp/engine_base/ProposeModelEngineInitParams.h"
 #include "rtp_llm/cpp/models/ModelTypes.h"
@@ -260,7 +259,6 @@ private:
     kmonitor::MetricsReporterPtr                                             metrics_reporter_ = nullptr;
     MetricsLoopReporter<RtpLLMTokenPSMetrics, RtpLLMTokenPSMetricsCollector> tps_reporter_;
     WallClockMetricsLoopReporter<RtpLLMWallClockTokenPSMetrics, RtpLLMTokenPSMetricsCollector> wall_tps_reporter_;
-    std::shared_ptr<ExpertBalancer>                                                            expert_balancer_;
     size_t                                                                                     vocab_size_;
 
     // for mtp

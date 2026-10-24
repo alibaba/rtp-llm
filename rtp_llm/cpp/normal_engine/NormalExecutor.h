@@ -13,7 +13,6 @@
 #include "rtp_llm/models_py/bindings/core/Types.h"
 #include "rtp_llm/models_py/bindings/core/DeviceData.h"
 #include "rtp_llm/cpp/metrics/RtpLLMMetrics.h"
-#include "rtp_llm/cpp/models/eplb/ExpertBalancer.h"
 
 namespace rtp_llm {
 
@@ -96,7 +95,6 @@ private:
     std::unique_ptr<NormalBatchStreamProcessor>                              batch_stream_processor_;
     std::shared_ptr<KVCacheManager>                                          cache_manager_;
     std::shared_ptr<ModelInputsLogger>                                       model_inputs_logger_;
-    std::shared_ptr<ExpertBalancer>                                          expert_balancer_;
     bool                                                                     warm_up_;
     bool                                                                     use_all_gather_;
     kmonitor::MetricsReporterPtr                                             metrics_reporter_ = nullptr;

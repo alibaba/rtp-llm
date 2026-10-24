@@ -163,7 +163,11 @@ class LocalLoopStrategy(RoutedExpertsStrategy):
         self._local_y_buf: Optional[torch.Tensor] = None
 
     def forward(
-        self, x: torch.Tensor, weights: torch.Tensor, indices: torch.Tensor
+        self,
+        x: torch.Tensor,
+        weights: torch.Tensor,
+        indices: torch.Tensor,
+        expert_load,
     ) -> torch.Tensor:
         """Per-expert compute over [local_expert_start, local_expert_end).
 
@@ -172,6 +176,8 @@ class LocalLoopStrategy(RoutedExpertsStrategy):
             avoids data-dependent ``torch.where``)
           - eager: ``_forward_eager`` (only iterates routed tokens per expert)
         """
+        if expert_load is not None and self.cfg.ep_size == 1:
+            expert_load.record_ids(indices)
         return self._forward_into_buf(
             x,
             weights,

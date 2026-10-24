@@ -116,6 +116,7 @@ public:
         }
         py_attn_pyobj_method_ = py_instance_.attr("prepare_fmha_impl");
         py_forward_method_    = py_instance_.attr(forward_method_name);
+        capture_mem_hold_.py_model_inputs_.expert_token_counts = graph_params.expert_token_counts;
         options_cuda_int32_   = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA).requires_grad(false);
         options_cpu_int32_    = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCPU).requires_grad(false);
         options_cuda_float_ = torch::TensorOptions().dtype(model_data_type_).device(torch::kCUDA).requires_grad(false);
@@ -208,6 +209,8 @@ private:
     }
     // Common input preparation logic for capture
     void prepareCaptureInputs(PyModelInputs& inputs, int batch_size, int seq_len_or_tokens);
+    // Inputs captured by address must retain their storage and metadata for replay.
+    void checkGraphInputStable(const PyModelInputs& inputs, const PyModelInputs& captured_inputs) const;
     // Common memory hold creation logic
     CaptureMemoryHold createCaptureMemoryHold(PyModelInputs& inputs, int tokens_count);
     void              initKernelInternalMemory();

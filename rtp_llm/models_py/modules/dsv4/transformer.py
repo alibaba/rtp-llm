@@ -563,7 +563,11 @@ class V4Transformer(nn.Module):
         for layer_idx, layer in enumerate(self.layers):
             with layer_forward_range(layer_idx):
                 h = layer.forward_decode(
-                    h, attn_metadata, input_ids_2d, kv_cache=kv_cache
+                    h,
+                    attn_metadata,
+                    input_ids_2d,
+                    kv_cache=kv_cache,
+                    expert_load=None,
                 )
         h = self._hc_head_reduce(h)  # [B, q_len, dim]
         # Framework RMSNorm wants 2D — flatten to [T_total, dim] and
@@ -690,6 +694,7 @@ class V4Transformer(nn.Module):
                         cu_seqlens,
                         kv_cache=kv_cache,
                         block_tables_by_type=block_tables_by_type,
+                        expert_load=None,
                     )
                     if _rt_on:
                         _rt.record(f"layer{li:02d}_out", h_flat)

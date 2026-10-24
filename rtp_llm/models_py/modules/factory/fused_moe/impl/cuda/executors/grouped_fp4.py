@@ -40,6 +40,7 @@ from rtp_llm.models_py.triton_kernels.moe.ep_kernels import (
 from rtp_llm.models_py.triton_kernels.moe.silu_mul_fp8_quant import (
     silu_mul_fp8_quant_packed,
 )
+from rtp_llm.models_py.utils.expert_load_monitor import ExpertLoadContext
 from rtp_llm.models_py.utils.math import align, ceil_div
 
 from .fp8_fp4_base import Fp8Fp4ExecutorBase, normalize_moe_w13_gate_up
@@ -74,7 +75,6 @@ def _has_fp8_fp4_grouped_kernel() -> bool:
 
 
 class GroupedFp4Executor(Fp8Fp4ExecutorBase):
-
     @classmethod
     def check_conditions(cls, checker: Any, config) -> None:
         super().check_conditions(checker, config)
@@ -152,6 +152,7 @@ class GroupedFp4Executor(Fp8Fp4ExecutorBase):
         x: torch.Tensor,
         weights: torch.Tensor,
         indices: torch.Tensor,
+        expert_load: Optional[ExpertLoadContext],
     ) -> torch.Tensor:
         """4-opt prefill path; returns ``[N, D] fp32``.
 
@@ -173,6 +174,9 @@ class GroupedFp4Executor(Fp8Fp4ExecutorBase):
         if N == 0:
             return torch.zeros(N, D, dtype=torch.float32, device=device)
         if torch.cuda.is_current_stream_capturing():
+            if expert_load is not None:
+                _, num_recv = recompute_topk_ids_sum_expert_count(indices, 0, E)
+                expert_load.expert_token_counts.add_(num_recv)
             return self._forward_capture_topk(x, weights, indices)
 
         # (1) Quant input ONCE — column-major TMA-aligned UE8M0 packed scale,
@@ -192,6 +196,8 @@ class GroupedFp4Executor(Fp8Fp4ExecutorBase):
             current_expert_start_id=0,
             num_local_experts=E,
         )
+        if expert_load is not None:
+            expert_load.expert_token_counts.add_(num_recv)
 
         # Sum of aligned counts → all_tokens (CPU sync, ~E ints; same kind of
         # sync the framework's contiguous executor does at deepgemm_hybrid_executor.py:445).
@@ -246,6 +252,7 @@ class GroupedFp4Executor(Fp8Fp4ExecutorBase):
             m_indices,
             output_index,
             scale_ue8m0=True,
+            expert_token_counts=None,
         )
         # Defensive clamp against any -1 leakage (e.g. if num_local_experts is
         # later split for EP > 1); matches framework safety guard.

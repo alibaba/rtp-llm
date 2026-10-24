@@ -761,30 +761,6 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
                                                 metrics_reporter_);
     }
 
-    if (params.eplb_config.enable_eplb() && params.model_config_.moe_style != 0) {
-        // use first moe layer weight as moe weight type
-        int         first_moe_layer = params.model_config_.moe_layer_index.front();
-        const auto& moe_kernel      = params.gpt_weights.layers[first_moe_layer].ffn_weights.moe_gate_weight->kernel;
-        auto        moe_weight_type = torchDTypeToDataType(moe_kernel.dtype());
-        bool        is_gated_activation = params.model_config_.isGatedActivation();
-        auto        moe_inter_size      = is_gated_activation ? moe_kernel.size(1) / 2 : moe_kernel.size(1);
-
-        expert_balancer_ =
-            std::make_shared<ExpertBalancer>(params.model_config_.expert_num,
-                                             params.eplb_config.phy_exp_num(params.model_config_.expert_num),
-                                             params.model_config_.num_layers,
-                                             moe_inter_size,
-                                             params.model_config_.hidden_size,
-                                             params.parallelism_config.ep_rank,
-                                             params.parallelism_config.ep_size,
-                                             params.parallelism_config.world_size,
-                                             params.py_eplb,
-                                             moe_weight_type,
-                                             params.model_config_.quant_algo,
-                                             metrics_reporter_,
-                                             params.eplb_config);
-    }
-
     const auto initial_sampler_batch_size =
         (propose_params->gen_num_per_circle + 1)
         * static_cast<size_t>(std::max(1, params.concurrency_config.concurrency_limit));
@@ -825,6 +801,9 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
          std::nullopt,
          params.model_config_.hc_mult});
     model_init_params.metrics_reporter = metrics_reporter_;
+    model_init_params.py_eplb          = params.py_eplb;
+    model_init_params.quant_algo       = params.model_config_.quant_algo;
+    model_init_params.eplb_config      = params.eplb_config;
     model_init_params.hidden_state_capture_layer_ids = selectHiddenStateCaptureLayerIds(
         HiddenStateCaptureModelRole::TARGET, role_type_, false, params.model_config_.hidden_state_capture_layer_ids);
     model_init_params.hidden_state_capture_dtype     = params.model_config_.hidden_state_capture_dtype;
@@ -900,7 +879,10 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
                                 cache_manager,
                                 std::make_optional(0),
                                 mtp_params->model_config_.hc_mult});
+        // Keep EPLB disabled for every draft wrapper; only the target records expert load.
         model_params.metrics_reporter = metrics_reporter_;
+        model_params.py_eplb          = mtp_params->py_eplb;
+        model_params.quant_algo       = mtp_params->model_config_.quant_algo;
         model_params.hidden_state_capture_layer_ids =
             selectHiddenStateCaptureLayerIds(HiddenStateCaptureModelRole::DRAFT,
                                              role_type_,
@@ -1196,14 +1178,6 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
         model_output          = std::move(forwardModel(model_.get(), model_input, ModelInputsModelRole::TARGET));
         maybeOverrideLastHiddenWithMtpBuffer(model_output, *model_, cp_enabled ? -1 : model_input.combo_tokens.numel());
         model_forward_us += autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
-    }
-
-    // eplb
-    if (expert_balancer_) {
-        RTP_LLM_PROFILE_SCOPE("executor.mtp.prefill_step(eplb_step_forward)");
-        int64_t start_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
-        expert_balancer_->stepForward(*model_, executor_collector);
-        executor_collector.eplb_step_latency_us = autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
     }
 
     if (target_only && !is_dspark_
@@ -1716,14 +1690,6 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
     if (spec_logits_processor_present && !spec_logits_result->has_active_processor) {
         return absl::InternalError("MTP async spec logits processor is present but no verify artifact was produced; "
                                    "disable MTP/async or implement spec verify for this processor");
-    }
-
-    // eplb
-    if (expert_balancer_) {
-        RTP_LLM_PROFILE_SCOPE("executor.mtp.decode_step(eplb_step_forward)");
-        int64_t start_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
-        expert_balancer_->stepForward(*model_, executor_collector);
-        executor_collector.eplb_step_latency_us = autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
     }
 
     SamplerOutput sampler_output;
@@ -2560,10 +2526,7 @@ absl::Status MtpExecutor::process(const std::list<GenerateStreamPtr>& streams, i
 }
 
 bool MtpExecutor::updateEplbConfig(const EPLBConfig& config) {
-    if (expert_balancer_) {
-        return expert_balancer_->updateEplbConfig(config);
-    }
-    return true;
+    return model_ ? model_->updateEplbConfig(config) : true;
 }
 
 void MtpExecutor::draftModelDecode(GptModelInputs&             model_input,

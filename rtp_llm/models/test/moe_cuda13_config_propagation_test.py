@@ -1,7 +1,11 @@
+import ast
+import inspect
 import json
+import logging
 import os
 import tempfile
 import unittest
+from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 from unittest.mock import patch
@@ -105,7 +109,7 @@ class Dsv4MoeConfigTest(unittest.TestCase):
                 super().__init__()
                 self.is_decode_forward = None
 
-            def forward(self, x, _input_ids, *, is_decode_forward=False):
+            def forward(self, x, expert_load, input_ids=None, is_decode_forward=False):
                 self.is_decode_forward = is_decode_forward
                 return x
 
@@ -126,6 +130,7 @@ class Dsv4MoeConfigTest(unittest.TestCase):
             x,
             SimpleNamespace(),
             torch.arange(2).view(2, 1),
+            expert_load=None,
         )
 
         self.assertTrue(block.ffn.is_decode_forward)
@@ -671,6 +676,86 @@ class Dsv4MoeConfigTest(unittest.TestCase):
 
 
 class MoeCuda13ConfigPropagationTest(unittest.TestCase):
+    def test_initial_mega_prewarm_disables_expert_load_recording(self):
+        from rtp_llm.models_py.modules.dsv41.moe.strategies.mega import MegaMoEStrategy
+        from rtp_llm.models_py.modules.dsv41.moe.strategies.mega_se import (
+            MegaMoEStrategySE,
+        )
+
+        source_dir = Path(inspect.getfile(DeepSeekV4Model)).parent
+        for filename, callable_name, implementations in (
+            (
+                "deepseek_v4_model.py",
+                "_executor",
+                (("mega_moe", MegaMoeExecutor), ("mega_moe_se", MegaMoeSEExecutor)),
+            ),
+            (
+                "deepseek_v41_base_model.py",
+                "_strategy",
+                (("mega", MegaMoEStrategy), ("mega_se", MegaMoEStrategySE)),
+            ),
+        ):
+            source = source_dir / filename
+            # Execute the production prewarm block without constructing weights
+            # or launching the unrelated attention/JIT warmups around it.
+            (prewarm,) = [
+                node
+                for node in ast.walk(ast.parse(source.read_text()))
+                if isinstance(node, ast.Try)
+                and any(
+                    isinstance(call, ast.Call)
+                    and isinstance(call.func, ast.Name)
+                    and call.func.id == callable_name
+                    for call in ast.walk(node)
+                )
+            ]
+            code = compile(
+                ast.Module(body=[prewarm], type_ignores=[]), str(source), "exec"
+            )
+            for strategy_name, implementation in implementations:
+                with self.subTest(model=filename, strategy=strategy_name):
+                    executor = implementation.__new__(implementation)
+                    nn.Module.__init__(executor)
+                    executor.cfg = SimpleNamespace(
+                        dim=8,
+                        n_activated_experts=2,
+                        local_expert_start=4,
+                        local_expert_end=8,
+                    )
+                    moe = SimpleNamespace(
+                        strategy_name=strategy_name,
+                        fused_moe=SimpleNamespace(fused_experts=executor),
+                        _strategy=executor,
+                    )
+                    model = SimpleNamespace(
+                        v4=SimpleNamespace(layers=[SimpleNamespace(ffn=moe)])
+                    )
+                    with mock.patch.object(
+                        implementation, "forward", autospec=True
+                    ) as forward, mock.patch.object(
+                        torch.distributed, "is_initialized", return_value=False
+                    ), mock.patch.object(
+                        torch.cuda, "synchronize"
+                    ) as synchronize:
+                        exec(
+                            code,
+                            {
+                                "self": model,
+                                "_torch": torch,
+                                "device_str": "cpu",
+                                "logging": logging,
+                            },
+                        )
+                    forward.assert_called_once()
+                    self.assertIs(forward.call_args.args[0], executor)
+                    self.assertEqual(forward.call_args.kwargs, {"expert_load": None})
+                    x, weights, indices = forward.call_args.args[1:]
+                    self.assertEqual(x.device.type, "cpu")
+                    self.assertEqual(x.shape, (1, 8))
+                    self.assertEqual(weights.tolist(), [[1.0, 0.0]])
+                    self.assertEqual(indices.tolist(), [[4, 5]])
+                    synchronize.assert_called_once_with()
+
     def test_real_adapter_constructs_mega_moe_executors(self):
         model_config = ModelConfig()
         model_config.expert_num = 64

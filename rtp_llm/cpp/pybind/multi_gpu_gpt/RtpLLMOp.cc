@@ -97,6 +97,7 @@ prepareMTPEngineInitParams(size_t model_id, py::object propose_model, const Engi
                                                                           base_params.vit_config,
                                                                           std::move(*gpt_weight),
                                                                           py::none(),
+                                                                          py::none(),
                                                                           py_eplb)));
         return std::move(
             std::make_unique<ProposeModelEngineInitParams>(sp_type, gen_num_per_cycle, std::move(mtp_params)));
@@ -144,6 +145,7 @@ prepareMTPEngineInitParams(size_t model_id, py::object propose_model, const Engi
                                                                            base_params.ffn_disaggregate_config,
                                                                            base_params.vit_config,
                                                                            std::move(*gpt_weight),
+                                                                           py::none(),
                                                                            py::none(),
                                                                            py_eplb)));
         model_id++;

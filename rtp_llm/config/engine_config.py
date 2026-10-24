@@ -211,6 +211,18 @@ class EngineConfig:
         # as RoleType::VIT to model code.
         parallelism_config.role_type = pd_sep_config.role_type
 
+        eplb_config = py_env_configs.eplb_config
+        interval = eplb_config.eplb_metrics_report_interval
+        if interval < -1:
+            raise ValueError(
+                "EPLB_METRICS_REPORT_INTERVAL must be 0 (disabled), "
+                "-1 (automatic), or a positive integer"
+            )
+        if interval == -1:
+            eplb_config.eplb_metrics_report_interval = (
+                100 if pd_sep_config.role_type == RoleType.PREFILL else 1000
+            )
+
         if nccl_comm_config is None:
             nccl_comm_config = NcclCommConfig(
                 nccl_ip="",

@@ -244,7 +244,9 @@ class PrefillFastPathCudaTest(_PrefillForwardTestBase):
             ),
             combo_position_ids=torch.empty(0, dtype=torch.long, device=device),
         )
-        inputs = SimpleNamespace(attention_inputs=attn, input_ids=input_ids)
+        inputs = SimpleNamespace(
+            attention_inputs=attn, input_ids=input_ids, expert_token_counts=None
+        )
 
         patches = (
             patch.object(prefill_forward, "set_cp_info"),
