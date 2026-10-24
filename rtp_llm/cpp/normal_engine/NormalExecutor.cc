@@ -120,11 +120,10 @@ NormalExecutor::NormalExecutor(const EngineInitParams&                params,
          is_propose_ ? std::make_optional(propose_model_index_) : std::nullopt,
          params.model_config_.hc_mult});
     model_init_params.metrics_reporter = metrics_reporter_;
-    model_init_params.py_eplb          = params.py_eplb;
     model_init_params.quant_algo       = params.model_config_.quant_algo;
     model_init_params.eplb_config      = params.eplb_config;
     if (warm_up_) {
-        // Include planner buffers in warmup memory accounting without reporting metrics.
+        // Disable EPLB metrics during warmup.
         model_init_params.eplb_config.eplb_metrics_report_interval = 0;
     }
     model_init_params.hidden_state_capture_layer_ids = selectHiddenStateCaptureLayerIds(

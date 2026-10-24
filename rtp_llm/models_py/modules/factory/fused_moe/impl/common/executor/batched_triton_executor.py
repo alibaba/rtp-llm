@@ -55,6 +55,9 @@ class BatchedTritonExperts(FusedMoeExpertExecutor):
         assert self.w1.stride(-1) == 1 and self.w2.stride(-1) == 1
         assert self.w2.size(0) == self.w1.size(0)
 
+    def get_eplb_weights(self) -> tuple[torch.Tensor, ...]:
+        return self.w1, self.w2
+
     @property
     def local_num_experts(self) -> int:
         return self.w1.size(0)

@@ -1077,13 +1077,14 @@ py::dict runPyWrappedModelCacheStoreScenario(py::object         py_model,
     RTP_LLM_CHECK_WITH_INFO(forward_count > 0, "forward_count must be positive");
 
     const bool cacheless_warmup = scenario_name == "cacheless_warmup";
+    const bool eplb_phase       = scenario_name == "eplb_prefill_then_verify";
     const bool inspect_split = scenario_name == "micro_batch_split_pinned" || scenario_name == "micro_batch_split_cuda"
                                || scenario_name == "micro_batch_split_single_group"
                                || scenario_name == "micro_batch_split_2d";
     const bool single_group_split =
         scenario_name == "micro_batch_split_single_group" || scenario_name == "micro_batch_split_2d";
     const auto input_scenario = inspect_split ? (single_group_split ? "micro_batch" : "micro_batch_multi_tag") :
-                                                (cacheless_warmup ? "multi_tag" : scenario_name);
+                                                ((cacheless_warmup || eplb_phase) ? "multi_tag" : scenario_name);
     auto       scenario       = makeScenario(input_scenario);
     if (inspect_split) {
         scenario.inputs.kv_cache_kernel_block_id.add_(100);
@@ -1126,6 +1127,10 @@ py::dict runPyWrappedModelCacheStoreScenario(py::object         py_model,
     description.attention_conf.head_num      = 1;
     description.attention_conf.kv_head_num   = 1;
     description.attention_conf.size_per_head = scenario.hidden_size;
+    if (eplb_phase) {
+        description.ffn_conf.moe_configs = MoeConfigs{2, 0, 1};
+        scenario.parallelism.role_type   = RoleType::PDFUSION;
+    }
 
     GptModelInitParams params{weights,
                               description,
@@ -1148,6 +1153,11 @@ py::dict runPyWrappedModelCacheStoreScenario(py::object         py_model,
                               /*kernel_block_table_width=*/0,
                               scenario.capture_layer_ids,
                               scenario.capture_dtype};
+    if (eplb_phase) {
+        params.eplb_config.eplb_mode              = EplbMode::ALL;
+        params.eplb_config.eplb_update_time       = 1;
+        params.eplb_config.eplb_stats_window_size = 1;
+    }
     if (cacheless_warmup) {
         params.cache_manager                     = nullptr;
         scenario.inputs.warmup                   = true;
@@ -1199,6 +1209,11 @@ py::dict runPyWrappedModelCacheStoreScenario(py::object         py_model,
         }
         for (size_t i = 0; i < forward_count; ++i) {
             auto forward_inputs = scenario.inputs;
+            if (eplb_phase) {
+                // Verify keeps the same context-shaped tensors; only its semantic phase differs.
+                forward_inputs.is_target_verify = i > 0;
+                forward_inputs.pd_separation    = false;
+            }
             if (capture_only_first_forward && i > 0) {
                 forward_inputs.capture_hidden_states = false;
             }

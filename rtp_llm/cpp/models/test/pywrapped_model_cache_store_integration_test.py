@@ -1094,6 +1094,58 @@ class PyWrappedModelCacheStoreIntegrationTest(unittest.TestCase):
         self.assertEqual(result["available_during"], result["available_before"])
         self.assertEqual(result["available_after"], result["available_before"])
 
+    def test_pdfusion_target_verify_reaches_eplb_as_decode_with_prefill_shapes(self):
+        class Model(CacheStoreForwardModel):
+            def __init__(self):
+                super().__init__()
+                self.eplb_prompts = []
+                self.eligible_samples = []
+                self.counts = None
+
+            def get_eplb_layers(self):
+                return [self]
+
+            def _forward_one(self, inputs):
+                self.counts = inputs.expert_token_counts
+                self.counts.fill_(self.forward_calls)
+                return super()._forward_one(inputs)
+
+        class Runtime:
+            def __init__(
+                self,
+                layers,
+                config,
+                ep_rank,
+                ep_size,
+                model_id,
+                is_normal_engine,
+                sync_prompt_phase,
+            ):
+                self.model = layers[0]
+                assert is_normal_engine
+                assert not sync_prompt_phase
+
+            def step(self, counts, is_prompt=False):
+                self.model.eplb_prompts.append(is_prompt)
+                if not is_prompt:
+                    self.model.eligible_samples.append(counts.clone())
+                return False
+
+        module = types.ModuleType("rtp_llm.eplb.runtime")
+        module.RuntimeExpertBalancer = Runtime
+        model = Model()
+        # NormalEngine enters inference mode before warmup and its worker loop.
+        with torch.inference_mode(), patch.dict(sys.modules, {module.__name__: module}):
+            run_scenario(model, "eplb_prefill_then_verify", forward_count=2)
+
+        self.assertEqual(model.forward_calls, 2)
+        self.assertEqual(model.seen_input_lengths, [[4], [4]])
+        self.assertEqual(model.eplb_prompts, [True, False])
+        self.assertEqual(
+            [sample.tolist() for sample in model.eligible_samples], [[[2, 2]]]
+        )
+        self.assertEqual(model.counts.tolist(), [[0, 0]])
+
     def test_dirty_generation_prefill_capture_does_not_retain_cache_manager(
         self,
     ) -> None:

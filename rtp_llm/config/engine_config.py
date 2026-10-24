@@ -212,6 +212,21 @@ class EngineConfig:
         parallelism_config.role_type = pd_sep_config.role_type
 
         eplb_config = py_env_configs.eplb_config
+        if eplb_config.eplb_update_time < 0:
+            raise ValueError(
+                "EPLB_UPDATE_TIME must be non-negative (0 disables rearrangement)"
+            )
+        window = eplb_config.eplb_stats_window_size
+        if window < 0 or (
+            eplb_config.eplb_update_time > 0
+            and not 1 <= window <= eplb_config.eplb_update_time
+        ):
+            raise ValueError(
+                "EPLB_STATS_WINDOW_SIZE must be non-negative and between 1 and "
+                "EPLB_UPDATE_TIME when rearrangement is enabled"
+            )
+        if eplb_config.eplb_rearrange_p2p_groups <= 0:
+            raise ValueError("EPLB_REARRANGE_P2P_GROUPS must be positive")
         interval = eplb_config.eplb_metrics_report_interval
         if interval < -1:
             raise ValueError(

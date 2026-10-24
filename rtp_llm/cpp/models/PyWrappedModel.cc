@@ -1016,7 +1016,8 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
             GenerationPrefillCudaGraphStatus::NOT_REQUESTED;
     const auto finalize_outputs = [&](GptModelOutputs outputs) {
         outputs.generation_prefill_cuda_graph_status = generation_prefill_cuda_graph_status;
-        expert_balancer_.step(inputs.warmup);
+        // Multi-token target verify uses prefill-shaped attention inputs but is a decode step.
+        expert_balancer_.step(inputs.warmup, has_context_request && !inputs.is_target_verify);
         return outputs;
     };
 

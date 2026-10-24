@@ -101,7 +101,7 @@ class GroupedFp4Executor(Fp8Fp4ExecutorBase):
         from rtp_llm.utils.model_weight import W
 
         cfg = self.cfg
-        E, D, inter = cfg.n_routed_experts, cfg.dim, cfg.moe_inter_dim
+        E, D, inter = cfg.physical_expert_num, cfg.dim, cfg.moe_inter_dim
         self._w13 = layer_weights.pop(W.moe_w1)
         s13_raw = layer_weights.pop(W.moe_s1)
         self._w13, s13_raw = normalize_moe_w13_gate_up(
@@ -140,6 +140,16 @@ class GroupedFp4Executor(Fp8Fp4ExecutorBase):
         # cached-but-unused inside PyTorch's allocator.
         torch.cuda.empty_cache()
 
+    def get_eplb_weights(self) -> tuple[torch.Tensor, ...]:
+        return (
+            self._w13,
+            self._s13,
+            self._w2,
+            self._s2,
+            self._s13_dense_t,
+            self._s2_dense_t,
+        )
+
     def dense_gemm_warmup_weights(self):
         """Expose the two dense fallback GEMMs to model-level JIT warmup."""
         return (
@@ -167,7 +177,7 @@ class GroupedFp4Executor(Fp8Fp4ExecutorBase):
         """
         cfg = self.cfg
         N, D = x.shape
-        E = cfg.n_routed_experts
+        E = cfg.physical_expert_num
         inter = cfg.moe_inter_dim
         device = x.device
 

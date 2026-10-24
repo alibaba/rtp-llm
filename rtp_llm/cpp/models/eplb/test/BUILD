@@ -27,7 +27,10 @@ cc_binary(
 
 py_test(
     name = "expert_balancer_step_test",
-    srcs = ["expert_balancer_step_test.py"],
+    srcs = [
+        "expert_balancer_step_test.py",
+        "eplb_runtime_test_utils.py",
+    ],
     data = [":th_eplb_py_wrapper_test"],
     deps = ["//rtp_llm:torch"],
     env = {"GPU_COUNT": "1"},
@@ -47,6 +50,7 @@ py_test(
     name = "eplb_py_wrapper_test",
     srcs = [
         "eplb_py_wrapper_test.py",
+        "eplb_runtime_test_utils.py",
     ],
     data = [
         ":th_eplb_py_wrapper_test",

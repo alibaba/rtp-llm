@@ -64,12 +64,6 @@ prepareMTPEngineInitParams(size_t model_id, py::object propose_model, const Engi
     const size_t weight_count          = py_layers_weights_vec.size();
     size_t       gen_num_per_cycle     = base_params.sp_config.gen_num_per_cycle;
 
-    // Get py_eplb if available (from model)
-    py::object py_eplb = py::none();
-    if (py::hasattr(sp_model, "py_eplb")) {
-        py_eplb = sp_model.attr("py_eplb");
-    }
-
     if (sp_type == SP_TYPE_DSPARK) {
         // DSpARK is one multi-layer draft model: gen_num_per_cycle controls the
         // width of its draft block, not the number of one-layer MTP modules, so
@@ -95,10 +89,7 @@ prepareMTPEngineInitParams(size_t model_id, py::object propose_model, const Engi
                                                                           base_params.grpc_config,
                                                                           base_params.ffn_disaggregate_config,
                                                                           base_params.vit_config,
-                                                                          std::move(*gpt_weight),
-                                                                          py::none(),
-                                                                          py::none(),
-                                                                          py_eplb)));
+                                                                           std::move(*gpt_weight))));
         return std::move(
             std::make_unique<ProposeModelEngineInitParams>(sp_type, gen_num_per_cycle, std::move(mtp_params)));
     }
@@ -144,10 +135,7 @@ prepareMTPEngineInitParams(size_t model_id, py::object propose_model, const Engi
                                                                            base_params.grpc_config,
                                                                            base_params.ffn_disaggregate_config,
                                                                            base_params.vit_config,
-                                                                           std::move(*gpt_weight),
-                                                                           py::none(),
-                                                                           py::none(),
-                                                                           py_eplb)));
+                                                                           std::move(*gpt_weight))));
         model_id++;
     }
 
@@ -271,12 +259,6 @@ EngineInitParams RtpLLMOp::initModel(py::object model, py::object engine_config,
         auto weight_manager = model.attr("weight_manager");
         // TODO(wangyin.yx): Only one of `py_model` and `gpt_weight` is actually needed.
 
-        // Get py_eplb if available (from model)
-        py::object py_eplb = py::none();
-        if (py::hasattr(model, "py_eplb")) {
-            py_eplb = model.attr("py_eplb");
-        }
-
         EngineInitParams params(model_id_,
                                 model_config,
                                 parallelism_config,
@@ -299,8 +281,7 @@ EngineInitParams RtpLLMOp::initModel(py::object model, py::object engine_config,
                                 vit_config_cpp,
                                 std::move(*gpt_weight),
                                 py_model,
-                                weight_manager,
-                                py_eplb);
+                                weight_manager);
         params.grammar_config   = grammar_config;
         params.nccl_comm_config = engine_config.attr("nccl_comm_config").cast<NcclCommConfig>();
         params.server_config    = engine_config.attr("server_config");
@@ -339,21 +320,9 @@ std::unique_ptr<ProposeModelEngineInitParams> RtpLLMOp::initProposeModel(py::obj
             auto convert    = WeightsConverter(false, model_config.quant_algo);
             auto gpt_weight = convert.createGptWeights(py_layers_weights, py_global_weights);
 
-            // Get py_eplb if available (from model)
-            py::object py_eplb = py::none();
-            if (py::hasattr(sp_model, "py_eplb")) {
-                py_eplb = sp_model.attr("py_eplb");
-            }
-
             size_t gen_num_per_cycle = base_params.sp_config.gen_num_per_cycle;
-            params                   = std::make_unique<ProposeModelEngineInitParams>(model_id_,
-                                                                    sp_type,
-                                                                    gen_num_per_cycle,
-                                                                    model_config,
-                                                                    base_params,
-                                                                    std::move(*gpt_weight),
-                                                                    py::none(),
-                                                                    py_eplb);
+            params                   = std::make_unique<ProposeModelEngineInitParams>(
+                model_id_, sp_type, gen_num_per_cycle, model_config, base_params, std::move(*gpt_weight));
             model_id_++;
         } else if (sp_type == SP_TYPE_MTP || sp_type == SP_TYPE_EAGLE || sp_type == SP_TYPE_EAGLE3
                    || sp_type == SP_TYPE_DSPARK) {

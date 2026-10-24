@@ -207,8 +207,14 @@ py_library(
         "eplb/*.py",
     ]),
     deps = [
+        ":torch",
         ":utils",
-    ],
+    ] + select({
+        "@//:using_cuda13_x86": [":deep_ep"],
+        "@//:using_cuda13_arm": [":deep_ep"],
+        "@//:using_cuda": [":deep_ep"],
+        "//conditions:default": [],
+    }),
 )
 
 py_library(

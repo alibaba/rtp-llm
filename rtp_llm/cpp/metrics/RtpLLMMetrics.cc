@@ -955,10 +955,6 @@ void RtpLLMCacheReuseMetrics::report(const kmonitor::MetricsTags* tags, RtpLLMCa
 }
 
 bool RtpLLmEplbMetrics::init(kmonitor::MetricsGroupManager* manager) {
-    REGISTER_QPS_MUTABLE_METRIC(update_weights_qps_metric, "rtp_llm_update_weights_qps");
-    REGISTER_QPS_MUTABLE_METRIC(update_layer_weights_qps_metric, "rtp_llm_update_layer_weights_qps");
-    REGISTER_GAUGE_MUTABLE_METRIC(update_weights_latency_ms_metric, "rtp_llm_update_weights_latency_ms");
-    REGISTER_GAUGE_MUTABLE_METRIC(gpu_loads_metric, "rtp_llm_gpu_loads");
     REGISTER_GAUGE_MUTABLE_METRIC(step_latency_us_metric, "rtp_llm_eplb_step_latency_us");
     REGISTER_GAUGE_MUTABLE_METRIC(moe_lb_metric, "rtp_llm_moe_lb");
     return true;
@@ -970,32 +966,6 @@ void RtpLLmEplbMetrics::report(const kmonitor::MetricsTags* tags, RtpLLmEplbMetr
     }
     if (collector->moe_lb >= 0) {
         REPORT_MUTABLE_METRIC(moe_lb_metric, collector->moe_lb);
-    }
-
-    // ep stats metrics
-    int  num_layer = collector->gpu_loads.size();
-    auto ep_tag    = kmonitor::MetricsTags("ep_rank", std::to_string(collector->ep_rank));
-    tags->MergeTags(&ep_tag);
-    for (int i = 0; i < num_layer; ++i) {
-        auto layer_tag = kmonitor::MetricsTags("layer", std::to_string(i));
-        ep_tag.MergeTags(&layer_tag);
-        if (gpu_loads_metric) {
-            gpu_loads_metric->Report(&layer_tag, collector->gpu_loads[i]);
-        }
-    }
-
-    // update weights metrics
-    if (collector->update_weights_qps) {
-        REPORT_MUTABLE_QPS(update_weights_qps_metric);
-        REPORT_MUTABLE_METRIC(update_weights_latency_ms_metric, collector->update_weights_latency_ms);
-
-        // report layer qps
-        auto layer_tag = kmonitor::MetricsTags("layer", std::to_string(collector->update_layer_id));
-        tags->MergeTags(&layer_tag);
-        if (update_layer_weights_qps_metric) {
-            update_layer_weights_qps_metric->Report(&layer_tag, 1);
-        }
-        collector->update_weights_qps = false;
     }
 }
 
