@@ -173,6 +173,14 @@ def _component_scope_parts(item: Component, scopes: dict[str, str]) -> tuple[str
         _distribution_version(part[1:]) if part.startswith("@") else scopes[part]
         for part in item.scopes
     )
+    if item.name in ("flashinfer", "tilelang"):
+        # Their native extensions link TVM FFI even when its own cache is an
+        # explicit opt-out. Older FlashInfer releases need no FFI package.
+        try:
+            ffi = _distribution_version("apache-tvm-ffi")
+        except importlib.metadata.PackageNotFoundError:
+            ffi = "absent"
+        parts += (f"ffi-{ffi}",)
     if item.name == "cute_dsl" and os.environ.get("MODEL_TYPE") in (
         "kimi_k3",
         "kimi_k3_mtp",
