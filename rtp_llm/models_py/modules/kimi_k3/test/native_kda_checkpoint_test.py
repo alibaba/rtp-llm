@@ -1,4 +1,4 @@
-"""Pinned cuLA checkpoints versus an independent FP32 recurrence."""
+"""Paged-state parity with cuLA; output precision versus an FP32 recurrence."""
 import unittest
 from unittest.mock import patch
 
@@ -10,7 +10,6 @@ from cula.kda import chunk_kda
 
 from rtp_llm.models_py.modules.factory.attention.cuda_kda_impl import (
     cula_kda_paged_prefill,
-    plan_state_sequences,
 )
 
 
@@ -30,14 +29,41 @@ def recurrent_reference(q, k, v, gate, beta, state, alog, bias):
                                 (gate.float() + bias.reshape(-1, 128)))).exp()
     beta = beta.float().sigmoid()
     state = state.clone()
-    outputs, checkpoints = [], []
+    outputs = []
     for t in range(q.shape[0]):
         state = state * decay[t, :, :, None]
         correction = (state * k[t, :, :, None]).sum(dim=-2)
         state = state + k[t, :, :, None] * ((v[t].float() - correction) * beta[t, :, None])[:, None, :]
         outputs.append((q[t, :, :, None] * state).sum(dim=-2))
-        checkpoints.append(state.clone())
-    return torch.stack(outputs), checkpoints
+    return torch.stack(outputs)
+
+
+def native_checkpoint_reference(q, k, v, gate, beta, initial, alog, bias, prefix, expected):
+    # A float32 checkpoint is storage precision, not an FP32-only recurrence:
+    # cuLA's chunk algorithm also rounds intermediate projections to BF16.
+    # Compare publication against the separate, unpaged final-state API, and
+    # retain the independent FP32 output-accuracy gate for every endpoint.
+    length = q.shape[0]
+    ends = [*range(64 - prefix % 64, length, 64), length]
+    states = {}
+    for end in ends:
+        with torch.inference_mode():
+            output, state = chunk_kda(
+                *(x[:end].unsqueeze(0).contiguous() for x in (q, k, v, gate)),
+                beta[:end].unsqueeze(0).contiguous(),
+                scale=128**-0.5,
+                initial_state=initial.unsqueeze(0).clone(),
+                output_final_state=True,
+                use_qk_l2norm_in_kernel=True,
+                use_gate_in_kernel=True,
+                use_beta_sigmoid_in_kernel=True,
+                safe_gate=True, lower_bound=-5.0,
+                use_intracard_cp=False, A_log=alog, dt_bias=bias,
+                disable_recompute=False,
+            )
+        torch.testing.assert_close(output[0].float(), expected[:end], rtol=0.03, atol=0.003)
+        states[end - 1] = state[0].clone()
+    return states
 
 
 class NativeKdaCheckpointTest(unittest.TestCase):
@@ -83,7 +109,10 @@ class NativeKdaCheckpointTest(unittest.TestCase):
                 else:
                     initial.zero_()
                 initial_pool = pool.clone()
-                expected, states = recurrent_reference(q, k, v, gate, beta, initial, alog, bias)
+                expected = recurrent_reference(q, k, v, gate, beta, initial, alog, bias)
+                states = native_checkpoint_reference(
+                    q, k, v, gate, beta, initial, alog, bias, prefix, expected,
+                )
                 chunk_sizes = (length, 128) if length == 401 else (length,)
                 for chunk_size in chunk_sizes:
                     pool.copy_(initial_pool)
@@ -92,7 +121,7 @@ class NativeKdaCheckpointTest(unittest.TestCase):
                         with self.subTest(chunk_size=chunk_size, start=start):
                             before = pool.clone()
                             if start:
-                                reset, _ = recurrent_reference(
+                                reset = recurrent_reference(
                                     q[start:start + 1], k[start:start + 1], v[start:start + 1],
                                     gate[start:start + 1], beta[start:start + 1], initial, alog, bias,
                                 )
@@ -106,10 +135,13 @@ class NativeKdaCheckpointTest(unittest.TestCase):
                             # Preserve the existing bounded-KDA operator tolerances.
                             torch.testing.assert_close(actual.float(), expected[start:end], rtol=0.03, atol=0.003)
                             written = set()
-                            for segment in plan_state_sequences([0, end - start], [prefix + start], [table], 64)[0].segments:
-                                torch.testing.assert_close(pool[segment.cache_block], states[start + segment.end - 1], rtol=0.03, atol=0.003)
-                                self.assertTrue(torch.isfinite(pool[segment.cache_block]).all().item())
-                                written.add(segment.cache_block)
+                            for endpoint, state in states.items():
+                                if not start <= endpoint < end:
+                                    continue
+                                block = table[(prefix + endpoint) // 64]
+                                torch.testing.assert_close(pool[block], state, rtol=0.03, atol=0.003)
+                                self.assertTrue(torch.isfinite(pool[block]).all().item())
+                                written.add(block)
                             untouched = [i for i in range(pool.shape[0]) if i not in written]
                             torch.testing.assert_close(pool[untouched], before[untouched], rtol=0, atol=0)
         self.assertTrue(poisoned)
