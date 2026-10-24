@@ -120,11 +120,14 @@ public class DefaultBatchDispatcher {
     /**
      * Package-visible sizing injection keeps integration fixtures bounded and deterministic.
      */
-    DefaultBatchDispatcher(EngineGrpcClient grpcClient, ConfigService configService,
-                           FlexMonitor monitor, int poolSize, int queueSize) {
+    DefaultBatchDispatcher(EngineGrpcClient grpcClient,
+                           ConfigService configService,
+                           FlexMonitor monitor,
+                           int poolSize,
+                           int queueSize) {
         this.grpcClient = grpcClient;
         this.configService = configService;
-        this.monitor = Objects.requireNonNull(monitor, "monitor");
+        this.monitor = monitor;
         this.admissionCapacity = Math.addExact(poolSize, queueSize);
         this.admissionPermits = new Semaphore(admissionCapacity);
         Logger.info("FlexLB dispatch executor config: poolSize={}, logicalAdmissionCapacity={}, threadFactory=flexlb-dispatch-executor, rejectionPolicy=AbortPolicy",
@@ -260,7 +263,6 @@ public class DefaultBatchDispatcher {
 
         @Override
         public void submit(BatchDeliveryStrategy.Delivery delivery) {
-            Objects.requireNonNull(delivery, "delivery");
             if (!phase.compareAndSet(
                     PermitPhase.PREPARED, PermitPhase.SUBMITTED)) {
                 throw new IllegalStateException(
@@ -302,12 +304,11 @@ public class DefaultBatchDispatcher {
         }
     }
 
-    private static DispatchTask dispatchTask(
-            List<ScheduledRequest> exactItems,
-            long batchId,
-            long predictedMs,
-            String decisionReason,
-            BiConsumer<ScheduledRequest, DeliveryResult> observer) {
+    private static DispatchTask dispatchTask(List<ScheduledRequest> exactItems,
+                                             long batchId,
+                                             long predictedMs,
+                                             String decisionReason,
+                                             BiConsumer<ScheduledRequest, DeliveryResult> observer) {
         List<ScheduledRequest> frozenItems = List.copyOf(exactItems);
         if (frozenItems.isEmpty()) {
             throw new IllegalArgumentException("batch cannot be empty");
@@ -316,13 +317,8 @@ public class DefaultBatchDispatcher {
             throw new IllegalArgumentException(
                     "batchId must be positive and predictedMs non-negative");
         }
-        return new DispatchTask(
-                frozenItems,
-                frozenItems.getFirst().prefillEp(),
-                batchId,
-                predictedMs,
-                Objects.requireNonNull(decisionReason, "decisionReason"),
-                Objects.requireNonNull(observer, "observer"));
+        return new DispatchTask(frozenItems, frozenItems.getFirst().prefillEp(), batchId, predictedMs, decisionReason,
+                observer);
     }
 
     private record DispatchTask(List<ScheduledRequest> items,

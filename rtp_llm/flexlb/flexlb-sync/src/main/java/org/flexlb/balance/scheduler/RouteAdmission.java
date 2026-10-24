@@ -39,9 +39,9 @@ public final class RouteAdmission implements AutoCloseable {
 
     private RouteAdmission(String requestId, Response response, Selection selection, DecodeDecideInfo decodeRequest) {
         this.requestId = requestId;
-        this.response = Objects.requireNonNull(response, "response");
-        this.selection = Objects.requireNonNull(selection, "selection");
-        this.decodeDecideInfo = Objects.requireNonNull(decodeRequest, "decodeRequest");
+        this.response = response;
+        this.selection = selection;
+        this.decodeDecideInfo = decodeRequest;
         if (!Objects.equals(decodeRequest.requirement().requestId(), requestId)) {
             throw new IllegalArgumentException("Decode admission belongs to another request");
         }
@@ -274,10 +274,6 @@ public final class RouteAdmission implements AutoCloseable {
 
     /** The caller has registered the same canonical request before selecting this route. */
     record RouteDelivery(DeliveryClaim claim, WorkSnapshot precedingWork, long unstartedWorkMs) {
-        RouteDelivery {
-            Objects.requireNonNull(claim, "claim");
-            Objects.requireNonNull(precedingWork, "precedingWork");
-        }
     }
 
     PlacementResult<RouteDelivery, PlacementKey> tryCommitDirectRoute(BalanceContext context,

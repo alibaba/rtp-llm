@@ -3,7 +3,6 @@ package org.flexlb.balance.prediction;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.Map;
-import java.util.Objects;
 import java.util.Set;
 
 import static org.flexlb.balance.prediction.ArithmeticFormulaAst.AggregateFuncNode;
@@ -28,12 +27,13 @@ final class ArithmeticFormulaParser {
     private int pos;
     private int aggregateDepth;
 
-    ArithmeticFormulaParser(String input, Map<String, Integer> variables,
-           Set<String> aggregateExcludedVariables, boolean allowAggregates) {
+    ArithmeticFormulaParser(String input,
+                            Map<String, Integer> variables,
+                            Set<String> aggregateExcludedVariables,
+                            boolean allowAggregates) {
         this.input = input;
-        this.variables = Map.copyOf(Objects.requireNonNull(variables, "variables"));
-        this.aggregateExcludedVariables = Set.copyOf(
-                Objects.requireNonNull(aggregateExcludedVariables, "aggregateExcludedVariables"));
+        this.variables = Map.copyOf(variables);
+        this.aggregateExcludedVariables = Set.copyOf(aggregateExcludedVariables);
         this.allowAggregates = allowAggregates;
         int count = 0;
         for (int index : this.variables.values()) {

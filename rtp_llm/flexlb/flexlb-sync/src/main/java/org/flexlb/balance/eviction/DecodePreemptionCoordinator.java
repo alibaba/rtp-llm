@@ -41,7 +41,6 @@ public final class DecodePreemptionCoordinator {
                 throw new IllegalArgumentException(
                         "committed preemption cannot be a control failure");
             }
-            Objects.requireNonNull(detail, "detail");
         }
     }
 
@@ -97,14 +96,12 @@ public final class DecodePreemptionCoordinator {
     private final RequestSchedulerReporter reporter;
     private final AtomicLong tokenSequence = new AtomicLong(1);
 
-    public DecodePreemptionCoordinator(
-            EngineCancelChannel cancelChannel,
-            RequestRegistry requests,
-            RequestSchedulerReporter reporter) {
-        this.cancelChannel = Objects.requireNonNull(
-                cancelChannel, "cancelChannel");
-        this.requests = Objects.requireNonNull(requests, "requests");
-        this.reporter = Objects.requireNonNull(reporter, "reporter");
+    public DecodePreemptionCoordinator(EngineCancelChannel cancelChannel,
+                                       RequestRegistry requests,
+                                       RequestSchedulerReporter reporter) {
+        this.cancelChannel = cancelChannel;
+        this.requests = requests;
+        this.reporter = reporter;
     }
 
     CompletableFuture<PreemptionResult> prepareReturnedPreemption(

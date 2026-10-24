@@ -16,7 +16,6 @@ import org.springframework.stereotype.Component;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
-import java.util.Objects;
 
 /**
  * Periodically evicts workers that have stopped sending WorkerStatus reports
@@ -42,14 +41,11 @@ public class ExpirationCleaner {
     private final WorkerDirectory workerDirectory;
 
     @Autowired
-    public ExpirationCleaner(
-            ConfigService configService,
-            CacheAwareService cacheAwareService,
-            WorkerDirectory workerDirectory) {
-        this.cacheAwareService = Objects.requireNonNull(
-                cacheAwareService, "cacheAwareService");
-        this.workerDirectory = Objects.requireNonNull(
-                workerDirectory, "workerDirectory");
+    public ExpirationCleaner(ConfigService configService,
+                             CacheAwareService cacheAwareService,
+                             WorkerDirectory workerDirectory) {
+        this.cacheAwareService = cacheAwareService;
+        this.workerDirectory = workerDirectory;
         this.workerTimeoutUs = resolveWorkerTimeoutUs(configService);
     }
 

@@ -10,8 +10,6 @@ import org.flexlb.sync.status.WorkerDirectory;
 import org.flexlb.util.CommonUtils;
 import org.springframework.stereotype.Component;
 
-import java.util.Objects;
-
 /**
  * Selects a healthy Encoder using observed requests and uncached MM work.
  */
@@ -24,7 +22,7 @@ public final class EncoderStrategy {
      * Select from the current worker directory and its pinned endpoint generations.
      */
     public EncoderStrategy(WorkerDirectory workerDirectory) {
-        this.workerDirectory = Objects.requireNonNull(workerDirectory, "workerDirectory");
+        this.workerDirectory = workerDirectory;
     }
 
     /**

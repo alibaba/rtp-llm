@@ -15,7 +15,6 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.util.Map;
-import java.util.Objects;
 import java.util.concurrent.CompletionException;
 import java.util.concurrent.Executor;
 
@@ -44,9 +43,12 @@ public class GrpcWorkerStatusRunner implements Runnable {
     private final CacheAwareService cacheAwareService;
     private final Executor callbackExecutor;
 
-    public GrpcWorkerStatusRunner(String modelName, String ipPort,
-                                  int workerStatusPort, String site,
-                                  RoleType roleType, String ignoredGroup,
+    public GrpcWorkerStatusRunner(String modelName,
+                                  String ipPort,
+                                  int workerStatusPort,
+                                  String site,
+                                  RoleType roleType,
+                                  String ignoredGroup,
                                   WorkerStatus workerStatus,
                                   WorkerStatus.PollLease pollLease,
                                   WorkerDirectory workerDirectory,
@@ -60,17 +62,15 @@ public class GrpcWorkerStatusRunner implements Runnable {
         this.workerStatusPort = workerStatusPort;
         this.modelName = modelName;
         this.workerStatus = workerStatus;
-        this.pollLease = Objects.requireNonNull(pollLease, "pollLease");
+        this.pollLease = pollLease;
         workerStatus.requireStatusPollLease(pollLease);
-        this.workerDirectory = Objects.requireNonNull(
-                workerDirectory, "workerDirectory");
+        this.workerDirectory = workerDirectory;
         this.site = site;
         this.roleType = roleType;
         this.engineHealthReporter = engineHealthReporter;
         this.engineGrpcService = engineGrpcService;
         this.syncRequestTimeoutMs = syncRequestTimeoutMs;
-        this.cacheAwareService = Objects.requireNonNull(
-                cacheAwareService, "cacheAwareService");
+        this.cacheAwareService = cacheAwareService;
         this.callbackExecutor = callbackExecutor;
     }
 

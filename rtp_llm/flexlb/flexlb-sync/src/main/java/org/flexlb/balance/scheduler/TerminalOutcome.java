@@ -1,11 +1,8 @@
 package org.flexlb.balance.scheduler;
 
-import java.util.Objects;
-
 /** Immutable terminal intention, selected before cleanup and committed only after cleanup. */
 record TerminalOutcome(RequestState.Phase phase, String detail) {
     TerminalOutcome {
-        Objects.requireNonNull(phase, "phase");
         if (!phase.isTerminal()) { throw new IllegalArgumentException("terminal phase required"); }
     }
     static TerminalOutcome fail(String detail) { return new TerminalOutcome(RequestState.Phase.FAILED, detail); }

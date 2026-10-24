@@ -5,7 +5,6 @@ import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.util.Logger;
 
 import java.util.ArrayDeque;
-import java.util.Objects;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.RejectedExecutionException;
@@ -37,11 +36,8 @@ final class RequestCompletionPublisher implements AutoCloseable {
         private final AtomicBoolean claimed = new AtomicBoolean();
         private final AtomicBoolean closed = new AtomicBoolean();
 
-        PublicationPermit(
-                RequestCompletionPublisher publisher,
-                RequestSlot slot,
-                PublicationKind kind) {
-            this.publisher = Objects.requireNonNull(publisher, "publisher");
+        PublicationPermit(RequestCompletionPublisher publisher, RequestSlot slot, PublicationKind kind) {
+            this.publisher = publisher;
             this.slot = slot;
             this.kind = kind;
         }

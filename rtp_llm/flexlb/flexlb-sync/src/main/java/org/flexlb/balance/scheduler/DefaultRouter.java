@@ -27,7 +27,6 @@ import java.util.Collections;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
-import java.util.Objects;
 import java.util.Set;
 import java.util.stream.Collectors;
 
@@ -44,20 +43,18 @@ public class DefaultRouter {
     private VitCacheSelector vitCacheSelector;
 
     @Autowired
-    public DefaultRouter(
-            CostBasedPrefillStrategy prefillSelector,
-            DecodeSelector decodeSelector,
-            RandomStrategy vitSelector,
-            EncoderStrategy encoderSelector,
-            ConfigService configService,
-            ModelMetaConfig modelMetaConfig) {
-        this.prefillSelector = Objects.requireNonNull(prefillSelector, "prefillSelector");
-        this.decodeSelector = Objects.requireNonNull(decodeSelector, "decodeSelector");
-        this.vitSelector = Objects.requireNonNull(vitSelector, "vitSelector");
-        this.encoderSelector = Objects.requireNonNull(encoderSelector, "encoderSelector");
-        this.configService = Objects.requireNonNull(configService, "configService");
-        this.requiredRoles = Collections.unmodifiableSet(new LinkedHashSet<>(
-                Objects.requireNonNull(modelMetaConfig, "modelMetaConfig").requiredRoles()));
+    public DefaultRouter(CostBasedPrefillStrategy prefillSelector,
+                         DecodeSelector decodeSelector,
+                         RandomStrategy vitSelector,
+                         EncoderStrategy encoderSelector,
+                         ConfigService configService,
+                         ModelMetaConfig modelMetaConfig) {
+        this.prefillSelector = prefillSelector;
+        this.decodeSelector = decodeSelector;
+        this.vitSelector = vitSelector;
+        this.encoderSelector = encoderSelector;
+        this.configService = configService;
+        this.requiredRoles = Collections.unmodifiableSet(new LinkedHashSet<>(modelMetaConfig.requiredRoles()));
     }
 
     boolean isEncoderOnly(BalanceContext context) {

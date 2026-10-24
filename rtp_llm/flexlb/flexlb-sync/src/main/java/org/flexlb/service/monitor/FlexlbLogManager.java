@@ -24,11 +24,12 @@ public class FlexlbLogManager {
         this(loggingSystem, loggerGroups, configService, new LogbackStdoutController());
     }
 
-    FlexlbLogManager(LoggingSystem loggingSystem, LoggerGroups loggerGroups, ConfigService configService,
+    FlexlbLogManager(LoggingSystem loggingSystem,
+                     LoggerGroups loggerGroups,
+                     ConfigService configService,
                      LogbackStdoutController stdoutController) {
         this.loggingSystem = loggingSystem;
-        this.loggerGroup = Objects.requireNonNull(
-                loggerGroups.get(LOG_GROUP_NAME), "Logging group 'flexlb' is not configured");
+        this.loggerGroup = loggerGroups.get(LOG_GROUP_NAME);
         this.stdoutController = stdoutController;
         configService.addUpdateListener(config -> {
             setLogLevel(config.getObservability().getLogging().getLevel());

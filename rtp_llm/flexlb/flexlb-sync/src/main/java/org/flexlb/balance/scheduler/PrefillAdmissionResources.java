@@ -11,7 +11,6 @@ import org.flexlb.util.Logger;
 
 import java.util.IdentityHashMap;
 import java.util.List;
-import java.util.Objects;
 
 /**
  * Shared endpoint-capability mechanics for the two delivery transactions.
@@ -43,10 +42,8 @@ final class PrefillAdmissionResources {
         final DecodeEndpoint.EngineDispatchPermit decode;
         MemberOwnership ownership = MemberOwnership.ADMISSION_OWNED;
 
-        Member(
-                ScheduledRequest item,
-                DecodeEndpoint.EngineDispatchPermit permit) {
-            this.item = Objects.requireNonNull(item, "item");
+        Member(ScheduledRequest item, DecodeEndpoint.EngineDispatchPermit permit) {
+            this.item = item;
             this.decode = permit;
         }
     }

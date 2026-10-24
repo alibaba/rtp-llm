@@ -12,7 +12,6 @@ import java.util.ArrayList;
 import java.util.EnumMap;
 import java.util.List;
 import java.util.Map;
-import java.util.Objects;
 import java.util.function.Supplier;
 
 /**
@@ -28,11 +27,10 @@ public class RoutingServiceDiscovery implements ServiceDiscovery {
         this(discoveryProviders, ServiceDiscoveryRuntimeConfig::new);
     }
 
-    public RoutingServiceDiscovery(
-            List<ServiceDiscoveryProvider> discoveryProviders,
-            Supplier<ServiceDiscoveryRuntimeConfig> runtimeConfigSupplier) {
+    public RoutingServiceDiscovery(List<ServiceDiscoveryProvider> discoveryProviders,
+                                   Supplier<ServiceDiscoveryRuntimeConfig> runtimeConfigSupplier) {
         this.providers = new EnumMap<>(ServiceDiscoveryType.class);
-        this.runtimeConfigSupplier = Objects.requireNonNull(runtimeConfigSupplier);
+        this.runtimeConfigSupplier = runtimeConfigSupplier;
         for (ServiceDiscoveryProvider provider : discoveryProviders) {
             ServiceDiscoveryProvider previous = providers.putIfAbsent(provider.getType(), provider);
             if (previous != null) {

@@ -1,6 +1,5 @@
 package org.flexlb.balance.endpoint;
 
-import java.util.Objects;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 /** One endpoint-generation admission gate and its retirement drain. */
@@ -25,8 +24,7 @@ final class EndpointGenerationLifecycle {
     private Throwable retirementFailure;
 
     EndpointGenerationLifecycle(Runnable handoffsDrained) {
-        this.handoffsDrained = Objects.requireNonNull(
-                handoffsDrained, "handoffsDrained");
+        this.handoffsDrained = handoffsDrained;
     }
 
     synchronized HandoffPermit tryAcquireHandoff() {

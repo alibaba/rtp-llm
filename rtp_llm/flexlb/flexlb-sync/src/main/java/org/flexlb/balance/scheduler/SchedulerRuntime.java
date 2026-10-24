@@ -17,7 +17,6 @@ import org.springframework.stereotype.Component;
 import javax.annotation.PreDestroy;
 import java.util.List;
 import java.util.Map;
-import java.util.Objects;
 
 /** Owns scheduler maintenance, metrics traversal, and ordered shutdown. */
 @Component
@@ -69,15 +68,13 @@ final class SchedulerRuntime {
         this.queueRoles = modelMetaConfig.requiredRoles().stream()
                 .filter(role -> role == RoleType.PREFILL || role == RoleType.PDFUSION)
                 .toList();
-        this.requests = Objects.requireNonNull(requests, "requests");
-        this.endpoints = Objects.requireNonNull(endpoints, "endpoints");
-        this.reporter = Objects.requireNonNull(reporter, "reporter");
-        this.admissionReporter = Objects.requireNonNull(
-                admissionReporter, "admissionReporter");
-        this.configService = Objects.requireNonNull(configService, "configService");
-        this.queueCapacity = Objects.requireNonNull(queueCapacity, "queueCapacity");
-        this.closePlacement = Objects.requireNonNull(
-                closePlacement, "closePlacement");
+        this.requests = requests;
+        this.endpoints = endpoints;
+        this.reporter = reporter;
+        this.admissionReporter = admissionReporter;
+        this.configService = configService;
+        this.queueCapacity = queueCapacity;
+        this.closePlacement = closePlacement;
     }
 
     @Scheduled(fixedRate = EXPIRATION_MAINTENANCE_INTERVAL_MS)

@@ -18,7 +18,6 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
 
 import java.util.List;
-import java.util.Objects;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 
@@ -39,31 +38,21 @@ public final class RequestScheduler {
     private final EncoderQueueCoordinator encoderQueue;
 
     @Autowired
-    RequestScheduler(
-            ConfigService configService,
-            DefaultRouter router,
-            EndpointRegistry endpointRegistry,
-            BatchSchedulerReporter reporter,
-            EvictionManager evictionManager,
-            RequestRegistry requestRegistry,
-            PlacementAvailability placementAvailability,
-            QueueCapacity queueCapacity) {
-        Objects.requireNonNull(configService, "configService");
-        this.router = Objects.requireNonNull(router, "router");
-        this.endpointRegistry = Objects.requireNonNull(
-                endpointRegistry, "endpointRegistry");
-        this.requestRegistry = Objects.requireNonNull(requestRegistry, "lifecycle");
+    RequestScheduler(ConfigService configService,
+                     DefaultRouter router,
+                     EndpointRegistry endpointRegistry,
+                     BatchSchedulerReporter reporter,
+                     EvictionManager evictionManager,
+                     RequestRegistry requestRegistry,
+                     PlacementAvailability placementAvailability,
+                     QueueCapacity queueCapacity) {
+        this.router = router;
+        this.endpointRegistry = endpointRegistry;
+        this.requestRegistry = requestRegistry;
         FlexlbConfig startupConfig = configService.loadBalanceConfig();
         this.globalQueue = startupConfig != null && startupConfig.isQueue()
-                ? new GlobalQueueCoordinator(
-                        configService,
-                        Objects.requireNonNull(router, "router"),
-                        Objects.requireNonNull(reporter, "reporter"),
-                        Objects.requireNonNull(evictionManager, "evictionManager"),
-                        this.requestRegistry,
-                        Objects.requireNonNull(
-                                placementAvailability, "placementAvailability"),
-                        Objects.requireNonNull(queueCapacity, "queueCapacity"))
+                ? new GlobalQueueCoordinator(configService, router, reporter, evictionManager, this.requestRegistry,
+                        placementAvailability, queueCapacity)
                 : null;
         this.encoderQueue = startupConfig != null && startupConfig.isQueue() && router.hasEncoderRole()
                 ? new EncoderQueueCoordinator(router, requestRegistry, startupConfig.isPriorityOrdering())

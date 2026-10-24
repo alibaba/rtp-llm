@@ -6,7 +6,6 @@ import org.flexlb.service.monitor.BatchSchedulerReporter;
 import org.flexlb.util.Logger;
 
 import java.util.List;
-import java.util.Objects;
 
 /**
  * No-throw metrics emitted after a delivery decision has committed.
@@ -16,7 +15,7 @@ public final class DeliveryMetrics {
     private final BatchSchedulerReporter reporter;
 
     public DeliveryMetrics(BatchSchedulerReporter reporter) {
-        this.reporter = Objects.requireNonNull(reporter, "reporter");
+        this.reporter = reporter;
     }
 
     public void routesDelivered(int remainingQueueDepth, List<ScheduledRequest> exactItems) {

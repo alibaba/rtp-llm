@@ -15,7 +15,6 @@ import java.util.EnumMap;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.Objects;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.function.Supplier;
 
@@ -36,8 +35,7 @@ public final class WorkerDirectory implements WorkerStatusProvider {
     private final EndpointRegistry endpointRegistry;
 
     public WorkerDirectory(EndpointRegistry endpointRegistry) {
-        this.endpointRegistry = Objects.requireNonNull(
-                endpointRegistry, "endpointRegistry");
+        this.endpointRegistry = endpointRegistry;
         for (RoleType role : RoleType.values()) {
             statusesByRole.put(role, new ConcurrentHashMap<>());
         }
@@ -78,16 +76,9 @@ public final class WorkerDirectory implements WorkerStatusProvider {
      * status identity only; its endpoint remains absent until the first valid
      * WorkerStatus response commits.
      */
-    public WorkerStatus currentOrDiscover(
-            RoleType role,
-            String address,
-            Supplier<WorkerStatus> discoveredFactory) {
-        Objects.requireNonNull(role, "role");
-        Objects.requireNonNull(address, "address");
-        Objects.requireNonNull(discoveredFactory, "discoveredFactory");
+    public WorkerStatus currentOrDiscover(RoleType role, String address, Supplier<WorkerStatus> discoveredFactory) {
         return statusesByRole.get(role).computeIfAbsent(address, ignored -> {
-            WorkerStatus discovered = Objects.requireNonNull(
-                    discoveredFactory.get(), "discovered status");
+            WorkerStatus discovered = discoveredFactory.get();
             if (discovered.getRole() != role
                     || !address.equals(discovered.getLogicalIpPort())) {
                 throw new IllegalArgumentException(
@@ -137,9 +128,6 @@ public final class WorkerDirectory implements WorkerStatusProvider {
             RoleType role,
             String address,
             WorkerStatus status) {
-        Objects.requireNonNull(status, "status");
-        Objects.requireNonNull(role, "role");
-        Objects.requireNonNull(address, "address");
         status.requireGenerationLock();
         status.requireActiveGeneration();
 
@@ -174,11 +162,6 @@ public final class WorkerDirectory implements WorkerStatusProvider {
             EndpointRegistry.DetachedGeneration detached,
             CacheAwareService cacheAwareService,
             Logger logger) {
-        Objects.requireNonNull(role, "role");
-        Objects.requireNonNull(address, "address");
-        Objects.requireNonNull(status, "status");
-        Objects.requireNonNull(cacheAwareService, "cacheAwareService");
-        Objects.requireNonNull(logger, "logger");
 
         Throwable cleanupFailure = null;
         try {

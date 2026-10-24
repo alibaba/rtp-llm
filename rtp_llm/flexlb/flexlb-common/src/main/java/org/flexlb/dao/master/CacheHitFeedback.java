@@ -1,7 +1,5 @@
 package org.flexlb.dao.master;
 
-import java.util.Objects;
-
 /**
  * Engine feedback comparing the routing cache-hit prediction with the actual cache hit.
  * The embedded {@link WorkerIdentity} preserves the routing identity
@@ -23,10 +21,6 @@ public record CacheHitFeedback(
         long kvcmGlobalMatchTokens,
         long actualHitTokens,
         long deltaHitTokens) {
-
-    public CacheHitFeedback {
-        Objects.requireNonNull(workerIdentity, "workerIdentity");
-    }
 
     public CacheHitFeedback(
             String eventType,

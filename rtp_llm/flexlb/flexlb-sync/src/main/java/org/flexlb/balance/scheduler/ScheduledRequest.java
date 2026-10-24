@@ -80,7 +80,7 @@ public final class ScheduledRequest implements Prioritized {
                             DecodeEndpoint.ReservationHandle decodeReservation,
                             long enqueuedAtMs,
                             DecodeDecideInfo frozenDecode) {
-        this.ctx = Objects.requireNonNull(ctx, "ctx");
+        this.ctx = ctx;
         this.future = future;
         this.routeResponse = routeResponse;
         this.prefill = prefill;
@@ -94,8 +94,7 @@ public final class ScheduledRequest implements Prioritized {
         this.enqueueSequence = ctx.getWorkerEnqueueSequence();
         this.expiresAtMs = ctx.getRequestExpiresAtMs();
         this.hitCache = hitCacheOf(prefill);
-        FlexlbConfig schedulingConfig = Objects.requireNonNull(
-                ctx.getConfig(), "request scheduling config");
+        FlexlbConfig schedulingConfig = ctx.getConfig();
         this.routeDelivery = schedulingConfig.getDispatcher().getType() == DispatcherConfig.Type.NON_BATCH;
         this.maxInflightBatchesPerPrefillWorker = routeDelivery ? 0
                 : schedulingConfig.getDispatcher().getMaxInflightPerPrefillWorker();

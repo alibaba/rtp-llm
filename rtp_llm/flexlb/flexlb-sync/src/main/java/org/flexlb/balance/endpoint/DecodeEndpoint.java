@@ -36,12 +36,13 @@ public class DecodeEndpoint extends WorkerEndpoint {
         this(status, endpointEvents, new PlacementAvailability());
     }
 
-    DecodeEndpoint(WorkerStatus status, EndpointEventProjector endpointEvents,
+    DecodeEndpoint(WorkerStatus status,
+                   EndpointEventProjector endpointEvents,
                    PlacementAvailability placementAvailability) {
         super(status);
         this.state = new DecodeState(status);
-        this.endpointEvents = java.util.Objects.requireNonNull(endpointEvents, "endpointEvents");
-        this.placementAvailability = java.util.Objects.requireNonNull(placementAvailability, "placementAvailability");
+        this.endpointEvents = endpointEvents;
+        this.placementAvailability = placementAvailability;
     }
 
     // Reservation and release. Lifecycle pins remain valid for the entire handoff.
@@ -129,8 +130,6 @@ public class DecodeEndpoint extends WorkerEndpoint {
 
     public EngineDispatchPermitAcquisition acquireDispatchPermit(
             ReservationHandle reservation, AdmissionCapacity capacity) {
-        java.util.Objects.requireNonNull(reservation, "reservation");
-        java.util.Objects.requireNonNull(capacity, "capacity");
         GenerationPin pin = tryPinGeneration();
         if (pin == null) {
             return new EngineDispatchPermitAcquisition(EngineDispatchPermitAcquireStatus.ENDPOINT_RETIRED, null);
@@ -144,8 +143,6 @@ public class DecodeEndpoint extends WorkerEndpoint {
 
     /** Resolve a permit once. ENGINE_OWNED means handoff, not Worker acceptance. */
     public EngineDispatchPermitTransferStatus dispatch(EngineDispatchPermit permit, DispatchOutcome outcome) {
-        java.util.Objects.requireNonNull(permit, "permit");
-        java.util.Objects.requireNonNull(outcome, "outcome");
         if (permit.endpoint != this) { throw new IllegalArgumentException("Dispatch permit belongs to another endpoint"); }
         return permit.resolve(outcome);
     }
@@ -378,7 +375,6 @@ public class DecodeEndpoint extends WorkerEndpoint {
                 throw new IllegalArgumentException("Only a Cancel reply carries a phase");
             }
             if (kind != Kind.CANCEL_REPLY && kind != Kind.CANCEL_SENDING) {
-                java.util.Objects.requireNonNull(reservation, "reservation");
                 if (!java.util.Objects.equals(requestId, reservation.requestId())) {
                     throw new IllegalArgumentException("Victim identity mismatch");
                 }
@@ -438,7 +434,6 @@ public class DecodeEndpoint extends WorkerEndpoint {
             long errorCode) {
         public WorkerStatusFact {
             java.util.Objects.requireNonNull(kind, "kind");
-            java.util.Objects.requireNonNull(reservation, "reservation");
             if (kind != Kind.TERMINAL && errorCode != 0L) {
                 throw new IllegalArgumentException(
                         "only a terminal Decode fact may carry an error code");
@@ -544,9 +539,6 @@ public class DecodeEndpoint extends WorkerEndpoint {
         public long totalKv() { return placementUsage.totalKvTokens(); }
 
         public DecodeRoutingView {
-            java.util.Objects.requireNonNull(address, "address");
-            java.util.Objects.requireNonNull(topology, "topology");
-            java.util.Objects.requireNonNull(workerStatus, "workerStatus");
             if (generationId <= 0L) {
                 throw new IllegalArgumentException(
                         "Decode routing view requires a positive generation");
@@ -606,8 +598,6 @@ public class DecodeEndpoint extends WorkerEndpoint {
         /** Use the same occupancy scope for the observation and every exact victim release. */
         public CapacityDeficit evaluate(CapacityUsage usage, long requiredKvTokens, long kvBudgetTokens,
                                         CapacityRelease release) {
-            java.util.Objects.requireNonNull(usage, "usage");
-            java.util.Objects.requireNonNull(release, "release");
             if (requiredKvTokens < 0L || kvBudgetTokens < requiredKvTokens) {
                 throw new IllegalArgumentException("Decode demand must satisfy KV budget >= required KV >= 0");
             }

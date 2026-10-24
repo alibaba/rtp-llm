@@ -100,16 +100,13 @@ public class EngineSyncRunner implements Runnable {
 
         this.modelName = modelName;
         this.workerAddressService = workerAddressService;
-        this.workerDirectory = Objects.requireNonNull(
-                workerDirectory, "workerDirectory");
+        this.workerDirectory = workerDirectory;
         this.statusCheckExecutor = statusCheckExecutor;
         this.engineHealthReporter = engineHealthReporter;
         this.engineGrpcService = engineGrpcService;
         this.roleType = roleType;
-        this.cacheAwareService = Objects.requireNonNull(
-                cacheAwareService, "cacheAwareService");
-        this.cacheIntervalService = Objects.requireNonNull(
-                cacheIntervalService, "cacheIntervalService");
+        this.cacheAwareService = cacheAwareService;
+        this.cacheIntervalService = cacheIntervalService;
         this.syncRequestTimeoutMs = syncRequestTimeoutMs;
         this.syncCount = syncCount;
         this.syncEngineStatusInterval = syncEngineStatusInterval;

@@ -62,7 +62,7 @@ public final class RequestSlot {
         private final RequestSlot owner;
 
         AdmissionHandle(RequestSlot owner) {
-            this.owner = Objects.requireNonNull(owner, "owner");
+            this.owner = owner;
         }
 
         /** A late placement attempt must not overwrite the frozen cancellation evidence. */
@@ -78,7 +78,6 @@ public final class RequestSlot {
 
         /** Transfer this exact admission attempt to canonical terminal ownership. */
         public void terminate(Response failure) {
-            Objects.requireNonNull(failure, "failure");
             if (failure.isSuccess()) { throw new IllegalArgumentException("admission termination requires a failure"); }
             if (resolved.compareAndSet(false, true)) {
                 owner.finishAdmission(this, failure);
@@ -231,9 +230,8 @@ public final class RequestSlot {
         this.expirationTimer = expirationTimer;
         this.terminalCleanup = terminalCleanup;
         this.admissionFinished = admissionFinished;
-        this.completionPublisher = Objects.requireNonNull(
-                completionPublisher, "completionPublisher");
-        this.context = Objects.requireNonNull(context, "context");
+        this.completionPublisher = completionPublisher;
+        this.context = context;
         this.requestId = context.getRequestId();
         this.numericRequestId = context.getNumericRequestId();
         this.requestPhase = context.getRequestPhase();
@@ -254,7 +252,6 @@ public final class RequestSlot {
     }
 
     boolean claimEncoderRoute(EncoderEndpoint endpoint) {
-        Objects.requireNonNull(endpoint, "endpoint");
         synchronized (this) {
             if (requestPhase != RequestPhase.ENCODER || !isOpen()
                     || state != RequestState.Phase.QUEUED || encoderEndpoint != null) {
@@ -273,7 +270,6 @@ public final class RequestSlot {
     }
 
     boolean publishEncoderRoute(Response response) {
-        Objects.requireNonNull(response, "response");
         if (!response.isSuccess()) {
             throw new IllegalArgumentException("Encoder route requires a successful response");
         }
@@ -874,7 +870,6 @@ public final class RequestSlot {
     }
 
     private void completeDelivery(DeliveryClaim claim, DeliveryResult result) {
-        Objects.requireNonNull(result, "delivery result");
         SelectedPublication failureResponse = null;
         RequestEffect acknowledgement = RequestEffect.DEFERRED;
         boolean failed = result.failed();
@@ -1287,7 +1282,6 @@ public final class RequestSlot {
     private RequestEffect applyDecodeRetirementLocked(
             DecodeEndpoint source, DecodeEndpoint.ReservationHandle reservation, String detail) {
         requireSlotLock("Decode generation retirement reduction");
-        Objects.requireNonNull(detail, "detail");
         if (!ownsDecodeFactLocked(source, reservation)) {
             return RequestEffect.STALE;
         }
@@ -1320,7 +1314,6 @@ public final class RequestSlot {
 
     /** Return the resulting request snapshot; accepting cancellation does not imply immediate cleanup. */
     public RequestState cancelRequest(long expectedBatchId, CancelReason reason) {
-        Objects.requireNonNull(reason, "reason");
         TerminalAction action = null;
         RequestState result;
         synchronized (this) {
@@ -1340,7 +1333,6 @@ public final class RequestSlot {
     /** Record the first cancellation only. Resource ownership is unchanged. */
     private boolean recordCancellationLocked(CancelReason reason, String message) {
         requireSlotLock("record cancellation");
-        Objects.requireNonNull(reason, "reason");
         if (!ownsActiveGenerationLocked() || state.isTerminal()
                 || cancellationReason != null || pendingAdmissionCancelReason != null) {
             return false;
@@ -1598,7 +1590,6 @@ public final class RequestSlot {
 
     private DecisionDeadline updateDeliveryPredictionLocked(WorkSnapshot precedingWork, long unstartedWorkMs, long nowMs) {
         requireSlotLock("delivery prediction consumption");
-        Objects.requireNonNull(precedingWork, "precedingWork");
         if (unstartedWorkMs < 0L) {
             throw new IllegalArgumentException("unstarted work must be non-negative");
         }
@@ -1693,7 +1684,7 @@ public final class RequestSlot {
                 || decisionStage == DecisionStage.ACCEPTED) {
             return;
         }
-        detail = "SUSPECTED_LOST: " + Objects.requireNonNull(message, "message");
+        detail = "SUSPECTED_LOST: " + message;
         updatedAtMs = System.currentTimeMillis();
         assertInvariantLocked();
     }
@@ -2034,7 +2025,6 @@ public final class RequestSlot {
     /** Map one end event to its request result; cleanup completion has its own entry. */
     private TerminalAction decideRequestEndLocked(DeferredTerminal event) {
         requireSlotLock("request completion");
-        Objects.requireNonNull(event, "request end event");
         if (cleanupProgress != null) { return tryCloseAfterCleanupLocked(); }
         String message = event.detail();
         TerminalOutcome outcome;
@@ -2232,7 +2222,6 @@ public final class RequestSlot {
         TerminalOutcome outcome = switch (completion) {
             case RESPONSE -> responseOutcome(response);
             case FAILURE -> {
-                Objects.requireNonNull(error, "error");
                 yield TerminalOutcome.fail("external future failure"
                         + (error.getMessage() == null ? "" : ": " + error.getMessage()));
             }
@@ -2440,7 +2429,6 @@ record DeferredTerminal(
     }
 
     DeferredTerminal {
-        Objects.requireNonNull(kind, "kind");
         boolean valid = switch (kind) {
             case FAILURE ->
                     errorType != null && workerSource == null;
@@ -2479,13 +2467,8 @@ record DeferredTerminal(
                 Kind.TIMEOUT, null, detail, null, false, 0L);
     }
 
-    static DeferredTerminal worker(
-            WorkerTerminalSource source,
-            boolean successful,
-            long errorCode) {
-        return new DeferredTerminal(
-                Kind.WORKER, null, null,
-                Objects.requireNonNull(source, "source"), successful, errorCode);
+    static DeferredTerminal worker(WorkerTerminalSource source, boolean successful, long errorCode) {
+        return new DeferredTerminal(Kind.WORKER, null, null, source, successful, errorCode);
     }
 
     static DeferredTerminal priority(String detail) {

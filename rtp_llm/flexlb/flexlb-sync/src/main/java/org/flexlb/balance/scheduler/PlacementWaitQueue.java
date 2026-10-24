@@ -5,7 +5,6 @@ import java.util.HashMap;
 import java.util.IdentityHashMap;
 import java.util.Map;
 import java.util.NavigableSet;
-import java.util.Objects;
 import java.util.TreeSet;
 import java.util.function.Consumer;
 
@@ -27,7 +26,7 @@ final class PlacementWaitQueue {
     private final NavigableSet<Domain> ready;
 
     PlacementWaitQueue(boolean priorityOrdering, PlacementAvailability availability) {
-        this.availability = Objects.requireNonNull(availability, "availability");
+        this.availability = availability;
         Comparator<GlobalQueueEntry> fifo = Comparator.comparingLong(entry -> entry.sequence);
         order = priorityOrdering
                 ? Comparator.<GlobalQueueEntry>comparingInt(entry -> entry.priority).reversed().thenComparing(fifo)
@@ -41,7 +40,6 @@ final class PlacementWaitQueue {
 
     /** The only park boundary: do not sleep through an edge published during planning. */
     boolean park(GlobalQueueEntry entry, PlacementKey blocker, long observedSequence) {
-        Objects.requireNonNull(blocker, "blocker");
         if (availability.lastChangedSequence(waitKey(blocker)) > observedSequence) {
             return false;
         }

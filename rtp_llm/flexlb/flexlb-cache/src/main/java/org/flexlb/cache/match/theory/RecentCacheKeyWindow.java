@@ -4,7 +4,6 @@ import lombok.Getter;
 import lombok.extern.slf4j.Slf4j;
 
 import java.util.List;
-import java.util.Objects;
 import java.util.function.LongSupplier;
 
 /**
@@ -43,7 +42,7 @@ public class RecentCacheKeyWindow {
         }
         this.timeWindowMs = timeWindowMs;
         this.maxCacheKeys = Math.toIntExact(maxCacheKeys);
-        this.nowSupplier = Objects.requireNonNull(nowSupplier, "nowSupplier");
+        this.nowSupplier = nowSupplier;
 
         int hashTableCapacity = hashTableCapacityFor(this.maxCacheKeys);
         this.tableMask = hashTableCapacity - 1;

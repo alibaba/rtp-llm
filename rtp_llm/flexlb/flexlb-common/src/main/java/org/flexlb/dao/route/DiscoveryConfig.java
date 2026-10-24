@@ -11,7 +11,6 @@ import org.flexlb.discovery.ServiceDiscoveryType;
 
 import java.util.ArrayList;
 import java.util.List;
-import java.util.Objects;
 import java.util.function.Supplier;
 
 /**
@@ -46,9 +45,8 @@ public class DiscoveryConfig {
      * MODEL_SERVICE_CONFIG while preserving the provider-facing accessors.
      */
     @JsonIgnore
-    public void bindRuntimeConfig(
-            Supplier<ServiceDiscoveryRuntimeConfig> runtimeConfigSupplier) {
-        this.runtimeConfigSupplier = Objects.requireNonNull(runtimeConfigSupplier);
+    public void bindRuntimeConfig(Supplier<ServiceDiscoveryRuntimeConfig> runtimeConfigSupplier) {
+        this.runtimeConfigSupplier = runtimeConfigSupplier;
     }
 
     @JsonIgnore

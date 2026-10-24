@@ -94,24 +94,21 @@ final class GlobalQueueCoordinator implements AutoCloseable {
     private final PlacementAvailability.Listener availabilityListener =
             this::onAvailabilityChanged;
 
-    GlobalQueueCoordinator(
-            ConfigService configService,
-            DefaultRouter router,
-            BatchSchedulerReporter reporter,
-            EvictionManager evictionManager,
-            RequestRegistry lifecycle,
-            PlacementAvailability availability,
-            QueueCapacity queueCapacity) {
-        ConfigService checkedConfig = Objects.requireNonNull(
-                configService, "configService");
+    GlobalQueueCoordinator(ConfigService configService,
+                           DefaultRouter router,
+                           BatchSchedulerReporter reporter,
+                           EvictionManager evictionManager,
+                           RequestRegistry lifecycle,
+                           PlacementAvailability availability,
+                           QueueCapacity queueCapacity) {
+        ConfigService checkedConfig = configService;
         this.configService = checkedConfig;
-        this.router = Objects.requireNonNull(router, "router");
-        this.reporter = Objects.requireNonNull(reporter, "reporter");
-        this.evictionManager = Objects.requireNonNull(
-                evictionManager, "evictionManager");
-        this.lifecycle = Objects.requireNonNull(lifecycle, "lifecycle");
-        this.availability = Objects.requireNonNull(availability, "availability");
-        this.queueCapacity = Objects.requireNonNull(queueCapacity, "queueCapacity");
+        this.router = router;
+        this.reporter = reporter;
+        this.evictionManager = evictionManager;
+        this.lifecycle = lifecycle;
+        this.availability = availability;
+        this.queueCapacity = queueCapacity;
         this.priorityOrdering = resolvePriorityOrdering(checkedConfig);
         this.orderedQueue = new OrderedRequestQueue(priorityOrdering);
         this.waitingRequests = new PlacementWaitQueue(priorityOrdering, availability);
@@ -157,8 +154,6 @@ final class GlobalQueueCoordinator implements AutoCloseable {
      * Enqueue without selecting an endpoint on the ingress thread.
      */
     OfferResult offer(BalanceContext context, CompletableFuture<Response> future, int priority) {
-        Objects.requireNonNull(context, "context");
-        Objects.requireNonNull(future, "future");
         GlobalQueueEntry entry = new GlobalQueueEntry(context, future, normalizePriority(priority),
                 router.resolvePolicyGroup(context));
         GlobalQueueEntry victim = null;

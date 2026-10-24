@@ -18,7 +18,6 @@ import java.util.ArrayList;
 import java.util.IdentityHashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.Objects;
 import java.util.OptionalLong;
 import java.util.function.BiConsumer;
 import java.util.function.LongSupplier;
@@ -43,17 +42,14 @@ public final class BatchDeliveryStrategy implements DeliveryStrategy {
     private final RequestRegistry requests;
     private final DeliveryMetrics telemetry;
 
-    public BatchDeliveryStrategy(
-            Supplier<CapacityBoundary.Attempt<PreparedSubmission>>
-                    prepareSubmission,
-            LongSupplier batchIds,
-            RequestRegistry requests,
-            DeliveryMetrics telemetry) {
-        this.prepareSubmission = Objects.requireNonNull(
-                prepareSubmission, "prepareSubmission");
-        this.batchIds = Objects.requireNonNull(batchIds, "batchIds");
-        this.requests = Objects.requireNonNull(requests, "requests");
-        this.telemetry = Objects.requireNonNull(telemetry, "telemetry");
+    public BatchDeliveryStrategy(Supplier<CapacityBoundary.Attempt<PreparedSubmission>> prepareSubmission,
+                                 LongSupplier batchIds,
+                                 RequestRegistry requests,
+                                 DeliveryMetrics telemetry) {
+        this.prepareSubmission = prepareSubmission;
+        this.batchIds = batchIds;
+        this.requests = requests;
+        this.telemetry = telemetry;
     }
 
     @Override
@@ -130,13 +126,9 @@ public final class BatchDeliveryStrategy implements DeliveryStrategy {
         }
     }
 
-    CapacityBoundary.Attempt<BatchTransaction> prepareAdmission(
-            ScheduledRequest head) {
+    CapacityBoundary.Attempt<BatchTransaction> prepareAdmission(ScheduledRequest head) {
         try {
-            CapacityBoundary.Attempt<
-                    PreparedSubmission> submissionAttempt =
-                    Objects.requireNonNull(
-                            prepareSubmission.get(), "submission attempt");
+            CapacityBoundary.Attempt<PreparedSubmission> submissionAttempt = prepareSubmission.get();
             if (!submissionAttempt.accepted()) {
                 return rejected(submissionAttempt.boundary());
             }
@@ -572,7 +564,6 @@ public final class BatchDeliveryStrategy implements DeliveryStrategy {
                 String decisionReason, int remainingQueueDepth,
                 WorkSnapshot precedingWork) {
             requirePhase(Phase.COMMITTED, "submit delivery");
-            Objects.requireNonNull(precedingWork, "precedingWork");
             phase = Phase.SUBMITTED;
             try {
                 // The strategy retains admission ownership while waiting for

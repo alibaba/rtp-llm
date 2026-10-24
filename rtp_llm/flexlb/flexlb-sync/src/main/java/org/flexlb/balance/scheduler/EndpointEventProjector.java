@@ -10,7 +10,6 @@ import org.flexlb.util.Logger;
 import org.springframework.stereotype.Component;
 
 import java.util.List;
-import java.util.Objects;
 
 /**
  * Total projection boundary from endpoint-owned facts into exact RequestSlot
@@ -23,7 +22,7 @@ public final class EndpointEventProjector {
     private final RequestRegistry scheduler;
 
     public EndpointEventProjector(RequestRegistry scheduler) {
-        this.scheduler = Objects.requireNonNull(scheduler, "scheduler");
+        this.scheduler = scheduler;
     }
 
     public void onPrefillStatus(

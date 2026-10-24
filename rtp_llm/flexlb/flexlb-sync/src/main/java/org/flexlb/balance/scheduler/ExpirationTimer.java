@@ -4,7 +4,6 @@ import org.flexlb.config.ConfigService;
 import org.flexlb.util.Logger;
 
 import java.util.List;
-import java.util.Objects;
 import java.util.OptionalLong;
 import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.ScheduledFuture;
@@ -198,13 +197,10 @@ final class ExpirationTimer implements AutoCloseable {
         this(lifecycle, config, System::currentTimeMillis);
     }
 
-    ExpirationTimer(
-            RequestRegistry lifecycle,
-            ConfigService config,
-            LongSupplier clock) {
-        this.lifecycle = Objects.requireNonNull(lifecycle, "lifecycle");
-        this.config = Objects.requireNonNull(config, "config");
-        this.clock = Objects.requireNonNull(clock, "clock");
+    ExpirationTimer(RequestRegistry lifecycle, ConfigService config, LongSupplier clock) {
+        this.lifecycle = lifecycle;
+        this.config = config;
+        this.clock = clock;
         this.executor = new ScheduledThreadPoolExecutor(1, runnable -> {
             Thread thread = new Thread(
                     runnable, "request-scheduler-expiration");

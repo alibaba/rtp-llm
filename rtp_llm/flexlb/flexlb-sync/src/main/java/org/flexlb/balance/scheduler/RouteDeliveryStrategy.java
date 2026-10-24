@@ -14,7 +14,6 @@ import org.flexlb.balance.scheduler.RequestSlot.DeliveryClaim;
 
 import java.util.ArrayList;
 import java.util.List;
-import java.util.Objects;
 import java.util.OptionalLong;
 
 import static org.flexlb.balance.scheduler.PrefillAdmissionResources.accepted;
@@ -36,11 +35,9 @@ public final class RouteDeliveryStrategy implements DeliveryStrategy {
     private final RequestRegistry requests;
     private final DeliveryMetrics telemetry;
 
-    public RouteDeliveryStrategy(
-            RequestRegistry requests,
-            DeliveryMetrics telemetry) {
-        this.requests = Objects.requireNonNull(requests, "requests");
-        this.telemetry = Objects.requireNonNull(telemetry, "telemetry");
+    public RouteDeliveryStrategy(RequestRegistry requests, DeliveryMetrics telemetry) {
+        this.requests = requests;
+        this.telemetry = telemetry;
     }
 
     @Override
@@ -399,13 +396,10 @@ public final class RouteDeliveryStrategy implements DeliveryStrategy {
         }
 
         @Override
-        public void handoff(
-                String decisionReason, int remainingQueueDepth,
-                WorkSnapshot precedingWork) {
+        public void handoff(String decisionReason, int remainingQueueDepth, WorkSnapshot precedingWork) {
             PrefillAdmissionResources.CommittedAdmissionOwner exactCommitted =
                     takeCommitted();
-            owner.deliver(this, exactCommitted, remainingQueueDepth,
-                    Objects.requireNonNull(precedingWork, "precedingWork"));
+            owner.deliver(this, exactCommitted, remainingQueueDepth, precedingWork);
         }
 
         @Override

@@ -97,13 +97,11 @@ public class PrefillEndpoint extends WorkerEndpoint {
                     QueueCapacity queueCapacity) {
         super(status);
         this.configSupplier = configSupplier;
-        this.reporter = java.util.Objects.requireNonNull(reporter, "reporter");
-        this.endpointEvents = java.util.Objects.requireNonNull(
-                endpointEvents, "endpointEvents");
-        this.placementAvailability = java.util.Objects.requireNonNull(
-                placementAvailability, "placementAvailability");
-        this.endpointRegistry = java.util.Objects.requireNonNull(endpointRegistry, "endpointRegistry");
-        this.queueCapacity = java.util.Objects.requireNonNull(queueCapacity, "queueCapacity");
+        this.reporter = reporter;
+        this.endpointEvents = endpointEvents;
+        this.placementAvailability = placementAvailability;
+        this.endpointRegistry = endpointRegistry;
+        this.queueCapacity = queueCapacity;
         FlexlbConfig startupConfig = configSupplier.get();
         this.engineSubQueueMode = QueueCapacity.isEngineSubQueueMode(startupConfig);
         this.predictor = createPredictor(startupConfig);

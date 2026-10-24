@@ -1,6 +1,5 @@
 package org.flexlb.dao.loadbalance;
 
-import java.util.Objects;
 import java.util.function.IntUnaryOperator;
 
 /** Read-only, indexed access to prompt token IDs without requiring an array copy. */
@@ -25,7 +24,7 @@ public interface TokenIds {
         private final int[] values;
 
         public ArrayTokenIds(int[] values) {
-            this.values = Objects.requireNonNull(values, "token IDs must not be null");
+            this.values = values;
         }
 
         @Override
@@ -45,7 +44,7 @@ public interface TokenIds {
 
         private IndexedTokenIds(int size, IntUnaryOperator accessor) {
             this.size = size;
-            this.accessor = Objects.requireNonNull(accessor, "token ID accessor must not be null");
+            this.accessor = accessor;
         }
 
         @Override

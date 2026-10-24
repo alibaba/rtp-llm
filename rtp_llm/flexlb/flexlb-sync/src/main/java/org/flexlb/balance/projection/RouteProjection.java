@@ -110,10 +110,6 @@ public final class RouteProjection {
             AfterProbeAdmission afterProbe,
             String afterProbeDetail,
             RoleType blockerRole) {
-        public AdmissionBlockSemantics {
-            blockerRole = java.util.Objects.requireNonNull(
-                    blockerRole, "blockerRole");
-        }
     }
 
     /** Virtual request evaluated against one frozen endpoint snapshot. */

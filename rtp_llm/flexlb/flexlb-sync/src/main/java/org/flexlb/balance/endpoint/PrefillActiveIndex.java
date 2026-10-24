@@ -12,7 +12,6 @@ import java.util.Comparator;
 import java.util.IdentityHashMap;
 import java.util.Iterator;
 import java.util.List;
-import java.util.Objects;
 import java.util.TreeSet;
 
 /**
@@ -190,7 +189,6 @@ public sealed interface PrefillActiveIndex extends Iterable<ScheduledRequest>
         private Capture capture;
 
         private Ordered(int initialCapacity, Comparator<ScheduledRequest> ordering) {
-            Objects.requireNonNull(ordering, "ordering");
             identities = new IdentityHashMap<>(initialCapacity);
             queue = new TreeSet<>((left, right) -> {
                 int compared = ordering.compare(left.request, right.request);
@@ -201,7 +199,6 @@ public sealed interface PrefillActiveIndex extends Iterable<ScheduledRequest>
 
         @Override
         public boolean add(ScheduledRequest item) {
-            Objects.requireNonNull(item, "item");
             if (identities.containsKey(item)) {
                 return false;
             }

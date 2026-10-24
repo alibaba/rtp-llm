@@ -44,7 +44,7 @@ final class DecodeState {
     private final WorkerStatus status;
 
     DecodeState(WorkerStatus status) {
-        this.status = java.util.Objects.requireNonNull(status, "status");
+        this.status = status;
     }
 
     private static final Logger logger = LoggerFactory.getLogger("syncLogger");
@@ -606,7 +606,6 @@ final class DecodeState {
     }
 
     DispatchResult dispatch(DispatchLease permit, DispatchOutcome outcome) {
-        java.util.Objects.requireNonNull(permit, "permit");
         java.util.Objects.requireNonNull(outcome, "outcome");
         if (outcome == DispatchOutcome.ENGINE_OWNED) { return dispatchToEngine(permit); }
         admissionLock.lock();
@@ -1040,7 +1039,6 @@ final class DecodeState {
     }
 
     boolean updatePreemption(long attemptToken, PreemptionUpdate update) {
-        java.util.Objects.requireNonNull(update, "update");
         admissionLock.lock();
         try {
             if (update.kind() == PreemptionUpdate.Kind.CANCEL_SENDING) {
@@ -1160,7 +1158,6 @@ final class DecodeState {
     }
 
     boolean finishPreemption(long attemptToken, PreemptionDecision decision) {
-        java.util.Objects.requireNonNull(decision, "decision");
         admissionLock.lock();
         try {
             EndpointPreemptionAttempt attempt = preemptionAttempts.get(attemptToken);

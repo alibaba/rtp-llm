@@ -49,10 +49,6 @@ public class EndpointRegistry {
     public record PrefillRoutingEntry(
             String address,
             PrefillEndpoint endpoint) {
-        public PrefillRoutingEntry {
-            java.util.Objects.requireNonNull(address, "address");
-            java.util.Objects.requireNonNull(endpoint, "endpoint");
-        }
     }
 
     /**
@@ -159,20 +155,16 @@ public class EndpointRegistry {
     @Autowired
     public EndpointRegistry(ConfigService configService,
                             EndpointEventProjector endpointEvents,
-                             BatchSchedulerReporter reporter,
-                             DeliveryStrategy deliveryStrategy,
-                             PlacementAvailability placementAvailability,
-                             QueueCapacity queueCapacity) {
-        this.configService = java.util.Objects.requireNonNull(
-                configService, "configService");
-        this.endpointEvents = java.util.Objects.requireNonNull(
-                endpointEvents, "endpointEvents");
-        this.reporter = java.util.Objects.requireNonNull(reporter, "reporter");
-        this.deliveryStrategy = java.util.Objects.requireNonNull(
-                deliveryStrategy, "deliveryStrategy");
-        this.placementAvailability = java.util.Objects.requireNonNull(
-                placementAvailability, "placementAvailability");
-            this.queueCapacity = java.util.Objects.requireNonNull(queueCapacity, "queueCapacity");
+                            BatchSchedulerReporter reporter,
+                            DeliveryStrategy deliveryStrategy,
+                            PlacementAvailability placementAvailability,
+                            QueueCapacity queueCapacity) {
+        this.configService = configService;
+        this.endpointEvents = endpointEvents;
+        this.reporter = reporter;
+        this.deliveryStrategy = deliveryStrategy;
+        this.placementAvailability = placementAvailability;
+        this.queueCapacity = queueCapacity;
     }
 
     public WorkerEndpoint get(RoleType roleType, String ipPort) {
@@ -370,7 +362,6 @@ public class EndpointRegistry {
                 throw new IllegalArgumentException(
                         "staged status role does not match its worker generation");
             }
-            java.util.Objects.requireNonNull(address, "address");
             if (status.appliedStatusCursor().statusVersion() >= 0L) {
                 throw new IllegalStateException(
                         "A committed WorkerStatus generation cannot publish a second endpoint: "

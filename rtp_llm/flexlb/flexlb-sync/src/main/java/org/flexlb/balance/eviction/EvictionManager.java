@@ -29,7 +29,6 @@ import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.Objects;
 import java.util.concurrent.CompletableFuture;
 
 /**
@@ -59,9 +58,8 @@ public class EvictionManager {
         this.reporter = reporter;
         this.cancelChannel = cancelChannel;
         this.preemptionCoordinator = preemptionCoordinator;
-        this.requests = Objects.requireNonNull(requests, "requests");
-        this.deliveryReporter = Objects.requireNonNull(
-                deliveryReporter, "deliveryReporter");
+        this.requests = requests;
+        this.deliveryReporter = deliveryReporter;
     }
 
     @PreDestroy
@@ -79,7 +77,6 @@ public class EvictionManager {
                             CompletableFuture<Response> future,
                             RouteAdmission admission,
                             WorkerEndpoint blockedEndpoint) {
-        Objects.requireNonNull(admission, "admission");
         DecodeRequirement request = admission.decodeDecideInfo().requirement();
         if (shutdown || future.isDone()
                 || ctx.requestExpired(System.currentTimeMillis())

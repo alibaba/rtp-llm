@@ -68,8 +68,11 @@ public class GrpcCacheStatusCheckRunner implements Runnable {
                 fullSnapshotDebugMode, callbackExecutor);
     }
 
-    public GrpcCacheStatusCheckRunner(String modelName, String ipPort, int workerStatusPort,
-                                      String site, RoleType roleType,
+    public GrpcCacheStatusCheckRunner(String modelName,
+                                      String ipPort,
+                                      int workerStatusPort,
+                                      String site,
+                                      RoleType roleType,
                                       WorkerStatus workerStatus,
                                       WorkerStatus.PollLease pollLease,
                                       WorkerDirectory workerDirectory,
@@ -89,18 +92,15 @@ public class GrpcCacheStatusCheckRunner implements Runnable {
         this.grpcPort = workerStatusPort;
         this.modelName = modelName;
         this.workerStatus = workerStatus;
-        this.workerDirectory = java.util.Objects.requireNonNull(
-                workerDirectory, "workerDirectory");
-        this.pollLease = java.util.Objects.requireNonNull(
-                pollLease, "pollLease");
+        this.workerDirectory = workerDirectory;
+        this.pollLease = pollLease;
         workerStatus.requireCachePollLease(pollLease);
         this.generationId = workerStatus.getGenerationId();
         this.site = site;
         this.engineHealthReporter = engineHealthReporter;
         this.engineGrpcService = engineGrpcService;
         this.cacheAwareService = cacheAwareService;
-        this.cacheIntervalService = java.util.Objects.requireNonNull(
-                cacheIntervalService, "cacheIntervalService");
+        this.cacheIntervalService = cacheIntervalService;
         this.debug = fullSnapshotDebugMode;
         this.requestTimeoutMs = requestTimeoutMs;
         this.syncCount = syncCount;

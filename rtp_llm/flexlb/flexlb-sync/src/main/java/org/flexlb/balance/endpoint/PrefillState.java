@@ -64,7 +64,6 @@ public final class PrefillState {
             Kind kind,
             long errorCode) {
         public WorkerStatusFact {
-            Objects.requireNonNull(item, "item");
             Objects.requireNonNull(kind, "kind");
             if (kind == Kind.ACTIVE && errorCode != 0L) {
                 throw new IllegalArgumentException(
@@ -110,9 +109,6 @@ public final class PrefillState {
             long actualWorkMs,
             boolean successfulCompletion,
             boolean learningEligible) {
-        public BatchCompletion {
-            Objects.requireNonNull(originalFeatures, "originalFeatures");
-        }
     }
 
     public record Retirement(
@@ -153,11 +149,10 @@ public final class PrefillState {
         private EndpointGenerationLifecycle.HandoffPermit generationHandoff;
         private final WorkSnapshot precedingWork;
 
-        private CommittedHandoff(
-                EndpointGenerationLifecycle.HandoffPermit generationHandoff,
-                WorkSnapshot precedingWork) {
+        private CommittedHandoff(EndpointGenerationLifecycle.HandoffPermit generationHandoff,
+                                 WorkSnapshot precedingWork) {
             this.generationHandoff = generationHandoff;
-            this.precedingWork = Objects.requireNonNull(precedingWork, "precedingWork");
+            this.precedingWork = precedingWork;
         }
 
         /** Other reserved work at the same ownership boundary that committed this admission. */
@@ -183,8 +178,7 @@ public final class PrefillState {
         private final RequestEntry originalOwner;
 
         private Reservation(RequestEntry originalOwner) {
-            this.originalOwner = Objects.requireNonNull(
-                    originalOwner, "originalOwner");
+            this.originalOwner = originalOwner;
         }
 
         /** Roll back an OPEN lease. Committed capacity stays Registry-owned. */
@@ -240,14 +234,13 @@ public final class PrefillState {
         private final long batchId;
 
         private BatchReservation(RequestEntry originalOwner,
-                                  String headRequestId,
+                                 String headRequestId,
                                  long batchId,
                                  EndpointGenerationLifecycle.HandoffPermit generationHandoff) {
             super(originalOwner);
             this.headRequestId = headRequestId;
             this.batchId = batchId;
-            this.generationHandoff = Objects.requireNonNull(
-                    generationHandoff, "generationHandoff");
+            this.generationHandoff = generationHandoff;
         }
 
         /* guarded by PrefillState.lock; non-null only while OPEN */
@@ -497,11 +490,6 @@ public final class PrefillState {
     public record Snapshot(long capturedAtMs,
                            PrefillActiveIndex.Capture active,
                            WorkCapture work) {
-        public Snapshot {
-            Objects.requireNonNull(active, "missing active queue snapshot");
-            Objects.requireNonNull(
-                    work, "missing committed work snapshot");
-        }
 
         public List<ScheduledRequest> activeItems() {
             return active.items();
@@ -633,13 +621,14 @@ public final class PrefillState {
         this(lock, activeIndex, System::currentTimeMillis, capacityAvailable);
     }
 
-    public PrefillState(ReentrantLock lock, PrefillActiveIndex activeIndex,
-                        LongSupplier clock, Runnable capacityAvailable) {
-        this.lock = Objects.requireNonNull(lock, "lock");
-        this.activeIndex = Objects.requireNonNull(activeIndex, "activeIndex");
-        this.clock = Objects.requireNonNull(clock, "clock");
-        this.capacityAvailable = Objects.requireNonNull(
-                capacityAvailable, "capacityAvailable");
+    public PrefillState(ReentrantLock lock,
+                        PrefillActiveIndex activeIndex,
+                        LongSupplier clock,
+                        Runnable capacityAvailable) {
+        this.lock = lock;
+        this.activeIndex = activeIndex;
+        this.clock = clock;
+        this.capacityAvailable = capacityAvailable;
     }
 
     private RequestEntry putRequestUnderLock(String requestId, RequestEntry entry) {
@@ -1071,7 +1060,6 @@ public final class PrefillState {
             List<ScheduledRequest> items,
             List<RouteReservation> exactReservations,
             EndpointGenerationLifecycle.HandoffPermit generationHandoff) {
-        Objects.requireNonNull(generationHandoff, "generationHandoff");
         if (exactReservations.isEmpty()) {
             throw new IllegalArgumentException(
                     "route commit requires at least one reservation");
@@ -1214,7 +1202,6 @@ public final class PrefillState {
      */
     public ReservationResult<RouteReservation> reserveUnqueuedRoute(
             ScheduledRequest item, long predictedMs, long maxOutstandingRequests) {
-        Objects.requireNonNull(item, "item");
         if (maxOutstandingRequests < 0L) {
             throw new IllegalArgumentException("request limit must be non-negative");
         }

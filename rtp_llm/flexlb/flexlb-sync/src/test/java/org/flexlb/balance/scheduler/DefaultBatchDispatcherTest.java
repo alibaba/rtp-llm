@@ -815,14 +815,6 @@ class DefaultBatchDispatcherTest {
     }
 
     @Test
-    void preparedSubmissionRejectsMissingDeliveryWithoutConsumingPermit() {
-        PreparedSubmission submission = reservePermit();
-        assertThrows(NullPointerException.class, () -> submission.submit(null));
-        submission.close();
-        reservePermit().close();
-    }
-
-    @Test
     void invalidFinalBatchFailsBeforeRpcOnTheDeliveryThread() throws Exception {
         ScheduledRequest item = createScheduledRequest(1L, 500, 200, createPrefillEndpoint());
         CompletableFuture<Void> checked = new CompletableFuture<>();
@@ -834,8 +826,6 @@ class DefaultBatchDispatcherTest {
                         () -> sender.sendBatch(List.of(item), 0L, 100, "id", callback));
                 assertThrows(IllegalArgumentException.class,
                         () -> sender.sendBatch(List.of(item), 1L, -1, "prediction", callback));
-                assertThrows(NullPointerException.class,
-                        () -> sender.sendBatch(List.of(item), 1L, 100, null, callback));
                 checked.complete(null);
             } catch (Throwable failure) {
                 checked.completeExceptionally(failure);

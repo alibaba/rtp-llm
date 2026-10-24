@@ -80,14 +80,12 @@ public class RequestRegistry {
     }
     @Autowired
     public RequestRegistry(ConfigService configService,
-                            BatchSchedulerReporter reporter,
-                            RequestSchedulerReporter requestReporter) {
-        this.configService = Objects.requireNonNull(configService, "configService");
-        this.reporter = Objects.requireNonNull(reporter, "reporter");
-        this.requestReporter = Objects.requireNonNull(requestReporter);
-        this.expirationTimer = new ExpirationTimer(
-                this,
-                Objects.requireNonNull(configService, "configService"));
+                           BatchSchedulerReporter reporter,
+                           RequestSchedulerReporter requestReporter) {
+        this.configService = configService;
+        this.reporter = reporter;
+        this.requestReporter = requestReporter;
+        this.expirationTimer = new ExpirationTimer(this, configService);
         this.completionPublisher = new RequestCompletionPublisher(
                 completionPublisherWorkers(configService), reporter);
         this.terminalCleanup = new RequestTerminalCleanup(expirationTimer, requestReporter);
@@ -232,7 +230,6 @@ public class RequestRegistry {
      */
     public boolean claimEncoderRoute(String requestId, CompletableFuture<Response> future,
                                      WorkerEndpoint.GenerationPin selected) {
-        Objects.requireNonNull(selected, "selected");
         WorkerEndpoint endpoint = selected.endpoint();
         endpoint.requirePinnedGeneration(selected);
         if (!(endpoint instanceof EncoderEndpoint encoder)) { return false; }
@@ -425,7 +422,6 @@ public class RequestRegistry {
     }
 
     PlacementResult.Status commitRoute(ScheduledRequest item, BooleanSupplier publication) {
-        Objects.requireNonNull(publication, "publication");
         if (shuttingDown.get() || item == null || item.future().isDone()) { return PlacementResult.Status.CLOSED; }
         RequestSlot slot = requestSlots.get(item.requestId());
         return slot == null || !slot.ownsFuture(item.future())
@@ -572,7 +568,6 @@ public class RequestRegistry {
 
     public RequestState cancelRequest(String requestId, long expectedBatchId, CancelReason reason,
                                       RequestPhase phase) {
-        Objects.requireNonNull(reason, "reason");
         RequestSlot slot = requestSlot(requestId, phase);
         return slot == null ? null : slot.cancelRequest(expectedBatchId, reason);
     }

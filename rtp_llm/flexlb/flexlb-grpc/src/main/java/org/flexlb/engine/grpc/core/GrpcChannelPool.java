@@ -26,7 +26,7 @@ public class GrpcChannelPool<K> {
     private final Function<K, ManagedChannel> channelFactory;
 
     public GrpcChannelPool(Function<K, ManagedChannel> channelFactory) {
-        this.channelFactory = Objects.requireNonNull(channelFactory, "channelFactory");
+        this.channelFactory = channelFactory;
     }
 
     public PooledChannel getOrCreate(K key) {

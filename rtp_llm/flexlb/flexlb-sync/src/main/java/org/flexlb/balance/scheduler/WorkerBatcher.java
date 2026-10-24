@@ -160,14 +160,11 @@ public final class WorkerBatcher {
             }
         }
 
-        private static BatcherCycleResult capacityBlocked(
-                ScheduledRequest item,
-                CapacityBoundary unavailable) {
-            return new BatcherCycleResult(false,
-                    Objects.requireNonNull(item, "item"),
-                    Objects.requireNonNull(unavailable, "unavailable"),
-                    0L, 0L, 0L, unavailable.projectionSemantics() == null
-                            ? "Prefill delivery capacity exhausted" : unavailable.projectionSemantics().blockedDetail());
+        private static BatcherCycleResult capacityBlocked(ScheduledRequest item, CapacityBoundary unavailable) {
+            return new BatcherCycleResult(false, Objects.requireNonNull(item, "item"), unavailable, 0L, 0L, 0L,
+                    unavailable.projectionSemantics() == null
+                            ? "Prefill delivery capacity exhausted"
+                            : unavailable.projectionSemantics().blockedDetail());
         }
 
         private static BatcherCycleResult awaitingSchedulingChange(
@@ -314,17 +311,16 @@ public final class WorkerBatcher {
     }
 
     public WorkerBatcher(String key,
-                          PrefillEndpoint prefillEp,
-                          Supplier<FlexlbConfig> configSupplier,
-                          DeliveryStrategy deliveryStrategy,
-                          EndpointEventProjector endpointEvents,
-                          QueueCapacity queueCapacity) {
-        this.configSupplier = Objects.requireNonNull(configSupplier, "configSupplier");
-        FlexlbConfig config = Objects.requireNonNull(
-                configSupplier.get(), "loadBalanceConfig");
+                         PrefillEndpoint prefillEp,
+                         Supplier<FlexlbConfig> configSupplier,
+                         DeliveryStrategy deliveryStrategy,
+                         EndpointEventProjector endpointEvents,
+                         QueueCapacity queueCapacity) {
+        this.configSupplier = configSupplier;
+        FlexlbConfig config = configSupplier.get();
         this.key = key;
         this.prefillEndpoint = prefillEp;
-        this.queueCapacity = Objects.requireNonNull(queueCapacity, "queueCapacity");
+        this.queueCapacity = queueCapacity;
         this.config = config;
         this.queueScheduling = config.isQueue();
         this.singleDecision = config.isSingleDecision();
@@ -335,10 +331,8 @@ public final class WorkerBatcher {
                 == DecisionPolicyConfig.Type.FIXED_WINDOW
                 ? resolvedDecision : null;
         boolean priorityOrdering = config.isPriorityOrdering();
-        this.endpointEvents = Objects.requireNonNull(
-                endpointEvents, "endpointEvents");
-        this.deliveryStrategy = Objects.requireNonNull(
-                deliveryStrategy, "deliveryStrategy");
+        this.endpointEvents = endpointEvents;
+        this.deliveryStrategy = deliveryStrategy;
         Comparator<ScheduledRequest> queueOrder = priorityOrdering
                 ? PRIORITY_QUEUE_ORDER : FIFO_QUEUE_ORDER;
         this.projectionOrder =
@@ -380,8 +374,7 @@ public final class WorkerBatcher {
             return;
         }
         try {
-            Objects.requireNonNull(
-                    workerThread, "QUEUE worker thread").start();
+            workerThread.start();
             runtimeState = RuntimeState.RUNNING;
         } catch (RuntimeException | Error startFailure) {
             Throwable cleanupFailure = stopAndDrain(
@@ -1364,9 +1357,8 @@ public final class WorkerBatcher {
         }
     }
 
-    private BatcherCycleResult commitPreparedSelection(
-            DeliveryStrategy.Transaction transaction,
-            String decisionReason) {
+    private BatcherCycleResult commitPreparedSelection(DeliveryStrategy.Transaction transaction,
+                                                       String decisionReason) {
         List<ScheduledRequest> items = transaction.items();
         if (items.isEmpty()) {
             throw new IllegalStateException(
@@ -1440,8 +1432,7 @@ public final class WorkerBatcher {
                 removedTerminalBoundary,
                 transaction.blockedItem(),
                 transaction.blockedResult());
-        handoff(transaction, Objects.requireNonNull(committedReason),
-                remainingQueueDepth, precedingWork);
+        handoff(transaction, committedReason, remainingQueueDepth, precedingWork);
         return BatcherCycleResult.CAPACITY_CHANGED;
     }
 

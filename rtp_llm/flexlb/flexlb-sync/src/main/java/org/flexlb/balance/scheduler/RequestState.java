@@ -1,7 +1,5 @@
 package org.flexlb.balance.scheduler;
 
-import java.util.Objects;
-
 /** Immutable public view of one canonical request generation. */
 public record RequestState(
         String requestId,
@@ -14,9 +12,6 @@ public record RequestState(
         String detail) {
 
     public RequestState {
-        Objects.requireNonNull(state, "state");
-        Objects.requireNonNull(deliveryClaimKind, "deliveryClaimKind");
-        Objects.requireNonNull(detail, "detail");
         if (deliveryClaimKind == DeliveryClaimKind.BATCH_ENQUEUE
                 && batchId <= 0L) {
             throw new IllegalArgumentException(

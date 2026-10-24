@@ -17,7 +17,6 @@ import org.flexlb.dao.route.RoleType;
 
 import java.util.EnumMap;
 import java.util.Map;
-import java.util.Objects;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 
@@ -164,7 +163,7 @@ public class BalanceContext {
     }
 
     public BalanceContext(FlexlbConfig config) {
-        this.config = Objects.requireNonNull(config, "config");
+        this.config = config;
     }
 
     public String getRequestId() {
@@ -235,16 +234,13 @@ public class BalanceContext {
     }
 
     public void recordRoutingDecision(RoutingDecision decision) {
-        Objects.requireNonNull(decision.role(), "role");
-        Objects.requireNonNull(decision.selectionReason(), "selectionReason");
         routingTelemetryState.selectionReasons.put(
                 decision.role(), decision.selectionReason());
         routingTelemetryState.routingDecisions.put(decision.role(), decision);
     }
 
     public void recordSelectionReason(RoleType role, String selectionReason) {
-        routingTelemetryState.selectionReasons.put(
-                role, Objects.requireNonNull(selectionReason, "selectionReason"));
+        routingTelemetryState.selectionReasons.put(role, selectionReason);
     }
 
     public int routingAttempt(RoleType role) {

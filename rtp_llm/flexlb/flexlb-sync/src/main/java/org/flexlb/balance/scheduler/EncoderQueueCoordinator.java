@@ -12,7 +12,6 @@ import org.flexlb.util.PriorityNormalizer;
 import java.util.Collections;
 import java.util.IdentityHashMap;
 import java.util.List;
-import java.util.Objects;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.locks.Condition;
@@ -36,8 +35,8 @@ final class EncoderQueueCoordinator implements AutoCloseable {
     private long capacityVersion;
 
     EncoderQueueCoordinator(DefaultRouter router, RequestRegistry requests, boolean priorityOrdering) {
-        this.router = Objects.requireNonNull(router, "router");
-        this.requests = Objects.requireNonNull(requests, "requests");
+        this.router = router;
+        this.requests = requests;
         this.queue = new OrderedRequestQueue(priorityOrdering);
         decisionThread = new Thread(this::runDecisions, "flexlb-encoder-decision");
         decisionThread.setDaemon(true);

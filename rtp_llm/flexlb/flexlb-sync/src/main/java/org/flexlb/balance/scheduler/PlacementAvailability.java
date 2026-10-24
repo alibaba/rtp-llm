@@ -4,7 +4,6 @@ import org.flexlb.dao.route.RoleType;
 import org.flexlb.util.Logger;
 import org.springframework.stereotype.Component;
 
-import java.util.Objects;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
 import java.util.concurrent.atomic.AtomicLong;
@@ -26,11 +25,6 @@ public final class PlacementAvailability {
     }
 
     record Event(PlacementKey key, ChangeKind kind) {
-
-        Event {
-            Objects.requireNonNull(key, "key");
-            Objects.requireNonNull(kind, "kind");
-        }
     }
 
     @FunctionalInterface
@@ -45,7 +39,6 @@ public final class PlacementAvailability {
             new ConcurrentHashMap<>();
 
     void addListener(Listener candidate) {
-        Objects.requireNonNull(candidate, "listener");
         listeners.put(candidate, Boolean.TRUE);
     }
 
@@ -66,7 +59,6 @@ public final class PlacementAvailability {
     }
 
     private void publish(PlacementKey key, ChangeKind kind) {
-        Objects.requireNonNull(key, "key");
         long next = sequence.incrementAndGet();
         // Publishers may reach these keys out of sequence; every edge retains
         // the newest version even when an older publication finishes later.

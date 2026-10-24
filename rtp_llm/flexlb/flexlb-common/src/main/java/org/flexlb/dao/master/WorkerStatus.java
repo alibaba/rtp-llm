@@ -535,7 +535,6 @@ public class WorkerStatus {
      * are never copied into the committed Engine observation.
      */
     public StatusObservation freezeStatusResponse(WorkerStatusResponse response) {
-        Objects.requireNonNull(response, "response");
         Map<String, TaskObservation> runningTasks = freezeTaskMap(
                 response.getRunningTaskInfo());
         Map<String, TaskObservation> finishedTasks = freezeTaskMap(

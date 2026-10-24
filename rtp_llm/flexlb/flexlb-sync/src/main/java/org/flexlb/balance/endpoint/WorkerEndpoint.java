@@ -3,7 +3,6 @@ package org.flexlb.balance.endpoint;
 import lombok.Getter;
 import org.flexlb.dao.master.WorkerStatus;
 
-import java.util.Objects;
 import java.util.OptionalLong;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -42,7 +41,7 @@ public class WorkerEndpoint {
     private final EndpointGenerationLifecycle generationLifecycle;
 
     public WorkerEndpoint(WorkerStatus status) {
-        this.status = Objects.requireNonNull(status, "status");
+        this.status = status;
         this.generationLifecycle = new EndpointGenerationLifecycle(
                 this::continueRetirementAfterHandoff);
     }

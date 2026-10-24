@@ -73,7 +73,7 @@ public class Response {
 
     /** Build a successful delivery response without mutating the original route response. */
     public static Response buildSuccessResponse(Response routeResponse, boolean enqueuedByMaster) {
-        Response success = copyOf(java.util.Objects.requireNonNull(routeResponse, "routeResponse"));
+        Response success = copyOf(routeResponse);
         success.success = true;
         success.code = 200;
         success.enqueuedByMaster = enqueuedByMaster;

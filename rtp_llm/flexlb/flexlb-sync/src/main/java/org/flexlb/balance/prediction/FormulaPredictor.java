@@ -38,8 +38,7 @@ public class FormulaPredictor
      * @param formulaString the cost formula expression
      */
     public FormulaPredictor(String formulaString) {
-        this.formulaIdentity = java.util.Objects.requireNonNull(
-                formulaString, "formulaString");
+        this.formulaIdentity = formulaString;
         this.formula = PrefillTimeFormula.parse(formulaString);
         logger.trace("formula predictor created");
     }

@@ -456,11 +456,6 @@ public class CostBasedPrefillStrategy {
             List<EndpointRegistry.PrefillRoutingEntry> candidates,
             int registeredCount) {
 
-        private EndpointDiscovery {
-            candidates = java.util.Objects.requireNonNull(
-                    candidates, "candidates");
-        }
-
         /** Zero-copy address view over the exact fleet used by this decision. */
         private List<String> addresses() {
             return new AbstractList<>() {
