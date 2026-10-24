@@ -1,9 +1,7 @@
 {
     "_comment": [
-        "Regenerated from the smoke_actual artifacts of runs 71439644 and 71441736, case",
-        "next_moe_nvfp4_cudagraph_tp2_sm100. Both runs produced the same responses after",
-        "SSM_STATE_DTYPE defaulted to auto and preserved this checkpoint's",
-        "mamba_ssm_dtype=float32 instead of overriding it with BF16.",
+        "CuTe norm baseline; SSM_STATE_DTYPE=auto preserves this checkpoint's",
+        "mamba_ssm_dtype=float32.",
         "This TP2 configuration remains batch-invariant: batch 1 and batch 3 all produce",
         "the same completion. The DP2 sibling uses DeepEP low-latency expert dispatch and",
         "therefore retains a separate, configuration-specific golden."
@@ -22,7 +20,7 @@
                 }
             },
             "result": {
-                "response": "\n\n<think>\nOkay, the user asked me to introduce myself. Let me start by recalling my identity",
+                "response": "\n\n<think>\n\n</think>\n\nHello! I'm **Qwen3.5**, the latest large language",
                 "finished": true
             }
         },
@@ -41,13 +39,13 @@
             "result": {
                 "response_batch": [
                     {
-                        "response": "\n\n<think>\nOkay, the user asked me to introduce myself. Let me start by recalling my identity"
+                        "response": "\n\n<think>\n\n</think>\n\nHello! I'm **Qwen3.5**, the latest large language"
                     },
                     {
-                        "response": "\n\n<think>\nOkay, the user asked me to introduce myself. Let me start by recalling my identity"
+                        "response": "\n\n<think>\n\n</think>\n\nHello! I'm **Qwen3.5**, the latest large language"
                     },
                     {
-                        "response": "\n\n<think>\nOkay, the user asked me to introduce myself. Let me start by recalling my identity"
+                        "response": "\n\n<think>\n\n</think>\n\nHello! I'm **Qwen3.5**, the latest large language"
                     }
                 ]
             }
