@@ -51,9 +51,14 @@ class MergedQB(torch.nn.Module):
         self._postprocess_op = None
         props = torch.cuda.get_device_properties(weight.device)
         if (props.major, props.minor, props.multi_processor_count) == (10, 3, 148):
-            from rtp_llm.ops.compute_ops import rtp_llm_ops
+            import deep_gemm
 
-            self._postprocess_op = getattr(rtp_llm_ops, "v41_qb_gemm", None)
+            op = getattr(deep_gemm, "dsv41_qb_indexer", None)
+            configure = getattr(deep_gemm, "dsv41_qb_indexer_config", None)
+            if callable(op) and callable(configure):
+                with torch.cuda.device(weight.device):
+                    configure()
+                self._postprocess_op = op
 
     def try_forward_prepared(self, data, scales, weights, frequencies, positions):
         """Decode-only; retain resident weights/SF and the original fallback.
@@ -83,16 +88,26 @@ class MergedQB(torch.nn.Module):
             or positions.dtype not in (torch.int32, torch.int64)
             or positions.numel() != rows
             or not positions.is_contiguous()
-            or any(t.device != data.device for t in (scales, weights, frequencies, positions))
+            or any(
+                t.device != data.device
+                for t in (scales, weights, frequencies, positions)
+            )
         ):
             return None
         q, payload, sf, scaled = self._postprocess_op(
-            data.view(rows, self.K), scales, self.weight, self.weight_scales,
-            weights.view(rows, 32), frequencies, positions.view(rows),
+            data.view(rows, self.K),
+            scales,
+            self.weight,
+            self.weight_scales,
+            weights.view(rows, 32),
+            frequencies,
+            positions.view(rows),
         )
         shape = data.shape[:-1]
         return q.view(*shape, self.main_width), (
-            payload.view(*shape, 32, 64), sf.view(*shape, 32), scaled.view(*shape, 32),
+            payload.view(*shape, 32, 64),
+            sf.view(*shape, 32),
+            scaled.view(*shape, 32),
         )
 
     @torch.no_grad()

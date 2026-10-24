@@ -176,16 +176,6 @@ def cuda13_x86_test_gpu():
     """
     return "SM103_TEST"
 
-def v41_front_gemm_deps():
-    # These optional decode fusions require the device-entry patch exported by
-    # deps/pip.bzl. Dependency overlays without it retain the Python fallback.
-    return select({
-        "@rtp_llm//:using_cuda13_x86": [
-            "@rtp_llm//rtp_llm/models_py/bindings/cuda:v41_front_gemm_op",
-        ],
-        "//conditions:default": [],
-    })
-
 def torch_deps():
     deps = select({
         "@rtp_llm//:using_rocm": [
