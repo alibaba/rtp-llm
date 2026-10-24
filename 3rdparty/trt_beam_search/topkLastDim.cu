@@ -854,6 +854,9 @@ __global__ void radix_kernel(T const* in, IdxT const* in_idx, T const* in_buf, I
     filter_and_histogram<T, IdxT, BitsPerPass>(in_buf, in_idx_buf, out_buf, out_idx_buf, out, out_idx, previous_len,
         counter, histogram, select_min, pass, early_stop);
     __threadfence();
+    // Every thread must publish its histogram writes before thread 0 marks the
+    // whole block complete; otherwise another block can scan a partial histogram.
+    __syncthreads();
 
     bool isLastBlock = false;
     if (threadIdx.x == 0)
@@ -1515,13 +1518,17 @@ void standalone_stable_radix_11bits(void* buf, size_t& buf_size, T const* in, in
     constexpr bool fused_last_filter = false;
     constexpr int topk_bits = 11;
 
+    // Full selection must use one-block: multi-block radix's initial early-stop
+    // branch does not populate the output when k == len. Keep this rule shared
+    // by workspace-size queries and execution, including force_path=1.
+    bool const select_all = (k == len);
     // See topkLastDim.h for the force_path legend.
     bool auto_one_block = (len <= block_dim * items_per_thread);
     unsigned grid_dim = 0;
     // grid_dim costs device queries (SM count + occupancy); compute it only when it can
     // affect the route: force_path=1 needs it for the clamp below, auto mode needs it
     // only when the small-len check didn't already select one-block.
-    if (force_path == 1 || (force_path == 0 && !auto_one_block))
+    if (!select_all && (force_path == 1 || (force_path == 0 && !auto_one_block)))
     {
         int sm_cnt = tensorrt_llm::common::getMultiProcessorCount();
         grid_dim = air_topk_stable::calc_grid_dim<T, idxT, topk_bits, block_dim>(batch_size, len, sm_cnt);
@@ -1549,7 +1556,7 @@ void standalone_stable_radix_11bits(void* buf, size_t& buf_size, T const* in, in
     // selected it below that (grid_dim==1 always went one-block), and forcing it there
     // yields invalid output, so any nonzero force_path clamps back to one-block.
     bool const one_block
-        = (force_path == 2) || (force_path == 0 && auto_one_block) || (force_path != 0 && grid_dim < 2);
+        = select_all || (force_path == 2) || (force_path == 0 && auto_one_block) || (force_path != 0 && grid_dim < 2);
     if (one_block)
     {
         standalone_stable_radix_topk_one_block_<T, idxT, topk_bits, block_dim>(buf, buf_size, in,

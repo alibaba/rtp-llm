@@ -12,6 +12,7 @@
 #include "rtp_llm/cpp/testing/TestBase.h"
 #include "rtp_llm/cpp/models/models_weight/W.h"
 #include "rtp_llm/cpp/normal_engine/NormalGenerateStream.h"
+#include "rtp_llm/cpp/models/logits_processor/CodebookLogitsProcessor.h"
 #include "rtp_llm/cpp/engine_base/schedulers/FIFOScheduler.h"
 #include "rtp_llm/cpp/engine_base/schedulers/SchedulerUtils.h"
 #include "rtp_llm/cpp/normal_engine/test/MockEngine.h"
@@ -286,14 +287,14 @@ TEST_F(NormalEngineTest, testDecodeWarmupUsesWarmupCacheTopology) {
 
 TEST_F(NormalEngineTest, testCacheManagerInitFailureDoesNotPublishPartialState) {
     ModelConfig model;
-    model.num_layers                   = 1;
-    model.attn_config.head_num         = 1;
-    model.attn_config.kv_head_num      = 1;
-    model.attn_config.size_per_head    = 1;
+    model.num_layers                          = 1;
+    model.attn_config.head_num                = 1;
+    model.attn_config.kv_head_num             = 1;
+    model.attn_config.size_per_head           = 1;
     model.attn_config.tokens_per_block        = 1;
     model.attn_config.kernel_tokens_per_block = 1;
-    model.kv_cache_spec_descs          = {{{"default", KVCacheSpecType::MultiHeadAttention}}};
-    const auto config                  = CacheConfigCreator::createWarmupConfig(model, {});
+    model.kv_cache_spec_descs                 = {{{"default", KVCacheSpecType::MultiHeadAttention}}};
+    const auto config                         = CacheConfigCreator::createWarmupConfig(model, {});
 
     auto            previous  = std::make_shared<KVCacheManager>(config, /*warmup=*/true);
     auto            candidate = std::make_shared<KVCacheManager>(config, /*warmup=*/true);
@@ -1172,6 +1173,162 @@ TEST_F(NormalEngineTest, testAllowsUnsupportedCombosWithoutOutputVocab) {
     config.speculative_enabled = true;
     config.warm_up_with_loss   = true;
     EXPECT_NO_THROW(createMockEngine(config));
+}
+
+TEST_F(NormalEngineTest, testCodebookRejectsInvalidModelAtInitialization) {
+    CustomConfig config;
+    config.output_vocab_ids = {0, 10, 11, 20, 21};
+    for (const auto& groups : std::vector<std::vector<std::vector<int64_t>>>{
+             {{2, 1}, {3, 4}}, {{1, 1}, {3, 4}}, {{1, 2}, {5}}, {{}, {3, 4}}, {{0, 1}, {3, 4}}}) {
+        config.output_vocab_groups = groups;
+        try {
+            createMockEngine(config);
+            FAIL() << "invalid codebook configuration was accepted";
+        } catch (const std::runtime_error& error) {
+            EXPECT_NE(std::string(error.what()).find("codebook"), std::string::npos);
+        }
+    }
+}
+
+TEST_F(NormalEngineTest, testCodebookDynamicBeamEndToEndAndFakeStream) {
+    CustomConfig config;
+    config.output_vocab_ids    = {0, 10, 11, 12, 20, 21, 22};
+    config.output_vocab_groups = {{1, 2, 3}, {4, 5, 6}};
+    auto engine                = createMockEngine(config);
+    ASSERT_NE(engine, nullptr);
+    ASSERT_TRUE(engine->resource_context_.codebook_masks.is_cuda());
+    auto initial_masks = engine->resource_context_.codebook_masks.clone();
+
+    // Scheduler padding streams are internal work, not user codebook sequences.
+    auto fake = engine->createMinFakeStream(1);
+    ASSERT_FALSE(fake->hasError());
+
+    auto query                                 = std::make_shared<GenerateInput>();
+    query->input_ids                           = torch::tensor({8, 9}, torch::kInt32);
+    query->begin_time_us                       = autil::TimeUtility::currentTimeInMicroSeconds();
+    query->generate_config                     = std::make_shared<GenerateConfig>();
+    query->generate_config->max_new_tokens     = 2;
+    query->generate_config->variable_num_beams = {2, 4};
+    query->generate_config->is_streaming       = false;
+    auto stream                                = engine->enqueue(query);
+    ASSERT_FALSE(stream->hasError());
+    auto result = stream->nextOutput();
+    ASSERT_TRUE(result.ok()) << result.status().ToString();
+    ASSERT_EQ(result.value().generate_outputs.size(), 4);
+    for (const auto& output : result.value().generate_outputs) {
+        auto ids = output.output_ids.reshape({-1});
+        ASSERT_EQ(ids.numel(), 2);
+        EXPECT_GE(ids[0].item<int>(), 10);
+        EXPECT_LE(ids[0].item<int>(), 12);
+        EXPECT_GE(ids[1].item<int>(), 20);
+        EXPECT_LE(ids[1].item<int>(), 22);
+    }
+    EXPECT_EQ(stream->nextOutput().status().code(), ErrorCode::FINISHED);
+    auto sibling = engine->makeStream(query);
+    ASSERT_FALSE(sibling->hasError());
+    for (const auto& request : {stream, sibling}) {
+        auto processor = std::dynamic_pointer_cast<CodebookLogitsProcessor>(request->getAllLogitsProcessorPtr().back());
+        ASSERT_NE(processor, nullptr);
+        EXPECT_EQ(processor->masks_.data_ptr(), engine->resource_context_.codebook_masks.data_ptr());
+    }
+    EXPECT_TRUE(torch::equal(initial_masks, engine->resource_context_.codebook_masks));
+}
+
+TEST_F(NormalEngineTest, testRejectsInvalidBeamWidths) {
+    CustomConfig config;
+    config.output_vocab_ids = {0, 10, 11, 12};
+    auto engine             = createMockEngine(config);
+    for (const auto& widths : std::vector<std::vector<int>>{{0}, {2, 0}, {0, 2}, {2, -1}}) {
+        auto input                                 = std::make_shared<GenerateInput>();
+        input->input_ids                           = torch::tensor({8, 9}, torch::kInt32);
+        input->generate_config                     = std::make_shared<GenerateConfig>();
+        input->generate_config->max_new_tokens     = 2;
+        input->generate_config->variable_num_beams = widths;
+        auto rejected                              = engine->enqueue(input);
+        ASSERT_TRUE(rejected->hasError());
+        EXPECT_EQ(rejected->statusInfo().code(), ErrorCode::INVALID_PARAMS);
+        EXPECT_EQ(input->generate_config->variable_num_beams, widths);
+    }
+}
+
+TEST_F(NormalEngineTest, testCodebookEqualSmallBeamsUseV2) {
+    CustomConfig config;
+    config.output_vocab_ids    = {0, 10, 20};
+    config.output_vocab_groups = {{1}, {2}};
+    auto engine                = createMockEngine(config);
+    // A singleton per level also exercises the ordinary 1->1 sampling path.
+    auto greedy_input                             = std::make_shared<GenerateInput>();
+    greedy_input->input_ids                       = torch::tensor({8, 9}, torch::kInt32);
+    greedy_input->generate_config                 = std::make_shared<GenerateConfig>();
+    greedy_input->generate_config->max_new_tokens = 2;
+    greedy_input->generate_config->is_streaming   = false;
+    auto greedy_stream                            = engine->enqueue(greedy_input);
+    auto greedy_result                            = greedy_stream->nextOutput();
+    ASSERT_TRUE(greedy_result.ok());
+    EXPECT_TRUE(torch::equal(greedy_result.value().generate_outputs[0].output_ids.reshape({-1}),
+                             torch::tensor({10, 20}, torch::kInt32)));
+
+    CustomConfig beam_config;
+    beam_config.output_vocab_ids    = {0, 10, 11, 20, 21};
+    beam_config.output_vocab_groups = {{1, 2}, {3, 4}};
+    auto beam_engine                = createMockEngine(beam_config);
+    for (const auto& widths : std::vector<std::vector<int>>{{}, {2}, {2, 2}}) {
+        auto input                                 = std::make_shared<GenerateInput>(*greedy_input);
+        input->generate_config                     = std::make_shared<GenerateConfig>(*greedy_input->generate_config);
+        input->generate_config->num_beams          = 2;
+        input->generate_config->variable_num_beams = widths;
+        auto stream                                = beam_engine->enqueue(input);
+        ASSERT_FALSE(stream->hasError());
+        auto result = stream->nextOutput();
+        ASSERT_TRUE(result.ok()) << result.status().ToString();
+        ASSERT_EQ(result.value().generate_outputs.size(), 2);
+        for (const auto& output : result.value().generate_outputs) {
+            auto ids = output.output_ids.reshape({-1});
+            ASSERT_EQ(ids.numel(), 2);
+            EXPECT_TRUE(ids[0].item<int>() == 10 || ids[0].item<int>() == 11);
+            EXPECT_TRUE(ids[1].item<int>() == 20 || ids[1].item<int>() == 21);
+        }
+        EXPECT_EQ(stream->nextOutput().status().code(), ErrorCode::FINISHED);
+    }
+}
+
+TEST_F(NormalEngineTest, testCodebookIgnoresStopWordsAcrossLevels) {
+    CustomConfig config;
+    config.output_vocab_ids                            = {0, 10, 11, 20, 21, 30, 31};
+    config.output_vocab_groups                         = {{1, 2}, {3, 4}, {5, 6}};
+    auto engine                                        = createMockEngine(config);
+    auto query                                         = std::make_shared<GenerateInput>();
+    query->input_ids                                   = torch::tensor({8, 9}, torch::kInt32);
+    query->begin_time_us                               = autil::TimeUtility::currentTimeInMicroSeconds();
+    query->generate_config                             = std::make_shared<GenerateConfig>();
+    query->generate_config->max_new_tokens             = 3;
+    query->generate_config->variable_num_beams         = {2, 4, 6};
+    query->generate_config->stop_words_list            = {{10}, {20}};
+    query->generate_config->is_streaming               = false;
+    auto healthy_query                                 = std::make_shared<GenerateInput>(*query);
+    healthy_query->generate_config                     = std::make_shared<GenerateConfig>(*query->generate_config);
+    healthy_query->generate_config->variable_num_beams = {2, 3, 5};
+    auto [accepted, streams]                           = engine->enqueueMultiple({query, healthy_query});
+    ASSERT_EQ(accepted, std::vector<bool>({true, true}));
+    ASSERT_EQ(streams.size(), 2);
+    auto result = streams[0]->nextOutput();
+    ASSERT_TRUE(result.ok()) << result.status().ToString();
+    ASSERT_EQ(result.value().generate_outputs.size(), 6);
+    EXPECT_FALSE(streams[0]->hasError());
+    EXPECT_EQ(streams[0]->outputTokenLen(), 3);
+
+    auto healthy_result = streams[1]->nextOutput();
+    ASSERT_TRUE(healthy_result.ok()) << healthy_result.status().ToString();
+    ASSERT_EQ(healthy_result.value().generate_outputs.size(), 5);
+    for (const auto* outputs : {&result.value(), &healthy_result.value()}) {
+        for (const auto& output : outputs->generate_outputs) {
+            auto ids = output.output_ids.reshape({-1});
+            ASSERT_EQ(ids.numel(), 3);
+            EXPECT_TRUE(ids[0].item<int>() == 10 || ids[0].item<int>() == 11);
+            EXPECT_TRUE(ids[1].item<int>() == 20 || ids[1].item<int>() == 21);
+            EXPECT_TRUE(ids[2].item<int>() == 30 || ids[2].item<int>() == 31);
+        }
+    }
 }
 
 }  // namespace rtp_llm

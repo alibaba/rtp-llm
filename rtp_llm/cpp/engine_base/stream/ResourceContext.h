@@ -1,6 +1,7 @@
 #pragma once
 
 #include <memory>
+#include <torch/types.h>
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
 #include "rtp_llm/cpp/engine_base/system_prompt/SystemPrompt.h"
@@ -25,6 +26,9 @@ struct ResourceContext {
     bool enable_disk_cache{false};
     bool enable_remote_cache{false};
     bool ignore_request_cache_switches{false};
+
+    // Shared by request processors; built from this engine's validated, immutable codebook configuration.
+    torch::Tensor codebook_masks;
 
     void initCacheConfig(const KVCacheConfig& kv_cache_config);
 };

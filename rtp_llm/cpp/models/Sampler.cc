@@ -15,6 +15,7 @@ namespace rtp_llm {
 
 Sampler::Sampler(const SamplerInitParams& params):
     fixed_max_batch_size_(params.max_batch_size > 0 && params.fixed_max_batch_size),
+    force_beam_search_v2_(params.force_beam_search_v2),
     copy_stream_(cuda_graph::graphGetStreamFromPool(false)) {
     if (params.max_batch_size > 0) {
         allocateGreedySamplingBuffers(params.max_batch_size);
@@ -295,7 +296,8 @@ SamplerOutput Sampler::forward(const SamplerInputs& inputs) {
                                                 input_lengths_t,
                                                 sequence_lengths_t,
                                                 cum_log_probs_in_t,
-                                                (size_t)cur_num_beams_out});
+                                                (size_t)cur_num_beams_out,
+                                                force_beam_search_v2_});
 
             auto token_ids_out_reshaped =
                 token_ids_out.reshape({(int64_t)beam_batch_size, (int64_t)cur_num_beams_out, (int64_t)max_seq_len_val});

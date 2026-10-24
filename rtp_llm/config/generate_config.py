@@ -858,12 +858,13 @@ class GenerateConfig(BaseModel):
                 f"max_new_tokens {self.max_new_tokens} is wrong data type",
             )
             check_with_info(
-                is_positive_integer(self.num_beams),
-                f"num_beams {self.num_beams} is wrong data type",
+                is_positive_integer(self.num_beams) and self.num_beams > 0,
+                f"num_beams {self.num_beams} must be greater than zero",
             )
             check_with_info(
-                is_list_positive_integer(self.variable_num_beams),
-                f"variable_num_beams {self.variable_num_beams} is wrong data type",
+                is_list_positive_integer(self.variable_num_beams)
+                and all(width > 0 for width in self.variable_num_beams),
+                f"variable_num_beams {self.variable_num_beams} entries must be greater than zero",
             )
             check_with_info(
                 is_positive_integer(self.num_return_sequences),

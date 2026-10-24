@@ -1,5 +1,6 @@
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
+#include <pybind11/eval.h>
 
 #include "rtp_llm/cpp/api_server/GenerateStreamWrapper.h"
 #include "rtp_llm/cpp/api_server/Exception.h"
@@ -28,6 +29,72 @@ std::shared_ptr<MockGenerateStream> CreateMockGenerateStream() {
 }
 
 class GenerateStreamWrapperTest: public Test {};
+
+TEST_F(GenerateStreamWrapperTest, codebookDecodesWithoutRequestOrModelStops) {
+    py::gil_scoped_acquire acquire;
+    py::dict               scope;
+    py::exec(R"(
+from types import SimpleNamespace
+from rtp_llm.frontend.token_processor import TokenProcessor
+class CodebookTestTokenizer:
+    def decode(self, ids):
+        return ''.join({10: 'A', 20: 'B'}[i] for i in ids)
+    def batch_decode(self, rows):
+        return [self.decode(ids) for ids in rows]
+processor = TokenProcessor(CodebookTestTokenizer(), SimpleNamespace(eos_token_id=0))
+)",
+             scope);
+    auto token_processor = std::make_shared<TokenProcessor>(scope["processor"]);
+    for (const bool codebook : {false, true}) {
+        for (const bool via_input : {false, true}) {
+            for (const bool streaming : {false, true}) {
+                auto stream                             = CreateMockGenerateStream();
+                stream->is_codebook_                    = codebook;
+                auto input                              = stream->generateInput();
+                input->generate_config->num_beams       = 2;
+                input->generate_config->stop_words_list = {{20}};
+                input->generate_config->stop_words_str  = {"A"};
+                input->generate_config->is_streaming    = streaming;
+                GenerateOutputs final_outputs;
+                GenerateOutput  final_output;
+                final_output.output_ids = torch::tensor({10, 20}, torch::kInt32);
+                final_output.finished   = true;
+                final_outputs.generate_outputs.push_back(final_output);
+                if (streaming) {
+                    GenerateOutputs partial_outputs;
+                    GenerateOutput  partial_output;
+                    partial_output.output_ids = torch::tensor({10}, torch::kInt32);
+                    partial_output.finished   = false;
+                    partial_outputs.generate_outputs.push_back(partial_output);
+                    EXPECT_CALL(*stream, nextOutput(_))
+                        .WillOnce(Return(ErrorResult<GenerateOutputs>(std::move(partial_outputs))))
+                        .WillOnce(Return(ErrorResult<GenerateOutputs>(std::move(final_outputs))));
+                } else {
+                    EXPECT_CALL(*stream, nextOutput(_))
+                        .WillOnce(Return(ErrorResult<GenerateOutputs>(std::move(final_outputs))));
+                }
+                auto                  engine = std::make_shared<MockEngineBase>();
+                GenerateStreamWrapper wrapper(nullptr, token_processor);
+                if (via_input) {
+                    EXPECT_CALL(*engine, enqueue(Matcher<const std::shared_ptr<GenerateInput>&>(_)))
+                        .WillOnce(Return(stream));
+                    wrapper.init(input, engine);
+                } else {
+                    wrapper.init(stream, engine);
+                }
+                if (streaming) {
+                    EXPECT_EQ(wrapper.generateResponse().first.response,
+                              std::vector<std::string>({codebook ? "A" : ""}));
+                }
+                auto response = wrapper.generateResponse().first;
+                EXPECT_EQ(response.response, std::vector<std::string>({codebook ? "AB" : ""}));
+                EXPECT_TRUE(response.finished);
+                EXPECT_EQ(input->generate_config->stop_words_list, std::vector<std::vector<int>>({{20}}));
+                EXPECT_EQ(input->generate_config->stop_words_str, std::vector<std::string>({"A"}));
+            }
+        }
+    }
+}
 
 TEST_F(GenerateStreamWrapperTest, generateResponse) {
 

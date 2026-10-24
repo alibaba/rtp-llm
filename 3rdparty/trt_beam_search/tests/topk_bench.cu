@@ -25,6 +25,7 @@
 #include <vector>
 #include <algorithm>
 #include <numeric>
+#include <utility>
 
 #include "3rdparty/trt_beam_search/common.h"
 #include "3rdparty/trt_beam_search/topkLastDim.h"
@@ -129,6 +130,10 @@ PathOutput runPath(int batch, int len, int k, bool sorted, int forcePath, float 
     int* dOutIdx = nullptr;
     BENCH_CHECK(cudaMalloc(&dOutVal, sizeof(float) * k * batch));
     BENCH_CHECK(cudaMalloc(&dOutIdx, sizeof(int) * k * batch));
+    // Make unwritten scratch/output slots observable instead of reusing old results.
+    BENCH_CHECK(cudaMemsetAsync(workspace, 0xFF, wsBytes, stream));
+    BENCH_CHECK(cudaMemsetAsync(dOutVal, 0xFF, sizeof(float) * k * batch, stream));
+    BENCH_CHECK(cudaMemsetAsync(dOutIdx, 0xFF, sizeof(int) * k * batch, stream));
 
     PathOutput out;
     out.us = timePath(batch, len, k, sorted, forcePath, dIn, dOutVal, dOutIdx, workspace, reps, stream);
@@ -182,9 +187,9 @@ void hostTopk(std::vector<float> const& in, int batch, int len, int k, bool inde
 // boundary group (WarpSort's boundary-tie pick among equal values is
 // path-specific by design). Tie-order divergence is reported as informational.
 bool checkVsHost(int batch, int len, int k, bool sorted, std::vector<float> const& hostIn, float const* dIn,
-    cudaStream_t stream, char const* label, bool strictOrder)
+    cudaStream_t stream, char const* label, bool strictOrder, int forcePath = 0)
 {
-    PathOutput dev = runPath(batch, len, k, sorted, /*forcePath=*/0, dIn, /*reps=*/3, stream);
+    PathOutput dev = runPath(batch, len, k, sorted, forcePath, dIn, /*reps=*/3, stream);
     std::vector<float> refVals;
     std::vector<int> refIdxs;
     hostTopk(hostIn, batch, len, k, /*indexAscending=*/!sorted, refVals, refIdxs);
@@ -250,8 +255,8 @@ bool checkVsHost(int batch, int len, int k, bool sorted, std::vector<float> cons
             label, batch, len, k, sorted ? 1 : 0, ok ? "PASS" : "FAIL", valuesOk ? "exact" : "MISMATCH", tieRows);
         return ok;
     }
-    std::printf("check[%s]: batch=%d len=%d k=%d sorted=%d -> %s\n", label, batch, len, k, sorted ? 1 : 0,
-        ok ? "PASS" : "FAIL");
+    std::printf("check[%s]: batch=%d len=%d k=%d sorted=%d path=%d -> %s\n", label, batch, len, k, sorted ? 1 : 0,
+        forcePath, ok ? "PASS" : "FAIL");
     if (!ok)
     {
         for (size_t i = 0; i < refIdxs.size(); ++i)
@@ -277,6 +282,75 @@ struct Shape
     char const* note;
     int k = 0;  // 0 = use the class default k list
 };
+
+// Check every invocation against an independent host reference. A timing loop
+// that checks only its final result can miss incomplete histogram writes.
+bool checkRepeatedMultiBlock(cudaStream_t stream)
+{
+    struct Case
+    {
+        int batch, len, k, firstAllowed, endAllowed, repeats;
+        bool sorted;
+    };
+    Case const cases[] = {
+        {1, 65537, 512, 1, 32769, 128, false},
+        {512, 65537, 2100, 32769, 65537, 64, false},
+        {1, 1075200, 2100, 0, 1075200, 128, true},
+    };
+    for (auto const& c : cases)
+    {
+        std::vector<float> input;
+        fillInput(input, c.batch, c.len);
+        for (int row = 0; row < c.batch; ++row)
+        {
+            auto begin = input.begin() + static_cast<size_t>(row) * c.len;
+            std::fill(begin, begin + c.firstAllowed, -std::numeric_limits<float>::infinity());
+            std::fill(begin + c.endAllowed, begin + c.len, -std::numeric_limits<float>::infinity());
+        }
+        std::vector<float> refVals;
+        std::vector<int> refIdxs;
+        hostTopk(input, c.batch, c.len, c.k, !c.sorted, refVals, refIdxs);
+        size_t const count = static_cast<size_t>(c.batch) * c.k;
+        float* dIn = toDevice(input);
+        float* dVals = nullptr;
+        int* dIdxs = nullptr;
+        void* workspace = nullptr;
+        BENCH_CHECK(cudaMalloc(&dVals, count * sizeof(float)));
+        BENCH_CHECK(cudaMalloc(&dIdxs, count * sizeof(int)));
+        size_t const wsBytes = invokeComputeTopkLastDimWorkspaceSize<float>(c.batch, c.len, c.k, true, 1);
+        BENCH_CHECK(cudaMalloc(&workspace, wsBytes));
+        std::vector<float> vals(count);
+        std::vector<int> idxs(count);
+        bool ok = true;
+        for (int repeat = 0; repeat < c.repeats; ++repeat)
+        {
+            // Prevent an unwritten slot from reusing a correct result from the previous call.
+            BENCH_CHECK(cudaMemsetAsync(workspace, 0xFF, wsBytes, stream));
+            invokeTopkLastDim<float>(c.batch, c.len, c.k, true, -std::numeric_limits<float>::infinity(),
+                dIn, dVals, dIdxs, workspace, stream, c.sorted, 1);
+            BENCH_CHECK(cudaMemcpyAsync(vals.data(), dVals, count * sizeof(float), cudaMemcpyDeviceToHost, stream));
+            BENCH_CHECK(cudaMemcpyAsync(idxs.data(), dIdxs, count * sizeof(int), cudaMemcpyDeviceToHost, stream));
+            BENCH_CHECK(cudaStreamSynchronize(stream));
+            if (vals != refVals || idxs != refIdxs)
+            {
+                std::fprintf(stderr, "repeated multi-block mismatch: batch=%d len=%d k=%d iteration=%d\n",
+                    c.batch, c.len, c.k, repeat);
+                ok = false;
+                break;
+            }
+        }
+        BENCH_CHECK(cudaFree(workspace));
+        BENCH_CHECK(cudaFree(dIdxs));
+        BENCH_CHECK(cudaFree(dVals));
+        BENCH_CHECK(cudaFree(dIn));
+        if (!ok)
+        {
+            return false;
+        }
+    }
+    std::printf("repeated multi-block: 320 invocations checked against host -> PASS\n");
+    return true;
+}
 
 // Part B: semantic checks vs host reference. Returns the number of failures.
 int runSemanticChecks()
@@ -314,6 +388,33 @@ int runSemanticChecks()
     // step1 C-stage edge: k == len (single beam expanded once).
     prep(1, 50);
     failures += checkVsHost(1, 50, 50, true, hostIn, dIn, stream, "warpsort-C-step1-k-eq-len", false) ? 0 : 1;
+
+    // Full selection used to leave multi-block outputs unwritten. len=3000 can
+    // select multiple blocks even for one row; 32769 also exercises the auto
+    // route beyond the small-len threshold. k>256 avoids ROCm's WarpSort gate.
+    for (auto const& shape : std::vector<std::pair<int, int>>{{1, 3000}, {3, 3000}, {1, 32769}})
+    {
+        int const batch = shape.first;
+        int const len = shape.second;
+        prep(batch, len);
+        for (int row = 0; row < batch; ++row)
+        {
+            for (int col = 0; col < len; ++col)
+            {
+                hostIn[static_cast<size_t>(row) * len + col] = col % 37 == 0 ?
+                    -std::numeric_limits<float>::infinity() : -0.125f * (1 + (col * 37 + row * 13) % 101);
+            }
+        }
+        BENCH_CHECK(cudaMemcpy(dIn, hostIn.data(), hostIn.size() * sizeof(float), cudaMemcpyHostToDevice));
+        for (bool const sorted : {false, true})
+        {
+            for (int const path : {0, 1, 2})
+            {
+                failures += checkVsHost(batch, len, len, sorted, hostIn, dIn, stream,
+                    "radix-full-selection", true, path) ? 0 : 1;
+            }
+        }
+    }
     if (dIn)
     {
         BENCH_CHECK(cudaFree(dIn));
@@ -348,6 +449,7 @@ int runSemanticChecks()
         failures += ok ? 0 : 1;
         BENCH_CHECK(cudaFree(dDual));
     }
+    failures += checkRepeatedMultiBlock(stream) ? 0 : 1;
     BENCH_CHECK(cudaStreamDestroy(stream));
     return failures;
 }
