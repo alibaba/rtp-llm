@@ -3,10 +3,12 @@ package org.flexlb.balance.scheduler;
 import org.flexlb.balance.delivery.CapacityBoundary;
 import org.flexlb.balance.delivery.DeliveryMetrics;
 import org.flexlb.balance.delivery.DeliveryStrategy;
+import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.endpoint.PrefillState;
 import org.flexlb.balance.prediction.PrefillTimePredictor;
 import org.flexlb.balance.projection.RouteProjection;
+import org.flexlb.balance.projection.WorkSnapshot;
 import org.flexlb.config.DecisionPolicyConfig;
 import org.flexlb.config.DispatcherConfig;
 import org.flexlb.config.FlexlbConfig;
@@ -574,6 +576,213 @@ class WorkerBatcherSchedulingTest {
             runtime.signalSchedulingInputsChanged();
         }
         await(delivery.firstAttempt);
+    }
+
+    @Test
+    @Timeout(value = 10, unit = TimeUnit.SECONDS)
+    void blockedDecodeAllowsOtherDecodeInPriorityAndFifoOrder() throws Exception {
+        FlexlbConfig config = singleConfig();
+        SchedulingTestConfig.usePriorityQueue(config);
+        PrefillEndpoint endpoint = stableEndpoint(stableStatus());
+        DecodeEndpoint blocked = mock(DecodeEndpoint.class);
+        DecodeEndpoint ready = mock(DecodeEndpoint.class);
+        TestAvailability blockedCapacity = new TestAvailability();
+        TestAvailability readyCapacity = new TestAvailability();
+        readyCapacity.release();
+        DecodeAwareDelivery delivery = new DecodeAwareDelivery(Map.of(blocked, blockedCapacity, ready, readyCapacity));
+        WorkerBatcher runtime = runningRuntime(config, endpoint, delivery);
+        delivery.runtime = runtime;
+        ScheduledRequest head = decodeItem(config, endpoint, blocked, 1001L, 50);
+        ScheduledRequest sameDecode = decodeItem(config, endpoint, blocked, 1002L, 40);
+        ScheduledRequest low = decodeItem(config, endpoint, ready, 1003L, 40);
+        ScheduledRequest high = decodeItem(config, endpoint, ready, 1004L, 50);
+        ScheduledRequest highFifo = decodeItem(config, endpoint, ready, 1005L, 50);
+        assertEquals(ACCEPTED, runtime.offerWithResult(head));
+        await(delivery.firstAttempt);
+        try {
+            for (ScheduledRequest request : List.of(sameDecode, low, high, highFifo)) {
+                assertEquals(ACCEPTED, runtime.offerWithResult(request));
+            }
+        } finally {
+            delivery.continueFirstAttempt.countDown();
+        }
+        low.future().get(5, TimeUnit.SECONDS);
+        await(blockedCapacity.subscribed);
+        assertEquals(List.of("1004", "1005", "1003"), delivery.delivered);
+        assertEquals(2, runtime.queueSize());
+        assertTrue(!delivery.attempted.contains("1002"), "same Decode must not bypass its higher-priority request");
+        int attempts = delivery.attempted.size();
+        TimeUnit.MILLISECONDS.sleep(100);
+        assertEquals(attempts, delivery.attempted.size(), "all blocked requests must sleep without polling");
+
+        blockedCapacity.release();
+        sameDecode.future().get(5, TimeUnit.SECONDS);
+        assertEquals(List.of("1004", "1005", "1003", "1001", "1002"), delivery.delivered);
+        assertEquals(0, runtime.queueSize());
+    }
+
+    @Test
+    @Timeout(value = 10, unit = TimeUnit.SECONDS)
+    void anyBlockedDecodeAndNewQueueMemberCanWakeTheScan() throws Exception {
+        FlexlbConfig config = singleConfig();
+        PrefillEndpoint endpoint = stableEndpoint(stableStatus());
+        DecodeEndpoint first = mock(DecodeEndpoint.class);
+        DecodeEndpoint second = mock(DecodeEndpoint.class);
+        DecodeEndpoint third = mock(DecodeEndpoint.class);
+        TestAvailability firstCapacity = new TestAvailability();
+        TestAvailability secondCapacity = new TestAvailability();
+        TestAvailability thirdCapacity = new TestAvailability();
+        thirdCapacity.release();
+        DecodeAwareDelivery delivery = new DecodeAwareDelivery(
+                Map.of(first, firstCapacity, second, secondCapacity, third, thirdCapacity));
+        WorkerBatcher runtime = runningRuntime(config, endpoint, delivery);
+        delivery.runtime = runtime;
+        ScheduledRequest head = decodeItem(config, endpoint, first, 1101L, 50);
+        ScheduledRequest tail = decodeItem(config, endpoint, second, 1102L, 50);
+        assertEquals(ACCEPTED, runtime.offerWithResult(head));
+        await(delivery.firstAttempt);
+        try {
+            assertEquals(ACCEPTED, runtime.offerWithResult(tail));
+        } finally {
+            delivery.continueFirstAttempt.countDown();
+        }
+        await(firstCapacity.subscribed);
+        await(secondCapacity.subscribed);
+        secondCapacity.release();
+        tail.future().get(5, TimeUnit.SECONDS);
+        assertTrue(!head.future().isDone());
+        ScheduledRequest arrival = decodeItem(config, endpoint, third, 1103L, 50);
+        assertEquals(ACCEPTED, runtime.offerWithResult(arrival));
+        arrival.future().get(5, TimeUnit.SECONDS);
+        assertEquals(List.of("1102", "1103"), delivery.delivered);
+        assertEquals(1, runtime.queueSize());
+        assertNull(runtime.stopAndAwait());
+        assertTrue(firstCapacity.listeners.isEmpty());
+        assertTrue(secondCapacity.listeners.isEmpty());
+        assertTrue(thirdCapacity.listeners.isEmpty());
+    }
+
+    @Test
+    @Timeout(value = 10, unit = TimeUnit.SECONDS)
+    void prefillCapacityRemainsSharedWhileDecodeIsBypassed() throws Exception {
+        FlexlbConfig config = singleConfig();
+        PrefillEndpoint endpoint = stableEndpoint(stableStatus());
+        DecodeEndpoint first = mock(DecodeEndpoint.class);
+        DecodeEndpoint second = mock(DecodeEndpoint.class);
+        TestAvailability firstCapacity = new TestAvailability();
+        TestAvailability secondCapacity = new TestAvailability();
+        secondCapacity.release();
+        DecodeAwareDelivery delivery = new DecodeAwareDelivery(Map.of(first, firstCapacity, second, secondCapacity));
+        delivery.prefillCapacity = new TestAvailability();
+        WorkerBatcher runtime = runningRuntime(config, endpoint, delivery);
+        delivery.runtime = runtime;
+        ScheduledRequest head = decodeItem(config, endpoint, first, 1201L, 50);
+        ScheduledRequest tail = decodeItem(config, endpoint, second, 1202L, 50);
+        assertEquals(ACCEPTED, runtime.offerWithResult(head));
+        await(delivery.firstAttempt);
+        try {
+            assertEquals(ACCEPTED, runtime.offerWithResult(tail));
+        } finally {
+            delivery.continueFirstAttempt.countDown();
+        }
+        await(delivery.prefillCapacity.subscribed);
+        assertTrue(delivery.delivered.isEmpty());
+        delivery.prefillCapacity.release();
+        tail.future().get(5, TimeUnit.SECONDS);
+        assertEquals(List.of("1202"), delivery.delivered);
+        assertTrue(!head.future().isDone());
+    }
+
+    @Test
+    @Timeout(value = 10, unit = TimeUnit.SECONDS)
+    void expiryOfSkippedSameDecodeRequestWakesTheQueue() throws Exception {
+        FlexlbConfig config = singleConfig();
+        PrefillEndpoint endpoint = stableEndpoint(stableStatus());
+        DecodeEndpoint decode = mock(DecodeEndpoint.class);
+        TestAvailability capacity = new TestAvailability();
+        DecodeAwareDelivery delivery = new DecodeAwareDelivery(Map.of(decode, capacity));
+        WorkerBatcher runtime = runningRuntime(config, endpoint, delivery);
+        delivery.runtime = runtime;
+        ScheduledRequest head = decodeItem(config, endpoint, decode, 1301L, 50);
+        ScheduledRequest expiring = decodeItem(config, endpoint, decode, 1302L, 50);
+        long deadline = System.currentTimeMillis() + 500L;
+        when(expiring.expiresAtMs()).thenReturn(deadline);
+        when(expiring.requestExpired(anyLong())).thenAnswer(call -> call.getArgument(0, Long.class) >= deadline);
+        assertEquals(ACCEPTED, runtime.offerWithResult(head));
+        await(delivery.firstAttempt);
+        try {
+            assertEquals(ACCEPTED, runtime.offerWithResult(expiring));
+        } finally {
+            delivery.continueFirstAttempt.countDown();
+        }
+        await(capacity.subscribed);
+        long timeout = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+        while (runtime.queueSize() != 1 && System.nanoTime() < timeout) {
+            TimeUnit.MILLISECONDS.sleep(10);
+        }
+        assertEquals(1, runtime.queueSize());
+        assertTrue(!delivery.attempted.contains("1302"));
+        assertTrue(runtime.removeQueued(head, "test cancellation"));
+        assertEquals(0, runtime.queueSize());
+        assertNull(runtime.stopAndAwait());
+        assertTrue(capacity.listeners.isEmpty());
+    }
+
+    private static ScheduledRequest decodeItem(FlexlbConfig config, PrefillEndpoint prefill, DecodeEndpoint decode,
+                                               long requestId, int priority) {
+        ScheduledRequest request = spy(item(config, prefill, requestId, priority, System.currentTimeMillis()));
+        when(request.decodeEp()).thenReturn(decode);
+        return request;
+    }
+
+    /**
+     * Exercises the threaded queue with deterministic capacity events and a test-side delivery commit.
+     */
+    private static final class DecodeAwareDelivery extends BoundaryDelivery {
+        private final Map<DecodeEndpoint, TestAvailability> capacities;
+        private final CountDownLatch firstAttempt = new CountDownLatch(1);
+        private final CountDownLatch continueFirstAttempt = new CountDownLatch(1);
+        private final List<String> attempted = new CopyOnWriteArrayList<>();
+        private final List<String> delivered = new CopyOnWriteArrayList<>();
+        private WorkerBatcher runtime;
+        private TestAvailability prefillCapacity;
+
+        private DecodeAwareDelivery(Map<DecodeEndpoint, TestAvailability> capacities) {
+            this.capacities = capacities;
+        }
+
+        @Override
+        public Transaction prepare(List<ScheduledRequest> candidates, PrefillTimePredictor.Evaluator evaluator,
+                                   OptionalLong prediction) {
+            ScheduledRequest request = candidates.getFirst();
+            attempted.add(request.requestId());
+            if (firstAttempt.getCount() != 0) {
+                firstAttempt.countDown();
+                await(continueFirstAttempt);
+            }
+            TestAvailability capacity = capacities.get(request.decodeEp());
+            if (!capacity.isAvailable()) {
+                return WorkerBatcherTestSupport.boundaryOnly(request, CapacityBoundary.unavailable(capacity,
+                        new RouteProjection.AdmissionBlockSemantics("DECODE_CAPACITY",
+                                RouteProjection.AfterProbeAdmission.UNAVAILABLE, "DECODE_CAPACITY", RoleType.DECODE)));
+            }
+            if (prefillCapacity != null && !prefillCapacity.isAvailable()) {
+                return WorkerBatcherTestSupport.boundaryOnly(request,
+                        CapacityBoundary.deliveryUnavailable(prefillCapacity));
+            }
+            Transaction transaction = mock(Transaction.class);
+            when(transaction.items()).thenReturn(candidates);
+            when(transaction.commitUnderLock()).thenAnswer(ignored -> {
+                assertTrue(runtime.ownedState().terminalizeActiveUnderLock(request));
+                return new WorkSnapshot(System.currentTimeMillis(), List.of(), List.of(), 0L);
+            });
+            doAnswer(ignored -> {
+                delivered.add(request.requestId());
+                request.future().complete(new Response());
+                return null;
+            }).when(transaction).handoff(any(), org.mockito.ArgumentMatchers.anyInt(), any());
+            return transaction;
+        }
     }
 
     private WorkerBatcher runningRuntime(FlexlbConfig config, PrefillEndpoint endpoint, DeliveryStrategy delivery) {

@@ -2,6 +2,7 @@ package org.flexlb.balance.scheduler;
 
 import org.flexlb.balance.delivery.CapacityBoundary;
 import org.flexlb.balance.delivery.DeliveryStrategy;
+import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.DecodeEndpoint.DecodeRoutingView;
 import org.flexlb.balance.endpoint.PrefillActiveIndex;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
@@ -18,6 +19,7 @@ import org.flexlb.config.DispatcherConfig;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.config.VictimStage;
 import org.flexlb.dao.master.WorkerStatus;
+import org.flexlb.dao.route.RoleType;
 import org.flexlb.enums.PrefillQueueEnqueueResult;
 import org.flexlb.util.Logger;
 import org.flexlb.util.PriorityNormalizer;
@@ -27,11 +29,13 @@ import java.util.ArrayList;
 import java.util.Collections;
 import java.util.Comparator;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.OptionalLong;
+import java.util.Set;
 import java.util.concurrent.CancellationException;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
@@ -160,13 +164,13 @@ public final class WorkerBatcher {
             }
         }
 
-        private static BatcherCycleResult capacityBlocked(
-                ScheduledRequest item,
-                CapacityBoundary unavailable) {
+        // Negative queueVersion denotes an exact-head wait; a captured version
+        // denotes a scan that must be retried when the queue or inputs change.
+        private static BatcherCycleResult capacityBlocked(ScheduledRequest item, CapacityBoundary unavailable) {
             return new BatcherCycleResult(false,
                     Objects.requireNonNull(item, "item"),
                     Objects.requireNonNull(unavailable, "unavailable"),
-                    0L, 0L, 0L, unavailable.projectionSemantics() == null
+                    -1L, 0L, 0L, unavailable.projectionSemantics() == null
                             ? "Prefill delivery capacity exhausted" : unavailable.projectionSemantics().blockedDetail());
         }
 
@@ -1087,18 +1091,6 @@ public final class WorkerBatcher {
         return activeIndex.capture().items();
     }
 
-    private ActiveQueueSnapshot snapshotActiveQueueHead() {
-        queueLock.lock();
-        try {
-            ScheduledRequest head = activeIndex.peek();
-            return new ActiveQueueSnapshot(
-                    queueVersion.get(), schedulingInputVersion,
-                    head == null ? List.of() : List.of(head));
-        } finally {
-            queueLock.unlock();
-        }
-    }
-
     private ActiveQueueSnapshot snapshotActiveQueue() {
         long version;
         long inputVersion;
@@ -1479,12 +1471,10 @@ public final class WorkerBatcher {
     }
 
     /** Caller holds {@link #queueLock}. */
-    private BatcherCycleResult resolveEmptyCapacityUnderLock(
-            ScheduledRequest item,
-            CapacityBoundary unavailable,
-            long nowMs) {
-        if (activeIndex.peek() != item
-                || item.requestExpired(nowMs)
+    private BatcherCycleResult resolveEmptyCapacityUnderLock(ScheduledRequest item,
+                                                             CapacityBoundary unavailable,
+                                                             long nowMs) {
+        if (item.requestExpired(nowMs)
                 || !containsIdentity(item)) {
             return BatcherCycleResult.NO_ACTION;
         }
@@ -1539,11 +1529,11 @@ public final class WorkerBatcher {
         }
     }
 
-    private void dropHead(ScheduledRequest head) {
+    private void dropQueuedRequest(ScheduledRequest item) {
         boolean removed;
         queueLock.lock();
         try {
-            removed = removeUnderLock(head);
+            removed = removeUnderLock(item);
         } finally {
             queueLock.unlock();
         }
@@ -1552,11 +1542,11 @@ public final class WorkerBatcher {
         }
         signalCapacityAvailable();
         try {
-            endpointEvents.onQueuedItemExpired(head);
+            endpointEvents.onQueuedItemExpired(item);
         } catch (Throwable callbackFailure) {
             Logger.error("WorkerBatcher[{}] ACTIVE terminal callback failed "
                             + "request_id={} reason={}",
-                    key, head.requestId(), "request_expired",
+                    key, item.requestId(), "request_expired",
                     callbackFailure);
         }
     }
@@ -1607,27 +1597,66 @@ public final class WorkerBatcher {
     }
 
     private BatcherCycleResult processSingleRequest() {
-        ActiveQueueSnapshot snapshot = snapshotActiveQueueHead();
-        ScheduledRequest head = snapshot.head();
-        if (head == null) {
+        ActiveQueueSnapshot snapshot = snapshotActiveQueue();
+        Set<DecodeEndpoint> blockedDecodes = new HashSet<>();
+        List<CapacityBoundary.Availability> blockedCapacity = new ArrayList<>();
+        long expiresAtMs = Long.MAX_VALUE;
+        String waitReason = null;
+        for (ScheduledRequest item : snapshot.items()) {
+            if (queueVersion.get() != snapshot.queueVersion()) {
+                return BatcherCycleResult.NO_ACTION;
+            }
+            expiresAtMs = Math.min(expiresAtMs, item.expiresAtMs());
+            if (blockedDecodes.contains(item.decodeEp()) && !item.requestExpired(now())) {
+                continue;
+            }
+            BatcherCycleResult result = processSingleCandidate(item, snapshot);
+            if (!result.capacityBlocked()) {
+                if (blockedCapacity.isEmpty() || !result.awaitingSchedulingChange()) {
+                    return result;
+                }
+                // Prefill KV is shared by every Decode. Wait for either Prefill
+                // inputs to change or an earlier Decode request to become runnable.
+                break;
+            }
+            var semantics = result.unavailable().projectionSemantics();
+            boolean decodeBlocked = semantics != null && semantics.blockerRole() == RoleType.DECODE;
+            if (!decodeBlocked && blockedCapacity.isEmpty()) {
+                return result;
+            }
+            blockedCapacity.add(result.unavailable().availability());
+            waitReason = result.waitReason();
+            if (!decodeBlocked) {
+                break;
+            }
+            // Requests sharing a Decode retain priority/FIFO order even when a
+            // later request needs fewer tokens and could fit its remaining KV.
+            blockedDecodes.add(item.decodeEp());
+        }
+        if (blockedCapacity.isEmpty()) {
             return BatcherCycleResult.NO_ACTION;
         }
+        return new BatcherCycleResult(false, snapshot.head(),
+                CapacityBoundary.deliveryUnavailable(new AnyCapacityAvailable(blockedCapacity)),
+                snapshot.queueVersion(), snapshot.schedulingInputVersion(), expiresAtMs, waitReason);
+    }
 
+    private BatcherCycleResult processSingleCandidate(ScheduledRequest item, ActiveQueueSnapshot snapshot) {
         long nowMs = now();
-        if (head.requestExpired(nowMs)) {
+        if (item.requestExpired(nowMs)) {
             Logger.debug("flexlb_single_drop request_id={} "
                             + "reason=request_expired expires_at_ms={} now_ms={}",
-                    head.requestId(), head.expiresAtMs(), nowMs);
-            dropHead(head);
+                    item.requestId(), item.expiresAtMs(), nowMs);
+            dropQueuedRequest(item);
             return BatcherCycleResult.CAPACITY_CHANGED;
         }
 
         GroupPlanner.Shape shape =
-                GroupPlanner.Shape.empty().add(head.seqLen());
+                GroupPlanner.Shape.empty().add(item.seqLen());
         BatchCapacitySnapshot capacity = batchCapacitySnapshot();
         if (!shape.fitsKv(capacity.kvCapacityFor(shape))) {
             return awaitPrefillKvCapacity(
-                    head, snapshot.queueVersion(),
+                    item, snapshot.queueVersion(),
                     snapshot.schedulingInputVersion());
         }
 
@@ -1636,17 +1665,17 @@ public final class WorkerBatcher {
         capacity = batchCapacitySnapshot();
         if (!shape.fitsKv(capacity.kvCapacityFor(shape))) {
             return awaitPrefillKvCapacity(
-                    head, snapshot.queueVersion(),
+                    item, snapshot.queueVersion(),
                     snapshot.schedulingInputVersion());
         }
 
-        return runPredictionBound(head, () -> {
+        return runPredictionBound(item, () -> {
             PrefillTimePredictor predictor =
                     prefillEndpoint.getPredictor();
             PrefillTimePredictor.Evaluator evaluator =
                     predictor.evaluator();
             return admitAndDeliverCapacityFeasiblePrefix(
-                    List.of(head), SINGLE_DECISION_REASON,
+                    List.of(item), SINGLE_DECISION_REASON,
                     evaluator, OptionalLong.empty());
         });
     }
@@ -1691,7 +1720,7 @@ public final class WorkerBatcher {
                             + "reason=request_expired expires_at_ms={} now_ms={}",
                     observedHead.requestId(),
                     observedHead.expiresAtMs(), nowMs);
-            dropHead(observedHead);
+            dropQueuedRequest(observedHead);
             return BatcherCycleResult.CAPACITY_CHANGED;
         }
 
@@ -1732,7 +1761,7 @@ public final class WorkerBatcher {
             Logger.debug("flexlb_batch_drop request_id={} "
                             + "reason=request_expired expires_at_ms={} now_ms={}",
                     head.requestId(), head.expiresAtMs(), nowMs);
-            dropHead(head);
+            dropQueuedRequest(head);
             return BatcherCycleResult.CAPACITY_CHANGED;
         }
         ScheduledRequest expiredMember = firstExpiredMember(
@@ -1742,7 +1771,7 @@ public final class WorkerBatcher {
                             + "reason=request_expired expires_at_ms={} now_ms={}",
                     expiredMember.requestId(),
                     expiredMember.expiresAtMs(), nowMs);
-            dropHead(expiredMember);
+            dropQueuedRequest(expiredMember);
             return BatcherCycleResult.CAPACITY_CHANGED;
         }
         GroupPlanner.Shape headShape =
@@ -1913,26 +1942,33 @@ public final class WorkerBatcher {
     }
 
     /**
-     * Wait while the exact active head is blocked by the exact rejecting
-     * resource. Offers wake the condition: a new higher-priority head exits the
-     * wait immediately, while a tail offer leaves the predicate true. Capacity
-     * is checked after listener installation while queueLock is held, closing
-     * the release-before-await race without polling.
+     * Wait for the rejecting capacities after subscribing under queueLock.
+     * A scanned queue also retries on membership/input changes and the earliest
+     * scanned expiry; an exact-head wait only retries for that head's capacity
+     * or replacement. Rechecking availability after subscription covers capacity
+     * released between admission and listener installation.
      */
-    private void awaitBlockedHeadCapacity(
-            BatcherCycleResult blocked)
-            throws InterruptedException {
+    private void awaitBlockedHeadCapacity(BatcherCycleResult blocked) throws InterruptedException {
         queueLock.lockInterruptibly();
         try {
             if (stopped) {
                 return;
             }
+            boolean rescanQueue = blocked.queueVersion() >= 0L;
+            if (rescanQueue && (queueVersion.get() != blocked.queueVersion()
+                    || schedulingInputVersion != blocked.schedulingInputVersion())) {
+                return;
+            }
             setCapacityBlockedHeadUnderLock(blocked);
+            long subscribedInputVersion = schedulingInputVersion;
             while (!stopped
                     && activeIndex.peek() == blocked.request()
                     && !blocked.request().requestExpired(System.currentTimeMillis())
+                    && (!rescanQueue || (queueVersion.get() == blocked.queueVersion()
+                    && schedulingInputVersion == subscribedInputVersion))
                     && !blocked.unavailable().availability().isAvailable()) {
-                long expiresAtMs = blocked.request().expiresAtMs();
+                long expiresAtMs = blocked.queueVersion() < 0L
+                        ? blocked.request().expiresAtMs() : blocked.wakeAtMs();
                 long nowMs = System.currentTimeMillis();
                 if (expiresAtMs <= nowMs) {
                     return;
