@@ -88,11 +88,11 @@ final class PrefillQueueEnqueuer {
             try {
                 attempt.rollback().close();
             } catch (Throwable rollbackFailure) {
-                failure = PrefillQueue.appendFailure(failure, rollbackFailure);
+                failure = GroupCommitter.appendFailure(failure, rollbackFailure);
             }
         }
         if (failure != null) {
-            throw PrefillQueue.propagateCommitFailure(failure);
+            throw GroupCommitter.propagateCommitFailure(failure);
         }
         if (attempt.accepted()) {
             for (ScheduledRequest victim : victims) {

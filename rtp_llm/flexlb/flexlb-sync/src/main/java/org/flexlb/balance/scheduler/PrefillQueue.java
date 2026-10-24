@@ -1,18 +1,12 @@
 package org.flexlb.balance.scheduler;
 
-import org.flexlb.balance.delivery.BlockedRequest;
-import org.flexlb.balance.delivery.DeliveryBlockReason;
-import org.flexlb.balance.delivery.DeliveryGroup;
 import org.flexlb.balance.delivery.DeliveryStrategy;
-import org.flexlb.balance.delivery.DeliveryTransaction;
 import org.flexlb.balance.endpoint.PrefillActiveIndex;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.endpoint.PrefillState;
 import org.flexlb.balance.estimate.PrefillTtftEstimate;
 import org.flexlb.balance.estimate.PrefillTtftEstimator;
-import org.flexlb.balance.estimate.WorkView;
 import org.flexlb.balance.planner.GroupPlanner;
-import org.flexlb.balance.prediction.InvalidPrefillPredictionException;
 import org.flexlb.balance.prediction.PrefillPredictionBoundary;
 import org.flexlb.balance.prediction.PrefillTimePredictor;
 import org.flexlb.balance.queue.BatchCapacityView;
@@ -94,11 +88,9 @@ public final class PrefillQueue {
     private final String key;
     private final PrefillEndpoint prefillEndpoint;
     private final QueueCapacity queueCapacity;
-    private final EndpointEventHandler endpointEvents;
     private final FlexlbConfig config;
     private final GroupingLimits groupingLimits;
     private final boolean singleDecision;
-    private final DeliveryStrategy deliveryStrategy;
     private final PrefillTtftEstimator ttftEstimator;
     private final QueueState queueState;
     private final LoadViewCache loadViewCache;
@@ -109,6 +101,7 @@ public final class PrefillQueue {
     private final CapacityBlockedHead capacityBlockedHead;
     private final QueueWaitRecorder queueWaitRecorder;
     private final QueuedRequestRemover queuedRequestRemover;
+    private final GroupCommitter groupCommitter;
     private final PrefillQueueLoop loop;
 
     public PrefillQueue(
@@ -137,8 +130,6 @@ public final class PrefillQueue {
         this.singleDecision = config.isSingleDecision();
         this.groupingLimits = new GroupingLimits(config, configSupplier);
         boolean priorityOrdering = config.isPriorityOrdering();
-        this.endpointEvents = endpointEvents;
-        this.deliveryStrategy = deliveryStrategy;
         this.ttftEstimator = ttftEstimator;
         Comparator<ScheduledRequest> queueOrder = priorityOrdering
                 ? PRIORITY_QUEUE_ORDER : FIFO_QUEUE_ORDER;
@@ -153,6 +144,14 @@ public final class PrefillQueue {
                                                              prefillState,
                                                              prefillEp,
                                                              queueCapacity);
+        this.groupCommitter = new GroupCommitter(key,
+                                                 queueState,
+                                                 prefillEndpoint,
+                                                 queueCapacity,
+                                                 endpointEvents,
+                                                 deliveryStrategy,
+                                                 capacityBlockedHead,
+                                                 queuedRequestRemover);
         this.loadViewCache = new LoadViewCache(queueState,
                                                prefillState,
                                                prefillEp,
@@ -367,312 +366,6 @@ public final class PrefillQueue {
         return loadViewCache.capture();
     }
 
-    // ==================== Delivery ownership ====================
-
-    private ProcessQueueResult admitAndDeliverCapacityFeasiblePrefix(List<ScheduledRequest> candidates,
-                                                                     String decisionReason,
-                                                                     PrefillTimePredictor.Evaluator evaluator,
-                                                                     OptionalLong plannedCommittedPredictionMs) {
-        if (candidates.isEmpty() || !selectionStillOwned(candidates)) {
-            return ProcessQueueResult.NO_ACTION;
-        }
-        try (DeliveryTransaction transaction =
-                deliveryStrategy.prepare(new DeliveryGroup(candidates, evaluator, plannedCommittedPredictionMs))) {
-            if (transaction.requests().isEmpty()) {
-                return commitBoundary(transaction.blocked());
-            }
-            ProcessQueueResult admitted = commitPreparedSelection(
-                    transaction, decisionReason);
-            return admitted == null
-                    ? ProcessQueueResult.NO_ACTION : admitted;
-        } catch (EndpointRetiredException retired) {
-            // The resources are closed, no handoff happened and the head is still queued: requeue it
-            // instead of letting the exception stop the loop and fail every queued request.
-            return commitBoundary(new BlockedRequest(
-                    candidates.get(0), DeliveryBlockReason.failed(retired)));
-        }
-    }
-
-    private void deliver(DeliveryTransaction transaction,
-                         String decisionReason,
-                         int remainingQueueDepth,
-                         WorkView precedingWork) {
-        Throwable deliveryFailure = null;
-        try {
-            String groupId = java.util.UUID.randomUUID().toString();
-            long committedAtMs = System.currentTimeMillis();
-            for (ScheduledRequest item : transaction.requests()) {
-                var context = item.ctx();
-                context.setDecisionGroup(new org.flexlb.dao.pv.DecisionGroup(groupId,
-                        context.getConfig().decisionPolicy().getType().name(),
-                        context.getConfig().getDispatcher().getType().name(),
-                        item.prefillEp().getStatus().getMetricIpPort(), transaction.requests().size(), decisionReason,
-                        committedAtMs, Math.max(0L, committedAtMs - item.enqueuedAtMs())));
-            }
-            transaction.deliver(decisionReason, remainingQueueDepth, precedingWork);
-        } catch (Throwable failure) {
-            deliveryFailure = failure;
-        }
-        Throwable unresolved = deliveryFailure != null
-                ? deliveryFailure
-                : new IllegalStateException(
-                        "delivery returned without resolving owner");
-        try {
-            transaction.rollbackCommitted(unresolved);
-        } catch (Throwable cleanupFailure) {
-            if (deliveryFailure == null) {
-                deliveryFailure = cleanupFailure;
-            } else if (deliveryFailure != cleanupFailure) {
-                deliveryFailure.addSuppressed(cleanupFailure);
-            }
-        }
-        if (deliveryFailure != null) {
-            Logger.error("PrefillQueue[{}] committed delivery failed",
-                    key, deliveryFailure);
-        }
-    }
-
-    private ProcessQueueResult runPredictionBound(
-            ScheduledRequest exactHead,
-            Supplier<ProcessQueueResult> operation) {
-        try {
-            return operation.get();
-        } catch (InvalidPrefillPredictionException failure) {
-            return commitBoundary(new BlockedRequest(
-                    exactHead, DeliveryBlockReason.failed(failure)));
-        }
-    }
-
-    private boolean selectionStillOwned(
-            List<ScheduledRequest> candidates) {
-        queueState.lock();
-        try {
-            if (queueState.isStopped()) {
-                return false;
-            }
-            long nowMs = now();
-            for (ScheduledRequest item : candidates) {
-                if (!containsIdentity(item)
-                        || item.requestExpired(nowMs)) {
-                    return false;
-                }
-            }
-            return true;
-        } finally {
-            queueState.unlock();
-        }
-    }
-
-    private ProcessQueueResult commitPreparedSelection(DeliveryTransaction transaction, String decisionReason) {
-        List<ScheduledRequest> items = transaction.requests();
-        if (items.isEmpty()) {
-            throw new IllegalStateException(
-                    "prepared selection commit requires a non-empty selection");
-        }
-        String committedReason = null;
-        int remainingQueueDepth = 0;
-        boolean removedTerminalBoundary = false;
-        Throwable postCommitFailure = null;
-        WorkView precedingWork;
-        queueState.lock();
-        try {
-            if (queueState.isStopped()) {
-                return null;
-            }
-            long nowMs = now();
-            for (ScheduledRequest item : items) {
-                if (!containsIdentity(item)
-                        || item.requestExpired(nowMs)) {
-                    return null;
-                }
-            }
-            precedingWork = transaction.commit();
-            // Committed requests no longer count toward either waiting limit.
-            var routingRole = prefillEndpoint.getStatus().getRole();
-            for (ScheduledRequest item : items) {
-                prefillEndpoint.reportSubQueueResidence(item);
-                queueCapacity.releaseEngineSubQueueSlot(routingRole);
-                queueCapacity.decreaseTotalQueueCount(item.future());
-            }
-            try {
-                removedTerminalBoundary = removeSelectionBoundaryUnderLock(
-                        transaction.blocked(), nowMs);
-                queueState.incrementQueueVersion();
-                committedReason = transaction.blocked() != null
-                        && transaction.blocked().reason().unavailable()
-                        ? "delivery_capacity_prefix" : decisionReason;
-                remainingQueueDepth = queueState.activeIndex().size();
-            } catch (Throwable failure) {
-                postCommitFailure = failure;
-            }
-        } finally {
-            queueState.unlock();
-        }
-
-        if (postCommitFailure != null) {
-            Throwable failure = postCommitFailure;
-            if (removedTerminalBoundary) {
-                capacityBlockedHead.signalCapacityAvailable();
-            }
-            try {
-                notifyTerminalAdmissionFailure(
-                        removedTerminalBoundary, transaction.blocked());
-            } catch (Throwable notificationFailure) {
-                failure = appendFailure(failure, notificationFailure);
-            }
-            try {
-                transaction.rollbackCommitted(failure);
-            } catch (Throwable ownerFailure) {
-                failure = appendFailure(failure, ownerFailure);
-            }
-            throw propagateCommitFailure(failure);
-        }
-        if (removedTerminalBoundary) {
-            capacityBlockedHead.signalCapacityAvailable();
-        }
-        notifyTerminalAdmissionFailure(
-                removedTerminalBoundary, transaction.blocked());
-        deliver(transaction, committedReason, remainingQueueDepth, precedingWork);
-        return ProcessQueueResult.CAPACITY_CHANGED;
-    }
-
-    private ProcessQueueResult commitBoundary(BlockedRequest blocked) {
-        ProcessQueueResult result = ProcessQueueResult.NO_ACTION;
-        boolean removedTerminalBoundary = false;
-        queueState.lock();
-        try {
-            if (queueState.isStopped()) {
-                return result;
-            }
-            long nowMs = now();
-            if (blocked != null && blocked.reason().unavailable()) {
-                result = resolveEmptyCapacityUnderLock(
-                        blocked.item(), blocked.reason(), nowMs);
-            } else {
-                removedTerminalBoundary = removeSelectionBoundaryUnderLock(
-                        blocked, nowMs);
-                if (removedTerminalBoundary) {
-                    queueState.incrementQueueVersion();
-                    result = ProcessQueueResult.CAPACITY_CHANGED;
-                }
-            }
-        } finally {
-            queueState.unlock();
-        }
-        if (removedTerminalBoundary) {
-            capacityBlockedHead.signalCapacityAvailable();
-        }
-        notifyTerminalAdmissionFailure(removedTerminalBoundary, blocked);
-        return result;
-    }
-
-    /** Caller holds the queue lock. */
-    private ProcessQueueResult resolveEmptyCapacityUnderLock(
-            ScheduledRequest item,
-            DeliveryBlockReason unavailable,
-            long nowMs) {
-        if (queueState.activeIndex().peek() != item
-                || item.requestExpired(nowMs)
-                || !containsIdentity(item)) {
-            return ProcessQueueResult.NO_ACTION;
-        }
-        return ProcessQueueResult.capacityBlocked(item, unavailable);
-    }
-
-    /** Caller holds the queue lock. */
-    private boolean removeSelectionBoundaryUnderLock(
-            BlockedRequest blocked,
-            long nowMs) {
-        if (blocked == null
-                || blocked.reason().unavailable()
-                || blocked.reason() == DeliveryBlockReason.OWNERSHIP_LOST) {
-            return false;
-        }
-        ScheduledRequest blockedItem = blocked.item();
-        if (!containsIdentity(blockedItem)
-                || blockedItem.requestExpired(nowMs)
-                || !queuedRequestRemover.removeTerminalActiveUnderLock(blockedItem)) {
-            return false;
-        }
-        return true;
-    }
-
-    private void notifyTerminalAdmissionFailure(
-            boolean removed,
-            BlockedRequest blocked) {
-        if (removed && blocked.reason().status() == DeliveryBlockReason.Status.FAILED) {
-            notifyAdmissionFailure(blocked.item(), blocked.reason().cause());
-        }
-    }
-
-    private boolean containsIdentity(ScheduledRequest expected) {
-        for (ScheduledRequest item : queueState.activeIndex()) {
-            if (item == expected) {
-                return true;
-            }
-        }
-        return false;
-    }
-
-    private void notifyAdmissionFailure(
-            ScheduledRequest item,
-            Throwable cause) {
-        try {
-            endpointEvents.onPreparedDeliveryFailure(item, cause);
-        } catch (Throwable callbackFailure) {
-            Logger.error("PrefillQueue[{}] delivery-failure callback failed "
-                            + "request_id={}",
-                    key, item.requestId(), callbackFailure);
-        }
-    }
-
-    private void dropHead(ScheduledRequest head) {
-        boolean removed;
-        queueState.lock();
-        try {
-            removed = queuedRequestRemover.removeUnderLock(head);
-        } finally {
-            queueState.unlock();
-        }
-        if (!removed) {
-            return;
-        }
-        capacityBlockedHead.signalCapacityAvailable();
-        try {
-            endpointEvents.onQueuedItemExpired(head);
-        } catch (Throwable callbackFailure) {
-            Logger.error("PrefillQueue[{}] ACTIVE terminal callback failed "
-                            + "request_id={} reason={}",
-                    key, head.requestId(), "request_expired",
-                    callbackFailure);
-        }
-    }
-
-    static Throwable appendFailure(
-            Throwable first,
-            Throwable next) {
-        if (first == null) {
-            return next;
-        }
-        if (first != next) {
-            first.addSuppressed(next);
-        }
-        return first;
-    }
-
-    /** Release the publish-time reservation only while it is still item-owned. */
-    static RuntimeException propagateCommitFailure(
-            Throwable failure) {
-        if (failure instanceof RuntimeException runtimeFailure) {
-            return runtimeFailure;
-        }
-        if (failure instanceof Error error) {
-            throw error;
-        }
-        return new IllegalStateException(
-                "delivery selection failed after ownership commit", failure);
-    }
-
     // ==================== Group decisions ====================
 
     private ProcessQueueResult processQueue() {
@@ -693,7 +386,7 @@ public final class PrefillQueue {
             Logger.debug("flexlb_single_drop request_id={} "
                             + "reason=request_expired expires_at_ms={} now_ms={}",
                     head.requestId(), head.expiresAtMs(), nowMs);
-            dropHead(head);
+            groupCommitter.dropHead(head);
             return ProcessQueueResult.CAPACITY_CHANGED;
         }
 
@@ -715,12 +408,12 @@ public final class PrefillQueue {
                     snapshot.schedulingInputVersion());
         }
 
-        return runPredictionBound(head, () -> {
+        return groupCommitter.runPredictionBound(head, () -> {
             PrefillTimePredictor predictor =
                     prefillEndpoint.getPredictor();
             PrefillTimePredictor.Evaluator evaluator =
                     predictor.evaluator();
-            return admitAndDeliverCapacityFeasiblePrefix(
+            return groupCommitter.admitAndDeliverCapacityFeasiblePrefix(
                     List.of(head), SINGLE_DECISION_REASON,
                     evaluator, OptionalLong.empty());
         });
@@ -766,7 +459,7 @@ public final class PrefillQueue {
                             + "reason=request_expired expires_at_ms={} now_ms={}",
                     observedHead.requestId(),
                     observedHead.expiresAtMs(), nowMs);
-            dropHead(observedHead);
+            groupCommitter.dropHead(observedHead);
             return ProcessQueueResult.CAPACITY_CHANGED;
         }
 
@@ -807,7 +500,7 @@ public final class PrefillQueue {
             Logger.debug("flexlb_batch_drop request_id={} "
                             + "reason=request_expired expires_at_ms={} now_ms={}",
                     head.requestId(), head.expiresAtMs(), nowMs);
-            dropHead(head);
+            groupCommitter.dropHead(head);
             return ProcessQueueResult.CAPACITY_CHANGED;
         }
         ScheduledRequest expiredMember = firstExpiredMember(
@@ -817,7 +510,7 @@ public final class PrefillQueue {
                             + "reason=request_expired expires_at_ms={} now_ms={}",
                     expiredMember.requestId(),
                     expiredMember.expiresAtMs(), nowMs);
-            dropHead(expiredMember);
+            groupCommitter.dropHead(expiredMember);
             return ProcessQueueResult.CAPACITY_CHANGED;
         }
         GroupPlanner.Shape headShape =
@@ -834,7 +527,7 @@ public final class PrefillQueue {
         int exactBatchMaxCount = batchMaxCount;
         long exactPredictThresholdMs = predictThresholdMs;
         long exactFixedWaitMs = fixedWaitMs;
-        return runPredictionBound(head, () -> {
+        return groupCommitter.runPredictionBound(head, () -> {
             PrefillTimePredictor.Evaluator evaluator = prefillEndpoint.getPredictor().evaluator();
             PrefillTimePredictor.Evaluator planningEvaluator =
                     exactPredictThresholdMs > 0 ? evaluator : null;
@@ -911,7 +604,7 @@ public final class PrefillQueue {
                 || !shape.fitsKv(capacity.kvCapacityFor(shape))) {
             return ProcessQueueResult.NO_ACTION;
         }
-        return admitAndDeliverCapacityFeasiblePrefix(
+        return groupCommitter.admitAndDeliverCapacityFeasiblePrefix(
                 picked, reason, evaluator,
                 plannedCommittedPredictionMs);
     }
