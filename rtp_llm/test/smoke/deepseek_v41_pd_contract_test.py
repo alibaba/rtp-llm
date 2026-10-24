@@ -54,7 +54,6 @@ class DeepSeekV41PDContractTest(contract.DeepSeekV41ContractTest):
             "FT_SERVER_TEST": "1",
             "DSV4_MOE_STRATEGY": "mega",
             "DSV4_USE_MEGA_MOE_SE": "0",
-            "DSV4_USE_MEGA_MOE_FUSED": "0",
             "DSV41_CED": "1",
             "DSV41_SWA_BOUNDED_REPLAY": "1",
             "WORLD_SIZE": str(role_size),

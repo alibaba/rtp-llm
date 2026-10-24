@@ -214,7 +214,6 @@ class Block(nn.Module):
             return
         if getattr(getattr(self.ffn, "_strategy", None), "name", "") not in (
             "mega",
-            "mega_fused",
             "mega_se",
         ):
             return
