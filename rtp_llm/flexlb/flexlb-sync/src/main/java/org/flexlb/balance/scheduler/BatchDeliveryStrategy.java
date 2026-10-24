@@ -10,7 +10,7 @@ import org.flexlb.balance.planner.GroupPlanner;
 import org.flexlb.balance.prediction.PrefillBatchFeatures;
 import org.flexlb.balance.prediction.PrefillPredictionBoundary;
 import org.flexlb.balance.prediction.PrefillTimePredictor;
-import org.flexlb.balance.projection.RouteProjection;
+import org.flexlb.balance.projection.PrefillTtftEstimate;
 import org.flexlb.balance.projection.WorkSnapshot;
 import org.flexlb.balance.scheduler.RequestSlot.DeliveryClaim;
 
@@ -34,7 +34,7 @@ import static org.flexlb.balance.scheduler.PrefillAdmissionResources.rollbackRes
 /** EnqueueBatch admission, ownership, transport, telemetry, and projection. */
 public final class BatchDeliveryStrategy implements DeliveryStrategy {
 
-    private static final RouteProjection.DeliveryProjection PROJECTION =
+    private static final PrefillTtftEstimate.DeliveryProjection PROJECTION =
             new BatchProjection();
     private final Supplier<CapacityBoundary.Attempt<PreparedSubmission>>
             prepareSubmission;
@@ -197,7 +197,7 @@ public final class BatchDeliveryStrategy implements DeliveryStrategy {
     }
 
     @Override
-    public RouteProjection.DeliveryProjection ttftEstimationRule() {
+    public PrefillTtftEstimate.DeliveryProjection ttftEstimationRule() {
         return PROJECTION;
     }
 
@@ -878,7 +878,7 @@ public final class BatchDeliveryStrategy implements DeliveryStrategy {
     }
 
     private static final class BatchProjection
-            implements RouteProjection.DeliveryProjection {
+            implements PrefillTtftEstimate.DeliveryProjection {
 
         private static final ThreadLocal<BatchPlanning> PLANNING =
                 ThreadLocal.withInitial(BatchPlanning::new);
@@ -889,7 +889,7 @@ public final class BatchDeliveryStrategy implements DeliveryStrategy {
         public long singletonCompletionOffsetMs(
                 long seqLen,
                 long hitCache,
-                RouteProjection.Predictions predictions) {
+                PrefillTtftEstimate.Predictions predictions) {
             // Committed prediction performs the same validated decision-group
             // evaluation before converting to lifecycle milliseconds. Running
             // the planning call first only evaluates the predictor twice for
@@ -898,8 +898,8 @@ public final class BatchDeliveryStrategy implements DeliveryStrategy {
         }
 
         @Override
-        public RouteProjection.GroupPlanning planning(
-                RouteProjection.Predictions predictions) {
+        public PrefillTtftEstimate.GroupPlanning planning(
+                PrefillTtftEstimate.Predictions predictions) {
             PrefillTimePredictor.BatchPrediction incremental = predictions.newBatchPrediction();
             if (incremental != null) {
                 return new AppendPlanning(incremental);
@@ -910,25 +910,25 @@ public final class BatchDeliveryStrategy implements DeliveryStrategy {
         }
 
         @Override
-        public RouteProjection.GroupService service(
+        public PrefillTtftEstimate.GroupService service(
                 GroupPlanner.Plan<GroupPlanner.Item> plan,
-                RouteProjection.Predictions predictions) {
+                PrefillTtftEstimate.Predictions predictions) {
             BatchService service = SERVICE.get();
             service.reset(plan, predictions, null);
             return service;
         }
 
         @Override
-        public RouteProjection.GroupService service(
-                GroupPlanner.Plan<GroupPlanner.Item> plan, RouteProjection.Predictions predictions,
-                RouteProjection.GroupPlanning planning) {
+        public PrefillTtftEstimate.GroupService service(
+                GroupPlanner.Plan<GroupPlanner.Item> plan, PrefillTtftEstimate.Predictions predictions,
+                PrefillTtftEstimate.GroupPlanning planning) {
             BatchService service = SERVICE.get();
             service.reset(plan, predictions, planning);
             return service;
         }
 
         /** One planner invocation; prefixes only grow and the probe boundary never moves backwards. */
-        private static final class AppendPlanning implements RouteProjection.GroupPlanning {
+        private static final class AppendPlanning implements PrefillTtftEstimate.GroupPlanning {
             private final PrefillTimePredictor.BatchPrediction prediction;
             private int size;
             private double latestPredictionMs;
@@ -968,14 +968,14 @@ public final class BatchDeliveryStrategy implements DeliveryStrategy {
         }
 
         private static final class BatchPlanning
-                implements RouteProjection.GroupPlanning {
+                implements PrefillTtftEstimate.GroupPlanning {
             private GroupPlanner.Item[] previous = new GroupPlanner.Item[0];
             private double[] durations = new double[0];
             private boolean[] computed = new boolean[0];
             private int previousSize;
-            private RouteProjection.Predictions predictions;
+            private PrefillTtftEstimate.Predictions predictions;
 
-            private void reset(RouteProjection.Predictions exactPredictions) {
+            private void reset(PrefillTtftEstimate.Predictions exactPredictions) {
                 predictions = exactPredictions;
                 if (previousSize != 0) {
                     java.util.Arrays.fill(computed, 0, previousSize, false);
@@ -1041,17 +1041,17 @@ public final class BatchDeliveryStrategy implements DeliveryStrategy {
         }
 
         private static final class BatchService
-                implements RouteProjection.GroupService {
+                implements PrefillTtftEstimate.GroupService {
             private GroupPlanner.Plan<GroupPlanner.Item> plan;
-            private RouteProjection.Predictions predictions;
-            private RouteProjection.GroupPlanning planning;
+            private PrefillTtftEstimate.Predictions predictions;
+            private PrefillTtftEstimate.GroupPlanning planning;
             private long[] completionOffsets = new long[0];
             private boolean[] computed = new boolean[0];
 
             private void reset(
                     GroupPlanner.Plan<GroupPlanner.Item> exactPlan,
-                    RouteProjection.Predictions exactPredictions,
-                    RouteProjection.GroupPlanning exactPlanning) {
+                    PrefillTtftEstimate.Predictions exactPredictions,
+                    PrefillTtftEstimate.GroupPlanning exactPlanning) {
                 plan = exactPlan;
                 predictions = exactPredictions;
                 planning = exactPlanning;

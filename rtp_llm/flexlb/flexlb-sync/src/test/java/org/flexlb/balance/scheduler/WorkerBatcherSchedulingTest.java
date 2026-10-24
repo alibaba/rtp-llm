@@ -6,7 +6,7 @@ import org.flexlb.balance.delivery.DeliveryStrategy;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.endpoint.PrefillState;
 import org.flexlb.balance.prediction.PrefillTimePredictor;
-import org.flexlb.balance.projection.RouteProjection;
+import org.flexlb.balance.projection.PrefillTtftEstimate;
 import org.flexlb.config.DecisionPolicyConfig;
 import org.flexlb.config.DispatcherConfig;
 import org.flexlb.config.FlexlbConfig;
@@ -181,7 +181,7 @@ class WorkerBatcherSchedulingTest {
         assertEquals(ACCEPTED, runtime.offerWithResult(item(config, endpoint, 31L, 50, now)));
         await(delivery.firstCapacity.subscribed);
 
-        RouteProjection.Inputs inputs = runtime.captureRouteProjectionInputs();
+        PrefillTtftEstimate.Inputs inputs = runtime.captureRouteProjectionInputs();
         assertEquals(1, inputs.queue().activeItems().size());
         assertNotNull(inputs.queue().admissionBlock());
         assertEquals(Long.MAX_VALUE, inputs.queue().constraints().batchKvCapacity());
@@ -253,16 +253,16 @@ class WorkerBatcherSchedulingTest {
 
         assertEquals(ACCEPTED, runtime.offerWithResult(head));
         await(delivery.firstCapacity.subscribed);
-        RouteProjection.Inputs inputs = runtime.captureRouteProjectionInputs();
+        PrefillTtftEstimate.Inputs inputs = runtime.captureRouteProjectionInputs();
         assertNotNull(inputs.queue().admissionBlock());
         assertNull(inputs.queue().admissionBlock().semantics(),
                 "batch capacity waits must not impose publication restrictions");
-        RouteProjection.DeliveryProjection projection = new BatchDeliveryStrategy(
+        PrefillTtftEstimate.DeliveryProjection projection = new BatchDeliveryStrategy(
                 () -> { throw new AssertionError("projection cannot prepare delivery"); },
                 () -> 0L, mock(RequestRegistry.class), mock(DeliveryMetrics.class))
                 .ttftEstimationRule();
-        RouteProjection.Candidate candidate = RouteProjection.project(
-                inputs, new RouteProjection.Probe("22", 50, now + 1L, Long.MAX_VALUE, 10L, 0L, 0L),
+        PrefillTtftEstimate.Candidate candidate = PrefillTtftEstimate.project(
+                inputs, new PrefillTtftEstimate.Probe("22", 50, now + 1L, Long.MAX_VALUE, 10L, 0L, 0L),
                 endpoint.getPredictor().evaluator(), projection, now);
         assertTrue(candidate.selectable(),
                 "a delivery-only wait must leave incoming backlog selectable");
@@ -299,7 +299,7 @@ class WorkerBatcherSchedulingTest {
             var first = readers.submit(runtime::captureRouteProjectionInputs);
             await(materializing);
             var started = new CountDownLatch(15);
-            var followers = new java.util.ArrayList<java.util.concurrent.Future<RouteProjection.Inputs>>();
+            var followers = new java.util.ArrayList<java.util.concurrent.Future<PrefillTtftEstimate.Inputs>>();
             for (int i = 0; i < 15; i++) {
                 followers.add(readers.submit(() -> {
                     started.countDown();
@@ -344,7 +344,7 @@ class WorkerBatcherSchedulingTest {
         try {
             assertEquals(ACCEPTED, runtime.offerWithResult(head));
             await(delivery.firstPrepareEntered);
-            CompletableFuture<RouteProjection.Inputs> oldCapture =
+            CompletableFuture<PrefillTtftEstimate.Inputs> oldCapture =
                     CompletableFuture.supplyAsync(() -> {
                         capturingThread.set(Thread.currentThread());
                         return runtime.captureRouteProjectionInputs();
@@ -698,9 +698,9 @@ class WorkerBatcherSchedulingTest {
             CapacityBoundary.Availability availability) {
         return CapacityBoundary.unavailable(
                 availability,
-                new RouteProjection.AdmissionBlockSemantics(
+                new PrefillTtftEstimate.AdmissionBlockSemantics(
                         "TEST_CAPACITY",
-                        RouteProjection.AfterProbeAdmission.BLOCKED,
+                        PrefillTtftEstimate.AfterProbeAdmission.BLOCKED,
                         "TEST_CAPACITY",
                         RoleType.PREFILL));
     }
@@ -715,8 +715,8 @@ class WorkerBatcherSchedulingTest {
         }
 
         @Override
-        public RouteProjection.DeliveryProjection ttftEstimationRule() {
-            return mock(RouteProjection.DeliveryProjection.class);
+        public PrefillTtftEstimate.DeliveryProjection ttftEstimationRule() {
+            return mock(PrefillTtftEstimate.DeliveryProjection.class);
         }
     }
 

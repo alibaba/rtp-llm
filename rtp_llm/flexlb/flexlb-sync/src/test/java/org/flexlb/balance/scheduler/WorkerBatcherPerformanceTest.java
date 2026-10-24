@@ -4,7 +4,7 @@ import org.flexlb.balance.delivery.CapacityBoundary;
 import org.flexlb.balance.delivery.DeliveryStrategy;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.prediction.PrefillTimePredictor;
-import org.flexlb.balance.projection.RouteProjection;
+import org.flexlb.balance.projection.PrefillTtftEstimate;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.SchedulingMetadata;
@@ -163,7 +163,7 @@ class WorkerBatcherPerformanceTest {
                     for (int operation = 0;
                          operation < operations;
                          operation++) {
-                        RouteProjection.Inputs inputs =
+                        PrefillTtftEstimate.Inputs inputs =
                                 runtime.captureRouteProjectionInputs();
                         checksum += inputs.queue().activeItems().size();
                         checksum += inputs.ownershipVersion();
@@ -320,9 +320,9 @@ class WorkerBatcherPerformanceTest {
                     candidates.getFirst(),
                     CapacityBoundary.unavailable(
                             availability,
-                            new RouteProjection.AdmissionBlockSemantics(
+                            new PrefillTtftEstimate.AdmissionBlockSemantics(
                                     "PERF_BLOCK",
-                                    RouteProjection.AfterProbeAdmission.BLOCKED,
+                                    PrefillTtftEstimate.AfterProbeAdmission.BLOCKED,
                                     "PERF_BLOCK",
                                     RoleType.PREFILL)));
         }
@@ -335,8 +335,8 @@ class WorkerBatcherPerformanceTest {
         }
 
         @Override
-        public RouteProjection.DeliveryProjection ttftEstimationRule() {
-            return mock(RouteProjection.DeliveryProjection.class);
+        public PrefillTtftEstimate.DeliveryProjection ttftEstimationRule() {
+            return mock(PrefillTtftEstimate.DeliveryProjection.class);
         }
 
     }

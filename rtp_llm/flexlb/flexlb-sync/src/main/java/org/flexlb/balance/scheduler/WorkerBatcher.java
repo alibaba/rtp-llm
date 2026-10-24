@@ -11,7 +11,7 @@ import org.flexlb.balance.prediction.InvalidPrefillPredictionException;
 import org.flexlb.balance.prediction.PrefillPredictionBoundary;
 import org.flexlb.balance.prediction.PrefillTimePredictor;
 import org.flexlb.balance.projection.QueueSnapshot.AdmissionBlock;
-import org.flexlb.balance.projection.RouteProjection;
+import org.flexlb.balance.projection.PrefillTtftEstimate;
 import org.flexlb.balance.projection.WorkSnapshot;
 import org.flexlb.config.DecisionPolicyConfig;
 import org.flexlb.config.DispatcherConfig;
@@ -594,7 +594,7 @@ public final class WorkerBatcher {
     }
 
     /** Immutable delivery semantics used by a pure route projection. */
-    public RouteProjection.DeliveryProjection deliveryProjection() {
+    public PrefillTtftEstimate.DeliveryProjection deliveryProjection() {
         return deliveryStrategy.ttftEstimationRule();
     }
 
@@ -1109,7 +1109,7 @@ public final class WorkerBatcher {
         private PrefillState.Snapshot ownership;
         private final GroupPlanner.Constraints constraints;
         private final AdmissionBlock admissionBlock;
-        private volatile RouteProjection.Inputs materialized;
+        private volatile PrefillTtftEstimate.Inputs materialized;
 
         private ProjectionSource(ProjectionVersion version, PrefillState.Snapshot ownership,
                                  GroupPlanner.Constraints constraints, AdmissionBlock admissionBlock) {
@@ -1119,8 +1119,8 @@ public final class WorkerBatcher {
             this.admissionBlock = admissionBlock;
         }
 
-        private RouteProjection.Inputs materialize() {
-            RouteProjection.Inputs result = materialized;
+        private PrefillTtftEstimate.Inputs materialize() {
+            PrefillTtftEstimate.Inputs result = materialized;
             if (result != null) {
                 return result;
             }
@@ -1128,7 +1128,7 @@ public final class WorkerBatcher {
                 if (materialized == null) {
                     var queueSnapshot = new org.flexlb.balance.projection.QueueSnapshot(ownership.capturedAtMs(),
                             projectionOrder, constraints, ownership.active().projectedItems(), admissionBlock);
-                    materialized = new RouteProjection.Inputs(
+                    materialized = new PrefillTtftEstimate.Inputs(
                             queueSnapshot, ownership.work().materialize(), version.ownership());
                     // The cached projection must not retain completed request contexts.
                     ownership = null;
@@ -1138,7 +1138,7 @@ public final class WorkerBatcher {
         }
     }
 
-    public RouteProjection.Inputs captureRouteProjectionInputs() {
+    public PrefillTtftEstimate.Inputs captureRouteProjectionInputs() {
         ProjectionSource source = projectionSource;
         if (source == null || !isCurrentProjection(source.version)) {
             queueLock.lock();

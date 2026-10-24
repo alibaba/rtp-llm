@@ -8,13 +8,15 @@ import java.util.List;
 import java.util.OptionalDouble;
 import java.util.OptionalLong;
 
-/** Projects one incoming route against immutable, coherently captured inputs. */
-public final class RouteProjection {
+/**
+ * 基于一致捕获的不可变快照，预估一条新请求排进某台 prefill 机器后的 TTFT。
+ */
+public final class PrefillTtftEstimate {
 
     private static final ThreadLocal<Session> SESSIONS =
             ThreadLocal.withInitial(Session::new);
 
-    private RouteProjection() {
+    private PrefillTtftEstimate() {
     }
 
     /**

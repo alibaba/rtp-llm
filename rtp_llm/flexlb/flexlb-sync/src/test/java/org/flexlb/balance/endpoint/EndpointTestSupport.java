@@ -4,7 +4,7 @@ import org.flexlb.balance.delivery.CapacityBoundary;
 import org.flexlb.balance.delivery.DeliveryMetrics;
 import org.flexlb.balance.delivery.DeliveryResult;
 import org.flexlb.balance.delivery.DeliveryStrategy;
-import org.flexlb.balance.projection.RouteProjection;
+import org.flexlb.balance.projection.PrefillTtftEstimate;
 import org.flexlb.balance.scheduler.EndpointEventProjector;
 import org.flexlb.balance.scheduler.PlacementAvailability;
 import org.flexlb.balance.scheduler.QueueCapacity;
@@ -219,9 +219,9 @@ public final class EndpointTestSupport {
                         public void removeListener(Runnable listener) {
                         }
                     },
-                    new RouteProjection.AdmissionBlockSemantics(
+                    new PrefillTtftEstimate.AdmissionBlockSemantics(
                             "test delivery parked",
-                            RouteProjection.AfterProbeAdmission.BLOCKED,
+                            PrefillTtftEstimate.AfterProbeAdmission.BLOCKED,
                             "test delivery parked",
                             RoleType.PREFILL));
 

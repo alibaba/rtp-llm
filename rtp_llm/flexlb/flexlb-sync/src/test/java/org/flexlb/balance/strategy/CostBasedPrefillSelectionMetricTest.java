@@ -3,7 +3,7 @@ package org.flexlb.balance.strategy;
 import org.flexlb.balance.PlacementResult;
 import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
-import org.flexlb.balance.projection.RouteProjection;
+import org.flexlb.balance.projection.PrefillTtftEstimate;
 import org.flexlb.balance.scheduler.ScheduledRequest;
 import org.flexlb.cache.domain.CacheMatchResult;
 import org.flexlb.cache.domain.CacheMatchSource;
@@ -762,12 +762,12 @@ class CostBasedPrefillSelectionMetricTest {
             candidates.addCandidate(
                     ip + ":8080",
                     endpoint,
-                    new RouteProjection.Candidate(
-                            ttftMs[i] < 0L ? RouteProjection.Candidate.State.UNMODELED_ENGINE_WORK
-                                    : RouteProjection.Candidate.State.MODELED,
+                    new PrefillTtftEstimate.Candidate(
+                            ttftMs[i] < 0L ? PrefillTtftEstimate.Candidate.State.UNMODELED_ENGINE_WORK
+                                    : PrefillTtftEstimate.Candidate.State.MODELED,
                             ttftMs[i],
                             Math.max(0L, ttftMs[i]),
-                            RouteProjection.Candidate.InitialHeadDisposition.NONE,
+                            PrefillTtftEstimate.Candidate.InitialHeadDisposition.NONE,
                             "",
                             null,
                             hitTokens[i],

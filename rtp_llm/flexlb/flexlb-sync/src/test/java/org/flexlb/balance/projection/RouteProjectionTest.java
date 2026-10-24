@@ -30,18 +30,18 @@ class RouteProjectionTest {
         WorkSnapshot current = new WorkSnapshot(20L, List.of(new WorkSnapshot.RequestWork(
                 "1", WorkSnapshot.Phase.ENGINE_RUNNING, 993L)), List.of(), 0L);
         assertEquals(
-                RouteProjection.project(new RouteProjection.Inputs(emptyQueue(20L), current),
+                PrefillTtftEstimate.project(new PrefillTtftEstimate.Inputs(emptyQueue(20L), current),
                         probe(), new CountingEvaluator(), routeProjection()),
-                RouteProjection.project(new RouteProjection.Inputs(emptyQueue(20L), cached),
+                PrefillTtftEstimate.project(new PrefillTtftEstimate.Inputs(emptyQueue(20L), cached),
                         probe(), new CountingEvaluator(), routeProjection()));
     }
 
     @Test
     void queueAndWorkComeFromOneCanonicalInput() {
-        RouteProjection.Inputs inputs = inputs(13L);
+        PrefillTtftEstimate.Inputs inputs = inputs(13L);
         CountingEvaluator evaluator = new CountingEvaluator();
 
-        RouteProjection.Candidate result = RouteProjection.project(
+        PrefillTtftEstimate.Candidate result = PrefillTtftEstimate.project(
                 inputs,
                 probe(),
                 evaluator,
@@ -52,7 +52,7 @@ class RouteProjectionTest {
         assertTrue(evaluator.invocations() > 0);
 
         assertThrows(IllegalArgumentException.class,
-                () -> new RouteProjection.Inputs(
+                () -> new PrefillTtftEstimate.Inputs(
                         emptyQueue(13L), emptyWork(14L)));
     }
 
@@ -69,7 +69,7 @@ class RouteProjectionTest {
         }
 
         assertNotSame(captured, predictor.evaluator());
-        RouteProjection.Candidate result = RouteProjection.project(
+        PrefillTtftEstimate.Candidate result = PrefillTtftEstimate.project(
                 inputs(31L),
                 probe(),
                 captured,
@@ -82,36 +82,36 @@ class RouteProjectionTest {
     @Test
     void onlyModeledCandidateCarriesKnownTtft() {
         assertThrows(IllegalArgumentException.class,
-                () -> candidate(RouteProjection.Candidate.State.MODELED,
+                () -> candidate(PrefillTtftEstimate.Candidate.State.MODELED,
                         OptionalLong.empty()));
         assertThrows(IllegalArgumentException.class,
-                () -> candidate(RouteProjection.Candidate.State.UNAVAILABLE,
+                () -> candidate(PrefillTtftEstimate.Candidate.State.UNAVAILABLE,
                         OptionalLong.of(1L)));
         assertThrows(IllegalArgumentException.class,
-                () -> candidate(RouteProjection.Candidate.State.MODELED,
+                () -> candidate(PrefillTtftEstimate.Candidate.State.MODELED,
                         OptionalLong.of(-2L)));
 
-        RouteProjection.Candidate modeled = candidate(
-                RouteProjection.Candidate.State.MODELED, OptionalLong.of(10L));
-        RouteProjection.Candidate unmodeled = candidate(
-                RouteProjection.Candidate.State.UNMODELED_ENGINE_WORK, OptionalLong.empty());
+        PrefillTtftEstimate.Candidate modeled = candidate(
+                PrefillTtftEstimate.Candidate.State.MODELED, OptionalLong.of(10L));
+        PrefillTtftEstimate.Candidate unmodeled = candidate(
+                PrefillTtftEstimate.Candidate.State.UNMODELED_ENGINE_WORK, OptionalLong.empty());
         assertEquals(10L, modeled.requiredProjectedTtftMs());
         assertTrue(unmodeled.engineWorkUnmodeled());
     }
 
-    private static RouteProjection.Candidate candidate(
-            RouteProjection.Candidate.State state,
+    private static PrefillTtftEstimate.Candidate candidate(
+            PrefillTtftEstimate.Candidate.State state,
             OptionalLong projectedTtftMs) {
-        return new RouteProjection.Candidate(
+        return new PrefillTtftEstimate.Candidate(
                 state,
-                projectedTtftMs.orElse(RouteProjection.Candidate.UNKNOWN),
+                projectedTtftMs.orElse(PrefillTtftEstimate.Candidate.UNKNOWN),
                 0L,
-                RouteProjection.Candidate.InitialHeadDisposition.NONE,
+                PrefillTtftEstimate.Candidate.InitialHeadDisposition.NONE,
                 state.name(), null, 0L, 0L);
     }
 
-    private static RouteProjection.Inputs inputs(long capturedAtMs) {
-        return new RouteProjection.Inputs(
+    private static PrefillTtftEstimate.Inputs inputs(long capturedAtMs) {
+        return new PrefillTtftEstimate.Inputs(
                 emptyQueue(capturedAtMs), emptyWork(capturedAtMs));
     }
 
@@ -130,13 +130,13 @@ class RouteProjectionTest {
                 capturedAtMs, List.of(), List.of(), 0L);
     }
 
-    private static RouteProjection.Probe probe() {
-        return new RouteProjection.Probe(
+    private static PrefillTtftEstimate.Probe probe() {
+        return new PrefillTtftEstimate.Probe(
                 "99", 50, 13L, Long.MAX_VALUE,
                 20L, 0L, 0L);
     }
 
-    private static RouteProjection.DeliveryProjection routeProjection() {
+    private static PrefillTtftEstimate.DeliveryProjection routeProjection() {
         return new RouteDeliveryStrategy(
                 Mockito.mock(RequestRegistry.class),
                 Mockito.mock(DeliveryMetrics.class))

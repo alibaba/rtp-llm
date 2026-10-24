@@ -55,10 +55,10 @@ final class RouteTimelineProjector {
      * and that cursor overlap via {@code max(cursor, readyAt)}. The snapshot's
      * frozen delivery projection defines each group's completion shape.
      */
-    RouteProjection.CandidateView project(QueueSnapshot queue,
+    PrefillTtftEstimate.CandidateView project(QueueSnapshot queue,
                                           WorkSnapshot committed,
                                           PrefillTimePredictor.Evaluator evaluator,
-                                          RouteProjection.DeliveryProjection deliveryProjection,
+                                          PrefillTtftEstimate.DeliveryProjection deliveryProjection,
                                           long planningAtMs) {
         long projectionAtMs = Math.max(queue.capturedAtMs(), planningAtMs);
         if (expiresAtMs <= 0L || projectionAtMs >= expiresAtMs) {
@@ -77,9 +77,9 @@ final class RouteTimelineProjector {
         }
     }
 
-    private RouteProjection.CandidateView projectWithPredictions(QueueSnapshot queue,
+    private PrefillTtftEstimate.CandidateView projectWithPredictions(QueueSnapshot queue,
                                                                  WorkSnapshot committed,
-                                                                 RouteProjection.DeliveryProjection deliveryProjection,
+                                                                 PrefillTtftEstimate.DeliveryProjection deliveryProjection,
                                                                  long projectionAtMs,
                                                                  PredictionBoundary predictions) {
         if (containsCommittedRequest(committed, requestId)) {
@@ -120,9 +120,9 @@ final class RouteTimelineProjector {
                 expiresAtMs, seqLen, hitCache);
         GroupPlanner.Item initialActiveHead =
                 queue.activeItems().isEmpty() ? null : queue.activeItems().getFirst();
-        RouteProjection.Candidate.InitialHeadDisposition initialHeadDisposition =
+        PrefillTtftEstimate.Candidate.InitialHeadDisposition initialHeadDisposition =
                 initialActiveHead == null
-                        ? RouteProjection.Candidate.InitialHeadDisposition.NONE
+                        ? PrefillTtftEstimate.Candidate.InitialHeadDisposition.NONE
                         : null;
         List<GroupPlanner.Item> eligibleActive = new ArrayList<>(
                 queue.activeItems().size());
@@ -132,7 +132,7 @@ final class RouteTimelineProjector {
             if (expiredAt(item, projectionAtMs)) {
                 if (item == initialActiveHead) {
                     initialHeadDisposition =
-                            RouteProjection.Candidate.InitialHeadDisposition.TERMINAL_PRUNED;
+                            PrefillTtftEstimate.Candidate.InitialHeadDisposition.TERMINAL_PRUNED;
                 }
                 continue;
             }
@@ -157,7 +157,7 @@ final class RouteTimelineProjector {
             ExpirationPrune expiration = ordered.pruneExpired(decisionNowMs);
             if (expiration.initialHeadExpired()) {
                 initialHeadDisposition =
-                        RouteProjection.Candidate.InitialHeadDisposition.TERMINAL_PRUNED;
+                        PrefillTtftEstimate.Candidate.InitialHeadDisposition.TERMINAL_PRUNED;
             }
             if (expiration.probeExpired()) {
                 return unavailable("INCOMING_EXPIRED_BEFORE_DISPATCH");
@@ -176,7 +176,7 @@ final class RouteTimelineProjector {
 
             int probePosition = ordered.probePosition();
             final GroupPlanner.Plan<GroupPlanner.Item> plan;
-            final RouteProjection.GroupPlanning planning;
+            final PrefillTtftEstimate.GroupPlanning planning;
             try {
                 planning = queue.constraints().predictedExecutionBudgetMs() > 0L
                         ? deliveryProjection.planning(predictions) : null;
@@ -211,11 +211,11 @@ final class RouteTimelineProjector {
             long startMs = Math.max(cursorMs, readyInMs);
 
             try {
-                RouteProjection.GroupService service =
+                PrefillTtftEstimate.GroupService service =
                         deliveryProjection.service(plan, predictions, planning);
                 if (probePosition < plan.items().size()) {
                     return candidate(
-                            RouteProjection.Candidate.State.MODELED,
+                            PrefillTtftEstimate.Candidate.State.MODELED,
                             saturatedAdd(startMs, service.completionOffsetMs(probePosition)),
                             incomingPrefillMs,
                             initialHeadDisposition,
@@ -232,8 +232,8 @@ final class RouteTimelineProjector {
                 "projected queue exhausted before planning the probe");
     }
 
-    private RouteProjection.CandidateView projectIdleSingleton(
-            RouteProjection.DeliveryProjection deliveryProjection,
+    private PrefillTtftEstimate.CandidateView projectIdleSingleton(
+            PrefillTtftEstimate.DeliveryProjection deliveryProjection,
             PredictionBoundary predictions,
             long incomingPrefillMs,
             long committedMs) {
@@ -248,10 +248,10 @@ final class RouteTimelineProjector {
                     predictionFailure.detail("SERVICE_PREDICTION_FAILED"));
         }
         return candidate(
-                RouteProjection.Candidate.State.MODELED,
+                PrefillTtftEstimate.Candidate.State.MODELED,
                 completionMs,
                 incomingPrefillMs,
-                RouteProjection.Candidate.InitialHeadDisposition.NONE,
+                PrefillTtftEstimate.Candidate.InitialHeadDisposition.NONE,
                 "EMPTY_ACTIVE_QUEUE_SINGLETON");
     }
 
@@ -341,14 +341,14 @@ final class RouteTimelineProjector {
             return headIndex == itemsInQueueOrder.length;
         }
 
-        private RouteProjection.Candidate.InitialHeadDisposition
+        private PrefillTtftEstimate.Candidate.InitialHeadDisposition
                 initialHeadDisposition() {
             if (initialHeadIndex < 0) {
-                return RouteProjection.Candidate.InitialHeadDisposition.TERMINAL_PRUNED;
+                return PrefillTtftEstimate.Candidate.InitialHeadDisposition.TERMINAL_PRUNED;
             }
             return initialHeadIndex < probeIndex
-                    ? RouteProjection.Candidate.InitialHeadDisposition.BEFORE_PROBE
-                    : RouteProjection.Candidate.InitialHeadDisposition.AFTER_PROBE;
+                    ? PrefillTtftEstimate.Candidate.InitialHeadDisposition.BEFORE_PROBE
+                    : PrefillTtftEstimate.Candidate.InitialHeadDisposition.AFTER_PROBE;
         }
 
         private GroupPlanner.Item head() {
@@ -448,30 +448,30 @@ final class RouteTimelineProjector {
         return deadlineMs <= nowMs ? 0L : deadlineMs - nowMs;
     }
 
-    private RouteProjection.CandidateView unavailable(String detail) {
+    private PrefillTtftEstimate.CandidateView unavailable(String detail) {
         return candidate(
-                RouteProjection.Candidate.State.UNAVAILABLE,
-                RouteProjection.Candidate.UNKNOWN,
+                PrefillTtftEstimate.Candidate.State.UNAVAILABLE,
+                PrefillTtftEstimate.Candidate.UNKNOWN,
                 0L,
-                RouteProjection.Candidate.InitialHeadDisposition.NONE, detail);
+                PrefillTtftEstimate.Candidate.InitialHeadDisposition.NONE, detail);
     }
 
-    private RouteProjection.CandidateView blocked(
+    private PrefillTtftEstimate.CandidateView blocked(
             long incomingPrefillMs,
-            RouteProjection.Candidate.InitialHeadDisposition initialHeadDisposition,
+            PrefillTtftEstimate.Candidate.InitialHeadDisposition initialHeadDisposition,
             String detail) {
         return candidate(
-                RouteProjection.Candidate.State.BLOCKED,
-                RouteProjection.Candidate.UNKNOWN,
+                PrefillTtftEstimate.Candidate.State.BLOCKED,
+                PrefillTtftEstimate.Candidate.UNKNOWN,
                 incomingPrefillMs,
                 initialHeadDisposition, detail);
     }
 
-    private RouteProjection.CandidateView candidate(
-            RouteProjection.Candidate.State state,
+    private PrefillTtftEstimate.CandidateView candidate(
+            PrefillTtftEstimate.Candidate.State state,
             long projectedTtftMs,
             long incomingPrefillMs,
-            RouteProjection.Candidate.InitialHeadDisposition headDisposition,
+            PrefillTtftEstimate.Candidate.InitialHeadDisposition headDisposition,
             String detail) {
         result.reset(
                 state, projectedTtftMs, incomingPrefillMs,
@@ -482,21 +482,21 @@ final class RouteTimelineProjector {
 
     /** Reused only by the owning projection thread. */
     private static final class ProjectedCandidate
-            implements RouteProjection.CandidateView {
-        private RouteProjection.Candidate.State state;
+            implements PrefillTtftEstimate.CandidateView {
+        private PrefillTtftEstimate.Candidate.State state;
         private long projectedTtftMsValue;
         private long incomingPrefillMs;
-        private RouteProjection.Candidate.InitialHeadDisposition headDisposition;
+        private PrefillTtftEstimate.Candidate.InitialHeadDisposition headDisposition;
         private String detail;
         private org.flexlb.dao.route.RoleType blockerRole;
         private long cacheHitTokens;
         private long routingCacheMatchTokens;
 
         private void reset(
-                RouteProjection.Candidate.State exactState,
+                PrefillTtftEstimate.Candidate.State exactState,
                 long exactProjectedTtftMs,
                 long exactIncomingPrefillMs,
-                RouteProjection.Candidate.InitialHeadDisposition exactHeadDisposition,
+                PrefillTtftEstimate.Candidate.InitialHeadDisposition exactHeadDisposition,
                 String exactDetail,
                 org.flexlb.dao.route.RoleType exactBlockerRole,
                 long exactCacheHitTokens,
@@ -512,7 +512,7 @@ final class RouteTimelineProjector {
         }
 
         @Override
-        public RouteProjection.Candidate.State state() {
+        public PrefillTtftEstimate.Candidate.State state() {
             return state;
         }
 
@@ -527,7 +527,7 @@ final class RouteTimelineProjector {
         }
 
         @Override
-        public RouteProjection.Candidate.InitialHeadDisposition
+        public PrefillTtftEstimate.Candidate.InitialHeadDisposition
                 initialHeadDisposition() {
             return headDisposition;
         }
@@ -565,7 +565,7 @@ final class RouteTimelineProjector {
      * while every numeric output is validated before it reaches scheduling.
      */
     private static final class PredictionBoundary
-            implements RouteProjection.Predictions {
+            implements PrefillTtftEstimate.Predictions {
 
         private PrefillTimePredictor.Evaluator evaluator;
         private Object cachedSingleSnapshot;

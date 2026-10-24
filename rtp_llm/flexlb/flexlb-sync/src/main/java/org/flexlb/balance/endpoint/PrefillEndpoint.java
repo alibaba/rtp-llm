@@ -8,7 +8,7 @@ import org.flexlb.balance.prediction.LearningPredictor;
 import org.flexlb.balance.prediction.PrefillBatchFeatures;
 import org.flexlb.balance.prediction.PrefillPredictionBoundary;
 import org.flexlb.balance.prediction.PrefillTimePredictor;
-import org.flexlb.balance.projection.RouteProjection;
+import org.flexlb.balance.projection.PrefillTtftEstimate;
 import org.flexlb.balance.scheduler.EndpointEventProjector;
 import org.flexlb.balance.scheduler.PlacementAvailability;
 import org.flexlb.balance.scheduler.QueueCapacity;
@@ -117,12 +117,12 @@ public class PrefillEndpoint extends WorkerEndpoint {
     }
 
     /** Capture the canonical queue/work inputs for one pure route projection. */
-    public RouteProjection.Inputs captureRouteProjectionInputs() {
+    public PrefillTtftEstimate.Inputs captureRouteProjectionInputs() {
         return runtime.captureRouteProjectionInputs();
     }
 
     /** Stable delivery semantics selected once for this endpoint generation. */
-    public RouteProjection.DeliveryProjection deliveryProjection() {
+    public PrefillTtftEstimate.DeliveryProjection deliveryProjection() {
         return runtime.deliveryProjection();
     }
 

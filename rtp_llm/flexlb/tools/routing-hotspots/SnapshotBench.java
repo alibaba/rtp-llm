@@ -9,7 +9,7 @@ import java.util.concurrent.locks.ReentrantLock;
 import org.flexlb.balance.delivery.*;
 import org.flexlb.balance.endpoint.PrefillActiveIndex;
 import org.flexlb.balance.prediction.FormulaPredictor;
-import org.flexlb.balance.projection.RouteProjection;
+import org.flexlb.balance.projection.PrefillTtftEstimate;
 import org.flexlb.balance.scheduler.*;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.*;
@@ -25,7 +25,7 @@ public class SnapshotBench {
     static FormulaPredictor model;
     static BatchDeliveryStrategy strategy;
     static RequestRegistry registry;
-    static final RouteProjection.Probe PROBE = new RouteProjection.Probe(
+    static final PrefillTtftEstimate.Probe PROBE = new PrefillTtftEstimate.Probe(
             Long.MAX_VALUE, 0, 1, Long.MAX_VALUE, 2048, 0, 0);
 
     record Endpoint(WorkerBatcher runtime, ReentrantLock lock, ScheduledRequest member) {
@@ -95,7 +95,7 @@ public class SnapshotBench {
             for (var endpoint : endpoints) {
                 var inputs = endpoint.runtime.captureRouteProjectionInputs();
                 checksum += inputs.queue().activeItems().size();
-                if (project) checksum += RouteProjection.project(inputs, PROBE, model,
+                if (project) checksum += PrefillTtftEstimate.project(inputs, PROBE, model,
                         strategy.ttftEstimationRule()).requiredProjectedTtftMs();
             }
         }

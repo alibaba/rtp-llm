@@ -5,7 +5,7 @@ import org.flexlb.balance.delivery.DeliveryMetrics;
 import org.flexlb.balance.planner.GroupPlanner;
 import org.flexlb.balance.prediction.PrefillTimePredictor;
 import org.flexlb.balance.projection.QueueSnapshot;
-import org.flexlb.balance.projection.RouteProjection;
+import org.flexlb.balance.projection.PrefillTtftEstimate;
 import org.flexlb.balance.projection.WorkSnapshot;
 
 import java.util.ArrayList;
@@ -28,12 +28,12 @@ final class RouteProjectionTestSupport {
                     .thenComparingLong(GroupPlanner.Item::enqueueSeq)
                     .thenComparing(GroupPlanner.Item::requestId);
 
-    static final RouteProjection.DeliveryProjection ROUTE =
+    static final PrefillTtftEstimate.DeliveryProjection ROUTE =
             new RouteDeliveryStrategy(
                     mock(RequestRegistry.class),
                     mock(DeliveryMetrics.class))
                     .ttftEstimationRule();
-    static final RouteProjection.DeliveryProjection BATCH =
+    static final PrefillTtftEstimate.DeliveryProjection BATCH =
             new BatchDeliveryStrategy(
                     () -> CapacityBoundary.Attempt.rejected(
                             CapacityBoundary.OWNERSHIP_LOST),
@@ -123,7 +123,7 @@ final class RouteProjectionTestSupport {
                 0L);
     }
 
-    static RouteProjection.Probe probe(
+    static PrefillTtftEstimate.Probe probe(
             long requestId,
             int priority,
             long sequenceLength,
@@ -132,14 +132,14 @@ final class RouteProjectionTestSupport {
                 sequenceLength, hitCache);
     }
 
-    static RouteProjection.Probe probe(
+    static PrefillTtftEstimate.Probe probe(
             long requestId,
             int priority,
             long enqueuedAtMs,
             long expiresAtMs,
             long sequenceLength,
             long hitCache) {
-        return new RouteProjection.Probe(
+        return new PrefillTtftEstimate.Probe(
                 Long.toString(requestId),
                 priority,
                 enqueuedAtMs,
@@ -161,14 +161,14 @@ final class RouteProjectionTestSupport {
                 NOW_MS, requests, batches, unknownRequestCount);
     }
 
-    static RouteProjection.Candidate project(
+    static PrefillTtftEstimate.Candidate project(
             QueueSnapshot queue,
             WorkSnapshot work,
             PrefillTimePredictor.Evaluator evaluator,
-            RouteProjection.Probe probe,
-            RouteProjection.DeliveryProjection deliveryProjection) {
-        return RouteProjection.project(
-                new RouteProjection.Inputs(
+            PrefillTtftEstimate.Probe probe,
+            PrefillTtftEstimate.DeliveryProjection deliveryProjection) {
+        return PrefillTtftEstimate.project(
+                new PrefillTtftEstimate.Inputs(
                         queue, work),
                 probe,
                 evaluator,

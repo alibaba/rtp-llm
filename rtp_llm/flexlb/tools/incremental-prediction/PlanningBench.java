@@ -18,7 +18,7 @@ public class PlanningBench {
     static final Comparator<GroupPlanner.Item> ORDER = Comparator.comparingInt(GroupPlanner.Item::priority)
             .thenComparingLong(GroupPlanner.Item::enqueueSeq);
     static FormulaPredictor model;
-    static RouteProjection.DeliveryProjection policy;
+    static PrefillTtftEstimate.DeliveryProjection policy;
     static GroupPlanner.Constraints constraints(int size) {
         return new GroupPlanner.Constraints(size, 1_000_000, 2_000_000, 700, 700);
     }
@@ -69,21 +69,21 @@ public class PlanningBench {
             bench("select_" + size, () -> select(inputs.get(index[0]++ & 63), size));
         }
         for (int depth : new int[]{0, 32, 128, 512}) {
-            var endpoints = new ArrayList<RouteProjection.Inputs>();
+            var endpoints = new ArrayList<PrefillTtftEstimate.Inputs>();
             for (int i = 0; i < 5; i++) {
-                endpoints.add(new RouteProjection.Inputs(new QueueSnapshot(1000, true, ORDER,
+                endpoints.add(new PrefillTtftEstimate.Inputs(new QueueSnapshot(1000, true, ORDER,
                         constraints(64), items(depth, i), null),
                         new WorkSnapshot(1000, List.of(), List.of(), 0)));
             }
-            var probes = new ArrayList<RouteProjection.Probe>();
-            for (int i = 0; i < 64; i++) probes.add(new RouteProjection.Probe(99999, 0, 1000, 61_000,
+            var probes = new ArrayList<PrefillTtftEstimate.Probe>();
+            for (int i = 0; i < 64; i++) probes.add(new PrefillTtftEstimate.Probe(99999, 0, 1000, 61_000,
                     1024 + i * 32, i * 8, i * 8));
             int[] index = {0};
             bench("fleet5_depth_" + depth, () -> {
                 var probe = probes.get(index[0]++ & 63);
                 double total = 0;
                 for (var endpoint : endpoints) {
-                    var candidate = RouteProjection.project(endpoint, probe, model, policy);
+                    var candidate = PrefillTtftEstimate.project(endpoint, probe, model, policy);
                     total += candidate.requiredProjectedTtftMs();
                 }
                 return total;

@@ -10,7 +10,7 @@ import org.flexlb.balance.endpoint.PrefillState;
 import org.flexlb.balance.prediction.DecodeCostFormula;
 import org.flexlb.balance.prediction.PrefillBatchFeatures;
 import org.flexlb.balance.prediction.PrefillTimePredictor;
-import org.flexlb.balance.projection.RouteProjection;
+import org.flexlb.balance.projection.PrefillTtftEstimate;
 import org.flexlb.balance.projection.WorkSnapshot;
 import org.flexlb.balance.scheduler.RequestSlot.DeliveryClaim;
 import org.flexlb.balance.scheduler.decode.DecodeDecideInfo;
@@ -660,9 +660,9 @@ public final class DeliveryStrategyTestSupport {
                     public void removeListener(Runnable listener) {
                     }
                 },
-                new RouteProjection.AdmissionBlockSemantics(
+                new PrefillTtftEstimate.AdmissionBlockSemantics(
                         "TEST_BLOCK",
-                        RouteProjection.AfterProbeAdmission.BLOCKED,
+                        PrefillTtftEstimate.AfterProbeAdmission.BLOCKED,
                         "TEST_BLOCK",
                         RoleType.PREFILL));
     }

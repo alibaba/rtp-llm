@@ -8,7 +8,7 @@ import org.flexlb.balance.endpoint.PrefillState;
 import org.flexlb.balance.planner.GroupPlanner;
 import org.flexlb.balance.prediction.PrefillPredictionBoundary;
 import org.flexlb.balance.prediction.PrefillTimePredictor;
-import org.flexlb.balance.projection.RouteProjection;
+import org.flexlb.balance.projection.PrefillTtftEstimate;
 import org.flexlb.balance.projection.WorkSnapshot;
 import org.flexlb.balance.scheduler.RequestSlot.DeliveryClaim;
 
@@ -30,7 +30,7 @@ import static org.flexlb.balance.scheduler.PrefillAdmissionResources.throwRollba
 /** Individual route admission, ownership, publication, and projection. */
 public final class RouteDeliveryStrategy implements DeliveryStrategy {
 
-    private static final RouteProjection.DeliveryProjection PROJECTION =
+    private static final PrefillTtftEstimate.DeliveryProjection PROJECTION =
             new RouteProjectionPolicy();
     private final RequestRegistry requests;
     private final DeliveryMetrics telemetry;
@@ -176,7 +176,7 @@ public final class RouteDeliveryStrategy implements DeliveryStrategy {
     }
 
     @Override
-    public RouteProjection.DeliveryProjection ttftEstimationRule() {
+    public PrefillTtftEstimate.DeliveryProjection ttftEstimationRule() {
         return PROJECTION;
     }
 
@@ -481,7 +481,7 @@ public final class RouteDeliveryStrategy implements DeliveryStrategy {
     }
 
     private static final class RouteProjectionPolicy
-            implements RouteProjection.DeliveryProjection {
+            implements PrefillTtftEstimate.DeliveryProjection {
 
         private static final ThreadLocal<RoutePlanning> PLANNING =
                 ThreadLocal.withInitial(RoutePlanning::new);
@@ -492,36 +492,36 @@ public final class RouteDeliveryStrategy implements DeliveryStrategy {
         public long singletonCompletionOffsetMs(
                 long seqLen,
                 long hitCache,
-                RouteProjection.Predictions predictions) {
+                PrefillTtftEstimate.Predictions predictions) {
             return predictions.itemDurationMs(seqLen, hitCache);
         }
 
         @Override
-        public RouteProjection.GroupPlanning planning(
-                RouteProjection.Predictions predictions) {
+        public PrefillTtftEstimate.GroupPlanning planning(
+                PrefillTtftEstimate.Predictions predictions) {
             RoutePlanning planning = PLANNING.get();
             planning.reset(predictions);
             return planning;
         }
 
         @Override
-        public RouteProjection.GroupService service(
+        public PrefillTtftEstimate.GroupService service(
                 GroupPlanner.Plan<GroupPlanner.Item> plan,
-                RouteProjection.Predictions predictions) {
+                PrefillTtftEstimate.Predictions predictions) {
             RouteService service = SERVICE.get();
             service.reset(plan, predictions);
             return service;
         }
 
         private static final class RoutePlanning
-                implements RouteProjection.GroupPlanning {
+                implements PrefillTtftEstimate.GroupPlanning {
             private GroupPlanner.Item[] previous = new GroupPlanner.Item[0];
             private long[] offsets = new long[0];
             private int previousSize;
             private int computedThrough;
-            private RouteProjection.Predictions predictions;
+            private PrefillTtftEstimate.Predictions predictions;
 
-            private void reset(RouteProjection.Predictions exactPredictions) {
+            private void reset(PrefillTtftEstimate.Predictions exactPredictions) {
                 predictions = exactPredictions;
                 previousSize = 0;
                 computedThrough = -1;
@@ -583,15 +583,15 @@ public final class RouteDeliveryStrategy implements DeliveryStrategy {
         }
 
         private static final class RouteService
-                implements RouteProjection.GroupService {
+                implements PrefillTtftEstimate.GroupService {
             private GroupPlanner.Plan<GroupPlanner.Item> plan;
-            private RouteProjection.Predictions predictions;
+            private PrefillTtftEstimate.Predictions predictions;
             private long[] offsets = new long[0];
             private int computedThrough;
 
             private void reset(
                     GroupPlanner.Plan<GroupPlanner.Item> exactPlan,
-                    RouteProjection.Predictions exactPredictions) {
+                    PrefillTtftEstimate.Predictions exactPredictions) {
                 plan = exactPlan;
                 predictions = exactPredictions;
                 if (offsets.length < exactPlan.items().size()) {

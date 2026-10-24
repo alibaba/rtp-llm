@@ -7,7 +7,7 @@ import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.endpoint.PrefillState;
 import org.flexlb.balance.endpoint.WorkerEndpoint;
-import org.flexlb.balance.projection.RouteProjection;
+import org.flexlb.balance.projection.PrefillTtftEstimate;
 import org.flexlb.balance.scheduler.EndpointEventProjector;
 import org.flexlb.balance.scheduler.PlacementAvailability;
 import org.flexlb.balance.scheduler.QueueCapacity;
@@ -239,9 +239,9 @@ final class StrategyTestSupport {
                         public void removeListener(Runnable listener) {
                         }
                     },
-                    new RouteProjection.AdmissionBlockSemantics(
+                    new PrefillTtftEstimate.AdmissionBlockSemantics(
                             "test delivery parked",
-                            RouteProjection.AfterProbeAdmission.BLOCKED,
+                            PrefillTtftEstimate.AfterProbeAdmission.BLOCKED,
                             "test delivery parked",
                             RoleType.PREFILL));
 

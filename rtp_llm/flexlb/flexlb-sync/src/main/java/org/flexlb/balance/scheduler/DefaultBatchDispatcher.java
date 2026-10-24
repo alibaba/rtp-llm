@@ -6,7 +6,7 @@ import io.micrometer.core.instrument.util.NamedThreadFactory;
 import org.flexlb.balance.delivery.CapacityBoundary;
 import org.flexlb.balance.delivery.DeliveryResult;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
-import org.flexlb.balance.projection.RouteProjection;
+import org.flexlb.balance.projection.PrefillTtftEstimate;
 import org.flexlb.balance.scheduler.BatchDeliveryStrategy.PreparedSubmission;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.DispatcherConfig;
@@ -60,11 +60,11 @@ import java.util.function.BiConsumer;
 public class DefaultBatchDispatcher {
 
     private static final long EXECUTOR_KEEP_ALIVE_SECONDS = 60L;
-    private static final RouteProjection.AdmissionBlockSemantics
+    private static final PrefillTtftEstimate.AdmissionBlockSemantics
             CAPACITY_BLOCK_SEMANTICS =
-            new RouteProjection.AdmissionBlockSemantics(
+            new PrefillTtftEstimate.AdmissionBlockSemantics(
                     "DELIVERY_CAPACITY_BATCH_ADMISSION",
-                    RouteProjection.AfterProbeAdmission.BLOCKED,
+                    PrefillTtftEstimate.AfterProbeAdmission.BLOCKED,
                     "DELIVERY_CAPACITY_BATCH_ADMISSION",
                     RoleType.PREFILL);
 

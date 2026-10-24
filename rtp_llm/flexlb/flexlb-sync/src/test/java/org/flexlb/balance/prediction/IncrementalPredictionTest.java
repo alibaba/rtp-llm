@@ -4,7 +4,7 @@ import org.flexlb.balance.delivery.CapacityBoundary;
 import org.flexlb.balance.delivery.DeliveryMetrics;
 import org.flexlb.balance.planner.GroupPlanner;
 import org.flexlb.balance.projection.QueueSnapshot;
-import org.flexlb.balance.projection.RouteProjection;
+import org.flexlb.balance.projection.PrefillTtftEstimate;
 import org.flexlb.balance.projection.WorkSnapshot;
 import org.flexlb.balance.scheduler.BatchDeliveryStrategy;
 import org.flexlb.balance.scheduler.RequestRegistry;
@@ -103,11 +103,11 @@ class IncrementalPredictionTest {
             items.sort(order);
             var queue = new QueueSnapshot(1000, order, new GroupPlanner.Constraints(64, 200_000, 300_000, 700, 700),
                     items, null);
-            var inputs = new RouteProjection.Inputs(queue, new WorkSnapshot(1000, List.of(), List.of(), 0));
-            var probe = new RouteProjection.Probe("999", trial % 5, 1000, 100_000,
+            var inputs = new PrefillTtftEstimate.Inputs(queue, new WorkSnapshot(1000, List.of(), List.of(), 0));
+            var probe = new PrefillTtftEstimate.Probe("999", trial % 5, 1000, 100_000,
                     1 + random.nextInt(32768), 0, 0);
-            assertEquals(RouteProjection.project(inputs, probe, full, policy),
-                    RouteProjection.project(inputs, probe, model, policy));
+            assertEquals(PrefillTtftEstimate.project(inputs, probe, full, policy),
+                    PrefillTtftEstimate.project(inputs, probe, model, policy));
         }
     }
 
@@ -178,7 +178,7 @@ class IncrementalPredictionTest {
                 () -> CapacityBoundary.Attempt.rejected(CapacityBoundary.OWNERSHIP_LOST),
                 () -> 1L, mock(RequestRegistry.class), mock(DeliveryMetrics.class));
         int[] fullCalls = {0};
-        var predictions = new RouteProjection.Predictions() {
+        var predictions = new PrefillTtftEstimate.Predictions() {
             public long itemDurationMs(GroupPlanner.Item i) { return 100; }
             public double batchPlanningDurationMs(List<GroupPlanner.Item> items) { return items.size() * 100.25; }
             public long batchDurationMs(List<GroupPlanner.Item> items) {
@@ -213,7 +213,7 @@ class IncrementalPredictionTest {
                 () -> 1L, mock(RequestRegistry.class), mock(DeliveryMetrics.class)).ttftEstimationRule();
         int[] appended = {0};
         int[] recomputed = {0};
-        var predictions = new RouteProjection.Predictions() {
+        var predictions = new PrefillTtftEstimate.Predictions() {
             public long itemDurationMs(GroupPlanner.Item item) { return 11; }
             public double batchPlanningDurationMs(List<GroupPlanner.Item> items) { return items.size() * 10.25; }
             public long batchDurationMs(List<GroupPlanner.Item> items) {

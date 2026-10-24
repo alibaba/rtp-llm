@@ -2,7 +2,7 @@ package org.flexlb.balance.delivery;
 
 import org.flexlb.balance.planner.GroupPlanner;
 import org.flexlb.balance.prediction.PrefillTimePredictor;
-import org.flexlb.balance.projection.RouteProjection;
+import org.flexlb.balance.projection.PrefillTtftEstimate;
 import org.flexlb.balance.projection.WorkSnapshot;
 import org.flexlb.balance.scheduler.ScheduledRequest;
 
@@ -39,7 +39,7 @@ public interface DeliveryStrategy {
     /**
      * 预估 TTFT 的规则：本投递模式下，请求前面排着的工作量怎么折算成等待时间。
      */
-    RouteProjection.DeliveryProjection ttftEstimationRule();
+    PrefillTtftEstimate.DeliveryProjection ttftEstimationRule();
 
     /**
      * 一次投递事务，贯穿 prepare、入队提交和 handoff 三个阶段。

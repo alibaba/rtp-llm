@@ -1,7 +1,7 @@
 package org.flexlb.balance.delivery;
 
 import org.flexlb.balance.planner.GroupPlanner;
-import org.flexlb.balance.projection.RouteProjection;
+import org.flexlb.balance.projection.PrefillTtftEstimate;
 import org.flexlb.balance.scheduler.BatchDeliveryStrategy;
 import org.flexlb.balance.scheduler.RequestRegistry;
 import org.flexlb.balance.scheduler.RouteDeliveryStrategy;
@@ -21,7 +21,7 @@ import static org.mockito.Mockito.mock;
 
 /**
  * Exact-value behavior contracts for the frozen
- * {@link RouteProjection.DeliveryProjection} SPI as implemented by
+ * {@link PrefillTtftEstimate.DeliveryProjection} SPI as implemented by
  * {@link RouteDeliveryStrategy} and {@link BatchDeliveryStrategy}.
  *
  * <p>Route service is a lazy cumulative prefix sum (asking for member i
@@ -49,7 +49,7 @@ class RouteDeliveryProjectionTest {
     @DisplayName("Route projection: lazy cumulative cursor")
     class RouteService {
 
-        private final RouteProjection.DeliveryProjection projection =
+        private final PrefillTtftEstimate.DeliveryProjection projection =
                 new RouteDeliveryStrategy(
                         mock(RequestRegistry.class),
                         mock(DeliveryMetrics.class)).ttftEstimationRule();
@@ -59,7 +59,7 @@ class RouteDeliveryProjectionTest {
             List<GroupPlanner.Item> items =
                     List.of(item(1L, 100L), item(2L, 200L), item(3L, 50L));
             CountingPredictions pred = new CountingPredictions();
-            RouteProjection.GroupService svc =
+            PrefillTtftEstimate.GroupService svc =
                     projection.service(plan(items, OptionalDouble.empty()), pred);
             // offset(0)=100, offset(1)=100+200=300, offset(2)=300+50=350
             assertEquals(100L, svc.completionOffsetMs(0));
@@ -73,7 +73,7 @@ class RouteDeliveryProjectionTest {
             List<GroupPlanner.Item> items =
                     List.of(item(1L, 100L), item(2L, 200L), item(3L, 50L));
             CountingPredictions pred = new CountingPredictions();
-            RouteProjection.GroupService svc =
+            PrefillTtftEstimate.GroupService svc =
                     projection.service(plan(items, OptionalDouble.empty()), pred);
             svc.completionOffsetMs(1);
             assertEquals(1, pred.itemCalls(1L));
@@ -88,7 +88,7 @@ class RouteDeliveryProjectionTest {
                     List.of(item(1L, 100L), item(2L, 200L), item(3L, 50L));
             CountingPredictions pred = new CountingPredictions();
             pred.failOn(3L);
-            RouteProjection.GroupService svc =
+            PrefillTtftEstimate.GroupService svc =
                     projection.service(plan(items, OptionalDouble.empty()), pred);
             assertEquals(300L, svc.completionOffsetMs(1),
                     "probe TTFT preserved even when suffix will fail");
@@ -100,7 +100,7 @@ class RouteDeliveryProjectionTest {
         void offsetsAreMemoizedAndEvaluatedAtMostOnce() {
             List<GroupPlanner.Item> items = List.of(item(1L, 100L), item(2L, 200L));
             CountingPredictions pred = new CountingPredictions();
-            RouteProjection.GroupService svc =
+            PrefillTtftEstimate.GroupService svc =
                     projection.service(plan(items, OptionalDouble.empty()), pred);
             svc.completionOffsetMs(1);
             svc.completionOffsetMs(0);
@@ -114,7 +114,7 @@ class RouteDeliveryProjectionTest {
             List<GroupPlanner.Item> items =
                     List.of(item(1L, 100L), item(2L, 200L), item(3L, 50L));
             CountingPredictions pred = new CountingPredictions();
-            RouteProjection.GroupPlanning planning = projection.planning(pred);
+            PrefillTtftEstimate.GroupPlanning planning = projection.planning(pred);
             // Through index 1: items[0]+items[1] = 100+200 = 300
             assertEquals(300.0, planning.durationMs(items, 1));
             assertEquals(0, pred.itemCalls(3L), "suffix beyond index not evaluated");
@@ -122,7 +122,7 @@ class RouteDeliveryProjectionTest {
 
         @Test
         void memberIndexIsBoundsChecked() {
-            RouteProjection.GroupService svc = projection.service(
+            PrefillTtftEstimate.GroupService svc = projection.service(
                     plan(List.of(item(1L, 100L)), OptionalDouble.empty()),
                     new CountingPredictions());
             assertThrows(IndexOutOfBoundsException.class, () -> svc.completionOffsetMs(1));
@@ -135,7 +135,7 @@ class RouteDeliveryProjectionTest {
     @DisplayName("Batch projection: per-prefix independent prediction")
     class BatchService {
 
-        private final RouteProjection.DeliveryProjection projection =
+        private final PrefillTtftEstimate.DeliveryProjection projection =
                 new BatchDeliveryStrategy(
                         () -> CapacityBoundary.Attempt.rejected(
                                 CapacityBoundary.OWNERSHIP_LOST),
@@ -149,7 +149,7 @@ class RouteDeliveryProjectionTest {
             List<GroupPlanner.Item> items =
                     List.of(item(1L, 100L), item(2L, 200L), item(3L, 50L));
             CountingPredictions pred = new CountingPredictions();
-            RouteProjection.GroupService svc =
+            PrefillTtftEstimate.GroupService svc =
                     projection.service(plan(items, OptionalDouble.empty()), pred);
             // offset(0) = batchDurationMs([item1]) = 100*1 = 100
             assertEquals(100L, svc.completionOffsetMs(0));
@@ -164,7 +164,7 @@ class RouteDeliveryProjectionTest {
         void eachPrefixIsComputedIndependentlyAndMemoized() {
             List<GroupPlanner.Item> items = List.of(item(1L, 100L), item(2L, 200L));
             CountingPredictions pred = new CountingPredictions();
-            RouteProjection.GroupService svc =
+            PrefillTtftEstimate.GroupService svc =
                     projection.service(plan(items, OptionalDouble.empty()), pred);
             svc.completionOffsetMs(0);
             svc.completionOffsetMs(0); // repeated
@@ -178,7 +178,7 @@ class RouteDeliveryProjectionTest {
         void planningDurationDelegates() {
             List<GroupPlanner.Item> items = List.of(item(1L, 100L), item(2L, 200L));
             CountingPredictions pred = new CountingPredictions();
-            RouteProjection.GroupPlanning planning = projection.planning(pred);
+            PrefillTtftEstimate.GroupPlanning planning = projection.planning(pred);
             // Batch planning returns batchPlanningDurationMs = 777 always.
             assertEquals(777.0, planning.durationMs(items, items.size() - 1));
         }
@@ -186,7 +186,7 @@ class RouteDeliveryProjectionTest {
 
     // ═══════════════════════════════════════════════════════════════════════
     private static final class CountingPredictions
-            implements RouteProjection.Predictions {
+            implements PrefillTtftEstimate.Predictions {
 
         private final Map<String, Integer> itemCalls = new HashMap<>();
         private Set<String> failingIds = Set.of();

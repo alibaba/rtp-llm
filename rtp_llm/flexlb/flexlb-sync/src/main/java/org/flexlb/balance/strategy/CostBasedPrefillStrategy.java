@@ -4,7 +4,7 @@ import org.flexlb.balance.PlacementResult;
 import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.endpoint.WorkerEndpoint;
-import org.flexlb.balance.projection.RouteProjection;
+import org.flexlb.balance.projection.PrefillTtftEstimate;
 import org.flexlb.cache.domain.CacheMatchQuery;
 import org.flexlb.cache.domain.CacheMatchResult;
 import org.flexlb.cache.domain.CacheMatchSource;
@@ -480,7 +480,7 @@ public class CostBasedPrefillStrategy {
         PrefillCandidateSet candidates = CANDIDATES.get();
         candidates.reset(eligibleSize);
         long planningAtMs = System.currentTimeMillis();
-        RouteProjection.Session projectionSession = RouteProjection.session();
+        PrefillTtftEstimate.Session projectionSession = PrefillTtftEstimate.session();
 
         // Use one endpoint snapshot for both service prediction and decision-group planning.
         for (int i = 0; i < discovery.candidates().size(); i++) {
@@ -492,8 +492,8 @@ public class CostBasedPrefillStrategy {
             CacheTokenMatch cacheMatch = calculateCacheMatch(ep, cacheMatchResult, request, balanceContext.getConfig());
             long cacheHit = cacheMatch.effectiveHitTokens();
             long routingCacheMatchTokens = cacheMatch.routingHitTokens();
-            RouteProjection.Inputs projectionInputs = ep.captureRouteProjectionInputs();
-            RouteProjection.CandidateView projection =
+            PrefillTtftEstimate.Inputs projectionInputs = ep.captureRouteProjectionInputs();
+            PrefillTtftEstimate.CandidateView projection =
                     projectionSession.projectViewForSelection(
                             projectionInputs,
                             request.getRequestId(),

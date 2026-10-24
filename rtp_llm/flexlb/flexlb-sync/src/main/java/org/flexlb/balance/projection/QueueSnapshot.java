@@ -43,7 +43,7 @@ public record QueueSnapshot(
     public record AdmissionBlock(
             String requestId,
             long enqueueSeq,
-            RouteProjection.AdmissionBlockSemantics semantics) {
+            PrefillTtftEstimate.AdmissionBlockSemantics semantics) {
     }
 
 }

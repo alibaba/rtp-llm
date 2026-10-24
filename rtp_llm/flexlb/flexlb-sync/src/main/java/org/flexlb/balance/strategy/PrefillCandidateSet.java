@@ -1,7 +1,7 @@
 package org.flexlb.balance.strategy;
 
 import org.flexlb.balance.endpoint.PrefillEndpoint;
-import org.flexlb.balance.projection.RouteProjection;
+import org.flexlb.balance.projection.PrefillTtftEstimate;
 import org.flexlb.dao.pv.RoutingDecision;
 
 import java.util.Arrays;
@@ -40,7 +40,7 @@ final class PrefillCandidateSet {
 
     void addCandidate(String address,
                       PrefillEndpoint endpoint,
-                      RouteProjection.CandidateView candidate,
+                      PrefillTtftEstimate.CandidateView candidate,
                       long ownershipVersion) {
         if (!candidate.selectable() && !candidate.engineWorkUnmodeled()) {
             throw new IllegalStateException("Prefill projection cannot be scored: "

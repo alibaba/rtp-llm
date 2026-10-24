@@ -1,6 +1,6 @@
 package org.flexlb.balance.delivery;
 
-import org.flexlb.balance.projection.RouteProjection;
+import org.flexlb.balance.projection.PrefillTtftEstimate;
 
 import java.util.Objects;
 
@@ -12,7 +12,7 @@ import java.util.Objects;
 public record CapacityBoundary(
         Status status,
         Availability availability,
-        RouteProjection.AdmissionBlockSemantics projectionSemantics,
+        PrefillTtftEstimate.AdmissionBlockSemantics projectionSemantics,
         Throwable cause) {
 
     public static final CapacityBoundary OWNERSHIP_LOST =
@@ -33,7 +33,7 @@ public record CapacityBoundary(
 
     public static CapacityBoundary unavailable(
             Availability availability,
-            RouteProjection.AdmissionBlockSemantics projectionSemantics) {
+            PrefillTtftEstimate.AdmissionBlockSemantics projectionSemantics) {
         return new CapacityBoundary(Status.UNAVAILABLE,
                 Objects.requireNonNull(availability, "availability"),
                 Objects.requireNonNull(projectionSemantics,
