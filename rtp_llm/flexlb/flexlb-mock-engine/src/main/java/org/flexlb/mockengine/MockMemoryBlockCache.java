@@ -190,6 +190,14 @@ final class MockMemoryBlockCache {
         return new WriteLease(reserved);
     }
 
+    synchronized int usedBlocks() { return entries.size() + pending.size(); }
+    synchronized int totalBlocks() { return capacity; }
+    synchronized int evictTo(int target) {
+        int before = entries.size();
+        while (usedBlocks() > target && evictOne()) { }
+        return before - entries.size();
+    }
+
     private boolean evictOne() {
         Entry selected = victims.pollFirst();
         if (selected == null) return false;

@@ -10,7 +10,7 @@ class WhaleCacheMetricsTest {
  @Test void nativeHashesMatchCppAndReuseOnlyCompleteBlocks() throws Exception {
   Path file=dir.resolve("perf.json");Files.writeString(file,"{\"block_size\":2}");
   Path master=dir.resolve("master.json");MockMasterConfig.writeWithPrefillExpression(master,"20");
-  var model=MockPerformanceModel.load(file.toString(),master.toString());
+  var model=MockModelFixture.load(file.toString(),master.toString());
   var input=EngineRpcService.GenerateInputPB.newBuilder().addAllTokenIds(List.of(1,2,3,4,5)).setGenerateConfig(EngineRpcService.GenerateConfigPB.newBuilder().setReuseCache(true)).build();
   var cache=new MockLruBlockCache(10);
   assertTrue(model.shape(input,cache).blockKeys().isEmpty());

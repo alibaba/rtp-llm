@@ -1,4 +1,5 @@
 """Run one CPU Mock ViT per Pod without loading the frontend/Torch runtime."""
+import json
 import os
 from pathlib import Path
 import shlex
@@ -25,11 +26,17 @@ def command(env):
     model = prepare_assets(source, runtime)
     java = str(Path(env.get("JAVA_HOME", "/opt/taobao/java")) / "bin/java")
     jar = Path(env.get("MOCK_BUNDLE_JAR_DIR", str(Path(__file__).parent / "jars"))) / "mock.jar"
+    from runtime_configs import engine_input, calibration_input
+    engine = engine_input(env)
+    calibration = calibration_input(env)
+    runtime.mkdir(parents=True, exist_ok=True)
+    (runtime / "engine-config.json").write_text(json.dumps(engine))
+    (runtime / "calibration.json").write_text(json.dumps(calibration))
     return [java, *shlex.split(env.get("MOCK_VIT_JAVA_OPTS", "-Xms64m -Xmx512m")),
             "-Djava.awt.headless=true", "-cp", str(jar), "org.flexlb.mockengine.MockVitServer",
             "--kmonitor", kmonitor, "--http-port", str(port), "--port", str(port + 1), "--model-path", str(model),
-            "--concurrency", env.get("VIT_MAX_CONCURRENT_REQUESTS", "32"),
-            "--embedding-cache-bytes", env.get("MOCK_VIT_CACHE_BYTES", "0")]
+            "--engine-config", str(runtime / "engine-config.json"),
+            "--calibration", str(runtime / "calibration.json")]
 
 
 if __name__ == "__main__":

@@ -71,7 +71,8 @@ class SharedRuntimeTests(unittest.TestCase):
             names.update(re.findall(r'System\.getenv\(\)\.getOrDefault\("([A-Z_]+)"', source))
             names.update(re.findall(r'text\(env,\s*"([A-Z_]+)"', source))
         self.assertTrue(names)
-        self.assertFalse(names - set(LOAD_CLIENT_ENV_VARS))
+        # GRPC_TARGETS is read only to reject it; ClientOps removes inherited values.
+        self.assertFalse(names - set(LOAD_CLIENT_ENV_VARS) - {"GRPC_TARGETS"})
         self.assertEqual(len(LOAD_CLIENT_ENV_VARS), len(set(LOAD_CLIENT_ENV_VARS)))
         self.assertTrue(all(re.fullmatch(r"[A-Z][A-Z0-9_]*", name) for name in LOAD_CLIENT_ENV_VARS))
 

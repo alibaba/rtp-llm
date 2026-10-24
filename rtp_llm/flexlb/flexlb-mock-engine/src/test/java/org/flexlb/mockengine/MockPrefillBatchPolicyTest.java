@@ -78,11 +78,11 @@ class MockPrefillBatchPolicyTest {
         MockMasterConfig.writeWithPrefillExpression(master, "1 + sum(computeTokens)");
         String fifo = "\"fifo\":{\"max_requests\":4,\"max_batch_tokens\":100,\"max_seq_len\":1000}";
         Files.writeString(performance, "{\"prefill\":{" + fifo + "}}");
-        assertNotNull(MockPerformanceModel.load(performance.toString(), master.toString()).prefillBatchPolicy());
+        assertNotNull(MockModelFixture.load(performance.toString(), master.toString()).prefillBatchPolicy());
         for (String obsolete : new String[] {"direct_batch_size_max", "max_batch_requests", "max_batch_tokens"}) {
             Files.writeString(performance, "{\"prefill\":{" + fifo + ",\"" + obsolete + "\":1}}");
             assertThrows(IllegalStateException.class,
-                    () -> MockPerformanceModel.load(performance.toString(), master.toString()));
+                    () -> MockModelFixture.load(performance.toString(), master.toString()));
         }
     }
 
@@ -120,6 +120,26 @@ class MockPrefillBatchPolicyTest {
         assertFalse(policy.allowsKvInitialization(2, false));
         assertTrue(policy.allowsKvInitialization(2, true));
         assertTrue(policy.allowsKvInitialization(1, false));
+    }
+
+    @Test void groupAdmissionDoesNotApplyOrdinaryUncachedStopQuota() {
+        var policy = new MockPrefillBatchPolicy(4, 1000, 0, 2000, 1, false, 10, 0, 0, false, false);
+        var ordinary = policy.newBudget();
+        ordinary.add(20, 0, 1);
+        assertFalse(ordinary.fits(20, 0, 1));
+        var group = policy.newBudget(false);
+        group.add(20, 0, 1);
+        assertTrue(group.fits(20, 0, 1), "evaluateWaitingGroupQueue only uses evaluateRunningBatch");
+    }
+
+    @Test void prefillOnlyMayFillTheCapAndNeverMixesWithGeneration() {
+        var budget = policy(0, 1).newBudget();
+        budget.add(50, 0, 1, true);
+        assertTrue(budget.fits(50, 0, 1, true));
+        assertFalse(budget.fits(1, 0, 1, false));
+        var generation = policy(0, 1).newBudget();
+        generation.add(50, 0, 1, false);
+        assertFalse(generation.fits(50, 0, 1, false));
     }
 
     @Test void prefillWidthMatchesBeamAndReturnSequenceRules() {

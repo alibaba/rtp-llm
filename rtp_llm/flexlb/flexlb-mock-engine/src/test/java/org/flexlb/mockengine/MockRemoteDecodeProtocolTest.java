@@ -29,6 +29,7 @@ class MockRemoteDecodeProtocolTest {
     private final CountDownLatch cancelled = new CountDownLatch(1);
     private final CountDownLatch started = new CountDownLatch(1);
     private volatile LinkedBlockingQueue<EngineRpcService.GenerateOutputsPB> outputs;
+    private volatile EngineRpcService.GenerateInputPB allocatedInput;
     private Server server;
     private ManagedChannel channel;
 
@@ -38,7 +39,9 @@ class MockRemoteDecodeProtocolTest {
             @Override
             public StreamObserver<EngineRpcService.GenerateRequestPB> remoteGenerate(
                     StreamObserver<EngineRpcService.GenerateOutputsPB> response) {
-                return new MockRemoteDecodeCall((input, clientId, stopped) -> new MockRemoteDecodeCall.Lease() {
+                return new MockRemoteDecodeCall((input, clientId, stopped) -> {
+                    allocatedInput = input;
+                    return new MockRemoteDecodeCall.Lease() {
                     @Override
                     public boolean start(LinkedBlockingQueue<EngineRpcService.GenerateOutputsPB> queue) {
                         outputs = queue;
@@ -59,12 +62,15 @@ class MockRemoteDecodeProtocolTest {
                     public void completed() {
                         completions.incrementAndGet();
                     }
+                    };
                 }, response, executor);
             }
         }).build().start();
         channel = ManagedChannelBuilder.forAddress("127.0.0.1", server.getPort()).usePlaintext().build();
         return new MockRemoteDecodeStream(channel,
-                EngineRpcService.GenerateInputPB.newBuilder().setRequestId(42).build(),
+                EngineRpcService.GenerateInputPB.newBuilder().setRequestId(42).setGroupSize(3)
+                        .setGroupId(com.google.protobuf.Int64Value.of(77))
+                        .setGenerateConfig(EngineRpcService.GenerateConfigPB.newBuilder().setGroupTimeout(com.google.protobuf.Int32Value.of(100))).build(),
                 "prefill-process-generation", 10_000, output::complete, failure::complete, () -> {});
     }
 
@@ -81,6 +87,8 @@ class MockRemoteDecodeProtocolTest {
         try (MockRemoteDecodeStream stream = connect(new CompletableFuture<>(), new CompletableFuture<>())) {
             stream.allocated().get(3, TimeUnit.SECONDS);
             assertEquals(0, starts.get());
+            assertFalse(allocatedInput.hasGroupId()); assertEquals(0, allocatedInput.getGroupSize());
+            assertFalse(allocatedInput.getGenerateConfig().hasGroupTimeout());
             stream.close();
             assertTrue(cancelled.await(3, TimeUnit.SECONDS));
             assertEquals(0, completions.get());
@@ -177,7 +185,9 @@ class MockRemoteDecodeProtocolTest {
         }).build().start();
         channel = ManagedChannelBuilder.forAddress("127.0.0.1", server.getPort()).usePlaintext().build();
         try (var stream = new MockRemoteDecodeStream(channel,
-                EngineRpcService.GenerateInputPB.newBuilder().setRequestId(42).build(), "owner", 0,
+                EngineRpcService.GenerateInputPB.newBuilder().setRequestId(42).setGroupSize(3)
+                        .setGroupId(com.google.protobuf.Int64Value.of(77))
+                        .setGenerateConfig(EngineRpcService.GenerateConfigPB.newBuilder().setGroupTimeout(com.google.protobuf.Int32Value.of(100))).build(), "owner", 0,
                 value -> fail("no generation expected"), error -> {}, () -> fail("cannot succeed"))) {
             stream.allocated().get(3, TimeUnit.SECONDS);
             stream.load().get(3, TimeUnit.SECONDS);

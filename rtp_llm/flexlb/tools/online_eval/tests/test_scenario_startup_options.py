@@ -48,31 +48,20 @@ class StartupOptionsTest(unittest.TestCase):
                 self.assertEqual(tuple(capture.values()), expected)
         source = ROOT / "data/performance/glm_5_3_l20d.json"
         document = json.loads(source.read_text())
-        document["prefill"]["memory_cache"]["capacity_blocks"] += 1
+        document["engine_config"]["roles"]["prefill"]["capacity"]["memory_blocks"] += 1
         with tempfile.TemporaryDirectory() as directory:
             changed = Path(directory) / "performance.json"
             changed.write_text(json.dumps(document))
             with self.assertRaisesRegex(ValueError, "checksum mismatch"):
                 load_performance_file(changed)
 
-    def test_preset_rejects_shadowed_and_unsupported_performance_fields(self):
-        source = ROOT / "data/performance/glm_5_3_l20d.json"
-        for section, field, value, message in (
-            ("prefill", "direct_batch_size_max", 1, "legacy prefill batch limits"),
-            ("prefill", "max_batch_requests", 1, "legacy prefill batch limits"),
-            ("prefill", "max_batch_tokens", 1024, "legacy prefill batch limits"),
-            ("memory_cache", "read_ms_per_block", 0, "unsupported prefill.memory_cache"),
-            ("memory_cache", "write_ms_per_block", 0, "unsupported prefill.memory_cache"),
-            ("memory_cache", "copy_lifecycle", True, "unsupported prefill.memory_cache"),
-        ):
+    def test_preset_rejects_behavior_fields_in_calibration(self):
+        for field in ("fifo", "max_batch_requests", "memory_cache", "reserve_block_ratio"):
             with self.subTest(field=field), tempfile.TemporaryDirectory() as directory:
-                document = json.loads(source.read_text())
-                target = (document["prefill"] if section == "prefill"
-                          else document["prefill"]["memory_cache"])
-                target[field] = value
-                changed = Path(directory) / "performance.json"
+                document = dict(prefill={field: 1})
+                changed = Path(directory) / "calibration.json"
                 changed.write_text(json.dumps(document))
-                with self.assertRaisesRegex(ValueError, message):
+                with self.assertRaisesRegex(ValueError, "calibration"):
                     load_performance_file(changed)
 
     def test_capture_deviations_require_explicit_baseline_and_reason(self):
@@ -156,24 +145,18 @@ class StartupOptionsTest(unittest.TestCase):
             with self.subTest(typo=typo), self.assertRaises(Exception):
                 spec({"perf_preset": typo})
 
-    def test_waiting_cap_merges_birth_perf_without_adding_batch_limits(self):
+    def test_waiting_cap_is_not_a_real_engine_configuration(self):
         for cap in (0, 16):
-            with self.subTest(cap=cap):
-                expected = copy.deepcopy(default_perf())
-                expected.setdefault("prefill", {})["max_waiting_batches"] = cap
-                actual = spec(
-                    {"perf_preset": "default", "prefill_max_waiting_batches": cap}
-                )
-                self.assertEqual(actual.perf, expected)
-                self.assertNotIn("max_batch_tokens", actual.perf["prefill"])
-                self.assertNotIn("max_batch_requests", actual.perf["prefill"])
-        self.assertEqual(spec({"perf_preset": "default"}).perf, default_perf())
+            with self.subTest(cap=cap), self.assertRaisesRegex(ValueError, "unknown fields"):
+                spec({"prefill_max_waiting_batches": cap})
 
-    def test_explicit_perf_replacement_and_cap_compose_without_mutating_input(self):
-        perf = dict(fixed_ms=3000, scale=1, max_batch_tokens=1024, max_batch_requests=0)
-        raw = dict(prefill_perf=perf, prefill_max_waiting_batches=16)
+    def test_calibration_and_batch_budgets_compose_without_mutating_input(self):
+        perf = dict(fixed_ms=3000, scale=1, max_batch_tokens=1024, max_batch_requests=2)
+        raw = dict(prefill_perf=perf)
         before = copy.deepcopy(raw)
-        self.assertEqual(spec(raw).perf["prefill"], dict(perf, max_waiting_batches=16))
+        actual = spec(raw).perf
+        self.assertEqual(actual["prefill"], dict(fixed_ms=3000, scale=1))
+        self.assertEqual(actual["engine_config"]["roles"]["prefill"]["scheduler"]["max_generate_batch_size"], 2)
         self.assertEqual(raw, before)
 
     def test_master_logging_and_diagnostic_api_are_independent(self):
@@ -202,9 +185,8 @@ class StartupOptionsTest(unittest.TestCase):
                 id="configured",
                 environment_overrides=dict(
                     master_debug_log=True,
-                    prefill_max_waiting_batches=16,
                     prefill_perf=dict(fixed_ms=100.0, scale=1.0,
-                                      max_batch_tokens=1024, max_batch_requests=0),
+                                      max_batch_tokens=1024, max_batch_requests=2),
                 ),
             ),
         ]
@@ -232,8 +214,7 @@ class StartupOptionsTest(unittest.TestCase):
                 self.assertTrue(actual.master_debug_log)
                 self.assertEqual(
                     actual.perf["prefill"],
-                    dict(fixed_ms=100.0, scale=1.0, max_batch_tokens=1024,
-                         max_batch_requests=0, max_waiting_batches=16),
+                    dict(fixed_ms=100.0, scale=1.0),
                 )
             else:
                 self.assertNotIn("prefill_max_waiting_batches", initial)

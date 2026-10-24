@@ -191,7 +191,7 @@ final class MockEngineTestSupport {
                 "prefill", prefill,
                 "decode", decode));
         MockMasterConfig.writeWithPrefillExpression(master, prefillFormula);
-        return MockPerformanceModel.load(performance.toString(), master.toString());
+        return MockModelFixture.load(performance.toString(), master.toString());
     }
 
     static MockPerformanceModel decodeModel(

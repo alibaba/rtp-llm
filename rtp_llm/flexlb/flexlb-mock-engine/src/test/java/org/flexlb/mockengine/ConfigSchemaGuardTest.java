@@ -20,7 +20,7 @@ class ConfigSchemaGuardTest {
     void shippedConfigPairsParseAgainstCurrentSchema() throws Exception {
         for (String master : MASTERS) {
             for (String performance : PERFORMANCES) {
-                assertNotNull(MockPerformanceModel.load(performance, master),
+                assertNotNull(MockModelFixture.load(performance, master),
                         master + " + " + performance + " must load");
             }
         }

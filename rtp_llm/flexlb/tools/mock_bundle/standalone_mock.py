@@ -64,32 +64,18 @@ def command(env):
     address = ipaddress.ip_address(host)
     if address.is_loopback or address.is_unspecified or address.version != 4:
         raise ValueError("POD_IP must be a routable IPv4 pod address")
-    block_size = integer(env, "MOCK_BLOCK_SIZE", 1024)
-    numeric = {
-        "--n-prefill": prefill,
-        "--n-decode": decode,
-        "--base-grpc-port": port,
-        "--block-size": block_size,
-    }
-    for role in ("PREFILL", "DECODE"):
-        key = f"MOCK_{role}_BLOCK_SIZE"
-        if key in env:
-            numeric[f"--{role.lower()}-block-size"] = integer(env, key, block_size)
+    numeric = {"--n-prefill": prefill, "--n-decode": decode, "--base-grpc-port": port}
     for flag, key, default in (
-        ("--prefill-kv-pool-blocks", "MOCK_PREFILL_KV_POOL_BLOCKS", 1024),
-        ("--decode-kv-pool-blocks", "MOCK_DECODE_KV_POOL_BLOCKS", 1024),
-        ("--decode-max-concurrency", "MOCK_DECODE_MAX_CONCURRENCY", 128),
         ("--event-loop-threads", "MOCK_EVENT_LOOP_THREADS", 4),
         ("--completion-threads", "MOCK_COMPLETION_THREADS", 4),
     ):
         numeric[flag] = integer(env, key, default)
-    performance = json_object(
-        env.get("MOCK_PERFORMANCE_CONFIG_JSON", (ROOT / "performance.json").read_text()),
-        "MOCK_PERFORMANCE_CONFIG_JSON",
-    )
-    if "block_size" in performance and performance["block_size"] != block_size:
-        raise ValueError("Performance block_size must match MOCK_BLOCK_SIZE")
-    performance["block_size"] = block_size
+    if "MOCK_ENGINE_CONFIG_JSON" not in env:
+        raise ValueError("MOCK_ENGINE_CONFIG_JSON is required; import the real effective configuration and capacity")
+    engine = json_object(env["MOCK_ENGINE_CONFIG_JSON"], "MOCK_ENGINE_CONFIG_JSON")
+    from runtime_configs import calibration_input, reject_removed_environment
+    performance = calibration_input(env)
+    reject_removed_environment(env)
     master = json_object(env.get("FLEXLB_CONFIG", "{}"), "FLEXLB_CONFIG")
     fetch = boolean(env, "FETCH_OUTPUT_STREAM", "1")
     kmonitor = boolean(env, "MOCK_KMONITOR_ENABLED", "true")
@@ -106,13 +92,14 @@ def command(env):
         args.extend([flag, str(value)])
     for flag, name in (("--endpoint-file", "endpoints.json"),
                        ("--discovery-file", "discovery.json"),
-                       ("--performance", "performance.json"),
-                       ("--master-config", "master-config.json")):
+                       ("--calibration", "calibration.json"),
+                       ("--engine-config", "engine-config.json")):
         if remote_decode and flag == "--discovery-file":
             continue
         args.extend([flag, str(runtime / name)])
     runtime.mkdir(parents=True, exist_ok=True)
-    (runtime / "performance.json").write_text(json.dumps(performance))
+    (runtime / "calibration.json").write_text(json.dumps(performance))
+    (runtime / "engine-config.json").write_text(json.dumps(engine))
     (runtime / "master-config.json").write_text(json.dumps(master))
     plan.record(runtime, prefill=prefill, decode=decode, host=host, grpc_base_port=port,
                 vip_grpc_endpoints=[

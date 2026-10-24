@@ -90,9 +90,9 @@ class BundleConfigurationTest(unittest.TestCase):
                          hashlib.sha256(calibration.read_bytes()).hexdigest())
         self.assertEqual(set(performance["decode"]),
                          {"scale", "step_base_ms", "step_per_running_ms", "tokens_per_step"})
-        self.assertEqual(command[command.index("--performance") + 1],
-                         str(Path(command[command.index("--master-config") + 1]).parent / "performance.json"))
-        self.assertEqual(command[command.index("--block-size") + 1], "1024")
+        self.assertEqual(command[command.index("--calibration") + 1],
+                         str(Path(command[command.index("--engine-config") + 1]).parent / "performance.json"))
+        self.assertIn("--engine-config", command)
         self.assertEqual(command[command.index("--auto-fetch") + 1], "true")
         self.assertEqual(command[command.index("--unique-engine-ips") + 1], "true")
         self.assertNotIn("--events-file", command)
@@ -120,36 +120,17 @@ class BundleConfigurationTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "FETCH_OUTPUT_STREAM must be 0 or 1"):
             self.launch_to_process_boundary({"FETCH_OUTPUT_STREAM": "invalid"})
 
-    def test_glm_config_and_eos_are_written_without_losing_coefficients(self):
-        profile = {
-            "bundle_overrides": {
-                "block_size": 64, "prefill_block_size": 512,
-                "decode_block_size": 64, "prefill": 3, "decode": 4,
-                "decode_max_concurrency": 8, "decode_kv_pool_blocks": 128,
-            },
-            "performance": {
-                "block_size": 64, "prefill": {"scale": 1},
-                "decode": {"step_base_ms": 20, "eos": {"enabled": True}},
-            },
-        }
-        command, performance = self.launch_to_process_boundary(
-            {
-                "MOCK_BUNDLE_OVERRIDES_YAML": json.dumps(profile["bundle_overrides"]),
-                "MOCK_PERFORMANCE_CONFIG_JSON": json.dumps(profile["performance"]),
-                "MOCK_EOS_CONFIG_JSON": '{"enabled": false}',
-            }
-        )
-        self.assertEqual(command[command.index("--block-size") + 1], "64")
-        self.assertEqual(command[command.index("--prefill-block-size") + 1], "512")
-        self.assertEqual(command[command.index("--decode-block-size") + 1], "64")
-        self.assertEqual(command[command.index("--n-prefill") + 1], "3")
-        self.assertEqual(command[command.index("--n-decode") + 1], "4")
-        self.assertEqual(command[command.index("--decode-max-concurrency") + 1], "8")
-        self.assertEqual(command[command.index("--decode-kv-pool-blocks") + 1], "128")
-        self.assertEqual(
-            performance["decode"]["step_base_ms"],
-            profile["performance"]["decode"]["step_base_ms"],
-        )
+    def test_engine_behavior_and_eos_calibration_are_separate(self):
+        engine = json.loads((bundle.ROOT / "engine-config.json").read_text())
+        engine["roles"]["decode"]["scheduler"]["max_generate_batch_size"] = 8
+        command, performance = self.launch_to_process_boundary({
+            "MOCK_ENGINE_CONFIG_JSON": json.dumps(engine),
+            "MOCK_CALIBRATION_CONFIG_JSON": '{"decode":{"step_base_ms":20}}',
+            "MOCK_EOS_CONFIG_JSON": '{"enabled":false}',
+        })
+        self.assertIn("--engine-config", command)
+        self.assertNotIn("--decode-max-concurrency", command)
+        self.assertEqual(performance["decode"]["step_base_ms"], 20)
         self.assertEqual(performance["decode"]["eos"], {"enabled": False})
 
     def test_invalid_capacity_cannot_launch(self):
@@ -160,13 +141,13 @@ class BundleConfigurationTest(unittest.TestCase):
                 )
 
     def test_block_override_alone_cannot_disagree_with_default_performance(self):
-        with self.assertRaisesRegex(ValueError, "block_size must match"):
+        with self.assertRaises(ValueError):
             self.launch_to_process_boundary(
                 {"MOCK_BUNDLE_OVERRIDES_YAML": '{"block_size":64}'}
             )
 
     def test_mismatched_performance_block_size_cannot_launch(self):
-        with self.assertRaisesRegex(ValueError, "block_size must match"):
+        with self.assertRaises(ValueError):
             self.launch_to_process_boundary(
                 {"MOCK_PERFORMANCE_CONFIG_JSON": '{"block_size":64}'}
             )

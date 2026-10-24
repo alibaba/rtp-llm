@@ -59,6 +59,7 @@ final class MockLruBlockCache {
     // Updated under the cache monitor on 0 <-> 1 reference transitions.
     private int referencedBlocks;
     private final double reserveRatio;
+    private Integer observedReserveBlocks;
     private final boolean floorReserve;
     /**
      * cache key → reference count. ref == 0: pure LRU block (evictable);
@@ -554,7 +555,13 @@ final class MockLruBlockCache {
     }
 
     /** Reserve watermark in blocks: ceil(reserveRatio x totalBlocks). */
+    synchronized void setObservedReserveBlocks(int count) {
+        if (count < 0 || count > totalBlocks) throw new IllegalArgumentException("reserve blocks outside pool");
+        observedReserveBlocks = count;
+    }
+
     synchronized int reserveBlocks() {
+        if (observedReserveBlocks != null) return observedReserveBlocks;
         return (int) (floorReserve ? Math.floor(totalBlocks * reserveRatio) : Math.ceil(totalBlocks * reserveRatio));
     }
 
@@ -693,6 +700,34 @@ final class MockLruBlockCache {
     }
 
     /** Oldest eligible leaf, then its unbranched ancestors; whole-chain rounding. */
+    synchronized int usedBlocks() { return totalBlocks - freeBlocks(); }
+    synchronized List<List<Long>> watermarkCandidates(int count) {
+        List<List<Long>> result = new ArrayList<>();
+        if (count <= 0) return result;
+        if (!prefixTreeEnabled) {
+            for (var entry : blocks.entrySet()) {
+                if (entry.getValue() == 0) { result.add(List.of(entry.getKey())); if (--count <= 0) break; }
+            }
+            return result;
+        }
+        Set<Long> selected = new HashSet<>();
+        for (var leaf : leaves) {
+            List<Long> chain = new ArrayList<>();
+            Long key = leaf.key();
+            while (key != null && chain.size() < count && Integer.valueOf(0).equals(blocks.get(key)) && selected.add(key)) {
+                chain.add(key);
+                var node = tree.get(key);
+                Long parent = node.parent;
+                if (parent == null || tree.get(parent).children.size() != 1) break;
+                key = parent;
+            }
+            java.util.Collections.reverse(chain);
+            if (!chain.isEmpty()) { result.add(chain); count -= chain.size(); }
+            if (count <= 0) break;
+        }
+        return result;
+    }
+
     private int evictChains(int minBlocks, String reason) {
         if (!prefixTreeEnabled) return evictFlatLru(minBlocks, reason);
         int freed = 0;

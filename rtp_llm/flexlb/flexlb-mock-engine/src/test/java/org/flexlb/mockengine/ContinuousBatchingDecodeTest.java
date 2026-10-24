@@ -354,6 +354,110 @@ class ContinuousBatchingDecodeTest {
 
     // ──────────── Model / service helpers ────────────
 
+    @Test void realFifoDefersJoinAndCancelledKvReleaseUntilTheStepBoundary() throws Exception {
+        var model = model(List.of(List.of(1, 500.0)));
+        model.setPrefillBatchPolicy(new MockPrefillBatchPolicy(3, 10000, 0, 10000, 1, false, 0, 0, 1, false, false));
+        var decode = newDecodeService(model, 3);
+        var first = new LinkedBlockingQueue<EngineRpcService.GenerateOutputsPB>();
+        var second = new LinkedBlockingQueue<EngineRpcService.GenerateOutputsPB>();
+        assertTrue(invokeScheduleDecodeCompletion(decode, shapeOf(model, 8101, 10, 3), -1, first));
+        assertTrue(invokeScheduleDecodeCompletion(decode, shapeOf(model, 8102, 10, 3), -1, second));
+        assertEquals(1, getActiveDecodeRequests(decode), "arrival during a step is still WAITING");
+        assertEquals(1, ((Number)decode.getSnapshot().get("waiting")).intValue());
+        var tasks = MockEngineTestSupport.workerStatus(decode, 0).getRunningTaskInfoList();
+        var queued = tasks.stream().filter(task -> task.getRequestId() == 8102).findFirst().orElseThrow();
+        assertEquals(EngineRpcService.TaskPhase.TASK_PHASE_RECEIVED, queued.getPhase());
+        assertTrue(queued.getIsWaiting());
+        long allocated = decode.getActiveKvTokens();
+        assertEquals(EngineRpcService.TaskPhase.TASK_PHASE_RUNNING, decode.cancel(8101));
+        assertEquals(allocated, decode.getActiveKvTokens());
+        assertEquals(1, getActiveDecodeRequests(decode));
+        awaitTerminalFrame(second, 10000);
+        awaitQuiescence(decode, 5000);
+        assertEquals(0, decode.getActiveKvTokens());
+        assertEquals(1, decode.getCancelledCount());
+        assertEquals(1, decode.getCompletedCount());
+    }
+
+    @Test void realFifoWaitingCancelIsCommittedAtStepBoundaryWithoutRunningIt() throws Exception {
+        var model = model(List.of(List.of(1, 300.0)));
+        model.setPrefillBatchPolicy(new MockPrefillBatchPolicy(3, 10000, 0, 10000, 1, false, 0, 0, 0, false, false));
+        var decode = newDecodeService(model, 3);
+        var first = new LinkedBlockingQueue<EngineRpcService.GenerateOutputsPB>();
+        var queued = new LinkedBlockingQueue<EngineRpcService.GenerateOutputsPB>();
+        assertTrue(invokeScheduleDecodeCompletion(decode, shapeOf(model, 8301, 10, 3), -1, first));
+        assertTrue(invokeScheduleDecodeCompletion(decode, shapeOf(model, 8302, 10, 3), -1, queued));
+        assertEquals(EngineRpcService.TaskPhase.TASK_PHASE_RECEIVED, decode.cancel(8302));
+        assertEquals(0, decode.getCancelledCount());
+        assertEquals(1, ((Number)decode.getSnapshot().get("waiting")).intValue());
+        awaitTerminalFrame(first, 10000);
+        awaitQuiescence(decode, 5000);
+        assertEquals(1, decode.getCancelledCount());
+        assertEquals(1, decode.getCompletedCount());
+        assertEquals(0, decode.getActiveKvTokens());
+        assertEquals(0, ((Number)decode.getSnapshot().get("waiting")).intValue());
+    }
+
+    @Test void priorityCancelReportsCancelingUntilDownstreamResourcesAreReleased() throws Exception {
+        var model = model(List.of(List.of(1, 500.0)));
+        model.setPrefillBatchPolicy(new MockPrefillBatchPolicy(3, 10000, 0, 10000, 1, false, 0, 0, 0, false, false));
+        var decode = newDecodeService(model, 3);
+        int port = BASE_PORT + nextPortOffset++;
+        var prefill = new JavaMockEngineCluster.FastRpcService("prefill", EngineRpcService.RoleTypePB.ROLE_TYPE_PREFILL,
+                port, services, scheduler, model, 100, new JavaMockEngineCluster.ClusterStats());
+        services.put(port, prefill);
+        var queue = new LinkedBlockingQueue<EngineRpcService.GenerateOutputsPB>();
+        assertTrue(invokeScheduleDecodeCompletion(decode, shapeOf(model, 8201, 10, 3), -1, queue));
+        prefill.registerDecodeOwnership(8201, decode);
+        assertTrue(prefill.cancelRequest(8201).found());
+        var pending = MockEngineTestSupport.workerStatus(prefill, 0);
+        assertTrue(pending.getFinishedTaskListList().isEmpty());
+        assertEquals(EngineRpcService.PriorityPreemptionProgressPB.PRIORITY_PREEMPTION_CANCELING,
+                pending.getRunningTaskInfo(0).getPriorityPreemptionProgress());
+        assertTrue(decode.getActiveKvTokens() > 0);
+        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(3);
+        EngineRpcService.WorkerStatusPB completed;
+        do {
+            completed = MockEngineTestSupport.workerStatus(prefill, 0);
+            if (!completed.getFinishedTaskListList().isEmpty()) break;
+            Thread.sleep(5);
+        } while (System.nanoTime() < deadline);
+        assertEquals(1, completed.getFinishedTaskListCount());
+        assertEquals(EngineRpcService.PriorityPreemptionProgressPB.PRIORITY_PREEMPTION_CANCELED,
+                completed.getFinishedTaskList(0).getPriorityPreemptionProgress());
+        assertTrue(completed.getRunningTaskInfoList().isEmpty());
+        assertEquals(0, decode.getActiveKvTokens());
+    }
+
+    @Test void downstreamQueuedPriorityCancelWaitsForSchedulerCleanup() throws Exception {
+        var model = model(List.of(List.of(1, 300.0)));
+        model.setPrefillBatchPolicy(new MockPrefillBatchPolicy(3, 10000, 0, 10000, 1, false, 0, 0, 0, false, false));
+        var decode = newDecodeService(model, 3);
+        int port = BASE_PORT + nextPortOffset++;
+        var prefill = new JavaMockEngineCluster.FastRpcService("prefill", EngineRpcService.RoleTypePB.ROLE_TYPE_PREFILL,
+                port, services, scheduler, model, 100, new JavaMockEngineCluster.ClusterStats());
+        services.put(port, prefill);
+        var first = new LinkedBlockingQueue<EngineRpcService.GenerateOutputsPB>();
+        var queued = new LinkedBlockingQueue<EngineRpcService.GenerateOutputsPB>();
+        assertTrue(invokeScheduleDecodeCompletion(decode, shapeOf(model, 8401, 10, 3), -1, first));
+        assertTrue(invokeScheduleDecodeCompletion(decode, shapeOf(model, 8402, 10, 3), -1, queued));
+        prefill.registerDecodeOwnership(8402, decode);
+        assertTrue(prefill.cancelRequest(8402).found());
+        assertEquals(0, decode.getCancelledCount());
+        var pending = MockEngineTestSupport.workerStatus(prefill, 0);
+        assertTrue(pending.getFinishedTaskListList().isEmpty());
+        assertEquals(EngineRpcService.PriorityPreemptionProgressPB.PRIORITY_PREEMPTION_CANCELING,
+                pending.getRunningTaskInfo(0).getPriorityPreemptionProgress());
+        awaitTerminalFrame(first, 10000);
+        awaitQuiescence(decode, 5000);
+        var completed = MockEngineTestSupport.workerStatus(prefill, 0);
+        assertEquals(1, completed.getFinishedTaskListCount());
+        assertEquals(EngineRpcService.PriorityPreemptionProgressPB.PRIORITY_PREEMPTION_CANCELED,
+                completed.getFinishedTaskList(0).getPriorityPreemptionProgress());
+        assertEquals(1, decode.getCancelledCount());
+        assertEquals(1, decode.getCompletedCount());
+    }
+
     /** Curve [[1,100],[2,200]] with sleep_scale 1.0 and no jitter. */
     private MockPerformanceModel twoPointCurveModel() throws Exception {
         return model(List.of(List.of(1, 100.0), List.of(2, 200.0)));
@@ -375,7 +479,7 @@ class ContinuousBatchingDecodeTest {
                 "prefill", Map.of("scale", 1.0),
                 "decode", decodeConfig));
         MockMasterConfig.writeWithPrefillExpression(master, "10");
-        return MockPerformanceModel.load(performance.toString(), master.toString());
+        return MockModelFixture.load(performance.toString(), master.toString());
     }
 
     private JavaMockEngineCluster.FastRpcService newDecodeService(

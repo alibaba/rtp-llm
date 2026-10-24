@@ -14,16 +14,17 @@ import vit
 class PerEngineRolesTest(unittest.TestCase):
     def test_vit_uses_real_metadata_and_own_http_grpc_pair(self):
         env = dict(RTP_LLM_MOCK_BUNDLE="1", ROLE_TYPE="VIT", START_PORT="22160",
-                   TOKENIZER_PATH="oss://actual-model", VIT_MAX_CONCURRENT_REQUESTS="3")
+                   TOKENIZER_PATH="oss://actual-model", MOCK_ENGINE_CONFIG_JSON=(Path(__file__).parent / "engine-config.json").read_text())
         with patch.object(vit, "prepare_assets", return_value=Path("/model")) as prepare:
             args = vit.command(env)
         prepare.assert_called_once()
         for key, value in (("--http-port", "22160"), ("--port", "22161"),
-                           ("--model-path", "/model"), ("--concurrency", "3")):
+                           ("--model-path", "/model")):
             self.assertEqual(args[args.index(key) + 1], value)
 
     def test_vit_passes_monitoring_toggle(self):
-        base = dict(RTP_LLM_MOCK_BUNDLE="1", ROLE_TYPE="VIT", TOKENIZER_PATH="/model")
+        base = dict(RTP_LLM_MOCK_BUNDLE="1", ROLE_TYPE="VIT", TOKENIZER_PATH="/model",
+                    MOCK_ENGINE_CONFIG_JSON=(Path(__file__).parent / "engine-config.json").read_text())
         for value, expected in ((None, "true"), ("true", "true"), ("1", "true"),
                                 ("false", "false"), ("0", "false")):
             with self.subTest(value=value), patch.object(vit, "prepare_assets", return_value=Path("/model")):
@@ -33,7 +34,8 @@ class PerEngineRolesTest(unittest.TestCase):
             vit.command({**base, "MOCK_KMONITOR_ENABLED": "typo"})
 
     def test_vit_rejects_role_model_and_port_errors_before_start(self):
-        base = dict(RTP_LLM_MOCK_BUNDLE="1", ROLE_TYPE="VIT", TOKENIZER_PATH="/model")
+        base = dict(RTP_LLM_MOCK_BUNDLE="1", ROLE_TYPE="VIT", TOKENIZER_PATH="/model",
+                    MOCK_ENGINE_CONFIG_JSON=(Path(__file__).parent / "engine-config.json").read_text())
         for override in ({"ROLE_TYPE": "PREFILL"}, {"START_PORT": "65535"},
                          {"TOKENIZER_PATH": ""}, {"RTP_LLM_MOCK_BUNDLE": "0"}):
             with self.subTest(override=override), self.assertRaises(ValueError):

@@ -81,12 +81,14 @@ class PrefillCachePolicy:
     def apply(self, prefill):
         capacity = self.memory_blocks
         if capacity is None:
-            capacity = prefill.get("memory_cache", {}).get("capacity_blocks")
+            capacity = prefill["capacity"]["memory_blocks"]
         if type(capacity) is not int or capacity < 0:
             raise ValueError("prefill memory cache policy requires captured capacity or explicit memory_blocks")
-        prefill["enable_gpu_prefix_tree"] = self.device_tree
-        prefill["memory_cache"] = dict(enabled=capacity > 0, capacity_blocks=capacity,
-                                     enable_prefix_tree=self.memory_tree)
+        if prefill["capacity"]["kind"] != "synthetic":
+            raise ValueError("cache experiments require an explicitly synthetic capacity")
+        prefill["capacity"].update(enable_gpu_prefix_tree=self.device_tree, memory_blocks=capacity,
+                                   enable_memory_prefix_tree=self.memory_tree)
+        prefill["kv_cache"]["enable_memory_cache"] = capacity > 0
 
 
 @dataclass(frozen=True)
@@ -112,6 +114,7 @@ class PrefillPerformance:
     def __post_init__(self):
         for item in fields(self):
             number(getattr(self, item.name), "prefill_perf." + item.name,
+                   minimum=1 if item.name.startswith("max_batch_") else 0,
                    integer=item.name.startswith("max_batch_"))
 
 
@@ -131,7 +134,6 @@ class EnvironmentDeclaration:
     mock_auto_fetch: bool | None = scalar_field(bool, minimum=None, startup=True, reconfigure=True)
     master_debug_log: bool | None = scalar_field(bool, minimum=None, startup=True, reconfigure=False)
     mock_fetch_attach_timeout_ms: int | None = scalar_field(int, minimum=1, startup=True, reconfigure=True)
-    prefill_max_waiting_batches: int | None = scalar_field(int, minimum=0, startup=False, reconfigure=False)
     master_test_control: bool | None = scalar_field(bool, minimum=None, startup=False, reconfigure=False)
     master_jvm_heap: str | None = scalar_field(str, startup=True, validate=heap_size)
     mock_heap: str | None = scalar_field(str, startup=True, validate=heap_size)
@@ -200,14 +202,15 @@ class EnvironmentDeclaration:
 
     def apply_performance(self, baseline):
         performance = copy.deepcopy(baseline)
+        role = performance["engine_config"]["roles"]["prefill"]
         if self.prefill_perf is not None:
-            if performance.get("prefill", {}).get("fifo") is not None:
-                raise ValueError("prefill_perf legacy batch limits cannot override a FIFO preset")
-            performance.setdefault("prefill", {}).update(asdict(self.prefill_perf))
-        if self.prefill_max_waiting_batches is not None:
-            performance.setdefault("prefill", {})["max_waiting_batches"] = self.prefill_max_waiting_batches
+            if role["capacity"]["kind"] != "synthetic":
+                raise ValueError("synthetic batch budgets cannot override a real effective config")
+            performance.setdefault("prefill", {}).update(fixed_ms=self.prefill_perf.fixed_ms, scale=self.prefill_perf.scale)
+            role["scheduler"].update(max_batch_tokens_size=self.prefill_perf.max_batch_tokens,
+                                     max_generate_batch_size=self.prefill_perf.max_batch_requests)
         if self.prefill_cache_policy is not None:
-            self.prefill_cache_policy.apply(performance.setdefault("prefill", {}))
+            self.prefill_cache_policy.apply(role)
         return performance
 
 

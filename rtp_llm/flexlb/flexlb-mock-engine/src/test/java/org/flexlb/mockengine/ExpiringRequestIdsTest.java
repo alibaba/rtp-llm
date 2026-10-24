@@ -14,7 +14,7 @@ class ExpiringRequestIdsTest {
         Path master = directory.resolve("master.json"), performance = directory.resolve("performance.json");
         MockMasterConfig.writeWithPrefillExpression(master, "1 + sum(computeTokens)");
         Files.writeString(performance, "{}");
-        return MockPerformanceModel.load(performance.toString(), master.toString());
+        return MockModelFixture.load(performance.toString(), master.toString());
     }
 
     @Test void livePrefillFenceSurvivesMoreThanTenThousandNewFences() throws Exception {

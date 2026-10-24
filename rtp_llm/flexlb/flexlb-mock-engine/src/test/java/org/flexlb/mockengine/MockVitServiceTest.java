@@ -172,4 +172,37 @@ class MockVitServiceTest {
         assertEquals(1, service.computations.get());
     }
 
+    @Test void slowDownloadDoesNotClaimGpuAndConfiguredHeadersReachOrigin() throws Exception {
+        var document = MockEngineConfigFixture.load().snapshot();
+        var limits = (com.fasterxml.jackson.databind.node.ObjectNode) document.path("roles").path("vit");
+        limits.put("download_headers", "{\"X-Mock-Image\":\"allowed\"}");
+        var config = new MockVitService.Config(8, limits.path("vit_concurrency").intValue(), limits.path("vit_max_queue_size").intValue(),
+                limits.path("mm_cache_cpu_max_bytes").longValue(), limits.path("mm_hash_key_cache_max_bytes").longValue(),
+                MockEngineConfig.vitImageBytes(limits), 1 << 20, 0);
+        var entered = new java.util.concurrent.CountDownLatch(1);
+        var release = new java.util.concurrent.CountDownLatch(1);
+        var header = new java.util.concurrent.atomic.AtomicReference<String>();
+        var origin = com.sun.net.httpserver.HttpServer.create(new java.net.InetSocketAddress("127.0.0.1", 0), 0);
+        var png = java.util.Base64.getDecoder().decode(image(28, 28, 0x123456).getMultimodalUrl().split(",", 2)[1]);
+        origin.createContext("/image", exchange -> {
+            header.set(exchange.getRequestHeaders().getFirst("X-Mock-Image")); entered.countDown();
+            try { release.await(); exchange.sendResponseHeaders(200, png.length); exchange.getResponseBody().write(png); }
+            catch (InterruptedException error) { Thread.currentThread().interrupt(); }
+            finally { exchange.close(); }
+        });
+        origin.start();
+        try (var strict = new MockVitService(config, null, document)) {
+            var remote = image(28, 28, 0).toBuilder().setMultimodalUrl("http://127.0.0.1:" + origin.getAddress().getPort() + "/image").build();
+            var slow = strict.acquire(remote, 5000);
+            assertTrue(entered.await(2, TimeUnit.SECONDS));
+            assertEquals(0, strict.snapshot().get("gpu_batches"));
+            assertEquals(0, strict.snapshot().get("gpu_queued"));
+            assertEquals(4, strict.acquire(image(28, 28, 0x654321), 2000).get(2, TimeUnit.SECONDS).rows());
+            assertFalse(slow.isDone());
+            release.countDown();
+            assertEquals(4, slow.get(2, TimeUnit.SECONDS).rows());
+            assertEquals("allowed", header.get());
+        } finally { release.countDown(); origin.stop(0); }
+    }
+
 }

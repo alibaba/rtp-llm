@@ -17,7 +17,7 @@ class WhaleDecodeCachePolicyTest {
         Files.writeString(master, "{}");
         Files.writeString(performance,
                 "{\"block_size\":64,\"prefill\":{\"formula\":\"1\",\"enable_gpu_prefix_tree\":false},\"decode\":{}}");
-        var model = MockPerformanceModel.load(performance.toString(), master.toString());
+        var model = MockModelFixture.load(performance.toString(), master.toString());
         assertFalse(model.forEngine().prefillGpuPrefixTree);
         assertTrue(model.forEngine().decodeGpuPrefixTree);
         try (var cluster = MockEngineTestCluster.create(model, 62000, 1, 1)) {
@@ -28,7 +28,7 @@ class WhaleDecodeCachePolicyTest {
         Files.writeString(performance,
                 "{\"prefill\":{\"formula\":\"1\",\"enable_gpu_prefix_tree\":\"false\"},\"decode\":{}}");
         assertThrows(IllegalStateException.class,
-                () -> MockPerformanceModel.load(performance.toString(), master.toString()));
+                () -> MockModelFixture.load(performance.toString(), master.toString()));
     }
 
     private MockPerformanceModel model(String decode) throws Exception {
@@ -36,7 +36,7 @@ class WhaleDecodeCachePolicyTest {
         Files.writeString(path, "{\"block_size\":64,\"prefill\":{\"formula\":\"1\"},\"decode\":" + decode + "}");
         Path master = dir.resolve("master.json");
         Files.writeString(master, "{}");
-        return MockPerformanceModel.load(path.toString(), master.toString());
+        return MockModelFixture.load(path.toString(), master.toString());
     }
 
     private MockLruBlockCache cache(JavaMockEngineCluster.FastRpcService engine) throws Exception {
@@ -116,7 +116,11 @@ class WhaleDecodeCachePolicyTest {
         assertTrue(model.decodeReuseCache);
         assertNull(model.decodeReserveBlockRatio);
         assertThrows(IllegalStateException.class, () -> model("{\"reuse_cache\":\"false\"}"));
-        assertThrows(IllegalStateException.class, () -> model("{\"reserve_block_ratio\":-1}"));
-        assertThrows(IllegalStateException.class, () -> model("{\"reserve_block_ratio\":80}"));
+        var doc = (com.fasterxml.jackson.databind.node.ObjectNode)MockEngineConfigFixture.load().snapshot();
+        var kv = (com.fasterxml.jackson.databind.node.ObjectNode)doc.path("roles").path("decode").path("kv_cache");
+        for (int ratio : new int[]{-1, 80}) {
+            kv.put("reserve_block_ratio", ratio);
+            assertThrows(IllegalArgumentException.class, () -> MockEngineConfig.parse(doc));
+        }
     }
 }

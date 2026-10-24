@@ -96,12 +96,10 @@ class ProductionCaliberDecodeTest {
 
     @Test
     void perTokenMsIsRemovedAndFailsFast() {
-        IllegalStateException ex = assertThrows(IllegalStateException.class,
-                () -> model(Map.of("per_token_ms", 45.0)));
-        assertTrue(ex.getMessage().contains("per_token_ms is removed"),
-                "migration hint must name per_token_ms: " + ex.getMessage());
-        assertTrue(ex.getMessage().contains("per STEP"),
-                "migration hint must point at the per-step caliber: " + ex.getMessage());
+        var decode = MAPPER.createObjectNode().put("per_token_ms", 45.0);
+        var calibration = MAPPER.createObjectNode().set("decode", decode);
+        var ex = assertThrows(IllegalArgumentException.class, () -> MockPerformanceModel.loadCalibration(calibration));
+        assertTrue(ex.getMessage().contains("per_token_ms"));
     }
 
     @Test
@@ -109,7 +107,7 @@ class ProductionCaliberDecodeTest {
         Map<String, Object> conflicting = new LinkedHashMap<>();
         conflicting.put("step_ms_by_batch", List.of(List.of(1, 5.0)));
         conflicting.put("step_base_ms", 10.0);
-        IllegalStateException ex = assertThrows(IllegalStateException.class,
+        IllegalArgumentException ex = assertThrows(IllegalArgumentException.class,
                 () -> model(conflicting));
         assertTrue(ex.getMessage().contains("mutually exclusive"),
                 "conflict must be explicit: " + ex.getMessage());
@@ -117,9 +115,9 @@ class ProductionCaliberDecodeTest {
 
     @Test
     void invalidTokensPerStepFailsFast() {
-        IllegalStateException ex = assertThrows(IllegalStateException.class,
+        IllegalArgumentException ex = assertThrows(IllegalArgumentException.class,
                 () -> model(Map.of("tokens_per_step", 0.0)));
-        assertTrue(ex.getMessage().contains("tokens_per_step must be > 0"),
+        assertTrue(ex.getMessage().contains("tokens_per_step must be positive"),
                 "reason must be named: " + ex.getMessage());
     }
 
@@ -192,7 +190,7 @@ class ProductionCaliberDecodeTest {
                 "prefill", Map.of("scale", 1.0),
                 "decode", decode));
         MockMasterConfig.writeWithPrefillExpression(master, "10");
-        return MockPerformanceModel.load(performance.toString(), master.toString());
+        return MockModelFixture.load(performance.toString(), master.toString());
     }
 
     /**

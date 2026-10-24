@@ -29,10 +29,13 @@ final class MockVitMonitor implements ServerInterceptor, AutoCloseable {
         this.labels = Map.copyOf(labels);
         for (String name : new String[]{"mock_vit_rpc_qps", "mock_vit_rpc_success_qps",
                 "mock_vit_rpc_error_qps", "py_rtp_vit_qps", "py_rtp_vit_success_qps",
-                "py_rtp_vit_error_qps"}) sink.register(name, FlexMetricType.QPS);
+                "py_rtp_vit_error_qps", "py_rtp_vit_embedding_overload_qps"}) sink.register(name, FlexMetricType.QPS);
         for (String name : new String[]{"mock_vit_active", "mock_vit_queued", "mock_vit_pending",
                 "mock_vit_embedding_bytes", "mock_vit_hash_bytes", "mock_vit_computations_total",
-                "mock_vit_computation_qps", "mock_vit_rpc_rt_us"}) sink.register(name, FlexMetricType.GAUGE);
+                "mock_vit_computation_qps", "mock_vit_rpc_rt_us",
+                "py_rtp_vit_embedding_queue_size", "py_rtp_vit_embedding_queue_wait_rt",
+                "py_rtp_vit_preprocess_queue_size", "py_rtp_vit_preprocess_rt", "py_rtp_vit_download_rt", "py_rtp_vit_preprocess_other_rt",
+                "py_rtp_vit_embedding_batch_size", "py_rtp_vit_embedding_forward_rt", "py_rtp_vit_embedding_rt"}) sink.register(name, FlexMetricType.GAUGE);
         sampler = Executors.newSingleThreadScheduledExecutor(task -> {
             var thread = new Thread(task, "mock-vit-monitor");
             thread.setDaemon(true);
@@ -41,6 +44,7 @@ final class MockVitMonitor implements ServerInterceptor, AutoCloseable {
     }
 
     void start(MockVitService service) {
+        service.setSchedulerMetrics(values -> values.forEach((name, value) -> report(name, labels, value.doubleValue())));
         sampler.scheduleAtFixedRate(() -> {
             try { sample(service.snapshot(), System.nanoTime()); }
             catch (RuntimeException error) {

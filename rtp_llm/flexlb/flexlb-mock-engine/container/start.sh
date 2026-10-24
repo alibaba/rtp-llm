@@ -25,7 +25,7 @@ set -eu
 }
 for argument in "$@"; do
     case "$argument" in
-        --whale|--whale-bundle|--n-prefill|--n-decode|--host|--unique-engine-ips|--base-grpc-port|--discovery-file|--endpoint-file)
+        --whale|--whale-bundle|--n-prefill|--n-decode|--host|--unique-engine-ips|--base-grpc-port|--discovery-file|--endpoint-file|--engine-config|--calibration)
             echo "Placement argument $argument is owned by MOCK_DEPLOYMENT_MODE and ROLE_TYPE" >&2; exit 2;;
     esac
 done
@@ -37,18 +37,21 @@ if [ -z "${POD_IP:-}" ]; then
 fi
 : "${POD_IP:?POD_IP must be the advertised engine Pod address}"
 : "${START_PORT:?START_PORT must be the HTTP service port}"
-if [ -n "${MOCK_PERFORMANCE_CONFIG_JSON:-}" ]; then
-    [ -z "${MOCK_PERFORMANCE_CONFIG:-}" ] || { echo "Choose performance path or JSON, not both" >&2; exit 2; }
-    MOCK_PERFORMANCE_CONFIG="$run_dir/performance.json"
-    printf '%s' "$MOCK_PERFORMANCE_CONFIG_JSON" > "$MOCK_PERFORMANCE_CONFIG"
+[ -z "${MOCK_PERFORMANCE_CONFIG+x}${MOCK_PERFORMANCE_CONFIG_JSON+x}${MOCK_MASTER_CONFIG+x}${MOCK_MASTER_CONFIG_JSON+x}" ] || {
+    echo "Removed performance/master inputs; use MOCK_ENGINE_CONFIG and MOCK_CALIBRATION_CONFIG" >&2; exit 2
+}
+if [ -n "${MOCK_ENGINE_CONFIG_JSON:-}" ]; then
+    [ -z "${MOCK_ENGINE_CONFIG:-}" ] || { echo "Choose engine config path or JSON, not both" >&2; exit 2; }
+    MOCK_ENGINE_CONFIG="$run_dir/engine-config.json"
+    printf '%s' "$MOCK_ENGINE_CONFIG_JSON" > "$MOCK_ENGINE_CONFIG"
 fi
-if [ -n "${MOCK_MASTER_CONFIG_JSON:-}" ]; then
-    [ -z "${MOCK_MASTER_CONFIG:-}" ] || { echo "Choose master path or JSON, not both" >&2; exit 2; }
-    MOCK_MASTER_CONFIG="$run_dir/master.json"
-    printf '%s' "$MOCK_MASTER_CONFIG_JSON" > "$MOCK_MASTER_CONFIG"
+if [ -n "${MOCK_CALIBRATION_CONFIG_JSON:-}" ]; then
+    [ -z "${MOCK_CALIBRATION_CONFIG:-}" ] || { echo "Choose calibration path or JSON, not both" >&2; exit 2; }
+    MOCK_CALIBRATION_CONFIG="$run_dir/calibration.json"
+    printf '%s' "$MOCK_CALIBRATION_CONFIG_JSON" > "$MOCK_CALIBRATION_CONFIG"
 fi
-: "${MOCK_PERFORMANCE_CONFIG:?Mount the mock performance configuration}"
-: "${MOCK_MASTER_CONFIG:?Mount the matching master performance configuration}"
+: "${MOCK_ENGINE_CONFIG:?Mount the effective engine configuration and allocator capacity}"
+: "${MOCK_CALIBRATION_CONFIG:?Mount the simulation calibration}"
 case "$START_PORT" in ''|*[!0-9]*) echo "Invalid START_PORT" >&2; exit 2;; esac
 [ "$START_PORT" -gt 0 ] && [ "$START_PORT" -lt 65535 ] || exit 2
 case "${ROLE_TYPE:-}" in
@@ -79,6 +82,6 @@ exec java -jar "${MOCK_ENGINE_JAR:-/opt/flexlb/mock-engine.jar}" \
     --unique-engine-ips false \
     --base-grpc-port "$((START_PORT + 1))" --auto-fetch "$automatic" \
     --kmonitor "${MOCK_KMONITOR_ENABLED:-$MOCK_MODE_KMONITOR_DEFAULT}" \
-    --performance "$MOCK_PERFORMANCE_CONFIG" --master-config "$MOCK_MASTER_CONFIG" \
+    --engine-config "$MOCK_ENGINE_CONFIG" --calibration "$MOCK_CALIBRATION_CONFIG" \
     --endpoint-file "$run_dir/unused-endpoint.json" \
     "$@"

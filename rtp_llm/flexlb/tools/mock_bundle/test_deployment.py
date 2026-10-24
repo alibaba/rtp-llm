@@ -76,7 +76,8 @@ class DeploymentTest(unittest.TestCase):
     def test_per_engine_role_and_single_pod_vip_port_plan(self):
         with tempfile.TemporaryDirectory() as directory:
             base = {"RTP_LLM_MOCK_BUNDLE": "1", "POD_IP": "10.0.0.5",
-                    "MOCK_BUNDLE_RUN_DIR": directory, "START_PORT": "7001"}
+                    "MOCK_BUNDLE_RUN_DIR": directory, "START_PORT": "7001",
+                    "MOCK_ENGINE_CONFIG_JSON": (Path(__file__).parent / "engine-config.json").read_text()}
             for role in ("PREFILL", "DECODE"):
                 args = standalone_mock.command({**base, "MOCK_DEPLOYMENT_MODE": "per_engine", "ROLE_TYPE": role})
                 self.assertEqual(args[args.index("--whale-bundle") + 1], "false")

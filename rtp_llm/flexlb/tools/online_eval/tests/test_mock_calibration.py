@@ -62,7 +62,7 @@ class MockCalibrationTest(unittest.TestCase):
         config = json.loads(render_env("single-nonbatch"))
         expression = config["router"]["roles"]["prefill"]["executionTimeEstimator"]["expression"]
         self.assertEqual(expression, calibration["prefill_expression"])
-        self.assertEqual(load_preset("default")[0]["block_size"], calibration["block_size"])
+        self.assertEqual(load_preset("default")[0]["engine_config"]["roles"]["prefill"]["kv_cache"]["seq_size_per_block"], calibration["block_size"])
 
     def test_run_files_expose_effective_default_calibration(self):
         calibration = load_mock_calibration()

@@ -46,7 +46,7 @@ class MockMemoryBlockCacheTest {
         Path p = dir.resolve("perf.json"), master = dir.resolve("master.json");
         Files.writeString(p, "{\"block_size\":64,\"prefill\":{\"memory_cache\":" + config + "}}");
         MockMasterConfig.writeWithPrefillExpression(master, "1 + sum(computeTokens)");
-        return MockPerformanceModel.load(p.toString(), master.toString());
+        return MockModelFixture.load(p.toString(), master.toString());
     }
 
     private Object field(Object object, String name) throws Exception {
@@ -118,6 +118,160 @@ class MockMemoryBlockCacheTest {
                 if (round == 0) ((MockLruBlockCache) field(p, "cache")).clear();
             }
             assertEquals(3, p.whaleMetrics().get("mock_memory_cache_read_blocks_total").longValue());
+        }
+    }
+
+    @Test void fifoHostLoadKeepsPinsAndGpuUntilSchedulerCancellation() throws Exception {
+        verifyAsyncHostLoad(true, false);
+    }
+
+    @Test void fifoHostLoadCompletionRunsOnlyAfterCopyAndReleasesPins() throws Exception {
+        verifyAsyncHostLoad(false, false);
+    }
+
+    @Test void fifoFailedHostCopyRecomputesInsteadOfPublishingCancelled() throws Exception {
+        verifyAsyncHostLoad(false, true);
+    }
+
+    @Test void retryableHostMaterializationReleasesThenReinitializes() throws Exception {
+        verifyAsyncHostLoad(false, false, MockLoadFailure.Kind.RETRYABLE);
+    }
+    @Test void permanentHostMaterializationReturnsMallocFailure() throws Exception {
+        verifyAsyncHostLoad(false, false, MockLoadFailure.Kind.PERMANENT);
+    }
+    @Test void internalHostMaterializationReturnsMallocFailure() throws Exception {
+        verifyAsyncHostLoad(false, false, MockLoadFailure.Kind.INTERNAL);
+    }
+    private void verifyAsyncHostLoad(boolean cancel, boolean failCopy) throws Exception {
+        verifyAsyncHostLoad(cancel, failCopy, null);
+    }
+    private void verifyAsyncHostLoad(boolean cancel, boolean failCopy, MockLoadFailure.Kind materialization) throws Exception {
+        var model = model("{\"enabled\":true,\"capacity_blocks\":10}");
+        model.setPrefillBatchPolicy(new MockPrefillBatchPolicy(4, 10000, 0, 10000, 1, false, 0, 0, 0, false, false));
+        var copy = new java.util.concurrent.CompletableFuture<Void>();
+        try (var cluster = MockEngineTestCluster.create(model, 61320, 1, 0)) {
+            var service = cluster.prefill(0);
+            var attempts = new java.util.concurrent.atomic.AtomicInteger();
+            service.setHostLoadBackend(id -> attempts.incrementAndGet() == 1 ? copy
+                    : java.util.concurrent.CompletableFuture.completedFuture(null));
+            var memory = (MockMemoryBlockCache) field(service, "memoryCache");
+            memory.write(List.of(1L, 2L));
+            var request = EngineRpcService.GenerateInputPB.newBuilder().setRequestId(999)
+                    .addAllTokenIds(java.util.Collections.nCopies(192, 123))
+                    .setGenerateConfig(EngineRpcService.GenerateConfigPB.newBuilder().setMaxNewTokens(1)
+                            .setUniqueKey("{\"input_len\":192,\"output_len\":1,\"block_cache_keys\":[1,2,3]}"))
+                    .build();
+            var done = new java.util.concurrent.CompletableFuture<EngineRpcService.GenerateOutputsPB>();
+            var last = new java.util.concurrent.atomic.AtomicReference<EngineRpcService.GenerateOutputsPB>();
+            service.generateStreamCall(request, new io.grpc.stub.StreamObserver<EngineRpcService.GenerateOutputsPB>() {
+                public void onNext(EngineRpcService.GenerateOutputsPB output) { last.set(output); }
+                public void onError(Throwable error) { done.completeExceptionally(error); }
+                public void onCompleted() { done.complete(last.get()); }
+            });
+            assertEquals(1, service.whaleMetrics().get("rtp_llm_loading_cache_stream_size").intValue());
+            assertEquals(2, service.whaleMetrics().get("mock_memory_cache_pinned_blocks").intValue());
+            assertTrue(service.getActiveKvTokens() > 0);
+            assertFalse(done.isDone(), "loading is an independently pending event");
+            if (cancel) service.cancel(999);
+            else if (materialization != null) copy.completeExceptionally(new MockLoadFailure(materialization));
+            else if (failCopy) copy.completeExceptionally(new IllegalStateException("copy failed"));
+            else copy.complete(null);
+            if (cancel) {
+                var error = assertThrows(java.util.concurrent.ExecutionException.class,
+                        () -> done.get(3, java.util.concurrent.TimeUnit.SECONDS));
+                assertEquals(io.grpc.Status.Code.CANCELLED, io.grpc.Status.fromThrowable(error.getCause()).getCode());
+            } else if (materialization == MockLoadFailure.Kind.PERMANENT || materialization == MockLoadFailure.Kind.INTERNAL) {
+                var error = assertThrows(java.util.concurrent.ExecutionException.class,
+                        () -> done.get(3, java.util.concurrent.TimeUnit.SECONDS));
+                assertEquals(602, MockRpcErrors.downstream(error.getCause()).getErrorCode());
+            } else {
+                var output = done.get(3, java.util.concurrent.TimeUnit.SECONDS);
+                if (materialization == MockLoadFailure.Kind.RETRYABLE) assertEquals(2, attempts.get());
+                assertTrue(output == null || !output.hasErrorInfo(), "copy failure must recompute successfully");
+            }
+            long until = System.nanoTime() + java.util.concurrent.TimeUnit.SECONDS.toNanos(2);
+            while ((service.getActiveKvTokens() != 0 || service.getInflightCount() != 0) && System.nanoTime() < until) Thread.sleep(1);
+            assertEquals(0, service.getActiveKvTokens());
+            assertEquals(0, service.whaleMetrics().get("mock_memory_cache_pinned_blocks").intValue());
+            assertEquals(0, service.whaleMetrics().get("rtp_llm_loading_cache_stream_size").intValue());
+            assertEquals(0, service.getInflightCount());
+            if (cancel) assertTrue(copy.isCancelled());
+        } finally { copy.complete(null); }
+    }
+
+    @Test void watermarkChoosesOnlyRequestedSuffixInsteadOfWholeAdmissionChain() {
+        var gpu = new MockLruBlockCache(10);
+        gpu.admit(List.of(1L, 2L, 3L, 4L, 5L, 6L, 7L, 8L));
+        assertEquals(List.of(List.of(7L, 8L)), gpu.watermarkCandidates(2));
+        assertEquals(8, gpu.usedBlocks(), "planning cannot release capacity");
+    }
+
+    @Test void gpuWatermarkKeepsSourceUntilDemotionCompletes() throws Exception {
+        var model = model("{\"enabled\":true,\"capacity_blocks\":10}");
+        model.hostTransferPolicy = new MockHostTransfer.Policy(1, 100, 100, 8, 2000);
+        model.cacheWatermarks = new MockCacheWatermarks(new MockCacheWatermarks.Tier(4.5 / 6144, 7.5 / 6144),
+                new MockCacheWatermarks.Tier(0, 0));
+        var entered = new java.util.concurrent.CountDownLatch(1); var release = new java.util.concurrent.CountDownLatch(1);
+        try (var cluster = MockEngineTestCluster.create(model, 61330, 1, 0)) {
+            var service = cluster.prefill(0);
+            var gpu = (MockLruBlockCache) field(service, "cache");
+            var memory = (MockMemoryBlockCache) field(service, "memoryCache");
+            var transfer = field(service, "hostTransfer");
+            var background = (MockCacheTaskPool)field(transfer, "background");
+            assertTrue(background.submit(false, () -> { entered.countDown(); try { release.await(); } catch (InterruptedException error) { Thread.currentThread().interrupt(); } }, Long.MAX_VALUE, () -> {}));
+            assertTrue(entered.await(1, java.util.concurrent.TimeUnit.SECONDS));
+            for (long key = 1; key <= 8; key++) gpu.admit(List.of(key));
+            var active = gpu.pinExisting(List.of(1L));
+            var apply = service.getClass().getDeclaredMethod("scheduleWatermarks"); apply.setAccessible(true); apply.invoke(service);
+            long until = System.nanoTime() + java.util.concurrent.TimeUnit.SECONDS.toNanos(1);
+            while (memory.pendingBlocks() == 0 && System.nanoTime() < until) Thread.sleep(1);
+            assertEquals(8, gpu.usedBlocks(), "source backings cannot be released before copy completes");
+            assertTrue(memory.pendingBlocks() > 0);
+            assertTrue(gpu.referencedKeyBlocks() > 1, "demotion owns additional GPU pins");
+            release.countDown();
+            until = System.nanoTime() + java.util.concurrent.TimeUnit.SECONDS.toNanos(2);
+            while (gpu.usedBlocks() != 4 && System.nanoTime() < until) Thread.sleep(1);
+            assertEquals(4, gpu.usedBlocks());
+            assertEquals(4, memory.size());
+            assertEquals(1, gpu.referencedKeyBlocks());
+            gpu.release(active);
+        } finally { release.countDown(); }
+    }
+
+    @Test void failedWatermarkReservationStillPublishesEarlierHostEvictions() throws Exception {
+        var model = model("{\"enabled\":true,\"capacity_blocks\":10}");
+        model.hostTransferPolicy = new MockHostTransfer.Policy(1, 100, 100, 8, 2000);
+        model.cacheWatermarks = new MockCacheWatermarks(new MockCacheWatermarks.Tier(.5 / 6144, 1.5 / 6144), new MockCacheWatermarks.Tier(0, 0));
+        try (var cluster = MockEngineTestCluster.create(model, 61350, 1, 0)) {
+            var service = cluster.prefill(0);
+            var gpu = (MockLruBlockCache)field(service, "cache");
+            var memory = (MockMemoryBlockCache)field(service, "memoryCache");
+            for (long key = 100; key < 110; key++) memory.write(List.of(key));
+            try (var held = memory.pinRead(java.util.stream.LongStream.range(100, 109).boxed().toList(), 0)) {
+                gpu.admit(List.of(1L, 2L));
+                var apply = service.getClass().getDeclaredMethod("applyWatermarks"); apply.setAccessible(true); apply.invoke(service);
+                assertEquals(9, memory.size(), "the first victim stays evicted when later allocation fails");
+                assertEquals(0, memory.pendingBlocks());
+                assertEquals(2, gpu.usedBlocks(), "failed demotion keeps the GPU source");
+                assertTrue(((java.util.concurrent.atomic.AtomicLong)field(service, "cacheVersion")).get() > 0,
+                        "directory version must expose host evictions even when no transfer was accepted");
+            }
+        }
+    }
+
+    @Test void hostWatermarkCannotEvictPinnedEntriesAndResumesBelowHigh() throws Exception {
+        var model = model("{\"enabled\":true,\"capacity_blocks\":10}");
+        model.cacheWatermarks = new MockCacheWatermarks(new MockCacheWatermarks.Tier(0, 0), new MockCacheWatermarks.Tier(.4, .8));
+        try (var cluster = MockEngineTestCluster.create(model, 61340, 1, 0)) {
+            var service = cluster.prefill(0);
+            var memory = (MockMemoryBlockCache)field(service, "memoryCache");
+            for (long key = 1; key <= 8; key++) memory.write(List.of(key));
+            var held = memory.pinRead(List.of(1L, 2L, 3L, 4L, 5L), 0);
+            var apply = service.getClass().getDeclaredMethod("applyWatermarks"); apply.setAccessible(true);
+            apply.invoke(service);
+            assertEquals(5, memory.size());
+            held.close(); apply.invoke(service);
+            assertEquals(4, memory.size(), "once triggered, trim to low even after usage falls below high");
         }
     }
 

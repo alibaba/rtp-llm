@@ -1,4 +1,9 @@
 #include <gtest/gtest.h>
+#include <cstdlib>
+#include <filesystem>
+#include <fstream>
+#include <iterator>
+#include <optional>
 #include <unordered_map>
 #include "rtp_llm/cpp/cache/test/TestLayoutSpec.h"
 
@@ -595,6 +600,43 @@ TEST_F(KVCacheManagerTest, InitAcceptsSingleIndependentLinearGroup) {
     ASSERT_EQ(cache_manager->coordinator_manager_->groupBlockPools().size(), 1u);
     ASSERT_EQ(cache_manager->coordinator_manager_->groupBlockPools().size(), 1u);
     EXPECT_NE(cache_manager->coordinator_manager_->groupBlockPools().front(), nullptr);
+}
+
+TEST_F(KVCacheManagerTest, CapacityExportUsesInitializedPoolsAndMarksUnsupportedTopology) {
+    const char* previous = std::getenv("RTP_LLM_SOURCE_REVISION");
+    const std::optional<std::string> saved = previous ? std::optional<std::string>(previous) : std::nullopt;
+    struct RestoreRevision {
+        std::optional<std::string> value;
+        ~RestoreRevision() {
+            if (value) setenv("RTP_LLM_SOURCE_REVISION", value->c_str(), 1);
+            else unsetenv("RTP_LLM_SOURCE_REVISION");
+        }
+    } restore{saved};
+    setenv("RTP_LLM_SOURCE_REVISION", "1111111111111111111111111111111111111111", 1);
+    char directory[] = "/tmp/rtp-capacity-XXXXXX";
+    ASSERT_NE(mkdtemp(directory), nullptr);
+    struct RemoveDirectory {
+        std::string path;
+        ~RemoveDirectory() { std::filesystem::remove_all(path); }
+    } cleanup{directory};
+    const std::string prefix = std::string(directory) + "/capacity";
+    auto full = makeSimpleMhaCacheConfig(2, 4, 2, rtp_llm::DataType::TYPE_BF16);
+    KVCacheManager manager(full, false);
+    ASSERT_TRUE(manager.init());
+    manager.exportCapacity(prefix, 7);
+    std::ifstream input(prefix + ".decode.rank0.dp0.json");
+    const std::string json((std::istreambuf_iterator<char>(input)), std::istreambuf_iterator<char>());
+    EXPECT_NE(json.find("\"layout\":\"single_pool\""), std::string::npos);
+    EXPECT_NE(json.find("\"device_blocks\":4"), std::string::npos);
+    EXPECT_NE(json.find("\"seq_size_per_block\":2"), std::string::npos);
+    EXPECT_NE(json.find("\"reserve_step\":7"), std::string::npos);
+    auto hybrid = makeSimpleHybridMhaCacheConfig(4, 6, 2, rtp_llm::DataType::TYPE_BF16);
+    KVCacheManager multi(hybrid, false);
+    ASSERT_TRUE(multi.init());
+    multi.exportCapacity(prefix, 0);
+    std::ifstream unsupported(prefix + ".decode.rank0.dp0.json");
+    const std::string unsupported_json((std::istreambuf_iterator<char>(unsupported)), std::istreambuf_iterator<char>());
+    EXPECT_NE(unsupported_json.find("\"layout\":\"unsupported_topology\""), std::string::npos);
 }
 
 TEST_F(KVCacheManagerTest, InitAcceptsFullAndLinearGroups) {

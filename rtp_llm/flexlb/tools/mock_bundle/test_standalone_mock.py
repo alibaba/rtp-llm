@@ -18,8 +18,7 @@ class StandaloneMockTest(unittest.TestCase):
             "MOCK_BUNDLE_RUN_DIR": self.directory.name,
             "MOCK_PREFILL_COUNT": "2",
             "MOCK_DECODE_COUNT": "3",
-            "MOCK_PREFILL_KV_POOL_BLOCKS": "113282",
-            "MOCK_DECODE_KV_POOL_BLOCKS": "113282",
+            "MOCK_ENGINE_CONFIG_JSON": (Path(__file__).parent / "engine-config.json").read_text(),
         }
 
     def test_five_engines_use_one_java_process_and_preserve_capacity(self):
@@ -35,8 +34,7 @@ class StandaloneMockTest(unittest.TestCase):
                             ("--unique-engine-ips", "false"),
                             ("--auto-fetch", "false"), ("--kmonitor", "true"),
                             ("--cache-status-compact-encoding", "false"),
-                            ("--prefill-kv-pool-blocks", "113282"),
-                            ("--decode-kv-pool-blocks", "113282")):
+                            ("--engine-config", str(Path(self.directory.name) / "engine-config.json"))):
             self.assertEqual(args[args.index(flag) + 1], value)
         self.assertNotIn("master.jar", " ".join(args))
         self.assertEqual(json.loads((Path(self.directory.name) / "master-config.json").read_text()), {})
@@ -46,13 +44,13 @@ class StandaloneMockTest(unittest.TestCase):
             "MOCK_JAVA_OPTS": '-Xmx3g "-Ddescription=mock engine"',
             "FETCH_OUTPUT_STREAM": "0", "MOCK_KMONITOR_ENABLED": "false",
             "FLEXLB_CONFIG": '{"schemaVersion":3}',
-            "MOCK_PERFORMANCE_CONFIG_JSON": '{"block_size":1024,"sleep_scale":2}',
+            "MOCK_CALIBRATION_CONFIG_JSON": '{"sleep_scale":2}',
         })
         args = standalone_mock.command(self.env)
         self.assertIn("-Ddescription=mock engine", args)
         self.assertEqual(args[args.index("--auto-fetch") + 1], "true")
         self.assertEqual(args[args.index("--kmonitor") + 1], "false")
-        self.assertEqual(json.loads((Path(self.directory.name) / "performance.json").read_text())["sleep_scale"], 2)
+        self.assertEqual(json.loads((Path(self.directory.name) / "calibration.json").read_text())["sleep_scale"], 2)
 
     def test_compact_cache_status_is_explicitly_opt_in(self):
         self.env["MOCK_CACHE_STATUS_COMPACT_ENCODING"] = "1"

@@ -94,20 +94,13 @@ class KvTotalReportAlignmentTest {
             String role, int blocksOverride, int grpcPort, long roleTotalKvTokens)
             throws IOException {
         JavaMockEngineCluster.Config config = new JavaMockEngineCluster.Config();
+        config.engineConfig = MockEngineConfigFixture.load();
         config.host = "127.0.0.1";
         config.uniqueEngineIps = false;
-        if (roleTotalKvTokens > 0) {
-            if ("prefill".equals(role)) {
-                config.prefillTotalKvTokens = roleTotalKvTokens;
-            } else {
-                config.decodeTotalKvTokens = roleTotalKvTokens;
-            }
-        }
-        if ("prefill".equals(role)) {
-            config.prefillCacheBlocks = blocksOverride;
-        } else {
-            config.decodeCacheBlocks = blocksOverride;
-        }
+        long tokens = roleTotalKvTokens > 0 ? roleTotalKvTokens : (role.equals("decode")
+                ? JavaMockEngineCluster.DEFAULT_DECODE_TOTAL_KV_TOKENS : JavaMockEngineCluster.DEFAULT_TOTAL_KV_TOKENS);
+        int blocks = blocksOverride > 0 ? blocksOverride : (int)((tokens + model.blockSize() - 1) / model.blockSize());
+        config.engineConfig = MockEngineConfigFixture.pool(role, blocks, model.blockSize());
         return JavaMockEngineCluster.startEngine(
                 config, model, serversByPort, bossGroup, workerGroup,
                 services, scheduler, new JavaMockEngineCluster.ClusterStats(),

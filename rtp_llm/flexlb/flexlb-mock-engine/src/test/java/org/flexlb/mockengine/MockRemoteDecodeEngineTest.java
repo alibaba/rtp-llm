@@ -40,7 +40,7 @@ class MockRemoteDecodeEngineTest {
         MockMasterConfig.writeWithPrefillExpression(master, "10");
         decode = new JavaMockEngineCluster.FastRpcService("decode",
                 EngineRpcService.RoleTypePB.ROLE_TYPE_DECODE, 0, new ConcurrentHashMap<>(), scheduler,
-                MockPerformanceModel.load(perf.toString(), master.toString()), 8,
+                MockModelFixture.load(perf.toString(), master.toString()), 8,
                 new JavaMockEngineCluster.ClusterStats());
         decode.setWhaleRemote(true);
         server = ServerBuilder.forPort(0).addService(decode).build().start();
@@ -121,6 +121,23 @@ class MockRemoteDecodeEngineTest {
             stream.generate(7);
             assertTrue(result.get(3, TimeUnit.SECONDS).getFlattenOutput().getFinishedList().contains(true));
             awaitDrain();
+        }
+    }
+
+    @Test void loadDeadlineClosesReservationAndLateCompletionCannotGenerate() throws Exception {
+        start();
+        var field = decode.getClass().getDeclaredField("performance"); field.setAccessible(true);
+        ((MockPerformanceModel)field.get(decode)).pdPolicy = new MockPdPolicy(0, 20, 1000, 1, 25, 1000, 128, 2000);
+        var transfer = new CompletableFuture<Void>();
+        decode.setRemoteLoadBackend(id -> transfer);
+        try (var stream = stream(42, new CompletableFuture<>())) {
+            stream.allocated().get(3, TimeUnit.SECONDS);
+            var error = assertThrows(java.util.concurrent.ExecutionException.class, () -> stream.load().get(3, TimeUnit.SECONDS));
+            assertEquals(8300, MockRpcErrors.downstream(error.getCause()).getErrorCode());
+            awaitDrain();
+            assertTrue(transfer.isCancelled());
+            assertFalse(transfer.complete(null));
+            assertEquals(0, decode.getOccupiedKvTokens());
         }
     }
 

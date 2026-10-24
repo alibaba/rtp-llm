@@ -32,8 +32,11 @@ final class MockVitClient implements AutoCloseable {
         var request = EngineRpcService.MultimodalInputsPB.newBuilder().setRequestId(input.getRequestId())
                 .addAllMultimodalInputs(input.getMultimodalInputsList()).setTimeoutMs(Math.min(budgetMs, 120000));
         if (typed) request.setV41Inputs(input.getV41Inputs());
-        var response = MultimodalRpcServiceGrpc.newBlockingStub(channel)
-                .withDeadlineAfter(Math.min(budgetMs, 120000), TimeUnit.MILLISECONDS).remoteMultimodalEmbedding(request.build());
+        EngineRpcService.MultimodalOutputPB response;
+        try {
+            response = MultimodalRpcServiceGrpc.newBlockingStub(channel)
+                    .withDeadlineAfter(Math.min(budgetMs, 120000), TimeUnit.MILLISECONDS).remoteMultimodalEmbedding(request.build());
+        } catch (RuntimeException error) { throw downstreamFailure(error); }
         if (Context.current().isCancelled()) throw Status.CANCELLED.asRuntimeException();
         var features = response.getMultimodalEmbedding();
         long rows = response.getSplitSizeList().stream().mapToLong(Integer::longValue).sum();
@@ -75,6 +78,33 @@ final class MockVitClient implements AutoCloseable {
             previousEnd = span.getOffset() + span.getLength();
         }
         return input;
+    }
+
+    /** MMGrpcTransport preserves named domain errors; only UNAVAILABLE/deadline become retryable RPC failures. */
+    static RuntimeException downstreamFailure(Throwable error) {
+        var status = Status.fromThrowable(error);
+        long code = MockRpcErrors.downstream(error, 0).getErrorCode();
+        if (code == 8211 && status.getCode() == Status.Code.RESOURCE_EXHAUSTED) code = 409;
+        String message = status.getDescription() == null ? "" : status.getDescription();
+        String[] names = {"MM_LONG_PROMPT_ERROR", "MM_WRONG_FORMAT_ERROR", "MM_PROCESS_ERROR",
+                "MM_EMPTY_ENGINE_ERROR", "MM_NOT_SUPPORTED_ERROR", "MM_DOWNLOAD_FAILED", "MM_REMOTE_RPC_FAILED",
+                "UNSAFE_INPUT_CONTENT", "UNSAFE_OUTPUT_CONTENT"};
+        for (int i = 0; i < names.length; i++) if (message.startsWith("[" + names[i] + "]")) code = 901 + i;
+        if (message.startsWith("[CONCURRENCY_LIMIT_ERROR]")) code = 409;
+        if (message.startsWith("[GENERATE_TIMEOUT]")) code = 603;
+        if (message.startsWith("[CANCELLED]")) code = 8100;
+        if (code == 0) code = switch (status.getCode()) {
+            case CANCELLED -> 8100;
+            case RESOURCE_EXHAUSTED -> 409;
+            case UNAVAILABLE, DEADLINE_EXCEEDED -> 907;
+            default -> 514;
+        };
+        return MockRpcErrors.error(status, code, message);
+    }
+
+    static boolean retryable(Throwable error) {
+        long code = MockRpcErrors.downstream(downstreamFailure(error), 0).getErrorCode();
+        return code == 903 || code == 904 || code == 906 || code == 907;
     }
 
     private static void validateV41Layout(EngineRpcService.GenerateInputPB input) {

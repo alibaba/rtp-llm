@@ -172,7 +172,7 @@ class DecodeKvAllocationSemanticsTest {
         for (String field : List.of("decode_retry_times", "decode_retry_interval_ms", "decode_retry_timeout_ms")) {
             var result = httpPostResponse(controlPort(), "/set_perf", "{\"engine\":\"" + d.getEngineName() + "\",\"" + field + "\":0}");
             assertEquals(400, result.statusCode());
-            assertTrue(result.body().contains("request timeout_ms"));
+            assertTrue(result.body().contains(field));
         }
     }
 

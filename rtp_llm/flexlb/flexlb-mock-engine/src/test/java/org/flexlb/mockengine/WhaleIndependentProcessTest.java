@@ -33,6 +33,11 @@ class WhaleIndependentProcessTest {
     private final int base = Integer.parseInt(System.getenv().getOrDefault("FLEXLB_PORT_BASE", "62400"));
     private ManagedChannel channel;
 
+    @org.junit.jupiter.api.BeforeEach void requireIndependentLoopbackAddresses() {
+        try (var socket = new java.net.ServerSocket()) { socket.bind(new java.net.InetSocketAddress("127.0.0.3", 0)); }
+        catch (java.io.IOException unavailable) { org.junit.jupiter.api.Assumptions.assumeTrue(false, "host does not support independent loopback IPs"); }
+    }
+
     private String get(String ip, int port, String path) throws Exception {
         var response = http.send(HttpRequest.newBuilder(URI.create("http://" + ip + ":" + port + path))
                 .timeout(Duration.ofSeconds(2)).GET().build(), HttpResponse.BodyHandlers.ofString());
@@ -44,8 +49,8 @@ class WhaleIndependentProcessTest {
         Path perf = directory.resolve("performance.json");
         Path master = directory.resolve("master.json");
         if (!Files.exists(perf)) {
-            new ObjectMapper().writeValue(perf.toFile(), Map.of("block_size", 1024, "sleep_scale", 1,
-                    "jitter_pct", 0, "prefill", Map.of("scale", 1), "decode", Map.of("scale", 1,
+            new ObjectMapper().writeValue(perf.toFile(), Map.of("sleep_scale", 1,
+                    "jitter_pct", 0, "prefill", Map.of("scale", 1, "expression", "30"), "decode", Map.of("scale", 1,
                             "tokens_per_step", 1, "step_ms_by_batch", List.of(List.of(1, 20)))));
             MockMasterConfig.writeWithPrefillExpression(master, "30");
         }
@@ -54,7 +59,7 @@ class WhaleIndependentProcessTest {
                 "-cp", System.getProperty("java.class.path"), JavaMockEngineCluster.class.getName(),
                 "--whale", "true", "--n-prefill", prefill ? "1" : "0", "--n-decode", prefill ? "0" : "1",
                 "--host", ip, "--bind-host", ip, "--base-grpc-port", String.valueOf(grpcPort),
-                "--performance", perf.toString(), "--master-config", master.toString(),
+                "--engine-config", "../tools/mock_bundle/engine-config.json", "--calibration", perf.toString(),
                 "--endpoint-file", directory.resolve(ip + "-unused-endpoint.json").toString(),
                 "--auto-fetch", String.valueOf(automatic))
                 .redirectErrorStream(true).redirectOutput(log.toFile()).start();

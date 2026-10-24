@@ -88,10 +88,14 @@ def start_mock_vit(model):
     java = str(Path(os.environ.get('JAVA_HOME', '/opt/taobao/java')) / 'bin/java')
     jar = Path(os.environ.get('MOCK_BUNDLE_JAR_DIR', '/opt/flexlb-mock/tools/mock_bundle/jars')) / 'mock.jar'
     port = int(os.environ.get('MOCK_VIT_PORT', '22161'))
+    from runtime_configs import engine_input, calibration_input
+    runtime = Path(os.environ.get("HIPPO_PROC_WORKDIR", "/tmp")) / "mock-vit-config"
+    runtime.mkdir(parents=True, exist_ok=True)
+    (runtime / "engine-config.json").write_text(json.dumps(engine_input(os.environ)))
+    (runtime / "calibration.json").write_text(json.dumps(calibration_input(os.environ)))
     args = [java, '-Xms64m', '-Xmx512m', '-Djava.awt.headless=true', '-cp', str(jar),
             'org.flexlb.mockengine.MockVitServer', '--port', str(port), '--model-path', str(model),
-            '--concurrency', os.environ.get('VIT_MAX_CONCURRENT_REQUESTS', '32'),
-            '--embedding-cache-bytes', os.environ.get('MOCK_VIT_CACHE_BYTES', '0')]
+            '--engine-config', str(runtime / "engine-config.json"), '--calibration', str(runtime / "calibration.json")]
     child = subprocess.Popen(args)
     channel = grpc.insecure_channel('127.0.0.1:' + str(port))
     stub = MultimodalRpcServiceStub(channel)

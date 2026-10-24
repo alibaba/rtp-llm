@@ -242,7 +242,13 @@ class CompletionRetainWindowTest {
         for (int i = 0; i < wave.length; i++) {
             wave[i] = input(i + 1, 10);
         }
-        assertEquals(1000, enqueue(prefill, batch(10001, slot(0, wave))).getSuccessesCount());
+        // Retention is independent of prepare-pool overload: dispatch bounded waves without status reads.
+        for (int start = 0; start < wave.length; start += 64) {
+            var group = java.util.Arrays.copyOfRange(wave, start, Math.min(wave.length, start + 64));
+            var ack = enqueue(prefill, batch(10001 + start, slot(0, group)));
+            assertEquals(group.length, ack.getSuccessesCount(), ack.toString());
+            assertEquals(0, ack.getErrorsCount());
+        }
         // Observe local completion only; the slow master has made NO status read.
         long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(10);
         while (prefill.getCompletedCount() < 1000 && System.nanoTime() < deadline) {

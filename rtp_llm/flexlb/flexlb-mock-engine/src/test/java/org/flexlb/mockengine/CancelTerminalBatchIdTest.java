@@ -176,7 +176,7 @@ class CancelTerminalBatchIdTest {
                 "decode", Map.of("scale", 1.0, "tokens_per_step", 1.0,
                         "step_ms_by_batch", List.of(List.of(1, 1.0)))));
         MockMasterConfig.writeWithPrefillExpression(master, prefillExpression);
-        return MockPerformanceModel.load(performance.toString(), master.toString());
+        return MockModelFixture.load(performance.toString(), master.toString());
     }
 
     // ──────────── Terminal-frame access through the status RPC ────────────

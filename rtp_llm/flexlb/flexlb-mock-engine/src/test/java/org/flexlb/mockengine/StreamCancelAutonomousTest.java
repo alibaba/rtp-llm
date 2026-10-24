@@ -44,15 +44,15 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * <ol>
  *   <li><b>prefill direct break</b> — the prefill is executing the request:
  *       runningTasks entry dropped, cancelled_rids recorded, typed CANCELLED
- *       terminal published, census counts it — all within 1s of the break;</li>
+ *       cancel intent detected within 1s; terminal and KV release follow the forward boundary;</li>
  *   <li><b>P→D propagation</b> — the break lands on the prefill AFTER the
  *       decode hand-off (both a broken GenerateStream and a broken
  *       FetchResponse): the decode cleans its slot/KV bookkeeping and records
  *       its own CANCELLED terminal, the prefill publishes the typed terminal
  *       carrying the request identity (tryCancelDownstream contract);</li>
  *   <li><b>decode direct break</b> — NON_BATCH style direct-to-decode stream:
- *       cleanup plus the terminal reported IMMEDIATELY (no stale-inflight TTL
- *       wait — the 5s decode step is still far from finishing);</li>
+ *       cancel intent is prompt, while cleanup and terminal wait for the executing
+ *       step, following GenerateStateMachine::moveToNext;</li>
  *   <li><b>race idempotence + no false positives</b> — client-gone vs the
  *       explicit Cancel RPC in both orderings publish exactly one terminal
  *       (the cancel() claim), and a stream that completes NORMALLY never
@@ -113,9 +113,8 @@ class StreamCancelAutonomousTest {
     // ════════════════════════════════════════════════════════════════
 
     @Test
-    void prefillDirectStreamBreakCleansUpWithinOneSecond() throws Exception {
-        // 4s prefill keeps the request executing on the prefill engine while
-        // the stream breaks; the 1s detection window is far inside it.
+    void prefillDirectStreamBreakRetainsKvUntilForwardBoundary() throws Exception {
+        // Cancellation must not free the 4s forward's KV while it is executing.
         startCluster(model("4000", 10), 1, 1);
         JavaMockEngineCluster.FastRpcService prefill = services.get(prefillPort());
         long rid = 7001L;
@@ -129,10 +128,7 @@ class StreamCancelAutonomousTest {
 
             stream.breakStream();
 
-            // ≤1s autonomous cleanup — the core production-alignment budget.
-            awaitCondition(() -> prefill.getCancelledCount() == 1, 1_000,
-                    "prefill should self-cancel after the client stream broke"
-                            + " (running=" + prefill.getRunningCount() + ")");
+            awaitCancellationBoundary(prefill, rid, 1);
             assertEquals(0, prefill.getRunningCount(),
                     "runningTasks entry must be dropped after the break");
             assertEquals(0, prefill.getInflightCount(),
@@ -164,9 +160,7 @@ class StreamCancelAutonomousTest {
 
             stream.breakStream();
 
-            awaitCondition(() -> decode.getCancelledCount() == 1, 1_000,
-                    "decode should be cancelled by the propagated client-gone"
-                            + " (running=" + decode.getRunningCount() + ")");
+            awaitCancellationBoundary(decode, rid, 1);
             // Decode-side cleanup: slot, KV, inflight all released.
             assertEquals(0, decode.getRunningCount());
             assertEquals(0, decode.getInflightCount());
@@ -212,8 +206,7 @@ class StreamCancelAutonomousTest {
             awaitCondition(() -> decode.getActiveDecodeCount() >= 1, 2_000,
                     "Fetch must have advanced the prepared Decode into execution");
             fetch.breakStream();
-            awaitCondition(() -> decode.getCancelledCount() == 1, 1_000,
-                    "decode should be cancelled by the broken fetch stream");
+            awaitCancellationBoundary(decode, rid, 1);
             assertEquals(0, decode.getRunningCount());
             assertEquals(0, decode.getActiveKvTokens());
             assertEquals(0, prefill.getCancelledCount());
@@ -228,11 +221,10 @@ class StreamCancelAutonomousTest {
     }
 
     @Test
-    void decodeDirectStreamBreakReportsTerminalImmediately() throws Exception {
+    void decodeDirectStreamBreakCommitsAtStepBoundary() throws Exception {
         // NON_BATCH style: GenerateStream straight to the decode engine. The
-        // 5s decode step means a NORMAL terminal is ~5s away — a terminal
-        // inside the 1s window proves the engine reported early instead of
-        // waiting out the stale-inflight TTL.
+        // The 5s decode step retains its resources until the scheduler boundary;
+        // cancellation intent must still be detected inside one second.
         startCluster(model("10", 5000), 0, 1);
         JavaMockEngineCluster.FastRpcService decode = services.get(decodePort());
         long rid = 7004L;
@@ -244,12 +236,7 @@ class StreamCancelAutonomousTest {
 
             stream.breakStream();
 
-            long breakNanos = System.nanoTime();
-            awaitCondition(() -> decode.getCancelledCount() == 1, 1_000,
-                    "decode must self-cancel within the 1s window");
-            long elapsedMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - breakNanos);
-            assertTrue(elapsedMs < 5_000,
-                    "terminal at " + elapsedMs + "ms must beat the 5s decode step");
+            awaitCancellationBoundary(decode, rid, 1);
 
             assertEquals(0, decode.getRunningCount());
             assertEquals(0, decode.getInflightCount());
@@ -257,7 +244,7 @@ class StreamCancelAutonomousTest {
                     "decode KV must be released");
             assertTrue(cancelledRids(decode).contains(rid));
             assertEquals(1, countCancelTerminals(decode, rid),
-                    "early typed CANCELLED terminal published exactly once");
+                    "typed CANCELLED terminal published exactly once at the boundary");
             assertEquals(1, clientGoneCensus());
         }
     }
@@ -274,8 +261,7 @@ class StreamCancelAutonomousTest {
             awaitCondition(() -> decode.getActiveDecodeCount() >= 1, 2_000,
                     "decode should run the request (order A leg)");
             stream.breakStream();
-            awaitCondition(() -> decode.getCancelledCount() == 1, 1_000,
-                    "client-gone cancel should claim the terminal first");
+            awaitCancellationBoundary(decode, ridA, 1);
 
             // The late explicit Cancel finds the claim armed → no-op.
             assertNull(decode.cancel(ridA),
@@ -299,13 +285,13 @@ class StreamCancelAutonomousTest {
                     "decode should run the request (order B leg)");
             assertNotNull(decode.cancel(ridB),
                     "explicit cancel should claim the terminal (request running)");
-            assertEquals(2, decode.getCancelledCount(),
-                    "two distinct requests cancelled so far");
+            assertEquals(1, decode.getCancelledCount(),
+                    "the second cancellation remains pending until the executing step completes");
 
             stream.breakStream();
             // Give the break time to propagate — if the detector mis-fired
             // it would show up inside this window.
-            Thread.sleep(500);
+            awaitCancellationBoundary(decode, ridB, 2);
 
             assertEquals(2, decode.getCancelledCount(),
                     "the late break must not cancel twice");
@@ -400,6 +386,7 @@ class StreamCancelAutonomousTest {
         serversByPort = new ConcurrentHashMap<>();
         stats = new JavaMockEngineCluster.ClusterStats();
         JavaMockEngineCluster.Config config = new JavaMockEngineCluster.Config();
+        config.engineConfig = MockEngineConfigFixture.load();
         config.host = "127.0.0.1";
         config.uniqueEngineIps = false;
 
@@ -464,8 +451,17 @@ class StreamCancelAutonomousTest {
                 .filter(task -> task.getRequestId() == rid)
                 .filter(task -> task.hasErrorInfo()
                         && task.getErrorInfo().getErrorCode()
-                                == EngineRpcService.ErrorCodePB.CANCELLED.getNumber())
+                                == 8100)
                 .count();
+    }
+
+    /** GenerateStream::releaseResource waits for captured workers; no TTL is involved. */
+    private static void awaitCancellationBoundary(JavaMockEngineCluster.FastRpcService service, long id, long count)
+            throws Exception {
+        awaitCondition(() -> service.cancellationPending(id), 1000, "cancel intent must reach the executing engine promptly");
+        assertTrue(service.getActiveKvTokens() > 0, "forward still owns its KV after cancellation intent");
+        assertTrue(service.getInflightCount() > 0, "terminal must not precede resource release");
+        awaitCondition(() -> service.getCancelledCount() == count, 7000, "cancel must commit at the forward/step boundary");
     }
 
     private static void awaitCondition(BooleanSupplier condition, long timeoutMs, String message)

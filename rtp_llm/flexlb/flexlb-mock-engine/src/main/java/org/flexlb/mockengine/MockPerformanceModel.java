@@ -3,9 +3,6 @@ package org.flexlb.mockengine;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.flexlb.balance.prediction.PrefillTimeFormula;
-import org.flexlb.config.ConfigService;
-import org.flexlb.config.FlexlbConfig;
-import org.flexlb.config.RoutingConfig.EstimatorType;
 import org.flexlb.engine.grpc.EngineRpcService;
 
 import java.io.IOException;
@@ -18,68 +15,13 @@ import java.util.HexFormat;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ThreadLocalRandom;
-import java.util.concurrent.atomic.AtomicBoolean;
 
 final class MockPerformanceModel {
     private static final ObjectMapper MAPPER = new ObjectMapper();
-    private static final AtomicBoolean CALIBRATION_LOGGED = new AtomicBoolean();
 
-    /**
-     * Default cap on queued (not running) prefill batches per engine, JSON
-     * "prefill.max_waiting_batches". Derivation for the recommended value 4:
-     * prefill batches run FIFO, so the k-th queued batch waits k × batch_ms
-     * before it starts. With a 1000 ms target latency and a prefill execution
-     * of ~150 ms, the wait allowance is about 850 ms; n = 4 bounds the deepest
-     * wait at 4 × 150 = 600 ms (750 ms total), leaving ~25% headroom. Rule of
-     * thumb: n ≈ target_latency_ms / batch_ms − 1.
-     *
-     * <p>The default here is 0 (unbounded, legacy behavior): the Auto-TPM E2E
-     * suites deliberately build deep prefill queues (queue-evict scenarios), so
-     * the cap is opt-in via the performance JSON. The current online_eval
-     * captured presets explicitly set 256; this default applies when absent.
-     */
-    static final int DEFAULT_MAX_WAITING_PREFILL_BATCHES = 0;
-
-    /**
-     * Default per-execution-batch prefill TOKEN budget, JSON
-     * "prefill.max_batch_tokens" (engine-internal regroup, 20260903 #8).
-     * Without prefill.fifo, the default is also reported by the mock to the
-     * master in WorkerStatus.max_batch_tokens_size (1_048_576): one number, two uses —
-     * the master clamps its decision-group token capacity against it
-     * (BatcherContext prefers the worker-reported limit), the engine's own
-     * regroup budget holds the same ceiling, so the two layers can never
-     * disagree about the configured mock limit. This legacy regroup path is
-     * separate from prefill.fifo; its token accounting is mock-specific.
-     * 0 disables the token dimension.
-     */
+    // Internal synthetic test defaults. Production behavior comes from MockEngineConfig.
     static final int DEFAULT_MAX_BATCH_TOKENS = 1_048_576;
-
-    /**
-     * Default per-execution-batch prefill REQUEST count cap, JSON
-     * "prefill.max_batch_requests" (engine-internal regroup, 20260903 #8).
-     * Default 32 is a mock regroup limit, separate from the master's
-     * FIXED_WINDOW maxRequests and from the prefill.fifo request limit.
-     * 0 disables the request-count dimension.
-     *
-     * <p>Both dimensions at 0 = regroup fully OFF: master-composed batches
-     * execute verbatim (the legacy behavior, reproducible on demand).
-     */
     static final int DEFAULT_MAX_BATCH_REQUESTS = 32;
-
-    /**
-     * Default decode KV reserve-step window in TOKENS, JSON
-     * "decode.reserve_step" (0 = disabled, the non-speculative production
-     * default). Production reference (Zola forensics): the speculative
-     * decode config sets {@code reserve_step_ = gen_num_per_circle + 1}
-     * (tokens proposed per step + 1, typically a single-digit number) — a
-     * CONSTANT look-ahead window front-loaded at initKVBlock: the initial
-     * allocation prices {@code ceil((seq_len + reserve_step) / spb)} blocks,
-     * and the front-loaded part is CONSUMED as seq_len grows (incrKVBlock may
-     * spend reserved blocks), adding one block only at each block boundary —
-     * constant front-load, never an accumulating append. MTP-style
-     * speculative stress profiles set it to {@code tokens_per_step + 1}; the
-     * default 0 keeps every existing behavior bit-identical.
-     */
     static final int DEFAULT_DECODE_RESERVE_STEP = 0;
 
     private record Calibration(JsonNode data, String sha256) {}
@@ -123,11 +65,18 @@ final class MockPerformanceModel {
     }
 
     private volatile int blockSize;
+    private JsonNode calibrationConfig;
+    private final java.util.concurrent.atomic.AtomicLong configGeneration = new java.util.concurrent.atomic.AtomicLong();
     private MockEosModel eosModel;
     private volatile MockEosModel runtimeEosModel;
     boolean nativeTokenCacheKeys;
     boolean prefillReuseCache = true;
     boolean prefillDeviceCache = true;
+    boolean decodeDeviceCache = true;
+    long hostLoadMs;
+    MockHostTransfer.Policy hostTransferPolicy;
+    MockCacheWatermarks cacheWatermarks;
+    MockPdPolicy pdPolicy = MockPdPolicy.DEFAULT;
     private final double sleepScale;
     private final double prefillScale;
     // Floor (ms) for the final post-scale prefill sleep from JSON "prefill.min_ms".
@@ -136,7 +85,7 @@ final class MockPerformanceModel {
     private final Double prefillMinMs;
     // Cap on queued (not running) prefill batches from JSON "prefill.max_waiting_batches".
     // <= 0 disables the cap; defaults to DEFAULT_MAX_WAITING_PREFILL_BATCHES when absent.
-    private final int maxWaitingPrefillBatches;
+    int maxWaitingPrefillBatches;
     // Cap on the number of requests coalesced into ONE prefill batch on the direct
     // (generate_stream / NON_BATCH) path, JSON "prefill.direct_batch_size_max"
     // (default 32, matching the master FIXED_WINDOW maxRequests). Production
@@ -145,12 +94,12 @@ final class MockPerformanceModel {
     // without coalescing the mock's direct-path drain rate is ~batch_ms per
     // SINGLE request, several times below production. 1 restores the legacy
     // one-request-per-batch behaviour.
-    private final int directBatchSizeMax;
+    int directBatchSizeMax;
     // Engine-internal regroup budget (20260903 #8): per-execution-batch token
     // ceiling and request-count cap. Both 0 = regroup off (legacy verbatim
     // master batches). See the DEFAULT_* constants above for the anchors.
-    private final int maxBatchTokens;
-    private final int maxBatchRequests;
+    int maxBatchTokens;
+    int maxBatchRequests;
     private final PrefillTimeFormula prefillFormula;
     private record RuntimePrefill(String expression, PrefillTimeFormula formula) {}
     private volatile RuntimePrefill runtimePrefill;
@@ -174,7 +123,9 @@ final class MockPerformanceModel {
     // Decode KV reserve-step window in tokens (JSON "decode.reserve_step",
     // default DEFAULT_DECODE_RESERVE_STEP = 0 = disabled): see the constant's
     // javadoc for the production speculative-decode anchor.
-    private final int decodeReserveStep;
+    private int decodeReserveStep;
+    boolean disableDecodeFirstReuse;
+    Integer observedReserveBlocks;
     boolean decodeReuseCache = true;
     boolean prefillGpuPrefixTree = true;
     boolean decodeGpuPrefixTree = true;
@@ -189,7 +140,7 @@ final class MockPerformanceModel {
     // real engine where KV_ALLOCATED is exactly "KV reserved, not running
     // yet". The decode hard concurrency gate (park overflow in the engine-side
     // waiting queue) is unconditional and needs no switch.
-    private final boolean reportQueuedAsKvAllocated;
+    boolean reportQueuedAsKvAllocated;
     private volatile double jitterPct;
     // Opt-in, bounded residual noise. Keep the legacy percentage jitter for old suites.
     private NoiseSpec prefillNoise = NoiseSpec.DISABLED;
@@ -241,13 +192,76 @@ final class MockPerformanceModel {
     // Python /set_perf compatibility: decode_scale overrides the config-file
     // decode scale (Python-compat /set_perf -> performance.decode_scale).
     private volatile Double overrideDecodeScale;
-    // Python /set_perf compatibility: max_waiting_batches overrides the
-    // config-file prefill waiting-queue cap (Python-compat /set_perf ->
-    // performance prefill.max_waiting_batches). Null = not overridden;
-    // the override value follows the same semantics as the JSON field
-    // (0 = unbounded, > 0 = cap on queued prefill batches).
-    private volatile Integer overrideMaxWaitingPrefillBatches;
     private MockPrefillBatchPolicy prefillBatchPolicy;
+
+    void setPrefillBatchPolicy(MockPrefillBatchPolicy policy) { prefillBatchPolicy = policy; }
+    void setDecodeReserveStep(int steps) { decodeReserveStep = steps; }
+
+    static MockPerformanceModel loadCalibration(String file) throws IOException {
+        return loadCalibration(MAPPER.readTree(Path.of(file).toFile()));
+    }
+
+    static MockPerformanceModel loadCalibration(JsonNode node) throws IOException {
+        MockEngineConfig.fields(node, "sleep_scale", "jitter_pct", "prefill", "decode", "vit",
+                "calibration_id", "calibration_model", "calibration_hardware", "calibration_status", "calibration_sha256");
+        JsonNode prefill = node.path("prefill"), decode = node.path("decode");
+        if (node.has("prefill")) MockEngineConfig.fields(prefill, "expression", "fixed_ms", "min_ms", "scale", "noise", "host_load_ms");
+        if (node.has("decode")) MockEngineConfig.fields(decode, "scale", "noise", "step_ms_by_batch",
+                "step_base_ms", "step_per_running_ms", "tokens_per_step", "eos");
+        Calibration calibration = loadCalibration();
+        if (node.has("calibration_sha256") && !calibration.sha256().equals(node.path("calibration_sha256").asText()))
+            throw new IllegalStateException("calibration_sha256 disagrees with packaged mock calibration");
+        JsonNode defaults = calibration.data().path("decode");
+        String expression = prefill.path("expression").asText(calibration.data().path("prefill_expression").asText());
+        var formula = validatePrefillExpression(expression);
+        List<DecodePoint> points = new ArrayList<>();
+        if (decode.has("step_ms_by_batch")) {
+            if (!decode.get("step_ms_by_batch").isArray() || decode.get("step_ms_by_batch").isEmpty())
+                throw new IllegalArgumentException("step_ms_by_batch must be a nonempty curve");
+            for (JsonNode pair : decode.get("step_ms_by_batch")) {
+                if (!pair.isArray() || pair.size() != 2 || !pair.get(0).isIntegralNumber()
+                        || !pair.get(0).canConvertToInt() || pair.get(0).intValue() < 1
+                        || !pair.get(1).isNumber() || !Double.isFinite(pair.get(1).doubleValue()) || pair.get(1).doubleValue() < 0)
+                    throw new IllegalArgumentException("invalid decode curve point");
+                points.add(new DecodePoint(pair.get(0).intValue(), pair.get(1).doubleValue()));
+            }
+            points.sort(Comparator.comparingInt(DecodePoint::batchSize));
+            if (points.stream().map(DecodePoint::batchSize).distinct().count() != points.size())
+                throw new IllegalArgumentException("duplicate decode batch size");
+            if (decode.has("step_base_ms") || decode.has("step_per_running_ms"))
+                throw new IllegalArgumentException("decode curve and linear coefficients are mutually exclusive");
+        }
+        double tokens = number(decode, "tokens_per_step", defaults.path("tokens_per_step").doubleValue());
+        if (tokens == 0) throw new IllegalArgumentException("tokens_per_step must be positive");
+        double jitter = number(node, "jitter_pct", 0);
+        NoiseSpec prefillNoise = NoiseSpec.read(prefill.path("noise"), "prefill.noise");
+        NoiseSpec decodeNoise = NoiseSpec.read(decode.path("noise"), "decode.noise");
+        if (jitter > 0 && (prefillNoise.maxAbsMs() > 0 || decodeNoise.maxAbsMs() > 0))
+            throw new IllegalStateException("jitter_pct and role noise are mutually exclusive");
+        var model = new MockPerformanceModel(1, number(node, "sleep_scale", 1), number(prefill, "scale", 1),
+                prefill.has("min_ms") ? number(prefill, "min_ms", 0) : null,
+                prefill.has("fixed_ms") ? number(prefill, "fixed_ms", 0) : null,
+                0, 32, DEFAULT_MAX_BATCH_TOKENS, DEFAULT_MAX_BATCH_REQUESTS, formula, List.copyOf(points),
+                number(decode, "step_base_ms", defaults.path("step_base_ms").doubleValue()),
+                number(decode, "step_per_running_ms", defaults.path("step_per_running_ms").doubleValue()),
+                tokens, 0, number(decode, "scale", 1), false, jitter);
+        model.configuredPrefillExpression = expression;
+        double hostLoadMs = number(prefill, "host_load_ms", 0);
+        if (hostLoadMs > Long.MAX_VALUE) throw new IllegalArgumentException("host_load_ms is too large");
+        model.hostLoadMs = (long)Math.ceil(hostLoadMs);
+        model.prefillNoise = prefillNoise; model.decodeNoise = decodeNoise;
+        model.eosModel = MockEosModel.load(decode.path("eos"));
+        model.calibrationConfig = node.deepCopy();
+        return model;
+    }
+
+    private static double number(JsonNode node, String key, double fallback) {
+        JsonNode value = node.get(key);
+        if (value == null) return fallback;
+        if (!value.isNumber() || !Double.isFinite(value.doubleValue()) || value.doubleValue() < 0)
+            throw new IllegalArgumentException(key + " must be finite and nonnegative");
+        return value.doubleValue();
+    }
 
     MockPrefillBatchPolicy prefillBatchPolicy() { return prefillBatchPolicy; }
 
@@ -297,9 +311,12 @@ final class MockPerformanceModel {
                 prefillFormula, List.copyOf(decodePoints), stepBaseMs, stepPerRunningMs,
                 tokensPerStep, decodeReserveStep, decodeScale, reportQueuedAsKvAllocated, jitterPct);
         // Explicit overrides installed before startup are part of that engine's initial settings.
+        copy.calibrationConfig = calibrationConfig;
         copy.eosModel = eosModel;
         copy.runtimeEosModel = runtimeEosModel;
         copy.decodeReuseCache = decodeReuseCache;
+        copy.disableDecodeFirstReuse = disableDecodeFirstReuse;
+        copy.observedReserveBlocks = observedReserveBlocks;
         copy.prefillGpuPrefixTree = prefillGpuPrefixTree;
         copy.decodeGpuPrefixTree = decodeGpuPrefixTree;
         copy.memoryCacheBlocks = memoryCacheBlocks;
@@ -310,6 +327,11 @@ final class MockPerformanceModel {
         copy.nativeTokenCacheKeys = nativeTokenCacheKeys;
         copy.prefillReuseCache = prefillReuseCache;
         copy.prefillDeviceCache = prefillDeviceCache;
+        copy.decodeDeviceCache = decodeDeviceCache;
+        copy.hostLoadMs = hostLoadMs;
+        copy.pdPolicy = pdPolicy;
+        copy.hostTransferPolicy = hostTransferPolicy;
+        copy.cacheWatermarks = cacheWatermarks;
         copy.overrideFixedPrefillMs = overrideFixedPrefillMs;
         copy.runtimePrefill = runtimePrefill;
         copy.runtimeDecode = runtimeDecode;
@@ -318,221 +340,7 @@ final class MockPerformanceModel {
         copy.configuredPrefillExpression = configuredPrefillExpression;
         copy.overrideDecodeStepMs = overrideDecodeStepMs;
         copy.overrideDecodeScale = overrideDecodeScale;
-        copy.overrideMaxWaitingPrefillBatches = overrideMaxWaitingPrefillBatches;
         return copy;
-    }
-
-    static MockPerformanceModel load(String performanceFile, String masterConfigFile) throws IOException {
-        Calibration calibration = loadCalibration();
-        JsonNode defaultDecode = calibration.data().path("decode");
-        JsonNode performance = MAPPER.readTree(Path.of(performanceFile).toFile());
-        if (performance.has("calibration_sha256")
-                && !calibration.sha256().equals(performance.path("calibration_sha256").asText())) {
-            throw new IllegalStateException("Performance JSON '" + performanceFile
-                    + "': calibration_sha256 disagrees with packaged mock calibration");
-        }
-        if (CALIBRATION_LOGGED.compareAndSet(false, true)) {
-            System.out.printf("mock calibration available: id=%s model=%s hardware=%s status=%s sha256=%s%n",
-                    calibration.data().path("id").asText(),
-                    calibration.data().path("model").asText(),
-                    calibration.data().path("hardware").asText(),
-                    calibration.data().path("status").asText(), calibration.sha256());
-        }
-        int blockSize = performance.path("block_size").asInt(1024);
-        double sleepScale = performance.path("sleep_scale").asDouble(1.0);
-        JsonNode prefill = performance.path("prefill");
-        if (prefill.has("fifo") && !prefill.get("fifo").isNull()
-                && (prefill.has("direct_batch_size_max")
-                        || prefill.has("max_batch_requests") || prefill.has("max_batch_tokens"))) {
-            throw new IllegalStateException("prefill.fifo cannot be combined with legacy prefill batch limits");
-        }
-        double prefillScale = prefill.path("scale").asDouble(1.0);
-        // "fixed_ms" is an explicit opt-in for duration-blind suites
-        // (chaos/elastic): when the JSON declares it, mock prefill is flat.
-        // Absent (the normal path) -> formula-driven, keeping mock execution
-        // time and master routing predictions on one expression. What was
-        // removed is the SILENT fallback, not this explicit channel.
-        Double prefillFixedMs = prefill.has("fixed_ms") ? prefill.get("fixed_ms").asDouble() : null;
-        Double prefillMinMs = prefill.has("min_ms") ? prefill.get("min_ms").asDouble() : null;
-        int maxWaitingPrefillBatches = prefill.path("max_waiting_batches")
-                .asInt(DEFAULT_MAX_WAITING_PREFILL_BATCHES);
-        int directBatchSizeMax = prefill.path("direct_batch_size_max").asInt(32);
-        int maxBatchTokens = prefill.path("max_batch_tokens")
-                .asInt(DEFAULT_MAX_BATCH_TOKENS);
-        int maxBatchRequests = prefill.path("max_batch_requests")
-                .asInt(DEFAULT_MAX_BATCH_REQUESTS);
-
-        String prefillExpression = loadPrefillExpression(masterConfigFile,
-                calibration.data().path("prefill_expression").asText());
-        PrefillTimeFormula formula = PrefillTimeFormula.parse(prefillExpression);
-
-        JsonNode decode = performance.path("decode");
-        // per_token_ms is REMOVED (task #69, wrong-version-deleted-clean rule):
-        // it was a fixed per-token latency (V3-era no-MTP single-stream caliber)
-        // that overstated low-batch decode ~5.5x and full-batch ~2.8x versus
-        // production. Fail fast with a migration hint instead of silently
-        // reinterpreting it.
-        if (decode.has("per_token_ms")) {
-            throw new IllegalStateException("Performance JSON '" + performanceFile
-                    + "': decode.per_token_ms is removed — decode is now priced per STEP"
-                    + ". Remove per_token_ms and declare decode step timing in the"
-                    + " performance file, or use the packaged mock calibration.");
-        }
-        boolean reportQueuedAsKvAllocated =
-                decode.path("report_queued_as_kv_allocated").asBoolean(false);
-        List<DecodePoint> points = new ArrayList<>();
-        for (JsonNode pair : decode.path("step_ms_by_batch")) {
-            if (pair.isArray() && pair.size() >= 2) {
-                points.add(new DecodePoint(pair.get(0).asInt(), pair.get(1).asDouble()));
-            }
-        }
-        boolean hasLinearCoeffs = decode.has("step_base_ms") || decode.has("step_per_running_ms");
-        if (!points.isEmpty() && hasLinearCoeffs) {
-            // Two explicit step-latency declarations are a config conflict;
-            // picking one silently would violate the least-surprise rule.
-            throw new IllegalStateException("Performance JSON '" + performanceFile
-                    + "': decode.step_ms_by_batch and decode.step_base_ms/step_per_running_ms"
-                    + " are mutually exclusive — declare exactly one step-latency source.");
-        }
-        points.sort(Comparator.comparingInt(DecodePoint::batchSize));
-        // A missing decode declaration uses the identified calibration packed
-        // into this jar. Explicit curves or coefficients override it.
-        double stepBaseMs = decode.path("step_base_ms")
-                .asDouble(defaultDecode.path("step_base_ms").asDouble());
-        double stepPerRunningMs = decode.path("step_per_running_ms")
-                .asDouble(defaultDecode.path("step_per_running_ms").asDouble());
-        double tokensPerStep = decode.path("tokens_per_step")
-                .asDouble(defaultDecode.path("tokens_per_step").asDouble());
-        if (tokensPerStep <= 0) {
-            throw new IllegalStateException("Performance JSON '" + performanceFile
-                    + "': decode.tokens_per_step must be > 0 (got " + tokensPerStep + ")");
-        }
-        int decodeReserveStep = decode.path("reserve_step").asInt(DEFAULT_DECODE_RESERVE_STEP);
-        if (decodeReserveStep < 0) {
-            throw new IllegalStateException("Performance JSON '" + performanceFile
-                    + "': decode.reserve_step must be >= 0 (got " + decodeReserveStep + ")");
-        }
-        double jitterPct = performance.path("jitter_pct").asDouble(0.0);
-        NoiseSpec prefillNoise = NoiseSpec.read(prefill.path("noise"), "prefill.noise");
-        NoiseSpec decodeNoise = NoiseSpec.read(decode.path("noise"), "decode.noise");
-        if (jitterPct > 0 && (prefillNoise.maxAbsMs() > 0 || decodeNoise.maxAbsMs() > 0))
-            throw new IllegalStateException("jitter_pct and role noise are mutually exclusive");
-        MockPerformanceModel model = new MockPerformanceModel(blockSize, sleepScale, prefillScale,
-                prefillMinMs, prefillFixedMs, maxWaitingPrefillBatches, directBatchSizeMax,
-                maxBatchTokens, maxBatchRequests, formula,
-                List.copyOf(points), stepBaseMs, stepPerRunningMs, tokensPerStep,
-                decodeReserveStep,
-                decode.path("scale").asDouble(1.0),
-                reportQueuedAsKvAllocated, jitterPct);
-        model.prefillNoise = prefillNoise;
-        model.decodeNoise = decodeNoise;
-        for (var role : List.of(prefill, decode)) {
-            if (role.has("enable_gpu_prefix_tree") && !role.get("enable_gpu_prefix_tree").isBoolean())
-                throw new IllegalStateException("enable_gpu_prefix_tree must be boolean");
-        }
-        model.configuredPrefillExpression = prefillExpression;
-        model.prefillGpuPrefixTree = prefill.path("enable_gpu_prefix_tree").asBoolean(true);
-        model.decodeGpuPrefixTree = decode.path("enable_gpu_prefix_tree").asBoolean(true);
-        for (String field : List.of("reuse_cache", "enable_device_cache")) {
-            if (prefill.has(field) && !prefill.get(field).isBoolean())
-                throw new IllegalStateException("prefill." + field + " must be boolean");
-        }
-        model.prefillReuseCache = prefill.path("reuse_cache").asBoolean(true);
-        model.prefillDeviceCache = prefill.path("enable_device_cache").asBoolean(true);
-        if (decode.has("reuse_cache")) {
-            if (!decode.get("reuse_cache").isBoolean()) {
-                throw new IllegalStateException("decode.reuse_cache must be boolean");
-            }
-            model.decodeReuseCache = decode.get("reuse_cache").booleanValue();
-        }
-        if (decode.has("reserve_block_ratio")) {
-            JsonNode ratio = decode.get("reserve_block_ratio");
-            double value = ratio.asDouble(Double.NaN);
-            if (!ratio.isNumber() || !Double.isFinite(value) || value < 0 || value > 50) {
-                throw new IllegalStateException("decode.reserve_block_ratio must be a percentage in [0, 50]");
-            }
-            model.decodeReserveBlockRatio = value;
-        }
-        if (prefill.has("reserve_block_ratio")) {
-            JsonNode ratio = prefill.get("reserve_block_ratio");
-            double value = ratio.asDouble(Double.NaN);
-            if (!ratio.isNumber() || !Double.isFinite(value) || value < 0 || value > 50) {
-                throw new IllegalStateException("prefill.reserve_block_ratio must be a percentage in [0, 50]");
-            }
-            model.prefillReserveBlockRatio = value;
-        }
-        JsonNode memory = prefill.path("memory_cache");
-        for (String obsolete : List.of("read_ms_per_block", "write_ms_per_block", "copy_lifecycle")) {
-            if (memory.has(obsolete)) {
-                throw new IllegalStateException("prefill.memory_cache." + obsolete + " is unsupported");
-            }
-        }
-        if (memory.has("enabled") && !memory.get("enabled").isBoolean())
-            throw new IllegalStateException("prefill.memory_cache.enabled must be boolean");
-        if (memory.path("enabled").asBoolean(false)) {
-            JsonNode blocks = memory.path("capacity_blocks");
-            if (!blocks.isIntegralNumber() || !blocks.canConvertToInt() || blocks.asInt() <= 0)
-                throw new IllegalStateException("prefill.memory_cache.capacity_blocks must be a positive integer");
-            model.memoryCacheBlocks = blocks.asInt();
-            if (memory.has("enable_prefix_tree") && !memory.get("enable_prefix_tree").isBoolean())
-                throw new IllegalStateException("prefill.memory_cache.enable_prefix_tree must be boolean");
-            model.memoryPrefixTree = memory.path("enable_prefix_tree").asBoolean(true);
-        }
-        model.eosModel = MockEosModel.load(decode.path("eos"));
-        model.prefillBatchPolicy = MockPrefillBatchPolicy.load(prefill.path("fifo"));
-        return model;
-    }
-
-    /**
-     * Resolve the prefill duration formula — exactly one source, never a
-     * silent hard-coded fallback:
-     * <ol>
-     *   <li>an explicit FORMULA estimator in the master config's FLEXLB_CONFIG
-     *       (blank expression = misconfiguration, fail fast);</li>
-     *   <li>otherwise the packaged, legacy-unverified DSv4 mock calibration.
-     *       It is a static approximation for LEARNING, which this mock cannot
-     *       replay.</li>
-     * </ol>
-     * Explicit FORMULA keeps mock execution time and master predictions on
-     * the same expression; the legacy silent fixed_ms / 300 ms fallbacks are gone
-     * (an explicit performance-JSON "prefill.fixed_ms" declaration still
-     * wins over the formula — see prefillMs).
-     */
-    private static String loadPrefillExpression(String masterConfigFile,
-                                               String defaultExpression) throws IOException {
-        JsonNode root = MAPPER.readTree(Path.of(masterConfigFile).toFile());
-        // The standalone launcher writes the schema-v3 configuration directly;
-        // bundle deployments retain the historical zone/env envelope.
-        if (root.has("schemaVersion")) {
-            var estimator = ConfigService.parse(root.toString()).getRouter().getRoles()
-                    .getPrefill().getExecutionTimeEstimator();
-            if (estimator != null && estimator.getType() == EstimatorType.FORMULA) {
-                return estimator.getExpression();
-            }
-            return defaultExpression;
-        }
-        JsonNode envs = root.path("zone_process_setting").path("process_info").path("envs");
-        for (JsonNode item : envs) {
-            if (item.isArray() && item.size() >= 2
-                    && "FLEXLB_CONFIG".equals(item.get(0).asText())) {
-                FlexlbConfig config = ConfigService.parse(item.get(1).asText());
-                var estimator = config.getRouter().getRoles().getPrefill()
-                        .getExecutionTimeEstimator();
-                if (estimator != null
-                        && estimator.getType() == EstimatorType.FORMULA) {
-                    String expression = estimator.getExpression();
-                    if (expression == null || expression.isBlank()) {
-                        throw new IllegalStateException("Master config " + masterConfigFile
-                                + ": router.roles.prefill.executionTimeEstimator is FORMULA"
-                                + " with a blank expression — set the expression explicitly or"
-                                + " omit the estimator to use the packaged mock calibration");
-                    }
-                    return expression;
-                }
-                break;  // LEARNING uses the file-backed mock approximation.
-            }
-        }
-        return defaultExpression;
     }
 
     RequestShape shape(EngineRpcService.GenerateInputPB input, MockLruBlockCache cache) {
@@ -563,8 +371,7 @@ final class MockPerformanceModel {
         if (nativeKeys) {
             // HashUtil.h / KVCacheHashUtil.cc: signed rolling Jenkins hash.
             // Publish only complete blocks; partial blocks are not reusable.
-            String physical = System.getenv("MOCK_HASH_BLOCK_SIZE");
-            int physicalBlockSize = physical == null || physical.isBlank() ? blockSize : Integer.parseInt(physical);
+            int physicalBlockSize = blockSize;
             blockKeys.addAll(MockImageCacheKeys.routeBlocks(input, physicalBlockSize, blockSize, MockImageCacheKeys.seed(input)));
         }
         // hitBlocks carries the RAW prefix-match run length (key count) — the
@@ -580,6 +387,10 @@ final class MockPerformanceModel {
         MockEosModel activeEos = runtimeEosModel;
         outputLen = (activeEos == null ? eosModel : activeEos)
                 .outputLength(input, Math.max(1, outputLen), explicitOutputLength);
+        if (prefillBatchPolicy != null) {
+            outputLen = input.getGenerateConfig().getMaxNewTokens() == 0 ? 0
+                    : (int)Math.min(outputLen, Math.max(0, prefillBatchPolicy.maxSeqLen() - decodeReserveStep - inputLen));
+        }
         return new RequestShape(input, inputLen, outputLen, List.copyOf(blockKeys),
                 hitTokens, hitBlocks, nativeKeys);
     }
@@ -655,6 +466,19 @@ final class MockPerformanceModel {
 
     void setPrefillExpression(String expression) {
         runtimePrefill = new RuntimePrefill(expression, validatePrefillExpression(expression));
+        configGeneration.incrementAndGet();
+    }
+
+    Map<String, Object> calibrationState() {
+        var state = new java.util.LinkedHashMap<String, Object>();
+        state.put("generation", configGeneration.get());
+        state.put("initial", calibrationConfig == null ? Map.of() : calibrationConfig);
+        state.put("prefill", prefillExpressionState());
+        state.put("decode", decodeModelState());
+        state.put("output_length", outputLengthState());
+        state.put("prefill_fixed_ms", overrideFixedPrefillMs == null ? configuredFixedPrefillMs : overrideFixedPrefillMs);
+        state.put("decode_scale", effectiveDecodeScale());
+        return state;
     }
 
     Map<String, Object> prefillExpressionState() {
@@ -665,7 +489,9 @@ final class MockPerformanceModel {
     }
 
     void setOverrideFixedPrefillMs(Double ms) {
+        if (ms == null || !Double.isFinite(ms) || ms < 0) throw new IllegalArgumentException("prefill_fixed_ms must be finite and nonnegative");
         this.overrideFixedPrefillMs = ms;
+        configGeneration.incrementAndGet();
     }
 
     void setOverrideDecodeStepMs(Double ms) {
@@ -674,33 +500,17 @@ final class MockPerformanceModel {
 
     /** Python /set_perf {@code decode_scale}: replace the decode latency scale. */
     void setOverrideDecodeScale(Double scale) {
+        if (scale == null || !Double.isFinite(scale) || scale < 0) throw new IllegalArgumentException("decode_scale must be finite and nonnegative");
         this.overrideDecodeScale = scale;
+        configGeneration.incrementAndGet();
     }
 
-    /**
-     * Python /set_perf {@code max_waiting_batches}: replace the prefill
-     * waiting-queue cap (same semantics as the JSON field: 0 = unbounded,
-     * > 0 = cap on queued batches). Null restores the JSON-configured value.
-     */
-    void setOverrideMaxWaitingPrefillBatches(Integer cap) {
-        this.overrideMaxWaitingPrefillBatches = cap;
-    }
-
-    /** Python launcher {@code --block-size}: override the block size from the perf config. */
+    /** Set finalized allocator geometry before engine construction. */
     void setBlockSize(int blockSize) {
         this.blockSize = blockSize;
     }
 
-    /**
-     * Cap on queued (not running) prefill batches per engine
-     * (JSON "prefill.max_waiting_batches", default 0 = unbounded).
-     * Runtime /set_perf override (max_waiting_batches) beats the JSON value,
-     * same priority chain as prefillMs (runtime > JSON).
-     */
-    int maxWaitingPrefillBatches() {
-        return overrideMaxWaitingPrefillBatches != null
-                ? overrideMaxWaitingPrefillBatches : maxWaitingPrefillBatches;
-    }
+    int maxWaitingPrefillBatches() { return maxWaitingPrefillBatches; }
 
     /**
      * Cap on requests coalesced into one direct-path prefill batch
@@ -773,6 +583,7 @@ final class MockPerformanceModel {
                 || perRunningMs < 0 || !Double.isFinite(tokensPerStep) || tokensPerStep <= 0)
             throw new IllegalArgumentException("decode coefficients must be finite; base/tokens positive and slope nonnegative");
         runtimeDecode = new RuntimeDecode(baseMs, perRunningMs, tokensPerStep);
+        configGeneration.incrementAndGet();
     }
 
     Map<String, Object> decodeModelState() {

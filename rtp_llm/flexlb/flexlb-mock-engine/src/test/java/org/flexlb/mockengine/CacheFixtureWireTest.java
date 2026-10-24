@@ -143,7 +143,7 @@ class CacheFixtureWireTest {
 
     @Test void compactEncodingCliDefaultsOffAndRejectsInvalidBoolean() {
         var args = new java.util.ArrayList<>(java.util.List.of("--endpoint-file", "endpoints.json",
-                "--performance", "performance.json", "--master-config", "master.json"));
+                "--engine-config", "../tools/mock_bundle/engine-config.json", "--calibration", "performance.json"));
         assertFalse(JavaMockEngineCluster.Config.parse(args.toArray(String[]::new)).cacheStatusCompactEncoding);
         args.addAll(java.util.List.of("--cache-status-compact-encoding", "true"));
         assertTrue(JavaMockEngineCluster.Config.parse(args.toArray(String[]::new)).cacheStatusCompactEncoding);
@@ -157,7 +157,7 @@ class CacheFixtureWireTest {
     void unmodifiedGrpcClientDecodesFixtureAndOrdinaryResponses(boolean compact) throws Exception {
         var perf = directory.resolve("perf.json"); java.nio.file.Files.writeString(perf, "{\"block_size\":2}");
         var config = directory.resolve("master.json"); MockMasterConfig.writeWithPrefillExpression(config, "20");
-        var model = MockPerformanceModel.load(perf.toString(), config.toString());
+        var model = MockModelFixture.load(perf.toString(), config.toString());
         try (var cluster = MockEngineTestCluster.create(model, 61580, 1, 0)) {
             var service = cluster.prefill(0);
             assertFalse(service.cacheStatusCompactEncoding, "extra Mock optimization defaults off");

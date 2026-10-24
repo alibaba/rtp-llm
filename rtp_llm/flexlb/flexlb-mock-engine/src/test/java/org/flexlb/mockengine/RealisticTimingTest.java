@@ -135,7 +135,7 @@ class RealisticTimingTest {
                 "decode", Map.of("scale", 1.0, "tokens_per_step", 1.0,
                         "step_ms_by_batch", List.of(List.of(1, 5.0)))));
         MockMasterConfig.writeWithPrefillExpression(master, "100");
-        return MockPerformanceModel.load(performance.toString(), master.toString());
+        return MockModelFixture.load(performance.toString(), master.toString());
     }
 
 }

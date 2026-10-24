@@ -81,7 +81,7 @@ def read_environment(value, path):
         required = {"fixed_ms", "scale", "max_batch_tokens", "max_batch_requests"}
         perf = mapping(value["prefill_perf"], field, required, required)
         result["prefill_perf"] = {
-            key: number(val, field + "." + key, integer=key.startswith("max_batch_"))
+            key: number(val, field + "." + key, minimum=1 if key.startswith("max_batch_") else 0, integer=key.startswith("max_batch_"))
             for key, val in perf.items()
         }
     for key in ("n_prefill", "n_decode"):

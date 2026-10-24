@@ -55,6 +55,26 @@ class MockVitMonitorTest {
         }
     }
 
+    @Test void schedulerMetricsUseRealNamesMillisecondsAndExcludeCacheHits() throws Exception {
+        var document = MockEngineConfigFixture.load().snapshot();
+        var limits = document.path("roles").path("vit");
+        var config = new MockVitService.Config(8, limits.path("vit_concurrency").intValue(),
+                limits.path("vit_max_queue_size").intValue(), limits.path("mm_cache_cpu_max_bytes").longValue(),
+                limits.path("mm_hash_key_cache_max_bytes").longValue(), 1 << 20, 1 << 20, 20);
+        try (var service = new MockVitService(config, null, document);
+             var monitor = new MockVitMonitor(sink, tags)) {
+            monitor.start(service);
+            var image = MockVitServiceTest.image(28, 28, 0xabc123);
+            service.acquire(image, 3000).get(3, TimeUnit.SECONDS);
+            service.acquire(image, 3000).get(3, TimeUnit.SECONDS);
+            verify(sink, times(1)).report(eq("py_rtp_vit_embedding_batch_size"), any(), eq(1.0));
+            verify(sink, times(1)).report(eq("py_rtp_vit_embedding_forward_rt"), any(), doubleThat(ms -> ms >= 15 && ms < 2000));
+            verify(sink, times(1)).report(eq("py_rtp_vit_embedding_queue_wait_rt"), any(), doubleThat(ms -> ms >= 0));
+            verify(sink, timeout(1000).times(1)).report(eq("py_rtp_vit_embedding_rt"), any(), doubleThat(ms -> ms >= 15));
+            verify(sink, atLeastOnce()).report(eq("py_rtp_vit_embedding_queue_size"), any(), eq(0.0));
+        }
+    }
+
     @Test void cancelledRpcRecordsOnlyOneTerminal() throws Exception {
         var d = MockVitService.Config.defaults();
         try (var service = new MockVitService(new MockVitService.Config(8, 1, 4, 1 << 20, 1 << 20,

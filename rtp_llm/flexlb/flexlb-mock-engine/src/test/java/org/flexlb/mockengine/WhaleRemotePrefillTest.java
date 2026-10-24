@@ -87,6 +87,26 @@ class WhaleRemotePrefillTest {
         assertTtftStrictlyBeforeE2e(stream);
     }
 
+    @Test @Timeout(10)
+    void downstreamFailureCannotReleaseGpuWhilePrefillForwardStillRuns() throws Exception {
+        startCluster("1000", 5.0);
+        var field = prefill.getClass().getDeclaredField("performance"); field.setAccessible(true);
+        var model = (MockPerformanceModel)field.get(prefill);
+        model.setPrefillBatchPolicy(new MockPrefillBatchPolicy(4, 10000, 0, 10000, 1, false, 0, 0, 0, false, false));
+        model.pdPolicy = new MockPdPolicy(0, 1000, 10000, 1, 5000, 10000, 128, 2000);
+        var ack = enqueue(prefill, batch(7900, slot(0, inputWithDecode(7900, 10, decode.getGrpcPort()))));
+        assertEquals(1, ack.getSuccessesCount(), ack.toString());
+        assertTrue(prefill.getActiveKvTokens() > 0);
+        remoteServer.shutdownNow();
+        var stream = fetch(prefill, 7900, 2000);
+        assertNotNull(stream.error.get());
+        assertTrue(prefill.getActiveKvTokens() > 0, "transport failure must retain GPU ownership until the forward boundary");
+        long until = System.nanoTime() + TimeUnit.SECONDS.toNanos(3);
+        while ((prefill.getActiveKvTokens() > 0 || prefill.getInflightCount() > 0) && System.nanoTime() < until) Thread.sleep(1);
+        assertEquals(0, prefill.getActiveKvTokens());
+        assertEquals(0, prefill.getInflightCount());
+    }
+
     private static void assertFrontendTensor(EngineRpcService.GenerateOutputsPB frame, int tokens, int token) {
         var output = frame.getFlattenOutput();
         assertTrue(output.hasOutputIds(), "normal frontend must receive output_ids");
@@ -215,7 +235,7 @@ class WhaleRemotePrefillTest {
                         "tokens_per_step", 1.0,
                         "step_ms_by_batch", List.of(List.of(1, decodeStepMs)))));
         MockMasterConfig.writeWithPrefillExpression(master, prefillFormulaMs);
-        MockPerformanceModel model = MockPerformanceModel.load(performance.toString(), master.toString());
+        MockPerformanceModel model = MockModelFixture.load(performance.toString(), master.toString());
 
         prefill = new JavaMockEngineCluster.FastRpcService(
                 "prefill", EngineRpcService.RoleTypePB.ROLE_TYPE_PREFILL,
@@ -353,4 +373,31 @@ class WhaleRemotePrefillTest {
                                             long awaitMs) throws InterruptedException {
         return collect(observer -> service.generateStreamCall(input, observer), awaitMs);
     }
+    @Test @Timeout(15)
+    void priorityCancelInterruptsRemoteAllocateUnderKvPressure() throws Exception {
+        startCluster("100", 5);
+        var field = prefill.getClass().getDeclaredField("performance"); field.setAccessible(true);
+        var model = (MockPerformanceModel)field.get(prefill);
+        model.setPrefillBatchPolicy(new MockPrefillBatchPolicy(4, 10000, 0, 10000, 1, false, 0, 0, 0, false, false));
+        model.pdPolicy = new MockPdPolicy(0, 5000, 10000, 1, 5000, 10000, 128, 2000);
+        field = decode.getClass().getDeclaredField("cache"); field.setAccessible(true);
+        var pool = (MockLruBlockCache)field.get(decode);
+        var held = pool.acquire(pool.totalBlocks() - pool.reserveBlocks(), List.of());
+        org.junit.jupiter.api.Assertions.assertNotNull(held);
+        try {
+            var response = java.util.concurrent.CompletableFuture.supplyAsync(() -> enqueue(prefill,
+                    batch(7990, slot(0, inputWithDecode(7990, 10, decode.getGrpcPort())))));
+            field = prefill.getClass().getDeclaredField("remotePrefillOwners"); field.setAccessible(true);
+            var owners = (Map<?, ?>)field.get(prefill);
+            long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(3);
+            while (!owners.containsKey(7990L) && System.nanoTime() < deadline) Thread.sleep(1);
+            assertTrue(owners.containsKey(7990L));
+            assertTrue(prefill.cancelRequest(7990).found());
+            var ack = response.get(1, TimeUnit.SECONDS);
+            assertEquals(0, ack.getSuccessesCount()); assertEquals(1, ack.getErrorsCount());
+            assertEquals(8429, ack.getErrors(0).getErrorInfo().getErrorCode());
+            assertEquals(0, decode.getAcceptedCount()); assertEquals(0, prefill.getOccupiedKvTokens());
+        } finally { pool.release(held); }
+    }
+
 }

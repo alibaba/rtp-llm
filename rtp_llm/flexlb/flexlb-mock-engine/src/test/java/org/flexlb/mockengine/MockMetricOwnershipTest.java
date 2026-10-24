@@ -15,7 +15,7 @@ class MockMetricOwnershipTest {
         var master = directory.resolve("master.json");
         java.nio.file.Files.writeString(perf, "{\"block_size\":64,\"prefill\":{\"formula\":\"1\"},\"decode\":{}}");
         java.nio.file.Files.writeString(master, "{}");
-        var model = MockPerformanceModel.load(perf.toString(), master.toString());
+        var model = MockModelFixture.load(perf.toString(), master.toString());
         try (var cluster = MockEngineTestCluster.create(model, 63180, 0, 1)) {
             var d = cluster.decode(0);
             var field = d.getClass().getDeclaredField("cache");
@@ -98,6 +98,28 @@ class MockMetricOwnershipTest {
         monitor.sample(Map.of("rtp_llm_generate_batch_size", 0), d, System.nanoTime());
         assertEquals(java.util.List.of(4.0), batches);
         assertEquals(java.util.List.of(4.0, 0.0), running);
+    }
+
+    @Test void queueObservationsAreSchedulerOwnedAndFallbackUsesCounterRegistration() {
+        var samples = new ArrayList<String>();
+        var kinds = new java.util.HashMap<String, Object>();
+        var sink = (FlexMonitor) java.lang.reflect.Proxy.newProxyInstance(getClass().getClassLoader(),
+                new Class<?>[]{FlexMonitor.class}, (proxy, method, args) -> {
+                    if (method.getName().equals("report")) samples.add((String)args[0]);
+                    if (method.getName().equals("register")) kinds.put((String)args[0], args[1]);
+                    return null;
+                });
+        var monitor = new WhaleMockMonitor(sink);
+        var tags = Map.of("role", "ROLE_TYPE_PREFILL");
+        var round = Map.<String, Number>of("rtp_llm_wait_stream_size", 2, "rtp_llm_loading_cache_stream_size", 1,
+                "rtp_llm_scheduler_admitted_context_batch_size", 1, "rtp_llm_scheduler_admitted_context_token_size", 64,
+                "rtp_llm_scheduler_waiting_oldest_age_us", 1000);
+        monitor.reportScheduler(round, tags);
+        monitor.sample(round, tags, System.nanoTime());
+        monitor.sample(round, tags, System.nanoTime());
+        assertEquals(5, samples.size(), "periodic snapshots cannot duplicate scheduler observations");
+        monitor.reportEvent(Map.of("rtp_llm_scheduler_group_fallback_acc", 2), tags);
+        assertEquals(org.flexlb.enums.FlexMetricType.COUNTER, kinds.get("rtp_llm_scheduler_group_fallback_acc"));
     }
 
     @Test void streamDimensionsUseLocalOutputAndDoNotInventZeroGaugeSamples() {

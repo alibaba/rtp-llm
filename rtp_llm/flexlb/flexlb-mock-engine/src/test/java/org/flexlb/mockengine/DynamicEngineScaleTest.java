@@ -685,6 +685,7 @@ class DynamicEngineScaleTest {
         serversByPort = new ConcurrentHashMap<>();
         JavaMockEngineCluster.ClusterStats stats = new JavaMockEngineCluster.ClusterStats();
         JavaMockEngineCluster.Config config = new JavaMockEngineCluster.Config();
+        config.engineConfig = MockEngineConfigFixture.load();
         clusterConfig = config;
         config.host = "127.0.0.1";
         // This suite pins discovery-file contents with literal 127.0.0.1
@@ -830,7 +831,7 @@ class DynamicEngineScaleTest {
         // FLEXLB_CONFIG env (FormulaEstimatorConfig), not the upstream
         // PREFILL_TIME_FORMULA env — use the shared test helper.
         MockMasterConfig.writeWithPrefillExpression(master, formula);
-        return MockPerformanceModel.load(performance.toString(), master.toString());
+        return MockModelFixture.load(performance.toString(), master.toString());
     }
 
     private static EngineRpcService.GenerateInputPB input(long requestId, int inputTokens) {

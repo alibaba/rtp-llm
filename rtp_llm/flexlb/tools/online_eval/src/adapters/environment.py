@@ -270,8 +270,9 @@ class EnvManager:
                 env.zk_launch_argv = (shlex.split(override) if override else
                                      ZkHelperOps.default_launch_argv(resolve_java21()))
 
-        # perf config
-        env.perf_file.write_text(json.dumps(spec.perf, indent=2))
+        # Freeze behavior and timing separately before starting either process.
+        self._write_mock_configuration(env, spec, env.perf_file)
+
 
         try:
             # mock cluster
@@ -303,6 +304,22 @@ class EnvManager:
             self._record_processes(env)
         self.current = env
         return env
+
+    def _write_mock_configuration(self, env, spec, calibration_file, *, engine_file=None):
+        import copy
+        calibration = copy.deepcopy(spec.perf)
+        engine = calibration.pop("engine_config")
+        for role, blocks in (("prefill", spec.prefill_cache_blocks), ("decode", spec.decode_cache_blocks)):
+            capacity = engine["roles"][role]["capacity"]
+            if capacity["kind"] == "synthetic":
+                capacity["device_blocks"] = blocks
+                capacity["reserve_blocks"] = int(blocks * engine["roles"][role]["kv_cache"]["reserve_block_ratio"] / 100)
+            elif capacity["device_blocks"] != blocks:
+                raise ValueError("real allocator capacity cannot be overridden by scenario pool size")
+        calibration_file.write_text(json.dumps(calibration, indent=2))
+        path = engine_file or env.run_dir / "engine-config.json"
+        path.write_text(json.dumps(engine, indent=2))
+        return path
 
     def _start_mock(self, env: FlexEnv, *, deadline=None) -> None:
         spec = self.mock_spec if self.mock_spec is not None else env.spec
@@ -343,10 +360,8 @@ class EnvManager:
             str(spec.mock_auto_fetch).lower(),
             "--fetch-attach-timeout-ms",
             str(spec.mock_fetch_attach_timeout_ms),
-            "--performance",
+            "--calibration",
             str(env.perf_file),
-            "--master-config",
-            str(_write_master_config(env, spec)),
             # stdout telemetry (java_mock_stats line every statsIntervalMs):
             # lets the archived mock_engine.log answer "which RPC counters
             # kept moving / stalled" for hang forensics (3c-class issues)
@@ -355,10 +370,8 @@ class EnvManager:
             str(spec.diagnostic_events).lower(),
             "--events-file",
             str(env.run_dir / "engine_events.jsonl") if spec.diagnostic_events else "",
-            "--prefill-kv-pool-blocks",
-            str(spec.prefill_cache_blocks),
-            "--decode-kv-pool-blocks",
-            str(spec.decode_cache_blocks),
+            "--engine-config",
+            str(env.run_dir / "engine-config.json"),
             "--endpoint-file",
             str(env.endpoint_file),
             "--env-file",
@@ -459,6 +472,14 @@ class EnvManager:
             if not port_accepting(grpc_port) and not port_accepting(http_port):
                 break
             time.sleep(0.5)
+        import copy
+        victim_spec = copy.copy(env.spec)
+        if perf_file is not None:
+            victim_spec.perf = json.loads(perf_file.read_text())
+            victim_spec.perf["engine_config"] = env.spec.perf["engine_config"]
+        victim_calibration = env.run_dir / f"victim-{role}-calibration.json"
+        victim_engine = self._write_mock_configuration(env, victim_spec, victim_calibration,
+                engine_file=env.run_dir / f"victim-{role}-engine-config.json")
         endpoint_file = env.run_dir / f"victim_endpoints_{role}.json"
         argv = [
             resolve_java21(),
@@ -473,14 +494,10 @@ class EnvManager:
             "1" if role == "decode" else "0",
             "--base-grpc-port",
             str(grpc_port),
-            "--performance",
-            str(perf_file or env.perf_file),
-            "--master-config",
-            str(_write_master_config(env)),
-            "--prefill-kv-pool-blocks",
-            str(env.spec.prefill_cache_blocks if role == "prefill" else 0),
-            "--decode-kv-pool-blocks",
-            str(env.spec.decode_cache_blocks if role == "decode" else 0),
+            "--calibration",
+            str(victim_calibration),
+            "--engine-config",
+            str(victim_engine),
             "--endpoint-file",
             str(endpoint_file),
         ]

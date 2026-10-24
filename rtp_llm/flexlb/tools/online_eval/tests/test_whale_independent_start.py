@@ -23,11 +23,12 @@ class WhaleIndependentStartTest(unittest.TestCase):
                 **os.environ, "PATH": f"{root}:{os.environ['PATH']}",
                 "FLEXLB_MOCK_WHALE": "1", "POD_IP": "10.0.0.5",
                 "START_PORT": "7001", "ROLE_TYPE": "PREFILL",
-                "MOCK_PERFORMANCE_CONFIG_JSON": "{}", "MOCK_MASTER_CONFIG_JSON": "{}",
+                "MOCK_CALIBRATION_CONFIG_JSON": "{}",
+                "MOCK_ENGINE_CONFIG_JSON": (START.parents[2] / "tools/mock_bundle/engine-config.json").read_text(),
                 "MOCK_RUN_DIR": str(root / "run"), "MOCK_KMONITOR_ENABLED": "false",
             }
-            env.pop("MOCK_PERFORMANCE_CONFIG", None)
-            env.pop("MOCK_MASTER_CONFIG", None)
+            env.pop("MOCK_ENGINE_CONFIG", None)
+            env.pop("MOCK_CALIBRATION_CONFIG", None)
             env.pop("MOCK_EVENT_LOG_ENABLED", None)
             env.update(extra or {})
             return subprocess.run(["sh", str(START), *arguments], env=env, text=True,

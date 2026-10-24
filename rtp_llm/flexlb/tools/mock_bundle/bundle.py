@@ -46,17 +46,7 @@ def vit_configuration(cfg, env, mock_port, legacy):
         return None
     if legacy:
         raise ValueError("modern Mock ViT requires the modern Master protocol")
-    values = {}
-    for name, default in {"port": mock_port + cfg["prefill"] + cfg["decode"],
-                          "hidden_size": 128, "concurrency": 4, "queue_capacity": 64,
-                          "embedding_cache_bytes": 67108864, "hash_cache_bytes": 8388608,
-                          "compute_delay_ms": 1}.items():
-        raw = env.get("MOCK_VIT_" + name.upper(), str(default))
-        if not raw.isdecimal():
-            raise ValueError("invalid MOCK_VIT_" + name.upper())
-        values[name] = int(raw)
-        if values[name] < (0 if name.endswith("bytes") or name == "compute_delay_ms" else 1):
-            raise ValueError("invalid MOCK_VIT_" + name.upper())
+    values = {"port": int(env.get("MOCK_VIT_PORT", mock_port + cfg["prefill"] + cfg["decode"]))}
     if not mock_port + cfg["prefill"] + cfg["decode"] <= values["port"] <= 65535:
         raise ValueError("Mock ViT port overlaps P/D or exceeds 65535")
     return values
@@ -81,16 +71,7 @@ def run():
     cfg_path = Path(os.environ.get("MOCK_BUNDLE_CONFIG_PATH", ROOT / "bundle.yaml"))
     cfg = yaml.safe_load(cfg_path.read_text())
     overrides = yaml.safe_load(os.environ.get("MOCK_BUNDLE_OVERRIDES_YAML", "{}"))
-    numeric_overrides = {
-        "prefill",
-        "decode",
-        "block_size",
-        "prefill_block_size",
-        "decode_block_size",
-        "prefill_kv_pool_blocks",
-        "decode_kv_pool_blocks",
-        "decode_max_concurrency",
-    }
+    numeric_overrides = {"prefill", "decode"}
     if not isinstance(overrides, dict) or set(overrides) - numeric_overrides - {
         "mock_heap",
         "master_heap",
@@ -147,18 +128,14 @@ def run():
         )
     )
     performance_path = (cfg_path.parent / cfg["performance"]).resolve()
-    performance_json = os.environ.get("MOCK_PERFORMANCE_CONFIG_JSON")
+    from runtime_configs import engine_input
+    engine = engine_input(os.environ, cfg_path.parent / cfg["engine_config"])
+    (runtime / "engine-config.json").write_text(json.dumps(engine))
+    performance_json = os.environ.get("MOCK_CALIBRATION_CONFIG_JSON")
     eos_json = os.environ.get("MOCK_EOS_CONFIG_JSON")
-    performance = json.loads(
-        performance_json
-        if performance_json is not None
-        else performance_path.read_text()
-    )
+    performance = json.loads(performance_json if performance_json is not None else performance_path.read_text())
     if not isinstance(performance, dict):
-        raise ValueError("MOCK_PERFORMANCE_CONFIG_JSON must be a JSON object")
-    if performance.get("block_size", cfg["block_size"]) != cfg["block_size"]:
-        raise ValueError("performance block_size must match bundle block_size")
-    performance["block_size"] = cfg["block_size"]
+        raise ValueError("MOCK_CALIBRATION_CONFIG_JSON must be a JSON object")
     if eos_json is not None:
         eos = json.loads(eos_json)
         if not isinstance(eos, dict):
@@ -236,11 +213,6 @@ def run():
                 str(cfg["prefill"]),
                 "--n-decode",
                 str(cfg["decode"]),
-                *(
-                    ["--decode-max-concurrency", str(cfg["decode_max_concurrency"])]
-                    if "decode_max_concurrency" in cfg
-                    else []
-                ),
                 "--base-grpc-port",
                 str(mock_port),
                 "--host",
@@ -253,26 +225,10 @@ def run():
                 str(runtime / "endpoints.json"),
                 "--discovery-file",
                 str(runtime / "discovery.json"),
-                "--performance",
+                "--calibration",
                 str(performance_path),
-                "--master-config",
-                str(runtime / "master-config.json"),
-                "--block-size",
-                str(cfg["block_size"]),
-                *(
-                    ["--prefill-block-size", str(cfg["prefill_block_size"])]
-                    if "prefill_block_size" in cfg
-                    else []
-                ),
-                *(
-                    ["--decode-block-size", str(cfg["decode_block_size"])]
-                    if "decode_block_size" in cfg
-                    else []
-                ),
-                "--prefill-kv-pool-blocks",
-                str(cfg["prefill_kv_pool_blocks"]),
-                "--decode-kv-pool-blocks",
-                str(cfg["decode_kv_pool_blocks"]),
+                "--engine-config",
+                str(runtime / "engine-config.json"),
                 *(["--events-file", str(runtime / "engine-events.jsonl")]
                   if event_log_enabled == "1" else []),
             ],
@@ -285,6 +241,8 @@ def run():
         if vit_cfg is not None:
             vit = start("vit", [java, "-Xms64m", "-Xmx512m", "-Djava.awt.headless=true", "-cp", str(jars / "mock.jar"),
                                 "org.flexlb.mockengine.MockVitServer",
+                                "--engine-config", str(runtime / "engine-config.json"),
+                                "--calibration", str(performance_path),
                                 *[part for key, value in vit_cfg.items()
                                   for part in ("--" + key.replace("_", "-"), str(value))],
                                 *(["--model-path", os.environ["MOCK_VIT_MODEL_PATH"]]

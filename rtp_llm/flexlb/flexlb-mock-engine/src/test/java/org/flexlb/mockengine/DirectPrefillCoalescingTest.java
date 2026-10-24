@@ -184,6 +184,84 @@ class DirectPrefillCoalescingTest {
         verifyFifoPhysicalPool(false, 100, 1);
     }
 
+    @Test void fifoRunningCancelKeepsKvUntilForwardBoundary() throws Exception {
+        var model = model(0, 1);
+        model.setOverrideFixedPrefillMs(500.0);
+        model.setPrefillBatchPolicy(new MockPrefillBatchPolicy(4, 10000, 0, 10000, 1, false, 0, 0, 0, false, false));
+        var prefill = startPrefill(model);
+        var first = generateAsync(prefill, input(7101, 10));
+        var second = generateAsync(prefill, input(7102, 10));
+        long allocated = prefill.getActiveKvTokens();
+        assertTrue(allocated > 0);
+        assertEquals(EngineRpcService.TaskPhase.TASK_PHASE_RUNNING, prefill.cancel(7101));
+        assertEquals(allocated, prefill.getActiveKvTokens(), "in-flight forward still owns its KV");
+        assertEquals(2, prefill.getInflightCount(), "terminal is committed at the execution boundary");
+        assertNotNull(first.get(5, TimeUnit.SECONDS));
+        assertNull(second.get(5, TimeUnit.SECONDS));
+        awaitCompleted(prefill, 1, 5000);
+        assertEquals(0, prefill.getActiveKvTokens());
+    }
+
+    @Test void consumerSeesCancelBeforeSchedulerCommitAndLaterDeadlineCannotReplaceIt() throws Exception {
+        var model = model(0, 1);
+        model.setOverrideFixedPrefillMs(400.0);
+        model.setPrefillBatchPolicy(new MockPrefillBatchPolicy(4, 10000, 0, 10000, 1, false, 0, 0, 0, false, false));
+        var service = startPrefill(model);
+        var request = input(7301, 10).toBuilder().setGenerateConfig(input(7301, 10).getGenerateConfig()
+                .toBuilder().setTimeoutMs(100)).build();
+        var response = generateAsync(service, request);
+        long held = service.getActiveKvTokens();
+        service.cancel(7301);
+        var error = response.get(200, TimeUnit.MILLISECONDS);
+        assertEquals(io.grpc.Status.Code.CANCELLED, io.grpc.Status.fromThrowable(error).getCode());
+        assertEquals(8100, MockRpcErrors.downstream(error).getErrorCode());
+        assertEquals(held, service.getActiveKvTokens());
+        assertEquals(1, service.getInflightCount());
+        assertEquals(0, service.getCancelledCount());
+        long until = System.nanoTime() + TimeUnit.SECONDS.toNanos(3);
+        while (service.getInflightCount() != 0 && System.nanoTime() < until) Thread.sleep(2);
+        var status = MockEngineTestSupport.workerStatus(service, 0);
+        assertEquals(8100, status.getFinishedTaskList(0).getErrorInfo().getErrorCode());
+        assertEquals(0, service.getActiveKvTokens());
+    }
+
+    @Test void permanentInitFailureTerminatesInSchedulerWithoutCountingAsCancel() throws Exception {
+        var model = model(0, 1);
+        model.observedReserveBlocks = 1;
+        model.setPrefillBatchPolicy(new MockPrefillBatchPolicy(4, 10000, 0, 10000, 1, false, 0, 0, 0, false, false));
+        var service = new JavaMockEngineCluster.FastRpcService("prefill", EngineRpcService.RoleTypePB.ROLE_TYPE_PREFILL,
+                BASE_PORT, services, scheduler, model, 5, stats);
+        services.put(BASE_PORT, service);
+        var failure = generateAsync(service, input(7351, 5120)).get(2, TimeUnit.SECONDS);
+        assertEquals(602, MockRpcErrors.downstream(failure).getErrorCode());
+        assertEquals(0, service.getInflightCount());
+        assertEquals(0, service.getCancelledCount());
+        assertEquals(0, service.getActiveKvTokens());
+        assertEquals(602, MockEngineTestSupport.workerStatus(service, 0).getFinishedTaskList(0).getErrorInfo().getErrorCode());
+    }
+
+    @Test void fifoBatchRpcPreservesGroupsAcrossExecutionBoundaries() throws Exception {
+        var model = model(0, 1);
+        model.setOverrideFixedPrefillMs(200.0);
+        model.setPrefillBatchPolicy(new MockPrefillBatchPolicy(4, 10000, 0, 10000, 1, false, 0, 0, 0, false, false));
+        var prefill = startPrefill(model);
+        var blocker = generateAsync(prefill, input(7201, 10));
+        for (int batch = 0; batch < 2; batch++) {
+            var response = MockEngineTestSupport.enqueueAndFetch(prefill, MockEngineTestSupport.batch(100 + batch,
+                    MockEngineTestSupport.slot(0, input(7210 + batch * 2, 10), input(7211 + batch * 2, 10))));
+            assertEquals(2, response.getSuccessesCount());
+        }
+        assertNull(blocker.get(5, TimeUnit.SECONDS));
+        awaitCompleted(prefill, 5, 5000);
+        assertEquals(3, stats.prefillBatches.sum(), "one blocker plus two isolated groups; no cross-group regroup");
+        assertEquals(2, stats.maxPrefillBatchSize.get());
+        var status = MockEngineTestSupport.workerStatus(prefill, 0);
+        assertEquals(0, status.getAvailableConcurrency(), "real LocalRpcServer leaves legacy count fields unset");
+        assertEquals(0, status.getWaitingQueryLen());
+        assertEquals(0, status.getRunningQueryLen());
+        assertFalse(prefill.isLeakDetected());
+    }
+
     private void verifyFifoPhysicalPool(boolean cancelLast) throws Exception {
         verifyFifoPhysicalPool(cancelLast, 5, 128);
     }
@@ -198,7 +276,7 @@ class DirectPrefillCoalescingTest {
                         "max_inited_kv_streams", initializedCap)),
                 "decode", Map.of("step_ms_by_batch", List.of(List.of(1, 1.0)))));
         MockMasterConfig.writeWithPrefillExpression(master, "500");
-        var model = MockPerformanceModel.load(config.toString(), master.toString());
+        var model = MockModelFixture.load(config.toString(), master.toString());
         var prefill = new JavaMockEngineCluster.FastRpcService("prefill",
                 EngineRpcService.RoleTypePB.ROLE_TYPE_PREFILL, BASE_PORT, services,
                 scheduler, model, blocks, stats);
@@ -209,7 +287,11 @@ class DirectPrefillCoalescingTest {
         assertFalse(second.isDone(), "temporary P KV shortage must queue, not reject");
         assertFalse(last.isDone());
         assertEquals(2, prefill.getWaitingCount());
-        if (cancelLast) prefill.cancel(5003);
+        if (cancelLast) {
+            prefill.cancel(5003);
+            assertEquals(3, prefill.getInflightCount(), "consumer error must not commit scheduler FINISHED early");
+            assertEquals(0, prefill.getCancelledCount());
+        }
         assertNull(first.get(5, TimeUnit.SECONDS));
         assertNull(second.get(5, TimeUnit.SECONDS));
         if (cancelLast) assertNotNull(last.get(5, TimeUnit.SECONDS));
@@ -231,7 +313,7 @@ class DirectPrefillCoalescingTest {
                         "max_seq_len", 10000, "max_waiting_requests", 10)),
                 "decode", Map.of("step_ms_by_batch", List.of(List.of(1, 1.0)))));
         MockMasterConfig.writeWithPrefillExpression(master, "500");
-        var loaded = MockPerformanceModel.load(performance.toString(), master.toString());
+        var loaded = MockModelFixture.load(performance.toString(), master.toString());
         assertNotNull(loaded.forEngine().prefillBatchPolicy(), "engine clone preserves policy");
         var prefill = startPrefill(loaded.forEngine());
         var first = generateAsync(prefill, input(4000, 1));
@@ -259,7 +341,7 @@ class DirectPrefillCoalescingTest {
                         "max_seq_len", 10000, "max_waiting_requests", 10)),
                 "decode", Map.of("step_ms_by_batch", List.of(List.of(1, 1.0)))));
         MockMasterConfig.writeWithPrefillExpression(master, "500");
-        var model = MockPerformanceModel.load(config.toString(), master.toString());
+        var model = MockModelFixture.load(config.toString(), master.toString());
         model.nativeTokenCacheKeys = true;
         var prefill = startPrefill(model);
         var first = generateAsync(prefill, input(6001, 60));
@@ -299,7 +381,7 @@ class DirectPrefillCoalescingTest {
                         "direct_batch_size_max", directBatchSizeMax),
                 "decode", Map.of("scale", 1.0, "step_ms_by_batch", List.of(List.of(1, 1.0)))));
         MockMasterConfig.writeWithPrefillExpression(master, "100");
-        return MockPerformanceModel.load(performance.toString(), master.toString());
+        return MockModelFixture.load(performance.toString(), master.toString());
     }
 
     private static void awaitCompleted(JavaMockEngineCluster.FastRpcService service,
