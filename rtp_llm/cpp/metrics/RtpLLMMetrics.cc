@@ -1,10 +1,28 @@
 #include "rtp_llm/cpp/metrics/RtpLLMMetrics.h"
+#include <mutex>
+#include <utility>
 #include "autil/EnvUtil.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "kmonitor/client/KMonitorFactory.h"
 #include "rtp_llm/cpp/metrics/KmonParam.h"
 
 namespace rtp_llm {
+namespace {
+
+struct KmonitorLifecycle {
+    std::mutex mutex;
+    std::map<void*, std::function<void()>> shutdown_hooks;
+    bool shutdown_started = false;
+};
+
+KmonitorLifecycle& kmonitorLifecycle() {
+    // 静态上报者在自身构造期间注册，使 registry 先完成构造、后析构，供其析构时安全注销。
+    // 不能将此顺序保证推广到构造完成后才注册的其它静态对象。
+    static KmonitorLifecycle lifecycle;
+    return lifecycle;
+}
+
+}  // namespace
 
 AUTIL_LOG_SETUP(rtp_llm, RpcMetrics);
 AUTIL_LOG_SETUP(rtp_llm, RpcWorkerStatusMetrics);
@@ -1143,6 +1161,8 @@ void RtpLLMCacheStoreMetrics::report(const kmonitor::MetricsTags*              t
 #undef REPORT_GAUGE
 
 bool initKmonitorFactory() {
+    auto& lifecycle = kmonitorLifecycle();
+    std::lock_guard<std::mutex> lock(lifecycle.mutex);
     KmonParam param;
     param.init();
     if (!param.kmonitorMetricsReporterCacheLimit.empty()) {
@@ -1187,11 +1207,40 @@ bool initKmonitorFactory() {
     RTP_LLM_LOG_INFO("KMonitorFactory::registerBuildInMetrics() finished");
 
     kmonitor::KMonitorFactory::Start();
+    lifecycle.shutdown_started = false;
     RTP_LLM_LOG_INFO("KMonitorFactory::Start() finished");
     return true;
 }
 
+bool registerKmonitorShutdownHook(void* owner, std::function<void()> hook) {
+    if (owner == nullptr || !hook) {
+        return false;
+    }
+    auto& lifecycle = kmonitorLifecycle();
+    std::lock_guard<std::mutex> lock(lifecycle.mutex);
+    if (lifecycle.shutdown_started) {
+        return false;
+    }
+    lifecycle.shutdown_hooks[owner] = std::move(hook);
+    return true;
+}
+
+void unregisterKmonitorShutdownHook(void* owner) {
+    auto& lifecycle = kmonitorLifecycle();
+    std::lock_guard<std::mutex> lock(lifecycle.mutex);
+    lifecycle.shutdown_hooks.erase(owner);
+}
+
 void stopKmonitorFactory() {
+    auto& lifecycle = kmonitorLifecycle();
+    std::lock_guard<std::mutex> lock(lifecycle.mutex);
+    lifecycle.shutdown_started = true;
+    // 持锁执行使注销等待在途回调结束，也阻止关闭期间注册并启动新的异步上报者。
+    // 停止回调返回前不能关闭 factory；否则在途 report 仍可能访问其已释放的指标资源。
+    // 重复关闭仍执行尚未注销的回调，因此回调必须可重复调用；shutdown_started 只阻止新注册。
+    for (const auto& hook : lifecycle.shutdown_hooks) {
+        hook.second();
+    }
     kmonitor::KMonitorFactory::Shutdown();
 }
 

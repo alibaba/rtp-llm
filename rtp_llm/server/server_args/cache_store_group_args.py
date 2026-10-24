@@ -1,4 +1,74 @@
+import argparse
+import logging
+
+from rtp_llm.ops import CacheStoreConfig
 from rtp_llm.server.server_args.util import str2bool
+
+RDMA_DEVICE_HEALTH_FAULT_HANDLERS = ["LOG", "ABORT"]
+
+
+def _rdma_device_health_range(field_name: str):
+    return getattr(CacheStoreConfig, f"{field_name}_range")
+
+
+def _rdma_device_health_int(field_name: str):
+    min_value, max_value = _rdma_device_health_range(field_name)
+
+    def parse(value: str) -> int:
+        try:
+            parsed = int(value)
+        except (TypeError, ValueError) as error:
+            raise argparse.ArgumentTypeError(
+                f"{field_name} must be an integer, got {value!r}"
+            ) from error
+        if parsed < min_value or parsed > max_value:
+            raise argparse.ArgumentTypeError(
+                f"{field_name} must be in [{min_value}, {max_value}], got {parsed}"
+            )
+        return parsed
+
+    return parse
+
+
+def validate_rdma_device_health_config(cache_store_config) -> None:
+    min_intervals = CacheStoreConfig.rdma_device_health_min_confirm_probe_intervals
+    probe_interval_ms = cache_store_config.rdma_device_health_probe_interval_ms
+    for field_name in (
+        "rdma_device_health_device_fault_confirm_ms",
+        "rdma_device_health_unavailable_threshold_ms",
+    ):
+        value = getattr(cache_store_config, field_name)
+        if value < min_intervals * probe_interval_ms:
+            raise ValueError(
+                f"{field_name} ({value}) must be at least "
+                f"{min_intervals} * rdma_device_health_probe_interval_ms ({probe_interval_ms})"
+            )
+    unavailable_threshold_ms = (
+        cache_store_config.rdma_device_health_unavailable_threshold_ms
+    )
+    fault_window_ms = cache_store_config.rdma_device_health_fault_window_ms
+    if unavailable_threshold_ms > fault_window_ms:
+        raise ValueError(
+            f"rdma_device_health_unavailable_threshold_ms ({unavailable_threshold_ms}) must not exceed "
+            f"rdma_device_health_fault_window_ms ({fault_window_ms})"
+        )
+
+    # 相邻恢复至少间隔两轮探测（UNAVAILABLE、AVAILABLE）；窗口包含两端点，故上限加一。
+    # 查询及上报耗时只会降低实际次数；超过理论上限时提示，不拒绝启动或改写阈值。
+    max_recoveries = fault_window_ms // (2 * probe_interval_ms) + 1
+    flap_warn_threshold = cache_store_config.rdma_device_health_flap_warn_threshold
+    if flap_warn_threshold > max_recoveries:
+        logging.warning(
+            "[RDMA_DEVICE_HEALTH_CONFIG] rdma_device_health_flap_warn_threshold (%d) "
+            "exceeds the theoretical maximum recoveries (%d) within "
+            "rdma_device_health_fault_window_ms (%d) at "
+            "rdma_device_health_probe_interval_ms (%d); flapping warnings cannot "
+            "trigger with this configuration. Startup continues without changing the threshold.",
+            flap_warn_threshold,
+            max_recoveries,
+            fault_window_ms,
+            probe_interval_ms,
+        )
 
 
 def init_cache_store_group_args(parser, cache_store_config):
@@ -177,4 +247,104 @@ def init_cache_store_group_args(parser, cache_store_config):
         type=int,
         default=100,
         help="P2P TCP 控制面 ANetRPCServer queueNum。",
+    )
+    probe_interval_range = _rdma_device_health_range(
+        "rdma_device_health_probe_interval_ms"
+    )
+    device_fault_confirm_range = _rdma_device_health_range(
+        "rdma_device_health_device_fault_confirm_ms"
+    )
+    fault_window_range = _rdma_device_health_range("rdma_device_health_fault_window_ms")
+    unavailable_threshold_range = _rdma_device_health_range(
+        "rdma_device_health_unavailable_threshold_ms"
+    )
+    flap_threshold_range = _rdma_device_health_range(
+        "rdma_device_health_flap_warn_threshold"
+    )
+    min_confirm_intervals = (
+        CacheStoreConfig.rdma_device_health_min_confirm_probe_intervals
+    )
+    cache_store_group.add_argument(
+        "--rdma_device_health_enabled",
+        env_name="RDMA_DEVICE_HEALTH_ENABLED",
+        bind_to=(cache_store_config, "rdma_device_health_enabled"),
+        type=str2bool,
+        default=True,
+        help="CacheStore / P2P RDMA 初始化成功后启用健康监控；监控启动返回失败不改变已成功的 RDMA 初始化结果。",
+    )
+    cache_store_group.add_argument(
+        "--rdma_device_health_fault_handler",
+        env_name="RDMA_DEVICE_HEALTH_FAULT_HANDLER",
+        bind_to=(cache_store_config, "rdma_device_health_fault_handler"),
+        type=str,
+        choices=RDMA_DEVICE_HEALTH_FAULT_HANDLERS,
+        default="LOG",
+        help=(
+            "全 RDMA 设备硬故障确认后的处理：LOG 每个总体故障期记录一次，ABORT 在首次确认时退出。"
+            "累计故障期阈值只产生限频 WARN；设备确认优先于同轮 WARN，后续 UNAVAILABLE 轮仍可告警。"
+        ),
+    )
+    cache_store_group.add_argument(
+        "--rdma_device_health_probe_interval_ms",
+        env_name="RDMA_DEVICE_HEALTH_PROBE_INTERVAL_MS",
+        bind_to=(cache_store_config, "rdma_device_health_probe_interval_ms"),
+        type=_rdma_device_health_int("rdma_device_health_probe_interval_ms"),
+        default=1000,
+        help="RDMA 设备健康探测间隔，单位毫秒，范围 {}-{}。".format(
+            *probe_interval_range
+        ),
+    )
+    cache_store_group.add_argument(
+        "--rdma_device_health_device_fault_confirm_ms",
+        env_name="RDMA_DEVICE_HEALTH_DEVICE_FAULT_CONFIRM_MS",
+        bind_to=(cache_store_config, "rdma_device_health_device_fault_confirm_ms"),
+        type=_rdma_device_health_int("rdma_device_health_device_fault_confirm_ms"),
+        default=3000,
+        help=(
+            "全设备移除或硬查询错误的 UNAVAILABLE 轮启动确认计时；再次出现该状态且计时达到阈值才确认。"
+            "UNKNOWN 无成功查询的明确健康设备证据时保留起点，经过时间继续计入，但当轮不确认。"
+            "AVAILABLE、DEGRADED、成功查询中有明确 device HEALTHY 证据的 UNKNOWN，或非全设备硬故障的 UNAVAILABLE 清除计时。"
+            "单位毫秒，范围 {}-{}，至少覆盖 {} 个探测间隔。"
+        ).format(
+            *device_fault_confirm_range, min_confirm_intervals
+        ),
+    )
+    cache_store_group.add_argument(
+        "--rdma_device_health_fault_window_ms",
+        env_name="RDMA_DEVICE_HEALTH_FAULT_WINDOW_MS",
+        bind_to=(cache_store_config, "rdma_device_health_fault_window_ms"),
+        type=_rdma_device_health_int("rdma_device_health_fault_window_ms"),
+        default=600000,
+        help=(
+            "累计总体故障期时长与抖动告警共用的滑动窗口。故障期从首次 UNAVAILABLE 到下次 AVAILABLE，"
+            "包含中间 UNKNOWN/DEGRADED。单位毫秒，范围 {}-{}。"
+        ).format(
+            *fault_window_range
+        ),
+    )
+    cache_store_group.add_argument(
+        "--rdma_device_health_unavailable_threshold_ms",
+        env_name="RDMA_DEVICE_HEALTH_UNAVAILABLE_THRESHOLD_MS",
+        bind_to=(cache_store_config, "rdma_device_health_unavailable_threshold_ms"),
+        type=_rdma_device_health_int("rdma_device_health_unavailable_threshold_ms"),
+        default=120000,
+        help=(
+            "窗口内总体故障期累计阈值，包含中间 UNKNOWN/DEGRADED；仅 UNAVAILABLE 轮评估，只 WARN、不退出。"
+            "设备确认优先于同轮 WARN；告警至少相隔一个窗口，恢复不重置限频。"
+            "单位毫秒，范围 {}-{}，至少覆盖 {} 个探测间隔且不得超过窗口。"
+        ).format(
+            *unavailable_threshold_range, min_confirm_intervals
+        ),
+    )
+    cache_store_group.add_argument(
+        "--rdma_device_health_flap_warn_threshold",
+        env_name="RDMA_DEVICE_HEALTH_FLAP_WARN_THRESHOLD",
+        bind_to=(cache_store_config, "rdma_device_health_flap_warn_threshold"),
+        type=_rdma_device_health_int("rdma_device_health_flap_warn_threshold"),
+        default=10,
+        help=(
+            "AVAILABLE 关闭故障期时，窗口内恢复次数达到阈值且距上次抖动 WARN 至少一个窗口才告警，范围 {}-{}。"
+            "恢复次数理论上限为 fault_window_ms // (2 * probe_interval_ms) + 1；"
+            "阈值超过上限时启动仅提示 WARN，不拒绝启动或自动调整阈值。"
+        ).format(*flap_threshold_range),
     )
