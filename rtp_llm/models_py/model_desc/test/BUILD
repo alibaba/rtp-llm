@@ -3,6 +3,36 @@ py_test_deps = [
 ]
 
 py_test(
+    name = "deepseek_maxpander_warmup_test",
+    srcs = ["deepseek_maxpander_warmup_test.py"],
+    deps = [
+        "//rtp_llm:config",
+        "//rtp_llm:testlib",
+        "//rtp_llm/models_py:models",
+    ],
+    target_compatible_with = select({
+        "@//:using_cuda13_x86": [],
+        "@//:using_cuda13_arm": [],
+        "//conditions:default": ["@platforms//:incompatible"],
+    }),
+)
+
+py_test(
+    name = "deepseek_v41_maxpander_test",
+    srcs = ["deepseek_v41_maxpander_test.py"],
+    deps = [
+        "//rtp_llm:config",
+        "//rtp_llm:testlib",
+        "//rtp_llm/models_py:models",
+    ],
+    target_compatible_with = select({
+        "@//:using_cuda13_x86": [],
+        "@//:using_cuda13_arm": [],
+        "//conditions:default": ["@platforms//:incompatible"],
+    }),
+)
+
+py_test(
     name = "qwen_gdn_graph_replay_test_rocm",
     srcs = ["qwen_gdn_graph_replay_test.py"],
     main = "qwen_gdn_graph_replay_test.py",

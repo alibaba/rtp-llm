@@ -60,6 +60,9 @@ from rtp_llm.models_py.modules.dsv41.moe.moe_layer import (
 )
 from rtp_llm.models_py.modules.dsv41.prefill.forward import forward_prefill
 from rtp_llm.models_py.modules.dsv41.transformer import V4Args, V4Transformer
+from rtp_llm.models_py.modules.factory.fused_moe.utils.mega_moe.jit_warmup import (
+    warmup_moe_executor,
+)
 from rtp_llm.ops import RoleType
 from rtp_llm.utils.warmup import model_warm_up_enabled
 
@@ -250,6 +253,7 @@ def _args_from_model_config(
         index_topk=attn_config.indexer_topk,
         moe_inter_dim=int(model_config.moe_inter_size),
         n_routed_experts=model_config.expert_num,
+        maxpander_config=model_config.maxpander_config,
         n_shared_experts=int(model_config.n_shared_experts),
         n_activated_experts=model_config.moe_k,
         score_func={0: "softmax", 1: "sigmoid", 2: "sqrtsoftplus"}[
@@ -557,6 +561,12 @@ class DeepSeekV4Model(GptModelBase):
         if mtp_last_hidden_capacity is not None:
             v4._allocate_mtp_last_hidden_buffer(device, mtp_last_hidden_capacity)
 
+    def _prewarm_mega_moe(self, device: str) -> None:
+        strategy = self.v4.layers[0].ffn._strategy
+        if getattr(strategy, "name", "") in ("mega", "mega_se"):
+            warmup_moe_executor(strategy, device)
+            logging.info("[DeepSeekV4Model] MegaMoE prewarm done")
+
     def _initialize_impl(self, init_resource: PyModelInitResources) -> bool:
         super().initialize(init_resource)
         self._max_prefill_batch_tokens = int(
@@ -766,39 +776,7 @@ class DeepSeekV4Model(GptModelBase):
                 )
                 raise
             try:
-                import torch.distributed as _dist
-
-                _strategy = self.v4.layers[0].ffn._strategy
-                if getattr(_strategy, "name", "") in ("mega", "mega_se"):
-                    if _dist.is_available() and _dist.is_initialized():
-                        _dist.barrier()
-                    _cfg = _strategy.cfg
-                    _x_moe = _torch.zeros(
-                        (1, int(_cfg.dim)), dtype=_torch.bfloat16, device=device_str
-                    )
-                    _w_moe = _torch.zeros(
-                        (1, int(_cfg.n_activated_experts)),
-                        dtype=_torch.float32,
-                        device=device_str,
-                    )
-                    _w_moe[:, 0] = 1.0
-                    _start = int(_cfg.local_expert_start)
-                    _end = max(int(_cfg.local_expert_end), _start + 1)
-                    _idx_vals = (
-                        _torch.arange(
-                            int(_cfg.n_activated_experts),
-                            dtype=_torch.int64,
-                            device=device_str,
-                        )
-                        % (_end - _start)
-                        + _start
-                    )
-                    _idx_moe = _idx_vals.unsqueeze(0).contiguous()
-                    _strategy(_x_moe, _w_moe, _idx_moe)
-                    _torch.cuda.synchronize()
-                    if _dist.is_available() and _dist.is_initialized():
-                        _dist.barrier()
-                    logging.info("[DeepSeekV4Model] MegaMoE prewarm done")
+                self._prewarm_mega_moe(device_str)
             except Exception:
                 logging.exception("[DeepSeekV4Model] MegaMoE prewarm failed")
                 raise

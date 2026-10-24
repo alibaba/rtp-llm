@@ -52,6 +52,8 @@ class _FakeFusedMoe:
 
     def __call__(self, *, hidden_states, topk_weights, topk_ids, activation):
         self.events.append("fused_moe.forward")
+        self.last_topk_weights = topk_weights
+        self.last_topk_ids = topk_ids
         return torch.ones_like(hidden_states)
 
 
@@ -95,6 +97,42 @@ class Fp8Fp4MoeLayerSchedulingTest(unittest.TestCase):
         layer.shared_experts = object() if with_shared else None
         layer._shared_executor = _FakeSharedExecutor(events) if with_shared else None
         return layer
+
+    def test_logical_gate_outputs_are_left_for_executor_mapping(self):
+        for with_shared in (True, False):
+            for with_observer in (True, False):
+                events = []
+                observed = {}
+                layer = self._layer(
+                    events, gate_pack_enabled=False, with_shared=with_shared
+                )
+                x = torch.ones((2, 4), dtype=torch.bfloat16)
+                with patch.object(
+                    layer_module,
+                    "combine_routed_and_shared",
+                    side_effect=self._combine(events),
+                ):
+                    layer(
+                        x,
+                        None,
+                        observer=(
+                            (lambda name, value: observed.update({name: value}))
+                            if with_observer
+                            else None
+                        ),
+                    )
+                self.assertLess(
+                    events.index("gate.forward"), events.index("fused_moe.forward")
+                )
+                self.assertNotIn("gate.prepare", events)
+                self.assertNotIn("fused_moe.forward_gate_pack", events)
+                self.assertTrue(torch.all(layer.fused_moe.last_topk_ids == 0).item())
+                self.assertTrue(
+                    torch.all(layer.fused_moe.last_topk_weights == 1).item()
+                )
+                if with_observer:
+                    self.assertTrue(torch.all(observed["topk_indices"] == 0).item())
+                    self.assertNotIn("physical_topk_indices", observed)
 
     @staticmethod
     def _combine(events):

@@ -14,6 +14,7 @@
 #include "rtp_llm/cpp/config/MTPModelConfigHelper.h"
 #include "rtp_llm/cpp/pybind/ConfigExtract.h"
 #include "rtp_llm/cpp/pybind/multi_gpu_gpt/RtpLLMOp.h"
+#include "rtp_llm/cpp/models/logits_processor/LogitsProcessorFactory.h"
 #include "rtp_llm/cpp/engine_base/EngineInitParams.h"
 #include "rtp_llm/cpp/engine_base/ProposeModelEngineInitParams.h"
 #include "rtp_llm/cpp/engine_base/WeightsConverter.h"
@@ -486,7 +487,9 @@ void RtpLLMOp::startHttpServer(py::object model_weights_loader,
 void RtpLLMOp::stop() {
     const int64_t stop_timeout_ms = getGrpcStopTimeoutMs();
     if (!is_server_shutdown_) {
+        std::shared_ptr<CacheStore> cache_store;
         if (model_rpc_service_) {
+            cache_store = model_rpc_service_->getEngine()->getCacheManager()->getCacheStore();
             model_rpc_service_->beginShutdown();
         }
         if (grpc_server_) {
@@ -515,10 +518,16 @@ void RtpLLMOp::stop() {
             http_server_->stop();
             http_server_.reset();
         }
+        if (cache_store) {
+            pybind11::gil_scoped_release release;
+            cache_store->stop();
+        }
+        cache_store.reset();
         is_server_shutdown_ = true;
         // bounded flush of remaining spans; never blocks process exit
         {
             pybind11::gil_scoped_release release;
+            LogitsProcessorFactory::shutdown();
             telemetry::TelemetryRuntime::shutdown();
         }
         stopKmonitorFactory();

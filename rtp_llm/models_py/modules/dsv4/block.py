@@ -11,6 +11,7 @@ from typing import Callable, Dict, Optional, Tuple
 import torch
 import torch.nn as nn
 
+from rtp_llm.config.maxpander_config import MaxPanderRuntimeConfig
 from rtp_llm.models_py.modules import RMSNorm
 from rtp_llm.models_py.modules.dsv4 import _profiler
 from rtp_llm.models_py.modules.dsv4.chunk_env import chunked_moe_enabled
@@ -105,6 +106,7 @@ class Block(nn.Module):
         fp8_kv_cache: bool = False,
         commit_only: bool = False,
         n_physical_experts: Optional[int] = None,
+        maxpander_config: MaxPanderRuntimeConfig = MaxPanderRuntimeConfig(),
     ):
         super().__init__()
         self.layer_id = layer_id
@@ -174,6 +176,7 @@ class Block(nn.Module):
             is_decode_role=is_decode_role,
             strategy=moe_strategy,
             n_physical_experts=n_physical_experts,
+            maxpander_config=maxpander_config,
             chunking_enabled=chunked_moe_enabled(),
             model_type="deepseek_v4",
             moe_w1_layout="gate_up",

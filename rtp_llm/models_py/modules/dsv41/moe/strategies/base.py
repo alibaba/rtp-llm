@@ -34,6 +34,8 @@ from typing import ClassVar, Dict, Optional, Type
 import torch
 import torch.nn as nn
 
+from rtp_llm.config.maxpander_config import MaxPanderRuntimeConfig
+
 
 @dataclass(frozen=True)
 class MoeCfg:
@@ -57,6 +59,12 @@ class MoeCfg:
     max_tokens_per_rank: int
     shared_fp8_block_size: int = 128
     is_decode_role: bool = False
+    maxpander_config: MaxPanderRuntimeConfig = MaxPanderRuntimeConfig()
+
+    @property
+    def physical_expert_num(self) -> int:
+        # Gate dimensions remain n_routed_experts (logical); transport uses P.
+        return self.n_local_experts * self.ep_size
 
 
 class RoutedExpertsStrategy(nn.Module):
@@ -103,6 +111,9 @@ class RoutedExpertsStrategy(nn.Module):
     def __init__(self, cfg: MoeCfg):
         super().__init__()
         self.cfg = cfg
+
+    def setup_routing(self, layer_weights: Dict) -> None:
+        pass
 
     def setup_weights(self, layer_weights: Dict) -> None:
         """Pop the strategy's own routed-expert stacks from ``layer_weights``

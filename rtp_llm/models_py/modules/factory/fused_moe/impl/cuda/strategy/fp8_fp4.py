@@ -28,7 +28,10 @@ class _CudaFp8Fp4Strategy(MoeStrategy):
     def check_conditions(cls, checker: Any, config: MoEConfigAdapter) -> None:
         checker.check(config.moe_strategy in ("auto", cls.strategy_name))
         checker.check(config.moe_quant_method == "FP8_FP4")
-        checker.check(not config.has_redundant_experts)
+        checker.check(
+            not config.has_redundant_experts
+            or (config.maxpander_config.enabled and cls.requires_ep)
+        )
         checker.check((config.ep_size > 1) == cls.requires_ep)
         if cls.requires_shared:
             checker.check(config.n_shared_experts > 0)

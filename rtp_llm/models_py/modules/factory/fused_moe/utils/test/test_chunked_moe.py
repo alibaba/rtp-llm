@@ -7,6 +7,7 @@ from unittest import mock
 import torch
 import torch.nn as nn
 
+from rtp_llm.config.maxpander_config import MaxPanderConfig, MaxPanderRuntimeConfig
 from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors.mega_moe import (
     _mega_output_capacity,
 )
@@ -56,6 +57,7 @@ def _fake_layer(dim=4, capacity=5, is_decode_role=False):
     layer.dim = dim
     layer.max_tokens_per_rank = capacity
     layer._is_decode_role = is_decode_role
+    layer.maxpander_config = MaxPanderRuntimeConfig()
     layer.chunking_enabled = True
     layer._observer_factory = None
     layer._record_function_scope = nullcontext
@@ -65,6 +67,13 @@ def _fake_layer(dim=4, capacity=5, is_decode_role=False):
 
 
 class ChunkedMoeTest(unittest.TestCase):
+    def test_prefill_maxpander_rejects_decode_before_routing(self):
+        layer = _fake_layer()
+        layer.maxpander_config = MaxPanderConfig(enable=True).resolve("PREFILL")
+        with self.assertRaisesRegex(ValueError, "cannot execute a DECODE"):
+            layer(torch.ones((1, 4)), is_decode_forward=True)
+        self.assertEqual(layer._moe.token_chunks, [])
+
     def test_observer_receives_positions_for_each_chunk(self):
         layer = _fake_layer(dim=2, capacity=3)
         records = []

@@ -90,7 +90,7 @@ class DeepSeekV41PDContractTest(contract.DeepSeekV41ContractTest):
                 device_ids=devices,
                 port=port,
                 role_name=f"deepseek_v41_{role}_contract",
-                smoke_args_str=f"{common_args} {args}",
+                smoke_args_str=f"{common_args} {args} {self.role_args(role)}".strip(),
             )
             self.addCleanup(manager.stop_server)
             if role == "prefill":
@@ -135,6 +135,9 @@ class DeepSeekV41PDContractTest(contract.DeepSeekV41ContractTest):
         self.assert_same(baseline, bypass)
         self.assertEqual(bypass["aux_info"][self.reuse_field], 0)
         self.assert_decode_graph_replayed_and_record_coverage()
+
+    def role_args(self, role):
+        return ""
 
     def test_graph_engram_and_prefix_reuse(self):
         super().test_graph_engram_and_prefix_reuse()

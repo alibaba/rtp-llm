@@ -1,4 +1,10 @@
 py_test(
+    name = "maxpander_config_test",
+    srcs = ["maxpander_config_test.py"],
+    deps = ["//rtp_llm:config"],
+)
+
+py_test(
     name = "grammar_compile_threads_test",
     srcs = ["grammar_compile_threads_test.py"],
     data = ["//rtp_llm:sdk"],

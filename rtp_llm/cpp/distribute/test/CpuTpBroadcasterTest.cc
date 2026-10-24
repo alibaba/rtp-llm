@@ -297,6 +297,70 @@ TEST(CpuTpBroadcasterTest, BroadcastHappyPathTp4) {
     runHappyPath(4);
 }
 
+void runShutdown(int tp_size, bool delay_reader) {
+    const std::string  base = makeTempBase();
+    std::vector<pid_t> children;
+    for (int rank = 0; rank < tp_size; ++rank) {
+        children.push_back(spawnChild([=] {
+            auto& broadcaster = CpuTpBroadcaster::instance();
+            broadcaster.reset();
+            broadcaster.initialize(rank, tp_size, base);
+            int value = 42;
+            broadcaster.broadcast(&value, sizeof(value), 0);
+            if (rank == 0) {
+                if (!delay_reader) {
+                    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+                }
+                broadcaster.shutdown();
+                broadcaster.shutdown();
+            } else if (delay_reader) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(100));
+            }
+            try {
+                broadcaster.broadcast(&value, sizeof(value), 0);
+            } catch (const CpuTpBroadcaster::Shutdown&) {
+                broadcaster.reset();
+                broadcaster.initialize(0, 1, base + "_reinit_" + std::to_string(rank));
+                broadcaster.broadcast(&value, sizeof(value), 0);
+                broadcaster.reset();
+                return 0;
+            }
+            return 1;
+        }));
+    }
+    expectChildrenOk(children);
+    cleanupTempBase(base, tp_size);
+}
+
+TEST(CpuTpBroadcasterTest, ShutdownWakesWaitingPeer) {
+    runShutdown(2, false);
+}
+
+TEST(CpuTpBroadcasterTest, ShutdownReachesPeersBeforeNextBroadcast) {
+    runShutdown(4, true);
+}
+
+TEST(CpuTpBroadcasterTest, UnexpectedPeerCloseStillFails) {
+    const std::string  base = makeTempBase();
+    std::vector<pid_t> children;
+    children.push_back(spawnChild([=] {
+        auto& broadcaster = CpuTpBroadcaster::instance();
+        broadcaster.reset();
+        broadcaster.initialize(0, 2, base);
+        broadcaster.reset();
+        return 0;
+    }));
+    children.push_back(spawnChild([=] {
+        auto& broadcaster = CpuTpBroadcaster::instance();
+        broadcaster.reset();
+        broadcaster.initialize(1, 2, base);
+        int value = 0;
+        return expectThrowContains([&] { broadcaster.broadcast(&value, sizeof(value), 0); }, "frame-header read");
+    }));
+    expectChildrenOk(children);
+    cleanupTempBase(base, 2);
+}
+
 TEST(CpuTpBroadcasterTest, RejectsPayloadSizeMismatchBeforeReadingPayload) {
     const std::string  base = makeTempBase();
     std::vector<pid_t> pids;

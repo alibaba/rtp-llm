@@ -52,6 +52,7 @@ private:
 };
 
 struct CustomConfig {
+    bool                                    maxpander_enabled   = false;
     bool                                    reuse_cache         = false;
     bool                                    enable_device_cache = true;
     DataType                                kv_cache_data_type  = DataType::TYPE_FP16;
@@ -173,6 +174,7 @@ rtp_llm::EngineInitParams createEngineInitParams(const CustomConfig&     config,
     rtp_llm::VitConfig             vit_config;
     runtime_config.output_dispatcher_worker_count = config.output_dispatcher_worker_count;
     pd_sep_config.role_type                       = config.role_type;
+    pd_sep_config.maxpander_enabled               = config.maxpander_enabled;
 
     rtp_llm::EngineInitParams rtp_llm_params(0,
                                              model_config,

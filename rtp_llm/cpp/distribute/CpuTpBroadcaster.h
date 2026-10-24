@@ -4,6 +4,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <mutex>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -16,6 +17,11 @@ namespace rtp_llm {
 // of consuming part of the next frame and hanging the TP group.
 class CpuTpBroadcaster {
 public:
+    class Shutdown: public std::runtime_error {
+    public:
+        Shutdown(): std::runtime_error("CpuTpBroadcaster shut down") {}
+    };
+
     static CpuTpBroadcaster& instance();
 
     // Bootstrap UDS endpoints. Call once per process. Subsequent calls with
@@ -27,6 +33,8 @@ public:
     // Calls are serialized per process. Throws on transport or frame-contract
     // mismatch before reading a differently sized payload.
     void broadcast(void* buf, std::size_t nbytes, int root);
+
+    void shutdown();
 
     // Close all sockets and return the singleton to its initial state so a
     // later distributed init can bootstrap a fresh base_path.
@@ -53,6 +61,7 @@ private:
     std::vector<int> peer_fds_;
     std::string      my_uds_path_;  // path to unlink at shutdown (rank 0 only)
     uint64_t         next_sequence_ = 0;
+    bool             shutdown_      = false;
 };
 
 }  // namespace rtp_llm

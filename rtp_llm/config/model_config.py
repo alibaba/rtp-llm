@@ -6,6 +6,7 @@ from typing import Any, Dict, Optional
 
 import torch
 
+from rtp_llm.config.maxpander_config import MaxPanderRuntimeConfig
 from rtp_llm.config.py_config_modules import VitConfig
 from rtp_llm.config.quant_config import (
     Fp8BlockWiseQuantConfig,
@@ -81,6 +82,7 @@ class ModelConfig(CppModelConfig):
     # Python-only fields that are allowed to be set
     _python_fields = {
         "is_mtp",
+        "maxpander_config",
         "is_deepseek_v41",
         "deepseek_v41_config",
         "dspark_noise_token_id",
@@ -577,6 +579,7 @@ class ModelConfig(CppModelConfig):
         super().__init__(*args, **kwargs)
         # Additional Python-only fields
         self.is_mtp: bool = False
+        self.maxpander_config = MaxPanderRuntimeConfig()
         self.is_deepseek_v41: bool = False
         self.deepseek_v41_config = None
         # DSpARK draft checkpoint metadata. Runtime proposal width comes only

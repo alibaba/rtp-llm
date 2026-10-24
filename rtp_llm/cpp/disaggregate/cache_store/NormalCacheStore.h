@@ -21,6 +21,8 @@ public:
 public:
     static std::shared_ptr<NormalCacheStore> createNormalCacheStore(const CacheStoreInitParams& params);
 
+    void stop() override;
+
     void store(const std::shared_ptr<RequestBlockBuffer>& request_block_buffer,
                CacheStoreStoreDoneCallback                callback) override;
 

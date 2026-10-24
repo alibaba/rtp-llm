@@ -3,6 +3,12 @@ py_test_deps = [
 ]
 
 py_test(
+    name = "test_maxpander_load_config",
+    srcs = ["test_maxpander_load_config.py"],
+    deps = py_test_deps,
+)
+
+py_test(
     name = "test_stacked_moe_weight",
     srcs = ["test_stacked_moe_weight.py"],
     deps = py_test_deps,

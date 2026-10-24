@@ -37,12 +37,14 @@ from rtp_llm.models_py.modules.factory.fused_moe.utils.mega_moe.jit_warmup impor
     clamp_token_counts,
     format_token_counts,
     generate_mega_moe_jit_token_counts,
+    make_moe_warmup_expert_ids,
     mega_moe_jit_warmup_enabled,
     parse_mega_moe_jit_warmup_tokens_override,
 )
 from rtp_llm.models_py.modules.factory.fused_moe.utils.mega_moe.warmup_sync import (
     sync_cuda_graph_warmup_ranks,
 )
+from rtp_llm.models_py.modules.maxpander import PackedMoeExecutorMixin
 
 from .fp8_fp4_base import Fp8Fp4ExecutorBase, normalize_moe_w13_gate_up
 
@@ -157,7 +159,7 @@ def _get_validated_world_ep_group(cfg, dist):
     return group
 
 
-class MegaMoeExecutor(Fp8Fp4ExecutorBase):
+class MegaMoeExecutor(PackedMoeExecutorMixin, Fp8Fp4ExecutorBase):
     execute_empty_inputs = True
 
     @property
@@ -260,7 +262,7 @@ class MegaMoeExecutor(Fp8Fp4ExecutorBase):
         # MoE layers via the module-level cache (see _get_or_create_mega_buf).
         self._mega_buf = _get_or_create_mega_buf(
             group=group,
-            num_experts=cfg.n_routed_experts,
+            num_experts=cfg.physical_expert_num,
             num_max_tokens_per_rank=max(cfg.max_tokens_per_rank, 1),
             num_topk=cfg.n_activated_experts,
             hidden=D,
@@ -277,6 +279,7 @@ class MegaMoeExecutor(Fp8Fp4ExecutorBase):
             device,
         )
         self._input_packer = get_mega_moe_input_packer()
+        self.setup_mega_moe_tile_policy(deep_gemm)
         self._maybe_warmup_jit_once()
 
     def _resolve_jit_warmup_token_counts(self, num_sms: int) -> list[int]:
@@ -289,15 +292,17 @@ class MegaMoeExecutor(Fp8Fp4ExecutorBase):
         override = parse_mega_moe_jit_warmup_tokens_override()
         if override is not None:
             return clamp_token_counts(override, max_tokens_per_rank)
+        tile_policy = getattr(self, "_maxpander_tile_policy", None)
         return generate_mega_moe_jit_token_counts(
             num_ranks=cfg.ep_size,
-            num_experts=cfg.n_routed_experts,
+            num_experts=cfg.physical_expert_num,
             num_experts_per_rank=cfg.n_local_experts,
             num_topk=cfg.n_activated_experts,
             intermediate_hidden=cfg.moe_inter_dim,
             num_sms=num_sms,
             max_tokens_per_rank=max_tokens_per_rank,
             include_cap=cfg.warmup_include_capacity,
+            block_m_resolver=tile_policy.block_m if tile_policy is not None else None,
         )
 
     def _maybe_warmup_jit_once(self) -> None:
@@ -320,7 +325,7 @@ class MegaMoeExecutor(Fp8Fp4ExecutorBase):
         max_tokens_per_rank = int(cfg.max_tokens_per_rank)
         warmup_key = (
             cfg.ep_size,
-            cfg.n_routed_experts,
+            cfg.physical_expert_num,
             cfg.n_local_experts,
             cfg.n_activated_experts,
             cfg.dim,
@@ -331,6 +336,7 @@ class MegaMoeExecutor(Fp8Fp4ExecutorBase):
             num_sms,
             tuple(token_counts),
             self.supports_gate_pack,
+            cfg.maxpander_config if cfg.maxpander_config.enabled else None,
         )
         if warmup_key in _MEGA_MOE_JIT_WARMED_KEYS:
             return
@@ -345,7 +351,7 @@ class MegaMoeExecutor(Fp8Fp4ExecutorBase):
                 format_token_counts(token_counts),
                 max_tokens_per_rank,
                 cfg.ep_size,
-                cfg.n_routed_experts,
+                cfg.physical_expert_num,
                 cfg.n_activated_experts,
                 cfg.dim,
                 cfg.moe_inter_dim,
@@ -383,9 +389,7 @@ class MegaMoeExecutor(Fp8Fp4ExecutorBase):
             dtype=torch.float32,
             device=device,
         )
-        local_expert_ids = cfg.local_expert_start + torch.arange(
-            cfg.n_activated_experts, dtype=torch.long, device=device
-        ) % max(cfg.n_local_experts, 1)
+        local_expert_ids = make_moe_warmup_expert_ids(cfg, device)
         indices = local_expert_ids.view(1, -1).expand(max_tokens, -1).contiguous()
         scores = torch.zeros(
             (max_tokens, cfg.n_routed_experts),
@@ -457,7 +461,7 @@ class MegaMoeExecutor(Fp8Fp4ExecutorBase):
             f"moe.mega_moe.layer{self.cfg.layer_id}.before_deepgemm",
             device,
         )
-        deep_gemm.fp8_fp4_mega_moe(
+        self._select_mega_moe_kernel(deep_gemm, tokens)(
             y,
             (self._mega_l1_w, self._mega_l1_sf),
             (self._mega_l2_w, self._mega_l2_sf),
@@ -508,9 +512,7 @@ class MegaMoeExecutor(Fp8Fp4ExecutorBase):
         # times, and the rank still participates as expert host.  No control
         # flow depending on a GPU-side scalar -> CUDA-graph-capture safe.
         self._input_packer.pack(x, weights, indices, buf, T)
-        y = self._mega_y[:T]
-        self._launch(y, T, x.device)
-        return y
+        return self._execute_packed_inputs(T, x.device)
 
     def forward_gate_pack(
         self,
@@ -520,7 +522,9 @@ class MegaMoeExecutor(Fp8Fp4ExecutorBase):
         """Route and pack directly into the MegaMoE symmetric buffer."""
 
         if not self.supports_gate_pack:
-            raise RuntimeError("MegaMoE fused gate packing requires the fused packer")
+            raise RuntimeError(
+                "MegaMoE fused gate packing requires the optimized fused packer and topk<=32"
+            )
         tokens = x.size(0)
         self._validate_capacity(tokens)
         from rtp_llm.models_py.triton_kernels.moe.mega_moe_input_pack import (
@@ -543,8 +547,7 @@ class MegaMoeExecutor(Fp8Fp4ExecutorBase):
             input_ids=gate_payload.input_ids,
             tid2eid=gate_payload.tid2eid,
         )
-        y = self._mega_y[:tokens]
-        self._launch(y, tokens, x.device)
+        y = self._execute_packed_inputs(tokens, x.device)
         return y, buf.topk_weights[:tokens], buf.topk_idx[:tokens]
 
     def _maybe_pre_kernel_barrier(self, tokens: int) -> None:

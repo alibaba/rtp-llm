@@ -1,12 +1,13 @@
 import json
 import logging
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Dict, Optional
 
 import torch
 
 from rtp_llm.config.kv_cache_config import KVCacheConfig
+from rtp_llm.config.maxpander_config import MaxPanderRuntimeConfig
 from rtp_llm.config.py_config_modules import (
     MIN_WORKER_INFO_PORT_NUM,
     LoadConfig,
@@ -72,6 +73,9 @@ class EngineConfig:
     dash_sc_grpc_config: DashScGrpcConfig
     grammar_config: GrammarConfig
     load_config: LoadConfig
+    maxpander_config: MaxPanderRuntimeConfig = field(
+        default_factory=MaxPanderRuntimeConfig
+    )
 
     def to_string(self) -> str:
         """Return a formatted string representation of EngineConfig for debugging.
@@ -210,6 +214,37 @@ class EngineConfig:
         # Mirrors the vit_separation override above so VIT rank also surfaces
         # as RoleType::VIT to model code.
         parallelism_config.role_type = pd_sep_config.role_type
+        maxpander_config = py_env_configs.maxpander_config.resolve(
+            pd_sep_config.role_type.name
+        )
+        pd_sep_config.maxpander_enabled = maxpander_config.enabled
+        if (
+            maxpander_config.requested
+            and pd_sep_config.role_type == RoleType.DECODE
+            and py_env_configs.eplb_config.redundant_expert
+            and not py_env_configs.eplb_config.enable_eplb()
+        ):
+            raise ValueError(
+                "MaxPander is disabled on DECODE; remove its redundant_expert setting"
+            )
+        if maxpander_config.enabled:
+            if hw_kernel_config.enable_cuda_graph:
+                raise ValueError(
+                    "MaxPander PREFILL workers do not support enable_cuda_graph; "
+                    "enable CUDA graphs only on DECODE workers"
+                )
+            if runtime_config.use_batch_decode_scheduler:
+                raise ValueError(
+                    "MaxPander PREFILL workers do not support use_batch_decode_scheduler"
+                )
+            if py_env_configs.model_args.model_type not in (
+                "deepseek_v41",
+                "deepseek_v41_dspark",
+            ) and moe_config.moe_strategy not in ("mega_moe", "mega_moe_se"):
+                raise ValueError("MaxPander requires explicit mega_moe or mega_moe_se")
+        logging.info(
+            "MaxPander resolved before weight loading: %s", maxpander_config.to_string()
+        )
 
         if nccl_comm_config is None:
             nccl_comm_config = NcclCommConfig(
@@ -242,6 +277,7 @@ class EngineConfig:
             dash_sc_grpc_config=dash_sc_grpc_config,
             grammar_config=grammar_config,
             load_config=load_config,
+            maxpander_config=maxpander_config,
         )
 
         runtime_config.max_generate_batch_size = concurrency_config.concurrency_limit

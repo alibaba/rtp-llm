@@ -32,11 +32,39 @@ MOE_STRATEGY_CHOICES = (
 )
 
 
-def init_moe_group_args(parser, moe_config, eplb_config, deep_ep_config):
+def init_moe_group_args(
+    parser, moe_config, eplb_config, deep_ep_config, maxpander_config
+):
     ##############################################################################################################
     # MOE 特性
     ##############################################################################################################
     moe_group = parser.add_argument_group("MOE 专家并行")
+    moe_group.add_argument(
+        "--maxpander_enable",
+        env_name="MAXPANDER_ENABLE",
+        bind_to=(maxpander_config, "enable"),
+        type=str2bool,
+        nargs="?",
+        const=True,
+        default=False,
+        help="启用静态 MaxPander，仅在独立 PREFILL worker 生效；DECODE 保持原路径。",
+    )
+    moe_group.add_argument(
+        "--maxpander_seed",
+        env_name="MAXPANDER_SEED",
+        bind_to=(maxpander_config, "seed"),
+        type=int,
+        default=0,
+        help="MaxPander 静态专家放置的随机种子。",
+    )
+    moe_group.add_argument(
+        "--maxpander_wf_passes",
+        env_name="MAXPANDER_WF_PASSES",
+        bind_to=(maxpander_config, "wf_passes"),
+        type=int,
+        default=2,
+        help="MaxPander GPU water-filling 轮数，范围 [1,64]。",
+    )
     moe_group.add_argument(
         "--use_deepep_moe",
         env_name="USE_DEEPEP_MOE",

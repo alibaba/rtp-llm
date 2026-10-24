@@ -130,7 +130,7 @@ class MegaMoEFusedStrategy(MegaMoEStrategy):
         self._mega_group = group
         self._mega_buf = _get_or_create_mega_fused_buf(
             group=group,
-            num_experts=cfg.n_routed_experts,
+            num_experts=cfg.physical_expert_num,
             num_max_tokens_per_rank=max(cfg.max_tokens_per_rank, 1),
             num_topk=cfg.n_activated_experts,
             hidden=D,
@@ -214,13 +214,17 @@ class MegaMoEFusedStrategy(MegaMoEStrategy):
         T = x.size(0)
         buf = self._mega_buf
         self._input_packer.pack(x, weights, indices, buf, T)
-        self._maybe_pre_kernel_barrier(T)
+        return self._execute_packed_inputs(T, x.device)
+
+    def _launch(self, output, tokens, device):
+        import deep_gemm
+
+        self._maybe_pre_kernel_barrier(tokens)
         sync_cuda_graph_warmup_ranks(
-            f"dsv4.mega_moe_fused.layer{self.cfg.layer_id}.before_deepgemm", x.device
+            f"dsv4.mega_moe_fused.layer{self.cfg.layer_id}.before_deepgemm", device
         )
-        y = self._mega_y[:T]
         deep_gemm.fp8_fp4_mega_moe_fused(
-            y,
+            output,
             self._se_l1_fp8,
             self._se_l1_sf,
             self._se_l2_fp8,
@@ -229,7 +233,7 @@ class MegaMoEFusedStrategy(MegaMoEStrategy):
             self._mid_sf,
             (self._mega_l1_w, self._mega_l1_sf),
             (self._mega_l2_w, self._mega_l2_sf),
-            buf,
+            self._mega_buf,
             recipe=(1, 1, FP4_BLOCK),
             activation="swiglu",
             activation_clamp=(
@@ -237,19 +241,19 @@ class MegaMoEFusedStrategy(MegaMoEStrategy):
             ),
             fast_math=True,
         )
-        return y
 
     def forward_with_gate_pack(
         self, x: torch.Tensor, gate, input_ids: torch.Tensor | None
     ) -> torch.Tensor:
         """Run MegaMoE fused with router gate + input pack fused together."""
+        if not self.can_use_gate_pack_static(gate):
+            raise RuntimeError(
+                "DSV4.1 MegaMoE fused gate-pack is unavailable for this gate or packer"
+            )
         kernels = _get_gate_pack_kernels()
         fused_mega_moe_gate_pack_nonhash, fused_mega_moe_gate_pack_hash, _ = kernels
         T = x.size(0)
         buf = self._mega_buf
-        y = self._mega_y[:T]
-        import deep_gemm
-
         with record_function_range("dsv4.moe.gate_linear_bf16"):
             scores_bf16 = F.linear(x, gate._weight_bf16())
         with record_function_range("dsv4.moe.mega_gate_pack"):
@@ -278,26 +282,4 @@ class MegaMoEFusedStrategy(MegaMoEStrategy):
                     route_scale=float(gate.route_scale),
                     norm_eps=1e-12,
                 )
-        self._maybe_pre_kernel_barrier(T)
-        sync_cuda_graph_warmup_ranks(
-            f"dsv4.mega_moe_fused.layer{self.cfg.layer_id}.before_deepgemm", x.device
-        )
-        deep_gemm.fp8_fp4_mega_moe_fused(
-            y,
-            self._se_l1_fp8,
-            self._se_l1_sf,
-            self._se_l2_fp8,
-            self._se_l2_sf,
-            self._mid_fp8,
-            self._mid_sf,
-            (self._mega_l1_w, self._mega_l1_sf),
-            (self._mega_l2_w, self._mega_l2_sf),
-            buf,
-            recipe=(1, 1, FP4_BLOCK),
-            activation="swiglu",
-            activation_clamp=(
-                self.cfg.swiglu_limit if self.cfg.swiglu_limit > 0 else None
-            ),
-            fast_math=True,
-        )
-        return y
+        return self._execute_packed_inputs(T, x.device)

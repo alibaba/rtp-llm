@@ -18,16 +18,21 @@ constexpr int    kDevicePinRetryBackoffMs         = 1000;
 }  // namespace
 
 NormalCacheStore::~NormalCacheStore() {
+    stop();
+}
+
+void NormalCacheStore::stop() {
     if (thread_pool_) {
         thread_pool_close_ = true;
         thread_pool_->stop();
         thread_pool_.reset();
     }
 
-    request_block_buffer_store_->stop();
+    if (request_block_buffer_store_) {
+        request_block_buffer_store_->stop();
+    }
     messager_.reset();
-    request_block_buffer_store_.reset();
-    RTP_LLM_LOG_INFO("destory cache store done");
+    RTP_LLM_LOG_INFO("cache store stopped");
 }
 
 std::shared_ptr<NormalCacheStore> NormalCacheStore::createNormalCacheStore(const CacheStoreInitParams& params) {

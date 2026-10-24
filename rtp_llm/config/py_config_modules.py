@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from typing import Dict, Optional
 
 from rtp_llm.config.kv_cache_config import KVCacheConfig
+from rtp_llm.config.maxpander_config import MaxPanderConfig
 from rtp_llm.config.model_args import ModelArgs
 
 st = time.time()
@@ -713,6 +714,7 @@ class PyEnvConfigs:
         )
         self.quantization_config: QuantizationConfig = QuantizationConfig()
         self.eplb_config: EPLBConfig = EPLBConfig()
+        self.maxpander_config = MaxPanderConfig()
         self.kv_cache_config: KVCacheConfig = KVCacheConfig()
         self.device_resource_config: DeviceResourceConfig = DeviceResourceConfig()
         self.runtime_config: RuntimeConfig = RuntimeConfig()
@@ -768,6 +770,7 @@ class PyEnvConfigs:
             + "\n\n"
             "[quantization_config]\n" + self.quantization_config.to_string() + "\n\n"
             "[eplb_config]\n" + self.eplb_config.to_string() + "\n\n"
+            "[maxpander_config]\n" + self.maxpander_config.to_string() + "\n\n"
             "[kv_cache_config]\n" + self.kv_cache_config.to_string() + "\n\n"
             "[device_resource_config]\n"
             + self.device_resource_config.to_string()

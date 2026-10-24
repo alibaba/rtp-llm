@@ -157,7 +157,9 @@ class StrategyRegistry:
             ):
                 raise ValueError(
                     "FP8/FP4 MOE strategies do not support EPLB redundant "
-                    "experts; disable EPLB or register an EPLB-aware backend "
+                    "experts without the explicit MaxPander MegaMoE adapter; "
+                    "use MAXPANDER_ENABLE=1 with static placement and an explicit "
+                    "mega_moe/mega_moe_se strategy, or disable redundant experts "
                     f"(logical_experts={getattr(config, 'expert_num', None)}, "
                     "physical_experts="
                     f"{getattr(config, 'physical_expert_num', None)}). "

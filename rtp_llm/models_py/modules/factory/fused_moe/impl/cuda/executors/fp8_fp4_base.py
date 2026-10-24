@@ -78,7 +78,11 @@ class Fp8Fp4ExecutorBase(FusedMoeExpertExecutor, torch.nn.Module):
         torch.nn.Module.__init__(self)
         super().__init__(config, quant_config, weights)
         self.cfg = config
+        self.setup_routing(weights)
         self.setup_weights(weights)
+
+    def setup_routing(self, layer_weights: Dict) -> None:
+        pass
 
     @classmethod
     def executor_type(cls) -> ExecutorType:

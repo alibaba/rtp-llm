@@ -1,6 +1,9 @@
 // Unit tests for GrammarLogitsProcessor over a 128-char ASCII vocab.
 
 #include "rtp_llm/cpp/models/logits_processor/GrammarLogitsProcessor.h"
+#include "rtp_llm/cpp/models/logits_processor/LogitsProcessorFactory.h"
+#include "rtp_llm/cpp/config/ModelConfig.h"
+#include "rtp_llm/cpp/metrics/RtpLLMMetrics.h"
 #include "rtp_llm/cpp/engine_base/grammar/RtpGrammarMatcher.h"
 #include "rtp_llm/cpp/engine_base/grammar/XGrammarBackend.h"
 #include "rtp_llm/cpp/models/logits_processor/BitmaskUtils.h"
@@ -44,6 +47,29 @@ GrammarConfig grammarConfig(bool terminate_without_stop_token = true) {
 std::shared_ptr<XGrammarBackend> makeBackend(bool terminate_without_stop_token = true, int vocab_size = 128) {
     return XGrammarBackend::create(makeAsciiTokenizerInfo(vocab_size).SerializeJSON(),
                                    grammarConfig(terminate_without_stop_token));
+}
+
+TEST(LogitsProcessorFactoryLifecycleTest, ReleasesBackendAndReporterBeforeMonitorShutdown) {
+    ASSERT_TRUE(initKmonitorFactory());
+    auto config = grammarConfig();
+    config.tokenizer_info_json = makeAsciiTokenizerInfo().SerializeJSON();
+    auto reporter = std::make_shared<kmonitor::MetricsReporter>("", "", kmonitor::MetricsTags{});
+    std::weak_ptr<kmonitor::MetricsReporter> reporter_ref = reporter;
+    LogitsProcessorFactory::init(ModelConfig{}, config, "", reporter);
+    std::weak_ptr<XGrammarBackend> backend_ref = LogitsProcessorFactory::grammarBackend();
+    reporter.reset();
+    EXPECT_FALSE(reporter_ref.expired());
+    EXPECT_FALSE(backend_ref.expired());
+
+    LogitsProcessorFactory::shutdown();
+    EXPECT_TRUE(backend_ref.expired());
+    EXPECT_TRUE(reporter_ref.expired());
+    LogitsProcessorFactory::shutdown();
+    stopKmonitorFactory();
+
+    LogitsProcessorFactory::init(ModelConfig{}, config, "");
+    EXPECT_NE(LogitsProcessorFactory::grammarBackend(), nullptr);
+    LogitsProcessorFactory::shutdown();
 }
 
 struct ProcessorBundle {

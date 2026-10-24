@@ -523,6 +523,90 @@ TEST_F(NormalEngineTest, testDecodeRoleRejectsPrefillOnlyBeforeScheduling) {
     EXPECT_EQ(positive_stream->curBlocksNum(), 0);
 }
 
+TEST_F(NormalEngineTest, testMaxPanderRejectsLocalDecodeBeforeScheduling) {
+    CustomConfig config;
+    config.role_type         = RoleType::PREFILL;
+    config.maxpander_enabled = true;
+    auto engine              = createMockEngine(config);
+    auto make_query          = [] {
+        auto query                                    = make_shared<GenerateInput>();
+        query->input_ids                              = torch::tensor({1, 2, 3, 4}, torch::kInt32);
+        query->generate_config                        = make_shared<GenerateConfig>();
+        query->generate_config->max_new_tokens        = 2;
+        query->generate_config->can_use_pd_separation = false;
+        return query;
+    };
+
+    auto assert_rejected = [&](const GenerateStreamPtr& stream) {
+        ASSERT_NE(stream, nullptr);
+        EXPECT_TRUE(stream->hasError());
+        EXPECT_EQ(stream->statusInfo().code(), ErrorCode::INVALID_PARAMS);
+        EXPECT_NE(stream->stopReason().find("cannot decode locally"), std::string::npos);
+        EXPECT_EQ(stream->curBlocksNum(), 0);
+        EXPECT_EQ(engine->getScheduler().onflightStreams(), 0);
+    };
+    assert_rejected(engine->makeStream(make_query()));
+    assert_rejected(engine->enqueue(make_query()));
+    auto direct_stream = engine->createStream(make_query());
+    ASSERT_FALSE(direct_stream->hasError());
+    engine->enqueue(direct_stream);
+    assert_rejected(direct_stream);
+
+    auto beam_query = make_query();
+    beam_query->generate_config->can_use_pd_separation = true;
+    beam_query->generate_config->num_beams             = 2;
+    auto multiple_query = make_query();
+    multiple_query->generate_config->can_use_pd_separation = true;
+    multiple_query->generate_config->num_return_sequences = 2;
+    auto result = engine->enqueueMultiple({beam_query, multiple_query});
+    EXPECT_EQ(result.first, std::vector<bool>({false, false}));
+    ASSERT_EQ(result.second.size(), 2);
+    for (const auto& stream : result.second) {
+        assert_rejected(stream);
+    }
+
+    auto pd_query = make_query();
+    pd_query->generate_config->pd_separation = true;
+    EXPECT_FALSE(engine->makeStream(pd_query)->hasError());
+    for (const int max_new_tokens : {0, 1}) {
+        auto query = make_query();
+        query->generate_config->max_new_tokens = max_new_tokens;
+        auto stream = engine->enqueue(query);
+        auto output = stream->nextOutput(5000);
+        ASSERT_TRUE(output.ok()) << output.status().ToString();
+        ASSERT_EQ(output.value().generate_outputs.size(), 1);
+        EXPECT_TRUE(output.value().generate_outputs[0].finished);
+    }
+}
+
+TEST_F(NormalEngineTest, testMaxPanderDisabledPreservesLocalDecodeAdmission) {
+    CustomConfig config;
+    config.role_type = RoleType::PREFILL;
+    auto engine      = createMockEngine(config);
+    auto query       = make_shared<GenerateInput>();
+    query->input_ids                              = torch::tensor({1, 2, 3, 4}, torch::kInt32);
+    query->generate_config                        = make_shared<GenerateConfig>();
+    query->generate_config->max_new_tokens        = 2;
+    query->generate_config->can_use_pd_separation = false;
+    EXPECT_FALSE(engine->makeStream(query)->hasError());
+}
+
+TEST_F(NormalEngineTest, testMaxPanderRejectsDecodeExecutionConfigurationBeforeStartup) {
+    for (const std::string feature : {"decode_role", "cuda_graph", "decode_scheduler"}) {
+        SCOPED_TRACE(feature);
+        CustomConfig config;
+        config.role_type         = feature == "decode_role" ? RoleType::DECODE : RoleType::PREFILL;
+        config.maxpander_enabled = true;
+        ModelConfig   model_config;
+        RuntimeConfig runtime_config;
+        KVCacheConfig kv_cache_config;
+        auto params = createEngineInitParams(config, model_config, runtime_config, kv_cache_config);
+        params.hw_kernel_config.enable_cuda_graph        = feature == "cuda_graph";
+        params.runtime_config.use_batch_decode_scheduler = feature == "decode_scheduler";
+        EXPECT_THROW(NormalEngine(params, nullptr), std::exception);
+    }
+}
+
 TEST_F(NormalEngineTest, testDirectEngineEntriesConvertPrefillValidationErrorsToStreamErrors) {
     CustomConfig config;
     auto         engine = createMockEngine(config);
