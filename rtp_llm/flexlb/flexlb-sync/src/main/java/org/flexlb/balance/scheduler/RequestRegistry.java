@@ -725,9 +725,9 @@ public class RequestRegistry {
                 : slot.prepareDispatch(item, () -> transaction.append(item));
     }
 
-    public DeliveryBlockReason.Attempt<ScheduledRequest> prepareRouteMember(
-            ScheduledRequest item, NonBatchDeliveryStrategy.NonBatchTransaction transaction,
-            PrefillTimePredictor.Evaluator evaluator) {
+    public DeliveryBlockReason.Attempt<ScheduledRequest> prepareRouteMember(ScheduledRequest item,
+                                                                            NonBatchTransaction transaction,
+                                                                            PrefillTimePredictor.Evaluator evaluator) {
         RequestSlot slot = entryFor(item);
         return slot == null ? DeliveryBlockReason.Attempt.rejected(DeliveryBlockReason.OWNERSHIP_LOST)
                 : slot.prepareDispatch(item, () -> transaction.append(item, evaluator));

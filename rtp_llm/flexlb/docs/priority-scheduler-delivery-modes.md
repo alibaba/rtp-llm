@@ -40,7 +40,7 @@ classDiagram
         -processSingleRequest()
         -processFixedWindow()
     }
-    class RouteDeliveryStrategy
+    class NonBatchDeliveryStrategy
     class BatchDeliveryStrategy
     class DefaultBatchDispatcher
     class PrefillEndpoint
@@ -55,7 +55,7 @@ classDiagram
     GlobalQueueCoordinator --> EvictionManager : priority rescue
     GlobalQueueCoordinator --> WorkerBatcher : committed endpoint work
     WorkerBatcher --> WorkerBatcher : endpoint-local delivery grouping
-    WorkerBatcher --> RouteDeliveryStrategy : NON_BATCH
+    WorkerBatcher --> NonBatchDeliveryStrategy : NON_BATCH
     WorkerBatcher --> BatchDeliveryStrategy : BATCH
     BatchDeliveryStrategy --> DefaultBatchDispatcher : prepared EnqueueBatch
     RequestRegistry --> PrefillEndpoint : exact accounting
