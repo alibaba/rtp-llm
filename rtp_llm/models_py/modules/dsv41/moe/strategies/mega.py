@@ -110,7 +110,7 @@ def _mega_intermediate_size(cfg: MoeCfg) -> int:
     alignment = 16 * FP4_BLOCK
     if intermediate % alignment == 0 or _native_mega_intermediate_supported(
         cfg.ep_size,
-        cfg.n_routed_experts,
+        cfg.physical_expert_num,
         cfg.n_activated_experts,
         cfg.dim,
         intermediate,
@@ -241,7 +241,7 @@ class MegaMoEStrategy(RoutedExpertsStrategy):
         group = dist.group.WORLD
         self._mega_group = group
         self._mega_buf_kwargs = dict(
-            num_experts=cfg.n_routed_experts,
+            num_experts=cfg.physical_expert_num,
             num_max_tokens_per_rank=max(cfg.max_tokens_per_rank, 1),
             num_topk=cfg.n_activated_experts,
             hidden=D,
@@ -315,6 +315,9 @@ class MegaMoEStrategy(RoutedExpertsStrategy):
         del w13, s13_int, w2, s2_int
         torch.cuda.empty_cache()
 
+    def get_eplb_weights(self) -> tuple[torch.Tensor, ...]:
+        return (self._mega_l1_w, self._mega_l1_sf, self._mega_l2_w, self._mega_l2_sf)
+
     def _ensure_mega_buffers(self) -> None:
         """Initialize runtime buffers once and preserve their addresses across graph replay."""
         if self._mega_buf is None:
@@ -342,7 +345,7 @@ class MegaMoEStrategy(RoutedExpertsStrategy):
         if callable(get_block_m):
             block_m_resolver = lambda tokens: get_block_m(
                 cfg.ep_size,
-                cfg.n_routed_experts,
+                cfg.physical_expert_num,
                 max_tokens_per_rank,
                 tokens,
                 cfg.n_activated_experts,
@@ -350,7 +353,7 @@ class MegaMoEStrategy(RoutedExpertsStrategy):
             )
         return generate_mega_moe_jit_token_counts(
             num_ranks=cfg.ep_size,
-            num_experts=cfg.n_routed_experts,
+            num_experts=cfg.physical_expert_num,
             num_experts_per_rank=cfg.n_local_experts,
             num_topk=cfg.n_activated_experts,
             intermediate_hidden=_mega_intermediate_size(cfg),
@@ -379,7 +382,7 @@ class MegaMoEStrategy(RoutedExpertsStrategy):
         max_tokens_per_rank = int(cfg.max_tokens_per_rank)
         warmup_key = (
             cfg.ep_size,
-            cfg.n_routed_experts,
+            cfg.physical_expert_num,
             cfg.n_local_experts,
             cfg.n_activated_experts,
             cfg.dim,
@@ -405,7 +408,7 @@ class MegaMoEStrategy(RoutedExpertsStrategy):
                 format_token_counts(token_counts),
                 max_tokens_per_rank,
                 cfg.ep_size,
-                cfg.n_routed_experts,
+                cfg.physical_expert_num,
                 cfg.n_activated_experts,
                 cfg.dim,
                 cfg.moe_inter_dim,

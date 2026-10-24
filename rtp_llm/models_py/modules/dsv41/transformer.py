@@ -108,6 +108,8 @@ class V4Args:
     fp8_kv_cache: bool = True
     # V4.1 uses delayed mHC readout and a distinct compressed attention layout.
     v41_config: Optional[Dict] = None
+    # Routed storage and dispatch capacity; gate scores retain the logical count.
+    n_physical_experts: Optional[int] = None
 
 
 def _block_kwargs(
@@ -145,6 +147,7 @@ def _block_kwargs(
         index_topk=args.index_topk,
         moe_inter_dim=args.moe_inter_dim,
         n_routed_experts=args.n_routed_experts,
+        n_physical_experts=args.n_physical_experts,
         n_activated_experts=args.n_activated_experts,
         n_shared_experts=args.n_shared_experts,
         score_func=args.score_func,

@@ -59,6 +59,15 @@ class MoeCfg:
     max_tokens_per_rank: int
     shared_fp8_block_size: int = 128
     is_decode_role: bool = False
+    n_physical_experts: Optional[int] = None
+
+    @property
+    def physical_expert_num(self) -> int:
+        return (
+            self.n_routed_experts
+            if self.n_physical_experts is None
+            else self.n_physical_experts
+        )
 
 
 class RoutedExpertsStrategy(nn.Module):
@@ -116,6 +125,10 @@ class RoutedExpertsStrategy(nn.Module):
         post-init audit can detect leftover keys (= bug).
         """
         raise NotImplementedError
+
+    def get_eplb_weights(self) -> tuple[torch.Tensor, ...]:
+        """Borrow every resident routed weight/scale with physical experts on dim 0."""
+        raise NotImplementedError(f"{type(self).__name__} does not support EPLB")
 
     def setup_runtime(self) -> None:
         """Create non-weight state after :meth:`setup_weights` completes.

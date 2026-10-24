@@ -138,7 +138,7 @@ class MegaMoEStrategySE(MegaMoEStrategy):
         self._mega_group = group
         self._mega_buf = _get_or_create_mega_se_buf(
             group=group,
-            num_experts=cfg.n_routed_experts,
+            num_experts=cfg.physical_expert_num,
             num_max_tokens_per_rank=max(cfg.max_tokens_per_rank, 1),
             num_topk=cfg.n_activated_experts,
             hidden=D,
@@ -249,7 +249,7 @@ class MegaMoEStrategySE(MegaMoEStrategy):
         return int(
             deep_gemm.get_block_m_for_mega_moe(
                 self.cfg.ep_size,
-                self.cfg.n_routed_experts,
+                self.cfg.physical_expert_num,
                 self._mega_buf.num_max_tokens_per_rank,
                 int(tokens),
                 self.cfg.n_activated_experts,
@@ -270,7 +270,7 @@ class MegaMoEStrategySE(MegaMoEStrategy):
         if callable(get_block_m):
             block_m_resolver = lambda tokens: get_block_m(
                 cfg.ep_size,
-                cfg.n_routed_experts,
+                cfg.physical_expert_num,
                 max_tokens_per_rank,
                 tokens,
                 cfg.n_activated_experts,
@@ -278,7 +278,7 @@ class MegaMoEStrategySE(MegaMoEStrategy):
             )
         return generate_mega_moe_se_jit_token_counts(
             num_ranks=cfg.ep_size,
-            num_experts=cfg.n_routed_experts,
+            num_experts=cfg.physical_expert_num,
             num_experts_per_rank=cfg.n_local_experts,
             num_topk=cfg.n_activated_experts,
             intermediate_hidden=cfg.moe_inter_dim,
@@ -307,7 +307,7 @@ class MegaMoEStrategySE(MegaMoEStrategy):
         warmup_key = (
             "mega_se",
             cfg.ep_size,
-            cfg.n_routed_experts,
+            cfg.physical_expert_num,
             cfg.n_local_experts,
             cfg.n_activated_experts,
             cfg.dim,
@@ -334,7 +334,7 @@ class MegaMoEStrategySE(MegaMoEStrategy):
                 format_token_counts(token_counts),
                 cfg.max_tokens_per_rank,
                 cfg.ep_size,
-                cfg.n_routed_experts,
+                cfg.physical_expert_num,
                 cfg.n_activated_experts,
                 cfg.dim,
                 cfg.moe_inter_dim,

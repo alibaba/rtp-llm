@@ -80,6 +80,7 @@ class DSparkRuntimeConfigTest(unittest.TestCase):
             (SpeculativeType.MTP, "deepseek_v4_mtp", False),
             (SpeculativeType.EAGLE, "eagle", False),
             (SpeculativeType.DSPARK, "deepseek_v4_dspark", True),
+            (SpeculativeType.DSPARK, "deepseek_v41_dspark", True),
         ):
             with self.subTest(sp_type=sp_type, model_type=model_type):
                 sp_config, target_config, draft_config = self._configs(gamma=3)
