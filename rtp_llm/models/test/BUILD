@@ -5,6 +5,18 @@ _DSV4_CUDA13_ONLY = select({
 })
 
 py_test(
+    name = "minimax_m31_kv_cache_test",
+    srcs = ["minimax_m31_kv_cache_test.py"],
+    deps = ["//rtp_llm:testlib"],
+)
+
+py_test(
+    name = "minimax_m31_dspark_test",
+    srcs = ["minimax_m31_dspark_test.py"],
+    deps = ["//rtp_llm:testlib"],
+)
+
+py_test(
     name = "dsv4_kv_cache_test",
     srcs = ["dsv4_kv_cache_test.py"],
     deps = ["//rtp_llm:testlib"],

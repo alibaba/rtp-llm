@@ -81,6 +81,9 @@ class ModelConfig(CppModelConfig):
     # Python-only fields that are allowed to be set
     _python_fields = {
         "is_mtp",
+        "msa_sparse_config",
+        "prepacked_nvfp4_moe",
+        "swiglu_alpha",
         "is_deepseek_v41",
         "deepseek_v41_config",
         "dspark_noise_token_id",
