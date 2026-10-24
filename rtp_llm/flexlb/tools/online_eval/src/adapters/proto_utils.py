@@ -1,6 +1,7 @@
 """Generate and cache RPC modules and encode request metadata."""
 
 from __future__ import annotations
+from file_io import read_json
 
 import json
 import fcntl
@@ -45,7 +46,7 @@ def _generate_proto(proto_name: str) -> tuple:
         fcntl.flock(lock, fcntl.LOCK_EX)
         manifest = out_dir / 'generated.json'
         try:
-            hashes = json.loads(manifest.read_text(encoding='utf-8'))
+            hashes = read_json(manifest)
             valid = isinstance(hashes, dict) and bool(hashes) and all(
                 (out_dir / name).is_file() and hashlib.sha256((out_dir / name).read_bytes()).hexdigest() == expected
                 for name, expected in hashes.items())

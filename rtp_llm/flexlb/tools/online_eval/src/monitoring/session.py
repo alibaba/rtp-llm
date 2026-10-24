@@ -5,6 +5,7 @@ or PATH); evidence-only plans do not launch it. Each environment has an isolated
 Live adapters read the TSDB, never the exporter. Query results carry their
 PromQL, evaluation bounds and source; absent/stale data is never replaced by 0.
 """
+from file_io import read_json
 
 import json
 import math
@@ -84,7 +85,7 @@ class PrometheusSession:
         if not selected:
             return
         path = self.directory / "prometheus.json"
-        previous_config = json.loads(path.read_text())
+        previous_config = read_json(path)
         config = dict(previous_config, scrape_configs=list(previous_config["scrape_configs"]))
         jobs = [scrape_job(self.query_plan, name, url, "client") for name, url in selected.items()]
         config["scrape_configs"].extend(jobs)
@@ -130,7 +131,7 @@ class PrometheusSession:
             raise ValueError("probe requires an HTTP(S) URL without credentials")
         self.probes[probe.job] = probe
         path = self.directory / "prometheus.json"
-        config = json.loads(path.read_text())
+        config = read_json(path)
         config["scrape_configs"].append(dict(job_name=probe.job, scheme=parsed.scheme, metrics_path=parsed.path or "/metrics", sample_limit=100000,
             body_size_limit="32MB", static_configs=[dict(targets=[parsed.netloc])],
             metric_relabel_configs=[dict(source_labels=["__name__"], action="keep",

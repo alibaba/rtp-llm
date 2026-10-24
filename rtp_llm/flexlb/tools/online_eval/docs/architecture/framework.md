@@ -108,7 +108,7 @@ case YAML 默认调用 Python 的 `default` 构建器，生成 `ProgramPlan`、`
 
 采样复用 `poll_samples` 和 `SampleBudget`。`observation.capture` 显式声明样本数与字节上限；超限保留已有现场和错误，证据不完整时不得判 PASS。先保留已获得的失效现场再检查流量状态，允许诊断停止原因；错误样本不能被当作有效门禁证据。HTTP 请求复用 `runtime.network`，timeout 受当前 deadline 或可停止的短请求预算约束。
 
-门禁的获取、终态补全和发布均通过 `artifacts.json_io.write_json` 原子更新同一证据文件，崩溃时保留最近的完整版本。公共获取信封包含格式版本、clock、criteria、samples、errors、provenance；业务 payload 保持所属格式的字段与语义。格式版本描述结构，`measurement_policy` 描述统计口径，两者独立。历史时钟字段只由 `artifacts.gate_inputs.evidence_origin` 转换；缺少锚点且没有样本时失败，不补零。
+门禁的获取、终态补全和发布均通过 `file_io.write_json` 原子更新同一证据文件，崩溃时保留最近的完整版本。公共获取信封包含格式版本、clock、criteria、samples、errors、provenance；业务 payload 保持所属格式的字段与语义。格式版本描述结构，`measurement_policy` 描述统计口径，两者独立。历史时钟字段只由 `artifacts.gate_inputs.evidence_origin` 转换；缺少锚点且没有样本时失败，不补零。
 
 `run_provenance.collect` 收集实际环境代次的启动输入；门禁复用其严格获取路径并冻结业务源码摘要。`adapters.java_flow.evidence_environment` 定义可比较客户端环境中的 run-local 字段排除规则。源文件位置变化只改变摘要，不改变历史证据的重判口径。
 
@@ -142,7 +142,7 @@ Java 流量控制使用 `FlowState`、`FlowStatus`、`StopCommand` 和 `DrainRes
 
 ## 执行领域对象与序列化边界
 
-`ScenarioCompiler.compile()` 返回不可变的 `CompiledInstance`，其中阶段为 `StagePlan`，公共请求、句柄引用和比较参数分别使用具体参数类型。`ExecutionPlan` 组合实例与依赖摘要，`ExecutionPlanCodec` 负责落盘、完整性验证和领域解码。摘要一致之外，加载时还检查身份、预算、资源范围和环境快照的一致性。`compile_scenarios()`、`freeze_plan()` 和 `load_plan()` 是清单及文件格式的投影入口，不作为运行时状态容器。
+`ScenarioCompiler.compile()` 返回不可变的 `CompiledInstance`，其中阶段为 `StagePlan`，公共请求、句柄引用和比较参数分别使用具体参数类型。实例的 metadata、implementation、reports 和 reporting 为具名字段，不在进程内编码成 JSON 字符串。`metadata.kind` 与 `execution` 为策略唯一来源；兼容的 test_kind、collection_profile 和 workload_runtime 只在外部投影生成。编译与冻结文件读取共用阶段生命周期及引用遍历规则，各自保留准入校验。`ExecutionPlan` 组合实例与依赖摘要，`ExecutionPlanCodec` 负责落盘、完整性验证和领域解码。摘要一致之外，加载时还检查身份、预算、资源范围和环境快照的一致性。`compile_scenarios()`、`freeze_plan()` 和 `load_plan()` 是清单及文件格式的投影入口，不作为运行时状态容器。
 
 `ScenarioRunner.run()` 接收编译实例并返回 `RunResult`。`StageExecutor` 返回 `StageExecutionSummary`，阶段、清理和交付状态具有独立的结果类型。`RunOutcome.evaluate()` 使用 `OutcomeEvidence` 统一判定执行、gate、有效性和交付；报告失败不重写阶段检查。`RunFinalizer` 在证据和报告各自的 deadline 内调用适配器，并在阶段开始、完成或失败时保存检查点。
 
@@ -182,3 +182,5 @@ Mock cluster 的 gRPC 协议调度使用独立的轻量执行器；业务回调�
 超过 RPC 在途上限的新调用通过正常协议返回 `RESOURCE_EXHAUSTED`，错误描述明确标记为 mock harness 限制；这不表示真实引擎的 KV、调度队列或 GPU 容量不足。已接收调用的取消与终态通知不受该准入限制，取消通知不等待引擎业务额度；已过期的排队调用不执行业务方法。移除引擎时停止该引擎的 RPC 所有者；cluster 收尾先停止并等待服务与传输，再有界回收协议执行器和业务回调，未终止则报告失败并允许重试。该机制仍不模拟真实 Pod 的 CPU、GC 或过载时延。
 
 缓存 RPC 每次复制当前 keys、重新构造完整 protobuf，并使用生成代码的标准序列化。相同版本仍返回完整 keys；不复用成员快照、protobuf 或编码字节。真实引擎的可选缓存状态快照不作为默认行为。协议一致不代表锁竞争、CPU、GC 和 RPC 时延等价；Mock 门禁不能替代真实引擎的缓存同步性能验证。
+
+归档容器由 `artifacts.experiment_store` 管理文件索引、角色、摘要和完整性，不加载报告或监控实现。`reporting.experiment` 负责视图布局、序列数据重建和实验发布；`artifacts.experiment` 仅保留兼容导出与命令入口。通用原子文本和 JSON 读写由标准库叶子模块 `file_io` 提供。单 Master 与 HA 共用 Master 启动、进程登记、日志边界及就绪检查过程，实例地址、发现配置和资源所有权由各自规格提供。

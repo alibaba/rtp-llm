@@ -5,7 +5,7 @@ from pathlib import Path
 
 
 def prune_tsdb(directory, artifacts, deadline):
-    from artifacts.experiment import ExperimentReader
+    from artifacts.experiment_store import ExperimentReader
     from file_digest import sha256_file
 
     directory = Path(directory).resolve()

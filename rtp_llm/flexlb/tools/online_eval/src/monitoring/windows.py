@@ -1,11 +1,12 @@
 """Bounded raw window capture; consumers read the same frozen MetricStore."""
+from file_io import read_json
 from dataclasses import dataclass
 import copy
 import json
 import math
 from pathlib import Path
 
-from artifacts.json_io import write_json
+from file_io import write_json
 from file_digest import sha256_file
 from monitoring.contracts import MetricUnavailable
 from monitoring.metric_store import MetricStore
@@ -33,7 +34,7 @@ class FrozenMetricWindow:
     @classmethod
     def read(cls, directory):
         directory = Path(directory)
-        manifest = json.loads((directory / "manifest.json").read_text())
+        manifest = read_json(directory / "manifest.json")
         if manifest.get("metric_window_schema_version") != 1 or set(manifest.get("files", {})) != {"metrics.json"}:
             raise ValueError("invalid raw window manifest")
         if sha256_file(directory / "metrics.json") != manifest["files"]["metrics.json"]:

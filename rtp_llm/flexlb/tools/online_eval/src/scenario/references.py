@@ -40,7 +40,7 @@ def validate_references(value, path, outputs):
         if "$ref" in value:
             ref = OutputReference.read(value, path)
             if ref.stage_id not in outputs:
-                fail(path, "unknown or forward stage reference")
+                fail(path, "unknown or forward reference")
             if outputs[ref.stage_id] is not None:
                 reference(value, path, outputs)
         else:
@@ -53,8 +53,10 @@ def validate_references(value, path, outputs):
 
 def enter_stage(action, index, setup_seen, torn_down, path):
     """Validate lifecycle at both compilation and frozen-file admission."""
-    if torn_down or (action == "setup" and (setup_seen or index != 0)):
-        fail(path, "invalid stage lifecycle: setup must be first and no stage may follow teardown")
+    if torn_down:
+        fail(path, "no stage may follow teardown")
+    if action == "setup" and (setup_seen or index != 0):
+        fail(path, "setup must occur exactly once as the first stage")
     if action != "setup" and not setup_seen:
         fail(path, "setup must precede actions")
     return setup_seen or action == "setup"

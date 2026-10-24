@@ -11,7 +11,7 @@ import pytest
 from monitoring.archive import export_metrics
 from monitoring.metric_store import MetricStore
 from monitoring.contracts import MetricContractError
-from artifacts.json_io import write_json
+from file_io import write_json
 from monitoring.query_plan import load_plan, queries_for_targets
 from monitoring.session import PrometheusSession
 from runtime.deadline import Deadline

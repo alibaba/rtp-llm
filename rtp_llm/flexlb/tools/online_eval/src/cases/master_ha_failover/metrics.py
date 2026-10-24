@@ -1,4 +1,5 @@
 """Case-owned HA numeric projections; raw journals remain separate evidence."""
+from file_io import read_json
 
 import json
 import math
@@ -173,7 +174,7 @@ def produce_gates(directory):
     from monitoring.metric_store import MetricStore
     directory = Path(directory)
     store = MetricStore.read(directory)
-    for stage in json.loads((directory / "result.json").read_text())["stages"]:
+    for stage in read_json(directory / "result.json")["stages"]:
         if stage["action"] in {"master_client_check", "master_client_analyze"}:
             for check in stage["checks"]:
                 if check["status"] in {"PASS", "FAIL", "WARNING"}:

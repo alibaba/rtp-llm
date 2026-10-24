@@ -1,9 +1,10 @@
 """Phase-level Java traffic control; Python never forwards individual requests."""
+from file_io import read_json
 
 import json
 import time
 from pathlib import Path
-from artifacts.json_io import write_json
+from file_io import write_json
 
 from adapters.flow_control import FlowControlProtocol, FlowStatus, DrainResult
 
@@ -69,7 +70,7 @@ class JavaFlowGroup:
         self.control.mkdir()
         source_manifest = trace.with_suffix(".manifest.json")
         semantics = (
-            json.loads(source_manifest.read_text()) if source_manifest.exists() else {}
+            read_json(source_manifest) if source_manifest.exists() else {}
         )
         if 'sha256' in semantics and semantics['sha256'] != self.trace_manifest['sha256']:
             raise ValueError('trace manifest SHA256 differs from materialized plan')
@@ -100,7 +101,7 @@ class JavaFlowGroup:
                 "client monitor endpoint absent",
             )
             self.monitor.add_client_target(
-                self.monitor_target, json.loads(target_path.read_text())["url"], deadline=deadline
+                self.monitor_target, read_json(target_path)["url"], deadline=deadline
             )
             write_json(self.directory / "metrics-ready", int(time.time() * 1000) + 500)
         from artifacts.startup import startup_phase

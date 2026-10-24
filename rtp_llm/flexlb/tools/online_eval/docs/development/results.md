@@ -22,7 +22,7 @@ workload 默认交付一份主报告。专属视图包含门禁、有效性、�
 
 | 产物 | 用途 |
 |---|---|
-| `experiment.eval.zip` | 单实例主工件：完整定义、执行、判定依据与可重绘视图；位置见 `result.json.artifacts.experiment` |
+| `experiment.eval.zip` | 单实例主工件：完整定义、执行、判定依据与可重绘视图；位置见 `result.json.reporting.experiment` |
 | `experiment-<sha256>.raw.zip` | 完整原始附件；位置见 `result.json.artifacts.raw`，与主工件中的摘要核对 |
 | `aggregate.json`、实例 `result.json` | 汇总、阶段与检查状态 |
 | `<gate>-gate-result.json`、对应 evidence / manifest | 独立门禁细项、判定与输入摘要；报告未生成时仍可读取 |
@@ -38,9 +38,9 @@ workload 默认交付一份主报告。专属视图包含门禁、有效性、�
 在 online_eval 目录执行：
 
 ```bash
-PYTHONPATH=src:. python3 -m artifacts.experiment /path/to/experiment.eval.zip --verify
-PYTHONPATH=src:. python3 -m artifacts.experiment /path/to/experiment.eval.zip --out /path/to/report.html
-PYTHONPATH=src:. python3 -m artifacts.experiment /path/to/experiment.eval.zip \
+PYTHONPATH=src:. python3 -m reporting.experiment /path/to/experiment.eval.zip --verify
+PYTHONPATH=src:. python3 -m reporting.experiment /path/to/experiment.eval.zip --out /path/to/report.html
+PYTHONPATH=src:. python3 -m reporting.experiment /path/to/experiment.eval.zip \
   --view default.yaml --out /path/to/default.html
 ```
 

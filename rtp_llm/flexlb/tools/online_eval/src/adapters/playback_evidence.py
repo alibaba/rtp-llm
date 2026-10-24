@@ -1,6 +1,6 @@
 """Verify sender-owned playback evidence against the materialized input and launch."""
+from file_io import read_json
 from dataclasses import dataclass
-import json
 from pathlib import Path
 from traffic.playback.configuration import JAVA_REPLAY_SPEED
 
@@ -11,7 +11,7 @@ class PlaybackEvidence:
 
     @classmethod
     def read(cls, path, trace_sha256, environment):
-        value = json.loads(Path(path).read_text())
+        value = read_json(Path(path))
         if not isinstance(value, dict) or value.get('trace_sha256') != trace_sha256:
             raise ValueError('Java playback trace SHA256 differs from materialized plan')
         if value.get('offline_plan_supported') is not True:

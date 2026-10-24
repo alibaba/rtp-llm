@@ -47,6 +47,7 @@ def architecture(tmp_path):
     (case / '__init__.py').write_text('')
     for name in ('analysis', 'inputs', 'report', 'panels'):
         (case / (name + '.py')).write_text('')
+    (tmp_path / 'artifacts' / 'experiment_store.py').write_text('')
     for name in ('compiler', 'program_compiler', 'stage_compiler', 'builder', 'contracts', 'inputs', 'gates', 'measurement'):
         (tmp_path / 'scenario' / (name + '.py')).write_text('')
     (tmp_path / '.importlinter').write_text((ROOT / '.importlinter').read_text())
@@ -58,11 +59,11 @@ def architecture(tmp_path):
     return tmp_path, run
 
 
-def test_pure_new_case_passes_all_four_contracts(architecture):
+def test_pure_new_case_passes_all_contracts(architecture):
     _, run = architecture
     result = run()
     assert result.returncode == 0, result.stdout + result.stderr
-    assert '4 kept, 0 broken' in result.stdout
+    assert '0 broken' in result.stdout
 
 
 @pytest.mark.parametrize('source,target,contract', [
@@ -72,6 +73,8 @@ def test_pure_new_case_passes_all_four_contracts(architecture):
     ('scenario/builder.py', 'cases.future_case.inputs', '用例构建合同不依赖业务实现'),
     ('scenario/contracts.py', 'scenario.measurement', '用例构建合同不依赖业务实现'),
     ('scenario/__init__.py', 'scripts', '场景库不依赖命令脚本'),
+    ('artifacts/experiment_store.py', 'reporting', '制品存储不依赖展示和执行'),
+    ('runtime/__init__.py', 'scenario', '运行底座和文件读写不依赖业务层'),
 ])
 def test_new_case_cannot_break_a_boundary(architecture, source, target, contract):
     root, run = architecture

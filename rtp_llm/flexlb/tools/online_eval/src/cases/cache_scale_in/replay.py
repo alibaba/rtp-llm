@@ -1,8 +1,8 @@
 """Explicit offline re-adjudication of this case; presentation never triggers it."""
+from file_io import read_json
 
 import argparse
 import hashlib
-import json
 from pathlib import Path
 
 from cases.cache_scale_in import analysis as cache_analysis
@@ -27,7 +27,7 @@ def cache_main():
     evidence = load_reinterpretation(parser, args, cache_analysis.__file__)
     original_errors = list(evidence.get("errors", []))
     if args.client_snapshot:
-        snapshot = json.loads(args.client_snapshot.read_text())
+        snapshot = read_json(args.client_snapshot)
         if len(snapshot["issued"]) == snapshot.get("status", {}).get("submitted"):
             try:
                 align_send_counters(evidence, snapshot["issued"])

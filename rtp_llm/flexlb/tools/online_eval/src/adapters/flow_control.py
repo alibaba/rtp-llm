@@ -1,4 +1,5 @@
 """Java producer control protocol, independent of discovery and traffic source."""
+from file_io import read_json
 
 import json
 import uuid
@@ -146,7 +147,7 @@ class FlowControlProtocol:
 
 def read_status(directory, identity):
     path = Path(directory) / "status.json"
-    state = json.loads(path.read_text()) if path.exists() else {}
+    state = read_json(path) if path.exists() else {}
     if not isinstance(state, dict) or state and any(state.get(k) != v for k, v in identity.items()):
         raise ValueError("flow control identity mismatch")
     return state

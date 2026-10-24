@@ -1,6 +1,7 @@
 """Prepare ZooKeeper outside runs; launch only verified compiled artifacts."""
 
 from __future__ import annotations
+from file_io import read_json
 
 import os
 import subprocess
@@ -59,7 +60,7 @@ class ZkHelperOps:
     @staticmethod
     def prepare(java_bin: str) -> Path:
         import fcntl
-        from artifacts.json_io import write_json
+        from file_io import write_json
         directory = FLEXLB_DIR / 'flexlb-sync' / 'target' / 'online-eval-runtime'
         directory.mkdir(parents=True, exist_ok=True)
         with (directory / 'prepare.lock').open('w') as lock:
@@ -101,13 +102,12 @@ class ZkHelperOps:
 
     @staticmethod
     def default_launch_argv(java_bin: str) -> list[str]:
-        import json
         directory = FLEXLB_DIR / 'flexlb-sync' / 'target' / 'online-eval-runtime'
         cp_file, manifest = directory / 'classpath.txt', directory / 'manifest.json'
         if not cp_file.is_file() or not manifest.is_file():
             raise RuntimeError('ZooKeeper runtime is not prepared; run tools/online_eval/scripts/commands/prepare_runtime.py')
         paths = ZkHelperOps._classpath_paths(cp_file)
-        if ZkHelperOps._fingerprints(paths) != json.loads(manifest.read_text())['files']:
+        if ZkHelperOps._fingerprints(paths) != read_json(manifest)['files']:
             raise RuntimeError('ZooKeeper runtime changed after preparation; run prepare_runtime.py again')
         launcher = paths[0] / (ZK_LAUNCHER_CLASS.replace('.', '/') + '.class')
         if not launcher.is_file():

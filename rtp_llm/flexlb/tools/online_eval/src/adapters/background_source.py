@@ -2,7 +2,7 @@
 import json
 from pathlib import Path
 
-from artifacts.json_io import write_json
+from file_io import write_json
 from runtime.observation import FrozenSnapshot
 from runtime.sample_worker import SampleWorker, SamplingError
 

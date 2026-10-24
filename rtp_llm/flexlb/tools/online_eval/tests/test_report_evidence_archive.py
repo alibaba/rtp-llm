@@ -163,7 +163,7 @@ def test_write_views_shares_metric_reads_and_archives_across_renderers(tmp_path)
     MetricStore(metric_document(1)).save(tmp_path)
 
     def renderer(identity):
-        def render(directory, analysis, presentation):
+        def render(directory, analysis, presentation, deadline=None):
             assert MetricStore.read(directory).document['run']['value'] == 1
             assert MetricStore.read(directory).document['run']['value'] == 1
             return publish(directory, identity, dict(run=analysis)) / 'report.html'

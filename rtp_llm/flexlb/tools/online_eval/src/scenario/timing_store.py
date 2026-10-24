@@ -1,12 +1,12 @@
 """Locked, advisory duration estimates for lane scheduling."""
+from file_io import read_json
 import fcntl
-import json
 import math
 import os
 import sys
 from pathlib import Path
 
-from artifacts.json_io import write_json
+from file_io import write_json
 from schema_contract import matches_schema
 
 def timing_path():
@@ -22,7 +22,7 @@ def read_timings(path):
     if not path.exists():
         return {}
     try:
-        data = json.loads(path.read_text())
+        data = read_json(path)
         if not (matches_schema(data, "timings_schema_version", 1) or matches_schema(data, "run_summary_schema_version", 1)) or not isinstance(
             data.get("instances"), list
         ):

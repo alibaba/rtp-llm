@@ -1,4 +1,5 @@
 """Convert explicit Prometheus query archives without acquiring other sources."""
+from file_io import read_json
 
 import json
 import math
@@ -8,7 +9,7 @@ import copy
 from monitoring.identity import SOURCE_KINDS
 from monitoring.metric_store import MetricStore
 from monitoring.contracts import MetricContractError
-from artifacts.json_io import write_json
+from file_io import write_json
 from monitoring.query_plan import definitions, plan_hash
 
 
@@ -42,7 +43,7 @@ def _archive_series(directory, anchor, *, archives=None):
     series, sources, gaps, errors = {}, {}, {}, []
     if archives is None:
         paths = _archive_paths(directory)
-        archives = ((path, json.loads(path.read_text())) for path in paths)
+        archives = ((path, read_json(path)) for path in paths)
     for path, data in archives:
         epoch = path.parent.name if path.parent != Path(directory) else "1"
         errors.extend(dict(source=epoch, **error) for error in data.get("errors", []))
@@ -135,7 +136,7 @@ def export_metrics(directory, plan=None, *, archive_directory=None):
     selected_plan = plan
     archive_root = Path(archive_directory) if archive_directory is not None else directory
     paths = _archive_paths(archive_root)
-    archives = [(path, json.loads(path.read_text())) for path in paths]
+    archives = [(path, read_json(path)) for path in paths]
     series, sources, gaps, errors = _archive_series(archive_root, 0, archives=archives)
     plans, declared, observations = {}, {}, {}
     for path, data in archives:

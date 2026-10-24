@@ -23,7 +23,6 @@ class ReportView:
     validator: ViewValidator
     renderer: ViewRenderer
     subtitle_fields: frozenset[str] = frozenset()
-    deadline_renderer: object = None
 
     def __post_init__(self):
         if not isinstance(self.subtitle_fields, (set, frozenset, tuple, list)):
@@ -130,9 +129,7 @@ class CaseRegistry:
                         or not callable(capability.validator) or not callable(capability.renderer)):
                     raise ValueError('invalid registered view capability: ' + name)
                 validate_call(capability.validator, 3, case.module + '.views.' + name + '.validator')
-                validate_call(capability.renderer, 3, case.module + '.views.' + name + '.renderer')
-                if capability.deadline_renderer is not None:
-                    validate_call(capability.deadline_renderer, 4, case.module + ".views." + name + ".deadline_renderer")
+                validate_call(capability.renderer, 4, case.module + '.views.' + name + '.renderer')
                 add(views, name, capability, 'view')
             if definition.metrics is not None:
                 declared = getattr(definition.metrics, "CONTRACTS", None)

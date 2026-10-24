@@ -19,22 +19,8 @@ TOOLS_DIR = Path(__file__).resolve().parents[1]
 
 from adapters import port_windows as parallel_runner
 
-PARALLEL_RUNNER = TOOLS_DIR / "scripts/pipeline/execute_cases.py"
-
-
 DEFAULT_LANES = (65535 - 151 - parallel_runner.MOCK_BASE_GRPC_PORT) // parallel_runner.MOCK_PORT_STRIDE + 1
 
-_FAMILY_WEIGHTS = {
-    "master": 60 * 8,
-    "engine_fault": 30 * 13,
-    "status": 15 * 24,
-    "admission": 30 * 11,
-    "elastic": 40 * 8,
-    "kv": 20 * 15,
-    "cancel": 12 * 13,
-    "balance": 15 * 6,
-    "priority": 30 * 1,
-}
 
 
 class LaneEnvTest(unittest.TestCase):

@@ -3,7 +3,7 @@ from pathlib import Path
 
 import pytest
 
-from artifacts.experiment import ExperimentReader, publish_run
+from reporting.experiment import ExperimentReader, publish_run
 from runtime.deadline import Deadline
 from artifacts.retention import prune_tsdb
 from test_experiment_container import definition, execution

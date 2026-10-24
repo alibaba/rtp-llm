@@ -13,7 +13,7 @@ from pathlib import Path
 
 from runtime.observation import SampleBudget
 from runtime.deadline import Deadline
-from artifacts.json_io import write_json
+from file_io import write_json
 from monitoring.sources import selected_sources
 from scenario.registry import registry
 

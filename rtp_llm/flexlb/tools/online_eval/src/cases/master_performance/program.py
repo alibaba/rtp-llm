@@ -67,7 +67,7 @@ from scenario.registry import ReportView
 from cases.master_performance import metrics
 
 render = partial(render_gate, name='performance', write_report=write_report)
-VIEW = ReportView(validate_view, render, frozenset(), render)
+VIEW = ReportView(validate_view, render, frozenset())
 
 
 from scenario.registry import CaseDefinition

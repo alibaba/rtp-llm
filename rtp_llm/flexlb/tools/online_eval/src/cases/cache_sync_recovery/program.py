@@ -64,7 +64,7 @@ from scenario.registry import ReportView
 from cases.cache_sync_recovery import metrics
 
 render = partial(render_gate, name='cache_stability', write_report=write_report)
-VIEW = ReportView(validate_view, render, frozenset(), render)
+VIEW = ReportView(validate_view, render, frozenset())
 
 CASE = CaseDefinition(execution_requirements=ExecutionRequirements(monitoring=True),
                       metrics=metrics, report_views={'cache_sync_recovery.yaml': VIEW},

@@ -14,7 +14,7 @@ class RunFinalizer:
         result_path = ctx.artifact_dir / "result.json"
 
         def checkpoint(pending=False):
-            from artifacts.json_io import write_json
+            from file_io import write_json
             document = result.to_dict()
             if pending:
                 document["status"] = "FINALIZING"
@@ -58,7 +58,7 @@ class RunFinalizer:
 
     @staticmethod
     def _archive(ctx, result, document, analysis, deadline):
-        from artifacts.experiment import publish_run
+        from reporting.experiment import publish_run
         result.artifacts = publish_run(ctx.artifact_dir, ctx.experiment_definition, document,
                                       analysis=analysis, deadline=deadline)
         if (not getattr(ctx.backend, "retain_tsdb", True)

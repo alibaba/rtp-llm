@@ -13,7 +13,7 @@ TOOLS = Path(__file__).resolve().parents[1]
 from scenario.backend import JavaMockBackend
 from document_io import DocumentError as ScenarioError
 from scenario.runtime import Deadline, RuntimeContext
-from scripts.commands.list_cases import instance_directory, select, summarize
+from scenario.child_cli import instance_directory, select, summarize
 
 
 class ChildTest(unittest.TestCase):

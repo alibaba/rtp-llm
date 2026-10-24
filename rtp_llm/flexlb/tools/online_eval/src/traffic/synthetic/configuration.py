@@ -6,10 +6,10 @@ validation or inference of error-censored output lengths is claimed.
 """
 
 from __future__ import annotations
+from file_io import read_json
 
 from dataclasses import dataclass
 from itertools import accumulate
-import json
 import math
 
 from traffic.request_rules import PRIORITY
@@ -106,7 +106,7 @@ def resolve(parameters: dict, *, document=None) -> tuple[SyntheticWorkload, dict
     profile = p.pop('profile', DEFAULT_PROFILE if 'families' not in p else None)
     provenance = None
     if profile:
-        document = document if document is not None else json.loads(profile_path(profile).read_text())
+        document = document if document is not None else read_json(profile_path(profile))
         if not isinstance(document, dict) or type(document.get('schema_version', 1)) is not int or document.get('schema_version', 1) not in (1, 2):
             raise ValueError('unsupported synthetic parameter schema')
         if not isinstance(document.get('parameters'), dict) or not isinstance(document.get('calibration'), dict):

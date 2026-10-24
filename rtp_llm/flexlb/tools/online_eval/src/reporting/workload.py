@@ -1,4 +1,5 @@
 """Publish selected case views or the default view of all archived metrics."""
+from file_io import read_json
 from reporting.events import attach_events
 from reporting.evidence_archive import archive_session
 
@@ -59,10 +60,7 @@ def _write_views(directory, analysis, names=None, *, deadline=None):
         try:
             if deadline is not None:
                 deadline.check()
-            if deadline is not None and capability.deadline_renderer is not None:
-                paths[name] = capability.deadline_renderer(directory, analysis, presentation, deadline)
-            else:
-                paths[name] = capability.renderer(directory, analysis, presentation)
+            paths[name] = capability.renderer(directory, analysis, presentation, deadline)
             if deadline is not None:
                 deadline.check()
         except ArtifactNotProduced:
@@ -92,9 +90,8 @@ def write_views(directory, analysis, names=None, *, deadline=None):
 
 def analysis_document(directory, result, evidence, series, statistic_sources):
     """Assemble presentation input from settled decisions and frozen evidence."""
-    import json
     from pathlib import Path
-    traffic = [json.loads(path.read_text()).get("trace", {})
+    traffic = [read_json(path).get("trace", {})
                for path in sorted(Path(directory).glob("flows/*/flow-input.json"))]
     return dict(
         workload_analysis_schema_version=1,

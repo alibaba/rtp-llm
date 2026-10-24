@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from pathlib import Path
 import time
 
-from artifacts.json_io import write_json
+from file_io import write_json
 from monitoring.query_plan import queries_for_targets, plan_hash
 
 

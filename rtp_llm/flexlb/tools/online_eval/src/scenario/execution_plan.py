@@ -1,10 +1,11 @@
 """Freeze compiled execution and verify code/presentation before child admission."""
+from file_io import read_json
 
 import hashlib
 import json
 from pathlib import Path
 
-from artifacts.json_io import write_json
+from file_io import write_json
 from document_io import DocumentError as ScenarioError
 from schema_contract import matches_schema
 from scenario.plan import CompiledInstance, ExecutionPlan
@@ -86,7 +87,7 @@ class ExecutionPlanCodec:
         return payload["sha256"]
 
     def read_document(self, path, expected_sha):
-        document = json.loads(Path(path).read_text())
+        document = read_json(Path(path))
         if not matches_schema(document, "execution_plan_schema_version", 1):
             raise ScenarioError("unsupported execution plan schema")
         if set(document) != {"execution_plan_schema_version", "instances", "dependencies", "sha256"}:

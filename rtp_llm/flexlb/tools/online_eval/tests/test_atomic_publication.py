@@ -4,8 +4,8 @@ from unittest.mock import patch
 
 import pytest
 
-from artifacts.file_io import write_text
-from artifacts.json_io import write_json
+from file_io import write_text
+from file_io import write_json
 
 
 @pytest.mark.parametrize('writer,invalid', [(write_text, None), (write_json, {'value': float('nan')})])

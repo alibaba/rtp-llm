@@ -9,7 +9,7 @@ from pathlib import Path
 
 import pytest
 
-from artifacts.experiment import ArtifactRole, ExperimentReader, publish_run
+from reporting.experiment import ArtifactRole, ExperimentReader, publish_run
 from artifacts.archive import create_archive
 from monitoring.metric_store import MetricStore
 from reporting import write_bundle, render
@@ -158,7 +158,7 @@ def test_automatic_archive_freezes_plan_and_preserves_failed_execution(tmp_path)
 def test_archive_failure_has_separate_delivery_and_preserves_gate(tmp_path):
     clock = Clock()
     instance = compile_scenarios([('fixture', source())])[0]
-    with patch('artifacts.experiment.publish_run', side_effect=OSError('disk full')):
+    with patch('reporting.experiment.publish_run', side_effect=OSError('disk full')):
         result = execute_instance(instance, Backend(clock), artifact_dir=tmp_path, clock=clock, sleeper=clock.sleep)
     assert result['outcome']['gate'] == 'PASS'
     assert result['outcome']['validity'] == 'VALID'
@@ -172,7 +172,7 @@ def test_archive_failure_has_separate_delivery_and_preserves_gate(tmp_path):
 def test_failed_publication_preserves_existing_primary_and_removes_temporary(tmp_path):
     original = publish_run(tmp_path, definition(), execution())
     previous = Path(original['experiment']).read_bytes()
-    with patch('artifacts.experiment.ExperimentWriter.add_view', side_effect=ValueError('bad view')):
+    with patch('reporting.experiment.ExperimentWriter.add_view', side_effect=ValueError('bad view')):
         write_bundle(tmp_path, 'run', 'case', {}, frozen_spec())
         with pytest.raises(ValueError, match='bad view'):
             publish_run(tmp_path, definition(), execution())
@@ -242,7 +242,7 @@ def test_archive_deadline_preserves_gate_and_has_its_own_budget(tmp_path):
     instance['execution']['archive_timeout_s'] = .5
     def delayed(directory, definition, execution, *, deadline, analysis=None):
         deadline.sleep(10)
-    with patch('artifacts.experiment.publish_run', side_effect=delayed):
+    with patch('reporting.experiment.publish_run', side_effect=delayed):
         result = execute_instance(instance, Backend(clock), artifact_dir=tmp_path,
                                   clock=clock, sleeper=clock.sleep)
     assert result['outcome']['gate'] == 'PASS'
@@ -268,7 +268,7 @@ def test_preferred_view_selects_case_before_default(tmp_path):
 
 
 def test_failed_republish_preserves_previous_raw_attachment(tmp_path):
-    from artifacts.experiment import ExperimentWriter
+    from reporting.experiment import ExperimentWriter
     (tmp_path / 'engine.log').write_text('previous log')
     previous = publish_run(tmp_path, definition(), execution())
     primary = Path(previous['experiment']).read_bytes()

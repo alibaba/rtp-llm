@@ -174,7 +174,7 @@ def test_committed_gate_corruption_never_falls_back_to_default(tmp_path, damage)
 
 
 def test_atomic_result_writer_preserves_previous_checkpoint_on_serialization_failure(tmp_path):
-    from artifacts.json_io import write_json
+    from file_io import write_json
     target = tmp_path / "result.json"
     write_json(target, {"status": "FINALIZING", "execution_status": "PASS"})
     before = target.read_bytes()
@@ -215,7 +215,7 @@ def test_failed_evidence_export_keeps_typed_metadata_without_absorbing_snapshot_
 
 
 def test_typed_report_delivery_keeps_archive_analysis_links(tmp_path):
-    from artifacts.experiment import ExperimentReader
+    from reporting.experiment import ExperimentReader
     clock = Clock()
     result = execute_workload(plan(), Backend(clock), artifact_dir=tmp_path,
                               clock=clock, sleeper=clock.sleep)

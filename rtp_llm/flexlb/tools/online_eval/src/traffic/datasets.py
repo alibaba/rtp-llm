@@ -1,7 +1,7 @@
 """Generate and verify self-describing capture manifests against their payload."""
+from file_io import read_json
 from dataclasses import dataclass
 import hashlib
-import json
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -58,7 +58,7 @@ def _admit(path):
     sidecar = path.with_suffix(".manifest.json")
     if not sidecar.is_file():
         raise ValueError(f"missing manifest: {sidecar}")
-    manifest = json.loads(sidecar.read_text())
+    manifest = read_json(sidecar)
     raw = path.read_bytes()
     digest = hashlib.sha256(raw).hexdigest()
     if manifest.get("bytes") != len(raw) or manifest.get("sha256") != digest:

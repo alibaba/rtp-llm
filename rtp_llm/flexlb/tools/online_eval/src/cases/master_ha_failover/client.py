@@ -1,6 +1,7 @@
 """HA discovery and replay resource; actions own registration and orchestration."""
 
 from __future__ import annotations
+from file_io import read_json
 
 import json
 import uuid
@@ -109,7 +110,7 @@ class HaReplayClient:
         trace_info = {}
         source_manifest = trace.with_suffix(".manifest.json")
         if source_manifest.is_file():
-            trace_info.update(json.loads(source_manifest.read_text()))
+            trace_info.update(read_json(source_manifest))
         trace_info.update(path=str(trace), sha256=sha256_file(trace), playback=playback)
         self.out_dir.mkdir(parents=True, exist_ok=True)
         (self.out_dir / "flow-input.json").write_text(json.dumps(

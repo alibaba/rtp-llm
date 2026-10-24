@@ -68,7 +68,7 @@ from scenario.registry import ReportView
 from cases.cache_scale_in import metrics
 
 render = partial(render_gate, name='cache', write_report=write_report)
-VIEW = ReportView(validate_view, render, frozenset({"expected_behavior", "observed_behavior"}), render)
+VIEW = ReportView(validate_view, render, frozenset({"expected_behavior", "observed_behavior"}))
 
 
 from scenario.registry import CaseDefinition

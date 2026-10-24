@@ -52,7 +52,7 @@ def build_spec(payload, presentation):
     return spec
 
 
-def write_report(directory, payload, presentation):
+def write_report(directory, payload, presentation, deadline=None):
     run = RunPresentation.read(payload, directory=directory)
     spec = canonical_spec(build_spec(payload, presentation), payload, run=run)
     bundle = write_bundle(

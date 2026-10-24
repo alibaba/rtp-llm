@@ -50,3 +50,29 @@ source_modules =
     scenario
 forbidden_modules =
     scripts
+
+[importlinter:contract:storage]
+name = 制品存储不依赖展示和执行
+type = forbidden
+source_modules =
+    artifacts.experiment_store
+forbidden_modules =
+    reporting
+    monitoring
+    scenario
+    cases
+
+[importlinter:contract:runtime]
+name = 运行底座和文件读写不依赖业务层
+type = forbidden
+source_modules =
+    runtime
+forbidden_modules =
+    scenario
+    cases
+    reporting
+    monitoring
+    artifacts
+    adapters
+    analysis
+    traffic

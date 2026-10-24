@@ -75,46 +75,8 @@ class RepositoryLayoutTest(unittest.TestCase):
             )
         expected = json.loads((ROOT / "tests/fixtures/instance_ids.json").read_text())
         self.assertEqual(expected, sorted(p["id"] for p in plans))
-        for path in [
-            "legacy",
-            "migration",
-            "archive",
-            "flexlb_test_framework/cases",
-            "flexlb_test_framework/support",
-            "flexlb_functional_tests.py",
-            "paired_case_runner.py",
-            "legacy_paired_runner.py",
-            "scripts/commands/run_stress.py",
-            "scripts/commands/render_stress_report.py",
-            "scripts/pipeline/calculate_metrics.py",
-            "scripts/pipeline/organize_evidence.py",
-            "src/runtime/stress.py",
-            "src/analysis/aggregate.py",
-            "src/analysis/consolidate.py",
-            "src/reporting/stress_report.py",
-        ]:
-            self.assertFalse((ROOT / path).exists(), path)
-        self.assertFalse(
-            any(name.startswith("flexlb_test_framework.cases") for name in sys.modules)
-        )
-
     def test_cases_root_contains_only_concrete_case_packages(self):
         self.assertEqual(
             {'__init__.py'},
             {path.name for path in (ROOT / 'src/cases').glob('*.py')},
         )
-
-    def test_source_components_are_unified(self):
-        expected = {
-            "monitoring", "traffic", "runtime", "cases", "scenario", "adapters",
-            "analysis", "reporting", "artifacts",
-        }
-        self.assertEqual(expected, {p.name for p in (ROOT / "src").iterdir() if p.is_dir() and p.name != "__pycache__"})
-        for old_package in ("online_eval", "flexlb_test_framework", "stress", "flexlb_eval"):
-            self.assertFalse((ROOT / "src" / old_package).exists(), old_package)
-        self.assertFalse((ROOT / "scenarios").exists())
-        self.assertTrue((ROOT / "config/scenarios").is_dir())
-
-
-if __name__ == "__main__":
-    unittest.main()

@@ -9,7 +9,7 @@ from scenario.contracts import StageHandler, StageOutput
 from functools import partial
 from scenario.parameters import validate_fields, reference_parameters
 from runtime.observation import SampleBudget, poll_samples
-from artifacts.json_io import write_json
+from file_io import write_json
 from artifacts.gate_inputs import new_evidence
 from artifacts.provenance import gate_provenance
 from adapters.mock_control import mock_json

@@ -1,7 +1,7 @@
 """Pure input-fidelity comparison, summaries and grading.
 
 Metrics describe infinite-history input structure, not finite-cache performance.
-Acquisition and production-generator orchestration live in traffic.fidelity_audit.
+Acquisition and production-generator orchestration live in analysis.fidelity_audit.
 """
 import math
 from collections import Counter

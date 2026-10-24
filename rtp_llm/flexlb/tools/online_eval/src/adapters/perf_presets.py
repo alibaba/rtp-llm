@@ -1,4 +1,5 @@
 """Declared mock performance presets; no name-specific Python branches."""
+from file_io import read_json
 import hashlib
 import json
 from dataclasses import dataclass
@@ -58,7 +59,7 @@ class PairedMasterSettings:
 
 
 def _registry():
-    entries = json.loads(INDEX.read_text(encoding="utf-8"))
+    entries = read_json(INDEX)
     if not isinstance(entries, dict) or not entries:
         raise ValueError(f"invalid performance preset registry: {INDEX}")
     return entries
@@ -100,7 +101,7 @@ def resolve_performance_calibration(performance, source_path):
 
 def load_performance_bundle(path):
     """Validate one Engine/Master record, then project its paired components."""
-    document = json.loads(Path(path).read_text(encoding="utf-8"))
+    document = read_json(Path(path))
     if not isinstance(document, dict):
         raise ValueError("performance document must be an object")
     if "schema_version" in document:

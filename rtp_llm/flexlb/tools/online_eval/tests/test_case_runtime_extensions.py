@@ -24,7 +24,7 @@ def test_selected_report_receives_the_live_render_budget(tmp_path):
         budget.check()
         seen.append(budget)
         return directory / 'report.html'
-    capability = ReportView(lambda *args: None, lambda *args: None, deadline_renderer=render)
+    capability = ReportView(lambda *args: None, render)
     with patch('reporting.workload.view_capabilities', return_value={'trial.yaml': capability}), \
          patch('reporting.workload.view', return_value=object()):
         assert write_views(tmp_path, {}, ['trial.yaml'], deadline=deadline)['trial.yaml'] == tmp_path / 'report.html'

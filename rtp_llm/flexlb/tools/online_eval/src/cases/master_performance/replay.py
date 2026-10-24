@@ -20,7 +20,7 @@ def performance_main():
     parser.add_argument("--json-only", action="store_true", help="write evidence and verdict without HTML")
     args = parser.parse_args()
     from artifacts.reinterpretation import load_reinterpretation, import_metrics
-    from artifacts.json_io import write_json
+    from file_io import write_json
     e = load_reinterpretation(parser, args, performance_analysis.__file__)
     r = analyze(e)
     if args.json_only:

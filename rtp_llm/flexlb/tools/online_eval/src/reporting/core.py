@@ -1,3 +1,4 @@
+from file_io import read_json
 import copy
 import hashlib
 import json
@@ -10,7 +11,7 @@ from reporting.renderer import _render_validated
 from reporting.components import run_meta
 from reporting.evidence_archive import project, restore, verify_references
 from file_digest import sha256_file
-from artifacts.file_io import write_text
+from file_io import write_text
 from schema_contract import matches_schema
 
 
@@ -100,7 +101,7 @@ def discover_reports(root, *, role=None, kind="run"):
         raise ValueError("unsupported report kind: " + str(kind))
     reports = []
     for path in sorted((Path(root) / "reports" / kind).glob("*/manifest.json")):
-        manifest = json.loads(path.read_text(encoding='utf-8'))
+        manifest = read_json(path)
         if role is not None and manifest.get("role") != role:
             continue
         directory = read_bundle(path)
@@ -114,7 +115,7 @@ def discover_reports(root, *, role=None, kind="run"):
 def read_bundle(path):
     path = Path(path)
     directory = path if path.is_dir() else path.parent
-    manifest = json.loads((directory / "manifest.json").read_text(encoding='utf-8'))
+    manifest = read_json(directory / "manifest.json")
     if not matches_schema(manifest, "report_manifest_schema_version", 1):
         raise ValueError("unsupported report manifest version")
     files = manifest.get("files")
@@ -128,10 +129,10 @@ def read_bundle(path):
             raise ValueError("report file escapes bundle")
         if sha256_file(target) != entry["sha256"]:
             raise ValueError("report checksum mismatch: " + entry["path"])
-    spec = json.loads((directory / "report-spec.json").read_text(encoding='utf-8'))
+    spec = read_json(directory / "report-spec.json")
     validate(spec, versioned=True)
     _validate_run_meta(spec.get("run_meta"))
-    analysis = json.loads((directory / "analysis.json").read_text(encoding='utf-8'))
+    analysis = read_json(directory / "analysis.json")
     if not matches_schema(analysis, "report_analysis_schema_version", 1):
         raise ValueError("unsupported report analysis version")
     _validate_run_meta(analysis.get("run_meta"))
@@ -155,7 +156,7 @@ def load_analysis(path):
         path = read_bundle(path) / "analysis.json"
     elif path.name == "analysis.json" and (path.parent / "manifest.json").exists():
         read_bundle(path.parent)
-    value = json.loads(path.read_text(encoding='utf-8'))
+    value = read_json(path)
     if not matches_schema(value, "report_analysis_schema_version", 1):
         raise ValueError("unsupported report analysis version")
     _validate_run_meta(value.get("run_meta"))

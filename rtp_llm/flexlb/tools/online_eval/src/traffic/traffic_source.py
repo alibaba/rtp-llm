@@ -7,7 +7,7 @@ import json
 from pathlib import Path
 
 from file_digest import sha256_file
-from artifacts.json_io import write_json
+from file_io import write_json
 from traffic.codecs import codec_for_version, decode_model
 from traffic.lineage_transforms import LineageProjector, LineageProjection
 from traffic.datasets import CapturedDataset
@@ -55,13 +55,10 @@ def validate_plan(path, namespace=None):
                 return type(t) is int and 0 <= t <= 2147483647
             if any(not (valid_token(t) or (compact and isinstance(t,list) and len(t)==block_size and all(valid_token(v) for v in t))) for t in tokens):
                 raise ValueError("invalid token id")
-            block_size = row.get("cache_key_block_size")
             try:
                 JAVA_LENGTH.validate(row.get("il"), "il")
             except ValueError as exc:
                 raise ValueError("invalid input length") from exc
-            if compact and (type(block_size) is not int or block_size not in (64,128,256,512,1024,2048,4096)):
-                raise ValueError("invalid compact block size")
             expected_count = (row["il"] + block_size - 1) // block_size if compact else row["il"]
             if expected_count != len(tokens):
                 raise ValueError("input length differs from tokens")
@@ -73,10 +70,6 @@ def validate_plan(path, namespace=None):
                 PRIORITY.validate(row.get("priority"), "priority")
             except ValueError as exc:
                 raise ValueError("invalid priority") from exc
-            if type(row.get("cache_key_block_size")) is not int or row[
-                "cache_key_block_size"
-            ] not in (64, 128, 256, 512, 1024, 2048, 4096):
-                raise ValueError("unsupported cache block size")
             # Untrusted supplied keys must not bypass the Java token hash check.
             for key in ("bh", "block_cache_keys"):
                 if key in row and not isinstance(row[key], list):

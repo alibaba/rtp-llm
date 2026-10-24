@@ -4,9 +4,9 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 
-from artifacts.json_io import write_json
+from file_io import write_json
 from reporting import details, table, render as render_spec
-from artifacts.file_io import write_text
+from file_io import write_text
 from reporting.catalog import ACCENT_COLORS
 
 METHOD_LABELS = {'real': '真实输入', 'independent': '独立采样', 'joint': '联合采样'}

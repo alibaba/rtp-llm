@@ -107,7 +107,7 @@ def test_child_uses_frozen_steps_without_loading_yaml(tmp_path, monkeypatch):
     from program_fixtures import compile_scenarios
     from test_scenario_runtime import Backend, Clock, source
     from test_scenario_backend import lease_manifest
-    module_path = Path(__file__).resolve().parents[1] / "scripts/commands/list_cases.py"
+    module_path = Path(__file__).resolve().parents[1] / "src/scenario/child_cli.py"
     spec = importlib.util.spec_from_file_location("frozen_child", module_path)
     child = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(child)

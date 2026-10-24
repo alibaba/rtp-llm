@@ -18,7 +18,7 @@ class ScenarioRunner:
         ctx = RuntimeContext(plan.to_dict(), backend, artifact_dir, clock, sleeper, enforce_deadlines)
         ctx.plan = plan
         ctx.artifact_dir.mkdir(parents=True, exist_ok=True)
-        from artifacts.json_io import write_json
+        from file_io import write_json
         from scenario.execution_plan import dependency_files
         from reporting.view_config import view, DEFAULT_VIEW
         ctx.experiment_definition = dict(experiment_definition_schema_version=1,

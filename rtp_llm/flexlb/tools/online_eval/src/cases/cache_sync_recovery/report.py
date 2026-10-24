@@ -10,7 +10,7 @@ from reporting.components import details, run_meta, table
 from reporting.core import write_bundle
 
 
-def compact_report_spec(data, original):
+def compact_report_spec(data, original, *, presentation=None, store=None):
     """同一冻结数据按变体选择两张主图；完整指标保留在汇总和证据中。"""
     spec = copy.deepcopy(original)
     variant = 'recovery' if data.get('intervention', data.get('parameters', {}).get('intervention', False)) else 'steady'
@@ -35,14 +35,24 @@ def compact_report_spec(data, original):
     def points(items, field, scale=1):
         return [dict(x=r['epoch_s']-zero, y=r[field]*scale if r.get(field) is not None else None) for r in items]
 
-    add('age', '未参与撤出的 Worker 最长未更新时长', 's', points(rows, 'healthy_max_status_age_ms', .001),
-        '成功轮询与已应用观测年龄的较大值；仅覆盖完整采样时刻，不代表连续时间窗无异常。')
-    env = data.get('environment', {})
-    total = env.get('n_prefill', 0)+env.get('n_decode', 0)-len(data.get('victims', []))
-    visible = [dict(epoch_s=r['epoch_s'], value=total-r['missing_workers']
-                    if total and r.get('missing_workers') is not None else None) for r in rows]
-    add('workers', '未参与撤出的 Worker 数量（Master 可见）', '个', points(visible, 'value'),
-        '不包含选中撤出的 Worker；Master 可见端点不等于实际存活进程或可调度容量。')
+    if presentation is None:
+        add('age', '未参与撤出的 Worker 最长未更新时长', 's', points(rows, 'healthy_max_status_age_ms', .001),
+            '成功轮询与已应用观测年龄的较大值；仅覆盖完整采样时刻，不代表连续时间窗无异常。')
+        env = data.get('environment', {})
+        total = env.get('n_prefill', 0)+env.get('n_decode', 0)-len(data.get('victims', []))
+        visible = [dict(epoch_s=r['epoch_s'], value=total-r['missing_workers']
+                        if total and r.get('missing_workers') is not None else None) for r in rows]
+        add('workers', '未参与撤出的 Worker 数量（Master 可见）', '个', points(visible, 'value'),
+            '不包含选中撤出的 Worker；Master 可见端点不等于实际存活进程或可调度容量。')
+    else:
+        from reporting.curves import materialize, project_panels
+        curves = [materialize(key, style, row["points"], origin=zero,
+                              labels=row["labels"], provenance=row["provenance"])
+                  for key, style in presentation.charts.curves.items()
+                  for row in store.document["metrics"].get(style.metric_id, [])]
+        panels = [p for p in project_panels(curves, presentation) if p["id"].startswith(variant+"-")]
+        for panel in panels:
+            panel["events"] = events
     anchor = [dict(id='cache_only_started', name='观察起点', t=e['epoch_s']-zero)
               for e in data['events'] if e['id']=='cache_only_started']
     spec.update(panels=panels, events=anchor+events, title=variant+' · 缓存同步实验 · '+spec['run_id'])
@@ -66,10 +76,12 @@ def write_report(directory, raw, result, *, run=None, presentation=None):
     directory = Path(directory)
     identity = run["id"]+"-cache-stability" if run else directory.name+"-cache-stability"
     frames = [{k: v for k, v in r.items() if k != 'workers'} for r in raw['frames']]
+    store = None
     if presentation is not None:
         from monitoring.metric_store import MetricStore
         from cases.cache_sync_recovery.telemetry import archived_metrics
-        frames = archived_metrics(MetricStore.read(directory), frames, epoch=raw["provenance"]["env_epoch"],
+        store = MetricStore.read(directory)
+        frames = archived_metrics(store, frames, epoch=raw["provenance"]["env_epoch"],
                                  maximum_gap_s=raw["parameters"]["observation"]["max_gap_s"])
     zero = next((e['epoch_s'] for e in raw['events'] if e.get('name', e['id']) == 'cache_only_started'), frames[0]['epoch_s'])
     performance_end = next((e['epoch_s'] for e in raw['events'] if e.get('name', e['id']) == 'performance_observation_finished'), frames[-1]['epoch_s'])
@@ -135,20 +147,7 @@ def write_report(directory, raw, result, *, run=None, presentation=None):
                   details('证据边界',dict(scope=raw['expiry_scope'],errors=raw['errors']))])
     if run is not None and run.get('workload', {}).get('runtime_validity') == 'INVALID':
         data['outcome']['validity'] = data['runtime_validity'] = 'INVALID'
-    spec = compact_report_spec(data, spec)
-    if presentation is not None:
-        from monitoring.metric_store import MetricStore
-        from reporting.curves import materialize, project_panels
-        store = MetricStore.read(directory)
-        curves = [materialize(key, style, row["points"], origin=zero,
-                              labels=row["labels"], provenance=row["provenance"])
-                  for key, style in presentation.charts.curves.items()
-                  for row in store.document["metrics"].get(style.metric_id, [])]
-        variant = "recovery" if raw["intervention"] else "steady"
-        panels = [p for p in project_panels(curves, presentation) if p["id"].startswith(variant+"-")]
-        for panel in panels:
-            panel["events"] = spec["panels"][0]["events"]
-        spec["panels"] = panels
+    spec = compact_report_spec(data, spec, presentation=presentation, store=store)
     spec['sections'].insert(0, table('实验有效性', ['检查','状态','实际值'],
         [[c['id'],c['status'],str(c['actual'])] for c in validity_checks]))
     # Keep execution/telemetry provenance from the common runner; preserve the case's own origin.

@@ -6,7 +6,7 @@ import zipfile
 
 import pytest
 
-from artifacts.experiment import ArtifactRole, ExperimentWriter
+from reporting.experiment import ArtifactRole, ExperimentWriter
 from reporting import read_bundle, run_meta, write_bundle
 from reporting.comparison import compare, main
 from reporting.comparison_inputs import load_snapshot

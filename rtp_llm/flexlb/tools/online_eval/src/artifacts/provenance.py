@@ -1,6 +1,6 @@
 """Freeze observed launch inputs before reports are assembled."""
+from file_io import read_json
 
-import json
 from pathlib import Path
 
 
@@ -14,11 +14,11 @@ def collect(directory, environments, metadata=None, *, required=()):
                                 ("performance", "perf.json"), ("master_config", "master_config.json")):
             path = root / filename
             if path.is_file():
-                data[field] = json.loads(path.read_text(encoding='utf-8'))
+                data[field] = read_json(path)
             elif field in required:
                 raise ValueError(f"required provenance file missing: {path}")
         epochs[epoch] = data
-    flows = [json.loads(path.read_text(encoding='utf-8')) for path in sorted(Path(directory).glob("**/flow-input.json"))]
+    flows = [read_json(path) for path in sorted(Path(directory).glob("**/flow-input.json"))]
     from runtime.paths import MOCK_JAR
     from file_digest import sha256_file
     mock_artifact = dict(path=str(MOCK_JAR), sha256=sha256_file(MOCK_JAR)) if Path(MOCK_JAR).is_file() else None
@@ -38,7 +38,7 @@ def gate_provenance(ctx, flow, *, source_files, analyzer_file):
     launch = observed["environments"][epoch]
     trace = dict(flow.trace_manifest)
     trace["workload_sha256"] = trace_workload_sha(trace["path"])
-    client = json.loads((flow.directory / "flow-input.json").read_text(encoding='utf-8'))
+    client = read_json(flow.directory / "flow-input.json")
     from runtime import observation
     from scenario import windows
     from scenario import metric_inputs

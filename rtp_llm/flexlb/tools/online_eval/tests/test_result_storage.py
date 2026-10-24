@@ -7,7 +7,7 @@ import pytest
 
 from analysis.checks import CheckResult
 from analysis.gates import gate_result
-from artifacts.experiment import ExperimentReader, publish_run
+from reporting.experiment import ExperimentReader, publish_run
 from artifacts.gate import freeze_gate, gate_check
 from monitoring.metric_store import MetricStore
 from reporting.run_model import RunPresentation
@@ -112,7 +112,7 @@ def test_archive_keeps_intentionally_distinct_presentation_metadata(tmp_path):
 
 
 def test_version_one_analysis_remains_readable(tmp_path):
-    from artifacts.experiment import ArtifactRole, ExperimentWriter
+    from reporting.experiment import ArtifactRole, ExperimentWriter
     path = tmp_path / 'legacy.eval.zip'
     metadata = dict(id='old', status='FAIL', clock_anchor={'epoch_s': 1})
     with ExperimentWriter(path).publication() as writer:

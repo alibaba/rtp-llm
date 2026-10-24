@@ -18,7 +18,7 @@ import uuid
 import queue
 from contextlib import nullcontext
 from concurrent.futures import ThreadPoolExecutor
-from artifacts.json_io import write_json
+from file_io import write_json
 from pathlib import Path
 
 
@@ -34,7 +34,7 @@ from runtime.resource_plan import ResourcePlanError
 from adapters.java_mock_resources import plan_lane_leases
 from adapters import port_windows
 
-SCENARIO_RUNNER = Path(__file__).resolve().parents[2] / "scripts/commands/list_cases.py"
+SCENARIO_RUNNER = Path(__file__).with_name("child_cli.py")
 from scenario.outcome import TERMINAL_STATUSES as STATUSES
 from scenario.result_validation import error_result, read_results
 from scenario.timing_store import timing_path, read_timings, write_timings
@@ -167,7 +167,7 @@ def _catalog(args):
     return instances
 
 
-def _run_segment(index, part, group, lease, args, out, children):
+def _run_segment(index, part, instance, lease, args, out, children):
     directory = out / f"lane{index}"
     directory.mkdir(parents=True, exist_ok=True)
     env = dict(os.environ)
@@ -182,8 +182,8 @@ def _run_segment(index, part, group, lease, args, out, children):
     try:
         from scenario.execution_plan import freeze_plan
         plan_path = segment / "execution-plan.json"
-        plan_sha = freeze_plan(plan_path, [instance.compiled for instance in group],
-                               dependencies=group[0].dependencies)
+        plan_sha = freeze_plan(plan_path, [instance.compiled],
+                               dependencies=instance.dependencies)
         command = [
             sys.executable,
             str(SCENARIO_RUNNER),
@@ -195,7 +195,7 @@ def _run_segment(index, part, group, lease, args, out, children):
             "--grade",
             args.grade,
             "--instances",
-            ",".join((instance.id for instance in group)),
+            instance.id,
             "--out-dir",
             str(segment),
             "--lease-json",
@@ -203,18 +203,10 @@ def _run_segment(index, part, group, lease, args, out, children):
         ]
         if getattr(args, "retain_tsdb", False):
             command.append("--retain-tsdb")
-        execution = [instance.metadata["execution"] for instance in group]
-        timeout = (
-            sum((item["timeout_s"] + item["cleanup_timeout_s"]
-                 + item["finalize_timeout_s"] + item["report_timeout_s"]
-                 + item["archive_timeout_s"] for item in execution))
-            + 30
-            if execution
-            else None
-        )
-        cleanup_timeout = (
-            max((item["cleanup_timeout_s"] for item in execution), default=0) + 15
-        )
+        execution = instance.metadata["execution"]
+        timeout = sum(execution[key] for key in (
+            "timeout_s", "cleanup_timeout_s", "finalize_timeout_s", "report_timeout_s", "archive_timeout_s")) + 30
+        cleanup_timeout = execution["cleanup_timeout_s"] + 15
         rc = children.run(
             command,
             env,
@@ -222,15 +214,15 @@ def _run_segment(index, part, group, lease, args, out, children):
             timeout=timeout,
             cleanup_timeout=cleanup_timeout,
         )
-        rows = read_results(result_path, group)
+        rows = read_results(result_path, [instance])
     except Exception as exc:
         rc = 1
-        rows = [error_result(instance, f"child launch failed: {exc}") for instance in group]
+        rows = [error_result(instance, f"child launch failed: {exc}")]
     results.extend(({**row, "lane": index} for row in rows))
     segments.append(
         {
             "source": "yaml",
-            "instance_ids": [instance.id for instance in group],
+            "instance_ids": [instance.id],
             "exit_code": rc,
             "watchdog_timeout": rc == 124,
             "result": str(result_path),
@@ -261,7 +253,7 @@ def _run_lane(index, lane, lease, args, out, children, dispatch=None):
             failure = "lane ports still occupied: " + str(busy)
             results.append(dict(error_result(instance, failure), not_started=True, lane=index))
             break
-        part = _run_segment(index, len(segments), [instance], lease, args, out, children)
+        part = _run_segment(index, len(segments), instance, lease, args, out, children)
         results.extend(part["instances"])
         segments.extend(part["segments"])
         row = part["instances"][0]

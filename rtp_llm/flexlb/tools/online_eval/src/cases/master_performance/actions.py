@@ -6,7 +6,7 @@ from scenario.contracts import StageHandler, StageOutput
 from functools import partial
 from scenario.parameters import validate_fields, reference_parameters
 from cases.master_performance.inputs import effective_profile
-from artifacts.json_io import write_json
+from file_io import write_json
 from artifacts.gate_inputs import compact_flow, new_evidence
 from artifacts.gate import gate_check
 from cases.master_performance.inputs import engine_roles

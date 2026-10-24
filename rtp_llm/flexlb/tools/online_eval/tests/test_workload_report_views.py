@@ -210,7 +210,7 @@ class WorkloadReportViewsTest(unittest.TestCase):
             from case_registry_fixtures import entry, snapshot
             render = mock.Mock(wraps=case_report.write_report)
             renderer = partial(render_gate, name='cache', write_report=render)
-            presentation = replace(VIEW, renderer=renderer, deadline_renderer=renderer)
+            presentation = replace(VIEW, renderer=renderer)
             registered = registry.registry().cases['cache_scale_in']
             definition = replace(registered.definition, report_views={'cache_scale_in.yaml': presentation})
             with mock.patch.object(registry, '_snapshot', snapshot(

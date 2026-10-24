@@ -10,7 +10,7 @@ import math
 from pathlib import Path
 
 from schema_contract import matches_schema
-from artifacts.json_io import write_json
+from file_io import write_json
 from monitoring.contracts import MetricContractError, MetricUnavailable, validate_observation, validate_definition
 
 

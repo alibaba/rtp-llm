@@ -1,5 +1,5 @@
 """Revalidate child result identities and nested evidence before aggregation."""
-import json
+from file_io import read_json
 from schema_contract import matches_schema
 from scenario.outcome import TERMINAL_STATUSES as STATUSES, RunOutcome
 
@@ -89,7 +89,7 @@ def read_results(path, group):
     """Missing, duplicated, unexpected or malformed rows cannot become a green run."""
     expected = {instance.id: instance for instance in group}
     try:
-        data = json.loads(path.read_text())
+        data = read_json(path)
         if (
             not matches_schema(data, "scenario_results_schema_version", 1)
             or (not isinstance(data.get("instances"), list))

@@ -28,7 +28,7 @@ class InstanceRunnerTest(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         self.root = Path(self.tmp.name)
-        self.child = self.root / "scripts/commands/list_cases.py"
+        self.child = self.root / "src/scenario/child_cli.py"
         self.child.parent.mkdir(parents=True)
         self.child.touch()
         self.data = catalog()
@@ -180,11 +180,11 @@ class InstanceRunnerTest(unittest.TestCase):
         module_root = Path(__file__).resolve().parents[1]
         self.child.write_text(
             "import sys\nsys.path.insert(0, "
-            + repr(str(module_root))
+            + repr(str(module_root / "src"))
             + ")\n"
             + """
 from types import SimpleNamespace, ModuleType
-from scripts.commands import list_cases as child
+from scenario import child_cli as child
 import scenario.backend as backend
 from scenario.contracts import StageHandler, StageOutput, CheckResult
 class FixtureBackend:

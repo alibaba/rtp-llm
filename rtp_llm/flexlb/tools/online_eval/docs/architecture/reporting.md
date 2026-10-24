@@ -147,7 +147,7 @@ ZIP 使用 Deflate level 3，已压缩文件直接存储；请求流水、日志
 
 预设可以使用 `ids` 选择稳定 `curve_id`，显示名称变化不影响选择。`visible`、`names`、`contains`、`groups` 为显式展示选择，`roles`、`aggregations` 为结构化角色和聚合选择。默认面板投影必须显式接收已解码视图，不读 YAML；HTML 的降采样不改变完整统计样本或归档证据。
 
-在线门禁使用 `write_gate_report(..., run=...)` 装配运行信息，离线发布使用 `write_archived_gate_report` 读取冻结时钟；两者共享 bundle 发布。公共原子文本写入由 `artifacts.file_io.write_text` 提供，工件模块不引用报告模块私有写入函数。发布层遍历报告协议中的 run/runs 节点，证据编解码器只处理单个节点，不推断对照布局。
+在线门禁使用 `write_gate_report(..., run=...)` 装配运行信息，离线发布使用 `write_archived_gate_report` 读取冻结时钟；两者共享 bundle 发布。公共原子文本写入由 `file_io.write_text` 提供，工件模块不引用报告模块私有写入函数。发布层遍历报告协议中的 run/runs 节点，证据编解码器只处理单个节点，不推断对照布局。
 
 公共输入解析由 `document_io.load_document` 提供，错误由 `DocumentError` 表示；scenario 保留场景编译入口，报告加载不依赖场景加载器。`view_schema` 只校验展示结构，`monitoring.view_binding` 在集成边界核对查询定义、曲线绑定和诊断分类。
 

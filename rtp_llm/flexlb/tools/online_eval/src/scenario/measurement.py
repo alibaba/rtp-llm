@@ -72,14 +72,14 @@ class WorkloadPolicy:
 
             joined = join_evidence(payload, monitor.environments)
             joined_path = ctx.artifact_dir / "request-engine-evidence.json"
-            from artifacts.json_io import write_json
+            from file_io import write_json
             write_json(joined_path, joined)
             payload["request_engine_join"] = str(joined_path)
         payload["collection_profile"] = monitor.profile
         payload["monitor_backend"] = "prometheus"
         from artifacts.provenance import collect
         payload["runtime_provenance"] = collect(ctx.artifact_dir, monitor.environments, monitor.environment_metadata)
-        from artifacts.json_io import write_json
+        from file_io import write_json
         write_json(evidence, payload)
         workload.details.update(
             evidence=str(evidence),

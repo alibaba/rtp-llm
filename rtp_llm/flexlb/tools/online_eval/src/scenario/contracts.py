@@ -45,7 +45,7 @@ class ViewValidator(Protocol):
 
 
 class ViewRenderer(Protocol):
-    def __call__(self, directory: Path, analysis: dict, presentation: dict) -> Path: ...
+    def __call__(self, directory: Path, analysis: dict, presentation: dict, deadline: Deadline | None = None) -> Path: ...
 
 
 class SourceFactory(Protocol):
