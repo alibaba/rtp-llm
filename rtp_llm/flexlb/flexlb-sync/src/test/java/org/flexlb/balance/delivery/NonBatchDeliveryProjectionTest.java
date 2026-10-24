@@ -1,9 +1,9 @@
 package org.flexlb.balance.delivery;
 
+import org.flexlb.balance.estimate.PrefillTtftEstimate;
+import org.flexlb.balance.estimate.estimator.BatchTtftEstimator;
+import org.flexlb.balance.estimate.estimator.NonBatchTtftEstimator;
 import org.flexlb.balance.planner.GroupPlanner;
-import org.flexlb.balance.projection.PrefillTtftEstimate;
-import org.flexlb.balance.projection.estimator.BatchTtftEstimator;
-import org.flexlb.balance.projection.estimator.NonBatchTtftEstimator;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;

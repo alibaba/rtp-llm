@@ -7,8 +7,8 @@ import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.endpoint.PrefillState;
 import org.flexlb.balance.endpoint.WorkerEndpoint;
-import org.flexlb.balance.projection.WorkSnapshot;
-import org.flexlb.balance.projection.estimator.NonBatchTtftEstimator;
+import org.flexlb.balance.estimate.WorkView;
+import org.flexlb.balance.estimate.estimator.NonBatchTtftEstimator;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.ModelMetaConfig;
 import org.flexlb.dao.loadbalance.Response;
@@ -104,7 +104,7 @@ class PrefillCompletionProjectionTest {
                     }
                 });
                 assertNotNull(claim);
-                requests.publishRoute(claim, new WorkSnapshot(System.currentTimeMillis(), java.util.List.of(), java.util.List.of(), 0L), 30_000L);
+                requests.publishRoute(claim, new WorkView(System.currentTimeMillis(), java.util.List.of(), java.util.List.of(), 0L), 30_000L);
             }
             assertTrue(future.get(2L, TimeUnit.SECONDS).isSuccess());
             assertEquals(1L, prefill.observedRequestCount());

@@ -1,10 +1,10 @@
 package org.flexlb.balance.prediction;
 
+import org.flexlb.balance.estimate.PrefillTtftEstimate;
+import org.flexlb.balance.estimate.QueueView;
+import org.flexlb.balance.estimate.WorkView;
+import org.flexlb.balance.estimate.estimator.BatchTtftEstimator;
 import org.flexlb.balance.planner.GroupPlanner;
-import org.flexlb.balance.projection.PrefillTtftEstimate;
-import org.flexlb.balance.projection.QueueSnapshot;
-import org.flexlb.balance.projection.WorkSnapshot;
-import org.flexlb.balance.projection.estimator.BatchTtftEstimator;
 import org.junit.jupiter.api.Test;
 
 import java.nio.charset.StandardCharsets;
@@ -96,9 +96,9 @@ class IncrementalPredictionTest {
                         i % 7 == 0 ? 500 : i % 11 == 0 ? 1100 : 100_000));
             }
             items.sort(order);
-            var queue = new QueueSnapshot(1000, order, new GroupPlanner.Constraints(64, 200_000, 300_000, 700, 700),
+            var queue = new QueueView(1000, order, new GroupPlanner.Constraints(64, 200_000, 300_000, 700, 700),
                     items, null);
-            var inputs = new PrefillTtftEstimate.Inputs(queue, new WorkSnapshot(1000, List.of(), List.of(), 0));
+            var inputs = new PrefillTtftEstimate.Inputs(queue, new WorkView(1000, List.of(), List.of(), 0));
             var probe = new PrefillTtftEstimate.Probe("999", trial % 5, 1000, 100_000,
                     1 + random.nextInt(32768), 0, 0);
             assertEquals(PrefillTtftEstimate.project(inputs, probe, full, policy),

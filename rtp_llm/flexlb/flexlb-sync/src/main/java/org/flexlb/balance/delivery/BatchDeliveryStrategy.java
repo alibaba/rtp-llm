@@ -2,10 +2,10 @@ package org.flexlb.balance.delivery;
 
 import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.endpoint.PrefillState;
+import org.flexlb.balance.estimate.WorkView;
 import org.flexlb.balance.prediction.PrefillBatchFeatures;
 import org.flexlb.balance.prediction.PrefillPredictionBoundary;
 import org.flexlb.balance.prediction.PrefillTimePredictor;
-import org.flexlb.balance.projection.WorkSnapshot;
 import org.flexlb.balance.scheduler.PrefillAdmissionResources;
 import org.flexlb.balance.scheduler.RequestRegistry;
 import org.flexlb.balance.scheduler.RequestSlot.DeliveryClaim;
@@ -157,7 +157,7 @@ public final class BatchDeliveryStrategy implements DeliveryStrategy {
             BatchTransaction batch,
             String decisionReason,
             int remainingQueueDepth,
-            WorkSnapshot precedingWork,
+            WorkView precedingWork,
             BatchSender sender) {
         List<ScheduledRequest> original = batch.requests();
         List<ClaimedMember> claimed = new ArrayList<>(original.size());
@@ -473,7 +473,7 @@ public final class BatchDeliveryStrategy implements DeliveryStrategy {
         }
 
         @Override
-        public synchronized WorkSnapshot commit() {
+        public synchronized WorkView commit() {
             requirePrepared("commit");
             requireAdmissionPrepared("commit");
             if (items.isEmpty()) {
@@ -502,7 +502,7 @@ public final class BatchDeliveryStrategy implements DeliveryStrategy {
         }
 
         @Override
-        public synchronized void deliver(String decisionReason, int remainingQueueDepth, WorkSnapshot precedingWork) {
+        public synchronized void deliver(String decisionReason, int remainingQueueDepth, WorkView precedingWork) {
             requirePhase(Phase.COMMITTED, "submit delivery");
             phase = Phase.SUBMITTED;
             try {
@@ -517,7 +517,7 @@ public final class BatchDeliveryStrategy implements DeliveryStrategy {
 
         private void sendInExecutor(String decisionReason,
                                     int remainingQueueDepth,
-                                    WorkSnapshot precedingWork,
+                                    WorkView precedingWork,
                                     BatchSender sender) {
             requirePhase(Phase.SUBMITTED, "sendInExecutor");
             try {

@@ -8,8 +8,8 @@ import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.endpoint.PrefillState;
 import org.flexlb.balance.endpoint.WorkerEndpoint;
-import org.flexlb.balance.projection.WorkSnapshot;
-import org.flexlb.balance.projection.estimator.NonBatchTtftEstimator;
+import org.flexlb.balance.estimate.WorkView;
+import org.flexlb.balance.estimate.estimator.NonBatchTtftEstimator;
 import org.flexlb.balance.scheduler.RequestSlot.DeliveryClaim;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.ModelMetaConfig;
@@ -122,7 +122,7 @@ class RequestConfirmationTimeoutTest {
                         ? RequestLifecycleTestSupport.claimBatchWithoutPrediction(requests, item, 1L, commitPrefill)
                         : RequestLifecycleTestSupport.claimRouteWithoutPrediction(requests, item, commitPrefill);
                 assertNotNull(claim);
-                requests.setDeliveryPrediction(claim, new WorkSnapshot(System.currentTimeMillis(), List.of(), List.of(), 0L), 30_000L);
+                requests.setDeliveryPrediction(claim, new WorkView(System.currentTimeMillis(), List.of(), List.of(), 0L), 30_000L);
             }
             if (waiting == ConfirmationWait.UNCERTAIN_REPLY) {
                 claim.complete(DeliveryResult.uncertain(new IllegalStateException("reply was lost")));

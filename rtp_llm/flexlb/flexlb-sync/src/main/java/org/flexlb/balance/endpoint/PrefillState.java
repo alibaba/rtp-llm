@@ -1,9 +1,9 @@
 package org.flexlb.balance.endpoint;
 
 import org.flexlb.balance.delivery.DeliveryBlockReason;
+import org.flexlb.balance.estimate.WorkView;
+import org.flexlb.balance.estimate.WorkView.Phase;
 import org.flexlb.balance.prediction.PrefillBatchFeatures;
-import org.flexlb.balance.projection.WorkSnapshot;
-import org.flexlb.balance.projection.WorkSnapshot.Phase;
 import org.flexlb.balance.scheduler.ScheduledRequest;
 import org.flexlb.dao.loadbalance.AdmissionRejectReason;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
@@ -147,16 +147,16 @@ public final class PrefillState {
     /** One-shot capability returned when an OPEN admission commits. */
     public static final class CommittedHandoff implements AutoCloseable {
         private EndpointGenerationLifecycle.HandoffPermit generationHandoff;
-        private final WorkSnapshot precedingWork;
+        private final WorkView precedingWork;
 
         private CommittedHandoff(EndpointGenerationLifecycle.HandoffPermit generationHandoff,
-                                 WorkSnapshot precedingWork) {
+                                 WorkView precedingWork) {
             this.generationHandoff = generationHandoff;
             this.precedingWork = precedingWork;
         }
 
         /** Other reserved work at the same ownership boundary that committed this admission. */
-        public WorkSnapshot precedingWork() {
+        public WorkView precedingWork() {
             return precedingWork;
         }
 
@@ -499,13 +499,13 @@ public final class PrefillState {
     /** Immutable leaves copied under the ownership lock; projection runs outside it. */
     public static final class WorkCapture {
         private final long capturedAtMs;
-        private final List<WorkSnapshot.RequestWork> requests;
-        private final List<WorkSnapshot.BatchWork> batches;
+        private final List<WorkView.RequestWork> requests;
+        private final List<WorkView.BatchWork> batches;
         private final long unknownRequestCount;
-        private volatile WorkSnapshot materialized;
+        private volatile WorkView materialized;
 
-        private WorkCapture(long capturedAtMs, List<WorkSnapshot.RequestWork> requests,
-                            List<WorkSnapshot.BatchWork> batches, long unknownRequestCount) {
+        private WorkCapture(long capturedAtMs, List<WorkView.RequestWork> requests,
+                            List<WorkView.BatchWork> batches, long unknownRequestCount) {
             this.capturedAtMs = capturedAtMs;
             this.requests = List.copyOf(requests);
             this.batches = List.copyOf(batches);
@@ -513,21 +513,21 @@ public final class PrefillState {
         }
 
         /** Shared lazy projection; callers never hold the endpoint ownership lock. */
-        public WorkSnapshot materialize() {
-            WorkSnapshot snapshot = materialized;
+        public WorkView materialize() {
+            WorkView snapshot = materialized;
             if (snapshot != null) {
                 return snapshot;
             }
             synchronized (this) {
                 if (materialized == null) {
-                    List<WorkSnapshot.RequestWork> orderedRequests = requests.stream()
-                            .sorted(Comparator.comparing(WorkSnapshot.RequestWork::requestId)).toList();
-                    List<WorkSnapshot.BatchWork> orderedBatches = batches.stream()
-                            .sorted(Comparator.comparingLong(WorkSnapshot.BatchWork::batchId))
-                            .map(batch -> new WorkSnapshot.BatchWork(batch.batchId(),
+                    List<WorkView.RequestWork> orderedRequests = requests.stream()
+                            .sorted(Comparator.comparing(WorkView.RequestWork::requestId)).toList();
+                    List<WorkView.BatchWork> orderedBatches = batches.stream()
+                            .sorted(Comparator.comparingLong(WorkView.BatchWork::batchId))
+                            .map(batch -> new WorkView.BatchWork(batch.batchId(),
                                     batch.requestIds().stream().sorted().toList(),
                                     batch.phase(), batch.remainingWorkMs())).toList();
-                    materialized = new WorkSnapshot(capturedAtMs, orderedRequests, orderedBatches, unknownRequestCount);
+                    materialized = new WorkView(capturedAtMs, orderedRequests, orderedBatches, unknownRequestCount);
                 }
                 return materialized;
             }
@@ -1929,7 +1929,7 @@ public final class PrefillState {
                 captureWorkUnderLock(nowMs));
     }
 
-    public WorkSnapshot committedSnapshot() {
+    public WorkView committedSnapshot() {
         WorkCapture capture;
         lock.lock();
         try {
@@ -1948,7 +1948,7 @@ public final class PrefillState {
         return committedWorkCapture;
     }
 
-    private WorkSnapshot capturePrecedingWorkUnderLock(List<ScheduledRequest> members, long nowMs) {
+    private WorkView capturePrecedingWorkUnderLock(List<ScheduledRequest> members, long nowMs) {
         requireLock();
         Set<RequestEntry> excluded = java.util.Collections.newSetFromMap(new IdentityHashMap<>());
         for (ScheduledRequest member : members) {
@@ -1963,7 +1963,7 @@ public final class PrefillState {
 
     private WorkCapture captureCurrentWorkUnderLock(long nowMs, Set<RequestEntry> excluded) {
         requireLock();
-        List<WorkSnapshot.RequestWork> individual = new ArrayList<>();
+        List<WorkView.RequestWork> individual = new ArrayList<>();
         IdentityHashMap<BatchWork, List<String>> batchMembers =
                 new IdentityHashMap<>();
         for (RequestEntry entry : requests.values()) {
@@ -1975,13 +1975,13 @@ public final class PrefillState {
                         && entry.reservation instanceof RouteReservation route) {
                     // Capacity has been reserved for immediate handoff. Later admissions
                     // must include this work even before its route is published.
-                    individual.add(new WorkSnapshot.RequestWork(
+                    individual.add(new WorkView.RequestWork(
                             entry.requestId, Phase.COMMITTED, route.predictedWorkMs));
                 }
                 continue;
             }
             if (entry.batchWork == null) {
-                individual.add(new WorkSnapshot.RequestWork(
+                individual.add(new WorkView.RequestWork(
                         entry.requestId,
                         entry.individualPhase,
                         individualRemaining(entry, nowMs)));
@@ -1991,11 +1991,11 @@ public final class PrefillState {
                         .add(entry.requestId);
             }
         }
-        List<WorkSnapshot.BatchWork> batches =
+        List<WorkView.BatchWork> batches =
                 new ArrayList<>(batchMembers.size());
         for (Map.Entry<BatchWork, List<String>> observed : batchMembers.entrySet()) {
             BatchWork batch = observed.getKey();
-            batches.add(new WorkSnapshot.BatchWork(
+            batches.add(new WorkView.BatchWork(
                     batch.lease.batchId,
                     observed.getValue(),
                     batch.servicePhase,

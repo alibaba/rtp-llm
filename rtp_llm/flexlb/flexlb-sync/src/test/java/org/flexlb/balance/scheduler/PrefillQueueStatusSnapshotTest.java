@@ -2,8 +2,8 @@ package org.flexlb.balance.scheduler;
 
 import org.flexlb.balance.delivery.DeliveryStrategy;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
+import org.flexlb.balance.estimate.estimator.PrefillTtftEstimator;
 import org.flexlb.balance.planner.GroupPlanner;
-import org.flexlb.balance.projection.estimator.PrefillTtftEstimator;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.master.WorkerStatusResponse;

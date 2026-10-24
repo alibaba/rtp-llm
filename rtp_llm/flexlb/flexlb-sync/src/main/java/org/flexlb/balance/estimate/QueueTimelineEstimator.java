@@ -1,4 +1,4 @@
-package org.flexlb.balance.projection;
+package org.flexlb.balance.estimate;
 
 import org.flexlb.balance.planner.GroupPlanner;
 import org.flexlb.balance.prediction.InvalidPrefillPredictionException;
@@ -14,7 +14,7 @@ import java.util.NoSuchElementException;
 import java.util.PriorityQueue;
 
 /** Pure frozen-snapshot TTFT projection shared by endpoint selection policies. */
-final class RouteTimelineProjector {
+final class QueueTimelineEstimator {
 
     private static final String INVALID_PREDICTION_DETAIL =
             "PREDICTOR_RETURNED_INVALID_VALUE";
@@ -28,7 +28,7 @@ final class RouteTimelineProjector {
     private long routingCacheMatchTokens;
     private final ProjectedCandidate result = new ProjectedCandidate();
 
-    RouteTimelineProjector() {
+    QueueTimelineEstimator() {
     }
 
     void reset(
@@ -55,8 +55,8 @@ final class RouteTimelineProjector {
      * and that cursor overlap via {@code max(cursor, readyAt)}. The snapshot's
      * frozen delivery projection defines each group's completion shape.
      */
-    PrefillTtftEstimate.CandidateView project(QueueSnapshot queue,
-                                          WorkSnapshot committed,
+    PrefillTtftEstimate.CandidateView project(QueueView queue,
+                                          WorkView committed,
                                           PrefillTimePredictor.Evaluator evaluator,
                                           PrefillTtftEstimate.DeliveryProjection deliveryProjection,
                                           long planningAtMs) {
@@ -77,8 +77,8 @@ final class RouteTimelineProjector {
         }
     }
 
-    private PrefillTtftEstimate.CandidateView projectWithPredictions(QueueSnapshot queue,
-                                                                 WorkSnapshot committed,
+    private PrefillTtftEstimate.CandidateView projectWithPredictions(QueueView queue,
+                                                                 WorkView committed,
                                                                  PrefillTtftEstimate.DeliveryProjection deliveryProjection,
                                                                  long projectionAtMs,
                                                                  PredictionBoundary predictions) {
@@ -256,13 +256,13 @@ final class RouteTimelineProjector {
     }
 
     private static boolean containsCommittedRequest(
-            WorkSnapshot committed, String requestId) {
+            WorkView committed, String requestId) {
         return committed.containsRequest(requestId);
     }
 
     /** Remaining committed work normalized to the projection's common clock. */
     private static long knownRemainingWorkMsAt(
-            WorkSnapshot committed, long projectionAtMs) {
+            WorkView committed, long projectionAtMs) {
         return committed.knownRemainingWorkMsAt(projectionAtMs);
     }
 

@@ -1,6 +1,6 @@
 package org.flexlb.balance.delivery;
 
-import org.flexlb.balance.projection.PrefillTtftEstimate;
+import org.flexlb.balance.estimate.PrefillTtftEstimate;
 
 import java.util.Objects;
 

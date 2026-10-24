@@ -1,9 +1,9 @@
 package org.flexlb.balance.scheduler;
 
+import org.flexlb.balance.estimate.PrefillTtftEstimate;
+import org.flexlb.balance.estimate.QueueView;
+import org.flexlb.balance.estimate.WorkView;
 import org.flexlb.balance.planner.GroupPlanner;
-import org.flexlb.balance.projection.PrefillTtftEstimate;
-import org.flexlb.balance.projection.QueueSnapshot;
-import org.flexlb.balance.projection.WorkSnapshot;
 import org.flexlb.dao.route.RoleType;
 import org.junit.jupiter.api.Test;
 
@@ -27,7 +27,7 @@ class RouteAdmissionPolicyTest {
     @Test
     void prefillSelectionScoresCacheHitsDespiteDecodeDeliveryWait() {
         GroupPlanner.Item head = item(1L, 50, 1L, 100L);
-        QueueSnapshot waiting = blockedQueue(false, head, semantics(
+        QueueView waiting = blockedQueue(false, head, semantics(
                 PrefillTtftEstimate.AfterProbeAdmission.UNAVAILABLE, RoleType.DECODE));
         PrefillTtftEstimate.Probe incoming = probe(99L, 50, 20L, 10L);
         PrefillTtftEstimate.Inputs inputs = new PrefillTtftEstimate.Inputs(waiting, noCommittedWork());
@@ -78,7 +78,7 @@ class RouteAdmissionPolicyTest {
     @Test
     void prioritySameOrLowerProbeRemainsBehindObservedHead() {
         GroupPlanner.Item head = item(1L, 50, 1L, 100L);
-        QueueSnapshot blocked = blockedQueue(true, head, semantics(
+        QueueView blocked = blockedQueue(true, head, semantics(
                 PrefillTtftEstimate.AfterProbeAdmission.BLOCKED));
 
         for (int probePriority : List.of(50, 49)) {
@@ -145,7 +145,7 @@ class RouteAdmissionPolicyTest {
     @Test
     void ignoredUnknownWorkPreservesTheAfterProbeCapacityCheck() {
         GroupPlanner.Item head = item(1L, 50, 1L, 100L);
-        WorkSnapshot unknownWork = RouteProjectionTestSupport.work(
+        WorkView unknownWork = RouteProjectionTestSupport.work(
                 List.of(), List.of(), 1L);
         PrefillTtftEstimate.Candidate result = project(
                 blockedQueue(true, head, semantics(
@@ -178,7 +178,7 @@ class RouteAdmissionPolicyTest {
                 result.initialHeadDisposition());
     }
 
-    private static QueueSnapshot blockedQueue(
+    private static QueueView blockedQueue(
             boolean priority,
             GroupPlanner.Item head,
             PrefillTtftEstimate.AdmissionBlockSemantics semantics) {
@@ -189,10 +189,10 @@ class RouteAdmissionPolicyTest {
                 block(head, semantics));
     }
 
-    private static QueueSnapshot.AdmissionBlock block(
+    private static QueueView.AdmissionBlock block(
             GroupPlanner.Item head,
             PrefillTtftEstimate.AdmissionBlockSemantics semantics) {
-        return new QueueSnapshot.AdmissionBlock(
+        return new QueueView.AdmissionBlock(
                 head.requestId(), head.enqueueSeq(), semantics);
     }
 

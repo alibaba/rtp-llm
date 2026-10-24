@@ -11,11 +11,11 @@ import org.flexlb.balance.delivery.NonBatchTransaction;
 import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.endpoint.PrefillState;
+import org.flexlb.balance.estimate.PrefillTtftEstimate;
+import org.flexlb.balance.estimate.WorkView;
 import org.flexlb.balance.prediction.DecodeCostFormula;
 import org.flexlb.balance.prediction.PrefillBatchFeatures;
 import org.flexlb.balance.prediction.PrefillTimePredictor;
-import org.flexlb.balance.projection.PrefillTtftEstimate;
-import org.flexlb.balance.projection.WorkSnapshot;
 import org.flexlb.balance.scheduler.RequestSlot.DeliveryClaim;
 import org.flexlb.balance.scheduler.decode.DecodeDecideInfo;
 import org.flexlb.balance.scheduler.decode.DecodeMode;
@@ -131,7 +131,7 @@ public final class DeliveryStrategyTestSupport {
                 if (!commit) {
                     return "NOT_COMMITTED";
                 }
-                WorkSnapshot precedingWork = transaction.commit();
+                WorkView precedingWork = transaction.commit();
                 transaction.deliver(decisionReason, remainingQueueDepth, precedingWork);
                 return "COMMITTED";
             }
@@ -157,7 +157,7 @@ public final class DeliveryStrategyTestSupport {
 
     /** Concrete endpoint capabilities used by the real delivery transaction. */
     static final class TestEndpointCapabilities {
-        private WorkSnapshot precedingWork = new WorkSnapshot(1_000L, List.of(), List.of(), 0L);
+        private WorkView precedingWork = new WorkView(1_000L, List.of(), List.of(), 0L);
         private final PrefillEndpoint prefill = Mockito.mock(PrefillEndpoint.class);
         private final PrefillEndpoint.RouteCommitAdmission routeCommit =
                 Mockito.mock(PrefillEndpoint.RouteCommitAdmission.class);
@@ -220,7 +220,7 @@ public final class DeliveryStrategyTestSupport {
             rejectPermitAt = preparedSize;
         }
 
-        void precedingWork(WorkSnapshot prediction) {
+        void precedingWork(WorkView prediction) {
             precedingWork = prediction;
         }
 
@@ -298,7 +298,7 @@ public final class DeliveryStrategyTestSupport {
         private final List<ScheduledRequest> committed = new ArrayList<>();
         private final List<ClaimIdentity> identities = new ArrayList<>();
         private final List<CompletionEvent> completions = new ArrayList<>();
-        private final Map<ScheduledRequest, WorkSnapshot> precedingWork = new IdentityHashMap<>();
+        private final Map<ScheduledRequest, WorkView> precedingWork = new IdentityHashMap<>();
         private final Map<ScheduledRequest, Long> unstartedWorkMs = new IdentityHashMap<>();
         private final List<ScheduledRequest> failedPrepared = new ArrayList<>();
         private final List<Throwable> preparedFailures = new ArrayList<>();
@@ -439,7 +439,7 @@ public final class DeliveryStrategyTestSupport {
             return Map.copyOf(unstartedWorkMs);
         }
 
-        WorkSnapshot precedingWork(ScheduledRequest item) {
+        WorkView precedingWork(ScheduledRequest item) {
             return precedingWork.get(item);
         }
 

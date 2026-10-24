@@ -209,7 +209,7 @@ class EndpointCleanupDeadlockTest {
                     case "decode-terminal" -> () -> slot.processDecodeStatus(endpoint,
                             DecodeEndpoint.WorkerStatusFact.terminal(reservation, 0L));
                     default -> () -> registry.setDeliveryPrediction(claim,
-                            new org.flexlb.balance.projection.WorkSnapshot(
+                            new org.flexlb.balance.estimate.WorkView(
                                     System.currentTimeMillis(), java.util.List.of(), java.util.List.of(), 0L), 30_000L);
                 };
             } else {

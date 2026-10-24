@@ -3,7 +3,7 @@ package org.flexlb.balance.strategy;
 import org.flexlb.balance.PlacementResult;
 import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
-import org.flexlb.balance.projection.PrefillTtftEstimate;
+import org.flexlb.balance.estimate.PrefillTtftEstimate;
 import org.flexlb.balance.scheduler.ScheduledRequest;
 import org.flexlb.cache.domain.CacheMatchResult;
 import org.flexlb.cache.domain.CacheMatchSource;

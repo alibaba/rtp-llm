@@ -7,9 +7,9 @@ import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.EncoderEndpoint;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.endpoint.PrefillState;
+import org.flexlb.balance.estimate.WorkView;
 import org.flexlb.balance.preemption.PreemptionCancelPhase;
 import org.flexlb.balance.preemption.VictimTerminal;
-import org.flexlb.balance.projection.WorkSnapshot;
 import org.flexlb.balance.scheduler.ExpirationTimer.DecisionDeadline;
 import org.flexlb.balance.scheduler.ExpirationTimer.InactivityDeadline;
 import org.flexlb.balance.scheduler.ExpirationTimer.RequestDeadline;
@@ -815,7 +815,7 @@ public final class RequestSlot {
                 && !state.isTerminal();
     }
 
-    void setDeliveryPrediction(DeliveryClaim claim, WorkSnapshot work, long predictedMs) {
+    void setDeliveryPrediction(DeliveryClaim claim, WorkView work, long predictedMs) {
         DecisionDeadline obsolete;
         synchronized (this) {
             if (!ownsDeliveryClaimLocked(claim)) { return; }
@@ -825,7 +825,7 @@ public final class RequestSlot {
         expirationTimer.attachDecisionDeadline(this);
     }
 
-    void publishRoute(DeliveryClaim claim, WorkSnapshot work, long predictedMs) {
+    void publishRoute(DeliveryClaim claim, WorkView work, long predictedMs) {
         try {
             publishRouteClaim(claim, work, predictedMs);
         } finally {
@@ -833,7 +833,7 @@ public final class RequestSlot {
         }
     }
 
-    private void publishRouteClaim(DeliveryClaim claim, WorkSnapshot work, long predictedMs) {
+    private void publishRouteClaim(DeliveryClaim claim, WorkView work, long predictedMs) {
         RequestEffect effect;
         DecisionDeadline obsolete;
         synchronized (this) {
@@ -1576,7 +1576,7 @@ public final class RequestSlot {
 
     // ── 可见性期限：预测、Engine 证据、疑似丢失诊断 ──
 
-    private DecisionDeadline updateDeliveryPredictionLocked(WorkSnapshot precedingWork, long unstartedWorkMs, long nowMs) {
+    private DecisionDeadline updateDeliveryPredictionLocked(WorkView precedingWork, long unstartedWorkMs, long nowMs) {
         requireSlotLock("delivery prediction consumption");
         if (unstartedWorkMs < 0L) {
             throw new IllegalArgumentException("unstarted work must be non-negative");

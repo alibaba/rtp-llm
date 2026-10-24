@@ -1,10 +1,10 @@
-package org.flexlb.balance.projection;
+package org.flexlb.balance.estimate;
 
+import org.flexlb.balance.estimate.estimator.NonBatchTtftEstimator;
 import org.flexlb.balance.planner.GroupPlanner;
 import org.flexlb.balance.prediction.LearningPredictor;
 import org.flexlb.balance.prediction.PrefillBatchFeatures;
 import org.flexlb.balance.prediction.PrefillTimePredictor;
-import org.flexlb.balance.projection.estimator.NonBatchTtftEstimator;
 import org.junit.jupiter.api.Test;
 
 import java.util.Comparator;
@@ -22,10 +22,10 @@ class RouteProjectionTest {
 
     @Test
     void unchangedRunningWorkCanReuseItsEarlierClockBase() {
-        WorkSnapshot cached = new WorkSnapshot(13L, List.of(new WorkSnapshot.RequestWork(
-                "1", WorkSnapshot.Phase.ENGINE_RUNNING, 1_000L)), List.of(), 0L);
-        WorkSnapshot current = new WorkSnapshot(20L, List.of(new WorkSnapshot.RequestWork(
-                "1", WorkSnapshot.Phase.ENGINE_RUNNING, 993L)), List.of(), 0L);
+        WorkView cached = new WorkView(13L, List.of(new WorkView.RequestWork(
+                "1", WorkView.Phase.ENGINE_RUNNING, 1_000L)), List.of(), 0L);
+        WorkView current = new WorkView(20L, List.of(new WorkView.RequestWork(
+                "1", WorkView.Phase.ENGINE_RUNNING, 993L)), List.of(), 0L);
         assertEquals(
                 PrefillTtftEstimate.project(new PrefillTtftEstimate.Inputs(emptyQueue(20L), current),
                         probe(), new CountingEvaluator(), routeProjection()),
@@ -112,8 +112,8 @@ class RouteProjectionTest {
                 emptyQueue(capturedAtMs), emptyWork(capturedAtMs));
     }
 
-    private static QueueSnapshot emptyQueue(long capturedAtMs) {
-        return new QueueSnapshot(
+    private static QueueView emptyQueue(long capturedAtMs) {
+        return new QueueView(
                 capturedAtMs,
                 Comparator.comparing(GroupPlanner.Item::requestId),
                 new GroupPlanner.Constraints(
@@ -122,8 +122,8 @@ class RouteProjectionTest {
                 null);
     }
 
-    private static WorkSnapshot emptyWork(long capturedAtMs) {
-        return new WorkSnapshot(
+    private static WorkView emptyWork(long capturedAtMs) {
+        return new WorkView(
                 capturedAtMs, List.of(), List.of(), 0L);
     }
 

@@ -320,11 +320,11 @@ class DefaultRouterTest {
     }
 
     private static void stubPrefillCommit(PrefillEndpoint prefill) {
-        stubRouteCommit(prefill, new org.flexlb.balance.projection.WorkSnapshot(System.currentTimeMillis(), List.of(), List.of(), 0L));
+        stubRouteCommit(prefill, new org.flexlb.balance.estimate.WorkView(System.currentTimeMillis(), List.of(), List.of(), 0L));
     }
 
     private static void stubRouteCommit(PrefillEndpoint endpoint,
-            org.flexlb.balance.projection.WorkSnapshot precedingWork) {
+            org.flexlb.balance.estimate.WorkView precedingWork) {
         var commit = mock(PrefillEndpoint.RouteCommitAdmission.class);
         var handoff = mock(PrefillState.CommittedHandoff.class);
         when(handoff.precedingWork()).thenReturn(precedingWork);

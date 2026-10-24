@@ -9,14 +9,14 @@ import org.flexlb.balance.endpoint.DecodeEndpoint.DecodeRoutingView;
 import org.flexlb.balance.endpoint.PrefillActiveIndex;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.endpoint.PrefillState;
+import org.flexlb.balance.estimate.PrefillTtftEstimate;
+import org.flexlb.balance.estimate.QueueView.AdmissionBlock;
+import org.flexlb.balance.estimate.WorkView;
+import org.flexlb.balance.estimate.estimator.PrefillTtftEstimator;
 import org.flexlb.balance.planner.GroupPlanner;
 import org.flexlb.balance.prediction.InvalidPrefillPredictionException;
 import org.flexlb.balance.prediction.PrefillPredictionBoundary;
 import org.flexlb.balance.prediction.PrefillTimePredictor;
-import org.flexlb.balance.projection.PrefillTtftEstimate;
-import org.flexlb.balance.projection.QueueSnapshot.AdmissionBlock;
-import org.flexlb.balance.projection.WorkSnapshot;
-import org.flexlb.balance.projection.estimator.PrefillTtftEstimator;
 import org.flexlb.balance.queue.QueueWaitSnapshot;
 import org.flexlb.balance.queue.QueuedRequestsSnapshot;
 import org.flexlb.config.DecisionPolicyConfig;
@@ -1065,7 +1065,7 @@ public final class PrefillQueue {
             }
             synchronized (this) {
                 if (materialized == null) {
-                    var queueSnapshot = new org.flexlb.balance.projection.QueueSnapshot(ownership.capturedAtMs(),
+                    var queueSnapshot = new org.flexlb.balance.estimate.QueueView(ownership.capturedAtMs(),
                             projectionOrder, constraints, ownership.active().projectedItems(), admissionBlock);
                     materialized = new PrefillTtftEstimate.Inputs(
                             queueSnapshot, ownership.work().materialize(), version.ownership());
@@ -1194,7 +1194,7 @@ public final class PrefillQueue {
     private void deliver(DeliveryTransaction transaction,
                          String decisionReason,
                          int remainingQueueDepth,
-                         WorkSnapshot precedingWork) {
+                         WorkView precedingWork) {
         Throwable deliveryFailure = null;
         try {
             String groupId = java.util.UUID.randomUUID().toString();
@@ -1271,7 +1271,7 @@ public final class PrefillQueue {
         int remainingQueueDepth = 0;
         boolean removedTerminalBoundary = false;
         Throwable postCommitFailure = null;
-        WorkSnapshot precedingWork;
+        WorkView precedingWork;
         queueLock.lock();
         try {
             if (stopped) {

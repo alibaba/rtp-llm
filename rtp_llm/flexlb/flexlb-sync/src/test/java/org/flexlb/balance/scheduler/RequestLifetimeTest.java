@@ -4,7 +4,7 @@ import org.flexlb.balance.delivery.DeliveryResult;
 import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.endpoint.PrefillState;
-import org.flexlb.balance.projection.WorkSnapshot;
+import org.flexlb.balance.estimate.WorkView;
 import org.flexlb.balance.scheduler.RequestSlot.AdmissionHandle;
 import org.flexlb.balance.scheduler.RequestSlot.DeliveryClaim;
 import org.flexlb.config.ConfigService;
@@ -45,7 +45,7 @@ import static org.mockito.Mockito.when;
 class RequestLifetimeTest {
     @Test
     void deadlineUsesTheActualDeliveryClockAndPreservesZeroAndSaturation() {
-        WorkSnapshot preceding = emptyWork(1_000L);
+        WorkView preceding = emptyWork(1_000L);
         assertEquals(13_100L, visibilityDeadline(preceding, 1_000L, 2, 1_100L).orElseThrow());
         assertEquals(11_000L, visibilityDeadline(preceding, 0L, 2, 1_000L).orElseThrow());
         assertEquals(11_002L, visibilityDeadline(emptyWork(900L), 1L, 2, 1_000L).orElseThrow());
@@ -58,20 +58,20 @@ class RequestLifetimeTest {
     void slowPreparationCannotConsumeTheRequestsOwnWork() {
         assertEquals(56_000L, visibilityDeadline(emptyWork(1_000L), 20_000L, 1.5, 16_000L).orElseThrow());
         assertEquals(100_000L, visibilityDeadline(emptyWork(1_000L), 20_000L, 1.5, 60_000L).orElseThrow());
-        WorkSnapshot preceding = new WorkSnapshot(1_000L, List.of(
-                new WorkSnapshot.RequestWork("1", WorkSnapshot.Phase.ENGINE_RUNNING, 20_000L),
-                new WorkSnapshot.RequestWork("2", WorkSnapshot.Phase.ENGINE_QUEUED, 3_000L)), List.of(), 0L);
+        WorkView preceding = new WorkView(1_000L, List.of(
+                new WorkView.RequestWork("1", WorkView.Phase.ENGINE_RUNNING, 20_000L),
+                new WorkView.RequestWork("2", WorkView.Phase.ENGINE_QUEUED, 3_000L)), List.of(), 0L);
         assertEquals(68_000L, visibilityDeadline(preceding, 20_000L, 1.5, 16_000L).orElseThrow());
     }
 
     @Test
     void onlyRunningPredecessorsAgeBeforeDelivery() {
-        WorkSnapshot preceding = new WorkSnapshot(1_000L, List.of(
-                new WorkSnapshot.RequestWork("1", WorkSnapshot.Phase.ENGINE_RUNNING, 20_000L),
-                new WorkSnapshot.RequestWork("2", WorkSnapshot.Phase.ENGINE_QUEUED, 7_000L),
-                new WorkSnapshot.RequestWork("3", WorkSnapshot.Phase.COMMITTED, 3_000L)), List.of(
-                new WorkSnapshot.BatchWork(4L, List.of("4"), WorkSnapshot.Phase.ENGINE_RUNNING, 8_000L),
-                new WorkSnapshot.BatchWork(5L, List.of("5"), WorkSnapshot.Phase.ENGINE_QUEUED, 4_000L)), 0L);
+        WorkView preceding = new WorkView(1_000L, List.of(
+                new WorkView.RequestWork("1", WorkView.Phase.ENGINE_RUNNING, 20_000L),
+                new WorkView.RequestWork("2", WorkView.Phase.ENGINE_QUEUED, 7_000L),
+                new WorkView.RequestWork("3", WorkView.Phase.COMMITTED, 3_000L)), List.of(
+                new WorkView.BatchWork(4L, List.of("4"), WorkView.Phase.ENGINE_RUNNING, 8_000L),
+                new WorkView.BatchWork(5L, List.of("5"), WorkView.Phase.ENGINE_QUEUED, 4_000L)), 0L);
         assertEquals(63_500L, visibilityDeadline(preceding, 11_000L, 1, 500L).orElseThrow());
         assertEquals(56_000L, visibilityDeadline(preceding, 11_000L, 1, 11_000L).orElseThrow());
         assertEquals(66_000L, visibilityDeadline(preceding, 11_000L, 1, 31_000L).orElseThrow());
@@ -79,18 +79,18 @@ class RequestLifetimeTest {
 
     @Test
     void unknownPredecessorsNeverBecomeACompleteEstimate() {
-        WorkSnapshot unknownBatch = new WorkSnapshot(1_000L, List.of(), List.of(
-                new WorkSnapshot.BatchWork(1L, List.of("1"), WorkSnapshot.Phase.COMMITTED,
+        WorkView unknownBatch = new WorkView(1_000L, List.of(), List.of(
+                new WorkView.BatchWork(1L, List.of("1"), WorkView.Phase.COMMITTED,
                         OptionalLong.empty())), 0L);
-        for (WorkSnapshot preceding : List.of(unknownWork(1_000L), unknownBatch)) {
+        for (WorkView preceding : List.of(unknownWork(1_000L), unknownBatch)) {
             assertTrue(visibilityDeadline(preceding, 20_000L, 2, 60_000L).isEmpty());
         }
     }
 
     @Test
     void combinedWorkSaturatesWithoutWrapping() {
-        WorkSnapshot preceding = new WorkSnapshot(1_000L, List.of(
-                new WorkSnapshot.RequestWork("1", WorkSnapshot.Phase.COMMITTED, Long.MAX_VALUE)), List.of(), 0L);
+        WorkView preceding = new WorkView(1_000L, List.of(
+                new WorkView.RequestWork("1", WorkView.Phase.COMMITTED, Long.MAX_VALUE)), List.of(), 0L);
         assertEquals(Long.MAX_VALUE, visibilityDeadline(preceding, 1L, 2, 60_000L).orElseThrow());
     }
 
@@ -492,15 +492,15 @@ class RequestLifetimeTest {
         assertNotNull(slot.commitTerminalRecord(terminal).terminal());
     }
 
-    private static WorkSnapshot emptyWork(long capturedAtMs) {
-        return new WorkSnapshot(capturedAtMs, List.of(), List.of(), 0L);
+    private static WorkView emptyWork(long capturedAtMs) {
+        return new WorkView(capturedAtMs, List.of(), List.of(), 0L);
     }
 
-    private static WorkSnapshot unknownWork(long capturedAtMs) {
-        return new WorkSnapshot(capturedAtMs, List.of(), List.of(), 1L);
+    private static WorkView unknownWork(long capturedAtMs) {
+        return new WorkView(capturedAtMs, List.of(), List.of(), 1L);
     }
 
-    private static OptionalLong visibilityDeadline(WorkSnapshot preceding, long unstartedWorkMs,
+    private static OptionalLong visibilityDeadline(WorkView preceding, long unstartedWorkMs,
                                                    double lifetime, long deliveredAtMs) {
         Fixture fixture = fixture(true);
         fixture.config.getRequestLifecycle().getDecision().setLifetime(lifetime);

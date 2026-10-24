@@ -1,7 +1,7 @@
 package org.flexlb.balance.strategy;
 
 import org.flexlb.balance.endpoint.PrefillEndpoint;
-import org.flexlb.balance.projection.PrefillTtftEstimate;
+import org.flexlb.balance.estimate.PrefillTtftEstimate;
 import org.flexlb.dao.pv.RoutingDecision;
 
 import java.util.Arrays;

@@ -1,4 +1,4 @@
-package org.flexlb.balance.projection;
+package org.flexlb.balance.estimate;
 
 import java.util.Arrays;
 import java.util.List;
@@ -14,7 +14,7 @@ import java.util.OptionalLong;
  * {@link BatchWork#remainingWorkMs()}. Neither form of unknown work may be
  * converted into fabricated milliseconds by a load projection.
  */
-public final class WorkSnapshot {
+public final class WorkView {
 
     private static final long[] EMPTY_LONGS = new long[0];
     private static final String[] EMPTY_STRINGS = new String[0];
@@ -28,7 +28,7 @@ public final class WorkSnapshot {
     private final String[] requestIds;
     private final boolean unknownWork;
 
-    public WorkSnapshot(
+    public WorkView(
             long capturedAtMs,
             List<RequestWork> requests,
             List<BatchWork> batches,
@@ -208,7 +208,7 @@ public final class WorkSnapshot {
         if (this == other) {
             return true;
         }
-        if (!(other instanceof WorkSnapshot that)) {
+        if (!(other instanceof WorkView that)) {
             return false;
         }
         return capturedAtMs == that.capturedAtMs
@@ -225,7 +225,7 @@ public final class WorkSnapshot {
 
     @Override
     public String toString() {
-        return "WorkSnapshot[capturedAtMs=" + capturedAtMs
+        return "WorkView[capturedAtMs=" + capturedAtMs
                 + ", requests=" + requests
                 + ", batches=" + batches
                 + ", unknownRequestCount=" + unknownRequestCount + ']';

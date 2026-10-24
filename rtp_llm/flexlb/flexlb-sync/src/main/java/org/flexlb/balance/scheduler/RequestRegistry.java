@@ -9,9 +9,9 @@ import org.flexlb.balance.endpoint.EncoderEndpoint;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.endpoint.PrefillState;
 import org.flexlb.balance.endpoint.WorkerEndpoint;
+import org.flexlb.balance.estimate.WorkView;
 import org.flexlb.balance.prediction.PrefillTimePredictor;
 import org.flexlb.balance.preemption.CancelTarget;
-import org.flexlb.balance.projection.WorkSnapshot;
 import org.flexlb.balance.scheduler.RequestSlot.AdmissionHandle;
 import org.flexlb.balance.scheduler.RequestSlot.DeliveryClaim;
 import org.flexlb.config.ConfigService;
@@ -747,11 +747,11 @@ public class RequestRegistry {
                 0L, () -> admission.transferToEndpoint(item));
     }
 
-    public void setDeliveryPrediction(DeliveryClaim claim, WorkSnapshot precedingWork, long predictedMs) {
+    public void setDeliveryPrediction(DeliveryClaim claim, WorkView precedingWork, long predictedMs) {
         claim.slot.setDeliveryPrediction(claim, precedingWork, predictedMs);
     }
 
-    public void publishRoute(DeliveryClaim claim, WorkSnapshot precedingWork, long predictedMs) {
+    public void publishRoute(DeliveryClaim claim, WorkView precedingWork, long predictedMs) {
         claim.slot.publishRoute(claim, precedingWork, predictedMs);
     }
 

@@ -1,4 +1,4 @@
-package org.flexlb.balance.projection;
+package org.flexlb.balance.estimate;
 
 import org.flexlb.balance.planner.GroupPlanner;
 import org.flexlb.balance.prediction.PrefillTimePredictor;
@@ -252,13 +252,13 @@ public final class PrefillTtftEstimate {
 
     /** Queue and committed work captured under one ownership lock. */
     public record Inputs(
-            QueueSnapshot queue,
-            WorkSnapshot work,
+            QueueView queue,
+            WorkView work,
             long ownershipVersion) {
 
         public Inputs(
-                QueueSnapshot queue,
-                WorkSnapshot work) {
+                QueueView queue,
+                WorkView work) {
             this(queue, work, 0L);
         }
 
@@ -327,8 +327,8 @@ public final class PrefillTtftEstimate {
     }
 
     public static final class Session {
-        private final RouteTimelineProjector projector =
-                new RouteTimelineProjector();
+        private final QueueTimelineEstimator projector =
+                new QueueTimelineEstimator();
 
         private Session() {
         }
@@ -374,8 +374,8 @@ public final class PrefillTtftEstimate {
     }
 
     /** Apply one observed worker admission wait without inventing a release duration. */
-    private static CandidateView applyAdmissionPolicy(QueueSnapshot queue, CandidateView candidate) {
-        QueueSnapshot.AdmissionBlock observation = queue.admissionBlock();
+    private static CandidateView applyAdmissionPolicy(QueueView queue, CandidateView candidate) {
+        QueueView.AdmissionBlock observation = queue.admissionBlock();
         if (observation == null || observation.semantics() == null
                 || (candidate.state() != Candidate.State.MODELED && !candidate.engineWorkUnmodeled())) {
             return candidate;

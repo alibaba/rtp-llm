@@ -1,12 +1,12 @@
 package org.flexlb.balance.scheduler;
 
+import org.flexlb.balance.estimate.PrefillTtftEstimate;
+import org.flexlb.balance.estimate.QueueView;
+import org.flexlb.balance.estimate.WorkView;
+import org.flexlb.balance.estimate.estimator.BatchTtftEstimator;
+import org.flexlb.balance.estimate.estimator.NonBatchTtftEstimator;
 import org.flexlb.balance.planner.GroupPlanner;
 import org.flexlb.balance.prediction.PrefillTimePredictor;
-import org.flexlb.balance.projection.PrefillTtftEstimate;
-import org.flexlb.balance.projection.QueueSnapshot;
-import org.flexlb.balance.projection.WorkSnapshot;
-import org.flexlb.balance.projection.estimator.BatchTtftEstimator;
-import org.flexlb.balance.projection.estimator.NonBatchTtftEstimator;
 
 import java.util.ArrayList;
 import java.util.Comparator;
@@ -65,21 +65,21 @@ final class RouteProjectionTestSupport {
                 collectionWindowMs);
     }
 
-    static QueueSnapshot queue(boolean priority,
+    static QueueView queue(boolean priority,
                                GroupPlanner.Constraints constraints,
                                List<GroupPlanner.Item> activeItems) {
         return queue(priority, constraints, activeItems, null);
     }
 
-    static QueueSnapshot queue(
+    static QueueView queue(
             boolean priority,
             GroupPlanner.Constraints constraints,
             List<GroupPlanner.Item> activeItems,
-            QueueSnapshot.AdmissionBlock admissionBlock) {
+            QueueView.AdmissionBlock admissionBlock) {
         Comparator<GroupPlanner.Item> ordering = priority ? PRIORITY : FIFO;
         List<GroupPlanner.Item> ordered = new ArrayList<>(activeItems);
         ordered.sort(ordering);
-        return new QueueSnapshot(
+        return new QueueView(
                 NOW_MS,
                 ordering,
                 constraints,
@@ -138,21 +138,21 @@ final class RouteProjectionTestSupport {
                 hitCache);
     }
 
-    static WorkSnapshot noCommittedWork() {
+    static WorkView noCommittedWork() {
         return work(List.of(), List.of(), 0L);
     }
 
-    static WorkSnapshot work(
-            List<WorkSnapshot.RequestWork> requests,
-            List<WorkSnapshot.BatchWork> batches,
+    static WorkView work(
+            List<WorkView.RequestWork> requests,
+            List<WorkView.BatchWork> batches,
             long unknownRequestCount) {
-        return new WorkSnapshot(
+        return new WorkView(
                 NOW_MS, requests, batches, unknownRequestCount);
     }
 
     static PrefillTtftEstimate.Candidate project(
-            QueueSnapshot queue,
-            WorkSnapshot work,
+            QueueView queue,
+            WorkView work,
             PrefillTimePredictor.Evaluator evaluator,
             PrefillTtftEstimate.Probe probe,
             PrefillTtftEstimate.DeliveryProjection deliveryProjection) {

@@ -3,8 +3,8 @@ package org.flexlb.balance.endpoint;
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import org.flexlb.balance.delivery.DeliveryResult;
 import org.flexlb.balance.delivery.DeliveryStrategy;
+import org.flexlb.balance.estimate.WorkView;
 import org.flexlb.balance.prediction.PrefillTimePredictor;
-import org.flexlb.balance.projection.WorkSnapshot;
 import org.flexlb.balance.scheduler.RequestSlot.DeliveryClaim;
 import org.flexlb.balance.scheduler.ScheduledRequest;
 import org.flexlb.config.DispatcherConfig;
@@ -210,7 +210,7 @@ class PrefillEndpointTest {
         assertEquals(1,
                 endpoint.captureRouteProjectionInputs().work().batches().size());
         assertEquals(1, endpoint.observedRequestCount());
-        WorkSnapshot remaining = endpoint.captureRouteProjectionInputs().work();
+        WorkView remaining = endpoint.captureRouteProjectionInputs().work();
         assertFalse(remaining.hasUnknownWork());
         assertEquals(100L, remaining.totalRemainingWorkMs().orElseThrow());
     }
@@ -244,7 +244,7 @@ class PrefillEndpointTest {
             assertDoesNotThrow(() -> reportRejectedBatchMember(
                     invalidPredictorEndpoint, 1L, 2L));
 
-            WorkSnapshot snapshot = invalidPredictorEndpoint
+            WorkView snapshot = invalidPredictorEndpoint
                     .captureRouteProjectionInputs().work();
             assertEquals(1, invalidPredictorEndpoint.observedRequestCount(),
                     "membership settlement must not depend on prediction");
@@ -438,22 +438,22 @@ class PrefillEndpointTest {
     void batchInflightReanchorsAcrossRunningQueuedRunning() {
         registerBatch(endpoint, 1L, 5_000,
                 List.of(createScheduledRequest(1L, 500, 0)));
-        assertEquals(WorkSnapshot.Phase.COMMITTED,
+        assertEquals(WorkView.Phase.COMMITTED,
                 onlyBatchWork(endpoint).phase());
 
         calibrate(Map.of(), Map.of(
                 "1", taskInfo(1L, 1L, TaskPhase.RUNNING, 0, 0)));
-        assertEquals(WorkSnapshot.Phase.ENGINE_RUNNING,
+        assertEquals(WorkView.Phase.ENGINE_RUNNING,
                 onlyBatchWork(endpoint).phase());
 
         calibrate(Map.of(), Map.of(
                 "1", taskInfo(1L, 1L, TaskPhase.PENDING, 0, 0)));
-        assertEquals(WorkSnapshot.Phase.ENGINE_QUEUED,
+        assertEquals(WorkView.Phase.ENGINE_QUEUED,
                 onlyBatchWork(endpoint).phase());
 
         calibrate(Map.of(), Map.of(
                 "1", taskInfo(1L, 1L, TaskPhase.RUNNING, 0, 0)));
-        assertEquals(WorkSnapshot.Phase.ENGINE_RUNNING,
+        assertEquals(WorkView.Phase.ENGINE_RUNNING,
                 onlyBatchWork(endpoint).phase());
     }
 
@@ -1095,7 +1095,7 @@ class PrefillEndpointTest {
             ScheduledRequest active = createScheduledRequest(handoffEndpoint, 111L, 500L, 0L);
             assertTrue(EndpointTestSupport.offer(handoffEndpoint, active));
 
-            org.flexlb.balance.projection.PrefillTtftEstimate.Inputs snapshot =
+            org.flexlb.balance.estimate.PrefillTtftEstimate.Inputs snapshot =
                     handoffEndpoint.captureRouteProjectionInputs();
             assertEquals(1, snapshot.queue().activeItems().size());
             assertEquals("111",
@@ -1797,9 +1797,9 @@ class PrefillEndpointTest {
         return created;
     }
 
-    private static WorkSnapshot.BatchWork onlyBatchWork(
+    private static WorkView.BatchWork onlyBatchWork(
             PrefillEndpoint target) {
-        List<WorkSnapshot.BatchWork> batches =
+        List<WorkView.BatchWork> batches =
                 target.captureRouteProjectionInputs().work().batches();
         assertEquals(1, batches.size());
         return batches.get(0);

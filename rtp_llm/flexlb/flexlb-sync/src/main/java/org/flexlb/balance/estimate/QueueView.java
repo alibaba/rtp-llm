@@ -1,4 +1,4 @@
-package org.flexlb.balance.projection;
+package org.flexlb.balance.estimate;
 
 import org.flexlb.balance.planner.GroupPlanner;
 
@@ -13,14 +13,14 @@ import java.util.Objects;
  * materialized from the canonical ownership registry at one linearization
  * point together with committed work and pending count.
  */
-public record QueueSnapshot(
+public record QueueView(
         long capturedAtMs,
         Comparator<GroupPlanner.Item> ordering,
         GroupPlanner.Constraints constraints,
         List<GroupPlanner.Item> activeItems,
         AdmissionBlock admissionBlock) {
 
-    public QueueSnapshot {
+    public QueueView {
         activeItems = List.copyOf(activeItems);
         if (admissionBlock != null) {
             if (activeItems.isEmpty()) {

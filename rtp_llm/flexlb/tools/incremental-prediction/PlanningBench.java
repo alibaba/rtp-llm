@@ -1,4 +1,4 @@
-import org.flexlb.balance.projection.estimator.BatchTtftEstimator;
+import org.flexlb.balance.estimate.estimator.BatchTtftEstimator;
 import com.sun.management.ThreadMXBean;
 import java.lang.management.ManagementFactory;
 import java.nio.file.*;
@@ -7,7 +7,7 @@ import java.util.function.DoubleSupplier;
 import org.flexlb.balance.delivery.*;
 import org.flexlb.balance.planner.GroupPlanner;
 import org.flexlb.balance.prediction.*;
-import org.flexlb.balance.projection.*;
+import org.flexlb.balance.estimate.*;
 import org.flexlb.balance.scheduler.*;
 import static org.mockito.Mockito.mock;
 
@@ -71,9 +71,9 @@ public class PlanningBench {
         for (int depth : new int[]{0, 32, 128, 512}) {
             var endpoints = new ArrayList<PrefillTtftEstimate.Inputs>();
             for (int i = 0; i < 5; i++) {
-                endpoints.add(new PrefillTtftEstimate.Inputs(new QueueSnapshot(1000, true, ORDER,
+                endpoints.add(new PrefillTtftEstimate.Inputs(new QueueView(1000, true, ORDER,
                         constraints(64), items(depth, i), null),
-                        new WorkSnapshot(1000, List.of(), List.of(), 0)));
+                        new WorkView(1000, List.of(), List.of(), 0)));
             }
             var probes = new ArrayList<PrefillTtftEstimate.Probe>();
             for (int i = 0; i < 64; i++) probes.add(new PrefillTtftEstimate.Probe(99999, 0, 1000, 61_000,

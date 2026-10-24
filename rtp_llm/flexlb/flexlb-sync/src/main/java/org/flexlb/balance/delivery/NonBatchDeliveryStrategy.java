@@ -1,9 +1,9 @@
 package org.flexlb.balance.delivery;
 
 import org.flexlb.balance.endpoint.PrefillEndpoint;
+import org.flexlb.balance.estimate.WorkView;
 import org.flexlb.balance.prediction.PrefillPredictionBoundary;
 import org.flexlb.balance.prediction.PrefillTimePredictor;
-import org.flexlb.balance.projection.WorkSnapshot;
 import org.flexlb.balance.scheduler.PrefillAdmissionResources;
 import org.flexlb.balance.scheduler.RequestRegistry;
 import org.flexlb.balance.scheduler.RequestSlot.DeliveryClaim;
@@ -81,7 +81,7 @@ public final class NonBatchDeliveryStrategy implements DeliveryStrategy {
     void deliver(NonBatchTransaction transaction,
                  PrefillAdmissionResources.CommittedAdmissionOwner admission,
                  int remainingQueueDepth,
-                 WorkSnapshot precedingWork) {
+                 WorkView precedingWork) {
         List<ScheduledRequest> items = transaction.requests();
         Throwable deliveryFailure = null;
         List<ScheduledRequest> delivered = new ArrayList<>(items.size());

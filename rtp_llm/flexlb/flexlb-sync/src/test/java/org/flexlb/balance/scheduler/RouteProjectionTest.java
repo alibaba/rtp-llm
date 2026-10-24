@@ -1,11 +1,11 @@
 package org.flexlb.balance.scheduler;
 
+import org.flexlb.balance.estimate.PrefillTtftEstimate;
+import org.flexlb.balance.estimate.QueueView;
+import org.flexlb.balance.estimate.WorkView;
 import org.flexlb.balance.planner.GroupPlanner;
 import org.flexlb.balance.prediction.PrefillBatchFeatures;
 import org.flexlb.balance.prediction.PrefillTimePredictor;
-import org.flexlb.balance.projection.PrefillTtftEstimate;
-import org.flexlb.balance.projection.QueueSnapshot;
-import org.flexlb.balance.projection.WorkSnapshot;
 import org.junit.jupiter.api.Test;
 
 import java.util.List;
@@ -49,7 +49,7 @@ class RouteProjectionTest {
                 throw new AssertionError("disabled execution budget must not construct a prefix predictor");
             }
         };
-        QueueSnapshot snapshot = queue(false, constraints(2, 0L), List.of(
+        QueueView snapshot = queue(false, constraints(2, 0L), List.of(
                 item(1L, 50, 1L, 10L), item(2L, 50, 2L, 10L), item(3L, 50, 3L, 10L)));
         for (PrefillTtftEstimate.DeliveryProjection delivery : List.of(BATCH, ROUTE)) {
             assertModeled(project(snapshot, noCommittedWork(), evaluator,
@@ -85,7 +85,7 @@ class RouteProjectionTest {
 
     @Test
     void expiryOnBothSidesOfProbeDuringCollectionKeepsItsLogicalPosition() {
-        QueueSnapshot snapshot = queue(true, constraints(5, 30L), List.of(
+        QueueView snapshot = queue(true, constraints(5, 30L), List.of(
                 item(1L, 100, 1L, 1L, NOW_MS + 5L),
                 item(2L, 100, 2L, 2L, NOW_MS + 5L),
                 item(3L, 100, 3L, 3L, NOW_MS + 5L),
@@ -102,9 +102,9 @@ class RouteProjectionTest {
 
     @Test
     void committedWorkOverlapsCollectionWindow() {
-        WorkSnapshot committed = work(
-                List.of(new WorkSnapshot.RequestWork(
-                        "1", WorkSnapshot.Phase.ENGINE_RUNNING, 100L)),
+        WorkView committed = work(
+                List.of(new WorkView.RequestWork(
+                        "1", WorkView.Phase.ENGINE_RUNNING, 100L)),
                 List.of(), 0L);
 
         PrefillTtftEstimate.Candidate result = project(
@@ -148,17 +148,17 @@ class RouteProjectionTest {
 
     @Test
     void coherentWorkPhasesContributeTheirFrozenRemainingDuration() {
-        WorkSnapshot committed = work(
+        WorkView committed = work(
                 List.of(
-                        new WorkSnapshot.RequestWork(
-                                "1", WorkSnapshot.Phase.COMMITTED, 10L),
-                        new WorkSnapshot.RequestWork(
-                                "2", WorkSnapshot.Phase.ENGINE_QUEUED, 20L),
-                        new WorkSnapshot.RequestWork(
-                                "3", WorkSnapshot.Phase.ENGINE_RUNNING, 30L)),
-                List.of(new WorkSnapshot.BatchWork(
+                        new WorkView.RequestWork(
+                                "1", WorkView.Phase.COMMITTED, 10L),
+                        new WorkView.RequestWork(
+                                "2", WorkView.Phase.ENGINE_QUEUED, 20L),
+                        new WorkView.RequestWork(
+                                "3", WorkView.Phase.ENGINE_RUNNING, 30L)),
+                List.of(new WorkView.BatchWork(
                         7L, List.of("4", "5"),
-                        WorkSnapshot.Phase.ENGINE_RUNNING, 40L)),
+                        WorkView.Phase.ENGINE_RUNNING, 40L)),
                 0L);
 
         PrefillTtftEstimate.Candidate result = project(queue(false, constraints(1, 0L), List.of()), committed,
@@ -169,8 +169,8 @@ class RouteProjectionTest {
 
     @Test
     void inputsRejectSnapshotsFromDifferentLinearizationPoints() {
-        QueueSnapshot queue = queue(false, constraints(1, 0L), List.of());
-        WorkSnapshot later = new WorkSnapshot(
+        QueueView queue = queue(false, constraints(1, 0L), List.of());
+        WorkView later = new WorkView(
                 NOW_MS + 1L, List.of(), List.of(), 0L);
 
         assertThrows(IllegalArgumentException.class,
@@ -318,8 +318,8 @@ class RouteProjectionTest {
     void unknownRequestWorkIsIgnoredWhileKnownAndQueuedWorkContributeToTtft() {
         PrefillTtftEstimate.Candidate candidate = project(
                 queue(true, constraints(1, 0L), List.of(item(2L, 50, 1L, 40L))),
-                work(List.of(new WorkSnapshot.RequestWork(
-                        "1", WorkSnapshot.Phase.ENGINE_QUEUED, 30L)), List.of(), 1L),
+                work(List.of(new WorkView.RequestWork(
+                        "1", WorkView.Phase.ENGINE_QUEUED, 30L)), List.of(), 1L),
                 TOKEN_EVALUATOR,
                 probe(99L, 50, 20L, 0L),
                 ROUTE);
@@ -330,13 +330,13 @@ class RouteProjectionTest {
 
     @Test
     void unknownBatchWorkIsIgnoredWhileKnownWorkContributesToTtft() {
-        WorkSnapshot unknown = work(
-                List.of(new WorkSnapshot.RequestWork(
-                        "2", WorkSnapshot.Phase.ENGINE_QUEUED, 30L)),
-                List.of(new WorkSnapshot.BatchWork(
+        WorkView unknown = work(
+                List.of(new WorkView.RequestWork(
+                        "2", WorkView.Phase.ENGINE_QUEUED, 30L)),
+                List.of(new WorkView.BatchWork(
                         7L,
                         List.of("1"),
-                        WorkSnapshot.Phase.ENGINE_RUNNING,
+                        WorkView.Phase.ENGINE_RUNNING,
                         OptionalLong.empty())),
                 0L);
 
@@ -393,7 +393,7 @@ class RouteProjectionTest {
 
     @Test
     void expirySkipsDeliveredPrefixAndRemovesInterleavedWaitingMembers() {
-        QueueSnapshot snapshot = queue(false, constraints(5, 30L), List.of(
+        QueueView snapshot = queue(false, constraints(5, 30L), List.of(
                 item(1L, 50, 1L, 1L, NOW_MS + 5L),
                 item(2L, 50, 2L, 2L, NOW_MS + 5L),
                 item(3L, 50, 3L, 3L, NOW_MS + 5L),
@@ -473,7 +473,7 @@ class RouteProjectionTest {
         GroupPlanner.Constraints splitByComputeShape =
                 new GroupPlanner.Constraints(
                         2, 150L, 1_000_000L, 0L, 30L);
-        QueueSnapshot snapshot = queue(
+        QueueView snapshot = queue(
                 true, splitByComputeShape, List.of(expiringSuffix));
         PrefillTtftEstimate.Probe probe = probe(
                 99L, 90, NOW_MS - 30L, Long.MAX_VALUE, 20L, 0L);
@@ -511,9 +511,9 @@ class RouteProjectionTest {
                 ROUTE);
         PrefillTtftEstimate.Candidate committed = project(
                 queue(false, constraints(1, 0L), List.of()),
-                work(List.of(new WorkSnapshot.RequestWork(
+                work(List.of(new WorkView.RequestWork(
                                 "99",
-                                WorkSnapshot.Phase.ENGINE_RUNNING,
+                                WorkView.Phase.ENGINE_RUNNING,
                                 20L)),
                         List.of(), 0L),
                 TOKEN_EVALUATOR,
@@ -569,7 +569,7 @@ class RouteProjectionTest {
         PrefillTimePredictor.Evaluator second = sharedEvaluator(
                 sharedSnapshot, singleCalls, batchCalls);
 
-        QueueSnapshot empty = queue(false,
+        QueueView empty = queue(false,
                 new GroupPlanner.Constraints(
                         1, 1_000_000L, 1_000_000L,
                         500L, 0L),

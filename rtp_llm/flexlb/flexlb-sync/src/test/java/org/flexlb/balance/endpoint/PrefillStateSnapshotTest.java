@@ -1,6 +1,6 @@
 package org.flexlb.balance.endpoint;
 
-import org.flexlb.balance.projection.WorkSnapshot;
+import org.flexlb.balance.estimate.WorkView;
 import org.flexlb.balance.scheduler.ScheduledRequest;
 import org.flexlb.dao.master.TaskInfo;
 import org.flexlb.dao.master.WorkerStatusResponse;
@@ -65,7 +65,7 @@ class PrefillStateSnapshotTest {
         var captured = capture();
         try (var executor = Executors.newFixedThreadPool(8)) {
             CountDownLatch start = new CountDownLatch(1);
-            List<Future<WorkSnapshot>> readers = new ArrayList<>();
+            List<Future<WorkView>> readers = new ArrayList<>();
             for (int i = 0; i < 32; i++) {
                 readers.add(executor.submit(() -> {
                     assertTrue(start.await(5, TimeUnit.SECONDS));
@@ -73,12 +73,12 @@ class PrefillStateSnapshotTest {
                 }));
             }
             start.countDown();
-            WorkSnapshot shared = readers.getFirst().get(5, TimeUnit.SECONDS);
+            WorkView shared = readers.getFirst().get(5, TimeUnit.SECONDS);
             for (var reader : readers) {
                 assertSame(shared, reader.get(5, TimeUnit.SECONDS));
             }
             assertEquals(List.of("1", "2"), shared.requests().stream()
-                    .map(WorkSnapshot.RequestWork::requestId).toList());
+                    .map(WorkView.RequestWork::requestId).toList());
             second.close();
             first.close();
             assertEquals(2, shared.requests().size());
@@ -290,7 +290,7 @@ class PrefillStateSnapshotTest {
                 });
         clock.set(250);
         assertEquals(170L, remainingWork());
-        assertEquals(WorkSnapshot.Phase.ENGINE_QUEUED,
+        assertEquals(WorkView.Phase.ENGINE_QUEUED,
                 state.committedSnapshot().batches().getFirst().phase());
 
         reconcile(Map.of("3", task(3, null, 0, 300)), Map.of(), unused -> {

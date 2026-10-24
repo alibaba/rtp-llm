@@ -2,8 +2,8 @@ package org.flexlb.balance.delivery;
 
 import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.endpoint.PrefillState;
+import org.flexlb.balance.estimate.WorkView;
 import org.flexlb.balance.prediction.PrefillTimePredictor;
-import org.flexlb.balance.projection.WorkSnapshot;
 import org.flexlb.balance.scheduler.PrefillAdmissionResources;
 import org.flexlb.balance.scheduler.ScheduledRequest;
 
@@ -119,7 +119,7 @@ public final class NonBatchTransaction implements DeliveryTransaction {
     }
 
     @Override
-    public synchronized WorkSnapshot commit() {
+    public synchronized WorkView commit() {
         requirePrepared("commit");
         if (!sameIdentitySequence(members, items)) {
             throw new IllegalArgumentException("route commit does not match prepared identities");
@@ -172,7 +172,7 @@ public final class NonBatchTransaction implements DeliveryTransaction {
     }
 
     @Override
-    public void deliver(String decisionReason, int remainingQueueDepth, WorkSnapshot precedingWork) {
+    public void deliver(String decisionReason, int remainingQueueDepth, WorkView precedingWork) {
         PrefillAdmissionResources.CommittedAdmissionOwner exactCommitted = takeCommitted();
         owner.deliver(this, exactCommitted, remainingQueueDepth, precedingWork);
     }

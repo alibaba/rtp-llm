@@ -4,7 +4,7 @@ import org.flexlb.balance.delivery.DeliveryResult;
 import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.endpoint.PrefillState;
-import org.flexlb.balance.projection.WorkSnapshot;
+import org.flexlb.balance.estimate.WorkView;
 import org.flexlb.balance.scheduler.RequestLifecycleTestSupport.Registered;
 import org.flexlb.balance.scheduler.RequestSlot.AdmissionHandle;
 import org.flexlb.balance.scheduler.RequestSlot.DeliveryClaim;
@@ -355,7 +355,7 @@ class RequestLifecycleDeliveryLockContractTest {
             assertEquals(0L, contenderEntered.getCount());
 
             lifecycle.publishRoute(claim,
-                    new WorkSnapshot(System.currentTimeMillis(), List.of(), List.of(), 0L), 30_000L);
+                    new WorkView(System.currentTimeMillis(), List.of(), List.of(), 0L), 30_000L);
             assertTrue(registered.future().get(5, TimeUnit.SECONDS).isSuccess());
         } finally {
             releaseTransfer.countDown();
@@ -424,14 +424,14 @@ class RequestLifecycleDeliveryLockContractTest {
         Response terminal = registered.future().get(5L, TimeUnit.SECONDS);
         assertTrue(terminal.isSuccess());
 
-        lifecycle.setDeliveryPrediction(claim, new WorkSnapshot(System.currentTimeMillis(), java.util.List.of(), java.util.List.of(), 0L), 30_000L);
+        lifecycle.setDeliveryPrediction(claim, new WorkView(System.currentTimeMillis(), java.util.List.of(), java.util.List.of(), 0L), 30_000L);
         claim.complete(DeliveryResult.delivered());
         assertSame(terminal, registered.future().join());
         assertTrue(lifecycle.removeExactTerminalRecord(original, Long.MAX_VALUE));
 
         Registered replacement = registerItem(207L, endpoint);
         bind(lifecycle, replacement);
-        lifecycle.setDeliveryPrediction(claim, new WorkSnapshot(System.currentTimeMillis(), java.util.List.of(), java.util.List.of(), 0L), 30_000L);
+        lifecycle.setDeliveryPrediction(claim, new WorkView(System.currentTimeMillis(), java.util.List.of(), java.util.List.of(), 0L), 30_000L);
         claim.complete(DeliveryResult.notSent(new IllegalStateException("late RPC failure")));
         assertFalse(replacement.future().isDone());
         assertQueuedWithoutClaim(207L);
@@ -460,7 +460,7 @@ class RequestLifecycleDeliveryLockContractTest {
                 ? RequestLifecycleTestSupport.claimBatchWithoutPrediction(lifecycle, item, 704L, () -> true)
                 : RequestLifecycleTestSupport.claimRouteWithoutPrediction(lifecycle, item, () -> true);
         assertNotNull(claim);
-        WorkSnapshot precedingWork = new WorkSnapshot(System.currentTimeMillis(), java.util.List.of(), java.util.List.of(), 0L);
+        WorkView precedingWork = new WorkView(System.currentTimeMillis(), java.util.List.of(), java.util.List.of(), 0L);
 
         if (batch) {
             lifecycle.setDeliveryPrediction(claim, precedingWork, 30_000L);
@@ -517,7 +517,7 @@ class RequestLifecycleDeliveryLockContractTest {
         assertNotNull(claim);
         assertThrows(IllegalArgumentException.class, () -> claim.complete(DeliveryResult.delivered()));
         assertFalse(registered.future().isDone(), "a batch callback cannot publish a route");
-        WorkSnapshot precedingWork = new WorkSnapshot(System.currentTimeMillis(), List.of(), List.of(), 0L);
+        WorkView precedingWork = new WorkView(System.currentTimeMillis(), List.of(), List.of(), 0L);
         lifecycle.publishRoute(claim, precedingWork, 10L);
         assertThrows(IllegalStateException.class, () -> lifecycle.publishRoute(claim, precedingWork, 10L));
 

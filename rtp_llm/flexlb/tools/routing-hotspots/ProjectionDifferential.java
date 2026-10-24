@@ -1,11 +1,11 @@
-import org.flexlb.balance.projection.estimator.NonBatchTtftEstimator;
+import org.flexlb.balance.estimate.estimator.NonBatchTtftEstimator;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
 import java.security.MessageDigest;
 import java.util.*;
 import org.flexlb.balance.delivery.DeliveryMetrics;
 import org.flexlb.balance.planner.GroupPlanner;
-import org.flexlb.balance.projection.*;
+import org.flexlb.balance.estimate.*;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
 
 /** Run identically against both revisions; compare complete selections and candidates. */
@@ -53,10 +53,10 @@ public class ProjectionDifferential {
                     (added, prefix) -> predictor.append(added.seqLen(), added.hitCache()));
             add(digest, selection);
             add(digest, GroupPlanner.evaluateReadiness(selection, limits, 1000));
-            var committed = new WorkSnapshot(1000, trial % 4 == 0
-                    ? List.of(new WorkSnapshot.RequestWork(9999, WorkSnapshot.Phase.ENGINE_RUNNING, 500))
+            var committed = new WorkView(1000, trial % 4 == 0
+                    ? List.of(new WorkView.RequestWork(9999, WorkView.Phase.ENGINE_RUNNING, 500))
                     : List.of(), List.of(), 0);
-            var inputs = new PrefillTtftEstimate.Inputs(new QueueSnapshot(1000, order, limits, items, null), committed);
+            var inputs = new PrefillTtftEstimate.Inputs(new QueueView(1000, order, limits, items, null), committed);
             var probe = new PrefillTtftEstimate.Probe(trial % 50 == 0 ? 1 : 999999,
                     random.nextInt(10), 1000, trial % 7 == 0 ? 1015 : Long.MAX_VALUE,
                     2048, 256, 256);

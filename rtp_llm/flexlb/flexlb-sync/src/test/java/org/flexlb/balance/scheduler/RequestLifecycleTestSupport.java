@@ -2,7 +2,7 @@ package org.flexlb.balance.scheduler;
 
 import org.flexlb.balance.PlacementResult;
 import org.flexlb.balance.delivery.BatchDeliveryStrategy;
-import org.flexlb.balance.projection.WorkSnapshot;
+import org.flexlb.balance.estimate.WorkView;
 import org.flexlb.balance.scheduler.RequestSlot.AdmissionHandle;
 import org.flexlb.balance.scheduler.RequestSlot.DeliveryClaim;
 import org.flexlb.config.FlexlbConfig;
@@ -107,8 +107,8 @@ final class RequestLifecycleTestSupport {
         return registry.claimBatchDelivery(item, transaction);
     }
 
-    private static WorkSnapshot emptyWork() {
-        return new WorkSnapshot(System.currentTimeMillis(), java.util.List.of(), java.util.List.of(), 0L);
+    private static WorkView emptyWork() {
+        return new WorkView(System.currentTimeMillis(), java.util.List.of(), java.util.List.of(), 0L);
     }
 
     // State-only fixtures deliberately seed a phase without executing publication or timers.

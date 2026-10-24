@@ -8,7 +8,7 @@ import org.flexlb.balance.delivery.BatchDeliveryStrategy.PreparedSubmission;
 import org.flexlb.balance.delivery.DeliveryBlockReason;
 import org.flexlb.balance.delivery.DeliveryResult;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
-import org.flexlb.balance.projection.PrefillTtftEstimate;
+import org.flexlb.balance.estimate.PrefillTtftEstimate;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.DispatcherConfig;
 import org.flexlb.constant.MetricConstant;

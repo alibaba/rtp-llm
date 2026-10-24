@@ -3,7 +3,7 @@ package org.flexlb.balance.scheduler;
 import org.flexlb.balance.delivery.BlockedRequest;
 import org.flexlb.balance.delivery.DeliveryBlockReason;
 import org.flexlb.balance.delivery.DeliveryTransaction;
-import org.flexlb.balance.projection.WorkSnapshot;
+import org.flexlb.balance.estimate.WorkView;
 
 import java.util.List;
 
@@ -25,13 +25,13 @@ final class PrefillQueueTestSupport {
             }
 
             @Override
-            public WorkSnapshot commit() {
+            public WorkView commit() {
                 throw new IllegalStateException(
                         "boundary-only preparation cannot commit");
             }
 
             @Override
-            public void deliver(String decisionReason, int remainingQueueDepth, WorkSnapshot precedingWork) {
+            public void deliver(String decisionReason, int remainingQueueDepth, WorkView precedingWork) {
                 throw new IllegalStateException(
                         "boundary-only preparation cannot hand off");
             }

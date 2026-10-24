@@ -1,4 +1,4 @@
-import org.flexlb.balance.projection.estimator.BatchTtftEstimator;
+import org.flexlb.balance.estimate.estimator.BatchTtftEstimator;
 import com.sun.management.ThreadMXBean;
 import java.lang.management.ManagementFactory;
 import java.lang.reflect.Field;
@@ -10,7 +10,7 @@ import java.util.concurrent.locks.ReentrantLock;
 import org.flexlb.balance.delivery.*;
 import org.flexlb.balance.endpoint.PrefillActiveIndex;
 import org.flexlb.balance.prediction.FormulaPredictor;
-import org.flexlb.balance.projection.PrefillTtftEstimate;
+import org.flexlb.balance.estimate.PrefillTtftEstimate;
 import org.flexlb.balance.scheduler.*;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.*;

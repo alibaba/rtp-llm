@@ -5,7 +5,7 @@ import org.flexlb.balance.delivery.DeliveryResult;
 import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.endpoint.PrefillState;
-import org.flexlb.balance.projection.WorkSnapshot;
+import org.flexlb.balance.estimate.WorkView;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.SchedulingMetadata;
@@ -278,7 +278,7 @@ class QueuedDecodeWithdrawalTest {
         assertFalse(item.future().isDone());
         verify(queue, never()).requeue(any());
 
-        registry.publishRoute(claim, new WorkSnapshot(System.currentTimeMillis(),
+        registry.publishRoute(claim, new WorkView(System.currentTimeMillis(),
                 List.of(), List.of(), 0L), 30_000L);
 
         assertTrue(item.future().get(2, TimeUnit.SECONDS).isSuccess());

@@ -3,7 +3,7 @@ package org.flexlb.balance.scheduler;
 import org.flexlb.balance.delivery.DeliveryBlockReason;
 import org.flexlb.balance.delivery.DeliveryResult;
 import org.flexlb.balance.delivery.NonBatchDeliveryStrategy;
-import org.flexlb.balance.projection.WorkSnapshot;
+import org.flexlb.balance.estimate.WorkView;
 import org.flexlb.balance.scheduler.DeliveryStrategyTestSupport.TestContext;
 import org.flexlb.balance.scheduler.DeliveryStrategyTestSupport.TestEndpointCapabilities;
 import org.flexlb.balance.scheduler.DeliveryStrategyTestSupport.TestRequestRegistry;
@@ -63,7 +63,7 @@ class NonBatchDeliveryStrategyTest {
         ScheduledRequest first = fixture.item(1L);
         ScheduledRequest cancelled = fixture.item(2L);
         ScheduledRequest last = fixture.item(3L);
-        fixture.capabilities.precedingWork(new WorkSnapshot(1_000L, List.of(new WorkSnapshot.RequestWork("99", WorkSnapshot.Phase.COMMITTED, 25L)), List.of(), 0L));
+        fixture.capabilities.precedingWork(new WorkView(1_000L, List.of(new WorkView.RequestWork("99", WorkView.Phase.COMMITTED, 25L)), List.of(), 0L));
         fixture.slots.commitLostFor(cancelled);
 
         fixture.context.deliver(fixture.strategy, List.of(first, cancelled, last),
@@ -95,7 +95,7 @@ class NonBatchDeliveryStrategyTest {
         Fixture fixture = new Fixture();
         ScheduledRequest first = fixture.item(1L);
         ScheduledRequest second = fixture.item(2L);
-        fixture.capabilities.precedingWork(new WorkSnapshot(2_000L, List.of(), List.of(), 1L));
+        fixture.capabilities.precedingWork(new WorkView(2_000L, List.of(), List.of(), 1L));
 
         fixture.context.deliver(fixture.strategy, List.of(first, second),
                 "unknown", 0, OptionalLong.empty());
@@ -112,9 +112,9 @@ class NonBatchDeliveryStrategyTest {
         Fixture fixture = new Fixture();
         ScheduledRequest first = fixture.item(1L);
         ScheduledRequest second = fixture.item(2L);
-        fixture.capabilities.precedingWork(new WorkSnapshot(1_000L, List.of(
-                        new WorkSnapshot.RequestWork("3", WorkSnapshot.Phase.ENGINE_RUNNING, 1_000L),
-                        new WorkSnapshot.RequestWork("4", WorkSnapshot.Phase.ENGINE_QUEUED, 300L)), List.of(), 0L));
+        fixture.capabilities.precedingWork(new WorkView(1_000L, List.of(
+                        new WorkView.RequestWork("3", WorkView.Phase.ENGINE_RUNNING, 1_000L),
+                        new WorkView.RequestWork("4", WorkView.Phase.ENGINE_QUEUED, 300L)), List.of(), 0L));
         AtomicInteger published = new AtomicInteger();
         AtomicLong deliveryClock = new AtomicLong(1_000L);
         fixture.slots.beforeCompletion(() -> {
