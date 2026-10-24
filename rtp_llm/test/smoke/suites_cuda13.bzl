@@ -1,4 +1,4 @@
-load("//rtp_llm/test/smoke:defs.bzl", "smoke_test")
+load("//rtp_llm/test/smoke:defs.bzl", "custom_smoke_test", "smoke_test")
 load("@arch_config//:arch_select.bzl", "cuda13_x86_test_gpu")
 
 def cuda13_suites():
@@ -49,6 +49,15 @@ def cuda13_suites():
         name = "smoke_cuda13_arm",
         tests = [
             ":deepseek_v41_flash_ced_dspark_pd_cp2_dp2_sm100_arm",
+            # CP computes on two ranks with replicated KV: chunked prefill does
+            # not yet support CP-sharded sparse cache groups. Reserve 2P + 2D.
+            custom_smoke_test(
+                name = "v4_flash_pd_batch_reuse_chunk_sm100",
+                main = "dsv4_pd_chunk_test.py",
+                smoke_args = "--world_size 4 --act_type BF16 --fp8_kv_cache 1 --seq_size_per_block 256 --kernel_seq_size_per_block 128 --max_seq_len 8192 --max_context_batch_size 4 --concurrency_limit 4 --prefill_chunk_size 1024 --reuse_cache 1 --enable_device_cache 1 --enable_memory_cache 0 --enable_disk_cache 0 --enable_remote_cache 0 --prefill_cp_kv_cache_sharded 0 --load_method fastsafetensors --moe_strategy mega_moe_se --use_deepep_moe 1 --kv_cache_mem_mb 4096 --reserver_runtime_mem_mb 32768 --cache_store_rdma_mode 0 --use_local 1 --load_cache_timeout_ms 120000 --enable_cuda_graph 0 --warm_up 0 --think_mode 0 --enable_detail_log 1",
+                gpu_type = ["SM100_ARM_CU13"],
+                data = ["//rtp_llm:sdk", ":smoke_framework_srcs"],
+            ),
             # DSpark speculative decode with CP page-RR. This is the blocking
             # regression for publishing both target and draft SWA_KV before decode
             # dispatch; missing draft publication fails with EC_FAILED_LOAD_BUFFER.
