@@ -40,6 +40,14 @@ public:
     // Empty while pending; a terminal status preserves retryable materialization failures.
     std::optional<absl::Status> pollAllocatorLoad();
     absl::Status                incrKVBlock(int seq_len_override = -1);
+    // Called under the owning stream's mutex after token/cache-layout commit.
+    // Record only; the scheduler drains this watermark before admission or allocation so an
+    // async output worker never mutates the host block table during gather.
+    void                        reclaimLinearHistory(int committed_tokens);
+    // Both methods require the owning stream mutex. Eligibility describes
+    // future decode as well as current execution, so a fresh context is allowed.
+    bool                        canReclaimLinearHistory(int target_batch_size) const;
+    void                        drainLinearHistory();
     void                        fakeInitKVBlock(size_t reserved_blocks = 0);
     int                         tryReleaseKVBlock(size_t nums);
     void                        freeBatchBlocks(size_t batch_id, std::vector<int>& blocks);
@@ -52,8 +60,12 @@ public:
 
     // TODO, remove this after remove fallback
     int singleBatchNeedBlocks(int seq_len, int reserve_step) const;
-    int estimatePeakNeedBlocks(
-        int seq_len, int common_seq_len, int remaining_tokens, int reserve_step, int target_batch_size) const;
+    int estimatePeakNeedBlocks(int                seq_len,
+                               int                common_seq_len,
+                               int                remaining_tokens,
+                               int                reserve_step,
+                               int                target_batch_size,
+                               const std::string& pool_tag = {}) const;
 
     int curBlocksNum() const;
     int mallocFailedTimes() const;
@@ -102,6 +114,13 @@ public:
         return resource_released_;
     }
 
+    // Set only before the first allocation of a stream that will load its final
+    // linear state from a prefill peer. This must not be inferred from the role
+    // or isContextStream(), which is still true during the initial PD allocation.
+    void setPDDecodeLinearTailOnly(bool enabled) {
+        pd_decode_linear_tail_only_ = enabled;
+    }
+
     // Borrow the owning stream pointer; used by GenerateStateMachine to query
     // async-bookkeeping state without duplicating accessors here. Lifetime is
     // bound by the GenerateStream that owns this StreamCacheResource.
@@ -132,6 +151,7 @@ public:
     }
 
 private:
+    LinearCachePolicy linearCachePolicy(int target_batch_size) const;
     void         clearCacheReuseState();
     void         recordCacheReuseMallocResult(const MallocResult& result);
     void         publishReuseLengths(int total_length, int host_length, int disk_length, int backend_length);
@@ -147,6 +167,8 @@ private:
     int                              malloc_failed_times_   = 0;
     bool                             fake_inited_           = false;
     bool                             resource_released_     = false;
+    int                              pending_linear_history_committed_tokens_ = 0;
+    bool                             pd_decode_linear_tail_only_              = false;
     std::shared_ptr<AsyncContext>    allocator_load_context_;
     RtpLLMCacheReuseMetricsCollector cache_reuse_metrics_;
     int64_t                          malloc_begin_time_us_    = 0;

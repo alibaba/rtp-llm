@@ -89,6 +89,14 @@ class _MalformedPDSepConfig:
         return _new_config, (PDSepConfig,), (RoleType.PDFUSION,) * self.size
 
 
+class _PDSepState:
+    def __init__(self, state):
+        self.state = state
+
+    def __reduce__(self):
+        return _new_config, (PDSepConfig,), tuple(self.state)
+
+
 class _InvalidTypePDSepConfig:
     def __reduce__(self):
         state = [
@@ -129,11 +137,28 @@ class PDSepConfigPickleTest(unittest.TestCase):
 
 
     def test_rejects_invalid_state_length(self):
-        for size in (20, 21, 23):
+        for size in (20, 21, 24):
             with self.subTest(size=size), self.assertRaisesRegex(
-                RuntimeError, "expected 22 fields"
+                RuntimeError, "expected 22 or 23 fields"
             ):
                 pickle.loads(pickle.dumps(_MalformedPDSepConfig(size)))
+
+    def test_legacy_and_current_state_lengths_round_trip(self):
+        # The setstate gate accepts both the 22-element legacy layout (before
+        # decode_linear_tail_only) and the 23-element current layout; pin both
+        # so the length gate cannot silently drop either state generation.
+        legacy = (RoleType.PDFUSION, False) + tuple(range(2, 19)) + (True, 118, 119)
+        self.assertEqual(len(legacy), 22)
+        restored = pickle.loads(pickle.dumps(_PDSepState(legacy)))
+        self.assertTrue(restored.decode_entrance)
+        self.assertEqual(restored.prefill_stop_stream_wait_timeout_ms, 118)
+        self.assertEqual(restored.prefill_prepare_resource_pool_size, 119)
+        self.assertFalse(restored.decode_linear_tail_only)
+
+        current = legacy + (True,)
+        self.assertEqual(len(current), 23)
+        restored = pickle.loads(pickle.dumps(_PDSepState(current)))
+        self.assertTrue(restored.decode_linear_tail_only)
 
     def test_rejects_invalid_state_type_with_context(self):
         with self.assertRaisesRegex(RuntimeError, "PDSepConfig unpickle error"):

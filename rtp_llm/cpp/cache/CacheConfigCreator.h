@@ -2,6 +2,8 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <array>
+#include <limits>
 #include <memory>
 #include <optional>
 #include "absl/status/status.h"
@@ -18,6 +20,7 @@ struct KVCacheBlockBudget {
     size_t explicit_pool_reserve_bytes = 0;
     size_t paged_block_bytes           = 0;
     size_t swa_block_bytes             = 0;
+    uint32_t max_baseline_block_num      = std::numeric_limits<uint32_t>::max();
 };
 
 // Returns the largest global block count whose independent-pool backing fits
@@ -51,7 +54,16 @@ public:
                                          const std::optional<WarmUpResult>&               warm_up_result = std::nullopt,
                                          const std::optional<SpeculativeExecutionConfig>& sp_config = std::nullopt);
     static uint32_t synchronizeBlockNum(uint32_t local_block_num, const ParallelismConfig& parallelism_config);
+    static uint32_t synchronizeBlockNum(uint32_t                 local_block_num,
+                                        const ParallelismConfig& parallelism_config,
+                                        const CacheConfig&       config);
     static uint32_t selectConfirmedBlockNum(const int* candidates, size_t count, bool is_ffn_service);
+    using SizingSignature = std::array<int32_t, 5>;
+    // baseline=0 describes sizing rules; a positive baseline also includes
+    // resulting capacities. Both signatures have a fixed collective shape.
+    static SizingSignature
+                sizingSignature(const CacheConfig& config, uint32_t baseline = 0, bool is_ffn_service = false);
+    static void validateSizingSignatures(const int32_t* signatures, size_t rank_count);
 
     // Unified desc->spec conversion. Callers provide the runtime build context;
     // descs remain read-only.

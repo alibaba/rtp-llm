@@ -47,14 +47,15 @@ BlockTreeLoader::BlockTreeLoader(BlockTree*                      tree,
         })) {}
 
 BlockTreeMatchResult BlockTreeLoader::matchLocked(const CacheKeysType&               cache_keys,
-                                                  const std::function<bool(size_t)>& valid_prefix) {
+                                                  const std::function<bool(size_t)>& valid_prefix,
+                                                  bool                               skip_linear) {
     if (cache_keys.empty()) {
         RTP_LLM_LOG_DEBUG("empty cache_keys, returning empty result");
         return {};
     }
 
     std::vector<TreeNode*> path   = tree_->findNode(cache_keys);
-    BlockTreeMatchResult   result = createMatchResult(path, cache_keys, valid_prefix);
+    BlockTreeMatchResult   result = createMatchResult(path, cache_keys, valid_prefix, skip_linear);
     RTP_LLM_LOG_DEBUG("matched %zu device blocks, cache_keys=%zu, tree_nodes=%zu",
                       result.matched_device_blocks,
                       cache_keys.size(),
@@ -64,7 +65,8 @@ BlockTreeMatchResult BlockTreeLoader::matchLocked(const CacheKeysType&          
 
 bool BlockTreeLoader::validMatch(std::vector<TreeNode*>&            path,
                                  std::vector<bool>&                 candidate_valid,
-                                 const std::function<bool(size_t)>& valid_prefix) const {
+                                 const std::function<bool(size_t)>& valid_prefix,
+                                 bool                               skip_linear) const {
     size_t valid_block_count = 0;
     candidate_valid.reserve(path.size());
     std::vector<std::unique_ptr<MatchValidator>> match_validators;
@@ -72,10 +74,15 @@ bool BlockTreeLoader::validMatch(std::vector<TreeNode*>&            path,
     for (const GroupSetPtr& group_set : tree_->groupSets()) {
         match_validators.push_back(group_set->createMatchValidator());
     }
+    bool has_considered_group_set = false;
     for (size_t i = 0; i < path.size(); ++i) {
         TreeNode* node             = path[i];
         bool      all_groups_valid = true;
         for (size_t group_set_id = 0; group_set_id < tree_->groupSets().size(); ++group_set_id) {
+            if (skip_linear && tree_->groupSets()[group_set_id]->groupType() == CacheGroupType::LINEAR) {
+                continue;
+            }
+            has_considered_group_set = true;
             if (!match_validators[group_set_id]->validate(node->group_set_resources[group_set_id])) {
                 all_groups_valid = false;
             }
@@ -87,6 +94,11 @@ bool BlockTreeLoader::validMatch(std::vector<TreeNode*>&            path,
         candidate_valid.push_back(all_groups_valid);
     }
 
+    if (!has_considered_group_set) {
+        path.clear();
+        candidate_valid.clear();
+        return false;
+    }
     path.resize(valid_block_count);
     candidate_valid.resize(valid_block_count);
     return valid_block_count > 0;
@@ -113,11 +125,14 @@ BlockIndicesType BlockTreeLoader::matchedBlocksForGroup(std::string_view        
 }
 
 std::vector<BlockTreeCacheReuseTimeMetricsSnapshot> BlockTreeLoader::collectReuseTimeSnapshots(
-    const std::vector<TreeNode*>& path, size_t matched_device_blocks, int64_t access_time_us) const {
+    const std::vector<TreeNode*>& path, size_t matched_device_blocks, int64_t access_time_us, bool skip_linear) const {
     std::vector<BlockTreeCacheReuseTimeSample> reuse_time_samples;
     reuse_time_samples.reserve(path.size() * tree_->groupSets().size());
     for (size_t group_set_id = 0; group_set_id < tree_->groupSets().size(); ++group_set_id) {
         const GroupSetPtr& group_set = tree_->groupSets()[group_set_id];
+        if (skip_linear && group_set->groupType() == CacheGroupType::LINEAR) {
+            continue;
+        }
         const size_t       ready_reuse_count =
             std::min(group_set->computeReuseBlockCount(matched_device_blocks), matched_device_blocks);
         for (size_t i = matched_device_blocks - ready_reuse_count; i < matched_device_blocks; ++i) {
@@ -146,10 +161,21 @@ std::vector<BlockTreeCacheReuseTimeMetricsSnapshot> BlockTreeLoader::collectReus
 
 BlockTreeMatchResult BlockTreeLoader::createMatchResult(std::vector<TreeNode*>&            path,
                                                         const CacheKeysType&               cache_keys,
-                                                        const std::function<bool(size_t)>& valid_prefix) {
+                                                        const std::function<bool(size_t)>& valid_prefix,
+                                                        bool                               skip_linear) {
     BlockTreeMatchResult result;
+    const bool           has_considered_group_set =
+        std::any_of(tree_->groupSets().begin(), tree_->groupSets().end(), [skip_linear](const GroupSetPtr& group_set) {
+            return !skip_linear || group_set->groupType() != CacheGroupType::LINEAR;
+        });
+    // A tail-only request on an all-LINEAR topology has no reusable prefix.
+    // Return an empty match instead of treating every key as FULL-reusable.
+    if (!has_considered_group_set) {
+        path.clear();
+        return result;
+    }
     std::vector<bool>    candidate_valid;
-    if (!path.empty() && !validMatch(path, candidate_valid, valid_prefix) && !storage_backend_) {
+    if (!path.empty() && !validMatch(path, candidate_valid, valid_prefix, skip_linear) && !storage_backend_) {
         return result;
     }
     const int64_t access_time_us = currentTimeUs();
@@ -161,6 +187,9 @@ BlockTreeMatchResult BlockTreeLoader::createMatchResult(std::vector<TreeNode*>& 
         bool all_groups_ready = true;
         for (size_t group_set_id = 0; group_set_id < tree_->groupSets().size(); ++group_set_id) {
             const GroupSetPtr& group_set = tree_->groupSets()[group_set_id];
+            if (skip_linear && group_set->groupType() == CacheGroupType::LINEAR) {
+                continue;
+            }
             const size_t reuse_count = std::min(group_set->computeReuseBlockCount(candidate_count), candidate_count);
             for (size_t i = candidate_count - reuse_count; i < candidate_count; ++i) {
                 if (!path[i]->group_set_resources[group_set_id].hasCompleteDeviceValue()) {
@@ -178,11 +207,15 @@ BlockTreeMatchResult BlockTreeLoader::createMatchResult(std::vector<TreeNode*>& 
         }
     }
 
-    result.reuse_time_metrics_snapshots = collectReuseTimeSnapshots(path, result.matched_device_blocks, access_time_us);
+    result.reuse_time_metrics_snapshots =
+        collectReuseTimeSnapshots(path, result.matched_device_blocks, access_time_us, skip_linear);
     std::vector<TransferDescriptor> pending_load_descs;
     std::vector<bool>               joined_loads;
     for (size_t group_set_id = 0; group_set_id < tree_->groupSets().size(); ++group_set_id) {
         const GroupSetPtr& group_set = tree_->groupSets()[group_set_id];
+        if (skip_linear && group_set->groupType() == CacheGroupType::LINEAR) {
+            continue;
+        }
         const size_t       ready_reuse_count =
             std::min(group_set->computeReuseBlockCount(result.matched_device_blocks), result.matched_device_blocks);
         MultiNodeResource matched_device_resource{group_set_id, Tier::DEVICE};
@@ -218,11 +251,11 @@ BlockTreeMatchResult BlockTreeLoader::createMatchResult(std::vector<TreeNode*>& 
             joined_loads.push_back(is_joined);
         }
     }
-    evictor_.onMatched(path);
+    evictor_.onMatched(path, skip_linear);
 
     StorageRequest storage_request;
     if (storage_backend_ && path.size() < cache_keys.size()) {
-        storage_request = makeStorageRequest(cache_keys, path.size());
+        storage_request = makeStorageRequest(cache_keys, path.size(), skip_linear);
     }
     const bool use_storage = !storage_request.empty();
     if (!pending_load_descs.empty() || use_storage) {
@@ -257,12 +290,16 @@ BlockTreeMatchResult BlockTreeLoader::createMatchResult(std::vector<TreeNode*>& 
 }
 
 StorageRequest BlockTreeLoader::makeStorageRequest(const CacheKeysType& cache_keys,
-                                                   size_t               local_matched_blocks_num) const {
+                                                   size_t               local_matched_blocks_num,
+                                                   bool                 skip_linear) const {
     StorageRequest request{std::make_shared<CacheKeysType>(cache_keys),
                            std::vector<std::vector<StorageBlockHandle>>(cache_keys.size()),
                            local_matched_blocks_num};
     for (auto& key_handles : request.handles) {
         for (const auto& group_set : tree_->groupSets()) {
+            if (skip_linear && group_set->groupType() == CacheGroupType::LINEAR) {
+                continue;
+            }
             for (const auto& tag : group_set->groupTags()) {
                 key_handles.push_back({tag, NULL_BLOCK_IDX});
             }

@@ -338,12 +338,31 @@ TEST(KVCMInternalTest, FullLinearMultiGroupLoadMatrixCoversTP1TP2AndTwoFullGroup
             EXPECT_EQ(view[1][spec_idx].uri, complete[spec_idx].uri);
         }
 
+        // PD decode has its LINEAR state from the prefill peer. Remote FULL
+        // reuse must include suffix blocks after the last LINEAR checkpoint,
+        // and must also accept prefixes written with no LINEAR payload at all.
+        for (const auto& full_only_locations :
+             {locations, trailing_full_only, kv_cache_manager::Locations{full, full}}) {
+            ASSERT_TRUE(
+                policy.filterNeedLoadLocations(full_only_locations, view, /*block_mask=*/0, /*full_only=*/true));
+            ASSERT_EQ(view.size(), full_only_locations.size());
+            for (const auto& location_view : view) {
+                ASSERT_EQ(location_view.size(), full_spec_count);
+                for (size_t spec_idx = 0; spec_idx < location_view.size(); ++spec_idx) {
+                    EXPECT_EQ(location_view[spec_idx].spec_name, full[spec_idx].spec_name);
+                    EXPECT_EQ(location_view[spec_idx].uri, full[spec_idx].uri);
+                }
+            }
+        }
+
         auto missing_spec = complete;
         missing_spec.pop_back();
         EXPECT_FALSE(policy.filterNeedLoadLocations({missing_spec}, view));
+        EXPECT_FALSE(policy.filterNeedLoadLocations({missing_spec}, view, /*block_mask=*/0, /*full_only=*/true));
         auto duplicate_spec   = complete;
         duplicate_spec.back() = duplicate_spec.front();
         EXPECT_FALSE(policy.filterNeedLoadLocations({duplicate_spec}, view));
+        EXPECT_FALSE(policy.filterNeedLoadLocations({duplicate_spec}, view, /*block_mask=*/0, /*full_only=*/true));
     }
 }
 

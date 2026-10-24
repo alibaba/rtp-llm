@@ -156,6 +156,14 @@ public:
     }
 };
 
+class MinimalMtpEngine: public MinimalEngine {
+public:
+    using MinimalEngine::MinimalEngine;
+    bool isMTPEagle() override {
+        return true;
+    }
+};
+
 void fillDsv4RegionBytes(
     const std::shared_ptr<KVCacheManager>& manager, int block_id, int layer_id, const std::string& tag, uint8_t value) {
     auto parts = manager->convertIndexToBuffer(layer_id, tag, block_id);
@@ -965,6 +973,197 @@ TEST_F(PdSepKVCacheReleaseTest, testCpShardedCacheStoreTransfersRankMappedPhysic
             expectDsv4RegionBytes(
                 decode_manager, decode_block, /*layer_id=*/0, "default", static_cast<uint8_t>(40 + logical_pos));
         }
+    }
+}
+
+TEST_F(PdSepKVCacheReleaseTest, WeightedPoolsTransferHybridMtpBytesAcrossUnequalCapacityAndBlockIds) {
+    constexpr int     spb           = 2;
+    constexpr int     prompt_blocks = 8;
+    constexpr int     reserve_step  = 21;
+    constexpr int     main_layers   = 4;
+    constexpr int     mtp_layers    = 2;
+    constexpr int64_t request_id    = 9101;
+    constexpr size_t  main_model_id = 101;
+    constexpr size_t  mtp_model_id  = 102;
+    const auto        makeConfig    = [](uint32_t base_blocks, uint32_t full_weight, uint32_t linear_weight) {
+        CacheConfig config;
+        config.dtype                       = DataType::TYPE_FP8_E4M3;
+        config.layer_num                   = main_layers;
+        config.seq_size_per_block          = spb;
+        config.enable_linear_cache_reclaim = true;
+        config.fromGroupedSpecs({test::makeLinearSpec("linear", spb, DataType::TYPE_BF16, 1, 4),
+                                 test::makeMhaSpec("full", spb, DataType::TYPE_FP8_E4M3, 1, 4)},
+                                          {{0, 2}, {1, 3}},
+                                          {CacheGroupType::LINEAR, CacheGroupType::FULL},
+                                          {"linear", "full"});
+        auto draft = test::makeSimpleMhaCacheConfig(mtp_layers, 1, spb, DataType::TYPE_FP8_E4M3, 1, 4);
+        config.mtp_sub_configs.push_back(config.mergeMTPModule(draft, 0, main_layers));
+        config.pool_block_weights = {{"full", full_weight}, {"linear", linear_weight}};
+        config.finalizeBlockNums(base_blocks, RuntimeConfig{});
+        return config;
+    };
+    auto prefill_config  = makeConfig(16, 2, 2);
+    auto decode_config   = makeConfig(28, 4, 1);
+    auto prefill_manager = std::make_shared<KVCacheManager>(prefill_config);
+    auto decode_manager  = std::make_shared<KVCacheManager>(decode_config);
+    ASSERT_TRUE(prefill_manager->init());
+    ASSERT_TRUE(decode_manager->init());
+    // The public sizing interface must affect actual backing, including the
+    // shared Full pool's MTP layers; block IDs are local to each endpoint.
+    ASSERT_EQ(prefill_manager->totalBlocksNum(), 62u);
+    ASSERT_EQ(decode_manager->totalBlocksNum(), 138u);
+    const auto makeTokens = [spb](int seq_len, int reserve) {
+        auto input             = std::make_shared<GenerateInput>();
+        input->input_ids       = torch::arange(seq_len, torch::kInt32);
+        input->generate_config = std::make_shared<GenerateConfig>();
+        auto tokens            = std::make_shared<CompleteTokenIds>(1, 1, seq_len + reserve + spb, spb);
+        tokens->init(input);
+        tokens->setSeqLength(seq_len);
+        tokens->setReserveStep(reserve);
+        return tokens;
+    };
+    const auto makeResource = [](const std::shared_ptr<KVCacheManager>& manager) {
+        auto resource = std::make_shared<BatchKVCacheResource>();
+        resource->resetBatchSize(1);
+        resource->initGroups(manager->cacheConfig().topologyPtr());
+        return resource;
+    };
+    auto       prefill_tokens   = makeTokens(prompt_blocks * spb, 0);
+    auto       decode_tokens    = makeTokens(prompt_blocks * spb, reserve_step);
+    auto       held_tokens      = makeTokens(3 * spb, 0);
+    auto       prefill_resource = makeResource(prefill_manager);
+    auto       decode_resource  = makeResource(decode_manager);
+    auto       held_resource    = makeResource(decode_manager);
+    MallocInfo held_info{held_resource, held_tokens, request_id - 1, true, true, false};
+    held_info.pd_decode_linear_tail_only = true;
+    ASSERT_TRUE(decode_manager->malloc(held_info).success);
+    ASSERT_TRUE(prefill_manager->malloc({prefill_resource, prefill_tokens, request_id, true, true, false}).success);
+    MallocInfo decode_info{decode_resource, decode_tokens, request_id, true, true, false};
+    decode_info.pd_decode_linear_tail_only = true;
+    ASSERT_TRUE(decode_manager->malloc(decode_info).success);
+    for (const auto& tag : decode_config.groupTags()) {
+        const auto& src = prefill_resource->blocks(0, tag);
+        const auto& dst = decode_resource->blocks(0, tag);
+        ASSERT_GT(dst.size(), static_cast<size_t>(prompt_blocks));
+        ASSERT_NE(src[prompt_blocks - 1], dst[prompt_blocks - 1]);
+        if (tag == "linear") {
+            for (int pos = 0; pos < prompt_blocks - 1; ++pos) {
+                EXPECT_EQ(dst[pos], NULL_BLOCK_IDX);
+            }
+        }
+    }
+    const auto fill = [](const std::vector<BlockInfo>& parts, uint8_t first_value) {
+        for (size_t part = 0; part < parts.size(); ++part) {
+            auto tensor = torch::from_blob(parts[part].addr,
+                                           {static_cast<int64_t>(parts[part].size_bytes)},
+                                           torch::TensorOptions(torch::kUInt8).device(torch::kCUDA));
+            tensor.fill_(static_cast<uint8_t>(first_value + part));
+        }
+    };
+    const auto expectBytes = [](const std::vector<BlockInfo>& parts, uint8_t first_value) {
+        for (size_t part = 0; part < parts.size(); ++part) {
+            auto tensor = torch::from_blob(parts[part].addr,
+                                           {static_cast<int64_t>(parts[part].size_bytes)},
+                                           torch::TensorOptions(torch::kUInt8).device(torch::kCUDA));
+            EXPECT_TRUE(tensor.cpu().eq(static_cast<uint8_t>(first_value + part)).all().item<bool>())
+                << "part=" << part;
+        }
+    };
+    const auto pattern = [](int layer, int pos) { return static_cast<uint8_t>(17 + layer * 23 + pos * 2); };
+    for (int layer = 0; layer < main_layers + mtp_layers; ++layer) {
+        const auto& tag = prefill_config.soleGroupForLayer(layer).tag;
+        for (int pos = 0; pos < prompt_blocks; ++pos) {
+            fill(prefill_manager->convertIndexToBuffer(layer, tag, prefill_resource->blocks(0, tag)[pos]),
+                 pattern(layer, pos));
+        }
+        for (const auto block : decode_resource->blocks(0, tag)) {
+            if (!isNullBlockIdx(block)) {
+                fill(decode_manager->convertIndexToBuffer(layer, tag, block), 0xED);
+            }
+        }
+    }
+    std::vector<CacheKeyType> keys;
+    for (int pos = 0; pos < prompt_blocks; ++pos) {
+        keys.push_back(14000 + pos);
+    }
+    auto store = std::make_shared<MemoryBackedCacheStore>();
+    for (int layer = 0; layer < main_layers + mtp_layers; ++layer) {
+        const bool  draft       = layer >= main_layers;
+        const int   local_layer = draft ? layer - main_layers : layer;
+        const auto& cfg         = draft ? prefill_manager->getMTPModuleCacheConfig(0) : prefill_config;
+        const auto  layout      = draft ? prefill_manager->getMTPModuleGroupedCacheLayerLayout(0) :
+                                          prefill_manager->getMainModelGroupedCacheLayerLayout();
+        const auto& tag         = prefill_config.soleGroupForLayer(layer).tag;
+        const auto& buffers     = layout.at(tag, local_layer);
+        auto        inputs =
+            makeDsv4WriteInputs(request_id, prompt_blocks * spb, 0, blockIdsTensor(prefill_resource, tag), keys);
+        torch_ext::LayerKVCache layer_cache;
+        layer_cache.kv_cache_base      = buffers.kv_addr;
+        layer_cache.kv_scale_base      = buffers.kv_scale_addr;
+        layer_cache.seq_size_per_block = spb;
+        layer_cache.layer_id           = local_layer;
+        layer_cache.tag                = tag;
+        if (tag == "full") {
+            ASSERT_TRUE(layer_cache.kv_scale_base.defined());
+        }
+        runtimeWriteCacheStore(inputs, layer_cache, cfg, store, draft ? mtp_model_id : main_model_id, 0, 1, nullptr);
+    }
+    EngineInitParams params;
+    params.model_id                  = main_model_id;
+    params.model_config_.num_layers  = main_layers;
+    auto module                      = std::make_unique<EngineInitParams>();
+    module->model_id                 = mtp_model_id;
+    module->model_config_.num_layers = mtp_layers;
+    auto modules                     = std::make_unique<std::vector<std::unique_ptr<EngineInitParams>>>();
+    modules->push_back(std::move(module));
+    ProposeModelEngineInitParams propose_params(SP_TYPE_MTP, 3, std::move(modules));
+    DecodeRpcServer              server;
+    server.engine_                   = std::make_shared<MinimalMtpEngine>(params, decode_manager);
+    server.maga_init_params_         = params;
+    server.propose_maga_init_params_ = &propose_params;
+    server.resource_.cache_store     = store;
+    grpc::ServerContext                 grpc_context;
+    DecodeRpcServer::LoadKVCacheContext load_context(request_id,
+                                                     "weighted-hybrid-mtp",
+                                                     {"127.0.0.1:12345:12346"},
+                                                     keys,
+                                                     decode_resource->cacheResource(0).groupBlockIds(),
+                                                     0,
+                                                     5000,
+                                                     1,
+                                                     0,
+                                                     &grpc_context,
+                                                     1);
+    const auto                          loaded = server.loadCache(load_context);
+    ASSERT_TRUE(loaded.ok()) << loaded.error_info.ToString();
+    EXPECT_EQ(loaded.loaded_cache_block_count, static_cast<size_t>(prompt_blocks));
+    for (int layer = 0; layer < main_layers + mtp_layers; ++layer) {
+        const auto& tag    = decode_config.soleGroupForLayer(layer).tag;
+        const auto& blocks = decode_resource->blocks(0, tag);
+        for (int pos = 0; pos < static_cast<int>(blocks.size()); ++pos) {
+            if (isNullBlockIdx(blocks[pos])) {
+                continue;
+            }
+            SCOPED_TRACE(testing::Message() << "layer=" << layer << " tag=" << tag << " pos=" << pos);
+            auto parts = decode_manager->convertIndexToBuffer(layer, tag, blocks[pos]);
+            if (tag == "full") {
+                ASSERT_EQ(parts.size(), 2u);  // KV payload and FP8 scales must both transfer.
+            }
+            expectBytes(parts, pos < prompt_blocks ? pattern(layer, pos) : 0xED);
+        }
+    }
+    // Cancellation releases every pool's user references, including reserve
+    // blocks that were never transferred, so a new handoff can be admitted.
+    decode_manager->free({decode_resource, decode_tokens, request_id});
+    decode_manager->free({held_resource, held_tokens, request_id - 1});
+    EXPECT_EQ(decode_manager->availableBlocksNum(), 138u);
+    auto replacement                    = makeResource(decode_manager);
+    decode_info.batch_kv_cache_resource = replacement;
+    ASSERT_TRUE(decode_manager->malloc(decode_info).success);
+    decode_manager->free({replacement, decode_tokens, request_id});
+    prefill_manager->free({prefill_resource, prefill_tokens, request_id});
+    for (const auto& pool : decode_manager->coordinator_manager_->groupBlockPools()) {
+        EXPECT_EQ(pool->referencedBlocksNum(), 0u);
     }
 }
 
