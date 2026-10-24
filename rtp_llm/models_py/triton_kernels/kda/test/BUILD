@@ -80,3 +80,22 @@ py_test(
     exec_properties = {"gpu": "L20_CU13"},
     tags = ["L20_CU13"],
 )
+
+py_test(
+    name = "test_chunk_prefill_h20_cached",
+    srcs = ["test_chunk_prefill.py"],
+    main = "test_chunk_prefill.py",
+    env = {"TRITON_AUTOTUNE_CACHE_MODE": "cached"},
+    deps = [
+        "//rtp_llm/models_py/triton_kernels:fla",
+        "//rtp_llm/models_py/triton_kernels:kda",
+        ":torch",
+        ":triton",
+        ":einops",
+        ":numpy",
+        ":packaging",
+    ],
+    visibility = ["//visibility:public"],
+    exec_properties = {"gpu": "H20_CU13", "gpu_count": "1"},
+    tags = ["H20_CU13"],
+)
