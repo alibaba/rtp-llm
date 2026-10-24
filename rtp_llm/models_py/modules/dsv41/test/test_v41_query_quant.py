@@ -8,6 +8,8 @@ from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 import torch
+import triton
+import triton.language as tl
 
 from rtp_llm.models_py.kernels.cuda.fp8_kernel import sgl_per_token_group_quant_fp8
 from rtp_llm.models_py.modules.dsv41._v41_fused_qkv import strided_q_rmsnorm
@@ -16,6 +18,19 @@ from rtp_llm.models_py.modules.dsv41._v41_query_quant import (
     try_project_quantized_qkv,
 )
 from rtp_llm.models_py.modules.dsv41.utils import V41MXFP8Linear
+
+
+@triton.jit
+def _delayed_qa(source, output, size: tl.constexpr):
+    tl.extra.cuda.gdc_wait()
+    tl.extra.cuda.gdc_launch_dependents()
+    offsets = tl.program_id(0) * 256 + tl.arange(0, 256)
+    tl.inline_asm_elementwise(
+        "nanosleep.u32 100000; // $0", "=r", [], tl.int32, is_pure=False, pack=1
+    )
+    tl.store(
+        output + offsets, tl.load(source + offsets, offsets < size, 0), offsets < size
+    )
 
 
 def reference(x, weight):
@@ -106,6 +121,95 @@ class QueryQuantGateTest(unittest.TestCase):
 
 @unittest.skipUnless(torch.cuda.is_available(), "requires CUDA")
 class QueryQuantCudaTest(unittest.TestCase):
+    @torch.inference_mode()
+    def test_pdl_qa_norm_qb_kv_graph_dependencies(self):
+        if torch.cuda.get_device_capability()[0] != 10:
+            self.skipTest("native MXFP8 GEMM requires SM10x")
+        import deep_gemm
+
+        from rtp_llm.models_py.modules.dsv41.fp8._v41_qkv_rope_cache_triton import (
+            try_fused_qkv_rope_cache,
+        )
+
+        previous_pdl = deep_gemm.get_pdl()
+        self.addCleanup(deep_gemm.set_pdl, previous_pdl)
+        torch.manual_seed(41)
+        for rows, q_rope, padded_heads in (
+            (64, False, None),
+            (96, False, None),
+            (384, False, None),
+            (64, True, None),
+            (64, False, 128),
+        ):
+            source = torch.randn(1, rows, 1792, device="cuda", dtype=torch.bfloat16)
+            raw = torch.empty_like(source)
+            q_weight = torch.randn(1280, device="cuda", dtype=torch.bfloat16)
+            kv_weight = torch.randn(512, device="cuda", dtype=torch.bfloat16)
+            weight = (torch.randn(32768, 1280, device="cuda") * 0.02).to(
+                torch.float8_e4m3fn
+            )
+            scales = torch.ones(1024, 40, device="cuda").to(torch.float8_e8m0fnu)
+            linear = V41MXFP8Linear(weight, scales)
+            angles = torch.randn(1024, 32, device="cuda")
+            freqs = torch.polar(torch.ones_like(angles), angles)
+            positions = torch.arange(rows, device="cuda", dtype=torch.int64)
+            slots = positions.clone()
+            slots[0] = -1
+            pool = torch.empty(4, 128, 528, device="cuda", dtype=torch.uint8)
+
+            def chain(pdl):
+                _delayed_qa[(triton.cdiv(raw.numel(), 256),)](
+                    source, raw, raw.numel(), launch_pdl=True
+                )
+                norm, pair = query_norm_quant(raw[..., :1280], q_weight, 1e-6, pdl=pdl)
+                q = linear.forward_quantized(*pair).view(1, rows, 64, 512)
+                result = try_fused_qkv_rope_cache(
+                    q,
+                    raw[..., 1280:],
+                    kv_weight,
+                    positions,
+                    freqs,
+                    pool,
+                    slots,
+                    apply_q_rope=q_rope,
+                    pad_query_heads=padded_heads,
+                    kv_ready=pdl,
+                )
+                self.assertIsNotNone(result)
+                return (
+                    norm,
+                    pair[0].view(torch.uint8),
+                    pair[1],
+                    result.q,
+                    result.kv,
+                    result.freqs_cis,
+                )
+
+            stream = torch.cuda.Stream()
+            stream.wait_stream(torch.cuda.current_stream())
+            with torch.cuda.stream(stream):
+                deep_gemm.set_pdl(True)
+                for _ in range(3):
+                    chain(True)
+                graph = torch.cuda.CUDAGraph()
+                with torch.cuda.graph(graph, stream=stream):
+                    actual = chain(True)
+                for iteration in range(6):
+                    source.normal_(std=(0.0, 1e-8, 1.0, 100.0)[iteration % 4])
+                    positions.add_(3)
+                    slots.copy_(slots.roll(1))
+                    pool.fill_(173)
+                    deep_gemm.set_pdl(False)
+                    expected = chain(False)
+                    expected_pool = pool.clone()
+                    pool.fill_(173)
+                    raw.zero_()
+                    graph.replay()
+                    for got, ref in zip(actual, expected):
+                        torch.testing.assert_close(got, ref, rtol=0, atol=0)
+                    torch.testing.assert_close(pool, expected_pool, rtol=0, atol=0)
+            torch.cuda.current_stream().wait_stream(stream)
+
     def assert_same(self, got, ref):
         torch.testing.assert_close(got[0], ref[0], rtol=0, atol=0)
         torch.testing.assert_close(

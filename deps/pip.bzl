@@ -32,6 +32,13 @@ CUDA13_ANNOTATIONS = dict(FLASHINFER_069_ANNOTATIONS, **{
                 ],
                 "patch_strip": 1,
             }),
+            "@rtp_llm//patches/deep_gemm:0002-normal-gemm-pdl-trigger.patch": json.encode({
+                "whls": [
+                    "deep_gemm-2.8.2+ad62a90.cu132-cp310-cp310-linux_x86_64.whl",
+                    "deep_gemm-2.8.2+ad62a90.cu132-cp310-cp310-linux_aarch64.whl",
+                ],
+                "patch_strip": 1,
+            }),
         },
         additive_build_content = """
 cc_library(

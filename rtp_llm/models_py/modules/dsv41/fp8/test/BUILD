@@ -124,7 +124,7 @@ _X86_TESTS = [
         env = {"RTP_V41_PREFILL_DEEPSELECT_GPU_TEST": "1"} if name == "test_v41_prefill_deepselect" else {},
         legacy_create_init = 0,
     )
-    for name in _TESTS
+    for name in _TESTS if name not in ["test_v41_qkv_rope_cache", "test_v41_global_overlap"]
 ]
 
 
@@ -173,21 +173,24 @@ cuda13_sm100_py_test(
 )
 
 
-cuda13_sm100_py_test(
-    name = "test_v41_deepgemm_producers",
-    srcs = glob(["*.py"]) + [
-        "//rtp_llm/test/pytest:pytest_main.py",
-        "//rtp_llm/models_py/modules/dsv4/fp8/test:test_prefill_common_metadata_cuda.py",
-    ],
-    main = "//rtp_llm/test/pytest:pytest_main.py",
-    args = ["--cuda-devices", "1", "$(location :test_v41_deepgemm_producers.py)"],
-    deps = [
-        "//rtp_llm:testlib",
-        "//rtp_llm/models_py:modules",
-        "//rtp_llm/models_py:tile_kernels_mhc",
-        "//rtp_llm:jit_cache_env",
-        test_requirement("pytest"),
-    ],
-    tags = ["dsv41_cuda13"],
-    legacy_create_init = 0,
-)
+[
+    cuda13_sm100_py_test(
+        name = name,
+        srcs = glob(["*.py"]) + [
+            "//rtp_llm/test/pytest:pytest_main.py",
+            "//rtp_llm/models_py/modules/dsv4/fp8/test:test_prefill_common_metadata_cuda.py",
+        ],
+        main = "//rtp_llm/test/pytest:pytest_main.py",
+        args = ["--cuda-devices", "1", "$(location :" + name + ".py)"],
+        deps = [
+            "//rtp_llm:testlib",
+            "//rtp_llm/models_py:modules",
+            "//rtp_llm/models_py:tile_kernels_mhc",
+            "//rtp_llm:jit_cache_env",
+            test_requirement("pytest"),
+        ],
+        tags = ["dsv41_cuda13"],
+        legacy_create_init = 0,
+    )
+    for name in ["test_v41_deepgemm_producers", "test_v41_qkv_rope_cache", "test_v41_global_overlap"]
+]
