@@ -19,7 +19,6 @@ cc_library(
         "//rtp_llm/cpp/config:static_config",
         "//rtp_llm/cpp/disaggregate/cache_store:cache_store_interface",
         "//rtp_llm/cpp/model_utils",
-        "//rtp_llm/cpp/models:stats",
         "//rtp_llm/cpp/models/models_weight:weights_define",
         "//rtp_llm/cpp/pybind:th_utils",
         "//rtp_llm/cpp/utils:core_utils",

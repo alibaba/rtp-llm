@@ -129,6 +129,11 @@ void PyWrappedModel::cleanupAfterConstructionFailure() noexcept {
     try {
         generation_prefill_graph_runner_.reset();
         graph_runner_.reset();
+        // The constructor's GIL guard is still alive here; member destruction
+        // happens after it unwinds, so leave no Python references for that step.
+        held_attn_pyobj_   = py::object();
+        py_forward_method_ = py::object();
+        py_model_          = py::object();
     } catch (const std::exception& e) {
         RTP_LLM_LOG_ERROR("PyWrappedModel construction cleanup failed: %s", e.what());
     } catch (...) {
@@ -1016,7 +1021,8 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
             GenerationPrefillCudaGraphStatus::NOT_REQUESTED;
     const auto finalize_outputs = [&](GptModelOutputs outputs) {
         outputs.generation_prefill_cuda_graph_status = generation_prefill_cuda_graph_status;
-        expert_balancer_.step(inputs.warmup);
+        // Multi-token target verify uses prefill-shaped attention inputs but is a decode step.
+        expert_balancer_.step(inputs.warmup, has_context_request && !inputs.is_target_verify);
         return outputs;
     };
 

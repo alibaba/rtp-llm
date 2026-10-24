@@ -436,8 +436,8 @@ class Dsv4MoeConfigTest(unittest.TestCase):
         self.assertEqual(args.n_routed_experts, 16)
         self.assertEqual(args.n_physical_experts, 24)
         self.assertEqual(kwargs["n_physical_experts"], 24)
-        # Propagation preserves the unsupported request so the production
-        # factory rejects it, rather than silently dropping redundant experts.
+        # Keep physical capacity through the real factory and executor
+        # constructor; only GPU availability and weight allocation are isolated.
         runtime = Fp8Fp4MoeRuntimeConfig(
             layer_id=0,
             hidden_size=args.dim,
@@ -448,14 +448,124 @@ class Dsv4MoeConfigTest(unittest.TestCase):
             n_shared_experts=args.n_shared_experts,
             swiglu_limit=args.swiglu_limit,
             ep_size=8,
-            ep_rank=0,
+            ep_rank=7,
             max_tokens_per_rank=32,
-            moe_strategy="auto",
+            moe_strategy="mega_moe",
         )
-        with self.assertRaisesRegex(
-            ValueError, "do not support EPLB.*logical_experts=16, physical_experts=24"
+        with mock.patch(
+            "rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors."
+            "mega_moe._mega_moe_available",
+            return_value=True,
+        ), mock.patch.object(
+            MegaMoeExecutor, "setup_weights", autospec=True
+        ) as setup_weights:
+            fused_moe = FusedMoeFactory().create_fused_moe(runtime, {})
+
+        self.assertIsInstance(fused_moe.fused_experts, MegaMoeExecutor)
+        setup_weights.assert_called_once_with(fused_moe.fused_experts, {})
+        self.assertIs(fused_moe.fused_experts.cfg, runtime)
+        self.assertEqual(fused_moe.strategy_name, "mega_moe")
+        self.assertEqual(fused_moe.expert_num, 24)
+        self.assertEqual(runtime.expert_num, 16)
+        self.assertEqual(runtime.n_routed_experts, 16)
+        self.assertEqual(runtime.n_local_experts, 3)
+        self.assertEqual(runtime.local_expert_start, 21)
+        self.assertEqual(runtime.local_expert_end, 24)
+
+    def test_v41_physical_capacity_reaches_private_moe(self):
+        from rtp_llm.models_py.model_desc.deepseek_v41_base_model import (
+            _args_from_model_config as v41_args_from_config,
+        )
+        from rtp_llm.models_py.modules.dsv41.block import Block as V41Block
+        from rtp_llm.models_py.modules.dsv41.transformer import (
+            _block_kwargs as v41_block_kwargs,
+        )
+        from rtp_llm.ops import EplbMode
+        from rtp_llm.utils.model_weight import W
+
+        class DummyModule(nn.Module):
+            def __init__(self, *args, **kwargs):
+                super().__init__()
+
+        for mode, redundant in (
+            (EplbMode.NONE, 0),
+            (EplbMode.NONE, 8),
+            (EplbMode.STATS, 8),
+            (EplbMode.ALL, 8),
         ):
-            FusedMoeFactory().create_fused_moe(runtime, {})
+            with self.subTest(mode=mode, redundant=redundant):
+                config = self._load_minimal_model_config(1)
+                config.eplb_config.eplb_mode = mode
+                config.eplb_config.redundant_expert = redundant
+                args = v41_args_from_config(config)
+                args.ep_size, args.ep_rank = 8, 7
+                weights = {
+                    key: torch.ones(1)
+                    for key in (
+                        W.v4_attn_norm,
+                        W.v4_ffn_norm,
+                        W.v4_hc_attn_fn,
+                        W.v4_hc_attn_base,
+                        W.v4_hc_attn_scale,
+                        W.v4_hc_ffn_fn,
+                        W.v4_hc_ffn_base,
+                        W.v4_hc_ffn_scale,
+                    )
+                }
+                kwargs = v41_block_kwargs(0, args, weights)
+                with (
+                    patch(
+                        "rtp_llm.models_py.modules.dsv41.block.AttentionFP8",
+                        DummyModule,
+                    ),
+                    patch(
+                        "rtp_llm.models_py.modules.dsv41.block.RMSNorm",
+                        DummyModule,
+                    ),
+                    patch(
+                        "rtp_llm.models_py.modules.dsv41.block.build_hc_unit",
+                        side_effect=lambda *args, **kwargs: DummyModule(),
+                    ),
+                    patch.object(
+                        V41Block,
+                        "_resolve_prefill_fast_hc_impls",
+                        return_value=(lambda: None,) * 4,
+                    ),
+                    patch(
+                        "rtp_llm.models_py.modules.dsv41.block.MoE", autospec=True
+                    ) as moe,
+                ):
+                    V41Block(**kwargs)
+
+                self.assertEqual(args.n_routed_experts, 16)
+                self.assertEqual(args.n_physical_experts, 16 + redundant)
+                self.assertEqual(moe.call_args.kwargs["n_routed_experts"], 16)
+                self.assertEqual(
+                    moe.call_args.kwargs["n_physical_experts"], 16 + redundant
+                )
+                self.assertEqual(moe.call_args.kwargs["ep_size"], 8)
+                self.assertEqual(moe.call_args.kwargs["ep_rank"], 7)
+
+    def test_v41_model_exposes_private_moe_runtime_layers(self):
+        from rtp_llm.eplb.runtime import EplbLayer
+        from rtp_llm.models_py.model_desc.deepseek_v41_model import DeepSeekV41Model
+
+        layer = EplbLayer(
+            0,
+            torch.tensor([[0], [1]], dtype=torch.int32),
+            torch.ones(2, dtype=torch.int32),
+            (torch.zeros(2, 4),),
+        )
+        model = DeepSeekV41Model.__new__(DeepSeekV41Model)
+        nn.Module.__init__(model)
+        model.v4 = SimpleNamespace(
+            layers=[
+                SimpleNamespace(ffn=SimpleNamespace(eplb_layer=layer)),
+                SimpleNamespace(ffn=None),
+            ]
+        )
+
+        self.assertEqual(model.get_eplb_layers(), [layer])
 
     def test_zero_routed_expert_width_fails_fast(self):
         model_config = self._load_minimal_model_config(0)
@@ -683,35 +793,34 @@ class MoeCuda13ConfigPropagationTest(unittest.TestCase):
         )
 
         source_dir = Path(inspect.getfile(DeepSeekV4Model)).parent
-        for filename, callable_name, implementations in (
+        for filename, implementations in (
             (
                 "deepseek_v4_model.py",
-                "_executor",
                 (("mega_moe", MegaMoeExecutor), ("mega_moe_se", MegaMoeSEExecutor)),
             ),
             (
                 "deepseek_v41_base_model.py",
-                "_strategy",
                 (("mega", MegaMoEStrategy), ("mega_se", MegaMoEStrategySE)),
             ),
         ):
-            source = source_dir / filename
-            # Execute the production prewarm block without constructing weights
-            # or launching the unrelated attention/JIT warmups around it.
-            (prewarm,) = [
-                node
-                for node in ast.walk(ast.parse(source.read_text()))
-                if isinstance(node, ast.Try)
-                and any(
-                    isinstance(call, ast.Call)
-                    and isinstance(call.func, ast.Name)
-                    and call.func.id == callable_name
-                    for call in ast.walk(node)
+            code = None
+            if filename == "deepseek_v41_base_model.py":
+                source = source_dir / filename
+                # V4.1 still has an inline production prewarm block.
+                (prewarm,) = [
+                    node
+                    for node in ast.walk(ast.parse(source.read_text()))
+                    if isinstance(node, ast.Try)
+                    and any(
+                        isinstance(call, ast.Call)
+                        and isinstance(call.func, ast.Name)
+                        and call.func.id == "_strategy"
+                        for call in ast.walk(node)
+                    )
+                ]
+                code = compile(
+                    ast.Module(body=[prewarm], type_ignores=[]), str(source), "exec"
                 )
-            ]
-            code = compile(
-                ast.Module(body=[prewarm], type_ignores=[]), str(source), "exec"
-            )
             for strategy_name, implementation in implementations:
                 with self.subTest(model=filename, strategy=strategy_name):
                     executor = implementation.__new__(implementation)
@@ -737,15 +846,18 @@ class MoeCuda13ConfigPropagationTest(unittest.TestCase):
                     ), mock.patch.object(
                         torch.cuda, "synchronize"
                     ) as synchronize:
-                        exec(
-                            code,
-                            {
-                                "self": model,
-                                "_torch": torch,
-                                "device_str": "cpu",
-                                "logging": logging,
-                            },
-                        )
+                        if code is None:
+                            DeepSeekV4Model._warmup_mega_moe(model, "cpu")
+                        else:
+                            exec(
+                                code,
+                                {
+                                    "self": model,
+                                    "_torch": torch,
+                                    "device_str": "cpu",
+                                    "logging": logging,
+                                },
+                            )
                     forward.assert_called_once()
                     self.assertIs(forward.call_args.args[0], executor)
                     self.assertEqual(forward.call_args.kwargs, {"expert_load": None})

@@ -18,6 +18,21 @@ py_test(
     deps = ["//rtp_llm:ops"],
 )
 
+py_test(
+    name = "rtp_llm_startup_test",
+    srcs = ["rtp_llm_startup_test.py"],
+    data = [
+        "//:rtp_compute_ops",
+        "//:th_transformer",
+        "//:th_transformer_config",
+    ],
+    deps = [
+        "//rtp_llm:device",
+        "//rtp_llm:ops",
+    ],
+    env = {"CUDA_VISIBLE_DEVICES": "", "GPU_COUNT": "0"},
+)
+
 cc_library(
     name = "py_utils",
     hdrs = [

@@ -1,6 +1,7 @@
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import (
+    TYPE_CHECKING,
     Any,
     Callable,
     Dict,
@@ -27,6 +28,10 @@ from rtp_llm.models_py.modules.factory.fused_moe.defs.type import (
     RouterType,
 )
 from rtp_llm.models_py.utils.expert_load_monitor import ExpertLoadContext
+
+if TYPE_CHECKING:
+    from rtp_llm.eplb.runtime import EplbLayer
+
 
 SKIP_TP_ALLREDUCE_ARG: Final[Literal["skip_tp_allreduce"]] = "skip_tp_allreduce"
 
@@ -240,6 +245,17 @@ class FusedMoeExpertExecutor(ABC):
         """
         pass
 
+    def get_eplb_weights(self) -> tuple[torch.Tensor, ...]:
+        """Return kernel tensors indexed by local physical expert in dim 0.
+
+        The tensors retain their storage throughout model execution, including
+        graph replay. Include every routed weight/scale representation read by
+        the backend; shared experts are outside this contract.
+        """
+        raise NotImplementedError(
+            f"{type(self).__name__} does not support EPLB weight migration"
+        )
+
     @property
     def topk_ids_dtype(self) -> torch.dtype:
         return torch.int64
@@ -271,12 +287,14 @@ class FusedMoe(torch.nn.Module):
         fused_experts: FusedMoeExpertExecutor,
         expert_num: int,
         strategy_name: str = "",
+        eplb_layer: Optional["EplbLayer"] = None,
     ):
         super().__init__()
         self.router = router
         self.fused_experts = fused_experts
         self.expert_num = expert_num
         self.strategy_name = strategy_name
+        self.eplb_layer = eplb_layer
 
     @property
     def includes_shared_expert(self) -> bool:
@@ -289,7 +307,9 @@ class FusedMoe(torch.nn.Module):
     @property
     def supports_gate_pack(self) -> bool:
         return bool(
-            self.router.supports_gate_pack and self.fused_experts.supports_gate_pack
+            self.eplb_layer is None
+            and self.router.supports_gate_pack
+            and self.fused_experts.supports_gate_pack
         )
 
     def forward_gate_pack(
@@ -343,6 +363,8 @@ class FusedMoe(torch.nn.Module):
 
         self._validate_skip_tp_allreduce(skip_tp_allreduce)
         a1 = hidden_states
+        if self.eplb_layer is not None:
+            topk_ids = self.eplb_layer.map_ids(topk_ids)
 
         expert_payload = self.router.prepare(
             a1,

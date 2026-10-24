@@ -51,8 +51,6 @@ private:
     std::unique_ptr<RpcServiceImpl> model_rpc_service_;
     std::shared_ptr<HttpApiServer>  http_server_;
     std::unique_ptr<grpc::Server>   grpc_server_;
-    std::thread                     grpc_server_thread_;
-    std::atomic<bool>               is_server_ready_{false};
     std::atomic<bool>               is_server_shutdown_{false};
     size_t                          model_id_ = 0;
 };

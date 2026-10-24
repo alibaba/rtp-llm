@@ -729,6 +729,7 @@ class KimiLinearDecoderLayer(nn.Module):
                 max_generate_batch_size,
                 enable_cuda_graph=enable_cuda_graph,
                 hw_kernel_config=hw_kernel_config,
+                layer_id=layer_idx,
             )
 
         # RMSResNorm: fused residual add + layernorm

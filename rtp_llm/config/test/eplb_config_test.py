@@ -79,7 +79,7 @@ class EplbMetricsConfigTest(unittest.TestCase):
                 self.assertEqual(restored.eplb_metrics_report_interval, interval)
                 self.assertEqual(restored.eplb_metrics_snapshot_max_files, 3)
         old = EPLBConfig.__new__(EPLBConfig)
-        old.__setstate__(config.__getstate__()[:9])
+        old.__setstate__((5000, "NONE", 0, "mix", 0, 10, 100, False, 1))
         self.assertEqual(old.eplb_metrics_report_interval, 0)
         self.assertEqual(old.eplb_metrics_snapshot_max_files, 0)
 
@@ -214,6 +214,127 @@ class EplbMetricsConfigTest(unittest.TestCase):
                         ValueError, "EPLB_METRICS_REPORT_INTERVAL must be"
                     ):
                         EngineConfig.create(configs)
+
+
+class EplbRearrangementConfigTest(unittest.TestCase):
+    def test_native_and_cli_defaults_match_deepinfer_schedule(self):
+        with patch.dict(os.environ, {}, clear=True):
+            for config in (EPLBConfig(), setup_args([]).eplb_config):
+                self.assertEqual(config.eplb_update_time, 0)
+                self.assertEqual(config.eplb_stats_window_size, 100)
+                self.assertFalse(config.eplb_rearrange_after_prefill)
+                self.assertEqual(config.eplb_rearrange_p2p_groups, 1)
+
+    def test_new_options_flow_from_cli_and_environment_through_pickle(self):
+        env = {
+            "EPLB_UPDATE_TIME": "24",
+            "EPLB_STATS_WINDOW_SIZE": "8",
+            "EPLB_REARRANGE_AFTER_PREFILL": "1",
+            "EPLB_REARRANGE_P2P_GROUPS": "3",
+        }
+        for use_cli in (False, True):
+            with self.subTest(use_cli=use_cli), patch.dict(os.environ, env, clear=True):
+                args = (
+                    [
+                        "--eplb_update_time",
+                        "0",
+                        "--eplb_stats_window_size",
+                        "0",
+                        "--eplb_rearrange_after_prefill",
+                        "0",
+                        "--eplb_rearrange_p2p_groups",
+                        "1",
+                    ]
+                    if use_cli
+                    else []
+                )
+                configs = setup_args(args)
+                EngineConfig.create(configs)
+                restored = pickle.loads(pickle.dumps(configs.eplb_config))
+                self.assertEqual(
+                    (
+                        restored.eplb_update_time,
+                        restored.eplb_stats_window_size,
+                        restored.eplb_rearrange_after_prefill,
+                        restored.eplb_rearrange_p2p_groups,
+                    ),
+                    (0, 0, False, 1) if use_cli else (24, 8, True, 3),
+                )
+
+    def test_legacy_pickles_restore_active_fields_without_retired_options(self):
+        old = (5000, "STATS", 32, "mix", 1, 10, 100, True, 2)
+        for state in (old, old + (7, 3)):
+            with self.subTest(fields=len(state)):
+                restored = EPLBConfig.__new__(EPLBConfig)
+                restored.__setstate__(state)
+                self.assertEqual(restored.eplb_update_time, 5000)
+                self.assertEqual(restored.eplb_stats_window_size, 10)
+                self.assertEqual(restored.redundant_expert, 32)
+                self.assertEqual(restored.eplb_rearrange_p2p_groups, 1)
+                self.assertFalse(restored.eplb_rearrange_after_prefill)
+                self.assertEqual(
+                    restored.eplb_metrics_report_interval, 7 if len(state) == 11 else 0
+                )
+                self.assertEqual(
+                    restored.eplb_metrics_snapshot_max_files,
+                    3 if len(state) == 11 else 0,
+                )
+                for name in (
+                    "balance_method",
+                    "eplb_balance_layer_per_step",
+                    "eplb_force_repack",
+                    "eplb_test_mode",
+                ):
+                    self.assertFalse(hasattr(restored, name))
+
+    def test_window_and_interval_boundaries(self):
+        for interval, window, valid in (
+            (0, 0, True),
+            (0, 100, True),
+            (1, 1, True),
+            (8, 8, True),
+            (8, 3, True),
+            (-1, 0, False),
+            (0, -1, False),
+            (4, 0, False),
+            (4, 5, False),
+        ):
+            with self.subTest(interval=interval, window=window), patch.dict(
+                os.environ, {}, clear=True
+            ):
+                configs = setup_args(
+                    [
+                        "--eplb_update_time",
+                        str(interval),
+                        "--eplb_stats_window_size",
+                        str(window),
+                    ]
+                )
+                if valid:
+                    EngineConfig.create(configs)
+                else:
+                    with self.assertRaisesRegex(
+                        ValueError, "EPLB_(UPDATE_TIME|STATS_WINDOW_SIZE)"
+                    ):
+                        EngineConfig.create(configs)
+
+    def test_p2p_groups_must_be_positive(self):
+        for groups in (0, -1):
+            with self.subTest(groups=groups), patch.dict(os.environ, {}, clear=True):
+                configs = setup_args(["--eplb_rearrange_p2p_groups", str(groups)])
+                with self.assertRaisesRegex(ValueError, "EPLB_REARRANGE_P2P_GROUPS"):
+                    EngineConfig.create(configs)
+
+    def test_retired_cli_options_are_rejected(self):
+        for name in (
+            "balance_method",
+            "eplb_balance_layer_per_step",
+            "eplb_force_repack",
+            "eplb_test_mode",
+        ):
+            with self.subTest(name=name), patch.dict(os.environ, {}, clear=True):
+                with self.assertRaises(SystemExit):
+                    setup_args(["--" + name, "1"])
 
 
 if __name__ == "__main__":

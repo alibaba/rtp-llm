@@ -128,7 +128,6 @@ class BaseModel(object):
 
         self.linear_bias_slopes: Optional[torch.Tensor] = None
         self.prefix_tokens: Optional[torch.Tensor] = None
-        self.py_eplb = None
         self.tokenizer: Optional[BaseTokenizer] = None
         self.custom_module: Optional[CustomModule] = None
         self.py_model = None
@@ -186,7 +185,6 @@ class BaseModel(object):
 
         self.custom_module = self._init_custom_module()
         self.model_weights_loader = self.create_model_loader()
-        self.py_eplb = self.model_weights_loader._py_eplb
         device_str = self._get_device_str()
         self._load(device_str)
         from rtp_llm.model_loader.weight_manager import WeightManager

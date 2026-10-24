@@ -106,38 +106,25 @@ def init_moe_group_args(parser, moe_config, eplb_config, deep_ep_config):
     )
 
     moe_group.add_argument(
-        "--eplb_test_mode",
-        env_name="EPLB_TEST_MODE",
-        bind_to=(eplb_config, "eplb_test_mode"),
-        type=str2bool,
-        default=False,
-        help="设置为 `True` 时，为 ExpertBalancer 组件启用测试模式。用于调试或特定的测试场景。",
-    )
-
-    moe_group.add_argument(
-        "--eplb_balance_layer_per_step",
-        env_name="EPLB_BALANCE_LAYER_PER_STEP",
-        bind_to=(eplb_config, "eplb_balance_layer_per_step"),
-        type=int,
-        default=1,
-        help="设置 eplb 每次更新的层数。",
-    )
-
-    moe_group.add_argument(
         "--eplb_mode",
         env_name="EPLB_MODE",
         bind_to=(eplb_config, "eplb_mode"),
         type=str,
         default="NONE",
-        help="专家并行的负载均衡模式",
+        help=(
+            "专家负载均衡模式。STATS 采样但不迁移，支持在线切换到 EPLB/ALL。"
+            "EPLB 和 ALL 均采样并重排专家；搬迁缓冲区在首次重排时初始化。"
+            "非 NONE 模式要求模型实现 EPLB、完整专家 EP=WORLD、PP=1 且关闭 FFN 分离；"
+            "仅上报负载指标请用 NONE 并设置 eplb_metrics_report_interval。"
+        ),
     )
     moe_group.add_argument(
         "--eplb_update_time",
         env_name="EPLB_UPDATE_TIME",
         bind_to=(eplb_config, "eplb_update_time"),
         type=int,
-        default=5000,
-        help="专家并行复杂均衡的更新时间",
+        default=0,
+        help="重排周期（有效 model step 数）；0 关闭重排，首次在周期的 1/4 后执行。",
     )
     moe_group.add_argument(
         "--redundant_expert",
@@ -147,29 +134,30 @@ def init_moe_group_args(parser, moe_config, eplb_config, deep_ep_config):
         default=0,
         help="冗余专家个数",
     )
-    moe_group.add_argument(
-        "--balance_method",
-        env_name="BALANCE_METHOD",
-        bind_to=(eplb_config, "balance_method"),
-        type=str,
-        default="mix",
-        help="负载均衡的方法",
-    )
-    moe_group.add_argument(
-        "--eplb_force_repack",
-        env_name="EPLB_FORCE_REPACK",
-        bind_to=(eplb_config, "eplb_force_repack"),
-        type=int,
-        default=0,
-        help="EPLB_FORCE_REPACK",
-    )
+
     moe_group.add_argument(
         "--eplb_stats_window_size",
         env_name="EPLB_STATS_WINDOW_SIZE",
         bind_to=(eplb_config, "eplb_stats_window_size"),
         type=int,
-        default=10,
-        help="负载均衡的统计窗口大小",
+        default=100,
+        help="重排计数窗口；非负，开启重排时必须在 1 到 eplb_update_time 之间。",
+    )
+    moe_group.add_argument(
+        "--eplb_rearrange_after_prefill",
+        env_name="EPLB_REARRANGE_AFTER_PREFILL",
+        bind_to=(eplb_config, "eplb_rearrange_after_prefill"),
+        type=str2bool,
+        default=False,
+        help="PDFUSION 的 prefill 计数入窗，并在下一个 decode step 重排；默认跳过其 prefill。",
+    )
+    moe_group.add_argument(
+        "--eplb_rearrange_p2p_groups",
+        env_name="EPLB_REARRANGE_P2P_GROUPS",
+        bind_to=(eplb_config, "eplb_rearrange_p2p_groups"),
+        type=int,
+        default=1,
+        help="跨 NVLink 域重排的 P2P 分组数，必须大于 0。",
     )
     moe_group.add_argument(
         "--eplb_metrics_report_interval",

@@ -77,7 +77,7 @@ class PyWrappedModel: public ModelBase {
 public:
     // py_instance is `py_model` indeedly.
     PyWrappedModel(const GptModelInitParams& params,
-                   py::object                py_instance,
+                   const py::object&         py_instance,
                    bool                      is_prefill_cuda_graph_mode   = false,
                    bool                      use_spec_decoding            = false,
                    DSparkModelRole           dspark_model_role            = DSparkModelRole::NONE,
@@ -203,7 +203,7 @@ private:
 
 // NOTE(wangyin): constructor can not be compiled correctly when placed in cc file.
 inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
-                                      py::object                py_instance,
+                                      const py::object&         py_instance,
                                       bool                      is_prefill_cuda_graph_mode,
                                       bool                      use_spec_decoding,
                                       DSparkModelRole           dspark_model_role,
@@ -224,7 +224,7 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
     layer_num_(params.weights.layers.size()),
     description_(params.description),
     cache_manager_(params.cache_manager),
-    expert_balancer_(description_.ffn_conf.moe_configs, params, weights_, overall_expert_stats_),
+    expert_balancer_(description_.ffn_conf.moe_configs, params),
     owns_generation_prefill_cuda_graph_(shouldCreateGenerationPrefillCudaGraph(params.hw_kernel_config,
                                                                                allow_cuda_graph,
                                                                                is_prefill_cuda_graph_mode,
@@ -322,12 +322,6 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
         residual_scale_fp32_ = residual_tensor;
         residual_scale_      = residual_tensor.to(dataTypeToTorchType(description_.data_type));
     }
-    if (params.description.ffn_conf.moe_configs.has_value()) {
-        auto moe_conf         = params.description.ffn_conf.moe_configs.value();
-        overall_expert_stats_ = execCreateMoeExpertStates(
-            {layer_num_, moe_conf.ep_size, moe_conf.expert_num, moe_conf.expert_num + moe_conf.extra_expert_num});
-    }
-
     if (setenv("PYTHONUNBUFFERED", "TRUE", 1) != 0) {
         RTP_LLM_LOG_WARNING("Failed to set PYTHONUNBUFFERED environment variable on POSIX.");
     } else {
@@ -361,6 +355,7 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
         RTP_LLM_LOG_ERROR("Python model initialize failed:\n%s", e.what());
         throw;
     }
+    expert_balancer_.initialize(py_model_);
     // Registration enables the handler; only batches with selected prefill rows invoke it.
     if (py::hasattr(py_model_, "custom_output_handler")) {
         initializeCustomOutput();

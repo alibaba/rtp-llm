@@ -1844,51 +1844,58 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                 }
             })
         .def_readwrite("redundant_expert", &EPLBConfig::redundant_expert)
-        .def_readwrite("balance_method", &EPLBConfig::balance_method)
-        .def_readwrite("eplb_force_repack", &EPLBConfig::eplb_force_repack)
         .def_readwrite("eplb_stats_window_size", &EPLBConfig::eplb_stats_window_size)
         .def_readwrite("eplb_control_step", &EPLBConfig::eplb_control_step)
-        .def_readwrite("eplb_test_mode", &EPLBConfig::eplb_test_mode)
-        .def_readwrite("eplb_balance_layer_per_step", &EPLBConfig::eplb_balance_layer_per_step)
+        .def_readwrite("eplb_rearrange_after_prefill", &EPLBConfig::eplb_rearrange_after_prefill)
+        .def_readwrite("eplb_rearrange_p2p_groups", &EPLBConfig::eplb_rearrange_p2p_groups)
         .def_readwrite("eplb_metrics_report_interval", &EPLBConfig::eplb_metrics_report_interval)
         .def_readwrite("eplb_metrics_snapshot_max_files", &EPLBConfig::eplb_metrics_snapshot_max_files)
         .def("enable_eplb", &EPLBConfig::enable_eplb, "Get enable_eplb status")
         .def("phy_exp_num", &EPLBConfig::phy_exp_num, py::arg("expert_num"), "Get physical expert number")
         .def(py::pickle(
             [](const EPLBConfig& self) {
-                return py::make_tuple(self.eplb_update_time,
+                // A versioned ten-field state cannot be confused with legacy nine/eleven-field states.
+                return py::make_tuple(1,
+                                      self.eplb_update_time,
                                       EPLBConfig::to_string(self.eplb_mode),
                                       self.redundant_expert,
-                                      self.balance_method,
-                                      self.eplb_force_repack,
                                       self.eplb_stats_window_size,
                                       self.eplb_control_step,
-                                      self.eplb_test_mode,
-                                      self.eplb_balance_layer_per_step,
+                                      self.eplb_rearrange_after_prefill,
+                                      self.eplb_rearrange_p2p_groups,
                                       self.eplb_metrics_report_interval,
                                       self.eplb_metrics_snapshot_max_files);
             },
             [](py::tuple t) {
-                if (t.size() != 9 && t.size() != 11)
-                    throw std::runtime_error("Invalid state!");
+                const bool legacy = t.size() == 9 || t.size() == 11;
+                if (!legacy && (t.size() != 10 || t[0].cast<int>() != 1)) {
+                    throw std::runtime_error("Invalid EPLBConfig pickle state");
+                }
                 EPLBConfig c;
                 try {
-                    c.eplb_update_time = t[0].cast<int64_t>();
-                    if (py::isinstance<py::str>(t[1])) {
-                        c.eplb_mode = EPLBConfig::from_string(t[1].cast<std::string>());
+                    const size_t offset = legacy ? 0 : 1;
+                    c.eplb_update_time  = t[offset].cast<int64_t>();
+                    if (py::isinstance<py::str>(t[offset + 1])) {
+                        c.eplb_mode = EPLBConfig::from_string(t[offset + 1].cast<std::string>());
                     } else {
-                        c.eplb_mode = t[1].cast<EplbMode>();
+                        c.eplb_mode = t[offset + 1].cast<EplbMode>();
                     }
-                    c.redundant_expert            = t[2].cast<int64_t>();
-                    c.balance_method              = t[3].cast<std::string>();
-                    c.eplb_force_repack           = t[4].cast<int64_t>();
-                    c.eplb_stats_window_size      = t[5].cast<int64_t>();
-                    c.eplb_control_step           = t[6].cast<int>();
-                    c.eplb_test_mode              = t[7].cast<bool>();
-                    c.eplb_balance_layer_per_step = t[8].cast<int>();
-                    if (t.size() == 11) {
-                        c.eplb_metrics_report_interval    = t[9].cast<int>();
-                        c.eplb_metrics_snapshot_max_files = t[10].cast<int>();
+                    c.redundant_expert = t[offset + 2].cast<int64_t>();
+                    if (legacy) {
+                        // Retired CPU layer-selection/debug settings are not restored.
+                        c.eplb_stats_window_size = t[5].cast<int64_t>();
+                        c.eplb_control_step      = t[6].cast<int>();
+                        if (t.size() == 11) {
+                            c.eplb_metrics_report_interval    = t[9].cast<int>();
+                            c.eplb_metrics_snapshot_max_files = t[10].cast<int>();
+                        }
+                    } else {
+                        c.eplb_stats_window_size          = t[4].cast<int64_t>();
+                        c.eplb_control_step               = t[5].cast<int>();
+                        c.eplb_rearrange_after_prefill    = t[6].cast<bool>();
+                        c.eplb_rearrange_p2p_groups       = t[7].cast<int>();
+                        c.eplb_metrics_report_interval    = t[8].cast<int>();
+                        c.eplb_metrics_snapshot_max_files = t[9].cast<int>();
                     }
                 } catch (const std::exception& e) {
                     throw std::runtime_error(std::string("EPLBConfig unpickle error: ") + e.what());

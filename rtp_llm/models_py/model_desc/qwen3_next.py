@@ -1435,6 +1435,7 @@ class Qwen3NextDecoderLayer(nn.Module):
                 max_generate_batch_size,
                 enable_cuda_graph,
                 hw_kernel_config=hw_kernel_config,
+                layer_id=layer_idx,
             )
         elif config.moe_style == 0:
             self.mlp = DenseMLP(

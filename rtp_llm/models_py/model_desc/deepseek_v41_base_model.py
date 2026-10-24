@@ -250,6 +250,9 @@ def _args_from_model_config(
         index_topk=attn_config.indexer_topk,
         moe_inter_dim=int(model_config.moe_inter_size),
         n_routed_experts=model_config.expert_num,
+        n_physical_experts=int(
+            model_config.eplb_config.phy_exp_num(model_config.expert_num)
+        ),
         n_shared_experts=int(model_config.n_shared_experts),
         n_activated_experts=model_config.moe_k,
         score_func={0: "softmax", 1: "sigmoid", 2: "sqrtsoftplus"}[
@@ -397,6 +400,11 @@ class DeepSeekV4Model(GptModelBase):
                 self._profile_trigger,
                 self._profile_path,
             )
+
+    def get_eplb_layers(self):
+        return [
+            layer.ffn.eplb_layer for layer in self.v4.layers if layer.ffn is not None
+        ]
 
     def initialize(self, init_resource: PyModelInitResources) -> bool:
         try:

@@ -1,28 +1,62 @@
 from __future__ import annotations
 
-import typing
+from typing import Any, Optional
 
 import torch
 
-__all__ = ["EplbPyWrapperOP"]
+__all__ = ["EplbPyWrapperOP", "ExpertBalancerStepTest", "ExpertLoadMonitor"]
 
 class EplbPyWrapperOP:
     def __init__(self) -> None: ...
-    def create_balance_plan(
-        self, log_stats: torch.Tensor, gpu_loads: torch.Tensor
-    ) -> None: ...
-    def get_result(
+    def initialize(
         self,
-    ) -> tuple[
-        int,
-        torch.Tensor,
-        torch.Tensor,
-        torch.Tensor,
-        torch.Tensor,
-        torch.Tensor,
-        torch.Tensor,
-        torch.Tensor,
-        torch.Tensor,
-    ]: ...
-    def init(self, arg0: typing.Any) -> None: ...
-    def load_moe_weight(self, ep_rank: int, ep_size: int) -> None: ...
+        model: Any,
+        ep_rank: int = 0,
+        ep_size: int = 1,
+        model_id: int = 0,
+        is_normal_engine: bool = False,
+        sync_prompt_phase: bool = False,
+    ) -> None: ...
+    def step(self, counts: torch.Tensor, is_prompt: bool = False) -> bool: ...
+    def update_config(self, mode: int, update_time: int) -> None: ...
+    def destroy(self) -> None: ...
+
+class ExpertBalancerStepTest:
+    def __init__(
+        self,
+        model: Any,
+        snapshot_max_files: int,
+        interval: int = 2,
+        model_id: int = 0,
+        moe: bool = True,
+        tp_rank: int = 0,
+        tp_size: int = 1,
+        mode: Optional[int] = None,
+        afd: bool = False,
+        pp_size: int = 1,
+        context_parallel: bool = False,
+        role_type: str = "PREFILL",
+        dp_size: int = 1,
+        sp_type: str = "none",
+    ) -> None: ...
+    def step(self, warmup: bool = False, is_prompt: bool = False) -> None: ...
+    def update_config(self, mode: int, update_time: int = 1) -> bool: ...
+    def destroy(self) -> None: ...
+    @property
+    def counts(self) -> Optional[torch.Tensor]: ...
+
+class ExpertLoadMonitor:
+    def __init__(
+        self,
+        layers: int,
+        experts: int,
+        world_size: int,
+        rank: int,
+        interval: int,
+        model_id: int,
+        snapshot_max_files: int,
+    ) -> None: ...
+    def clear_record_buffer(self) -> None: ...
+    def record_step(self) -> None: ...
+    @property
+    def counts(self) -> torch.Tensor: ...

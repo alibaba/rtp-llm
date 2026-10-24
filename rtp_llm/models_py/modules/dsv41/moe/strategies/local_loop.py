@@ -12,7 +12,7 @@ Three forward variants:
     ``_forward_topk_bsN``    — graph-capture top-K dispatch: iterates only
     the K = ``cfg.n_activated_experts`` active slots per token (via
     ``torch.index_select`` on stacked routed weights), instead of all
-    ``cfg.n_routed_experts``. Used when ``ep_size==1`` and the captured
+    ``cfg.physical_expert_num``. Used when ``ep_size==1`` and the captured
     batch size N ≤ ``DSV4_LOCALLOOP_TOPK_MAX_N`` (default 32). Replaces a
     256-expert × 3-GEMM unconditional loop with N×K×3 GEMMs per layer
     (e.g. bs=1: 768→18, bs=8: 768→144).
@@ -158,9 +158,22 @@ class LocalLoopStrategy(RoutedExpertsStrategy):
             )
 
         self.experts = nn.ModuleList(
-            [_expert_at(i) for i in range(cfg.n_routed_experts)]
+            [_expert_at(i) for i in range(cfg.physical_expert_num)]
         )
         self._local_y_buf: Optional[torch.Tensor] = None
+
+    def get_eplb_weights(self) -> tuple[torch.Tensor, ...]:
+        return (
+            self._W1_w,
+            self._W1_s,
+            self._W1_s_gemm,
+            self._W2_w,
+            self._W2_s,
+            self._W2_s_gemm,
+            self._W3_w,
+            self._W3_s,
+            self._W3_s_gemm,
+        )
 
     def forward(
         self,

@@ -1,4 +1,5 @@
 load(":defs.bzl", "custom_smoke_test", "smoke_test")
+load("@arch_config//:arch_select.bzl", "cuda13_x86_test_gpu")
 package(default_visibility = ["//visibility:public"])
 
 # Framework source files for cross-package smoke tests.
@@ -51,6 +52,14 @@ py_test(
     srcs = [
         "comparison_utils.py",
         "comparison_utils_test.py",
+    ],
+)
+
+py_test(
+    name = "eplb_smoke_checks_test",
+    srcs = [
+        "eplb_smoke_checks.py",
+        "eplb_smoke_checks_test.py",
     ],
 )
 
@@ -175,6 +184,23 @@ custom_smoke_test(
         "deepseek_v41_contract_test.py",
         "deepseek_v41_pd_contract_test.py",
         "deepseek_v41_dspark_contract_test.py",
+    ],
+)
+
+custom_smoke_test(
+    name = "deepseek_v41_flash_ced_dspark_pd_cp2_dp2_sm100_eplb",
+    main = "deepseek_v41_eplb_contract_test.py",
+    smoke_args = "--tp_size 2 --ep_size 2 --dp_size 1 --world_size 4 --act_type BF16 --fp8_kv_cache 1 --seq_size_per_block 256 --kernel_seq_size_per_block 128 --max_seq_len 4096 --max_context_batch_size 1 --concurrency_limit 4 --reuse_cache 1 --load_method fastsafetensors --reserver_runtime_mem_mb 24576 --cache_store_rdma_mode 0 --use_local 1 --load_cache_timeout_ms 120000 --prefill_cp_kv_cache_sharded 1 --prefill_cp_size 2 --sp_type dspark --sp_model_type deepseek_v41_dspark --sp_act_type BF16 --gen_num_per_cycle 3 --eplb_mode ALL --redundant_expert 32 --eplb_update_time 4 --eplb_stats_window_size 4 --eplb_metrics_report_interval 4",
+    gpu_type = [cuda13_x86_test_gpu()],
+    tags = ["dsv41_cuda13", "model_contract", "pd_contract", "dspark_contract", "eplb_contract"],
+    data = [
+        "//rtp_llm:sdk",
+        "data/model/deepseek_v41/full_feature_cp2_dp2.json",
+        "deepseek_v41_contract_test.py",
+        "deepseek_v41_pd_contract_test.py",
+        "deepseek_v41_dspark_contract_test.py",
+        "deepseek_v41_full_contract_test.py",
+        "eplb_smoke_checks.py",
     ],
 )
 

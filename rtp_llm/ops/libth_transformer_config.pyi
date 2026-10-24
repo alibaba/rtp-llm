@@ -323,12 +323,12 @@ class DeviceResourceConfig:
     def to_string(self) -> str:
         ...
 class EPLBConfig:
-    balance_method: str
-    eplb_balance_layer_per_step: int
+    eplb_rearrange_after_prefill: bool
+    eplb_rearrange_p2p_groups: int
+    eplb_metrics_report_interval: int
+    eplb_metrics_snapshot_max_files: int
     eplb_control_step: int
-    eplb_force_repack: int
     eplb_stats_window_size: int
-    eplb_test_mode: bool
     eplb_update_time: int
     redundant_expert: int
     def __getstate__(self) -> tuple:

@@ -200,7 +200,7 @@ def _build_block(
 
 
 class V4Transformer(nn.Module):
-    """Standalone V4 forward. No TP/EP/PP sharding (world_size=1)."""
+    """V4 forward with framework-provided parallelism and weights."""
 
     def __init__(self, args: V4Args, mw):
         """``mw`` is the framework's ``ModelWeights`` (with ``.global_weights``

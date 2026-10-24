@@ -80,6 +80,7 @@ class Block(nn.Module):
         commit_only: bool = False,
         v41_config: Optional[Dict] = None,
         shared_attention: Optional[Dict] = None,
+        n_physical_experts: Optional[int] = None,
     ):
         super().__init__()
         self.layer_id = layer_id
@@ -151,6 +152,7 @@ class Block(nn.Module):
             dim=dim,
             moe_inter_dim=moe_inter_dim,
             n_routed_experts=n_routed_experts,
+            n_physical_experts=n_physical_experts,
             n_activated_experts=n_activated_experts,
             n_shared_experts=n_shared_experts,
             score_func=score_func,

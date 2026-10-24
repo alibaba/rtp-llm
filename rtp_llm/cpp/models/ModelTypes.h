@@ -2,7 +2,6 @@
 
 #include "rtp_llm/models_py/bindings/core/OpData.h"
 #include "rtp_llm/cpp/models/models_weight/Weights.h"
-#include "rtp_llm/cpp/models/eplb/stats/ExpertStats.h"
 #include "rtp_llm/models_py/bindings/OpDefs.h"
 #include "rtp_llm/cpp/cache/BufferTypes.h"
 #include "rtp_llm/cpp/cache/Types.h"
@@ -78,8 +77,6 @@ struct GptModelInitParams {
     HiddenStateCaptureDtype hidden_state_capture_dtype = HiddenStateCaptureDtype::BF16;
     EPLBConfig              eplb_config;
     QuantAlgo               quant_algo;
-    // Borrowed for construction; ExpertBalancer retains it under the GIL.
-    py::handle py_eplb;
 };
 
 enum GptModelInputIndex : size_t {
@@ -260,9 +257,8 @@ public:
         return torch::Tensor();
     }
 
-    rtp_llm::Weights            weights_;
-    rtp_llm::OverallExpertStats overall_expert_stats_;
-    size_t                      model_id_ = 0;
+    rtp_llm::Weights weights_;
+    size_t           model_id_ = 0;
 };
 
 }  // namespace rtp_llm

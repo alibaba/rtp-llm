@@ -37,44 +37,30 @@ using namespace rtp_llm;
 
 namespace unittest {
 
-class BalancerTestModel: public ModelBase {
-public:
-    GptModelOutputs forward(const GptModelInputs&) override {
-        return {};
-    }
-};
-
 class ExpertBalancerStepTest {
 public:
-    ExpertBalancerStepTest(py::object planner,
-                           int        snapshot_max_files,
-                           int        interval,
-                           size_t     model_id,
-                           bool       moe,
-                           int        tp_rank,
-                           int        tp_size,
-                           bool       afd) {
+    ExpertBalancerStepTest(const py::object&  model,
+                           int                snapshot_max_files,
+                           int                interval,
+                           size_t             model_id,
+                           bool               moe,
+                           int                tp_rank,
+                           int                tp_size,
+                           std::optional<int> mode,
+                           bool               afd,
+                           int                pp_size,
+                           bool               context_parallel,
+                           const std::string& role_type,
+                           int                dp_size,
+                           const std::string& sp_type) {
         config_.eplb_metrics_report_interval    = interval;
         config_.eplb_metrics_snapshot_max_files = snapshot_max_files;
         config_.eplb_update_time                = 1;
+        config_.eplb_stats_window_size          = 1;
         config_.eplb_control_step               = 1;
-        config_.eplb_test_mode                  = true;
-        Weights            weights;
-        OverallExpertStats expert_stats;
+        config_.eplb_mode = mode ? static_cast<EplbMode>(*mode) : (model.is_none() ? EplbMode::NONE : EplbMode::EPLB);
+        Weights weights;
         weights.layers.resize(1);
-        if (!planner.is_none()) {
-            config_.eplb_mode = EplbMode::EPLB;
-            const auto i32    = torch::TensorOptions(torch::kInt32).device(torch::kCUDA);
-            const auto bf16   = torch::TensorOptions(torch::kBFloat16).device(torch::kCUDA);
-            expert_stats      = {1, 1, 2, 2, {torch::tensor({2, 3}, i32).reshape({1, 2}), torch::full({1, 1}, 5, i32)}};
-            auto& ffn_weights = weights.layers[0].ffn_weights;
-            ffn_weights.moe_gate_weight         = std::make_shared<DenseWeights>();
-            ffn_weights.moe_down_weight         = std::make_shared<DenseWeights>();
-            ffn_weights.moe_gate_weight->kernel = torch::zeros({2, 2, 1}, bf16);
-            ffn_weights.moe_down_weight->kernel = torch::zeros({2, 1, 1}, bf16);
-            ffn_weights.logic_expert_cnt        = torch::ones({2}, i32);
-            ffn_weights.log2phy                 = torch::arange(2, i32).reshape({2, 1});
-        }
         GptModelDescription description{};
         description.ffn_conf.activation_type = ActivationType::Swiglu;
         if (moe) {
@@ -83,26 +69,35 @@ public:
         GptModelInitParams params{weights, description, std::nullopt};
         params.parallelism_config.ffn_disaggregate_config.enable_ffn_disaggregate = afd;
 
-        params.hidden_size                   = 1;
-        params.model_id                      = model_id;
-        params.eplb_config                   = config_;
-        params.py_eplb                       = planner;
+        params.hidden_size                = 1;
+        params.model_id                   = model_id;
+        params.eplb_config                = config_;
+        params.parallelism_config.pp_size = pp_size;
+        if (context_parallel) {
+            params.parallelism_config.prefill_cp_config.method = CPRotateMethod::ALL_GATHER;
+        }
+        params.sp_config.type                = SpeculativeExecutionConfig::from_string(sp_type);
+        params.parallelism_config.role_type  = role_type == "PDFUSION" ?
+                                                   RoleType::PDFUSION :
+                                                   (role_type == "DECODE" ? RoleType::DECODE : RoleType::PREFILL);
+        params.parallelism_config.dp_size    = dp_size;
+        params.parallelism_config.ep_size    = dp_size > 1 ? tp_size * dp_size : 1;
+        params.parallelism_config.ep_rank    = 0;
         params.parallelism_config.tp_rank    = tp_rank;
         params.parallelism_config.tp_size    = tp_size;
         params.parallelism_config.world_rank = tp_rank;
-        params.parallelism_config.world_size = tp_size;
-        balancer_                            = std::make_unique<ExpertBalancer>(
-            description.ffn_conf.moe_configs, params, model_.weights_, model_.overall_expert_stats_);
-        model_.weights_              = params.weights;
-        model_.overall_expert_stats_ = std::move(expert_stats);
+        params.parallelism_config.world_size = tp_size * dp_size;
+        balancer_ = std::make_unique<ExpertBalancer>(description.ffn_conf.moe_configs, params);
+        balancer_->initialize(model);
     }
 
-    void step(bool warmup) {
-        balancer_->step(warmup);
+    void step(bool warmup, bool is_prompt) {
+        balancer_->step(warmup, is_prompt);
     }
 
-    bool disablePlanner() {
-        config_.eplb_mode = EplbMode::NONE;
+    bool updateConfig(int mode, int64_t update_time) {
+        config_.eplb_mode        = static_cast<EplbMode>(mode);
+        config_.eplb_update_time = update_time;
         return balancer_->updateEplbConfig(config_);
     }
 
@@ -114,60 +109,86 @@ public:
         return balancer_->stable_expert_token_counts();
     }
 
-    torch::Tensor gateWeights() const {
-        return model_.weights_.layers[0].ffn_weights.moe_gate_weight->kernel;
-    }
-
-    torch::Tensor log2phy() const {
-        return model_.weights_.layers[0].ffn_weights.log2phy;
-    }
-
 private:
-    BalancerTestModel               model_;
     EPLBConfig                      config_;
     std::unique_ptr<ExpertBalancer> balancer_;
 };
 
-class EplbPyWrapperOP: public torch::jit::CustomClassHolder {
+class EplbPyWrapperOP {
 public:
-    void init(py::object py_eplb) {
-        eplb_py_wrapper_ = ExpertBalancerPythonWrapper(py_eplb);
+    void initialize(const py::object& model,
+                    size_t            ep_rank,
+                    size_t            ep_size,
+                    size_t            model_id,
+                    bool              is_normal_engine,
+                    bool              sync_prompt_phase) {
+        EPLBConfig config;
+        config.eplb_mode                    = EplbMode::ALL;
+        config.eplb_update_time             = 7;
+        config.eplb_stats_window_size       = 3;
+        config.eplb_rearrange_after_prefill = true;
+        config.eplb_rearrange_p2p_groups    = 2;
+        wrapper_                            = std::make_unique<ExpertBalancerPythonWrapper>();
+        wrapper_->initialize(model, config, ep_rank, ep_size, model_id, is_normal_engine, sync_prompt_phase);
     }
 
-    void createBalancePlan(torch::Tensor log_stats, torch::Tensor gpu_loads) {
-        eplb_py_wrapper_.createBalancePlan(log_stats, gpu_loads, eplb_plan_);
+    bool step(const torch::Tensor& counts, bool is_prompt) {
+        return wrapper_->step(counts, is_prompt);
     }
 
-    void loadMoeWeight(int64_t ep_rank, int64_t ep_size) {
-        eplb_py_wrapper_.loadBalanceWeight(ep_rank, ep_size, eplb_plan_);
+    void updateConfig(int mode, int64_t update_time) {
+        EPLBConfig config;
+        config.eplb_mode        = static_cast<EplbMode>(mode);
+        config.eplb_update_time = update_time;
+        wrapper_->updateConfig(config);
     }
 
-    EplbPlanTensors::tuple_type getResult() {
-        return eplb_plan_.to_tuple();
+    void destroy() {
+        wrapper_.reset();
     }
 
 private:
-    ExpertBalancerPythonWrapper eplb_py_wrapper_;
-    EplbPlanTensors             eplb_plan_;
+    std::unique_ptr<ExpertBalancerPythonWrapper> wrapper_;
 };
 
 PYBIND11_MODULE(libth_eplb_py_wrapper_test, m) {
     py::class_<ExpertBalancerStepTest>(m, "ExpertBalancerStepTest")
-        .def(py::init<py::object, int, int, size_t, bool, int, int, bool>(),
-             py::arg("planner"),
+        .def(py::init<const py::object&,
+                      int,
+                      int,
+                      size_t,
+                      bool,
+                      int,
+                      int,
+                      std::optional<int>,
+                      bool,
+                      int,
+                      bool,
+                      const std::string&,
+                      int,
+                      const std::string&>(),
+             py::arg("model"),
              py::arg("snapshot_max_files"),
-             py::arg("interval") = 2,
-             py::arg("model_id") = 0,
-             py::arg("moe")      = true,
-             py::arg("tp_rank")  = 0,
-             py::arg("tp_size")  = 1,
-             py::arg("afd")      = false)
-        .def("step", &ExpertBalancerStepTest::step, py::arg("warmup") = false, py::call_guard<py::gil_scoped_release>())
-        .def("disable_planner", &ExpertBalancerStepTest::disablePlanner)
+             py::arg("interval")         = 2,
+             py::arg("model_id")         = 0,
+             py::arg("moe")              = true,
+             py::arg("tp_rank")          = 0,
+             py::arg("tp_size")          = 1,
+             py::arg("mode")             = py::none(),
+             py::arg("afd")              = false,
+             py::arg("pp_size")          = 1,
+             py::arg("context_parallel") = false,
+             py::arg("role_type")        = "PREFILL",
+             py::arg("dp_size")          = 1,
+             py::arg("sp_type")          = "none")
+        .def("step",
+             &ExpertBalancerStepTest::step,
+             py::arg("warmup")    = false,
+             py::arg("is_prompt") = false,
+             py::call_guard<py::gil_scoped_release>())
+        .def("update_config", &ExpertBalancerStepTest::updateConfig, py::arg("mode"), py::arg("update_time") = 1)
         .def("destroy", &ExpertBalancerStepTest::destroy, py::call_guard<py::gil_scoped_release>())
-        .def_property_readonly("counts", &ExpertBalancerStepTest::counts)
-        .def_property_readonly("gate_weights", &ExpertBalancerStepTest::gateWeights)
-        .def_property_readonly("log2phy", &ExpertBalancerStepTest::log2phy);
+        .def_property_readonly("counts", &ExpertBalancerStepTest::counts);
     py::class_<ExpertLoadMonitor>(m, "ExpertLoadMonitor")
         .def(py::init([](size_t layers,
                          size_t experts,
@@ -192,9 +213,25 @@ PYBIND11_MODULE(libth_eplb_py_wrapper_test, m) {
         .def_property_readonly("counts", &ExpertLoadMonitor::stepCountsBuffer);
     py::class_<EplbPyWrapperOP>(m, "EplbPyWrapperOP")
         .def(py::init<>())
-        .def("init", &EplbPyWrapperOP::init)
-        .def("create_balance_plan", &EplbPyWrapperOP::createBalancePlan, py::arg("log_stats"), py::arg("gpu_loads"))
-        .def("load_moe_weight", &EplbPyWrapperOP::loadMoeWeight, py::arg("ep_rank"), py::arg("ep_size"))
-        .def("get_result", &EplbPyWrapperOP::getResult);
+        .def("initialize",
+             &EplbPyWrapperOP::initialize,
+             py::arg("model"),
+             py::arg("ep_rank")           = 0,
+             py::arg("ep_size")           = 1,
+             py::arg("model_id")          = 0,
+             py::arg("is_normal_engine")  = false,
+             py::arg("sync_prompt_phase") = false,
+             py::call_guard<py::gil_scoped_release>())
+        .def("step",
+             &EplbPyWrapperOP::step,
+             py::arg("counts"),
+             py::arg("is_prompt") = false,
+             py::call_guard<py::gil_scoped_release>())
+        .def("update_config",
+             &EplbPyWrapperOP::updateConfig,
+             py::arg("mode"),
+             py::arg("update_time"),
+             py::call_guard<py::gil_scoped_release>())
+        .def("destroy", &EplbPyWrapperOP::destroy, py::call_guard<py::gil_scoped_release>());
 }
 }  // namespace unittest

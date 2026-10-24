@@ -1079,20 +1079,116 @@ class PyWrappedModelCacheStoreIntegrationTest(unittest.TestCase):
     def test_late_constructor_failure_destroys_clean_graphs_without_cache_allocation(
         self,
     ) -> None:
-        model = LateInitializeFailureGenerationPrefillCaptureModel()
-        result = run_generation_prefill_capture_scenario(
-            model, "Python model initialization failed"
-        )
+        for release_gil in (False, True):
+            with self.subTest(release_gil_during_construction=release_gil):
+                model = LateInitializeFailureGenerationPrefillCaptureModel()
+                result = run_generation_prefill_capture_scenario(
+                    model,
+                    "Python model initialization failed",
+                    release_gil_during_construction=release_gil,
+                )
 
-        self.assertEqual(model.initialize_calls, 2)
-        self.assertEqual(model.prefill_forward_calls, 4)
-        self.assertTrue(result["saw_capture_error"])
-        self.assertIn(
-            "Python model initialization failed", result["capture_error_message"]
+                self.assertEqual(model.initialize_calls, 2)
+                self.assertEqual(model.prefill_forward_calls, 4)
+                self.assertTrue(result["saw_capture_error"])
+                self.assertIn(
+                    "Python model initialization failed",
+                    result["capture_error_message"],
+                )
+                self.assertFalse(result["graph_enabled"])
+                self.assertEqual(result["available_during"], result["available_before"])
+                self.assertEqual(result["available_after"], result["available_before"])
+
+    def test_pdfusion_target_verify_reaches_eplb_as_decode_with_prefill_shapes(self):
+        class Model(CacheStoreForwardModel):
+            def __init__(self):
+                super().__init__()
+                self.eplb_prompts = []
+                self.eligible_samples = []
+                self.counts = None
+
+            def get_eplb_layers(self):
+                return [self]
+
+            def _forward_one(self, inputs):
+                self.counts = inputs.expert_token_counts
+                self.counts.fill_(self.forward_calls)
+                return super()._forward_one(inputs)
+
+        class Runtime:
+            def __init__(
+                self,
+                layers,
+                config,
+                ep_rank,
+                ep_size,
+                model_id,
+                is_normal_engine,
+                sync_prompt_phase,
+            ):
+                self.model = layers[0]
+                assert is_normal_engine
+                assert not sync_prompt_phase
+
+            def step(self, counts, is_prompt=False):
+                self.model.eplb_prompts.append(is_prompt)
+                if not is_prompt:
+                    self.model.eligible_samples.append(counts.clone())
+                return False
+
+        module = types.ModuleType("rtp_llm.eplb.runtime")
+        module.RuntimeExpertBalancer = Runtime
+        model = Model()
+        # NormalEngine enters inference mode before warmup and its worker loop.
+        with torch.inference_mode(), patch.dict(sys.modules, {module.__name__: module}):
+            run_scenario(model, "eplb_prefill_then_verify", forward_count=2)
+
+        self.assertEqual(model.forward_calls, 2)
+        self.assertEqual(model.seen_input_lengths, [[4], [4]])
+        self.assertEqual(model.eplb_prompts, [True, False])
+        self.assertEqual(
+            [sample.tolist() for sample in model.eligible_samples], [[[2, 2]]]
         )
-        self.assertFalse(result["graph_enabled"])
-        self.assertEqual(result["available_during"], result["available_before"])
-        self.assertEqual(result["available_after"], result["available_before"])
+        self.assertEqual(model.counts.tolist(), [[0, 0]])
+
+    def test_python_constructor_failure_without_outer_gil_releases_model(self) -> None:
+        class FailingModel:
+            def __init__(self, failure_stage):
+                self.failure_stage = failure_stage
+                self.initialize_calls = 0
+                self.eplb_calls = 0
+
+            def initialize(self, resources):
+                self.initialize_calls += 1
+                if self.failure_stage == "initialize":
+                    raise NotImplementedError("Python constructor failure: initialize")
+                return True
+
+            def get_eplb_layers(self):
+                self.eplb_calls += 1
+                raise NotImplementedError("Python constructor failure: get_eplb_layers")
+
+        for failure_stage in ("initialize", "get_eplb_layers"):
+            with self.subTest(failure_stage=failure_stage):
+                model = FailingModel(failure_stage)
+                references_before = sys.getrefcount(model)
+                expected_error = f"Python constructor failure: {failure_stage}"
+                result = run_generation_prefill_capture_scenario(
+                    model,
+                    expected_error,
+                    release_gil_during_construction=True,
+                    enable_eplb=failure_stage == "get_eplb_layers",
+                )
+                self.assertEqual(model.initialize_calls, 1)
+                self.assertEqual(
+                    model.eplb_calls, int(failure_stage == "get_eplb_layers")
+                )
+                self.assertTrue(result["saw_capture_error"])
+                self.assertIn(expected_error, result["capture_error_message"])
+                self.assertFalse(result["graph_enabled"])
+                self.assertEqual(result["available_during"], result["available_before"])
+                self.assertEqual(result["available_after"], result["available_before"])
+                self.assertEqual(sys.getrefcount(model), references_before)
 
     def test_dirty_generation_prefill_capture_does_not_retain_cache_manager(
         self,
