@@ -38,6 +38,7 @@ _MODEL_CONTRACT_TESTS = [
     "test_hc_impl",
     "test_dsv4_kernel_jit_warmup",
     "test_layer_profiler_ranges",
+    "test_norm_predictor",
 ]
 
 _GPU_TESTS = [

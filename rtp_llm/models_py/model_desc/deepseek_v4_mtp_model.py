@@ -64,6 +64,7 @@ class DeepSeekV4MtpModel(DeepSeekV4Model):
         # on the ModelConfig; we additionally drop the hash-router count
         # so the lone draft layer always picks the noaux_tc path.
         self._v4_args.n_hash_layers = 0
+        self._v4_args.model_type = "deepseek_v4_mtp"
         self._v4_args.compress_ratios = (
             [int(self._v4_args.compress_ratios[0])]
             if (self._v4_args.compress_ratios)

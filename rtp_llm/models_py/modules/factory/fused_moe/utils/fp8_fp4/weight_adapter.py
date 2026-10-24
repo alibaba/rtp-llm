@@ -19,42 +19,43 @@ def adapt_split_moe_weights(
     Copying the halves also supports scale dtypes without ``torch.cat``.
     """
 
-    if W.moe_w1 in weights:
-        return weights
+    if W.moe_w1 not in weights:
+        routed_w1 = weights.pop(weight_names["routed_gate"])
+        routed_w3 = weights.pop(weight_names["routed_up"])
+        routed_s1 = weights.pop(weight_names["routed_gate_scale"])
+        routed_s3 = weights.pop(weight_names["routed_up_scale"])
+        expert_count, _, packed_hidden = routed_w1.shape
+        combined_shape = (expert_count, 2 * moe_inter_dim, packed_hidden)
+        combined_w13 = torch.empty(
+            combined_shape,
+            dtype=routed_w1.dtype,
+            device=routed_w1.device,
+        )
+        combined_s13 = torch.empty(
+            (expert_count, 2 * moe_inter_dim, routed_s1.size(-1)),
+            dtype=routed_s1.dtype,
+            device=routed_s1.device,
+        )
+        combined_w13[:, :moe_inter_dim].copy_(routed_w1)
+        combined_w13[:, moe_inter_dim:].copy_(routed_w3)
+        combined_s13[:, :moe_inter_dim].copy_(routed_s1)
+        combined_s13[:, moe_inter_dim:].copy_(routed_s3)
+        weights[W.moe_w1] = combined_w13
+        weights[W.moe_s1] = combined_s13
+        weights[W.moe_w2] = weights.pop(weight_names["routed_down"])
+        weights[W.moe_s2] = weights.pop(weight_names["routed_down_scale"])
 
-    routed_w1 = weights.pop(weight_names["routed_gate"])
-    routed_w3 = weights.pop(weight_names["routed_up"])
-    routed_s1 = weights.pop(weight_names["routed_gate_scale"])
-    routed_s3 = weights.pop(weight_names["routed_up_scale"])
-    expert_count, _, packed_hidden = routed_w1.shape
-    combined_shape = (expert_count, 2 * moe_inter_dim, packed_hidden)
-    combined_w13 = torch.empty(
-        combined_shape,
-        dtype=routed_w1.dtype,
-        device=routed_w1.device,
-    )
-    combined_s13 = torch.empty(
-        (expert_count, 2 * moe_inter_dim, routed_s1.size(-1)),
-        dtype=routed_s1.dtype,
-        device=routed_s1.device,
-    )
-    combined_w13[:, :moe_inter_dim].copy_(routed_w1)
-    combined_w13[:, moe_inter_dim:].copy_(routed_w3)
-    combined_s13[:, :moe_inter_dim].copy_(routed_s1)
-    combined_s13[:, moe_inter_dim:].copy_(routed_s3)
-    weights[W.moe_w1] = combined_w13
-    weights[W.moe_s1] = combined_s13
-    weights[W.moe_w2] = weights.pop(weight_names["routed_down"])
-    weights[W.moe_s2] = weights.pop(weight_names["routed_down_scale"])
-
-    weights[W.moe_gate] = weights.pop(weight_names["router"])
+    router_name = weight_names.get("router")
+    if router_name and router_name in weights:
+        weights[W.moe_gate] = weights.pop(router_name)
     if weight_names.get("router_bias") in weights:
         weights[W.moe_gate_bias] = weights.pop(weight_names["router_bias"])
     if weight_names.get("router_tid2eid") in weights:
         weights[W.moe_gate_tid2eid] = weights.pop(weight_names["router_tid2eid"])
 
-    if n_shared_experts > 0:
-        weights[W.ffn_w13] = weights.pop(weight_names["shared_gate_up"])
+    shared_gate_up_name = weight_names.get("shared_gate_up")
+    if n_shared_experts > 0 and shared_gate_up_name and shared_gate_up_name in weights:
+        weights[W.ffn_w13] = weights.pop(shared_gate_up_name)
         weights[W.ffn_s13] = weights.pop(weight_names["shared_gate_up_scale"])
         weights[W.ffn_w2] = weights.pop(weight_names["shared_down"])
         weights[W.ffn_s2] = weights.pop(weight_names["shared_down_scale"])

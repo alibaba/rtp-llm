@@ -375,6 +375,11 @@ class DeepSeekV4Model(GptModelBase):
             max_generate_batch_size,
             moe_config=moe_config,
         )
+        args.parallelism_config = parallelism_config
+        args.moe_config = moe_config
+        args.enable_cuda_graph = bool(
+            getattr(py_hw_kernel_config, "enable_cuda_graph", False)
+        )
         self._max_generate_batch_size = int(max_generate_batch_size)
         assert self._max_generate_batch_size > 0, (
             "max_generate_batch_size must be positive, "
@@ -764,6 +769,15 @@ class DeepSeekV4Model(GptModelBase):
         # shared cos_sin_cache before runtime memory allocation starts.
         for layer in self.v4.layers:
             layer.attn.init_rope_cache(device=device_str)
+
+        # Predictor weights are external to the model checkpoint. Load them
+        # eagerly, before any CUDA graph capture, so the first user request
+        # never performs filesystem I/O or allocates predictor tensors inside
+        # a captured stream.
+        for layer in self.v4.layers:
+            preload = getattr(layer.ffn, "preload_norm_predictor", None)
+            if preload is not None:
+                preload(device_str)
 
         # Subclass hook: lift any model-level weights (e.g. MTP fusion
         # norms / projections) off the ModelWeights wrapper before we
