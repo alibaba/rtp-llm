@@ -57,7 +57,7 @@ public class ProjectionDifferential {
             var committed = new WorkSnapshot(1000, trial % 4 == 0
                     ? List.of(new WorkSnapshot.RequestWork(9999, WorkSnapshot.Phase.ENGINE_RUNNING, 500))
                     : List.of(), List.of(), 0);
-            var inputs = new RouteProjection.Inputs(new QueueSnapshot(1000, true, order, limits, items, null), committed);
+            var inputs = new RouteProjection.Inputs(new QueueSnapshot(1000, order, limits, items, null), committed);
             var probe = new RouteProjection.Probe(trial % 50 == 0 ? 1 : 999999,
                     random.nextInt(10), 1000, trial % 7 == 0 ? 1015 : Long.MAX_VALUE,
                     2048, 256, 256);

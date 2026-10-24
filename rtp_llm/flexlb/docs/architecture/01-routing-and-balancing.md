@@ -16,10 +16,9 @@ EPD 部署当前按客户端分别请求 Encoder 与 Generation 阶段；混合�
 Encoder 使用独立的 `EncoderStrategy`：候选必须是已发布且存活的 Encoder endpoint。
 请求携带可选 `encoder_cache_hit_len` 时，先比较各节点在途的未命中编码工作量代理值，
 并列时比较 `running_query_len + waiting_query_len + 本地待观察请求数`；未携带时仅比较并发数。
-Encoder 不按可用 KV cache 筛选或决胜。Encoder 单独请求按 `scheduler.type` 走
-DIRECT 或独立的 QUEUE，FlexLB 返回 `ENCODER` 端点，不调用 EnqueueBatch。
-QUEUE 还会过滤已达到 `dispatcher.maxInflightPerEncoderWorker` 的节点，并在容量释放后重试；
-DIRECT 没有候选时返回 `NO_ENCODER_WORKER` (8408)。
+Encoder 不按可用 KV cache 筛选或决胜。Encoder 单独请求进入独立的
+Encoder QUEUE，FlexLB 返回 `ENCODER` 端点，不调用 EnqueueBatch。
+QUEUE 会过滤已达到 `dispatcher.maxInflightPerEncoderWorker` 的节点，并在容量释放后重试。
 本地待观察请求在 endpoint 的并发 map 中逐请求更新，选点读取允许短暂滞后；并发请求可能依据
 同一份负载快照选中同一 worker。Prefill/Decode 与 PDFusion 的既有策略保持原样。
 

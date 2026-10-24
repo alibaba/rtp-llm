@@ -4,7 +4,6 @@ import com.google.protobuf.ByteString;
 import io.opentelemetry.api.trace.Span;
 import io.opentelemetry.context.Context;
 import org.flexlb.config.FlexlbConfig;
-import org.flexlb.config.SchedulerConfig;
 import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.loadbalance.Response;
@@ -41,18 +40,13 @@ class RouteServiceTraceTest {
 
     @Test
     void modesKeepOriginalFutureOwnershipAndCompatibleTraceLabels() {
-        for (String mode : new String[] {"DIRECT", "QUEUE", "BATCH"}) {
+        for (String mode : new String[]{"QUEUE", "BATCH"}) {
             FlexlbConfig config = new FlexlbConfig();
-            if (mode.equals("DIRECT")) {
-                config.setScheduler(SchedulerConfig.direct());
+            SchedulingTestConfig.useFifoQueue(config);
+            if (mode.equals("QUEUE")) {
                 SchedulingTestConfig.useNonBatchDispatcher(config);
             } else {
-                SchedulingTestConfig.useFifoQueue(config);
-                if (mode.equals("QUEUE")) {
-                    SchedulingTestConfig.useNonBatchDispatcher(config);
-                } else {
-                    SchedulingTestConfig.useBatchDispatcher(config);
-                }
+                SchedulingTestConfig.useBatchDispatcher(config);
             }
             RequestScheduler scheduler = mock(RequestScheduler.class);
             CompletableFuture<Response> pending = new CompletableFuture<>();

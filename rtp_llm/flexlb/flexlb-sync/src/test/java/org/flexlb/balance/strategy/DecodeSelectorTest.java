@@ -9,7 +9,6 @@ import org.flexlb.balance.scheduler.decode.DecodeRequirement;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.PreemptionConfig;
 import org.flexlb.config.QueueOrderingConfig;
-import org.flexlb.config.SchedulerConfig;
 import org.flexlb.config.VictimStage;
 import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.loadbalance.Request;
@@ -493,13 +492,9 @@ class DecodeSelectorTest {
         }
     }
 
-    @ParameterizedTest
-    @ValueSource(booleans = {false, true})
-    void availabilityUsesDispatchForDirectAndAllReservationsForQueue(boolean direct) {
+    @Test
+    void availabilityCountsAllReservationsForQueue() {
         configureCost("running_size / max_running_size");
-        if (direct) {
-            configService.loadBalanceConfig().setScheduler(SchedulerConfig.direct());
-        }
         configService.loadBalanceConfig().getRouter().getRoles().getDecode()
                 .getAvailability().setMaxEngineRequests(1L);
         registerWorker("127.0.0.1", 10_000L, 10_000L);
@@ -512,15 +507,14 @@ class DecodeSelectorTest {
         ServerStatus selected = selectStatus(availableStrategy(registry), context(100L, 1_001L),
                 RoleType.DECODE, null);
 
-        Assertions.assertEquals(direct ? "127.0.0.2" : "127.0.0.1", selected.getServerIp(),
-                "DIRECT can use dispatch capacity; QUEUE sees both workers full and selects a blocked placement candidate");
+        Assertions.assertEquals("127.0.0.1", selected.getServerIp(),
+                "QUEUE sees both workers full and selects a blocked placement candidate");
     }
 
     @ParameterizedTest
     @ValueSource(strings = {"kvcache_used_ratio", "running_size"})
     void should_skip_worker_with_insufficient_kv_cache_capacity(String expression) {
         configureCost(expression);
-        configService.loadBalanceConfig().setScheduler(SchedulerConfig.direct());
         registerWorker("127.0.0.1", 1_000, 100);
         registerWorker("127.0.0.2", 1_000, 800);
         EndpointRegistry registry = decodeRegistry();
@@ -533,20 +527,6 @@ class DecodeSelectorTest {
 
         Assertions.assertTrue(status.isSuccess());
         Assertions.assertEquals("127.0.0.2", status.getServerIp());
-    }
-
-    @Test
-    void should_return_error_when_all_workers_kv_insufficient() {
-        configService.loadBalanceConfig().setScheduler(SchedulerConfig.direct());
-        registerWorker("127.0.0.1", 1_000, 50);
-        registerWorker("127.0.0.2", 1_000, 100);
-        DecodeSelector decodeSelector = availableStrategy(decodeRegistry());
-        BalanceContext balanceContext = context(200, 3_000L);
-
-        ServerStatus status = selectStatus(
-                decodeSelector, balanceContext, RoleType.DECODE, null);
-
-        Assertions.assertNull(status);
     }
 
     @ParameterizedTest

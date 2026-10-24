@@ -9,7 +9,6 @@ import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.config.PreemptionConfig;
 import org.flexlb.config.QueueOrderingConfig;
-import org.flexlb.config.SchedulerConfig;
 import org.flexlb.config.VictimStage;
 import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.loadbalance.Request;
@@ -85,8 +84,7 @@ class DecodeSelectionAdmissionContractTest {
 
     @ParameterizedTest(name = "{0}: {1}")
     @MethodSource("dispatchAdmissionCases")
-    void selectionDoesNotReserveAndUsesTheModesCapacityScope(
-            Policy policy, CapacityDimension dimension) {
+    void selectionDoesNotReserveAndUsesTheModesCapacityScope(Policy policy, CapacityDimension dimension) {
         try (Fixture fixture = new Fixture(policy, dimension)) {
             fixture.assertPlacementAndDispatchDisagree();
             var queuedUsage = fixture.queued.routingView().placementUsage();
@@ -102,13 +100,12 @@ class DecodeSelectionAdmissionContractTest {
                 }
             }
 
-            assertEquals(policy == Policy.DIRECT ? Map.of(QUEUED_IP, 3, FREE_IP, 3) : Map.of(FREE_IP, 6), selectedCounts,
-                    "QUEUE includes queued reservations; DIRECT retains dispatch admission");
+            assertEquals(Map.of(FREE_IP, 6), selectedCounts, "QUEUE includes queued reservations");
         }
     }
 
     private static Stream<Arguments> dispatchAdmissionCases() {
-        return Stream.of(Policy.DIRECT, Policy.FIFO, Policy.PRIORITY_ONLY)
+        return Stream.of(Policy.FIFO, Policy.PRIORITY_ONLY)
                 .flatMap(policy -> Stream.of(CapacityDimension.values())
                         .map(dimension -> Arguments.of(policy, dimension)));
     }
@@ -119,7 +116,7 @@ class DecodeSelectionAdmissionContractTest {
                 .flatMap(policy -> Stream.of(CapacityDimension.values()).map(dimension -> Arguments.of(policy, dimension)));
     }
 
-    private enum Policy { DIRECT, FIFO, PRIORITY_ONLY, PRIORITY_DEFAULT, PREEMPTIVE }
+    private enum Policy { FIFO, PRIORITY_ONLY, PRIORITY_DEFAULT, PREEMPTIVE }
 
     private static final class Fixture implements AutoCloseable {
         private final FlexlbConfig config = StrategyTestSupport.config();
@@ -131,9 +128,7 @@ class DecodeSelectionAdmissionContractTest {
 
         private Fixture(Policy policy, CapacityDimension dimension) {
             config.getRouter().getRoles().getDecode().getCostEstimator().setExpression("0");
-            if (policy == Policy.DIRECT) {
-                config.setScheduler(SchedulerConfig.direct());
-            } else if (policy != Policy.FIFO) {
+            if (policy != Policy.FIFO) {
                 QueueOrderingConfig ordering = QueueOrderingConfig.priority();
                 if (policy == Policy.PRIORITY_ONLY) { ordering.setPreemption(null); }
                 if (policy == Policy.PREEMPTIVE) {

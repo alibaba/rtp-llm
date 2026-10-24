@@ -17,7 +17,6 @@ import static org.flexlb.balance.scheduler.RouteProjectionTestSupport.item;
 import static org.flexlb.balance.scheduler.RouteProjectionTestSupport.noCommittedWork;
 import static org.flexlb.balance.scheduler.RouteProjectionTestSupport.probe;
 import static org.flexlb.balance.scheduler.RouteProjectionTestSupport.project;
-import static org.flexlb.balance.scheduler.RouteProjectionTestSupport.queue;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -179,34 +178,11 @@ class RouteAdmissionPolicyTest {
                 result.initialHeadDisposition());
     }
 
-    @Test
-    void directProjectionIgnoresPriorQueueAdmissionObservation() {
-        GroupPlanner.Item head = item(1L, 50, 1L, 100L);
-        QueueSnapshot queue = RouteProjectionTestSupport.queue(
-                false,
-                false,
-                constraints(1, 0L),
-                List.of(head),
-                block(head, semantics(
-                        RouteProjection.AfterProbeAdmission.BLOCKED)));
-
-        RouteProjection.Candidate result = project(
-                queue, noCommittedWork(), TOKEN_EVALUATOR,
-                probe(99L, 50, 20L, 0L),
-                ROUTE);
-
-        assertEquals(RouteProjection.Candidate.State.MODELED, result.state());
-        assertEquals(OptionalLong.of(20L), result.projectedTtftMs());
-        assertEquals(RouteProjection.Candidate.InitialHeadDisposition.NONE,
-                result.initialHeadDisposition());
-    }
-
     private static QueueSnapshot blockedQueue(
             boolean priority,
             GroupPlanner.Item head,
             RouteProjection.AdmissionBlockSemantics semantics) {
         return RouteProjectionTestSupport.queue(
-                true,
                 priority,
                 constraints(1, 0L),
                 List.of(head),

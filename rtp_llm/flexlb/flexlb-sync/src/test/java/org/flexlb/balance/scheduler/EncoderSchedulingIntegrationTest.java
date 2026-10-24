@@ -52,6 +52,7 @@ import static org.mockito.Mockito.when;
  */
 class EncoderSchedulingIntegrationTest {
 
+    private FlexlbConfig config;
     private ConfigService configService;
     private WorkerDirectory directory;
     private RequestRegistry requests;
@@ -59,8 +60,9 @@ class EncoderSchedulingIntegrationTest {
 
     @BeforeEach
     void setUp() {
-        FlexlbConfig config = SchedulingTestConfig.batchConfig();
-        config.setScheduler(org.flexlb.config.SchedulerConfig.direct());
+        config = SchedulingTestConfig.batchConfig();
+        SchedulingTestConfig.useFifoQueue(config);
+        SchedulingTestConfig.useNonBatchDispatcher(config);
         configService = mock(ConfigService.class);
         when(configService.loadBalanceConfig()).thenReturn(config);
         directory = mock(WorkerDirectory.class);
@@ -236,11 +238,9 @@ class EncoderSchedulingIntegrationTest {
 
     @Test
     void queueDoesNotStartWithoutConfiguredEncoderRole() {
-        scheduler.closePlacement();
-        FlexlbConfig config = SchedulingTestConfig.batchConfig();
-        SchedulingTestConfig.useFifoQueue(config);
-        SchedulingTestConfig.useNonBatchDispatcher(config);
-        when(configService.loadBalanceConfig()).thenReturn(config);
+        tearDown();
+        requests = new RequestRegistry(configService, mock(BatchSchedulerReporter.class),
+                mock(RequestSchedulerReporter.class));
         ModelMetaConfig model = mock(ModelMetaConfig.class);
         when(model.requiredRoles()).thenReturn(List.of(RoleType.PREFILL, RoleType.DECODE));
         DefaultRouter router = new DefaultRouter(mock(CostBasedPrefillStrategy.class),
@@ -259,20 +259,7 @@ class EncoderSchedulingIntegrationTest {
     }
 
     private void useEncoderQueue(int maxInflight) {
-        scheduler.closePlacement();
-        FlexlbConfig config = SchedulingTestConfig.batchConfig();
-        SchedulingTestConfig.useFifoQueue(config);
-        SchedulingTestConfig.useNonBatchDispatcher(config);
         config.getDispatcher().setMaxInflightPerEncoderWorker(maxInflight);
-        when(configService.loadBalanceConfig()).thenReturn(config);
-        ModelMetaConfig model = mock(ModelMetaConfig.class);
-        when(model.requiredRoles()).thenReturn(List.of(RoleType.ENCODER));
-        DefaultRouter router = new DefaultRouter(mock(CostBasedPrefillStrategy.class),
-                mock(DecodeSelector.class), mock(RandomStrategy.class), new EncoderStrategy(directory),
-                configService, model);
-        scheduler = new RequestScheduler(configService, router, mock(EndpointRegistry.class),
-                mock(BatchSchedulerReporter.class), mock(EvictionManager.class), requests,
-                new PlacementAvailability(), new QueueCapacity());
     }
 
     @Test
@@ -348,7 +335,7 @@ class EncoderSchedulingIntegrationTest {
     }
 
     @Test
-    void deadOrWrongGroupWorkersCannotWinAndNoCandidateReturnsEncoderError() {
+    void deadOrWrongGroupWorkersCannotWinAndNoCandidateWaitsUntilExpiry() throws Exception {
         worker("dead", 8001, false, "group", 0, Map.of(), 0, 0);
         worker("foreign", 8002, true, "other", 0, Map.of(), 0, 0);
         when(directory.endpointAddressSnapshot(RoleType.ENCODER)).thenReturn(List.of("dead", "foreign"));
@@ -357,9 +344,10 @@ class EncoderSchedulingIntegrationTest {
         TrafficPolicyConfig groupSelector = mock(TrafficPolicyConfig.class);
         context.getConfig().getRouter().setGroupSelector(groupSelector);
         when(groupSelector.resolveTargetGroup(context.getRequest())).thenReturn(Optional.of("group"));
-        Response response = scheduler.submit(context).join();
+        context.setSchedulingMetadata(SchedulingMetadata.explicit(50, System.currentTimeMillis() + 300L));
+        Response response = scheduler.submit(context).get(2, TimeUnit.SECONDS);
 
-        assertEquals(StrategyErrorType.NO_ENCODER_WORKER.getErrorCode(), response.getCode());
+        assertEquals(StrategyErrorType.RESOURCE_EXHAUSTED.getErrorCode(), response.getCode());
         assertEquals(RequestPhase.ENCODER, requests.requestSlot("5", RequestPhase.ENCODER).requestPhase());
     }
 

@@ -252,8 +252,6 @@ public class ConfigService {
         }
         boolean changed = false;
         if (document.get("scheduler") instanceof ObjectNode scheduler) {
-            changed |= preserveStartupMode(scheduler, "scheduler.type",
-                    startupDecisionTopology.schedulerType().name(), Set.of("DIRECT", "QUEUE"));
             if (scheduler.get("decision") instanceof ObjectNode decision) {
                 changed |= preserveWorkerDecisionType(decision);
             }
@@ -308,8 +306,7 @@ public class ConfigService {
         return true;
     }
 
-    private record StartupDecisionTopology(SchedulerConfig.Type schedulerType,
-                                           DispatcherConfig.Type dispatcherType,
+    private record StartupDecisionTopology(DispatcherConfig.Type dispatcherType,
                                            DecisionPolicyConfig.Type decisionType) {
 
         /**
@@ -317,8 +314,7 @@ public class ConfigService {
          */
         private static StartupDecisionTopology from(FlexlbConfig config) {
             SchedulerConfig scheduler = config.getScheduler();
-            return new StartupDecisionTopology(scheduler.getType(), config.getDispatcher().getType(),
-                    scheduler.getDecision().getType());
+            return new StartupDecisionTopology(config.getDispatcher().getType(), scheduler.getDecision().getType());
         }
     }
 
@@ -333,11 +329,9 @@ public class ConfigService {
     }
 
     private static void logEffectiveConfig(FlexlbConfig config, int configSchemaVersion) {
-        String scheduler = config.isDirect() ? "DIRECT" : "QUEUE";
-        String ordering = config.isDirect() ? "N/A"
-                : config.isPriorityOrdering() ? "PRIORITY" : "FIFO";
-        String decision = config.isDirect() ? "N/A"
-                : config.isFixedWindowDecision() ? "FIXED_WINDOW" : "SINGLE";
+        String scheduler = config.getScheduler().getType().name();
+        String ordering = config.isPriorityOrdering() ? "PRIORITY" : "FIFO";
+        String decision = config.isFixedWindowDecision() ? "FIXED_WINDOW" : "SINGLE";
         String dispatcher = config.getDispatcher().typeName();
         log.info("FlexLB config loaded: schemaVersion={}, scheduler={}, ordering={}, decision={}, "
                         + "dispatcher={}, prefillEstimator={}, groupRules={}",

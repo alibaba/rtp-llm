@@ -310,8 +310,7 @@ public class RequestRegistry {
         if (slot != null) { slot.recordDecodeRetirement(source, exact); }
     }
 
-    CompletableFuture<Response> register(
-            BalanceContext context) {
+    CompletableFuture<Response> register(BalanceContext context) {
         if (context == null || context.getRequest() == null) {
             return CompletableFuture.completedFuture(buildErrorResponse(
                     StrategyErrorType.INVALID_REQUEST, null));
@@ -335,9 +334,7 @@ public class RequestRegistry {
                             "duplicate request_id: " + context.getRequestId()));
                 }
                 if (context.requestExpired(System.currentTimeMillis())) {
-                    Response failure = buildErrorResponse(
-                            context.getConfig().isQueue()
-                                    ? StrategyErrorType.RESOURCE_EXHAUSTED : StrategyErrorType.BATCH_SLO_EXPIRED,
+                    Response failure = buildErrorResponse(StrategyErrorType.RESOURCE_EXHAUSTED,
                             "request scheduling deadline has expired before placement");
                     if (globalQueue != null && context.getRequestPhase() != RequestPhase.ENCODER) {
                         context.setSchedulingDiagnostics(globalQueue.waitDiagnostics());
@@ -349,9 +346,8 @@ public class RequestRegistry {
                             StrategyErrorType.DISPATCH_FAILED,
                             "request scheduler is shutting down"));
                 }
-                boolean queueScheduling = context.getConfig().isQueue();
                 slot = new RequestSlot(completionPublisher, context, expirationTimer, terminalCleanup,
-                        this::exitAdmissionHandleGate, queueScheduling, globalQueue);
+                        this::exitAdmissionHandleGate, globalQueue);
                 context.setEnqueueTime(System.currentTimeMillis());
                 synchronized (slot) {
                     var requestLifecycle = context.getConfig().getRequestLifecycle().getRequest();
@@ -401,9 +397,7 @@ public class RequestRegistry {
         return requestLifecycle.getDispatchConfirmTimeoutPolls() * pollIntervalMs;
     }
 
-    void attachRequestExpiration(
-            BalanceContext context,
-            CompletableFuture<Response> future) {
+    void attachRequestExpiration(BalanceContext context, CompletableFuture<Response> future) {
         if (shuttingDown.get()) {
             return;
         }
@@ -411,9 +405,7 @@ public class RequestRegistry {
         if (slot == null || !slot.ownsFuture(future)) {
             return;
         }
-        if (context.getConfig().isQueue()) {
-            expirationTimer.attachRequestDeadline(slot, context.getRequestExpiresAtMs());
-        }
+        expirationTimer.attachRequestDeadline(slot, context.getRequestExpiresAtMs());
         expirationTimer.attachInactivityDeadline(slot);
     }
 

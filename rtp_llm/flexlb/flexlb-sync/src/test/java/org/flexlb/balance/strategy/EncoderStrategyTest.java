@@ -2,7 +2,6 @@ package org.flexlb.balance.strategy;
 
 import org.flexlb.balance.endpoint.EncoderEndpoint;
 import org.flexlb.balance.endpoint.WorkerEndpoint;
-import org.flexlb.config.SchedulerConfig;
 import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.master.WorkerStatus;
@@ -111,21 +110,6 @@ class EncoderStrategyTest {
         context.getConfig().getDispatcher().setMaxInflightPerEncoderWorker(1);
 
         assertNull(strategy.select(context, "group"));
-    }
-
-    @Test
-    void directModeDoesNotApplyEncoderInflightLimit() {
-        endpoint("only-worker", 8001, true, 0, 1, 0, 0);
-        when(directory.endpointAddressSnapshot(RoleType.ENCODER))
-                .thenReturn(List.of("only-worker"));
-
-        BalanceContext context = context();
-        context.getConfig().setScheduler(SchedulerConfig.direct());
-        context.getConfig().getDispatcher().setMaxInflightPerEncoderWorker(1);
-
-        try (SelectedRole selected = strategy.select(context, "group")) {
-            assertEquals("only-worker", selected.serverStatus().getServerIp());
-        }
     }
 
     private EncoderEndpoint endpoint(String address, int port, boolean alive, long kv,

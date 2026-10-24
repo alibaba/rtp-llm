@@ -118,7 +118,6 @@ class RouteProjectionTest {
     private static QueueSnapshot emptyQueue(long capturedAtMs) {
         return new QueueSnapshot(
                 capturedAtMs,
-                true,
                 Comparator.comparing(GroupPlanner.Item::requestId),
                 new GroupPlanner.Constraints(
                         1, 1_000_000L, 1_000_000L, 0L, 30L),

@@ -42,12 +42,9 @@ public final class DispatcherConfig {
         return type == Type.BATCH;
     }
 
-    void validateFor(SchedulerConfig scheduler) {
+    void validate() {
         if (type == null) {
             throw new ConfigValidationException("dispatcher.type", "is required");
-        }
-        if (type == Type.BATCH && scheduler.getType() == SchedulerConfig.Type.DIRECT) {
-            throw new ConfigValidationException("dispatcher.type", "DIRECT requires NON_BATCH");
         }
         if (maxInflightPerPrefillWorker <= 0) {
             throw new ConfigValidationException("dispatcher.maxInflightPerPrefillWorker",

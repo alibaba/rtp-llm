@@ -80,7 +80,7 @@ The online loader accepts schema 3 only. Duplicate keys, unknown or inactive fie
 
 | Setting | Schema 3 behavior |
 | --- | --- |
-| `dispatcher.maxInflightPerPrefillWorker` | Positive integer, default 2 in every mode. BATCH counts batches; NON_BATCH / DIRECT count requests. |
+| `dispatcher.maxInflightPerPrefillWorker` | Positive integer, default 2 in every mode. BATCH counts batches; NON_BATCH counts requests. |
 | `dispatcher.fetchAttachTimeoutMs` | Positive integer, default 3000 ms. BATCH sends this as Engine `fetch_attach_timeout_ms`, limiting the wait for `FetchResponse` attachment. Engine caps it by the remaining request timeout when present. Once attached, this timer does not limit generation duration. |
 | Prefill ownership | Work remains tracked until authoritative completion, safe rollback or retirement. PDFUSION has no distinct Prefill-completion signal, so its ownership lasts through request termination. |
 | Queued requests on Worker retirement | Requests still owned by the Worker subqueue return to the global queue for route selection after their old route reservations are released. They retain their original priority, queue order and deadline. Requests whose dispatch ownership has already transferred follow delivery settlement. |
@@ -88,8 +88,9 @@ The online loader accepts schema 3 only. Duplicate keys, unknown or inactive fie
 | `requestLifecycle.request.dispatchConfirmTimeoutPolls` | Positive integer, default 4. After delivery starts, FlexLB waits at most count × `workerRegistry.health.statusPollIntervalMs` for the first Engine status matching the request and route (heartbeats and delivery ACK do not count). On expiry it releases the request's Prefill slot, Decode reservation and timers locally with reason `DISPATCH_CONFIRM_TIMEOUT` and never re-sends. Changes apply to requests registered afterwards. |
 | `workerRegistry.health.cleanupIntervalMs` | Positive integer, default 3000 ms; scan interval for retiring workers whose status exceeds `statusStaleAfterMs`. |
 | `requestLifecycle.decision.lifetime` | Finite number ≥ 1, default 2.0. At delivery, remaining Prefill time (including waiting) × lifetime + 10000 ms sets the deadline. Only observed running predecessors consume elapsed time; unstarted work keeps its full estimate. Independent of request age. |
-| `scheduler.queueTimeoutMs` | QUEUE only, positive, default 3600000 ms; actual queue TTL. DIRECT has no queue timer and rejects this field. |
-| `scheduler.maxQueuedRequests` | QUEUE only, positive integer, default 100000. Limits Generation requests waiting for or undergoing global placement. Configuration updates apply to subsequent arrivals. Encoder has a separate queue. |
+| `scheduler.type` | `QUEUE` only, default `QUEUE`. Configuring `DIRECT` fails startup validation. |
+| `scheduler.queueTimeoutMs` | Positive, default 3600000 ms; actual queue TTL. |
+| `scheduler.maxQueuedRequests` | Positive integer, default 100000. Limits Generation requests waiting for or undergoing global placement. Configuration updates apply to subsequent arrivals. Encoder has a separate queue. |
 | `scheduler.ordering.highPriorityThreshold` | PRIORITY ordering only, integer 1–100, default 50. When the global queue is full, an incoming request below this threshold receives code 429 with detail `低优先级限流`. A request at or above the threshold preempts the newest waiting request at the lowest strictly lower priority; the preempted request receives the same 429 response. When no eligible waiting request exists, the incoming request receives code 503 with detail `队列满`. Requests undergoing placement cannot be preempted. FIFO ordering returns 503 when full. Configuration updates apply to subsequent arrivals. |
 | `router.roles.decode.costEstimator.expression` | Default `kvcache_used_ratio`; smallest cost wins within the same availability tier. Using `max_running_size` requires a positive `availability.maxEngineRequests`. |
 | Transport timeout | `flexlb.engine-grpc.enqueue-timeout-ms`, default 5000; outside the scheduling JSON. |
@@ -255,14 +256,12 @@ axes:
 
 | Scheduler | Queue ordering | Decision | Dispatcher | Behavior |
 | --- | --- | --- | --- | --- |
-| `DIRECT` | not applicable | not applicable | `NON_BATCH` | Route immediately; the frontend sends the request |
 | `QUEUE` | `FIFO` | `SINGLE` | `NON_BATCH` | Form singleton decisions; frontend sends |
 | `QUEUE` | `FIFO` | `SINGLE` | `BATCH` | Master sends singleton `EnqueueBatch` calls |
 | `QUEUE` | `FIFO` | `FIXED_WINDOW` | `NON_BATCH` | Form bounded groups; frontend sends each routed request |
 | `QUEUE` | `FIFO` | `FIXED_WINDOW` | `BATCH` | Form bounded groups; Master sends `EnqueueBatch` |
 
-`PRIORITY` can replace `FIFO` in all four QUEUE combinations. `DIRECT + BATCH`
-is invalid and DIRECT cannot configure `decision`. `FIFO`/`PRIORITY` choose which
+`PRIORITY` can replace `FIFO` in all four combinations. `FIFO`/`PRIORITY` choose which
 request is considered first, `SINGLE`/`FIXED_WINDOW` choose how many requests form
 one decision group, and `NON_BATCH`/`BATCH` choose whether the frontend or Master
 sends them.
@@ -279,12 +278,12 @@ Configuration examples:
 - [QUEUE + PRIORITY + NON_BATCH](docs/config-examples/flexlb-queue-priority-non-batch.json)
 - [QUEUE + PRIORITY + BATCH](docs/config-examples/flexlb-queue-priority-batch.json)
 
-DIRECT uses `dispatcher.maxInflightPerPrefillWorker` as its per-worker request limit. Example:
+NON_BATCH uses `dispatcher.maxInflightPerPrefillWorker` as its per-worker request limit. Example:
 
 ```bash
 export FLEXLB_CONFIG='{
   "schemaVersion": 3,
-  "scheduler": {"type": "DIRECT"},
+  "scheduler": {"type": "QUEUE"},
   "dispatcher": {"type": "NON_BATCH", "maxInflightPerPrefillWorker": 2},
   "requestLifecycle": {
     "request": {"timeoutMs": 60000},
@@ -302,8 +301,7 @@ remains compute work. Omit `cacheAffinity` to disable that preference.
 The projection uses a frozen snapshot of current work and cannot predict future arrivals.
 
 Decode freezes each route attempt's request identity, priority, complete prompt-plus-output
-demand, capacity limits and admission mode before selecting workers. DIRECT requires
-immediately available dispatch capacity. QUEUE without reclamation can retain a physically
+demand, capacity limits and admission mode before selecting workers. Without reclamation, QUEUE can retain a physically
 feasible route while Decode is busy and wait for a permit at delivery. With Decode reclamation
 enabled, placement also counts queued reservations and can reclaim allowed lower-priority owners.
 Selection prefers workers with current dispatch capacity over feasible workers that must wait.

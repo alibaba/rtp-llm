@@ -1,7 +1,7 @@
 # Scheduling and Request Lifecycle
 
 同一个业务 `request_id` 在 FlexLB 内按 `RequestPhase` 分为 `ENCODER` 与 `GENERATION`
-两条生命周期。Encoder 单独决策按 `scheduler.type` 走 DIRECT 或独立 QUEUE：登记请求后选点，选中端点接管请求时进入
+两条生命周期。Encoder 单独决策进入独立的 Encoder QUEUE：登记请求后选点，选中端点接管请求时进入
 `DISPATCHING`，确认并提交路由成功响应时进入 `ACKNOWLEDGED`，随后由 Encoder 的 WorkerStatus 活跃任务、
 完成任务或失活超时推进状态。Frontend 负责把请求发给选中的 Encoder，FlexLB 不做
 Encoder 批量派发，也不调用 Encoder Cancel RPC。Encoder QUEUE 只在模型配置包含 Encoder role 时创建，
@@ -14,14 +14,10 @@ Encoder 请求；队列超时和取消按 Encoder 阶段独立清理。Generatio
 业务 ID 决策 Prefill、Prefill + Decode 或 PDFusion。混合阶段角色同时请求不在当前
 验证流程内，也没有专门的角色组合白名单。
 
-`FLEXLB_CONFIG.scheduler` 是带 `type` 的联合配置：
+`FLEXLB_CONFIG.scheduler.type` 取值为 `QUEUE`（默认）：请求交给 `PriorityScheduler`，
+由调度器持有请求生命周期、endpoint 预留和对外发布权。
 
-- `DIRECT`：`RouteService` 在调用链中执行 `DefaultRouter.route()`，返回已完成的
-  `CompletableFuture<Response>`。
-- `QUEUE`（默认）：请求交给 `PriorityScheduler`，由调度器持有请求生命周期、
-  endpoint 预留和对外发布权。
-
-QUEUE 模式下，`ordering.type` 和 `dispatcher.type` 是两个正交维度：
+`ordering.type` 和 `dispatcher.type` 是两个正交维度：
 
 - ordering：`FIFO`（默认）或 `PRIORITY`；PRIORITY 由 `PriorityAdmissionScheduler`
   进行优先级准入、状态快照和可选抢占。
@@ -34,7 +30,7 @@ QUEUE 模式下，`ordering.type` 和 `dispatcher.type` 是两个正交维度：
 ## 提交与准入
 
 `RouteService.route()` 先将当前不可变的 `FlexlbConfig` 快照绑定到
-`BalanceContext`，再按 scheduler 类型分流。QUEUE 路径的关键边界是：
+`BalanceContext`，再提交给 QUEUE 调度器。QUEUE 路径的关键边界是：
 
 1. `request_id` 是请求代际标识；活跃或已终态的重复 ID 会被拒绝。
 2. `scheduler.maxQueuedRequests`（默认 100000）在 QUEUE + NON_BATCH 下是 Generation 的总排队上限，
@@ -88,7 +84,6 @@ QUEUE + NON_BATCH 完成 Decode 排队预留和 Prefill 子队列入队后，请
 总排队上限和共享子队列上限是两个独立边界：同一高优请求可能先在全局入口抢占，
 再在选中 Prefill 的子队列抢占另一个低优请求。
 QUEUE + BATCH 完成 Decode 排队预留和 Prefill 子队列入队后，按批次上限准备交付。
-DIRECT 没有子队列，选中的 Prefill 和 Decode 在路由提交时检查容量，容量不足则返回错误。
 Prefill 待交付队列中的请求被高优新请求替换时，同样按被替换请求自己的优先级返回 8433 或 8434。
 
 Worker 下线停止子队列时，尚未完成 dispatch 交接的请求释放旧 Prefill 路由预留和 Decode 预留，

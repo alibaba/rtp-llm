@@ -111,7 +111,6 @@ class UniConfigConfigSourceTest {
         assertThat(source.load()).isEqualTo(legacyConfig);
         assertThat(requestPath.get()).isEqualTo(CONFIG_PATH);
         assertThat(requestMethod.get()).isEqualTo("GET");
-        assertThat(configService.loadBalanceConfig().isQueue()).isTrue();
         AtomicInteger updates = new AtomicInteger();
         configService.addUpdateListener(config -> updates.incrementAndGet());
         FlexlbConfig original = configService.loadBalanceConfig();
@@ -122,15 +121,14 @@ class UniConfigConfigSourceTest {
         assertThat(configService.loadBalanceConfig()).isSameAs(original);
         assertThat(updates).hasValue(1);
         String currentConfig = """
-                {"schemaVersion":3,"requestLifecycle":{"request":{"timeoutMs":60000}},"scheduler":{"type":"DIRECT"},
-                "dispatcher":{"type":"NON_BATCH"},"consistency":{"type":"NONE"},
+                {"schemaVersion":3,"requestLifecycle":{"request":{"timeoutMs":60000}},"scheduler":{"type":"QUEUE"},
+                "dispatcher":{"type":"BATCH"},"consistency":{"type":"NONE"},
                 "fallbackBatchTokenCapacity":1048585}
                 """;
         response.set(new Response(200, currentConfig));
         poll.run();
 
         assertThat(source.load()).isEqualTo(currentConfig);
-        assertThat(configService.loadBalanceConfig().isQueue()).isTrue();
         assertThat(configService.loadBalanceConfig().getDispatcher().typeName()).isEqualTo(startupDispatcherType);
         assertThat(configService.loadBalanceConfig().getFallbackBatchTokenCapacity())
                 .isEqualTo(1048585L);

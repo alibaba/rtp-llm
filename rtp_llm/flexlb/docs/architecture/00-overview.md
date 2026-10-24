@@ -73,7 +73,6 @@ gRPC FlexlbService.Schedule (FlexlbGrpcServer, HTTP 端口 + 100)
     ↓ 若启用一致性且本机非 master → 转发给 master（master 不可达则降级本地路由）
     ↓ 校验客户端提供的 block_cache_keys 与 cache_key_block_size
 RouteService.route()
-    ├─ scheduler.type=DIRECT：当前调用链执行 DefaultRouter.route()
     └─ scheduler.type=QUEUE：PriorityScheduler.submit()
            ├─ ordering.type=FIFO：普通路由后提交到 Prefill WorkerBatcher
            └─ ordering.type=PRIORITY：PriorityAdmissionScheduler 做优先级准入/抢占

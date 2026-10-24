@@ -5,18 +5,16 @@
 FlexLB exposes the scheduler plus three independent QUEUE axes in one strict
 `FLEXLB_CONFIG` JSON document:
 
-1. `scheduler.type` chooses immediate routing (`DIRECT`) or scheduler-owned
-   request lifecycle (`QUEUE`).
-2. `scheduler.ordering.type`, present only for `QUEUE`, chooses arrival order
-   (`FIFO`) or priority order (`PRIORITY`).
-3. `scheduler.decision.type`, present only for `QUEUE`, chooses one request per
-   decision (`SINGLE`) or bounded group formation (`FIXED_WINDOW`).
+1. `scheduler.type` selects the scheduler-owned request lifecycle (`QUEUE`).
+2. `scheduler.ordering.type` chooses arrival order (`FIFO`) or priority order
+   (`PRIORITY`).
+3. `scheduler.decision.type` chooses one request per decision (`SINGLE`) or
+   bounded group formation (`FIXED_WINDOW`).
 4. `dispatcher.type` chooses frontend delivery (`NON_BATCH`) or Master-side
    `EnqueueBatch` delivery (`BATCH`).
 
 These names are not interchangeable. `FIFO` is the peer of `PRIORITY`, `SINGLE`
-is the peer of `FIXED_WINDOW`, and `NON_BATCH` is the peer of `BATCH`. `DIRECT`
-requires `NON_BATCH` and cannot configure a decision policy. Every
+is the peer of `FIXED_WINDOW`, and `NON_BATCH` is the peer of `BATCH`. Every
 ordering/decision/dispatcher combination is valid under `QUEUE`.
 
 `RequestScheduler` is the public QUEUE facade for both FIFO and PRIORITY.
@@ -48,7 +46,6 @@ classDiagram
     class PrefillEndpoint
     class DecodeEndpoint
 
-    RouteService --> DefaultRouter : DIRECT
     RouteService --> RequestScheduler : QUEUE
     DefaultRouter --> CostBasedPrefillStrategy : full-fleet Prefill selection
     DefaultRouter --> CostBasedDecodeStrategy : full-fleet Decode selection
@@ -65,9 +62,8 @@ classDiagram
     RequestRegistry --> DecodeEndpoint : exact reservation/accounting
 ```
 
-`DIRECT` skips QUEUE admission, the ordered active index, and the endpoint worker thread, but it uses the same
-`router.groupSelector` and `router.roles` worker-selection configuration as
-QUEUE. PDFUSION follows the prefill role configuration and requires only a
+Worker selection uses the `router.groupSelector` and `router.roles`
+configuration. PDFUSION follows the prefill role configuration and requires only a
 PDFUSION endpoint; a separate Decode endpoint is optional only when explicitly
 requested by the model topology.
 
@@ -82,26 +78,21 @@ sequenceDiagram
     participant E as Prefill / Decode engine
 
     F->>R: Schedule(request)
-    alt scheduler.type = DIRECT
-        R-->>F: route decision
+    R->>S: submit(context)
+    S->>S: register, order, select P/D, and commit exact placement
+    S->>W: enqueue selected Prefill work
+    W->>W: form endpoint-local delivery group
+    W->>W: reserve delivery capacity in order
+    alt dispatcher.type = NON_BATCH
+        S-->>F: route decision, enqueued_by_master=false
         F->>E: GenerateStream(request)
-    else scheduler.type = QUEUE
-        R->>S: submit(context)
-        S->>S: register, order, select P/D, and commit exact placement
-        S->>W: enqueue selected Prefill work
-        W->>W: form endpoint-local delivery group
-        W->>W: reserve delivery capacity in order
-        alt dispatcher.type = NON_BATCH
-            S-->>F: route decision, enqueued_by_master=false
-            F->>E: GenerateStream(request)
-        else dispatcher.type = BATCH
-            S->>E: EnqueueBatch(group)
-            E-->>S: ACK
-            S-->>F: enqueued_by_master=true
-        end
-        E-->>S: typed WorkerStatus
-        S->>S: settle lifecycle and ledgers exactly once
+    else dispatcher.type = BATCH
+        S->>E: EnqueueBatch(group)
+        E-->>S: ACK
+        S-->>F: enqueued_by_master=true
     end
+    E-->>S: typed WorkerStatus
+    S->>S: settle lifecycle and ledgers exactly once
 ```
 
 The decision policy and dispatcher answer different questions. The global queue
@@ -191,8 +182,7 @@ expires_at_ms = flexlb_admission_time_ms + scheduler.queueTimeoutMs
 The deadline covers queueing, routing, and delivery acknowledgement. Prompt
 length, priority, queue movement, generation replanning, and preemption never
 extend or
-multiply it. DIRECT does not queue and therefore does not apply a scheduling
-timeout. The caller's protobuf `generate_timeout` remains a transport/engine
+multiply it. The caller's protobuf `generate_timeout` remains a transport/engine
 field and does not control FlexLB scheduling. Consequently there are no SLO
 length buckets, SLO budgets, or priority TTL multipliers to configure.
 
@@ -207,7 +197,7 @@ accepted.
 
 | JSON path | Applies to | Default | Meaning |
 | --- | --- | ---: | --- |
-| `scheduler.type` | all | `QUEUE` | `DIRECT` or `QUEUE` |
+| `scheduler.type` | all | `QUEUE` | `QUEUE`; configuring `DIRECT` fails validation |
 | `scheduler.queueTimeoutMs` | `QUEUE` | `3600000` ms | Total scheduling lifetime from FlexLB admission through delivery acknowledgement |
 | `scheduler.ordering.type` | `QUEUE` | `FIFO` | `FIFO` or `PRIORITY` |
 | `scheduler.ordering.defaultPriority` | `QUEUE + PRIORITY` | `50` | Fallback priority in `[1, 100]` |
@@ -250,8 +240,8 @@ reported changes before deploying the resulting JSON:
 
 - NON_BATCH receives an explicit `SINGLE` decision. BATCH grouping fields move
   to `scheduler.decision`; its waiting bound moves to `scheduler.capacity`.
-- The old Prefill pending bound maps to the canonical NON_BATCH request cap,
-  including DIRECT. BATCH queue and batch limits need explicit sizing because
+- The old Prefill pending bound maps to the canonical NON_BATCH request cap.
+  BATCH queue and batch limits need explicit sizing because
   they use different units.
 - Prefill/Decode `RANDOM` policies have no equivalent and fail conversion.
   Availability hysteresis is reported as removed; recovery follows exact
@@ -270,25 +260,15 @@ short admission critical section. Rejected submissions publish no lifecycle obje
 
 | JSON path | Applies to | Default | Meaning |
 | --- | --- | ---: | --- |
-| `dispatcher.type` | all | `BATCH` | `BATCH` or `NON_BATCH`; DIRECT requires `NON_BATCH` |
+| `dispatcher.type` | all | `BATCH` | `BATCH` or `NON_BATCH` |
 | `dispatcher.maxInflightBatchesPerPrefillWorker` | `BATCH` | omitted | Optional positive per-Prefill EnqueueBatch backpressure cap |
 | `dispatcher.enqueueRpcTimeoutMs` | `BATCH` | `5000` ms | EnqueueBatch RPC timeout |
-| `dispatcher.maxInflightRequestsPerPrefillWorker` | `DIRECT/QUEUE + NON_BATCH` | omitted | Optional positive per-Prefill outstanding request cap |
+| `dispatcher.maxInflightRequestsPerPrefillWorker` | `NON_BATCH` | omitted | Optional positive per-Prefill outstanding request cap |
 
 The two optional inflight limits use omission, not zero, to mean unlimited.
 Decision-group and waiting-queue parameters are rejected under `dispatcher`.
 
 ## Valid examples
-
-DIRECT with the default role routing configuration:
-
-```json
-{
-  "schemaVersion": 2,
-  "scheduler": {"type": "DIRECT"},
-  "dispatcher": {"type": "NON_BATCH"}
-}
-```
 
 The four minimal FIFO QUEUE combinations make the independent axes explicit.
 
@@ -441,7 +421,6 @@ any of these valid modes. Role algorithms themselves are fixed.
     the accepted dispatcher task performs no second executor-capacity check.
     The endpoint slot remains owned through transport-unknown and protected
     survivor states, and batch settlement signals the exact blocked resource.
-    DIRECT requests remain in the separate request-keyed ledger.
 11. A callback exception is terminal for every member it did not transfer. The
     callback is never retried and no member returns to the active queue.
 12. Batch-load publication is established before `ACTIVE` removal. A typed
@@ -464,7 +443,6 @@ any of these valid modes. Role algorithms themselves are fixed.
 
 | Scheduler | Ordering | Decision | Dispatcher | Delivery |
 | --- | --- | --- | --- | --- |
-| `DIRECT` | — | — | `NON_BATCH` | Immediate route response; frontend sends |
 | `QUEUE` | `FIFO` | `SINGLE` | `NON_BATCH` | FIFO singleton route response; frontend sends |
 | `QUEUE` | `FIFO` | `SINGLE` | `BATCH` | FIFO singleton `EnqueueBatch`; Master sends |
 | `QUEUE` | `FIFO` | `FIXED_WINDOW` | `NON_BATCH` | FIFO-ordered independent route decisions; frontend sends each request |
@@ -473,6 +451,3 @@ any of these valid modes. Role algorithms themselves are fixed.
 | `QUEUE` | `PRIORITY` | `SINGLE` | `BATCH` | Priority singleton `EnqueueBatch`; Master sends |
 | `QUEUE` | `PRIORITY` | `FIXED_WINDOW` | `NON_BATCH` | Priority-ordered independent route decisions; frontend sends each request |
 | `QUEUE` | `PRIORITY` | `FIXED_WINDOW` | `BATCH` | Priority-ordered independent route decisions; each selected endpoint batches locally |
-
-`DIRECT + BATCH` and `DIRECT + decision` are rejected during strict
-configuration parsing/validation.

@@ -1178,7 +1178,6 @@ class PrefillEndpointTest {
     void nonBatchUnconfirmedGaugeDropsOnConfirmationAndInflightDropsOnlyOnCompletion(TaskPhase phase) {
         FlexlbConfig requestConfig = org.flexlb.balance.scheduler.SchedulingTestConfig.newConfig();
         requestConfig.setDispatcher(DispatcherConfig.nonBatch());
-        requestConfig.setScheduler(SchedulerConfig.direct());
         PrefillEndpoint metricsEndpoint = routeEndpoint(requestConfig, "127.0.0.4");
         SimpleMeterRegistry registry = new SimpleMeterRegistry();
         try {
@@ -1283,7 +1282,6 @@ class PrefillEndpointTest {
                 null, null, 1, 2);
         FlexlbConfig requestConfig = org.flexlb.balance.scheduler.SchedulingTestConfig.newConfig();
         requestConfig.setDispatcher(DispatcherConfig.nonBatch());
-        requestConfig.setScheduler(SchedulerConfig.direct());
         PrefillEndpoint first = EndpointTestSupport.standalonePrefillEndpoint(firstStatus, requestConfig,
                 EndpointTestSupport.routeStrategy(requestRuntime), requestRuntime.events(), endpointReporter);
         PrefillEndpoint sibling = EndpointTestSupport.standalonePrefillEndpoint(siblingStatus, requestConfig,

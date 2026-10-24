@@ -366,14 +366,16 @@ public class PrefillEndpoint extends WorkerEndpoint {
 
     /**
      * Requests owned by a local Prefill lifecycle: admitted QUEUE batch members
-     * plus individually tracked DIRECT and QUEUE_ROUTE requests.
+     * plus individually tracked QUEUE_ROUTE requests.
      */
     public int getLocallyOwnedRequestCount() {
         PrefillState.Stats stats = prefillState.stats();
         return stats.locallyOwnedRequests();
     }
 
-    /** Individually-accounted DIRECT and QUEUE_ROUTE requests. */
+    /**
+     * Individually-accounted QUEUE_ROUTE requests.
+     */
     public int getIndividuallyTrackedRequestCount() {
         PrefillState.Stats stats = prefillState.stats();
         return stats.individuallyOwnedRequests();

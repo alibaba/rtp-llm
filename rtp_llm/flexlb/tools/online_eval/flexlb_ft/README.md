@@ -28,7 +28,7 @@ python3 parallel_runner.py --categories kv --parallel 2   # 只跑指定分类
 | Schema 3 测试配置 | 取值来源 |
 | --- | --- |
 | 请求 `timeoutMs` / 决策 `lifetime` | 请求 timeoutMs 必填；决策系数默认 2.0，期限为 `2 × Prefill剩余预测 + 10s`。harness 显式使用 60000 ms / 2.0。 |
-| `dispatcher.maxInflightPerPrefillWorker` | 正整数，所有模式默认 2；BATCH 单位是批，NON_BATCH / DIRECT 单位是请求。与组批大小独立。 |
+| `dispatcher.maxInflightPerPrefillWorker` | 正整数，所有模式默认 2；BATCH 单位是批，NON_BATCH 单位是请求。与组批大小独立。 |
 | `DECODE_ENGINE_OWNED` 抢占 | `scheduler.ordering.preemption.timeoutMs` 默认 1000 ms；ACK 阶段结束后等待真实 Engine 终态。超时则 incoming 失败、victim 资源继续保护；ACK 内部默认 50 ms。 |
 | 旧数量门槛测试 | 已改为Engine 能力倍数、全局排队与 TTL 到期测试。 |
 

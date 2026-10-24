@@ -580,7 +580,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--schedule-mode",
-        choices=["auto", "batch", "direct", "queue"],
+        choices=["auto", "batch", "queue"],
         default="batch",
     )
     parser.add_argument("--request-id-base", type=int, default=10000)

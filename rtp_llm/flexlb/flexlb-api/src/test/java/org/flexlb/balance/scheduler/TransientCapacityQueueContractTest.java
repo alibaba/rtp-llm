@@ -1248,16 +1248,6 @@ class TransientCapacityQueueContractTest {
         }
 
         @Override
-        public PlacementResult<RouteAdmission, PlacementKey> select(BalanceContext context) {
-            long startedAt = metrics.placementStarted(context);
-            try {
-                return delegate.select(context);
-            } finally {
-                metrics.placementFinished(startedAt);
-            }
-        }
-
-        @Override
         public PlacementResult<RouteAdmission, PlacementKey> select(
                 BalanceContext context, String policyGroup) {
             long startedAt = metrics.placementStarted(context);

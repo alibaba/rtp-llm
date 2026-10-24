@@ -20,7 +20,6 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
-import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
@@ -203,19 +202,6 @@ class PrefillRequestCapacityTest {
         assertTrue(state.canAcceptRequest(1L));
         assertFalse(state.canAcceptRequest(0L));
         assertFalse(state.canAcceptRequest(-1L));
-    }
-
-    @Test
-    void failedQueueInsertionDoesNotConsumePublishedCapacity() {
-        var direct = new PrefillState(lock, PrefillActiveIndex.disabled(), () -> { });
-        lock.lock();
-        try {
-            assertThrows(IllegalStateException.class, () -> direct.enqueueActiveUnderLock(item(1), 1L));
-            assertTrue(direct.canAcceptRequest(1L));
-            assertEquals(0L, direct.observedRequestCount());
-        } finally {
-            lock.unlock();
-        }
     }
 
     @Test

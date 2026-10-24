@@ -901,7 +901,7 @@ class EnvSpec:
 # a named axis combination.
 #
 # Phase-1 profile set (user ruling 2026-08): all QUEUE + FIFO ordering.
-# PRIORITY ordering / DIRECT / preemption / selector variants are left for a
+# PRIORITY ordering / preemption / selector variants are left for a
 # dedicated later phase.
 
 PROFILES = (

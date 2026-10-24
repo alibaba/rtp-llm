@@ -6,7 +6,6 @@ import org.flexlb.config.DecisionPolicyConfig;
 import org.flexlb.config.DispatcherConfig;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.config.QueueOrderingConfig;
-import org.flexlb.config.SchedulerConfig;
 import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.SchedulingMetadata;
 import org.flexlb.dao.loadbalance.AdmissionRejectReason;
@@ -16,16 +15,13 @@ import org.flexlb.service.RouteService;
 import org.flexlb.service.TheoryCacheHitReporter;
 import org.junit.jupiter.api.Timeout;
 import org.junit.jupiter.params.ParameterizedTest;
-import org.junit.jupiter.params.provider.Arguments;
 import org.junit.jupiter.params.provider.MethodSource;
 
 import java.util.List;
 import java.util.concurrent.TimeUnit;
 import java.util.stream.Stream;
 
-import static org.flexlb.dao.loadbalance.AdmissionRejectReason.HIGHER_PRIORITY_AHEAD;
 import static org.flexlb.dao.loadbalance.AdmissionRejectReason.RESOURCE_EXHAUSTED;
-import static org.flexlb.dao.loadbalance.AdmissionRejectReason.SAME_PRIORITY_AHEAD;
 import static org.flexlb.dao.loadbalance.AdmissionRejectReason.UNSPECIFIED;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -49,7 +45,7 @@ class SchedulingErrorCodeMatrixTest {
                 .flatMap(decision -> Stream.of("NON_BATCH", "BATCH").map(dispatch -> order + "/" + decision + "/" + dispatch)));
     }
 
-    static Stream<String> modes() { return Stream.concat(Stream.of("DIRECT"), queuedModes()); }
+    static Stream<String> modes() { return queuedModes(); }
     static Stream<String> batchModes() { return queuedModes().filter(mode -> mode.endsWith("/BATCH")); }
 
     @ParameterizedTest(name = "{0}: healthy -> 200")
@@ -71,9 +67,8 @@ class SchedulingErrorCodeMatrixTest {
         try (Fixture fixture = new Fixture(mode)) {
             BalanceContext context = fixture.context();
             context.setSchedulingMetadata(SchedulingMetadata.explicit(50, System.currentTimeMillis() - 1));
-            // DIRECT retains 8511; QUEUE reports 8431 and never sends an Engine RPC.
-            assertFailure(fixture.route(context), fixture.harness.config.isDirect() ? 8511 : 8431,
-                    fixture.harness.config.isDirect() ? UNSPECIFIED : RESOURCE_EXHAUSTED, "expired");
+            // QUEUE reports 8431 and never sends an Engine RPC.
+            assertFailure(fixture.route(context), 8431, RESOURCE_EXHAUSTED, "expired");
             assertTrue(fixture.harness.engineArrivalOrder.isEmpty());
             assertEquals(0, fixture.harness.decodeEndpoint(0).getInflightCount());
         }
@@ -87,48 +82,6 @@ class SchedulingErrorCodeMatrixTest {
             assertFailure(fixture.route(fixture.context()), 8431, RESOURCE_EXHAUSTED,
                     "admission capacity is temporarily exhausted");
             assertEquals(0, fixture.harness.decodeEndpoint(0).getInflightCount());
-            assertTrue(fixture.harness.engineArrivalOrder.isEmpty());
-        }
-    }
-
-    static Stream<Arguments> directPriorityCases() {
-        return Stream.of(Arguments.of(70, 8430, HIGHER_PRIORITY_AHEAD, "higher-priority requests are ahead"),
-                Arguments.of(50, 8430, SAME_PRIORITY_AHEAD, "same-priority requests are ahead"),
-                Arguments.of(30, 8431, RESOURCE_EXHAUSTED, "admission capacity is temporarily exhausted"),
-                Arguments.of(0, 8432, UNSPECIFIED, "blocker priority attribution is unavailable"));
-    }
-
-    static Stream<Arguments> prefillPriorityCases() {
-        return directPriorityCases().filter(arguments -> (int) arguments.get()[0] > 0);
-    }
-
-    @ParameterizedTest(name = "DIRECT: Prefill owner P{0} -> {1}")
-    @MethodSource("prefillPriorityCases")
-    void directPrefillCapacityUsesOwnerProvenance(int priority, int code, AdmissionRejectReason reason,
-                                                String message) throws Exception {
-        try (Fixture fixture = new Fixture("DIRECT", 1)) {
-            fixture.harness.config.getRouter().getRoles().getDecode().getAvailability().setMaxEngineRequests(0L);
-            assertTrue(fixture.route(fixture.harness.context(REQUEST_ID - 1, priority)).isSuccess());
-            BalanceContext context = fixture.context();
-            Response failure = fixture.route(context);
-            assertFailure(failure, code, reason, message);
-            assertEquals("PREFILL", context.getSchedulingDiagnostics().get("role"));
-            assertEquals(1, context.getSchedulingDiagnostics().get("workers"));
-            assertEquals(1, fixture.harness.prefillEndpoint(0).getLocallyOwnedRequestCount());
-            assertTrue(fixture.harness.engineArrivalOrder.isEmpty());
-        }
-    }
-
-    @ParameterizedTest(name = "DIRECT: Decode owner P{0} -> {1}")
-    @MethodSource("directPriorityCases")
-    void directDecodeCapacityUsesOwnerProvenance(int priority, int code, AdmissionRejectReason reason,
-                                                String message) throws Exception {
-        try (Fixture fixture = new Fixture("DIRECT")) {
-            fixture.reserveDecode(priority);
-            BalanceContext context = fixture.context();
-            assertFailure(fixture.route(context), code, reason, message);
-            assertNotNull(context.getSchedulingDiagnostics());
-            assertEquals(1, fixture.harness.decodeEndpoint(0).getInflightCount());
             assertTrue(fixture.harness.engineArrivalOrder.isEmpty());
         }
     }
@@ -247,17 +200,13 @@ class SchedulingErrorCodeMatrixTest {
             DecisionPolicyConfig decision = new DecisionPolicyConfig();
             decision.setMaxRequests(1);
             decision.setMaxCollectionWaitMs(0);
-            if (mode.equals("DIRECT")) {
-                config.setScheduler(SchedulerConfig.direct());
-                config.setDispatcher(DispatcherConfig.nonBatch());
-            } else {
-                String[] parts = mode.split("/");
-                config.queueScheduler().setOrdering(parts[0].equals("PRIORITY")
-                        ? QueueOrderingConfig.priority() : new QueueOrderingConfig());
-                decision.setType(DecisionPolicyConfig.Type.valueOf(parts[1]));
-                config.queueScheduler().setDecision(decision);
-                config.getDispatcher().setType(DispatcherConfig.Type.valueOf(parts[2]));
-            }
+            String[] parts = mode.split("/");
+            config.queueScheduler()
+                    .setOrdering(
+                            parts[0].equals("PRIORITY") ? QueueOrderingConfig.priority() : new QueueOrderingConfig());
+            decision.setType(DecisionPolicyConfig.Type.valueOf(parts[1]));
+            config.queueScheduler().setDecision(decision);
+            config.getDispatcher().setType(DispatcherConfig.Type.valueOf(parts[2]));
             config.getRouter().getRoles().getDecode().getAvailability().setMaxEngineRequests(1L);
             config.getDispatcher().setMaxInflightPerPrefillWorker(prefillCapacity);
             harness = new AutoTpmE2EHarness(61_500, 1, 1, "1", 1.0, true,

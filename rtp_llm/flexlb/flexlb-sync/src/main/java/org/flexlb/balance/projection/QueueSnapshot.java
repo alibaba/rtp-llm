@@ -15,7 +15,6 @@ import java.util.Objects;
  */
 public record QueueSnapshot(
         long capturedAtMs,
-        boolean queueScheduling,
         Comparator<GroupPlanner.Item> ordering,
         GroupPlanner.Constraints constraints,
         List<GroupPlanner.Item> activeItems,

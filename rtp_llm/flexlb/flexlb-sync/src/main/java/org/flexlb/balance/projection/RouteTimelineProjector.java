@@ -77,12 +77,11 @@ final class RouteTimelineProjector {
         }
     }
 
-    private RouteProjection.CandidateView projectWithPredictions(
-            QueueSnapshot queue,
-            WorkSnapshot committed,
-            RouteProjection.DeliveryProjection deliveryProjection,
-            long projectionAtMs,
-            PredictionBoundary predictions) {
+    private RouteProjection.CandidateView projectWithPredictions(QueueSnapshot queue,
+                                                                 WorkSnapshot committed,
+                                                                 RouteProjection.DeliveryProjection deliveryProjection,
+                                                                 long projectionAtMs,
+                                                                 PredictionBoundary predictions) {
         if (containsCommittedRequest(committed, requestId)) {
             return unavailable("INCOMING_ALREADY_COMMITTED");
         }
@@ -104,7 +103,7 @@ final class RouteTimelineProjector {
          * decision, so the generic ProjectedQueue/readiness machinery is
          * exactly equivalent to committedMs + singleton completion offset.
          */
-        if (queue.queueScheduling() && queue.activeItems().isEmpty()) {
+        if (queue.activeItems().isEmpty()) {
             long collectionDeadline = GroupPlanner.collectionDeadlineMs(
                     enqueuedAtMs,
                     queue.constraints().collectionWindowMs());
@@ -116,15 +115,6 @@ final class RouteTimelineProjector {
                     incomingPrefillMs, committedMs);
         }
 
-        if (!queue.queueScheduling()) {
-            long completionMs = saturatedAdd(committedMs, incomingPrefillMs);
-            return candidate(
-                    RouteProjection.Candidate.State.MODELED,
-                    completionMs,
-                    incomingPrefillMs,
-                    RouteProjection.Candidate.InitialHeadDisposition.NONE,
-                    "SERIAL_FROZEN_DIRECT");
-        }
         GroupPlanner.Item probe = new GroupPlanner.Item(
                 requestId, priority, Long.MAX_VALUE, enqueuedAtMs,
                 expiresAtMs, seqLen, hitCache);

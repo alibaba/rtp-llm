@@ -119,7 +119,6 @@ public final class RequestSlot {
     private final Runnable admissionFinished;
 
     private final RequestCompletionPublisher completionPublisher;
-    private final boolean queueScheduling;
     private final GlobalQueueCoordinator globalQueue;
     /** Used while active to capture PV evidence; released with the terminal record. */
     private BalanceContext context;
@@ -211,21 +210,12 @@ public final class RequestSlot {
         }
     }
 
-    RequestSlot(
-            RequestCompletionPublisher completionPublisher,
-            BalanceContext context, ExpirationTimer expirationTimer,
-            RequestTerminalCleanup terminalCleanup, Runnable admissionFinished) {
-        this(completionPublisher, context, expirationTimer, terminalCleanup, admissionFinished, false, null);
-    }
-
     RequestSlot(RequestCompletionPublisher completionPublisher,
                 BalanceContext context,
                 ExpirationTimer expirationTimer,
                 RequestTerminalCleanup terminalCleanup,
                 Runnable admissionFinished,
-                boolean queueScheduling,
                 GlobalQueueCoordinator globalQueue) {
-        this.queueScheduling = queueScheduling;
         this.globalQueue = globalQueue;
         this.expirationTimer = expirationTimer;
         this.terminalCleanup = terminalCleanup;
@@ -941,7 +931,7 @@ public final class RequestSlot {
     }
 
     void failDeliveryPreparation(ScheduledRequest exact, Throwable cause) {
-        if (queueScheduling && cause instanceof EndpointRetiredException) {
+        if (cause instanceof EndpointRetiredException) {
             requeueStoppedWorker(exact);
             return;
         }
@@ -1253,15 +1243,13 @@ public final class RequestSlot {
             if (ownsDecodeFactLocked(source, exact) && itemWhoseWorkerStoppedDuringEnqueue == item) {
                 return;
             }
-            if (queueScheduling && ownsDecodeFactLocked(source, exact)
-                    && deliveryClaimKind == DeliveryClaimKind.ROUTE_DECISION
+            if (ownsDecodeFactLocked(source, exact) && deliveryClaimKind == DeliveryClaimKind.ROUTE_DECISION
                     && state == RequestState.Phase.DISPATCHING) {
                 decodeRetiredDuringRouteClaim = source;
                 decodeReservationRetiredDuringRouteClaim = exact;
                 return;
             }
-            retiredRoute = queueScheduling && ownsDecodeFactLocked(source, exact)
-                    && ownsPreparedDeliveryLocked(item) ? item : null;
+            retiredRoute = ownsDecodeFactLocked(source, exact) && ownsPreparedDeliveryLocked(item) ? item : null;
             if (retiredRoute == null) {
                 work = applyDecodeRetirementLocked(source, exact,
                         "Decode endpoint generation retired: generation=" + exact.endpointGenerationId());
@@ -1337,7 +1325,7 @@ public final class RequestSlot {
                 || cancellationReason != null || pendingAdmissionCancelReason != null) {
             return false;
         }
-        if (reason == CancelReason.DEADLINE_EXCEEDED && queueScheduling) {
+        if (reason == CancelReason.DEADLINE_EXCEEDED) {
             ScheduledRequest item = activeItem();
             Map<String, Object> diagnostics;
             if (deliveryClaimKind != DeliveryClaimKind.NONE) {

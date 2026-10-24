@@ -9,9 +9,7 @@ import org.flexlb.balance.scheduler.SchedulingTestConfig;
 import org.flexlb.balance.scheduler.decode.DecodeDecideInfo;
 import org.flexlb.balance.scheduler.decode.DecodeRequirement;
 import org.flexlb.config.EngineCancellationConfig;
-import org.flexlb.config.FlexlbConfig;
 import org.flexlb.config.PreemptionConfig;
-import org.flexlb.config.SchedulerConfig;
 import org.flexlb.config.VictimStage;
 import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.SchedulingMetadata;
@@ -242,17 +240,6 @@ class EvictionManagerTryAdmitTest {
     void fifoOrderingNeverEvicts() {
         BalanceContext ctx = ctx(50);
         when(ctx.getConfig()).thenReturn(org.flexlb.balance.scheduler.SchedulingTestConfig.newConfig()); // default=QUEUE+FIFO
-        assertFalse(tryAdmit(ctx, new CompletableFuture<>()));
-        assertZeroSideEffect();
-    }
-
-    @Test
-    @DisplayName("DIRECT scheduler mode declines without side effects")
-    void directSchedulerDeclines() {
-        BalanceContext ctx = ctx(50);
-        FlexlbConfig directConfig = org.flexlb.balance.scheduler.SchedulingTestConfig.newConfig();
-        directConfig.setScheduler(SchedulerConfig.direct());
-        when(ctx.getConfig()).thenReturn(directConfig);
         assertFalse(tryAdmit(ctx, new CompletableFuture<>()));
         assertZeroSideEffect();
     }

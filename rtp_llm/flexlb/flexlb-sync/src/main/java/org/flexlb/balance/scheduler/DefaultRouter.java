@@ -81,10 +81,6 @@ public class DefaultRouter {
                 : PlacementResult.success(selected);
     }
 
-    public PlacementResult<RouteAdmission, PlacementKey> select(BalanceContext context) {
-        return select(context, resolvePolicyGroup(context));
-    }
-
     public PlacementResult<RouteAdmission, PlacementKey> select(BalanceContext context, String policyGroup) {
         Response validationFailure = validateRequest(context);
         if (validationFailure != null) { return PlacementResult.rejected(validationFailure); }

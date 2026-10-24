@@ -127,6 +127,6 @@ public final class SchedulingTestConfig {
 
     private static SchedulerConfig activeQueueOrNew(FlexlbConfig config) {
         configureRequiredValues(config);
-        return config.isQueue() ? config.getScheduler() : new SchedulerConfig();
+        return config.getScheduler();
     }
 }

@@ -84,9 +84,11 @@ public final class V0ConfigDocumentParser implements ConfigDocumentParser {
     }
 
     private static void configureScheduling(ObjectNode v0Config, ObjectNode flexlbConfig) {
-        boolean queueingEnabled = v0Config.path("enableQueueing").asBoolean(false);
-        ObjectNode scheduler = flexlbConfig.putObject("scheduler");
-        scheduler.put("type", queueingEnabled ? "QUEUE" : "DIRECT");
+        if (!v0Config.path("enableQueueing").asBoolean(false)) {
+            throw new IllegalArgumentException(
+                    "V0 configuration requires enableQueueing=true; DIRECT scheduling is not supported");
+        }
+        flexlbConfig.putObject("scheduler").put("type", "QUEUE");
         flexlbConfig.putObject("dispatcher").put("type", "NON_BATCH");
     }
 

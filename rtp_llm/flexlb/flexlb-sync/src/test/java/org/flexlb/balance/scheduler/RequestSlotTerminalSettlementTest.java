@@ -42,8 +42,8 @@ class RequestSlotTerminalSettlementTest {
         var queue = mock(GlobalQueueCoordinator.class);
         var timeoutEvidence = java.util.Map.<String, Object>of("cause", "DECODE placement unavailable");
         when(queue.waitDiagnostics()).thenReturn(timeoutEvidence);
-        var slot = new RequestSlot(mock(RequestCompletionPublisher.class), context,
-                mock(ExpirationTimer.class), mock(RequestTerminalCleanup.class), () -> { }, true, queue);
+        var slot = new RequestSlot(mock(RequestCompletionPublisher.class), context, mock(ExpirationTimer.class),
+                mock(RequestTerminalCleanup.class), () -> {}, queue);
         var admission = slot.tryBeginAdmissionHandle();
         assertNotNull(admission);
         admission.recordDiagnostics(java.util.Map.of("cause", "earlier placement"));
@@ -200,8 +200,8 @@ class RequestSlotTerminalSettlementTest {
         var publisher = mock(RequestCompletionPublisher.class);
         var timer = mock(ExpirationTimer.class);
         var reporter = mock(org.flexlb.service.monitor.RequestSchedulerReporter.class);
-        RequestSlot slot = new RequestSlot(publisher, context, timer,
-                new RequestTerminalCleanup(timer, reporter), () -> { });
+        RequestSlot slot =
+                new RequestSlot(publisher, context, timer, new RequestTerminalCleanup(timer, reporter), () -> {}, null);
         when(publisher.tryReservePublication(any(), any())).thenAnswer(call ->
                 new RequestCompletionPublisher.PublicationPermit(publisher, slot, call.getArgument(1)));
         doAnswer(call -> { ((RequestCompletionPublisher.SelectedPublication) call.getArgument(0)).complete(); return null; })

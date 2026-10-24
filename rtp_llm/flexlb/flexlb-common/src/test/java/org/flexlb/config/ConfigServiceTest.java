@@ -172,7 +172,7 @@ class ConfigServiceTest {
     void retained_defaults_have_one_owner() {
         FlexlbConfig config = ConfigTestFixtures.parse("{}");
         assertEquals(3, config.getSchemaVersion());
-        assertTrue(config.isQueue());
+        assertEquals(SchedulerConfig.Type.QUEUE, config.getScheduler().getType());
         assertFalse(config.isPriorityOrdering());
         assertTrue(config.isFixedWindowDecision());
         assertEquals(3600000L, config.queueScheduler().getQueueTimeoutMs());

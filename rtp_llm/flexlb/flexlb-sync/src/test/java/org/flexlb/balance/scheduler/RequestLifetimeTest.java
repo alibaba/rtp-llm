@@ -523,7 +523,8 @@ class RequestLifetimeTest {
         FlexlbConfig config = SchedulingTestConfig.newConfig();
         SchedulingTestConfig.useNonBatchDispatcher(config);
         BalanceContext context = RequestLifecycleTestSupport.context(config, 101L);
-        RequestSlot slot = new RequestSlot(mock(RequestCompletionPublisher.class), context, mock(ExpirationTimer.class), mock(RequestTerminalCleanup.class), () -> { });
+        RequestSlot slot = new RequestSlot(mock(RequestCompletionPublisher.class), context, mock(ExpirationTimer.class),
+                mock(RequestTerminalCleanup.class), () -> {}, null);
         if (observeTimer) { slot = org.mockito.Mockito.spy(slot); }
         PrefillEndpoint prefill = mock(PrefillEndpoint.class);
         DecodeEndpoint decode = separateDecode ? mock(DecodeEndpoint.class) : null;

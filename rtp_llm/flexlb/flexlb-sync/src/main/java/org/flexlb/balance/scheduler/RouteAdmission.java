@@ -1,14 +1,9 @@
 package org.flexlb.balance.scheduler;
 
 import org.flexlb.balance.PlacementResult;
-import org.flexlb.balance.delivery.CapacityBoundary;
 import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
-import org.flexlb.balance.endpoint.PrefillState;
 import org.flexlb.balance.endpoint.WorkerEndpoint;
-import org.flexlb.balance.projection.WorkSnapshot;
-import org.flexlb.balance.scheduler.RequestSlot.AdmissionHandle;
-import org.flexlb.balance.scheduler.RequestSlot.DeliveryClaim;
 import org.flexlb.balance.scheduler.decode.DecodeDecideInfo;
 import org.flexlb.balance.scheduler.decode.DecodeRequirement;
 import org.flexlb.balance.scheduler.decode.DecodeSelection;
@@ -16,7 +11,6 @@ import org.flexlb.balance.strategy.SelectedRole;
 import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.ServerStatus;
-import org.flexlb.dao.loadbalance.StrategyErrorType;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.enums.PrefillQueueEnqueueResult;
 import org.flexlb.util.Logger;
@@ -24,7 +18,6 @@ import org.flexlb.util.Logger;
 import java.util.List;
 import java.util.Objects;
 import java.util.concurrent.CompletableFuture;
-import java.util.function.BooleanSupplier;
 
 /** Exact selected route and its provisional resources, shared by both scheduling modes. */
 public final class RouteAdmission implements AutoCloseable {
@@ -272,99 +265,8 @@ public final class RouteAdmission implements AutoCloseable {
                 decodeDecideInfo.reservation(), enqueuedAtMs, decodeDecideInfo);
     }
 
-    /** The caller has registered the same canonical request before selecting this route. */
-    record RouteDelivery(DeliveryClaim claim, WorkSnapshot precedingWork, long unstartedWorkMs) {
-    }
-
-    PlacementResult<RouteDelivery, PlacementKey> tryCommitDirectRoute(BalanceContext context,
-                                                                      RequestRegistry lifecycle) {
-        requireProvisional();
-        try (AdmissionHandle handle = lifecycle.claimAdmissionHandle(requestId, context.getFuture())) {
-            if (handle == null) { return PlacementResult.closed(); }
-            if (!reserveDecode()) {
-                return PlacementResult.blocked(decodePlacementKey());
-            }
-            ScheduledRequest item = createScheduledRequest(context, context.getFuture(), context.getEnqueueTime());
-            CapacityBoundary.Attempt<PrefillAdmissionResources.Member> attempt =
-                    PrefillAdmissionResources.prepareMember(item);
-            if (!attempt.accepted()) {
-                return switch (attempt.boundary().status()) {
-                    case UNAVAILABLE -> PlacementResult.blocked(decodePlacementKey());
-                    case OWNERSHIP_LOST -> PlacementResult.rejected(
-                            Response.error(StrategyErrorType.RESOURCE_EXHAUSTED));
-                    case FAILED -> throw new IllegalStateException("route admission failed", attempt.boundary().cause());
-                };
-            }
-            PrefillAdmissionResources.Member member = attempt.value();
-            try {
-                return commitImmediateRoute(lifecycle, item, member);
-            } finally {
-                Throwable cleanup = PrefillAdmissionResources.rollbackMember(member, null);
-                if (cleanup != null) { PrefillAdmissionResources.throwRollbackFailure(cleanup); }
-            }
-        }
-    }
-
-    private PlacementResult<RouteDelivery, PlacementKey> commitImmediateRoute(
-            RequestRegistry lifecycle, ScheduledRequest item,
-            PrefillAdmissionResources.Member member) {
-        var reservationAttempt = new PrefillReservationAttempt(item);
-        try (PrefillEndpoint.RouteCommitAdmission routeCommit = prefillEndpoint().tryBeginRouteCommitAdmission()) {
-            if (routeCommit == null) {
-                return PlacementResult.rejected(Response.error(StrategyErrorType.DISPATCH_FAILED));
-            }
-            try (var admission = PrefillAdmissionResources.createCommittedOwner(List.of(member))) {
-                PlacementResult.Status result = lifecycle.commitRoute(item, reservationAttempt);
-                if (result != PlacementResult.Status.SUCCESS) {
-                    return result == PlacementResult.Status.CLOSED ? PlacementResult.closed()
-                            : PlacementResult.rejected(Response.error(reservationAttempt.failure()));
-                }
-                var handoff = routeCommit.commit(List.of(item), List.of(reservationAttempt.reservation()));
-                admission.bindPrefillHandoff(handoff);
-                var claim = lifecycle.claimRouteDelivery(item, admission);
-                if (claim == null) { return PlacementResult.closed(); }
-                markCommitted();
-                return PlacementResult.success(new RouteDelivery(claim, handoff.precedingWork(), selection.prefillWorkMs()));
-            }
-        } finally {
-            if (reservationAttempt.reservation() != null) { reservationAttempt.reservation().close(); }
-        }
-    }
-
     private PlacementKey decodePlacementKey() {
         return PlacementKey.exact(decodeStatus().getRole(), decodeStatus().getGroup(), decodeEndpoint().ipPort());
-    }
-
-    /** Holds acquisition output without mixing a failed publication with capacity pressure. */
-    private final class PrefillReservationAttempt implements BooleanSupplier {
-        private final ScheduledRequest item;
-        private PrefillState.ReservationResult<PrefillState.RouteReservation> result;
-
-        private PrefillReservationAttempt(ScheduledRequest item) {
-            this.item = item;
-        }
-
-        @Override
-        public boolean getAsBoolean() {
-            result = prefillEndpoint().reserveUnqueuedRoute(prefillPin(), item,
-                    selection.prefillWorkMs());
-            return result.status() == PrefillState.CapacityStatus.ACQUIRED;
-        }
-
-        private PrefillState.RouteReservation reservation() {
-            return result == null ? null : result.reservation();
-        }
-
-        private StrategyErrorType failure() {
-            if (result == null) { return StrategyErrorType.REQUEST_CANCELLED; }
-            return switch (result.status()) {
-                case CAPACITY_FULL -> StrategyErrorType.RESOURCE_EXHAUSTED;
-                case ENDPOINT_RETIRED -> StrategyErrorType.DISPATCH_FAILED;
-                case REQUEST_ALREADY_RESERVED, REQUEST_NOT_ACTIVE, BATCH_ID_ALREADY_RESERVED ->
-                        StrategyErrorType.RESOURCE_EXHAUSTED;
-                case ACQUIRED -> throw new IllegalStateException("successful admission cannot be rejected");
-            };
-        }
     }
 
     private void markCommitted() {

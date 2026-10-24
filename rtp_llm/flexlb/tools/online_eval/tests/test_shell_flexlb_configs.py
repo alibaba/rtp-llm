@@ -57,13 +57,12 @@ class ShellFlexlbConfigTest(unittest.TestCase):
                 env = dict(master["zone_process_setting"]["process_info"]["envs"])
                 self.assert_v3(json.loads(env["FLEXLB_CONFIG"]))
 
-    def test_smoke_matrix_preserves_its_three_mode_contracts(self):
+    def test_smoke_matrix_preserves_its_two_mode_contracts(self):
         script = (SCRIPT_DIR / "run_matrix_smoke.sh").read_text()
         documents = re.findall(r"FLEXLB_CONFIG='(\{.*?\})'", script, re.S)
-        self.assertEqual(3, len(documents))
+        self.assertEqual(2, len(documents))
         expected = (
             ("QUEUE", "PRIORITY", "FIXED_WINDOW", "BATCH", 4),
-            ("DIRECT", None, None, "NON_BATCH", 2),
             ("QUEUE", "FIFO", "SINGLE", "NON_BATCH", 2),
         )
         for raw, (scheduler, ordering, decision, dispatcher, concurrency) in zip(documents, expected):
@@ -76,8 +75,6 @@ class ShellFlexlbConfigTest(unittest.TestCase):
                 self.assertEqual({"type": dispatcher, "maxInflightPerPrefillWorker": concurrency},
                                  config["dispatcher"])
                 self.assertEqual(132, config["router"]["roles"]["decode"]["availability"]["maxEngineRequests"])
-                if scheduler == "DIRECT":
-                    self.assertNotIn("queueTimeoutMs", config["scheduler"])
 
     def test_active_smoke_and_recovery_scripts_use_v3_defaults(self):
         for filename in ("run_cancel_smoke.sh", "run_batch_smoke_only.sh",

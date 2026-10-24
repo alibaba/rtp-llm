@@ -17,7 +17,6 @@ import org.flexlb.cache.match.CacheAwareService;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.config.ModelMetaConfig;
-import org.flexlb.config.SchedulerConfig;
 import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.ServerStatus;
 import org.flexlb.dao.master.TaskInfo;
@@ -45,11 +44,9 @@ import static org.mockito.Mockito.when;
 
 class PdfusionSchedulingTest {
     @ParameterizedTest
-    @CsvSource({
-            "false,false,false,false", "false,false,false,true", "false,false,true,false", "false,false,true,true",
-            "false,true,false,false", "false,true,false,true", "false,true,true,false", "false,true,true,true",
-            "true,false,false,false"})
-    void fusionNeedsOnlyItsOwnRole(boolean direct, boolean priority, boolean window, boolean batch) throws Exception {
+    @CsvSource({"false,false,false", "false,false,true", "false,true,false", "false,true,true", "true,false,false",
+            "true,false,true", "true,true,false", "true,true,true"})
+    void fusionNeedsOnlyItsOwnRole(boolean priority, boolean window, boolean batch) throws Exception {
         FlexlbConfig config = SchedulingTestConfig.batchConfig();
         SchedulingTestConfig.useNonBatchDispatcher(config);
         if (priority) {
@@ -65,9 +62,6 @@ class PdfusionSchedulingTest {
         }
         if (batch) {
             SchedulingTestConfig.useBatchDispatcher(config);
-        }
-        if (direct) {
-            config.setScheduler(SchedulerConfig.direct());
         }
         ConfigService service = mock(ConfigService.class);
         when(service.loadBalanceConfig()).thenReturn(config);
@@ -117,10 +111,8 @@ class PdfusionSchedulingTest {
                 new DecodeSelector(directory), new RandomStrategy(directory), mock(EncoderStrategy.class), service, model);
         RequestScheduler scheduler = new RequestScheduler(service, router, endpoints, reporter,
                 mock(EvictionManager.class), lifecycle, availability, queueCapacity);
-        SchedulerRuntime runtime = direct
-                ? new SchedulerRuntime(lifecycle, endpoints, reporter, requestReporter, service, queueCapacity, new ModelMetaConfig())
-                : new SchedulerRuntime(lifecycle, endpoints, reporter, requestReporter,
-                        scheduler, service, queueCapacity, new ModelMetaConfig());
+        SchedulerRuntime runtime = new SchedulerRuntime(lifecycle, endpoints, reporter, requestReporter, scheduler,
+                service, queueCapacity, new ModelMetaConfig());
         try {
             long requestId = 920001L;
             var context = RequestLifecycleTestSupport.context(config, requestId);
@@ -137,8 +129,7 @@ class PdfusionSchedulingTest {
             assertTrue(committedWork.containsRequest(Long.toString(requestId)));
             TaskInfo finished = new TaskInfo();
             finished.setRequestId(Long.toString(requestId));
-            finished.setBatchId(direct ? 0L : lifecycle.getRequestState(
-                    Long.toString(requestId), 0L).batchId());
+            finished.setBatchId(lifecycle.getRequestState(Long.toString(requestId), 0L).batchId());
             finished.setPhase(TaskPhase.RUNNING);
             finished.setErrorCode(0L);
             status.setStatusVersion(2L);
@@ -159,12 +150,8 @@ class PdfusionSchedulingTest {
                     "published snapshots stay immutable");
             assertTrue(!endpoint.captureRouteProjectionInputs().work()
                     .containsRequest(Long.toString(requestId)));
-            if (!direct) {
-                assertEquals(RequestState.Phase.COMPLETED,
-                        lifecycle.getRequestState(
-                                Long.toString(requestId), 0L).state());
-                assertEquals(0, lifecycle.trackedRequestCount());
-            }
+            assertEquals(RequestState.Phase.COMPLETED, lifecycle.getRequestState(Long.toString(requestId), 0L).state());
+            assertEquals(0, lifecycle.trackedRequestCount());
         } finally {
             runtime.shutdown();
         }

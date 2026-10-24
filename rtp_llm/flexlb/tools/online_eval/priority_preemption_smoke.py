@@ -536,7 +536,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--flexlb-http-port", type=int, default=18080)
     parser.add_argument("--request-id-base", type=int, default=20000)
     parser.add_argument(
-        "--schedule-mode", choices=["auto", "batch", "direct", "queue"], default="batch"
+        "--schedule-mode", choices=["auto", "batch", "queue"], default="batch"
     )
     parser.add_argument(
         "--prefill-request-cap",

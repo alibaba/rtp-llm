@@ -23,7 +23,7 @@ public final class QueueCapacity {
     private final Set<CompletableFuture<?>> queuedRequestFutures = ConcurrentHashMap.newKeySet();
 
     public static boolean isEngineSubQueueMode(FlexlbConfig config) {
-        return config.isQueue() && !config.isBatchDispatch();
+        return !config.isBatchDispatch();
     }
 
     public long globalQueueAndEngineSubQueueCount() {

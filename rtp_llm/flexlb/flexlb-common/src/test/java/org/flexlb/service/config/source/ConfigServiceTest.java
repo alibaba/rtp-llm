@@ -50,7 +50,6 @@ class ConfigServiceTest {
                 """
                         {
                           "schemaVersion":3,"requestLifecycle":{"request":{"timeoutMs":60000}},
-                          "scheduler":{"type":"DIRECT"},
                           "dispatcher":{"type":"NON_BATCH"},
                           "observability":{"logging":{"level":"warn"}}
                         }
@@ -58,24 +57,21 @@ class ConfigServiceTest {
 
         ConfigService service = createService(List.of(nacosSource, environmentSource));
 
-        assertThat(service.loadBalanceConfig().isDirect()).isTrue();
+        assertThat(service.loadBalanceConfig().isBatchDispatch()).isFalse();
         assertThat(service.loadBalanceConfig().getObservability()
                 .getLogging().getLevel()).isEqualTo(LogLevel.WARN);
     }
 
     @Test
     void doesNotLoadUnregisteredConfigSources() {
-        FakeConfigSource unregisteredSource = new FakeConfigSource(
-                "unregistered",
-                200,
-                """
-                        {"schemaVersion":3,"requestLifecycle":{"request":{"timeoutMs":60000}},"scheduler":{"type":"DIRECT"},"dispatcher":{"type":"NON_BATCH"}}
-                        """);
+        FakeConfigSource unregisteredSource = new FakeConfigSource("unregistered", 200, """
+                {"schemaVersion":3,"requestLifecycle":{"request":{"timeoutMs":60000}},"dispatcher":{"type":"NON_BATCH"}}
+                """);
 
         ConfigService service = createService(List.of(environmentSource(Map.of())));
 
         assertThat(unregisteredSource.loaded).isFalse();
-        assertThat(service.loadBalanceConfig().isQueue()).isTrue();
+        assertThat(service.loadBalanceConfig().isBatchDispatch()).isTrue();
     }
 
     @Test
@@ -101,13 +97,8 @@ class ConfigServiceTest {
     }
 
     @Test
-    void treatsEmptyV2ObjectAsCompatibilityDefaults() {
-        FakeConfigSource source = new FakeConfigSource("Nacos", 200, "{}");
-
-        ConfigService service = createService(List.of(environmentSource(Map.of()), source));
-
-        assertThat(service.loadBalanceConfig().isDirect()).isTrue();
-        assertThat(service.loadBalanceConfig().isBatchDispatch()).isFalse();
+    void rejectsEmptyV0ObjectWithoutQueueing() {
+        assertInvalidInitialContent("{}", "V0 configuration requires enableQueueing=true");
     }
 
     @Test
@@ -393,11 +384,10 @@ class ConfigServiceTest {
         ConfigService service = createService(List.of(environmentSource(Map.of()), source));
 
         source.emit("""
-                {"schemaVersion":3,"scheduler":{"type":"DIRECT"},
+                {"schemaVersion":3,"scheduler":{"type":"QUEUE"},
                  "dispatcher":{"type":"NON_BATCH","maxInflightPerPrefillWorker":9}}
                 """);
 
-        assertThat(service.loadBalanceConfig().isQueue()).isTrue();
         assertThat(service.loadBalanceConfig().isBatchDispatch()).isTrue();
         assertThat(service.loadBalanceConfig().getDispatcher().getMaxInflightPerPrefillWorker()).isEqualTo(9);
         assertThat(service.loadBalanceConfig().getDispatcher().getFetchAttachTimeoutMs()).isEqualTo(1500);

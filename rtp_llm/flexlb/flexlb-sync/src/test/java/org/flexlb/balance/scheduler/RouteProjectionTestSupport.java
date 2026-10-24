@@ -76,15 +76,13 @@ final class RouteProjectionTestSupport {
                 collectionWindowMs);
     }
 
-    static QueueSnapshot queue(
-            boolean priority,
-            GroupPlanner.Constraints constraints,
-            List<GroupPlanner.Item> activeItems) {
-        return queue(true, priority, constraints, activeItems, null);
+    static QueueSnapshot queue(boolean priority,
+                               GroupPlanner.Constraints constraints,
+                               List<GroupPlanner.Item> activeItems) {
+        return queue(priority, constraints, activeItems, null);
     }
 
     static QueueSnapshot queue(
-            boolean queueScheduling,
             boolean priority,
             GroupPlanner.Constraints constraints,
             List<GroupPlanner.Item> activeItems,
@@ -94,7 +92,6 @@ final class RouteProjectionTestSupport {
         ordered.sort(ordering);
         return new QueueSnapshot(
                 NOW_MS,
-                queueScheduling,
                 ordering,
                 constraints,
                 ordered,

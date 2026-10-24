@@ -19,14 +19,14 @@ public final class FlexlbConfigValidator {
         validateDocumentShape(document, document);
     }
 
-    public static void validateDocumentShape(
-            JsonNode document, JsonNode effectiveDocument) {
+    public static void validateDocumentShape(JsonNode document, JsonNode effectiveDocument) {
         JsonNode scheduler = document.path("scheduler");
         if (scheduler.isObject()) {
             String type = effectiveDocument.path("scheduler").path("type").asText("QUEUE");
             if ("DIRECT".equals(type)) {
-                rejectFieldsExcept(scheduler, "scheduler", "type");
-            } else if ("QUEUE".equals(type)) {
+                throw new ConfigValidationException("scheduler.type", "DIRECT is not supported; use QUEUE");
+            }
+            if ("QUEUE".equals(type)) {
                 validateOrderingShape(scheduler.path("ordering"),
                         effectiveDocument.path("scheduler").path("ordering"));
                 validateDecisionShape(scheduler.path("decision"),
@@ -139,10 +139,8 @@ public final class FlexlbConfigValidator {
         require(config.getConsistency() != null, "consistency", "is required");
         positive(config.getFallbackBatchTokenCapacity(), "fallbackBatchTokenCapacity");
 
-        if (!config.isDirect()) {
-            validateQueue(config.queueScheduler());
-        }
-        config.getDispatcher().validateFor(config.getScheduler());
+        validateQueue(config.queueScheduler());
+        config.getDispatcher().validate();
         validateRequestLifecycle(config.getRequestLifecycle());
         validateRouting(config.getRouter());
         validateWorkerRegistry(config.getWorkerRegistry());

@@ -242,7 +242,6 @@ public final class WorkerBatcher {
     private final Supplier<FlexlbConfig> configSupplier;
     private final DecisionPolicyConfig fixedWindowDecision;
     private final boolean singleDecision;
-    private final boolean queueScheduling;
     private final DeliveryStrategy deliveryStrategy;
     private final PrefillActiveIndex activeIndex;
     private final Comparator<GroupPlanner.Item> projectionOrder;
@@ -280,7 +279,9 @@ public final class WorkerBatcher {
      * release cannot race between the cap re-check and await.
      */
     private final Condition stateChanged = queueLock.newCondition();
-    /** QUEUE-only serialized runtime; DIRECT owns no queue execution thread. */
+    /**
+     * Serialized queue runtime for this worker.
+     */
     private final Thread workerThread;
     /** Constructed before this endpoint generation can begin retirement. */
     private final CancellationException normalStopFailure;
@@ -322,14 +323,10 @@ public final class WorkerBatcher {
         this.prefillEndpoint = prefillEp;
         this.queueCapacity = queueCapacity;
         this.config = config;
-        this.queueScheduling = config.isQueue();
         this.singleDecision = config.isSingleDecision();
-        DecisionPolicyConfig resolvedDecision = queueScheduling
-                ? config.decisionPolicy() : null;
-        this.fixedWindowDecision = resolvedDecision != null
-                && resolvedDecision.getType()
-                == DecisionPolicyConfig.Type.FIXED_WINDOW
-                ? resolvedDecision : null;
+        DecisionPolicyConfig resolvedDecision = config.decisionPolicy();
+        this.fixedWindowDecision =
+                resolvedDecision.getType() == DecisionPolicyConfig.Type.FIXED_WINDOW ? resolvedDecision : null;
         boolean priorityOrdering = config.isPriorityOrdering();
         this.endpointEvents = endpointEvents;
         this.deliveryStrategy = deliveryStrategy;
@@ -338,26 +335,20 @@ public final class WorkerBatcher {
         this.projectionOrder =
                 priorityOrdering
                         ? PRIORITY_PROJECTION_ORDER : FIFO_PROJECTION_ORDER;
-        this.activeIndex = queueScheduling
-                ? PrefillActiveIndex.ordered(INITIAL_QUEUE_ALLOCATION, queueOrder)
-                : PrefillActiveIndex.disabled();
+        this.activeIndex = PrefillActiveIndex.ordered(INITIAL_QUEUE_ALLOCATION, queueOrder);
         this.prefillState = new PrefillState(queueLock, activeIndex, capacityAvailableSignal);
         this.normalStopFailure = new CancellationException(
                 "FlexLB worker scheduling queue stopped: " + key);
         this.stopAcknowledgementFailure = new IllegalStateException(
                 "FlexLB worker stop callback lost its exact retained owner: "
                         + key);
-        // Waiting QUEUE runtimes use virtual threads so a large endpoint fleet
-        // does not consume one OS thread per worker. DIRECT never constructs a
-        // scheduler thread.
-        this.workerThread = queueScheduling
-                ? Thread.ofVirtual()
-                        .name("flexlb-batcher-" + key)
-                        .uncaughtExceptionHandler((thread, failure) -> Logger.error(
-                                "WorkerBatcher[{}] thread died unexpectedly",
-                                key, failure))
-                        .unstarted(this::runLoop)
-                : null;
+        // Waiting queue runtimes use virtual threads so a large endpoint fleet
+        // does not consume one OS thread per worker.
+        this.workerThread = Thread.ofVirtual()
+                .name("flexlb-batcher-" + key)
+                .uncaughtExceptionHandler(
+                        (thread, failure) -> Logger.error("WorkerBatcher[{}] thread died unexpectedly", key, failure))
+                .unstarted(this::runLoop);
     }
 
     public synchronized void start() {
@@ -367,12 +358,6 @@ public final class WorkerBatcher {
                             + runtimeState);
         }
         runtimeState = RuntimeState.STARTING;
-        if (!queueScheduling) {
-            // DIRECT uses only the shared Prefill ownership/projection ledger.
-            // It has no admission queue and therefore owns no scheduler thread.
-            runtimeState = RuntimeState.RUNNING;
-            return;
-        }
         try {
             workerThread.start();
             runtimeState = RuntimeState.RUNNING;
@@ -388,10 +373,6 @@ public final class WorkerBatcher {
     }
 
     public PrefillQueueEnqueueResult offerWithResult(ScheduledRequest exactItem) {
-        if (!queueScheduling) {
-            throw new IllegalStateException(
-                    "DIRECT Prefill generation cannot accept queued work");
-        }
         ScheduledRequest item = exactItem;
         requireExactEndpoint(item, "incoming item");
         if (runtimeState != RuntimeState.RUNNING || stopped) {
@@ -643,7 +624,7 @@ public final class WorkerBatcher {
     }
 
     public Throwable stopAndAwait() {
-        if (workerThread != null && Thread.currentThread() == workerThread) {
+        if (Thread.currentThread() == workerThread) {
             throw new IllegalStateException(
                     "Prefill runtime cannot await its own worker thread");
         }
@@ -651,14 +632,12 @@ public final class WorkerBatcher {
                 normalStopFailure,
                 true);
         boolean interrupted = false;
-        if (workerThread != null) {
-            while (true) {
-                try {
-                    workerThread.join();
-                    break;
-                } catch (InterruptedException interruption) {
-                    interrupted = true;
-                }
+        while (true) {
+            try {
+                workerThread.join();
+                break;
+            } catch (InterruptedException interruption) {
+                interrupted = true;
             }
         }
         synchronized (this) {
@@ -692,9 +671,7 @@ public final class WorkerBatcher {
         }
     }
 
-    private Throwable stopAndDrain(
-            Throwable terminalFailure,
-            boolean interruptWorker) {
+    private Throwable stopAndDrain(Throwable terminalFailure, boolean interruptWorker) {
         boolean interrupted = false;
         synchronized (this) {
             stopped = true;
@@ -751,8 +728,7 @@ public final class WorkerBatcher {
                 }
             }
 
-            if (interruptWorker && workerThread != null
-                    && Thread.currentThread() != workerThread) {
+            if (interruptWorker && Thread.currentThread() != workerThread) {
                 try {
                     workerThread.interrupt();
                 } catch (Throwable interruptFailure) {
@@ -1150,9 +1126,8 @@ public final class WorkerBatcher {
             }
             synchronized (this) {
                 if (materialized == null) {
-                    var queueSnapshot = new org.flexlb.balance.projection.QueueSnapshot(
-                            ownership.capturedAtMs(), queueScheduling, projectionOrder,
-                            constraints, ownership.active().projectedItems(), admissionBlock);
+                    var queueSnapshot = new org.flexlb.balance.projection.QueueSnapshot(ownership.capturedAtMs(),
+                            projectionOrder, constraints, ownership.active().projectedItems(), admissionBlock);
                     materialized = new RouteProjection.Inputs(
                             queueSnapshot, ownership.work().materialize(), version.ownership());
                     // The cached projection must not retain completed request contexts.

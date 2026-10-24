@@ -1,7 +1,6 @@
 package org.flexlb.dao.pv;
 
 import org.flexlb.config.FlexlbConfig;
-import org.flexlb.config.SchedulerConfig;
 import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.SchedulingMetadata;
 import org.flexlb.dao.loadbalance.Request;
@@ -130,10 +129,9 @@ class PvLogDataTest {
 
     @Test
     void omitsFormattedTimesWhenTimestampsAreAbsentOrUnlimited() throws Exception {
-        FlexlbConfig config = new FlexlbConfig();
-        config.setScheduler(SchedulerConfig.direct());
-        BalanceContext context = new BalanceContext(config);
+        BalanceContext context = new BalanceContext(new FlexlbConfig());
         context.setStartTime(0);
+        context.setSchedulingMetadata(SchedulingMetadata.explicit(50, Long.MAX_VALUE));
         context.setRequest(new Request());
         context.setDecisionGroup(new DecisionGroup("group", "SINGLE", "NON_BATCH", "worker",
                 1, "ready", 0, 0));

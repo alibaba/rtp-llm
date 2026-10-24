@@ -12,7 +12,7 @@ import java.util.Objects;
  * One exact endpoint-generation selection.
  *
  * <p>The selection owns its generation pin until the router moves it into a
- * DIRECT registration or a queue-route admission.  It carries only immutable
+ * queue-route admission.  It carries only immutable
  * routing output besides that pin; {@link ServerStatus} remains response
  * metadata and is never an ownership token.</p>
  */

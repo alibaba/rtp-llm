@@ -11,7 +11,6 @@ import org.flexlb.balance.projection.WorkSnapshot;
 import org.flexlb.balance.scheduler.RequestSlot.DeliveryClaim;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.ModelMetaConfig;
-import org.flexlb.config.SchedulerConfig;
 import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.ServerStatus;
 import org.flexlb.dao.master.WorkerStatus;
@@ -45,7 +44,6 @@ class RequestConfirmationTimeoutTest {
     void unconfirmedRequestReleasesPrefillAndDecodeCapacityAtTtl(ConfirmationWait waiting)
             throws Exception {
         var config = SchedulingTestConfig.newConfig();
-        config.setScheduler(SchedulerConfig.direct());
         SchedulingTestConfig.useNonBatchDispatcher(config);
         config.getDispatcher().setMaxInflightPerPrefillWorker(1);
         config.getRequestLifecycle().getRequest().setTimeoutMs(TIMEOUT_MS);

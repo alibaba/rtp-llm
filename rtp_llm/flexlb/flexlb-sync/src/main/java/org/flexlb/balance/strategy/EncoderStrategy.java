@@ -32,9 +32,7 @@ public final class EncoderStrategy {
      */
     public SelectedRole select(BalanceContext context, String group) {
         context.beginRoutingAttempt(RoleType.ENCODER);
-        int maxInflightPerWorker = context.getConfig().isQueue()
-                ? context.getConfig().getDispatcher().getMaxInflightPerEncoderWorker()
-                : Integer.MAX_VALUE;
+        int maxInflightPerWorker = context.getConfig().getDispatcher().getMaxInflightPerEncoderWorker();
         WorkerEndpoint.GenerationPin winner = null;
         WorkerStatus.TopologySnapshot winnerTopology = null;
         WorkerStatus.EngineObservation winnerEngine = null;

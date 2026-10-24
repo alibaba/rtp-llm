@@ -9,7 +9,6 @@ import org.flexlb.balance.endpoint.WorkerEndpoint;
 import org.flexlb.balance.projection.WorkSnapshot;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.ModelMetaConfig;
-import org.flexlb.config.SchedulerConfig;
 import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.master.TaskInfo;
 import org.flexlb.dao.master.WorkerStatus;
@@ -39,7 +38,6 @@ class PrefillCompletionProjectionTest {
     void successfulPrefillCompletionReleasesTokensAndProjectsHandoffEvidence(boolean decodeAlreadyAccepted)
             throws Exception {
         var config = SchedulingTestConfig.newConfig();
-        config.setScheduler(SchedulerConfig.direct());
         SchedulingTestConfig.useNonBatchDispatcher(config);
         ConfigService service = mock(ConfigService.class);
         when(service.loadBalanceConfig()).thenReturn(config);

@@ -22,7 +22,6 @@ class EnvironmentConfigSourceTest {
                 """
                         {
                           "schemaVersion":3,"requestLifecycle":{"request":{"timeoutMs":60000}},
-                          "scheduler":{"type":"DIRECT"},
                           "dispatcher":{"type":"NON_BATCH"},
                           "observability":{"logging":{
                             "level":"debug","stdoutEnabled":true
@@ -46,7 +45,7 @@ class EnvironmentConfigSourceTest {
         });
 
         FlexlbConfig config = configService.loadBalanceConfig();
-        assertThat(config.isDirect()).isTrue();
+        assertThat(config.isBatchDispatch()).isFalse();
         assertThat(config.getObservability().getLogging().getLevel())
                 .isEqualTo(LogLevel.DEBUG);
         assertThat(config.getObservability().getLogging().isStdoutEnabled()).isTrue();

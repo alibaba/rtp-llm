@@ -99,8 +99,6 @@ class FlexLBSmokeBase:
         config = json.loads(document)
         if config.get("dispatcher", {}).get("type") == "BATCH":
             return "batch"
-        if config.get("scheduler", {}).get("type") == "DIRECT":
-            return "direct"
         return "queue"
 
     def _master_target(self) -> str:

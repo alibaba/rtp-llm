@@ -372,15 +372,10 @@ public final class RouteProjection {
     }
 
     /** Apply one observed worker admission wait without inventing a release duration. */
-    private static CandidateView applyAdmissionPolicy(
-            QueueSnapshot queue,
-            CandidateView candidate) {
+    private static CandidateView applyAdmissionPolicy(QueueSnapshot queue, CandidateView candidate) {
         QueueSnapshot.AdmissionBlock observation = queue.admissionBlock();
-        if (!queue.queueScheduling()
-                || observation == null
-                || observation.semantics() == null
-                || (candidate.state() != Candidate.State.MODELED
-                        && !candidate.engineWorkUnmodeled())) {
+        if (observation == null || observation.semantics() == null
+                || (candidate.state() != Candidate.State.MODELED && !candidate.engineWorkUnmodeled())) {
             return candidate;
         }
         if (candidate.engineWorkUnmodeled()) {

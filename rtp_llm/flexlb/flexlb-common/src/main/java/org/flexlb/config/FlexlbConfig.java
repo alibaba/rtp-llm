@@ -34,20 +34,8 @@ public final class FlexlbConfig {
     private final InternalRuntimeSettings internalRuntime = new InternalRuntimeSettings();
 
     @JsonIgnore
-    public boolean isDirect() {
-        return scheduler.getType() == SchedulerConfig.Type.DIRECT;
-    }
-
-    @JsonIgnore
-    public boolean isQueue() {
-        return scheduler.getType() == SchedulerConfig.Type.QUEUE;
-    }
-
-    @JsonIgnore
     public boolean isPriorityOrdering() {
-        return isQueue()
-                && scheduler.getOrdering().getType()
-                == QueueOrderingConfig.Type.PRIORITY;
+        return scheduler.getOrdering().getType() == QueueOrderingConfig.Type.PRIORITY;
     }
 
     @JsonIgnore
@@ -87,14 +75,12 @@ public final class FlexlbConfig {
 
     @JsonIgnore
     public boolean isSingleDecision() {
-        return isQueue() && queueScheduler().getDecision().getType()
-                == DecisionPolicyConfig.Type.SINGLE;
+        return queueScheduler().getDecision().getType() == DecisionPolicyConfig.Type.SINGLE;
     }
 
     @JsonIgnore
     public boolean isFixedWindowDecision() {
-        return isQueue() && queueScheduler().getDecision().getType()
-                == DecisionPolicyConfig.Type.FIXED_WINDOW;
+        return queueScheduler().getDecision().getType() == DecisionPolicyConfig.Type.FIXED_WINDOW;
     }
 
     @JsonIgnore
@@ -109,10 +95,7 @@ public final class FlexlbConfig {
 
     @JsonIgnore
     public SchedulerConfig queueScheduler() {
-        if (isQueue()) {
-            return scheduler;
-        }
-        throw new IllegalStateException("queue scheduler configuration is not active");
+        return scheduler;
     }
 
     @JsonIgnore

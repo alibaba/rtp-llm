@@ -4,8 +4,8 @@ set -euo pipefail
 # ===========================================================================
 # run_matrix_smoke.sh — Matrix orchestration for FlexLB smoke tests.
 #
-# Runs three test suites (cancel, scheduling, anomaly) across three
-# path/algorithm configurations (batch+fixed_window, direct, queue)
+# Runs three test suites (cancel, scheduling, anomaly) across two
+# path/algorithm configurations (batch+fixed_window, queue)
 # against a single mock engine cluster (2P + 4D).
 #
 # Flow:
@@ -214,11 +214,6 @@ set_group_config() {
       FLEXLB_CONFIG='{"schemaVersion":3,"scheduler":{"type":"QUEUE","ordering":{"type":"PRIORITY"},"decision":{"type":"FIXED_WINDOW","maxRequests":32,"maxCollectionWaitMs":10,"maxPredictedExecutionMs":550}},"dispatcher":{"type":"BATCH","maxInflightPerPrefillWorker":4},"router":{"roles":{"prefill":{"executionTimeEstimator":{"type":"FORMULA"}},"decode":{"availability":{"maxKvUsagePercent":90,"maxEngineRequests":132}}}},"requestLifecycle":{"request":{"timeoutMs":300000},"decision":{"lifetime":2.0}}}'
       TEST_RID_BASES=(10000 20000 30000)
       ;;
-    direct)
-      SCHEDULING_PROFILE="direct-non-batch"
-      FLEXLB_CONFIG='{"schemaVersion":3,"scheduler":{"type":"DIRECT"},"dispatcher":{"type":"NON_BATCH","maxInflightPerPrefillWorker":2},"router":{"roles":{"prefill":{"executionTimeEstimator":{"type":"FORMULA"}},"decode":{"availability":{"maxKvUsagePercent":90,"maxEngineRequests":132}}}},"requestLifecycle":{"request":{"timeoutMs":300000},"decision":{"lifetime":2.0}}}'
-      TEST_RID_BASES=(40000 50000 60000)
-      ;;
     queue)
       SCHEDULING_PROFILE="queue-fifo-non-batch"
       FLEXLB_CONFIG='{"schemaVersion":3,"scheduler":{"type":"QUEUE","ordering":{"type":"FIFO"},"decision":{"type":"SINGLE"}},"dispatcher":{"type":"NON_BATCH","maxInflightPerPrefillWorker":2},"router":{"roles":{"prefill":{"executionTimeEstimator":{"type":"FORMULA"}},"decode":{"availability":{"maxKvUsagePercent":90,"maxEngineRequests":132}}}},"requestLifecycle":{"request":{"timeoutMs":300000},"decision":{"lifetime":2.0}}}'
@@ -290,9 +285,9 @@ run_test_suite() {
   return "${exit_code}"
 }
 
-# -- Main loop: 3 groups x 3 test suites ------------------------------------
+# -- Main loop: 2 groups x 3 test suites ------------------------------------
 
-GROUP_NAMES=("batch" "direct" "queue")
+GROUP_NAMES=("batch" "queue")
 TEST_NAMES=("cancel_smoke" "scheduling_smoke" "anomaly_smoke")
 TEST_SCRIPTS=("cancel_smoke.py" "scheduling_smoke.py" "anomaly_smoke.py")
 TOTAL_PASS=0

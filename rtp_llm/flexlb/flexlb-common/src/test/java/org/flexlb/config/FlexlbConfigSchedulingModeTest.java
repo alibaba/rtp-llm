@@ -3,7 +3,6 @@ package org.flexlb.config;
 import org.junit.jupiter.api.Test;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -11,21 +10,16 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 class FlexlbConfigSchedulingModeTest {
 
     @Test
-    void direct_is_explicit_and_only_supports_non_batch_delivery() {
-        FlexlbConfig config = ConfigTestFixtures.parse("""
+    void direct_scheduler_type_is_rejected() {
+        var error = assertThrows(ConfigValidationException.class, () -> ConfigTestFixtures.parse("""
                 {
                   "scheduler":{"type":"DIRECT"},
                   "dispatcher":{"type":"NON_BATCH"}
                 }
-                """);
+                """));
 
-        assertTrue(config.isDirect());
-        assertFalse(config.isQueue());
-        assertFalse(config.isPriorityOrdering());
-        assertFalse(config.isSingleDecision());
-        assertFalse(config.isFixedWindowDecision());
-        assertEquals(DispatcherConfig.Type.NON_BATCH,
-                config.getDispatcher().getType());
+        assertTrue(error.getMessage().contains("scheduler.type"), error.getMessage());
+        assertTrue(error.getMessage().contains("DIRECT is not supported"), error.getMessage());
     }
 
     @Test
@@ -155,7 +149,7 @@ class FlexlbConfigSchedulingModeTest {
     }
 
     @Test
-    void scan_budget_rejects_invalid_values_and_direct_configuration() {
+    void scan_budget_rejects_invalid_values() {
         for (String value : new String[]{"0", "0.99", "-2", "1e309", "\"2.0\"", "true", "null", "[]", "{}"}) {
             var error = assertThrows(ConfigValidationException.class, () -> ConfigTestFixtures.parse("""
                     {"scheduler":{"type":"QUEUE","scanBudgetMultiplier":%s}}
@@ -167,15 +161,10 @@ class FlexlbConfigSchedulingModeTest {
             config.queueScheduler().setScanBudgetMultiplier(value);
             assertThrows(ConfigValidationException.class, () -> FlexlbConfigValidator.validate(config));
         }
-        var error = assertThrows(ConfigValidationException.class, () -> ConfigTestFixtures.parse("""
-                {"scheduler":{"type":"DIRECT","scanBudgetMultiplier":2.0},
-                 "dispatcher":{"type":"NON_BATCH"}}
-                """));
-        assertTrue(error.getMessage().contains("scheduler.scanBudgetMultiplier"));
     }
 
     @Test
-    void queue_capacity_is_positive_and_only_valid_for_queue_scheduling() {
+    void queue_capacity_is_positive() {
         assertEquals(100_000, ConfigTestFixtures.parse("{}").queueScheduler().getMaxQueuedRequests());
         assertEquals(2, ConfigTestFixtures.parse("""
                 {"scheduler":{"type":"QUEUE","maxQueuedRequests":2}}
@@ -186,11 +175,6 @@ class FlexlbConfigSchedulingModeTest {
                     """.formatted(value)));
             assertTrue(error.getMessage().contains("maxQueuedRequests"), error.getMessage());
         }
-        var error = assertThrows(ConfigValidationException.class, () -> ConfigTestFixtures.parse("""
-                {"scheduler":{"type":"DIRECT","maxQueuedRequests":2},
-                 "dispatcher":{"type":"NON_BATCH"}}
-                """));
-        assertTrue(error.getMessage().contains("scheduler.maxQueuedRequests"));
     }
 
     @Test
@@ -268,17 +252,11 @@ class FlexlbConfigSchedulingModeTest {
                   "dispatcher":{"type":"NON_BATCH"}
                 }
                 """));
-        assertThrows(ConfigValidationException.class, () -> ConfigTestFixtures.parse("""
-                {
-                  "scheduler":{"type":"DIRECT","decision":{"type":"SINGLE"}},
-                  "dispatcher":{"type":"NON_BATCH"}
-                }
-                """));
     }
 
     @Test
     void all_delivery_modes_share_the_same_default_and_explicit_limit() {
-        for (String mode : new String[]{"QUEUE/BATCH", "QUEUE/NON_BATCH", "DIRECT/NON_BATCH"}) {
+        for (String mode : new String[]{"QUEUE/BATCH", "QUEUE/NON_BATCH"}) {
             String[] parts = mode.split("/");
             FlexlbConfig config = parse(parts[0], parts[1], "");
             assertEquals(2, config.getDispatcher().getMaxInflightPerPrefillWorker(), mode);
@@ -343,10 +321,6 @@ class FlexlbConfigSchedulingModeTest {
                         () -> parse("QUEUE", type, ",\"" + field + "\":2"), field);
             }
         }
-        assertThrows(ConfigValidationException.class, () -> ConfigTestFixtures.parse("""
-                {"scheduler":{"type":"DIRECT","queueTimeoutMs":1000},
-                 "dispatcher":{"type":"NON_BATCH"}}
-                """));
     }
 
     private static FlexlbConfig parseQueue(
@@ -367,7 +341,6 @@ class FlexlbConfigSchedulingModeTest {
                                    boolean priority,
                                    boolean single,
                                    boolean batchDispatch) {
-        assertTrue(config.isQueue());
         assertEquals(priority, config.isPriorityOrdering());
         assertEquals(single, config.isSingleDecision());
         assertEquals(!single, config.isFixedWindowDecision());

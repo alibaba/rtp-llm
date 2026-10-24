@@ -83,7 +83,7 @@ PREFILL 与 PDFUSION 的端点和待交付名额不合并计算。
 共享名额满时请求留在全局队列等待重新选路。QUEUE + NON_BATCH 下，`scheduler.maxQueuedRequests` 是
 GlobalQueue 和 EngineSubQueue 合计的总排队上限；其他 QUEUE 模式仍只按 GlobalQueue 深度判满。
 高优新请求仍只从 GlobalQueue 寻找低优受害者。
-DIRECT 的候选筛选与占位、BATCH 的批次占位仍使用请求的上限。
+BATCH 的批次占位同样使用请求的上限。
 端点创建时固定其工作模式，正常切换调度模式需重启 Master。
 更新后进入的请求使用新值，已进入调度流程的请求保留原有快照。
 降低上限时，已有占位继续保持，直到完成或清理后才按新上限接收请求。
@@ -201,10 +201,10 @@ UniConfig / Nacos 的 v3 部分更新示例：
 
 公共 schema 当前为 version 3，按责任分区：
 
-- `scheduler`：`DIRECT` / `QUEUE`；QUEUE 拥有 ordering、capacity 和 lifecycle。
-- `dispatcher`：`BATCH` / `NON_BATCH`。QUEUE 模式可用
+- `scheduler`：`type` 取 `QUEUE`（配置 `DIRECT` 时校验失败）；QUEUE 拥有 ordering、capacity 和 lifecycle。
+- `dispatcher`：`BATCH` / `NON_BATCH`。可用
   `maxInflightPerEncoderWorker` 限制每台 Encoder 的在途请求数；未配置时不设额外上限，
-  不影响 DIRECT 或未配置 Encoder 的模型。
+  不影响未配置 Encoder 的模型。
 - `router`：角色 availability、execution estimator、selector、cache affinity 和
   group selector。
 - `workerRegistry`：worker health 与 cache-status 刷新策略。
@@ -241,7 +241,7 @@ UniConfig / Nacos 的 v3 部分更新示例：
   优先使用 Engine 上报的 `max_batch_tokens_size`，其次使用 `max_seq_len`。
 - `internalRuntime`：代码内部设置，不接受公共 JSON 输入。
 
-`DIRECT + BATCH` 非法；可选配置应省略，不能写 `null`。完整示例和 selector
+可选配置应省略，不能写 `null`。完整示例和 selector
 矩阵见根目录 [README](../../README.md)。
 
 ### KVCM 查询参数热更新
@@ -502,9 +502,9 @@ WorkerStatus 成功轮询上报 `app.flexlb.encoder.pending.request.count` 和
 `engineIp=scheduler`；Prefill 序列只统计 Generation。节点侧使用 `app.flexlb.inflight.request.count`，按真实 `engineIp` 和
 role 分开展示。QUEUE + NON_BATCH 默认模式的 `role=PREFILL/PDFUSION`
 表示已提交未确认、已确认但仍占用容量的请求，加上引擎报告的额外活动请求；
-本地待交付请求由子队列深度指标统计。使用 DIRECT 时， 该指标还包含本地排队请求。同一请求按 ID 去重；WorkerStatus 仅提供 running/waiting 数量、
+本地待交付请求由子队列深度指标统计。同一请求按 ID 去重；WorkerStatus 仅提供 running/waiting 数量、
 缺少请求明细时，对无法确认重合的请求保守计数。该指标不是引擎 GPU 当前执行请求数。
-NON_BATCH（包括 DIRECT）的 Prefill 序列与 `dispatcher.maxInflightPerPrefillWorker` 的请求限流计数一致：
+NON_BATCH 的 Prefill 序列与 `dispatcher.maxInflightPerPrefillWorker` 的请求限流计数一致：
 设为 4 时，已确认请求仍占用名额，完成或本地清理后才释放。若引擎有其它来源的请求，或本地超时清理后
 引擎仍在处理请求，不能仅凭该配置保证引擎实际并发不超过 4。
 BATCH 的上限单位是批次，仍使用 `app.flexlb.inflight.batch.count` 查看已提交、尚未清理完成的批数；

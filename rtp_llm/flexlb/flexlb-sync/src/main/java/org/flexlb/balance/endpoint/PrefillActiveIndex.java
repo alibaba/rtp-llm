@@ -7,7 +7,6 @@ import org.flexlb.util.PriorityNormalizer;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collection;
-import java.util.Collections;
 import java.util.Comparator;
 import java.util.IdentityHashMap;
 import java.util.Iterator;
@@ -17,16 +16,10 @@ import java.util.TreeSet;
 /**
  * Active request identities for one Prefill generation.
  *
- * <p>The scheduler type selects one implementation at construction time.
- * DIRECT has no backing queue and cannot accept ACTIVE queue work; QUEUE owns
- * one ordered index shared by its runtime and canonical Prefill ledger.</p>
+ * <p>One ordered index is shared by the worker queue runtime and the canonical
+ * Prefill ledger.</p>
  */
-public sealed interface PrefillActiveIndex extends Iterable<ScheduledRequest>
-        permits PrefillActiveIndex.Disabled, PrefillActiveIndex.Ordered {
-
-    static PrefillActiveIndex disabled() {
-        return Disabled.INSTANCE;
-    }
+public sealed interface PrefillActiveIndex extends Iterable<ScheduledRequest> permits PrefillActiveIndex.Ordered {
 
     static PrefillActiveIndex ordered(
             int initialCapacity,
@@ -122,61 +115,6 @@ public sealed interface PrefillActiveIndex extends Iterable<ScheduledRequest>
                 }
                 return projectedItem;
             }
-        }
-    }
-
-    final class Disabled implements PrefillActiveIndex {
-        private static final Disabled INSTANCE = new Disabled();
-
-        private Disabled() {
-        }
-
-        @Override
-        public boolean add(ScheduledRequest item) {
-            throw new IllegalStateException(
-                    "DIRECT Prefill generation has no active request index");
-        }
-
-        @Override
-        public boolean remove(ScheduledRequest item) {
-            return false;
-        }
-
-        @Override
-        public boolean contains(ScheduledRequest item) {
-            return false;
-        }
-
-        @Override
-        public ScheduledRequest peek() {
-            return null;
-        }
-
-        @Override
-        public boolean isEmpty() {
-            return true;
-        }
-
-        @Override
-        public int size() {
-            return 0;
-        }
-
-        @Override
-        public int size(int priority) { return 0; }
-
-        @Override
-        public void clear() {
-        }
-
-        @Override
-        public Capture capture() {
-            return Capture.EMPTY;
-        }
-
-        @Override
-        public Iterator<ScheduledRequest> iterator() {
-            return Collections.emptyIterator();
         }
     }
 

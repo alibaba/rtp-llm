@@ -129,8 +129,8 @@ public class BalanceContext {
 
     /**
      * Immutable per-request scheduling metadata. The expiration is an
-     * absolute caller-supplied Unix timestamp and is shared by DIRECT, QUEUE,
-     * and BATCH without being reset on retry or rescue.
+     * absolute caller-supplied Unix timestamp and is shared by QUEUE and BATCH
+     * without being reset on retry or rescue.
      */
     private SchedulingMetadata schedulingMetadata;
 
@@ -188,7 +188,7 @@ public class BalanceContext {
         if (schedulingMetadata != null) {
             return schedulingMetadata.expiresAtMs();
         }
-        if (config != null && config.isQueue()) {
+        if (config != null) {
             return config.queueScheduler().resolveExpiresAtMs(startTime);
         }
         return Long.MAX_VALUE;

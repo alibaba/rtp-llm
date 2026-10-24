@@ -48,10 +48,8 @@ public class RouteService {
             return CompletableFuture.completedFuture(Response.error(StrategyErrorType.VIT_ROUTE_STALE));
         }
         FlexlbConfig flexlbConfig = balanceContext.getConfig();
-        FlexlbTrace.setScheduleAttribute(balanceContext.getTraceContext(),
-                FlexlbTrace.SCHEDULE_MODE, flexlbConfig.isDirect() ? "DIRECT"
-                        : flexlbConfig.getDispatcher().getType() == DispatcherConfig.Type.BATCH
-                                ? "BATCH" : "QUEUE");
+        FlexlbTrace.setScheduleAttribute(balanceContext.getTraceContext(), FlexlbTrace.SCHEDULE_MODE,
+                flexlbConfig.getDispatcher().getType() == DispatcherConfig.Type.BATCH ? "BATCH" : "QUEUE");
 
         CompletableFuture<Response> resultFuture = routeScheduled(balanceContext);
 

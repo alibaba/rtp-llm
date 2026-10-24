@@ -161,15 +161,10 @@ class RouteProjectionTest {
                         WorkSnapshot.Phase.ENGINE_RUNNING, 40L)),
                 0L);
 
-        RouteProjection.Candidate result = project(
-                queue(false, false, constraints(1, 0L), List.of(), null),
-                committed,
-                TOKEN_EVALUATOR,
-                probe(99L, 50, 20L, 0L),
-                ROUTE);
+        RouteProjection.Candidate result = project(queue(false, constraints(1, 0L), List.of()), committed,
+                TOKEN_EVALUATOR, probe(99L, 50, 20L, 0L), ROUTE);
 
         assertModeled(result, 120L);
-        assertEquals("SERIAL_FROZEN_DIRECT", result.detail());
     }
 
     @Test

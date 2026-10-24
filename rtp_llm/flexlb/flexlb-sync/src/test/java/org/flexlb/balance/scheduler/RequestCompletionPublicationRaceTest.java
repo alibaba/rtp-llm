@@ -208,7 +208,7 @@ class RequestCompletionPublicationRaceTest {
     void externalFutureOperationUnderSlotLockLeavesRequestUnchanged(TerminalForm form) {
         RequestSlot slot = new RequestSlot(mock(RequestCompletionPublisher.class),
                 RequestLifecycleTestSupport.context(SchedulingTestConfig.batchConfig(), 702L),
-                mock(ExpirationTimer.class), mock(RequestTerminalCleanup.class), () -> { });
+                mock(ExpirationTimer.class), mock(RequestTerminalCleanup.class), () -> {}, null);
         synchronized (slot) {
             assertThrows(IllegalStateException.class, () -> {
                 switch (form) {
@@ -227,7 +227,8 @@ class RequestCompletionPublicationRaceTest {
         RequestCompletionPublisher publisher = mock(RequestCompletionPublisher.class);
         var config = SchedulingTestConfig.batchConfig();
         BalanceContext context = RequestLifecycleTestSupport.context(config, 701L);
-        RequestSlot slot = new RequestSlot(publisher, context, mock(ExpirationTimer.class), mock(RequestTerminalCleanup.class), () -> { });
+        RequestSlot slot = new RequestSlot(publisher, context, mock(ExpirationTimer.class),
+                mock(RequestTerminalCleanup.class), () -> {}, null);
         when(publisher.tryReservePublication(eq(slot), any())).thenAnswer(invocation ->
                 new RequestCompletionPublisher.PublicationPermit(publisher, slot, invocation.getArgument(1)));
         ScheduledRequest item = new ScheduledRequest(context, slot.future(), new Response(), null, null,

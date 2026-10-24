@@ -140,7 +140,7 @@ formula environment variable. Omitting the estimator uses
 `sum(computeTokens) + 0.3*sum(hitCacheTokens)`; the shipped `master_fixed_window.json`
 sets its DSv4 fit explicitly. Schema 3 requires request `timeoutMs`; decision `lifetime` defaults to 2.0.
 `dispatcher.maxInflightPerPrefillWorker` defaults to 2: batches for BATCH, requests
-for NON_BATCH / DIRECT. Values in this benchmark's templates are workload
+for NON_BATCH. Values in this benchmark's templates are workload
 settings, not Java defaults; set them through `FLEXLB_CONFIG` or `PROCESS_CONFIG_FILE`.
 
 If `flexlb-api` is already running, use:

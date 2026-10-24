@@ -4,6 +4,7 @@ import org.flexlb.config.ConfigSchemaVersion;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.DispatcherConfig;
 import org.flexlb.config.KvcmCacheMatchingConfig;
+import org.flexlb.config.SchedulerConfig;
 import org.flexlb.config.ZookeeperConsistencyConfig;
 import org.flexlb.service.config.ConfigSource;
 import org.flexlb.service.config.NormalizedConfig;
@@ -44,6 +45,15 @@ class V0ConfigDocumentParserTest {
         V0ConfigDocumentParser parser = new V0ConfigDocumentParser();
         assertThatThrownBy(() -> parser.parse(null, null)).isInstanceOf(IllegalArgumentException.class).hasMessage("V0 compatibility configuration document must not be null or blank");
         assertThatThrownBy(() -> parser.parse("   ", null)).isInstanceOf(IllegalArgumentException.class).hasMessage("V0 compatibility configuration document must not be null or blank");
+    }
+
+    @Test
+    void rejectsV0DocumentWithoutQueueing() {
+        V0ConfigDocumentParser parser = new V0ConfigDocumentParser();
+        for (String document : new String[]{"{\"enableQueueing\":false}", "{\"fallbackBatchTokenCapacity\":1}"}) {
+            assertThatThrownBy(() -> parser.parse(document, null)).isInstanceOf(IllegalArgumentException.class)
+                    .hasMessage("V0 configuration requires enableQueueing=true; DIRECT scheduling is not supported");
+        }
     }
 
     @Test
@@ -111,7 +121,7 @@ class V0ConfigDocumentParserTest {
         var behavior = service.loadBalanceConfig();
         var modelService = service.modelServiceConfig();
 
-        assertThat(behavior.isQueue()).isTrue();
+        assertThat(behavior.getScheduler().getType()).isEqualTo(SchedulerConfig.Type.QUEUE);
         assertThat(converted.sourceSchemaVersion()).isEqualTo(ConfigSchemaVersion.V0_COMPATIBILITY);
         assertThat(behavior.getFallbackBatchTokenCapacity()).isEqualTo(4_194_304L);
         assertThat(behavior.getDispatcher().getType())

@@ -184,8 +184,7 @@ non-finite preferred tier fails routing with a formula error.
 
 Scheduling and dispatch are independent tagged choices in `FLEXLB_CONFIG`:
 
-- `scheduler.type=DIRECT`: Routes immediately through `DefaultRouter`.
-- `scheduler.type=QUEUE`: Uses `RequestScheduler` and `GlobalQueueCoordinator` for ordered placement; `RequestRegistry` owns cancellation and request/decision lifetimes. Queue ordering is `FIFO` or `PRIORITY`.
+- `scheduler.type=QUEUE` (the only scheduler type): Uses `RequestScheduler` and `GlobalQueueCoordinator` for ordered placement; `RequestRegistry` owns cancellation and request/decision lifetimes. Queue ordering is `FIFO` or `PRIORITY`.
 - `scheduler.decision.type=SINGLE`: Forms one-request decision groups.
 - `scheduler.decision.type=FIXED_WINDOW`: Forms groups bounded by request count, collection window, and an optional predicted-execution cap.
 - `dispatcher.type=NON_BATCH`: The frontend delivers requests from the formed group.
@@ -258,7 +257,7 @@ The parser is strict: fields belonging to an inactive scheduler, ordering, or di
 variant are rejected. Missing `FLEXLB_CONFIG` fails startup. The online loader
 accepts only schema 3; no legacy-schema converter or old-field aliases are provided.
 `dispatcher.maxInflightPerPrefillWorker` is a positive integer, default 2 in every
-mode. It counts batches in BATCH and requests in NON_BATCH / DIRECT.
+mode. It counts batches in BATCH and requests in NON_BATCH.
 `router.roles.decode.costEstimator.expression` must be non-empty and parse as a valid
 Decode formula. An expression using `max_running_size` requires a positive
 `router.roles.decode.availability.maxEngineRequests` as the variable's fixed value.
@@ -307,8 +306,8 @@ captures; writers publish status through the endpoint lifecycle transaction.
 
 ### Queue Concurrency
 `RequestRegistry` owns request lifecycle. `dispatcher.maxInflightPerPrefillWorker`
-limits batches in BATCH and requests in NON_BATCH / DIRECT, default 2.
-`decision.maxRequests` only controls group size. DIRECT has no queue timer.
+limits batches in BATCH and requests in NON_BATCH, default 2.
+`decision.maxRequests` only controls group size.
 The global queue has no request-count cap; TTL bounds queue residence.
 Reservation and release paths must remain idempotent across
 completion, timeout, and cancellation races.

@@ -288,11 +288,6 @@ public final class RequestSchedulerTestRuntime implements AutoCloseable {
         }
 
         @Override
-        public PlacementResult<RouteAdmission, PlacementKey> select(BalanceContext context) {
-            return requireBound().select(context);
-        }
-
-        @Override
         public PlacementResult<RouteAdmission, PlacementKey> select(
                 BalanceContext context, String policyGroup) {
             return requireBound().select(context, policyGroup);

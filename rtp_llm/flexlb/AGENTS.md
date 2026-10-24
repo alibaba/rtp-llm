@@ -26,7 +26,7 @@ This file provides guidance to agents when working with code in this repository.
 - **Prefill 候选先完整参与缓存匹配。** 选路先按节点注册生命周期和目标 group 确定
   合法 P 集合；在计算缓存匹配前，不按当前容量、在途请求数、排队等待或耗时预测
   缩小这个集合。缓存匹配结果属于整个合法集合，耗时用于选路评分，容量在请求提交
-  或交付时处理。DIRECT、QUEUE + BATCH 和 QUEUE + NON_BATCH 均遵循此约束。
+  或交付时处理。QUEUE + BATCH 和 QUEUE + NON_BATCH 均遵循此约束。
 - **新增辅助类尽量使用独立的顶层类。** 让类名和文件名直接表明职责，便于查找和审核；
   只有紧贴外层类才容易理解的短小实现，才考虑使用嵌套类。
 - **注释解释业务原因和约束。** 用具体对象描述保留什么、释放什么、等待什么；必要时给一个

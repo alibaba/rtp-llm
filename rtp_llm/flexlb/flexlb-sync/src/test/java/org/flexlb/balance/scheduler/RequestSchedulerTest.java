@@ -8,7 +8,6 @@ import org.flexlb.balance.eviction.EvictionManager;
 import org.flexlb.balance.scheduler.RequestSlot.AdmissionHandle;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
-import org.flexlb.config.SchedulerConfig;
 import org.flexlb.config.VictimStage;
 import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.SchedulingMetadata;
@@ -500,8 +499,7 @@ class RequestSchedulerTest {
                 mock(AdmissionHandle.class));
         when(lifecycle.claimAdmissionHandle("802", followerFuture)).thenReturn(
                 mock(AdmissionHandle.class));
-        when(router.select(any())).thenReturn(
-                PlacementResult.blocked(blocker));
+        when(router.select(any(), isNull())).thenReturn(PlacementResult.blocked(blocker));
 
         RequestScheduler scheduler = new RequestScheduler(
                 configService,
@@ -840,38 +838,27 @@ class RequestSchedulerTest {
         }
     }
 
-    @ParameterizedTest(name = "requestUsesDirect={0}, currentConfigUsesQueue=true")
-    @ValueSource(booleans = {true, false})
-    @DisplayName("提交按请求快照选择 DIRECT 或 QUEUE，同时允许读取当前队列配置")
-    void submissionUsesRequestSchedulerModeWithCurrentQueueConfig(boolean requestUsesDirect) throws Exception {
+    @Test
+    @DisplayName("提交按请求快照进入 QUEUE，同时允许读取当前队列配置")
+    void submissionUsesRequestSchedulerModeWithCurrentQueueConfig() throws Exception {
         Fixture fixture = new Fixture(true);
         try {
             FlexlbConfig requestConfig = SchedulingTestConfig.batchConfig();
-            if (requestUsesDirect) {
-                requestConfig.setScheduler(SchedulerConfig.direct());
-            } else {
-                SchedulingTestConfig.usePriorityQueue(requestConfig);
-            }
+            SchedulingTestConfig.usePriorityQueue(requestConfig);
             when(fixture.context.getConfig()).thenReturn(requestConfig);
             when(fixture.context.getFuture()).thenReturn(fixture.future);
             FlexlbConfig currentConfig = SchedulingTestConfig.batchConfig();
             SchedulingTestConfig.usePriorityQueue(currentConfig).setMaxQueuedRequests(2);
             when(fixture.configService.loadBalanceConfig()).thenReturn(currentConfig);
-            when(fixture.router.select(fixture.context)).thenReturn(PlacementResult.rejected(
-                    Response.buildErrorResponse(StrategyErrorType.NO_PREFILL_WORKER, null)));
+            when(fixture.router.select(fixture.context, null)).thenReturn(
+                    PlacementResult.rejected(Response.buildErrorResponse(StrategyErrorType.NO_PREFILL_WORKER, null)));
 
             CompletableFuture<Response> future = fixture.scheduler.submit(fixture.context);
 
             assertSame(fixture.future, future);
             assertEquals(StrategyErrorType.NO_PREFILL_WORKER.getErrorCode(),
                     future.get(5, TimeUnit.SECONDS).getCode());
-            if (requestUsesDirect) {
-                verify(fixture.router).select(fixture.context);
-                verify(fixture.router, never()).select(fixture.context, null);
-            } else {
-                verify(fixture.router).select(fixture.context, null);
-                verify(fixture.router, never()).select(fixture.context);
-            }
+            verify(fixture.router).select(fixture.context, null);
         } finally {
             fixture.scheduler.closePlacement();
         }
