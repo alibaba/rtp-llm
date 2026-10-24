@@ -1,0 +1,58 @@
+"""CI membership, instance kind and file location remain independent."""
+import copy
+import tempfile
+import unittest
+from pathlib import Path
+
+import yaml
+
+from scenario import ScenarioError, load_scenarios
+from scenario.execution_policy import normalize_metadata, normalize_execution
+from scenario.suites import classify, default_suite, preselect_documents, suite_names
+
+ROOT = Path(__file__).resolve().parents[1]
+
+
+class SuiteOwnershipTest(unittest.TestCase):
+    def test_retained_functional_variant_is_selected_without_mutation(self):
+        docs = load_scenarios(ROOT / 'config/scenarios/request_completion.yaml')
+        original = copy.deepcopy(docs)
+        functional = preselect_documents(docs, kind='functional')
+        workload = preselect_documents(docs, kind='workload')
+        self.assertEqual(['default'], [v['id'] for v in functional[0][1]['variants']])
+        self.assertEqual([], workload)
+        self.assertEqual(docs, original)
+        self.assertEqual(functional[0][1]["implementation"], docs[0][1]["implementation"])
+
+    def test_ci_can_select_one_workload_independent_of_directory_or_kind(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'suites.yaml'
+            path.write_text(yaml.safe_dump(dict(suite_schema_version=3, default_profile='batch-window', ci_jobs={}, default_suite='smoke',
+                                               suites={'smoke': ['custom::load']})))
+            metadata = dict(kind='workload', description='Load under restart')
+            execution = dict(collection='request')
+            plan = dict(scenario_id='custom', variant_id='load', source_path='/any/core/place.yaml', metadata=metadata, execution=execution)
+            self.assertEqual('smoke', default_suite(path))
+            self.assertEqual(('smoke',), suite_names(path))
+            self.assertEqual('workload', classify([plan], 'smoke', path)[0]['metadata']['kind'])
+            self.assertEqual([], classify([plan], catalog=path, kind='functional'))
+            plan['source_path'] = '/different/workload/place.yaml'
+            self.assertEqual('workload', classify([plan], 'smoke', path)[0]['metadata']['kind'])
+            with self.assertRaisesRegex(ScenarioError, 'missing: custom::load'):
+                classify([], 'smoke', path)
+            path.write_text(yaml.safe_dump(dict(suite_schema_version=3, default_profile='batch-window', ci_jobs={}, default_suite='smoke',
+                                               suites={'smoke': ['custom::load', 'custom::load']})))
+            with self.assertRaisesRegex(ScenarioError, 'unique'):
+                suite_names(path)
+
+    def test_missing_metadata_and_invalid_monitoring_fail_loud(self):
+        base = dict(kind='workload', description='Scale in')
+        for key in base:
+            invalid = {k: v for k, v in base.items() if k != key}
+            with self.subTest(key=key), self.assertRaises(ScenarioError):
+                normalize_metadata(invalid)
+        with self.assertRaisesRegex(ScenarioError, 'collection'):
+            normalize_execution({}, kind='workload')
+        with self.assertRaisesRegex(ScenarioError, 'shorter'):
+            normalize_execution(dict(collection='request', monitoring={
+                'sample_interval_s': 10, 'max_sample_gap_s': 5}), kind='workload')

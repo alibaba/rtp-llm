@@ -47,8 +47,12 @@ public final class RoutingConfig {
     @Getter
     @Setter
     public static final class CacheAffinityConfig {
-        /** Maximum TTFT penalty accepted for choosing a cache leader. */
-        private long maxExtraTtftMs;
+        /**
+         * Maximum TTFT penalty accepted for choosing a cache leader.
+         * The opt-in cache-affinity test control updates this value while
+         * routing threads read it without acquiring the control lock.
+         */
+        private volatile long maxExtraTtftMs;
 
         /** Minimum reusable-prefix percentage required before affinity applies. */
         private double minPrefixHitPercent = 5;

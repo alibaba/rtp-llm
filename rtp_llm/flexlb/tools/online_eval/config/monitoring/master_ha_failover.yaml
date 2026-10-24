@@ -1,0 +1,155 @@
+metric_plan_schema_version: 5
+include:
+- default.yaml
+exclude:
+- client/actual_send_qps
+- client/success_qps
+- client/error_qps
+- client/completed_qps
+- client/ttft_p99_seconds
+- client/total_p99_seconds
+- master/flexlb_app_flexlb_scheduler_inflight_size
+- master/flexlb_app_flexlb_inflight_request_count
+- master/flexlb_auto_tpm_decode_reserved_count
+- master/flexlb_auto_tpm_decode_running_count
+- master/arrivals_qps
+- master/dispatch_qps
+- master/schedule_responses_qps
+- master/flexlb_app_flexlb_batcher_queue_size
+- client/schedule_p99_seconds
+produced:
+  ha/sent:
+    producer: ha_evidence
+    source_type: client_journal
+    unit: requests/s
+    value_kind: gauge
+    labels: []
+  ha/success:
+    producer: ha_evidence
+    source_type: client_journal
+    unit: requests/s
+    value_kind: gauge
+    labels: []
+  ha/failed:
+    producer: ha_evidence
+    source_type: client_journal
+    unit: requests/s
+    value_kind: gauge
+    labels: []
+  ha/prefill_peak_qps:
+    producer: ha_evidence
+    source_type: client_journal
+    unit: requests/s
+    value_kind: gauge
+    labels: []
+  ha/prefill_mean_qps:
+    producer: ha_evidence
+    source_type: client_journal
+    unit: requests/s
+    value_kind: gauge
+    labels: []
+  ha/prefill_skew:
+    producer: ha_evidence
+    source_type: client_journal
+    unit: ratio
+    value_kind: gauge
+    labels: []
+  ha/http_up:
+    producer: ha_evidence
+    source_type: debug_api
+    unit: boolean
+    value_kind: gauge
+    labels:
+    - master
+  ha/scheduler_inflight:
+    producer: ha_evidence
+    source_type: debug_api
+    unit: requests
+    value_kind: gauge
+    labels:
+    - master
+  ha/prefill_inflight_requests:
+    producer: ha_evidence
+    source_type: debug_api
+    unit: requests
+    value_kind: gauge
+    labels:
+    - master
+  ha/decode_master_queued:
+    producer: ha_evidence
+    source_type: debug_api
+    unit: requests
+    value_kind: gauge
+    labels:
+    - master
+  ha/decode_confirmed_running:
+    producer: ha_evidence
+    source_type: debug_api
+    unit: requests
+    value_kind: gauge
+    labels:
+    - master
+  ha_gate/duplicate_ids:
+    producer: ha_gates
+    source_type: client_journal
+    unit: requests
+    value_kind: scalar
+    labels:
+    - window
+    - selection
+  ha_gate/failed_count:
+    producer: ha_gates
+    source_type: client_journal
+    unit: requests
+    value_kind: scalar
+    labels:
+    - window
+    - selection
+  ha_gate/non_ok_count:
+    producer: ha_gates
+    source_type: client_journal
+    unit: requests
+    value_kind: scalar
+    labels:
+    - window
+    - selection
+  ha_gate/prefill_max_share:
+    producer: ha_gates
+    source_type: client_journal
+    unit: ratio
+    value_kind: scalar
+    labels:
+    - window
+    - selection
+  ha_gate/route_count:
+    producer: ha_gates
+    source_type: client_journal
+    unit: requests
+    value_kind: scalar
+    labels:
+    - window
+    - selection
+  ha_gate/success_rate:
+    producer: ha_gates
+    source_type: client_journal
+    unit: ratio
+    value_kind: scalar
+    labels:
+    - window
+    - selection
+  ha_gate/target_share:
+    producer: ha_gates
+    source_type: client_journal
+    unit: ratio
+    value_kind: scalar
+    labels:
+    - window
+    - selection
+  ha_gate/visible_terminal_share:
+    producer: ha_gates
+    source_type: client_journal
+    unit: ratio
+    value_kind: scalar
+    labels:
+    - window
+    - selection

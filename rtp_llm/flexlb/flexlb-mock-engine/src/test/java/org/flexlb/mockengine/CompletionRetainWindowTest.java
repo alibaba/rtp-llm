@@ -34,7 +34,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * first poller permanently destroyed the second poller's unconsumed records
  * (active-master inflight leak). The rework keeps the read path a pure
  * cursor filter (no destruction) and bounds the backlog with a retain
- * window trimmed by {@code periodicCleanup()}.
+ * window enforced at each insertion.
  *
  * <p>Coverage: dual-consumer non-starvation, single-consumer increment
  * protocol byte-compatibility (same cursor → same increment list), retain
@@ -67,7 +67,7 @@ class CompletionRetainWindowTest {
         int port = PORT_ALLOCATOR.getAndAdd(10);
         prefill = new JavaMockEngineCluster.FastRpcService(
                 "prefill", EngineRpcService.RoleTypePB.ROLE_TYPE_PREFILL,
-                port, services, scheduler, performanceModel(tempDir, "10"), 100,
+                port, services, scheduler, performanceModel(tempDir, "10"), 4096,
                 new JavaMockEngineCluster.ClusterStats());
         services.put(port, prefill);
     }
@@ -176,14 +176,14 @@ class CompletionRetainWindowTest {
     // ════════════════════════════════════════════════════════════════
 
     @Test
-    void periodicCleanupTrimsBacklogToRetainWindow() throws Exception {
+    void insertionTrimsBacklogBeforeAnyCleanup() throws Exception {
         prefill.setCompletionRetainWindow(2);
         publishCompletions(1, 4);
 
-        // Before cleanup the full backlog is still readable (reads never trim).
-        assertEquals(4, workerStatus(prefill, 0).getFinishedTaskListCount());
+        // Capacity holds immediately, even if cleanup has never run.
+        assertEquals(List.of(3L, 4L), finishedRids(workerStatus(prefill, 0)));
 
-        // One 60s cleanup pass: only the 2 most recent records survive.
+        // Housekeeping does not alter the retained window.
         prefill.periodicCleanup();
 
         EngineRpcService.WorkerStatusPB afterTrim = workerStatus(prefill, 0);
@@ -232,6 +232,54 @@ class CompletionRetainWindowTest {
         // The last round's records (rid 5, 6) plus one older (rid 4) — the
         // 3 most recent by version.
         assertEquals(List.of(4L, 5L, 6L), finishedRids(bounded));
+    }
+
+    @Test
+    void defaultCapacityCutsThe1001stRecordWithoutConsumerOrCleanup() throws Exception {
+        assertEquals(1000, JavaMockEngineCluster.FastRpcService.DEFAULT_COMPLETION_RETAIN_WINDOW);
+        prefill.setAutoFetch(true);
+        EngineRpcService.GenerateInputPB[] wave = new EngineRpcService.GenerateInputPB[1000];
+        for (int i = 0; i < wave.length; i++) {
+            wave[i] = input(i + 1, 10);
+        }
+        assertEquals(1000, enqueue(prefill, batch(10001, slot(0, wave))).getSuccessesCount());
+        // Observe local completion only; the slow master has made NO status read.
+        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(10);
+        while (prefill.getCompletedCount() < 1000 && System.nanoTime() < deadline) {
+            Thread.sleep(2);
+        }
+        assertEquals(1000, prefill.getCompletedCount());
+        var atCapacity = workerStatus(prefill, 0);
+        assertEquals(1000, atCapacity.getFinishedTaskListCount());
+        assertEquals(1L, finishedRids(atCapacity).get(0));
+        assertEquals(1000L, finishedRids(atCapacity).get(999));
+
+        assertEquals(1, enqueue(prefill, batch(10002, slot(0, input(1001, 10)))).getSuccessesCount());
+        deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+        while (prefill.getCompletedCount() < 1001 && System.nanoTime() < deadline) {
+            Thread.sleep(2);
+        }
+        assertEquals(1001, prefill.getCompletedCount());
+        var delayed = workerStatus(prefill, 0);
+        assertEquals(1000, delayed.getFinishedTaskListCount());
+        assertEquals(2L, finishedRids(delayed).get(0));
+        assertEquals(1001L, finishedRids(delayed).get(999));
+        assertEquals(1001, delayed.getLatestFinishedVersion());
+        assertEquals(List.of(1001L), finishedRids(workerStatus(prefill, 1000)));
+        assertEquals(finishedRids(delayed), finishedRids(workerStatus(prefill, 0)),
+                "another consumer cannot recover the clipped rid or consume this one's backlog");
+    }
+
+    @Test
+    void reducingCapacityAndZeroWindowApplyImmediately() throws Exception {
+        publishCompletions(1, 4);
+        prefill.setCompletionRetainWindow(1);
+        assertEquals(List.of(4L), finishedRids(workerStatus(prefill, 0)));
+        prefill.setCompletionRetainWindow(0);
+        assertTrue(finishedRids(workerStatus(prefill, 0)).isEmpty());
+        publishCompletions(5, 1);
+        assertEquals(5, workerStatus(prefill, 0).getLatestFinishedVersion());
+        assertTrue(finishedRids(workerStatus(prefill, 0)).isEmpty());
     }
 
     // ════════════════════════════════════════════════════════════════

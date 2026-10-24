@@ -1,0 +1,307 @@
+"""Workload policy: retain independent observations and own continuous telemetry.
+
+Functional execution remains fail-fast. Both policies reuse stage dispatch,
+resource ownership and deadline cleanup; workloads never suppress ERROR/TIMEOUT.
+"""
+
+import json
+import time
+from pathlib import Path
+
+from monitoring.query_plan import DEFAULT_PLAN
+from monitoring.collection_plan import instance_plan
+from scenario.runtime import execute_instance
+
+ROOT = Path(__file__).resolve().parents[2]
+
+
+class WorkloadPolicy:
+    def attach(self, ctx):
+        self.options = dict(ctx.instance["workload_runtime"])
+        self.reports = ctx.instance.get("reports")
+        self.profile = ctx.instance.get("collection_profile", "request")
+        self.monitors = {}
+        self.anchor = dict(monotonic_s=ctx.clock(), epoch_s=time.time())
+        self.collectors = {}
+        self.events = []
+        self.expected_telemetry = []
+        self.telemetry_windows = {}
+        self.environments = {}
+        self.environment_metadata = {}
+        self.master_log_directories = {}
+        self.master_incarnations = {}
+        self.final_snapshots = set()
+        self.snapshot_errors = []
+
+    def continue_after_failure(self, spec):
+        return spec.get("purpose") == "observation"
+
+    def _snapshot_servers(self, ctx, env, epoch, remaining_s):
+        if (
+            self.profile != "diagnostic"
+            or epoch in self.final_snapshots
+            or remaining_s <= 0
+        ):
+            return
+        import urllib.request
+
+        targets = {
+            name: f"{spec.bind_ip}:{spec.http_port}"
+            for name, spec in getattr(env, "master_specs", {}).items()
+        }
+        if not targets:
+            targets = {"single": f"127.0.0.1:{env.master_http_port}"}
+        directory = ctx.artifact_dir / "telemetry" / str(epoch)
+        directory.mkdir(parents=True, exist_ok=True)
+        expires = ctx.clock() + remaining_s
+        for name, address in targets.items():
+            try:
+                timeout = min(
+                    self.options["collector_shutdown_s"], expires - ctx.clock()
+                )
+                if timeout <= 0:
+                    raise TimeoutError("final server snapshot budget expired")
+                with urllib.request.urlopen(
+                    f"http://{address}/rtp_llm/server_latency", timeout=timeout
+                ) as response:
+                    snapshot = json.load(response)
+                if not isinstance(snapshot, dict) or "arrival_count" not in snapshot:
+                    raise ValueError("server latency snapshot lacks arrival_count")
+                (directory / f"server-latency-{name}.json").write_text(
+                    json.dumps(snapshot)
+                )
+            except Exception as exc:
+                self.snapshot_errors.append(
+                    dict(env_epoch=epoch, master=name, error=str(exc))
+                )
+        self.final_snapshots.add(epoch)
+
+    def _stop_monitor(self, ctx, source, deadline):
+        shutdown = self.options["collector_shutdown_s"]
+        remaining = max(0, deadline.expires_at - ctx.clock())
+        source.stop(
+            shutdown, export=remaining > 0, materialize=False,
+            archive_timeout=max(0, remaining - shutdown), deadline=deadline,
+        )
+
+    def before_stage(self, ctx, spec):
+        if spec["action"] == "teardown" and ctx.env_epoch in self.monitors:
+            # Stop the monitoring interval before intentional target teardown.
+            self._stop_monitor(ctx, self.monitors[ctx.env_epoch], ctx.stage_deadline)
+        if (
+            spec["action"] == "teardown"
+            and ctx.env is not None
+            and self.options["capture_metrics"]
+        ):
+            self._snapshot_servers(
+                ctx,
+                ctx.env,
+                ctx.env_epoch,
+                max(0, ctx.instance_deadline_s - ctx.clock()),
+            )
+        self.events.append(
+            dict(
+                stage=spec["id"],
+                action=spec["action"],
+                event="start",
+                monotonic_s=ctx.clock(),
+                epoch_s=time.time(),
+                env_epoch=ctx.env_epoch,
+            )
+        )
+
+    def after_stage(self, ctx, spec, row):
+        self.events.append(
+            dict(
+                stage=spec["id"],
+                action=spec["action"],
+                event="end",
+                status=row["status"],
+                master_generations=dict(getattr(ctx.env, "masters_start_count", {})),
+                monotonic_s=ctx.clock(),
+                epoch_s=time.time(),
+                env_epoch=ctx.env_epoch,
+            )
+        )
+        if (
+            not self.options["capture_metrics"]
+            or ctx.env is None
+            or ctx.env_epoch in self.collectors
+        ):
+            return
+        env = ctx.env
+        self.environments[str(ctx.env_epoch)] = str(env.run_dir)
+        self.environment_metadata[str(ctx.env_epoch)] = dict(
+            n_prefill=env.spec.n_prefill,
+            n_decode=env.spec.n_decode,
+            send_mode="case program",
+        )
+        self.master_incarnations[str(ctx.env_epoch)] = getattr(
+            env, "master_incarnations", []
+        )
+        self.collectors[ctx.env_epoch] = []
+        specs = getattr(env, "master_specs", {})
+        self.master_log_directories[str(ctx.env_epoch)] = {
+            name: str(Path(env.run_dir) / (value.log_dir_name or f"logs_{name}"))
+            for name, value in specs.items()
+        }
+        if not specs and getattr(env, "master_log_dir", None):
+            self.master_log_directories[str(ctx.env_epoch)]["single"] = str(
+                env.master_log_dir
+            )
+        masters = [
+            (name, value.bind_ip, value.management()) for name, value in specs.items()
+        ] or [("single", "127.0.0.1", env.master_management_port)]
+        from monitoring.session import PrometheusSession
+
+        targets = {
+            "mock": f"http://127.0.0.1:{env.mock_http_port}/metrics?per_engine=true"
+        }
+        targets.update(
+            {
+                "master-" + name: f"http://{host}:{port}/prometheus"
+                for name, host, port in masters
+            }
+        )
+        source = PrometheusSession(
+            ctx.artifact_dir / "telemetry" / str(ctx.env_epoch),
+            targets,
+            self.options["sample_interval_s"],
+            self.options.get("max_sample_gap_s", 5),
+            query_plan=ctx.instance["execution"]["monitoring"].get("query_plan", DEFAULT_PLAN),
+            metric_plan=instance_plan(ctx.instance),
+            target_kinds={name: "mock" if name == "mock" else "master"
+                          for name in targets},
+        )
+        window = dict(started_epoch_s=time.time(), ended_epoch_s=None)
+        for name in source.targets:
+            self.telemetry_windows[f"{ctx.env_epoch}/{name}"] = window
+            self.expected_telemetry.append(f"{ctx.env_epoch}/{name}")
+
+        # Register cleanup before startup so a failed start cannot leak a process.
+        def stop_source(deadline):
+            window["ended_epoch_s"] = time.time()
+            self._stop_monitor(ctx, source, deadline)
+
+        ctx.add_cleanup("prometheus-" + str(ctx.env_epoch), stop_source)
+        from artifacts.startup import startup_phase
+        with startup_phase(ctx.artifact_dir, "monitoring", ctx.stage_deadline):
+            source.start(deadline=ctx.stage_deadline)
+        self.monitors[ctx.env_epoch] = source
+        ctx.monitor = source
+        epoch = ctx.env_epoch
+        ctx.add_cleanup(
+            "final-server-snapshot-" + str(epoch),
+            lambda deadline: self._snapshot_servers(
+                ctx, env, epoch, deadline.remaining()
+            ),
+        )
+
+    def finalize(self, ctx, result, deadline):
+        from workload.validity import analyze_report
+
+        evidence = ctx.artifact_dir / "workload-evidence.json"
+        records = []
+        incomplete = []
+        expected_outages = []
+        producers = {}
+        for handle, snapshot in ctx.export_evidence(self.profile, deadline):
+            expected_outages.extend(snapshot.outages)
+            if snapshot.producer is not None:
+                producers.setdefault(str(handle["env_epoch"]), set()).add(snapshot.producer)
+            if snapshot.requests:
+                records.append(dict(resource=handle, **snapshot.requests))
+            if snapshot.errors:
+                incomplete.append(dict(resource=handle, errors=list(snapshot.errors)))
+        for epoch, values in producers.items():
+            if epoch in self.environment_metadata:
+                self.environment_metadata[epoch]["load_client_workers"] = len(values)
+        from reporting.timeline import traffic_event, freeze
+        events = list(ctx.report_events)
+        onset = traffic_event(records)
+        if onset is not None:
+            if any(event['id'] == 'traffic_started' for event in events):
+                raise ValueError('traffic_started is reserved for issued-request evidence')
+            events.append(onset)
+        timeline = (freeze(ctx.instance['reporting'], events=events, phases=self.events)
+                    if 'reporting' in ctx.instance else None)
+        payload = dict(
+            workload_evidence_schema_version=1,
+            instance_id=result["id"],
+            clock_anchor=self.anchor,
+            phases=self.events,
+            events=events,
+            report_timeline=timeline,
+            request_resources=records,
+            incomplete_request_resources=incomplete,
+            expected_telemetry=self.expected_telemetry,
+            telemetry_windows=self.telemetry_windows,
+            expected_outages=expected_outages,
+            master_incarnations=self.master_incarnations,
+            final_server_snapshot_errors=self.snapshot_errors,
+        )
+        joined = {"issues": [], "requests": []}
+        # Request/engine correlation is a dedicated diagnostic, never a curve source.
+        if self.profile == "diagnostic":
+            from workload.request_engine import join_evidence
+
+            joined = join_evidence(payload, self.environments)
+            joined_path = ctx.artifact_dir / "request-engine-evidence.json"
+            from artifacts.json_io import write_json
+            write_json(joined_path, joined)
+            payload["request_engine_join"] = str(joined_path)
+        payload["collection_profile"] = self.profile
+        payload["monitor_backend"] = "prometheus"
+        from artifacts.provenance import collect
+        payload["runtime_provenance"] = collect(ctx.artifact_dir, self.environments, self.environment_metadata)
+        from artifacts.json_io import write_json
+        write_json(evidence, payload)
+        result["workload"] = dict(
+            evidence=str(evidence),
+            capture_metrics=self.options["capture_metrics"],
+            runtime_configuration=dict(self.options),
+            runtime_validity=(
+                "INVALID"
+                if incomplete
+                or joined["issues"]
+                or result["status"] in ("ERROR", "TIMEOUT")
+                or any(x["status"] != "PASS" for x in result["cleanup"])
+                else "VALID"
+            ),
+        )
+        result["workload"]["collection_profile"] = self.profile
+        result["workload"]["monitor_backend"] = "prometheus"
+        from monitoring.archive import export_metrics
+        metric_plan = instance_plan(ctx.instance)
+        metric_store = export_metrics(ctx.artifact_dir, metric_plan)
+        metric_store.document["run"] = dict(id=result["id"],
+            configuration_sha256=result.get("implementation", {}).get("configuration_sha256"),
+            report_timeline=timeline, phases=self.events, events=events)
+        metric_store.save(ctx.artifact_dir)
+        result["workload"]["metrics"] = str(ctx.artifact_dir / "metrics.json")
+        from monitoring.producers import produce
+        from case_api.registry import ProducerPhase
+        produce(ctx.artifact_dir, {}, phase=ProducerPhase.GATE, deadline=deadline)
+        analysis = analyze_report(ctx.artifact_dir, result, payload)
+        produce(ctx.artifact_dir, analysis, deadline=deadline)
+        from monitoring.metric_store import MetricStore
+        analysis["series"], analysis["statistic_sources"], _, _ = MetricStore.read(ctx.artifact_dir).series(
+            self.anchor["epoch_s"])
+        deadline.check()
+        return analysis
+
+    def render(self, ctx, result, analysis, deadline):
+        from reporting.workload import write_views
+        deadline.check()
+        view_links = write_views(ctx.artifact_dir, analysis, self.reports, deadline=deadline)
+        result["workload"]["report"] = str(next(iter(view_links.values())))
+        result["workload"]["reports"] = {name: str(path) for name, path in view_links.items()}
+        deadline.check()
+
+
+def execute_workload(instance, backend, handlers=None, artifact_dir=".", **kwargs):
+    if instance.get("test_kind") != "workload":
+        raise ValueError("workload executor requires a workload plan")
+    return execute_instance(
+        instance, backend, handlers, artifact_dir, _policy=WorkloadPolicy(), **kwargs
+    )

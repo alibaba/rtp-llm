@@ -1,0 +1,348 @@
+"""Public schema regressions: profile identity, semantic variants and isolated inputs."""
+import copy
+import json
+from pathlib import Path
+
+import pytest
+
+from scenario.program_compiler import configure_program
+from flexlb_cfg import (
+    ConfigOverride, DispatcherPolicy, FifoOrdering, FixedWindowDecision,
+    PreemptionPolicy, PriorityOrdering, ProfileIdentityError, PROFILES,
+    SingleDecision, render_env,
+)
+from scenario import ScenarioError, compile_scenarios, load_scenarios
+from scenario.environment_config import environment
+from scenario.environment_declaration import (
+    OPTIONAL_SCALARS, environment_fields, optional_scalars,
+    variant_environment_fields,
+)
+from document_io import load_document
+
+ROOT = Path(__file__).resolve().parents[1]
+
+
+def config():
+    return load_document(ROOT / 'config/scenarios/request_completion.yaml')
+
+
+def compile_config(data):
+    return compile_scenarios([('case.yaml', configure_program(data, 'case.yaml'))])
+
+
+def test_no_variants_matches_internal_default_without_inheritance():
+    data = config()
+    original = copy.deepcopy(data)
+    document = configure_program(data, 'case.yaml')
+    explicit = compile_scenarios([('case.yaml', document)])
+    default = copy.deepcopy(document)
+    default['stages'] = default.pop('variants')[0]['stages']
+    # Test annotations are not compiler defaults; compare executable content.
+    implicit = compile_scenarios([('case.yaml', default)])
+    assert len(explicit) == len(implicit)
+    for left, right in zip(explicit, implicit):
+        for key in ('id', 'environment', 'stages'):
+            assert left[key] == right[key]
+        assert left['variant_id'] == 'default'
+    assert data == original
+    for variants in ([], None):
+        with pytest.raises(ScenarioError):
+            compile_config({**data, 'variants': variants})
+
+
+@pytest.mark.parametrize('program', [None, 'immediate', 'rolling'])
+def test_every_case_requires_root_default_even_with_variants(program):
+    data = config()
+    if program is None:
+        del data['program']
+    else:
+        data['program'] = program
+    data['variants'] = [{'id': 'two', 'parameters': {'traffic': {'count': 2}}}]
+    with pytest.raises(ScenarioError, match='every case must declare program: default'):
+        configure_program(data, 'case.yaml')
+
+
+def test_variants_cannot_replace_a_missing_python_default(monkeypatch):
+    from cases.master_ha_failover import program as master_ha_failover
+    from dataclasses import replace
+    from case_api import registry
+    case = registry.registry().cases['master_ha_failover']
+    invalid = replace(case, definition=replace(case.definition, builders={'non_rolling': master_ha_failover.non_rolling}))
+    with pytest.raises(ValueError, match='invalid case builders'):
+        registry.CaseRegistry.build([invalid])
+
+
+def test_default_id_is_reserved_for_the_root_program():
+    data = config()
+    data['variants'] = [{'id': 'default', 'parameters': {'traffic': {'count': 2}}}]
+    with pytest.raises(ScenarioError, match="duplicate configuration id 'default'"):
+        configure_program(data, 'case.yaml')
+
+
+def test_ha_default_can_run_without_extra_flows():
+    data = load_document(ROOT / 'config/scenarios/master_ha_failover.yaml')
+    del data['variants']
+    document = configure_program(data, 'ha.yaml')
+    assert [v['id'] for v in document['variants']] == ['default']
+    ids = [s['id'] for s in document['variants'][0]['stages']]
+    assert 'outage_failures' not in ids
+    assert ids.index('restart_a') < ids.index('kill_b')
+
+
+def test_profile_caps_use_dispatcher_units_and_l3_is_profile_keyed():
+    data = config()
+    data['environment']['config_overrides'] = {'request_timeout_ms': 12345}
+    data['environment']['profile_overrides'] = {
+        'single-nonbatch': {'max_inflight_per_prefill_worker': 96},
+        'batch-window': {'max_inflight_per_prefill_worker': 3, 'queue_timeout_ms': {'omit': True}},
+    }
+    plans = compile_config(data)
+    caps = {'single-nonbatch': 96, 'single-batch': 2, 'batch-window': 3, 'window-nonbatch': 64}
+    for plan in plans:
+        doc = plan['environment']['resolved_config']
+        assert doc['dispatcher']['maxInflightPerPrefillWorker'] == caps[plan['profile']]
+        assert doc['requestLifecycle']['request']['timeoutMs'] == 12345
+        assert ('queueTimeoutMs' in doc['scheduler']) == (plan['profile'] != 'batch-window')
+    for profile in PROFILES:
+        doc = json.loads(render_env(profile))
+        assert doc['dispatcher']['maxInflightPerPrefillWorker'] == (2 if doc['dispatcher']['type'] == 'BATCH' else 64)
+
+@pytest.mark.parametrize('patch', [
+    {'config_overrides': {'decision': 'single'}},
+    {'profile_overrides': {'batch-window': {'dispatcher': 'non_batch'}}},
+    {'profile_overrides': {'single-nonbatch': {'decision': 'fixed_window'}}},
+    {'profile_overrides': {'typo': {}}},
+    {'profile_overrides': {'single-nonbatch': {'max_requests': 'bad'}}},
+    {'profile_overrides': {'single-nonbatch': {'invented': 1}}},
+])
+def test_invalid_or_retyped_unselected_profiles_fail_during_load(patch):
+    data = config()
+    data['profiles'] = ['batch-window']
+    data['environment'].update(patch)
+    with pytest.raises(ScenarioError):
+        configure_program(data, 'case.yaml')
+
+
+def test_second_data_point_is_isolated_and_identity_and_keys_cannot_collide(tmp_path):
+    data = config()
+    data['variants'] = [
+        {'id': 'one', 'parameters': {'traffic': {'count': 1}}},
+        {'id': 'two', 'parameters': {'traffic': {'count': 2}}},
+    ]
+    original = copy.deepcopy(data)
+    plans = compile_config(data)
+    assert len({p['id'] for p in plans}) == 12
+    for plan in plans:
+        assert plan['stages'][1]['params']['count'] == {'default': 1, 'one': 1, 'two': 2}[plan['variant_id']]
+    assert data == original
+    data['variants'][1]['id'] = 'one'
+    with pytest.raises(ScenarioError, match='duplicate'):
+        compile_config(data)
+    path = tmp_path / 'collision.yaml'
+    path.write_text('parameters:\n  flow: {count: 1}\n  flow: {count: 2}\n')
+    with pytest.raises(ScenarioError, match='duplicate key'):
+        load_document(path)
+
+def test_variant_combines_flow_topology_and_parameters_without_an_axis():
+    data = config()
+    data['variants'] = [{'id': 'alternate', 'program': 'default',
+        'environment': {'n_prefill': 2},
+        'parameters': {'traffic': {'count': 2, 'output_len': 10}}}]
+    plans = compile_config(data)
+    variants = [plan for plan in plans if plan['variant_id'] == 'alternate']
+    assert variants and all(plan['environment']['n_prefill'] == 2 for plan in variants)
+    assert all(plan['stages'][1]['params']['count'] == 2 for plan in variants)
+    assert all(plan['stages'][1]['params']['output_len'] == 10 for plan in variants)
+
+
+def test_variant_identity_is_independent_of_program_and_restart_mode_is_program_owned():
+    data = load_document(ROOT / 'config/scenarios/master_ha_failover.yaml')
+    document = configure_program(data, 'ha.yaml')
+    assert [v['id'] for v in document['variants']] == ['default', 'non_rolling']
+    for variant in document['variants']:
+        ids = [s['id'] for s in variant['stages']]
+        assert ('outage_failures' in ids) == (variant['id'] == 'non_rolling')
+    wrong = copy.deepcopy(data)
+    wrong['variants'][0]['id'] = 'full_restart'
+    renamed = configure_program(wrong, 'ha.yaml')
+    assert renamed['variants'][1]['id'] == 'full_restart'
+    assert 'outage_failures' in [step['id'] for step in renamed['variants'][1]['stages']]
+    for mode in ('rolling', 'non_rolling'):
+        wrong = copy.deepcopy(data)
+        wrong['parameters']['procedure']['restart_mode'] = mode
+        with pytest.raises(ScenarioError, match='owned by flow identity'):
+            configure_program(wrong, 'ha.yaml')
+
+@pytest.mark.parametrize('profile', PROFILES)
+def test_renderer_cannot_retype_functional_profile(profile):
+    doc = json.loads(render_env(profile))
+    for axis, replacement in (
+        ('dispatcher', 'non_batch' if doc['dispatcher']['type'] == 'BATCH' else 'batch'),
+        ('decision', 'single' if doc['scheduler']['decision']['type'] == 'FIXED_WINDOW' else 'fixed_window'),
+    ):
+        with pytest.raises(ValueError, match='profile identity'):
+            render_env(profile, ConfigOverride(**{axis: replacement}))
+
+
+def test_null_keyed_value_preserves_common_l3_and_l2_owns_linked_defaults():
+    from flexlb_profile_data import FUNCTIONAL_DEFAULTS, FUNCTIONAL_PROFILE_KWARGS
+    for values in FUNCTIONAL_PROFILE_KWARGS.values():
+        assert not FUNCTIONAL_DEFAULTS.keys() & values.keys()
+        assert {'decision', 'dispatcher', 'max_requests', 'max_collection_wait_ms',
+                'max_predicted_execution_ms', 'max_inflight_per_prefill_worker'} <= values.keys()
+    result = environment({'config_overrides': {'request_timeout_ms': 12345},
+                          'profile_overrides': {'single-nonbatch': {'request_timeout_ms': None}}},
+                         'environment', 'single-nonbatch')
+    assert result['resolved_config']['requestLifecycle']['request']['timeoutMs'] == 12345
+
+
+def test_unused_variant_parameter_is_still_rejected():
+    data = config()
+    data['variants'] = [{'id': 'two', 'parameters': {'coutn': 2}}]
+    with pytest.raises(ScenarioError, match='unknown configuration fields'):
+        compile_config(data)
+
+@pytest.mark.parametrize('profile,axis,wrong', [
+    ('batch-window', 'decision', 'single'),
+    ('single-nonbatch', 'dispatcher', 'batch'),
+])
+def test_identity_rejection_has_one_source(profile, axis, wrong):
+    with pytest.raises(ProfileIdentityError) as direct:
+        render_env(profile, ConfigOverride(**{axis: wrong}))
+    with pytest.raises(ScenarioError) as compiled:
+        environment({'config_overrides': {axis: wrong}}, 'case.environment', profile)
+    assert type(compiled.value.__cause__) is ProfileIdentityError
+    assert str(compiled.value.__cause__) == str(direct.value)
+    assert str(compiled.value) == f'case.environment: {direct.value}'
+
+
+def test_environment_vocabulary_is_shared_with_an_explicit_backend_boundary(monkeypatch):
+    from scenario.catalog import handlers
+    assert variant_environment_fields() == environment_fields() - {'backend'}
+    from dataclasses import fields
+    from scenario.environment_declaration import EnvironmentDeclaration
+    assert environment_fields() == {field.name for field in fields(EnvironmentDeclaration)} | {
+        'config_overrides', 'profile_overrides'}
+    assert environment({'debug_enabled': True}, 'env', 'batch-window')['debug_enabled'] is True
+    document = load_scenarios(ROOT / 'config/scenarios/request_completion.yaml')[0][1]
+    document['variants'][0]['environment_overrides'] = {'debug_enabled': True}
+    plans = compile_scenarios([('case.yaml', document)], handlers=handlers())
+    assert all(plan['environment']['debug_enabled'] is True for plan in plans)
+    document['variants'][0]['environment_overrides'] = {'backend': 'java_mock'}
+    with pytest.raises(ScenarioError, match='backend'):
+        compile_scenarios([('case.yaml', document)], handlers=handlers())
+    with pytest.raises(ScenarioError, match='unknown fields'):
+        environment({'invented': 1}, 'env', 'batch-window')
+
+@pytest.mark.parametrize('field,invalid,error', [
+    ('debug_enabled', None, 'env.debug_enabled: expected boolean'),
+    ('mock_auto_fetch', 1, 'env.mock_auto_fetch: expected boolean'),
+    ('master_debug_log', 'true', 'env.master_debug_log: expected boolean'),
+    ('master_sync_log', None, 'env.master_sync_log: expected boolean'),
+    ('mock_fetch_attach_timeout_ms', 0, 'env.mock_fetch_attach_timeout_ms: expected integer >= 1'),
+    ('prefill_max_waiting_batches', -1, 'env.prefill_max_waiting_batches: expected integer >= 0'),
+])
+def test_optional_scalar_rejections_keep_their_exact_messages(field, invalid, error):
+    with pytest.raises(ScenarioError) as exc:
+        environment({field: invalid}, 'env', 'batch-window')
+    assert str(exc.value) == error
+
+
+def test_optional_scalar_declarations_preserve_presence_and_extend_in_one_row():
+    result = environment({}, 'env', 'batch-window')
+    assert result['debug_enabled'] is False and result['master_sync_log'] is False
+    for field in ('mock_auto_fetch', 'master_debug_log',
+                  'mock_fetch_attach_timeout_ms', 'prefill_max_waiting_batches'):
+        assert field not in result
+    assert environment({'prefill_max_waiting_batches': 0}, 'env', 'batch-window')[
+        'prefill_max_waiting_batches'] == 0
+    extra = {**OPTIONAL_SCALARS, 'new_boolean': (bool, False, None),
+             'new_positive_integer': (int, object(), 1)}
+    normalized = {}
+    optional_scalars({'new_boolean': True, 'new_positive_integer': 3},
+                     'env', normalized, declarations=extra)
+    assert normalized['new_boolean'] is True
+    assert normalized['new_positive_integer'] == 3
+
+
+def test_typed_scheduling_blocks_match_functional_and_stress_documents():
+    expected_fields = {
+        'FIFO': {'type'},
+        'PRIORITY': {'type', 'defaultPriority', 'preemption'},
+        'SINGLE': {'type'},
+        'FIXED_WINDOW': {'type', 'maxRequests', 'maxCollectionWaitMs',
+                         'maxPredictedExecutionMs'},
+        'BATCH': {'type', 'maxInflightPerPrefillWorker'},
+        'NON_BATCH': {'type', 'maxInflightPerPrefillWorker'},
+    }
+    for profile in PROFILES:
+        doc = json.loads(render_env(profile))
+        for block in (doc['scheduler']['ordering'], doc['scheduler']['decision'],
+                      doc['dispatcher']):
+            assert set(block) <= expected_fields[block['type']]
+    for decision in ('single', 'fixed_window'):
+        doc = json.loads(render_env('stress-na130', ConfigOverride(decision=decision)))
+        block = doc['scheduler']['decision']
+        assert set(block) == expected_fields[block['type']]
+
+
+def test_scheduling_value_objects_reject_invalid_combinations():
+    assert FifoOrdering().to_json() == {'type': 'FIFO'}
+    assert SingleDecision().to_json() == {'type': 'SINGLE'}
+    assert PriorityOrdering().to_json() == {'type': 'PRIORITY'}
+    assert FixedWindowDecision(32, 10, 550).to_json()['maxRequests'] == 32
+    assert DispatcherPolicy('non_batch', 64).to_json() == {
+        'type': 'NON_BATCH', 'maxInflightPerPrefillWorker': 64,
+    }
+    with pytest.raises(ValueError, match='default_priority'):
+        PriorityOrdering(default_priority=0)
+    with pytest.raises(ValueError, match='dispatcher'):
+        DispatcherPolicy('unknown', 1)
+    with pytest.raises(ValueError, match='max_requests'):
+        FixedWindowDecision(0, 10, 550)
+    with pytest.raises(ValueError, match='max_inflight_per_prefill_worker'):
+        DispatcherPolicy('batch', 0)
+    preemption = PreemptionPolicy.from_input({
+        'allowed_victim_stages': ['DECODE_ENGINE_OWNED'], 'timeout_ms': 1000,
+    })
+    assert PreemptionPolicy.from_json(preemption.to_json()) == preemption
+    assert PriorityOrdering(50, preemption).to_json()['preemption'] == {
+        'allowedVictimStages': ['DECODE_ENGINE_OWNED'], 'timeoutMs': 1000,
+    }
+    with pytest.raises(ValueError, match='requires DECODE_ENGINE_OWNED'):
+        PreemptionPolicy(('PREFILL_QUEUED',), 1000)
+    with pytest.raises(TypeError, match='PreemptionPolicy'):
+        PriorityOrdering(preemption={'allowedVictimStages': ['PREFILL_QUEUED']})
+
+
+def test_stress_scheduling_overrides_are_serialized_by_value_objects():
+    doc = json.loads(render_env('stress-na130', ConfigOverride(
+        decision='single', dispatcher='non_batch', max_inflight_per_prefill_worker=7,
+    )))
+    assert doc['scheduler']['decision'] == SingleDecision().to_json()
+    assert doc['dispatcher'] == DispatcherPolicy('non_batch', 7).to_json()
+    with pytest.raises(ValueError, match="max_requests applies only to decision='fixed_window'"):
+        render_env('stress-na130', ConfigOverride(decision='single', max_requests=64))
+
+
+def test_bundled_performance_window_settings_are_profile_scoped():
+    document = load_document(ROOT / 'config/scenarios/master_performance.yaml')
+    single = environment(document['environment'], 'performance.environment', 'single-nonbatch')
+    batch = environment(document['environment'], 'performance.environment', 'batch-window')
+    assert single['resolved_config']['scheduler']['decision'] == {'type': 'SINGLE'}
+    decision = batch['resolved_config']['scheduler']['decision']
+    assert decision['type'] == 'FIXED_WINDOW'
+    assert decision['maxRequests'] == 64
+    assert decision['maxCollectionWaitMs'] == 350
+    assert decision['maxPredictedExecutionMs'] == 350
+
+
+@pytest.mark.parametrize('field,value', [
+    ('profiles', ['single-nonbatch']), ('execution', {'timeout_s': 10}),
+    ('reports', ['default.yaml']), ('metadata', {'kind': 'functional'}),
+])
+def test_unsupported_variant_fields_are_rejected_instead_of_ignored(field, value):
+    data = config()
+    data['variants'] = [{'id': 'unsupported', field: value}]
+    with pytest.raises(ScenarioError, match='unknown configuration fields'):
+        configure_program(data, 'case.yaml')

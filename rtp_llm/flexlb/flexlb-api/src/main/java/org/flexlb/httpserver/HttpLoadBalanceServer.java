@@ -246,6 +246,15 @@ public class HttpLoadBalanceServer {
         }
     }
 
+    private static void putPollHealth(Map<String, Object> output, WorkerStatus status) {
+        WorkerStatus.PollHealth health = status.pollHealth();
+        output.put("generation", status.getGenerationId());
+        output.put("reported_alive", health.reportedAlive());
+        output.put("status_age_ms", health.lastSuccessfulPollUs() == 0 ? -1L
+                : Math.max(0L, System.nanoTime() / 1000 - health.lastSuccessfulPollUs()) / 1000.0);
+        output.put("transport_failures", health.consecutiveTransportFailures());
+    }
+
     public Mono<ServerResponse> inflightStatus(ServerRequest request) {
         try {
             Map<String, Object> result = new LinkedHashMap<>();
@@ -263,6 +272,7 @@ public class HttpLoadBalanceServer {
                 CacheStatus cacheStatus = cacheIndex.cacheStatus();
                 Map<String, Object> ep = new LinkedHashMap<>();
                 ep.put("ip_port", entry.getKey());
+                putPollHealth(ep, endpoint.getStatus());
                 ep.put("inflight_batches", endpoint.getInflightBatchCount());
                 ep.put("inflight_requests", endpoint.getLocallyOwnedRequestCount());
                 ep.put("inflight_route_requests",
@@ -284,6 +294,7 @@ public class HttpLoadBalanceServer {
                         entry.getValue().resourceSnapshot();
                 Map<String, Object> ep = new LinkedHashMap<>();
                 ep.put("ip_port", entry.getKey());
+                putPollHealth(ep, entry.getValue().getStatus());
                 ep.put("reserved_total", view.reserved().size());
                 ep.put("master_queued", view.queuedCount());
                 ep.put("engine_may_have_seen",

@@ -2,7 +2,6 @@ package org.flexlb.httpserver;
 
 import io.grpc.Server;
 import io.grpc.ServerInterceptors;
-import io.grpc.netty.NettyServerBuilder;
 import io.micrometer.core.instrument.FunctionCounter;
 import io.micrometer.core.instrument.Gauge;
 import io.micrometer.core.instrument.MeterRegistry;
@@ -111,7 +110,7 @@ public class FlexlbGrpcServer {
         // Register monitoring metrics for the gRPC server executor
         registerMetrics();
 
-        server = NettyServerBuilder.forPort(port)
+        server = GrpcServerBinding.builder(environment, port)
                 .channelType(NioServerSocketChannel.class)
                 .bossEventLoopGroup(bossGroup)
                 .workerEventLoopGroup(grpcServerEventLoopGroup)

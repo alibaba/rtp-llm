@@ -58,8 +58,7 @@ class UniformSendModeTest {
                 traceFile, "127.0.0.1:7001", "127.0.0.1:7003",
                 durationS, 16, 1000.0, 1, outDir, numShards, shardIndex, limit,
                 120_000L, 500.0, false, loop, 1, 1, 0L, 120, true,
-                "engine_service", "",
-                false, 10, 1000, 0, 0, "", false, "", true, 0, 0, sendMode, sendModeQps,
+                "engine_service", "", 0, 0, "", false, "", true, 0, 0, sendMode, sendModeQps,
                 true);
     }
 
@@ -115,7 +114,7 @@ class UniformSendModeTest {
         Path outDir = tempDir.resolve("uniform_out");
         // 50 QPS for 2s -> 100 sends at exactly 20ms spacing (single shard).
         JavaLoadClient client = new JavaLoadClient(config(trace.toString(), outDir.toString(),
-                2, 0, 1, 0, false, "uniform", 50.0));
+                2, 0, 1, 0, true, "uniform", 50.0));
         client.run();
 
         List<JsonNode> rows = readPerRequest(outDir);
@@ -151,7 +150,7 @@ class UniformSendModeTest {
         Path outDir = tempDir.resolve("shard_out");
         // 200 QPS over 4 shards -> 50 QPS per shard (20ms interval) for 1s.
         JavaLoadClient client = new JavaLoadClient(config(trace.toString(), outDir.toString(),
-                1, 0, 4, 1, false, "uniform", 200.0));
+                1, 0, 4, 1, true, "uniform", 200.0));
         client.run();
 
         List<JsonNode> rows = readPerRequest(outDir);
@@ -180,9 +179,9 @@ class UniformSendModeTest {
     void uniformLimitCapsTotalSends() throws Exception {
         Path trace = writeTrace(3);
         Path outDir = tempDir.resolve("limit_out");
-        // DURATION_S=0: LIMIT alone stops the run (loop-replay semantics).
+        // Loop playback requires a bounded duration; LIMIT must stop it first.
         JavaLoadClient client = new JavaLoadClient(config(trace.toString(), outDir.toString(),
-                0, 10, 1, 0, false, "uniform", 1000.0));
+                1, 10, 1, 0, true, "uniform", 1000.0));
         client.run();
 
         assertEquals(10, readPerRequest(outDir).size());

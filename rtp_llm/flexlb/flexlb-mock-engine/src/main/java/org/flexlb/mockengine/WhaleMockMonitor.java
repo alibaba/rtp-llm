@@ -1,0 +1,224 @@
+package org.flexlb.mockengine;
+
+import org.flexlb.enums.FlexMetricType;
+import org.flexlb.metric.FlexMetricTags;
+import org.flexlb.metric.FlexMonitor;
+import org.flexlb.metric.MasterStatusProvider;
+import org.flexlb.metric.NoOpFlexMonitor;
+
+import java.util.Map;
+import java.util.HashMap;
+
+/** Optional internal adapter; no private class is linked by the open-source runtime. */
+final class WhaleMockMonitor implements AutoCloseable {
+    private final FlexMonitor monitor;
+    private boolean closed;
+    private static final class EngineSample {
+        final Map<String, Long> previous = new HashMap<>();
+        boolean schedulerReported;
+        final PrefillTpsMetrics.Reader prefillTps = new PrefillTpsMetrics.Reader();
+        final CounterRateMetrics.Reader decodeTps = new CounterRateMetrics.Reader();
+        final CacheHitMetrics.Reader cacheHits = new CacheHitMetrics.Reader();
+        long sampledAt = System.nanoTime();
+    }
+    private final Map<Map<String, String>, EngineSample> samples = new HashMap<>();
+
+    private EngineSample state(Map<String, String> labels) {
+        return samples.computeIfAbsent(Map.copyOf(labels), ignored -> new EngineSample());
+    }
+    private final java.util.Set<String> registered = new java.util.HashSet<>();
+    private static boolean belongsToRole(String name, Map<String, String> labels) {
+        var metric = MockMetricContract.require(name);
+        String role = labels.get("role");
+        return role == null || metric.belongsTo(role);
+    }
+
+    private static boolean schedulerMetric(String name) {
+        return MockMetricContract.require(name).sampling() == MockMetricContract.Sampling.SCHEDULER;
+    }
+
+    static WhaleMockMonitor create() {
+        try {
+            FlexMonitor monitor = (FlexMonitor) Class.forName("org.flexlb.monitor.FlexMonitorFactory")
+                    .getMethod("createKMonitorAdapter", MasterStatusProvider.class).invoke(null, new Object[]{null});
+            if (monitor instanceof NoOpFlexMonitor) {
+                throw new IllegalStateException("KMonitor initialization returned a no-op adapter");
+            }
+            // Reuse internal sink initialization, but not the master's whale-lb
+            // namespace. Engine dashboards query unprefixed rtp_llm_* metrics.
+            Class<?> config = Class.forName("com.taobao.kmonitor.impl.KMonitorConfig");
+            config.getMethod("setKMonitorServiceName", String.class).invoke(null, "");
+            Object engineMonitor = Class.forName("com.taobao.kmonitor.KMonitorFactory")
+                    .getMethod("getKMonitor", String.class, String.class, String.class)
+                    .invoke(null, "rtp_llm_mock", "", System.getenv().getOrDefault("kmonitorTenant", "default"));
+            FlexMonitor adapter = (FlexMonitor) Class.forName("org.flexlb.monitor.KMonitorAdapter")
+                    .getConstructor(Class.forName("com.taobao.kmonitor.KMonitor"))
+                    .newInstance(engineMonitor);
+            return new WhaleMockMonitor(adapter);
+        } catch (ReflectiveOperationException | LinkageError error) {
+            throw new IllegalStateException("Whale KMonitor requires the internal Maven profile", error);
+        }
+    }
+
+    WhaleMockMonitor(FlexMonitor monitor) { this.monitor = monitor; }
+
+    void sample(JavaMockEngineCluster.FastRpcService service) {
+        // Engine snapshots acquire cache, decode and completion locks. Never
+        // hold the monitor lock while reading them: engine callbacks report
+        // metrics while holding those same locks.
+        Map<String, String> labels = service.whaleMetricTags();
+        Map<String, Number> values = new HashMap<>(service.whaleMetrics());
+        var decode = "ROLE_TYPE_DECODE".equals(labels.get("role"))
+                ? service.decodeTpsSnapshot() : null;
+        var prefill = "ROLE_TYPE_PREFILL".equals(labels.get("role"))
+                ? service.prefillTpsSnapshot() : null;
+        var cacheHits = service.cacheHitSnapshot();
+        long now = System.nanoTime();
+        synchronized (this) {
+            if (closed) return;
+            if (decode != null) {
+                var reader = state(labels).decodeTps;
+                values.put("mock_decode_wall_tps", reader.sample(decode, now));
+                values.put("rtp_llm_generate_tps", reader.lastTokens());
+            }
+            state(labels).cacheHits.sample(cacheHits, now)
+                    .ifPresent(value -> values.put("rtp_llm_kv_cache_hit_rate", value));
+            sample(values, labels, now);
+            if (prefill != null) samplePrefillTps(prefill, labels, now);
+        }
+    }
+
+    synchronized void samplePrefillTps(PrefillTpsMetrics.Snapshot snapshot,
+                                       Map<String, String> labels, long now) {
+        Map<String, Number> values = new HashMap<>();
+        state(labels).prefillTps.sample(snapshot, now).forEach((name, value) -> values.put("rtp_llm_" + name, value));
+        reportEvent(values, labels);
+    }
+
+    synchronized void reportWorkerStatus(Map<String, String> labels, long latencyUs) {
+        FlexMetricTags tags = new FlexMetricTags.ImmutableFlexMetricTags(labels);
+        String qps = "rtp_llm_rpc_worker_status_qps", latency = "rtp_llm_rpc_worker_status_total_rt_us";
+        if (registered.add(qps)) monitor.register(qps, FlexMetricType.QPS);
+        if (registered.add(latency)) monitor.register(latency, FlexMetricType.GAUGE);
+        monitor.report(qps, tags, 1.0);
+        monitor.report(latency, tags, latencyUs);
+    }
+
+    synchronized void reportEvent(Map<String, Number> metrics, Map<String, String> labels) {
+        if (closed) return;
+        FlexMetricTags tags = new FlexMetricTags.ImmutableFlexMetricTags(labels);
+        metrics.forEach((name, value) -> {
+            if (!belongsToRole(name, labels)) return;
+            if (!registered.contains(name)) {
+                monitor.register(name, FlexMetricType.GAUGE);
+                registered.add(name);
+            }
+            monitor.report(name, tags, value.doubleValue());
+        });
+    }
+
+    synchronized void reportScheduler(Map<String, Number> metrics, Map<String, String> labels) {
+        if (closed) return;
+        FlexMetricTags tags = new FlexMetricTags.ImmutableFlexMetricTags(labels);
+        for (var entry : metrics.entrySet()) {
+            if (!schedulerMetric(entry.getKey()))
+                throw new IllegalArgumentException("Not a scheduler metric: " + entry.getKey());
+            if (!belongsToRole(entry.getKey(), labels)) continue;
+            if (!registered.contains(entry.getKey())) {
+                monitor.register(entry.getKey(), FlexMetricType.GAUGE);
+                registered.add(entry.getKey());
+            }
+            monitor.report(entry.getKey(), tags, entry.getValue().doubleValue());
+        }
+        state(labels).schedulerReported = true;
+    }
+
+    synchronized void sample(Map<String, Number> metrics, Map<String, String> labels, long now) {
+        EngineSample sample = state(labels);
+        double seconds = Math.max(1e-9, (now - sample.sampledAt) / 1e9);
+        sample.sampledAt = now;
+        if (closed) return;
+        FlexMetricTags tags = new FlexMetricTags.ImmutableFlexMetricTags(labels);
+        boolean hadSchedulerSteps = sample.schedulerReported;
+        sample.schedulerReported = false;
+        Map<String, Long> deltas = new HashMap<>();
+        metrics.forEach((name, value) -> {
+            if (MockMetricContract.require(name).type() == MockMetricContract.Type.COUNTER) {
+                Long before = sample.previous.put(name, value.longValue());
+                deltas.put(name, before == null ? 0L : Math.max(0, value.longValue() - before));
+            }
+        });
+        // No-Fetch mode has no client success response. This is the engine's
+        // successful Decode terminal rate, separate from frontend success QPS.
+        if ("ROLE_TYPE_DECODE".equals(labels.get("role"))
+                && metrics.containsKey("mock_engine_completed_total")) {
+            String name = "mock_decode_success_qps";
+            if (!registered.contains(name)) {
+                monitor.register(name, FlexMetricType.GAUGE);
+                registered.add(name);
+            }
+            double successQps = deltas.getOrDefault("mock_engine_completed_total", 0L) / seconds;
+            monitor.report(name, tags, successQps);
+        }
+        metrics.forEach((name, value) -> {
+            if (!belongsToRole(name, labels)) return;
+            // Preserve execution-round samples. A periodic zero between two
+            // short P batches must not dilute them. With no rounds this period,
+            // retain the instantaneous gauge so idle engines return to zero.
+            if (name.equals("rtp_llm_context_batch_size")) return;
+            // P running size is sampled at execution transitions. FIFO blocks
+            // while idle; periodic zeros would bias low-traffic averages.
+            // Completion already emits the terminal zero, so preserve that event.
+            if (name.equals("rtp_llm_running_stream_size")
+                    && "ROLE_TYPE_PREFILL".equals(labels.get("role"))) return;
+            if (hadSchedulerSteps && schedulerMetric(name)) return;
+            if (!registered.contains(name)) {
+                monitor.register(name, FlexMetricType.GAUGE);
+                registered.add(name);
+            }
+            monitor.report(name, tags, value.doubleValue());
+            String rate = switch (name) {
+                case "mock_decode_step_tokens_total" -> "mock_decode_wall_tps";
+                default -> null;
+            };
+            if (rate != null && !metrics.containsKey(rate)) {
+                if (registered.add(rate)) monitor.register(rate, FlexMetricType.GAUGE);
+                if (!metrics.containsKey("rtp_llm_generate_tps")) {
+                    if (registered.add("rtp_llm_generate_tps")) monitor.register("rtp_llm_generate_tps", FlexMetricType.GAUGE);
+                    monitor.report("rtp_llm_generate_tps", tags, deltas.getOrDefault(name, 0L));
+                }
+                monitor.report(rate, tags, CounterRateMetrics.rate(deltas.getOrDefault(name, 0L), (long) (seconds * 1e9)));
+            }
+        });
+    }
+
+    static Map<String, String> engineTags(Map<String, String> environment, String host, String role) {
+        Map<String, String> tags = new HashMap<>();
+        tags.put("hippo_app", environment.getOrDefault("HIPPO_APP", ""));
+        tags.put("hippo_role", environment.getOrDefault("HIPPO_ROLE", ""));
+        tags.put("hippo_group", environment.getOrDefault("HIPPO_SERVICE_NAME", ""));
+        tags.put("host_ip", environment.getOrDefault("HIPPO_SLAVE_IP", host));
+        tags.put("container_ip", host);
+        tags.put("dp_rank", "0"); // Each mock engine is single-DP; engine identity is a separate tag.
+        tags.put("priority", "0"); // Aggregate mock series, not a per-priority breakdown.
+        tags.put("mtp_model_type", "main");
+        tags.put("pool", "0"); // The mock has one physical KV pool, matching C++ gid=0.
+        String aliasVariable = switch (role) {
+            case "ROLE_TYPE_PREFILL" -> "MOCK_PREFILL_HIPPO_ROLE";
+            case "ROLE_TYPE_DECODE" -> "MOCK_DECODE_HIPPO_ROLE";
+            default -> null;
+        };
+        String alias = aliasVariable == null ? null : environment.get(aliasVariable);
+        if (alias != null && !alias.isBlank()) {
+            tags.put("hippo_role", alias);
+        }
+        return tags;
+    }
+
+    @Override
+    public synchronized void close() {
+        if (closed) return;
+        closed = true;
+        monitor.close();
+    }
+}
