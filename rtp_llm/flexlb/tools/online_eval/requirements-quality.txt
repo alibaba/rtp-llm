@@ -2,3 +2,4 @@ ruff==0.14.0
 import-linter==2.5
 mypy==1.18.2
 types-PyYAML==6.0.12.20250915
+pytest==9.1.1
