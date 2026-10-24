@@ -424,6 +424,16 @@ class KdaPagedPrefill(KdaPrefill):
 
 
 class KdaDecode(KdaBase):
+    def __init__(
+        self,
+        linear_attn_config: LinearAttentionConfig,
+        parallelism_config: ParallelismConfig,
+        weights: Dict[str, torch.Tensor],
+        transpose_state_layout: bool = True,
+    ):
+        super().__init__(linear_attn_config, parallelism_config, weights)
+        self.transpose_state_layout = transpose_state_layout
+
     def _conv1d(
         self,
         mixed_qkv: torch.Tensor,
@@ -488,8 +498,10 @@ class KdaDecode(KdaBase):
         g = forget_gate_2d.view(
             batch, seq, self.local_num_v_heads, self.head_k_dim
         ).contiguous()
-        # Apply sigmoid in the recurrent kernel to avoid a separate producer.
+        # Preserve Kimi-Linear's FP32 producer; K3 fuses sigmoid into recurrence.
         beta_out = beta.reshape(batch, seq, self.local_num_v_heads)
+        if not self.transpose_state_layout:
+            beta_out = beta_out.float().sigmoid()
 
         ssm_states = self._get_ssm_states(kv_cache_tensor)
 
@@ -507,8 +519,9 @@ class KdaDecode(KdaBase):
             inplace_final_state=True,
             use_qk_l2norm_in_kernel=True,
             use_gate_in_kernel=True,
-            use_beta_sigmoid_in_kernel=True,
+            use_beta_sigmoid_in_kernel=self.transpose_state_layout,
             state_v_first=False,
+            transpose_state_layout=self.transpose_state_layout,
             block_map=attn_inputs.kv_cache_kernel_block_id_device,
             seq_size_per_block=seq_size_per_block,
             sequence_lengths=attn_inputs.sequence_lengths_plus_1_device,

@@ -146,7 +146,10 @@ class KimiLinearKDA(nn.Module):
             linear_attn_config, parallelism_config, weights
         )
         self.decode_kda = KimiLinearKDADecode(
-            linear_attn_config, parallelism_config, weights
+            linear_attn_config,
+            parallelism_config,
+            weights,
+            transpose_state_layout=False,
         )
         # o_norm with sigmoid activation (not SwiGLU)
         self.norm = RmsNormGated(
