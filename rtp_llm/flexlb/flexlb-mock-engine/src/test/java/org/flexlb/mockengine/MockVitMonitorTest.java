@@ -20,7 +20,7 @@ class MockVitMonitorTest {
             "container_ip", "127.0.0.1", "source", "mock_vit");
 
     @Test void pollingIsExcludedAndCachedEmbeddingStillCountsAsRpc() throws Exception {
-        try (var service = new MockVitService(MockVitService.Config.defaults());
+        try (var service = MockVitTestSupport.service(MockVitService.Config.defaults());
              var monitor = new MockVitMonitor(sink, tags)) {
             var server = NettyServerBuilder.forPort(0).addService(service).intercept(monitor).build().start();
             var channel = ManagedChannelBuilder.forAddress("127.0.0.1", server.getPort()).usePlaintext().build();
@@ -55,6 +55,19 @@ class MockVitMonitorTest {
         }
     }
 
+    @Test void logicalPoolAndUrlCacheGaugesAreRegisteredBeforeSampling() {
+        try (var service = MockVitTestSupport.service(MockVitService.Config.defaults());
+             var monitor = new MockVitMonitor(sink, tags)) {
+            monitor.sample(service.snapshot(), System.nanoTime());
+            monitor.sample(service.snapshot(), System.nanoTime());
+            for (String field : java.util.List.of("gpu_pool_used_bytes", "cpu_pool_pending_bytes",
+                    "cpu_pool_largest_free_block_bytes", "hash_pool_used_bytes", "url_cache_items")) {
+                verify(sink, times(1)).register(eq("mock_vit_" + field), eq(org.flexlb.enums.FlexMetricType.GAUGE));
+                verify(sink, times(2)).report(eq("mock_vit_" + field), any(), anyDouble());
+            }
+        }
+    }
+
     @Test void schedulerMetricsUseRealNamesMillisecondsAndExcludeCacheHits() throws Exception {
         var document = MockEngineConfigFixture.load().snapshot();
         var limits = document.path("roles").path("vit");
@@ -77,7 +90,7 @@ class MockVitMonitorTest {
 
     @Test void cancelledRpcRecordsOnlyOneTerminal() throws Exception {
         var d = MockVitService.Config.defaults();
-        try (var service = new MockVitService(new MockVitService.Config(8, 1, 4, 1 << 20, 1 << 20,
+        try (var service = MockVitTestSupport.service(new MockVitService.Config(8, 1, 4, 1 << 20, 1 << 20,
                 d.maxInputBytes(), d.maxOutputBytes(), 500)); var monitor = new MockVitMonitor(sink, tags)) {
             var server = NettyServerBuilder.forPort(0).addService(service).intercept(monitor).build().start();
             var channel = ManagedChannelBuilder.forAddress("127.0.0.1", server.getPort()).usePlaintext().build();

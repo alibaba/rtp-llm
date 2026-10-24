@@ -25,6 +25,7 @@ key 版本初始为 -1，只在逻辑节点创建、最终移除时递增；GPU/
 | `MockPerformanceModel`、`PrefillTimeFormula` | 性能 JSON、公式、执行耗时及有界噪声 |
 | `MockPrefillBatchPolicy` | FIFO 候选准入、token 预算与 CP 计价 |
 | `MockLruBlockCache` | Device KV lease、前缀匹配与驱逐 |
+| `MockVitEmbeddingCache`、`MockVitHashCache`、`MockTensorPool` | ViT 分层驻留、独立 sidecar、连续空间和事件回收；规则见[引擎配置](../tools/online_eval/docs/architecture/engine-configuration.md) |
 | `MockControlServer`、`DynamicEngineManager` | HTTP 控制、故障和动态引擎管理 |
 | `JavaLoadClient` | 播放、Schedule、Fetch / Generate、请求终态证据 |
 

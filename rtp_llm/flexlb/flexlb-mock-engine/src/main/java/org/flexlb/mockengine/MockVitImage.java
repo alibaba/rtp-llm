@@ -64,33 +64,43 @@ final class MockVitImage {
     static Prepared prepare(EngineRpcService.MultimodalInputPB input, int hiddenSize,
                             int maxInputBytes, long maxOutputBytes, long timeoutMs,
                             java.util.Map<String, String> headers) throws Exception {
+        return prepare(input, hiddenSize, maxInputBytes, maxOutputBytes, timeoutMs, headers, null);
+    }
+
+    static Prepared prepare(EngineRpcService.MultimodalInputPB input, int hiddenSize,
+                            int maxInputBytes, long maxOutputBytes, long timeoutMs,
+                            java.util.Map<String, String> headers, MockVitMediaCache mediaCache) throws Exception {
         long downloadStarted = System.nanoTime();
         if (input.getMultimodalType() != 1) throw new IllegalArgumentException("Mock ViT currently supports IMAGE only");
         if (input.getMultimodalTensor().getSerializedSize() != 0)
             throw new IllegalArgumentException("Mock ViT requires URL images, not preprocessed tensors");
-        byte[] raw;
         String url = input.getMultimodalUrl();
-        if (url.startsWith("data:")) {
-            int comma = url.indexOf(',');
-            if (comma < 0 || !url.substring(0, comma).endsWith(";base64"))
-                throw new IllegalArgumentException("image data URL must be base64");
-            if ((long)(url.length() - comma - 1) * 3 / 4 > maxInputBytes)
-                throw new IllegalArgumentException("image exceeds byte limit");
-            raw = Base64.getDecoder().decode(url.substring(comma + 1));
-        } else {
-            URI uri = URI.create(url);
-            if (!"http".equals(uri.getScheme()) && !"https".equals(uri.getScheme()))
-                throw new IllegalArgumentException("image URL must use http, https or data");
-            var client = HttpClient.newBuilder().connectTimeout(Duration.ofMillis(timeoutMs))
-                    .followRedirects(HttpClient.Redirect.NORMAL).build();
-            var request = HttpRequest.newBuilder(uri).timeout(Duration.ofMillis(timeoutMs));
-            headers.forEach(request::header);
-            var response = client.send(request.GET().build(),
-                    HttpResponse.BodyHandlers.ofInputStream());
-            try (var body = response.body()) {
-                if (response.statusCode() / 100 != 2) throw new IllegalArgumentException("image download HTTP " + response.statusCode());
-                raw = body.readNBytes(maxInputBytes + 1);
+        byte[] raw = mediaCache == null ? null : mediaCache.get(url);
+        if (raw == null) {
+            if (url.startsWith("data:")) {
+                int comma = url.indexOf(',');
+                if (comma < 0 || !url.substring(0, comma).endsWith(";base64"))
+                    throw new IllegalArgumentException("image data URL must be base64");
+                if ((long)(url.length() - comma - 1) * 3 / 4 > maxInputBytes)
+                    throw new IllegalArgumentException("image exceeds byte limit");
+                raw = Base64.getDecoder().decode(url.substring(comma + 1));
+            } else {
+                URI uri = URI.create(url);
+                if (!"http".equals(uri.getScheme()) && !"https".equals(uri.getScheme()))
+                    throw new IllegalArgumentException("image URL must use http, https or data");
+                var client = HttpClient.newBuilder().connectTimeout(Duration.ofMillis(timeoutMs))
+                        .followRedirects(HttpClient.Redirect.NORMAL).build();
+                var request = HttpRequest.newBuilder(uri).timeout(Duration.ofMillis(timeoutMs));
+                headers.forEach(request::header);
+                var response = client.send(request.GET().build(),
+                        HttpResponse.BodyHandlers.ofInputStream());
+                try (var body = response.body()) {
+                    if (response.statusCode() / 100 != 2) throw new IllegalArgumentException("image download HTTP " + response.statusCode());
+                    raw = body.readNBytes(maxInputBytes + 1);
+                }
             }
+            if (raw.length > maxInputBytes) throw new IllegalArgumentException("image exceeds byte limit");
+            if (mediaCache != null) mediaCache.put(url, raw);
         }
         if (raw.length > maxInputBytes) throw new IllegalArgumentException("image exceeds byte limit");
         double downloadMs = (System.nanoTime() - downloadStarted) / 1e6;

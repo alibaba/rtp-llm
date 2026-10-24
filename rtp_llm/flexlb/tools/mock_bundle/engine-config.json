@@ -146,7 +146,20 @@
       "mm_image_max_file_size_kb": 16384,
       "use_local_preprocess": false,
       "mm_preprocess_max_workers": 4,
-      "download_headers": ""
+      "download_headers": "",
+      "hash_cache_accounting": {
+        "entry_overhead": 96,
+        "ascii_base": 49,
+        "latin1_base": 73,
+        "bmp_base": 74,
+        "ucs4_base": 76,
+        "hash_list_bytes": 88,
+        "tensor_object_bytes": 80,
+        "record_bytes": 80,
+        "integer_bytes": 24
+      },
+      "mm_cache_item_num": 10,
+      "url_cache_item_num": 100
     }
   }
 }

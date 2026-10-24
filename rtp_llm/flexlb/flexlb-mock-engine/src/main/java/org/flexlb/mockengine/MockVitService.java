@@ -35,52 +35,35 @@ public final class MockVitService extends MultimodalRpcServiceGrpc.MultimodalRpc
             return new Config(64, 4, 64, 64L << 20, 8L << 20, 16 << 20, 64L << 20, 1);
         }
     }
-    private record HashEntry(EngineRpcService.TensorPB hashes, int rows, String generation) {
-        long bytes(String key) { return hashes.getInt32Data().size() + key.length() * 2L + 128; }
-    }
     final Config config;
     private final MockV41Image.Config v41;
-    final String instance = UUID.randomUUID().toString();
+    final String instance = UUID.randomUUID().toString().replace("-", "");
     private final ThreadPoolExecutor executor;
-    private final java.util.concurrent.ExecutorService syncExecutor = java.util.concurrent.Executors.newThreadPerTaskExecutor(
-            Thread.ofVirtual().name("mock-vit-sync").factory());
     private final Map<String, CompletableFuture<MockVitImage.Result>> pending = new ConcurrentHashMap<>();
-    private final LinkedHashMap<String, MockVitImage.Result> embeddings = new LinkedHashMap<>(16, .75f, true);
-    private final LinkedHashMap<String, HashEntry> hashes = new LinkedHashMap<>(16, .75f, true);
-    private final LinkedHashMap<String, MockVitImage.Result> gpuEmbeddings = new LinkedHashMap<>(16, .75f, true);
-    private long gpuBytes;
-    private long gpuLimit;
-    private long embeddingTimeoutMs = 120000;
-    private int maxImageBytes;
+    private final MockVitEmbeddingCache<MockVitImage.Result> embeddingCache;
+    private final MockVitHashCache hashCache;
+    private final MockVitMediaCache mediaCache;
+    private final long embeddingTimeoutMs;
+    private final int maxImageBytes;
 
-    private MockVitScheduler gpuScheduler;
-    private MockVitPreprocessor preprocessor;
-    private Map<String, String> downloadHeaders = Map.of();
-    private com.fasterxml.jackson.databind.JsonNode effectiveConfig;
+    private final MockVitScheduler gpuScheduler;
+    private final MockVitPreprocessor preprocessor;
+    private final Map<String, String> downloadHeaders;
+    private final com.fasterxml.jackson.databind.JsonNode effectiveConfig;
     private final Map<CompletableFuture<MockVitImage.Result>, java.util.concurrent.atomic.AtomicInteger> owners = new ConcurrentHashMap<>();
     private final Map<CompletableFuture<MockVitImage.Result>, java.util.concurrent.FutureTask<Void>> tasks = new ConcurrentHashMap<>();
-    private long embeddingBytes, hashBytes;
     private volatile boolean closed;
     final AtomicLong computations = new AtomicLong();
 
-    public MockVitService(Config config) {
-        this(config, null);
-    }
-
-    MockVitService(Config config, MockV41Image.Config v41) {
+    MockVitService(Config config, MockV41Image.Config model, com.fasterxml.jackson.databind.JsonNode document) {
         this.config = config;
-        this.v41 = v41;
-        typedCacheCapacity = v41 == null ? 0 : Math.max(0, Integer.parseInt(
+        this.v41 = model;
+        typedCacheCapacity = model == null ? 0 : Math.max(0, Integer.parseInt(
                 System.getenv().getOrDefault("V41_IMAGE_ENCODE_CACHE_ITEMS", "16")));
-        this.maxImageBytes = config.maxInputBytes();
         executor = new ThreadPoolExecutor(config.concurrency(), config.concurrency(), 0, TimeUnit.MILLISECONDS,
                 new java.util.concurrent.LinkedBlockingQueue<>(), task -> {
                     Thread thread = new Thread(task, "mock-vit-forward"); thread.setDaemon(true); return thread;
                 }, new ThreadPoolExecutor.AbortPolicy());
-    }
-
-    MockVitService(Config config, MockV41Image.Config model, com.fasterxml.jackson.databind.JsonNode document) {
-        this(config, model);
         effectiveConfig = document.deepCopy();
         var limits = document.path("roles").path("vit");
         if (config.concurrency() != limits.path("vit_concurrency").intValue()
@@ -95,75 +78,43 @@ public final class MockVitService extends MultimodalRpcServiceGrpc.MultimodalRpc
         preprocessor = new MockVitPreprocessor(limits.path("use_local_preprocess").booleanValue(),
                 limits.path("mm_preprocess_max_workers").intValue());
         downloadHeaders = MockEngineConfig.vitDownloadHeaders(limits);
-        gpuLimit = limits.path("mm_cache_gpu_max_bytes").longValue();
+        embeddingCache = new MockVitEmbeddingCache<>(limits.path("mm_cache_gpu_max_bytes").longValue(), config.embeddingCacheBytes());
+        hashCache = new MockVitHashCache(config.hashCacheBytes(), limits.path("hash_cache_accounting"));
+        mediaCache = new MockVitMediaCache(limits.path("url_cache_item_num").intValue());
         gpuScheduler = new MockVitScheduler(limits.path("mm_max_queue_size").intValue(),
                 limits.path("gpu_max_batch_size").intValue(), limits.path("gpu_max_batch_images").longValue(),
                 limits.path("gpu_batch_wait_ms").longValue(), config.computeDelayMs(), MockEngineConfig.vitWorkBudget(limits));
     }
 
     void setSchedulerMetrics(java.util.function.Consumer<Map<String, Number>> reporter) {
-        if (gpuScheduler != null) gpuScheduler.setMetrics(reporter);
-        if (preprocessor != null) preprocessor.setMetrics(reporter);
+        gpuScheduler.setMetrics(reporter);
+        preprocessor.setMetrics(reporter);
     }
 
-    private long charge(String key, MockVitImage.Result result) {
-        return result.embeddingBytes() + result.hashBytes() + key.length() * 2L + 128;
+    private CompletableFuture<MockVitImage.Result> cached(String key, long budgetMs) {
+        var read = embeddingCache.claim(key, budgetMs);
+        if (read == null) return null;
+        var result = new CompletableFuture<MockVitImage.Result>();
+        // Cache consumption belongs to the caller, outside shared admission/queue locks.
+        Thread.startVirtualThread(() -> {
+            try {
+                var hit = read.get();
+                if (hashCache.consume(key, hit.generation()) == null) hashCache.put(key, hit.value(), hit.generation());
+                result.complete(hit.value());
+            } catch (Throwable error) { result.completeExceptionally(error); }
+        });
+        return result;
     }
-
-    private void rememberGpu(String key, MockVitImage.Result result) {
-        long size = charge(key, result);
-        if (size > gpuLimit) { rememberCpu(key, result); return; }
-        var old = gpuEmbeddings.remove(key);
-        if (old != null) gpuBytes -= charge(key, old);
-        while (gpuBytes + size > gpuLimit) {
-            var victim = gpuEmbeddings.entrySet().iterator().next();
-            gpuBytes -= charge(victim.getKey(), victim.getValue());
-            rememberCpu(victim.getKey(), victim.getValue());
-            gpuEmbeddings.remove(victim.getKey());
-        }
-        gpuEmbeddings.put(key, result); gpuBytes += size;
-    }
-
-    private void rememberCpu(String key, MockVitImage.Result result) {
-        long bytes = charge(key, result);
-        if (bytes > config.embeddingCacheBytes()) return;
-        var old = embeddings.put(key, result);
-        if (old != null) embeddingBytes -= charge(key, old);
-        embeddingBytes += bytes;
-        while (embeddingBytes > config.embeddingCacheBytes()) {
-            var victim = embeddings.entrySet().iterator().next();
-            embeddingBytes -= charge(victim.getKey(), victim.getValue());
-            embeddings.remove(victim.getKey());
-        }
-    }
-
-    private synchronized MockVitImage.Result cached(String key) {
-        var gpu = gpuEmbeddings.get(key);
-        if (gpu != null) return gpu;
-        var cpu = embeddings.get(key);
-        if (cpu != null && charge(key, cpu) <= gpuLimit) {
-            embeddings.remove(key); embeddingBytes -= charge(key, cpu);
-            rememberGpu(key, cpu);
-        }
-        return cpu;
-    }
-    private synchronized HashEntry hash(String key) { return hashes.get(key); }
-    private synchronized void remember(String key, MockVitImage.Result result) {
+    private MockVitHashCache.Entry hash(String key) { return hashCache.peek(key); }
+    private void remember(String key, MockVitImage.Result result) {
         if (closed || key.startsWith("uncached:")) return;
-        if (gpuLimit > 0) rememberGpu(key, result); else rememberCpu(key, result);
-        var previousEntry = hashes.get(key);
-        var entry = new HashEntry(result.hashes(), result.rows(),
-                previousEntry == null ? UUID.randomUUID().toString() : previousEntry.generation());
-        long charge = entry.bytes(key);
-        var previous = hashes.remove(key);
-        if (previous != null) hashBytes -= previous.bytes(key);
-        if (charge <= config.hashCacheBytes()) {
-            hashes.put(key, entry); hashBytes += charge;
-            while (hashBytes > config.hashCacheBytes()) {
-                var victim = hashes.entrySet().iterator().next();
-                hashBytes -= victim.getValue().bytes(victim.getKey()); hashes.remove(victim.getKey());
-            }
-        }
+        String generation = UUID.randomUUID().toString().replace("-", "");
+        // Feature hashes are an independent CPU sidecar, not embedding-pool payload.
+        var layout = List.of(new MockVitEmbeddingCache.Tensor(result.embedding(), result.embeddingBytes(),
+                result.embedding().getDataType() == EngineRpcService.TensorPB.DataType.BF16 ? 2 : 4,
+                MockVitEmbeddingCache.Device.GPU));
+        embeddingCache.put(key, result, layout, generation);
+        hashCache.put(key, result, generation);
     }
 
     CompletableFuture<MockVitImage.Result> acquire(EngineRpcService.MultimodalInputPB image, long timeoutMs) {
@@ -173,12 +124,9 @@ public final class MockVitService extends MultimodalRpcServiceGrpc.MultimodalRpc
         java.util.function.LongSupplier budget = () -> Math.min(timeoutMs, mediaTimeout)
                 - TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - preparedAt);
         return acquirePrepared(MockVitImage.key(image), timeoutMs, mediaTimeout, () -> {
-            var prepared = preprocessor == null
-                    ? MockVitImage.prepare(image, config.hiddenSize(), maxImageBytes, config.maxOutputBytes(),
-                            positivePreprocessBudget(budget), downloadHeaders)
-                    : preprocessor.submit(() -> MockVitImage.prepare(image, config.hiddenSize(), maxImageBytes,
-                            config.maxOutputBytes(), positivePreprocessBudget(budget), downloadHeaders))
-                            .get(positivePreprocessBudget(budget), TimeUnit.MILLISECONDS);
+            var prepared = preprocessor.submit(() -> MockVitImage.prepare(image, config.hiddenSize(), maxImageBytes,
+                    config.maxOutputBytes(), positivePreprocessBudget(budget), downloadHeaders, mediaCache))
+                    .get(positivePreprocessBudget(budget), TimeUnit.MILLISECONDS);
             return () -> MockVitImage.forward(prepared);
         });
     }
@@ -189,15 +137,18 @@ public final class MockVitService extends MultimodalRpcServiceGrpc.MultimodalRpc
         return remaining;
     }
 
-    private synchronized CompletableFuture<MockVitImage.Result> acquirePrepared(String key, long timeoutMs, long mediaTimeout,
+    private CompletableFuture<MockVitImage.Result> acquirePrepared(String key, long timeoutMs, long mediaTimeout,
             java.util.concurrent.Callable<java.util.concurrent.Callable<MockVitImage.Result>> prepare) {
         if (closed) return CompletableFuture.failedFuture(Status.UNAVAILABLE.asRuntimeException());
         if (timeoutMs <= 0) return CompletableFuture.failedFuture(Status.DEADLINE_EXCEEDED.asRuntimeException());
-        var result = cached(key);
-        if (result != null) {
-            if (hash(key) == null) remember(key, result);
-            return CompletableFuture.completedFuture(result);
-        }
+        var result = cached(key, timeoutMs);
+        if (result != null) return result;
+        return enqueuePrepared(key, timeoutMs, mediaTimeout, prepare);
+    }
+
+    private synchronized CompletableFuture<MockVitImage.Result> enqueuePrepared(String key, long timeoutMs, long mediaTimeout,
+            java.util.concurrent.Callable<java.util.concurrent.Callable<MockVitImage.Result>> prepare) {
+        if (closed) return CompletableFuture.failedFuture(Status.UNAVAILABLE.asRuntimeException());
         var shared = pending.get(key);
         if (shared != null) return shared;
         if (tasks.size() >= (long)config.concurrency() + config.queueCapacity())
@@ -211,24 +162,19 @@ public final class MockVitService extends MultimodalRpcServiceGrpc.MultimodalRpc
                 try {
                     long remaining = Math.min(timeoutMs, mediaTimeout) - TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - submittedAt);
                     if (remaining <= 0) throw Status.DEADLINE_EXCEEDED.withDescription("ViT async queue deadline exceeded").asRuntimeException();
-                    var resident = cached(key);
-                    if (resident != null) { created.complete(resident); return; }
+                    var resident = cached(key, remaining);
+                    if (resident != null) { created.complete(resident.get(remaining, TimeUnit.MILLISECONDS)); return; }
                     var forward = prepare.call();
                     remaining = Math.min(timeoutMs, mediaTimeout) - TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - submittedAt);
                     if (remaining <= 0) throw Status.DEADLINE_EXCEEDED.withDescription("ViT preprocessing deadline exceeded").asRuntimeException();
                     MockVitImage.Result computed;
-                    if (gpuScheduler == null) {
-                        if (config.computeDelayMs() > 0) Thread.sleep(config.computeDelayMs());
-                        computed = forward.call();
-                    } else {
-                        var gpuWork = gpuScheduler.submit(forward);
-                        try { computed = gpuWork.get(Math.min(remaining, mediaTimeout), TimeUnit.MILLISECONDS); }
-                        catch (java.util.concurrent.TimeoutException error) {
-                            gpuScheduler.cancelRequest(gpuWork);
-                            throw Status.DEADLINE_EXCEEDED.withDescription("ViT GPU queue/forward deadline exceeded").asRuntimeException();
-                        }
-                        catch (InterruptedException error) { gpuScheduler.cancelRequest(gpuWork); throw error; }
+                    var gpuWork = gpuScheduler.submit(forward);
+                    try { computed = gpuWork.get(Math.min(remaining, mediaTimeout), TimeUnit.MILLISECONDS); }
+                    catch (java.util.concurrent.TimeoutException error) {
+                        gpuScheduler.cancelRequest(gpuWork);
+                        throw Status.DEADLINE_EXCEEDED.withDescription("ViT GPU queue/forward deadline exceeded").asRuntimeException();
                     }
+                    catch (InterruptedException error) { gpuScheduler.cancelRequest(gpuWork); throw error; }
                     computations.incrementAndGet(); remember(key, computed); created.complete(computed);
                 } catch (Throwable error) { created.completeExceptionally(error); }
                 finally { pending.remove(key, created); tasks.remove(created); }
@@ -289,7 +235,7 @@ public final class MockVitService extends MultimodalRpcServiceGrpc.MultimodalRpc
     private synchronized CompletableFuture<List<MockVitImage.Result>> acquireAll(EngineRpcService.MultimodalInputsPB inputs, long budget) {
         validate(inputs);
         long misses = inputs.getMultimodalInputsList().stream().map(MockVitImage::key).distinct()
-                .filter(key -> cached(key) == null && !pending.containsKey(key)).count();
+                .filter(key -> !embeddingCache.contains(key) && !pending.containsKey(key)).count();
         if (tasks.size() + misses > (long)config.concurrency() + config.queueCapacity())
             throw MockRpcErrors.error(Status.RESOURCE_EXHAUSTED, 409, "[CONCURRENCY_LIMIT_ERROR] ViT async batch exceeds admission capacity");
         var values = inputs.getMultimodalInputsList().stream().map(image -> acquire(image, budget)).toList();
@@ -332,20 +278,11 @@ public final class MockVitService extends MultimodalRpcServiceGrpc.MultimodalRpc
     private CompletableFuture<List<MockVitImage.Result>> acquireTyped(EngineRpcService.MultimodalInputsPB inputs, long budget) {
         if (closed) return CompletableFuture.failedFuture(Status.UNAVAILABLE.asRuntimeException());
         var work = MockV41Image.validate(inputs, v41, maxImageBytes);
-        if (gpuScheduler != null && work.size() > gpuScheduler.maxRequestImages())
+        if (work.size() > gpuScheduler.maxRequestImages())
             throw MockRpcErrors.error(Status.INVALID_ARGUMENT, 902, "[MM_WRONG_FORMAT_ERROR] V4.1 request exceeds image-count limit");
         if (work.isEmpty()) return CompletableFuture.completedFuture(List.of());
         var items = work.stream().map(item -> new MockVitScheduler.Item(() -> forwardTyped(item), 1, null)).toList();
-        CompletableFuture<List<MockVitImage.Result>> submitted;
-        if (gpuScheduler != null) submitted = gpuScheduler.submitItems(items);
-        else submitted = CompletableFuture.supplyAsync(() -> {
-            try {
-                if (config.computeDelayMs() > 0) Thread.sleep(config.computeDelayMs());
-                List<MockVitImage.Result> values = new ArrayList<>();
-                for (var item : items) values.add(item.forward().call());
-                return values;
-            } catch (Exception error) { throw new CompletionException(error); }
-        }, syncExecutor);
+        var submitted = gpuScheduler.submitItems(items);
         var result = submitted.copy().orTimeout(Math.max(0, Math.min(budget, embeddingTimeoutMs)), TimeUnit.MILLISECONDS)
                 .exceptionallyCompose(error -> CompletableFuture.failedFuture(cause(error) instanceof java.util.concurrent.TimeoutException
                         ? MockRpcErrors.error(Status.DEADLINE_EXCEEDED, 903, "[MM_PROCESS_ERROR] ViT embedding wait timed out") : cause(error)));
@@ -422,7 +359,7 @@ public final class MockVitService extends MultimodalRpcServiceGrpc.MultimodalRpc
                 var response = EngineRpcService.MultimodalHashResponsePB.newBuilder().setWorkerInstance(instance);
                 for (String key : keys) {
                     var entry = response.addEntriesBuilder().setKey(key);
-                    HashEntry found = hash(key);
+                    MockVitHashCache.Entry found = hash(key);
                     var computed = transientResults.get(key);
                     if (found != null || computed != null) {
                         entry.setHashHit(true).setEntryGeneration(found == null ? "" : found.generation())
@@ -430,8 +367,8 @@ public final class MockVitService extends MultimodalRpcServiceGrpc.MultimodalRpc
                                 .setFeatureHashes(found == null ? computed.hashes().getInt32Data() : found.hashes().getInt32Data());
                     }
                     synchronized (this) {
-                        if (gpuEmbeddings.containsKey(key)) entry.setEmbeddingHit(true).setEmbeddingTier("gpu");
-                        else if (embeddings.containsKey(key)) entry.setEmbeddingHit(true).setEmbeddingTier("cpu");
+                        String tier = embeddingCache.tier(key);
+                        if (tier != null) entry.setEmbeddingHit(true).setEmbeddingTier(tier);
                     }
                 }
                 return response.build();
@@ -485,14 +422,10 @@ public final class MockVitService extends MultimodalRpcServiceGrpc.MultimodalRpc
     }
     /** get_mm_cache_keys: recent hashes first, then GPU/CPU residency, one union limit. */
     synchronized EngineRpcService.MultimodalCacheStatusPB cacheDirectory(int limit) {
-        var recent = new java.util.ArrayList<>(hashes.reversed().keySet().stream().limit(limit).toList());
-        java.util.Collections.reverse(recent);
+        var recent = hashCache.keys(limit);
         var tiers = new LinkedHashMap<String, String>();
-        for (String key : gpuEmbeddings.reversed().keySet()) {
-            if (tiers.size() >= limit) break;
-            tiers.put(key, "gpu");
-        }
-        for (String key : embeddings.reversed().keySet()) {
+        for (String key : embeddingCache.keys(MockVitEmbeddingCache.Device.GPU, limit)) tiers.put(key, "gpu");
+        for (String key : embeddingCache.keys(MockVitEmbeddingCache.Device.CPU, limit)) {
             if (tiers.size() >= limit) break;
             tiers.putIfAbsent(key, "cpu");
         }
@@ -511,34 +444,36 @@ public final class MockVitService extends MultimodalRpcServiceGrpc.MultimodalRpc
         return directory.build();
     }
 
-    public synchronized Map<String, Long> snapshot() {
-        return Map.of("embedding_bytes", embeddingBytes, "gpu_embedding_bytes", gpuBytes, "hash_bytes", hashBytes,
-                "gpu_queued", gpuScheduler == null ? 0L : (long)gpuScheduler.queued(),
-                "gpu_batches", gpuScheduler == null ? 0L : gpuScheduler.batches(),
-                "pending", (long)pending.size(), "active", (long)executor.getActiveCount(),
-                "queued", (long)executor.getQueue().size(), "computations", computations.get());
+    public Map<String, Long> snapshot() {
+        var result = new LinkedHashMap<String, Long>(embeddingCache.stats());
+        result.putAll(hashCache.stats());
+        result.put("url_cache_items", mediaCache.size());
+        result.put("gpu_queued", (long)gpuScheduler.queued()); result.put("gpu_batches", gpuScheduler.batches());
+        result.put("pending", (long)pending.size()); result.put("active", (long)executor.getActiveCount());
+        result.put("queued", (long)executor.getQueue().size()); result.put("computations", computations.get());
+        return result;
     }
     synchronized Map<String, Object> effectiveConfiguration() {
-        return Map.of("config", effectiveConfig == null ? Map.of() : effectiveConfig,
+        return Map.of("config", effectiveConfig,
                 "simulation", Map.of("hidden_size", config.hiddenSize(), "forward_ms", config.computeDelayMs(),
                         "max_output_bytes", config.maxOutputBytes()),
                 "model", Map.of("V41_IMAGE_ENCODE_CACHE_ITEMS", typedCacheCapacity),
-                "limitations", List.of("GPU/CPU tiers use JVM memory", "no DMA or RDMA", "work estimates require a matching model estimator"));
+                "limitations", List.of("logical GPU/CPU pools; immutable JVM payloads", "no physical DMA/RDMA or workspace/OOM model", "work estimates require a matching model estimator"));
     }
     @Override public void close() {
         closed = true;
-        executor.shutdown(); syncExecutor.shutdown();
+        executor.shutdown();
         for (Runnable task : executor.getQueue()) {
             if (executor.remove(task) && task instanceof java.util.concurrent.Future<?> queued) queued.cancel(false);
         }
         try {
             while (!executor.awaitTermination(1, TimeUnit.SECONDS)) { /* running forwards retain ownership */ }
-            while (!syncExecutor.awaitTermination(1, TimeUnit.SECONDS)) { /* synchronous callers drain independently */ }
         } catch (InterruptedException interrupted) { Thread.currentThread().interrupt(); }
-        if (preprocessor != null) preprocessor.close();
-        if (gpuScheduler != null) gpuScheduler.close();
+        preprocessor.close();
+        gpuScheduler.close();
         pending.values().forEach(value -> value.completeExceptionally(Status.UNAVAILABLE.asRuntimeException())); pending.clear();
         tasks.values().forEach(task -> task.cancel(true)); tasks.clear(); owners.clear();
-        synchronized (this) { embeddings.clear(); gpuEmbeddings.clear(); hashes.clear(); typedEmbeddings.clear(); embeddingBytes = hashBytes = gpuBytes = 0; }
+        embeddingCache.close(); hashCache.close(); mediaCache.clear();
+        synchronized (this) { typedEmbeddings.clear(); }
     }
 }

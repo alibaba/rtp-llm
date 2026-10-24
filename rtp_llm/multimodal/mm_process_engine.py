@@ -828,7 +828,8 @@ class MMProcessEngine:
 
             export_requested(
                 lambda revision: vit_snapshot(
-                    vit_config, revision=revision, work_budget=self._scheduler._work_budget
+                    vit_config, revision=revision, work_budget=self._scheduler._work_budget,
+                    hash_cache_accounting=MMHashKeyCache.accounting(),
                 ),
                 rank=self.server_id,
             )

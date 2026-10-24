@@ -40,6 +40,17 @@ class MockEngineConfigTest {
         assertThrows(IllegalArgumentException.class, () -> MockEngineConfig.parse(document));
     }
 
+    @Test void hashAccountingMustComeFromRealRuntimeRatherThanAFixedJavaGuess() {
+        ObjectNode document = (ObjectNode)MockEngineConfigFixture.load().snapshot();
+        var vit = (ObjectNode)document.path("roles").path("vit");
+        var accounting = (ObjectNode)vit.remove("hash_cache_accounting");
+        assertThrows(IllegalArgumentException.class, () -> MockEngineConfig.parse(document));
+        vit.set("hash_cache_accounting", accounting);
+        assertDoesNotThrow(() -> MockEngineConfig.parse(document));
+        accounting.put("tensor_object_bytes", -1);
+        assertThrows(IllegalArgumentException.class, () -> MockEngineConfig.parse(document));
+    }
+
     @Test void vitBudgetMustBeExplicitAndEveryDimensionValidated() {
         ObjectNode document = (ObjectNode)MockEngineConfigFixture.load().snapshot();
         var vit = (ObjectNode)document.path("roles").path("vit");

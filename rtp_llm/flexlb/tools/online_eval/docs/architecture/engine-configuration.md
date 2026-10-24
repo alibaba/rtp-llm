@@ -172,9 +172,27 @@ V4.1 typed RPC 对应 `submit_v41`，绕过 async C+Q 和 URL preprocess，完�
 MM 错误详情保留到 P，903 可重试，902/409 不重试。
 typed 编码缓存位于 model forward 内，使用独立 item-count LRU，读取 real 同名环境变量 `V41_IMAGE_ENCODE_CACHE_ITEMS`（默认 16，非正关闭）；
 可信 content hash、processor identity 和网格共同作 key，空 hash 绕过缓存。它不占通用 URL embedding/hash 的字节容量。
-GPU、CPU、hash 各自使用字节预算；GPU 淘汰下放 CPU，CPU 命中可提升回 GPU。
-这里的 GPU/CPU tier 都使用 JVM 内存，只模拟驻留和容量，不模拟 CUDA event、
-真实搬运。只支持 inline gRPC，不接受 RDMA 和远端 embedding cache。
+GPU、CPU embedding 按实际输出 tensor 的元素数、dtype、目标设备及 tensor 对象身份去重计费；
+同设备的结果按元素对齐打包，每个池一次申请连续区间。Hash 是独立 CPU sidecar，不重复计入 embedding 池。
+三个池均为固定容量的分配元数据，按 8 字节对齐 first-fit，合并相邻空闲区间，不搬动活跃区间做压实。
+GPU 淘汰下放 CPU；CPU 容量不足先淘汰冷项，必要时淘汰含 CPU tensor 的 GPU 热项；
+Embedding 总字节足够但连续区间不足时继续驱逐，分配失败重试一次后旁路缓存，不把成功 forward 改成失败。
+Hash 按总计费先驱逐，池分配仍失败则直接旁路该项。
+单项超过 GPU 容量尝试存 CPU，连 CPU 也放不下则不保留。CPU 读取恢复失败是请求错误；
+恢复成功后的缓存提升失败只放弃驻留，已恢复的请求结果仍可用。
+
+`hash_cache_accounting` 从 real `MMHashKeyCache.accounting()` 导出 Python 字符串、列表、tensor wrapper、
+记录及字典项的计费布局，Mock 必须显式导入，不能使用 JVM 对象大小或固定常数猜测。
+Hash 查询元数据不刷新 LRU；消费且 generation 一致才刷新。超大替换删除自身旧 generation，不冲掉无关记录。
+`url_cache_item_num` 控制每个逻辑 worker 的 URL 原始字节 LRU，独立于 embedding 字节预算；
+缓存命中仍校验当前文件大小限制。`mm_cache_item_num` 保留 real 的模型内部旧缓存配置，
+当前通用 URL scheduler 不使用它；V4.1 编码缓存由上面的独立环境变量控制。
+
+GPU/CPU pool 不申请真实显存，payload 仍为不可变 JVM 数据。回收依赖完成事件，事件未完成的块计入
+used/pending，不能重新分配；默认 CPU 模拟事件立即完成，测试通过受控事件覆盖延迟回收和搬运失败。
+这些事件用于验证所有权和容量，不拟合 CUDA/DMA 延迟、forward workspace 或真实 OOM。
+模拟输出的 shape/dtype 由现有模型/校准输入决定，比较容量时必须先匹配输出 tensor 布局。
+只支持 inline gRPC，不接受 RDMA 和远端 embedding cache。
 
 V 的 `work_budget` 来自初始化完成后的 real `MMScheduler`，必须显式为 `null` 或五维预算对象。
 五维为 `input_patches`、`output_tokens`、`estimated_workspace_bytes`、
@@ -232,7 +250,9 @@ Mock 的公共入口是 `MockEngineConfig`、`MockVitServer` 和 `JavaMockEngine
 | `mm_max_queue_size` | 同名 V 字段 | 新请求只看 waiting；pending carry-over 计入监控，续块绕过 newcomer 门禁 |
 | `mm_timeout_ms` | 同名 V 字段 | embedding 阶段预算；媒体级正值覆盖默认，仍受原请求剩余期限约束，不替代 RPC deadline |
 | `mm_image_max_file_size_kb` | 同名 V 字段 | 文件限制为 KB×1024；不再从性能校准文件提供输入文件容量 |
-| `mm_cache_gpu_max_bytes`、`mm_cache_cpu_max_bytes`、`mm_hash_key_cache_max_bytes` | 同名 V 字段 | 三个独立预算；GPU 淘汰下放 CPU，hash 驻留独立；真实 tensor 分配成本未模拟 |
+| `mm_cache_gpu_max_bytes`、`mm_cache_cpu_max_bytes`、`mm_hash_key_cache_max_bytes` | 同名 V 字段 | 三个独立预算；固定逻辑池、连续空间及 pending 回收，GPU 淘汰下放 CPU；不模拟物理分配/搬运耗时 |
+| `MMHashKeyCache.accounting()` | `hash_cache_accounting` | real 运行时派生的 Python 元数据布局，必填；不是新的 VitConfig 调参项 |
+| `url_cache_item_num`、`mm_cache_item_num` | 同名 V 字段 | URL 原始数据按条数 LRU；旧 embedding 条数配置保留给模型内部，通用 scheduler 不使用 |
 | `get_batch_work_budget()` 初始化结果 | `vit.work_budget` | 不是 VitConfig 原生字段；从实际 scheduler 导出的派生值。当前具体模型均为 None |
 
 ### 异名或旧名容易导致的误解

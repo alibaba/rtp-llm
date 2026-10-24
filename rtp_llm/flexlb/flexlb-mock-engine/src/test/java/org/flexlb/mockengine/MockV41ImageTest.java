@@ -62,7 +62,7 @@ class MockV41ImageTest {
     }
     @Test void preparedRpcReturnsBf16AndPrefillPreservesCanonicalIds() throws Exception {
         var image = image("a".repeat(64));
-        try (var service = new MockVitService(MockVitService.Config.defaults(), config())) {
+        try (var service = MockVitTestSupport.service(MockVitService.Config.defaults(), config())) {
             Server server = NettyServerBuilder.forPort(0).addService(service).build().start();
             ManagedChannel channel = ManagedChannelBuilder.forAddress("127.0.0.1", server.getPort()).usePlaintext().build();
             try (var client = new MockVitClient()) {
@@ -87,7 +87,7 @@ class MockV41ImageTest {
         }
     }
     @Test void emptyContentIdentityBypassesModelEncodeCache() throws Exception {
-        try (var service = new MockVitService(MockVitService.Config.defaults(), config())) {
+        try (var service = MockVitTestSupport.service(MockVitService.Config.defaults(), config())) {
             var image = image("");
             var work = MockV41Image.validate(request(image), config(), 1 << 20);
             assertNotEquals(work.getFirst().key(), MockV41Image.validate(request(image), config(), 1 << 20).getFirst().key());

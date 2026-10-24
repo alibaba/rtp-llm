@@ -181,6 +181,8 @@ class EffectiveConfigTest(unittest.TestCase):
             mm_cache_cpu_max_bytes=1024,
             mm_hash_key_cache_max_bytes=1024,
             mm_remote_cache_enable=False,
+            mm_cache_item_num=10,
+            url_cache_item_num=100,
             mm_timeout_ms=120000,
             mm_image_max_file_size_kb=16384,
             use_local_preprocess=False,
@@ -197,6 +199,9 @@ class EffectiveConfigTest(unittest.TestCase):
         self.assertEqual(result["vit_concurrency"], 1)
         self.assertEqual(result["vit_max_queue_size"], 0)
         self.assertIsNone(result["work_budget"])
+        self.assertIsNone(result["hash_cache_accounting"])
+        accounting = {"tensor_object_bytes": 80}
+        self.assertEqual(vit_snapshot(vit, revision="fixture", hash_cache_accounting=accounting)["roles"]["vit"]["hash_cache_accounting"], accounting)
         budget = NS(
             input_patches=8,
             output_tokens=16,

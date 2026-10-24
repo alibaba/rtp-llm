@@ -102,7 +102,7 @@ def snapshot(engine, model, *, revision, capacity=None):
     }
 
 
-def vit_snapshot(vit, *, revision, work_budget=None):
+def vit_snapshot(vit, *, revision, work_budget=None, hash_cache_accounting=None):
     scheduler = vit.embedding_scheduler_args()
     names = (
         "vit_concurrency",
@@ -115,6 +115,8 @@ def vit_snapshot(vit, *, revision, work_budget=None):
         "mm_cache_cpu_max_bytes",
         "mm_hash_key_cache_max_bytes",
         "mm_remote_cache_enable",
+        "mm_cache_item_num",
+        "url_cache_item_num",
         "mm_timeout_ms",
         "mm_image_max_file_size_kb",
         "use_local_preprocess",
@@ -141,6 +143,7 @@ def vit_snapshot(vit, *, revision, work_budget=None):
                     )
                 },
                 "mm_transport_mode": vit.output_transport.mode,
+                "hash_cache_accounting": hash_cache_accounting,
                 "vit_concurrency": max(1, int(vit.vit_concurrency)),
                 "vit_max_queue_size": max(0, int(vit.vit_max_queue_size)),
                 "gpu_max_batch_size": scheduler["max_batch_size"],

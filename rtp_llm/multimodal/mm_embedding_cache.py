@@ -662,6 +662,21 @@ class MMHashKeyCache:
         OrderedDict()
     )
 
+    @classmethod
+    def accounting(cls) -> Dict[str, int]:
+        """Export this runtime's one-image hash-record layout, not a JVM estimate."""
+        return {
+            "entry_overhead": cls._ENTRY_OVERHEAD,
+            "ascii_base": sys.getsizeof(""),
+            "latin1_base": sys.getsizeof("é") - 1,
+            "bmp_base": sys.getsizeof("中") - 2,
+            "ucs4_base": sys.getsizeof("🙂") - 4,
+            "hash_list_bytes": sys.getsizeof([item for item in (None,)]),
+            "tensor_object_bytes": sys.getsizeof(torch.empty(0, dtype=torch.int32)),
+            "record_bytes": sys.getsizeof((None, None, 0, [], False)),
+            "integer_bytes": sys.getsizeof(0),
+        }
+
     def __init__(self, max_bytes: int):
         if max_bytes < 0:
             raise ValueError("hash cache max_bytes must be non-negative")

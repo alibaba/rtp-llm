@@ -21,6 +21,7 @@ final class MockVitMonitor implements ServerInterceptor, AutoCloseable {
     private final Map<String, String> labels;
     private final ScheduledExecutorService sampler;
     private final AtomicBoolean reportFailureLogged = new AtomicBoolean();
+    private final Set<String> registered = new java.util.HashSet<>();
     private long previousComputations;
     private long previousNanos = System.nanoTime();
 
@@ -29,13 +30,13 @@ final class MockVitMonitor implements ServerInterceptor, AutoCloseable {
         this.labels = Map.copyOf(labels);
         for (String name : new String[]{"mock_vit_rpc_qps", "mock_vit_rpc_success_qps",
                 "mock_vit_rpc_error_qps", "py_rtp_vit_qps", "py_rtp_vit_success_qps",
-                "py_rtp_vit_error_qps", "py_rtp_vit_embedding_overload_qps"}) sink.register(name, FlexMetricType.QPS);
+                "py_rtp_vit_error_qps", "py_rtp_vit_embedding_overload_qps"}) register(name, FlexMetricType.QPS);
         for (String name : new String[]{"mock_vit_active", "mock_vit_queued", "mock_vit_pending",
                 "mock_vit_embedding_bytes", "mock_vit_hash_bytes", "mock_vit_computations_total",
                 "mock_vit_computation_qps", "mock_vit_rpc_rt_us",
                 "py_rtp_vit_embedding_queue_size", "py_rtp_vit_embedding_queue_wait_rt",
                 "py_rtp_vit_preprocess_queue_size", "py_rtp_vit_preprocess_rt", "py_rtp_vit_download_rt", "py_rtp_vit_preprocess_other_rt",
-                "py_rtp_vit_embedding_batch_size", "py_rtp_vit_embedding_forward_rt", "py_rtp_vit_embedding_rt"}) sink.register(name, FlexMetricType.GAUGE);
+                "py_rtp_vit_embedding_batch_size", "py_rtp_vit_embedding_forward_rt", "py_rtp_vit_embedding_rt"}) register(name, FlexMetricType.GAUGE);
         sampler = Executors.newSingleThreadScheduledExecutor(task -> {
             var thread = new Thread(task, "mock-vit-monitor");
             thread.setDaemon(true);
@@ -59,8 +60,15 @@ final class MockVitMonitor implements ServerInterceptor, AutoCloseable {
         report("mock_vit_computation_qps", labels, Math.max(0, computations - previousComputations) / elapsed);
         previousComputations = computations;
         previousNanos = now;
-        snapshot.forEach((name, value) -> report(name.equals("computations")
-                ? "mock_vit_computations_total" : "mock_vit_" + name, labels, value));
+        snapshot.forEach((name, value) -> {
+            String metric = name.equals("computations") ? "mock_vit_computations_total" : "mock_vit_" + name;
+            register(metric, FlexMetricType.GAUGE);
+            report(metric, labels, value);
+        });
+    }
+
+    private void register(String name, FlexMetricType type) {
+        if (registered.add(name)) sink.register(name, type);
     }
 
     private void report(String name, Map<String, String> tags, double value) {

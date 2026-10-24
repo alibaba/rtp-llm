@@ -202,8 +202,8 @@ class MockVitSchedulerTest {
         var document = (com.fasterxml.jackson.databind.node.ObjectNode)MockEngineConfigFixture.load().snapshot();
         var limits = (com.fasterxml.jackson.databind.node.ObjectNode)document.path("roles").path("vit");
         limits.put("vit_concurrency", 2).put("vit_max_queue_size", 4).put("mm_hash_key_cache_max_bytes", 8192);
-        limits.put("mm_cache_gpu_max_bytes", 600).put("mm_cache_cpu_max_bytes", 600);
-        try (var service = new MockVitService(new MockVitService.Config(8, 2, 4, 600, 8192, 1 << 20, 1 << 20, 0), null, document)) {
+        limits.put("mm_cache_gpu_max_bytes", 128).put("mm_cache_cpu_max_bytes", 128);
+        try (var service = new MockVitService(new MockVitService.Config(8, 2, 4, 128, 8192, 1 << 20, 1 << 20, 0), null, document)) {
             var a = MockVitServiceTest.image(56, 56, 123);
             var b = MockVitServiceTest.image(56, 56, 456);
             service.acquire(a, 2000).get(2, TimeUnit.SECONDS);
@@ -212,8 +212,8 @@ class MockVitSchedulerTest {
             assertTrue(service.snapshot().get("embedding_bytes") > 0);
             service.acquire(a, 2000).get(2, TimeUnit.SECONDS);
             assertEquals(2, service.computations.get());
-            assertTrue(service.snapshot().get("gpu_embedding_bytes") <= 600);
-            assertTrue(service.snapshot().get("embedding_bytes") <= 600);
+            assertTrue(service.snapshot().get("gpu_embedding_bytes") <= 128);
+            assertTrue(service.snapshot().get("embedding_bytes") <= 128);
         }
     }
 }
