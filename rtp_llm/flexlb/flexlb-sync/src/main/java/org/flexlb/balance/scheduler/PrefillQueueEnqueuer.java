@@ -137,7 +137,7 @@ final class PrefillQueueEnqueuer {
         } finally {
             if (replacement == null) {
                 for (int index = 0; index < reservations.size(); index++) {
-                    PrefillQueue.restoreRouteReservation(victims.get(index), reservations.get(index));
+                    QueuedRequestRemover.restoreRouteReservation(victims.get(index), reservations.get(index));
                 }
             }
         }

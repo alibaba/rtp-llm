@@ -1,0 +1,84 @@
+package org.flexlb.balance.scheduler;
+
+import org.flexlb.balance.endpoint.PrefillEndpoint;
+import org.flexlb.balance.endpoint.PrefillState;
+import org.flexlb.balance.queue.QueueState;
+
+/**
+ * 把一个还在排队的请求从队列里移除：释放它预留的 Prefill 资源，归还引擎排队名额，并上报它在队列里待了多久。
+ * <p>
+ * 请求取消、超时、交付失败被丢弃时都走这里。
+ */
+final class QueuedRequestRemover {
+
+    private final QueueState queueState;
+    private final PrefillState prefillState;
+    private final PrefillEndpoint prefillEndpoint;
+    private final QueueCapacity queueCapacity;
+
+    QueuedRequestRemover(QueueState queueState,
+                         PrefillState prefillState,
+                         PrefillEndpoint prefillEndpoint,
+                         QueueCapacity queueCapacity) {
+        this.queueState = queueState;
+        this.prefillState = prefillState;
+        this.prefillEndpoint = prefillEndpoint;
+        this.queueCapacity = queueCapacity;
+    }
+
+    /**
+     * 移除请求，但不推进队列版本，由调用方在一批改动做完后统一推进。请求已不在队列里时返回 false。
+     * 调用方持有队列锁。
+     */
+    boolean removeTerminalActiveUnderLock(ScheduledRequest item) {
+        boolean removed;
+        if (!item.requiresRouteReservation()) {
+            removed = prefillState.terminalizeActiveUnderLock(item);
+        } else {
+            PrefillState.RouteReservation reservation =
+                    item.takePublishedRouteReservation();
+            if (reservation == null) {
+                return false;
+            }
+            try {
+                removed = prefillState.terminalizeActiveRouteUnderLock(
+                        item, reservation);
+            } catch (Throwable failure) {
+                restoreRouteReservation(item, reservation);
+                throw failure;
+            }
+            if (!removed) {
+                restoreRouteReservation(item, reservation);
+            }
+        }
+        if (removed) {
+            prefillEndpoint.reportSubQueueResidence(item);
+            queueCapacity.releaseEngineSubQueueSlot(prefillEndpoint.getStatus().getRole());
+        }
+        return removed;
+    }
+
+    /**
+     * 把取下来的 Prefill 资源预留放回请求上。用于移除没成功时撤回。
+     */
+    static void restoreRouteReservation(
+            ScheduledRequest item,
+            PrefillState.RouteReservation reservation) {
+        if (!item.restorePublishedRouteReservation(reservation)) {
+            throw new IllegalStateException(
+                    "ACTIVE route reservation could not be restored request_id="
+                            + item.requestId());
+        }
+    }
+
+    /**
+     * 移除请求并推进队列版本。请求已不在队列里时返回 false。调用方持有队列锁。
+     */
+    boolean removeUnderLock(ScheduledRequest item) {
+        boolean removed = removeTerminalActiveUnderLock(item);
+        if (removed) {
+            queueState.incrementQueueVersion();
+        }
+        return removed;
+    }
+}

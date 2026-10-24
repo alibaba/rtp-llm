@@ -108,6 +108,7 @@ public final class PrefillQueue {
     private final PrefillQueueEnqueuer enqueuer;
     private final CapacityBlockedHead capacityBlockedHead;
     private final QueueWaitRecorder queueWaitRecorder;
+    private final QueuedRequestRemover queuedRequestRemover;
     private final PrefillQueueLoop loop;
 
     public PrefillQueue(
@@ -148,6 +149,10 @@ public final class PrefillQueue {
                                              queueState.activeIndex(),
                                              capacityBlockedHead.capacityAvailableSignal());
         this.queueWaitRecorder = new QueueWaitRecorder(key, queueState, prefillState);
+        this.queuedRequestRemover = new QueuedRequestRemover(queueState,
+                                                             prefillState,
+                                                             prefillEp,
+                                                             queueCapacity);
         this.loadViewCache = new LoadViewCache(queueState,
                                                prefillState,
                                                prefillEp,
@@ -264,7 +269,7 @@ public final class PrefillQueue {
         try {
             removed = lifecycle.isRunning()
                     && !queueState.isStopped()
-                    && removeUnderLock(item);
+                    && queuedRequestRemover.removeUnderLock(item);
             if (removed) {
                 queueState.signalChange();
             }
@@ -312,54 +317,6 @@ public final class PrefillQueue {
 
     private static long now() {
         return System.currentTimeMillis();
-    }
-
-    /** Caller holds the queue lock. */
-    private boolean removeTerminalActiveUnderLock(ScheduledRequest item) {
-        boolean removed;
-        if (!item.requiresRouteReservation()) {
-            removed = prefillState.terminalizeActiveUnderLock(item);
-        } else {
-            PrefillState.RouteReservation reservation =
-                    item.takePublishedRouteReservation();
-            if (reservation == null) {
-                return false;
-            }
-            try {
-                removed = prefillState.terminalizeActiveRouteUnderLock(
-                        item, reservation);
-            } catch (Throwable failure) {
-                restoreRouteReservation(item, reservation);
-                throw failure;
-            }
-            if (!removed) {
-                restoreRouteReservation(item, reservation);
-            }
-        }
-        if (removed) {
-            prefillEndpoint.reportSubQueueResidence(item);
-            queueCapacity.releaseEngineSubQueueSlot(prefillEndpoint.getStatus().getRole());
-        }
-        return removed;
-    }
-
-    static void restoreRouteReservation(
-            ScheduledRequest item,
-            PrefillState.RouteReservation reservation) {
-        if (!item.restorePublishedRouteReservation(reservation)) {
-            throw new IllegalStateException(
-                    "ACTIVE route reservation could not be restored request_id="
-                            + item.requestId());
-        }
-    }
-
-    /** Caller holds the queue lock. */
-    private boolean removeUnderLock(ScheduledRequest item) {
-        boolean removed = removeTerminalActiveUnderLock(item);
-        if (removed) {
-            queueState.incrementQueueVersion();
-        }
-        return removed;
     }
 
     private List<ScheduledRequest> activeItemsInSchedulingOrder() {
@@ -634,7 +591,7 @@ public final class PrefillQueue {
         ScheduledRequest blockedItem = blocked.item();
         if (!containsIdentity(blockedItem)
                 || blockedItem.requestExpired(nowMs)
-                || !removeTerminalActiveUnderLock(blockedItem)) {
+                || !queuedRequestRemover.removeTerminalActiveUnderLock(blockedItem)) {
             return false;
         }
         return true;
@@ -673,7 +630,7 @@ public final class PrefillQueue {
         boolean removed;
         queueState.lock();
         try {
-            removed = removeUnderLock(head);
+            removed = queuedRequestRemover.removeUnderLock(head);
         } finally {
             queueState.unlock();
         }
