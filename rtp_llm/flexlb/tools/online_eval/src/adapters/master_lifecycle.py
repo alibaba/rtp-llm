@@ -5,6 +5,7 @@ references and incarnation history stay on that environment for cleanup.
 """
 
 from __future__ import annotations
+from file_io import read_json
 import json
 import hashlib
 import time
@@ -94,10 +95,10 @@ class MasterLifecycle:
                 )
         menv["HIPPO_ROLE"] = f"flexlb_ft_{spec.label}"
         if spec.discovery == "file":
-            payload = json.loads(env.endpoint_file.read_text(encoding="utf-8"))
+            payload = read_json(env.endpoint_file)
             menv["MODEL_SERVICE_CONFIG"] = payload["env"]["MODEL_SERVICE_CONFIG"]
         elif spec.discovery == "discovery_file":
-            payload = json.loads(env.endpoint_file.read_text(encoding="utf-8"))
+            payload = read_json(env.endpoint_file)
             service_config = json.loads(payload["env"]["MODEL_SERVICE_CONFIG"])
             service_config["discovery_file"] = str(env.discovery_file)
             menv["MODEL_SERVICE_CONFIG"] = json.dumps(service_config)
@@ -176,99 +177,70 @@ class MasterLifecycle:
         ]
         return [p for p in ports if port_accepting(p)]
 
-    def start_master(
-        self, env: FlexEnv, log_name: Optional[str] = None, *, deadline=None
-    ) -> ManagedProcess:
+    def start_master(self, env: FlexEnv, log_name: Optional[str] = None, *, deadline=None) -> ManagedProcess:
+        return self._start_master(env, None, log_name, deadline)
+
+    def _start_master(self, env, mspec, log_name, deadline):
+        """Launch, register and check one owned JVM through the same lifecycle."""
         deadline = startup_deadline(deadline, 240)
         deadline.check()
-        spec = env.spec
+        name = mspec.name if mspec else "single"
         if not API_JAR.is_file():
             raise RuntimeError(f"flexlb-api jar not found: {API_JAR} (build it first)")
-        if env.master is not None:
-            raise RuntimeError("master already running; stop it first")
-        # Pre-flight: a concurrently running master (sibling framework
-        # instance) holds the fixed 18080/18081/18082 ports — wait for release
-        # instead of dying on BindException while the readiness probe hits the
-        # *foreign* master (mis-detected as "up").
-        wait_ready(deadline, 'master ports available',
-                   lambda: not self._master_ports_in_use(env))
-        env.master_start_count += 1
-        log_name = log_name or (
-            "flexlb_master.log"
-            if env.master_start_count == 1
-            else f"flexlb_master_restart{env.master_start_count}.log"
-        )
-        argv = master_arguments(env)
-        # The JVM's stdout redirection (flexlb_master.log) captures only
-        # the console appender's first buffered lines — implementation-
-        # period finding: a config-rejected master leaves ~11 stdout
-        # lines with NO strict-parser message.  The full Spring startup
-        # and ConfigValidationException stacks land in the logback file
-        # appender at ~/ai-whale/logs/application.log (shared across
-        # every master start in the container), so capture its size now
-        # and append the bytes written by THIS start to the failure
-        # diagnostics.
-        # Honor an explicitly isolated log directory for every diagnostic read.
-        # Offsets on the shared default file do not establish process ownership.
+        current = env.masters.get(name) if mspec else env.master
+        if current is not None:
+            raise RuntimeError(f"master {name!r} already running; stop it first")
+        ports = (lambda: self._instance_ports_in_use(mspec)) if mspec else (lambda: self._master_ports_in_use(env))
+        wait_ready(deadline, f"master/{name}/ports available", lambda: not ports())
+        if mspec:
+            generation = env.masters_start_count.get(name, 0) + 1
+            env.masters_start_count[name] = generation
+        else:
+            env.master_start_count += 1
+            generation = env.master_start_count
+        suffix = f"_{name}" if mspec else ""
+        log_name = log_name or (f"flexlb_master{suffix}.log" if generation == 1
+                                else f"flexlb_master{suffix}_restart{generation}.log")
+        argv = master_arguments(env, mspec)
         log_root = Path.home() / "ai-whale" / "logs"
-        for arg in spec.master_extra_args:
+        for arg in argv:
             if arg.startswith("--flexlb.log.path="):
                 log_root = Path(arg.split("=", 1)[1])
-        app_log = log_root / "application.log"
-        try:
-            app_log_offset = app_log.stat().st_size
-        except OSError:
-            app_log_offset = 0
-        # Same offset discipline for the flexlbLogger file appender
-        # (~/ai-whale/logs/flexlb.log — shared across every master in the
-        # container): cases read "the bytes THIS master wrote" via
-        # env.flexlb_log_offset.
-        flexlb_log = log_root / "flexlb.log"
-        try:
-            env.flexlb_log_offset = flexlb_log.stat().st_size
-        except OSError:
-            env.flexlb_log_offset = 0
-        # A8 (Daniel P2-3): same offset discipline for the pv.log request
-        # journal (~/ai-whale/logs/pv.log — shared across every master in
-        # the container): cases read only THIS master's rows via
-        # env.pv_log_offset, with an
-        # additional per-case requestId filter on top.
-        pv_log = log_root / "pv.log"
-        try:
-            env.pv_log_offset = pv_log.stat().st_size
-        except OSError:
-            env.pv_log_offset = 0
-        master_env = configure_master(env, self.master_environment(env), API_JAR)
-        proc = ProcessOps.start(argv, master_env, env.run_dir / log_name)
-        env.master = proc
-        env.master_incarnations.append(
-            dict(
-                name="single",
-                target=f"127.0.0.1:{env.master_http_port + 2}",
-                generation=env.master_start_count,
-                pid=proc.pid,
-                started_epoch_ms=time.time() * 1000,
-            )
-        )
-
-        def _app_log_tail_this_start(lines: int = 60) -> str:
+        offsets = {}
+        for filename in ("application.log", "flexlb.log", "pv.log"):
+            path = log_root / filename
             try:
-                with open(app_log, "rb") as fh:
-                    fh.seek(app_log_offset)
-                    chunk = fh.read().decode("utf-8", errors="replace")
-                return "\n".join(chunk.splitlines()[-lines:])
+                offsets[filename] = path.stat().st_size
             except OSError:
-                return ""
-
+                offsets[filename] = 0
+        if not mspec:
+            env.flexlb_log_offset = offsets["flexlb.log"]
+            env.pv_log_offset = offsets["pv.log"]
+        proc = ProcessOps.start(argv, configure_master(env, self.master_environment(env, mspec), API_JAR),
+                                env.run_dir / log_name)
+        host = mspec.bind_ip if mspec else "127.0.0.1"
+        http = mspec.http_port if mspec else env.master_http_port
+        grpc = mspec.grpc_port() if mspec else http + 2
+        if mspec:
+            env.masters[name] = proc
+            env.master_specs[name] = mspec
+        else:
+            env.master = proc
+        env.master_incarnations.append(dict(name=name, target=f"{host}:{grpc}",
+            generation=generation, pid=proc.pid, started_epoch_ms=time.time() * 1000))
         try:
-            self._wait_master(env, proc, 'single', '127.0.0.1', env.master_http_port, deadline)
+            self._wait_master(env, proc, name, host, http, deadline)
         except Exception as exc:
-            app_tail = _app_log_tail_this_start()
-            extra = f"\n--- {app_log} (this start) ---\n" + app_tail if app_tail else ""
+            app_log = log_root / "application.log"
+            try:
+                with app_log.open("rb") as stream:
+                    stream.seek(offsets["application.log"])
+                    tail = "\n".join(stream.read().decode("utf-8", errors="replace").splitlines()[-60:])
+            except OSError:
+                tail = ""
+            extra = f"\n--- {app_log} (this start) ---\n{tail}" if tail else ""
             raise type(exc)(str(exc) + extra) from exc
-        self._log(
-            f"master up (pid={proc.pid}, profile={spec.master_profile}, log={log_name})"
-        )
+        self._log(f"master {name!r} up (pid={proc.pid}, http={host}:{http}, grpc={host}:{grpc}, log={log_name})")
         return proc
 
     def _wait_master(self, env, proc, name, host, port, deadline):
@@ -333,60 +305,9 @@ class MasterLifecycle:
         ports = [mspec.http_port, mspec.management(), mspec.grpc_port()]
         return [p for p in ports if port_accepting(p, mspec.bind_ip)]
 
-    def start_master_instance(
-        self, env: FlexEnv, mspec: MasterSpec, log_name: Optional[str] = None, *, deadline=None
-    ) -> ManagedProcess:
-        """Start ONE flexlb-api JVM per MasterSpec (HA dual-master path).
-
-        Mirrors start_master()'s readiness ladder (port → /master/info
-        ready → engine stable window) with every probe pointed at the
-        instance's own bind ip/port, plus the per-instance argv/env keys:
-        --server.address, --management.server.address, --flexlb.log.path
-        (per-instance log dir), FLEXLB_ADVERTISED_IP and
-        FLEXLB_SYNC_CONSISTENCY_CONFIG via master_environment(env, mspec).
-        """
-        deadline = startup_deadline(deadline, 240)
-        deadline.check()
-        if not API_JAR.is_file():
-            raise RuntimeError(f"flexlb-api jar not found: {API_JAR} (build it first)")
-        if env.masters.get(mspec.name) is not None:
-            raise RuntimeError(
-                f"master instance '{mspec.name}' already running; stop it first"
-            )
-        wait_ready(deadline, f'master/{mspec.name}/ports available',
-                   lambda: not self._instance_ports_in_use(mspec))
-        env.masters_start_count[mspec.name] = (
-            env.masters_start_count.get(mspec.name, 0) + 1
-        )
-        n = env.masters_start_count[mspec.name]
-        log_name = log_name or (
-            f"flexlb_master_{mspec.name}.log"
-            if n == 1
-            else f"flexlb_master_{mspec.name}_restart{n}.log"
-        )
-        argv = master_arguments(env, mspec)
-        proc = ProcessOps.start(
-            argv, configure_master(env, self.master_environment(env, mspec), API_JAR), env.run_dir / log_name
-        )
-        env.masters[mspec.name] = proc
-        env.master_specs[mspec.name] = mspec
-        env.master_incarnations.append(
-            dict(
-                name=mspec.name,
-                target=f"{mspec.bind_ip}:{mspec.grpc_port()}",
-                generation=n,
-                pid=proc.pid,
-                started_epoch_ms=time.time() * 1000,
-            )
-        )
-
-        base_url = f"http://{mspec.bind_ip}:{mspec.http_port}"
-        self._wait_master(env, proc, mspec.name, mspec.bind_ip, mspec.http_port, deadline)
-        self._log(
-            f"master instance '{mspec.name}' up (pid={proc.pid}, "
-            f"http={base_url}, grpc={mspec.bind_ip}:{mspec.grpc_port()})"
-        )
-        return proc
+    def start_master_instance(self, env: FlexEnv, mspec: MasterSpec,
+                              log_name: Optional[str] = None, *, deadline=None) -> ManagedProcess:
+        return self._start_master(env, mspec, log_name, deadline)
 
     def _live_instance(self, env: FlexEnv, name: str) -> ManagedProcess:
         mp = env.masters.get(name)
