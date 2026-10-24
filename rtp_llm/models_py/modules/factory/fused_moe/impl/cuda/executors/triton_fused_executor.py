@@ -47,7 +47,7 @@ class TritonFusedMoeExecutor(FusedMoeExpertExecutor):
 
         self.ep_size = config.ep_size
         self.ep_rank = config.ep_rank
-        self.num_experts = config.expert_num
+        self.num_experts = config.physical_expert_num
         assert self.num_experts % self.ep_size == 0
         self.num_experts_per_partition = self.num_experts // self.ep_size
         self.start_expert_id = self.ep_rank * self.num_experts_per_partition
@@ -61,6 +61,9 @@ class TritonFusedMoeExecutor(FusedMoeExpertExecutor):
         self.N = self.w1.size(1)  # 2 * inter_size
         self.K = self.w1.size(2)  # hidden_size
         self.inter_size = self.N // 2
+
+    def get_eplb_weights(self) -> tuple[torch.Tensor, ...]:
+        return self.w1, self.w2
 
     @property
     def topk_ids_dtype(self) -> torch.dtype:

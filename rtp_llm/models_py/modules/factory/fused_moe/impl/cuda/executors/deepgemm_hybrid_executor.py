@@ -214,7 +214,7 @@ class DeepGemmHybridExecutor(FusedMoeExpertExecutor):
 
         self.ep_size = config.ep_size
         self.ep_rank = config.ep_rank
-        self.num_experts = config.expert_num
+        self.num_experts = config.physical_expert_num
 
         assert self.num_experts % self.ep_size == 0
         self.num_experts_per_partition = self.num_experts // self.ep_size
@@ -276,6 +276,14 @@ class DeepGemmHybridExecutor(FusedMoeExpertExecutor):
         )
 
         self.num_gemm_sms = get_num_device_sms()
+
+    def get_eplb_weights(self) -> tuple[torch.Tensor, ...]:
+        return (
+            self.w13_weight,
+            self.w13_weight_scale_inv,
+            self.w2_weight,
+            self.w2_weight_scale_inv,
+        )
 
     def execute(
         self,

@@ -54,10 +54,6 @@ class Fp8Fp4MoeRuntimeConfig:
         moe_w1_layout: str = "up_gate",
         physical_expert_num: Optional[int] = None,
     ) -> None:
-        if expert_num % max(ep_size, 1) != 0:
-            raise ValueError(
-                f"expert_num={expert_num} must be divisible by ep_size={ep_size}"
-            )
         self.layer_id = int(layer_id)
         self.hidden_size = int(hidden_size)
         self.dim = self.hidden_size

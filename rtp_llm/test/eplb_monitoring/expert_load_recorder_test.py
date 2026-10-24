@@ -37,7 +37,15 @@ class _PassThroughExecutor:
     def __init__(self, config):
         self.config = config
 
-    def execute(self, payload, **kwargs):
+    def execute(
+        self,
+        payload,
+        activation,
+        expert_map,
+        a2_scale,
+        apply_router_weight_on_input,
+        extra_expert_args,
+    ):
         expert_load = payload.expert_load
         if expert_load is not None:
             counts = expert_load.expert_token_counts
@@ -258,7 +266,11 @@ class ExpertLoadRecorderTest(unittest.TestCase):
         for ep_size in (1, 2):
             rank = ep_size - 1
             config = SimpleNamespace(
-                ep_size=ep_size, ep_rank=rank, expert_num=4, moe_k=2
+                ep_size=ep_size,
+                ep_rank=rank,
+                expert_num=4,
+                physical_expert_num=4,
+                moe_k=2,
             )
             experts = 4 // ep_size
             executor = TritonFusedMoeExecutor(
@@ -320,7 +332,9 @@ class ExpertLoadRecorderTest(unittest.TestCase):
 
         executor = object.__new__(GroupedFp4Executor)
         nn.Module.__init__(executor)
-        executor.cfg = SimpleNamespace(n_routed_experts=4, moe_inter_dim=32)
+        executor.cfg = SimpleNamespace(
+            n_routed_experts=4, physical_expert_num=4, moe_inter_dim=32
+        )
         # Only GEMM compute is replaced; capture uses the production routing.
         executor._forward_capture_topk = lambda x, weights, indices: x
         ids = torch.tensor([[0, 1], [1, 3]], device="cuda")

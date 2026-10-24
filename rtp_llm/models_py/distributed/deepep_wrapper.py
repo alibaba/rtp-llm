@@ -170,7 +170,7 @@ class DeepepWrapperConfig:
             world_size=parallelism_config.world_size,
             # Model parameters
             hidden_size=model_config.hidden_size,
-            expert_num=model_config.expert_num,
+            expert_num=config_adapter.physical_expert_num,
             moe_k=model_config.moe_k,
             # MoE-specific parameters
             deep_ep_num_sm=moe_config.deep_ep_num_sm,

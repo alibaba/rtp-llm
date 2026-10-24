@@ -56,6 +56,7 @@ class GenericMoeLayer(nn.Module):
         max_generate_batch_size: int = 0,
         enable_cuda_graph: bool = False,
         hw_kernel_config: Optional["HWKernelConfig"] = None,
+        layer_id: int = -1,
     ):
         super().__init__()
         self.config = config
@@ -75,6 +76,8 @@ class GenericMoeLayer(nn.Module):
         )
         self.select_topk = SelectTopk(config=config)
         if moe_config.fake_balance_expert:
+            if W.log2phy in weights:
+                raise ValueError("fake_balance_expert cannot be combined with EPLB")
             self.fake_balance_expert = FakeBalanceExpert(
                 expert_num=config.expert_num,
                 moe_k=config.moe_k,
@@ -91,6 +94,7 @@ class GenericMoeLayer(nn.Module):
             quant_config=quant_config,
             enable_cuda_graph=enable_cuda_graph,
         )
+        config_adapter.layer_id = layer_id
         config_adapter.has_shared_expert_gate = W.shared_expert_gate in weights
         self.fused_moe = FusedMoeFactory().create_fused_moe(config_adapter, weights)
         router = self.fused_moe.router
@@ -339,6 +343,7 @@ class GenericMoeDecoderLayer(nn.Module):
                 max_generate_batch_size,
                 enable_cuda_graph=enable_cuda_graph,
                 hw_kernel_config=hw_kernel_config,
+                layer_id=layer_idx,
             )
 
         # 使用 RMSResNorm 来 fuse residual add 和 layernorm
@@ -436,6 +441,13 @@ class GenericMoeModel(GptModelBase):
             self._capture_canonical_layer,
             self._capture_canonical_final,
         )
+
+    def get_eplb_layers(self):
+        return [
+            layer.mlp.fused_moe.eplb_layer
+            for layer in self.layers
+            if isinstance(layer.mlp, GenericMoeLayer)
+        ]
 
     def _capture_canonical_layer(
         self, hidden_states: torch.Tensor, residual: torch.Tensor | None

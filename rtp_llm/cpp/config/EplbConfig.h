@@ -1,12 +1,12 @@
 #pragma once
+#include <cstdint>
 #include <string>
-#include <vector>
 
 namespace rtp_llm {
 
 enum class EplbMode {
     NONE,
-    STATS,  // stats, only
+    STATS,  // Sample only; prebuild the same resources as EPLB for online switching.
     EPLB,   // load balance, only
     ALL     // stats + load balance
 };
@@ -29,21 +29,8 @@ struct EPLBConfig {
         return ((mode == modes) || ...);
     }
 
-    std::vector<int> toList() const {
-        std::vector<int> list;
-        list.push_back((int)eplb_mode);
-        list.push_back((int)eplb_update_time);
-        return list;
-    }
-
-    static EPLBConfig fromList(const int* list) {
-        EPLBConfig data;
-        data.eplb_mode = (EplbMode)list[0];
-        data.eplb_update_time = list[1];
-        return data;
-    }
-
-    // Getter methods
+    // STATS also requires a supported runtime model and full EP=WORLD experts.
+    // Independent monitoring uses NONE with eplb_metrics_report_interval > 0.
     bool enable_eplb() const {
         return eplb_mode != EplbMode::NONE;
     }

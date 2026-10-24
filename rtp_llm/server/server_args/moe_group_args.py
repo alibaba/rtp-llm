@@ -129,7 +129,11 @@ def init_moe_group_args(parser, moe_config, eplb_config, deep_ep_config):
         bind_to=(eplb_config, "eplb_mode"),
         type=str,
         default="NONE",
-        help="专家并行的负载均衡模式",
+        help=(
+            "专家负载均衡模式。STATS 采样但不迁移，预建均衡资源以支持在线切换到 EPLB/ALL。"
+            "非 NONE 模式要求模型实现 EPLB、完整专家 EP=WORLD、PP=1 且关闭 FFN 分离；"
+            "仅上报负载指标请用 NONE 并设置 eplb_metrics_report_interval。"
+        ),
     )
     moe_group.add_argument(
         "--eplb_update_time",

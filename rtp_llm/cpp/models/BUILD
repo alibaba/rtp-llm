@@ -161,7 +161,6 @@ cc_library(
     name = "model_types",
     hdrs = ["ModelTypes.h"],
     deps = [
-        ":stats",
         "//:rtp_compute_ops",
         "//rtp_llm/cpp/cache:cache_types",
         "//rtp_llm/cpp/config:config_modules",
@@ -245,14 +244,6 @@ cc_library(
         "//rtp_llm/cpp/utils:core_utils",
         "@havenask//aios/autil:env_util",
     ] + torch_deps(),
-    visibility = ["//visibility:public"],
-)
-
-cc_library(
-    name = "stats",
-    hdrs = [
-        "eplb/stats/ExpertStats.h",
-    ],
     visibility = ["//visibility:public"],
 )
 

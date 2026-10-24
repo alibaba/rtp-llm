@@ -261,7 +261,7 @@ class MegaMoeExecutor(Fp8Fp4ExecutorBase):
         # MoE layers via the module-level cache (see _get_or_create_mega_buf).
         self._mega_buf = _get_or_create_mega_buf(
             group=group,
-            num_experts=cfg.n_routed_experts,
+            num_experts=cfg.physical_expert_num,
             num_max_tokens_per_rank=max(cfg.max_tokens_per_rank, 1),
             num_topk=cfg.n_activated_experts,
             hidden=D,
@@ -280,6 +280,9 @@ class MegaMoeExecutor(Fp8Fp4ExecutorBase):
         self._input_packer = get_mega_moe_input_packer()
         self._maybe_warmup_jit_once()
 
+    def get_eplb_weights(self) -> tuple[torch.Tensor, ...]:
+        return self._mega_l1_w, self._mega_l1_sf, self._mega_l2_w, self._mega_l2_sf
+
     def _resolve_jit_warmup_token_counts(self, num_sms: int) -> list[int]:
         cfg = self.cfg
         # Use the logical model/runtime token cap, not DeepGEMM's internally
@@ -292,7 +295,7 @@ class MegaMoeExecutor(Fp8Fp4ExecutorBase):
             return clamp_token_counts(override, max_tokens_per_rank)
         return generate_mega_moe_jit_token_counts(
             num_ranks=cfg.ep_size,
-            num_experts=cfg.n_routed_experts,
+            num_experts=cfg.physical_expert_num,
             num_experts_per_rank=cfg.n_local_experts,
             num_topk=cfg.n_activated_experts,
             intermediate_hidden=cfg.moe_inter_dim,
@@ -321,7 +324,7 @@ class MegaMoeExecutor(Fp8Fp4ExecutorBase):
         max_tokens_per_rank = int(cfg.max_tokens_per_rank)
         warmup_key = (
             cfg.ep_size,
-            cfg.n_routed_experts,
+            cfg.physical_expert_num,
             cfg.n_local_experts,
             cfg.n_activated_experts,
             cfg.dim,
@@ -346,7 +349,7 @@ class MegaMoeExecutor(Fp8Fp4ExecutorBase):
                 format_token_counts(token_counts),
                 max_tokens_per_rank,
                 cfg.ep_size,
-                cfg.n_routed_experts,
+                cfg.physical_expert_num,
                 cfg.n_activated_experts,
                 cfg.dim,
                 cfg.moe_inter_dim,
@@ -410,7 +413,10 @@ class MegaMoeExecutor(Fp8Fp4ExecutorBase):
                 expert_load=None,
             )
             torch.cuda.synchronize(device)
-            if self.supports_gate_pack:
+            if (
+                self.supports_gate_pack
+                and cfg.physical_expert_num == cfg.n_routed_experts
+            ):
                 self.forward_gate_pack(
                     x[:token_count],
                     ExpertGatePayload(

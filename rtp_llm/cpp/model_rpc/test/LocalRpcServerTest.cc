@@ -138,6 +138,8 @@ class FailingEngine: public EngineBase {
 public:
     explicit FailingEngine(EngineFailureMode mode): EngineBase(EngineInitParams()), mode_(mode) {}
 
+    MOCK_METHOD(bool, updateEplbConfig, (const EPLBConfig&), (override));
+
     std::shared_ptr<GenerateStream> enqueue(const std::shared_ptr<GenerateInput>&) override {
         if (mode_ == EngineFailureMode::THROW_STD_EXCEPTION) {
             throw std::runtime_error("injected engine enqueue failure");
@@ -529,6 +531,48 @@ TEST(LocalRpcServerTest, AllocatorDumpAggregationRejectsMismatchedIds) {
 
     EXPECT_EQ(status.error_code(), grpc::StatusCode::DATA_LOSS);
     EXPECT_EQ(response.results_size(), 0);
+}
+
+TEST(LocalRpcServerTest, UpdateEplbConfigReturnsEngineResult) {
+    for (const bool accepted : {false, true}) {
+        SCOPED_TRACE(accepted);
+        TestLocalRpcServer server;
+        auto               engine = std::make_shared<FailingEngine>(EngineFailureMode::REJECT_ALL);
+        server.setEngineForTest(engine);
+        UpdateEplbConfigRequestPB request;
+        request.set_mode("all");
+        request.set_update_time(17);
+        grpc::ServerContext context;
+        EmptyPB             response;
+        EXPECT_CALL(*engine, updateEplbConfig(_)).WillOnce(Invoke([accepted](const EPLBConfig& config) {
+            EXPECT_EQ(config.eplb_mode, EplbMode::ALL);
+            EXPECT_EQ(config.eplb_update_time, 17);
+            return accepted;
+        }));
+
+        const auto status = server.UpdateEplbConfig(&context, &request, &response);
+
+        EXPECT_EQ(status.error_code(), accepted ? grpc::StatusCode::OK : grpc::StatusCode::FAILED_PRECONDITION);
+        if (!accepted) {
+            EXPECT_THAT(status.error_message(), HasSubstr("rejected"));
+        }
+    }
+}
+
+TEST(LocalRpcServerTest, UpdateEplbConfigRejectsUnknownModeWithoutCallingEngine) {
+    TestLocalRpcServer server;
+    auto               engine = std::make_shared<FailingEngine>(EngineFailureMode::REJECT_ALL);
+    server.setEngineForTest(engine);
+    UpdateEplbConfigRequestPB request;
+    request.set_mode("invalid");
+    request.set_update_time(17);
+    grpc::ServerContext context;
+    EmptyPB             response;
+    EXPECT_CALL(*engine, updateEplbConfig(_)).Times(0);
+
+    const auto status = server.UpdateEplbConfig(&context, &request, &response);
+
+    EXPECT_EQ(status.error_code(), grpc::StatusCode::INVALID_ARGUMENT);
 }
 
 TEST(LocalRpcServerTest, PrepareInputReturnsInvalidParamsMappedToInvalidArgument) {

@@ -3,7 +3,6 @@
 #include "rtp_llm/models_py/bindings/core/OpData.h"
 #include "rtp_llm/models_py/bindings/core/DeviceData.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
-#include "rtp_llm/cpp/models/eplb/stats/ExpertStats.h"
 #include "rtp_llm/models_py/bindings/common/kernels/fuse_copy_util.h"
 
 #include <memory>
@@ -121,12 +120,6 @@ AllReduceOutput execAllReduce(const AllReduceParams& params);
 void            execAllGather(const AllGatherParams& params);
 void            execSyncCommunication(bool timeout = true);
 void            execSyncCommunication(ParallelMode mode, bool timeout = true);
-
-// ===================================================================
-// MOE / EPLB
-// ===================================================================
-
-OverallExpertStats execCreateMoeExpertStates(const ExpertStatsParams& params);
 
 // ===================================================================
 // Events

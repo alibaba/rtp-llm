@@ -801,7 +801,6 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
          std::nullopt,
          params.model_config_.hc_mult});
     model_init_params.metrics_reporter = metrics_reporter_;
-    model_init_params.py_eplb          = params.py_eplb;
     model_init_params.quant_algo       = params.model_config_.quant_algo;
     model_init_params.eplb_config      = params.eplb_config;
     model_init_params.hidden_state_capture_layer_ids = selectHiddenStateCaptureLayerIds(
@@ -881,7 +880,6 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
                                 mtp_params->model_config_.hc_mult});
         // Keep EPLB disabled for every draft wrapper; only the target records expert load.
         model_params.metrics_reporter = metrics_reporter_;
-        model_params.py_eplb          = mtp_params->py_eplb;
         model_params.quant_algo       = mtp_params->model_config_.quant_algo;
         model_params.hidden_state_capture_layer_ids =
             selectHiddenStateCaptureLayerIds(HiddenStateCaptureModelRole::DRAFT,
