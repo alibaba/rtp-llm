@@ -1,15 +1,25 @@
 """Preset loading, profile rendering, deviation checks and frozen effective environments."""
+
 from __future__ import annotations
+
 import copy
 import json
 from dataclasses import dataclass
-from flexlb_cfg import PROFILE_CAPS, PROFILES, VICTIM_STAGES, ProfileIdentityError, render_env, validate_profile_identity
+
 from adapters.perf_presets import load_preset_bundle
 from document_io import DocumentError as ScenarioError
-from scenario.validation import fail, mapping
-from scenario.master_patch import MasterPatch
+from flexlb_cfg import (
+    PROFILE_CAPS,
+    PROFILES,
+    VICTIM_STAGES,
+    ProfileIdentityError,
+    render_env,
+    validate_profile_identity,
+)
 from scenario.environment_declaration import EnvironmentDeclaration, captured_fields
 from scenario.environment_snapshot import EnvironmentSnapshot
+from scenario.master_patch import MasterPatch
+from scenario.validation import fail, mapping
 
 CAPABILITIES = set().union(*PROFILE_CAPS.values()) | {
     "priority",
@@ -52,9 +62,14 @@ class ResolvedEnvironment:
     effective_capabilities: tuple[str, ...]
 
     def to_dict(self):
-        return dict(self.declaration.to_dict(), config_overrides=copy.deepcopy(self.master_patch.declared),
-                    resolved_config=json.loads(self.snapshot.master_json), rendered=self.snapshot.to_dict(),
-                    effective_axes=dict(self.effective_axes), effective_capabilities=list(self.effective_capabilities))
+        return dict(
+            self.declaration.to_dict(),
+            config_overrides=copy.deepcopy(self.master_patch.declared),
+            resolved_config=json.loads(self.snapshot.master_json),
+            rendered=self.snapshot.to_dict(),
+            effective_axes=dict(self.effective_axes),
+            effective_capabilities=list(self.effective_capabilities),
+        )
 
 
 @dataclass(frozen=True)
@@ -73,8 +88,10 @@ class EnvironmentResolver:
         performance, runtime = bundle.performance, bundle.runtime
         common = MasterPatch.read(value.get("config_overrides", {}), path + ".config_overrides")
         patches = mapping(value.get("profile_overrides", {}), path + ".profile_overrides", PROFILES)
-        profiles = {profile: MasterPatch.read(patch, path + ".profile_overrides." + profile)
-                    for profile, patch in patches.items()}
+        profiles = {
+            profile: MasterPatch.read(patch, path + ".profile_overrides." + profile)
+            for profile, patch in patches.items()
+        }
         paired = runtime.get("paired_master")
         # Check excluded profiles too; this never recursively renders an environment.
         for profile, patch in profiles.items():
@@ -109,26 +126,40 @@ class EnvironmentResolver:
         paired_master, declared_overrides = baseline.declared, declared.declared
         captured = self.captured
         if captured:
-            changed = [field for field, source_field in captured_fields().items() if getattr(declaration, field) is not None and getattr(declaration, field) != captured[source_field]]
-            if (declared_overrides.get("prefill_expression") is not None and declared_overrides["prefill_expression"] != paired_master.get("prefill_expression")) or declaration.prefill_perf is not None:
+            changed = [
+                field
+                for field, source_field in captured_fields().items()
+                if getattr(declaration, field) is not None and getattr(declaration, field) != captured[source_field]
+            ]
+            if (
+                declared_overrides.get("prefill_expression") is not None
+                and declared_overrides["prefill_expression"] != paired_master.get("prefill_expression")
+            ) or declaration.prefill_perf is not None:
                 changed.append("prefill model")
-            changed.extend("master." + key for key, val in declared_overrides.items()
-                           if val is not None and key in paired_master and val != paired_master[key])
+            changed.extend(
+                "master." + key
+                for key, val in declared_overrides.items()
+                if val is not None and key in paired_master and val != paired_master[key]
+            )
             if declaration.prefill_cache_policy is not None:
                 performance = self.performance
                 policy = declaration.prefill_cache_policy
                 original = performance.get("prefill", {})
                 memory = original.get("memory_cache", {})
-                if (policy.device_tree != original.get("enable_gpu_prefix_tree")
+                if (
+                    policy.device_tree != original.get("enable_gpu_prefix_tree")
                     or policy.memory_tree != memory.get("enable_prefix_tree")
-                    or (policy.memory_blocks is not None and policy.memory_blocks != memory.get("capacity_blocks"))):
+                    or (policy.memory_blocks is not None and policy.memory_blocks != memory.get("capacity_blocks"))
+                ):
                     changed.append("prefill_cache_policy")
             if changed and declaration.model_override is None:
                 fail(path + ".model_override", "test deviation requires baseline and reason: " + ", ".join(changed))
         axes, capabilities = effective_capabilities(config)
         from scenario.environment_snapshot import EnvironmentSnapshot
+
         snapshot = EnvironmentSnapshot.freeze(
-            config, self.effective_performance(declaration),
+            config,
+            self.effective_performance(declaration),
             {key: value for key, value in self.runtime.items() if key != "paired_master"},
         )
         return ResolvedEnvironment(declaration, resolved, snapshot, axes, tuple(capabilities))

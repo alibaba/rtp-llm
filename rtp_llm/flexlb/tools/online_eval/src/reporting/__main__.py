@@ -1,8 +1,9 @@
 """Offline rendering: python -m reporting REPORT_SPEC --out PAGE."""
-from file_io import read_json
 
 import argparse
 from pathlib import Path
+
+from file_io import read_json
 from reporting import render
 from reporting.spec import validate
 

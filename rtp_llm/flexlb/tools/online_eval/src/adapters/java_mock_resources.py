@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import os
-
 from dataclasses import dataclass
 from typing import Sequence
 
 from runtime.resource_plan import (
-    ResourcePlanError, validate_integer, port_numbers, validate_disjoint_intervals,
+    ResourcePlanError,
+    port_numbers,
+    validate_disjoint_intervals,
+    validate_integer,
 )
 
 MASTER_PORT_COUNT = 6
@@ -21,9 +23,7 @@ MOCK_WINDOW_LAST = max(VICTIM_OFFSETS)
 MIN_MOCK_STRIDE = MOCK_WINDOW_LAST - MOCK_CONTROL_OFFSET + 1
 
 
-def port_intervals(
-    master_base: int, mock_base: int
-) -> tuple[tuple[str, int, int], ...]:
+def port_intervals(master_base: int, mock_base: int) -> tuple[tuple[str, int, int], ...]:
     return (
         ("master", master_base, master_base + MASTER_PORT_COUNT - 1),
         ("mock", mock_base + MOCK_CONTROL_OFFSET, mock_base + MOCK_WINDOW_LAST),
@@ -71,9 +71,7 @@ class JavaMockBudget:
 
     @property
     def worker_capacity(self) -> int:
-        return (
-            self.max_environment_workers or self.initial_workers
-        ) + self.dynamic_additions
+        return (self.max_environment_workers or self.initial_workers) + self.dynamic_additions
 
     def to_manifest(self) -> dict:
         return {
@@ -92,13 +90,21 @@ class JavaMockBudget:
 
     def to_metadata(self) -> dict:
         """Compiler/frozen-plan projection of the same resource bound."""
-        return dict(backend="java_mock", bounded=True, initial_workers=self.initial_workers,
-                    max_dynamic_additions=self.dynamic_additions,
-                    **({"max_environment_workers": self.max_environment_workers}
-                       if self.max_environment_workers is not None else {}),
-                    mock_control_offset=MOCK_CONTROL_OFFSET,
-                    victim_control_offset=VICTIM_OFFSETS[0], victim_grpc_offset=VICTIM_OFFSETS[1],
-                    reserved_tail_offset=VICTIM_OFFSETS[2])
+        return dict(
+            backend="java_mock",
+            bounded=True,
+            initial_workers=self.initial_workers,
+            max_dynamic_additions=self.dynamic_additions,
+            **(
+                {"max_environment_workers": self.max_environment_workers}
+                if self.max_environment_workers is not None
+                else {}
+            ),
+            mock_control_offset=MOCK_CONTROL_OFFSET,
+            victim_control_offset=VICTIM_OFFSETS[0],
+            victim_grpc_offset=VICTIM_OFFSETS[1],
+            reserved_tail_offset=VICTIM_OFFSETS[2],
+        )
 
     @classmethod
     def from_metadata(cls, raw: dict) -> JavaMockBudget:
@@ -119,9 +125,7 @@ class JavaMockBudget:
             raise ResourcePlanError("invalid resource_budget v1 fields")
         for name, expected in fixed.items():
             if type(raw[name]) is not type(expected) or raw[name] != expected:
-                raise ResourcePlanError(
-                    f"unsupported resource budget {name}={raw[name]!r}"
-                )
+                raise ResourcePlanError(f"unsupported resource budget {name}={raw[name]!r}")
         if "max_environment_workers" in raw:
             validate_integer(raw["max_environment_workers"], "max_environment_workers", 1)
         return cls(
@@ -161,10 +165,7 @@ class LaneLease:
         return port_numbers(self.intervals())
 
     def lock_names(self) -> tuple[str, ...]:
-        return tuple(
-            f"{'m' if side == 'master' else 'g'}{lo}_{hi}.lock"
-            for side, lo, hi in self.intervals()
-        )
+        return tuple(f"{'m' if side == 'master' else 'g'}{lo}_{hi}.lock" for side, lo, hi in self.intervals())
 
     def child_env(self) -> dict[str, str]:
         return child_port_env(self.master_base, self.mock_base)
@@ -176,10 +177,7 @@ class LaneLease:
             "master_base": self.master_base,
             "mock_base": self.mock_base,
             "worker_capacity": self.worker_capacity,
-            "intervals": [
-                {"side": side, "first": lo, "last": hi}
-                for side, lo, hi in self.intervals()
-            ],
+            "intervals": [{"side": side, "first": lo, "last": hi} for side, lo, hi in self.intervals()],
             "lock_names": list(self.lock_names()),
             "child_env": self.child_env(),
         }
@@ -205,12 +203,6 @@ def plan_lane_leases(
         )
         for i, budgets in enumerate(budgets_by_lane)
     ]
-    intervals = [
-        (lease.lane, side, lo, hi)
-        for lease in leases
-        for side, lo, hi in lease.intervals()
-    ]
-    validate_disjoint_intervals(
-        [(f"lane {lane} {side}", lo, hi) for lane, side, lo, hi in intervals]
-    )
+    intervals = [(lease.lane, side, lo, hi) for lease in leases for side, lo, hi in lease.intervals()]
+    validate_disjoint_intervals([(f"lane {lane} {side}", lo, hi) for lane, side, lo, hi in intervals])
     return leases

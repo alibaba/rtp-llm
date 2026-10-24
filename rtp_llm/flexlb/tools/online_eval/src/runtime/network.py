@@ -9,6 +9,7 @@ import time
 import urllib.error
 import urllib.request
 from typing import Callable, Optional
+
 from runtime.deadline import StageTimeout
 
 
@@ -22,13 +23,9 @@ def http_get_json(url: str, timeout: float = 10.0) -> Optional[dict]:
         return None
 
 
-def http_post_json(
-    url: str, body: dict, timeout: float = 10.0
-) -> tuple[int, Optional[dict]]:
+def http_post_json(url: str, body: dict, timeout: float = 10.0) -> tuple[int, Optional[dict]]:
     data = json.dumps(body).encode("utf-8")
-    req = urllib.request.Request(
-        url, data=data, headers={"Content-Type": "application/json"}, method="POST"
-    )
+    req = urllib.request.Request(url, data=data, headers={"Content-Type": "application/json"}, method="POST")
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             payload = resp.read().decode("utf-8")

@@ -8,9 +8,9 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+from adapters.java_client import ClientOps
 from adapters.load_client import LOAD_CLIENT_ENV_VARS
 from adapters.requests import ClientRecords, request_success
-from adapters.java_client import ClientOps
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -59,15 +59,20 @@ class SharedRuntimeTests(unittest.TestCase):
         for name in ("FORCE_PRIORITY", "RAMP_UP_SECONDS", "REPLAY_UNIQUE_PREFIX"):
             self.assertEqual(env[name], "")
 
-
     def test_java_environment_reads_are_all_isolated(self):
         directory = ROOT.parents[1] / "flexlb-mock-engine/src/main/java/org/flexlb/mockengine"
-        sources = [(directory / name).read_text() for name in
-                   ("JavaLoadClient.java", "Playback.java", "FlowControl.java", "ClientEventJournal.java")]
+        sources = [
+            (directory / name).read_text()
+            for name in ("JavaLoadClient.java", "Playback.java", "FlowControl.java", "ClientEventJournal.java")
+        ]
         names = set()
         for source in sources:
-            names.update(re.findall(
-                r'(?:System\.getenv|env(?:Int|Long|Double|Bool)?|input\.(?:text|integer|longValue|number|flag))\("([A-Z_]+)"', source))
+            names.update(
+                re.findall(
+                    r'(?:System\.getenv|env(?:Int|Long|Double|Bool)?|input\.(?:text|integer|longValue|number|flag))\("([A-Z_]+)"',
+                    source,
+                )
+            )
             names.update(re.findall(r'System\.getenv\(\)\.getOrDefault\("([A-Z_]+)"', source))
             names.update(re.findall(r'text\(env,\s*"([A-Z_]+)"', source))
         self.assertTrue(names)
@@ -80,7 +85,6 @@ class SharedRuntimeTests(unittest.TestCase):
             ClientOps(None)._base_env({"GRPC_TARGETS": "127.0.0.1:7003"})
         self.assertEqual(len(LOAD_CLIENT_ENV_VARS), len(set(LOAD_CLIENT_ENV_VARS)))
         self.assertTrue(all(re.fullmatch(r"[A-Z][A-Z0-9_]*", name) for name in LOAD_CLIENT_ENV_VARS))
-
 
 
 if __name__ == "__main__":

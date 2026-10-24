@@ -1,34 +1,33 @@
 """Convert explicit Prometheus query archives without acquiring other sources."""
-from file_io import read_json
 
+import copy
 import json
 import math
 from pathlib import Path
-import copy
 
+from file_io import read_json, write_json
+from monitoring.contracts import MetricContractError
 from monitoring.identity import SOURCE_KINDS
 from monitoring.metric_store import MetricStore
-from monitoring.contracts import MetricContractError
-from file_io import write_json
 from monitoring.query_plan import definitions, plan_hash
 
 
 def _query_identity(query_id):
-    if not isinstance(query_id, str) or '/' not in query_id:
-        raise MetricContractError('archived query requires source/metric identity: ' + str(query_id))
-    source, metric = query_id.split('/', 1)
+    if not isinstance(query_id, str) or "/" not in query_id:
+        raise MetricContractError("archived query requires source/metric identity: " + str(query_id))
+    source, metric = query_id.split("/", 1)
     if not source or not metric:
-        raise MetricContractError('archived query requires source/metric identity: ' + query_id)
+        raise MetricContractError("archived query requires source/metric identity: " + query_id)
     return source, metric
 
 
 def _archive_paths(directory):
     directory = Path(directory)
-    paths = sorted(directory.glob('telemetry/*/queries.json'))
-    root = directory / 'queries.json'
+    paths = sorted(directory.glob("telemetry/*/queries.json"))
+    root = directory / "queries.json"
     if root.is_file():
-        if any(path.parent.name == '1' for path in paths):
-            raise MetricContractError('ambiguous epoch 1 archives: root and telemetry/1')
+        if any(path.parent.name == "1" for path in paths):
+            raise MetricContractError("ambiguous epoch 1 archives: root and telemetry/1")
         paths.append(root)
     return paths
 
@@ -48,8 +47,7 @@ def _archive_series(directory, anchor, *, archives=None):
         epoch = path.parent.name if path.parent != Path(directory) else "1"
         errors.extend(dict(source=epoch, **error) for error in data.get("errors", []))
         errors.extend(
-            dict(source=epoch, query=query, error="monitor series absent",
-                 severity="diagnostic")
+            dict(source=epoch, query=query, error="monitor series absent", severity="diagnostic")
             for query in data.get("missing_queries", [])
         )
         for query_id, query in data["queries"].items():
@@ -72,29 +70,15 @@ def _archive_series(directory, anchor, *, archives=None):
                     backend="prometheus",
                 )
                 if metric == "up":
-                    gaps.setdefault(f"{epoch}/{source}/collection", []).extend(
-                        t for t, value in points if value != 1
-                    )
+                    gaps.setdefault(f"{epoch}/{source}/collection", []).extend(t for t, value in points if value != 1)
         for source in data["targets"]:
             query = data["queries"].get(source + "/up", {})
-            points = sorted(
-                (float(t), _finite(v))
-                for row in query.get("result", [])
-                for t, v in row["values"]
-            )
+            points = sorted((float(t), _finite(v)) for row in query.get("result", []) for t, v in row["values"])
             if not points:
-                errors.append(
-                    dict(source=f"{epoch}/{source}", error="no Prometheus up samples")
-                )
+                errors.append(dict(source=f"{epoch}/{source}", error="no Prometheus up samples"))
             elif (
-                points[0][0]
-                - data.get("target_bounds", {}).get(source, [data["start"], None])[0]
-                > 2 * data["step"]
-                or (
-                    data.get("target_bounds", {}).get(source, [None, None])[1]
-                    or data["end"]
-                )
-                - points[-1][0]
+                points[0][0] - data.get("target_bounds", {}).get(source, [data["start"], None])[0] > 2 * data["step"]
+                or (data.get("target_bounds", {}).get(source, [None, None])[1] or data["end"]) - points[-1][0]
                 > 2 * data["step"]
             ):
                 errors.append(
@@ -152,17 +136,33 @@ def export_metrics(directory, plan=None, *, archive_directory=None):
             if kind not in SOURCE_KINDS:
                 raise MetricContractError("invalid archived source kind: " + str(kind))
             identity = kind + "/" + metric
-            spec = frozen.get(identity, dict(source_type="prometheus", source_kind=kind,
-                unit="unspecified", value_kind="gauge", labels=[], promql=query["promql"]))
+            spec = frozen.get(
+                identity,
+                dict(
+                    source_type="prometheus",
+                    source_kind=kind,
+                    unit="unspecified",
+                    value_kind="gauge",
+                    labels=[],
+                    promql=query["promql"],
+                ),
+            )
             if identity in declared and declared[identity] != spec:
                 raise MetricContractError("conflicting frozen metric definitions: " + identity)
             declared[identity] = spec
             result = query.get("result", [])
             if not result:
-                observations.setdefault(identity, []).append(dict(metric_id=identity,
-                    epoch=epoch, source=source, labels={}, points=[], status="ERROR" if any(
-                        e.get("query") == query_id for e in data.get("errors", [])) else "ABSENT",
-                    provenance=dict(source_type="prometheus", path=str(path), promql=query["promql"])))
+                observations.setdefault(identity, []).append(
+                    dict(
+                        metric_id=identity,
+                        epoch=epoch,
+                        source=source,
+                        labels={},
+                        points=[],
+                        status="ERROR" if any(e.get("query") == query_id for e in data.get("errors", [])) else "ABSENT",
+                        provenance=dict(source_type="prometheus", path=str(path), promql=query["promql"]),
+                    )
+                )
             seen = set()
             for raw in result:
                 labels = dict(raw["metric"])
@@ -175,14 +175,28 @@ def export_metrics(directory, plan=None, *, archive_directory=None):
                     continue
                 seen.add(key)
                 points = series.get(key, [])
-                provenance = dict(sources.get(key, {}), source_type="prometheus",
-                                  timestamp_kind="scrape" if spec.get("mode") == "scrape" else "evaluation",
-                                  measurement=copy.deepcopy(spec.get("measurement", {})))
-                observations.setdefault(identity, []).append(dict(metric_id=identity,
-                    epoch=epoch, source=source, labels=labels, points=points, series_key=key,
-                    status="ERROR" if any(e.get("query") == query_id for e in data.get("errors", []))
-                           else "PRESENT" if any(v is not None for _, v in points) else "ABSENT",
-                    provenance=provenance))
+                provenance = dict(
+                    sources.get(key, {}),
+                    source_type="prometheus",
+                    timestamp_kind="scrape" if spec.get("mode") == "scrape" else "evaluation",
+                    measurement=copy.deepcopy(spec.get("measurement", {})),
+                )
+                observations.setdefault(identity, []).append(
+                    dict(
+                        metric_id=identity,
+                        epoch=epoch,
+                        source=source,
+                        labels=labels,
+                        points=points,
+                        series_key=key,
+                        status="ERROR"
+                        if any(e.get("query") == query_id for e in data.get("errors", []))
+                        else "PRESENT"
+                        if any(v is not None for _, v in points)
+                        else "ABSENT",
+                        provenance=provenance,
+                    )
+                )
         for identity, spec in frozen.items():
             if identity in declared and declared[identity] != spec:
                 raise MetricContractError("conflicting frozen metric definitions: " + identity)
@@ -211,8 +225,15 @@ def export_metrics(directory, plan=None, *, archive_directory=None):
     metadata = previous.get("run", {}) if destination.exists() else {}
     for identity in declared:
         observations.setdefault(identity, [])
-    document = dict(metrics_schema_version=1, run=metadata, plans=plans, definitions=declared,
-                    metrics=observations, collection_gaps=gaps, errors=errors)
+    document = dict(
+        metrics_schema_version=1,
+        run=metadata,
+        plans=plans,
+        definitions=declared,
+        metrics=observations,
+        collection_gaps=gaps,
+        errors=errors,
+    )
     store = MetricStore(document)
     write_json(destination, store.document)
     return store

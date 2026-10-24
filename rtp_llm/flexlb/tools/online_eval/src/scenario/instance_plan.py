@@ -4,11 +4,10 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
-
-from schema_contract import matches_schema
 from typing import Mapping, Sequence
 
 from adapters.java_mock_resources import JavaMockBudget
+from schema_contract import matches_schema
 
 
 class InstancePlanError(ValueError):
@@ -18,9 +17,7 @@ class InstancePlanError(ValueError):
 def _names(raw: str | None, flag: str) -> list[str] | None:
     if raw is None:
         return None
-    values = list(
-        dict.fromkeys(value.strip() for value in raw.split(",") if value.strip())
-    )
+    values = list(dict.fromkeys(value.strip() for value in raw.split(",") if value.strip()))
     if not values:
         raise InstancePlanError(f"{flag} contains no nonempty entries")
     return values
@@ -40,9 +37,7 @@ class Instance:
 
 
 def parse_catalog(payload: dict, *, source: str, profile: str) -> list[Instance]:
-    if (
-        not matches_schema(payload, "instance_catalog_schema_version", 1)
-    ):
+    if not matches_schema(payload, "instance_catalog_schema_version", 1):
         raise InstancePlanError("unsupported instance list instance_catalog_schema_version")
     rows = payload.get("instances")
     if not isinstance(rows, list):
@@ -65,36 +60,27 @@ def parse_catalog(payload: dict, *, source: str, profile: str) -> list[Instance]
                 raise InstancePlanError(f"instance requires nonempty {key}")
         identity = row["id"]
         if "," in identity or any(c.isspace() for c in identity):
-            raise InstancePlanError(
-                f"instance id cannot contain comma or whitespace: {identity!r}"
-            )
+            raise InstancePlanError(f"instance id cannot contain comma or whitespace: {identity!r}")
         if identity in seen:
             raise InstancePlanError(f"duplicate instance id: {identity}")
         seen.add(identity)
         if row["source"] != source or row["profile"] != profile:
             raise InstancePlanError(f"instance source/profile mismatch: {identity}")
         for key in ["tags", "requires"]:
-            if not isinstance(row.get(key), list) or any(
-                not isinstance(item, str) for item in row[key]
-            ):
-                raise InstancePlanError(
-                    f"instance {identity} requires a string list for {key}"
-                )
+            if not isinstance(row.get(key), list) or any(not isinstance(item, str) for item in row[key]):
+                raise InstancePlanError(f"instance {identity} requires a string list for {key}")
         duration = row.get("estimated_duration_s")
-        if (
-            type(duration) not in (int, float)
-            or not math.isfinite(duration)
-            or duration <= 0
-        ):
-            raise InstancePlanError(
-                f"instance {identity} has invalid estimated_duration_s"
-            )
+        if type(duration) not in (int, float) or not math.isfinite(duration) or duration <= 0:
+            raise InstancePlanError(f"instance {identity} has invalid estimated_duration_s")
         if source == "yaml":
             budget = JavaMockBudget.from_metadata(row.get("resource_budget"))
-            from scenario.execution_policy import (
-                EXECUTION_BUDGETS, normalize_execution, normalize_metadata,
-            )
             from document_io import DocumentError as ScenarioError
+
+            from scenario.execution_policy import (
+                EXECUTION_BUDGETS,
+                normalize_execution,
+                normalize_metadata,
+            )
 
             try:
                 metadata = normalize_metadata(row.get("metadata"))
@@ -102,18 +88,12 @@ def parse_catalog(payload: dict, *, source: str, profile: str) -> list[Instance]
             except ScenarioError as exc:
                 raise InstancePlanError(f"instance {identity}: {exc}") from exc
             if not EXECUTION_BUDGETS <= set(execution):
-                raise InstancePlanError(
-                    f"instance {identity} requires execution time budgets"
-                )
+                raise InstancePlanError(f"instance {identity} requires execution time budgets")
             if any(
-                type(execution[key]) not in (int, float)
-                or not math.isfinite(execution[key])
-                or execution[key] <= 0
+                type(execution[key]) not in (int, float) or not math.isfinite(execution[key]) or execution[key] <= 0
                 for key in EXECUTION_BUDGETS
             ):
-                raise InstancePlanError(
-                    f"instance {identity} has invalid execution time budgets"
-                )
+                raise InstancePlanError(f"instance {identity} has invalid execution time budgets")
         else:
             raise InstancePlanError(f"unsupported instance source: {source}")
         instances.append(
@@ -166,21 +146,13 @@ def select_instances(
     if ids is not None:
         missing = set(ids) - {row.id for row in instances}
         if missing:
-            raise InstancePlanError(
-                f"unknown or profile-excluded instances: {sorted(missing)}"
-            )
+            raise InstancePlanError(f"unknown or profile-excluded instances: {sorted(missing)}")
     if cats is not None:
         cats = ["engine_fault" if c == "engine-fault" else c for c in cats]
         missing = set(cats) - {row.category for row in instances}
         if missing:
-            raise InstancePlanError(
-                f"unknown or profile-empty categories: {sorted(missing)}"
-            )
-    selected = [
-        row
-        for row in instances
-        if (ids is None or row.id in ids) and (cats is None or row.category in cats)
-    ]
+            raise InstancePlanError(f"unknown or profile-empty categories: {sorted(missing)}")
+    selected = [row for row in instances if (ids is None or row.id in ids) and (cats is None or row.category in cats)]
     if not selected:
         raise InstancePlanError("selection contains no executable instances")
     return selected

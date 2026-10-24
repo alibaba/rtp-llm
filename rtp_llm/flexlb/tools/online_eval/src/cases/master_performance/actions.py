@@ -1,17 +1,16 @@
 """Fixed-window observation over the existing Java flow and runtime lifecycle."""
 
-from cases.master_performance.inputs import validate as validate_criteria
-
-from scenario.contracts import StageHandler, StageOutput
 from functools import partial
-from scenario.parameters import validate_fields, reference_parameters
-from cases.master_performance.inputs import effective_profile
-from file_io import write_json
-from artifacts.gate_inputs import compact_flow, new_evidence
+
 from artifacts.gate import gate_check
-from cases.master_performance.inputs import engine_roles
+from artifacts.gate_inputs import compact_flow, new_evidence
+from cases.master_performance.inputs import effective_profile, engine_roles
+from cases.master_performance.inputs import validate as validate_criteria
 from file_digest import sha256_file
+from file_io import write_json
 from runtime.observation import SampleBudget, poll_samples
+from scenario.contracts import StageHandler, StageOutput
+from scenario.parameters import reference_parameters, validate_fields
 
 
 def observe_validate(params, plan):
@@ -20,10 +19,12 @@ def observe_validate(params, plan):
     plan.reference(p["flow"], "java_flow")
     validate_criteria(p["criteria"], p["gate_input"])
     from cases.master_performance.inputs import observation_contract
+
     durations = observation_contract(p["observation"])
     if any(p["criteria"][key] != value for key, value in durations.items()):
         raise ValueError("observation windows disagree with frozen criteria")
     from flexlb_profile_data import PROFILES
+
     if set(p["criteria"].get("engine_tps_by_profile", {})) - set(PROFILES):
         raise ValueError("engine_tps_by_profile requires registered profiles")
     return p
@@ -32,9 +33,8 @@ def observe_validate(params, plan):
 def provenance(ctx, flow):
     from artifacts.provenance import gate_provenance
     from cases.master_performance import analysis
-    return gate_provenance(ctx, flow,
-        source_files=ctx.services.source_files(),
-        analyzer_file=analysis.__file__)
+
+    return gate_provenance(ctx, flow, source_files=ctx.services.source_files(), analyzer_file=analysis.__file__)
 
 
 def observe(ctx, p, deadline):
@@ -53,8 +53,13 @@ def observe(ctx, p, deadline):
     origin = clock.origin_epoch_s * 1000
     lo = origin + c["warmup_s"] * 1000
     hi = lo + c["measure_s"] * 1000
-    evidence = new_evidence("performance_evidence_schema_version", clock, c,
-        instance=ctx.instance["id"], env_epoch=ctx.env_epoch, version=2,
+    evidence = new_evidence(
+        "performance_evidence_schema_version",
+        clock,
+        c,
+        instance=ctx.instance["id"],
+        env_epoch=ctx.env_epoch,
+        version=2,
         gate_input=p["gate_input"],
         capture_limits=p["observation"]["capture"],
         window=dict(start_epoch_ms=lo, end_epoch_ms=hi),
@@ -65,6 +70,7 @@ def observe(ctx, p, deadline):
         evidence["provenance"].update(initial_provenance if initial_provenance is not None else provenance(ctx, flow))
         budget = SampleBudget(p["observation"]["capture"])
         evidence["window_declarations"] = p["observation"]["windows"]
+
         def sample():
             nonlocal initial_state
             if initial_state is not None:
@@ -73,29 +79,29 @@ def observe(ctx, p, deadline):
             else:
                 state = flow.control_status()
                 timestamp = ctx.clock()
-            row = dict(clock.stamp(timestamp), state=state.get("state"),
-                       process_returncode=state.get("process_returncode"))
+            row = dict(
+                clock.stamp(timestamp), state=state.get("state"), process_returncode=state.get("process_returncode")
+            )
             row["epoch_ms"] = row["epoch_s"] * 1000
             budget.append(row)
             evidence["samples"].append(row)
             return row
+
         end = clock.origin_monotonic_s + c["warmup_s"] + c["measure_s"]
         measurement_started = False
         for row in poll_samples(deadline, c["sample_s"], sample, until=end, immediate=True):
             state = row
             epoch = row["epoch_ms"]
-            if (
-                state.get("state") != "SENDING"
-                or state.get("process_returncode") is not None
-            ):
+            if state.get("state") != "SENDING" or state.get("process_returncode") is not None:
                 raise ValueError("traffic ended before measurement completed")
             if epoch >= lo and not measurement_started:
-                ctx.record_event("measurement_started", timestamp=dict(
-                    epoch_s=lo / 1000, monotonic_s=clock.origin_monotonic_s + c["warmup_s"]))
+                ctx.record_event(
+                    "measurement_started",
+                    timestamp=dict(epoch_s=lo / 1000, monotonic_s=clock.origin_monotonic_s + c["warmup_s"]),
+                )
                 measurement_started = True
             if epoch >= hi:
-                ctx.record_event("measurement_ended", timestamp=dict(
-                    epoch_s=hi / 1000, monotonic_s=end))
+                ctx.record_event("measurement_ended", timestamp=dict(epoch_s=hi / 1000, monotonic_s=end))
                 break
         ctx.record_event("observation_end")
     except Exception as exc:
@@ -119,26 +125,33 @@ def finish(ctx, p, deadline):
             # Query only the contract metrics; fetching all 240 engines' series
             # and discarding most of them after JSON decoding is unbounded work.
             from monitoring.windows import capture_window
+
             engine_roles(e["gate_input"], e["criteria"]["engine_tps"])
-            raw = capture_window(ctx.monitor.client, e["gate_input"]["fields"], source="mock",
+            raw = capture_window(
+                ctx.monitor.client,
+                e["gate_input"]["fields"],
+                source="mock",
                 windows=[(e["window"]["start_epoch_ms"] / 1000, e["window"]["end_epoch_ms"] / 1000)],
-                epoch=e["provenance"]["env_epoch"], deadline=deadline, limits=e["capture_limits"],
-                directory=ctx.artifact_dir / "performance-measurement")
+                epoch=e["provenance"]["env_epoch"],
+                deadline=deadline,
+                limits=e["capture_limits"],
+                directory=ctx.artifact_dir / "performance-measurement",
+            )
             e["engine_tps_samples"] = [row for rows in raw.field_rows().values() for row in rows]
-            e["raw_evidence"] = dict(path="performance-measurement/manifest.json",
-                sha256=sha256_file(ctx.artifact_dir / "performance-measurement/manifest.json"))
+            e["raw_evidence"] = dict(
+                path="performance-measurement/manifest.json",
+                sha256=sha256_file(ctx.artifact_dir / "performance-measurement/manifest.json"),
+            )
         except Exception as exc:
             e["errors"].append("engine TPS collection: " + str(exc))
     # Preserve terminal evidence even if analysis or presentation later times out.
     write_json(ctx.artifact_dir / "performance-gate-evidence.json", e)
     from artifacts.gate import commit_gate
     from cases.master_performance.analysis import analyze
-    result, path = commit_gate(ctx.artifact_dir, 'performance', e, analyze)
+
+    result, path = commit_gate(ctx.artifact_dir, "performance", e, analyze)
     return StageOutput(
-        checks=[
-            gate_check("absolute_performance", result, path,
-                       "single run satisfies all absolute criteria")
-        ],
+        checks=[gate_check("absolute_performance", result, path, "single run satisfies all absolute criteria")],
         artifacts=[
             str(ctx.artifact_dir / "performance-gate-evidence.json"),
             str(path),
@@ -148,12 +161,10 @@ def finish(ctx, p, deadline):
 
 
 HANDLERS = [
-    StageHandler(
-        "performance_observe", observe_validate, observe, {"evidence": "gate_evidence"}
-    ),
+    StageHandler("performance_observe", observe_validate, observe, {"evidence": "gate_evidence"}),
     StageHandler(
         "performance_finish",
-        partial(reference_parameters, resources={'flow': 'java_flow', 'evidence': 'gate_evidence'}),
+        partial(reference_parameters, resources={"flow": "java_flow", "evidence": "gate_evidence"}),
         finish,
         {},
         checks=frozenset({"absolute_performance"}),

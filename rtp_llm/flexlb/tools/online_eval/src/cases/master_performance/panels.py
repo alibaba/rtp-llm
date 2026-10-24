@@ -1,6 +1,5 @@
 """Selectable request and archived Prometheus views; never affect gate decisions."""
 
-
 from monitoring.metric_store import MetricStore
 from reporting.curves import materialize, project_panels
 from reporting.gate_lines import Threshold, apply_gate_lines
@@ -12,23 +11,37 @@ def prepare_curves(directory, evidence, presentation):
 
     def add(curve_id, points, description, *, name=None, labels=None, provenance=None):
         style = presentation.charts.curves[curve_id]
-        curves.append(materialize(
-            curve_id, style, points, name=name, labels=labels,
-            unit=store.document["definitions"][style.metric_id]["unit"],
-            description=description, provenance=provenance,
-            color_index=list(presentation.charts.curves).index(curve_id),
-        ))
+        curves.append(
+            materialize(
+                curve_id,
+                style,
+                points,
+                name=name,
+                labels=labels,
+                unit=store.document["definitions"][style.metric_id]["unit"],
+                description=description,
+                provenance=provenance,
+                color_index=list(presentation.charts.curves).index(curve_id),
+            )
+        )
 
     store = MetricStore.read(directory)
     from reporting.metric_binding import monitoring_audit
+
     inventory = monitoring_audit(store, presentation)
     from reporting.metric_binding import bindings
+
     rows, gaps, errors = store.project(lo / 1000)
     for row in rows:
         if row["metric_id"].startswith("request/"):
             for curve_id, _ in bindings(presentation, row["metric_id"], row["labels"]):
-                add(curve_id, row["points"], "逐请求证据；cohort 和完成窗口由指标生产器冻结，不替代整窗门禁 p99",
-                    labels=row["labels"], provenance=row["provenance"])
+                add(
+                    curve_id,
+                    row["points"],
+                    "逐请求证据；cohort 和完成窗口由指标生产器冻结，不替代整窗门禁 p99",
+                    labels=row["labels"],
+                    provenance=row["provenance"],
+                )
 
     for row in rows:
         provenance = dict(row["provenance"], metric_id=row["metric_id"], unit=row["unit"])
@@ -36,7 +49,7 @@ def prepare_curves(directory, evidence, presentation):
         if not row["points"] or "promql" not in provenance or identity.split("/", 1)[1] == "up":
             continue
         selected = bindings(presentation, identity, labels)
-        residual = {k:v for k,v in labels.items() if k != "role"}
+        residual = {k: v for k, v in labels.items() if k != "role"}
         for curve_id, style in selected:
             name = style.name
             if residual:
@@ -44,8 +57,14 @@ def prepare_curves(directory, evidence, presentation):
             if any(c["name"] == name for c in curves):
                 name += " · epoch " + row["epoch"]
             add(curve_id, row["points"], provenance["promql"], name=name, labels=labels, provenance=provenance)
-            audit.append(dict(name=name, samples=sum(v is not None for _,v in row["points"]), **provenance))
-    return curves, dict(queries=audit, gaps=gaps, errors=errors, available=any(row["points"] for row in rows), metric_classification=inventory)
+            audit.append(dict(name=name, samples=sum(v is not None for _, v in row["points"]), **provenance))
+    return curves, dict(
+        queries=audit,
+        gaps=gaps,
+        errors=errors,
+        available=any(row["points"] for row in rows),
+        metric_classification=inventory,
+    )
 
 
 def report_panels(curves, criteria, presentation):
@@ -53,7 +72,6 @@ def report_panels(curves, criteria, presentation):
     floors = criteria.get("engine_tps", {})
     thresholds = {
         metric: Threshold(floors[metric], 0, duration) if metric in floors else None
-        for metric in ("mock/rtp_llm_context_tps", "mock/rtp_llm_context_tps_with_cache",
-                       "mock/mock_decode_wall_tps")
+        for metric in ("mock/rtp_llm_context_tps", "mock/rtp_llm_context_tps_with_cache", "mock/mock_decode_wall_tps")
     }
     return apply_gate_lines(project_panels(curves, presentation), presentation, thresholds)

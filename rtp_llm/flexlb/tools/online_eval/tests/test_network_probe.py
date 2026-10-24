@@ -5,7 +5,6 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-
 from runtime.network import PROBE_BIND_HOST, port_accepting, port_in_use
 
 

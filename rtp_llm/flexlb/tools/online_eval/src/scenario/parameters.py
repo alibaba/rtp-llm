@@ -1,6 +1,7 @@
 """Action adapter for the shared strict field-set contract."""
 
 import copy
+
 from input_contract import mapping_fields
 
 

@@ -6,12 +6,12 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from scenario import load_scenarios
 from program_fixtures import compile_scenarios
+from scenario import load_scenarios
 from scenario.catalog import handlers
+from scenario.measurement import execute_workload
 from scenario.runtime import execute_instance
 from scenario.suites import classify, preselect_documents
-from scenario.measurement import execute_workload
 from test_scenario_runtime import Backend, Clock, source
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -21,18 +21,24 @@ class WorkloadRuntimeTests(unittest.TestCase):
     def test_core_inventory_does_not_compile_large_workload(self):
         documents = preselect_documents(load_scenarios(ROOT / "config/scenarios"), "quick")
         self.assertNotIn("cache_scale_in", {doc.id for _, doc in documents})
-        self.assertEqual(len(classify(compile_scenarios(documents, "single-nonbatch", handlers=handlers()), "quick")), 1)
+        self.assertEqual(
+            len(classify(compile_scenarios(documents, "single-nonbatch", handlers=handlers()), "quick")), 1
+        )
 
-    def run_plan(
-        self, workload, observation=True, setup_error=False, cleanup_error=False
-    ):
+    def run_plan(self, workload, observation=True, setup_error=False, cleanup_error=False):
         doc = source()
         doc["stages"][-1]["purpose"] = "observation" if observation else "operation"
         doc["stages"].append(dict(doc["stages"][-1], id="independent"))
-        doc['variants'] = [dict(id='default', metadata=dict(
-            kind='workload' if workload else 'functional', description=doc['description']),
-            execution=dict(collection='request', monitoring=dict(
-                capture_metrics=False, sample_interval_s=1, collector_shutdown_s=2)))]
+        doc["variants"] = [
+            dict(
+                id="default",
+                metadata=dict(kind="workload" if workload else "functional", description=doc["description"]),
+                execution=dict(
+                    collection="request",
+                    monitoring=dict(capture_metrics=False, sample_interval_s=1, collector_shutdown_s=2),
+                ),
+            )
+        ]
         plan = compile_scenarios([("fixture", doc)])[0]
         clock = Clock()
         backend = Backend(clock)
@@ -45,11 +51,7 @@ class WorkloadRuntimeTests(unittest.TestCase):
             )
             if workload:
                 self.assertTrue(Path(result["workload"]["report"]).is_file())
-                report = json.loads(
-                    Path(result["workload"]["report"])
-                    .with_name("analysis.json")
-                    .read_text()
-                )["result"]
+                report = json.loads(Path(result["workload"]["report"]).with_name("analysis.json").read_text())["result"]
                 self.assertEqual(result["status"], report["status"])
             return result
 
@@ -66,9 +68,7 @@ class WorkloadRuntimeTests(unittest.TestCase):
         self.assertEqual(r["outcome"]["gate"], "FAIL")
 
     def test_prerequisite_failure_blocks(self):
-        self.assertEqual(
-            self.run_plan(True, observation=False)["stages"][-1]["status"], "BLOCKED"
-        )
+        self.assertEqual(self.run_plan(True, observation=False)["stages"][-1]["status"], "BLOCKED")
 
     def test_setup_error_is_invalid(self):
         r = self.run_plan(True, setup_error=True)
@@ -81,35 +81,34 @@ class WorkloadRuntimeTests(unittest.TestCase):
         self.assertTrue(any(c["status"] != "PASS" for c in r["cleanup"]))
 
     def test_catalog_is_disjoint_and_complete(self):
-        with mock.patch("scenario.compiler.VICTIM_OFFSETS", (700, 701, 702)), \
-             mock.patch("adapters.java_mock_resources.VICTIM_OFFSETS", (700, 701, 702)):
-            plans = compile_scenarios(
-                load_scenarios(ROOT / "config/scenarios"), handlers=handlers()
-            )
+        with (
+            mock.patch("scenario.compiler.VICTIM_OFFSETS", (700, 701, 702)),
+            mock.patch("adapters.java_mock_resources.VICTIM_OFFSETS", (700, 701, 702)),
+        ):
+            plans = compile_scenarios(load_scenarios(ROOT / "config/scenarios"), handlers=handlers())
         f = {p["id"] for p in classify(plans, kind="functional")}
         w = {p["id"] for p in classify(plans, kind="workload")}
         self.assertFalse(f & w)
         self.assertEqual(f | w, {p["id"] for p in plans})
         self.assertIn("master_ha_failover::default::batch-window", w)
         self.assertEqual(
-            {
-                plan["scenario_id"] + "::" + plan["variant_id"]
-                for plan in classify(plans, kind="functional")
-            },
+            {plan["scenario_id"] + "::" + plan["variant_id"] for plan in classify(plans, kind="functional")},
             {
                 "request_completion::default",
             },
         )
-        self.assertTrue({"cache_sync_recovery::steady::batch-window", "cache_sync_recovery::recovery::batch-window"} <= w)
+        self.assertTrue(
+            {"cache_sync_recovery::steady::batch-window", "cache_sync_recovery::recovery::batch-window"} <= w
+        )
         self.assertEqual(len(plans), 22)
         self.assertIn("cache_scale_in::default::single-nonbatch", w)
 
     def test_quick_suite_is_request_completion_for_every_master_profile(self):
-        with mock.patch("scenario.compiler.VICTIM_OFFSETS", (700, 701, 702)), \
-             mock.patch("adapters.java_mock_resources.VICTIM_OFFSETS", (700, 701, 702)):
-            plans = compile_scenarios(
-                load_scenarios(ROOT / "config/scenarios"), handlers=handlers()
-            )
+        with (
+            mock.patch("scenario.compiler.VICTIM_OFFSETS", (700, 701, 702)),
+            mock.patch("adapters.java_mock_resources.VICTIM_OFFSETS", (700, 701, 702)),
+        ):
+            plans = compile_scenarios(load_scenarios(ROOT / "config/scenarios"), handlers=handlers())
         expected = {
             "request_completion::default",
         }
@@ -119,29 +118,26 @@ class WorkloadRuntimeTests(unittest.TestCase):
             "single-nonbatch",
             "window-nonbatch",
         ):
-            selected = classify(
-                [plan for plan in plans if plan["profile"] == profile], "quick"
-            )
+            selected = classify([plan for plan in plans if plan["profile"] == profile], "quick")
             self.assertEqual(len(selected), 1)
             self.assertEqual(
-                {
-                    plan["scenario_id"] + "::" + plan["variant_id"]
-                    for plan in selected
-                },
+                {plan["scenario_id"] + "::" + plan["variant_id"] for plan in selected},
                 expected,
             )
 
 
 def test_teardown_collects_queries_without_materializing_metrics():
     from types import SimpleNamespace
+
     from monitoring.run_monitor import RunMonitor
+
     policy = RunMonitor()
     monitor = mock.Mock()
     policy.monitors = {1: monitor}
     policy.options = {"capture_metrics": False, "collector_shutdown_s": 5}
     policy.events = []
-    ctx = SimpleNamespace(env_epoch=1, env=None, clock=lambda: 0,
-                          stage_deadline=mock.Mock(expires_at=60))
+    ctx = SimpleNamespace(env_epoch=1, env=None, clock=lambda: 0, stage_deadline=mock.Mock(expires_at=60))
     policy.before_stage(ctx, {"id": "stop", "action": "teardown"})
-    monitor.stop.assert_called_once_with(5, export=True, materialize=False,
-                                         archive_timeout=55, deadline=ctx.stage_deadline)
+    monitor.stop.assert_called_once_with(
+        5, export=True, materialize=False, archive_timeout=55, deadline=ctx.stage_deadline
+    )

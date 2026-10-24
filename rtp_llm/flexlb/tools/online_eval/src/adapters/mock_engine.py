@@ -1,6 +1,7 @@
 """Stateless Mock control operations; the execution facade owns its endpoint."""
 
 from typing import Optional
+
 from runtime.network import http_get_json, http_post_json
 
 
@@ -8,11 +9,8 @@ class MockEngineControl:
     def snapshot(self) -> dict:
         data = http_get_json(f"http://127.0.0.1:{self.mock_http_port}/snapshot")
         if data is None:
-            raise RuntimeError(
-                f"snapshot failed on mock http port {self.mock_http_port}"
-            )
+            raise RuntimeError(f"snapshot failed on mock http port {self.mock_http_port}")
         return data
-
 
     def _post(self, action, body, **options):
         return http_post_json(f"http://127.0.0.1:{self.mock_http_port}/{action}", body, **options)
@@ -48,9 +46,7 @@ class MockEngineControl:
     def start_engine(self, engine_name: str) -> dict:
         return self._require_engine_command("start_engine", engine_name)
 
-    def add_engine(
-        self, role: str, port: Optional[int] = None
-    ) -> tuple[int, Optional[dict]]:
+    def add_engine(self, role: str, port: Optional[int] = None) -> tuple[int, Optional[dict]]:
         """POST /add_engine {"role": ..., "port": optional} — dynamic scale-out.
 
         The Java mock's field name is ``port`` (gRPC port; auto-allocated as

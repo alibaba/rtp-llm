@@ -1,7 +1,8 @@
 """Output reference grammar and prior-stage type resolution."""
 
 from dataclasses import dataclass
-from scenario.validation import mapping, fail
+
+from scenario.validation import fail, mapping
 
 
 @dataclass(frozen=True)

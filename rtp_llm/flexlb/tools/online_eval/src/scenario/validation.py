@@ -2,15 +2,16 @@
 
 import math
 import re
+
 from document_io import DocumentError as ScenarioError
 from input_contract import fail
 
 ID = re.compile(r"[a-z][a-z0-9_]*\Z")
 
 
-
 def mapping(value, path, allowed, required=()):
     from input_contract import FieldSetError, mapping_fields
+
     try:
         return mapping_fields(value, allowed, path, required=required)
     except FieldSetError as exc:

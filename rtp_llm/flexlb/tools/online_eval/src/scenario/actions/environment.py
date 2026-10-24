@@ -28,14 +28,8 @@ def mutate_config(config, mutation):
         ordering["defaultPriority"] = 50
     elif mutation == "removed_engine_cancellation":
         preemption = ordering.get("preemption", {})
-        if ordering[
-            "type"
-        ] != "PRIORITY" or "DECODE_ENGINE_OWNED" not in preemption.get(
-            "allowedVictimStages", []
-        ):
-            raise ValueError(
-                "removed_engine_cancellation requires a valid owned-cancellation base"
-            )
+        if ordering["type"] != "PRIORITY" or "DECODE_ENGINE_OWNED" not in preemption.get("allowedVictimStages", []):
+            raise ValueError("removed_engine_cancellation requires a valid owned-cancellation base")
         preemption["engineCancellation"] = {
             "ackTimeoutMs": 50,
             "completionTimeoutMs": 1000,
@@ -51,11 +45,7 @@ def _validate(params, plan, probe=False):
 
     required = {"config_overrides", "mutation"} if probe else {"config_overrides"}
     allowed = required if probe else required | reconfigurable_fields()
-    if (
-        not isinstance(params, dict)
-        or set(params) - allowed
-        or not required <= set(params)
-    ):
+    if not isinstance(params, dict) or set(params) - allowed or not required <= set(params):
         raise ValueError(f"{plan.path}: expected {sorted(required)}")
     if probe and params["mutation"] not in MUTATIONS:
         raise ValueError(f"{plan.path}: unknown raw config mutation")
@@ -64,19 +54,14 @@ def _validate(params, plan, probe=False):
         original = environment(plan.environment, plan.path, profile)
         replacement = copy.deepcopy(plan.environment)
         replacement["config_overrides"] = copy.deepcopy(params["config_overrides"])
-        replacement.update({name: copy.deepcopy(params[name]) for name in reconfigurable_fields()
-                            if name in params})
+        replacement.update({name: copy.deepcopy(params[name]) for name in reconfigurable_fields() if name in params})
         target = environment(replacement, plan.path, profile)
         for axis in ("decision", "dispatcher"):
             if original["effective_axes"][axis] != target["effective_axes"][axis]:
-                raise ValueError(
-                    f"{plan.path}: environment replacement cannot change {axis}"
-                )
+                raise ValueError(f"{plan.path}: environment replacement cannot change {axis}")
         if probe:
             if target["master_layout"] != "single" or target["master_sync_log"]:
-                raise ValueError(
-                    "startup probes require a single Master and their own private logs"
-                )
+                raise ValueError("startup probes require a single Master and their own private logs")
             mutate_config(target["resolved_config"], params["mutation"])
         compiled[profile] = target
     if not compiled:
@@ -91,18 +76,14 @@ def _validate(params, plan, probe=False):
 def _close(ctx, deadline):
     results = ctx.cleanup(min(30, deadline.remaining()), retain_failed=True)
     if any(row["status"] != "PASS" for row in results):
-        raise RuntimeError(
-            "environment replacement cleanup failed; next environment not started"
-        )
+        raise RuntimeError("environment replacement cleanup failed; next environment not started")
     ctx.env = ctx.ops = None
     return results
 
 
 def _begin(ctx):
     ctx.env_epoch += 1
-    ctx.add_cleanup(
-        f"environment_epoch_{ctx.env_epoch}", lambda d: ctx.backend.teardown(ctx, d)
-    )
+    ctx.add_cleanup(f"environment_epoch_{ctx.env_epoch}", lambda d: ctx.backend.teardown(ctx, d))
 
 
 def reconfigure(ctx, params, deadline):
@@ -118,14 +99,10 @@ def startup_probe(ctx, params, deadline):
     _begin(ctx)
     plan = params["environments"][ctx.instance["profile"]]
     raw_config = mutate_config(plan["resolved_config"], params["mutation"])
-    observation = dict(
-        env_epoch=ctx.env_epoch, mutation=params["mutation"], raw_config=raw_config
-    )
+    observation = dict(env_epoch=ctx.env_epoch, mutation=params["mutation"], raw_config=raw_config)
     path = ctx.artifact_dir / f"startup-probe-{ctx.env_epoch}.json"
     try:
-        observation.update(
-            ctx.backend.probe_startup(ctx, plan, json.dumps(raw_config), deadline)
-        )
+        observation.update(ctx.backend.probe_startup(ctx, plan, json.dumps(raw_config), deadline))
     finally:
         # Persist even an incomplete attempt and retain final-cleanup callbacks
         # when intermediate teardown fails. Never start another epoch on failure.
@@ -149,9 +126,7 @@ def startup_probe(ctx, params, deadline):
             rejected=rejected,
             parser_matched=bool(matched),
             environment_absent=observation["current_absent_before_cleanup"],
-            evidence=ctx.register_resource(
-                "environment_probe", observation, historical=True
-            ),
+            evidence=ctx.register_resource("environment_probe", observation, historical=True),
         ),
         artifacts=[str(path)],
     )
@@ -164,8 +139,7 @@ HANDLERS = [
         reconfigure,
         {"environment": "environment"},
         max_environment_workers=lambda params, profile: (
-            params["environments"][profile]["n_prefill"]
-            + params["environments"][profile]["n_decode"]
+            params["environments"][profile]["n_prefill"] + params["environments"][profile]["n_decode"]
         ),
         next_environment=lambda params: params["environment"],
     ),

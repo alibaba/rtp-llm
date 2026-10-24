@@ -9,35 +9,34 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import queue
 import signal
 import subprocess
 import sys
 import threading
 import time
 import uuid
-import queue
-from contextlib import nullcontext
 from concurrent.futures import ThreadPoolExecutor
-from file_io import write_json
+from contextlib import nullcontext
 from pathlib import Path
 
-
+from adapters import port_windows
+from adapters.java_mock_resources import plan_lane_leases
+from file_io import write_json
 from reporting.view_config import DEFAULT_VIEW
+from runtime.resource_plan import ResourcePlanError
 from scenario.instance_plan import (
     InstancePlanError,
+    order_instances,
     parse_catalog,
     plan_instances,
-    order_instances,
     select_instances,
 )
-from runtime.resource_plan import ResourcePlanError
-from adapters.java_mock_resources import plan_lane_leases
-from adapters import port_windows
 
 SCENARIO_RUNNER = Path(__file__).with_name("child_cli.py")
 from scenario.outcome import TERMINAL_STATUSES as STATUSES
 from scenario.result_validation import error_result, read_results
-from scenario.timing_store import timing_path, read_timings, write_timings
+from scenario.timing_store import read_timings, timing_path, write_timings
 
 
 class ChildProcesses:
@@ -115,19 +114,23 @@ class ChildProcesses:
             children = dict(self.processes)
         deadline = time.monotonic() + max(children.values(), default=0)
         from runtime.cleanup import cleanup_all
+
         def settle(child):
             try:
                 self._wait_or_kill(child, max(0, deadline - time.monotonic()))
             finally:
                 self._signal(child, signal.SIGKILL)
-        operations = [(str(child.pid) + " signal", lambda child=child: self._signal(child, signal.SIGTERM))
-                      for child in children]
+
+        operations = [
+            (str(child.pid) + " signal", lambda child=child: self._signal(child, signal.SIGTERM)) for child in children
+        ]
         operations.extend((str(child.pid) + " reap", lambda child=child: settle(child)) for child in children)
         cleanup_all(operations)
 
 
 def _catalog(args):
     from scenario.selection_cli import selection_arguments
+
     instances = []
     if not SCENARIO_RUNNER.is_file():
         raise InstancePlanError(
@@ -153,9 +156,7 @@ def _catalog(args):
         timeout=60,
     )
     if proc.returncode:
-        raise InstancePlanError(
-            f"scenario list failed (rc={proc.returncode}): {proc.stderr[-2000:]}"
-        )
+        raise InstancePlanError(f"scenario list failed (rc={proc.returncode}): {proc.stderr[-2000:]}")
     try:
         payload = json.loads(proc.stdout)
     except ValueError as exc:
@@ -181,13 +182,16 @@ def _run_segment(index, part, instance, lease, args, out, children):
     write_json(lease_path, {"lease_schema_version": 1, **lease.to_manifest()})
     try:
         from scenario.execution_plan import freeze_plan
+
         plan_path = segment / "execution-plan.json"
-        plan_sha = freeze_plan(plan_path, [instance.compiled],
-                               dependencies=instance.dependencies)
+        plan_sha = freeze_plan(plan_path, [instance.compiled], dependencies=instance.dependencies)
         command = [
             sys.executable,
             str(SCENARIO_RUNNER),
-            "--plan", str(plan_path), "--plan-sha256", plan_sha,
+            "--plan",
+            str(plan_path),
+            "--plan-sha256",
+            plan_sha,
             "--source",
             str(Path(args.case_dir).resolve()),
             "--profile",
@@ -204,8 +208,19 @@ def _run_segment(index, part, instance, lease, args, out, children):
         if getattr(args, "retain_tsdb", False):
             command.append("--retain-tsdb")
         execution = instance.metadata["execution"]
-        timeout = sum(execution[key] for key in (
-            "timeout_s", "cleanup_timeout_s", "finalize_timeout_s", "report_timeout_s", "archive_timeout_s")) + 30
+        timeout = (
+            sum(
+                execution[key]
+                for key in (
+                    "timeout_s",
+                    "cleanup_timeout_s",
+                    "finalize_timeout_s",
+                    "report_timeout_s",
+                    "archive_timeout_s",
+                )
+            )
+            + 30
+        )
         cleanup_timeout = execution["cleanup_timeout_s"] + 15
         rc = children.run(
             command,
@@ -232,11 +247,11 @@ def _run_segment(index, part, instance, lease, args, out, children):
     return {"lane": index, "segments": segments, "instances": results}
 
 
-
 def _run_lane(index, lane, lease, args, out, children, dispatch=None):
     """One lease, one child per instance; failed cleanup retires this lane."""
-    from scenario.lane_safety import cleanup_failure
     from adapters.port_windows import busy_ports
+    from scenario.lane_safety import cleanup_failure
+
     results, segments = [], []
     pending = iter(lane)
     failure = None
@@ -268,19 +283,21 @@ def _run_lane(index, lane, lease, args, out, children, dispatch=None):
         if failure:
             break
     if failure and dispatch is None:
-        results.extend(dict(error_result(instance, failure), not_started=True, lane=index)
-                       for instance in pending)
-    return {"lane": index, "segments": segments, "instances": results,
-            "reusable": failure is None, "retirement_reason": failure}
+        results.extend(dict(error_result(instance, failure), not_started=True, lane=index) for instance in pending)
+    return {
+        "lane": index,
+        "segments": segments,
+        "instances": results,
+        "reusable": failure is None,
+        "retirement_reason": failure,
+    }
 
 
 def _aggregate(lanes, instances, args, elapsed):
     rows = [row for lane in lanes for row in lane["instances"]]
     order = {instance.id: i for (i, instance) in enumerate(instances)}
     rows.sort(key=lambda row: order[row["id"]])
-    counts = {
-        status: sum((row["status"] == status for row in rows)) for status in STATUSES
-    }
+    counts = {status: sum((row["status"] == status for row in rows)) for status in STATUSES}
     failed = counts["FAIL"] + counts["ERROR"] + counts["TIMEOUT"]
     rc = int(
         bool(
@@ -310,10 +327,7 @@ def _aggregate(lanes, instances, args, elapsed):
         },
         "instances": rows,
         "cases": [{**row, "name": row["id"]} for row in rows],
-        "lanes": [
-            {key: value for (key, value) in lane.items() if key != "instances"}
-            for lane in lanes
-        ],
+        "lanes": [{key: value for (key, value) in lane.items() if key != "instances"} for lane in lanes],
     }
 
 
@@ -328,26 +342,42 @@ def _print_planned_reports(instances):
 
 def _print_generated_reports(rows):
     for row in rows:
-        if row.get('artifacts'):
-            print('experiment artifacts: ' + json.dumps(dict(instance=row['id'],
-                artifacts=row['artifacts']), ensure_ascii=False))
+        if row.get("artifacts"):
+            print(
+                "experiment artifacts: "
+                + json.dumps(dict(instance=row["id"], artifacts=row["artifacts"]), ensure_ascii=False)
+            )
         if row.get("test_kind") != "workload":
             continue
         workload = row.get("workload")
         reports = workload.get("reports") if isinstance(workload, dict) else None
-        print("workload reports: " + json.dumps({
-            "instance": row["id"], "status": row["status"],
-            "reports": reports if isinstance(reports, dict) else None,
-        }, ensure_ascii=False))
+        print(
+            "workload reports: "
+            + json.dumps(
+                {
+                    "instance": row["id"],
+                    "status": row["status"],
+                    "reports": reports if isinstance(reports, dict) else None,
+                },
+                ensure_ascii=False,
+            )
+        )
 
 
 def run_structured(args: argparse.Namespace) -> int:
     """Own window and output locks before listing, releasing them on every exit."""
-    explicit = any((os.environ.get(key) or "").strip() for key in (
-        "FLEXLB_FT_PARALLEL_MASTER_BASE", "FLEXLB_FT_PARALLEL_MOCK_BASE"))
-    with port_windows.admit_port_window(args.parallel, args.mock_stride,
-            master=port_windows.master_base(), mock=port_windows.mock_base(),
-            explicit=explicit, dry_run=args.dry_run) as admission:
+    explicit = any(
+        (os.environ.get(key) or "").strip()
+        for key in ("FLEXLB_FT_PARALLEL_MASTER_BASE", "FLEXLB_FT_PARALLEL_MOCK_BASE")
+    )
+    with port_windows.admit_port_window(
+        args.parallel,
+        args.mock_stride,
+        master=port_windows.master_base(),
+        mock=port_windows.mock_base(),
+        explicit=explicit,
+        dry_run=args.dry_run,
+    ) as admission:
         for warning in admission.warnings:
             print(warning, file=sys.stderr)
         args.port_provenance = admission.port_provenance
@@ -362,20 +392,18 @@ def run_structured(args: argparse.Namespace) -> int:
 
 def _run_admitted(args, out, admission):
     try:
-        instances = select_instances(
-            _catalog(args), exact_ids=args.instances, categories=args.categories
-        )
-        timings = read_timings(
-            Path(args.timing_json) if args.timing_json else timing_path()
-        )
+        instances = select_instances(_catalog(args), exact_ids=args.instances, categories=args.categories)
+        timings = read_timings(Path(args.timing_json) if args.timing_json else timing_path())
         lanes = plan_instances(instances, args.parallel, timings)
         scheduling = getattr(args, "scheduling", "dynamic")
         if scheduling not in {"static", "dynamic"}:
             raise InstancePlanError("unknown scheduling policy")
         ordered = order_instances(instances, timings)
-        budgets = ([[instance.budget for instance in instances]] * len(lanes)
-                   if scheduling == "dynamic" else
-                   [[instance.budget for instance in lane] for lane in lanes])
+        budgets = (
+            [[instance.budget for instance in instances]] * len(lanes)
+            if scheduling == "dynamic"
+            else [[instance.budget for instance in lane] for lane in lanes]
+        )
         leases = plan_lane_leases(
             budgets,
             master_base=admission.master_base,
@@ -387,11 +415,12 @@ def _run_admitted(args, out, admission):
                 i, args.mock_stride, admission.master_base, admission.mock_base
             ):
                 raise ResourcePlanError("resource planner and port preflight disagree")
-            if lease.child_env() != port_windows.lane_env(i, args.mock_stride, admission.master_base, admission.mock_base):
-                raise ResourcePlanError(
-                    "resource planner and child environment disagree"
-                )
+            if lease.child_env() != port_windows.lane_env(
+                i, args.mock_stride, admission.master_base, admission.mock_base
+            ):
+                raise ResourcePlanError("resource planner and child environment disagree")
         from mode_profiles import master_mode_for_profile, resolve_mode
+
         runtime_plan = resolve_mode("scenario", master_mode_for_profile(args.profile))
         manifest = {
             "runner_plan_schema_version": 1,
@@ -438,13 +467,14 @@ def _run_admitted(args, out, admission):
         for instance in ordered:
             dispatch.put(instance)
     futures = [
-        pool.submit(_run_lane, i, lane, leases[i], args, out, children, dispatch)
-        for (i, lane) in enumerate(lanes)
+        pool.submit(_run_lane, i, lane, leases[i], args, out, children, dispatch) for (i, lane) in enumerate(lanes)
     ]
     interrupted = False
+
     def terminate(signum, frame):
         if not children.stopping:
             raise KeyboardInterrupt("suite terminated")
+
     previous_term = None
     if threading.current_thread() is threading.main_thread():
         previous_term = signal.signal(signal.SIGTERM, terminate)
@@ -462,8 +492,7 @@ def _run_admitted(args, out, admission):
             if previous_term is not None:
                 signal.signal(signal.SIGTERM, previous_term)
     if dispatch is not None:
-        reasons = "; ".join(row["retirement_reason"] for row in results
-                            if row.get("retirement_reason"))
+        reasons = "; ".join(row["retirement_reason"] for row in results if row.get("retirement_reason"))
         while True:
             try:
                 instance = dispatch.get_nowait()
@@ -488,11 +517,16 @@ def _run_admitted(args, out, admission):
             sources["aggregate"] = target
         archive_kind = "scenario" if any(i.metadata.get("test_kind") == "workload" for i in instances) else "case"
         create_archive(
-            Path(args.archive), sources, kind=archive_kind,
+            Path(args.archive),
+            sources,
+            kind=archive_kind,
             status="incomplete" if interrupted else "complete",
-            metadata={"profile": args.profile, "grade": args.grade,
-                      "exit_code": payload["summary"]["exit_code"],
-                      "instance_count": payload["summary"]["total"]},
+            metadata={
+                "profile": args.profile,
+                "grade": args.grade,
+                "exit_code": payload["summary"]["exit_code"],
+                "instance_count": payload["summary"]["total"],
+            },
         )
         print(f"experiment archive: {args.archive}")
     try:

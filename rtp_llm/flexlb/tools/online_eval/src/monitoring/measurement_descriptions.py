@@ -1,7 +1,8 @@
 """Table-driven descriptions retain case ownership of measurements and accuracy."""
+
+from copy import deepcopy
 from dataclasses import dataclass
 from types import MappingProxyType
-from copy import deepcopy
 
 
 @dataclass(frozen=True)
@@ -14,11 +15,19 @@ class MeasurementDescription:
     collection: object = None
 
     def contract(self):
-        from monitoring.contracts import implementation_measurement
         from implementation_identity import implementation_identity
-        result = dict(source_type=self.source, implementation=implementation_identity(self.function),
-            measurement=implementation_measurement(self.function, population=self.population,
-                accuracy=self.accuracy, request_identity=self.request_identity))
+        from monitoring.contracts import implementation_measurement
+
+        result = dict(
+            source_type=self.source,
+            implementation=implementation_identity(self.function),
+            measurement=implementation_measurement(
+                self.function,
+                population=self.population,
+                accuracy=self.accuracy,
+                request_identity=self.request_identity,
+            ),
+        )
         if self.collection is not None:
             result["collection"] = deepcopy(self.collection)
         return result
@@ -26,8 +35,10 @@ class MeasurementDescription:
 
 class MeasurementDescriptions:
     def __init__(self, declarations):
-        if any(not isinstance(key, tuple) or len(key) != 2 or
-               not isinstance(value, MeasurementDescription) for key, value in declarations.items()):
+        if any(
+            not isinstance(key, tuple) or len(key) != 2 or not isinstance(value, MeasurementDescription)
+            for key, value in declarations.items()
+        ):
             raise ValueError("descriptions require (producer, metric) keys and MeasurementDescription values")
         self.declarations = MappingProxyType(dict(declarations))
 

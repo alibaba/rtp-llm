@@ -1,20 +1,19 @@
 """Phase-level Java traffic control; Python never forwards individual requests."""
-from file_io import read_json
 
 import json
 import time
 from pathlib import Path
-from file_io import write_json
-
-from adapters.flow_control import FlowControlProtocol, FlowStatus, DrainResult
 
 from adapters.client_journal import LiveClientEvents
+from adapters.flow_control import DrainResult, FlowControlProtocol, FlowStatus
+from adapters.load_client import bind_environment, client_environment, collection_environment
 from adapters.playback_evidence import PlaybackEvidence
 from file_digest import sha256_file
-from adapters.load_client import client_environment, collection_environment, bind_environment
+from file_io import read_json, write_json
 
-RUN_LOCAL_ENVIRONMENT = frozenset({"TRACE_FILE", "FLOW_CONTROL_DIR", "FLOW_RUN_ID",
-    "GRPC_TARGET", "MASTER_DISCOVERY_FILE", "OUTPUT_DIR"})
+RUN_LOCAL_ENVIRONMENT = frozenset(
+    {"TRACE_FILE", "FLOW_CONTROL_DIR", "FLOW_RUN_ID", "GRPC_TARGET", "MASTER_DISCOVERY_FILE", "OUTPUT_DIR"}
+)
 
 
 def evidence_environment(environment):
@@ -52,9 +51,7 @@ class JavaFlowGroup:
         self.proc = None
         self.control = self.directory / "control"
         self.control_protocol = FlowControlProtocol(self.control, self.identity)
-        self.journal = LiveClientEvents(
-            self.directory / "client_lifecycle.jsonl", max_events=max_events
-        )
+        self.journal = LiveClientEvents(self.directory / "client_lifecycle.jsonl", max_events=max_events)
         self.stop_command = None
         self.trace_manifest = None
         self._drain_result = None
@@ -69,21 +66,23 @@ class JavaFlowGroup:
         self.directory.mkdir(parents=True)
         self.control.mkdir()
         source_manifest = trace.with_suffix(".manifest.json")
-        semantics = (
-            read_json(source_manifest) if source_manifest.exists() else {}
-        )
-        if 'sha256' in semantics and semantics['sha256'] != self.trace_manifest['sha256']:
-            raise ValueError('trace manifest SHA256 differs from materialized plan')
+        semantics = read_json(source_manifest) if source_manifest.exists() else {}
+        if "sha256" in semantics and semantics["sha256"] != self.trace_manifest["sha256"]:
+            raise ValueError("trace manifest SHA256 differs from materialized plan")
         self.trace_manifest.update(semantics)
         self.trace_manifest["playback"] = playback
-        env = bind_environment(env, dict(
-            TRACE_FILE=str(trace), GRPC_TARGET=target,
-            FLOW_CONTROL_DIR=str(self.control),
-            FLOW_RUN_ID=self.identity["run_id"],
-            FLOW_GROUP_ID=self.identity["group_id"],
-            FLOW_PHASE_ID=self.identity["phase_id"],
-            **collection_environment(self.collection_profile, monitoring=self.monitor is not None),
-        ))
+        env = bind_environment(
+            env,
+            dict(
+                TRACE_FILE=str(trace),
+                GRPC_TARGET=target,
+                FLOW_CONTROL_DIR=str(self.control),
+                FLOW_RUN_ID=self.identity["run_id"],
+                FLOW_GROUP_ID=self.identity["group_id"],
+                FLOW_PHASE_ID=self.identity["phase_id"],
+                **collection_environment(self.collection_profile, monitoring=self.monitor is not None),
+            ),
+        )
         (self.directory / "flow-input.json").write_text(
             json.dumps(
                 dict(**self.identity, trace=self.trace_manifest, environment=env),
@@ -92,6 +91,7 @@ class JavaFlowGroup:
         )
         deadline.check()
         from adapters.client_session import launch_client
+
         self.proc, _ = launch_client(self.client, env, self.directory, self.directory / "client.log", deadline)
         if self.monitor is not None:
             target_path = self.directory / "metrics-target.json"
@@ -100,19 +100,18 @@ class JavaFlowGroup:
                 deadline,
                 "client monitor endpoint absent",
             )
-            self.monitor.add_client_target(
-                self.monitor_target, read_json(target_path)["url"], deadline=deadline
-            )
+            self.monitor.add_client_target(self.monitor_target, read_json(target_path)["url"], deadline=deadline)
             write_json(self.directory / "metrics-ready", int(time.time() * 1000) + 500)
-        from artifacts.startup import startup_phase
         from adapters.flow_control import wait_flow_started
-        with startup_phase(self.directory, 'client/sending', deadline):
+        from artifacts.startup import startup_phase
+
+        with startup_phase(self.directory, "client/sending", deadline):
             started = wait_flow_started(self.control, self.identity, self.proc, deadline)
-        snapshot = PlaybackEvidence.read(self.directory / 'playback.json',
-                                         self.trace_manifest['sha256'], env)
-        self.trace_manifest['java_playback'] = snapshot.to_dict()
-        (self.directory / 'flow-input.json').write_text(json.dumps(
-            dict(**self.identity, trace=self.trace_manifest, environment=env), indent=2))
+        snapshot = PlaybackEvidence.read(self.directory / "playback.json", self.trace_manifest["sha256"], env)
+        self.trace_manifest["java_playback"] = snapshot.to_dict()
+        (self.directory / "flow-input.json").write_text(
+            json.dumps(dict(**self.identity, trace=self.trace_manifest, environment=env), indent=2)
+        )
         return started
 
     def observe_control(self):
@@ -121,8 +120,7 @@ class JavaFlowGroup:
     def control_status(self):
         """Serialized control observation for experiment evidence consumers."""
         observation = self.observe_control()
-        state = (dict(self.identity, **observation.status.encode())
-                 if observation.status is not None else {})
+        state = dict(self.identity, **observation.status.encode()) if observation.status is not None else {}
         state["process_returncode"] = observation.process_returncode
         return state
 
@@ -132,19 +130,13 @@ class JavaFlowGroup:
             state["observed_started"] = state.get("started", 0)
             state["observed_terminal"] = state.get("terminal", 0)
             state["unfinished_ids"] = []
-            state["process_returncode"] = (
-                None if self.proc is None else self.proc.proc.poll()
-            )
+            state["process_returncode"] = None if self.proc is None else self.proc.proc.poll()
             return state
         self.journal.read()
         state["observed_started"] = len(self.journal.issued)
         state["observed_terminal"] = len(self.journal.terminal)
-        state["unfinished_ids"] = sorted(
-            self.journal.issued.keys() - self.journal.terminal.keys()
-        )
-        state["process_returncode"] = (
-            None if self.proc is None else self.proc.proc.poll()
-        )
+        state["unfinished_ids"] = sorted(self.journal.issued.keys() - self.journal.terminal.keys())
+        state["process_returncode"] = None if self.proc is None else self.proc.proc.poll()
         return state
 
     def _wait_evidence(self, predicate, deadline, message):
@@ -176,6 +168,7 @@ class JavaFlowGroup:
         """Publish cancellation without waiting for the Java producer."""
         if self.proc is not None and self.proc.alive() and self.control.exists():
             from adapters.flow_control import stop_sending
+
             self.stop_command = stop_sending(self.control, self.identity, self.stop_command)
 
     def stop_sending(self, deadline, *, on_poll=None):
@@ -184,34 +177,39 @@ class JavaFlowGroup:
         observation = self.observe_control()
         if observation.status is None or not observation.status.state.sending_finished:
             from adapters.flow_control import stop_sending
+
             self.stop_command = stop_sending(self.control, self.identity, self.stop_command)
             observation = self._wait_control(
                 lambda o: o.status.state.sending_finished,
-                deadline, "flow did not stop accepting new trace records",
+                deadline,
+                "flow did not stop accepting new trace records",
                 on_poll=on_poll,
             )
-        return dict(self.identity, **observation.status.encode(),
-                    process_returncode=observation.process_returncode)
+        return dict(self.identity, **observation.status.encode(), process_returncode=observation.process_returncode)
 
     def drain(self, deadline, *, on_poll=None):
         if self._drain_result is not None:
             return self._drain_result.encode(self.identity)
         self._wait_control(
             lambda o: o.status.state.terminal and o.process_returncode is not None,
-            deadline, "flow did not drain and exit",
+            deadline,
+            "flow did not drain and exit",
             on_poll=on_poll,
         )
         # Read evidence once after the producer has exited; failures remain retryable.
         state = self.status()
         result = DrainResult(
-            FlowStatus.decode(state), state["process_returncode"],
-            state["observed_started"], state["observed_terminal"],
+            FlowStatus.decode(state),
+            state["process_returncode"],
+            state["observed_started"],
+            state["observed_terminal"],
             tuple(state["unfinished_ids"]),
         )
         result.validate(self.stop_command)
         if self.monitor is not None:
             self.monitor.end_target(
-                self.monitor_target, result.status.recorded_epoch_ms / 1000,
+                self.monitor_target,
+                result.status.recorded_epoch_ms / 1000,
             )
         self._drain_result = result
         return self._drain_result.encode(self.identity)
@@ -244,6 +242,7 @@ class JavaFlowGroup:
 
     def evidence_snapshot(self):
         from adapters.client_journal import request_timing
+
         errors = []
         try:
             state = self.status()
@@ -254,9 +253,7 @@ class JavaFlowGroup:
             complete = (
                 state.get("state") == "DRAINED"
                 and state.get("process_returncode") == 0
-                and state.get("submitted")
-                == state.get("started")
-                == state.get("terminal")
+                and state.get("submitted") == state.get("started") == state.get("terminal")
             )
             return dict(
                 producer_kind="java",
@@ -279,9 +276,7 @@ class JavaFlowGroup:
         errors.extend(timing["errors"])
         complete = complete and not errors
         if not complete:
-            errors.append(
-                "flow has not proven complete submission and terminal accounting"
-            )
+            errors.append("flow has not proven complete submission and terminal accounting")
         return dict(
             producer_kind="java",
             complete=complete,
@@ -289,15 +284,8 @@ class JavaFlowGroup:
             **self.identity,
             status=state,
             trace=self.trace_manifest,
-            records=[
-                self.journal.terminal.get(rid, row)
-                for rid, row in self.journal.issued.items()
-            ],
+            records=[self.journal.terminal.get(rid, row) for rid, row in self.journal.issued.items()],
             issued=list(self.journal.issued.values()),
             traffic_start=timing["traffic_start"],
-            unfinished=[
-                r
-                for rid, r in self.journal.issued.items()
-                if rid not in self.journal.terminal
-            ],
+            unfinished=[r for rid, r in self.journal.issued.items() if rid not in self.journal.terminal],
         )

@@ -7,16 +7,15 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from scenario.program_compiler import configure_program
-from cases.master_ha_failover import actions as master_ha
-from scenario import registry
 from case_registry_fixtures import entry, snapshot
+from cases.master_ha_failover import actions as master_ha
 from cases.master_performance import program as master_performance
-from scenario import ScenarioError
-from program_fixtures import compile_scenarios
-from scenario.catalog import FOUNDATION_HANDLERS, handlers
 from document_io import load_document
+from program_fixtures import compile_scenarios
+from scenario import ScenarioError, registry
+from scenario.catalog import FOUNDATION_HANDLERS, handlers
 from scenario.parameters import validate_fields
+from scenario.program_compiler import configure_program
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -37,26 +36,48 @@ class ActionContractsTest(unittest.TestCase):
         document = configure_program(load_document(path), str(path))
         document = replace(document, id="master_performance")
         variant = document.variants[0]
-        variant = replace(variant, stages=(variant.stages[0], replace(variant.stages[1], action="performance_finish"), *variant.stages[2:]))
+        variant = replace(
+            variant,
+            stages=(variant.stages[0], replace(variant.stages[1], action="performance_finish"), *variant.stages[2:]),
+        )
         document = replace(document, variants=(variant,))
         with self.assertRaisesRegex(ScenarioError, "belongs to cases.*master_performance"):
             compile_scenarios([(str(path), document)], handlers=handlers())
 
     def test_duplicate_foundational_or_case_action_is_rejected(self):
         duplicate = FOUNDATION_HANDLERS[0]
-        with patch.object(registry, "_snapshot", snapshot(entry("master_performance", replace(master_performance.CASE, actions=(duplicate,))), include_existing=True)):
+        with patch.object(
+            registry,
+            "_snapshot",
+            snapshot(
+                entry("master_performance", replace(master_performance.CASE, actions=(duplicate,))),
+                include_existing=True,
+            ),
+        ):
             with self.assertRaisesRegex(ValueError, "duplicate action"):
                 handlers("master_performance")
-        with patch.object(registry, "_snapshot", snapshot(entry("master_performance", replace(master_performance.CASE, actions=(replace(duplicate, owners=frozenset({"another_case"})),))), include_existing=True)):
+        with patch.object(
+            registry,
+            "_snapshot",
+            snapshot(
+                entry(
+                    "master_performance",
+                    replace(master_performance.CASE, actions=(replace(duplicate, owners=frozenset({"another_case"})),)),
+                ),
+                include_existing=True,
+            ),
+        ):
             with self.assertRaisesRegex(ValueError, "conflicting case owner"):
                 handlers("master_performance")
 
     def test_field_validation_rejects_unknown_missing_and_non_mapping_input(self):
         plan = SimpleNamespace(path="case.stage")
-        for value, message in ((None, "case.stage: expected mapping"),
-                               ([], "case.stage: expected mapping"),
-                               ({"extra": 1}, "case.stage: unknown configuration fields"),
-                               ({}, "missing YAML parameter case.stage.required")):
+        for value, message in (
+            (None, "case.stage: expected mapping"),
+            ([], "case.stage: expected mapping"),
+            ({"extra": 1}, "case.stage: unknown configuration fields"),
+            ({}, "missing YAML parameter case.stage.required"),
+        ):
             with self.subTest(value=value), self.assertRaisesRegex(ValueError, message):
                 validate_fields(value, plan, {"required"}, {"required"})
         source = {"required": {"nested": [1]}}
@@ -65,28 +86,38 @@ class ActionContractsTest(unittest.TestCase):
         self.assertEqual([1], source["required"]["nested"])
 
     def test_shared_implementation_requires_each_program_to_declare_it(self):
-        with patch.object(registry, "_snapshot", snapshot(entry("second_performance", master_performance.CASE), include_existing=True)):
+        with patch.object(
+            registry, "_snapshot", snapshot(entry("second_performance", master_performance.CASE), include_existing=True)
+        ):
             catalog = handlers()
             self.assertEqual(
                 frozenset({"master_performance", "second_performance"}),
                 catalog["performance_finish"].owners,
             )
         descriptor = master_performance.ACTION_HANDLERS[0]
-        with patch.object(registry, "_snapshot", snapshot(entry("master_performance", replace(master_performance.CASE, actions=(descriptor, descriptor))), include_existing=True)):
+        with patch.object(
+            registry,
+            "_snapshot",
+            snapshot(
+                entry("master_performance", replace(master_performance.CASE, actions=(descriptor, descriptor))),
+                include_existing=True,
+            ),
+        ):
             with self.assertRaisesRegex(ValueError, "duplicate action"):
                 handlers("master_performance")
 
     def test_ha_period_records_the_same_bounded_event_boundaries(self):
         from runtime.deadline import Deadline
         from scenario.runtime import RuntimeContext
+
         now = [10.0]
+
         def sleep(seconds):
             now[0] += seconds
-        ctx = RuntimeContext({}, None, ".", lambda: now[0], sleep,
-                             wall_clock=lambda: 1234 + now[0] - 10)
+
+        ctx = RuntimeContext({}, None, ".", lambda: now[0], sleep, wall_clock=lambda: 1234 + now[0] - 10)
         deadline = Deadline(30, ctx.clock, sleep)
-        result = master_ha._period(ctx, dict(name="b", settle_s=2, duration_s=3,
-                                            operation_timeout_s=6), deadline)
+        result = master_ha._period(ctx, dict(name="b", settle_s=2, duration_s=3, operation_timeout_s=6), deadline)
         self.assertEqual(["b_start", "b_end"], [e["id"] for e in ctx.report_events])
         self.assertAlmostEqual(1236, result.output["start"])
         self.assertAlmostEqual(1239, result.output["end"])

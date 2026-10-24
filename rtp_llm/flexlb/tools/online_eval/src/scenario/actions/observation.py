@@ -6,11 +6,12 @@ import json
 import math
 import uuid
 from pathlib import Path
-from adapters.observation_sources import Sources, SOURCES, MAX_DATASET_BYTES
-from adapters.observation_window import Observer
 
 from adapters.debug_client import DebugUnavailable
+from adapters.observation_sources import MAX_DATASET_BYTES, SOURCES, Sources
+from adapters.observation_window import Observer
 from scenario.contracts import CheckResult, StageHandler, StageOutput
+
 
 def _error(plan, detail):
     raise ValueError(f"{plan.path}: {detail}")
@@ -18,11 +19,7 @@ def _error(plan, detail):
 
 def _number(value, plan, name, minimum, maximum, integer=False):
     types = (int,) if integer else (int, float)
-    if (
-        type(value) not in types
-        or not math.isfinite(value)
-        or not minimum <= value <= maximum
-    ):
+    if type(value) not in types or not math.isfinite(value) or not minimum <= value <= maximum:
         _error(plan, f"{name} must be {minimum}..{maximum}")
     return value
 
@@ -43,8 +40,8 @@ def validate_snapshot(params, plan):
         _error(plan, "unknown snapshot parameters")
     sources = params.get("sources")
     available = set(SOURCES)
-    if isinstance(sources, list) and 'master_debug' in sources and 'master_debug' not in available:
-        _error(plan, 'master_debug is not a supported source; bundled Master has no debug snapshot endpoint')
+    if isinstance(sources, list) and "master_debug" in sources and "master_debug" not in available:
+        _error(plan, "master_debug is not a supported source; bundled Master has no debug snapshot endpoint")
     if (
         not isinstance(sources, list)
         or not sources
@@ -65,34 +62,24 @@ def validate_snapshot(params, plan):
     if "client_records" in sources and not ({"requests", "flow"} & params.keys()):
         _error(plan, "client_records requires a requests or flow reference")
     targets = params.get("targets", [])
-    if not isinstance(targets, list) or any(
-        not isinstance(x, str) or not x for x in targets
-    ):
+    if not isinstance(targets, list) or any(not isinstance(x, str) or not x for x in targets):
         _error(plan, "targets must contain engine names")
     if len(targets) > 256 or len(set(targets)) != len(targets):
         _error(plan, "too many or duplicate targets")
     result["targets"] = list(targets)
-    include = params.get(
-        "master_include", ["scheduler", "queues", "prefill", "decode", "engine"]
-    )
+    include = params.get("master_include", ["scheduler", "queues", "prefill", "decode", "engine"])
     if (
         not isinstance(include, list)
         or not include
         or any(
-            not isinstance(x, str)
-            or x not in {"scheduler", "queues", "prefill", "decode", "engine"}
-            for x in include
+            not isinstance(x, str) or x not in {"scheduler", "queues", "prefill", "decode", "engine"} for x in include
         )
     ):
         _error(plan, "invalid master_include")
     result["master_include"] = list(include)
     result["limit"] = _number(params.get("limit", 500), plan, "limit", 1, 5000, True)
-    result["scan_limit"] = _number(
-        params.get("scan_limit", 2000), plan, "scan_limit", result["limit"], 20000, True
-    )
-    result["endpoint_limit"] = _number(
-        params.get("endpoint_limit", 64), plan, "endpoint_limit", 1, 256, True
-    )
+    result["scan_limit"] = _number(params.get("scan_limit", 2000), plan, "scan_limit", result["limit"], 20000, True)
+    result["endpoint_limit"] = _number(params.get("endpoint_limit", 64), plan, "endpoint_limit", 1, 256, True)
     return result
 
 
@@ -132,9 +119,7 @@ def validate_observe(params, plan):
         duration_s=duration,
         interval_s=interval,
         cohort=cohort,
-        max_samples=_number(
-            params.get("max_samples", 10000), plan, "max_samples", 1, 10000, True
-        ),
+        max_samples=_number(params.get("max_samples", 10000), plan, "max_samples", 1, 10000, True),
         max_bytes=_number(
             params.get("max_bytes", MAX_DATASET_BYTES),
             plan,
@@ -190,16 +175,10 @@ def execute_observe(ctx, params, deadline):
         frozen = observer.stop(deadline)
     else:
         observer = Observer(ctx, params)
-        observer.handle = ctx.register_resource(
-            "observation", observer, cleanup=observer.stop, historical=True
-        )
+        observer.handle = ctx.register_resource("observation", observer, cleanup=observer.stop, historical=True)
         observer.start(deadline)
         if params["mode"] == "start":
-            initial = (
-                json.loads(observer.samples[0])
-                if observer.samples
-                else {"status": "partial"}
-            )
+            initial = json.loads(observer.samples[0]) if observer.samples else {"status": "partial"}
             checks = _coverage(params["required"], initial)
             return StageOutput(output={"observation": observer.handle}, checks=checks)
         while not observer.done_event.is_set():
@@ -211,9 +190,7 @@ def execute_observe(ctx, params, deadline):
         observer.artifact = _artifact(ctx, "observation", data)
     artifact = observer.artifact
     checks = _coverage(observer.params["required"], data, artifact)
-    return StageOutput(
-        output={"observation": observer.handle}, checks=checks, artifacts=[artifact]
-    )
+    return StageOutput(output={"observation": observer.handle}, checks=checks, artifacts=[artifact])
 
 
 HANDLERS = [

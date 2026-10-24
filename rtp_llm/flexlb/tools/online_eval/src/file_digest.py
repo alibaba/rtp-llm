@@ -1,4 +1,5 @@
 """Streaming digests for input and artifact provenance."""
+
 import hashlib
 from pathlib import Path
 

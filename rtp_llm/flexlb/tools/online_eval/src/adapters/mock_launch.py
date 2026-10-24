@@ -1,4 +1,5 @@
 """Mock JVM 的公共启动规格；入口负责配置准入和进程所有权。"""
+
 from dataclasses import dataclass, fields
 from pathlib import Path
 from typing import Optional, Union
@@ -42,16 +43,17 @@ class MockLaunchSpec:
     extra_args: tuple[str, ...] = ()
 
     def argv(self) -> list[str]:
-        args = [self.java, *self.jvm_options, '-jar', str(self.jar)]
+        args = [self.java, *self.jvm_options, "-jar", str(self.jar)]
         for field in fields(self):
-            if field.name in {'java', 'jar', 'jvm_options', 'extra_args', 'discovery_file'}:
+            if field.name in {"java", "jar", "jvm_options", "extra_args", "discovery_file"}:
                 continue
             value = getattr(self, field.name)
             if value is not None:
-                args.extend(['--' + field.name.replace('_', '-'),
-                             str(value).lower() if type(value) is bool else str(value)])
+                args.extend(
+                    ["--" + field.name.replace("_", "-"), str(value).lower() if type(value) is bool else str(value)]
+                )
         args.extend(self.extra_args)
         # Local launchers reserve discovery ownership after caller-supplied flags.
         if self.discovery_file is not None:
-            args.extend(['--discovery-file', str(self.discovery_file)])
+            args.extend(["--discovery-file", str(self.discovery_file)])
         return args

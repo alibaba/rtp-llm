@@ -5,20 +5,25 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 from flexlb_cfg import render_env
-from scenario import load_scenarios
 from program_fixtures import compile_scenarios
+from scenario import load_scenarios
 from scenario.backend_spec import make_env_spec
 
 
 class EffectiveAxesTests(unittest.TestCase):
     def source(self, overrides):
         from dataclasses import asdict
+
         typed = load_scenarios(ROOT / "config/scenarios/request_completion.yaml")[0][1]
-        source = dict(id=typed.id, description=typed.description, category=typed.category,
-                      environment=copy.deepcopy(typed.environment), implementation=typed.implementation,
-                      profiles=list(typed.profiles),
-                      stages=[{k: v for k, v in asdict(step).items() if v is not None}
-                              for step in typed.variants[0].stages])
+        source = dict(
+            id=typed.id,
+            description=typed.description,
+            category=typed.category,
+            environment=copy.deepcopy(typed.environment),
+            implementation=typed.implementation,
+            profiles=list(typed.profiles),
+            stages=[{k: v for k, v in asdict(step).items() if v is not None} for step in typed.variants[0].stages],
+        )
         source["environment"]["config_overrides"] = overrides
         return source
 
@@ -71,9 +76,7 @@ class EffectiveAxesTests(unittest.TestCase):
         source = self.source(dict(ordering="priority", preemption=preemption))
         source["requires"] = ["preemption", "engine_cancellation"]
         plan = compile_scenarios([("axes.yaml", source)])[0]
-        spec = make_env_spec(
-            plan["environment"], plan["profile"], dict(master_base=28000)
-        )
+        spec = make_env_spec(plan["environment"], plan["profile"], dict(master_base=28000))
         self.assertEqual(spec.config_overrides.preemption, preemption)
         self.assertEqual(
             json.loads(render_env(plan["profile"], spec.config_overrides)),
@@ -106,9 +109,7 @@ class EffectiveAxesTests(unittest.TestCase):
                     [
                         (
                             "axes.yaml",
-                            self.source(
-                                dict(ordering="priority", preemption=preemption)
-                            ),
+                            self.source(dict(ordering="priority", preemption=preemption)),
                         )
                     ]
                 )

@@ -1,10 +1,11 @@
 """Declared mock performance presets; no name-specific Python branches."""
-from file_io import read_json
+
 import hashlib
 import json
 from dataclasses import dataclass
 from pathlib import Path
 
+from file_io import read_json
 from flexlb_profile_data import PROFILES, REGISTERED_PROFILE_SPECS
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -23,9 +24,7 @@ class PairedMasterSettings:
     def from_record(cls, master):
         from flexlb_cfg import ConfigOverride
 
-        if not isinstance(master, dict) or set(master) - {
-            "config_overrides", "profile_scope", "provenance"
-        }:
+        if not isinstance(master, dict) or set(master) - {"config_overrides", "profile_scope", "provenance"}:
             raise ValueError("invalid paired master settings")
         if not master:
             return cls({}, {})
@@ -36,17 +35,18 @@ class PairedMasterSettings:
             raise ValueError("paired master requires config_overrides and provenance")
         if provenance.get("status") not in {"verified", "legacy_unverified"} or not provenance.get("source"):
             raise ValueError("paired master requires provenance status and source")
-        if (not isinstance(scopes, dict) or set(scopes) - set(overrides)
-                or set(scopes) - PROFILE_SCOPED_MASTER_FIELDS):
+        if not isinstance(scopes, dict) or set(scopes) - set(overrides) or set(scopes) - PROFILE_SCOPED_MASTER_FIELDS:
             raise ValueError("paired master profile_scope must name supported configured fields")
         missing_scopes = PROFILE_SCOPED_MASTER_FIELDS.intersection(overrides) - scopes.keys()
         if missing_scopes:
             raise ValueError(f"paired master profile_scope required for {sorted(missing_scopes)}")
         for field, profiles in scopes.items():
-            if (not isinstance(profiles, list) or not profiles
-                    or any(not isinstance(profile, str) or profile not in PROFILES
-                           for profile in profiles)
-                    or len(profiles) != len(set(profiles))):
+            if (
+                not isinstance(profiles, list)
+                or not profiles
+                or any(not isinstance(profile, str) or profile not in PROFILES for profile in profiles)
+                or len(profiles) != len(set(profiles))
+            ):
                 raise ValueError(f"invalid paired master profile_scope for {field}")
         ConfigOverride(**overrides)
         return cls(overrides, {field: tuple(profiles) for field, profiles in scopes.items()})
@@ -54,8 +54,11 @@ class PairedMasterSettings:
     def for_profile(self, profile):
         if profile not in REGISTERED_PROFILE_SPECS:
             raise ValueError(f"invalid paired master profile {profile!r}")
-        return {field: value for field, value in self.overrides.items()
-                if field not in self.profile_scope or profile in self.profile_scope[field]}
+        return {
+            field: value
+            for field, value in self.overrides.items()
+            if field not in self.profile_scope or profile in self.profile_scope[field]
+        }
 
 
 def _registry():
@@ -114,7 +117,9 @@ def load_performance_bundle(path):
     prefill = document.get("prefill", {})
     if isinstance(prefill, dict):
         if prefill.get("fifo") is not None and {
-            "direct_batch_size_max", "max_batch_requests", "max_batch_tokens"
+            "direct_batch_size_max",
+            "max_batch_requests",
+            "max_batch_tokens",
         }.intersection(prefill):
             raise ValueError("prefill.fifo cannot be combined with legacy prefill batch limits")
         memory = prefill.get("memory_cache", {})
@@ -124,9 +129,7 @@ def load_performance_bundle(path):
                 raise ValueError(f"unsupported prefill.memory_cache fields: {sorted(obsolete)}")
     capture = document.pop("capture", None)
     if capture is not None:
-        if not isinstance(capture, dict) or capture.get("status") not in (
-            "verified", "legacy_unverified", "orphan"
-        ):
+        if not isinstance(capture, dict) or capture.get("status") not in ("verified", "legacy_unverified", "orphan"):
             raise ValueError("invalid capture provenance status")
         record = (json.dumps(document, indent=2) + "\n").encode()
         if hashlib.sha256(record).hexdigest() != capture.get("record_sha256"):
@@ -172,14 +175,15 @@ def load_preset_bundle(name):
     if "calibration" in entry:
         performance["calibration"] = entry["calibration"]
         resolve_performance_calibration(performance, INDEX)
-    runtime = {key: value for key, value in entry.items()
-               if key not in {"performance", "calibration"}}
+    runtime = {key: value for key, value in entry.items() if key not in {"performance", "calibration"}}
     if set(runtime) - {"mock_heap", "mock_extra_args"}:
         raise ValueError(f"perf_preset {name!r} has unknown runtime options: {set(runtime)}")
     if "mock_heap" in runtime and not isinstance(runtime["mock_heap"], str):
         raise ValueError(f"perf_preset {name!r} has invalid mock_heap")
-    if "mock_extra_args" in runtime and (not isinstance(runtime["mock_extra_args"], list)
-                                              or not all(isinstance(arg, str) for arg in runtime["mock_extra_args"])):
+    if "mock_extra_args" in runtime and (
+        not isinstance(runtime["mock_extra_args"], list)
+        or not all(isinstance(arg, str) for arg in runtime["mock_extra_args"])
+    ):
         raise ValueError(f"perf_preset {name!r} has invalid mock_extra_args")
     if capture and capture["status"] != "orphan" and "mock_extra_args" in capture:
         if "mock_extra_args" in runtime:

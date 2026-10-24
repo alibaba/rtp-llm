@@ -13,9 +13,7 @@ def master_incarnation(history, target, started_ms, ended_ms):
         key=lambda h: h["started_epoch_ms"],
     )
     before = [h for h in candidates if h["started_epoch_ms"] <= started_ms]
-    if not before or any(
-        started_ms < h["started_epoch_ms"] <= ended_ms for h in candidates
-    ):
+    if not before or any(started_ms < h["started_epoch_ms"] <= ended_ms for h in candidates):
         return None
     return dict(before[-1])
 
@@ -47,11 +45,7 @@ def join_evidence(payload, environments):
         for row in resource["records"]:
             rid = row.get("wire_request_id", row.get("rid"))
             if rid is None:
-                issues.append(
-                    dict(
-                        resource=resource["resource"], error="missing request identity"
-                    )
-                )
+                issues.append(dict(resource=resource["resource"], error="missing request identity"))
                 continue
             attempt = row.get("attempt")
             key = (epoch, str(rid), attempt)
@@ -69,11 +63,7 @@ def join_evidence(payload, environments):
                 continue
             issued = row.get("issued_s")
             if issued is None and row.get("send_start_epoch_ms") is not None:
-                issued = (
-                    row["send_start_epoch_ms"] / 1000
-                    - anchor["epoch_s"]
-                    + anchor["monotonic_s"]
-                )
+                issued = row["send_start_epoch_ms"] / 1000 - anchor["epoch_s"] + anchor["monotonic_s"]
             phases = [
                 e
                 for e in payload["phases"]
@@ -99,15 +89,9 @@ def join_evidence(payload, environments):
                 )
             if not attempts and row.get("schedule", {}).get("started_s") is not None:
                 schedule = row["schedule"]
-                started = (
-                    schedule["started_s"] - anchor["monotonic_s"] + anchor["epoch_s"]
-                ) * 1000
+                started = (schedule["started_s"] - anchor["monotonic_s"] + anchor["epoch_s"]) * 1000
                 ended = schedule.get("ended_s")
-                ended = (
-                    None
-                    if ended is None
-                    else (ended - anchor["monotonic_s"] + anchor["epoch_s"]) * 1000
-                )
+                ended = None if ended is None else (ended - anchor["monotonic_s"] + anchor["epoch_s"]) * 1000
                 attempts.append(
                     dict(
                         attempt=attempt,
@@ -115,9 +99,7 @@ def join_evidence(payload, environments):
                         started_epoch_ms=started,
                         ended_epoch_ms=ended,
                         status=schedule.get("status"),
-                        master_incarnation=master_incarnation(
-                            history, row.get("master_target"), started, ended
-                        ),
+                        master_incarnation=master_incarnation(history, row.get("master_target"), started, ended),
                     )
                 )
             requests[key] = dict(
@@ -128,21 +110,11 @@ def join_evidence(payload, environments):
                 phase=phases[-1]["stage"] if phases else None,
                 master_target=row.get("master_target"),
                 endpoint_generation=row.get("endpoint_generation"),
-                batch_ids=sorted(
-                    {
-                        str(e["batch_id"])
-                        for e in engine_events
-                        if e.get("batch_id") is not None
-                    }
-                ),
+                batch_ids=sorted({str(e["batch_id"]) for e in engine_events if e.get("batch_id") is not None}),
                 engine_events=engine_events,
                 schedule_attempts=attempts,
                 engine_incarnations=sorted(
-                    {
-                        e["engine_incarnation"]
-                        for e in engine_events
-                        if e.get("engine_incarnation")
-                    }
+                    {e["engine_incarnation"] for e in engine_events if e.get("engine_incarnation")}
                 ),
                 original=row,
                 resources=[resource["resource"]],

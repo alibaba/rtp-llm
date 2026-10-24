@@ -1,12 +1,13 @@
 """Explicit run presentation data; dictionaries are decoded at this boundary."""
-from dataclasses import dataclass
+
 import copy
+from dataclasses import dataclass
 from typing import Optional
 
 
 def _object(value, path):
     if not isinstance(value, dict):
-        raise ValueError(path + ' must be an object')
+        raise ValueError(path + " must be an object")
     return copy.deepcopy(value)
 
 
@@ -16,25 +17,31 @@ class CheckNode:
     status: str
     actual: object
     expected: object
-    children: tuple['CheckNode', ...] = ()
+    children: tuple["CheckNode", ...] = ()
 
     @classmethod
     def read(cls, data, prefix, read_gate=None):
-        data = _object(data, 'check')
-        if type(data.get('id')) is not str or not data['id']:
-            raise ValueError('check identity must be a nonempty string')
-        identity = prefix + '/' + data['id']
-        evidence = _object(data.get('evidence', {}), 'check.evidence')
-        children = evidence.get('checks', [])
-        if 'checks' not in evidence and 'result' in evidence and 'sha256' in evidence:
+        data = _object(data, "check")
+        if type(data.get("id")) is not str or not data["id"]:
+            raise ValueError("check identity must be a nonempty string")
+        identity = prefix + "/" + data["id"]
+        evidence = _object(data.get("evidence", {}), "check.evidence")
+        children = evidence.get("checks", [])
+        if "checks" not in evidence and "result" in evidence and "sha256" in evidence:
             if read_gate is None:
-                raise ValueError('gate check reference requires its experiment source')
+                raise ValueError("gate check reference requires its experiment source")
             from artifacts.gate import referenced_checks
+
             children = referenced_checks(evidence, read_gate)
         if not isinstance(children, list):
-            raise ValueError('check children must be an array')
-        return cls(identity, data['status'], data.get('actual'), data.get('expected'),
-                   tuple(cls.read(child, identity, read_gate) for child in children))
+            raise ValueError("check children must be an array")
+        return cls(
+            identity,
+            data["status"],
+            data.get("actual"),
+            data.get("expected"),
+            tuple(cls.read(child, identity, read_gate) for child in children),
+        )
 
     def rows(self):
         yield [self.identity, self.status, self.actual, self.expected]
@@ -53,17 +60,24 @@ class RunValidity:
 
     @classmethod
     def read(cls, workload):
-        return cls(runtime_validity=workload.get('runtime_validity'),
-                   telemetry_completeness=workload.get('telemetry_completeness'),
-                   missing_telemetry=workload.get('missing_telemetry'),
-                   telemetry_integrity_errors=workload.get('telemetry_integrity_errors'),
-                   telemetry_diagnostics=workload.get('telemetry_diagnostics'),
-                   telemetry_warnings=workload.get('telemetry_warnings'))
+        return cls(
+            runtime_validity=workload.get("runtime_validity"),
+            telemetry_completeness=workload.get("telemetry_completeness"),
+            missing_telemetry=workload.get("missing_telemetry"),
+            telemetry_integrity_errors=workload.get("telemetry_integrity_errors"),
+            telemetry_diagnostics=workload.get("telemetry_diagnostics"),
+            telemetry_warnings=workload.get("telemetry_warnings"),
+        )
 
     def to_dict(self):
-        return dict(runtime_validity=self.runtime_validity, telemetry_completeness=self.telemetry_completeness,
-                    missing_telemetry=self.missing_telemetry, telemetry_integrity_errors=self.telemetry_integrity_errors,
-                    telemetry_diagnostics=self.telemetry_diagnostics, telemetry_warnings=self.telemetry_warnings)
+        return dict(
+            runtime_validity=self.runtime_validity,
+            telemetry_completeness=self.telemetry_completeness,
+            missing_telemetry=self.missing_telemetry,
+            telemetry_integrity_errors=self.telemetry_integrity_errors,
+            telemetry_diagnostics=self.telemetry_diagnostics,
+            telemetry_warnings=self.telemetry_warnings,
+        )
 
 
 @dataclass(frozen=True)
@@ -88,38 +102,53 @@ class RunPresentation:
     def read(cls, analysis, *, directory=None, read_gate=None):
         # Copy only presentation fields; archived time series are read elsewhere.
         if not isinstance(analysis, dict):
-            raise ValueError('run analysis must be an object')
+            raise ValueError("run analysis must be an object")
         if directory is not None:
             from pathlib import Path
+
             read_gate = lambda name: (Path(directory) / name).read_bytes()
-        implementation = analysis.get('implementation', {})
+        implementation = analysis.get("implementation", {})
         if not isinstance(implementation, dict):
-            raise ValueError('run.implementation must be an object')
-        checks = analysis.get('checks')
+            raise ValueError("run.implementation must be an object")
+        checks = analysis.get("checks")
         if checks is None:
-            checks = [dict(stage=stage['id'], **check) for stage in analysis.get('stages', [])
-                      for check in stage['checks']]
-        analysis = dict(analysis, checks=checks,
-                        configuration=analysis.get('configuration', implementation.get('configuration')),
-                        configuration_sha256=analysis.get('configuration_sha256', implementation.get('configuration_sha256')))
-        fields = set(cls.__dataclass_fields__) | {'id', 'workload'}
+            checks = [
+                dict(stage=stage["id"], **check) for stage in analysis.get("stages", []) for check in stage["checks"]
+            ]
+        analysis = dict(
+            analysis,
+            checks=checks,
+            configuration=analysis.get("configuration", implementation.get("configuration")),
+            configuration_sha256=analysis.get("configuration_sha256", implementation.get("configuration_sha256")),
+        )
+        fields = set(cls.__dataclass_fields__) | {"id", "workload"}
         analysis = copy.deepcopy({key: value for key, value in analysis.items() if key in fields})
-        identity = analysis.get('id')
+        identity = analysis.get("id")
         if type(identity) is not str or not identity:
-            raise ValueError('run identity must be a nonempty string')
-        workload = _object(analysis.get('workload', {}), 'run.workload')
-        checks = analysis.get('checks', [])
+            raise ValueError("run identity must be a nonempty string")
+        workload = _object(analysis.get("workload", {}), "run.workload")
+        checks = analysis.get("checks", [])
         if not isinstance(checks, list):
-            raise ValueError('run checks must be an array')
+            raise ValueError("run checks must be an array")
         nodes = []
         for check in checks:
-            if not isinstance(check, dict) or type(check.get('stage')) is not str or not check['stage']:
-                raise ValueError('run check requires a nonempty stage')
-            nodes.append(CheckNode.read(check, check['stage'], read_gate))
-        return cls(identity, analysis.get('status'), RunValidity.read(workload),
+            if not isinstance(check, dict) or type(check.get("stage")) is not str or not check["stage"]:
+                raise ValueError("run check requires a nonempty stage")
+            nodes.append(CheckNode.read(check, check["stage"], read_gate))
+        return cls(
+            identity,
+            analysis.get("status"),
+            RunValidity.read(workload),
             tuple(nodes),
-            analysis.get('configuration'), analysis.get('configuration_sha256'),
-            workload.get('runtime_configuration'), _object(analysis.get('implementation', {}), 'run.implementation'),
-            analysis.get('traffic_manifests'), analysis.get('runtime_provenance'),
-            analysis.get('clock_anchor'), analysis.get('report_timeline'), analysis.get('request_sources'),
-            tuple(analysis.get('phases', [])), tuple(analysis.get('events', [])))
+            analysis.get("configuration"),
+            analysis.get("configuration_sha256"),
+            workload.get("runtime_configuration"),
+            _object(analysis.get("implementation", {}), "run.implementation"),
+            analysis.get("traffic_manifests"),
+            analysis.get("runtime_provenance"),
+            analysis.get("clock_anchor"),
+            analysis.get("report_timeline"),
+            analysis.get("request_sources"),
+            tuple(analysis.get("phases", [])),
+            tuple(analysis.get("events", [])),
+        )

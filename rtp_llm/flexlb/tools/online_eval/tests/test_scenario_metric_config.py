@@ -30,9 +30,7 @@ class MetricConfigTest(unittest.TestCase):
         )
         self.assertEqual(
             plan["resolved_config"],
-            environment({"debug_enabled": True}, "test", "single-nonbatch")[
-                "resolved_config"
-            ],
+            environment({"debug_enabled": True}, "test", "single-nonbatch")["resolved_config"],
         )
 
     def test_variant_whitelist_is_explicit_and_other_variants_do_not_inherit_it(self):

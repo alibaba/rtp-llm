@@ -1,12 +1,12 @@
 """Finite request issuance, stream ownership and typed RPC error evidence."""
 
 import json
-import threading
 import sys
+import threading
 
 from adapters.requests import ClientRecords, request_success
-from runtime.deadline import StageTimeout
 from adapters.rpc_error_evidence import error_trailer_evidence
+from runtime.deadline import StageTimeout
 
 
 class RequestBatch(ClientRecords):
@@ -17,7 +17,7 @@ class RequestBatch(ClientRecords):
         self.ctx, self.ops, self.params = ctx, ctx.ops, params
         self.entries = []
         self.cancelled = False
-        self.artifact = ctx.artifact_dir / f"requests-{ctx.resource_count+1}.json"
+        self.artifact = ctx.artifact_dir / f"requests-{ctx.resource_count + 1}.json"
 
     def persist(self):
         self.artifact.write_text(json.dumps(self.snapshot_records(), indent=2) + "\n")
@@ -56,28 +56,18 @@ class RequestBatch(ClientRecords):
                 record["qos_level"] = self.params.get("qos_level")
             rid = record["wire_request_id"]
             try:
-                limit = min(
-                    self.params.get("schedule_timeout_s", 30), deadline.remaining()
-                )
+                limit = min(self.params.get("schedule_timeout_s", 30), deadline.remaining())
                 self.update(
                     record,
-                    schedule=dict(
-                        started_s=self.ctx.clock(), deadline_s=self.ctx.clock() + limit
-                    ),
+                    schedule=dict(started_s=self.ctx.clock(), deadline_s=self.ctx.clock() + limit),
                 )
-                stub = self.ops.schedule_pb2_grpc.FlexlbServiceStub(
-                    self.ops._channel(self.ops.master_target())
-                )
+                stub = self.ops.schedule_pb2_grpc.FlexlbServiceStub(self.ops._channel(self.ops.master_target()))
                 rpc_options = {"timeout": limit}
                 if "qos_level" in self.params:
                     from adapters.engine_ops import QOS_LEVEL_HEADER
 
-                    rpc_options["metadata"] = (
-                        (QOS_LEVEL_HEADER, str(self.params["qos_level"])),
-                    )
-                call = stub.Schedule.future(
-                    self.ops.build_schedule_request(rid, **self.shape), **rpc_options
-                )
+                    rpc_options["metadata"] = ((QOS_LEVEL_HEADER, str(self.params["qos_level"])),)
+                call = stub.Schedule.future(self.ops.build_schedule_request(rid, **self.shape), **rpc_options)
                 self._register_schedule_call(entry, call)
                 # The RPC already owns its transport deadline. Reusing that
                 # duration as the local future wait races gRPC's completion
@@ -101,10 +91,7 @@ class RequestBatch(ClientRecords):
                         consumer_exit_s=self.ctx.clock(),
                     )
                     continue
-                if (
-                    self.params["consume"] == "deferred"
-                    and not response.enqueued_by_master
-                ):
+                if self.params["consume"] == "deferred" and not response.enqueued_by_master:
                     raise RuntimeError("deferred request was not enqueued by master")
                 if self.params["consume"] == "immediate":
                     self._start_consumer(entry, self.ctx.instance_deadline_s)
@@ -135,9 +122,7 @@ class RequestBatch(ClientRecords):
     @property
     def shape(self):
         return {
-            key: self.params[key]
-            for key in ("input_len", "output_len", "block_keys", "priority")
-            if key in self.params
+            key: self.params[key] for key in ("input_len", "output_len", "block_keys", "priority") if key in self.params
         }
 
     def _start_consumer(self, entry, end):
@@ -159,9 +144,7 @@ class RequestBatch(ClientRecords):
         limit = min(self.params.get("stream_timeout_s", 60), end - self.ctx.clock())
         if limit <= 0:
             raise StageTimeout("stream deadline expired before opening")
-        method = (
-            "FetchResponse" if response.enqueued_by_master else "GenerateStreamCall"
-        )
+        method = "FetchResponse" if response.enqueued_by_master else "GenerateStreamCall"
         self.update(
             record,
             stream=dict(
@@ -170,9 +153,7 @@ class RequestBatch(ClientRecords):
                 deadline_s=self.ctx.clock() + limit,
             ),
         )
-        stub = self.ops.pb2_grpc.RpcServiceStub(
-            self.ops._channel(self.ops.prefill_addr(response))
-        )
+        stub = self.ops.pb2_grpc.RpcServiceStub(self.ops._channel(self.ops.prefill_addr(response)))
         if response.enqueued_by_master:
             self.update(record, fetch_invocations=1)
             call = stub.FetchResponse(
@@ -240,16 +221,12 @@ class RequestBatch(ClientRecords):
             or record["stream"]["ended_s"] is None
             or record["stream"]["status"] is None
         ):
-            raise RuntimeError(
-                "consumer completion signal lacks terminal exit evidence"
-            )
+            raise RuntimeError("consumer completion signal lacks terminal exit evidence")
         self.update(record, consumer_completion_verified=True)
 
     def wait(self, deadline):
         for entry in self.entries:
-            self._start_consumer(
-                entry, min(deadline.expires_at, self.ctx.instance_deadline_s)
-            )
+            self._start_consumer(entry, min(deadline.expires_at, self.ctx.instance_deadline_s))
         for entry in self.entries:
             self._await_consumer(entry, deadline)
         self.persist()
@@ -258,13 +235,9 @@ class RequestBatch(ClientRecords):
             for phase in ("schedule", "stream"):
                 rpc = record[phase]
                 if rpc["status"] == "DEADLINE_EXCEEDED":
-                    raise StageTimeout(
-                        f"{phase} RPC deadline exceeded for {record['wire_request_id']}"
-                    )
+                    raise StageTimeout(f"{phase} RPC deadline exceeded for {record['wire_request_id']}")
                 if rpc["status"] not in (None, "OK", "REJECTED"):
-                    raise RuntimeError(
-                        f"{phase} RPC failed for {record['wire_request_id']}: {rpc['error']}"
-                    )
+                    raise RuntimeError(f"{phase} RPC failed for {record['wire_request_id']}: {rpc['error']}")
         return dict(
             completed=bool(records) and all(request_success(r) for r in records),
             error_count=sum(not request_success(r) for r in records),
@@ -276,10 +249,7 @@ class RequestBatch(ClientRecords):
             self.cancelled = True
             for entry in self.entries:
                 record, call = entry["record"], entry["call"]
-                if (
-                    request_success(record)
-                    or record["cancel"]["requested_s"] is not None
-                ):
+                if request_success(record) or record["cancel"]["requested_s"] is not None:
                     continue
                 count += 1
                 self.update(
@@ -321,25 +291,17 @@ class RequestBatch(ClientRecords):
                 request_id=record["wire_request_id"],
                 reason=ops.schedule_pb2.CANCEL_REASON_CLIENT_CANCELLED,
             )
-            if (
-                response is not None
-                and response.HasField("lifecycle")
-                and response.lifecycle.batch_id
-            ):
+            if response is not None and response.HasField("lifecycle") and response.lifecycle.batch_id:
                 request.batch_id = response.lifecycle.batch_id
             calls = [
                 (
                     "master",
-                    ops.schedule_pb2_grpc.FlexlbServiceStub(
-                        ops._channel(ops.master_target())
-                    ).Cancel,
+                    ops.schedule_pb2_grpc.FlexlbServiceStub(ops._channel(ops.master_target())).Cancel,
                     request,
                 )
             ]
             if response is not None and not response.enqueued_by_master:
-                stub = ops.pb2_grpc.RpcServiceStub(
-                    ops._channel(ops.prefill_addr(response))
-                )
+                stub = ops.pb2_grpc.RpcServiceStub(ops._channel(ops.prefill_addr(response)))
                 calls.append(
                     (
                         "worker",

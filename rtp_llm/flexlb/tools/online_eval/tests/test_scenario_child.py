@@ -10,10 +10,10 @@ from pathlib import Path
 from types import SimpleNamespace as NS
 
 TOOLS = Path(__file__).resolve().parents[1]
-from scenario.backend import JavaMockBackend
 from document_io import DocumentError as ScenarioError
-from scenario.runtime import Deadline, RuntimeContext
+from scenario.backend import JavaMockBackend
 from scenario.child_cli import instance_directory, select, summarize
+from scenario.runtime import Deadline, RuntimeContext
 
 
 class ChildTest(unittest.TestCase):
@@ -33,9 +33,7 @@ class ChildTest(unittest.TestCase):
 
     def test_backend_rejects_unsafe_root_before_process_harness_import(self):
         with tempfile.TemporaryDirectory() as tmp:
-            ctx = RuntimeContext(
-                {}, None, Path(tmp) / "unsafe:root", time.monotonic, time.sleep
-            )
+            ctx = RuntimeContext({}, None, Path(tmp) / "unsafe:root", time.monotonic, time.sleep)
             backend = JavaMockBackend({})
             with self.assertRaisesRegex(ValueError, "JVM -Xlog"):
                 backend.setup(ctx, {}, Deadline(time.monotonic() + 1))
@@ -101,9 +99,7 @@ class ChildTest(unittest.TestCase):
 
     def test_backend_reaps_only_its_owned_process_and_preserves_unrelated_process(self):
         owned = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
-        unrelated = subprocess.Popen(
-            [sys.executable, "-c", "import time; time.sleep(30)"]
-        )
+        unrelated = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
         try:
             managed = NS(pid=owned.pid, proc=owned, alive=lambda: owned.poll() is None)
             backend = JavaMockBackend({})

@@ -4,21 +4,33 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+from artifacts.provenance import collect
 from reporting import discover_reports, load_analysis, read_bundle, render, table
 from reporting.run_context import canonical_spec, provenance_from
 from reporting.workload import write_views
-from artifacts.provenance import collect
 
 
 def analysis():
-    return dict(id="case::variant::profile", status="FAIL", series={'1/mock/qps/{"role":"prefill"}': [[0, None], [1, 3]]},
-                statistic_sources={'1/mock/qps/{"role":"prefill"}': dict(unit="requests/s")},
-                clock_anchor=dict(epoch_s=10),
-                workload={"runtime_validity": "VALID"},
-                checks=[dict(stage="end", id="inflight", status="PASS",
-                             actual={"endpoint_loads": {"PREFILL": [0] * 125, "DECODE": [0] * 536}},
-                             expected=0)], configuration={"n_prefill": 125},
-                runtime_provenance={"topology": {"n_prefill": 125}}, implementation={"sha": "abc"})
+    return dict(
+        id="case::variant::profile",
+        status="FAIL",
+        series={'1/mock/qps/{"role":"prefill"}': [[0, None], [1, 3]]},
+        statistic_sources={'1/mock/qps/{"role":"prefill"}': dict(unit="requests/s")},
+        clock_anchor=dict(epoch_s=10),
+        workload={"runtime_validity": "VALID"},
+        checks=[
+            dict(
+                stage="end",
+                id="inflight",
+                status="PASS",
+                actual={"endpoint_loads": {"PREFILL": [0] * 125, "DECODE": [0] * 536}},
+                expected=0,
+            )
+        ],
+        configuration={"n_prefill": 125},
+        runtime_provenance={"topology": {"n_prefill": 125}},
+        implementation={"sha": "abc"},
+    )
 
 
 class ReportPresentationTest(unittest.TestCase):
@@ -42,11 +54,12 @@ class ReportPresentationTest(unittest.TestCase):
 
     def test_dedicated_is_primary_even_when_full_view_is_first_in_yaml(self):
         with tempfile.TemporaryDirectory() as directory:
-            from test_cache_scale_gate import CacheGateTest
-            from cases.cache_scale_in.analysis import analyze
             from artifacts.gate import freeze_gate
+            from cases.cache_scale_in.analysis import analyze
             from metric_fixtures import freeze_metrics
-            evidence = CacheGateTest().evidence(.3)
+            from test_cache_scale_gate import CacheGateTest
+
+            evidence = CacheGateTest().evidence(0.3)
             original = analyze(evidence)
             freeze_gate(directory, "cache", evidence, original)
             freeze_metrics(directory, "cache_scale_in")
@@ -66,19 +79,23 @@ class ReportPresentationTest(unittest.TestCase):
         spec = dict(panels=[], sections=[dict(type="details", title="策略诊断", value={"verdict": "FAIL"})])
         first = canonical_spec(spec, source)
         self.assertEqual(first, canonical_spec(first, source))
-        self.assertEqual(["门禁检查", "有效性与证据完整性", "策略诊断"],
-                         [item["title"] for item in first["sections"]])
+        self.assertEqual(["门禁检查", "有效性与证据完整性", "策略诊断"], [item["title"] for item in first["sections"]])
         self.assertNotIn("title", spec)
 
     def test_context_preserves_gate_sources_and_raw_evidence_is_escaped(self):
         source = analysis()
-        meta = provenance_from(source, {"identity": {"verdict": "FAIL"},
-                                       "evidence": {"sha256": "gate-hash"}})
+        meta = provenance_from(source, {"identity": {"verdict": "FAIL"}, "evidence": {"sha256": "gate-hash"}})
         self.assertEqual("gate-hash", meta["evidence"]["gate"]["sha256"])
         self.assertEqual("FAIL", meta["identity"]["verdict"])
-        page = render(dict(title="case", run_meta=meta, panels=[], sections=[
-            table("诊断", ["原始值"], [[{"raw": "<script>" * 100}]], opened=False)]))
-        self.assertIn('&lt;script&gt;', page)
+        page = render(
+            dict(
+                title="case",
+                run_meta=meta,
+                panels=[],
+                sections=[table("诊断", ["原始值"], [[{"raw": "<script>" * 100}]], opened=False)],
+            )
+        )
+        self.assertIn("&lt;script&gt;", page)
         self.assertIn('<details class="report-block attachment"><summary>诊断', page)
 
     def test_provenance_is_observed_not_fabricated_and_malformed_inputs_fail(self):

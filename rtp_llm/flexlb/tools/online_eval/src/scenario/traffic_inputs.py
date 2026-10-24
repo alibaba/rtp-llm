@@ -2,11 +2,15 @@
 
 from adapters.java_flow_spec import JavaFlowSpec
 from scenario.inputs import section_fields
-from scenario.numeric_parameters import SOURCE_NUMBERS, JAVA_FLOW_NUMBERS
+from scenario.numeric_parameters import JAVA_FLOW_NUMBERS, SOURCE_NUMBERS
 
 
 def java_flow_inputs(*, max_requests=False, numbers=None):
     definitions = JavaFlowSpec.input_fields(max_requests=max_requests)
-    rules = {**SOURCE_NUMBERS, **JAVA_FLOW_NUMBERS, **(numbers or {}),
-             **{'traffic.' + name: rule for name, rule in definitions.items() if rule is not None}}
-    return section_fields('traffic', definitions.keys() | {'kind'}, rules)
+    rules = {
+        **SOURCE_NUMBERS,
+        **JAVA_FLOW_NUMBERS,
+        **(numbers or {}),
+        **{"traffic." + name: rule for name, rule in definitions.items() if rule is not None},
+    }
+    return section_fields("traffic", definitions.keys() | {"kind"}, rules)

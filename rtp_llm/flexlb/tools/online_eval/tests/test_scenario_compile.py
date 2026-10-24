@@ -10,10 +10,10 @@ from pathlib import Path
 
 TOOLS = Path(__file__).resolve().parents[1]
 
-from flexlb_cfg import render_env
-from scenario import ScenarioError, load_scenarios
-from program_fixtures import compile_scenarios
 from document_io import load_document
+from flexlb_cfg import render_env
+from program_fixtures import compile_scenarios
+from scenario import ScenarioError, load_scenarios
 
 
 def scenario():
@@ -89,9 +89,7 @@ class CompileTest(unittest.TestCase):
             [p["id"] for p in plans],
             ["completion::short::single-batch", "completion::long::window-nonbatch"],
         )
-        self.assertEqual(
-            [p["stages"][1]["params"]["output_len"] for p in plans], [1, 20]
-        )
+        self.assertEqual([p["stages"][1]["params"]["output_len"] for p in plans], [1, 20])
         plans[0]["stages"][1]["params"]["output_len"] = 999
         self.assertEqual(plans[1]["stages"][1]["params"]["output_len"], 20)
         self.assertEqual(doc, original)
@@ -106,6 +104,7 @@ class CompileTest(unittest.TestCase):
 
     def test_raw_program_dictionaries_are_rejected_with_source(self):
         from scenario.compiler import compile_scenarios
+
         for document in (scenario(), {"program_schema_version": 1}, {"python": "exec()"}, {1: "bad"}):
             with self.subTest(document=document), self.assertRaisesRegex(ScenarioError, "test.yaml.*ProgramPlan"):
                 compile_scenarios([("test.yaml", document)])
@@ -119,9 +118,7 @@ class CompileTest(unittest.TestCase):
         ):
             doc = scenario()
             doc["stages"][2]["params"]["requests"] = {"$ref": ref}
-            with self.subTest(ref=ref), self.assertRaisesRegex(
-                ScenarioError, r"stages\[2\]"
-            ):
+            with self.subTest(ref=ref), self.assertRaisesRegex(ScenarioError, r"stages\[2\]"):
                 self.compile(doc)
         doc = scenario()
         doc["stages"][0]["action"] = "request"
@@ -169,9 +166,7 @@ class CompileTest(unittest.TestCase):
         ):
             doc = scenario()
             doc["environment"] = environment
-            with self.subTest(environment=environment), self.assertRaises(
-                ScenarioError
-            ):
+            with self.subTest(environment=environment), self.assertRaises(ScenarioError):
                 self.compile(doc)
         doc = scenario()
         doc["stages"][1]["action"] = "press"
@@ -202,9 +197,7 @@ class CompileTest(unittest.TestCase):
         doc["variants"] = [{"id": "bad", "profiles": ["single-batch"]}]
         with self.assertRaises(ScenarioError):
             self.compile(doc)
-        doc["variants"] = [
-            {"id": "bad", "stage_overrides": {"submit": {"action": "probe"}}}
-        ]
+        doc["variants"] = [{"id": "bad", "stage_overrides": {"submit": {"action": "probe"}}}]
         with self.assertRaises(ScenarioError):
             self.compile(doc)
 
@@ -243,9 +236,7 @@ class LoaderTest(unittest.TestCase):
             for name, content in examples:
                 p = Path(tmp) / name
                 p.write_text(content)
-                with self.subTest(content=content), self.assertRaisesRegex(
-                    ScenarioError, name
-                ):
+                with self.subTest(content=content), self.assertRaisesRegex(ScenarioError, name):
                     load_document(p)
 
     def test_depth_size_and_symlink_escape(self):

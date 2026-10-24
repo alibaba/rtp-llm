@@ -5,23 +5,25 @@ references and incarnation history stay on that environment for cleanup.
 """
 
 from __future__ import annotations
-from file_io import read_json
-import json
+
 import hashlib
+import json
 import time
 import urllib.request
 from pathlib import Path
-from typing import Optional, TYPE_CHECKING
-from flexlb_cfg import render_env
+from typing import TYPE_CHECKING, Optional
+
 from adapters.environment_config import MasterSpec
-from runtime.java_runtime import JAVA_MODULE_OPTS, resolve_java21
 from adapters.master_artifact import configure_master
 from adapters.master_control import master_url
-from runtime.network import http_post_json, port_accepting
-from runtime.startup import startup_deadline, wait_ready
 from artifacts.startup import startup_phase
+from file_io import read_json
+from flexlb_cfg import render_env
+from runtime.java_runtime import JAVA_MODULE_OPTS, resolve_java21
+from runtime.network import http_post_json, port_accepting
 from runtime.paths import API_JAR
 from runtime.process import ManagedProcess, ProcessOps
+from runtime.startup import startup_deadline, wait_ready
 
 if TYPE_CHECKING:
     from adapters.environment import FlexEnv
@@ -47,15 +49,25 @@ def master_arguments(env, mspec=None):
     spec = env.spec
     http = mspec.http_port if mspec else env.master_http_port
     management = mspec.management() if mspec else env.master_management_port
-    argv = [resolve_java21(), *master_jvm_options(spec), *JAVA_MODULE_OPTS,
-            "-jar", str(API_JAR), f"--server.port={http}",
-            f"--management.server.port={management}",
-            f"--spring.profiles.active={spec.spring_profile}"]
+    argv = [
+        resolve_java21(),
+        *master_jvm_options(spec),
+        *JAVA_MODULE_OPTS,
+        "-jar",
+        str(API_JAR),
+        f"--server.port={http}",
+        f"--management.server.port={management}",
+        f"--spring.profiles.active={spec.spring_profile}",
+    ]
     if mspec:
         log_dir = env.run_dir / (mspec.log_dir_name or f"logs_{mspec.name}")
-        argv.extend((f"--server.address={mspec.bind_ip}",
-                     f"--management.server.address={mspec.bind_ip}",
-                     f"--flexlb.log.path={log_dir}"))
+        argv.extend(
+            (
+                f"--server.address={mspec.bind_ip}",
+                f"--management.server.address={mspec.bind_ip}",
+                f"--flexlb.log.path={log_dir}",
+            )
+        )
     if not (spec.master_pv_log if spec.master_pv_log is not None else spec.diagnostic_events):
         argv.append("--logging.level.pvLogger=WARN")
     if spec.master_debug_log:
@@ -90,9 +102,7 @@ class MasterLifecycle:
                 # bypassed (atpm strict-reject variants).
                 menv["FLEXLB_CONFIG"] = spec.raw_config
             else:
-                menv["FLEXLB_CONFIG"] = render_env(
-                    spec.master_profile, spec.config_overrides
-                )
+                menv["FLEXLB_CONFIG"] = render_env(spec.master_profile, spec.config_overrides)
         menv["HIPPO_ROLE"] = f"flexlb_ft_{spec.label}"
         if spec.discovery == "file":
             payload = read_json(env.endpoint_file)
@@ -128,9 +138,7 @@ class MasterLifecycle:
             service_config = json.loads(menv["MODEL_SERVICE_CONFIG"])
             service_config["hosts"] = {
                 f"mock.{role}.hosts.address": [
-                    host.strip()
-                    for host in spec.domain_addrs[role].split(",")
-                    if host.strip()
+                    host.strip() for host in spec.domain_addrs[role].split(",") if host.strip()
                 ]
                 for role in ("prefill", "decode")
             }
@@ -142,15 +150,17 @@ class MasterLifecycle:
             if mspec.advertised_ip is not None:
                 menv["FLEXLB_ADVERTISED_IP"] = mspec.advertised_ip
             if spec.zk_consistency is not None:
-                menv["HIPPO_ROLE"] = mspec.hippo_role or "flexlb_ft_" + hashlib.sha256(str(env.run_dir.resolve()).encode()).hexdigest()[:16]
+                menv["HIPPO_ROLE"] = (
+                    mspec.hippo_role
+                    or "flexlb_ft_" + hashlib.sha256(str(env.run_dir.resolve()).encode()).hexdigest()[:16]
+                )
                 if not env.zk_connect_string:
                     # Fail-closed: a master must never boot with
                     # needConsistency=true against a missing/dead ZK —
                     # a dual-master pair without the election quorum
                     # would split-brain.
                     raise RuntimeError(
-                        "zk_consistency spec requires a live ZK helper "
-                        "(connectString missing) — fail-closed"
+                        "zk_consistency spec requires a live ZK helper (connectString missing) — fail-closed"
                     )
                 menv["FLEXLB_SYNC_CONSISTENCY_CONFIG"] = json.dumps(
                     {
@@ -199,8 +209,9 @@ class MasterLifecycle:
             env.master_start_count += 1
             generation = env.master_start_count
         suffix = f"_{name}" if mspec else ""
-        log_name = log_name or (f"flexlb_master{suffix}.log" if generation == 1
-                                else f"flexlb_master{suffix}_restart{generation}.log")
+        log_name = log_name or (
+            f"flexlb_master{suffix}.log" if generation == 1 else f"flexlb_master{suffix}_restart{generation}.log"
+        )
         argv = master_arguments(env, mspec)
         log_root = Path.home() / "ai-whale" / "logs"
         for arg in argv:
@@ -216,8 +227,9 @@ class MasterLifecycle:
         if not mspec:
             env.flexlb_log_offset = offsets["flexlb.log"]
             env.pv_log_offset = offsets["pv.log"]
-        proc = ProcessOps.start(argv, configure_master(env, self.master_environment(env, mspec), API_JAR),
-                                env.run_dir / log_name)
+        proc = ProcessOps.start(
+            argv, configure_master(env, self.master_environment(env, mspec), API_JAR), env.run_dir / log_name
+        )
         host = mspec.bind_ip if mspec else "127.0.0.1"
         http = mspec.http_port if mspec else env.master_http_port
         grpc = mspec.grpc_port() if mspec else http + 2
@@ -226,8 +238,15 @@ class MasterLifecycle:
             env.master_specs[name] = mspec
         else:
             env.master = proc
-        env.master_incarnations.append(dict(name=name, target=f"{host}:{grpc}",
-            generation=generation, pid=proc.pid, started_epoch_ms=time.time() * 1000))
+        env.master_incarnations.append(
+            dict(
+                name=name,
+                target=f"{host}:{grpc}",
+                generation=generation,
+                pid=proc.pid,
+                started_epoch_ms=time.time() * 1000,
+            )
+        )
         try:
             self._wait_master(env, proc, name, host, http, deadline)
         except Exception as exc:
@@ -245,42 +264,48 @@ class MasterLifecycle:
 
     def _wait_master(self, env, proc, name, host, port, deadline):
         deadline = startup_deadline(deadline, 240)
-        with startup_phase(env.run_dir, f'master/{name}', deadline):
-            wait_ready(deadline, f'master/{name}/http',
-                       lambda: port_accepting(port, host), process=proc)
+        with startup_phase(env.run_dir, f"master/{name}", deadline):
+            wait_ready(deadline, f"master/{name}/http", lambda: port_accepting(port, host), process=proc)
             if env.spec.zk_consistency is not None:
                 # Production sidecars invoke this hook to join the election.
                 # Opening the HTTP listener alone does not register a leader.
                 deadline.check()
-                with urllib.request.urlopen(f'http://{host}:{port}/hook/after_start',
-                        timeout=min(10, deadline.remaining())) as response:
-                    if response.status != 200 or response.read().decode().strip() != 'success':
-                        raise RuntimeError('Master online hook failed')
+                with urllib.request.urlopen(
+                    f"http://{host}:{port}/hook/after_start", timeout=min(10, deadline.remaining())
+                ) as response:
+                    if response.status != 200 or response.read().decode().strip() != "success":
+                        raise RuntimeError("Master online hook failed")
+
             def info():
-                status, data = http_post_json(
-                    master_url(host, port, 'info'), {},
-                    timeout=min(3, deadline.remaining()))
+                status, data = http_post_json(master_url(host, port, "info"), {}, timeout=min(3, deadline.remaining()))
                 return data if status == 200 and isinstance(data, dict) else None
-            wait_ready(deadline, f'master/{name}/sync',
-                       lambda: bool((info() or {}).get('ready')), process=proc)
+
+            wait_ready(deadline, f"master/{name}/sync", lambda: bool((info() or {}).get("ready")), process=proc)
             if env.spec.master_stable_window_s > 0:
+
                 def topology():
                     data = info()
-                    if not data or not data.get('ready'):
+                    if not data or not data.get("ready"):
                         return False
-                    summary = data.get('worker_summary', {})
-                    for role, expected in [('PREFILL', env.spec.n_prefill), ('DECODE', env.spec.n_decode)]:
+                    summary = data.get("worker_summary", {})
+                    for role, expected in [("PREFILL", env.spec.n_prefill), ("DECODE", env.spec.n_decode)]:
                         if expected <= 0:
                             continue
                         entry = summary.get(role, {})
                         try:
-                            if int(entry.get('discovered', -1)) != expected or int(entry.get('alive', -1)) != expected:
+                            if int(entry.get("discovered", -1)) != expected or int(entry.get("alive", -1)) != expected:
                                 return False
                         except (TypeError, ValueError):
                             return False
                     return True
-                wait_ready(deadline, f'master/{name}/topology', topology,
-                           process=proc, stable_s=env.spec.master_stable_window_s)
+
+                wait_ready(
+                    deadline,
+                    f"master/{name}/topology",
+                    topology,
+                    process=proc,
+                    stable_s=env.spec.master_stable_window_s,
+                )
 
     def stop_master(self, env: FlexEnv, settle_s: float = 2.0) -> None:
         if env.master is not None:
@@ -305,8 +330,9 @@ class MasterLifecycle:
         ports = [mspec.http_port, mspec.management(), mspec.grpc_port()]
         return [p for p in ports if port_accepting(p, mspec.bind_ip)]
 
-    def start_master_instance(self, env: FlexEnv, mspec: MasterSpec,
-                              log_name: Optional[str] = None, *, deadline=None) -> ManagedProcess:
+    def start_master_instance(
+        self, env: FlexEnv, mspec: MasterSpec, log_name: Optional[str] = None, *, deadline=None
+    ) -> ManagedProcess:
         return self._start_master(env, mspec, log_name, deadline)
 
     def _live_instance(self, env: FlexEnv, name: str) -> ManagedProcess:

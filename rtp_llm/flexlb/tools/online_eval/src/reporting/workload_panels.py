@@ -5,8 +5,8 @@ import json
 import math
 
 from reporting.catalog import PALETTE
-from reporting.report_model import panel_document
 from reporting.curves import resolve_presets
+from reporting.report_model import panel_document
 from reporting.view_model import PresetSelection, SelectionKind
 
 
@@ -63,15 +63,16 @@ def build_panels(series, sources, presentation):
     grouped = {}
     for key, points in series.items():
         base, labels = _identity(key)
-        residual = {name: value for name, value in labels.items()
-                    if name not in presentation.charts.detail_labels}
+        residual = {name: value for name, value in labels.items() if name not in presentation.charts.detail_labels}
         group = (*base, json.dumps(residual, sort_keys=True))
         grouped.setdefault(group, []).append((key, points, labels))
     panels = []
     for (epoch, source, metric, residual), members in sorted(grouped.items()):
         members.sort(key=lambda row: row[0])
-        if any(key not in sources or type(sources[key].get("unit")) is not str
-               or not sources[key]["unit"] for key, _, _ in members):
+        if any(
+            key not in sources or type(sources[key].get("unit")) is not str or not sources[key]["unit"]
+            for key, _, _ in members
+        ):
             raise ValueError("missing frozen metric unit: " + metric)
         units = {sources[key]["unit"] for key, _, _ in members}
         if len(units) != 1:
@@ -85,44 +86,74 @@ def build_panels(series, sources, presentation):
         for index, method in enumerate(methods):
             keys = [key for key, _, _ in members]
             raw = _summarize(members, method)
-            curves.append(dict(
-                metric_id=sources[members[0][0]].get("metric_id") or source + "/" + metric,
-                labels=json.loads(residual), measurement=dict(epoch=epoch, source=source),
-                role="summary", aggregation=method,
-                name=("均值" if method == "mean" else "最大值") + f" · {len(members)} series",
-                group="汇总", axis=axis, unit=unit, color=PALETTE[index],
-                hidden=method not in visible, points=_sample(raw, limit),
-                statistics_points=[dict(x=t, y=v) for t, v in raw],
-                description="缺少任一原始 series 的采样时留空，不补零。",
-                provenance=dict(kind="derived", source_series_keys=keys,
-                                calculation=dict(aggregation=method, alignment="same_timestamp", missing="require_all_sources"),
-                                projection=f"bucket min/max/gap; max_points={limit}"),
-            ))
+            curves.append(
+                dict(
+                    metric_id=sources[members[0][0]].get("metric_id") or source + "/" + metric,
+                    labels=json.loads(residual),
+                    measurement=dict(epoch=epoch, source=source),
+                    role="summary",
+                    aggregation=method,
+                    name=("均值" if method == "mean" else "最大值") + f" · {len(members)} series",
+                    group="汇总",
+                    axis=axis,
+                    unit=unit,
+                    color=PALETTE[index],
+                    hidden=method not in visible,
+                    points=_sample(raw, limit),
+                    statistics_points=[dict(x=t, y=v) for t, v in raw],
+                    description="缺少任一原始 series 的采样时留空，不补零。",
+                    provenance=dict(
+                        kind="derived",
+                        source_series_keys=keys,
+                        calculation=dict(aggregation=method, alignment="same_timestamp", missing="require_all_sources"),
+                        projection=f"bucket min/max/gap; max_points={limit}",
+                    ),
+                )
+            )
         for index, (key, points, labels) in enumerate(members):
             name = json.dumps(labels, sort_keys=True, ensure_ascii=False) if labels else key
-            curves.append(dict(
-                metric_id=sources[key].get("metric_id") or source + "/" + metric,
-                labels=labels, measurement=dict(epoch=epoch, source=source), role="detail",
-                name=name, group=category, axis=axis, unit=unit,
-                color=PALETTE[(index + len(methods)) % len(PALETTE)],
-                hidden=high_cardinality,
-                points=_sample(points, limit), description=key,
-                statistics_points=[dict(x=t, y=v) for t, v in points],
-                provenance=dict(kind="archived", source_series_key=key,
-                                source=sources.get(key),
-                                projection=f"bucket min/max/gap; max_points={limit}"),
-            ))
+            curves.append(
+                dict(
+                    metric_id=sources[key].get("metric_id") or source + "/" + metric,
+                    labels=labels,
+                    measurement=dict(epoch=epoch, source=source),
+                    role="detail",
+                    name=name,
+                    group=category,
+                    axis=axis,
+                    unit=unit,
+                    color=PALETTE[(index + len(methods)) % len(PALETTE)],
+                    hidden=high_cardinality,
+                    points=_sample(points, limit),
+                    description=key,
+                    statistics_points=[dict(x=t, y=v) for t, v in points],
+                    provenance=dict(
+                        kind="archived",
+                        source_series_key=key,
+                        source=sources.get(key),
+                        projection=f"bucket min/max/gap; max_points={limit}",
+                    ),
+                )
+            )
         selectors = {}
         for name, kinds in presets.items():
             selectors[name] = tuple(
-                [PresetSelection(SelectionKind.AGGREGATIONS, tuple(k for k in kinds if k != 'detail'))]
-                + ([PresetSelection(SelectionKind.ROLES, ('detail',))] if 'detail' in kinds or not high_cardinality else []))
+                [PresetSelection(SelectionKind.AGGREGATIONS, tuple(k for k in kinds if k != "detail"))]
+                + (
+                    [PresetSelection(SelectionKind.ROLES, ("detail",))]
+                    if "detail" in kinds or not high_cardinality
+                    else []
+                )
+            )
         choices = resolve_presets(curves, selectors)
-        panels.append(panel_document(
-            identity="metric-" + hashlib.sha256("/".join((epoch, source, metric, residual)).encode()).hexdigest(),
-            title=f"{epoch}/{source} · {title}" + (f" · {residual}" if residual != "{}" else ""),
-            caption="同指标同图；明细可从指标选择器检索。仅 HTML 采样，analysis.json 保留原始全集。",
-            axes={axis: dict(title=unit, position="left")},
-            series=curves, presets=choices,
-        ))
+        panels.append(
+            panel_document(
+                identity="metric-" + hashlib.sha256("/".join((epoch, source, metric, residual)).encode()).hexdigest(),
+                title=f"{epoch}/{source} · {title}" + (f" · {residual}" if residual != "{}" else ""),
+                caption="同指标同图；明细可从指标选择器检索。仅 HTML 采样，analysis.json 保留原始全集。",
+                axes={axis: dict(title=unit, position="left")},
+                series=curves,
+                presets=choices,
+            )
+        )
     return panels

@@ -41,9 +41,7 @@ def interruptible(deadline, enabled=False):
 
 
 class Deadline:
-    def __init__(
-        self, expires_at, clock=time.monotonic, sleeper=time.sleep, cancelled=None
-    ):
+    def __init__(self, expires_at, clock=time.monotonic, sleeper=time.sleep, cancelled=None):
         self.expires_at = expires_at
         self.clock = clock
         self.sleeper = sleeper
@@ -51,8 +49,7 @@ class Deadline:
 
     def child(self, timeout_s):
         """Bound a sequential operation without extending the owning deadline."""
-        return Deadline(min(self.expires_at, self.clock() + timeout_s),
-                        self.clock, self.sleeper, self.cancelled)
+        return Deadline(min(self.expires_at, self.clock() + timeout_s), self.clock, self.sleeper, self.cancelled)
 
     @contextmanager
     def operation(self, timeout_s, enforce=False):

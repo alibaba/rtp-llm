@@ -11,8 +11,10 @@ class TimeBuckets:
     width_s: float
 
     def __post_init__(self):
-        if any(type(v) not in (int, float) or not math.isfinite(v)
-               for v in (self.origin_epoch_s, self.width_s)) or self.width_s <= 0:
+        if (
+            any(type(v) not in (int, float) or not math.isfinite(v) for v in (self.origin_epoch_s, self.width_s))
+            or self.width_s <= 0
+        ):
             raise ValueError("time buckets require a finite origin and positive width")
 
     def index(self, epoch_ms):

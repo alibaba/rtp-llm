@@ -6,19 +6,18 @@ import time
 import unittest
 from types import SimpleNamespace as NS
 
-from scenario.request_batch import RequestBatch
-from adapters.rpc_error_evidence import error_trailer_evidence
-from scenario.runtime import Deadline, RuntimeContext
 from google.protobuf import descriptor_pb2, descriptor_pool, message_factory
+
+from adapters.rpc_error_evidence import error_trailer_evidence
+from scenario.request_batch import RequestBatch
+from scenario.runtime import Deadline, RuntimeContext
 from test_scenario_backend import Ops, Stream
 
 
 def details_type():
     # Exact ErrorDetailsPB wire fields from model_rpc_service.proto; dynamic
     # protobuf decoding exercises unknown fields and malformed wire payloads.
-    file = descriptor_pb2.FileDescriptorProto(
-        name="trailer-test.proto", syntax="proto3"
-    )
+    file = descriptor_pb2.FileDescriptorProto(name="trailer-test.proto", syntax="proto3")
     message = file.message_type.add(name="ErrorDetailsPB")
     message.field.add(name="error_code", number=1, type=3, label=1)
     message.field.add(name="error_message", number=2, type=9, label=1)
@@ -49,19 +48,13 @@ def trailer(raw):
 class ErrorTrailerTest(unittest.TestCase):
     def test_real_consumer_retains_transport_typed_code_and_bytes(self):
         for transport in ("INTERNAL", "CANCELLED"):
-            with self.subTest(
-                transport=transport
-            ), tempfile.TemporaryDirectory() as tmp:
-                raw = DETAILS(
-                    error_code=8430, error_message="victim"
-                ).SerializeToString()
+            with self.subTest(transport=transport), tempfile.TemporaryDirectory() as tmp:
+                raw = DETAILS(error_code=8430, error_message="victim").SerializeToString()
                 ctx = RuntimeContext({}, None, tmp, time.monotonic, time.sleep)
                 ctx.ops = Ops(batch=False)
                 ctx.ops.pb2.ErrorDetailsPB = DETAILS
                 ctx.ops.pb2_grpc.RpcServiceStub = lambda channel: NS(
-                    GenerateStreamCall=lambda *a, **kw: Stream(
-                        error=RpcFailure(trailer(raw), transport)
-                    )
+                    GenerateStreamCall=lambda *a, **kw: Stream(error=RpcFailure(trailer(raw), transport))
                 )
                 ctx.instance_deadline_s = time.monotonic() + 2
                 batch = RequestBatch(ctx, dict(count=1, consume="immediate"))
@@ -74,9 +67,7 @@ class ErrorTrailerTest(unittest.TestCase):
                 self.assertEqual(record["stream"]["trailer_error_code"], 8430)
                 self.assertIsNone(record["business_error_code"])
                 self.assertEqual(
-                    base64.b64decode(
-                        record["stream"]["error_trailer"]["values"][0]["base64"]
-                    ),
+                    base64.b64decode(record["stream"]["error_trailer"]["values"][0]["base64"]),
                     raw,
                 )
 
@@ -101,9 +92,7 @@ class ErrorTrailerTest(unittest.TestCase):
                 self.assertIsNone(evidence["trailer_error_code"])
                 for value in evidence["error_trailer"]["values"]:
                     if "base64" in value:
-                        self.assertLessEqual(
-                            len(base64.b64decode(value["base64"])), 65536
-                        )
+                        self.assertLessEqual(len(base64.b64decode(value["base64"])), 65536)
 
     def test_cancelled_without_typed_trailer_and_inband_enum_are_not_normalized(self):
         absent = error_trailer_evidence(RpcFailure(None, "CANCELLED"), PB2)

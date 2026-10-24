@@ -1,6 +1,8 @@
 """Case metadata and collection policy validation."""
+
 import copy
 import math
+
 from document_io import DocumentError as ScenarioError
 
 KINDS = ("functional", "workload")
@@ -15,10 +17,20 @@ DEFAULT_MONITORING = {
 def normalize_metadata(value):
     from scenario.validation import mapping
 
-    mapping(value, "metadata", {
-        "kind", "description", "category", "tags", "requires", "findings",
-        "estimated_duration_s",
-    }, {"kind", "description"})
+    mapping(
+        value,
+        "metadata",
+        {
+            "kind",
+            "description",
+            "category",
+            "tags",
+            "requires",
+            "findings",
+            "estimated_duration_s",
+        },
+        {"kind", "description"},
+    )
     if value["kind"] not in KINDS:
         raise ScenarioError("metadata.kind must be functional or workload")
     if not isinstance(value["description"], str) or not value["description"].strip():
@@ -26,7 +38,14 @@ def normalize_metadata(value):
     return copy.deepcopy(value)
 
 
-EXECUTION_BUDGETS = {"timeout_s", "stage_timeout_s", "cleanup_timeout_s", "finalize_timeout_s", "report_timeout_s", "archive_timeout_s"}
+EXECUTION_BUDGETS = {
+    "timeout_s",
+    "stage_timeout_s",
+    "cleanup_timeout_s",
+    "finalize_timeout_s",
+    "report_timeout_s",
+    "archive_timeout_s",
+}
 EXECUTION_FIELDS = EXECUTION_BUDGETS | {"collection", "monitoring"}
 
 

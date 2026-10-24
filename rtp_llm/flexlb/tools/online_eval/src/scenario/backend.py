@@ -10,9 +10,9 @@ import subprocess
 import threading
 from dataclasses import replace
 
-from scenario.request_batch import RequestBatch
-from scenario.backend_spec import make_env_spec, configure_master_sync_log
 from runtime.deadline import StageTimeout
+from scenario.backend_spec import configure_master_sync_log, make_env_spec
+from scenario.request_batch import RequestBatch
 
 
 class BoundedOps:
@@ -43,16 +43,12 @@ class BoundedOps:
                 first = self._lease["mock_base"]
                 last = (
                     first
-                    + self._budget.get(
-                        "max_environment_workers", self._budget["initial_workers"]
-                    )
+                    + self._budget.get("max_environment_workers", self._budget["initial_workers"])
                     + self._budget["max_dynamic_additions"]
                     - 1
                 )
                 if type(allocated) is not int or not first <= allocated <= last:
-                    raise RuntimeError(
-                        "mock allocated a worker outside its declared lane budget"
-                    )
+                    raise RuntimeError("mock allocated a worker outside its declared lane budget")
             return status, body
 
 
@@ -81,24 +77,18 @@ class JavaMockBackend:
 
     def setup(self, ctx, plan, deadline):
         from artifacts.startup import startup_phase
+
         with startup_phase(ctx.artifact_dir, "environment", deadline):
             return self._setup(ctx, plan, deadline)
 
     def _setup(self, ctx, plan, deadline, raw_config=None):
         if ":" in str(ctx.artifact_dir.resolve()):
-            raise ValueError(
-                "Java mock artifact path contains the JVM -Xlog colon delimiter"
-            )
+            raise ValueError("Java mock artifact path contains the JVM -Xlog colon delimiter")
         workers = plan["n_prefill"] + plan["n_decode"]
         budget = ctx.instance["resource_budget"]
         bound = budget.get("max_environment_workers", budget["initial_workers"])
-        if (
-            workers > bound
-            or workers + budget["max_dynamic_additions"] > self.lease["worker_capacity"]
-        ):
-            raise ValueError(
-                "environment topology exceeds compiled or leased worker capacity"
-            )
+        if workers > bound or workers + budget["max_dynamic_additions"] > self.lease["worker_capacity"]:
+            raise ValueError("environment topology exceeds compiled or leased worker capacity")
         from adapters.engine_ops import EngineOps
         from adapters.environment import EnvManager
 
@@ -107,18 +97,14 @@ class JavaMockBackend:
         # Keep the first-epoch artifact layout compatible with existing runs.
         # Later environments never overwrite its config, logs or cleanup proof.
         artifact_dir = (
-            ctx.artifact_dir
-            if ctx.env_epoch == 1
-            else ctx.artifact_dir / f"environment-epoch-{ctx.env_epoch}"
+            ctx.artifact_dir if ctx.env_epoch == 1 else ctx.artifact_dir / f"environment-epoch-{ctx.env_epoch}"
         )
         artifact_dir.mkdir(parents=True, exist_ok=True)
         self.current_artifact_dir = artifact_dir
         if raw_config is not None:
             spec.raw_config = raw_config
         sync_log_path = (
-            configure_master_sync_log(spec, artifact_dir, ctx.env_epoch)
-            if plan.get("master_sync_log", False)
-            else None
+            configure_master_sync_log(spec, artifact_dir, ctx.env_epoch) if plan.get("master_sync_log", False) else None
         )
         private_log = sync_log_path.parent if sync_log_path else None
         if not spec.masters and private_log is None:
@@ -178,9 +164,7 @@ class JavaMockBackend:
             error = repr(exc)
         # Timeout/interrupt/IO failure is not an expected parser rejection.
         deadline.check()
-        masters = [
-            env.master for env in self.environments[first:] if env.master is not None
-        ]
+        masters = [env.master for env in self.environments[first:] if env.master is not None]
         if not masters:
             raise RuntimeError("startup probe has no owned Master process evidence")
         logs = []
@@ -206,10 +190,15 @@ class JavaMockBackend:
 
     def start_requests(self, ctx, params, deadline):
         from adapters.resource_evidence import request_evidence
+
         batch = RequestBatch(ctx, params)
         handle = ctx.register_resource(
-            "requests", batch, batch.cleanup, historical=True, evidence=request_evidence,
-            request_stop=lambda: batch.cancel("cleanup")
+            "requests",
+            batch,
+            batch.cleanup,
+            historical=True,
+            evidence=request_evidence,
+            request_stop=lambda: batch.cancel("cleanup"),
         )
         batch.submit(deadline)
         return handle
@@ -268,24 +257,22 @@ class JavaMockBackend:
                 remaining_pids.append(mp.pid)
                 errors.append((str(mp.pid) + " reap", exc))
         (ctx.artifact_dir / "process-cleanup.json").write_text(
-            json.dumps(
-                dict(owned_pids=list(unique), remaining_pids=remaining_pids), indent=2
-            )
-            + "\n"
+            json.dumps(dict(owned_pids=list(unique), remaining_pids=remaining_pids), indent=2) + "\n"
         )
         current = getattr(self, "current_artifact_dir", ctx.artifact_dir)
         if current == ctx.artifact_dir:
             current = ctx.artifact_dir / f"environment-epoch-{ctx.env_epoch}"
         current.mkdir(parents=True, exist_ok=True)
-        (current / "process-cleanup.json").write_text(
-            (ctx.artifact_dir / "process-cleanup.json").read_text()
-        )
+        (current / "process-cleanup.json").write_text((ctx.artifact_dir / "process-cleanup.json").read_text())
         if remaining_pids:
             raise StageTimeout(f"owned processes not reaped: {remaining_pids}")
         if self.manager is not None:
             self.manager.current = None
         if errors:
             message = "; ".join(name + ": " + str(exc) for name, exc in errors)
-            error_type = StageTimeout if any(isinstance(exc, (TimeoutError, subprocess.TimeoutExpired))
-                                             for _, exc in errors) else RuntimeError
+            error_type = (
+                StageTimeout
+                if any(isinstance(exc, (TimeoutError, subprocess.TimeoutExpired)) for _, exc in errors)
+                else RuntimeError
+            )
             raise error_type(message) from errors[0][1]

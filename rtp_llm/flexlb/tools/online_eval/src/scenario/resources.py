@@ -2,9 +2,9 @@
 
 from dataclasses import dataclass
 
-from scenario.contracts import ResourceHandle
 from input_contract import validate_call
 from runtime.deadline import Deadline, interruptible
+from scenario.contracts import ResourceHandle
 
 
 @dataclass
@@ -16,9 +16,9 @@ class CleanupAction:
 
 
 def _cleanup_action(name, callback, request_stop):
-    validate_call(callback, 1, 'cleanup.' + name)
+    validate_call(callback, 1, "cleanup." + name)
     if request_stop is not None:
-        validate_call(request_stop, 0, 'cleanup.' + name + '.request_stop')
+        validate_call(request_stop, 0, "cleanup." + name + ".request_stop")
     return CleanupAction(name, callback, request_stop)
 
 
@@ -44,6 +44,7 @@ class ResourceScope:
 
     def export_evidence(self, profile, deadline):
         from adapters.resource_evidence import ResourceEvidence
+
         for identity, exporter in self._evidence_exporters.items():
             deadline.check()
             handle, value, _ = self._resources[identity]
@@ -56,10 +57,8 @@ class ResourceScope:
     def register_resource(self, kind, value, cleanup=None, historical=False, *, evidence=None, request_stop=None):
         if evidence is not None and not callable(evidence):
             raise TypeError("resource evidence exporter must be callable")
-        handle = ResourceHandle(
-            kind, f"resource_{len(self._resources) + 1}", self.env_epoch
-        ).to_dict()
-        action = _cleanup_action(handle['id'], cleanup, request_stop) if cleanup is not None else None
+        handle = ResourceHandle(kind, f"resource_{len(self._resources) + 1}", self.env_epoch).to_dict()
+        action = _cleanup_action(handle["id"], cleanup, request_stop) if cleanup is not None else None
         self._resources[handle["id"]] = (handle, value, historical)
         if evidence is not None:
             self._evidence_exporters[handle["id"]] = evidence
@@ -91,8 +90,11 @@ class ResourceScope:
             if action.request_stop is not None:
                 try:
                     deadline.check()
-                    stop_deadline = Deadline(min(deadline.expires_at, self.clock() +
-                        min(.05, deadline.remaining() / (len(actions) + 1))), self.clock, self.sleeper)
+                    stop_deadline = Deadline(
+                        min(deadline.expires_at, self.clock() + min(0.05, deadline.remaining() / (len(actions) + 1))),
+                        self.clock,
+                        self.sleeper,
+                    )
                     with interruptible(stop_deadline, self.enforce_deadlines):
                         action.request_stop()
                 except Exception as exc:

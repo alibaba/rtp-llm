@@ -25,7 +25,6 @@ class Clock:
 
 
 class WraparoundTests(unittest.TestCase):
-
     def run_gate(self, fn, response, budget):
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
@@ -44,7 +43,6 @@ class WraparoundTests(unittest.TestCase):
             patch.object(master, "_master_json", side_effect=http),
             Deadline(budget, clock, clock.sleep),
         )
-
 
     def test_clean_ledger_needs_no_topology_or_health_response(self):
         raw = {
@@ -73,13 +71,9 @@ class WraparoundTests(unittest.TestCase):
                     "prefill_endpoints": [{"inflight_batches": prefill}],
                     "decode_endpoints": [decode],
                 }
-                ctx, clock, mocked, deadline = self.run_gate(
-                    master._wrap_inflight, raw, 10
-                )
+                ctx, clock, mocked, deadline = self.run_gate(master._wrap_inflight, raw, 10)
                 with mocked, self.assertRaises(StageTimeout):
                     master._wrap_inflight(ctx, {"target": "A"}, deadline)
                 self.assertEqual(10, clock())
-                rows = json.loads(
-                    next(ctx.artifact_dir.glob("master-inflight*")).read_text()
-                )
+                rows = json.loads(next(ctx.artifact_dir.glob("master-inflight*")).read_text())
                 self.assertEqual(20, len(rows))

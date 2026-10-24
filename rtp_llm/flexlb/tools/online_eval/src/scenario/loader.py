@@ -1,19 +1,21 @@
 """Load data-only scenarios and invoke their registered builders."""
 
 from pathlib import Path
-from document_io import DocumentError as ScenarioError, load_document
+
+from document_io import DocumentError as ScenarioError
+from document_io import load_document
 
 
 def load_scenarios(root, *, experiment_params=None):
     """Load data-only configurations and invoke their registered Python builders."""
+    from scenario.experiment_params import ExperimentParams
     from scenario.program_compiler import configure_program
 
-    from scenario.experiment_params import ExperimentParams
     overrides = ExperimentParams.read(experiment_params)
     root = Path(root).resolve()
     if root.is_file():
         raw = load_document(root)
-        overrides.require_cases([raw.get('case')])
+        overrides.require_cases([raw.get("case")])
         return [(str(root), configure_program(overrides.apply(raw), str(root)))]
     if not root.is_dir():
         raise ScenarioError(f"scenario root does not exist: {root}")

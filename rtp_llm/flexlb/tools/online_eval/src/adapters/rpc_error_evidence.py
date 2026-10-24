@@ -1,4 +1,5 @@
 """Bounded decoding of typed gRPC engine error metadata."""
+
 import base64
 import hashlib
 

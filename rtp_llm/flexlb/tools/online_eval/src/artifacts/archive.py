@@ -9,41 +9,57 @@ from __future__ import annotations
 import argparse
 import json
 import os
-from pathlib import Path
 import tempfile
 import zipfile
+from pathlib import Path
 
 from file_digest import sha256_file
 
 ARCHIVE_MANIFEST_SCHEMA_VERSION = 1
 PRECOMPRESSED = {".gz", ".zip", ".jar", ".zst", ".xz", ".bz2", ".png", ".jpg"}
-SECRET_WORDS = ("api_token", "auth_token", "access_token", "refresh_token",
-                "api_key", "access_key", "secret", "credential", "password",
-                "private_key")
+SECRET_WORDS = (
+    "api_token",
+    "auth_token",
+    "access_token",
+    "refresh_token",
+    "api_key",
+    "access_key",
+    "secret",
+    "credential",
+    "password",
+    "private_key",
+)
 
 
 def _secret_like(path: Path) -> bool:
     name = path.name.lower()
-    return name in {"token", "token.txt", "token.json", "token.yaml",
-                    "token.yml", ".env"} or any(
+    return name in {"token", "token.txt", "token.json", "token.yaml", "token.yml", ".env"} or any(
         word in name for word in SECRET_WORDS
     )
 
 
-def create_archive(output: Path, sources: dict[str, Path], *, kind: str,
-                   status: str = "complete", metadata: dict | None = None) -> dict:
+def create_archive(
+    output: Path, sources: dict[str, Path], *, kind: str, status: str = "complete", metadata: dict | None = None
+) -> dict:
     """Archive named run directories/files; never follow symlinks or include output."""
     output = Path(output).resolve()
     output.parent.mkdir(parents=True, exist_ok=True)
     if status not in {"complete", "incomplete"}:
         raise ValueError("status must be complete or incomplete")
-    manifest = {"archive_manifest_schema_version": ARCHIVE_MANIFEST_SCHEMA_VERSION, "kind": kind, "status": status,
-                "metadata": metadata or {}, "files": [], "omitted": []}
+    manifest = {
+        "archive_manifest_schema_version": ARCHIVE_MANIFEST_SCHEMA_VERSION,
+        "kind": kind,
+        "status": status,
+        "metadata": metadata or {},
+        "files": [],
+        "omitted": [],
+    }
     fd, temp_name = tempfile.mkstemp(prefix=".experiment-", suffix=".zip", dir=output.parent)
     os.close(fd)
     try:
-        with zipfile.ZipFile(temp_name, "w", compression=zipfile.ZIP_DEFLATED,
-                             compresslevel=3, allowZip64=True) as archive:
+        with zipfile.ZipFile(
+            temp_name, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=3, allowZip64=True
+        ) as archive:
             for label, root in sources.items():
                 if not label or "/" in label or label in (".", ".."):
                     raise ValueError(f"invalid source label: {label!r}")
@@ -52,8 +68,7 @@ def create_archive(output: Path, sources: dict[str, Path], *, kind: str,
                     raise FileNotFoundError(root)
                 files = sorted(root.rglob("*")) if root.is_dir() else [root]
                 for path in files:
-                    if (path.is_symlink() or not path.is_file()
-                            or path.resolve() in {output, Path(temp_name).resolve()}):
+                    if path.is_symlink() or not path.is_file() or path.resolve() in {output, Path(temp_name).resolve()}:
                         continue
                     relative = path.relative_to(root) if root.is_dir() else Path(path.name)
                     name = f"{label}/{relative.as_posix()}"
@@ -62,12 +77,16 @@ def create_archive(output: Path, sources: dict[str, Path], *, kind: str,
                         continue
                     size = path.stat().st_size
                     record = {"path": name, "size": size, "sha256": sha256_file(path)}
-                    archive.write(path, name, compress_type=zipfile.ZIP_STORED
-                                  if path.suffix.lower() in PRECOMPRESSED else zipfile.ZIP_DEFLATED)
+                    archive.write(
+                        path,
+                        name,
+                        compress_type=zipfile.ZIP_STORED
+                        if path.suffix.lower() in PRECOMPRESSED
+                        else zipfile.ZIP_DEFLATED,
+                    )
                     record["completeness"] = "full"
                     manifest["files"].append(record)
-            archive.writestr("manifest.json", json.dumps(manifest, ensure_ascii=False,
-                                                          indent=2).encode("utf-8"))
+            archive.writestr("manifest.json", json.dumps(manifest, ensure_ascii=False, indent=2).encode("utf-8"))
         os.replace(temp_name, output)
     finally:
         if os.path.exists(temp_name):
@@ -81,8 +100,9 @@ def main(argv=None):
     create = sub.add_parser("create")
     create.add_argument("--out", type=Path, required=True)
     create.add_argument("--kind", choices=("case", "scenario", "ab"), required=True)
-    create.add_argument("--source", action="append", required=True,
-                        help="label=directory or label=file; repeat as needed")
+    create.add_argument(
+        "--source", action="append", required=True, help="label=directory or label=file; repeat as needed"
+    )
     create.add_argument("--status", choices=("complete", "incomplete"), default="complete")
     create.add_argument("--metadata-json", default="{}", help="small provenance/verdict object")
     inspect = sub.add_parser("inspect")
@@ -98,8 +118,7 @@ def main(argv=None):
         metadata = json.loads(args.metadata_json)
         if not isinstance(metadata, dict):
             parser.error("--metadata-json must be an object")
-        manifest = create_archive(args.out, sources, kind=args.kind,
-                                  status=args.status, metadata=metadata)
+        manifest = create_archive(args.out, sources, kind=args.kind, status=args.status, metadata=metadata)
     else:
         with zipfile.ZipFile(args.archive) as archive:
             manifest = json.loads(archive.read("manifest.json"))

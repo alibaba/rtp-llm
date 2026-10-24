@@ -1,10 +1,16 @@
 """Durable checkpoints and independently budgeted evidence/report delivery."""
+
 from dataclasses import asdict
 
 from runtime.deadline import Deadline, interruptible
 from scenario.run_result import (
-    RunResult, FinalizationPhase, FinalizationResult, DeliveryStatus,
-    WorkloadResult, EvidenceResult, ReportResult,
+    DeliveryStatus,
+    EvidenceResult,
+    FinalizationPhase,
+    FinalizationResult,
+    ReportResult,
+    RunResult,
+    WorkloadResult,
 )
 
 
@@ -15,6 +21,7 @@ class RunFinalizer:
 
         def checkpoint(pending=False):
             from file_io import write_json
+
             document = result.to_dict()
             if pending:
                 document["status"] = "FINALIZING"
@@ -26,24 +33,48 @@ class RunFinalizer:
             budgets = result.plan.execution
             # The snapshot is input only: policy changes cannot replace execution state.
             snapshot = result.to_dict()
-            evidence = self._phase(ctx, result, FinalizationPhase.EVIDENCE,
-                budgets.finalize_timeout_s, started, checkpoint,
-                lambda deadline: self._collect(policy, ctx, result, snapshot, deadline))
+            evidence = self._phase(
+                ctx,
+                result,
+                FinalizationPhase.EVIDENCE,
+                budgets.finalize_timeout_s,
+                started,
+                checkpoint,
+                lambda deadline: self._collect(policy, ctx, result, snapshot, deadline),
+            )
             if isinstance(evidence, EvidenceResult):
                 analysis = evidence.analysis
             if result.finalization[-1].status == DeliveryStatus.PASS:
                 outcome = result.adjudicate()
-                self._phase(ctx, result, FinalizationPhase.REPORT,
-                    budgets.report_timeout_s, started, checkpoint,
-                    lambda deadline: self._render(policy, ctx, analysis, outcome, deadline))
+                self._phase(
+                    ctx,
+                    result,
+                    FinalizationPhase.REPORT,
+                    budgets.report_timeout_s,
+                    started,
+                    checkpoint,
+                    lambda deadline: self._render(policy, ctx, analysis, outcome, deadline),
+                )
             else:
-                result.finalization.append(FinalizationResult(FinalizationPhase.REPORT,
-                    budgets.report_timeout_s, DeliveryStatus.BLOCKED, "evidence finalization failed"))
+                result.finalization.append(
+                    FinalizationResult(
+                        FinalizationPhase.REPORT,
+                        budgets.report_timeout_s,
+                        DeliveryStatus.BLOCKED,
+                        "evidence finalization failed",
+                    )
+                )
         snapshot = result.to_dict()
-        self._phase(ctx, result, FinalizationPhase.ARCHIVE,
-            result.plan.execution.archive_timeout_s, started, checkpoint,
-            lambda deadline: self._archive(ctx, result, snapshot, analysis, deadline))
-        result.duration_ms = int((ctx.clock()-started)*1000)
+        self._phase(
+            ctx,
+            result,
+            FinalizationPhase.ARCHIVE,
+            result.plan.execution.archive_timeout_s,
+            started,
+            checkpoint,
+            lambda deadline: self._archive(ctx, result, snapshot, analysis, deadline),
+        )
+        result.duration_ms = int((ctx.clock() - started) * 1000)
         checkpoint()
         return result
 
@@ -59,11 +90,15 @@ class RunFinalizer:
     @staticmethod
     def _archive(ctx, result, document, analysis, deadline):
         from reporting.experiment import publish_run
-        result.artifacts = publish_run(ctx.artifact_dir, ctx.experiment_definition, document,
-                                      analysis=analysis, deadline=deadline)
-        if (not getattr(ctx.backend, "retain_tsdb", True)
-                and all(row["status"] == "PASS" for row in document["cleanup"])):
+
+        result.artifacts = publish_run(
+            ctx.artifact_dir, ctx.experiment_definition, document, analysis=analysis, deadline=deadline
+        )
+        if not getattr(ctx.backend, "retain_tsdb", True) and all(
+            row["status"] == "PASS" for row in document["cleanup"]
+        ):
             from artifacts.retention import prune_tsdb
+
             prune_tsdb(ctx.artifact_dir, result.artifacts, deadline)
 
     @staticmethod
@@ -108,7 +143,7 @@ class RunFinalizer:
                 workload.report_status = row.status.value
         elif phase == FinalizationPhase.REPORT and result.workload is not None:
             result.workload.report_status = "PASS"
-        row.duration_ms = int((ctx.clock()-phase_start)*1000)
-        result.duration_ms = int((ctx.clock()-started)*1000)
+        row.duration_ms = int((ctx.clock() - phase_start) * 1000)
+        result.duration_ms = int((ctx.clock() - started) * 1000)
         checkpoint()
         return value

@@ -5,7 +5,6 @@ import json
 import re
 import urllib.request
 
-
 ENGINE_NAME = re.compile(r"[A-Za-z0-9_-]+\Z")
 
 
@@ -47,11 +46,7 @@ def select_engines(snapshot, targets):
         raise ValueError("snapshot has no engine list")
     selected = {}
     for name in targets:
-        matches = [
-            entry
-            for entry in entries
-            if isinstance(entry, dict) and entry.get("name") == name
-        ]
+        matches = [entry for entry in entries if isinstance(entry, dict) and entry.get("name") == name]
         if len(matches) != 1:
             raise ValueError(f"engine {name!r} missing or ambiguous")
         entry = matches[0]
@@ -60,9 +55,7 @@ def select_engines(snapshot, targets):
             or not isinstance(entry.get("grpc_addr"), str)
             or type(entry.get("stopped")) is not bool
         ):
-            raise ValueError(
-                f"engine {name!r} snapshot lacks role/address/stopped evidence"
-            )
+            raise ValueError(f"engine {name!r} snapshot lacks role/address/stopped evidence")
         selected[name] = copy.deepcopy(entry)
     return selected
 
@@ -70,13 +63,9 @@ def select_engines(snapshot, targets):
 def topology_pools(ctx, deadline, address_field="grpc_addr"):
     raw = control_json(ctx.ops, "snapshot?view=topology", deadline)
     pools = {
-        role: sorted(r[address_field] for r in raw["engines"] if r["role"] == role)
-        for role in ("prefill", "decode")
+        role: sorted(r[address_field] for r in raw["engines"] if r["role"] == role) for role in ("prefill", "decode")
     }
     expected = {"prefill": ctx.env.spec.n_prefill, "decode": ctx.env.spec.n_decode}
-    if any(
-        len(pools[role]) != expected[role] or len(set(pools[role])) != expected[role]
-        for role in pools
-    ):
+    if any(len(pools[role]) != expected[role] or len(set(pools[role])) != expected[role] for role in pools):
         raise ValueError("mock pool differs from configured topology")
     return pools

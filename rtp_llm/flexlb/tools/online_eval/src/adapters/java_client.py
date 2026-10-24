@@ -6,11 +6,10 @@ import os
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from adapters.load_client import LOAD_CLIENT_ENV_VARS, validate_environment, validate_flow_environment
 from runtime.java_runtime import resolve_java21
 from runtime.paths import MOCK_JAR
 from runtime.process import ManagedProcess, ProcessOps
-
-from adapters.load_client import LOAD_CLIENT_ENV_VARS, validate_environment, validate_flow_environment
 
 if TYPE_CHECKING:
     from adapters.environment import EnvManager

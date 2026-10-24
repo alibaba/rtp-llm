@@ -8,7 +8,6 @@ import subprocess
 from pathlib import Path
 from typing import Optional
 
-
 JAVA_MODULE_OPTS = [
     "--add-modules",
     "ALL-SYSTEM",
@@ -34,9 +33,7 @@ _java21_cache: Optional[str] = None
 
 def _java_major(java_bin: str) -> int:
     try:
-        out = subprocess.run(
-            [java_bin, "-version"], capture_output=True, text=True, timeout=30
-        ).stderr
+        out = subprocess.run([java_bin, "-version"], capture_output=True, text=True, timeout=30).stderr
     except Exception:
         return 0
     import re as _re
@@ -61,14 +58,7 @@ def resolve_java21() -> str:
     if path_java:
         candidates.append(path_java)
     for cand in candidates:
-        if (
-            os.path.isfile(cand)
-            and os.access(cand, os.X_OK)
-            and _java_major(cand) >= 21
-        ):
+        if os.path.isfile(cand) and os.access(cand, os.X_OK) and _java_major(cand) >= 21:
             _java21_cache = cand
             return cand
-    raise RuntimeError(
-        "Java 21+ is required (set JAVA_HOME/JAVA21_HOME). Tried: "
-        + ", ".join(candidates)
-    )
+    raise RuntimeError("Java 21+ is required (set JAVA_HOME/JAVA21_HOME). Tried: " + ", ".join(candidates))

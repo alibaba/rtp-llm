@@ -9,10 +9,10 @@ from pathlib import Path
 from types import SimpleNamespace as NS
 from unittest.mock import Mock, patch
 
-from scenario.backend import BoundedOps
-from scenario.request_batch import RequestBatch
-from scenario.lease import validate_lease
 from document_io import DocumentError as ScenarioError
+from scenario.backend import BoundedOps
+from scenario.lease import validate_lease
+from scenario.request_batch import RequestBatch
 from scenario.runtime import (
     Deadline,
     RuntimeContext,
@@ -46,21 +46,15 @@ class Ops:
         self.batch, self.hanging = batch, hanging
         self.streams, self.fetch_count, self.generate_count, self.counter = [], 0, 0, 0
         self.responses = []
-        self.schedule_pb2_grpc = NS(
-            FlexlbServiceStub=lambda channel: NS(Schedule=NS(future=self.future))
-        )
+        self.schedule_pb2_grpc = NS(FlexlbServiceStub=lambda channel: NS(Schedule=NS(future=self.future)))
         self.pb2_grpc = NS(
-            RpcServiceStub=lambda channel: NS(
-                FetchResponse=self.fetch, GenerateStreamCall=self.generate
-            )
+            RpcServiceStub=lambda channel: NS(FetchResponse=self.fetch, GenerateStreamCall=self.generate)
         )
         self.pb2 = NS(FetchRequestPB=lambda **kw: kw)
 
     def future(self, req, timeout, metadata=None):
         self.last_schedule = (req, timeout, metadata)
-        response = NS(
-            code=200, success=True, error_message="", enqueued_by_master=self.batch
-        )
+        response = NS(code=200, success=True, error_message="", enqueued_by_master=self.batch)
         self.responses.append(response)
         return NS(result=lambda timeout: response, cancel=lambda: True)
 
@@ -119,7 +113,7 @@ def lease_manifest():
             dict(side="master", first=m, last=m + 5),
             dict(side="mock", first=b - 1, last=b + 151),
         ],
-        lock_names=[f"m{m}_{m+5}.lock", f"g{b-1}_{b+151}.lock"],
+        lock_names=[f"m{m}_{m + 5}.lock", f"g{b - 1}_{b + 151}.lock"],
         child_env=env,
     )
 
@@ -178,9 +172,7 @@ class BackendTest(unittest.TestCase):
         ctx = RuntimeContext({}, None, tmp.name, time.monotonic, time.sleep)
         ctx.ops = Ops(batch, hanging)
         ctx.instance_deadline_s = time.monotonic() + 2
-        requests = RequestBatch(
-            ctx, dict(count=2, input_len=10, output_len=2, consume=consume)
-        )
+        requests = RequestBatch(ctx, dict(count=2, input_len=10, output_len=2, consume=consume))
         ctx.register_resource("requests", requests, requests.cleanup)
         requests.submit(Deadline(time.monotonic() + 1))
         return requests, ctx
@@ -191,9 +183,7 @@ class BackendTest(unittest.TestCase):
                 ctx = RuntimeContext({}, None, root, time.monotonic, time.sleep)
                 ctx.ops = Ops(batch_mode)
                 ctx.instance_deadline_s = time.monotonic() + 2
-                requests = RequestBatch(
-                    ctx, dict(count=2, consume="immediate", input_len=10, output_len=2)
-                )
+                requests = RequestBatch(ctx, dict(count=2, consume="immediate", input_len=10, output_len=2))
                 cancelled, waited, created = [], [], []
 
                 def future(req, timeout):
@@ -204,12 +194,8 @@ class BackendTest(unittest.TestCase):
                         result=lambda **kw: waited.append(True),
                     )
 
-                ctx.ops.schedule_pb2_grpc = NS(
-                    FlexlbServiceStub=lambda channel: NS(Schedule=NS(future=future))
-                )
-                with self.assertRaisesRegex(
-                    RuntimeError, "cancelled during Schedule startup"
-                ):
+                ctx.ops.schedule_pb2_grpc = NS(FlexlbServiceStub=lambda channel: NS(Schedule=NS(future=future)))
+                with self.assertRaisesRegex(RuntimeError, "cancelled during Schedule startup"):
                     requests.submit(Deadline(ctx.instance_deadline_s))
                 self.assertTrue(cancelled)
                 self.assertEqual(created, [True])
@@ -221,9 +207,7 @@ class BackendTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as root:
             ctx = RuntimeContext({}, None, root, time.monotonic, time.sleep)
             ctx.ops = Ops(True)
-            requests = RequestBatch(
-                ctx, dict(count=2, consume="immediate", input_len=10, output_len=2)
-            )
+            requests = RequestBatch(ctx, dict(count=2, consume="immediate", input_len=10, output_len=2))
             requests.cancel("already stopped")
             with self.assertRaisesRegex(RuntimeError, "cancelled before Schedule"):
                 requests.submit(Deadline(time.monotonic() + 2))
@@ -233,19 +217,14 @@ class BackendTest(unittest.TestCase):
     def test_deferred_has_zero_fetch_until_wait_and_business_completion(self):
         requests, ctx = self.run_batch("deferred")
         self.assertEqual(ctx.ops.fetch_count, 0)
-        self.assertTrue(
-            all(r["consumer_exit_s"] is None for r in requests.snapshot_records())
-        )
+        self.assertTrue(all(r["consumer_exit_s"] is None for r in requests.snapshot_records()))
         self.assertEqual(
             requests.wait(Deadline(time.monotonic() + 1)),
             dict(completed=True, error_count=0),
         )
         self.assertEqual(ctx.ops.fetch_count, 2)
         self.assertTrue(
-            all(
-                r["fetch_invocations"] == 1 and r["business_finished"]
-                for r in requests.snapshot_records()
-            )
+            all(r["fetch_invocations"] == 1 and r["business_finished"] for r in requests.snapshot_records())
         )
         self.assertEqual([r["status"] for r in ctx.cleanup(1)], ["PASS"])
 
@@ -285,9 +264,7 @@ class BackendTest(unittest.TestCase):
             self.assertEqual(ctx.ops.build_generate_input.call_args.kwargs, request[1])
             record = requests.snapshot_records()[0]
             self.assertEqual(record["request_shape"], request[1])
-            self.assertLessEqual(
-                record["stream"]["deadline_s"] - record["stream"]["started_s"], 0.501
-            )
+            self.assertLessEqual(record["stream"]["deadline_s"] - record["stream"]["started_s"], 0.501)
             self.assertEqual(ctx.cleanup(1)[0]["status"], "PASS")
 
     def test_omitted_priority_stays_unset_without_qos_header(self):
@@ -305,18 +282,14 @@ class BackendTest(unittest.TestCase):
             def shape(self):
                 result = super().shape
                 if self.entries:
-                    result["block_keys"] = [
-                        self.entries[-1]["record"]["wire_request_id"] * 100
-                    ]
+                    result["block_keys"] = [self.entries[-1]["record"]["wire_request_id"] * 100]
                 return result
 
         with tempfile.TemporaryDirectory() as root:
             ctx = RuntimeContext({}, None, root, time.monotonic, time.sleep)
             ctx.ops = Ops()
             ctx.instance_deadline_s = time.monotonic() + 2
-            batch = Generated(
-                ctx, dict(count=1, input_len=10, output_len=2, consume="immediate")
-            )
+            batch = Generated(ctx, dict(count=1, input_len=10, output_len=2, consume="immediate"))
             ctx.register_resource("requests", batch, batch.cleanup)
             batch.submit(Deadline(time.monotonic() + 1))
             batch.wait(Deadline(time.monotonic() + 1))
@@ -349,9 +322,7 @@ class BackendTest(unittest.TestCase):
             )
             ctx.register_resource("requests", batch, batch.cleanup)
             batch.submit(Deadline(5, clock, sleep))
-            self.assertEqual(
-                [row["issued_s"] for row in batch.snapshot_records()], [0, 0.12, 0.24]
-            )
+            self.assertEqual([row["issued_s"] for row in batch.snapshot_records()], [0, 0.12, 0.24])
             self.assertAlmostEqual(now[0], 0.36)
             self.assertEqual(ctx.ops.fetch_count, 0)
             self.assertTrue(batch.wait(Deadline(5, clock, sleep))["completed"])
@@ -364,18 +335,14 @@ class BackendTest(unittest.TestCase):
         self.assertEqual([r["status"] for r in ctx.cleanup(1)], ["PASS"])
         self.assertTrue(all(s.cancelled.is_set() for s in ctx.ops.streams))
         self.assertFalse(any(e["thread"].is_alive() for e in requests.entries))
-        self.assertTrue(
-            all(not r["business_finished"] for r in requests.snapshot_records())
-        )
+        self.assertTrue(all(not r["business_finished"] for r in requests.snapshot_records()))
 
     def test_partial_submission_resources_registered_before_failure(self):
         with tempfile.TemporaryDirectory() as tmp:
             ctx = RuntimeContext({}, None, tmp, time.monotonic, time.sleep)
             ctx.ops = Ops(batch=False)
             ctx.instance_deadline_s = time.monotonic() + 2
-            requests = RequestBatch(
-                ctx, dict(count=1, input_len=10, output_len=2, consume="deferred")
-            )
+            requests = RequestBatch(ctx, dict(count=1, input_len=10, output_len=2, consume="deferred"))
             ctx.register_resource("requests", requests, requests.cleanup)
             with self.assertRaisesRegex(RuntimeError, "not enqueued"):
                 requests.submit(Deadline(time.monotonic() + 1))
@@ -402,9 +369,7 @@ class BackendTest(unittest.TestCase):
 
     def test_dynamic_allocation_counts_failed_attempts_and_rejects_explicit(self):
         raw = NS(add_engine=Mock(return_value=(503, {})))
-        ops = BoundedOps(
-            raw, dict(initial_workers=4, max_dynamic_additions=1), lease_manifest()
-        )
+        ops = BoundedOps(raw, dict(initial_workers=4, max_dynamic_additions=1), lease_manifest())
         with self.assertRaises(ValueError):
             ops.add_engine("prefill", port=55010)
         self.assertEqual(ops.add_engine("prefill")[0], 503)
@@ -426,10 +391,7 @@ class BackendTest(unittest.TestCase):
             ready.sleep(0.001)
         for stream in ctx.ops.streams:
             stream.cancel = Mock(return_value=True)  # acknowledged, still blocked
-        patches = [
-            patch.object(e["thread"], "is_alive", return_value=False)
-            for e in requests.entries
-        ]
+        patches = [patch.object(e["thread"], "is_alive", return_value=False) for e in requests.entries]
         for p in patches:
             p.start()
         try:

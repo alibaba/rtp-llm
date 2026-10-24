@@ -1,87 +1,118 @@
 """Request-cohort projections published by the performance case."""
 
 from analysis.request_metrics import RequestLedger, describe_calculation
-from cases.master_performance.analysis import analyze, engine_tps_checks
-from monitoring.contracts import implementation_measurement
 from implementation_identity import implementation_identity
+from monitoring.contracts import implementation_measurement
 from monitoring.metric_store import series_row
 
+from cases.master_performance.analysis import analyze, engine_tps_checks
 
 GATE_POPULATIONS = {
-    'arrival_cohort': frozenset({'cohort_requests', 'slo_fraction', 'goodput_rps',
-        'offered_qps_deviation', 'pacing_lag_max_ms'}),
-    'whole_run_terminals': frozenset({'error_rate'}),
-    'completion_window_successes': frozenset({'input_tps', 'output_tps'}),
-    'arrival_cohort_successes': frozenset({'ttft_p99_ms', 'e2e_p99_ms', 'tpot_p99_ms'}),
-    'full_request_lifetimes': frozenset({'inflight_growth_rps'}),
+    "arrival_cohort": frozenset(
+        {"cohort_requests", "slo_fraction", "goodput_rps", "offered_qps_deviation", "pacing_lag_max_ms"}
+    ),
+    "whole_run_terminals": frozenset({"error_rate"}),
+    "completion_window_successes": frozenset({"input_tps", "output_tps"}),
+    "arrival_cohort_successes": frozenset({"ttft_p99_ms", "e2e_p99_ms", "tpot_p99_ms"}),
+    "full_request_lifetimes": frozenset({"inflight_growth_rps"}),
 }
-ENGINE_METRICS = frozenset({'rtp_llm_context_tps', 'rtp_llm_context_tps_with_cache', 'mock_decode_wall_tps'})
+ENGINE_METRICS = frozenset({"rtp_llm_context_tps", "rtp_llm_context_tps_with_cache", "mock_decode_wall_tps"})
 
 
 def metric_contract(producer, identity, calculation):
-    if producer != 'performance_requests':
-        raise ValueError('unsupported performance metric producer')
-    if identity.startswith('request/'):
+    if producer != "performance_requests":
+        raise ValueError("unsupported performance metric producer")
+    if identity.startswith("request/"):
         if calculation is None:
-            raise ValueError('request metric requires executable calculation: ' + identity)
-        return describe_calculation(calculation, windows={'measurement', 'traffic'})
+            raise ValueError("request metric requires executable calculation: " + identity)
+        return describe_calculation(calculation, windows={"measurement", "traffic"})
     if calculation is not None:
-        raise ValueError('performance gate owns its frozen calculation')
-    key = identity.removeprefix('performance_gate/')
-    if not identity.startswith('performance_gate/'):
-        raise ValueError('unknown performance metric: ' + identity)
-    engine_keys = {name + suffix for name in ENGINE_METRICS for suffix in ('_scrape_engine_mean', '_engine_count')}
+        raise ValueError("performance gate owns its frozen calculation")
+    key = identity.removeprefix("performance_gate/")
+    if not identity.startswith("performance_gate/"):
+        raise ValueError("unknown performance metric: " + identity)
+    engine_keys = {name + suffix for name in ENGINE_METRICS for suffix in ("_scrape_engine_mean", "_engine_count")}
     if key in engine_keys:
-        return dict(source_type='prometheus', implementation=implementation_identity(engine_tps_checks), measurement=implementation_measurement(
-            engine_tps_checks, population='measurement_window_engine_incarnations',
-            accuracy='sampled', request_identity=False))
+        return dict(
+            source_type="prometheus",
+            implementation=implementation_identity(engine_tps_checks),
+            measurement=implementation_measurement(
+                engine_tps_checks,
+                population="measurement_window_engine_incarnations",
+                accuracy="sampled",
+                request_identity=False,
+            ),
+        )
     for population, keys in GATE_POPULATIONS.items():
         if key in keys:
-            return dict(source_type='client_journal', implementation=implementation_identity(analyze), measurement=implementation_measurement(
-                analyze, population=population, accuracy='request_ledger', request_identity=True))
-    raise ValueError('unknown performance metric: ' + identity)
+            return dict(
+                source_type="client_journal",
+                implementation=implementation_identity(analyze),
+                measurement=implementation_measurement(
+                    analyze, population=population, accuracy="request_ledger", request_identity=True
+                ),
+            )
+    raise ValueError("unknown performance metric: " + identity)
 
 
 def values(evidence, definitions=None):
     if definitions is None:
-        from monitoring.query_plan import definitions as expand, load_plan
-        definitions = expand(load_plan('master_performance.yaml'))
-    ledger = RequestLedger(evidence['flow']['records'])
-    window = evidence['window']
-    windows = {'measurement': (window['start_epoch_ms'], window['end_epoch_ms'])}
-    if any(spec.get('calculation', {}).get('window') == 'traffic' for spec in definitions.values()):
+        from monitoring.query_plan import definitions as expand
+        from monitoring.query_plan import load_plan
+
+        definitions = expand(load_plan("master_performance.yaml"))
+    ledger = RequestLedger(evidence["flow"]["records"])
+    window = evidence["window"]
+    windows = {"measurement": (window["start_epoch_ms"], window["end_epoch_ms"])}
+    if any(spec.get("calculation", {}).get("window") == "traffic" for spec in definitions.values()):
         # Display includes warmup and drain; gate calculations retain measurement.
-        starts = [row['send_start_epoch_ms'] for row in evidence['flow'].get('issued', [])]
+        starts = [row["send_start_epoch_ms"] for row in evidence["flow"].get("issued", [])]
         starts.extend(ledger.sends)
         if not starts:
-            raise ValueError('traffic display window requires issued request evidence')
+            raise ValueError("traffic display window requires issued request evidence")
         finishes = [ledger.completion(row) for row in ledger.records]
-        windows['traffic'] = (min(starts), max([max(starts) + 1, *finishes]))
-    return {identity: ledger.series(spec['calculation'], windows)
-            for identity, spec in definitions.items() if spec.get('producer') == 'performance_requests'
-            and 'calculation' in spec}
+        windows["traffic"] = (min(starts), max([max(starts) + 1, *finishes]))
+    return {
+        identity: ledger.series(spec["calculation"], windows)
+        for identity, spec in definitions.items()
+        if spec.get("producer") == "performance_requests" and "calculation" in spec
+    }
 
 
 def produce(directory, evidence, result):
+    from pathlib import Path
+
+    from monitoring.archive import export_metrics
     from monitoring.contracts import MetricContractError
     from monitoring.metric_store import MetricStore
     from monitoring.publication import publish
-    from monitoring.archive import export_metrics
-    from pathlib import Path
+
     if not (Path(directory) / "metrics.json").is_file():
         export_metrics(directory)
     store = MetricStore.read(directory)
     epoch = evidence["provenance"]["env_epoch"]
-    request_values = ({identity: [] for identity, spec in store.document['definitions'].items()
-                       if spec.get('producer') == 'performance_requests' and 'calculation' in spec}
-                      if result['verdict'] == 'INVALID' and not result['metrics'] and not result['windows']
-                      else values(evidence, store.document['definitions']))
+    request_values = (
+        {
+            identity: []
+            for identity, spec in store.document["definitions"].items()
+            if spec.get("producer") == "performance_requests" and "calculation" in spec
+        }
+        if result["verdict"] == "INVALID" and not result["metrics"] and not result["windows"]
+        else values(evidence, store.document["definitions"])
+    )
     for identity, points in request_values.items():
-        publish(store, identity, store.document["definitions"][identity],
-                [series_row(points, epoch=epoch, source="client", labels={})],
-                producer="performance_requests", evidence=dict(
-                    path=str(directory) + "/performance-gate-evidence.json",
-                    window=evidence.get("window"), calculation=store.document["definitions"][identity]["calculation"]))
+        publish(
+            store,
+            identity,
+            store.document["definitions"][identity],
+            [series_row(points, epoch=epoch, source="client", labels={})],
+            producer="performance_requests",
+            evidence=dict(
+                path=str(directory) + "/performance-gate-evidence.json",
+                window=evidence.get("window"),
+                calculation=store.document["definitions"][identity]["calculation"],
+            ),
+        )
 
     # Analysis retains its explanatory intermediates; publish only declared
     # scalar measurements. Missing declared results are contract errors.
@@ -104,22 +135,36 @@ def produce(directory, evidence, result):
                 value = None
             else:
                 raise MetricContractError("missing declared performance result: " + identity)
-            publish(store, identity, definition,
-                    [series_row([[evidence["window"]["end_epoch_ms"]/1000, value]],
-                                epoch=epoch, source="performance_gate", labels={})],
-                    producer="performance_requests", evidence=dict(
-                        path=str(directory) + "/performance-gate-evidence.json",
-                        window=evidence["window"], measurement_validity="INVALID" if result["verdict"] == "INVALID" else "VALID",
-                        algorithm="absolute_performance_gate"))
+            publish(
+                store,
+                identity,
+                definition,
+                [
+                    series_row(
+                        [[evidence["window"]["end_epoch_ms"] / 1000, value]],
+                        epoch=epoch,
+                        source="performance_gate",
+                        labels={},
+                    )
+                ],
+                producer="performance_requests",
+                evidence=dict(
+                    path=str(directory) + "/performance-gate-evidence.json",
+                    window=evidence["window"],
+                    measurement_validity="INVALID" if result["verdict"] == "INVALID" else "VALID",
+                    algorithm="absolute_performance_gate",
+                ),
+            )
     store.save(directory)
 
 
-CONTRACTS = {'performance_requests': metric_contract}
+CONTRACTS = {"performance_requests": metric_contract}
 
 
 def project(directory, selected, deadline):
     from artifacts.gate import project_gate
-    if 'performance_requests' in selected:
+
+    if "performance_requests" in selected:
         deadline.check()
-        project_gate(directory, 'performance', produce)
+        project_gate(directory, "performance", produce)
         deadline.check()

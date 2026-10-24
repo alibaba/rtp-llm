@@ -37,20 +37,24 @@ if __name__ == "__main__":
 
 def test_policy_hook_cannot_consume_budget_and_still_start_operation(tmp_path):
     from types import SimpleNamespace
+
     from program_fixtures import compile_scenarios
-    from scenario.plan import CompiledInstance
     from scenario.context import RuntimeContext
+    from scenario.plan import CompiledInstance
     from scenario.stage_execution import StageExecutor
-    from test_scenario_runtime import source, Clock, Backend
+    from test_scenario_runtime import Backend, Clock, source
+
     clock = Clock()
     backend = Backend(clock)
     doc = source()
     compiled = compile_scenarios([(str(tmp_path / "case.yaml"), doc)])[0]
     ctx = RuntimeContext(compiled, backend, tmp_path, clock, clock.sleep, False)
     ctx.plan = CompiledInstance.read(compiled)
-    policy = SimpleNamespace(attach=lambda ctx: None,
+    policy = SimpleNamespace(
+        attach=lambda ctx: None,
         before_stage=lambda ctx, spec: clock.sleep(100000),
-        after_stage=lambda ctx, spec, row: None)
+        after_stage=lambda ctx, spec, row: None,
+    )
     summary = StageExecutor().run(ctx, {}, clock(), clock() + 1000, None, policy)
     assert summary.status == "TIMEOUT"
     assert not backend.calls

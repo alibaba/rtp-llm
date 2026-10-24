@@ -5,7 +5,6 @@ or PATH); evidence-only plans do not launch it. Each environment has an isolated
 Live adapters read the TSDB, never the exporter. Query results carry their
 PromQL, evaluation bounds and source; absent/stale data is never replaced by 0.
 """
-from file_io import read_json
 
 import json
 import math
@@ -19,15 +18,16 @@ import urllib.request
 import uuid
 from pathlib import Path
 
-from file_io import write_json
-from monitoring.query_plan import DEFAULT_PLAN, load_plan, plan_hash
-from monitoring.client import PrometheusClient
-from monitoring.archive import export_metrics
-from monitoring.recording import ArchiveWindow, record_queries
-from runtime.deadline import Deadline
+from file_io import read_json, write_json
 from runtime.cleanup import cleanup_all
+from runtime.deadline import Deadline
 from runtime.startup import startup_deadline, wait_ready
-from monitoring.collection_plan import scrape_job, collection_plan
+
+from monitoring.archive import export_metrics
+from monitoring.client import PrometheusClient
+from monitoring.collection_plan import collection_plan, scrape_job
+from monitoring.query_plan import DEFAULT_PLAN, load_plan, plan_hash
+from monitoring.recording import ArchiveWindow, record_queries
 
 
 def _available_port():
@@ -37,9 +37,17 @@ def _available_port():
 
 
 class PrometheusSession:
-    def __init__(self, directory, targets, interval_s=1, max_gap_s=5, binary=None,
-                 query_plan=DEFAULT_PLAN, target_kinds=None, metric_plan=None):
-
+    def __init__(
+        self,
+        directory,
+        targets,
+        interval_s=1,
+        max_gap_s=5,
+        binary=None,
+        query_plan=DEFAULT_PLAN,
+        target_kinds=None,
+        metric_plan=None,
+    ):
         self.directory = Path(directory).resolve()
         self.query_plan_name = query_plan
         self.query_plan = metric_plan if metric_plan is not None else load_plan(query_plan)
@@ -51,18 +59,14 @@ class PrometheusSession:
         self.collection_plan = collection_plan(self.query_plan)
         self.query_plan_sha256 = plan_hash(self.query_plan)
         self.interval, self.max_gap = float(interval_s), float(max_gap_s)
-        if (
-            not math.isfinite(self.max_gap)
-            or not 0.001 <= self.interval <= self.max_gap
-        ):
+        if not math.isfinite(self.max_gap) or not 0.001 <= self.interval <= self.max_gap:
             raise ValueError("invalid Prometheus targets or sampling budget")
-        self.binary = (
-            binary or os.environ.get("PROMETHEUS_BIN") or shutil.which("prometheus")
-        )
+        self.binary = binary or os.environ.get("PROMETHEUS_BIN") or shutil.which("prometheus")
         self.process = None
         self.started = self.monotonic = None
-        self.client = PrometheusClient(None, query_plan=self.query_plan,
-                                       target_kinds=self.target_kinds, max_gap_s=self.max_gap)
+        self.client = PrometheusClient(
+            None, query_plan=self.query_plan, target_kinds=self.target_kinds, max_gap_s=self.max_gap
+        )
         self.log = None
         self.target_bounds = {}
         self.closed = False
@@ -97,7 +101,7 @@ class PrometheusSession:
             write_json(path, config)
             reload_attempted = True
             self._reload(deadline)
-            self._wait_targets(selected, deadline, 'client metrics')
+            self._wait_targets(selected, deadline, "client metrics")
         except BaseException:
             # Preserve shared inventory objects used by the query client.
             self.targets.clear()
@@ -132,26 +136,41 @@ class PrometheusSession:
         self.probes[probe.job] = probe
         path = self.directory / "prometheus.json"
         config = read_json(path)
-        config["scrape_configs"].append(dict(job_name=probe.job, scheme=parsed.scheme, metrics_path=parsed.path or "/metrics", sample_limit=100000,
-            body_size_limit="32MB", static_configs=[dict(targets=[parsed.netloc])],
-            metric_relabel_configs=[dict(source_labels=["__name__"], action="keep",
-                regex="(" + "|".join(probe.names.values()) + ")")]))
+        config["scrape_configs"].append(
+            dict(
+                job_name=probe.job,
+                scheme=parsed.scheme,
+                metrics_path=parsed.path or "/metrics",
+                sample_limit=100000,
+                body_size_limit="32MB",
+                static_configs=[dict(targets=[parsed.netloc])],
+                metric_relabel_configs=[
+                    dict(source_labels=["__name__"], action="keep", regex="(" + "|".join(probe.names.values()) + ")")
+                ],
+            )
+        )
         write_json(path, config)
-        with urllib.request.urlopen(urllib.request.Request(self.client.url + "/-/reload", data=b"", method="POST"), timeout=min(5, deadline.remaining())):
+        with urllib.request.urlopen(
+            urllib.request.Request(self.client.url + "/-/reload", data=b"", method="POST"),
+            timeout=min(5, deadline.remaining()),
+        ):
             pass
         self._write_session()
+
         def ready():
             if probe.error is not None:
-                raise RuntimeError('probe startup failed: ' + str(probe.error)) from probe.error
-            health = self.client.query('up{job=' + json.dumps(probe.job) + '}', timeout=min(5, deadline.remaining()))
-            return len(health) == 1 and float(health[0]['value'][1]) == 1
-        wait_ready(deadline, 'probe/first scrape', ready, interval_s=0.05)
+                raise RuntimeError("probe startup failed: " + str(probe.error)) from probe.error
+            health = self.client.query("up{job=" + json.dumps(probe.job) + "}", timeout=min(5, deadline.remaining()))
+            return len(health) == 1 and float(health[0]["value"][1]) == 1
+
+        wait_ready(deadline, "probe/first scrape", ready, interval_s=0.05)
 
     def end_target(self, name, ended=None):
         self.target_bounds[name][1] = ended or time.time()
 
     def _wait_targets(self, targets, deadline, phase):
         deadline = startup_deadline(deadline, 15)
+
         def ready():
             try:
                 for name in targets:
@@ -161,6 +180,7 @@ class PrometheusSession:
                 raise
             except (OSError, RuntimeError):
                 return False
+
         wait_ready(deadline, phase, ready, interval_s=0.1)
 
     def start(self, *, deadline=None):
@@ -174,14 +194,13 @@ class PrometheusSession:
             self._write_session()
             return self
         if not self.binary:
-            raise RuntimeError(
-                "Prometheus is required; install it or set PROMETHEUS_BIN (no collector fallback)"
-            )
+            raise RuntimeError("Prometheus is required; install it or set PROMETHEUS_BIN (no collector fallback)")
         self.directory.mkdir(parents=True, exist_ok=True)
         if (self.directory / "data").exists():
             raise ValueError("Prometheus directory must be fresh")
-        jobs = [scrape_job(self.query_plan, name, url, self.client.target_kind(name))
-                for name, url in self.targets.items()]
+        jobs = [
+            scrape_job(self.query_plan, name, url, self.client.target_kind(name)) for name, url in self.targets.items()
+        ]
         config = {
             "global": {
                 "scrape_interval": f"{round(self.interval * 1000)}ms",
@@ -194,6 +213,7 @@ class PrometheusSession:
         self.log = (self.directory / "prometheus.log").open("w")
         prefix = "/" + uuid.uuid4().hex
         attempts, log_offset = 0, 0
+
         def launch():
             nonlocal attempts, log_offset
             deadline.check()
@@ -215,27 +235,30 @@ class PrometheusSession:
                 stdout=self.log,
                 stderr=subprocess.STDOUT,
             )
+
         try:
             deadline = startup_deadline(deadline, 30)
             launch()
+
             def retry_bind_collision():
                 if self.process.poll() is None or attempts >= 3:
                     return False
-                with (self.directory / 'prometheus.log').open('rb') as stream:
+                with (self.directory / "prometheus.log").open("rb") as stream:
                     stream.seek(log_offset)
                     failed_log = stream.read(65536).lower()
-                if b'address already in use' not in failed_log:
+                if b"address already in use" not in failed_log:
                     return False
                 self.process.wait(timeout=deadline.remaining())
                 launch()
                 return True
+
             def ready():
                 if self.process.poll() is not None:
                     if retry_bind_collision():
                         return False
-                    raise RuntimeError('Prometheus exited; inspect ' + str(self.directory / 'prometheus.log'))
+                    raise RuntimeError("Prometheus exited; inspect " + str(self.directory / "prometheus.log"))
                 try:
-                    with urllib.request.urlopen(self.client.url + '/-/ready', timeout=min(1, deadline.remaining())):
+                    with urllib.request.urlopen(self.client.url + "/-/ready", timeout=min(1, deadline.remaining())):
                         return True
                 except TimeoutError:
                     if retry_bind_collision():
@@ -243,8 +266,9 @@ class PrometheusSession:
                     raise
                 except OSError:
                     return False
-            wait_ready(deadline, 'prometheus/http', ready, interval_s=0.05)
-            self._wait_targets(self.targets, deadline, 'prometheus/first scrape')
+
+            wait_ready(deadline, "prometheus/http", ready, interval_s=0.05)
+            self._wait_targets(self.targets, deadline, "prometheus/first scrape")
             self.started, self.monotonic = time.time(), time.monotonic()
             self._write_session()
         except BaseException:
@@ -253,21 +277,41 @@ class PrometheusSession:
         return self
 
     def _write_session(self):
-        (self.directory / "session.json").write_text(json.dumps(dict(
-            backend="prometheus", url=self.client.url, targets=self.targets,
-            collection_plan=self.collection_plan,
-            evidence_targets={name: dict(source=probe.source, fields=probe.fields, url=probe.url, path=str(probe.path))
-                              for name, probe in self.probes.items()}, started_epoch_s=self.started,
-            interval_s=self.interval, retention_time="24h", retention_size="1GB"), indent=2))
+        (self.directory / "session.json").write_text(
+            json.dumps(
+                dict(
+                    backend="prometheus",
+                    url=self.client.url,
+                    targets=self.targets,
+                    collection_plan=self.collection_plan,
+                    evidence_targets={
+                        name: dict(source=probe.source, fields=probe.fields, url=probe.url, path=str(probe.path))
+                        for name, probe in self.probes.items()
+                    },
+                    started_epoch_s=self.started,
+                    interval_s=self.interval,
+                    retention_time="24h",
+                    retention_size="1GB",
+                ),
+                indent=2,
+            )
+        )
 
     def archive(self, *, materialize=True, deadline=None):
-        window = ArchiveWindow(self.directory, self.query_plan_name, self.collection_plan,
-                               self.started, self.interval, dict(self.targets),
-                               {name: list(bounds) for name, bounds in self.target_bounds.items()})
+        window = ArchiveWindow(
+            self.directory,
+            self.query_plan_name,
+            self.collection_plan,
+            self.started,
+            self.interval,
+            dict(self.targets),
+            {name: list(bounds) for name, bounds in self.target_bounds.items()},
+        )
         result = record_queries(window, self.client, deadline=deadline)
         if self.registration_error is not None:
-            result["errors"].append(dict(error="monitor target registration rollback failed: "
-                                               + str(self.registration_error)))
+            result["errors"].append(
+                dict(error="monitor target registration rollback failed: " + str(self.registration_error))
+            )
             write_json(self.directory / "queries.json", result)
         if materialize:
             if deadline is not None:
@@ -281,8 +325,7 @@ class PrometheusSession:
                 deadline.check()
             raise RuntimeError("incomplete Prometheus archive")
 
-    def stop(self, timeout=10, export=True, *, materialize=True,
-             archive_timeout=None, deadline=None):
+    def stop(self, timeout=10, export=True, *, materialize=True, archive_timeout=None, deadline=None):
         # The enclosing cleanup budget bounds the whole operation. Query export
         # cannot spend the time reserved for terminating and reaping Prometheus.
         archive_timeout = timeout if archive_timeout is None else archive_timeout
@@ -292,16 +335,28 @@ class PrometheusSession:
             expires = clock() + max(0, seconds)
             if deadline is not None:
                 expires = min(expires, deadline.expires_at - reserve)
-            return Deadline(expires, clock=clock,
-                            cancelled=deadline.cancelled if deadline is not None else None)
+            return Deadline(expires, clock=clock, cancelled=deadline.cancelled if deadline is not None else None)
 
         probe_deadline = bounded(timeout)
-        operations = [(name, lambda probe=probe: probe.stop(deadline=probe_deadline))
-                      for name, probe in self.probes.items()]
-        if not self.closed and export and (self.process is not None and self.process.poll() is None
-                or self.started is not None and not any(self.query_plan["sources"].values())):
-            operations.append(("Prometheus archive", lambda: self.archive(
-                materialize=materialize, deadline=bounded(archive_timeout, reserve=timeout))))
+        operations = [
+            (name, lambda probe=probe: probe.stop(deadline=probe_deadline)) for name, probe in self.probes.items()
+        ]
+        if (
+            not self.closed
+            and export
+            and (
+                self.process is not None
+                and self.process.poll() is None
+                or self.started is not None
+                and not any(self.query_plan["sources"].values())
+            )
+        ):
+            operations.append(
+                (
+                    "Prometheus archive",
+                    lambda: self.archive(materialize=materialize, deadline=bounded(archive_timeout, reserve=timeout)),
+                )
+            )
         # Construct this deadline when shutdown starts, after archive succeeds
         # or fails, so query time never consumes the process shutdown allowance.
         operations.append(("Prometheus process", lambda: self._stop_process(bounded(timeout))))

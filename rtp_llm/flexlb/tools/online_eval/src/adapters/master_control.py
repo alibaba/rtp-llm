@@ -17,9 +17,7 @@ def require_process(ctx, target):
         proc = ctx.env.master
     else:
         if set(getattr(ctx.env, "master_specs", {})) != {"A", "B"}:
-            raise ValueError(
-                "A/B target requires an actual dual-master environment"
-            )
+            raise ValueError("A/B target requires an actual dual-master environment")
         proc = ctx.env.masters.get(target)
     if proc is None or not proc.alive():
         raise RuntimeError(f"owned master {target} is not running")
@@ -28,20 +26,14 @@ def require_process(ctx, target):
 
 def master_json(ctx, target, path, deadline, post=False):
     require_process(ctx, target)
-    port = (
-        ctx.env.master_http_port
-        if target == "single"
-        else ctx.env.master_specs[target].http_port
-    )
+    port = ctx.env.master_http_port if target == "single" else ctx.env.master_specs[target].http_port
     host = "127.0.0.1" if target == "single" else ctx.env.master_specs[target].bind_ip
     request = urllib.request.Request(
         f"http://{host}:{port}{path}",
         data=b"{}" if post else None,
         headers={"Content-Type": "application/json"},
     )
-    with urllib.request.urlopen(
-        request, timeout=min(5, deadline.remaining())
-    ) as response:
+    with urllib.request.urlopen(request, timeout=min(5, deadline.remaining())) as response:
         data = json.load(response)
     if not isinstance(data, dict):
         raise ValueError("master response is not a JSON object")

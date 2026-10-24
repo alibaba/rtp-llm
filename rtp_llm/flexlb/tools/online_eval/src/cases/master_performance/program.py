@@ -1,40 +1,44 @@
 """Single-run absolute gate; profiles are separate runs, never an A/B dependency."""
 
-from cases.master_performance.report import validate_view, write_report
-
-from cases.master_performance.actions import HANDLERS as ACTION_HANDLERS
-
-from scenario.builder import output
-from cases.master_performance.inputs import INPUTS
 from adapters.client_configuration import ClientConfiguration
-from cases.master_performance.inputs import CRITERIA, SLO_INPUTS, compile_checks, observation_contract
-from traffic.contracts import driver, uniform_gate_flow
+from cases.master_performance.actions import HANDLERS as ACTION_HANDLERS
+from cases.master_performance.inputs import CRITERIA, INPUTS, SLO_INPUTS, compile_checks, observation_contract
+from cases.master_performance.report import validate_view, write_report
+from scenario.builder import output
 from scenario.metric_inputs import bind_mock_engine_metrics
+from traffic.contracts import driver, uniform_gate_flow
 
 
 def default(case):
     data = case.config
     from input_contract import finite_number
-    analysis_timeout = data['procedure']["analysis_timeout_s"]
+
+    analysis_timeout = data["procedure"]["analysis_timeout_s"]
     if not finite_number(analysis_timeout) or analysis_timeout <= 0:
         raise ValueError("analysis_timeout_s must be finite and positive")
-    inputs = data['observation']["inputs"]
+    inputs = data["observation"]["inputs"]
     if not isinstance(inputs, dict) or set(inputs) != {"engine_tps"}:
         raise ValueError("performance gate requires engine_tps input")
-    flow = driver(data['traffic'], "java_flow")
+    flow = driver(data["traffic"], "java_flow")
     client = ClientConfiguration.read(flow["client"])
     from scenario.inputs import fields
-    slo = fields(data['analysis']["slo"], SLO_INPUTS, "parameters.analysis.slo")
-    c = CRITERIA.project(observation=data['observation'],
-                         windows=observation_contract(data['observation']),
-                         checks=compile_checks(case, data['checks'], inputs["engine_tps"]),
-                         slo={"slo_" + key: value for key, value in slo.items()},
-                         runtime={"qps": client.playback.qps})
+
+    slo = fields(data["analysis"]["slo"], SLO_INPUTS, "parameters.analysis.slo")
+    c = CRITERIA.project(
+        observation=data["observation"],
+        windows=observation_contract(data["observation"]),
+        checks=compile_checks(case, data["checks"], inputs["engine_tps"]),
+        slo={"slo_" + key: value for key, value in slo.items()},
+        runtime={"qps": client.playback.qps},
+    )
     allowed = c["qps"] * (1 + c["qps_tolerance"])
     if c["min_requests"] > allowed * c["measure_s"] or c["min_goodput_rps"] > allowed:
-        raise ValueError("request/goodput floors exceed the declared offered-load envelope; review thresholds after changing playback.qps")
-    bind_mock_engine_metrics(case, inputs["engine_tps"],
-        {field: "tokens/s" for field in inputs["engine_tps"]["fields"]})
+        raise ValueError(
+            "request/goodput floors exceed the declared offered-load envelope; review thresholds after changing playback.qps"
+        )
+    bind_mock_engine_metrics(
+        case, inputs["engine_tps"], {field: "tokens/s" for field in inputs["engine_tps"]["fields"]}
+    )
     budget = c["warmup_s"] + c["measure_s"]
     uniform_gate_flow(flow, client, duration_s=budget + 10, trace_duration_s=client.playback.duration_s)
     case.step("setup", "setup", timeout_s=180)
@@ -42,42 +46,45 @@ def default(case):
     case.step(
         "measure",
         "performance_observe",
-        params=dict(flow=output("traffic", "flow"), criteria=c, gate_input=inputs["engine_tps"],
-                    observation=data['observation']),
+        params=dict(
+            flow=output("traffic", "flow"), criteria=c, gate_input=inputs["engine_tps"], observation=data["observation"]
+        ),
         timeout_s=budget + 30,
     )
     case.step("stop", "java_flow_stop", params={"flow": output("traffic", "flow")})
-    case.step("drain", "java_flow_drain", params={"flow": output("traffic", "flow")},
-              timeout_s=client.limits.drain_timeout_s + 30)
+    case.step(
+        "drain",
+        "java_flow_drain",
+        params={"flow": output("traffic", "flow")},
+        timeout_s=client.limits.drain_timeout_s + 30,
+    )
     case.observe(
         "gate",
         "performance_finish",
-        params=dict(
-            flow=output("traffic", "flow"), evidence=output("measure", "evidence")
-        ),
+        params=dict(flow=output("traffic", "flow"), evidence=output("measure", "evidence")),
         timeout_s=analysis_timeout,
     )
     case.step("teardown", "teardown")
 
 
-
 from functools import partial
-from artifacts.gate import render_gate
-from scenario.registry import ReportView
-from cases.master_performance import metrics
 
-render = partial(render_gate, name='performance', write_report=write_report)
+from artifacts.gate import render_gate
+from cases.master_performance import metrics
+from scenario.registry import ReportView
+
+render = partial(render_gate, name="performance", write_report=write_report)
 VIEW = ReportView(validate_view, render, frozenset())
 
 
-from scenario.registry import CaseDefinition
-
 from scenario.contracts import ExecutionRequirements
+from scenario.registry import CaseDefinition
 
 CASE = CaseDefinition(
     execution_requirements=ExecutionRequirements(request_evidence=True, monitoring=True),
     builders={"default": default},
     input_schema=INPUTS,
-    metrics=metrics, report_views={'master_performance.yaml': VIEW},
+    metrics=metrics,
+    report_views={"master_performance.yaml": VIEW},
     actions=tuple(ACTION_HANDLERS),
 )

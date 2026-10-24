@@ -2,12 +2,19 @@
 
 import time
 from pathlib import Path
+
 from scenario.resources import ResourceScope
 
 
 class RuntimeContext(ResourceScope):
     def __init__(
-        self, instance, backend, artifact_dir, clock, sleeper, enforce_deadlines=False,
+        self,
+        instance,
+        backend,
+        artifact_dir,
+        clock,
+        sleeper,
+        enforce_deadlines=False,
         wall_clock=None,
     ):
         self.instance = instance
@@ -17,6 +24,7 @@ class RuntimeContext(ResourceScope):
         super().__init__(clock, sleeper, enforce_deadlines)
         self.env = self.ops = self.monitor = None
         from scenario.capabilities import RuntimeCapabilities
+
         self.services = RuntimeCapabilities(self)
         self.outputs = {}
         self.report_events = []
@@ -24,6 +32,7 @@ class RuntimeContext(ResourceScope):
     @property
     def environment_plan(self):
         from scenario.plan import EnvironmentPlan
+
         if hasattr(self, "plan"):
             return self.plan.environment
         return EnvironmentPlan.read(self.instance["environment"])
@@ -31,14 +40,16 @@ class RuntimeContext(ResourceScope):
     def record_event(self, identity, *, timestamp=None):
         """Record the actual case event time; presentation names belong to views."""
         import re
+
         if type(identity) is not str or not re.fullmatch(r"[a-z][a-z0-9_]*", identity):
             raise ValueError("invalid case event identity")
         if timestamp is None:
             timestamp = dict(epoch_s=self.wall_clock(), monotonic_s=self.clock())
         import math
-        if (set(timestamp) != {"epoch_s", "monotonic_s"}
-                or any(type(value) not in (int, float) or not math.isfinite(value)
-                       for value in timestamp.values())):
+
+        if set(timestamp) != {"epoch_s", "monotonic_s"} or any(
+            type(value) not in (int, float) or not math.isfinite(value) for value in timestamp.values()
+        ):
             raise ValueError("event requires finite epoch_s and monotonic_s")
         event = dict(id=identity, **timestamp)
         self.report_events.append(event)
@@ -47,6 +58,7 @@ class RuntimeContext(ResourceScope):
     def start_observation(self):
         """Record the execution event before handing its anchor to the clock."""
         from runtime.observation import ObservationClock
+
         event = self.record_event("observation_start")
         return ObservationClock(event["epoch_s"], event["monotonic_s"])
 

@@ -3,15 +3,14 @@
 import re
 from pathlib import Path
 
+from document_io import DocumentError as ScenarioError
+from document_io import load_document
 from schema_contract import matches_schema
 
-from document_io import DocumentError as ScenarioError, load_document
-
-
-from monitoring.identity import NAME, METRIC_ID, SOURCE_KINDS
 from monitoring.contracts import validate_measurement
-from monitoring.sources import selected_sources
+from monitoring.identity import METRIC_ID, NAME, SOURCE_KINDS
 from monitoring.measurement_contract import output_contract
+from monitoring.sources import selected_sources
 
 CATALOG = Path(__file__).resolve().parents[2] / "config/monitoring"
 DEFAULT_PLAN = "default.yaml"
@@ -29,13 +28,13 @@ def load_plan(name, _stack=()):
         raise ScenarioError("metric set include cycle: " + " -> ".join((*_stack, name)))
     path = CATALOG / name
     data = load_document(path)
-    if (set(data) - {"metric_plan_schema_version", "sources", "include", "exclude", "produced"}
-            or not matches_schema(data, "metric_plan_schema_version", PLAN_VERSION)):
+    if set(data) - {"metric_plan_schema_version", "sources", "include", "exclude", "produced"} or not matches_schema(
+        data, "metric_plan_schema_version", PLAN_VERSION
+    ):
         raise ScenarioError(f"{path}: invalid query plan header")
     sources = {kind: {} for kind in SOURCE_KINDS}
     produced = {}
-    includes = _unique_strings(data.get("include", []), path,
-                               "include must contain unique metric set filenames")
+    includes = _unique_strings(data.get("include", []), path, "include must contain unique metric set filenames")
     for included in includes:
         plan = load_plan(included, (*_stack, name))
         for kind in SOURCE_KINDS:
@@ -56,8 +55,7 @@ def load_plan(name, _stack=()):
 
 
 def _unique_strings(value, path, message):
-    if (not isinstance(value, list) or any(type(x) is not str for x in value)
-            or len(set(value)) != len(value)):
+    if not isinstance(value, list) or any(type(x) is not str for x in value) or len(set(value)) != len(value):
         raise ScenarioError(f"{path}: {message}")
     return value
 
@@ -84,11 +82,30 @@ def _add_sources(sources, own, path):
 
 
 def _validate_query(spec, kind, metric, path):
-    if not isinstance(spec, dict) or set(spec) - {"promql", "required", "unit", "value_kind", "labels", "mode", "measurement", "exported_metrics"}:
+    if not isinstance(spec, dict) or set(spec) - {
+        "promql",
+        "required",
+        "unit",
+        "value_kind",
+        "labels",
+        "mode",
+        "measurement",
+        "exported_metrics",
+    }:
         raise ScenarioError(f"{path}: invalid query definition {kind}/{metric}")
-    spec = dict(spec, labels=spec.get("labels", []), measurement=spec.get("measurement", dict(
-        method="raw_scrape" if spec.get("mode") == "scrape" else "promql_evaluation",
-        population=kind + "_selector", accuracy="sampled", requires_request_identity=False)))
+    spec = dict(
+        spec,
+        labels=spec.get("labels", []),
+        measurement=spec.get(
+            "measurement",
+            dict(
+                method="raw_scrape" if spec.get("mode") == "scrape" else "promql_evaluation",
+                population=kind + "_selector",
+                accuracy="sampled",
+                requires_request_identity=False,
+            ),
+        ),
+    )
     expression = spec.get("promql")
     if not isinstance(expression, str) or not expression.strip():
         raise ScenarioError(f"{path}: missing PromQL for {kind}/{metric}")
@@ -123,20 +140,26 @@ def _add_produced(produced, own, path):
 def _validate_produced(spec, metric, path):
     if isinstance(spec, dict):
         spec = dict(spec, labels=spec.get("labels", []))
-    if (type(metric) is not str or not METRIC_ID.fullmatch(metric)
-            or not isinstance(spec, dict)
-            or not {"producer", "source_type", "unit", "value_kind", "labels"} <= set(spec)
-            or set(spec) - {"producer", "source_type", "unit", "value_kind", "labels", "calculation"}
-            or spec["source_type"] not in ("prometheus", "debug_api", "client_journal", "process_log")
-            or type(spec["producer"]) is not str or not NAME.fullmatch(spec["producer"])):
+    if (
+        type(metric) is not str
+        or not METRIC_ID.fullmatch(metric)
+        or not isinstance(spec, dict)
+        or not {"producer", "source_type", "unit", "value_kind", "labels"} <= set(spec)
+        or set(spec) - {"producer", "source_type", "unit", "value_kind", "labels", "calculation"}
+        or spec["source_type"] not in ("prometheus", "debug_api", "client_journal", "process_log")
+        or type(spec["producer"]) is not str
+        or not NAME.fullmatch(spec["producer"])
+    ):
         raise ScenarioError(f"{path}: invalid produced metric {metric}")
     _metadata(spec, path)
     try:
         contract = output_contract(metric, spec)
     except ValueError as exc:
         raise ScenarioError(f"{path}: {exc}") from exc
-    return dict(spec, **{key: value for key, value in contract.items()
-                         if key in {"measurement", "collection", "implementation"}})
+    return dict(
+        spec,
+        **{key: value for key, value in contract.items() if key in {"measurement", "collection", "implementation"}},
+    )
 
 
 def _exclude(sources, produced, value, path):
@@ -152,11 +175,14 @@ def _exclude(sources, produced, value, path):
 
 
 def _metadata(spec, path):
-    if (type(spec.get("unit")) is not str or not spec["unit"]
-            or spec.get("value_kind") not in ("gauge", "counter", "scalar")
-            or not isinstance(spec.get("labels"), list)
-            or any(type(x) is not str or not NAME.fullmatch(x) for x in spec["labels"])
-            or len(set(spec["labels"])) != len(spec["labels"])):
+    if (
+        type(spec.get("unit")) is not str
+        or not spec["unit"]
+        or spec.get("value_kind") not in ("gauge", "counter", "scalar")
+        or not isinstance(spec.get("labels"), list)
+        or any(type(x) is not str or not NAME.fullmatch(x) for x in spec["labels"])
+        or len(set(spec["labels"])) != len(spec["labels"])
+    ):
         raise ScenarioError(f"{path}: metric requires unit, value_kind and unique labels")
     if "measurement" in spec:
         try:
@@ -166,13 +192,27 @@ def _metadata(spec, path):
 
 
 def definitions(plan):
-    result = {kind + "/" + metric: dict(spec, source_type="prometheus", source_kind=kind)
-              for kind, queries in plan["sources"].items() for metric, spec in queries.items()}
+    result = {
+        kind + "/" + metric: dict(spec, source_type="prometheus", source_kind=kind)
+        for kind, queries in plan["sources"].items()
+        for metric, spec in queries.items()
+    }
     for kind in SOURCE_KINDS:
-        result[kind + "/up"] = dict(source_type="prometheus", source_kind=kind,
-            promql="up${selector}", required=True, unit="boolean", value_kind="gauge", labels=[],
-            measurement=dict(method="promql_evaluation", population=kind + "_selector",
-                             accuracy="sampled", requires_request_identity=False))
+        result[kind + "/up"] = dict(
+            source_type="prometheus",
+            source_kind=kind,
+            promql="up${selector}",
+            required=True,
+            unit="boolean",
+            value_kind="gauge",
+            labels=[],
+            measurement=dict(
+                method="promql_evaluation",
+                population=kind + "_selector",
+                accuracy="sampled",
+                requires_request_identity=False,
+            ),
+        )
     if set(result) & set(plan["produced"]):
         raise ScenarioError("produced metric conflicts with a Prometheus metric")
     return {**result, **plan["produced"]}
@@ -181,6 +221,7 @@ def definitions(plan):
 def plan_hash(plan):
     import hashlib
     import json
+
     return hashlib.sha256(json.dumps(plan, sort_keys=True, separators=(",", ":"), allow_nan=False).encode()).hexdigest()
 
 
@@ -192,8 +233,11 @@ def validate_export_filter(plan, environment):
     validation still responsible for proving actual metric availability.
     """
     filters = [environment.get("metric_whitelist")]
-    filters.extend(patch.get("metric_whitelist") for patch in
-                   environment.get("profile_overrides", {}).values() if "metric_whitelist" in patch)
+    filters.extend(
+        patch.get("metric_whitelist")
+        for patch in environment.get("profile_overrides", {}).values()
+        if "metric_whitelist" in patch
+    )
     for value in filters:
         if value is None:
             continue
@@ -201,7 +245,9 @@ def validate_export_filter(plan, environment):
         for metric, spec in plan["sources"]["master"].items():
             for name in spec.get("exported_metrics", []):
                 if name.startswith("flexlb_") and not any(name.startswith(prefix) for prefix in prefixes):
-                    raise ScenarioError(f"master/{metric}: exported metric {name} excluded by metric_whitelist; exclude the query or allow its inputs")
+                    raise ScenarioError(
+                        f"master/{metric}: exported metric {name} excluded by metric_whitelist; exclude the query or allow its inputs"
+                    )
 
 
 def queries_for_targets(plan, targets, selector, interval, target_kinds=None):
@@ -219,9 +265,9 @@ def queries_for_targets(plan, targets, selector, interval, target_kinds=None):
         required.add(source + "/up")
         for metric, definition in plan["sources"][kind].items():
             key = source + "/" + metric
-            queries[key] = (definition["promql"]
-                            .replace("${selector}", selector(source))
-                            .replace("${window_ms}", str(window_ms)))
+            queries[key] = (
+                definition["promql"].replace("${selector}", selector(source)).replace("${window_ms}", str(window_ms))
+            )
             if definition.get("required", False):
                 required.add(key)
     return queries, required

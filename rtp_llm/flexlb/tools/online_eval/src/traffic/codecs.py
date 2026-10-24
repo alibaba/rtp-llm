@@ -1,13 +1,15 @@
 """从数据 envelope 识别 lineage codec；调用方版本仅作一致性断言。"""
+
 from __future__ import annotations
 
 import json
-from traffic import prefix_lineage, prefix_lineage_v3
-from traffic.lineage_model import LineageModel
-from traffic.lineage_envelope import decompress
 
-CODECS = {2: prefix_lineage.BlockAlignedLineageCodec,
-          3: prefix_lineage_v3.ExactLengthLineageCodec}
+from traffic import prefix_lineage, prefix_lineage_v3
+from traffic.lineage_envelope import decompress
+from traffic.lineage_model import LineageModel
+
+CODECS = {2: prefix_lineage.BlockAlignedLineageCodec, 3: prefix_lineage_v3.ExactLengthLineageCodec}
+
 
 def codec_for_version(version):
     if type(version) is not int or version not in CODECS:

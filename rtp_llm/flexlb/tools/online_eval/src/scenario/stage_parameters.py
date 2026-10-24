@@ -1,14 +1,15 @@
 """Core action parameters; case adapters own their extensible payload contracts."""
+
 from __future__ import annotations
 
-from dataclasses import dataclass, fields
-from copy import deepcopy
 import json
-from typing import Protocol, Optional, Union
+from copy import deepcopy
+from dataclasses import dataclass, fields
+from typing import Optional, Protocol, Union
 
 from document_io import DocumentError as ScenarioError
-from scenario.validation import mapping
 from scenario.references import OutputReference
+from scenario.validation import mapping
 
 
 class StageParameters(Protocol):
@@ -35,8 +36,9 @@ class RequestParameters:
     post_issue_delay_s: Optional[float] = None
 
     def to_dict(self):
-        result = {field.name: getattr(self, field.name) for field in fields(self)
-                  if getattr(self, field.name) is not None}
+        result = {
+            field.name: getattr(self, field.name) for field in fields(self) if getattr(self, field.name) is not None
+        }
         if self.block_keys is not None:
             result["block_keys"] = list(self.block_keys)
         return result
@@ -63,10 +65,11 @@ class ComparisonParameters:
 @dataclass(frozen=True)
 class AdapterParameters:
     """Frozen transport for an action whose schema is owned by its registered adapter."""
+
     _value: dict
 
     def __post_init__(self):
-        object.__setattr__(self, '_value', deepcopy(self._value))
+        object.__setattr__(self, "_value", deepcopy(self._value))
 
     def to_dict(self):
         return deepcopy(self._value)
@@ -79,6 +82,7 @@ def decode_parameters(action, value):
         return EmptyParameters()
     if action == "request":
         from scenario.request_parameters import normalize_request_parameters
+
         required = {"input_len", "output_len", "count", "consume"}
         if not required <= set(value):
             raise ScenarioError("compiled request parameters must be complete")
@@ -93,6 +97,7 @@ def decode_parameters(action, value):
     if action == "check":
         mapping(value, "stage.params", {"actual", "op", "expected"}, {"actual", "op", "expected"})
         from analysis.checks import validate_comparison
+
         validate_comparison(value["op"], value["expected"])
         return ComparisonParameters(OutputReference.read(value["actual"]), value["op"], value["expected"])
     json.dumps(value, allow_nan=False)  # Validate the artifact boundary without storing encoded state.

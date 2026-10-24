@@ -1,4 +1,5 @@
 """Discover pinned input files without importing their codecs."""
+
 from pathlib import Path
 
 DATA = Path(__file__).resolve().parents[2] / "data"

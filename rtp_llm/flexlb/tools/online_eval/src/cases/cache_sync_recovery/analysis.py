@@ -3,9 +3,12 @@
 from analysis.checks import CheckResult, evaluate, invalid_check
 from analysis.gates import gate_result
 
-VALIDITY_CHECKS = frozenset({"actual_sync_intensity", "response_shape", "clock_input_intensity",
-                             "sampling_complete", "client_complete"})
-CHECK_IDS = frozenset({"healthy_survivors", "victims_withdrawn", "victims_rebuilt", "cache_converged"}) | VALIDITY_CHECKS
+VALIDITY_CHECKS = frozenset(
+    {"actual_sync_intensity", "response_shape", "clock_input_intensity", "sampling_complete", "client_complete"}
+)
+CHECK_IDS = (
+    frozenset({"healthy_survivors", "victims_withdrawn", "victims_rebuilt", "cache_converged"}) | VALIDITY_CHECKS
+)
 
 
 def analyze(evidence):
@@ -21,25 +24,48 @@ def analyze(evidence):
         keys = procedure["unique_keys"] + procedure["shared_keys"]
         progress = evidence["cache_progress"]
         from cases.cache_sync_recovery.health import converged
-        ready = (converged(last, set(evidence["worker_addresses"]), progress.get("expected_keys", keys),
-                           progress["expected_versions"], limits["max_status_age_ms"])
-                 and progress["converged"]
-                 and evidence["convergence_samples"] >= observation["converged_samples"])
+
+        ready = (
+            converged(
+                last,
+                set(evidence["worker_addresses"]),
+                progress.get("expected_keys", keys),
+                progress["expected_versions"],
+                limits["max_status_age_ms"],
+            )
+            and progress["converged"]
+            and evidence["convergence_samples"] >= observation["converged_samples"]
+        )
         measured = evidence["intensity"]["measurement"]
-        checks += [evaluate("cache_converged", ready, "eq", True),
-                   evaluate("actual_sync_intensity", measured["responses"], "ge", limits["min_cache_responses_per_s"]),
-                   evaluate("response_shape", measured["totals"]["entries"] == measured["totals"]["responses"]*keys
-                            and measured["totals"]["full_responses"] == measured["totals"]["responses"], "eq", True),
-                   evaluate("clock_input_intensity", limits["min_added_keys_per_s"] <= measured["added_keys"]
-                            <= limits["max_added_keys_per_s"], "eq", True),
-                   evaluate("sampling_complete", evidence["max_sample_gap_s"], "le", observation["max_gap_s"]),
-                   evaluate("client_complete", evidence["client"]["complete"], "eq", True)]
+        checks += [
+            evaluate("cache_converged", ready, "eq", True),
+            evaluate("actual_sync_intensity", measured["responses"], "ge", limits["min_cache_responses_per_s"]),
+            evaluate(
+                "response_shape",
+                measured["totals"]["entries"] == measured["totals"]["responses"] * keys
+                and measured["totals"]["full_responses"] == measured["totals"]["responses"],
+                "eq",
+                True,
+            ),
+            evaluate(
+                "clock_input_intensity",
+                limits["min_added_keys_per_s"] <= measured["added_keys"] <= limits["max_added_keys_per_s"],
+                "eq",
+                True,
+            ),
+            evaluate("sampling_complete", evidence["max_sample_gap_s"], "le", observation["max_gap_s"]),
+            evaluate("client_complete", evidence["client"]["complete"], "eq", True),
+        ]
         if evidence["intervention"]:
             for identity, field in (("victims_withdrawn", "expired_workers"), ("victims_rebuilt", "rebuilt_workers")):
                 checks.append(evaluate(identity, len(evidence[field]), "eq", len(evidence["victims"])))
         else:
-            checks += [CheckResult(id=k, status="SKIP", detail="steady has no withdrawal event")
-                       for k in ("victims_withdrawn", "victims_rebuilt")]
+            checks += [
+                CheckResult(id=k, status="SKIP", detail="steady has no withdrawal event")
+                for k in ("victims_withdrawn", "victims_rebuilt")
+            ]
     present = {c.id for c in checks}
-    checks += [CheckResult(id=key, status="SKIP", detail="observation interrupted") for key in sorted(CHECK_IDS-present)]
+    checks += [
+        CheckResult(id=key, status="SKIP", detail="observation interrupted") for key in sorted(CHECK_IDS - present)
+    ]
     return dict(gate_result(checks, requirements=VALIDITY_CHECKS), errors=errors)

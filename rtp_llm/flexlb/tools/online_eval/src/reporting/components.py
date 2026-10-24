@@ -1,5 +1,6 @@
 """Pure report section and metadata construction, without publication I/O."""
 
+
 def details(title, value, *, opened=False, identity=None):
     return dict(type="details", id=identity, title=title, value=value, opened=opened)
 

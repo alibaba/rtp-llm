@@ -4,17 +4,16 @@ Domain analyzers own statistics and decisions. Rendering never reads evidence or
 changes a decision. report-spec.json alone is sufficient for offline rendering.
 """
 
+from reporting.components import details, links, run_meta, table
 from reporting.core import (
     bundle_path,
     discover_reports,
-    write_bundle,
     load_analysis,
     read_bundle,
+    write_bundle,
 )
-
-from reporting.components import details, table, links, run_meta
-from reporting.report_model import compare_controls
 from reporting.renderer import render
+from reporting.report_model import compare_controls
 
 __all__ = [
     "bundle_path",

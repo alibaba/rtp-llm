@@ -20,8 +20,8 @@ from scenario.actions.environment import (
 )
 from scenario.backend import JavaMockBackend
 from scenario.catalog import handlers
-from scenario.environment_config import environment
 from scenario.contracts import PlanContext
+from scenario.environment_config import environment
 from scenario.runtime import (
     Deadline,
     RuntimeContext,
@@ -97,21 +97,15 @@ class EnvironmentTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             _validate({"config_overrides": {"dispatcher": "batch"}}, self.plan)
         with self.assertRaises(ValueError):
-            _validate(
-                {"config_overrides": {}, "master_layout": "dual_standalone"}, self.plan
-            )
+            _validate({"config_overrides": {}, "master_layout": "dual_standalone"}, self.plan)
 
     def test_consumers_clean_before_replacement_old_handles_stale(self):
-        initial = _core_action("setup", self.ctx, {}, self.deadline).output[
-            "environment"
-        ]
+        initial = _core_action("setup", self.ctx, {}, self.deadline).output["environment"]
         self.ctx.add_cleanup(
             "consumer",
             lambda d: self.backend.calls.append(("consumer", self.ctx.env_epoch)),
         )
-        historical = self.ctx.register_resource(
-            "snapshot", {"first": True}, historical=True
-        )
+        historical = self.ctx.register_resource("snapshot", {"first": True}, historical=True)
         self.ctx.outputs["old"] = {"passed": True}
         reconfigure(
             self.ctx,
@@ -129,18 +123,14 @@ class EnvironmentTest(unittest.TestCase):
         )
         with self.assertRaisesRegex(ValueError, "stale"):
             self.ctx.resource(initial, "environment")
-        self.assertEqual(
-            self.ctx.resource(historical, "snapshot", allow_stale=True), {"first": True}
-        )
+        self.assertEqual(self.ctx.resource(historical, "snapshot", allow_stale=True), {"first": True})
         self.assertTrue(self.ctx.resolve({"$ref": "stages.old.output.passed"}))
 
     def test_cleanup_failure_prevents_new_setup_and_remains_for_final_retry(self):
         _core_action("setup", self.ctx, {}, self.deadline)
         self.backend.fail_cleanup = True
         with self.assertRaisesRegex(RuntimeError, "cleanup failed"):
-            reconfigure(
-                self.ctx, _validate({"config_overrides": {}}, self.plan), self.deadline
-            )
+            reconfigure(self.ctx, _validate({"config_overrides": {}}, self.plan), self.deadline)
         self.assertEqual(self.ctx.env_epoch, 1)
         self.assertEqual(sum(row[0] == "setup" for row in self.backend.calls), 1)
         self.assertTrue(self.ctx._cleanup)
@@ -151,9 +141,7 @@ class EnvironmentTest(unittest.TestCase):
         _core_action("setup", self.ctx, {}, self.deadline)
         self.backend.fail_setup = True
         with self.assertRaisesRegex(RuntimeError, "partial setup"):
-            reconfigure(
-                self.ctx, _validate({"config_overrides": {}}, self.plan), self.deadline
-            )
+            reconfigure(self.ctx, _validate({"config_overrides": {}}, self.plan), self.deadline)
         self.assertEqual(self.ctx.env_epoch, 2)
         self.assertTrue(self.ctx._cleanup)
         self.ctx.cleanup(1)
@@ -176,14 +164,13 @@ class EnvironmentTest(unittest.TestCase):
             elif name == "fifo_default_priority":
                 expected["scheduler"]["ordering"]["defaultPriority"] = 50
             else:
-                expected["scheduler"]["ordering"]["preemption"][
-                    "engineCancellation"
-                ] = {"ackTimeoutMs": 50, "completionTimeoutMs": 1000}
+                expected["scheduler"]["ordering"]["preemption"]["engineCancellation"] = {
+                    "ackTimeoutMs": 50,
+                    "completionTimeoutMs": 1000,
+                }
             self.assertEqual(mutate_config(base, name), expected)
         with self.assertRaises(ValueError):
-            mutate_config(
-                json.loads(render_env(PROFILE)), "removed_engine_cancellation"
-            )
+            mutate_config(json.loads(render_env(PROFILE)), "removed_engine_cancellation")
 
     def test_probe_does_not_turn_cleanup_or_generic_failure_into_parser_pass(self):
         params = _validate(
@@ -229,9 +216,10 @@ class EnvironmentTest(unittest.TestCase):
             master_management_port=28001,
             mock_http_port=54999,
         )
-        with patch(
-            "adapters.environment.EnvManager.ensure", return_value=env
-        ) as ensure, patch("adapters.engine_ops.EngineOps"):
+        with (
+            patch("adapters.environment.EnvManager.ensure", return_value=env) as ensure,
+            patch("adapters.engine_ops.EngineOps"),
+        ):
             self.ctx.env_epoch = 1
             first = environment(self.raw_env, "test", PROFILE)
             backend.setup(self.ctx, first, self.deadline)
@@ -248,24 +236,14 @@ class EnvironmentTest(unittest.TestCase):
             )
             backend.setup(self.ctx, second, self.deadline)
             log_args = [
-                next(
-                    arg
-                    for arg in call.args[0].master_extra_args
-                    if arg.startswith("--flexlb.log.path=")
-                )
+                next(arg for arg in call.args[0].master_extra_args if arg.startswith("--flexlb.log.path="))
                 for call in ensure.call_args_list
             ]
             self.assertNotEqual(log_args[0], log_args[1])
-            self.assertTrue(
-                all(str(Path(self.tmp.name).resolve()) in arg for arg in log_args)
-            )
+            self.assertTrue(all(str(Path(self.tmp.name).resolve()) in arg for arg in log_args))
             self.assertEqual(env.master_log_dir, self.ctx.master_log_dir)
-        self.assertEqual(
-            (Path(self.tmp.name) / "environment.json").read_bytes(), initial
-        )
-        later = json.loads(
-            (Path(self.tmp.name) / "environment-epoch-2/environment.json").read_text()
-        )
+        self.assertEqual((Path(self.tmp.name) / "environment.json").read_bytes(), initial)
+        later = json.loads((Path(self.tmp.name) / "environment-epoch-2/environment.json").read_text())
         self.assertEqual(later["resolved_config"], second["resolved_config"])
         self.assertEqual(later["master_log_dir"], str(self.ctx.master_log_dir))
 
@@ -273,9 +251,7 @@ class EnvironmentTest(unittest.TestCase):
         backend = JavaMockBackend(lease_manifest())
         directory = Path(self.tmp.name)
         (directory / "master-logs").mkdir()
-        (directory / "master-logs/application.log").write_text(
-            "ConfigValidationException"
-        )
+        (directory / "master-logs/application.log").write_text("ConfigValidationException")
         stdout = directory / "stdout.log"
         stdout.write_text("owned stdout")
         mp = NS(pid=321, proc=NS(poll=lambda: 1), log_file=stdout)
@@ -309,9 +285,7 @@ class EnvironmentTest(unittest.TestCase):
         app_log.write_text("previous bytes\n")
         jar = directory / "placeholder.jar"
         jar.touch()
-        spec = EnvSpec(
-            label="probe", master_extra_args=[f"--flexlb.log.path={log_root}"]
-        )
+        spec = EnvSpec(label="probe", master_extra_args=[f"--flexlb.log.path={log_root}"])
         env = NS(
             spec=spec,
             master=None,
@@ -328,20 +302,16 @@ class EnvironmentTest(unittest.TestCase):
                 stream.write("ConfigValidationException from owned start\n")
             return NS(pid=123, alive=lambda: False, tail_log=lambda: "owned stdout")
 
-        with patch("adapters.master_lifecycle.API_JAR", jar), patch(
-            "adapters.master_lifecycle.resolve_java21", return_value="unused-java"
-        ), patch(
-            "adapters.master_lifecycle.port_accepting", return_value=False
-        ), patch.object(
-            manager.master_lifecycle, "master_environment", return_value={}
-        ), patch(
-            "adapters.master_lifecycle.ProcessOps.start", side_effect=launch
+        with (
+            patch("adapters.master_lifecycle.API_JAR", jar),
+            patch("adapters.master_lifecycle.resolve_java21", return_value="unused-java"),
+            patch("adapters.master_lifecycle.port_accepting", return_value=False),
+            patch.object(manager.master_lifecycle, "master_environment", return_value={}),
+            patch("adapters.master_lifecycle.ProcessOps.start", side_effect=launch),
         ):
             with self.assertRaises(RuntimeError) as error:
                 manager.start_master(env)
-        self.assertIn(
-            "ConfigValidationException from owned start", str(error.exception)
-        )
+        self.assertIn("ConfigValidationException from owned start", str(error.exception))
         self.assertNotIn("previous bytes", str(error.exception))
         self.assertIn(str(app_log), str(error.exception))
 

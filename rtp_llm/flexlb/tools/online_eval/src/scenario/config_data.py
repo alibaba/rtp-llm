@@ -1,6 +1,7 @@
 """Data-only guards and isolated merges shared by case configuration and variants."""
 
 import copy
+
 from document_io import DocumentError as ScenarioError
 from input_contract import mapping_fields
 
@@ -35,9 +36,7 @@ def data_only(value, path):
             "when",
         }
         if forbidden:
-            raise ScenarioError(
-                f"{path}: YAML cannot orchestrate steps ({sorted(forbidden)}); edit the Python case"
-            )
+            raise ScenarioError(f"{path}: YAML cannot orchestrate steps ({sorted(forbidden)}); edit the Python case")
         for key, child in value.items():
             data_only(child, f"{path}.{key}")
     elif isinstance(value, list):

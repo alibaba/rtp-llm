@@ -1,50 +1,67 @@
 """Present frozen cache-gate results and published metrics; never adjudicate."""
 
-from artifacts.gate_inputs import evidence_origin
-
 import hashlib
 from pathlib import Path
 
-from reporting.view_config import view
+from artifacts.gate_inputs import evidence_origin
 from reporting import run_meta
-from reporting.gate_report import write_gate_report, write_archived_gate_report
-from reporting.run_context import KPI_LABELS, title
 from reporting.curves import materialize, project_panels
+from reporting.gate_report import write_archived_gate_report, write_gate_report
+from reporting.run_context import KPI_LABELS, title
+from reporting.view_config import view
 from reporting.view_sections import view_details, view_table
 
 
 def request_outcomes(evidence):
     """Display the whole ledger, including victims, unknown routes and late failures."""
-    attribution = evidence.get('client_attribution') or {}
-    failures = attribution.get('failures', [])
-    complete = attribution.get('complete') is True
-    rows = [['整轮（完整账本）' if complete else '整轮（账本不完整）',
-             attribution.get('issued_count'), attribution.get('terminal_count'),
-             len(failures) if complete else '不可确认']]
-    for group, counts in attribution.get('counts', {}).items():
-        rows.append([group, counts['sent'], counts['terminal'], counts['failed']])
-    inactive = sum('REQUEST_INACTIVE' in (failure.get('error') or '') for failure in failures)
-    kpis = [dict(id='case.request_failures', label='整轮请求失败',
-                 value=len(failures) if complete else '不可确认',
-                 tone='danger' if failures or not complete else 'success'),
-            dict(id='case.inactive_failures', label='REQUEST_INACTIVE 失败',
-                 value=inactive if complete else '不可确认',
-                 tone='danger' if inactive or not complete else 'success')]
+    attribution = evidence.get("client_attribution") or {}
+    failures = attribution.get("failures", [])
+    complete = attribution.get("complete") is True
+    rows = [
+        [
+            "整轮（完整账本）" if complete else "整轮（账本不完整）",
+            attribution.get("issued_count"),
+            attribution.get("terminal_count"),
+            len(failures) if complete else "不可确认",
+        ]
+    ]
+    for group, counts in attribution.get("counts", {}).items():
+        rows.append([group, counts["sent"], counts["terminal"], counts["failed"]])
+    inactive = sum("REQUEST_INACTIVE" in (failure.get("error") or "") for failure in failures)
+    kpis = [
+        dict(
+            id="case.request_failures",
+            label="整轮请求失败",
+            value=len(failures) if complete else "不可确认",
+            tone="danger" if failures or not complete else "success",
+        ),
+        dict(
+            id="case.inactive_failures",
+            label="REQUEST_INACTIVE 失败",
+            value=inactive if complete else "不可确认",
+            tone="danger" if inactive or not complete else "success",
+        ),
+    ]
     return rows, kpis
 
 
 def prepare_report(directory, evidence, *, presentation=None):
-    from monitoring.metric_store import MetricStore
     from statistics import median
+
+    from monitoring.metric_store import MetricStore
 
     rows = evidence["samples"]
     anchor = evidence_origin(evidence)
     store = MetricStore.read(directory)
     observations, gaps, errors = store.project(anchor)
-    sources = {row["series_key"]: dict(row["provenance"], metric_id=row["metric_id"], unit=row["unit"])
-               for row in observations if row["points"]}
+    sources = {
+        row["series_key"]: dict(row["provenance"], metric_id=row["metric_id"], unit=row["unit"])
+        for row in observations
+        if row["points"]
+    }
     presentation = presentation if presentation is not None else view("cache_scale_in.yaml")
     from reporting.metric_binding import monitoring_audit
+
     inventory = monitoring_audit(store, presentation)
     diagnostic_only = set(presentation.metrics.diagnostic_only)
     curves = []
@@ -61,6 +78,7 @@ def prepare_report(directory, evidence, *, presentation=None):
         if labels.get("role") == "decode":
             continue
         from reporting.metric_binding import bindings
+
         selected_styles = bindings(presentation, identity, labels)
         if not selected_styles:
             if identity in diagnostic_only:
@@ -71,16 +89,19 @@ def prepare_report(directory, evidence, *, presentation=None):
             qualifiers = [str(value) for label, value in sorted(labels.items()) if label not in {"role"}]
             if qualifiers:
                 name += " · " + ", ".join(qualifiers)
-            valid_points = sum(
-                value is not None and 0 <= timestamp <= visible_end
-                for timestamp, value in points
-            )
+            valid_points = sum(value is not None and 0 <= timestamp <= visible_end for timestamp, value in points)
             expected = max(1, round((visible_end + 1) / max(provenance.get("step", 1), 0.001)))
             coverage = min(1, valid_points / expected)
-            curves.append(materialize(
-                curve_id, definition, points, name=name,
-                description=provenance["promql"], provenance=provenance,
-            ))
+            curves.append(
+                materialize(
+                    curve_id,
+                    definition,
+                    points,
+                    name=name,
+                    description=provenance["promql"],
+                    provenance=provenance,
+                )
+            )
             audit.append([name, f"{coverage:.0%}", "OK" if coverage >= 0.8 else "SPARSE", provenance["promql"]])
     by_id = {curve["metric_id"]: curve for curve in curves}
     for identity, definition in presentation.charts.curves.items():
@@ -91,29 +112,31 @@ def prepare_report(directory, evidence, *, presentation=None):
         return [
             point["y"]
             for point in by_id.get(metric_id, {}).get("points", [])
-            if point["y"] is not None
-            and (start is None or point["x"] >= start)
-            and (end is None or point["x"] <= end)
+            if point["y"] is not None and (start is None or point["x"] >= start) and (end is None or point["x"] <= end)
         ]
+
     baseline_start, baseline_end = evidence.get("baseline_start"), evidence.get("baseline_end")
     sent = values("client/actual_send_qps", baseline_start, baseline_end)
     success = values("client/success_qps", baseline_start, baseline_end)
     failures = values("client/error_qps", baseline_start, baseline_end)
     monitor_warnings = [str(error) for error in errors]
-    if not any('promql' in source for source in sources.values()):
+    if not any("promql" in source for source in sources.values()):
         monitor_warnings.append("缺少冻结的 Prometheus 样本；监控曲线不可用")
     if sent and success and median(sent) > 0 and median(success) / median(sent) < 0.9:
-        monitor_warnings.append(
-            f"缩容前客户端成功率偏低：success/send 中位数 {median(success) / median(sent):.1%}"
-        )
+        monitor_warnings.append(f"缩容前客户端成功率偏低：success/send 中位数 {median(success) / median(sent):.1%}")
     if sent and failures and median(sent) > 0 and median(failures) / median(sent) > 0.05:
-        monitor_warnings.append(
-            f"缩容前客户端错误率偏高：error/send 中位数 {median(failures) / median(sent):.1%}"
-        )
+        monitor_warnings.append(f"缩容前客户端错误率偏高：error/send 中位数 {median(failures) / median(sent):.1%}")
     monitoring_status = "WARN" if monitor_warnings else "OK"
-    return dict(curves=curves, audit=audit, sources=sources, gaps=gaps, errors=errors,
-                metric_classification=inventory,
-                monitoring_status=monitoring_status, monitor_warnings=monitor_warnings)
+    return dict(
+        curves=curves,
+        audit=audit,
+        sources=sources,
+        gaps=gaps,
+        errors=errors,
+        metric_classification=inventory,
+        monitoring_status=monitoring_status,
+        monitor_warnings=monitor_warnings,
+    )
 
 
 def build_spec(directory, evidence, result, prepared, *, presentation=None):
@@ -121,14 +144,22 @@ def build_spec(directory, evidence, result, prepared, *, presentation=None):
     rows = evidence["samples"]
     curves = list(prepared["curves"])
     from monitoring.metric_store import MetricStore
+
     store = MetricStore.read(directory)
-    for identity in ('derived/survivor_hit_ratio',):
+    for identity in ("derived/survivor_hit_ratio",):
         style = presentation.charts.curves[identity]
-        for observation in store.document['metrics'].get(identity, []):
-            curves.append(materialize(identity, style, observation['points'],
-                name=style.name,
-                origin=evidence_origin(evidence), provenance=observation['provenance'],
-                description=observation['provenance'].get('calculation', 'frozen case measurement')))
+        for observation in store.document["metrics"].get(identity, []):
+            curves.append(
+                materialize(
+                    identity,
+                    style,
+                    observation["points"],
+                    name=style.name,
+                    origin=evidence_origin(evidence),
+                    provenance=observation["provenance"],
+                    description=observation["provenance"].get("calculation", "frozen case measurement"),
+                )
+            )
     audit = prepared["audit"]
     sources, gaps, errors = (prepared[key] for key in ("sources", "gaps", "errors"))
     monitoring_status = prepared["monitoring_status"]
@@ -138,36 +169,60 @@ def build_spec(directory, evidence, result, prepared, *, presentation=None):
         run_id=evidence["provenance"]["instance"],
         title=title(evidence["provenance"]["instance"]),
         subtitle=presentation.subtitle.render(
-            verdict=result["verdict"], monitoring_status=monitoring_status,
+            verdict=result["verdict"],
+            monitoring_status=monitoring_status,
             expected_behavior=result.get("expected_behavior", "stable"),
-            observed_behavior=result.get("observed_behavior", "unknown")),
+            observed_behavior=result.get("observed_behavior", "unknown"),
+        ),
         timeOriginLabel="秒；t=0 为观测开始",
         kpis=[
             dict(label=KPI_LABELS["verdict"], value=result["verdict"]),
-            dict(label=KPI_LABELS["monitoring"], value=monitoring_status,
-                 tone="danger" if monitor_warnings else "success"),
-        ] + request_kpis,
+            dict(
+                label=KPI_LABELS["monitoring"],
+                value=monitoring_status,
+                tone="danger" if monitor_warnings else "success",
+            ),
+        ]
+        + request_kpis,
         panels=project_panels(curves, presentation),
         sections=[
-            view_table(presentation, 'request_outcomes', request_rows),
+            view_table(presentation, "request_outcomes", request_rows),
             view_table(presentation, "audit", audit),
             view_details(presentation, "monitoring", dict(status=monitoring_status, warnings=monitor_warnings)),
             view_details(presentation, "checks", result),
-            view_details(presentation, "measurement", dict(scope=result["measurement_scope"],
+            view_details(
+                presentation,
+                "measurement",
+                dict(
+                    scope=result["measurement_scope"],
                     client_attribution=evidence.get("client_attribution"),
                     removals=evidence.get("removals"),
-                    reinterpretation=evidence.get("reinterpretation"))),
-            view_details(presentation, "sources", dict(queries=sources, gaps=gaps, errors=errors,
-                metric_classification=prepared["metric_classification"])),
+                    reinterpretation=evidence.get("reinterpretation"),
+                ),
+            ),
+            view_details(
+                presentation,
+                "sources",
+                dict(
+                    queries=sources, gaps=gaps, errors=errors, metric_classification=prepared["metric_classification"]
+                ),
+            ),
         ],
         timeAxis=dict(min=0, max=max((r["t"] for r in rows), default=1)),
     )
     from reporting.gate_lines import Threshold, apply_gate_lines
-    spec['panels'] = apply_gate_lines(spec['panels'], presentation, {
-        'survivor_hit_floor': Threshold(result['threshold'], evidence['post_start'], evidence['post_end'])
-        if evidence['post_start'] < evidence['post_end'] else None,
-    })
+
+    spec["panels"] = apply_gate_lines(
+        spec["panels"],
+        presentation,
+        {
+            "survivor_hit_floor": Threshold(result["threshold"], evidence["post_start"], evidence["post_end"])
+            if evidence["post_start"] < evidence["post_end"]
+            else None,
+        },
+    )
     from reporting.events import attach_events
+
     origin = evidence_origin(evidence)
     return attach_events(spec, presentation, origin=origin, events=evidence.get("events", []))
 
@@ -181,9 +236,7 @@ def write_report(directory, evidence, result, prepared=None, *, run=None, presen
     provenance = evidence.get("provenance", {})
     meta = run_meta(
         dict(id=provenance["instance"]),
-        implementation=dict(
-            files=provenance.get("files"), master=provenance.get("master_artifact")
-        ),
+        implementation=dict(files=provenance.get("files"), master=provenance.get("master_artifact")),
         workload=provenance.get("trace"),
         configuration={
             k: provenance.get(k)
@@ -193,24 +246,32 @@ def write_report(directory, evidence, result, prepared=None, *, run=None, presen
         evidence=[
             dict(
                 path="../../../cache-gate-evidence.json",
-                sha256=hashlib.sha256(
-                    (directory / "cache-gate-evidence.json").read_bytes()
-                ).hexdigest(),
+                sha256=hashlib.sha256((directory / "cache-gate-evidence.json").read_bytes()).hexdigest(),
             )
         ],
     )
     if run is None:
-        return write_archived_gate_report(directory, result, presentation, spec,
-            identity="cache-scale-in", producer="cache-gate", meta=meta)
-    return write_gate_report(directory, result, presentation, spec,
-        identity="cache-scale-in", producer="cache-gate", meta=meta, run=run)
+        return write_archived_gate_report(
+            directory, result, presentation, spec, identity="cache-scale-in", producer="cache-gate", meta=meta
+        )
+    return write_gate_report(
+        directory, result, presentation, spec, identity="cache-scale-in", producer="cache-gate", meta=meta, run=run
+    )
 
 
 def validate_view(path, data, fail):
     from reporting.view_schema import validate_section_contract
 
-    validate_section_contract(path, data, {
-        "request_outcomes": 4,
-        "audit": 4, "monitoring": None, "checks": None,
-        "measurement": None, "sources": None,
-    }, fail)
+    validate_section_contract(
+        path,
+        data,
+        {
+            "request_outcomes": 4,
+            "audit": 4,
+            "monitoring": None,
+            "checks": None,
+            "measurement": None,
+            "sources": None,
+        },
+        fail,
+    )

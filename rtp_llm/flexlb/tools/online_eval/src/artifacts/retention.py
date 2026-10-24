@@ -24,8 +24,11 @@ def prune_tsdb(directory, artifacts, deadline):
                 candidates.append(path)
     with ExperimentReader(artifacts["experiment"]) as primary, ExperimentReader(artifacts["raw"]) as raw:
         reference = primary.read_json("raw-attachment.json")
-        if (raw.kind != "raw" or Path(artifacts["raw"]).stat().st_size != reference["size"]
-                or sha256_file(artifacts["raw"]) != reference["sha256"]):
+        if (
+            raw.kind != "raw"
+            or Path(artifacts["raw"]).stat().st_size != reference["size"]
+            or sha256_file(artifacts["raw"]) != reference["sha256"]
+        ):
             raise ValueError("raw attachment checksum mismatch")
         for path in candidates:
             deadline.check()

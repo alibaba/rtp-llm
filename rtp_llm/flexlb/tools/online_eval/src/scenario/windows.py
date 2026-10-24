@@ -3,16 +3,19 @@
 import math
 from dataclasses import dataclass
 
+from document_io import DocumentError as ScenarioError
 from scenario.builder import output
 from scenario.inputs import fields
-from document_io import DocumentError as ScenarioError
 
 
 def check_windows(data, *, available, path, single=False):
     """Validate explicit window references without introducing composite names."""
-    if (not isinstance(data, list) or not data
-            or any(type(name) is not str or name not in available for name in data)
-            or len(set(data)) != len(data)):
+    if (
+        not isinstance(data, list)
+        or not data
+        or any(type(name) is not str or name not in available for name in data)
+        or len(set(data)) != len(data)
+    ):
         raise ScenarioError(path + ": windows must be a nonempty list of distinct available window names")
     if single and len(data) != 1:
         raise ScenarioError(path + ": measurement requires exactly one window")
@@ -41,17 +44,23 @@ class ObservationWindow:
     def read(cls, data, path, *, timestamp_stages):
         fields(data, (), path, optional={"from", "until"})
         if isinstance(timestamp_stages, dict) and any(
-                not isinstance(value, TimestampOutput) or name != value.stage
-                for name, value in timestamp_stages.items()):
+            not isinstance(value, TimestampOutput) or name != value.stage for name, value in timestamp_stages.items()
+        ):
             raise ScenarioError(path + ": timestamp declarations must match their stage identity")
-        declared = (dict.fromkeys(timestamp_stages, "epoch_s") if not isinstance(timestamp_stages, dict)
-                    else {name: value.field for name, value in timestamp_stages.items()})
+        declared = (
+            dict.fromkeys(timestamp_stages, "epoch_s")
+            if not isinstance(timestamp_stages, dict)
+            else {name: value.field for name, value in timestamp_stages.items()}
+        )
         params = {}
         for side, boundary in data.items():
             loc = f"{path}.{side}"
             fields(boundary, {"stage", "field"}, loc, optional={"offset_s"})
-            if (type(boundary["stage"]) is not str or boundary["stage"] not in timestamp_stages
-                    or boundary["field"] != declared[boundary["stage"]]):
+            if (
+                type(boundary["stage"]) is not str
+                or boundary["stage"] not in timestamp_stages
+                or boundary["field"] != declared[boundary["stage"]]
+            ):
                 raise ScenarioError(f"{loc}: unknown timestamp output")
             params[side] = output(boundary["stage"], boundary["field"])
             if "offset_s" in boundary:
@@ -69,8 +78,7 @@ def anchored_window(data, path, *, anchor):
     for side, boundary in data.items():
         fields(boundary, {"event", "offset_s"}, path + "." + side)
         offset = boundary["offset_s"]
-        if (boundary["event"] != anchor or type(offset) not in (int, float)
-                or not math.isfinite(offset)):
+        if boundary["event"] != anchor or type(offset) not in (int, float) or not math.isfinite(offset):
             raise ScenarioError(f"{path}.{side}: requires {anchor} and finite offset_s")
         offsets[side] = offset
     if offsets["from"] >= offsets["until"]:
@@ -78,12 +86,10 @@ def anchored_window(data, path, *, anchor):
     return offsets
 
 
-
 def anchored_windows(data, anchors, *, path="parameters.observation.windows"):
     """Validate named windows against their program-owned runtime event anchors."""
     fields(data, set(anchors), path)
-    return {name: anchored_window(data[name], path + '.' + name, anchor=anchor)
-            for name, anchor in anchors.items()}
+    return {name: anchored_window(data[name], path + "." + name, anchor=anchor) for name, anchor in anchors.items()}
 
 
 def resolve_window(lower, upper, *, lower_offset_s=0, upper_offset_s=0):

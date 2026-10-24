@@ -3,17 +3,21 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from tests.ha_fixtures import client_resource
 from scenario.measurement import analyze_evidence
-from scenario.run_result import WorkloadResult
 from scenario.outcome import apply_outcome
+from scenario.run_result import WorkloadResult
+from tests.ha_fixtures import client_resource
+
 
 def analyze_report(directory, result, evidence):
     from monitoring.archive import export_metrics
+
     export_metrics(directory)
     metadata = result.get("workload", {})
-    workload = WorkloadResult(runtime_validity=metadata.get("runtime_validity", "VALID"),
-        details={key: value for key, value in metadata.items() if key != "runtime_validity"})
+    workload = WorkloadResult(
+        runtime_validity=metadata.get("runtime_validity", "VALID"),
+        details={key: value for key, value in metadata.items() if key != "runtime_validity"},
+    )
     finalized = analyze_evidence(directory, result, evidence, workload)
     result["workload"] = finalized.workload.to_dict()
     apply_outcome(result)
@@ -22,11 +26,20 @@ def analyze_report(directory, result, evidence):
 
 def executed_result(status="PASS", **values):
     check_status = "FAIL" if status in {"FAIL", "FINDING-CONFIRMED"} else "PASS"
-    result = dict(id="test", status=status, error=None, cleanup=[], stages=[dict(
-        id="check", status="TIMEOUT" if status == "TIMEOUT" else check_status,
-        error="stage deadline exceeded" if status == "TIMEOUT" else None,
-        checks=[dict(id="criterion", status=check_status)],
-    )])
+    result = dict(
+        id="test",
+        status=status,
+        error=None,
+        cleanup=[],
+        stages=[
+            dict(
+                id="check",
+                status="TIMEOUT" if status == "TIMEOUT" else check_status,
+                error="stage deadline exceeded" if status == "TIMEOUT" else None,
+                checks=[dict(id="criterion", status=check_status)],
+            )
+        ],
+    )
     if status == "FINDING-CONFIRMED":
         result["finding_confirmed"] = ["check.criterion"]
     elif status == "FINDING-RESOLVED":
@@ -40,26 +53,33 @@ class EvidenceIntegrityTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             telemetry = Path(d) / "telemetry" / "1"
             telemetry.mkdir(parents=True)
-            queries = dict(start=1, end=2, step=1, targets={}, queries={
-                "mock/running_avg": dict(promql="running", result=[dict(
-                    metric={"role": "prefill"}, values=[[1, "1"]]
-                )])
-            }, missing_queries=["master-single/optional"], errors=[])
+            queries = dict(
+                start=1,
+                end=2,
+                step=1,
+                targets={},
+                queries={
+                    "mock/running_avg": dict(
+                        promql="running", result=[dict(metric={"role": "prefill"}, values=[[1, "1"]])]
+                    )
+                },
+                missing_queries=["master-single/optional"],
+                errors=[],
+            )
             path = telemetry / "queries.json"
             path.write_text(json.dumps(queries))
+
             def result():
-                return executed_result(workload=dict(capture_metrics=True,
-                                          runtime_validity="VALID"))
-            evidence = dict(clock_anchor={"epoch_s": 0}, phases=[],
-                            expected_telemetry=["1/mock"])
+                return executed_result(workload=dict(capture_metrics=True, runtime_validity="VALID"))
+
+            evidence = dict(clock_anchor={"epoch_s": 0}, phases=[], expected_telemetry=["1/mock"])
             report = result()
             analyze_report(d, report, evidence)
             self.assertEqual(report["status"], "PASS")
             self.assertEqual(report["workload"]["runtime_validity"], "VALID")
             self.assertEqual(report["workload"]["telemetry_completeness"], "PARTIAL")
             self.assertEqual(len(report["workload"]["telemetry_diagnostics"]), 1)
-            queries["errors"] = [dict(query="mock/running_avg",
-                                     error="required monitor series absent")]
+            queries["errors"] = [dict(query="mock/running_avg", error="required monitor series absent")]
             path.write_text(json.dumps(queries))
             report = result()
             analyze_report(d, report, evidence)
@@ -76,9 +96,7 @@ class EvidenceIntegrityTest(unittest.TestCase):
                 raw.append(f"# ts={t * 1000}\nalways 1\n")
                 if t in (1, 10):
                     raw.append("dynamic 1\n")
-                journal.append(
-                    json.dumps(dict(sequence=t, epoch_s=t, monotonic_s=t, error=None))
-                )
+                journal.append(json.dumps(dict(sequence=t, epoch_s=t, monotonic_s=t, error=None)))
             (telemetry / "mock.prom").write_text("".join(raw))
             (telemetry / "mock-samples.jsonl").write_text("\n".join(journal) + "\n")
             result = executed_result(
@@ -163,9 +181,7 @@ class EvidenceIntegrityTest(unittest.TestCase):
                     recorded_epoch_ms=1002,
                 ),
             ]
-            (p / "client_lifecycle.jsonl").write_text(
-                "".join(json.dumps(row) + "\n" for row in rows)
-            )
+            (p / "client_lifecycle.jsonl").write_text("".join(json.dumps(row) + "\n" for row in rows))
             evidence = client_resource(out_dir=p).evidence_snapshot()
             self.assertEqual(evidence["records"], [rows[1], rows[2]])
             self.assertFalse(evidence["complete"])
@@ -186,8 +202,7 @@ class EvidenceIntegrityTest(unittest.TestCase):
                         targets={"mock": "http://mock", "master-A": "http://master"},
                         errors=[],
                         queries={
-                            name
-                            + "/up": dict(
+                            name + "/up": dict(
                                 promql="up",
                                 result=[
                                     dict(
@@ -220,9 +235,7 @@ class EvidenceIntegrityTest(unittest.TestCase):
         evidence = dict(
             clock_anchor={"epoch_s": 100},
             phases=[],
-            expected_outages=[
-                dict(source="1/master-A", started_epoch_s=102, ended_epoch_s=104)
-            ],
+            expected_outages=[dict(source="1/master-A", started_epoch_s=102, ended_epoch_s=104)],
         )
         gaps = {"1/master-A/x": [1, 3, 5], "1/master-B/x": [3]}
         expected, unexpected = classify_gaps(gaps, evidence)

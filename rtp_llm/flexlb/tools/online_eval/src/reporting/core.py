@@ -1,28 +1,23 @@
-from file_io import read_json
 import copy
 import hashlib
 import json
 import re
 from pathlib import Path
 
-from reporting.spec import REPORT_SPEC_SCHEMA_VERSION, validate
-from reporting.report_model import ExperimentConditions
-from reporting.renderer import _render_validated
+from file_digest import sha256_file
+from file_io import read_json, write_text
 from reporting.components import run_meta
 from reporting.evidence_archive import project, restore, verify_references
-from file_digest import sha256_file
-from file_io import write_text
+from reporting.renderer import _render_validated
+from reporting.report_model import ExperimentConditions
+from reporting.spec import REPORT_SPEC_SCHEMA_VERSION, validate
 from schema_contract import matches_schema
 
 
 def _slug(identity):
     text = str(identity)
     safe = re.sub(r"[^A-Za-z0-9_.-]+", "-", text).strip(".-") or "report"
-    return (
-        safe
-        if safe == text and len(safe) <= 96
-        else safe[:96] + "-" + hashlib.sha256(text.encode()).hexdigest()[:8]
-    )
+    return safe if safe == text and len(safe) <= 96 else safe[:96] + "-" + hashlib.sha256(text.encode()).hexdigest()[:8]
 
 
 def bundle_path(root, kind, identity):
@@ -39,20 +34,32 @@ def write_bundle(root, kind, identity, analysis, spec, *, meta=None, producer=No
     """Publish one canonical report; manifest is written last as the commit record."""
     attachments = dict((attachments or {}).items())
     for name, content in attachments.items():
-        if (not isinstance(name, str) or not name or Path(name).name != name or "\\" in name
-                or name in {".", "..", "manifest.json", "analysis.json", "report-spec.json", "report.html"}
-                or not isinstance(content, str)):
+        if (
+            not isinstance(name, str)
+            or not name
+            or Path(name).name != name
+            or "\\" in name
+            or name in {".", "..", "manifest.json", "analysis.json", "report-spec.json", "report.html"}
+            or not isinstance(content, str)
+        ):
             raise ValueError("invalid report attachment path or content")
     validate(spec)
     spec = dict(spec)
     spec["report_spec_schema_version"] = REPORT_SPEC_SCHEMA_VERSION
-    spec["run_meta"] = copy.deepcopy(meta or spec.get("run_meta") or run_meta(
-        dict(id=str(identity), kind=kind),
-        clock=dict(axis=spec.get("timeAxis"), origin=spec.get("timeOriginLabel")),
-    ))
+    spec["run_meta"] = copy.deepcopy(
+        meta
+        or spec.get("run_meta")
+        or run_meta(
+            dict(id=str(identity), kind=kind),
+            clock=dict(axis=spec.get("timeAxis"), origin=spec.get("timeOriginLabel")),
+        )
+    )
     controls = ExperimentConditions(
-        spec["run_meta"].get("configuration"), spec["run_meta"].get("workload"),
-        spec["run_meta"].get("environment"), analysis.get("criteria"), analysis.get("statistic_sources"),
+        spec["run_meta"].get("configuration"),
+        spec["run_meta"].get("workload"),
+        spec["run_meta"].get("environment"),
+        analysis.get("criteria"),
+        analysis.get("statistic_sources"),
     )
     spec["run_meta"]["comparison_controls"] = controls.to_dict()
     _validate_run_meta(spec["run_meta"])
@@ -68,9 +75,11 @@ def write_bundle(root, kind, identity, analysis, spec, *, meta=None, producer=No
         result=archived_analysis,
     )
     # Serialize and release each output before building the next large document.
-    for name, produce in (("analysis.json", lambda: _json(result)),
-                          ("report-spec.json", lambda: _json(spec)),
-                          ("report.html", lambda: _render_validated(spec))):
+    for name, produce in (
+        ("analysis.json", lambda: _json(result)),
+        ("report-spec.json", lambda: _json(spec)),
+        ("report.html", lambda: _render_validated(spec)),
+    ):
         content = produce()
         write_text(directory / name, content)
         files[name] = dict(path=name, sha256=hashlib.sha256(content.encode()).hexdigest())
@@ -120,8 +129,11 @@ def read_bundle(path):
         raise ValueError("unsupported report manifest version")
     files = manifest.get("files")
     required = {"analysis.json", "report-spec.json", "report.html"}
-    if (not isinstance(files, dict) or not required <= files.keys()
-            or any(files[name].get("path") != name for name in required)):
+    if (
+        not isinstance(files, dict)
+        or not required <= files.keys()
+        or any(files[name].get("path") != name for name in required)
+    ):
         raise ValueError("report manifest lacks required bundle files")
     for entry in files.values():
         target = directory / entry["path"]
@@ -166,8 +178,8 @@ def load_analysis(path):
 def _analysis_nodes(analysis, operation):
     """The publication contract owns run envelopes; the codec handles one node."""
     result = operation(analysis)
-    if isinstance(result.get('run'), dict):
-        result['run'] = _analysis_nodes(result['run'], operation)
-    if isinstance(result.get('runs'), dict):
-        result['runs'] = {label: _analysis_nodes(run, operation) for label, run in result['runs'].items()}
+    if isinstance(result.get("run"), dict):
+        result["run"] = _analysis_nodes(result["run"], operation)
+    if isinstance(result.get("runs"), dict):
+        result["runs"] = {label: _analysis_nodes(run, operation) for label, run in result["runs"].items()}
     return result

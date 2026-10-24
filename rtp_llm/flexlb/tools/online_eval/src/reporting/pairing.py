@@ -39,29 +39,37 @@ def merge_nearby_events(events, tolerance_s=1.0):
     A zero tolerance disables merging.
     """
     if type(tolerance_s) not in (int, float) or not math.isfinite(tolerance_s) or tolerance_s < 0:
-        raise ValueError('event merge tolerance must be finite and nonnegative')
+        raise ValueError("event merge tolerance must be finite and nonnegative")
     if tolerance_s == 0:
         return copy.deepcopy(events)
     groups, unchanged = {}, []
     for event in events:
-        if not event.get('id') or not event.get('run'):
+        if not event.get("id") or not event.get("run"):
             unchanged.append(copy.deepcopy(event))
             continue
-        key = (event['id'], event['event_name'])
+        key = (event["id"], event["event_name"])
         groups.setdefault(key, []).append(event)
     result = unchanged
     for (identity, name), candidates in groups.items():
         clusters = []
-        for event in sorted(candidates, key=lambda e: e['t']):
-            if (not clusters or event['t'] - clusters[-1][0]['t'] > tolerance_s
-                    or any(e['run'] == event['run'] for e in clusters[-1])):
+        for event in sorted(candidates, key=lambda e: e["t"]):
+            if (
+                not clusters
+                or event["t"] - clusters[-1][0]["t"] > tolerance_s
+                or any(e["run"] == event["run"] for e in clusters[-1])
+            ):
                 clusters.append([])
             clusters[-1].append(event)
         for members in clusters:
             if len(members) == 1:
                 result.append(copy.deepcopy(members[0]))
             else:
-                result.append(dict(id=identity, name=name + ' ×' + str(len(members)),
-                    t=sum(e['t'] for e in members) / len(members),
-                    members=copy.deepcopy(members)))
-    return sorted(result, key=lambda e: (e['t'], e.get('name', '')))
+                result.append(
+                    dict(
+                        id=identity,
+                        name=name + " ×" + str(len(members)),
+                        t=sum(e["t"] for e in members) / len(members),
+                        members=copy.deepcopy(members),
+                    )
+                )
+    return sorted(result, key=lambda e: (e["t"], e.get("name", "")))

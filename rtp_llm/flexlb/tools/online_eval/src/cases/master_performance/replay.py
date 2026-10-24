@@ -4,32 +4,35 @@ import argparse
 import json
 from pathlib import Path
 
+from artifacts.gate import publish_gate
 from cases.master_performance import analysis as performance_analysis
 from cases.master_performance.analysis import analyze
 from cases.master_performance.metrics import produce
 from cases.master_performance.report import write_report
-from artifacts.gate import publish_gate
 
 
 def performance_main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("evidence", type=Path)
     parser.add_argument("--output", required=True, type=Path)
-    parser.add_argument("--reinterpret", action="store_true",
-                        help="explicitly re-adjudicate evidence into a NEW output directory")
+    parser.add_argument(
+        "--reinterpret", action="store_true", help="explicitly re-adjudicate evidence into a NEW output directory"
+    )
     parser.add_argument("--json-only", action="store_true", help="write evidence and verdict without HTML")
     args = parser.parse_args()
-    from artifacts.reinterpretation import load_reinterpretation, import_metrics
+    from artifacts.reinterpretation import import_metrics, load_reinterpretation
     from file_io import write_json
+
     e = load_reinterpretation(parser, args, performance_analysis.__file__)
     r = analyze(e)
     if args.json_only:
         args.output.mkdir(parents=True, exist_ok=True)
         from artifacts.gate import freeze_gate
+
         freeze_gate(args.output, "performance", e, r)
         write_json(args.output / "analysis.json", r)
     else:
         import_metrics(args.output, args.evidence.parent)
-        publish_gate(args.output, 'performance', e, r, produce, write_report)
+        publish_gate(args.output, "performance", e, r, produce, write_report)
     print(json.dumps(r, allow_nan=False))
     return {"PASS": 0, "FAIL": 1, "INVALID": 2}[r["verdict"]]

@@ -1,4 +1,5 @@
 """Prefix identity model with explicit token lengths and allocation semantics."""
+
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -42,17 +43,27 @@ class LineageMetadata:
         except (KeyError, TypeError, ValueError) as exc:
             raise ValueError("invalid lineage metadata") from exc
         prefix_block_size(result.block_size)
-        if (type(result.version) is not int or result.version not in (2, 3)
-                or type(result.count) is not int
-                or not 1 <= result.count <= MAX_LINEAGE_EVENTS or not isinstance(result.provenance, dict)
-                or result.tail != (LengthSemantics.BLOCK_ALIGNED if result.version == 2 else LengthSemantics.EXACT)):
+        if (
+            type(result.version) is not int
+            or result.version not in (2, 3)
+            or type(result.count) is not int
+            or not 1 <= result.count <= MAX_LINEAGE_EVENTS
+            or not isinstance(result.provenance, dict)
+            or result.tail != (LengthSemantics.BLOCK_ALIGNED if result.version == 2 else LengthSemantics.EXACT)
+        ):
             raise ValueError("invalid lineage metadata")
         return result
 
     def to_dict(self):
-        result = dict(version=self.version, block_size=self.block_size, count=self.count,
-                      realism=self.realism, tail=self.tail.value, arrival=self.arrival,
-                      provenance=self.provenance)
+        result = dict(
+            version=self.version,
+            block_size=self.block_size,
+            count=self.count,
+            realism=self.realism,
+            tail=self.tail.value,
+            arrival=self.arrival,
+            provenance=self.provenance,
+        )
         if self.token_adjustment is not None:
             result["token_adjustment"] = self.token_adjustment
         if self.allocation_bitmap is not None:
@@ -79,17 +90,28 @@ class LineageModel:
             raise ValueError("lineage model count mismatch")
         previous = 0
         for index, event in enumerate(self.events):
-            if (any(type(value) is not int for value in (event.timestamp_ms, event.input_tokens,
-                    event.parent_index, event.shared_full_blocks, event.reserved_labels))
-                    or not previous <= event.timestamp_ms <= 9223372036854775807
-                    or not 1 <= event.input_tokens <= 2147483647
-                    or not -1 <= event.parent_index < index
-                    or not 0 <= event.shared_full_blocks <= event.input_tokens // self.metadata.block_size
-                    or event.reserved_labels not in (0, 1)):
+            if (
+                any(
+                    type(value) is not int
+                    for value in (
+                        event.timestamp_ms,
+                        event.input_tokens,
+                        event.parent_index,
+                        event.shared_full_blocks,
+                        event.reserved_labels,
+                    )
+                )
+                or not previous <= event.timestamp_ms <= 9223372036854775807
+                or not 1 <= event.input_tokens <= 2147483647
+                or not -1 <= event.parent_index < index
+                or not 0 <= event.shared_full_blocks <= event.input_tokens // self.metadata.block_size
+                or event.reserved_labels not in (0, 1)
+            ):
                 raise ValueError("invalid lineage event")
-            if ((event.parent_index == -1 and event.shared_full_blocks)
-                    or (event.parent_index >= 0 and event.shared_full_blocks >
-                        self.events[event.parent_index].input_tokens // self.metadata.block_size)):
+            if (event.parent_index == -1 and event.shared_full_blocks) or (
+                event.parent_index >= 0
+                and event.shared_full_blocks > self.events[event.parent_index].input_tokens // self.metadata.block_size
+            ):
                 raise ValueError("invalid lineage shared prefix")
             if self.metadata.tail == LengthSemantics.BLOCK_ALIGNED:
                 if event.input_tokens % self.metadata.block_size:
@@ -102,19 +124,31 @@ class LineageModel:
     def from_wire(cls, metadata, events):
         header = LineageMetadata.read(metadata)
         if header.version == 2:
-            typed = tuple(LineageEvent(ts, blocks * header.block_size, parent, shared, reserve)
-                          for ts, blocks, parent, shared, reserve in events)
+            typed = tuple(
+                LineageEvent(ts, blocks * header.block_size, parent, shared, reserve)
+                for ts, blocks, parent, shared, reserve in events
+            )
         else:
             typed = tuple(LineageEvent(*event) for event in events)
         return cls(header, typed)
 
     def to_wire(self):
         if self.metadata.version == 2:
-            events = [(event.timestamp_ms, event.input_tokens // self.metadata.block_size, event.parent_index,
-                       event.shared_full_blocks, event.reserved_labels) for event in self.events]
+            events = [
+                (
+                    event.timestamp_ms,
+                    event.input_tokens // self.metadata.block_size,
+                    event.parent_index,
+                    event.shared_full_blocks,
+                    event.reserved_labels,
+                )
+                for event in self.events
+            ]
         else:
-            events = [[event.timestamp_ms, event.input_tokens, event.parent_index,
-                       event.shared_full_blocks] for event in self.events]
+            events = [
+                [event.timestamp_ms, event.input_tokens, event.parent_index, event.shared_full_blocks]
+                for event in self.events
+            ]
         return self.metadata.to_dict(), events
 
 
@@ -140,8 +174,10 @@ class LineageExpander:
         paths: list[tuple[int, ...]] = []
         next_label = 1
         for index, event in enumerate(self.model.events):
-            prefix = paths[event.parent_index][:event.shared_full_blocks] if event.parent_index >= 0 else ()
-            fresh = (event.input_tokens + self.model.metadata.block_size - 1) // self.model.metadata.block_size - event.shared_full_blocks
+            prefix = paths[event.parent_index][: event.shared_full_blocks] if event.parent_index >= 0 else ()
+            fresh = (
+                event.input_tokens + self.model.metadata.block_size - 1
+            ) // self.model.metadata.block_size - event.shared_full_blocks
             if next_label + fresh + event.reserved_labels > self.label_limit:
                 raise ValueError("lineage label budget exceeded")
             retained = fresh if self.retained_blocks is None else max(0, self.retained_blocks - len(prefix))

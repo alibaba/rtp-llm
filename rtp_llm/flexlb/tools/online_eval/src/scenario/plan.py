@@ -1,27 +1,28 @@
 """Immutable execution contracts; JSON belongs to admission and artifact codecs."""
+
 from __future__ import annotations
 
-from dataclasses import dataclass, fields, field
 import json
-from typing import Optional, TYPE_CHECKING
+from dataclasses import dataclass, field, fields
+from typing import TYPE_CHECKING, Optional
 
 if TYPE_CHECKING:
     from scenario.declarations import MonitoringPolicy
     from scenario.environment_declaration import EnvironmentDeclaration
 
-from flexlb_cfg import PROFILES
-from scenario.environment_snapshot import EnvironmentSnapshot
-from document_io import DocumentError as ScenarioError
-from scenario.validation import mapping, number, identifier
-from scenario.references import validate_references, enter_stage
-from scenario.execution_policy import EXECUTION_BUDGETS
-from scenario.stage_parameters import StageParameters, AdapterParameters, decode_parameters
 from adapters.java_mock_resources import JavaMockBudget
+from document_io import DocumentError as ScenarioError
+from flexlb_cfg import PROFILES
+
+from scenario.environment_snapshot import EnvironmentSnapshot
+from scenario.execution_policy import EXECUTION_BUDGETS
+from scenario.references import enter_stage, validate_references
+from scenario.stage_parameters import AdapterParameters, StageParameters, decode_parameters
+from scenario.validation import identifier, mapping, number
 
 
 def json_document(value):
     return json.dumps(value, separators=(",", ":"), allow_nan=False)
-
 
 
 @dataclass(frozen=True)
@@ -37,13 +38,13 @@ class ExecutionBudgets:
 
     def __post_init__(self):
         for name in EXECUTION_BUDGETS:
-            number(getattr(self, name), "execution." + name, minimum=.001)
+            number(getattr(self, name), "execution." + name, minimum=0.001)
 
     @classmethod
     def read(cls, value):
         required = {item.name for item in fields(cls)} - {"collection", "monitoring"}
         mapping(value, "execution", required | {"collection", "monitoring"}, required)
-        budgets = {key: number(value[key], "execution." + key, minimum=.001) for key in required}
+        budgets = {key: number(value[key], "execution." + key, minimum=0.001) for key in required}
         collection = value.get("collection")
         if collection is not None and collection not in {"aggregate", "request", "diagnostic"}:
             raise ScenarioError("invalid execution collection")
@@ -51,12 +52,19 @@ class ExecutionBudgets:
         if monitoring is not None and not isinstance(monitoring, dict):
             raise ScenarioError("execution monitoring requires a mapping")
         from scenario.declarations import MonitoringPolicy
-        return cls(**budgets, collection=collection,
-                   monitoring=MonitoringPolicy.read(monitoring) if monitoring is not None else None)
+
+        return cls(
+            **budgets,
+            collection=collection,
+            monitoring=MonitoringPolicy.read(monitoring) if monitoring is not None else None,
+        )
 
     def to_dict(self):
-        result = {item.name: getattr(self, item.name) for item in fields(self)
-                  if item.name not in {"collection", "monitoring"}}
+        result = {
+            item.name: getattr(self, item.name)
+            for item in fields(self)
+            if item.name not in {"collection", "monitoring"}
+        }
         if self.collection is not None:
             result["collection"] = self.collection
         if self.monitoring is not None:
@@ -75,23 +83,41 @@ class StagePlan:
 
     @classmethod
     def read(cls, value):
-        mapping(value, "stage", {"id", "action", "timeout_s", "params", "check_ids", "purpose"},
-                {"id", "action", "timeout_s", "params", "check_ids"})
+        mapping(
+            value,
+            "stage",
+            {"id", "action", "timeout_s", "params", "check_ids", "purpose"},
+            {"id", "action", "timeout_s", "params", "check_ids"},
+        )
         sid = identifier(value["id"], "stage.id")
         action = identifier(value["action"], "stage.action")
         checks = value["check_ids"]
-        if (not isinstance(checks, list) or any(type(check) is not str for check in checks)
-                or len(set(checks)) != len(checks)):
+        if (
+            not isinstance(checks, list)
+            or any(type(check) is not str for check in checks)
+            or len(set(checks)) != len(checks)
+        ):
             raise ScenarioError("invalid stage check identities")
         purpose = value.get("purpose")
         if purpose is not None and purpose not in {"operation", "observation"}:
             raise ScenarioError("invalid stage purpose")
-        return cls(sid, action, number(value["timeout_s"], "stage.timeout_s", minimum=.001),
-                   decode_parameters(action, value["params"]), tuple(checks), purpose)
+        return cls(
+            sid,
+            action,
+            number(value["timeout_s"], "stage.timeout_s", minimum=0.001),
+            decode_parameters(action, value["params"]),
+            tuple(checks),
+            purpose,
+        )
 
     def to_dict(self):
-        result = dict(id=self.id, action=self.action, timeout_s=self.timeout_s,
-                      params=self.parameters.to_dict(), check_ids=list(self.check_ids))
+        result = dict(
+            id=self.id,
+            action=self.action,
+            timeout_s=self.timeout_s,
+            params=self.parameters.to_dict(),
+            check_ids=list(self.check_ids),
+        )
         if self.purpose is not None:
             result["purpose"] = self.purpose
         return result
@@ -100,6 +126,7 @@ class StagePlan:
 @dataclass(frozen=True)
 class EnvironmentPlan:
     """Validated launch declaration and effective, frozen configuration."""
+
     declaration: "EnvironmentDeclaration"
     snapshot: EnvironmentSnapshot
     patch_json: str
@@ -109,13 +136,28 @@ class EnvironmentPlan:
     @classmethod
     def read(cls, value):
         from scenario.environment_declaration import EnvironmentDeclaration
-        from scenario.master_patch import MasterPatch
         from scenario.environment_resolver import effective_capabilities
+        from scenario.master_patch import MasterPatch
+
         extras = {"resolved_config", "rendered", "config_overrides", "effective_axes", "effective_capabilities"}
         allowed = {item.name for item in fields(EnvironmentDeclaration)} | extras
-        mapping(value, "environment", allowed, extras | {
-            "backend", "n_prefill", "n_decode", "discovery", "perf_preset", "master_layout",
-            "master_stable_window_s", "debug_enabled", "master_sync_log"})
+        mapping(
+            value,
+            "environment",
+            allowed,
+            extras
+            | {
+                "backend",
+                "n_prefill",
+                "n_decode",
+                "discovery",
+                "perf_preset",
+                "master_layout",
+                "master_stable_window_s",
+                "debug_enabled",
+                "master_sync_log",
+            },
+        )
         snapshot = EnvironmentSnapshot.read(value["rendered"])
         if json.loads(snapshot.master_json) != value["resolved_config"]:
             raise ScenarioError("environment configuration disagrees with frozen snapshot")
@@ -123,17 +165,26 @@ class EnvironmentPlan:
         if axes != value["effective_axes"] or capabilities != value["effective_capabilities"]:
             raise ScenarioError("environment capabilities disagree with frozen configuration")
         MasterPatch.read(value["config_overrides"], "environment.config_overrides")
-        declaration = EnvironmentDeclaration.read_normalized({key: val for key, val in value.items() if key not in extras})
-        if declaration.backend != "java_mock" or any(type(count) is not int or count < 1
-                for count in (declaration.n_prefill, declaration.n_decode)):
+        declaration = EnvironmentDeclaration.read_normalized(
+            {key: val for key, val in value.items() if key not in extras}
+        )
+        if declaration.backend != "java_mock" or any(
+            type(count) is not int or count < 1 for count in (declaration.n_prefill, declaration.n_decode)
+        ):
             raise ScenarioError("invalid compiled environment topology")
-        return cls(declaration, snapshot, json_document(value["config_overrides"]),
-                   tuple(axes.items()), tuple(capabilities))
+        return cls(
+            declaration, snapshot, json_document(value["config_overrides"]), tuple(axes.items()), tuple(capabilities)
+        )
 
     def to_dict(self):
-        return dict(self.declaration.to_dict(), resolved_config=json.loads(self.snapshot.master_json),
-                    rendered=self.snapshot.to_dict(), config_overrides=json.loads(self.patch_json),
-                    effective_axes=dict(self.axes), effective_capabilities=list(self.capabilities))
+        return dict(
+            self.declaration.to_dict(),
+            resolved_config=json.loads(self.snapshot.master_json),
+            rendered=self.snapshot.to_dict(),
+            config_overrides=json.loads(self.patch_json),
+            effective_axes=dict(self.axes),
+            effective_capabilities=list(self.capabilities),
+        )
 
 
 @dataclass(frozen=True)
@@ -165,10 +216,23 @@ class CompiledInstance:
         if isinstance(value, cls):
             return value
         required = {item.name for item in fields(cls)} - {"metadata", "implementation", "reports", "reporting"}
-        attachments = {"metadata", "reports", "reporting", "implementation", "test_kind",
-                       "collection_profile", "workload_runtime"}
-        mapping(value, "instance", required | {"resource_budget", "scenario", "variant",
-                "effective_axes", "effective_capabilities"} | attachments, required | {"resource_budget"})
+        attachments = {
+            "metadata",
+            "reports",
+            "reporting",
+            "implementation",
+            "test_kind",
+            "collection_profile",
+            "workload_runtime",
+        }
+        mapping(
+            value,
+            "instance",
+            required
+            | {"resource_budget", "scenario", "variant", "effective_axes", "effective_capabilities"}
+            | attachments,
+            required | {"resource_budget"},
+        )
         sid, vid = value["scenario_id"], value["variant_id"]
         profile = value["profile"]
         if profile not in PROFILES or value["id"] != f"{sid}::{vid}::{profile}":
@@ -185,6 +249,7 @@ class CompiledInstance:
             raise ScenarioError("duplicate compiled stage identity")
         # Frozen references are structural dependencies, never arbitrary JSON paths.
         from scenario.stage_compiler import OUTPUTS
+
         seen = {}
         setup_seen, torn_down = False, False
         for index, stage in enumerate(stages):
@@ -194,27 +259,40 @@ class CompiledInstance:
             torn_down = stage.action == "teardown"
         for name in ("findings", "requires", "tags"):
             items = value[name]
-            if (not isinstance(items, list) or any(type(item) is not str for item in items)
-                    or len(set(items)) != len(items)):
+            if (
+                not isinstance(items, list)
+                or any(type(item) is not str for item in items)
+                or len(set(items)) != len(items)
+            ):
                 raise ScenarioError("invalid frozen " + name)
         check_ids = {stage.id + "." + check for stage in stages for check in stage.check_ids}
         if not check_ids or set(value["findings"]) - check_ids:
             raise ScenarioError("compiled instance requires declared checks/findings")
         environment = EnvironmentPlan.read(value["environment"])
-        for name, expected in (("effective_axes", dict(environment.axes)),
-                               ("effective_capabilities", list(environment.capabilities))):
+        for name, expected in (
+            ("effective_axes", dict(environment.axes)),
+            ("effective_capabilities", list(environment.capabilities)),
+        ):
             if name in value and value[name] != expected:
                 raise ScenarioError("instance capability projection disagrees with environment")
-        from scenario.execution_policy import normalize_metadata, normalize_execution
-        metadata = normalize_metadata(value.get("metadata", {
-            "kind": "functional", "description": value["description"],
-        }))
+        from scenario.execution_policy import normalize_execution, normalize_metadata
+
+        metadata = normalize_metadata(
+            value.get(
+                "metadata",
+                {
+                    "kind": "functional",
+                    "description": value["description"],
+                },
+            )
+        )
         policy = normalize_execution(
             dict(value["execution"], collection=value["execution"].get("collection", "diagnostic")),
             kind=metadata["kind"],
         )
-        from scenario.registry import registry
         from scenario.catalog import handlers
+        from scenario.registry import registry
+
         registered = registry().cases.get(value.get("implementation", {}).get("program"))
         try:
             if registered is not None:
@@ -225,34 +303,85 @@ class CompiledInstance:
                     descriptors[stage.action].execution_requirements.validate(policy)
         except ValueError as exc:
             raise ScenarioError("frozen execution prerequisites: " + str(exc)) from exc
-        projections = dict(test_kind=metadata["kind"], collection_profile=policy["collection"],
-                           workload_runtime=policy["monitoring"] if metadata["kind"] == "workload" else {})
+        projections = dict(
+            test_kind=metadata["kind"],
+            collection_profile=policy["collection"],
+            workload_runtime=policy["monitoring"] if metadata["kind"] == "workload" else {},
+        )
         for key, expected in projections.items():
             if key in value and value[key] != expected:
                 raise ScenarioError("instance policy projection disagrees with canonical policy: " + key)
         resource_budget = JavaMockBudget.from_metadata(value["resource_budget"])
-        scalar = {key: value[key] for key in ("id", "scenario_id", "variant_id", "profile", "category",
-                  "description", "source", "source_path", "grade", "estimated_duration_s")}
-        return cls(**scalar, environment=environment, execution=ExecutionBudgets.read(policy),
-                   stages=stages, findings=tuple(value["findings"]), requires=tuple(value["requires"]),
-                   tags=tuple(value["tags"]), resource_budget=resource_budget,
-                   metadata=AdapterParameters(metadata),
-                   **{key: tuple(value[key]) if key == "reports" else AdapterParameters(value[key])
-                      for key in ("implementation", "reports", "reporting") if key in value})
+        scalar = {
+            key: value[key]
+            for key in (
+                "id",
+                "scenario_id",
+                "variant_id",
+                "profile",
+                "category",
+                "description",
+                "source",
+                "source_path",
+                "grade",
+                "estimated_duration_s",
+            )
+        }
+        return cls(
+            **scalar,
+            environment=environment,
+            execution=ExecutionBudgets.read(policy),
+            stages=stages,
+            findings=tuple(value["findings"]),
+            requires=tuple(value["requires"]),
+            tags=tuple(value["tags"]),
+            resource_budget=resource_budget,
+            metadata=AdapterParameters(metadata),
+            **{
+                key: tuple(value[key]) if key == "reports" else AdapterParameters(value[key])
+                for key in ("implementation", "reports", "reporting")
+                if key in value
+            },
+        )
 
     def to_dict(self):
-        result = {key: getattr(self, key) for key in ("id", "scenario_id", "variant_id", "profile", "category",
-                  "description", "source", "source_path", "grade", "estimated_duration_s")}
-        result.update(scenario=self.scenario_id, variant=self.variant_id,
-            effective_axes=dict(self.environment.axes), effective_capabilities=list(self.environment.capabilities),
-            environment=self.environment.to_dict(), execution=self.execution.to_dict(),
-            stages=[stage.to_dict() for stage in self.stages], findings=list(self.findings),
-            requires=list(self.requires), tags=list(self.tags), resource_budget=self.resource_budget.to_metadata())
+        result = {
+            key: getattr(self, key)
+            for key in (
+                "id",
+                "scenario_id",
+                "variant_id",
+                "profile",
+                "category",
+                "description",
+                "source",
+                "source_path",
+                "grade",
+                "estimated_duration_s",
+            )
+        }
+        result.update(
+            scenario=self.scenario_id,
+            variant=self.variant_id,
+            effective_axes=dict(self.environment.axes),
+            effective_capabilities=list(self.environment.capabilities),
+            environment=self.environment.to_dict(),
+            execution=self.execution.to_dict(),
+            stages=[stage.to_dict() for stage in self.stages],
+            findings=list(self.findings),
+            requires=list(self.requires),
+            tags=list(self.tags),
+            resource_budget=self.resource_budget.to_metadata(),
+        )
         metadata = self.metadata.to_dict()
-        result.update(metadata=metadata, test_kind=metadata["kind"],
-                      collection_profile=self.execution.collection,
-                      workload_runtime=self.execution.monitoring.to_dict()
-                          if metadata["kind"] == "workload" and self.execution.monitoring else {})
+        result.update(
+            metadata=metadata,
+            test_kind=metadata["kind"],
+            collection_profile=self.execution.collection,
+            workload_runtime=self.execution.monitoring.to_dict()
+            if metadata["kind"] == "workload" and self.execution.monitoring
+            else {},
+        )
         for key in ("implementation", "reports", "reporting"):
             value = getattr(self, key)
             if value is not None:

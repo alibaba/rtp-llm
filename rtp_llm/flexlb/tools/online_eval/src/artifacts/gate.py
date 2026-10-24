@@ -1,15 +1,15 @@
 """Atomic, verified gate artifacts independent of metric and HTML delivery."""
-from file_io import read_json
 
 import hashlib
 import json
 from pathlib import Path
+
 from analysis.checks import CheckResult
 from analysis.gates import gate_result
 from artifacts.errors import ArtifactNotProduced
-from schema_contract import matches_schema
-from file_io import write_json
 from file_digest import sha256_file
+from file_io import read_json, write_json
+from schema_contract import matches_schema
 
 
 def _validate_result(result):
@@ -28,11 +28,14 @@ def freeze_gate(directory, name, evidence, result):
     target = directory / f"{name}-gate-result.json"
     write_json(source, evidence)
     write_json(target, result)
-    write_json(directory / f"{name}-gate-manifest.json", dict(
-        gate_result_schema_version=1,
-        evidence=dict(file=source.name, sha256=sha256_file(source)),
-        result=dict(file=target.name, sha256=sha256_file(target)),
-    ))
+    write_json(
+        directory / f"{name}-gate-manifest.json",
+        dict(
+            gate_result_schema_version=1,
+            evidence=dict(file=source.name, sha256=sha256_file(source)),
+            result=dict(file=target.name, sha256=sha256_file(target)),
+        ),
+    )
     return target
 
 
@@ -45,8 +48,7 @@ def load_gate(directory, name):
     if not matches_schema(manifest, "gate_result_schema_version", 1):
         raise ValueError("unsupported frozen gate manifest")
     values = []
-    for key, filename in (("evidence", f"{name}-gate-evidence.json"),
-                          ("result", f"{name}-gate-result.json")):
+    for key, filename in (("evidence", f"{name}-gate-evidence.json"), ("result", f"{name}-gate-result.json")):
         entry = manifest[key]
         if entry["file"] != filename:
             raise ValueError("unexpected gate artifact path")
@@ -59,9 +61,14 @@ def load_gate(directory, name):
 
 
 def gate_check(identity, result, path, expected):
-    return CheckResult(identity, {"INVALID": "ERROR", "PASS": "PASS", "FAIL": "FAIL"}[result["verdict"]],
-                       detail="; ".join(result.get("errors", [])), actual=result["verdict"], expected=expected,
-                       evidence=dict(result=Path(path).name, sha256=sha256_file(Path(path))))
+    return CheckResult(
+        identity,
+        {"INVALID": "ERROR", "PASS": "PASS", "FAIL": "FAIL"}[result["verdict"]],
+        detail="; ".join(result.get("errors", [])),
+        actual=result["verdict"],
+        expected=expected,
+        evidence=dict(result=Path(path).name, sha256=sha256_file(Path(path))),
+    )
 
 
 def commit_gate(directory, name, evidence, analyze):
@@ -92,15 +99,15 @@ def publish_gate(directory, name, evidence, result, project, write_report, *, re
     project_gate(directory, name, project)
     evidence, result = load_gate(directory, name)
     options = dict(report_options or {})
-    if 'run' in options:
-        raise ValueError('offline publication does not accept a live run')
+    if "run" in options:
+        raise ValueError("offline publication does not accept a live run")
     return write_report(directory, evidence, result, **options)
 
 
 def referenced_checks(reference, read_bytes):
     """Verify a frozen result reference before expanding presentation-only children."""
     name = reference["result"]
-    if not isinstance(name, str) or Path(name).name != name or not name.endswith('-gate-result.json'):
+    if not isinstance(name, str) or Path(name).name != name or not name.endswith("-gate-result.json"):
         raise ValueError("invalid gate result reference")
     payload = read_bytes(name)
     if hashlib.sha256(payload).hexdigest() != reference["sha256"]:

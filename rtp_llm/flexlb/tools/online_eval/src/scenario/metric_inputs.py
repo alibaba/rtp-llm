@@ -1,21 +1,32 @@
 """Local field names bind explicit metric IDs and label projections."""
 
-from monitoring.identity import METRIC_ID, NAME as FIELD
+from monitoring.identity import METRIC_ID
+from monitoring.identity import NAME as FIELD
 
 
 def metric_fields(spec):
-    if (not isinstance(spec, dict) or set(spec) != {"fields"}
-            or not isinstance(spec["fields"], dict)
-            or not spec["fields"]):
+    if (
+        not isinstance(spec, dict)
+        or set(spec) != {"fields"}
+        or not isinstance(spec["fields"], dict)
+        or not spec["fields"]
+    ):
         raise ValueError("metric input requires fields; the program owns the reader")
     identities = set()
     for name, binding in spec["fields"].items():
-        if (type(name) is not str or not FIELD.fullmatch(name)
-                or not isinstance(binding, dict) or set(binding) != {"metric", "labels"}
-                or type(binding["metric"]) is not str or not METRIC_ID.fullmatch(binding["metric"])
-                or not isinstance(binding["labels"], dict)
-                or any(type(k) is not str or not FIELD.fullmatch(k)
-                       or type(v) is not str or not v for k, v in binding["labels"].items())):
+        if (
+            type(name) is not str
+            or not FIELD.fullmatch(name)
+            or not isinstance(binding, dict)
+            or set(binding) != {"metric", "labels"}
+            or type(binding["metric"]) is not str
+            or not METRIC_ID.fullmatch(binding["metric"])
+            or not isinstance(binding["labels"], dict)
+            or any(
+                type(k) is not str or not FIELD.fullmatch(k) or type(v) is not str or not v
+                for k, v in binding["labels"].items()
+            )
+        ):
             raise ValueError("invalid metric field binding: " + str(name))
         identity = (binding["metric"], tuple(sorted(binding["labels"].items())))
         if identity in identities:

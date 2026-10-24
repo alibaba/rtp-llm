@@ -1,16 +1,16 @@
 """Case-owned HA numeric projections; raw journals remain separate evidence."""
-from file_io import read_json
 
 import json
 import math
 from collections import defaultdict
 from pathlib import Path
 
-from cases.master_ha_failover.analysis import prefill_assignment_windows
 from analysis.time_buckets import TimeBuckets
+from file_io import read_json
 from monitoring.contracts import MetricUnavailable
 from monitoring.metric_store import series_row
 
+from cases.master_ha_failover.analysis import prefill_assignment_windows
 from cases.master_ha_failover.state_contract import STATE_FIELDS
 
 
@@ -22,8 +22,7 @@ def _artifacts(payload, *, require_states=True):
             continue
         paths = {Path(path).name: Path(path) for path in stage["artifacts"]}
         if "client_events.jsonl" in paths and (not require_states or "master_states.jsonl" in paths):
-            candidates.append((paths["client_events.jsonl"], paths.get("master_states.jsonl"),
-                               resource["env_epoch"]))
+            candidates.append((paths["client_events.jsonl"], paths.get("master_states.jsonl"), resource["env_epoch"]))
     if len(candidates) != 1:
         raise MetricUnavailable("HA metrics require one completed request/state journal resource")
     return candidates[0]
@@ -45,8 +44,7 @@ def _request_series(rows, anchor):
     if not buckets:
         return {key: [] for key in ("sent", "success", "failed")}
     return {
-        key: [dict(x=second - anchor, y=buckets[second][key])
-              for second in range(min(buckets), max(buckets) + 1)]
+        key: [dict(x=second - anchor, y=buckets[second][key]) for second in range(min(buckets), max(buckets) + 1)]
         for key in ("sent", "success", "failed")
     }
 
@@ -58,8 +56,9 @@ def _state_series(rows, anchor, fields=STATE_FIELDS):
         name = row.get("master")
         if type(timestamp) not in (int, float) or not math.isfinite(timestamp) or name not in {"A", "B"}:
             raise ValueError("HA Master state row lacks timestamp or identity")
-        if row.get("http_up") not in (0, 1) or (row["http_up"] == 1 and (
-                row.get("state_error") or any(row.get(field) is None for field in fields))):
+        if row.get("http_up") not in (0, 1) or (
+            row["http_up"] == 1 and (row.get("state_error") or any(row.get(field) is None for field in fields))
+        ):
             raise ValueError("healthy HA Master state violates ledger contract")
         for field in fields:
             value = row.get(field)
@@ -86,40 +85,66 @@ def _prefill_balance_series(rows, anchor, fleet_size):
 
 
 from monitoring.measurement_descriptions import MeasurementDescription, MeasurementDescriptions
+
 from cases.master_ha_failover.analysis import HA_METRICS, measure_client_metric
 
-_DESCRIPTIONS = MeasurementDescriptions({
-    **{('ha_gates', 'ha_gate/' + name): MeasurementDescription(measure_client_metric,
-        'client_journal', 'declared_request_window_and_selection', 'request_ledger', True)
-        for name in HA_METRICS},
-    **{('ha_evidence', 'ha/' + name): MeasurementDescription(_state_series,
-        'debug_api', 'master_instance', 'sampled', False,
-        dict(source='master_inflight', field=name)) for name in STATE_FIELDS},
-    **{('ha_evidence', 'ha/' + name): MeasurementDescription(_request_series,
-        'client_journal', 'ha_requests_by_send_time', 'request_ledger', True)
-        for name in ('sent', 'success', 'failed')},
-    **{('ha_evidence', 'ha/' + name): MeasurementDescription(_prefill_balance_series,
-        'client_journal', 'declared_prefill_fleet', 'request_ledger', True)
-        for name in ('prefill_peak_qps', 'prefill_mean_qps', 'prefill_skew')},
-})
+_DESCRIPTIONS = MeasurementDescriptions(
+    {
+        **{
+            ("ha_gates", "ha_gate/" + name): MeasurementDescription(
+                measure_client_metric, "client_journal", "declared_request_window_and_selection", "request_ledger", True
+            )
+            for name in HA_METRICS
+        },
+        **{
+            ("ha_evidence", "ha/" + name): MeasurementDescription(
+                _state_series,
+                "debug_api",
+                "master_instance",
+                "sampled",
+                False,
+                dict(source="master_inflight", field=name),
+            )
+            for name in STATE_FIELDS
+        },
+        **{
+            ("ha_evidence", "ha/" + name): MeasurementDescription(
+                _request_series, "client_journal", "ha_requests_by_send_time", "request_ledger", True
+            )
+            for name in ("sent", "success", "failed")
+        },
+        **{
+            ("ha_evidence", "ha/" + name): MeasurementDescription(
+                _prefill_balance_series, "client_journal", "declared_prefill_fleet", "request_ledger", True
+            )
+            for name in ("prefill_peak_qps", "prefill_mean_qps", "prefill_skew")
+        },
+    }
+)
 metric_contract = _DESCRIPTIONS.describe
 
 
 def produce(directory, payload):
     from monitoring.metric_store import MetricStore
     from monitoring.publication import publish
+
     store = MetricStore.read(directory)
     anchor = payload["clock_anchor"]["epoch_s"]
     fields = [field for field in STATE_FIELDS if "ha/" + field in store.document["definitions"]]
     request_path, state_path, epoch = _artifacts(payload, require_states=bool(fields))
     requests, states = _read_rows(request_path), _read_rows(state_path) if fields else []
-    configured = (payload.get("configuration") or payload.get("implementation", {}).get("configuration", {})).get("environment", {}).get("n_prefill")
+    configured = (
+        (payload.get("configuration") or payload.get("implementation", {}).get("configuration", {}))
+        .get("environment", {})
+        .get("n_prefill")
+    )
     observed = len({r.get("prefill") for r in requests if r.get("prefill")})
     fleet_size = configured if type(configured) is int and configured > 0 else observed
     values = {key: [(None, points)] for key, points in _request_series(requests, anchor).items()}
     if fleet_size:
-        values.update({key: [(None, points)] for key, points in
-                       _prefill_balance_series(requests, anchor, fleet_size).items()})
+        values.update(
+            {key: [(None, points)] for key, points in _prefill_balance_series(requests, anchor, fleet_size).items()}
+        )
     states_by_key = _state_series(states, anchor, fields)
     for field in fields:
         values[field] = [(master, states_by_key.get((master, field), [])) for master in ("A", "B")]
@@ -130,48 +155,74 @@ def produce(directory, payload):
         if identity not in store.document["definitions"]:
             continue
         definition = store.document["definitions"][identity]
-        publish(store, identity, definition, [series_row([[p["x"] + anchor, p["y"]] for p in points],
-                epoch=epoch, source="ha", labels={"master": master} if master else {})
-                for master, points in members], producer="ha_evidence",
-                evidence=dict(request_events=str(request_path) if request_path else None,
-                              master_states=str(state_path) if state_path else None,
-                              transport="prometheus" if identity.removeprefix("ha/") in STATE_FIELDS else "client_journal",
-                              probe_archive=str(state_path.with_suffix(".prometheus.json")) if state_path and identity.removeprefix("ha/") in STATE_FIELDS else None,
-                              fleet_size=fleet_size or None))
+        publish(
+            store,
+            identity,
+            definition,
+            [
+                series_row(
+                    [[p["x"] + anchor, p["y"]] for p in points],
+                    epoch=epoch,
+                    source="ha",
+                    labels={"master": master} if master else {},
+                )
+                for master, points in members
+            ],
+            producer="ha_evidence",
+            evidence=dict(
+                request_events=str(request_path) if request_path else None,
+                master_states=str(state_path) if state_path else None,
+                transport="prometheus" if identity.removeprefix("ha/") in STATE_FIELDS else "client_journal",
+                probe_archive=str(state_path.with_suffix(".prometheus.json"))
+                if state_path and identity.removeprefix("ha/") in STATE_FIELDS
+                else None,
+                fleet_size=fleet_size or None,
+            ),
+        )
     store.save(directory)
-    return dict(request_events=str(request_path) if request_path else None,
-                request_count=len(requests), prefill_fleet_size=fleet_size or None,
-                prefill_fleet_size_source="declared configuration" if configured else "observed endpoints",
-                master_states=str(state_path) if state_path else None, state_samples=len(states))
+    return dict(
+        request_events=str(request_path) if request_path else None,
+        request_count=len(requests),
+        prefill_fleet_size=fleet_size or None,
+        prefill_fleet_size_source="declared configuration" if configured else "observed endpoints",
+        master_states=str(state_path) if state_path else None,
+        state_samples=len(states),
+    )
 
 
 def gate_labels(params):
     """The cohort and predicate identify the frozen scalar, not its publish timestamp."""
-    return dict(window=json.dumps(params["rows"], sort_keys=True),
-                selection=json.dumps({k: params[k] for k in ("target", "route")
-                                      if k in params}, sort_keys=True))
-
+    return dict(
+        window=json.dumps(params["rows"], sort_keys=True),
+        selection=json.dumps({k: params[k] for k in ("target", "route") if k in params}, sort_keys=True),
+    )
 
 
 def _project_gate(store, stage, check):
     from monitoring.publication import publish
+
     evidence = check["evidence"]
     identity = evidence["metric"]
     labels = evidence["labels"]
-    observations = [row for row in store.document["metrics"].get(identity, [])
-                    if row["labels"] != labels]
+    observations = [row for row in store.document["metrics"].get(identity, []) if row["labels"] != labels]
     stamp = evidence["observed_request_bounds"]
     if stamp is None:
         raise MetricUnavailable("HA gate evidence lacks observed request bounds")
-    current = series_row([[stamp[1], check["actual"]]], epoch=evidence["env_epoch"],
-                        source="ha_gate", labels=labels)
-    publish(store, identity, store.document["definitions"][identity], [current],
-            producer="ha_gates", evidence=dict(evidence, check=stage["id"] + "." + check["id"]))
+    current = series_row([[stamp[1], check["actual"]]], epoch=evidence["env_epoch"], source="ha_gate", labels=labels)
+    publish(
+        store,
+        identity,
+        store.document["definitions"][identity],
+        [current],
+        producer="ha_gates",
+        evidence=dict(evidence, check=stage["id"] + "." + check["id"]),
+    )
     store.document["metrics"][identity] = observations + store.document["metrics"][identity]
 
 
 def produce_gates(directory):
     from monitoring.metric_store import MetricStore
+
     directory = Path(directory)
     store = MetricStore.read(directory)
     for stage in read_json(directory / "result.json")["stages"]:

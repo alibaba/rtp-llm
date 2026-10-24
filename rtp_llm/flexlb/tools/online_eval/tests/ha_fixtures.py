@@ -16,6 +16,6 @@ def replay_source():
 
 def replay_trace(path, *_args, **_kwargs):
     import json
-    path.write_text("".join(json.dumps(dict(ts=t, il=16, ol=4, bh=[7], priority=50)) + "\n"
-                            for t in (0, 120000)))
+
+    path.write_text("".join(json.dumps(dict(ts=t, il=16, ol=4, bh=[7], priority=50)) + "\n" for t in (0, 120000)))
     return path

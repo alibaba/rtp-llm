@@ -1,4 +1,5 @@
 """Python 构建器生成的类型化程序；不作为文件格式或配置入口。"""
+
 from __future__ import annotations
 
 from dataclasses import dataclass, field

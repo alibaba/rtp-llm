@@ -1,17 +1,18 @@
 """Read-only value trees with explicit mutable exports; no ownership of live data."""
+
+import copy
 from collections.abc import Mapping
 from types import MappingProxyType
-import copy
 
 
 class FrozenMapping(Mapping):
-    __slots__ = ('_data',)
+    __slots__ = ("_data",)
 
     def __init__(self, value):
-        object.__setattr__(self, '_data', MappingProxyType({key: freeze(item) for key, item in value.items()}))
+        object.__setattr__(self, "_data", MappingProxyType({key: freeze(item) for key, item in value.items()}))
 
     def __setattr__(self, name, value):
-        raise TypeError('report value is read-only')
+        raise TypeError("report value is read-only")
 
     def __getitem__(self, key):
         return self._data[key]

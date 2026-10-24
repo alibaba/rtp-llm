@@ -3,8 +3,8 @@
 import tempfile
 import unittest
 
-from scenario import ScenarioError
 from program_fixtures import compile_scenarios
+from scenario import ScenarioError
 from scenario.contracts import StageHandler, StageOutput
 from scenario.runtime import execute_instance
 from test_scenario_runtime import Backend, Clock, source
@@ -46,9 +46,7 @@ class ScalarCheckTest(unittest.TestCase):
             plan = compile_scenarios([("scalar.yaml", doc)], handlers=handlers)[0]
             clock = Clock()
             with tempfile.TemporaryDirectory() as tmp:
-                result = execute_instance(
-                    plan, Backend(clock), handlers, tmp, clock, clock.sleep
-                )
+                result = execute_instance(plan, Backend(clock), handlers, tmp, clock, clock.sleep)
             self.assertEqual(result["status"], "PASS")
             self.assertEqual(result["stages"][-1]["checks"][0]["actual"], actual)
 
@@ -69,9 +67,7 @@ class ScalarCheckTest(unittest.TestCase):
         plan = compile_scenarios([("scalar.yaml", doc)], handlers=handlers)[0]
         clock = Clock()
         with tempfile.TemporaryDirectory() as tmp:
-            result = execute_instance(
-                plan, Backend(clock), handlers, tmp, clock, clock.sleep
-            )
+            result = execute_instance(plan, Backend(clock), handlers, tmp, clock, clock.sleep)
         self.assertEqual(result["status"], "ERROR")
         self.assertEqual(result["stages"][-1]["status"], "BLOCKED")
         self.assertEqual(result["cleanup"][0]["status"], "PASS")

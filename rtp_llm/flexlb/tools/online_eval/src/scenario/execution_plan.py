@@ -1,21 +1,21 @@
 """Freeze compiled execution and verify code/presentation before child admission."""
-from file_io import read_json
 
 import hashlib
 import json
 from pathlib import Path
 
-from file_io import write_json
 from document_io import DocumentError as ScenarioError
-from schema_contract import matches_schema
+from file_io import read_json, write_json
 from scenario.plan import CompiledInstance, ExecutionPlan
+from schema_contract import matches_schema
 
 ROOT = Path(__file__).resolve().parents[2]
 
 
 def _sha(value):
-    return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":"),
-                                     allow_nan=False).encode()).hexdigest()
+    return hashlib.sha256(
+        json.dumps(value, sort_keys=True, separators=(",", ":"), allow_nan=False).encode()
+    ).hexdigest()
 
 
 def selected_cases(instances):
@@ -31,6 +31,7 @@ def selected_cases(instances):
         if name is None:
             return None  # Internal contract fixtures have no registered case.
         from monitoring.identity import NAME
+
         if not isinstance(name, str) or not NAME.fullmatch(name):
             raise ScenarioError("invalid frozen case identity")
         names.add(name)
@@ -46,11 +47,13 @@ def scope_dependencies(dependencies, instances):
         value = instance.to_dict() if isinstance(instance, CompiledInstance) else instance
         if value.get("metadata", {}).get("kind") == "workload":
             views.update({"default.yaml", *value.get("reports", [])})
-    return {path: digest for path, digest in dependencies.items()
-            if (not path.startswith("src/cases/") or path.split("/")[2] in names
-                or path == "src/cases/__init__.py")
-            and (not path.startswith("config/report_views/") or path.split("/")[-1] in views)
-            and (not path.startswith("src/reporting/assets/") or views)}
+    return {
+        path: digest
+        for path, digest in dependencies.items()
+        if (not path.startswith("src/cases/") or path.split("/")[2] in names or path == "src/cases/__init__.py")
+        and (not path.startswith("config/report_views/") or path.split("/")[-1] in views)
+        and (not path.startswith("src/reporting/assets/") or views)
+    }
 
 
 def dependency_files(instances=None):
@@ -58,9 +61,13 @@ def dependency_files(instances=None):
     paths = list((ROOT / "src").rglob("*.py")) + list(ROOT.glob("*.py"))
     paths += list((ROOT / "scripts").rglob("*.py"))
     paths += [path for path in (ROOT / "src/reporting/assets").rglob("*") if path.is_file()]
-    paths += [path for path in (ROOT / "config").rglob("*") if path.is_file()
-              and "scenarios" not in path.relative_to(ROOT / "config").parts
-              and path.suffix in {".yaml", ".json", ".bzl"}]
+    paths += [
+        path
+        for path in (ROOT / "config").rglob("*")
+        if path.is_file()
+        and "scenarios" not in path.relative_to(ROOT / "config").parts
+        and path.suffix in {".yaml", ".json", ".bzl"}
+    ]
     selected = {str(path.relative_to(ROOT)): path for path in sorted(paths)}
     if instances is not None:
         selected = scope_dependencies(selected, instances)
@@ -79,9 +86,11 @@ class ExecutionPlanCodec:
     def write(self, path, plan):
         if dict(plan.dependencies) != self.current_dependencies(plan.instances):
             raise ScenarioError("execution code/config changed after compilation")
-        payload = dict(execution_plan_schema_version=1,
-                       instances=[instance.to_dict() for instance in plan.instances],
-                       dependencies=dict(plan.dependencies))
+        payload = dict(
+            execution_plan_schema_version=1,
+            instances=[instance.to_dict() for instance in plan.instances],
+            dependencies=dict(plan.dependencies),
+        )
         payload["sha256"] = _sha(payload)
         write_json(path, payload)
         return payload["sha256"]
@@ -104,16 +113,19 @@ class ExecutionPlanCodec:
 
     def read(self, path, expected_sha):
         document = self.read_document(path, expected_sha)
-        return ExecutionPlan(tuple(CompiledInstance.read(instance) for instance in document["instances"]),
-                             tuple(sorted(document["dependencies"].items())))
+        return ExecutionPlan(
+            tuple(CompiledInstance.read(instance) for instance in document["instances"]),
+            tuple(sorted(document["dependencies"].items())),
+        )
 
 
 def freeze_plan(path, plans, *, dependencies=None):
     """Artifact-facing projection; internal callers can write ExecutionPlan directly."""
     plans = tuple(plans)
     dependencies = dependency_files(plans) if dependencies is None else scope_dependencies(dependencies, plans)
-    plan = ExecutionPlan(tuple(CompiledInstance.read(instance) for instance in plans),
-                         tuple(sorted(dependencies.items())))
+    plan = ExecutionPlan(
+        tuple(CompiledInstance.read(instance) for instance in plans), tuple(sorted(dependencies.items()))
+    )
     return ExecutionPlanCodec().write(path, plan)
 
 

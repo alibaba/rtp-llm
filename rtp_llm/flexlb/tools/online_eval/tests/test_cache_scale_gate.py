@@ -1,4 +1,3 @@
-from reporting.view_model import ViewDefinition
 import copy
 import json
 import tempfile
@@ -6,25 +5,31 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from traffic.synthetic.generator import materialize
 from analysis.workload_profile import profile as analyze_profile
+from reporting.view_model import ViewDefinition
+from traffic.synthetic.generator import materialize
 from traffic.token_plan import read_token_plan
+
 
 def profile(path, capacities=(128, 256, 512, 1024)):
     return analyze_profile(read_token_plan(path), capacities)
+
 
 from cases.cache_scale_in.analysis import align_send_counters, analyze
 from cases.cache_scale_in.report import prepare_report as read_report
 from delivery_fixtures import publish_cache
 from metric_fixtures import freeze_metrics
 
+
 def write_report(directory, evidence, result, prepared=None):
     freeze_metrics(directory, "cache_scale_in")
     bundle = publish_cache(directory, evidence, result, report_options={"prepared": prepared})
     return json.loads((bundle / "report-spec.json").read_text())
+
+
+from program_fixtures import compile_scenarios
 from reporting.view_config import view
 from scenario import load_scenarios
-from program_fixtures import compile_scenarios
 from scenario.catalog import handlers
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -33,6 +38,7 @@ ROOT = Path(__file__).resolve().parents[1]
 def prepare_report(directory, evidence):
     from monitoring.archive import export_metrics
     from monitoring.query_plan import load_plan
+
     export_metrics(directory, load_plan("cache_scale_in.yaml"))
     return read_report(directory, evidence)
 
@@ -40,12 +46,15 @@ def prepare_report(directory, evidence):
 def metric_spec(directory, evidence, result, prepared):
     from cases.cache_scale_in.metrics import produce
     from cases.cache_scale_in.report import build_spec
+
     freeze_metrics(directory, "cache_scale_in")
     produce(directory, evidence, result)
     from monitoring.metric_store import MetricStore
     from reporting.metric_binding import monitoring_audit
-    prepared = dict(prepared, metric_classification=monitoring_audit(
-        MetricStore.read(directory), view("cache_scale_in.yaml")))
+
+    prepared = dict(
+        prepared, metric_classification=monitoring_audit(MetricStore.read(directory), view("cache_scale_in.yaml"))
+    )
     return build_spec(directory, evidence, result, prepared)
 
 
@@ -53,11 +62,16 @@ class CacheGateTest(unittest.TestCase):
     def test_derived_curve_label_comes_from_yaml_presentation(self):
         template = view("cache_scale_in.yaml").to_dict()
         template["charts"]["curves"]["derived/survivor_hit_ratio"]["name"] = "YAML survivor"
-        prepared = dict(curves=[], audit=[], sources={}, gaps={}, errors=[],
-                        monitoring_status="OK", monitor_warnings=[])
+        prepared = dict(
+            curves=[], audit=[], sources={}, gaps={}, errors=[], monitoring_status="OK", monitor_warnings=[]
+        )
         evidence = self.evidence()
-        with tempfile.TemporaryDirectory() as d, mock.patch(
-            "cases.cache_scale_in.report.view", return_value=ViewDefinition.read(template, subtitle_fields={"expected_behavior", "observed_behavior"})
+        with (
+            tempfile.TemporaryDirectory() as d,
+            mock.patch(
+                "cases.cache_scale_in.report.view",
+                return_value=ViewDefinition.read(template, subtitle_fields={"expected_behavior", "observed_behavior"}),
+            ),
         ):
             spec = metric_spec(d, evidence, analyze(evidence), prepared)
         self.assertEqual(spec["panels"][0]["series"][0]["name"], "YAML survivor")
@@ -66,24 +80,37 @@ class CacheGateTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             archive = Path(d) / "telemetry/1/queries.json"
             archive.parent.mkdir(parents=True)
-            archive.write_text(json.dumps({
-                "missing_queries": [], "start": 1000, "end": 1001, "step": 1,
-                "targets": {}, "errors": [],
-                "queries": {"master-a/dispatch_qps": {
-                    "promql": "rate(dispatch_total[10s])",
-                    "result": [{"metric": {"reason": "cache"},
-                                "values": [[1000, "3"]]}],
-                }},
-            }))
+            archive.write_text(
+                json.dumps(
+                    {
+                        "missing_queries": [],
+                        "start": 1000,
+                        "end": 1001,
+                        "step": 1,
+                        "targets": {},
+                        "errors": [],
+                        "queries": {
+                            "master-a/dispatch_qps": {
+                                "promql": "rate(dispatch_total[10s])",
+                                "result": [{"metric": {"reason": "cache"}, "values": [[1000, "3"]]}],
+                            }
+                        },
+                    }
+                )
+            )
             result = prepare_report(d, self.evidence())
             from monitoring.metric_store import MetricStore
+
             store = MetricStore.read(d)
             self.assertEqual(store.select("master/dispatch_qps")[0]["points"][0][1], 3)
-        dispatch = [curve for curve in result["curves"]
-                    if curve["metric_id"] == "master/dispatch_qps"]
+        dispatch = [curve for curve in result["curves"] if curve["metric_id"] == "master/dispatch_qps"]
         self.assertEqual(dispatch, [])
-        self.assertTrue(any(row["metric_id"] == "master/dispatch_qps" and
-            row["classification"] == "DIAGNOSTIC_ONLY" for row in result["metric_classification"]))
+        self.assertTrue(
+            any(
+                row["metric_id"] == "master/dispatch_qps" and row["classification"] == "DIAGNOSTIC_ONLY"
+                for row in result["metric_classification"]
+            )
+        )
         self.assertIn(["master/dispatch_qps", "—", "DIAGNOSTIC_ONLY", "rate(dispatch_total[10s])"], result["audit"])
 
     def test_report_layout_follows_yaml_view(self):
@@ -92,40 +119,84 @@ class CacheGateTest(unittest.TestCase):
         template["charts"]["panels"][0]["curve_ids"] = ["mock/engine_count"]
         template["charts"]["panels"][0].pop("gate_lines")
         prepared = dict(
-            curves=[dict(curve_id="mock/engine_count", metric_id="mock/engine_count", name="Renamed engine count", group="规模", axis="count",
-                         points=[dict(x=0, y=2)])],
-            audit=[], sources={}, gaps={}, errors=[], monitoring_status="OK",
+            curves=[
+                dict(
+                    curve_id="mock/engine_count",
+                    metric_id="mock/engine_count",
+                    name="Renamed engine count",
+                    group="规模",
+                    axis="count",
+                    points=[dict(x=0, y=2)],
+                )
+            ],
+            audit=[],
+            sources={},
+            gaps={},
+            errors=[],
+            monitoring_status="OK",
             monitor_warnings=[],
         )
-        with tempfile.TemporaryDirectory() as d, mock.patch(
-            "cases.cache_scale_in.report.view", return_value=ViewDefinition.read(template, subtitle_fields={"expected_behavior", "observed_behavior"})
+        with (
+            tempfile.TemporaryDirectory() as d,
+            mock.patch(
+                "cases.cache_scale_in.report.view",
+                return_value=ViewDefinition.read(template, subtitle_fields={"expected_behavior", "observed_behavior"}),
+            ),
         ):
             evidence = self.evidence()
             spec = metric_spec(d, evidence, analyze(evidence), prepared)
         self.assertEqual(spec["title"], "cache_scale_in : default : batch-window")
         self.assertEqual(spec["panels"][0]["title"], "YAML panel")
         self.assertEqual([s["name"] for s in spec["panels"][0]["series"]], ["Renamed engine count"])
-        self.assertEqual([p["id"] for p in spec["panels"]], [
-            "cache-hit", "client-qps", "prefill-queue", "prefill-forward",
-            "prefill-tps", "prefill-qps", "client-latency", "worker-status", "master-cpu",
-        ])
+        self.assertEqual(
+            [p["id"] for p in spec["panels"]],
+            [
+                "cache-hit",
+                "client-qps",
+                "prefill-queue",
+                "prefill-forward",
+                "prefill-tps",
+                "prefill-qps",
+                "client-latency",
+                "worker-status",
+                "master-cpu",
+            ],
+        )
         self.assertTrue(all("presets" not in p for p in spec["panels"]))
 
     def test_split_panels_keep_metric_values_and_missing_annotations(self):
         from reporting.curves import project_panels
-        names = ["P cache hit ratio", "P engine count", "Client sent QPS",
-                 "Client success QPS", "Client error QPS", "P Waiting / engine"]
-        metric_ids = ["mock/cache_hit_ratio", "mock/engine_count", "client/actual_send_qps",
-                      "client/success_qps", "client/error_qps", "mock/waiting_avg"]
-        curves = [dict(curve_id=metric_id, metric_id=metric_id, name=name,
-                       axis=view("cache_scale_in.yaml").charts.curves[metric_id].axis,
-                       points=[dict(x=5, y=None), dict(x=6, y=2)])
-                  for metric_id, name in zip(metric_ids, names)]
+
+        names = [
+            "P cache hit ratio",
+            "P engine count",
+            "Client sent QPS",
+            "Client success QPS",
+            "Client error QPS",
+            "P Waiting / engine",
+        ]
+        metric_ids = [
+            "mock/cache_hit_ratio",
+            "mock/engine_count",
+            "client/actual_send_qps",
+            "client/success_qps",
+            "client/error_qps",
+            "mock/waiting_avg",
+        ]
+        curves = [
+            dict(
+                curve_id=metric_id,
+                metric_id=metric_id,
+                name=name,
+                axis=view("cache_scale_in.yaml").charts.curves[metric_id].axis,
+                points=[dict(x=5, y=None), dict(x=6, y=2)],
+            )
+            for metric_id, name in zip(metric_ids, names)
+        ]
         panels = project_panels(curves, view("cache_scale_in.yaml"))
         self.assertEqual([s["name"] for s in panels[0]["series"]], names[:2])
         self.assertEqual([s["name"] for s in panels[1]["series"]], names[2:5] + names[1:2])
-        self.assertEqual([s["name"] for s in panels[2]["series"]],
-                         ["P Waiting / engine", "P engine count"])
+        self.assertEqual([s["name"] for s in panels[2]["series"]], ["P Waiting / engine", "P engine count"])
         self.assertEqual(panels[0]["series"][1]["points"], panels[1]["series"][-1]["points"])
         self.assertEqual(panels[2]["series"][0]["points"], curves[-1]["points"])
         self.assertIsNone(panels[0]["series"][0]["points"][0]["y"])
@@ -137,27 +208,26 @@ class CacheGateTest(unittest.TestCase):
 
     def test_status_reporting_is_observation_only(self):
         reference = analyze(self.evidence())
-        self.assertEqual(reference['verdict'], 'PASS')
+        self.assertEqual(reference["verdict"], "PASS")
         for qps, latency in ((0, 1000000), (None, None)):
             evidence = self.evidence()
-            for row in evidence['samples']:
-                for engine in row['engines'].values():
-                    engine['worker_status_qps'] = qps
-                    engine['worker_status_rt_us'] = latency
+            for row in evidence["samples"]:
+                for engine in row["engines"].values():
+                    engine["worker_status_qps"] = qps
+                    engine["worker_status_rt_us"] = latency
             self.assertEqual(analyze(evidence), reference)
         evidence = self.evidence()
-        for row in evidence['samples']:
-            for engine in row['engines'].values():
-                engine.pop('worker_status_qps')
-                engine.pop('worker_status_rt_us')
+        for row in evidence["samples"]:
+            for engine in row["engines"].values():
+                engine.pop("worker_status_qps")
+                engine.pop("worker_status_rt_us")
         self.assertEqual(analyze(evidence), reference)
 
     def test_status_reporting_chart_retains_original_metrics(self):
-        presentation = view('cache_scale_in.yaml').to_dict()
-        panel = next(p for p in presentation['charts']['panels'] if p['id'] == 'worker-status')
-        self.assertEqual(panel['curve_ids'], ['mock/worker_status_qps_fleet',
-                                             'mock/worker_status_rt_us_fleet'])
-        self.assertFalse(any('derived/status_' in key for key in presentation['charts']['curves']))
+        presentation = view("cache_scale_in.yaml").to_dict()
+        panel = next(p for p in presentation["charts"]["panels"] if p["id"] == "worker-status")
+        self.assertEqual(panel["curve_ids"], ["mock/worker_status_qps_fleet", "mock/worker_status_rt_us_fleet"])
+        self.assertFalse(any("derived/status_" in key for key in presentation["charts"]["curves"]))
 
     def evidence(self, hit=0.8):
         rows = []
@@ -172,7 +242,9 @@ class CacheGateTest(unittest.TestCase):
                     cache_evictions=t,
                     waiting=100 if t > 20 else 0,
                     running=1,
-                    prefill_ms_avg=200, worker_status_qps=50, worker_status_rt_us=100,
+                    prefill_ms_avg=200,
+                    worker_status_qps=50,
+                    worker_status_rt_us=100,
                 )
             rows.append(
                 dict(
@@ -222,9 +294,7 @@ class CacheGateTest(unittest.TestCase):
         evidence = self.evidence()
         evidence["samples"][40]["started"] -= 120
         self.assertEqual(analyze(evidence)["verdict"], "INVALID")
-        issued = [
-            dict(send_start_epoch_ms=1000000 + (i + 0.5) * 100) for i in range(800)
-        ]
+        issued = [dict(send_start_epoch_ms=1000000 + (i + 0.5) * 100) for i in range(800)]
         align_send_counters(evidence, issued)
         self.assertEqual(evidence["samples"][40]["journal_observed_started"], 280)
         self.assertEqual(analyze(evidence)["verdict"], "PASS")
@@ -315,13 +385,11 @@ class CacheGateTest(unittest.TestCase):
             write_report(d, e, analyze(e))
             from reporting import discover_reports
 
-            self.assertEqual(discover_reports(d, role="gate"), [
-                str((Path(d) / "reports/run/cache-scale-in/report.html").resolve())
-            ])
             self.assertEqual(
-                json.loads(
-                    (Path(d) / "reports/run/cache-scale-in/analysis.json").read_text()
-                )["result"]["verdict"],
+                discover_reports(d, role="gate"), [str((Path(d) / "reports/run/cache-scale-in/report.html").resolve())]
+            )
+            self.assertEqual(
+                json.loads((Path(d) / "reports/run/cache-scale-in/analysis.json").read_text())["result"]["verdict"],
                 "FAIL",
             )
             self.assertIn(
@@ -336,15 +404,16 @@ class CacheGateTest(unittest.TestCase):
             write_report(d, e, result)
             html = (Path(d) / "reports/run/cache-scale-in/report.html").read_text()
             spec, _ = json.JSONDecoder().raw_decode(html.split("const SPEC = ", 1)[1])
-            curves = {s["name"]: s["points"] for s in spec["panels"][0]["series"]
-                      if s.get("source_type") != "configuration"}
-            self.assertEqual(curves, {"Survivor window hit ratio":
-                                     [dict(x=w["end"], y=w["hit"]) for w in result["windows"]]})
+            curves = {
+                s["name"]: s["points"] for s in spec["panels"][0]["series"] if s.get("source_type") != "configuration"
+            }
+            self.assertEqual(
+                curves, {"Survivor window hit ratio": [dict(x=w["end"], y=w["hit"]) for w in result["windows"]]}
+            )
             self.assertIn("缺少有效曲线", spec["panels"][0]["caption"])
             self.assertNotIn("P cache hit ratio", curves)
             self.assertEqual(spec["summary"]["kpis"][1]["value"], "WARN")
-            self.assertIn("缺少冻结的 Prometheus 样本",
-                          html)
+            self.assertIn("缺少冻结的 Prometheus 样本", html)
             self.assertEqual(analyze(e), result)
 
     def test_report_uses_friendly_monitor_labels_and_audits_missing_series(self):
@@ -354,29 +423,37 @@ class CacheGateTest(unittest.TestCase):
             telemetry = root / "telemetry" / "1"
             telemetry.mkdir(parents=True)
             epoch = e["samples"][0]["epoch_s"]
-            (telemetry / "queries.json").write_text(json.dumps({
-                "missing_queries": ["master-single/completions_qps"],
-                "start": epoch, "end": epoch + 1, "step": 1,
-                "targets": {}, "target_bounds": {}, "errors": [],
-                "queries": {"mock/waiting_avg": {
-                    "promql": "avg by (role) (rtp_llm_wait_stream_size)",
-                    "result": [{"metric": {"role": "prefill"},
-                                "values": [[epoch, "12"]]}],
-                }},
-            }))
+            (telemetry / "queries.json").write_text(
+                json.dumps(
+                    {
+                        "missing_queries": ["master-single/completions_qps"],
+                        "start": epoch,
+                        "end": epoch + 1,
+                        "step": 1,
+                        "targets": {},
+                        "target_bounds": {},
+                        "errors": [],
+                        "queries": {
+                            "mock/waiting_avg": {
+                                "promql": "avg by (role) (rtp_llm_wait_stream_size)",
+                                "result": [{"metric": {"role": "prefill"}, "values": [[epoch, "12"]]}],
+                            }
+                        },
+                    }
+                )
+            )
             spec = write_report(root, e, analyze(e))
-            self.assertEqual([s["name"] for s in spec["panels"][0]["series"]
-                              if s.get("source_type") != "configuration"],
-                             ["Survivor window hit ratio"])
+            self.assertEqual(
+                [s["name"] for s in spec["panels"][0]["series"] if s.get("source_type") != "configuration"],
+                ["Survivor window hit ratio"],
+            )
             self.assertEqual(spec["panels"][2]["id"], "prefill-queue")
-            self.assertEqual([s["name"] for s in spec["panels"][2]["series"]],
-                             ["P Waiting / engine"])
+            self.assertEqual([s["name"] for s in spec["panels"][2]["series"]], ["P Waiting / engine"])
             self.assertIn("P Waiting / engine", json.dumps(spec["sections"]))
             self.assertNotIn("1/mock/", json.dumps(spec["panels"][0]["series"]))
             self.assertEqual(spec["kpis"][1]["value"], "WARN")
             inventory = spec["sections"][-1]["value"]["metric_classification"]
-            missing = next(row for row in inventory
-                           if row["metric_id"] == "master/schedule_responses_qps")
+            missing = next(row for row in inventory if row["metric_id"] == "master/schedule_responses_qps")
             self.assertEqual(missing["classification"], "DIAGNOSTIC_ONLY")
             self.assertEqual(missing["series_count"], 0)
 
@@ -390,51 +467,56 @@ class CacheGateTest(unittest.TestCase):
         envs = dict(envelope["zone_process_setting"]["process_info"]["envs"])
         self.assertEqual(json.loads(envs["FLEXLB_CONFIG"]), config)
         self.assertEqual(
-            config["router"]["roles"]["prefill"]["executionTimeEstimator"][
-                "expression"
-            ],
+            config["router"]["roles"]["prefill"]["executionTimeEstimator"]["expression"],
             expression,
         )
 
     def test_report_keeps_withdrawal_failures_visible_when_cache_passes(self):
         evidence = self.evidence(0.8)
-        evidence['client_attribution'] = dict(complete=True, issued_count=100,
-            terminal_count=100, counts={'unknown': dict(sent=100, terminal=100, failed=2)},
-            failures=[dict(error='REQUEST_INACTIVE'), dict(error='queue stopped')])
+        evidence["client_attribution"] = dict(
+            complete=True,
+            issued_count=100,
+            terminal_count=100,
+            counts={"unknown": dict(sent=100, terminal=100, failed=2)},
+            failures=[dict(error="REQUEST_INACTIVE"), dict(error="queue stopped")],
+        )
         result = analyze(evidence)
-        self.assertEqual(result['verdict'], 'PASS')
+        self.assertEqual(result["verdict"], "PASS")
         with tempfile.TemporaryDirectory() as directory:
             spec = write_report(directory, evidence, result)
-        kpis = {item.get('id'): item for item in spec['kpis']}
-        self.assertEqual(kpis['case.request_failures']['value'], 2)
-        self.assertEqual(kpis['case.inactive_failures']['value'], 1)
-        section = next(s for s in spec['sections'] if s.get('id') == 'case.request_outcomes')
-        self.assertTrue(section['opened'])
-        self.assertEqual(section['rows'][0][-1], 2)
-        self.assertEqual(result['verdict'], 'PASS')
+        kpis = {item.get("id"): item for item in spec["kpis"]}
+        self.assertEqual(kpis["case.request_failures"]["value"], 2)
+        self.assertEqual(kpis["case.inactive_failures"]["value"], 1)
+        section = next(s for s in spec["sections"] if s.get("id") == "case.request_outcomes")
+        self.assertTrue(section["opened"])
+        self.assertEqual(section["rows"][0][-1], 2)
+        self.assertEqual(result["verdict"], "PASS")
 
     def test_real_scenario_compiles_and_preserves_cache_policy(self):
-        with mock.patch("scenario.compiler.VICTIM_OFFSETS", (700, 701, 702)), \
-             mock.patch("adapters.java_mock_resources.VICTIM_OFFSETS", (700, 701, 702)):
+        with (
+            mock.patch("scenario.compiler.VICTIM_OFFSETS", (700, 701, 702)),
+            mock.patch("adapters.java_mock_resources.VICTIM_OFFSETS", (700, 701, 702)),
+        ):
             plans = compile_scenarios(
                 load_scenarios(ROOT / "config/scenarios/cache_scale_in.yaml"),
                 handlers=handlers(),
             )
         self.assertEqual(len(plans), 8)
-        self.assertEqual(
-            plans[0]["environment"]["prefill_cache_policy"]["memory_tree"], False
-        )
+        self.assertEqual(plans[0]["environment"]["prefill_cache_policy"]["memory_tree"], False)
         self.assertIn("cache_scale_in_check", [s["action"] for s in plans[0]["stages"]])
 
     def test_topology_budget_is_independent_of_drain(self):
         import yaml
         from scenario.program_compiler import configure_program
+
         case = yaml.safe_load((ROOT / "config/scenarios/cache_scale_in.yaml").read_text())
         for mode in ("graceful",):
             changed = copy.deepcopy(case)
             changed["parameters"]["procedure"].update(topology_timeout_s=31, removal_mode=mode)
-            with mock.patch("scenario.compiler.VICTIM_OFFSETS", (700, 701, 702)), \
-                 mock.patch("adapters.java_mock_resources.VICTIM_OFFSETS", (700, 701, 702)):
+            with (
+                mock.patch("scenario.compiler.VICTIM_OFFSETS", (700, 701, 702)),
+                mock.patch("adapters.java_mock_resources.VICTIM_OFFSETS", (700, 701, 702)),
+            ):
                 plans = compile_scenarios([("test", configure_program(changed, "test"))], handlers=handlers())
             self.assertEqual(len(plans), 8)
         changed["parameters"]["procedure"]["removal_mode"] = "silent"
@@ -454,6 +536,7 @@ class CacheGateTest(unittest.TestCase):
 
     def test_failures_and_removal_diagnostics_do_not_decide_cache_gate(self):
         from cases.cache_scale_in.analysis import MEASUREMENT_POLICY, attribute_client, topology_ready
+
         evidence = self.evidence()
         evidence["measurement_policy"] = MEASUREMENT_POLICY
         for row in evidence["samples"]:
@@ -461,15 +544,25 @@ class CacheGateTest(unittest.TestCase):
                 engine["admission_open"] = 1
             if row["t"] > 20:
                 row["engines"]["p0"]["waiting"] = 0
-                row["engines"]["p1"] = dict(row["engines"]["p0"], grpc_addr="p1",
-                                                waiting=9999, admission_open=0)
+                row["engines"]["p1"] = dict(row["engines"]["p0"], grpc_addr="p1", waiting=9999, admission_open=0)
         self.assertTrue(topology_ready(evidence["samples"][-1], ["p0"], ["p0", "p1"]))
         evidence["events"] = [dict(id="withdraw_start", epoch_s=1020, t=20)]
-        records = [dict(rid=1, prefill="p1", status="exception", error="removed",
-                        send_start_epoch_ms=1021000, total_ms=200)]
+        records = [
+            dict(rid=1, prefill="p1", status="exception", error="removed", send_start_epoch_ms=1021000, total_ms=200)
+        ]
         attribute_client(evidence, dict(complete=True, records=records))
-        evidence["removals"] = [dict(engine="p1", admission=dict(admission_open=0, admission_closed_epoch_ms=1020000,
-                admitted_rpcs_total=42, admitted_rpcs_at_close=42), drained=False)]
+        evidence["removals"] = [
+            dict(
+                engine="p1",
+                admission=dict(
+                    admission_open=0,
+                    admission_closed_epoch_ms=1020000,
+                    admitted_rpcs_total=42,
+                    admitted_rpcs_at_close=42,
+                ),
+                drained=False,
+            )
+        ]
         result = analyze(evidence)
         self.assertEqual(result["verdict"], "PASS")
         self.assertEqual(result["windows"][0]["waiting"], 0)
@@ -498,7 +591,9 @@ class CacheGateTest(unittest.TestCase):
 
     def test_reinterpretation_preserves_frozen_input_and_requires_new_output(self):
         import sys
+
         from cases.cache_scale_in.replay import cache_main as main
+
         with tempfile.TemporaryDirectory() as directory:
             source = Path(directory) / "source" / "evidence.json"
             source.parent.mkdir()
@@ -517,9 +612,7 @@ class CacheGateTest(unittest.TestCase):
     def test_staircase_requires_a_separate_case_identity(self):
         import yaml
 
-        case = yaml.safe_load(
-            (ROOT / "config/scenarios/cache_scale_in.yaml").read_text()
-        )
+        case = yaml.safe_load((ROOT / "config/scenarios/cache_scale_in.yaml").read_text())
         gate = case["parameters"]["procedure"]
         gate.update(intermediate_p=72, intermediate_hold_s=60)
         flow = case["parameters"]["traffic"]
@@ -530,11 +623,11 @@ class CacheGateTest(unittest.TestCase):
 
             def compile_case(value):
                 path.write_text(yaml.safe_dump(value))
-                with mock.patch("scenario.compiler.VICTIM_OFFSETS", (700, 701, 702)), \
-                     mock.patch("adapters.java_mock_resources.VICTIM_OFFSETS", (700, 701, 702)):
-                    return compile_scenarios(
-                        load_scenarios(path), handlers=handlers()
-                    )
+                with (
+                    mock.patch("scenario.compiler.VICTIM_OFFSETS", (700, 701, 702)),
+                    mock.patch("adapters.java_mock_resources.VICTIM_OFFSETS", (700, 701, 702)),
+                ):
+                    return compile_scenarios(load_scenarios(path), handlers=handlers())
 
             with self.assertRaisesRegex(ValueError, "unknown configuration fields"):
                 compile_case(case)
@@ -569,9 +662,7 @@ class WorkloadTest(unittest.TestCase):
             b = materialize(Path(d) / "b.jsonl", self.spec(), "g", d)
             self.assertEqual(a.read_bytes(), b.read_bytes())
             rows = [json.loads(l) for l in a.read_text().splitlines()]
-            self.assertEqual(
-                len({tuple(r["input_token_blocks"][-1:]) for r in rows}), len(rows)
-            )
+            self.assertEqual(len({tuple(r["input_token_blocks"][-1:]) for r in rows}), len(rows))
             hot = [r for r in rows if r["family"] != "cold"]
             self.assertEqual(len({tuple(r["input_token_blocks"][:1]) for r in hot}), 1)
             self.assertGreater(len({r["family"] for r in hot}), 1)

@@ -5,18 +5,11 @@ import math
 
 def select_window(rows, lower, upper, *, time, include_end=False):
     """Request cohorts use [lower, upper); counter endpoints may include upper."""
-    return [
-        row
-        for row in rows
-        if lower <= time(row)
-        and (time(row) <= upper if include_end else time(row) < upper)
-    ]
+    return [row for row in rows if lower <= time(row) and (time(row) <= upper if include_end else time(row) < upper)]
 
 
 def counter_delta(values):
-    if any(
-        type(v) not in (int, float) or not math.isfinite(v) or v < 0 for v in values
-    ):
+    if any(type(v) not in (int, float) or not math.isfinite(v) or v < 0 for v in values):
         return None, "MISSING_COUNTER"
     if any(b < a for a, b in zip(values, values[1:])):
         return None, "COUNTER_RESET"

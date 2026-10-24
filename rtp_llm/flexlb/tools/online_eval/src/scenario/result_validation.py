@@ -1,7 +1,10 @@
 """Revalidate child result identities and nested evidence before aggregation."""
+
 from file_io import read_json
+from scenario.outcome import TERMINAL_STATUSES as STATUSES
+from scenario.outcome import RunOutcome
 from schema_contract import matches_schema
-from scenario.outcome import TERMINAL_STATUSES as STATUSES, RunOutcome
+
 
 def error_result(instance, message):
     return {
@@ -21,11 +24,7 @@ def execution_issues(row):
     if not isinstance(stages, list) or not isinstance(cleanup, list):
         return ["stages and cleanup must be arrays"]
     for item in cleanup:
-        if (
-            not isinstance(item, dict)
-            or item.get("status") != "PASS"
-            or item.get("error")
-        ):
+        if not isinstance(item, dict) or item.get("status") != "PASS" or item.get("error"):
             issues.append("cleanup did not complete successfully")
     for phase in row.get("finalization", []):
         if not isinstance(phase, dict) or phase.get("status") != "PASS" or phase.get("error"):
@@ -71,11 +70,10 @@ def execution_issues(row):
             or (not failed_checks)
             or (set(confirmed) != failed_checks)
         ):
-            issues.append(
-                "finding classification does not match explicit failed checks"
-            )
+            issues.append("finding classification does not match explicit failed checks")
     if "outcome" in row:
         from dataclasses import asdict
+
         try:
             outcome = RunOutcome.from_result(row)
             if row["outcome"] != asdict(outcome) or row["status"] != outcome.status:
@@ -90,9 +88,8 @@ def read_results(path, group):
     expected = {instance.id: instance for instance in group}
     try:
         data = read_json(path)
-        if (
-            not matches_schema(data, "scenario_results_schema_version", 1)
-            or (not isinstance(data.get("instances"), list))
+        if not matches_schema(data, "scenario_results_schema_version", 1) or (
+            not isinstance(data.get("instances"), list)
         ):
             raise ValueError("unsupported scenario result schema")
         rows = data["instances"]
@@ -121,20 +118,16 @@ def read_results(path, group):
                 row["original_status"] = row["status"]
                 row["status"] = "ERROR"
                 row["error"] = (
-                    row.get("error")
-                    or "; ".join(failures)
-                    or "stage/cleanup error cannot be classified as a finding"
+                    row.get("error") or "; ".join(failures) or "stage/cleanup error cannot be classified as a finding"
                 )
             if row["status"] in {"PASS", "FINDING-CONFIRMED", "FINDING-RESOLVED"}:
                 stages = row.get("stages", [])
                 executed_checks = [
                     check
                     for stage in stages
-                    if isinstance(stage, dict)
-                    and stage.get("status") in {"PASS", "FAIL"}
+                    if isinstance(stage, dict) and stage.get("status") in {"PASS", "FAIL"}
                     for check in stage.get("checks", [])
-                    if isinstance(check, dict)
-                    and check.get("status") in {"PASS", "FAIL", "WARNING"}
+                    if isinstance(check, dict) and check.get("status") in {"PASS", "FAIL", "WARNING"}
                 ]
                 if not executed_checks:
                     row["original_status"] = row["status"]
@@ -146,7 +139,4 @@ def read_results(path, group):
             for (identity, instance) in expected.items()
         ]
     except (OSError, ValueError, TypeError, KeyError, AttributeError) as exc:
-        return [
-            error_result(instance, f"invalid child result {path}: {exc}")
-            for instance in group
-        ]
+        return [error_result(instance, f"invalid child result {path}: {exc}") for instance in group]

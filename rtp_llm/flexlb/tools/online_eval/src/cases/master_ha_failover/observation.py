@@ -4,7 +4,6 @@ import math
 
 from adapters.master_control import master_url
 
-
 from cases.master_ha_failover.state_contract import STATE_FIELDS
 
 STATE_FIELDS = frozenset(STATE_FIELDS)
@@ -12,6 +11,7 @@ STATE_FIELDS = frozenset(STATE_FIELDS)
 
 def master_state_fields(data, fields=STATE_FIELDS - {"http_up"}):
     """Project a successful response; absent ledger fields are contract errors."""
+
     def number(value):
         if type(value) not in (int, float) or not math.isfinite(value) or value < 0:
             raise ValueError("HA state requires finite nonnegative ledger values")
@@ -47,13 +47,19 @@ def master_state_fields(data, fields=STATE_FIELDS - {"http_up"}):
 def master_adapters(env, fields):
     """Case-owned protocol interpretation, with public lifecycle and field selection."""
     from adapters.http_json import HttpJsonAdapter
+
     if not fields or not fields <= STATE_FIELDS:
         raise ValueError("unknown Master state fields")
+
     def adapter(name, spec):
         return HttpJsonAdapter(
             master_url(spec.bind_ip, spec.http_port, "inflight"),
-            lambda data: dict(master=name, **({"http_up": 1} if "http_up" in fields else {}),
-                              **master_state_fields(data, fields - {"http_up"})),
+            lambda data: dict(
+                master=name,
+                **({"http_up": 1} if "http_up" in fields else {}),
+                **master_state_fields(data, fields - {"http_up"}),
+            ),
             lambda: dict(master=name, **({"http_up": 0} if "http_up" in fields else {})),
         )
+
     return {name: adapter(name, spec) for name, spec in env.master_specs.items()}

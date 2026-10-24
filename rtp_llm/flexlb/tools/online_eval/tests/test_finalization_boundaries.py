@@ -3,59 +3,79 @@
 import json
 import time
 from unittest import mock
+
 import pytest
-from program_fixtures import compile_scenarios
-from scenario.runtime import RuntimeContext, Deadline
-from scenario.measurement import execute_workload, WorkloadPolicy
 from adapters.resource_evidence import ResourceEvidence
+from program_fixtures import compile_scenarios
+from scenario.measurement import WorkloadPolicy, execute_workload
 from scenario.run_result import EvidenceResult
-from test_scenario_runtime import Clock, Backend, source
-from test_performance_gate import evidence as performance_evidence
+from scenario.runtime import Deadline, RuntimeContext
 from test_cache_scale_gate import CacheGateTest
+from test_performance_gate import evidence as performance_evidence
+from test_scenario_runtime import Backend, Clock, source
 
 
 def plan():
     document = source()
-    document['variants'] = [dict(id='default', metadata=dict(
-        kind='workload', description=document['description']), execution=dict(
-            collection='request', monitoring=dict(capture_metrics=False,
-                sample_interval_s=1, collector_shutdown_s=2)))]
+    document["variants"] = [
+        dict(
+            id="default",
+            metadata=dict(kind="workload", description=document["description"]),
+            execution=dict(
+                collection="request",
+                monitoring=dict(capture_metrics=False, sample_interval_s=1, collector_shutdown_s=2),
+            ),
+        )
+    ]
     return compile_scenarios([("fixture", document)])[0]
 
 
 @pytest.mark.parametrize("kind", ["cache", "performance"])
 def test_online_gate_never_calls_metric_or_html_delivery(tmp_path, kind):
-    from artifacts.gate import load_gate
     from types import SimpleNamespace
+
+    from artifacts.gate import load_gate
+
     case = "cache_scale_in" if kind == "cache" else "master_performance"
     module = __import__("cases." + case + ".actions", fromlist=["actions"])
-    e = CacheGateTest().evidence(.8) if kind == "cache" else performance_evidence()
-    snapshot = e["flow"] if kind == "performance" else dict(
-        issued=[], records=[], complete=True, errors=[], status=dict(submitted=0))
+    e = CacheGateTest().evidence(0.8) if kind == "cache" else performance_evidence()
+    snapshot = (
+        e["flow"]
+        if kind == "performance"
+        else dict(issued=[], records=[], complete=True, errors=[], status=dict(submitted=0))
+    )
     flow = SimpleNamespace(directory=tmp_path, evidence_snapshot=lambda: snapshot)
     (tmp_path / "client_lifecycle.jsonl").write_text("")
-    ctx = RuntimeContext({"implementation": {"configuration": {"case": case}}}, None, tmp_path, lambda: 0, lambda _: None)
+    ctx = RuntimeContext(
+        {"implementation": {"configuration": {"case": case}}}, None, tmp_path, lambda: 0, lambda _: None
+    )
     if kind == "cache":
         e["client_attribution"] = {}
         e["capture_limits"] = dict(max_samples=1000, max_bytes=1000000)
         raw_directory = tmp_path / "cache-measurement"
         raw_directory.mkdir()
-        (raw_directory / "manifest.json").write_text('{}')
+        (raw_directory / "manifest.json").write_text("{}")
     f = ctx.register_resource("java_flow", flow)
     h = ctx.register_resource("gate_evidence", e)
     ctx.monitor = SimpleNamespace(archive=lambda: None)
     # Cache attribution is unrelated to the presentation boundary exercised here.
-    with mock.patch("cases." + case + ".metrics.produce", side_effect=AssertionError("metric delivery")), \
-         mock.patch("cases." + case + ".report.write_report", side_effect=AssertionError("HTML delivery")):
+    with (
+        mock.patch("cases." + case + ".metrics.produce", side_effect=AssertionError("metric delivery")),
+        mock.patch("cases." + case + ".report.write_report", side_effect=AssertionError("HTML delivery")),
+    ):
         if kind == "cache":
-            with mock.patch.object(module, "align_send_counters"), mock.patch.object(module, "attribute_client"), \
-                 mock.patch("cases.cache_scale_in.observation.measurement_samples", return_value=e["samples"]):
+            with (
+                mock.patch.object(module, "align_send_counters"),
+                mock.patch.object(module, "attribute_client"),
+                mock.patch("cases.cache_scale_in.observation.measurement_samples", return_value=e["samples"]),
+            ):
                 output = module.check(ctx, dict(flow=f, evidence=h), Deadline(100, lambda: 0))
         else:
             output = module.finish(ctx, dict(flow=f, evidence=h), Deadline(100, lambda: 0))
     _, frozen = load_gate(tmp_path, kind)
     assert output.checks[0].actual == frozen["verdict"]
     from artifacts.gate import referenced_checks
+
     assert "checks" not in output.checks[0].evidence
     assert referenced_checks(output.checks[0].evidence, lambda name: (tmp_path / name).read_bytes()) == frozen["checks"]
     assert output.checks[0].status == {"PASS": "PASS", "FAIL": "FAIL", "INVALID": "ERROR"}[frozen["verdict"]]
@@ -68,8 +88,7 @@ def test_report_failure_preserves_gate_and_runtime_validity(tmp_path, completed)
     backend = Backend(clock)
     backend.completed = completed
     with mock.patch("reporting.workload.write_views", side_effect=RuntimeError("HTML failure")):
-        result = execute_workload(plan(), backend, artifact_dir=tmp_path,
-                                  clock=clock, sleeper=clock.sleep)
+        result = execute_workload(plan(), backend, artifact_dir=tmp_path, clock=clock, sleeper=clock.sleep)
     assert result["execution_status"] == ("PASS" if completed else "FAIL")
     assert result["workload"]["runtime_validity"] == "VALID"
     assert result["workload"]["report_status"] == "ERROR"
@@ -81,15 +100,16 @@ def test_virtual_deadline_includes_finalization_and_persists_base_result(tmp_pat
     clock = Clock()
     instance = plan()
     instance["execution"]["finalize_timeout_s"] = 2
+
     def slow(self, ctx, result, deadline, *, workload):
         saved = json.loads((tmp_path / "result.json").read_text())
         assert saved["execution_status"] == "PASS"
         assert saved["status"] == "FINALIZING"
         assert saved["finalization"][0]["status"] == "RUNNING"
         deadline.sleep(10)
+
     with mock.patch.object(WorkloadPolicy, "finalize", slow):
-        result = execute_workload(instance, Backend(clock), artifact_dir=tmp_path,
-                                  clock=clock, sleeper=clock.sleep)
+        result = execute_workload(instance, Backend(clock), artifact_dir=tmp_path, clock=clock, sleeper=clock.sleep)
     assert result["status"] == "TIMEOUT"
     assert result["duration_ms"] == 3000
     assert result["finalization"][1]["status"] == "BLOCKED"
@@ -99,17 +119,21 @@ def test_virtual_deadline_includes_finalization_and_persists_base_result(tmp_pat
 
 def test_uncooperative_finalization_is_interrupted(tmp_path):
     instance = plan()
-    instance["execution"]["finalize_timeout_s"] = .05
+    instance["execution"]["finalize_timeout_s"] = 0.05
+
     # Real clock plus signal guard proves a blocking writer cannot hang the runner.
     class NoWaitBackend(Backend):
         def start_requests(self, ctx, params, deadline):
             return ctx.register_resource("requests", [])
+
         def teardown(self, ctx, deadline):
             pass
+
     started = time.monotonic()
     with mock.patch.object(WorkloadPolicy, "finalize", side_effect=lambda *args, **kwargs: time.sleep(5)):
-        result = execute_workload(instance, NoWaitBackend(time.monotonic),
-                                  artifact_dir=tmp_path, enforce_deadlines=True)
+        result = execute_workload(
+            instance, NoWaitBackend(time.monotonic), artifact_dir=tmp_path, enforce_deadlines=True
+        )
     assert time.monotonic() - started < 1
     assert result["finalization"][0]["status"] == "TIMEOUT"
     assert result["execution_status"] == "PASS"
@@ -122,17 +146,26 @@ def test_new_resource_evidence_needs_no_policy_branch(tmp_path):
     policy = WorkloadPolicy()
     policy.attach(ctx)
     ctx.env_epoch = 7
-    ctx.register_resource("new_transport", object(), historical=True,
+    ctx.register_resource(
+        "new_transport",
+        object(),
+        historical=True,
         evidence=lambda value, profile, deadline: ResourceEvidence(
-            requests=dict(records=[dict(rid="new", status="ok")]), producer="new_worker",
-            outages=(dict(source="7/new", started_epoch_s=10, ended_epoch_s=11, reason="test"),)))
+            requests=dict(records=[dict(rid="new", status="ok")]),
+            producer="new_worker",
+            outages=(dict(source="7/new", started_epoch_s=10, ended_epoch_s=11, reason="test"),),
+        ),
+    )
+
     # Ignore duck-typed methods unless a resource explicitly declares an exporter.
     class NotEvidence:
         def evidence_snapshot(self):
             raise AssertionError("implicit resource evidence")
+
     ctx.register_resource("unexported", NotEvidence())
     result = dict(id="example", status="PASS", error=None, stages=[], cleanup=[])
     from monitoring.metric_store import MetricStore
+
     with mock.patch.object(MetricStore, "project", autospec=True, side_effect=MetricStore.project) as project:
         policy.finalize(ctx, result, Deadline(20, clock, clock.sleep))
     assert project.call_count == 1
@@ -145,12 +178,13 @@ def test_new_resource_evidence_needs_no_policy_branch(tmp_path):
 def test_report_budget_is_separate_and_included_in_elapsed_time(tmp_path):
     clock = Clock()
     instance = plan()
-    instance["execution"]["report_timeout_s"] = .5
+    instance["execution"]["report_timeout_s"] = 0.5
+
     def slow(self, ctx, analysis, deadline):
         deadline.sleep(10)
+
     with mock.patch.object(WorkloadPolicy, "render", slow):
-        result = execute_workload(instance, Backend(clock), artifact_dir=tmp_path,
-                                  clock=clock, sleeper=clock.sleep)
+        result = execute_workload(instance, Backend(clock), artifact_dir=tmp_path, clock=clock, sleeper=clock.sleep)
     assert result["duration_ms"] == 1500
     assert result["execution_status"] == "PASS"
     assert result["workload"]["runtime_validity"] == "VALID"
@@ -163,7 +197,8 @@ def test_committed_gate_corruption_never_falls_back_to_default(tmp_path, damage)
     from artifacts.gate import freeze_gate
     from cases.cache_scale_in.analysis import analyze
     from reporting.workload import write_views
-    e = CacheGateTest().evidence(.8)
+
+    e = CacheGateTest().evidence(0.8)
     result_path = freeze_gate(tmp_path, "cache", e, analyze(e))
     if damage == "missing":
         result_path.unlink()
@@ -175,6 +210,7 @@ def test_committed_gate_corruption_never_falls_back_to_default(tmp_path, damage)
 
 def test_atomic_result_writer_preserves_previous_checkpoint_on_serialization_failure(tmp_path):
     from file_io import write_json
+
     target = tmp_path / "result.json"
     write_json(target, {"status": "FINALIZING", "execution_status": "PASS"})
     before = target.read_bytes()
@@ -186,11 +222,12 @@ def test_atomic_result_writer_preserves_previous_checkpoint_on_serialization_fai
 
 def test_malformed_analysis_is_a_persisted_delivery_error(tmp_path):
     clock = Clock()
+
     def invalid_analysis(self, ctx, result, deadline, *, workload):
         return EvidenceResult(workload, None)
+
     with mock.patch.object(WorkloadPolicy, "finalize", invalid_analysis):
-        result = execute_workload(plan(), Backend(clock), artifact_dir=tmp_path,
-                                  clock=clock, sleeper=clock.sleep)
+        result = execute_workload(plan(), Backend(clock), artifact_dir=tmp_path, clock=clock, sleeper=clock.sleep)
     assert result["outcome"] == dict(execution="PASS", gate="PASS", validity="VALID", delivery="ERROR")
     assert result["finalization"][1]["status"] == "ERROR"
     assert json.loads((tmp_path / "result.json").read_text()) == result
@@ -198,14 +235,15 @@ def test_malformed_analysis_is_a_persisted_delivery_error(tmp_path):
 
 def test_failed_evidence_export_keeps_typed_metadata_without_absorbing_snapshot_mutations(tmp_path):
     clock = Clock()
+
     def fail(self, ctx, snapshot, deadline, *, workload):
         workload.details["evidence"] = "partial-evidence.json"
         snapshot["stages"][-1]["checks"][0]["status"] = "FAIL"
         snapshot["workload"] = {"runtime_validity": "VALID", "unexpected": True}
         raise RuntimeError("query archive failed")
+
     with mock.patch.object(WorkloadPolicy, "finalize", fail):
-        result = execute_workload(plan(), Backend(clock), artifact_dir=tmp_path,
-                                  clock=clock, sleeper=clock.sleep)
+        result = execute_workload(plan(), Backend(clock), artifact_dir=tmp_path, clock=clock, sleeper=clock.sleep)
     assert result["workload"]["evidence"] == "partial-evidence.json"
     assert result["workload"]["runtime_validity"] == "INVALID"
     assert "unexpected" not in result["workload"]
@@ -216,9 +254,9 @@ def test_failed_evidence_export_keeps_typed_metadata_without_absorbing_snapshot_
 
 def test_typed_report_delivery_keeps_archive_analysis_links(tmp_path):
     from reporting.experiment import ExperimentReader
+
     clock = Clock()
-    result = execute_workload(plan(), Backend(clock), artifact_dir=tmp_path,
-                              clock=clock, sleeper=clock.sleep)
+    result = execute_workload(plan(), Backend(clock), artifact_dir=tmp_path, clock=clock, sleeper=clock.sleep)
     assert result["status"] == "PASS"
     with ExperimentReader(result["artifacts"]["experiment"]) as archive:
         workload = archive.read_json("analysis.json")["metadata"]["workload"]

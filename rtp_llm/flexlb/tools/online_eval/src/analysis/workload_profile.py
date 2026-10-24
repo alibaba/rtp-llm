@@ -4,7 +4,7 @@ These are workload properties, not a prediction of multi-engine tree eviction,
 Memory handover, admission, pinned blocks or in-flight publication semantics.
 """
 
-from collections import OrderedDict, Counter
+from collections import Counter, OrderedDict
 
 
 def profile(requests, capacities=(128, 256, 512, 1024)):
@@ -47,12 +47,9 @@ def profile(requests, capacities=(128, 256, 512, 1024)):
         distinct_prefix_blocks=len(seen),
         family_requests=dict(families),
         infinite_cache_potential_hit=potential / tokens if tokens else None,
-        lru_hit_by_capacity={
-            str(n): v / tokens if tokens else None for n, v in hit_tokens.items()
-        },
+        lru_hit_by_capacity={str(n): v / tokens if tokens else None for n, v in hit_tokens.items()},
         repeat_gap_ms={
-            str(q): gaps[min(len(gaps) - 1, int(q * (len(gaps) - 1)))] if gaps else None
-            for q in (0.5, 0.9, 0.99)
+            str(q): gaps[min(len(gaps) - 1, int(q * (len(gaps) - 1)))] if gaps else None for q in (0.5, 0.9, 0.99)
         },
         realism="NOT_VALIDATED",
         semantics=__doc__,

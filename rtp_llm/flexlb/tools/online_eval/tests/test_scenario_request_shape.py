@@ -2,8 +2,8 @@ import unittest
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-from scenario import load_scenarios
 from program_fixtures import compile_scenarios
+from scenario import load_scenarios
 
 
 class RequestShapeTests(unittest.TestCase):
@@ -16,6 +16,7 @@ class RequestShapeTests(unittest.TestCase):
 
     def source(self):
         from program_fixtures import mutable_program
+
         source = mutable_program(load_scenarios(ROOT / "config/scenarios/request_completion.yaml")[0][1])
         return source
 
@@ -30,9 +31,7 @@ class RequestShapeTests(unittest.TestCase):
             {"block_keys": [-(2**63), 0, 2**63 - 1]},
         ):
             source["stages"][1]["params"] = dict(params, **extra)
-            compiled = compile_scenarios([("shape.yaml", source)])[0]["stages"][1][
-                "params"
-            ]
+            compiled = compile_scenarios([("shape.yaml", source)])[0]["stages"][1]["params"]
             if "priority" not in extra:
                 self.assertNotIn("priority", compiled)
             for key, value in extra.items():

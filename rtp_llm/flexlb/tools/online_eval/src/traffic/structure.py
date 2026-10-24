@@ -1,31 +1,43 @@
 """Input structure shared by parameter derivation and standalone fidelity analysis."""
+
 from collections import Counter
+
 from traffic.lineage_model import DEFAULT_PREFIX_BLOCK_SIZE as BLOCK
-from traffic.lineage_model import LineageModel, LineageExpander
+from traffic.lineage_model import LineageExpander, LineageModel
 
 
 def model_shape(model):
     width = 4096 // model.metadata.block_size
-    families = Counter(request.block_labels for request in
-                       LineageExpander(model, retained_blocks=width))
-    return dict(blocks=[e.input_tokens / BLOCK for e in model.events],
-                shared=[e.shared_full_blocks * model.metadata.block_size / BLOCK for e in model.events],
-                families=sorted(families.values(), reverse=True))
+    families = Counter(request.block_labels for request in LineageExpander(model, retained_blocks=width))
+    return dict(
+        blocks=[e.input_tokens / BLOCK for e in model.events],
+        shared=[e.shared_full_blocks * model.metadata.block_size / BLOCK for e in model.events],
+        families=sorted(families.values(), reverse=True),
+    )
 
 
 def stratified(values, size):
     ordered = sorted(values)
-    return [ordered[min(len(ordered)-1, int((i+.5)*len(ordered)/size))]
-            for i in range(min(size, len(ordered)))] if len(ordered) >= size else ordered
+    return (
+        [ordered[min(len(ordered) - 1, int((i + 0.5) * len(ordered) / size))] for i in range(min(size, len(ordered)))]
+        if len(ordered) >= size
+        else ordered
+    )
 
 
 def joint_distribution(model: LineageModel, strata=1024):
     block = model.metadata.block_size
     events = [(max(1, e.input_tokens // block), e.shared_full_blocks) for e in model.events]
-    return dict(schema_version=1, strata=strata, sort_key=['blocks', 'shared_blocks'],
-                sampling='equal_mass_midpoint_strata',
-                warm_pairs=[list(pair) for pair in stratified([(blocks, shared) for blocks, shared in events if shared], strata)],
-                cold_blocks=stratified([blocks for blocks, shared in events if not shared], strata))
+    return dict(
+        schema_version=1,
+        strata=strata,
+        sort_key=["blocks", "shared_blocks"],
+        sampling="equal_mass_midpoint_strata",
+        warm_pairs=[
+            list(pair) for pair in stratified([(blocks, shared) for blocks, shared in events if shared], strata)
+        ],
+        cold_blocks=stratified([blocks for blocks, shared in events if not shared], strata),
+    )
 
 
 class PrefixIndex:
@@ -34,6 +46,7 @@ class PrefixIndex:
     Consecutive integer labels occupy a single edge, including private suffixes.
     Explicit token blocks remain tuple keys. No probabilistic hashing is used.
     """
+
     def __init__(self):
         self.root = {}
 
@@ -73,8 +86,13 @@ def generated_shape(rows):
     index, families = PrefixIndex(), Counter()
     blocks, shared = [], []
     for row in rows:
-        labels = row['input_token_blocks'][:row['il']//row['cache_key_block_size']]
-        blocks.append(row['il'] / BLOCK)
-        shared.append(index.observe(labels) * row['cache_key_block_size'] / BLOCK)
-        families[tuple(tuple(v) if isinstance(v, list) else v for v in row['input_token_blocks'][:4096 // row['cache_key_block_size']])] += 1
+        labels = row["input_token_blocks"][: row["il"] // row["cache_key_block_size"]]
+        blocks.append(row["il"] / BLOCK)
+        shared.append(index.observe(labels) * row["cache_key_block_size"] / BLOCK)
+        families[
+            tuple(
+                tuple(v) if isinstance(v, list) else v
+                for v in row["input_token_blocks"][: 4096 // row["cache_key_block_size"]]
+            )
+        ] += 1
     return dict(blocks=blocks, shared=shared, families=sorted(families.values(), reverse=True))

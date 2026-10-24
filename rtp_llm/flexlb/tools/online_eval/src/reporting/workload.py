@@ -1,17 +1,16 @@
 """Publish selected case views or the default view of all archived metrics."""
+
+from artifacts.errors import ArtifactNotProduced
 from file_io import read_json
+from scenario.registry import view_capabilities
+
+from reporting import details, write_bundle
 from reporting.events import attach_events
 from reporting.evidence_archive import archive_session
-
-
-
-from scenario.registry import view_capabilities
-from artifacts.errors import ArtifactNotProduced
-from reporting import details, write_bundle
 from reporting.run_context import canonical_spec, provenance_from
+from reporting.run_model import RunPresentation
 from reporting.view_config import DEFAULT_VIEW, view
 from reporting.workload_panels import build_panels
-from reporting.run_model import RunPresentation
 
 
 def build_spec(payload, directory, *, name=DEFAULT_VIEW, presentation=None, run=None):
@@ -22,14 +21,18 @@ def build_spec(payload, directory, *, name=DEFAULT_VIEW, presentation=None, run=
         timeOriginLabel="秒；t=0 为 workload 运行开始",
         kpis=[],
         panels=build_panels(series, payload.get("statistic_sources", {}), presentation),
-        timeAxis=dict(min=0, max=max((point[0] for points in series.values()
-                                    for point in points), default=1) or 1),
+        timeAxis=dict(min=0, max=max((point[0] for points in series.values() for point in points), default=1) or 1),
         sections=[],
     )
     if payload.get("unavailable_report_views"):
         spec["sections"].append(details("未生成的报告视角", payload["unavailable_report_views"]))
-    attach_events(spec, presentation, origin=payload["clock_anchor"]["epoch_s"],
-                  phases=payload.get("phases", []), events=payload.get("events", []))
+    attach_events(
+        spec,
+        presentation,
+        origin=payload["clock_anchor"]["epoch_s"],
+        phases=payload.get("phases", []),
+        events=payload.get("events", []),
+    )
     return canonical_spec(spec, payload, run=run)
 
 
@@ -38,9 +41,15 @@ def write_report(directory, analysis, *, name=DEFAULT_VIEW):
     payload["report_view"] = name
     identity = payload["id"]
     run = RunPresentation.read(payload, directory=directory)
-    return write_bundle(directory, "run", identity, payload,
-                        build_spec(analysis, directory, name=name, run=run),
-                        meta=provenance_from(payload, run=run), producer="workload")
+    return write_bundle(
+        directory,
+        "run",
+        identity,
+        payload,
+        build_spec(analysis, directory, name=name, run=run),
+        meta=provenance_from(payload, run=run),
+        producer="workload",
+    )
 
 
 def _write_views(directory, analysis, names=None, *, deadline=None):
@@ -66,10 +75,14 @@ def _write_views(directory, analysis, names=None, *, deadline=None):
         except ArtifactNotProduced:
             if analysis["status"] not in {"FAIL", "ERROR", "TIMEOUT", "BLOCKED"}:
                 raise
-            analysis.setdefault("unavailable_report_views", []).append(dict(
-                view=name, producer=presentation.report.producer, status="NOT_PRODUCED",
-                reason="专属门禁证据未完成；保留失败与证据，不补算结论。",
-            ))
+            analysis.setdefault("unavailable_report_views", []).append(
+                dict(
+                    view=name,
+                    producer=presentation.report.producer,
+                    status="NOT_PRODUCED",
+                    reason="专属门禁证据未完成；保留失败与证据，不补算结论。",
+                )
+            )
     for name in names:
         if name == DEFAULT_VIEW:
             paths[name] = write_report(directory, analysis, name=name) / "report.html"
@@ -84,6 +97,7 @@ def _write_views(directory, analysis, names=None, *, deadline=None):
 
 def write_views(directory, analysis, names=None, *, deadline=None):
     from monitoring.metric_store import frozen_metric_reads
+
     with frozen_metric_reads(), archive_session():
         return _write_views(directory, analysis, names, deadline=deadline)
 
@@ -91,14 +105,23 @@ def write_views(directory, analysis, names=None, *, deadline=None):
 def analysis_document(directory, result, evidence, series, statistic_sources):
     """Assemble presentation input from settled decisions and frozen evidence."""
     from pathlib import Path
-    traffic = [read_json(path).get("trace", {})
-               for path in sorted(Path(directory).glob("flows/*/flow-input.json"))]
+
+    traffic = [read_json(path).get("trace", {}) for path in sorted(Path(directory).glob("flows/*/flow-input.json"))]
     return dict(
         workload_analysis_schema_version=1,
-        traffic_manifests=traffic, iterations=[],
+        traffic_manifests=traffic,
+        iterations=[],
         implementation=result.get("implementation", {}),
         runtime_provenance=evidence.get("runtime_provenance"),
-        id=result["id"], status=result["status"], workload=result["workload"],
-        stages=result["stages"], clock_anchor=evidence["clock_anchor"], phases=evidence["phases"],
-        events=evidence.get("events", []), report_timeline=evidence.get("report_timeline"),
-        series=series, statistic_sources=statistic_sources, request_sources=[])
+        id=result["id"],
+        status=result["status"],
+        workload=result["workload"],
+        stages=result["stages"],
+        clock_anchor=evidence["clock_anchor"],
+        phases=evidence["phases"],
+        events=evidence.get("events", []),
+        report_timeline=evidence.get("report_timeline"),
+        series=series,
+        statistic_sources=statistic_sources,
+        request_sources=[],
+    )

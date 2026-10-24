@@ -1,11 +1,11 @@
 """Record a bounded observation window from a query client into raw evidence."""
 
+import time
 from dataclasses import dataclass
 from pathlib import Path
-import time
 
 from file_io import write_json
-from monitoring.query_plan import queries_for_targets, plan_hash
+from monitoring.query_plan import plan_hash, queries_for_targets
 
 
 @dataclass(frozen=True)
@@ -23,7 +23,10 @@ def record_queries(window, client, *, deadline=None):
     end = time.time()
 
     queries, required_queries = queries_for_targets(
-        client.query_plan, window.targets, client.selector, window.interval,
+        client.query_plan,
+        window.targets,
+        client.selector,
+        window.interval,
         client.target_kinds,
     )
     result = dict(
@@ -45,9 +48,7 @@ def record_queries(window, client, *, deadline=None):
     for key, expression in queries.items():
         rows = []
         # API query_range has a maximum point count; chunk long experiments.
-        start, target_end = window.target_bounds.get(
-            key.split("/", 1)[0], [window.started, end]
-        )
+        start, target_end = window.target_bounds.get(key.split("/", 1)[0], [window.started, end])
         query_end = target_end or end
         cursor = start
         try:
@@ -60,23 +61,30 @@ def record_queries(window, client, *, deadline=None):
                 if definition.get("mode") == "scrape":
                     if right <= cursor:
                         break
-                    for chunk in client.metric_chunks(client.target_kind(source) + "/" + metric,
-                                                      source=source, start=cursor, end=right,
-                                                      deadline=deadline):
+                    for chunk in client.metric_chunks(
+                        client.target_kind(source) + "/" + metric,
+                        source=source,
+                        start=cursor,
+                        end=right,
+                        deadline=deadline,
+                    ):
                         rows.extend(chunk)
                 else:
-                    data = client.api("query_range", query=expression, start=cursor,
-                                    end=right, step=window.interval,
-                                       **({"deadline": deadline} if deadline is not None else {}))
+                    data = client.api(
+                        "query_range",
+                        query=expression,
+                        start=cursor,
+                        end=right,
+                        step=window.interval,
+                        **({"deadline": deadline} if deadline is not None else {}),
+                    )
                     rows.extend(data["result"])
                 cursor = right if definition.get("mode") == "scrape" and right < query_end else right + window.interval
             result["queries"][key] = dict(promql=expression, result=rows)
             if not rows:
                 result["missing_queries"].append(key)
                 if key in required_queries:
-                    result["errors"].append(
-                        dict(query=key, error="required monitor series absent")
-                    )
+                    result["errors"].append(dict(query=key, error="required monitor series absent"))
         except Exception as exc:
             result["queries"][key] = dict(promql=expression, result=rows)
             result["errors"].append(dict(query=key, error=str(exc)))

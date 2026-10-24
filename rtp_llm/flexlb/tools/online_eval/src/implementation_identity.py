@@ -1,5 +1,6 @@
 """Describe executable implementations independently of measurement domains."""
 
+
 def implementation_identity(function):
     """Execution identity is independent of human-readable measurement semantics."""
     if not callable(function):

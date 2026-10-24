@@ -4,9 +4,11 @@ import threading
 import time
 from dataclasses import dataclass, field
 from typing import List, Optional
+
 import grpc
 
 STREAM_CANCEL_TIMEOUT_S = 5.0
+
 
 @dataclass
 class StreamSnapshot:

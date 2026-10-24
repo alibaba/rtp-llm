@@ -1,9 +1,10 @@
 """Continuous-measurement hooks over the common scenario executor."""
 
-from scenario.runtime import execute_instance
-from monitoring.run_monitor import RunMonitor
 from monitoring.collection_plan import instance_plan
-from scenario.run_result import WorkloadResult, EvidenceResult, ReportResult
+from monitoring.run_monitor import RunMonitor
+
+from scenario.run_result import EvidenceResult, ReportResult, WorkloadResult
+from scenario.runtime import execute_instance
 
 
 class WorkloadPolicy:
@@ -41,15 +42,19 @@ class WorkloadPolicy:
         for epoch, values in producers.items():
             if epoch in monitor.environment_metadata:
                 monitor.environment_metadata[epoch]["load_client_workers"] = len(values)
-        from reporting.timeline import traffic_event, freeze
+        from reporting.timeline import freeze, traffic_event
+
         events = list(ctx.report_events)
         onset = traffic_event(records)
         if onset is not None:
-            if any(event['id'] == 'traffic_started' for event in events):
-                raise ValueError('traffic_started is reserved for issued-request evidence')
+            if any(event["id"] == "traffic_started" for event in events):
+                raise ValueError("traffic_started is reserved for issued-request evidence")
             events.append(onset)
-        timeline = (freeze(ctx.instance['reporting'], events=events, phases=monitor.events)
-                    if 'reporting' in ctx.instance else None)
+        timeline = (
+            freeze(ctx.instance["reporting"], events=events, phases=monitor.events)
+            if "reporting" in ctx.instance
+            else None
+        )
         payload = dict(
             workload_evidence_schema_version=1,
             instance_id=result["id"],
@@ -73,13 +78,16 @@ class WorkloadPolicy:
             joined = join_evidence(payload, monitor.environments)
             joined_path = ctx.artifact_dir / "request-engine-evidence.json"
             from file_io import write_json
+
             write_json(joined_path, joined)
             payload["request_engine_join"] = str(joined_path)
         payload["collection_profile"] = monitor.profile
         payload["monitor_backend"] = "prometheus"
         from artifacts.provenance import collect
+
         payload["runtime_provenance"] = collect(ctx.artifact_dir, monitor.environments, monitor.environment_metadata)
         from file_io import write_json
+
         write_json(evidence, payload)
         workload.details.update(
             evidence=str(evidence),
@@ -87,7 +95,9 @@ class WorkloadPolicy:
             runtime_configuration=dict(monitor.options),
         )
         workload.runtime_validity = (
-            "INVALID" if incomplete or joined["issues"]
+            "INVALID"
+            if incomplete
+            or joined["issues"]
             or result["status"] in ("ERROR", "TIMEOUT")
             or any(x["status"] != "PASS" for x in result["cleanup"])
             else "VALID"
@@ -95,14 +105,20 @@ class WorkloadPolicy:
         workload.details["collection_profile"] = monitor.profile
         workload.details["monitor_backend"] = "prometheus"
         from monitoring.archive import export_metrics
+
         metric_plan = instance_plan(ctx.instance)
         metric_store = export_metrics(ctx.artifact_dir, metric_plan)
-        metric_store.document["run"] = dict(id=result["id"],
+        metric_store.document["run"] = dict(
+            id=result["id"],
             configuration_sha256=result.get("implementation", {}).get("configuration_sha256"),
-            report_timeline=timeline, phases=monitor.events, events=events)
+            report_timeline=timeline,
+            phases=monitor.events,
+            events=events,
+        )
         metric_store.save(ctx.artifact_dir)
         workload.details["metrics"] = str(ctx.artifact_dir / "metrics.json")
         from scenario.registry import registry
+
         selected = {spec["producer"] for spec in metric_store.document["definitions"].values() if "producer" in spec}
         case_name = result.get("implementation", {}).get("configuration", {}).get("case")
         metrics = registry().cases[case_name].definition.metrics if selected and case_name is not None else None
@@ -115,9 +131,10 @@ class WorkloadPolicy:
         analysis = finalized.analysis
         analysis["metric_directory"] = str(ctx.artifact_dir)
         if metrics is not None and selected and hasattr(metrics, "finalize"):
+            import json
             from copy import deepcopy
             from types import MappingProxyType
-            import json
+
             metadata = metrics.finalize(ctx.artifact_dir, MappingProxyType(deepcopy(analysis)), selected, deadline)
             if not isinstance(metadata, dict) or metadata.keys() - selected:
                 raise ValueError("case metric finalization must return selected source metadata")
@@ -125,36 +142,43 @@ class WorkloadPolicy:
             analysis["producer_results"] = metadata
             deadline.check()
             from monitoring.metric_store import MetricStore
+
             analysis["series"], analysis["statistic_sources"], _, _ = MetricStore.read(ctx.artifact_dir).series(
-                monitor.anchor["epoch_s"])
+                monitor.anchor["epoch_s"]
+            )
         deadline.check()
         return finalized
 
     def render(self, ctx, analysis, deadline):
         from reporting.workload import write_views
+
         deadline.check()
         links = write_views(ctx.artifact_dir, analysis, self.reports, deadline=deadline)
         return ReportResult(links)
 
 
-
 def execute_workload(instance, backend, handlers=None, artifact_dir=".", **kwargs):
     if instance.get("test_kind") != "workload":
         raise ValueError("workload executor requires a workload plan")
-    return execute_instance(
-        instance, backend, handlers, artifact_dir, _policy=WorkloadPolicy(), **kwargs
-    )
+    return execute_instance(instance, backend, handlers, artifact_dir, _policy=WorkloadPolicy(), **kwargs)
 
 
 def analyze_evidence(directory, result, evidence, workload):
     from monitoring.metric_store import MetricStore
     from monitoring.quality import assess_collection
-    from scenario.outcome import apply_outcome
     from reporting.workload import analysis_document
+
+    from scenario.outcome import apply_outcome
+
     series, sources, gaps, errors = MetricStore.read(directory).series(evidence["clock_anchor"]["epoch_s"])
-    workload.quality = assess_collection(series, gaps, errors, evidence,
+    workload.quality = assess_collection(
+        series,
+        gaps,
+        errors,
+        evidence,
         capture_metrics=workload.details.get("capture_metrics", False),
-        max_gap_s=workload.details.get("runtime_configuration", {}).get("max_sample_gap_s", 0))
+        max_gap_s=workload.details.get("runtime_configuration", {}).get("max_sample_gap_s", 0),
+    )
     snapshot = dict(result, workload=workload.to_dict())
     apply_outcome(snapshot)
     return EvidenceResult(workload, analysis_document(directory, snapshot, evidence, series, sources))

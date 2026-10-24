@@ -2,11 +2,11 @@
 
 from dataclasses import replace
 
-from scenario.registry import registry
 from scenario.actions.environment import HANDLERS as ENVIRONMENT_HANDLERS
 from scenario.actions.java_flow import HANDLERS as JAVA_FLOW_HANDLERS
 from scenario.actions.master import HANDLERS as MASTER_HANDLERS
 from scenario.actions.observation import HANDLERS as OBSERVATION_HANDLERS
+from scenario.registry import registry
 
 FOUNDATION_HANDLERS = (
     *ENVIRONMENT_HANDLERS,
@@ -42,8 +42,7 @@ def handlers(case=None):
             elif (
                 previous.owners
                 and name not in previous.owners
-                and replace(previous, owners=frozenset())
-                == replace(descriptor, owners=frozenset())
+                and replace(previous, owners=frozenset()) == replace(descriptor, owners=frozenset())
             ):
                 # Sharing is explicit: each program declares the same implementation.
                 result[descriptor.name] = replace(previous, owners=previous.owners | owned.owners)

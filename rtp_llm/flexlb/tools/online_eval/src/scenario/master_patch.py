@@ -1,10 +1,13 @@
 """Validated Master configuration operations and atomic overlay semantics."""
+
 import copy
 from dataclasses import dataclass, fields
-from flexlb_cfg import ConfigOverride, OMIT, VICTIM_STAGES
-from scenario.validation import fail, mapping, number, names
+
+from flexlb_cfg import OMIT, VICTIM_STAGES, ConfigOverride
+from scenario.validation import fail, mapping, names, number
 
 MASTER_PATCH_FIELDS = {field.name for field in fields(ConfigOverride)} - {"strip_preemption"}
+
 
 @dataclass(frozen=True)
 class MasterPatch:
@@ -51,9 +54,7 @@ class MasterPatch:
                 if not victim_stages:
                     fail(field, "preemption victim stages cannot be empty")
                 if "timeout_ms" in val:
-                    number(
-                        val["timeout_ms"], field + ".timeout_ms", minimum=1, integer=True
-                    )
+                    number(val["timeout_ms"], field + ".timeout_ms", minimum=1, integer=True)
             elif key == "decision_lifetime":
                 number(val, field, minimum=1)
             elif isinstance(val, dict):

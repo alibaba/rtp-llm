@@ -9,11 +9,11 @@ from pathlib import Path
 from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
-from scenario.program_compiler import configure_program
-from scenario import ScenarioError, load_scenarios
-from program_fixtures import compile_scenarios
-from scenario.catalog import handlers
 from document_io import load_document
+from program_fixtures import compile_scenarios
+from scenario import ScenarioError, load_scenarios
+from scenario.catalog import handlers
+from scenario.program_compiler import configure_program
 
 
 class CaseConfigTest(unittest.TestCase):
@@ -66,9 +66,7 @@ class CaseConfigTest(unittest.TestCase):
             )
             self.assertEqual(
                 plan["environment"]["resolved_config"],
-                json.loads(
-                    render_env(plan["profile"], ConfigOverride())
-                ),
+                json.loads(render_env(plan["profile"], ConfigOverride())),
             )
 
     def config(self):
@@ -122,25 +120,15 @@ class CaseConfigTest(unittest.TestCase):
         original = copy.deepcopy(config)
         plans = self.compile(config)
         self.assertEqual(
-            {
-                p["stages"][1]["params"]["count"]
-                for p in plans
-                if p["variant_id"] == "immediate"
-            },
+            {p["stages"][1]["params"]["count"] for p in plans if p["variant_id"] == "immediate"},
             {4},
         )
         self.assertEqual(
-            {
-                p["stages"][1]["params"]["count"]
-                for p in plans
-                if p["variant_id"] == "default_count"
-            },
+            {p["stages"][1]["params"]["count"] for p in plans if p["variant_id"] == "default_count"},
             {2},
         )
         self.assertEqual(config, original)
-        self.assertEqual(
-            self.compile(self.config())[0]["stages"][1]["params"]["count"], 1
-        )
+        self.assertEqual(self.compile(self.config())[0]["stages"][1]["params"]["count"], 1)
 
     def test_new_yaml_file_can_select_an_existing_python_program(self):
         config = self.config()
@@ -282,9 +270,7 @@ class CaseConfigTest(unittest.TestCase):
 
     def test_nested_variant_data_is_isolated(self):
         config = self.config()
-        config["variants"][0]["parameters"] = {
-            "checks": {"no_errors": {"expected": 3}}
-        }
+        config["variants"][0]["parameters"] = {"checks": {"no_errors": {"expected": 3}}}
         for plan in self.compile(config):
             expected = 3 if plan["variant_id"] == "immediate" else 0
             self.assertEqual(plan["stages"][1]["params"]["checks"]["no_errors"]["expected"], expected)
@@ -309,8 +295,10 @@ class CaseConfigTest(unittest.TestCase):
 
     def test_shipped_inventory_is_data_only_and_keeps_all_checks(self):
         documents = load_scenarios(ROOT / "config/scenarios")
-        with mock.patch("scenario.compiler.VICTIM_OFFSETS", (700, 701, 702)), \
-             mock.patch("adapters.java_mock_resources.VICTIM_OFFSETS", (700, 701, 702)):
+        with (
+            mock.patch("scenario.compiler.VICTIM_OFFSETS", (700, 701, 702)),
+            mock.patch("adapters.java_mock_resources.VICTIM_OFFSETS", (700, 701, 702)),
+        ):
             plans = compile_scenarios(documents, handlers=handlers())
         expected = json.loads((ROOT / "tests/fixtures/instance_ids.json").read_text())
         self.assertEqual(sorted(p["id"] for p in plans), expected)

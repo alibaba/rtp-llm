@@ -1,6 +1,7 @@
 """Startup waits share the caller's budget and report the failing phase."""
 
 import time
+
 from runtime.deadline import Deadline
 
 

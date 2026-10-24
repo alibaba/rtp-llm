@@ -1,14 +1,15 @@
 from cases.master_performance.inputs import validate as validate_criteria
+
 """Absolute single-run performance decisions from frozen request evidence."""
 
 import bisect
 import math
 
-from schema_contract import matches_schema
-from analysis.checks import compare, CheckResult, evaluate
+from analysis.checks import CheckResult, compare, evaluate
 from analysis.gates import gate_result
 from analysis.statistics import percentile_nr
 from input_contract import finite_number as finite
+from schema_contract import matches_schema
 
 
 def engine_tps_checks(evidence):
@@ -24,6 +25,7 @@ def engine_tps_checks(evidence):
     hi = evidence["window"]["end_epoch_ms"] / 1000
     gap = evidence["criteria"]["max_gap_s"]
     from cases.master_performance.inputs import engine_roles
+
     roles = engine_roles(evidence.get("gate_input"), bounds)
     groups = {name: {} for name in roles}
     for row in evidence.get("engine_tps_samples", []):
@@ -48,8 +50,12 @@ def engine_tps_checks(evidence):
     metrics, checks = {}, []
     for name, engines in groups.items():
         expected = evidence["provenance"]["topology"][roles[name]]
-        if (type(expected) is not int or expected <= 0 or len(engines) != expected
-                or len({key[0] for key in engines}) != expected):
+        if (
+            type(expected) is not int
+            or expected <= 0
+            or len(engines) != expected
+            or len({key[0] for key in engines}) != expected
+        ):
             raise ValueError("engine TPS coverage/epoch mismatch: " + name)
         means = []
         for priorities in engines.values():
@@ -57,8 +63,7 @@ def engine_tps_checks(evidence):
             if not stamp_sets or not stamp_sets[0] or any(s != stamp_sets[0] for s in stamp_sets):
                 raise ValueError("missing engine TPS priority samples: " + name)
             stamps = sorted(stamp_sets[0])
-            if (stamps[0] - lo > gap or hi - stamps[-1] > gap
-                    or any(b - a > gap for a, b in zip(stamps, stamps[1:]))):
+            if stamps[0] - lo > gap or hi - stamps[-1] > gap or any(b - a > gap for a, b in zip(stamps, stamps[1:])):
                 raise ValueError("engine TPS scrape gap: " + name)
             means.append(sum(sum(s[t] for s in priorities.values()) for t in stamps) / len(stamps))
         value = sum(means) / expected
@@ -92,6 +97,7 @@ def analyze(evidence):
         if not matches_schema(evidence, "performance_evidence_schema_version", 2):
             raise ValueError("unsupported evidence version")
         from artifacts.provenance import validate_gate_provenance
+
         p = validate_gate_provenance(evidence["provenance"])
         if str(p["client_environment"].get("FETCH_OUTPUT_STREAM")).lower() not in {
             "1",
@@ -109,9 +115,7 @@ def analyze(evidence):
             raise ValueError("measurement duration differs from contract")
         snap = evidence["flow"]
         if snap.get("complete") is not True or snap.get("errors"):
-            raise ValueError(
-                "incomplete request accounting: " + str(snap.get("errors", []))
-            )
+            raise ValueError("incomplete request accounting: " + str(snap.get("errors", [])))
         issued, records = snap["issued"], snap["records"]
         a, b = {}, {}
         for source, target in ((issued, a), (records, b)):
@@ -141,10 +145,7 @@ def analyze(evidence):
                 n = terminal.get("observed_output_tokens")
                 if type(n) is not int or n <= 0:
                     raise ValueError("successful request lacks observed output tokens")
-                if (
-                    not finite(terminal.get("ttft_ms"))
-                    or not 0 < terminal["ttft_ms"] <= terminal["total_ms"]
-                ):
+                if not finite(terminal.get("ttft_ms")) or not 0 < terminal["ttft_ms"] <= terminal["total_ms"]:
                     raise ValueError("invalid successful TTFT")
         stamps = [x["epoch_ms"] for x in evidence["samples"]]
         if len(stamps) < 2 or any(not finite(x) for x in stamps):
@@ -152,10 +153,7 @@ def analyze(evidence):
         if (
             stamps[0] > lo
             or stamps[-1] < hi
-            or any(
-                y <= x or y - x > c["max_gap_s"] * 1000
-                for x, y in zip(stamps, stamps[1:])
-            )
+            or any(y <= x or y - x > c["max_gap_s"] * 1000 for x, y in zip(stamps, stamps[1:]))
         ):
             # Coverage invalidates the run, not the independently validated request ledger.
             errors.append("observer coverage gap")
@@ -170,10 +168,7 @@ def analyze(evidence):
     sent_qps = len(cohort) / duration
     if abs(sent_qps / c["qps"] - 1) > c["qps_tolerance"]:
         errors.append("offered QPS outside contract")
-    if (
-        cohort
-        and max(a[r["rid"]]["pacing_lag_ms"] for r in cohort) > c["max_pacing_lag_ms"]
-    ):
+    if cohort and max(a[r["rid"]]["pacing_lag_ms"] for r in cohort) > c["max_pacing_lag_ms"]:
         errors.append("client pacing lag exceeds budget")
     ok = [r for r in cohort if r["status"] == "ok"]
 
@@ -200,8 +195,7 @@ def analyze(evidence):
     completed_stamps = [finished(r) for r in completed]
 
     def completions(start, end):
-        return completed[bisect.bisect_left(completed_stamps, start):
-                         bisect.bisect_left(completed_stamps, end)]
+        return completed[bisect.bisect_left(completed_stamps, start) : bisect.bisect_left(completed_stamps, end)]
 
     sends = sorted(r["send_start_epoch_ms"] for r in all_rows)
     ends = sorted(finished(r) for r in all_rows)
@@ -245,20 +239,18 @@ def analyze(evidence):
         ("inflight_growth_rps", "max_inflight_growth_rps", "max"),
     ):
         v = m[metric]
-        na = (
-            metric == "tpot_p99_ms"
-            and bool(ok)
-            and all(r["observed_output_tokens"] == 1 for r in ok)
+        na = metric == "tpot_p99_ms" and bool(ok) and all(r["observed_output_tokens"] == 1 for r in ok)
+        passed = na or (v is not None and compare(v, "ge" if direction == "min" else "le", c[key]))
+        checks.append(
+            CheckResult(
+                metric,
+                "SKIP" if na else "PASS" if passed else "FAIL",
+                detail="single-token output has no TPOT" if na else "",
+                actual=v,
+                expected=c[key],
+                evidence={"op": "ge" if direction == "min" else "le"},
+            )
         )
-        passed = na or (
-            v is not None and compare(v, "ge" if direction == "min" else "le", c[key])
-        )
-        checks.append(CheckResult(
-            metric, "SKIP" if na else "PASS" if passed else "FAIL",
-            detail="single-token output has no TPOT" if na else "",
-            actual=v, expected=c[key],
-            evidence={"op": "ge" if direction == "min" else "le"},
-        ))
     # Curves use disjoint completion buckets; cohort goodput above includes delayed terminals.
     try:
         engine_metrics, engine_checks = engine_tps_checks(evidence)

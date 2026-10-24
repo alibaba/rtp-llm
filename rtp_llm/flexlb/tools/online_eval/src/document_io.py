@@ -82,9 +82,7 @@ def load_document(path):
     except (OSError, UnicodeError, ValueError, RecursionError) as exc:
         raise DocumentError(f"{path}: {exc}") from exc
     except ImportError as exc:
-        raise DocumentError(
-            f"{path}: YAML input requires PyYAML; JSON needs no optional parser"
-        ) from exc
+        raise DocumentError(f"{path}: YAML input requires PyYAML; JSON needs no optional parser") from exc
     except Exception as exc:
         # PyYAML parser errors carry line/column; preserve them for diagnostics.
         if type(exc).__module__.startswith("yaml"):

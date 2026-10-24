@@ -2,17 +2,16 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 import json
+from dataclasses import dataclass
 from pathlib import Path
 
 from file_digest import sha256_file
 from file_io import write_json
 from traffic.codecs import codec_for_version, decode_model
-from traffic.lineage_transforms import LineageProjector, LineageProjection
 from traffic.datasets import CapturedDataset
-from traffic.request_rules import PRIORITY, JAVA_LENGTH
-
+from traffic.lineage_transforms import LineageProjection, LineageProjector
+from traffic.request_rules import JAVA_LENGTH, PRIORITY
 
 
 def validate_plan(path, namespace=None):
@@ -24,14 +23,8 @@ def validate_plan(path, namespace=None):
                 continue
             row = json.loads(line)
             if set(row) & {"request_id", "request_id_int"}:
-                raise ValueError(
-                    "canonical plans use rid only; alternate IDs bypass namespace isolation"
-                )
-            if (
-                "bh" in row
-                and "block_cache_keys" in row
-                and row["bh"] != row["block_cache_keys"]
-            ):
+                raise ValueError("canonical plans use rid only; alternate IDs bypass namespace isolation")
+            if "bh" in row and "block_cache_keys" in row and row["bh"] != row["block_cache_keys"]:
                 raise ValueError("conflicting cache key fields")
             rid, ts = row.get("rid"), row.get("ts")
             tokens = row.get("input_ids")
@@ -43,17 +36,23 @@ def validate_plan(path, namespace=None):
             if not isinstance(rid, str) or not rid or rid in ids:
                 raise ValueError("request identities must be nonempty and unique")
             if type(ts) is not int or not previous <= ts <= 9223372036854775807:
-                raise ValueError(
-                    "arrival times must be ordered nonnegative int64 milliseconds"
-                )
+                raise ValueError("arrival times must be ordered nonnegative int64 milliseconds")
             if ts < 0 or not isinstance(tokens, list) or not tokens:
                 raise ValueError("canonical arrival and exact input_ids required")
             block_size = row.get("cache_key_block_size")
-            if type(block_size) is not int or block_size not in (64,128,256,512,1024,2048,4096):
+            if type(block_size) is not int or block_size not in (64, 128, 256, 512, 1024, 2048, 4096):
                 raise ValueError("unsupported cache block size")
+
             def valid_token(t):
                 return type(t) is int and 0 <= t <= 2147483647
-            if any(not (valid_token(t) or (compact and isinstance(t,list) and len(t)==block_size and all(valid_token(v) for v in t))) for t in tokens):
+
+            if any(
+                not (
+                    valid_token(t)
+                    or (compact and isinstance(t, list) and len(t) == block_size and all(valid_token(v) for v in t))
+                )
+                for t in tokens
+            ):
                 raise ValueError("invalid token id")
             try:
                 JAVA_LENGTH.validate(row.get("il"), "il")
@@ -94,13 +93,15 @@ class SourceSpecification:
     @classmethod
     def read(cls, value):
         required = {"kind", "model", "parameters"}
-        if (not isinstance(value, dict) or not required <= set(value)
-                or set(value) - required - {"version"}):
+        if not isinstance(value, dict) or not required <= set(value) or set(value) - required - {"version"}:
             raise ValueError("source requires kind, model and parameters; version is an optional pin")
         result = cls(**value)
-        if (type(result.kind) is not str or type(result.model) is not str
-                or not isinstance(result.parameters, dict)
-                or ("version" in value and type(result.version) is not str)):
+        if (
+            type(result.kind) is not str
+            or type(result.model) is not str
+            or not isinstance(result.parameters, dict)
+            or ("version" in value and type(result.version) is not str)
+        ):
             raise ValueError("invalid source specification")
         if result.is_lineage:
             if result.version is not None:
@@ -117,27 +118,41 @@ class SourceSpecification:
 
     def write_trace(self, path, namespace, base_dir, *, max_requests=None, captured: CapturedDataset | None = None):
         if captured is not None and not self.is_lineage:
-            raise ValueError('captured dataset requires a lineage source')
+            raise ValueError("captured dataset requires a lineage source")
         if self.is_lineage:
             projector = LineageProjector(lambda raw: decode_model(raw, expected_version=self.version))
             if captured is not None:
                 parameters = LineageProjection.read(self.parameters)
                 if (Path(base_dir) / parameters.path).resolve() != captured.path:
-                    raise ValueError('captured dataset path differs from source')
+                    raise ValueError("captured dataset path differs from source")
                 if self.version is not None and self.version != str(captured.model.metadata.version):
-                    raise ValueError('source version disagrees with model contents')
-                return projector.project_model(path, parameters, namespace, captured.model,
-                    source_sha256=captured.sha256, max_requests=max_requests)
+                    raise ValueError("source version disagrees with model contents")
+                return projector.project_model(
+                    path,
+                    parameters,
+                    namespace,
+                    captured.model,
+                    source_sha256=captured.sha256,
+                    max_requests=max_requests,
+                )
             return projector.write_trace(path, self.parameters, namespace, base_dir, max_requests=max_requests)
         raise ValueError("scenario source must be trace/prefix_lineage")
 
 
-def materialize(path, specification, namespace, base_dir, *, max_requests=None, captured: CapturedDataset | None = None):
+def materialize(
+    path, specification, namespace, base_dir, *, max_requests=None, captured: CapturedDataset | None = None
+):
     source = SourceSpecification.read(specification)
-    return publish_plan(path, specification, namespace, base_dir,
-        lambda temporary: source.write_trace(temporary, namespace, base_dir,
-                                              max_requests=max_requests, captured=captured),
-        max_requests=max_requests)
+    return publish_plan(
+        path,
+        specification,
+        namespace,
+        base_dir,
+        lambda temporary: source.write_trace(
+            temporary, namespace, base_dir, max_requests=max_requests, captured=captured
+        ),
+        max_requests=max_requests,
+    )
 
 
 def publish_plan(path, specification, namespace, base_dir, writer, *, max_requests=None):

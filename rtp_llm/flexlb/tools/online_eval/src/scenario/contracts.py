@@ -1,4 +1,5 @@
 """Shared authoring, execution and evidence contracts."""
+
 from __future__ import annotations
 
 from dataclasses import dataclass, field
@@ -8,9 +9,10 @@ from typing import TYPE_CHECKING, Callable, Protocol
 from analysis.checks import CheckResult
 
 if TYPE_CHECKING:
+    from runtime.deadline import Deadline
     from scenario.builder import CaseBuilder
     from scenario.context import RuntimeContext
-    from runtime.deadline import Deadline
+
 
 @dataclass(frozen=True)
 class ExecutionRequirements:
@@ -19,13 +21,16 @@ class ExecutionRequirements:
 
     def __post_init__(self):
         if type(self.request_evidence) is not bool or type(self.monitoring) is not bool:
-            raise ValueError('execution requirements must be boolean')
+            raise ValueError("execution requirements must be boolean")
 
     def validate(self, execution):
-        if self.request_evidence and execution.get('collection', 'request') == 'aggregate':
-            raise ValueError('execution.collection requires request or diagnostic evidence')
-        if self.monitoring and (not isinstance(execution.get('monitoring'), dict) or execution['monitoring'].get('capture_metrics', True) is False):
-            raise ValueError('execution.monitoring.capture_metrics must be true for this consumer')
+        if self.request_evidence and execution.get("collection", "request") == "aggregate":
+            raise ValueError("execution.collection requires request or diagnostic evidence")
+        if self.monitoring and (
+            not isinstance(execution.get("monitoring"), dict)
+            or execution["monitoring"].get("capture_metrics", True) is False
+        ):
+            raise ValueError("execution.monitoring.capture_metrics must be true for this consumer")
 
 
 class StageValidator(Protocol):
@@ -45,7 +50,9 @@ class ViewValidator(Protocol):
 
 
 class ViewRenderer(Protocol):
-    def __call__(self, directory: Path, analysis: dict, presentation: dict, deadline: Deadline | None = None) -> Path: ...
+    def __call__(
+        self, directory: Path, analysis: dict, presentation: dict, deadline: Deadline | None = None
+    ) -> Path: ...
 
 
 class SourceFactory(Protocol):
@@ -77,7 +84,7 @@ class StageHandler:
 
     def __post_init__(self):
         if not isinstance(self.execution_requirements, ExecutionRequirements):
-            raise ValueError('stage execution_requirements must be an ExecutionRequirements')
+            raise ValueError("stage execution_requirements must be an ExecutionRequirements")
 
 
 @dataclass
@@ -108,6 +115,7 @@ class PlanContext:
     @property
     def env(self):
         from scenario.environment_view import EnvironmentView
+
         if not hasattr(self, "_environment_view"):
             self._environment_view = EnvironmentView(self.environment, self.profiles, path=self.path)
         return self._environment_view

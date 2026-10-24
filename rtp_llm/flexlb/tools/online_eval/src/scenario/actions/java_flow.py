@@ -6,11 +6,11 @@ from pathlib import Path
 from adapters.client_journal import MAX_EVIDENCE_EVENTS
 from adapters.java_flow import JavaFlowGroup
 from adapters.java_flow_spec import JavaFlowSpec
-from traffic.traffic_source import materialize
-from traffic.contracts import source_priority
-
 from scenario.contracts import StageHandler, StageOutput
 from scenario.parameters import validate_fields
+from traffic.contracts import source_priority
+from traffic.traffic_source import materialize
+
 
 def _start_validate(params, plan):
     if isinstance(params, dict) and "trace" in params:
@@ -22,15 +22,19 @@ def _start_validate(params, plan):
 def _start(ctx, p, deadline):
     if ctx.instance["environment"].get("master_test_control", False):
         from adapters.master_control import affinity_request
+
         initial = affinity_request(ctx, deadline)
-        expected = ctx.instance["environment"]["resolved_config"]["router"]["roles"]["prefill"]["cacheAffinity"]["maxExtraTtftMs"]
+        expected = ctx.instance["environment"]["resolved_config"]["router"]["roles"]["prefill"]["cacheAffinity"][
+            "maxExtraTtftMs"
+        ]
         if initial.get("maxExtraTtftMs") != expected:
             raise ValueError("unexpected initial affinity test policy")
         (ctx.artifact_dir / "master-test-control.json").write_text(json.dumps(initial, indent=2))
     directory = ctx.artifact_dir / "flows" / p["group_id"]
     directory.parent.mkdir(exist_ok=True)
     from artifacts.startup import startup_phase
-    with startup_phase(ctx.artifact_dir, 'traffic/input', deadline):
+
+    with startup_phase(ctx.artifact_dir, "traffic/input", deadline):
         trace = materialize(
             directory.parent / (p["group_id"] + ".jsonl"),
             p["source"],
@@ -61,10 +65,17 @@ def _start(ctx, p, deadline):
             flow.drain(d)
 
     from adapters.resource_evidence import flow_evidence
-    handle = ctx.register_resource("java_flow", flow, cleanup=cleanup, evidence=flow_evidence, request_stop=flow.request_stop)
-    flow.start(trace, environment, deadline,
-               target=f"127.0.0.1:{ctx.env.master_http_port + 2}",
-               priority=source_priority(p["source"]))
+
+    handle = ctx.register_resource(
+        "java_flow", flow, cleanup=cleanup, evidence=flow_evidence, request_stop=flow.request_stop
+    )
+    flow.start(
+        trace,
+        environment,
+        deadline,
+        target=f"127.0.0.1:{ctx.env.master_http_port + 2}",
+        priority=source_priority(p["source"]),
+    )
     return StageOutput({"flow": handle}, artifacts=[str(directory / "flow-input.json")])
 
 
@@ -77,18 +88,13 @@ def _flow_validate(params, plan):
 def _stop(ctx, p, deadline):
     flow = ctx.resource(p["flow"], "java_flow")
     state = flow.stop_sending(deadline)
-    return StageOutput(
-        {"snapshot": ctx.register_resource("snapshot", state, historical=True)}
-    )
+    return StageOutput({"snapshot": ctx.register_resource("snapshot", state, historical=True)})
 
 
 def _drain(ctx, p, deadline):
     flow = ctx.resource(p["flow"], "java_flow")
     state = flow.drain(deadline)
-    return StageOutput(
-        {"snapshot": ctx.register_resource("snapshot", state, historical=True)}
-    )
-
+    return StageOutput({"snapshot": ctx.register_resource("snapshot", state, historical=True)})
 
 
 HANDLERS = [

@@ -1,6 +1,9 @@
 """Bind report views to declared monitoring metrics at the integration boundary."""
-from monitoring import query_plan
+
 from input_contract import fail
+
+from monitoring import query_plan
+
 
 def validate_bindings(path, data, plan, fail):
     declared = query_plan.definitions(plan)
@@ -14,18 +17,20 @@ def validate_monitoring_policy(path, data, plan, fail):
     if "diagnostic_only" not in policy:
         fail(path, "selected views must classify diagnostic_only metrics explicitly")
     metrics = data["charts"]["curves"]
-    if any(
-        not {"unit", "color"} <= set(style)
-        for style in metrics.values()
-    ):
+    if any(not {"unit", "color"} <= set(style) for style in metrics.values()):
         fail(path, "classified monitoring styles require unit and color")
     diagnostic = policy.get("diagnostic_only", [])
 
-    known = {identity: definition for identity, definition in query_plan.definitions(plan).items()
-             if not ("promql" in definition and identity.split('/')[-1] == 'up')}
-    if not isinstance(diagnostic, list) or any(
-        type(identity) is not str or identity not in known for identity in diagnostic
-    ) or len(diagnostic) != len(set(diagnostic)):
+    known = {
+        identity: definition
+        for identity, definition in query_plan.definitions(plan).items()
+        if not ("promql" in definition and identity.split("/")[-1] == "up")
+    }
+    if (
+        not isinstance(diagnostic, list)
+        or any(type(identity) is not str or identity not in known for identity in diagnostic)
+        or len(diagnostic) != len(set(diagnostic))
+    ):
         fail(path, "invalid diagnostic_only metrics")
 
 

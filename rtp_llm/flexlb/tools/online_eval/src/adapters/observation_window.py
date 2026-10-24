@@ -1,12 +1,13 @@
 """Freeze scenario cohorts after the background sampler has joined."""
+
 import json
 import threading
 
-from schema_contract import matches_schema
 from adapters.debug_client import DebugUnavailable
-from adapters.observation_sources import Sources, MAX_DATASET_BYTES
+from adapters.observation_sources import MAX_DATASET_BYTES, Sources
 from runtime.observation import FrozenSnapshot
 from runtime.sample_worker import SampleWorker, SamplingError
+from schema_contract import matches_schema
 
 
 class Observer(SampleWorker):
@@ -44,10 +45,7 @@ class Observer(SampleWorker):
         # the last periodic sample and stop must remain in the cohort, including
         # unfinished attempts. Never consult the replacement environment.
         if self.sources.records is not None:
-            if (
-                self.ctx.env_epoch != self.sources.epoch
-                or self.ctx.env is not self.sources.env
-            ):
+            if self.ctx.env_epoch != self.sources.epoch or self.ctx.env is not self.sources.env:
                 self.error = "environment changed before cohort freeze"
             else:
                 try:
@@ -69,11 +67,7 @@ class Observer(SampleWorker):
             "submitted_in_window": lambda r: r.get("schedule", {}).get("started_s"),
             "terminal_in_window": lambda r: r.get("transport_terminal_s"),
         }[self.params["cohort"]]
-        records = [
-            r
-            for r in records
-            if key(r) is not None and self.started <= key(r) < self.stopped_at
-        ]
+        records = [r for r in records if key(r) is not None and self.started <= key(r) < self.stopped_at]
         data = dict(
             observation_window_schema_version=1,
             phase="frozen",
@@ -88,13 +82,7 @@ class Observer(SampleWorker):
             samples=samples,
             sample_count=len(samples),
             error=self.error,
-            status=(
-                "ok"
-                if samples
-                and not self.error
-                and all(s["status"] == "ok" for s in samples)
-                else "partial"
-            ),
+            status=("ok" if samples and not self.error and all(s["status"] == "ok" for s in samples) else "partial"),
         )
         encoded = json.dumps(data, allow_nan=False)
         if len(encoded.encode()) > MAX_DATASET_BYTES:

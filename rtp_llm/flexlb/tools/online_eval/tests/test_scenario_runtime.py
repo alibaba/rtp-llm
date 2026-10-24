@@ -4,7 +4,6 @@ import tempfile
 import unittest
 from pathlib import Path
 
-
 from program_fixtures import compile_scenarios
 from scenario.contracts import (
     CheckResult,
@@ -61,9 +60,7 @@ class Backend:
     def __init__(self, clock):
         self.clock = clock
         self.calls = []
-        self.fail_setup = self.fail_submit = self.fail_cleanup = self.timeout_wait = (
-            False
-        )
+        self.fail_setup = self.fail_submit = self.fail_cleanup = self.timeout_wait = False
         self.completed = True
 
     def setup(self, ctx, environment, deadline):
@@ -109,9 +106,7 @@ class RuntimeTest(unittest.TestCase):
         self.addCleanup(self.tmp.cleanup)
 
     def run_plan(self, doc=None, handlers=None):
-        plan = compile_scenarios(
-            [("fixture.json", doc or source())], handlers=handlers
-        )[0]
+        plan = compile_scenarios([("fixture.json", doc or source())], handlers=handlers)[0]
         return execute_instance(
             plan,
             self.backend,
@@ -142,9 +137,7 @@ class RuntimeTest(unittest.TestCase):
         self.backend.calls.clear()
         result = self.run_plan()
         self.assertEqual(result["status"], "ERROR")
-        self.assertEqual(
-            self.backend.calls, ["setup", "submit", "request_cleanup", "teardown"]
-        )
+        self.assertEqual(self.backend.calls, ["setup", "submit", "request_cleanup", "teardown"])
 
     def test_timeout_has_independent_cleanup_budget(self):
         self.backend.timeout_wait = True
@@ -189,10 +182,11 @@ class RuntimeTest(unittest.TestCase):
 
     def test_warning_is_visible_and_does_not_fail_execution(self):
         handler = StageHandler(
-            "inspect", lambda p, plan: p,
-            lambda ctx, p, d: StageOutput(
-                {"ok": True}, [CheckResult("complete", "WARNING", "known issue")]),
-            {"ok": "boolean"}, checks=frozenset({"complete"}),
+            "inspect",
+            lambda p, plan: p,
+            lambda ctx, p, d: StageOutput({"ok": True}, [CheckResult("complete", "WARNING", "known issue")]),
+            {"ok": "boolean"},
+            checks=frozenset({"complete"}),
         )
         doc = source()
         doc["stages"].append({"id": "advisory", "action": "inspect"})
@@ -206,9 +200,7 @@ class RuntimeTest(unittest.TestCase):
         handler = StageHandler(
             "inspect",
             lambda p, plan: p,
-            lambda ctx, p, d: StageOutput(
-                {"ok": True}, [CheckResult("complete", "ERROR", "missing sample")]
-            ),
+            lambda ctx, p, d: StageOutput({"ok": True}, [CheckResult("complete", "ERROR", "missing sample")]),
             {"ok": "boolean"},
             checks=frozenset({"complete"}),
         )
@@ -223,9 +215,7 @@ class RuntimeTest(unittest.TestCase):
         handler = StageHandler(
             "inspect",
             lambda p, plan: p,
-            lambda ctx, p, d: StageOutput(
-                {}, [CheckResult("sample", "SKIP", "no matching sample")]
-            ),
+            lambda ctx, p, d: StageOutput({}, [CheckResult("sample", "SKIP", "no matching sample")]),
             {},
             checks=frozenset({"sample"}),
         )
@@ -246,9 +236,7 @@ class RuntimeTest(unittest.TestCase):
         self.assertEqual(len(result["cleanup"]), 2)
 
     def test_handle_authenticity_epoch_and_historical_read(self):
-        ctx = RuntimeContext(
-            {}, self.backend, self.tmp.name, self.clock, self.clock.sleep
-        )
+        ctx = RuntimeContext({}, self.backend, self.tmp.name, self.clock, self.clock.sleep)
         live = ctx.register_resource("requests", [1])
         historic = ctx.register_resource("snapshot", {"count": 1}, historical=True)
         with self.assertRaisesRegex(ValueError, "forged"):
@@ -256,9 +244,7 @@ class RuntimeTest(unittest.TestCase):
         ctx.env_epoch += 1
         with self.assertRaisesRegex(ValueError, "stale"):
             ctx.resource(live, "requests", allow_stale=True)
-        self.assertEqual(
-            ctx.resource(historic, "snapshot", allow_stale=True), {"count": 1}
-        )
+        self.assertEqual(ctx.resource(historic, "snapshot", allow_stale=True), {"count": 1})
 
     def test_cleanup_errors_preserve_primary_error_and_all_attempts(self):
         self.backend.fail_submit = self.backend.fail_cleanup = True

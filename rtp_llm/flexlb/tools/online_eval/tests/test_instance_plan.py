@@ -1,13 +1,13 @@
 import copy
 import unittest
 
+from runtime.resource_plan import ResourcePlanError
 from scenario.instance_plan import (
     InstancePlanError,
     parse_catalog,
     plan_instances,
     select_instances,
 )
-from runtime.resource_plan import ResourcePlanError
 
 
 def catalog():
@@ -26,9 +26,15 @@ def catalog():
                 "requires": [],
                 "estimated_duration_s": i + 1,
                 "metadata": {"kind": "functional", "description": "Fixture"},
-                "execution": {"timeout_s": 60, "stage_timeout_s": 30,
-                              "cleanup_timeout_s": 10, "finalize_timeout_s": 20,
-                              "report_timeout_s": 10, "archive_timeout_s": 10, "collection": "diagnostic"},
+                "execution": {
+                    "timeout_s": 60,
+                    "stage_timeout_s": 30,
+                    "cleanup_timeout_s": 10,
+                    "finalize_timeout_s": 20,
+                    "report_timeout_s": 10,
+                    "archive_timeout_s": 10,
+                    "collection": "diagnostic",
+                },
                 "resource_budget": {
                     "backend": "java_mock",
                     "initial_workers": 6,
@@ -47,6 +53,7 @@ def catalog():
     for row in document["instances"]:
         from program_fixtures import compile_scenarios
         from test_scenario_runtime import source
+
         declaration = source()
         declaration.update(id=row["scenario_id"], category=row["category"], description=row["metadata"]["description"])
         compiled = compile_scenarios([(row["source_path"], declaration)])[0]
@@ -64,9 +71,7 @@ class InstancePlanTest(unittest.TestCase):
         instances = parse()
         for n in [1, 2, 4, 20]:
             lanes = plan_instances(instances, n)
-            self.assertCountEqual(
-                [i.id for i in instances], [i.id for lane in lanes for i in lane]
-            )
+            self.assertCountEqual([i.id for i in instances], [i.id for lane in lanes for i in lane])
             self.assertTrue(all(lanes))
 
     def test_lpt_uses_full_id_and_restores_catalog_order(self):

@@ -1,21 +1,20 @@
 """Generate and cache RPC modules and encode request metadata."""
 
 from __future__ import annotations
-from file_io import read_json
 
-import json
 import fcntl
 import hashlib
-from importlib.metadata import version
-import shutil
+import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
+from importlib.metadata import version
 from pathlib import Path
 
+from file_io import read_json
 from runtime.paths import REPO_ROOT
-
 
 PROTO_DIR = REPO_ROOT / "rtp_llm" / "cpp" / "model_rpc" / "proto"
 
@@ -42,31 +41,47 @@ def _generate_proto(proto_name: str) -> tuple:
         digest.update(source.name.encode())
         digest.update(source.read_bytes())
     out_dir = cache / digest.hexdigest()
-    with (cache / (digest.hexdigest() + '.lock')).open('a') as lock:
+    with (cache / (digest.hexdigest() + ".lock")).open("a") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
-        manifest = out_dir / 'generated.json'
+        manifest = out_dir / "generated.json"
         try:
             hashes = read_json(manifest)
-            valid = isinstance(hashes, dict) and bool(hashes) and all(
-                (out_dir / name).is_file() and hashlib.sha256((out_dir / name).read_bytes()).hexdigest() == expected
-                for name, expected in hashes.items())
-            valid = valid and (out_dir / proto_name.replace('.proto', '_pb2.py')).is_file() and (out_dir / proto_name.replace('.proto', '_pb2_grpc.py')).is_file()
+            valid = (
+                isinstance(hashes, dict)
+                and bool(hashes)
+                and all(
+                    (out_dir / name).is_file() and hashlib.sha256((out_dir / name).read_bytes()).hexdigest() == expected
+                    for name, expected in hashes.items()
+                )
+            )
+            valid = (
+                valid
+                and (out_dir / proto_name.replace(".proto", "_pb2.py")).is_file()
+                and (out_dir / proto_name.replace(".proto", "_pb2_grpc.py")).is_file()
+            )
         except (OSError, ValueError, TypeError):
             valid = False
         if not valid:
             with tempfile.TemporaryDirectory(dir=cache) as temporary:
-                stage = Path(temporary) / 'generated'
+                stage = Path(temporary) / "generated"
                 stage.mkdir()
-                command = [sys.executable, '-m', 'grpc_tools.protoc', f'-I{PROTO_DIR}',
-                           f'--python_out={stage}', f'--grpc_python_out={stage}',
-                           *[source.name for source in sources]]
+                command = [
+                    sys.executable,
+                    "-m",
+                    "grpc_tools.protoc",
+                    f"-I{PROTO_DIR}",
+                    f"--python_out={stage}",
+                    f"--grpc_python_out={stage}",
+                    *[source.name for source in sources],
+                ]
                 try:
                     subprocess.run(command, check=True, capture_output=True)
                 except subprocess.CalledProcessError as exc:
-                    raise RuntimeError('protobuf generation failed: ' + exc.stderr.decode('utf-8', errors='replace')) from exc
-                generated = {file.name: hashlib.sha256(file.read_bytes()).hexdigest()
-                             for file in stage.glob('*.py')}
-                (stage / 'generated.json').write_text(json.dumps(generated), encoding='utf-8')
+                    raise RuntimeError(
+                        "protobuf generation failed: " + exc.stderr.decode("utf-8", errors="replace")
+                    ) from exc
+                generated = {file.name: hashlib.sha256(file.read_bytes()).hexdigest() for file in stage.glob("*.py")}
+                (stage / "generated.json").write_text(json.dumps(generated), encoding="utf-8")
                 if out_dir.exists():
                     shutil.rmtree(out_dir)
                 stage.rename(out_dir)

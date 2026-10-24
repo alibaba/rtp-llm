@@ -10,8 +10,15 @@ class ReportSpecTest(unittest.TestCase):
     def test_labels_and_nullable_series_survive_rendering(self):
         label = 'engine O\'Brien "P" & <cache> {x} 中文\\path </script><script>bad()</script>'
         data = [0, None, 12.3456]
-        panel = dict(title=label, caption=label, type="line", axes={"y": {"title": "tok/s"}},
-                     yMax=20, unit="tok/s", series=[dict(name=label, points=[dict(x=t,y=v) for t,v in zip([-1,0,2],data)])])
+        panel = dict(
+            title=label,
+            caption=label,
+            type="line",
+            axes={"y": {"title": "tok/s"}},
+            yMax=20,
+            unit="tok/s",
+            series=[dict(name=label, points=[dict(x=t, y=v) for t, v in zip([-1, 0, 2], data)])],
+        )
         panel.update(id="p1", timeX=True)
         page = renderer.render(
             {

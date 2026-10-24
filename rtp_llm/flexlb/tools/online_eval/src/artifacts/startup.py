@@ -1,25 +1,25 @@
 """Persist startup phase costs using the caller's execution clock."""
-from file_io import read_json
 
 from contextlib import contextmanager
 from pathlib import Path
-from file_io import write_json
+
+from file_io import read_json, write_json
 
 
 @contextmanager
 def startup_phase(directory, phase, deadline):
     """Record preparation costs without introducing another execution clock."""
-    path = Path(directory) / 'startup.json'
+    path = Path(directory) / "startup.json"
     started = deadline.clock()
-    status, error = 'PASS', None
+    status, error = "PASS", None
     try:
         deadline.check()
         yield
         deadline.check()
     except BaseException as exc:
-        status, error = 'ERROR', f'{type(exc).__name__}: {exc}'
+        status, error = "ERROR", f"{type(exc).__name__}: {exc}"
         raise
     finally:
         rows = read_json(path) if path.exists() else []
-        rows.append(dict(phase=phase, status=status, duration_s=deadline.clock()-started, error=error))
+        rows.append(dict(phase=phase, status=status, duration_s=deadline.clock() - started, error=error))
         write_json(path, rows)

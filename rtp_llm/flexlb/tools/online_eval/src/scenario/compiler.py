@@ -4,23 +4,20 @@ from __future__ import annotations
 
 import copy
 from dataclasses import dataclass, replace
-from scenario.environment_declaration import EnvironmentDeclaration, variant_environment_fields
-from scenario.environment_resolver import EnvironmentResolver
-from scenario.plan import CompiledInstance, EnvironmentPlan, ExecutionBudgets, json_document
-from scenario.program import ProgramPlan, VariantPlan
-from scenario.stage_parameters import AdapterParameters
-from adapters.java_mock_resources import JavaMockBudget
-from scenario.execution_policy import normalize_metadata, normalize_execution
 
+from adapters.java_mock_resources import VICTIM_OFFSETS, JavaMockBudget
 from flexlb_cfg import PROFILES
 
-from adapters.java_mock_resources import VICTIM_OFFSETS
-from scenario.validation import fail, mapping, identifier, number, names
+from scenario.environment_config import environment as _environment
+from scenario.environment_config import read_environment
+from scenario.environment_declaration import EnvironmentDeclaration, variant_environment_fields
+from scenario.environment_resolver import CAPABILITIES, EnvironmentResolver
+from scenario.execution_policy import EXECUTION_BUDGETS, EXECUTION_FIELDS, normalize_execution, normalize_metadata
+from scenario.plan import CompiledInstance, EnvironmentPlan, ExecutionBudgets, StagePlan, json_document
+from scenario.program import ProgramPlan, VariantPlan
 from scenario.stage_compiler import OUTPUTS, stages
-from scenario.plan import StagePlan
-from scenario.execution_policy import EXECUTION_FIELDS, EXECUTION_BUDGETS
-from scenario.environment_config import environment as _environment, read_environment
-from scenario.environment_resolver import CAPABILITIES
+from scenario.stage_parameters import AdapterParameters
+from scenario.validation import fail, identifier, mapping, names, number
 
 CATEGORIES = {
     "cancel",
@@ -106,20 +103,14 @@ def _compile_document(source, doc, profile, handlers, grade, seen):
         fail(source + ".category", "unknown category")
     tags = doc.tags
     for key, items in (("tags", tags),):
-        if (
-            not isinstance(items, tuple)
-            or any(not isinstance(x, str) for x in items)
-            or len(set(items)) != len(items)
-        ):
+        if not isinstance(items, tuple) or any(not isinstance(x, str) for x in items) or len(set(items)) != len(items):
             fail(source + "." + key, "expected unique string list")
     estimate = number(
         doc.estimated_duration_s,
         source + ".estimated_duration_s",
         minimum=0.001,
     )
-    profiles = names(
-        list(doc.profiles), source + ".profiles", PROFILES
-    )
+    profiles = names(list(doc.profiles), source + ".profiles", PROFILES)
     if not profiles:
         fail(source + ".profiles", "must not be empty")
     requires = names(
@@ -133,9 +124,7 @@ def _compile_document(source, doc, profile, handlers, grade, seen):
         EXECUTION_BUDGETS,
     )
     budgets = {
-        key: number(
-            execution.get(key, default), source + ".execution." + key, minimum=0.001
-        )
+        key: number(execution.get(key, default), source + ".execution." + key, minimum=0.001)
         for key, default in (
             ("timeout_s", 600),
             ("stage_timeout_s", 60),
@@ -148,7 +137,9 @@ def _compile_document(source, doc, profile, handlers, grade, seen):
     variants = doc.variants
     if not isinstance(variants, tuple) or not variants:
         fail(source + ".variants", "expected nonempty typed variant sequence")
-    context = _DocumentCompilation(source, doc, profile, handlers, grade, sid, tags, estimate, profiles, requires, budgets)
+    context = _DocumentCompilation(
+        source, doc, profile, handlers, grade, sid, tags, estimate, profiles, requires, budgets
+    )
     variant_ids = set()
     instances = []
     for variant in variants:
@@ -170,21 +161,15 @@ def _compile_variant(document, variant, variant_ids):
     if vid in variant_ids:
         fail(loc, f"duplicate variant {vid}")
     variant_ids.add(vid)
-    selected = names(
-        list(variant.profiles) if variant.profiles is not None else profiles, loc + ".profiles", profiles
-    )
+    selected = names(list(variant.profiles) if variant.profiles is not None else profiles, loc + ".profiles", profiles)
     if not selected:
         fail(loc + ".profiles", "must not be empty")
     variant_budgets = dict(budgets)
-    variant_execution = mapping(
-        variant.execution, loc + ".execution", EXECUTION_FIELDS
-    )
+    variant_execution = mapping(variant.execution, loc + ".execution", EXECUTION_FIELDS)
     for key, value in variant_execution.items():
         if key not in budgets:
             continue
-        variant_budgets[key] = number(
-            value, loc + ".execution." + key, minimum=0.001
-        )
+        variant_budgets[key] = number(value, loc + ".execution." + key, minimum=0.001)
     variant_requires = set(requires) | set(
         names(
             list(variant.requires),
@@ -196,17 +181,22 @@ def _compile_variant(document, variant, variant_ids):
     if not isinstance(env, dict):
         fail(source + ".environment", "expected mapping")
     from scenario.config_data import merge_environment
-    env = merge_environment(env, mapping(variant.environment_overrides, loc + ".environment_overrides",
-                                         variant_environment_fields()))
+
+    env = merge_environment(
+        env, mapping(variant.environment_overrides, loc + ".environment_overrides", variant_environment_fields())
+    )
     declaration, resolver = read_environment(env, source + f"::{vid}.environment")
     # Action validation receives the same resolved topology as execution.
     for field in ("n_prefill", "n_decode", "prefill_cache_blocks", "decode_cache_blocks"):
         value = getattr(declaration, field)
         if value is not None:
             env[field] = value
-    steps = tuple(replace(step, timeout_s=variant_budgets["cleanup_timeout_s"])
-                  if step.action == "teardown" and step.timeout_s is None else step
-                  for step in variant.stages)
+    steps = tuple(
+        replace(step, timeout_s=variant_budgets["cleanup_timeout_s"])
+        if step.action == "teardown" and step.timeout_s is None
+        else step
+        for step in variant.stages
+    )
     compiled = stages(
         steps,
         source + f"::{vid}.stages",
@@ -239,7 +229,22 @@ def _compile_variant(document, variant, variant_ids):
         source + ".findings",
         check_ids,
     )
-    context = _VariantCompilation(document, variant, vid, selected, variant_budgets, variant_execution, declaration, resolver, env, compiled, variant_requires, action_requires, additions, findings)
+    context = _VariantCompilation(
+        document,
+        variant,
+        vid,
+        selected,
+        variant_budgets,
+        variant_execution,
+        declaration,
+        resolver,
+        env,
+        compiled,
+        variant_requires,
+        action_requires,
+        additions,
+        findings,
+    )
     instances = []
     for p in selected:
         instances.extend(_compile_profile(context, p))
@@ -281,8 +286,7 @@ def _compile_profile(context, p):
                 max_environment_workers,
                 number(
                     bound,
-                    source
-                    + f"::{vid}.{stage.id}.max_environment_workers",
+                    source + f"::{vid}.{stage.id}.max_environment_workers",
                     integer=True,
                 ),
             )
@@ -295,9 +299,7 @@ def _compile_profile(context, p):
                 descriptor.execution_requirements.validate(variant_execution)
             except ValueError as exc:
                 fail(source + f"::{vid}.{stage.id}.execution", str(exc))
-        stage_requires = set(variant_requires) | (
-            set(descriptor.requires) if descriptor else set()
-        )
+        stage_requires = set(variant_requires) | (set(descriptor.requires) if descriptor else set())
         if stage_requires - stage_caps:
             fail(
                 source,
@@ -326,14 +328,22 @@ def _compile_profile(context, p):
         )
     if profile is not None and p != profile:
         return []
-    metadata = normalize_metadata(variant.metadata if variant.metadata is not None else {
-        "kind": "functional", "description": doc.description,
-    })
-    policy_data = {**variant_budgets, **{key: copy.deepcopy(value) for key, value in variant_execution.items()
-                                       if key not in budgets}}
+    metadata = normalize_metadata(
+        variant.metadata
+        if variant.metadata is not None
+        else {
+            "kind": "functional",
+            "description": doc.description,
+        }
+    )
+    policy_data = {
+        **variant_budgets,
+        **{key: copy.deepcopy(value) for key, value in variant_execution.items() if key not in budgets},
+    }
     policy_data.setdefault("collection", "diagnostic")
     policy = normalize_execution(policy_data, kind=metadata["kind"])
     from scenario.registry import registry
+
     registered = registry().cases.get(doc.implementation.get("program"))
     try:
         if registered is not None:
@@ -347,21 +357,42 @@ def _compile_profile(context, p):
             attachments[key] = copy.deepcopy(value)
     if variant.monitoring_query_plan is not None:
         attachments["implementation"]["monitoring_query_plan"] = copy.deepcopy(variant.monitoring_query_plan)
-    instances.append(CompiledInstance(
-        id=f"{sid}::{vid}::{p}", scenario_id=sid, variant_id=vid, profile=p,
-        grade=grade, category=doc.category, description=doc.description,
-        requires=tuple(sorted(action_requires)), source="yaml", source_path=source,
-        tags=tuple(tags), estimated_duration_s=estimate,
-        resource_budget=JavaMockBudget(initial_workers, additions,
-                                       max_environment_workers if max_environment_workers > initial_workers else None),
-        environment=EnvironmentPlan(resolved.declaration, resolved.snapshot,
-                                    json_document(resolved.master_patch.declared),
-                                    tuple(resolved.effective_axes.items()), resolved.effective_capabilities),
-        execution=ExecutionBudgets.read(policy), stages=compiled, findings=tuple(findings),
-        metadata=AdapterParameters(metadata),
-        **{key: tuple(value) if key == "reports" else AdapterParameters(value)
-           for key, value in attachments.items()},
-    ))
+    instances.append(
+        CompiledInstance(
+            id=f"{sid}::{vid}::{p}",
+            scenario_id=sid,
+            variant_id=vid,
+            profile=p,
+            grade=grade,
+            category=doc.category,
+            description=doc.description,
+            requires=tuple(sorted(action_requires)),
+            source="yaml",
+            source_path=source,
+            tags=tuple(tags),
+            estimated_duration_s=estimate,
+            resource_budget=JavaMockBudget(
+                initial_workers,
+                additions,
+                max_environment_workers if max_environment_workers > initial_workers else None,
+            ),
+            environment=EnvironmentPlan(
+                resolved.declaration,
+                resolved.snapshot,
+                json_document(resolved.master_patch.declared),
+                tuple(resolved.effective_axes.items()),
+                resolved.effective_capabilities,
+            ),
+            execution=ExecutionBudgets.read(policy),
+            stages=compiled,
+            findings=tuple(findings),
+            metadata=AdapterParameters(metadata),
+            **{
+                key: tuple(value) if key == "reports" else AdapterParameters(value)
+                for key, value in attachments.items()
+            },
+        )
+    )
     return instances
 
 

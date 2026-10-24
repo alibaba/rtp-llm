@@ -58,9 +58,7 @@ class GoldenProfileTest(unittest.TestCase):
             {"request": {"timeoutMs": 300000}, "decision": {"lifetime": 2.0}},
             doc["requestLifecycle"],
         )
-        self.assertEqual(
-            {"type": "BATCH", "maxInflightPerPrefillWorker": 2}, doc["dispatcher"]
-        )
+        self.assertEqual({"type": "BATCH", "maxInflightPerPrefillWorker": 2}, doc["dispatcher"])
         self.assertNotIn("candidateChoice", doc["router"]["roles"]["prefill"])
         self.assertEqual(
             {"availability": {"maxKvUsagePercent": 95, "maxEngineRequests": 384}},
@@ -100,9 +98,7 @@ class LayeringTest(unittest.TestCase):
         self.assertEqual(2, doc["dispatcher"]["maxInflightPerPrefillWorker"])
 
     def test_omit_removes_key(self) -> None:
-        doc = json.loads(
-            render_env("batch-window", ConfigOverride(queue_timeout_ms=OMIT))
-        )
+        doc = json.loads(render_env("batch-window", ConfigOverride(queue_timeout_ms=OMIT)))
         self.assertNotIn("queueTimeoutMs", doc["scheduler"])
 
     def test_omit_on_always_present_field_raises(self) -> None:
@@ -155,49 +151,35 @@ class LayeringTest(unittest.TestCase):
             )
 
     def test_functional_kv_limit_is_explicit(self):
-        doc = json.loads(
-            render_env("batch-window", ConfigOverride(decode_max_kv_usage_percent=85))
-        )
-        self.assertEqual(
-            85, doc["router"]["roles"]["decode"]["availability"]["maxKvUsagePercent"]
-        )
+        doc = json.loads(render_env("batch-window", ConfigOverride(decode_max_kv_usage_percent=85)))
+        self.assertEqual(85, doc["router"]["roles"]["decode"]["availability"]["maxKvUsagePercent"])
 
 
 class StressOverrideTest(unittest.TestCase):
     """stress-na130 override edit-in-place contracts."""
 
     def test_decode_max_engine_requests(self) -> None:
-        doc = json.loads(
-            render_env(STRESS_PROFILE, ConfigOverride(decode_max_engine_requests=5000))
-        )
+        doc = json.loads(render_env(STRESS_PROFILE, ConfigOverride(decode_max_engine_requests=5000)))
         self.assertEqual(
             5000,
             doc["router"]["roles"]["decode"]["availability"]["maxEngineRequests"],
         )
 
     def test_strip_preemption(self) -> None:
-        doc = json.loads(
-            render_env(STRESS_PROFILE, ConfigOverride(strip_preemption=True))
-        )
+        doc = json.loads(render_env(STRESS_PROFILE, ConfigOverride(strip_preemption=True)))
         self.assertNotIn("preemption", doc["scheduler"]["ordering"])
 
     def test_strip_preemption_functional_noop(self) -> None:
         # functional bases have no preemption block to strip
-        doc = json.loads(
-            render_env("batch-window", ConfigOverride(strip_preemption=True))
-        )
+        doc = json.loads(render_env("batch-window", ConfigOverride(strip_preemption=True)))
         self.assertNotIn("preemption", doc["scheduler"]["ordering"])
 
     def test_queue_timeout_omit(self) -> None:
-        doc = json.loads(
-            render_env(STRESS_PROFILE, ConfigOverride(queue_timeout_ms=OMIT))
-        )
+        doc = json.loads(render_env(STRESS_PROFILE, ConfigOverride(queue_timeout_ms=OMIT)))
         self.assertNotIn("queueTimeoutMs", doc["scheduler"])
 
     def test_kv_usage_percent_edit(self) -> None:
-        doc = json.loads(
-            render_env(STRESS_PROFILE, ConfigOverride(decode_max_kv_usage_percent=80))
-        )
+        doc = json.loads(render_env(STRESS_PROFILE, ConfigOverride(decode_max_kv_usage_percent=80)))
         self.assertEqual(
             80,
             doc["router"]["roles"]["decode"]["availability"]["maxKvUsagePercent"],
@@ -207,9 +189,7 @@ class StressOverrideTest(unittest.TestCase):
         doc = json.loads(
             render_env(
                 STRESS_PROFILE,
-                ConfigOverride(
-                    dispatcher="non_batch", max_inflight_per_prefill_worker=1
-                ),
+                ConfigOverride(dispatcher="non_batch", max_inflight_per_prefill_worker=1),
             )
         )
         self.assertEqual(
@@ -225,9 +205,7 @@ class StressOverrideTest(unittest.TestCase):
             doc = json.loads(
                 render_env(
                     STRESS_PROFILE,
-                    ConfigOverride(
-                        dispatcher=dispatcher, max_inflight_per_prefill_worker=7
-                    ),
+                    ConfigOverride(dispatcher=dispatcher, max_inflight_per_prefill_worker=7),
                 )
             )
             self.assertEqual(7, doc["dispatcher"]["maxInflightPerPrefillWorker"])
@@ -262,26 +240,24 @@ class ProcessConfigTest(unittest.TestCase):
         doc = json.loads(text)
         self.assertEqual("master", doc["zone_name"])
         envs = doc["zone_process_setting"]["process_info"]["envs"]
-        self.assertEqual(
-            ["FLEXLB_CONFIG", "FLEXLB_JVM_HEAP_SIZE"], [e[0] for e in envs]
-        )
+        self.assertEqual(["FLEXLB_CONFIG", "FLEXLB_JVM_HEAP_SIZE"], [e[0] for e in envs])
         self.assertEqual("16g", envs[1][1])
         # env payload == render_env of the same profile
         self.assertEqual(render_env("batch-window"), envs[0][1])
 
     def test_envelope_env_and_file_cannot_diverge(self) -> None:
         overrides = ConfigOverride(request_timeout_ms=9999)
-        envs = json.loads(render_process_config("single-batch", overrides))[
-            "zone_process_setting"
-        ]["process_info"]["envs"]
+        envs = json.loads(render_process_config("single-batch", overrides))["zone_process_setting"]["process_info"][
+            "envs"
+        ]
         self.assertEqual(render_env("single-batch", overrides), envs[0][1])
 
     def test_raw_config_projection(self) -> None:
         # negative-test bypass: the raw string lands in the envelope verbatim
         raw = '{"schemaVersion":2,"autoTpmEnabled":true}'
-        envs = json.loads(render_process_config("batch-window", raw_config=raw))[
-            "zone_process_setting"
-        ]["process_info"]["envs"]
+        envs = json.loads(render_process_config("batch-window", raw_config=raw))["zone_process_setting"][
+            "process_info"
+        ]["envs"]
         self.assertEqual(raw, envs[0][1])
         self.assertEqual("32g", envs[1][1])
 
@@ -306,12 +282,7 @@ class JavaFixtureLockstepTest(unittest.TestCase):
     before it can surprise the Java side)."""
 
     FIXTURE = (
-        SCRIPT_DIR.parents[1]
-        / "flexlb-mock-engine"
-        / "src"
-        / "test"
-        / "resources"
-        / "master-config-stress-na130.json"
+        SCRIPT_DIR.parents[1] / "flexlb-mock-engine" / "src" / "test" / "resources" / "master-config-stress-na130.json"
     )
 
     def test_fixture_byte_equal(self) -> None:

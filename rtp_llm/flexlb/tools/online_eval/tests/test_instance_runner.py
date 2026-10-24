@@ -9,8 +9,8 @@ import os
 import subprocess
 import sys
 import tempfile
-import time
 import threading
+import time
 import unittest
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -70,21 +70,13 @@ class InstanceRunnerTest(unittest.TestCase):
     def fixture_child(self, command, env, log_path, **kwargs):
         self.assertEqual(
             5,
-            len(
-                [
-                    key
-                    for key in env
-                    if key.startswith("FLEXLB_FT_") and key.endswith("PORT")
-                ]
-            ),
+            len([key for key in env if key.startswith("FLEXLB_FT_") and key.endswith("PORT")]),
         )
         if "--instances" in command:
             lease_path = Path(command[command.index("--lease-json") + 1])
             lease = json.loads(lease_path.read_text())
             self.assertEqual(1, lease["lease_schema_version"])
-            self.assertEqual(
-                lease["child_env"], {key: env[key] for key in lease["child_env"]}
-            )
+            self.assertEqual(lease["child_env"], {key: env[key] for key in lease["child_env"]})
             selected = command[command.index("--instances") + 1].split(",")
             rows = [
                 {
@@ -116,16 +108,12 @@ class InstanceRunnerTest(unittest.TestCase):
     def run_fixture(self, args, spawn=None):
         for row in self.data["instances"]:
             row["grade"] = args.grade
-        listed = subprocess.CompletedProcess(
-            [], 0, stdout=json.dumps(self.data), stderr=""
-        )
+        listed = subprocess.CompletedProcess([], 0, stdout=json.dumps(self.data), stderr="")
         output = io.StringIO()
-        with mock.patch.object(
-            runner.subprocess, "run", return_value=listed
-        ) as listing, mock.patch.object(
-            runner.ChildProcesses, "run", side_effect=spawn or self.fixture_child
-        ) as child, contextlib.redirect_stdout(
-            output
+        with (
+            mock.patch.object(runner.subprocess, "run", return_value=listed) as listing,
+            mock.patch.object(runner.ChildProcesses, "run", side_effect=spawn or self.fixture_child) as child,
+            contextlib.redirect_stdout(output),
         ):
             rc = runner.run_structured(args)
         self.stdout = output.getvalue()
@@ -158,18 +146,20 @@ class InstanceRunnerTest(unittest.TestCase):
             path = Path(command[command.index("--out-dir") + 1]) / "scenarios.json"
             result = json.loads(path.read_text())
             result["instances"][0]["workload"] = {
-                "telemetry_gaps": {"large": "x" * 5000}, "reports": paths,
+                "telemetry_gaps": {"large": "x" * 5000},
+                "reports": paths,
             }
             path.write_text(json.dumps(result))
             return 0
 
         target = self.root / "output/selected-aggregate.json"
-        rc, _, _ = self.run_fixture(
-            self.args(instances=identity, parallel=1, json=str(target)), spawn=completed_child
-        )
+        rc, _, _ = self.run_fixture(self.args(instances=identity, parallel=1, json=str(target)), spawn=completed_child)
         self.assertEqual(0, rc)
-        lines = [line.removeprefix("workload reports: ") for line in self.stdout.splitlines()
-                 if line.startswith("workload reports: ")]
+        lines = [
+            line.removeprefix("workload reports: ")
+            for line in self.stdout.splitlines()
+            if line.startswith("workload reports: ")
+        ]
         self.assertEqual(1, len(lines))
         self.assertEqual({"instance": identity, "status": "PASS", "reports": paths}, json.loads(lines[0]))
         self.assertEqual(paths, json.loads(target.read_text())["instances"][0]["workload"]["reports"])
@@ -233,9 +223,7 @@ program: default
                 captured = io.StringIO()
                 with contextlib.redirect_stdout(captured):
                     self.assertEqual(0, runner.run_structured(args))
-                manifest = json.loads(
-                    captured.getvalue()[captured.getvalue().index("{") :]
-                )
+                manifest = json.loads(captured.getvalue()[captured.getvalue().index("{") :])
                 self.assertEqual(grade, manifest["grade"])
                 self.assertEqual(grade, manifest["instances"][0]["grade"])
                 args.dry_run = False
@@ -262,9 +250,7 @@ program: default
         self.assertEqual(1, rc)
         result = json.loads((self.root / "output/aggregate.json").read_text())
         self.assertTrue(all(row["status"] == "ERROR" for row in result["instances"]))
-        self.assertTrue(
-            all("grade mismatch" in row["error"] for row in result["instances"])
-        )
+        self.assertTrue(all("grade mismatch" in row["error"] for row in result["instances"]))
 
     def test_grade_is_identical_for_listing_execution_and_manifest(self):
         for grade in ("strict", "normal", "loose"):
@@ -277,9 +263,7 @@ program: default
                     command = call.args[0]
                     self.assertEqual(grade, command[command.index("--grade") + 1])
                 manifest = json.loads((self.root / "output/manifest.json").read_text())
-                aggregate = json.loads(
-                    (self.root / "output/aggregate.json").read_text()
-                )
+                aggregate = json.loads((self.root / "output/aggregate.json").read_text())
                 self.assertEqual(grade, manifest["grade"])
                 self.assertEqual(grade, aggregate["summary"]["grade"])
 
@@ -305,12 +289,9 @@ program: default
             lease = next(
                 row
                 for row in doc["lanes"]
-                if row["child_env"]["FLEXLB_FT_MASTER_HTTP_PORT"]
-                == env["FLEXLB_FT_MASTER_HTTP_PORT"]
+                if row["child_env"]["FLEXLB_FT_MASTER_HTTP_PORT"] == env["FLEXLB_FT_MASTER_HTTP_PORT"]
             )
-            self.assertEqual(
-                lease["child_env"], {key: env[key] for key in lease["child_env"]}
-            )
+            self.assertEqual(lease["child_env"], {key: env[key] for key in lease["child_env"]})
         timings = json.loads((self.root / "timing.json").read_text())
         self.assertEqual(1, timings["timings_schema_version"])
         self.assertEqual(7, len(timings["instances"]))
@@ -380,9 +361,7 @@ program: default
         diagnostic = {
             "id": "retired",
             "status": "PASS",
-            "checks": [
-                {"id": "diagnostic", "status": "SKIP", "detail": "retired contract"}
-            ],
+            "checks": [{"id": "diagnostic", "status": "SKIP", "detail": "retired contract"}],
         }
         behavioral = {
             "id": "completion",
@@ -422,7 +401,9 @@ program: default
             self.assertEqual("WARNING", rows[0]["stages"][0]["checks"][0]["status"])
             aggregate = runner._aggregate(
                 [{"lane": 0, "instances": rows, "segments": [{"exit_code": 0}]}],
-                group, self.args(), 1,
+                group,
+                self.args(),
+                1,
             )
             self.assertEqual(int(expected == "ERROR"), aggregate["summary"]["exit_code"])
 
@@ -445,9 +426,7 @@ program: default
         mutations = []
         for status in ("FAIL", "ERROR", "TIMEOUT", "BLOCKED", "UNKNOWN", None):
             payload = copy.deepcopy(base)
-            payload["cleanup"] = [
-                {"id": "environment", "status": status, "error": None}
-            ]
+            payload["cleanup"] = [{"id": "environment", "status": status, "error": None}]
             mutations.append(payload)
         for status in ("ERROR", "TIMEOUT", "UNKNOWN", "FAIL"):
             payload = copy.deepcopy(base)
@@ -455,9 +434,7 @@ program: default
             mutations.append(payload)
         for payload in mutations:
             with self.subTest(payload=payload):
-                path.write_text(
-                    json.dumps({"scenario_results_schema_version": 1, "instances": [payload]})
-                )
+                path.write_text(json.dumps({"scenario_results_schema_version": 1, "instances": [payload]}))
                 rows = result_validation.read_results(path, group)
                 aggregate = runner._aggregate(
                     [{"lane": 0, "instances": rows, "segments": [{"exit_code": 0}]}],
@@ -485,9 +462,7 @@ program: default
             "finding_confirmed": ["verify.known"],
         }
         path.write_text(json.dumps({"scenario_results_schema_version": 1, "instances": [payload]}))
-        self.assertEqual(
-            "FINDING-CONFIRMED", result_validation.read_results(path, group)[0]["status"]
-        )
+        self.assertEqual("FINDING-CONFIRMED", result_validation.read_results(path, group)[0]["status"])
         for bad in ("ERROR", "TIMEOUT"):
             broken = copy.deepcopy(payload)
             broken["stages"][0]["checks"].append({"id": "bad", "status": bad})
@@ -510,7 +485,6 @@ program: default
                 with self.assertRaisesRegex(ports.PortAdmissionError, "held by another"):
                     runner.run_structured(args)
                 listing.assert_not_called()
-
 
     def test_dynamic_idle_lane_claims_work_before_slow_lane_finishes(self):
         instances = parse_catalog(self.data, source="yaml", profile="batch-window")
@@ -549,6 +523,7 @@ program: default
             result["instances"][0]["cleanup"] = [dict(id="environment", status="ERROR", error="leaked")]
             path.write_text(json.dumps(result))
             return 1
+
         rc, _, child = self.run_fixture(self.args(), spawn=spawn)
         self.assertEqual(1, rc)
         self.assertEqual(2, child.call_count)
@@ -559,12 +534,15 @@ program: default
 
     def test_static_lane_stops_on_occupied_port_after_completed_run(self):
         occupied = set()
+
         def probe(port, host=None):
             return port in occupied
+
         def spawn(command, env, log, **kwargs):
             rc = self.fixture_child(command, env, log, **kwargs)
             occupied.add(int(env["FLEXLB_FT_MASTER_HTTP_PORT"]))
             return rc
+
         with mock.patch.object(ports, "port_in_use", side_effect=probe):
             rc, _, child = self.run_fixture(self.args(parallel=1, scheduling="static"), spawn=spawn)
         self.assertEqual(1, rc)
@@ -575,12 +553,16 @@ program: default
 
     def test_retiring_after_last_run_is_still_an_infrastructure_failure(self):
         occupied = set()
+
         def spawn(command, env, log, **kwargs):
             rc = self.fixture_child(command, env, log, **kwargs)
             occupied.add(int(env["FLEXLB_FT_MASTER_HTTP_PORT"]))
             return rc
+
         with mock.patch.object(ports, "port_in_use", side_effect=lambda port, host=None: port in occupied):
-            rc, _, child = self.run_fixture(self.args(parallel=1, instances=self.data["instances"][0]["id"]), spawn=spawn)
+            rc, _, child = self.run_fixture(
+                self.args(parallel=1, instances=self.data["instances"][0]["id"]), spawn=spawn
+            )
         self.assertEqual(1, rc)
         self.assertEqual(1, child.call_count)
         result = json.loads((self.root / "output/aggregate.json").read_text())
@@ -598,6 +580,7 @@ program: default
             row["stages"][0]["checks"][0]["status"] = "FAIL"
             path.write_text(json.dumps(result))
             return 1
+
         rc, _, child = self.run_fixture(self.args(parallel=1, scheduling="static"), spawn=spawn)
         self.assertEqual(1, rc)
         self.assertEqual(7, child.call_count)
@@ -609,15 +592,20 @@ program: default
 class ChildProcessesTest(unittest.TestCase):
     def test_exited_runner_cannot_leave_a_live_descendant(self):
         import socket
+
         with tempfile.TemporaryDirectory() as d:
             root = Path(d)
             ready = root / "descendant-port"
-            descendant = ("import socket,time;from pathlib import Path;"
-                          "s=socket.socket();s.bind(('127.0.0.1',0));s.listen();"
-                          "Path(" + repr(str(ready)) + ").write_text(str(s.getsockname()[1]));time.sleep(60)")
-            parent = ("import subprocess,sys,time;from pathlib import Path;"
-                      "subprocess.Popen([sys.executable,'-c'," + repr(descendant) + "]);"
-                      "p=Path(" + repr(str(ready)) + ")\nwhile not p.exists(): time.sleep(.01)")
+            descendant = (
+                "import socket,time;from pathlib import Path;"
+                "s=socket.socket();s.bind(('127.0.0.1',0));s.listen();"
+                "Path(" + repr(str(ready)) + ").write_text(str(s.getsockname()[1]));time.sleep(60)"
+            )
+            parent = (
+                "import subprocess,sys,time;from pathlib import Path;"
+                "subprocess.Popen([sys.executable,'-c'," + repr(descendant) + "]);"
+                "p=Path(" + repr(str(ready)) + ")\nwhile not p.exists(): time.sleep(.01)"
+            )
             children = runner.ChildProcesses()
             with self.assertRaisesRegex(RuntimeError, "live descendant"):
                 children.run([sys.executable, "-c", parent], dict(os.environ), root / "runner.log", timeout=5)
@@ -627,7 +615,7 @@ class ChildProcessesTest(unittest.TestCase):
                 with socket.socket() as client:
                     if client.connect_ex(("127.0.0.1", port)) != 0:
                         break
-                time.sleep(.01)
+                time.sleep(0.01)
             else:
                 self.fail("owned descendant socket remained live")
             self.assertFalse(children.processes)
@@ -651,9 +639,7 @@ class ChildProcessesTest(unittest.TestCase):
 
     def test_stop_terminates_owned_child_and_refuses_further_launch(self):
         children = runner.ChildProcesses()
-        with tempfile.TemporaryDirectory() as tmp, ThreadPoolExecutor(
-            max_workers=1
-        ) as pool:
+        with tempfile.TemporaryDirectory() as tmp, ThreadPoolExecutor(max_workers=1) as pool:
             log = Path(tmp) / "child.log"
             future = pool.submit(
                 children.run,

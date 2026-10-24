@@ -3,7 +3,7 @@
 from pathlib import Path
 
 from reporting import run_meta
-from reporting.gate_report import write_gate_report, write_archived_gate_report
+from reporting.gate_report import write_archived_gate_report, write_gate_report
 from reporting.run_context import title
 from reporting.view_sections import view_details, view_table
 
@@ -27,7 +27,8 @@ def write_report(directory, evidence, result, *, run=None, presentation=None):
         panels=panels,
         sections=[
             view_table(
-                presentation, "checks",
+                presentation,
+                "checks",
                 [
                     [
                         x["id"],
@@ -44,23 +45,48 @@ def write_report(directory, evidence, result, *, run=None, presentation=None):
         ],
     )
     from reporting.events import attach_events
-    attach_events(spec, presentation, origin=evidence["window"]["start_epoch_ms"] / 1000,
-                  phases=evidence.get("phases", []), events=evidence.get("events", []))
+
+    attach_events(
+        spec,
+        presentation,
+        origin=evidence["window"]["start_epoch_ms"] / 1000,
+        phases=evidence.get("phases", []),
+        events=evidence.get("events", []),
+    )
     meta = run_meta(
         dict(id=p["instance"], verdict=result["verdict"]),
-        implementation=p.get("master_artifact"), workload=p.get("trace"), configuration=p,
+        implementation=p.get("master_artifact"),
+        workload=p.get("trace"),
+        configuration=p,
         evidence=dict(file="performance-gate-evidence.json"),
     )
     if run is None:
-        return write_archived_gate_report(directory, result, presentation, spec,
-            identity="master-performance", producer="performance-gate", meta=meta)
-    return write_gate_report(directory, result, presentation, spec,
-        identity="master-performance", producer="performance-gate", meta=meta, run=run)
+        return write_archived_gate_report(
+            directory, result, presentation, spec, identity="master-performance", producer="performance-gate", meta=meta
+        )
+    return write_gate_report(
+        directory,
+        result,
+        presentation,
+        spec,
+        identity="master-performance",
+        producer="performance-gate",
+        meta=meta,
+        run=run,
+    )
 
 
 def validate_view(path, data, fail):
     from reporting.view_schema import validate_section_contract
 
-    validate_section_contract(path, data, {
-        "checks": 4, "monitoring": None, "validity": None, "metrics": None,
-    }, fail)
+    validate_section_contract(
+        path,
+        data,
+        {
+            "checks": 4,
+            "monitoring": None,
+            "validity": None,
+            "metrics": None,
+        },
+        fail,
+    )

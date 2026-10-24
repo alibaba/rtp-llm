@@ -1,20 +1,18 @@
 """Frozen numeric observations shared by gates and report projections."""
 
-from contextlib import contextmanager
-from contextvars import ContextVar
-
 import copy
-from dataclasses import dataclass
 import json
 import math
+from contextlib import contextmanager
+from contextvars import ContextVar
+from dataclasses import dataclass
 from pathlib import Path
 
-from schema_contract import matches_schema
 from file_io import write_json
-from monitoring.contracts import MetricContractError, MetricUnavailable, validate_observation, validate_definition
+from monitoring.contracts import MetricContractError, MetricUnavailable, validate_definition, validate_observation
+from schema_contract import matches_schema
 
-
-_READ_SESSION = ContextVar('frozen_metric_reads', default=None)
+_READ_SESSION = ContextVar("frozen_metric_reads", default=None)
 
 
 @contextmanager
@@ -30,6 +28,7 @@ def frozen_metric_reads():
 @dataclass(frozen=True)
 class MetricReduction:
     """A scalar and detached evidence from the same selected observations."""
+
     value: object
     evidence: dict
 
@@ -40,12 +39,15 @@ class MetricStore:
     def __init__(self, document):
         if not matches_schema(document, "metrics_schema_version", 1):
             raise MetricContractError("unsupported metric artifact schema")
-        if (not isinstance(document.get("definitions"), dict)
-                or not isinstance(document.get("metrics"), dict)
-                or set(document["metrics"]) - set(document["definitions"])):
+        if (
+            not isinstance(document.get("definitions"), dict)
+            or not isinstance(document.get("metrics"), dict)
+            or set(document["metrics"]) - set(document["definitions"])
+        ):
             raise MetricContractError("invalid metric artifact inventory")
-        if (not isinstance(document.get("collection_gaps", {}), dict)
-                or not isinstance(document.get("errors", []), list)):
+        if not isinstance(document.get("collection_gaps", {}), dict) or not isinstance(
+            document.get("errors", []), list
+        ):
             raise MetricContractError("invalid metric artifact diagnostics")
         for metric_id, definition in document["definitions"].items():
             validate_definition(definition, metric_id)
@@ -64,7 +66,7 @@ class MetricStore:
         cache = _READ_SESSION.get()
         if cache is not None and path in cache and cache[path][0] == signature:
             return cache[path][1]
-        with path.open(encoding='utf-8') as stream:
+        with path.open(encoding="utf-8") as stream:
             store = cls(json.load(stream))
         if cache is not None:
             cache[path] = (signature, store)
@@ -75,8 +77,9 @@ class MetricStore:
         MetricStore(self.document)
         write_json(Path(directory) / "metrics.json", self.document)
 
-    def select(self, metric_id, *, labels=None, start=None, end=None,
-               source=None, epoch=None, min_samples=1, max_gap_s=None):
+    def select(
+        self, metric_id, *, labels=None, start=None, end=None, source=None, epoch=None, min_samples=1, max_gap_s=None
+    ):
         """Select without filling gaps; max_gap_s bounds coverage, not failed samples."""
         if metric_id not in self.document["definitions"]:
             raise MetricContractError("undeclared metric id: " + metric_id)
@@ -84,8 +87,9 @@ class MetricStore:
             raise MetricContractError("metric definition was not frozen: " + metric_id)
         if type(min_samples) is not int or min_samples < 1:
             raise MetricContractError("min_samples must be a positive integer")
-        if (start is None) != (end is None) or (start is not None and (
-                not math.isfinite(start) or not math.isfinite(end) or start >= end)):
+        if (start is None) != (end is None) or (
+            start is not None and (not math.isfinite(start) or not math.isfinite(end) or start >= end)
+        ):
             raise MetricContractError("selection requires an increasing finite window")
         if max_gap_s is not None and (not math.isfinite(max_gap_s) or max_gap_s <= 0):
             raise MetricContractError("max_gap_s must be positive")
@@ -102,17 +106,20 @@ class MetricStore:
             if row["status"] == "ERROR":
                 raise MetricUnavailable(metric_id + ": source query failed")
             points = [p for p in _ordered_points(row) if start is None or start <= p[0] <= end]
-            if any(type(t) not in (int, float) or not math.isfinite(t)
-                   or (v is not None and (type(v) not in (int, float) or not math.isfinite(v)))
-                   for t, v in points):
+            if any(
+                type(t) not in (int, float)
+                or not math.isfinite(t)
+                or (v is not None and (type(v) not in (int, float) or not math.isfinite(v)))
+                for t, v in points
+            ):
                 raise MetricUnavailable(metric_id + ": non-finite observation")
             valid = [p for p in points if p[1] is not None]
             if len(valid) < min_samples or len(valid) != len(points):
                 raise MetricUnavailable(metric_id + ": missing/invalid samples")
             if max_gap_s is not None:
-                if (any(b[0] - a[0] > max_gap_s for a, b in zip(valid, valid[1:]))
-                        or (start is not None and (valid[0][0] - start > max_gap_s
-                                                   or end - valid[-1][0] > max_gap_s))):
+                if any(b[0] - a[0] > max_gap_s for a, b in zip(valid, valid[1:])) or (
+                    start is not None and (valid[0][0] - start > max_gap_s or end - valid[-1][0] > max_gap_s)
+                ):
                     raise MetricUnavailable(metric_id + ": insufficient time coverage")
             selected.append(dict(row, points=points))
         if not selected:
@@ -127,10 +134,20 @@ class MetricStore:
     def reduce_with_evidence(self, metric_id, *, op, **selection):
         """Select once and detach the definition and observation provenance."""
         value, rows = self._reduce_selected(metric_id, op=op, **selection)
-        evidence = dict(definition=self.document["definitions"][metric_id],
-            observations=[dict(source=row["source"], epoch=row["epoch"],
-                labels=row["labels"], provenance=row["provenance"], sample_count=len(row["points"]),
-                observed_bounds=[row["points"][0][0], row["points"][-1][0]]) for row in rows])
+        evidence = dict(
+            definition=self.document["definitions"][metric_id],
+            observations=[
+                dict(
+                    source=row["source"],
+                    epoch=row["epoch"],
+                    labels=row["labels"],
+                    provenance=row["provenance"],
+                    sample_count=len(row["points"]),
+                    observed_bounds=[row["points"][0][0], row["points"][-1][0]],
+                )
+                for row in rows
+            ],
+        )
         return MetricReduction(value, copy.deepcopy(evidence))
 
     def _reduce_selected(self, metric_id, *, op, **selection):
@@ -140,8 +157,7 @@ class MetricStore:
         if len(rows) != 1:
             raise MetricContractError("scalar reduction requires exactly one series")
         values = [v for _, v in rows[0]["points"]]
-        value = {"min": min, "max": max, "first": lambda x: x[0],
-                "last": lambda x: x[-1]}[op](values)
+        value = {"min": min, "max": max, "first": lambda x: x[0], "last": lambda x: x[-1]}[op](values)
         return value, rows
 
     def project(self, anchor):
@@ -151,25 +167,39 @@ class MetricStore:
             for row in observations:
                 key = row.get("series_key")
                 if key is None:
-                    key = "/".join((str(row["epoch"]), row["source"], row["metric_id"],
-                                    json.dumps(row["labels"], sort_keys=True)))
+                    key = "/".join(
+                        (str(row["epoch"]), row["source"], row["metric_id"], json.dumps(row["labels"], sort_keys=True))
+                    )
                 if row["points"] and key in seen:
                     raise MetricContractError("duplicate archived series key: " + key)
                 if row["points"]:
                     seen.add(key)
                 points = list(_ordered_points(row))
-                if any(value is not None and (type(value) not in (int, float) or not math.isfinite(value)) for _, value in points):
-                    raise MetricUnavailable(row['metric_id'] + ': non-finite observation')
-                rows.append(dict(row, series_key=key, points=[[t - anchor, value] for t, value in points],
-                                 unit=self.document["definitions"][row["metric_id"]]["unit"]))
+                if any(
+                    value is not None and (type(value) not in (int, float) or not math.isfinite(value))
+                    for _, value in points
+                ):
+                    raise MetricUnavailable(row["metric_id"] + ": non-finite observation")
+                rows.append(
+                    dict(
+                        row,
+                        series_key=key,
+                        points=[[t - anchor, value] for t, value in points],
+                        unit=self.document["definitions"][row["metric_id"]]["unit"],
+                    )
+                )
         gaps = {k: [t - anchor for t in v] for k, v in self.document.get("collection_gaps", {}).items()}
         return rows, gaps, copy.deepcopy(self.document.get("errors", []))
 
     def series(self, anchor):
         rows, gaps, errors = self.project(anchor)
         rows = [row for row in rows if row["points"]]
-        return ({row["series_key"]: row["points"] for row in rows},
-                {row["series_key"]: dict(row["provenance"], metric_id=row["metric_id"], unit=row["unit"]) for row in rows}, gaps, errors)
+        return (
+            {row["series_key"]: row["points"] for row in rows},
+            {row["series_key"]: dict(row["provenance"], metric_id=row["metric_id"], unit=row["unit"]) for row in rows},
+            gaps,
+            errors,
+        )
 
 
 def _ordered_points(row):

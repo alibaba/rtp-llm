@@ -1,18 +1,13 @@
 """Continuous Java traffic across a concurrent Prefill scale-in."""
 
-from cases.cache_scale_in.constants import SHARED_WARMUP_AFFINITY_MS
-
 import math
 from concurrent.futures import ThreadPoolExecutor
-
-from scenario.contracts import StageHandler, StageOutput
 from functools import partial
-from scenario.parameters import validate_fields, reference_parameters
-from runtime.observation import SampleBudget, poll_samples
-from file_io import write_json
+
+from adapters.mock_control import mock_json
+from artifacts.gate import gate_check
 from artifacts.gate_inputs import new_evidence
 from artifacts.provenance import gate_provenance
-from adapters.mock_control import mock_json
 from cases.cache_scale_in.analysis import (
     MEASUREMENT_POLICY,
     align_send_counters,
@@ -21,15 +16,23 @@ from cases.cache_scale_in.analysis import (
     topology_ready,
     window,
 )
-from artifacts.gate import gate_check
-
+from cases.cache_scale_in.constants import SHARED_WARMUP_AFFINITY_MS
 from cases.cache_scale_in.inputs import validate_criteria
+from file_io import write_json
+from runtime.observation import SampleBudget, poll_samples
+from scenario.contracts import StageHandler, StageOutput
+from scenario.parameters import reference_parameters, validate_fields
 
 
 def validate(params, plan):
-    grouped = validate_fields(params, plan,
-        {"flow", "criteria", "gate_input", "observation"}, {"flow", "criteria", "gate_input", "observation"})
+    grouped = validate_fields(
+        params,
+        plan,
+        {"flow", "criteria", "gate_input", "observation"},
+        {"flow", "criteria", "gate_input", "observation"},
+    )
     from cases.cache_scale_in.inputs import observation_contract
+
     durations = observation_contract(grouped["observation"])
     if any(grouped["criteria"].get(key) != value for key, value in durations.items()):
         raise ValueError("observation windows disagree with frozen criteria")
@@ -40,8 +43,10 @@ def validate(params, plan):
 def _master_count(ctx, deadline):
     from adapters.master_control import master_url
     from runtime.network import http_post_json
-    code, data = http_post_json(master_url("127.0.0.1", ctx.env.master_http_port, "info"),
-                                {}, timeout=min(3, deadline.remaining()))
+
+    code, data = http_post_json(
+        master_url("127.0.0.1", ctx.env.master_http_port, "info"), {}, timeout=min(3, deadline.remaining())
+    )
     if code != 200 or not isinstance(data, dict):
         raise ValueError("master topology HTTP unavailable")
     value = data["worker_summary"]["PREFILL"]["alive"]
@@ -62,7 +67,11 @@ def _affinity_transition(ctx, value, deadline):
         raise ValueError("unexpected warmup affinity policy")
     update = request(dict(expectedMaxExtraTtftMs=SHARED_WARMUP_AFFINITY_MS, maxExtraTtftMs=value))
     readback = request()
-    if update.get("before") != SHARED_WARMUP_AFFINITY_MS or update.get("maxExtraTtftMs") != value or readback.get("maxExtraTtftMs") != value:
+    if (
+        update.get("before") != SHARED_WARMUP_AFFINITY_MS
+        or update.get("maxExtraTtftMs") != value
+        or readback.get("maxExtraTtftMs") != value
+    ):
         raise ValueError("affinity intervention readback mismatch")
     return dict(before=before, update=update, readback=readback)
 
@@ -74,9 +83,12 @@ def observe(ctx, p, deadline):
     clock = ctx.start_observation()
     origin = clock.origin_monotonic_s
     budget = SampleBudget(observation["capture"])
-    evidence = new_evidence("cache_evidence_schema_version", clock,
+    evidence = new_evidence(
+        "cache_evidence_schema_version",
+        clock,
         {k: v for k, v in p.items() if k not in ("flow", "gate_input")},
-        instance=ctx.instance["id"], env_epoch=ctx.env_epoch,
+        instance=ctx.instance["id"],
+        env_epoch=ctx.env_epoch,
         measurement_policy=MEASUREMENT_POLICY,
         window_declarations=observation["windows"],
         observation_origin_epoch_s=clock.origin_epoch_s,
@@ -92,6 +104,7 @@ def observe(ctx, p, deadline):
         capture_limits=observation["capture"],
     )
     from cases.cache_scale_in import analysis as cache_gate
+
     path = ctx.artifact_dir / "cache-gate-evidence.json"
 
     def event(name, row=None):
@@ -102,8 +115,8 @@ def observe(ctx, p, deadline):
     def sample():
         deadline.check()
         from cases.cache_scale_in.observation import engine_metric_snapshot
-        engines = engine_metric_snapshot(ctx.monitor, p["gate_input"]["fields"],
-                                  timeout=min(3, deadline.remaining()))
+
+        engines = engine_metric_snapshot(ctx.monitor, p["gate_input"]["fields"], timeout=min(3, deadline.remaining()))
         state = flow.status()
         stamp = clock.stamp(ctx.clock())
         row = dict(
@@ -125,7 +138,9 @@ def observe(ctx, p, deadline):
     pool = None
     futures = []
     try:
-        evidence["provenance"].update(gate_provenance(ctx, flow, source_files=ctx.services.source_files(), analyzer_file=cache_gate.__file__))
+        evidence["provenance"].update(
+            gate_provenance(ctx, flow, source_files=ctx.services.source_files(), analyzer_file=cache_gate.__file__)
+        )
         first = sample()
         initial = sorted(first["engines"])
         evidence["initial_engines"] = initial
@@ -137,10 +152,13 @@ def observe(ctx, p, deadline):
             t = row["t"]
             if t >= max(p["baseline_s"], p["warmup_min_s"]):
                 from cases.cache_scale_in.observation import measurement_samples
-                baseline_rows = measurement_samples(ctx.monitor, evidence, deadline,
-                    evidence["capture_limits"], windows=[(t-p["baseline_s"], t)])
-                align_send_counters(dict(samples=baseline_rows),
-                    flow.issued_snapshot(deadline, fields=("send_start_epoch_ms",)))
+
+                baseline_rows = measurement_samples(
+                    ctx.monitor, evidence, deadline, evidence["capture_limits"], windows=[(t - p["baseline_s"], t)]
+                )
+                align_send_counters(
+                    dict(samples=baseline_rows), flow.issued_snapshot(deadline, fields=("send_start_epoch_ms",))
+                )
                 left = window(
                     baseline_rows,
                     t - p["baseline_s"],
@@ -164,11 +182,7 @@ def observe(ctx, p, deadline):
                     and abs(w["sent_qps"] / p["qps"] - 1) <= p["qps_tolerance"]
                     for w in (left, right)
                 )
-                if (
-                    t >= p["warmup_min_s"]
-                    and ready
-                    and abs(left["hit"] - right["hit"]) <= p["baseline_max_spread"]
-                ):
+                if t >= p["warmup_min_s"] and ready and abs(left["hit"] - right["hit"]) <= p["baseline_max_spread"]:
                     evidence.update(baseline_start=t - p["baseline_s"], baseline_end=t)
                     evidence["readiness_sample_source"] = "prometheus_raw_scrape"
                     event("baseline_ready", row)
@@ -180,9 +194,7 @@ def observe(ctx, p, deadline):
         event("withdraw_start")
         # Every removal withdraws discovery before waiting. Parallel requests do
         # not serialize the drain periods; the Java mutation lock only covers rewrite.
-        pool = ThreadPoolExecutor(
-            max_workers=len(removed), thread_name_prefix="scale-in"
-        )
+        pool = ThreadPoolExecutor(max_workers=len(removed), thread_name_prefix="scale-in")
         futures = [
             pool.submit(
                 mock_json,
@@ -235,15 +247,23 @@ def check(ctx, p, deadline):
     # Keep the original poll ledger for topology and latency diagnostics.
     from cases.cache_scale_in.observation import measurement_samples
     from file_digest import sha256_file
+
     control_path = ctx.artifact_dir / "cache-control-evidence.json"
     write_json(control_path, evidence)
     evidence["control_evidence"] = dict(file=control_path.name, sha256=sha256_file(control_path))
     try:
-        evidence["samples"] = measurement_samples(ctx.monitor, evidence, deadline,
-                                                 evidence["capture_limits"], directory=ctx.artifact_dir / "cache-measurement")
+        evidence["samples"] = measurement_samples(
+            ctx.monitor,
+            evidence,
+            deadline,
+            evidence["capture_limits"],
+            directory=ctx.artifact_dir / "cache-measurement",
+        )
         evidence["gate_sample_source"] = "prometheus_raw_scrape"
-        evidence["raw_evidence"] = dict(path="cache-measurement/manifest.json",
-            sha256=sha256_file(ctx.artifact_dir / "cache-measurement/manifest.json"))
+        evidence["raw_evidence"] = dict(
+            path="cache-measurement/manifest.json",
+            sha256=sha256_file(ctx.artifact_dir / "cache-measurement/manifest.json"),
+        )
     except TimeoutError:
         raise
     except (ValueError, RuntimeError, OSError) as exc:
@@ -268,8 +288,7 @@ def check(ctx, p, deadline):
     issued = [
         r
         for r in snapshot["issued"]
-        if times
-        and times[0] * 1000 <= r.get("send_start_epoch_ms", -1) <= times[-1] * 1000
+        if times and times[0] * 1000 <= r.get("send_start_epoch_ms", -1) <= times[-1] * 1000
     ]
     lags = [r.get("pacing_lag_ms") for r in issued]
     if lags and all(type(v) in (int, float) and math.isfinite(v) for v in lags):
@@ -278,11 +297,13 @@ def check(ctx, p, deadline):
     evidence["curve_source"] = "prometheus"
     from artifacts.gate import commit_gate
     from cases.cache_scale_in.analysis import analyze
-    result, path = commit_gate(ctx.artifact_dir, 'cache', evidence, analyze)
+
+    result, path = commit_gate(ctx.artifact_dir, "cache", evidence, analyze)
     return StageOutput(
         checks=[
-            gate_check("cache_stability", result, path,
-                       "valid survivor cache measurement without sustained hit collapse")
+            gate_check(
+                "cache_stability", result, path, "valid survivor cache measurement without sustained hit collapse"
+            )
         ],
         artifacts=[
             str(ctx.artifact_dir / name)
@@ -300,7 +321,7 @@ HANDLERS = [
     StageHandler("cache_scale_in_observe", validate, observe, {"evidence": "gate_evidence"}),
     StageHandler(
         "cache_scale_in_check",
-        partial(reference_parameters, resources={'flow': 'java_flow', 'evidence': 'gate_evidence'}),
+        partial(reference_parameters, resources={"flow": "java_flow", "evidence": "gate_evidence"}),
         check,
         {},
         checks=frozenset({"cache_stability"}),

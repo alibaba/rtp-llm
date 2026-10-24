@@ -5,8 +5,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from scenario import ScenarioError
 from program_fixtures import compile_scenarios
+from scenario import ScenarioError
 from scenario.backend_spec import configure_master_sync_log, make_env_spec
 from scenario.contracts import StageHandler
 from test_scenario_compile import scenario
@@ -15,20 +15,14 @@ from test_scenario_compile import scenario
 class VariantProgramsTest(unittest.TestCase):
     def test_sync_log_is_private_per_epoch_and_does_not_create_fake_evidence(self):
         doc = scenario()
-        doc["variants"] = [
-            dict(id="logged", environment_overrides=dict(master_sync_log=True))
-        ]
+        doc["variants"] = [dict(id="logged", environment_overrides=dict(master_sync_log=True))]
         plan = compile_scenarios([("logged.yaml", doc)], "batch-window")[0]
         self.assertTrue(plan["environment"]["master_sync_log"])
-        spec = make_env_spec(
-            plan["environment"], plan["profile"], dict(master_base=28000)
-        )
+        spec = make_env_spec(plan["environment"], plan["profile"], dict(master_base=28000))
         with tempfile.TemporaryDirectory() as root:
             path = configure_master_sync_log(spec, root, 1)
             self.assertEqual(path, Path(root).resolve() / "master-sync-1" / "sync.log")
-            self.assertEqual(
-                spec.master_extra_args, [f"--flexlb.log.path={path.parent}"]
-            )
+            self.assertEqual(spec.master_extra_args, [f"--flexlb.log.path={path.parent}"])
             self.assertFalse(path.exists())
             with self.assertRaises(FileExistsError):
                 configure_master_sync_log(spec, root, 1)
@@ -45,9 +39,7 @@ class VariantProgramsTest(unittest.TestCase):
         from adapters.environment_config import default_perf
 
         doc = scenario()
-        disabled = dict(
-            fixed_ms=3000, scale=1, max_batch_tokens=0, max_batch_requests=0
-        )
+        disabled = dict(fixed_ms=3000, scale=1, max_batch_tokens=0, max_batch_requests=0)
         limited = dict(disabled, max_batch_tokens=1024, max_batch_requests=2)
         doc["environment"]["prefill_perf"] = disabled
         doc["variants"] = [
@@ -58,9 +50,7 @@ class VariantProgramsTest(unittest.TestCase):
             compile_scenarios([("budget.yaml", doc)], "batch-window"),
             (disabled, limited),
         ):
-            spec = make_env_spec(
-                plan["environment"], plan["profile"], dict(master_base=28000)
-            )
+            spec = make_env_spec(plan["environment"], plan["profile"], dict(master_base=28000))
             self.assertEqual(spec.perf["prefill"], expected)
             self.assertEqual(spec.perf["decode"], default_perf()["decode"])
             spec.perf["prefill"]["fixed_ms"] = 0
@@ -86,23 +76,17 @@ class VariantProgramsTest(unittest.TestCase):
         doc = scenario()
         alternate = copy.deepcopy(doc["stages"])
         alternate[1]["id"] = "other_submit"
-        alternate[2]["params"]["requests"][
-            "$ref"
-        ] = "stages.other_submit.output.requests"
+        alternate[2]["params"]["requests"]["$ref"] = "stages.other_submit.output.requests"
         doc["variants"] = [
             dict(id="base"),
             dict(id="alternate", stages=alternate, execution=dict(timeout_s=33)),
         ]
         original = copy.deepcopy(doc)
         plans = compile_scenarios([("variants.yaml", doc)], "batch-window")
-        self.assertEqual(
-            [p["stages"][1]["id"] for p in plans], ["submit", "other_submit"]
-        )
+        self.assertEqual([p["stages"][1]["id"] for p in plans], ["submit", "other_submit"])
         self.assertEqual(plans[1]["execution"]["timeout_s"], 33)
         self.assertEqual(doc, original)
-        doc["variants"][1]["stages"][2]["params"]["requests"][
-            "$ref"
-        ] = "stages.submit.output.requests"
+        doc["variants"][1]["stages"][2]["params"]["requests"]["$ref"] = "stages.submit.output.requests"
         with self.assertRaisesRegex(ScenarioError, "unknown or forward"):
             compile_scenarios([("variants.yaml", doc)])
 
@@ -126,12 +110,8 @@ class VariantProgramsTest(unittest.TestCase):
             debug_enabled=True,
         )
         plan = compile_scenarios([("dual.yaml", doc)], "batch-window")[0]
-        spec = make_env_spec(
-            plan["environment"], plan["profile"], dict(master_base=28000)
-        )
-        self.assertEqual(
-            [(m.name, m.http_port) for m in spec.masters], [("A", 28000), ("B", 28003)]
-        )
+        spec = make_env_spec(plan["environment"], plan["profile"], dict(master_base=28000))
+        self.assertEqual([(m.name, m.http_port) for m in spec.masters], [("A", 28000), ("B", 28003)])
         self.assertIsNone(spec.zk_consistency)
         self.assertEqual(spec.master_stable_window_s, 0)
         self.assertEqual(spec.master_env, {"FLEXLB_DEBUG_ENABLED": "true"})

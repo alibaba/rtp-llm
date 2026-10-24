@@ -2,12 +2,13 @@
 
 import json
 from dataclasses import asdict
-from scenario.stage_compiler import OUTPUTS
-from scenario.contracts import StageOutput
-from scenario.stage_parameters import decode_parameters
-from scenario.run_result import StageResult, StageStatus, StageExecutionSummary, CleanupResult
+
 from analysis.checks import CHECK_STATUSES
 from runtime.deadline import Deadline, interruptible
+from scenario.contracts import StageOutput
+from scenario.run_result import CleanupResult, StageExecutionSummary, StageResult, StageStatus
+from scenario.stage_compiler import OUTPUTS
+from scenario.stage_parameters import decode_parameters
 
 
 def _core_action(action, ctx, params, deadline):
@@ -30,16 +31,15 @@ def _core_action(action, ctx, params, deadline):
         requests = ctx.resource(params.requests.to_dict(), "requests")
         if action == "wait":
             return StageOutput(ctx.backend.wait_requests(ctx, requests, deadline))
-        return StageOutput(
-            {"issued": ctx.backend.cancel_requests(ctx, requests, deadline)}
-        )
+        return StageOutput({"issued": ctx.backend.cancel_requests(ctx, requests, deadline)})
     if action == "check":
         from analysis.checks import evaluate
 
         actual = ctx.resolve(params.actual.to_dict())
         result = evaluate("comparison", actual, params.op, params.expected)
         return StageOutput(
-            {"passed": result.status == "PASS"}, [result],
+            {"passed": result.status == "PASS"},
+            [result],
         )
     if action == "teardown":
         results = ctx.cleanup(deadline.remaining(), retain_failed=True)
@@ -64,6 +64,7 @@ def _validate_output(ctx, result, expected, check_ids):
         }.get(kind)
         if kind == "nullable_number":
             import math
+
             if value is not None and (type(value) not in (int, float) or not math.isfinite(value)):
                 raise ValueError(f"output {key} expected finite number or null")
             if value is None and not any(c.status == "ERROR" for c in result.checks):
@@ -99,9 +100,7 @@ class StageExecutor:
                 if blocked:
                     rows.append(row)
                     continue
-                deadline = Deadline(
-                    min(end, t0 + spec.timeout_s), clock, sleeper, cancelled
-                )
+                deadline = Deadline(min(end, t0 + spec.timeout_s), clock, sleeper, cancelled)
                 try:
                     deadline.check()
                     ctx.stage_deadline = deadline
@@ -134,11 +133,7 @@ class StageExecutor:
                             primary_error = check.detail or "check evidence error"
                             blocked = True
                         elif qualified in instance.findings:
-                            (
-                                finding_failures
-                                if check.status == "FAIL"
-                                else finding_passes
-                            ).append(qualified)
+                            (finding_failures if check.status == "FAIL" else finding_passes).append(qualified)
                             if check.status == "FAIL" and row.status == StageStatus.PASS:
                                 row.status = StageStatus.FAIL
                         elif check.status == "FAIL":
@@ -146,8 +141,7 @@ class StageExecutor:
                                 row.status = StageStatus.FAIL
                                 terminal_status = "FAIL"
                                 blocked = blocked or not (
-                                    _policy is not None
-                                    and _policy.continue_after_failure(spec.to_dict())
+                                    _policy is not None and _policy.continue_after_failure(spec.to_dict())
                                 )
                     if _policy is not None:
                         with interruptible(deadline, enforce_deadlines):
@@ -155,9 +149,7 @@ class StageExecutor:
                             deadline.check()
                     # Known findings do not prevent additional independent checks.
                 except Exception as exc:
-                    terminal_status = (
-                        "TIMEOUT" if isinstance(exc, TimeoutError) else "ERROR"
-                    )
+                    terminal_status = "TIMEOUT" if isinstance(exc, TimeoutError) else "ERROR"
                     primary_error = f"{type(exc).__name__}: {exc}"
                     row.status = StageStatus(terminal_status)
                     row.error = primary_error
@@ -179,5 +171,6 @@ class StageExecutor:
                 terminal_status = "FINDING-CONFIRMED"
             elif finding_passes:
                 terminal_status = "FINDING-RESOLVED"
-        return StageExecutionSummary(tuple(rows), terminal_status, primary_error,
-                                     tuple(finding_failures), tuple(finding_passes), cleanup)
+        return StageExecutionSummary(
+            tuple(rows), terminal_status, primary_error, tuple(finding_failures), tuple(finding_passes), cleanup
+        )

@@ -1,11 +1,15 @@
 """Typed authored environment data and scalar field contracts."""
+
 from __future__ import annotations
+
 import copy
-from dataclasses import dataclass, field, fields, asdict
+from dataclasses import asdict, dataclass, field, fields
+
 from adapters.zookeeper_config import ZooKeeperConfig
 from scenario.validation import fail, number
 
 _ABSENT = object()
+
 
 def environment_fields():
     """One vocabulary for both top-level fields and simple scalar declarations."""
@@ -19,8 +23,16 @@ def variant_environment_fields():
 
 def scalar_field(kind, default=_ABSENT, minimum=None, *, startup=False, reconfigure=False, validate=None, capture=None):
     """Declare authored admission, startup forwarding and replacement in one place."""
-    return field(default=None if default is _ABSENT else default, metadata={
-        "scalar": (kind, default, minimum), "startup": startup, "reconfigure": reconfigure, "validate": validate, "capture": capture})
+    return field(
+        default=None if default is _ABSENT else default,
+        metadata={
+            "scalar": (kind, default, minimum),
+            "startup": startup,
+            "reconfigure": reconfigure,
+            "validate": validate,
+            "capture": capture,
+        },
+    )
 
 
 def validate_scalar(value, kind, minimum, path):
@@ -37,6 +49,7 @@ def validate_scalar(value, kind, minimum, path):
 
 def heap_size(value, path):
     import re
+
     if not re.fullmatch(r"[1-9][0-9]*[mMgG]", value):
         fail(path, "requires a positive JVM heap with m/g units")
 
@@ -53,13 +66,17 @@ def optional_scalars(value, path, result, declarations=None):
 
 def startup_options(plan):
     """Only explicitly authored startup fields cross into the backend specification."""
-    return {item.name: copy.deepcopy(plan[item.name]) for item in fields(EnvironmentDeclaration)
-            if item.metadata.get("startup") and item.name in plan}
+    return {
+        item.name: copy.deepcopy(plan[item.name])
+        for item in fields(EnvironmentDeclaration)
+        if item.metadata.get("startup") and item.name in plan
+    }
 
 
 def captured_fields():
-    return {item.name: item.metadata["capture"] for item in fields(EnvironmentDeclaration)
-            if item.metadata.get("capture")}
+    return {
+        item.name: item.metadata["capture"] for item in fields(EnvironmentDeclaration) if item.metadata.get("capture")
+    }
 
 
 def reconfigurable_fields():
@@ -85,8 +102,9 @@ class PrefillCachePolicy:
         if type(capacity) is not int or capacity < 0:
             raise ValueError("prefill memory cache policy requires captured capacity or explicit memory_blocks")
         prefill["enable_gpu_prefix_tree"] = self.device_tree
-        prefill["memory_cache"] = dict(enabled=capacity > 0, capacity_blocks=capacity,
-                                     enable_prefix_tree=self.memory_tree)
+        prefill["memory_cache"] = dict(
+            enabled=capacity > 0, capacity_blocks=capacity, enable_prefix_tree=self.memory_tree
+        )
 
 
 @dataclass(frozen=True)
@@ -94,10 +112,13 @@ class ModelDeviation:
     baseline: str
     reason: str
 
-
     def __post_init__(self):
-        if (type(self.baseline) is not str or not self.baseline.strip()
-                or type(self.reason) is not str or not self.reason.strip()):
+        if (
+            type(self.baseline) is not str
+            or not self.baseline.strip()
+            or type(self.reason) is not str
+            or not self.reason.strip()
+        ):
             raise ValueError("model deviation requires baseline and reason")
 
 
@@ -108,11 +129,9 @@ class PrefillPerformance:
     max_batch_tokens: int
     max_batch_requests: int
 
-
     def __post_init__(self):
         for item in fields(self):
-            number(getattr(self, item.name), "prefill_perf." + item.name,
-                   integer=item.name.startswith("max_batch_"))
+            number(getattr(self, item.name), "prefill_perf." + item.name, integer=item.name.startswith("max_batch_"))
 
 
 @dataclass(frozen=True)
@@ -150,8 +169,8 @@ class EnvironmentDeclaration:
             raise ValueError("invalid environment backend/discovery")
         if self.master_layout not in {"single", "dual_standalone", "dual_zookeeper"}:
             raise ValueError("invalid environment master layout")
-        if (self.master_layout == 'dual_zookeeper') != (self.zookeeper is not None):
-            raise ValueError('zookeeper configuration requires dual_zookeeper layout')
+        if (self.master_layout == "dual_zookeeper") != (self.zookeeper is not None):
+            raise ValueError("zookeeper configuration requires dual_zookeeper layout")
         for name in ("n_prefill", "n_decode", "prefill_cache_blocks", "decode_cache_blocks"):
             value = getattr(self, name)
             if value is not None:
@@ -178,15 +197,20 @@ class EnvironmentDeclaration:
         policy = options.pop("prefill_cache_policy", None)
         performance = options.pop("prefill_perf", None)
         deviation = options.pop("model_override", None)
-        return cls(**options, zookeeper=ZooKeeperConfig.read(zk) if zk is not None else None,
-                   prefill_cache_policy=PrefillCachePolicy(**policy) if policy is not None else None,
-                   prefill_perf=PrefillPerformance(**performance) if performance is not None else None,
-                   model_override=ModelDeviation(**deviation) if deviation is not None else None)
-
+        return cls(
+            **options,
+            zookeeper=ZooKeeperConfig.read(zk) if zk is not None else None,
+            prefill_cache_policy=PrefillCachePolicy(**policy) if policy is not None else None,
+            prefill_perf=PrefillPerformance(**performance) if performance is not None else None,
+            model_override=ModelDeviation(**deviation) if deviation is not None else None,
+        )
 
     def to_dict(self):
-        result = {field.name: copy.deepcopy(getattr(self, field.name)) for field in fields(self)
-                  if getattr(self, field.name) is not None}
+        result = {
+            field.name: copy.deepcopy(getattr(self, field.name))
+            for field in fields(self)
+            if getattr(self, field.name) is not None
+        }
         for name in ("prefill_perf", "model_override", "zookeeper"):
             value = getattr(self, name)
             if value is not None:
@@ -195,7 +219,8 @@ class EnvironmentDeclaration:
             result["prefill_cache_policy"] = {
                 field.name: getattr(self.prefill_cache_policy, field.name)
                 for field in fields(self.prefill_cache_policy)
-                if getattr(self.prefill_cache_policy, field.name) is not None}
+                if getattr(self.prefill_cache_policy, field.name) is not None
+            }
         return result
 
     def apply_performance(self, baseline):
@@ -212,5 +237,6 @@ class EnvironmentDeclaration:
 
 
 # Simple field rules are metadata of their typed declaration, not a second schema.
-OPTIONAL_SCALARS = {item.name: item.metadata["scalar"] for item in fields(EnvironmentDeclaration)
-                    if "scalar" in item.metadata}
+OPTIONAL_SCALARS = {
+    item.name: item.metadata["scalar"] for item in fields(EnvironmentDeclaration) if "scalar" in item.metadata
+}

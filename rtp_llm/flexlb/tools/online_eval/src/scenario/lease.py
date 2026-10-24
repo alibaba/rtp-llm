@@ -2,11 +2,10 @@
 
 import os
 
-from schema_contract import matches_schema
-
 from adapters.java_mock_resources import MOCK_WINDOW_LAST, WORKER_PORT_CAPACITY
 from document_io import DocumentError as ScenarioError
 from document_io import load_document
+from schema_contract import matches_schema
 
 
 def validate_lease(path, budget, environ=None):
@@ -23,11 +22,7 @@ def validate_lease(path, budget, environ=None):
         "lock_names",
         "child_env",
     }
-    if (
-        set(data) != required
-        or not matches_schema(data, "lease_schema_version", 1)
-        or data["backend"] != "java_mock"
-    ):
+    if set(data) != required or not matches_schema(data, "lease_schema_version", 1) or data["backend"] != "java_mock":
         raise ScenarioError("invalid Java mock lease manifest fields or version")
     for key in ("lane", "master_base", "mock_base", "worker_capacity"):
         if type(data[key]) is not int or data[key] < 0:
@@ -42,9 +37,7 @@ def validate_lease(path, budget, environ=None):
         "FLEXLB_FT_HA_MASTER_B_HTTP_PORT": str(m + 3),
         "FLEXLB_FT_MOCK_BASE_GRPC_PORT": str(b),
     }
-    if data["child_env"] != expected or any(
-        env.get(k) != v for k, v in expected.items()
-    ):
+    if data["child_env"] != expected or any(env.get(k) != v for k, v in expected.items()):
         raise ScenarioError("process port environment differs from parent lease")
     intervals = [
         dict(side="master", first=m, last=m + 5),
@@ -52,7 +45,7 @@ def validate_lease(path, budget, environ=None):
     ]
     if data["intervals"] != intervals or not (m + 5 < b - 1 or b + MOCK_WINDOW_LAST < m):
         raise ScenarioError("lease intervals invalid or overlap")
-    if data["lock_names"] != [f"m{m}_{m+5}.lock", f"g{b-1}_{b+MOCK_WINDOW_LAST}.lock"]:
+    if data["lock_names"] != [f"m{m}_{m + 5}.lock", f"g{b - 1}_{b + MOCK_WINDOW_LAST}.lock"]:
         raise ScenarioError("lease lock names do not match port windows")
     worker_bound = budget.get("max_environment_workers", budget["initial_workers"])
     if (

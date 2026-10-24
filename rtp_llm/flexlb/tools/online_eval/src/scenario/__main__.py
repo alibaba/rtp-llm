@@ -10,19 +10,13 @@ from scenario.compiler import plan_counts
 
 
 def main(argv=None):
-    parser = argparse.ArgumentParser(
-        description="Validate and compile scenario instances; no services are started"
-    )
+    parser = argparse.ArgumentParser(description="Validate and compile scenario instances; no services are started")
     parser.add_argument("root")
     parser.add_argument("--profile")
-    parser.add_argument(
-        "--grade", choices=("strict", "normal", "loose"), default="normal"
-    )
+    parser.add_argument("--grade", choices=("strict", "normal", "loose"), default="normal")
     args = parser.parse_args(argv)
     try:
-        plans = compile_scenarios(
-            load_scenarios(args.root), args.profile, handlers(), grade=args.grade
-        )
+        plans = compile_scenarios(load_scenarios(args.root), args.profile, handlers(), grade=args.grade)
         if not plans:
             raise ScenarioError("selection contains no scenario instances")
     except (ScenarioError, ValueError, OSError) as exc:

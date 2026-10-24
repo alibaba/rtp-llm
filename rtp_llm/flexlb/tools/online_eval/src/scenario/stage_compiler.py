@@ -3,19 +3,17 @@
 import copy
 import math
 from dataclasses import dataclass
-from scenario.program import StageDefinition
-from scenario.plan import StagePlan
-from scenario.stage_parameters import decode_parameters
 from typing import Callable
 
+from analysis.checks import validate_comparison
 from document_io import DocumentError as ScenarioError
 from scenario.contracts import PlanContext
-from scenario.validation import fail, mapping, identifier, number
-from analysis.checks import validate_comparison
+from scenario.plan import StagePlan
+from scenario.program import StageDefinition
+from scenario.references import enter_stage, reference, validate_references
 from scenario.request_parameters import normalize_request_parameters
-
-
-from scenario.references import reference, validate_references, enter_stage
+from scenario.stage_parameters import decode_parameters
+from scenario.validation import fail, identifier, mapping, number
 
 
 def _empty_params(params, loc, outputs):
@@ -42,8 +40,7 @@ def _check_params(params, loc, outputs):
         "string": (str,),
     }.get(kind, ())
     if type(params["expected"]) not in expected_types or (
-        type(params["expected"]) is float
-        and not math.isfinite(params["expected"])
+        type(params["expected"]) is float and not math.isfinite(params["expected"])
     ):
         fail(
             loc,
@@ -63,7 +60,10 @@ class _CoreAction:
 
 _CORE_ACTIONS = {
     "setup": _CoreAction({"environment": "environment"}, _empty_params),
-    "request": _CoreAction({"requests": "requests", "count": "integer"}, lambda params, loc, outputs: normalize_request_parameters(params, loc)),
+    "request": _CoreAction(
+        {"requests": "requests", "count": "integer"},
+        lambda params, loc, outputs: normalize_request_parameters(params, loc),
+    ),
     "wait": _CoreAction({"completed": "boolean", "error_count": "integer"}, _request_reference),
     "cancel": _CoreAction({"issued": "integer"}, _request_reference),
     "check": _CoreAction({"passed": "boolean"}, _check_params),
@@ -88,16 +88,22 @@ class _StageCompiler:
     def compile(self, values, path):
         if not isinstance(values, tuple) or not values:
             fail(path, "expected nonempty typed stage sequence")
-        return tuple(self._stage(value, index, f"{path}[{index}]")
-                     for index, value in enumerate(values))
+        return tuple(self._stage(value, index, f"{path}[{index}]") for index, value in enumerate(values))
 
     def _handler_params(self, descriptor, params, loc, action):
         if descriptor.owners and self.case not in descriptor.owners:
             fail(loc + ".action", f"action {action!r} belongs to cases {sorted(descriptor.owners)!r}")
         try:
-            params = descriptor.validate(params, PlanContext(
-                loc + ".params", dict(self.outputs), copy.deepcopy(self.environment), self.profiles, self.case,
-            ))
+            params = descriptor.validate(
+                params,
+                PlanContext(
+                    loc + ".params",
+                    dict(self.outputs),
+                    copy.deepcopy(self.environment),
+                    self.profiles,
+                    self.case,
+                ),
+            )
         except ScenarioError:
             raise
         except ValueError as exc:
@@ -120,7 +126,9 @@ class _StageCompiler:
         if not isinstance(action, str) or action not in (set(OUTPUTS) | set(self.handlers)):
             fail(loc + ".action", f"unsupported action {action!r}")
         self.setup_seen = enter_stage(action, index, self.setup_seen, self.torn_down, loc)
-        timeout = number(value.timeout_s if value.timeout_s is not None else self.default_timeout, loc + ".timeout_s", minimum=0.001)
+        timeout = number(
+            value.timeout_s if value.timeout_s is not None else self.default_timeout, loc + ".timeout_s", minimum=0.001
+        )
         params = copy.deepcopy(value.params)
         descriptor = self.handlers.get(action)
         if descriptor is not None:

@@ -1,13 +1,15 @@
 """Generate and verify self-describing capture manifests against their payload."""
-from file_io import read_json
-from dataclasses import dataclass
+
 import hashlib
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from traffic.statistics import statistics
+from file_io import read_json
 from traffic.codecs import decode_model
 from traffic.lineage_model import LineageModel
+from traffic.statistics import statistics
+
 
 def build_manifest(path, source=None):
     path = Path(path)
@@ -16,29 +18,44 @@ def build_manifest(path, source=None):
     metadata = model.metadata.to_dict()
     provenance = metadata["provenance"]
     local = timezone(timedelta(hours=8))
-    window = {key: datetime.fromtimestamp(provenance[field] / 1000, local).isoformat()
-              if provenance.get(field) is not None else None
-              for key, field in (("start", "source_start"), ("end", "source_end"))}
-    return dict(metadata, manifest_schema_version=2, bytes=len(raw),
-                sha256=hashlib.sha256(raw).hexdigest(),
-                codec=dict(name="prefix_lineage", version=metadata["version"]),
-                data_kind="real", source=source or dict(
-                    capture=dict(layer="frontend"),
-                    attribution=dict(identity=None, status="unconfirmed", evidence=None),
-                    model=dict(name=None, status="unconfirmed", evidence=None)),
-                capture_window=dict(window, timezone="Asia/Shanghai"),
-                statistics=statistics(model),
-                limitations=[("Input lengths are exact; original text and tokens are absent."
-                              if metadata["version"] == 3 else
-                              "Input lengths are block aligned; original text and tokens are absent."),
-                             "Output lengths and outcomes are not retained in this codec.",
-                             "Prefix sharing is theoretical structure, not measured cache reuse.",
-                             "Source attribution and model require independent confirmation."])
+    window = {
+        key: datetime.fromtimestamp(provenance[field] / 1000, local).isoformat()
+        if provenance.get(field) is not None
+        else None
+        for key, field in (("start", "source_start"), ("end", "source_end"))
+    }
+    return dict(
+        metadata,
+        manifest_schema_version=2,
+        bytes=len(raw),
+        sha256=hashlib.sha256(raw).hexdigest(),
+        codec=dict(name="prefix_lineage", version=metadata["version"]),
+        data_kind="real",
+        source=source
+        or dict(
+            capture=dict(layer="frontend"),
+            attribution=dict(identity=None, status="unconfirmed", evidence=None),
+            model=dict(name=None, status="unconfirmed", evidence=None),
+        ),
+        capture_window=dict(window, timezone="Asia/Shanghai"),
+        statistics=statistics(model),
+        limitations=[
+            (
+                "Input lengths are exact; original text and tokens are absent."
+                if metadata["version"] == 3
+                else "Input lengths are block aligned; original text and tokens are absent."
+            ),
+            "Output lengths and outcomes are not retained in this codec.",
+            "Prefix sharing is theoretical structure, not measured cache reuse.",
+            "Source attribution and model require independent confirmation.",
+        ],
+    )
 
 
 @dataclass(frozen=True)
 class CapturedDataset:
     """单次准入的输入快照；下游消费同一模型与摘要，不重新打开源文件。"""
+
     path: Path
     manifest: dict
     model: LineageModel

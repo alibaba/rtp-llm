@@ -58,16 +58,12 @@ class EnvironmentBudgetTest(unittest.TestCase):
         budget = JavaMockBudget.from_metadata(raw)
         self.assertEqual(budget.worker_capacity, 5)
         self.assertEqual(budget.to_manifest()["initial_workers"], 4)
-        lease = plan_lane_leases([[budget]], master_base=28000, mock_base=55000)[
-            0
-        ].to_manifest()
+        lease = plan_lane_leases([[budget]], master_base=28000, mock_base=55000)[0].to_manifest()
         lease["lease_schema_version"] = 1
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "lease.json"
             path.write_text(json.dumps(lease))
-            self.assertEqual(
-                validate_lease(path, raw, lease["child_env"])["worker_capacity"], 5
-            )
+            self.assertEqual(validate_lease(path, raw, lease["child_env"])["worker_capacity"], 5)
             lease["worker_capacity"] = 4
             path.write_text(json.dumps(lease))
             with self.assertRaisesRegex(ValueError, "capacity"):
@@ -125,20 +121,14 @@ class EnvironmentBudgetTest(unittest.TestCase):
             master_base=28000,
             mock_base=55000,
         )[0].to_manifest()
-        with tempfile.TemporaryDirectory() as tmp, patch(
-            "adapters.environment.EnvManager.ensure"
-        ) as ensure:
+        with tempfile.TemporaryDirectory() as tmp, patch("adapters.environment.EnvManager.ensure") as ensure:
             ctx = RuntimeContext(instance, None, tmp, time.monotonic, time.sleep)
             ctx.env_epoch = 1
             for compiled_bound, capacity in ((4, 5), (5, 4)):
-                ctx.instance["resource_budget"][
-                    "max_environment_workers"
-                ] = compiled_bound
+                ctx.instance["resource_budget"]["max_environment_workers"] = compiled_bound
                 lease["worker_capacity"] = capacity
                 with self.assertRaisesRegex(ValueError, "capacity"):
-                    JavaMockBackend(lease).setup(
-                        ctx, target, Deadline(time.monotonic() + 1)
-                    )
+                    JavaMockBackend(lease).setup(ctx, target, Deadline(time.monotonic() + 1))
             ensure.assert_not_called()
 
     def test_dynamic_additions_remain_cumulative_beyond_largest_fresh_population(self):

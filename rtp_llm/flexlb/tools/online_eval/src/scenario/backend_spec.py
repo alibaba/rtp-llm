@@ -1,20 +1,20 @@
 """Convert frozen environment plans into controlled Java startup specifications."""
 
+
 def make_env_spec(plan, profile, lease):
     """Controlled environment rendering; no JVM is started by this function."""
-    from flexlb_cfg import OMIT, ConfigOverride
     from adapters.environment_config import EnvSpec, MasterSpec
+    from flexlb_cfg import OMIT, ConfigOverride
     from scenario.environment_declaration import startup_options
 
-    kwargs = {
-        k: OMIT if v == {"omit": True} else v
-        for k, v in plan["config_overrides"].items()
-    }
+    kwargs = {k: OMIT if v == {"omit": True} else v for k, v in plan["config_overrides"].items()}
     from scenario.environment_snapshot import EnvironmentSnapshot
+
     snapshot = EnvironmentSnapshot.read(plan["rendered"])
     preset_perf, preset_runtime = snapshot.performance, snapshot.runtime
     from adapters.zookeeper_config import ZooKeeperConfig
-    elected = plan.get('master_layout') == 'dual_zookeeper'
+
+    elected = plan.get("master_layout") == "dual_zookeeper"
     spec = EnvSpec(
         label="scenario",
         runtime_mode="scenario",
@@ -26,9 +26,12 @@ def make_env_spec(plan, profile, lease):
         masters=(
             [
                 MasterSpec(name="A", http_port=lease["master_base"], advertised_ip="127.0.0.1" if elected else None),
-                MasterSpec(name="B", http_port=lease["master_base"] if elected else lease["master_base"] + 3,
-                           bind_ip="127.0.0.2" if elected else "127.0.0.1",
-                           advertised_ip="127.0.0.2" if elected else None),
+                MasterSpec(
+                    name="B",
+                    http_port=lease["master_base"] if elected else lease["master_base"] + 3,
+                    bind_ip="127.0.0.2" if elected else "127.0.0.1",
+                    advertised_ip="127.0.0.2" if elected else None,
+                ),
             ]
             if plan.get("master_layout", "single") in ("dual_standalone", "dual_zookeeper")
             else []
@@ -41,6 +44,7 @@ def make_env_spec(plan, profile, lease):
     if plan.get("master_test_control", False):
         # A per-environment token opts the isolated Master into test controls.
         import secrets
+
         spec.master_env["FLEXLB_TEST_CONTROL_TOKEN"] = secrets.token_hex(32)
     if "mock_heap" in preset_runtime and "mock_heap" not in plan:
         spec.mock_heap = preset_runtime["mock_heap"]
@@ -48,9 +52,7 @@ def make_env_spec(plan, profile, lease):
     if plan["debug_enabled"]:
         spec.master_extra_args.append("--flexlb.debug.enabled=true")
     if "metric_whitelist" in plan:
-        spec.master_extra_args.append(
-            "--flexlb.monitor.metric-whitelist=" + plan["metric_whitelist"]
-        )
+        spec.master_extra_args.append("--flexlb.monitor.metric-whitelist=" + plan["metric_whitelist"])
     return spec
 
 
@@ -59,9 +61,7 @@ def configure_master_sync_log(spec, artifact_dir, env_epoch):
     from pathlib import Path
 
     if spec.masters or type(env_epoch) is not int or env_epoch < 1:
-        raise ValueError(
-            "private sync log requires one master and a positive environment epoch"
-        )
+        raise ValueError("private sync log requires one master and a positive environment epoch")
     log_dir = Path(artifact_dir).resolve() / f"master-sync-{env_epoch}"
     log_dir.mkdir(parents=True, exist_ok=False)
     spec.master_extra_args = [*spec.master_extra_args, f"--flexlb.log.path={log_dir}"]

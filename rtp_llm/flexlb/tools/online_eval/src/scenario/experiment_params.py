@@ -1,4 +1,5 @@
 """Temporary scalar overrides applied before the existing case compiler."""
+
 import copy
 import json
 from dataclasses import dataclass
@@ -25,19 +26,19 @@ class ExperimentParams:
                 raise ScenarioError("experiment_params requires nonempty case patches")
             paths = list(patches)
             for path, value in patches.items():
-                parts = path.split('.')
-                if len(parts) < 2 or parts[0] not in ('parameters', 'environment', 'execution') or not all(parts):
+                parts = path.split(".")
+                if len(parts) < 2 or parts[0] not in ("parameters", "environment", "execution") or not all(parts):
                     raise ScenarioError("unsupported experiment parameter path: " + path)
                 if type(value) not in (str, int, float, bool) and value is not None:
                     raise ScenarioError("experiment parameters replace scalar fields only: " + path)
-                if any(other.startswith(path + '.') for other in paths):
+                if any(other.startswith(path + ".") for other in paths):
                     raise ScenarioError("overlapping experiment parameter paths: " + path)
         return cls(values)
 
     def apply(self, document):
         result = copy.deepcopy(document)
-        for path, value in self.values.get(document.get('case'), {}).items():
-            parts = path.split('.')
+        for path, value in self.values.get(document.get("case"), {}).items():
+            parts = path.split(".")
             parent = result
             for part in parts[:-1]:
                 if not isinstance(parent, dict) or part not in parent:
@@ -57,7 +58,9 @@ class ExperimentParams:
     def require_cases(self, cases):
         missing = set(self.values) - set(cases)
         if missing:
-            raise ScenarioError("experiment parameters target unselected or unknown cases: " + ', '.join(sorted(missing)))
+            raise ScenarioError(
+                "experiment parameters target unselected or unknown cases: " + ", ".join(sorted(missing))
+            )
 
     def for_cases(self, cases):
         return ExperimentParams({case: patches for case, patches in self.values.items() if case in cases})

@@ -4,34 +4,41 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from scenario.program_compiler import configure_program
-from reporting import load_analysis, read_bundle
-from reporting.view_config import DEFAULT_VIEW, declaration, view
+from cases.master_ha_failover.metrics import _prefill_balance_series
 from document_io import DocumentError as ScenarioError
 from document_io import load_document
+from reporting import load_analysis, read_bundle
+from reporting.view_config import DEFAULT_VIEW, declaration, view
 from reporting.workload import write_report, write_views
 from reporting.workload_panels import build_panels
-from cases.master_ha_failover.metrics import _prefill_balance_series
+from scenario.program_compiler import configure_program
 
 ROOT = Path(__file__).resolve().parents[1]
 
 
 def payload(series=None, gates=None):
     return dict(
-        id="example", status="PASS", workload={"runtime_validity": "VALID"},
-        implementation={}, configuration={}, configuration_sha256=None,
-        clock_anchor={"epoch_s": 10}, request_sources=[], series=series or {},
-        statistic_sources={k: dict(unit="count") for k in series or {}}, checks=[dict(stage="observe", id="cache", status="PASS")],
-        iterations=[], traffic_manifests=[], gate_reports=gates or [],
+        id="example",
+        status="PASS",
+        workload={"runtime_validity": "VALID"},
+        implementation={},
+        configuration={},
+        configuration_sha256=None,
+        clock_anchor={"epoch_s": 10},
+        request_sources=[],
+        series=series or {},
+        statistic_sources={k: dict(unit="count") for k in series or {}},
+        checks=[dict(stage="observe", id="cache", status="PASS")],
+        iterations=[],
+        traffic_manifests=[],
+        gate_reports=gates or [],
     )
 
 
 class WorkloadReportViewsTest(unittest.TestCase):
     def test_case_metric_ids_and_axes_are_validated(self):
         presentation = view("cache_scale_in.yaml")
-        self.assertEqual(
-            presentation.charts.panels[0].curve_ids[1], "mock/cache_hit_ratio"
-        )
+        self.assertEqual(presentation.charts.panels[0].curve_ids[1], "mock/cache_hit_ratio")
         broken = presentation.to_dict()
         broken["charts"]["panels"] = [panel.to_dict() for panel in presentation.charts.panels]
         broken["charts"]["panels"][0]["axes"] = {"count": {"title": "数量", "position": "left"}}
@@ -46,6 +53,7 @@ class WorkloadReportViewsTest(unittest.TestCase):
         plan["sources"]["master"]["new_metric"] = {"promql": "new_metric${selector}"}
         with mock.patch("monitoring.query_plan.load_plan", return_value=plan):
             from monitoring.collection_plan import select_plan
+
             selected = select_plan(plan, {}, [view("cache_scale_in.yaml")])
             self.assertNotIn("new_metric", selected["sources"]["master"])
 
@@ -53,33 +61,60 @@ class WorkloadReportViewsTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             root = Path(d)
             requests = root / "client_events.jsonl"
-            requests.write_text("\n".join(json.dumps(row) for row in [
-                {"send_start_epoch_ms": 11_100, "status": "ok", "prefill": "P0"},
-                {"send_start_epoch_ms": 11_800, "status": "exception", "prefill": "P0"},
-                {"send_start_epoch_ms": 12_100, "status": "ok", "prefill": "P1"},
-            ]) + "\n")
+            requests.write_text(
+                "\n".join(
+                    json.dumps(row)
+                    for row in [
+                        {"send_start_epoch_ms": 11_100, "status": "ok", "prefill": "P0"},
+                        {"send_start_epoch_ms": 11_800, "status": "exception", "prefill": "P0"},
+                        {"send_start_epoch_ms": 12_100, "status": "ok", "prefill": "P1"},
+                    ]
+                )
+                + "\n"
+            )
             state = root / "master_states.jsonl"
-            state.write_text("\n".join(json.dumps(row) for row in [
-                {"epoch_s": 11, "master": "A", "http_up": 1,
-                 "scheduler_inflight": 3, "prefill_inflight_requests": 2,
-                 "decode_master_queued": 1, "decode_confirmed_running": 4},
-                {"epoch_s": 11, "master": "B", "http_up": 0},
-                {"epoch_s": 15, "master": "A", "http_up": 0},
-            ]) + "\n")
+            state.write_text(
+                "\n".join(
+                    json.dumps(row)
+                    for row in [
+                        {
+                            "epoch_s": 11,
+                            "master": "A",
+                            "http_up": 1,
+                            "scheduler_inflight": 3,
+                            "prefill_inflight_requests": 2,
+                            "decode_master_queued": 1,
+                            "decode_confirmed_running": 4,
+                        },
+                        {"epoch_s": 11, "master": "B", "http_up": 0},
+                        {"epoch_s": 15, "master": "A", "http_up": 0},
+                    ]
+                )
+                + "\n"
+            )
             analysis = payload()
             analysis["id"] = "master_ha_failover::default::batch-window"
             analysis["status"] = "FAIL"
             analysis["configuration"] = {"environment": {"n_prefill": 2}}
-            analysis["stages"] = [dict(id="finish", output=dict(rows=dict(kind="ha_rows", env_epoch=1)),
-                                       artifacts=[str(requests), str(state)])]
-            analysis["phases"] = [dict(stage="kill_a", event="end", epoch_s=11),
-                                  dict(stage="finish", event="end", epoch_s=15)]
+            analysis["stages"] = [
+                dict(
+                    id="finish",
+                    output=dict(rows=dict(kind="ha_rows", env_epoch=1)),
+                    artifacts=[str(requests), str(state)],
+                )
+            ]
+            analysis["phases"] = [
+                dict(stage="kill_a", event="end", epoch_s=11),
+                dict(stage="finish", event="end", epoch_s=15),
+            ]
             analysis["events"] = [dict(id="traffic_started", epoch_s=11.1)]
             from reporting.timeline import freeze
+
             declaration = load_document(ROOT / "config/scenarios/master_ha_failover.yaml")["reporting"]
             analysis["report_timeline"] = freeze(declaration, events=analysis["events"], phases=analysis["phases"])
             from delivery_fixtures import finalize_metrics as produce
             from metric_fixtures import freeze_metrics
+
             freeze_metrics(root, "master_ha_failover")
             produce(root, analysis)
             requests.unlink()
@@ -95,13 +130,13 @@ class WorkloadReportViewsTest(unittest.TestCase):
             self.assertEqual([1, 0], [point["y"] for point in panels["inflight"]["series"][-2]["points"]])
             balance = panels["prefill_balance"]["series"]
             self.assertTrue(all(not curve["points"] for curve in balance[:3]))
-            self.assertEqual(["A · HTTP 可回读", "B · HTTP 可回读"],
-                             [curve["name"] for curve in balance[3:]])
+            self.assertEqual(["A · HTTP 可回读", "B · HTTP 可回读"], [curve["name"] for curve in balance[3:]])
             self.assertEqual([1, 0], [point["y"] for point in balance[3]["points"]])
             self.assertEqual([0], [point["y"] for point in balance[4]["points"]])
             self.assertTrue(all(curve["axis"] == "up" for curve in balance[3:]))
-            self.assertTrue(all(panel["axes"]["up"]["position"] == "right"
-                                and panel["events"] for panel in panels.values()))
+            self.assertTrue(
+                all(panel["axes"]["up"]["position"] == "right" and panel["events"] for panel in panels.values())
+            )
             self.assertAlmostEqual(-0.1, panels["request_qps"]["events"][0]["t"])
             self.assertAlmostEqual(3.9, spec["timeAxis"]["max"])
             self.assertEqual(11.1, spec["timeOriginEpochS"])
@@ -114,9 +149,11 @@ class WorkloadReportViewsTest(unittest.TestCase):
 
     def test_ha_balance_chart_matches_five_second_gate_window(self):
         rows = [
-            {"send_start_epoch_ms": 11_000 + (i // 60) * 1000,
-             "status": "exception" if i < 30 else "ok",
-             "prefill": f"P{i % 125}"}
+            {
+                "send_start_epoch_ms": 11_000 + (i // 60) * 1000,
+                "status": "exception" if i < 30 else "ok",
+                "prefill": f"P{i % 125}",
+            }
             for i in range(300)
         ]
         series = _prefill_balance_series(rows, 10, 125)
@@ -126,8 +163,9 @@ class WorkloadReportViewsTest(unittest.TestCase):
 
     def test_per_engine_metrics_share_one_chart_with_switchable_detail(self):
         series = {
-            f'1/mock/running_streams/{{"engine_name":"p-{i}"}}':
-                [[t, None if t == 201 else i + t % 11] for t in range(1800)]
+            f'1/mock/running_streams/{{"engine_name":"p-{i}"}}': [
+                [t, None if t == 201 else i + t % 11] for t in range(1800)
+            ]
             for i in range(128)
         }
         with tempfile.TemporaryDirectory() as d:
@@ -140,10 +178,8 @@ class WorkloadReportViewsTest(unittest.TestCase):
             self.assertEqual(sum(not row["hidden"] for row in panel["series"]), 2)
             self.assertEqual(len(panel["presets"]["明细"]), 128)
             self.assertTrue(all(len(row["points"]) <= 256 for row in panel["series"]))
-            self.assertTrue(all(row["provenance"]["source_series_key"] in series
-                                for row in panel["series"][2:]))
-            self.assertIsNone(next(point["y"] for point in panel["series"][0]["points"]
-                                   if point["x"] == 201))
+            self.assertTrue(all(row["provenance"]["source_series_key"] in series for row in panel["series"][2:]))
+            self.assertIsNone(next(point["y"] for point in panel["series"][0]["points"] if point["x"] == 201))
             self.assertIn("FlexMultiCurve.mount", (bundle / "report.html").read_text())
             self.assertLess((bundle / "report.html").stat().st_size, 6_000_000)
             self.assertEqual(load_analysis(bundle)["series"], series)
@@ -162,14 +198,10 @@ class WorkloadReportViewsTest(unittest.TestCase):
                 self.assertTrue(names)
                 self.assertEqual(len(names), len(set(names)))
                 self.assertTrue(any(name != DEFAULT_VIEW for name in names))
-                self.assertTrue(all((ROOT / "config/report_views" / name).is_file()
-                                    for name in names))
+                self.assertTrue(all((ROOT / "config/report_views" / name).is_file() for name in names))
         cache = load_document(ROOT / "config/scenarios/cache_scale_in.yaml")
         self.assertEqual(cache["reports"], ["default.yaml", "cache_scale_in.yaml"])
-        series = {
-            f'1/mock/qps/{{"engine_name":"p-{i}"}}': [[0, i], [1, i + 1]]
-            for i in range(2)
-        }
+        series = {f'1/mock/qps/{{"engine_name":"p-{i}"}}': [[0, i], [1, i + 1]] for i in range(2)}
         self.assertEqual(len(build_panels(series, {k: dict(unit="req/s") for k in series}, view(DEFAULT_VIEW))), 1)
 
     def test_unlabelled_legacy_statistic_is_still_visible(self):
@@ -184,37 +216,42 @@ class WorkloadReportViewsTest(unittest.TestCase):
         panels = build_panels({key: values}, {key: dict(unit="ms")}, view(DEFAULT_VIEW))
         self.assertEqual(panels[0]["axes"], {"y": dict(title="ms", position="left")})
         self.assertEqual(panels[0]["series"][0]["unit"], "ms")
-        self.assertEqual(panels[0]["series"][0]["points"],
-                         [dict(x=0, y=123), dict(x=1, y=None)])
+        self.assertEqual(panels[0]["series"][0]["points"], [dict(x=0, y=123), dict(x=1, y=None)])
         self.assertIn("cache_hit_ratio", panels[0]["title"])
         with self.assertRaisesRegex(ValueError, "missing frozen metric unit"):
             build_panels({key: values}, {}, view(DEFAULT_VIEW))
 
     def test_selected_view_renders_verified_frozen_gate_once(self):
-        from cases.cache_scale_in.analysis import analyze
         from artifacts.gate import freeze_gate
-        from test_cache_scale_gate import CacheGateTest
+        from cases.cache_scale_in.analysis import analyze
         from metric_fixtures import freeze_metrics
+        from test_cache_scale_gate import CacheGateTest
+
         with tempfile.TemporaryDirectory() as d:
-            e = CacheGateTest().evidence(.8)
+            e = CacheGateTest().evidence(0.8)
             decision = analyze(e)
             freeze_gate(d, "cache", e, decision)
             freeze_metrics(d, "cache_scale_in")
             before = (Path(d) / "cache-gate-result.json").read_bytes()
             from dataclasses import replace
-            from scenario import registry
+            from functools import partial
+
+            from artifacts.gate import render_gate
+            from case_registry_fixtures import entry, snapshot
             from cases.cache_scale_in import report as case_report
             from cases.cache_scale_in.program import VIEW
-            from artifacts.gate import render_gate
-            from functools import partial
-            from case_registry_fixtures import entry, snapshot
+            from scenario import registry
+
             render = mock.Mock(wraps=case_report.write_report)
-            renderer = partial(render_gate, name='cache', write_report=render)
+            renderer = partial(render_gate, name="cache", write_report=render)
             presentation = replace(VIEW, renderer=renderer)
-            registered = registry.registry().cases['cache_scale_in']
-            definition = replace(registered.definition, report_views={'cache_scale_in.yaml': presentation})
-            with mock.patch.object(registry, '_snapshot', snapshot(
-                entry(registered.name, definition, registered.module, registered.path), include_existing=True)):
+            registered = registry.registry().cases["cache_scale_in"]
+            definition = replace(registered.definition, report_views={"cache_scale_in.yaml": presentation})
+            with mock.patch.object(
+                registry,
+                "_snapshot",
+                snapshot(entry(registered.name, definition, registered.module, registered.path), include_existing=True),
+            ):
                 links = write_views(d, payload(), ["default.yaml", "cache_scale_in.yaml"])
             self.assertEqual(render.call_count, 1)
             frozen = load_analysis(links["cache_scale_in.yaml"].parent)
@@ -226,9 +263,13 @@ class WorkloadReportViewsTest(unittest.TestCase):
     def test_missing_view_source_and_invalid_declarations_fail_loud(self):
         with tempfile.TemporaryDirectory() as d, self.assertRaises(OSError):
             write_views(d, payload(), ["default.yaml", "cache_scale_in.yaml"])
-        for names in ([], ["missing.yaml", "default.yaml"], ["../default.yaml"],
-                      ["default.yaml", "default.yaml"],
-                      ["default.yaml", {"action": "render"}]):
+        for names in (
+            [],
+            ["missing.yaml", "default.yaml"],
+            ["../default.yaml"],
+            ["default.yaml", "default.yaml"],
+            ["default.yaml", {"action": "render"}],
+        ):
             with self.subTest(names=names), self.assertRaises(ScenarioError):
                 declaration(names, kind="workload")
         with self.assertRaisesRegex(ScenarioError, "metadata.kind=workload"):
@@ -251,11 +292,12 @@ class WorkloadReportViewsTest(unittest.TestCase):
             self.assertIn("未生成的报告视角", paths[DEFAULT_VIEW].read_text())
 
     def test_failed_run_does_not_hide_corrupt_frozen_gate(self):
-        from cases.cache_scale_in.analysis import analyze
         from artifacts.gate import freeze_gate
+        from cases.cache_scale_in.analysis import analyze
         from test_cache_scale_gate import CacheGateTest
+
         with tempfile.TemporaryDirectory() as d:
-            e = CacheGateTest().evidence(.8)
+            e = CacheGateTest().evidence(0.8)
             freeze_gate(d, "cache", e, analyze(e))
             (Path(d) / "cache-gate-result.json").write_text("{}")
             data = payload()
@@ -267,27 +309,57 @@ class WorkloadReportViewsTest(unittest.TestCase):
         from cases.master_performance.report import write_report as report
 
         presentation = view("master_performance.yaml")
-        with tempfile.TemporaryDirectory() as d, mock.patch(
-            "reporting.view_config.view", return_value=presentation
-        ), mock.patch(
-            "cases.master_performance.panels.prepare_curves",
-            return_value=([
-                dict(curve_id="mock/rtp_llm_context_tps_engine_mean/P", metric_id="mock/rtp_llm_context_tps_engine_mean/P", name="P throughput", group="Prefill TPS", axis="forward", hidden=False, points=[]),
-                dict(curve_id="mock/mock_decode_wall_tps_engine_mean/D", metric_id="mock/mock_decode_wall_tps_engine_mean/D", name="D detail", group="Decode 逐引擎 TPS", axis="forward", hidden=True, points=[]),
-            ], {}),
+        with (
+            tempfile.TemporaryDirectory() as d,
+            mock.patch("reporting.view_config.view", return_value=presentation),
+            mock.patch(
+                "cases.master_performance.panels.prepare_curves",
+                return_value=(
+                    [
+                        dict(
+                            curve_id="mock/rtp_llm_context_tps_engine_mean/P",
+                            metric_id="mock/rtp_llm_context_tps_engine_mean/P",
+                            name="P throughput",
+                            group="Prefill TPS",
+                            axis="forward",
+                            hidden=False,
+                            points=[],
+                        ),
+                        dict(
+                            curve_id="mock/mock_decode_wall_tps_engine_mean/D",
+                            metric_id="mock/mock_decode_wall_tps_engine_mean/D",
+                            name="D detail",
+                            group="Decode 逐引擎 TPS",
+                            axis="forward",
+                            hidden=True,
+                            points=[],
+                        ),
+                    ],
+                    {},
+                ),
+            ),
         ):
             from metric_fixtures import freeze_metrics
+
             freeze_metrics(Path(d), "master_performance")
-            bundle = report(d, {"criteria": {"measure_s": 1}, "window": {"start_epoch_ms": 0},
-                                "provenance": {"instance": "master_performance::default::single-nonbatch"}},
-                            {"verdict": "PASS", "checks": [], "errors": [], "metrics": {}, "windows": []})
+            bundle = report(
+                d,
+                {
+                    "criteria": {"measure_s": 1},
+                    "window": {"start_epoch_ms": 0},
+                    "provenance": {"instance": "master_performance::default::single-nonbatch"},
+                },
+                {"verdict": "PASS", "checks": [], "errors": [], "metrics": {}, "windows": []},
+            )
             spec = json.loads((bundle / "report-spec.json").read_text())
             self.assertEqual(spec["title"], "master_performance : default : single-nonbatch")
-            self.assertEqual([panel["title"] for panel in spec["panels"]],
-                             [panel.title for panel in presentation.charts.panels])
-            self.assertEqual([panel["id"] for panel in spec["panels"]],
-                             ["engine-tps", "client-qps", "latency", "cache-hit",
-                              "prefill-batch", "prefill-state"])
+            self.assertEqual(
+                [panel["title"] for panel in spec["panels"]], [panel.title for panel in presentation.charts.panels]
+            )
+            self.assertEqual(
+                [panel["id"] for panel in spec["panels"]],
+                ["engine-tps", "client-qps", "latency", "cache-hit", "prefill-batch", "prefill-state"],
+            )
 
 
 if __name__ == "__main__":

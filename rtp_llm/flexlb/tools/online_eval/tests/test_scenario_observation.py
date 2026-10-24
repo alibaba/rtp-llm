@@ -6,6 +6,9 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
 
+from adapters.observation_sources import Sources
+from adapters.observation_window import Observer
+from runtime.sample_worker import CaptureDeadline
 from scenario.actions.observation import (
     DebugUnavailable,
     execute_observe,
@@ -13,11 +16,6 @@ from scenario.actions.observation import (
     validate_observe,
     validate_snapshot,
 )
-
-
-from runtime.sample_worker import CaptureDeadline
-from adapters.observation_sources import Sources
-from adapters.observation_window import Observer
 
 
 class Plan:
@@ -67,9 +65,7 @@ class Context:
 
 
 def deadline(seconds=2):
-    return CaptureDeadline(
-        time.monotonic, time.monotonic() + seconds, threading.Event()
-    )
+    return CaptureDeadline(time.monotonic, time.monotonic() + seconds, threading.Event())
 
 
 def params(**extra):
@@ -106,9 +102,7 @@ class ObservationTest(unittest.TestCase):
 
     def test_required_source_failure_is_error_optional_preserves_failure(self):
         for required in (True, False):
-            p = validate_snapshot(
-                {"sources": ["engine_snapshot"], "required": required}, Plan()
-            )
+            p = validate_snapshot({"sources": ["engine_snapshot"], "required": required}, Plan())
             with patch(
                 "adapters.observation_sources._read_json",
                 side_effect=OSError("offline"),
@@ -117,34 +111,24 @@ class ObservationTest(unittest.TestCase):
             frozen = self.ctx.resource(result.output["snapshot"], "snapshot").to_dict()
             self.assertEqual("partial", frozen["status"])
             self.assertEqual("error", frozen["sources"]["engine_snapshot"]["status"])
-            self.assertEqual(
-                ["ERROR"] if required else ["PASS"], [c.status for c in result.checks]
-            )
+            self.assertEqual(["ERROR"] if required else ["PASS"], [c.status for c in result.checks])
 
     def test_missing_master_source_is_rejected_before_execution(self):
-        with self.assertRaisesRegex(ValueError, 'not a supported source'):
+        with self.assertRaisesRegex(ValueError, "not a supported source"):
             validate_snapshot({"sources": ["master_debug"]}, Plan())
 
     def test_epoch_change_performs_no_new_environment_io(self):
-        source = Sources(
-            self.ctx, validate_snapshot({"sources": ["engine_snapshot"]}, Plan())
-        )
+        source = Sources(self.ctx, validate_snapshot({"sources": ["engine_snapshot"]}, Plan()))
         self.ctx.env_epoch += 1
-        with patch(
-            "adapters.observation_sources._read_json"
-        ) as read:
+        with patch("adapters.observation_sources._read_json") as read:
             result = source.capture(deadline()).to_dict()
         read.assert_not_called()
-        self.assertEqual(
-            "epoch_changed", result["sources"]["engine_snapshot"]["status"]
-        )
+        self.assertEqual("epoch_changed", result["sources"]["engine_snapshot"]["status"])
 
     def test_membership_and_missing_targets_preserved(self):
         source = Sources(
             self.ctx,
-            validate_snapshot(
-                {"sources": ["engine_snapshot"], "targets": ["p1"]}, Plan()
-            ),
+            validate_snapshot({"sources": ["engine_snapshot"], "targets": ["p1"]}, Plan()),
         )
         with patch(
             "adapters.observation_sources._read_json",
@@ -171,17 +155,13 @@ class ObservationTest(unittest.TestCase):
                 transport_terminal_s=None,
             )
         )
-        stopped = execute_observe(
-            self.ctx, {"mode": "stop", "observation": observer.handle}, deadline()
-        )
+        stopped = execute_observe(self.ctx, {"mode": "stop", "observation": observer.handle}, deadline())
         data = observer.frozen.to_dict()
         self.assertEqual(1, len(data["cohort_records"]))
         self.assertIsNone(data["cohort_records"][0]["transport_terminal_s"])
         data["cohort_records"].clear()
         self.assertEqual(1, len(observer.frozen.to_dict()["cohort_records"]))
-        repeated = execute_observe(
-            self.ctx, {"mode": "stop", "observation": observer.handle}, deadline()
-        )
+        repeated = execute_observe(self.ctx, {"mode": "stop", "observation": observer.handle}, deadline())
         self.assertEqual(stopped.output, repeated.output)
         self.assertEqual(stopped.artifacts, repeated.artifacts)
         self.assertFalse(observer.thread.is_alive())
@@ -191,9 +171,7 @@ class ObservationTest(unittest.TestCase):
         observer = self.ctx.resource(result.output["observation"], "observation")
         count = self.ctx.records.calls
         self.ctx.env_epoch = 2
-        stopped = execute_observe(
-            self.ctx, {"mode": "stop", "observation": observer.handle}, deadline()
-        )
+        stopped = execute_observe(self.ctx, {"mode": "stop", "observation": observer.handle}, deadline())
         self.assertEqual(count, self.ctx.records.calls)
         self.assertEqual("ERROR", stopped.checks[0].status)
         self.assertFalse(observer.thread.is_alive())
@@ -229,9 +207,7 @@ class ObservationTest(unittest.TestCase):
     def test_reported_dead_thread_without_completion_signal_cannot_freeze(self):
         # Controlled fixture for a missing exit proof, not a claimed CPython bug.
         observer = Observer(self.ctx, params())
-        observer.thread = SimpleNamespace(
-            join=lambda timeout: None, is_alive=lambda: False
-        )
+        observer.thread = SimpleNamespace(join=lambda timeout: None, is_alive=lambda: False)
         with self.assertRaises(TimeoutError):
             observer.stop(deadline(0.01))
         self.assertIsNone(observer.frozen)
@@ -244,9 +220,7 @@ class ObservationTest(unittest.TestCase):
     def test_worker_exception_publishes_done_after_exit_record(self):
         observer = Observer(self.ctx, params())
         observer.params["interval_s"] = 0.001
-        with patch.object(
-            observer, "capture", side_effect=RuntimeError("source failure")
-        ):
+        with patch.object(observer, "capture", side_effect=RuntimeError("source failure")):
             observer.thread = threading.Thread(target=observer._run)
             observer.thread.start()
             self.assertTrue(observer.done_event.wait(1))
@@ -256,10 +230,9 @@ class ObservationTest(unittest.TestCase):
         self.assertEqual("partial", frozen["status"])
         self.assertIn("source failure", frozen["error"])
 
-
     def test_core_optional_source_and_required_finding_semantics(self):
-        from scenario.actions.observation import HANDLERS
         from program_fixtures import compile_scenarios
+        from scenario.actions.observation import HANDLERS
         from scenario.runtime import execute_instance
 
         class Backend:
@@ -297,19 +270,13 @@ class ObservationTest(unittest.TestCase):
                 "adapters.observation_sources._read_json",
                 side_effect=OSError("missing"),
             ):
-                result = execute_instance(
-                    plan, Backend(), handlers=handlers, artifact_dir=self.temp.name
-                )
+                result = execute_instance(plan, Backend(), handlers=handlers, artifact_dir=self.temp.name)
             self.assertEqual("ERROR" if required else "PASS", result["status"], result)
             self.assertEqual([], result["finding_confirmed"])
 
     def test_expired_deadline_prevents_io(self):
-        source = Sources(
-            self.ctx, validate_snapshot({"sources": ["engine_snapshot"]}, Plan())
-        )
-        with patch(
-            "adapters.observation_sources._read_json"
-        ) as read:
+        source = Sources(self.ctx, validate_snapshot({"sources": ["engine_snapshot"]}, Plan()))
+        with patch("adapters.observation_sources._read_json") as read:
             with self.assertRaises(TimeoutError):
                 source.capture(deadline(0))
         read.assert_not_called()

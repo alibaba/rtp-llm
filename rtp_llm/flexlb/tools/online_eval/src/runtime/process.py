@@ -13,9 +13,7 @@ from typing import Optional
 class ManagedProcess:
     """A subprocess started by the harness, restartable from its original argv."""
 
-    def __init__(
-        self, proc: subprocess.Popen, argv: list[str], env: dict, log_file: Path
-    ):
+    def __init__(self, proc: subprocess.Popen, argv: list[str], env: dict, log_file: Path):
         self.proc = proc
         self.argv = argv
         self.env = env
@@ -40,6 +38,7 @@ class ManagedProcess:
         """SIGTERM → wait → SIGKILL fallback."""
         from runtime.cleanup import stop_process
         from runtime.deadline import Deadline
+
         stop_process(self, Deadline(time.monotonic() + timeout_s))
 
     def kill9(self) -> None:
@@ -115,9 +114,7 @@ class ProcessOps:
         os.kill(pid, signal.SIGCONT)
 
     @staticmethod
-    def restart(
-        mp: ManagedProcess, new_log: Optional[Path] = None, timeout_s: float = 0.0
-    ) -> ManagedProcess:
+    def restart(mp: ManagedProcess, new_log: Optional[Path] = None, timeout_s: float = 0.0) -> ManagedProcess:
         """Start a fresh process with the same argv/env (old one must be dead)."""
         log = new_log or mp.log_file
         return ProcessOps.start(mp.argv, mp.env, log)

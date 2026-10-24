@@ -1,13 +1,13 @@
 """Bounded raw window capture; consumers read the same frozen MetricStore."""
-from file_io import read_json
-from dataclasses import dataclass
+
 import copy
 import json
 import math
+from dataclasses import dataclass
 from pathlib import Path
 
-from file_io import write_json
 from file_digest import sha256_file
+from file_io import read_json, write_json
 from monitoring.contracts import MetricUnavailable
 from monitoring.metric_store import MetricStore
 from runtime.observation import capture_limits
@@ -26,10 +26,14 @@ class FrozenMetricWindow:
     def field_rows(self):
         """Project declared fields without I/O, filling or cross-source joins."""
         store = self.store()
-        return {field: [dict(metric_id=binding["metric"], metric=row["labels"], values=row["points"])
+        return {
+            field: [
+                dict(metric_id=binding["metric"], metric=row["labels"], values=row["points"])
                 for row in store.document["metrics"].get(binding["metric"], [])
-                if all(row["labels"].get(k) == v for k, v in binding["labels"].items())]
-                for field, binding in store.document["capture"]["fields"].items()}
+                if all(row["labels"].get(k) == v for k, v in binding["labels"].items())
+            ]
+            for field, binding in store.document["capture"]["fields"].items()
+        }
 
     @classmethod
     def read(cls, directory):
@@ -54,27 +58,52 @@ def capture_window(client, fields, *, source, windows, epoch, deadline, limits, 
     """
     deadline.check()
     limits = capture_limits(limits, "capture")
-    if (not fields or not windows or not isinstance(source, str) or not source
-            or type(epoch) not in (str, int) or not str(epoch).strip()
-            or (type(epoch) is int and epoch <= 0)):
+    if (
+        not fields
+        or not windows
+        or not isinstance(source, str)
+        or not source
+        or type(epoch) not in (str, int)
+        or not str(epoch).strip()
+        or (type(epoch) is int and epoch <= 0)
+    ):
         raise ValueError("raw window requires fields, source, epoch and windows")
     fields = copy.deepcopy(fields)
     for field, binding in fields.items():
-        if (not isinstance(field, str) or not field or set(binding) != {"metric", "labels"}
-                or not isinstance(binding["metric"], str) or not isinstance(binding["labels"], dict)):
+        if (
+            not isinstance(field, str)
+            or not field
+            or set(binding) != {"metric", "labels"}
+            or not isinstance(binding["metric"], str)
+            or not isinstance(binding["labels"], dict)
+        ):
             raise ValueError("invalid raw field binding")
     windows = [list(w) for w in windows]
-    if any(len(w) != 2 or any(type(v) not in (int, float) or not math.isfinite(v) for v in w)
-           or w[0] >= w[1] for w in windows):
+    if any(
+        len(w) != 2 or any(type(v) not in (int, float) or not math.isfinite(v) for v in w) or w[0] >= w[1]
+        for w in windows
+    ):
         raise ValueError("invalid raw measurement window")
     if directory is not None:
         directory = Path(directory)
         directory.mkdir(parents=True, exist_ok=False)
     definitions = {b["metric"]: copy.deepcopy(client.metric_definition(b["metric"])) for b in fields.values()}
-    document = dict(metrics_schema_version=1, definitions=definitions,
-        metrics={identity: [] for identity in definitions}, errors=[], collection_gaps={},
-        capture=dict(status="INCOMPLETE", fields=fields, source=source, epoch=str(epoch),
-                     windows=windows, boundary="(start,end]", limits=limits))
+    document = dict(
+        metrics_schema_version=1,
+        definitions=definitions,
+        metrics={identity: [] for identity in definitions},
+        errors=[],
+        collection_gaps={},
+        capture=dict(
+            status="INCOMPLETE",
+            fields=fields,
+            source=source,
+            epoch=str(epoch),
+            windows=windows,
+            boundary="(start,end]",
+            limits=limits,
+        ),
+    )
     retained = len(json.dumps(document, separators=(",", ":"), allow_nan=False).encode())
     timestamps, series, seen = set(), {}, {}
 
@@ -92,8 +121,10 @@ def capture_window(client, fields, *, source, windows, epoch, deadline, limits, 
         encoded = json.dumps(document, separators=(",", ":"), allow_nan=False)
         if directory is not None:
             write_json(directory / "metrics.json", document)
-            write_json(directory / "manifest.json", dict(metric_window_schema_version=1,
-                files={"metrics.json": sha256_file(directory / "metrics.json")}))
+            write_json(
+                directory / "manifest.json",
+                dict(metric_window_schema_version=1, files={"metrics.json": sha256_file(directory / "metrics.json")}),
+            )
         return FrozenMetricWindow(encoded)
 
     try:
@@ -102,8 +133,9 @@ def capture_window(client, fields, *, source, windows, epoch, deadline, limits, 
         for identity, selector in sorted(requests):
             labels = json.loads(selector)
             for start, end in windows:
-                for chunk in client.metric_chunks(identity, source=source, start=start, end=end,
-                                                   deadline=deadline, labels=labels):
+                for chunk in client.metric_chunks(
+                    identity, source=source, start=start, end=end, deadline=deadline, labels=labels
+                ):
                     deadline.check()
                     for raw in chunk:
                         raw_labels = dict(raw["metric"])
@@ -125,10 +157,19 @@ def capture_window(client, fields, *, source, windows, epoch, deadline, limits, 
                                     raise ValueError("conflicting duplicate raw measurement")
                                 continue
                             if key not in series:
-                                row = dict(metric_id=identity, source=source, epoch=str(epoch),
-                                    labels=raw_labels, points=[], status="PRESENT",
-                                    provenance=dict(source_type="prometheus", timestamp_kind="scrape",
-                                                    measurement=definitions[identity].get("measurement", {})))
+                                row = dict(
+                                    metric_id=identity,
+                                    source=source,
+                                    epoch=str(epoch),
+                                    labels=raw_labels,
+                                    points=[],
+                                    status="PRESENT",
+                                    provenance=dict(
+                                        source_type="prometheus",
+                                        timestamp_kind="scrape",
+                                        measurement=definitions[identity].get("measurement", {}),
+                                    ),
+                                )
                                 reserve(len(json.dumps(row, separators=(",", ":")).encode()) + 1)
                                 series[key] = row
                                 document["metrics"][identity].append(row)

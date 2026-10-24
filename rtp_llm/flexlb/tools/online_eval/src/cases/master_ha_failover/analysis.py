@@ -1,7 +1,6 @@
 """HA client metrics computed from frozen rows and explicit topology inputs."""
 
 import math
-
 from collections import Counter, defaultdict
 from dataclasses import dataclass
 from typing import Optional, Sequence
@@ -37,8 +36,7 @@ def prefill_assignment_windows(rows: list, seconds: int = 5) -> dict:
         return {}
     first, last = min(buckets), max(buckets)
     return {
-        end: sum((buckets.get(second, Counter())
-                  for second in range(end - seconds + 1, end + 1)), Counter())
+        end: sum((buckets.get(second, Counter()) for second in range(end - seconds + 1, end + 1)), Counter())
         for end in range(first + seconds - 1, last + 1)
     }
 
@@ -66,8 +64,9 @@ def _prefill_max_share(source):
 
 
 def _visible_terminal_count(source):
-    return sum(row["status"] == "ok" or row["error_kind"] in {"deadline", "transport", "business"}
-               for row in source.rows)
+    return sum(
+        row["status"] == "ok" or row["error_kind"] in {"deadline", "transport", "business"} for row in source.rows
+    )
 
 
 _CLIENT_METRICS = {

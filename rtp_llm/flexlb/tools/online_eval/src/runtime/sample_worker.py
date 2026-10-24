@@ -1,5 +1,7 @@
 """Bounded background sampling with cancellation and joined shutdown."""
+
 import threading
+
 from runtime.observation import SampleBudget, SampleSchedule
 
 
@@ -52,9 +54,7 @@ class SampleWorker:
             self.schedule.next = self.clock()
         else:
             self.append(self.capture(deadline))
-        self.thread = threading.Thread(
-            target=self._run, name="flexlb-scenario-observer", daemon=True
-        )
+        self.thread = threading.Thread(target=self._run, name="flexlb-scenario-observer", daemon=True)
         self.thread.start()
 
     def _run(self):
@@ -62,11 +62,7 @@ class SampleWorker:
             while not self.stop_event.wait(max(0, min(self.schedule.next, self.end) - self.clock())):
                 if self.clock() >= self.end:
                     break
-                self.append(
-                    self.capture(
-                        CaptureDeadline(self.clock, self.end, self.stop_event)
-                    )
-                )
+                self.append(self.capture(CaptureDeadline(self.clock, self.end, self.stop_event)))
                 self.schedule.advance(self.clock())
         except TimeoutError as error:
             if not self.stop_event.is_set() and self.clock() < self.end:
@@ -79,11 +75,7 @@ class SampleWorker:
             self.done_event.set()
 
     def stop_sampling(self, deadline):
-        self.stopped_at = (
-            min(self.clock(), self.end)
-            if self.stopped_at is None
-            else self.stopped_at
-        )
+        self.stopped_at = min(self.clock(), self.end) if self.stopped_at is None else self.stopped_at
         self.stop_event.set()
         if self.thread is not None:
             while not self.done_event.is_set():
@@ -93,6 +85,4 @@ class SampleWorker:
                 raise SamplingError("observer completion signal has no exit record")
             self.thread.join(timeout=deadline.remaining())
             if self.thread.is_alive():
-                raise TimeoutError(
-                    "observer thread still alive; cleanup has not completed"
-                )
+                raise TimeoutError("observer thread still alive; cleanup has not completed")

@@ -9,17 +9,26 @@ CURVES = frozenset({"mean", "max", "detail"})
 
 def validate_structure(path, data, fail):
     required = {"report_view_schema_version", "kind", "report"}
-    if (not required <= data.keys() or data.keys() - required - {"metrics", "charts", "sections"}
-            or not matches_schema(data, "report_view_schema_version", 1)):
+    if (
+        not required <= data.keys()
+        or data.keys() - required - {"metrics", "charts", "sections"}
+        or not matches_schema(data, "report_view_schema_version", 1)
+    ):
         fail(path, "invalid report view fields or version")
     report = data["report"]
-    if (not isinstance(report, dict) or not {"subtitle"} <= report.keys()
-            or report.keys() - {"subtitle", "id", "producer"}):
+    if (
+        not isinstance(report, dict)
+        or not {"subtitle"} <= report.keys()
+        or report.keys() - {"subtitle", "id", "producer"}
+    ):
         fail(str(path) + ".report", "invalid report fields")
     if "metrics" in data:
         metrics = data["metrics"]
-        if (not isinstance(metrics, dict) or "query_plan" not in metrics
-                or metrics.keys() - {"query_plan", "diagnostic_only"}):
+        if (
+            not isinstance(metrics, dict)
+            or "query_plan" not in metrics
+            or metrics.keys() - {"query_plan", "diagnostic_only"}
+        ):
             fail(str(path) + ".metrics", "invalid metric selection fields")
     if "charts" in data and not isinstance(data["charts"], dict):
         fail(str(path) + ".charts", "expected mapping")
@@ -33,10 +42,12 @@ def validate_structure(path, data, fail):
                 fail(location, "invalid section fields")
 
 
-
 def validate_default(path, data, fail):
-    if (set(data) != {"report_view_schema_version", "kind", "report", "charts"}
-            or data["kind"] != "default" or set(data["report"]) != {"subtitle"}):
+    if (
+        set(data) != {"report_view_schema_version", "kind", "report", "charts"}
+        or data["kind"] != "default"
+        or set(data["report"]) != {"subtitle"}
+    ):
         fail(path, "invalid default view")
     charts = data["charts"]
     required = {"group_by", "detail_labels", "summaries", "default_visible", "max_points_per_series", "presets"}
@@ -45,15 +56,21 @@ def validate_default(path, data, fail):
     if charts["group_by"] != ["epoch", "source", "metric"]:
         fail(path, "default view must retain metric identity")
     labels = charts["detail_labels"]
-    if not isinstance(labels, list) or not labels or any(
-        type(x) is not str or not x.strip() for x in labels
-    ) or len(set(labels)) != len(labels):
+    if (
+        not isinstance(labels, list)
+        or not labels
+        or any(type(x) is not str or not x.strip() for x in labels)
+        or len(set(labels)) != len(labels)
+    ):
         fail(path, "invalid detail_labels")
     for field in ("summaries", "default_visible"):
         values = charts[field]
-        if not isinstance(values, list) or not values or any(
-            type(x) is not str or x not in CURVES for x in values
-        ) or len(set(values)) != len(values):
+        if (
+            not isinstance(values, list)
+            or not values
+            or any(type(x) is not str or x not in CURVES for x in values)
+            or len(set(values)) != len(values)
+        ):
             fail(path, "invalid " + field)
     if set(charts["summaries"]) - {"mean", "max"} or set(charts["default_visible"]) - set(charts["summaries"]):
         fail(path, "default_visible must select summary curves")
@@ -61,10 +78,17 @@ def validate_default(path, data, fail):
     if type(points) is not int or not 32 <= points <= 2048:
         fail(path, "max_points_per_series must be 32..2048")
     presets = charts["presets"]
-    if not isinstance(presets, dict) or not presets or any(
-        type(key) is not str or not key or not isinstance(values, list)
-        or not values or any(type(item) is not str or item not in CURVES for item in values)
-        for key, values in presets.items()
+    if (
+        not isinstance(presets, dict)
+        or not presets
+        or any(
+            type(key) is not str
+            or not key
+            or not isinstance(values, list)
+            or not values
+            or any(type(item) is not str or item not in CURVES for item in values)
+            for key, values in presets.items()
+        )
     ):
         fail(path, "invalid presets")
 
@@ -74,8 +98,7 @@ def validate_curves(path, data, fail):
     if not isinstance(metrics, dict):
         fail(path, "metrics must be a mapping")
     for identity in metrics:
-        if type(identity) is not str or not re.fullmatch(
-                r"[a-z][a-z0-9_]*(/[A-Za-z][A-Za-z0-9_]*)*", identity):
+        if type(identity) is not str or not re.fullmatch(r"[a-z][a-z0-9_]*(/[A-Za-z][A-Za-z0-9_]*)*", identity):
             fail(path, "invalid metric presentation " + str(identity))
 
     return metrics
@@ -84,19 +107,19 @@ def validate_curves(path, data, fail):
 def validate_panels(path, data, fail):
     panels, curves = data.charts.panels, data.charts.curves
     if not panels:
-        fail(path, 'invalid panels')
+        fail(path, "invalid panels")
     ids, selected = set(), set()
     for panel in panels:
         if panel.id in ids:
-            fail(path, 'invalid panel id')
+            fail(path, "invalid panel id")
         ids.add(panel.id)
         try:
             panel.validate_bindings(curves)
         except ValueError as exc:
             fail(path, str(exc))
         selected.update(panel.curve_ids)
-    if set(curves)-selected:
-        fail(path, 'curve declarations must be referenced by a panel')
+    if set(curves) - selected:
+        fail(path, "curve declarations must be referenced by a panel")
 
 
 def validate_selected(path, data, fail):
@@ -110,11 +133,9 @@ def validate_selected(path, data, fail):
         if type(report[field]) is not str or not re.fullmatch(r"[a-z][a-z0-9-]*", report[field]):
             fail(str(path) + ".report", "invalid " + field)
     charts = data["charts"]
-    if (not {"curves", "panels"} <= charts.keys()
-            or charts.keys() - {"curves", "panels", "events", "event_ids"}):
+    if not {"curves", "panels"} <= charts.keys() or charts.keys() - {"curves", "panels", "events", "event_ids"}:
         fail(str(path) + ".charts", "invalid selected chart fields")
     validate_curves(path, charts, fail)
-
 
 
 def validate_section_contract(path, data, expected, fail):

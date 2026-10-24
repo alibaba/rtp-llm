@@ -9,6 +9,7 @@ import sys
 import threading
 from pathlib import Path
 from pathlib import Path as _Path
+
 sys.path.insert(0, str(_Path(__file__).resolve().parents[2] / "src"))
 sys.path.insert(0, str(_Path(__file__).resolve().parents[2]))
 
@@ -17,11 +18,11 @@ from scenario import (
     compile_scenarios,
     load_scenarios,
 )
-from scenario.suites import classify, preselect_documents, exact_documents
-from scenario.selection_cli import add_selection_arguments, resolve_selection
 from scenario.catalog import handlers
 from scenario.compiler import plan_counts
 from scenario.lease import validate_lease
+from scenario.selection_cli import add_selection_arguments, resolve_selection
+from scenario.suites import classify, exact_documents, preselect_documents
 
 LIST_FIELDS = (
     "id",
@@ -61,10 +62,10 @@ def inventory(plans, dependencies):
         row["compiled"] = plan
         rows.append(row)
     from scenario.execution_plan import dependency_files
+
     if dependencies != dependency_files():
         raise ScenarioError("execution code/config changed during compilation")
-    return dict(instance_catalog_schema_version=1, counts=plan_counts(plans), instances=rows,
-                dependencies=dependencies)
+    return dict(instance_catalog_schema_version=1, counts=plan_counts(plans), instances=rows, dependencies=dependencies)
 
 
 def select(plans, exact_ids):
@@ -84,8 +85,7 @@ def select(plans, exact_ids):
 
 def summarize(rows):
     failed = sum(
-        row["status"] in ("FAIL", "ERROR", "TIMEOUT")
-        or any(c["status"] != "PASS" for c in row["cleanup"])
+        row["status"] in ("FAIL", "ERROR", "TIMEOUT") or any(c["status"] != "PASS" for c in row["cleanup"])
         for row in rows
     )
     return dict(
@@ -101,32 +101,36 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--source", required=True, help="scenario file or directory")
     add_selection_arguments(parser)
-    parser.add_argument(
-        "--grade", choices=("strict", "normal", "loose"), default="normal"
-    )
+    parser.add_argument("--grade", choices=("strict", "normal", "loose"), default="normal")
     parser.add_argument("--instances", help="comma separated exact instance IDs")
     parser.add_argument("--list-json", action="store_true")
     parser.add_argument("--plan", type=Path, help="execute a frozen parent-owned plan")
     parser.add_argument("--plan-sha256", help="expected frozen plan checksum")
     parser.add_argument("--out-dir", type=Path)
-    parser.add_argument("--archive", type=Path,
-                        help="optional single-file scenario experiment archive")
-    parser.add_argument("--retain-tsdb", action="store_true", help="keep stopped TSDB directories after verified archiving")
+    parser.add_argument("--archive", type=Path, help="optional single-file scenario experiment archive")
+    parser.add_argument(
+        "--retain-tsdb", action="store_true", help="keep stopped TSDB directories after verified archiving"
+    )
     parser.add_argument("--lease-json", type=Path)
     parser.add_argument("--experiment-params", help="JSON: case -> dotted YAML field -> scalar value")
     args = parser.parse_args(argv)
     resolve_selection(args, parser)
     from contextlib import nullcontext
-    from scenario.registry import using_cases
+
     from scenario.execution_plan import ExecutionPlanCodec, selected_cases
+    from scenario.registry import using_cases
+
     try:
         if args.plan:
             if args.experiment_params:
                 raise ScenarioError("frozen plans already contain effective experiment parameters")
             if args.list_json or not args.plan_sha256:
                 raise ScenarioError("frozen execution requires --plan-sha256 and cannot list")
-        scope = (using_cases(selected_cases(ExecutionPlanCodec().read_document(
-            args.plan, args.plan_sha256)["instances"])) if args.plan else nullcontext())
+        scope = (
+            using_cases(selected_cases(ExecutionPlanCodec().read_document(args.plan, args.plan_sha256)["instances"]))
+            if args.plan
+            else nullcontext()
+        )
         with scope:
             return run_selected(args)
     except (ScenarioError, OSError, ValueError) as exc:
@@ -137,10 +141,12 @@ def main(argv=None):
 def run_selected(args):
     try:
         from scenario.execution_plan import dependency_files
+
         dependencies = dependency_files() if not args.plan else {}
         registry = handlers()
         if args.plan:
             from scenario.execution_plan import load_plan
+
             plans = select(load_plan(args.plan, args.plan_sha256), args.instances)
             if any(plan["profile"] != args.profile or plan["grade"] != args.grade for plan in plans):
                 raise ScenarioError("frozen plan profile/grade disagrees with selection")
@@ -150,12 +156,20 @@ def run_selected(args):
             plans = select(
                 classify(
                     compile_scenarios(
-                        exact_documents(preselect_documents(load_scenarios(args.source, experiment_params=args.experiment_params), args.suite, kind=args.kind), args.instances),
+                        exact_documents(
+                            preselect_documents(
+                                load_scenarios(args.source, experiment_params=args.experiment_params),
+                                args.suite,
+                                kind=args.kind,
+                            ),
+                            args.instances,
+                        ),
                         args.profile,
                         registry,
                         grade=args.grade,
                     ),
-                    args.suite, kind=args.kind,
+                    args.suite,
+                    kind=args.kind,
                 ),
                 args.instances,
             )
@@ -163,13 +177,9 @@ def run_selected(args):
             print(json.dumps(inventory(plans, dependencies), indent=2, allow_nan=False))
             return 0
         if args.out_dir is None or args.lease_json is None:
-            raise ScenarioError(
-                "execution requires --out-dir and --lease-json from the parent port planner"
-            )
+            raise ScenarioError("execution requires --out-dir and --lease-json from the parent port planner")
         if ":" in str(args.out_dir.resolve()):
-            raise ScenarioError(
-                "Java mock output directory cannot contain a colon (JVM -Xlog delimiter)"
-            )
+            raise ScenarioError("Java mock output directory cannot contain a colon (JVM -Xlog delimiter)")
         leases = [validate_lease(args.lease_json, p["resource_budget"]) for p in plans]
     except (ScenarioError, OSError, ValueError) as exc:
         print(str(exc), file=sys.stderr)
@@ -177,9 +187,8 @@ def run_selected(args):
 
     # Keep --list-json free of gRPC/proto/process initialization.
     from scenario.backend import JavaMockBackend
-    from scenario.runtime import StageTimeout, execute_instance
-
     from scenario.measurement import execute_workload
+    from scenario.runtime import StageTimeout, execute_instance
 
     cancelled = threading.Event()
 
@@ -192,27 +201,33 @@ def run_selected(args):
         if callable(handler) and getattr(handler, "__name__", "") == "expire":
             raise StageTimeout(f"child interrupted by signal {signum}")
 
-    previous = {
-        sig: signal.signal(sig, cancel) for sig in (signal.SIGTERM, signal.SIGINT)
-    }
+    previous = {sig: signal.signal(sig, cancel) for sig in (signal.SIGTERM, signal.SIGINT)}
     args.out_dir.mkdir(parents=True, exist_ok=True)
     rows = []
     retirement = None
     try:
         for index, (plan, lease) in enumerate(zip(plans, leases)):
             if retirement is not None:
-                rows.append(dict({key: plan[key] for key in ("id", "scenario_id", "variant_id", "profile", "grade", "test_kind") if key in plan},
-                                 status="ERROR", duration_ms=0,
-                                 not_started=True, stages=[], cleanup=[], error=retirement))
+                rows.append(
+                    dict(
+                        {
+                            key: plan[key]
+                            for key in ("id", "scenario_id", "variant_id", "profile", "grade", "test_kind")
+                            if key in plan
+                        },
+                        status="ERROR",
+                        duration_ms=0,
+                        not_started=True,
+                        stages=[],
+                        cleanup=[],
+                        error=retirement,
+                    )
+                )
             else:
                 backend = JavaMockBackend(lease)
                 backend.retain_tsdb = args.retain_tsdb
                 rows.append(
-                    (
-                        execute_workload
-                        if plan["test_kind"] == "workload"
-                        else execute_instance
-                    )(
+                    (execute_workload if plan["test_kind"] == "workload" else execute_instance)(
                         plan,
                         backend,
                         registry,
@@ -222,9 +237,11 @@ def run_selected(args):
                     )
                 )
                 from scenario.lane_safety import cleanup_failure
+
                 retirement = cleanup_failure(rows[-1])
-                from scenario.lane_safety import occupied_ports
                 from adapters.environment import port_in_use
+                from scenario.lane_safety import occupied_ports
+
                 busy = occupied_ports(lease["intervals"], lambda port: port_in_use(port, "0.0.0.0"))
                 if busy:
                     retirement = "lane ports not released: " + str(busy)
@@ -240,11 +257,16 @@ def run_selected(args):
             from artifacts.archive import create_archive
 
             create_archive(
-                args.archive, {"run": args.out_dir}, kind="scenario",
-                status="incomplete" if cancelled.is_set() or len(rows) != len(plans)
-                       else "complete",
-                metadata={"profile": args.profile, "grade": args.grade,
-                          "instance_count": len(rows), "planned_count": len(plans)},
+                args.archive,
+                {"run": args.out_dir},
+                kind="scenario",
+                status="incomplete" if cancelled.is_set() or len(rows) != len(plans) else "complete",
+                metadata={
+                    "profile": args.profile,
+                    "grade": args.grade,
+                    "instance_count": len(rows),
+                    "planned_count": len(plans),
+                },
             )
     return summarize(rows)["exit_code"]
 

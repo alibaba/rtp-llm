@@ -18,7 +18,8 @@ def load_reinterpretation(parser, args, analyzer_path):
     raw = source.read_bytes()
     evidence = json.loads(raw)
     evidence["reinterpretation"] = dict(
-        source=str(source), source_sha256=hashlib.sha256(raw).hexdigest(),
+        source=str(source),
+        source_sha256=hashlib.sha256(raw).hexdigest(),
         analyzer_sha256=hashlib.sha256(Path(analyzer_path).read_bytes()).hexdigest(),
     )
     return evidence
@@ -26,8 +27,8 @@ def load_reinterpretation(parser, args, analyzer_path):
 
 def import_metrics(destination, source):
     """Copy frozen metrics and convert raw archives, always writing at destination."""
-    from monitoring.metric_store import MetricStore
     from monitoring.archive import export_metrics
+    from monitoring.metric_store import MetricStore
 
     destination, source = Path(destination), Path(source)
     destination.mkdir(parents=True, exist_ok=True)

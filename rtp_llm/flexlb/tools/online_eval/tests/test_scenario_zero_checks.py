@@ -3,8 +3,8 @@
 import tempfile
 import unittest
 
-from scenario import ScenarioError
 from program_fixtures import compile_scenarios
+from scenario import ScenarioError
 from scenario.runtime import execute_instance
 from test_scenario_runtime import Backend, Clock, source
 
@@ -31,9 +31,7 @@ class ZeroChecksTest(unittest.TestCase):
         backend = Backend(clock)
         backend.fail_setup = True
         with tempfile.TemporaryDirectory() as tmp:
-            result = execute_instance(
-                plan, backend, artifact_dir=tmp, clock=clock, sleeper=clock.sleep
-            )
+            result = execute_instance(plan, backend, artifact_dir=tmp, clock=clock, sleeper=clock.sleep)
         self.assertEqual(result["status"], "ERROR")
         self.assertIn("partial setup", result["error"])
         self.assertTrue(all(r["status"] == "BLOCKED" for r in result["stages"][1:]))
@@ -43,9 +41,7 @@ class ZeroChecksTest(unittest.TestCase):
         plan = compile_scenarios([("valid.yaml", source())])[0]
         clock = Clock()
         with tempfile.TemporaryDirectory() as tmp:
-            result = execute_instance(
-                plan, Backend(clock), artifact_dir=tmp, clock=clock, sleeper=clock.sleep
-            )
+            result = execute_instance(plan, Backend(clock), artifact_dir=tmp, clock=clock, sleeper=clock.sleep)
         self.assertEqual(result["status"], "PASS")
         self.assertEqual(sum(len(r["checks"]) for r in result["stages"]), 1)
 

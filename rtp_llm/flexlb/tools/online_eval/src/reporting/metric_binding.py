@@ -2,10 +2,11 @@
 
 
 def bindings(presentation, metric_id, labels):
-    return [(curve_id, style) for curve_id, style in presentation.charts.curves.items()
-            if style.metric_id == metric_id
-            and all(labels.get(key) == value for key, value in style.labels)]
-
+    return [
+        (curve_id, style)
+        for curve_id, style in presentation.charts.curves.items()
+        if style.metric_id == metric_id and all(labels.get(key) == value for key, value in style.labels)
+    ]
 
 
 def metric_classification(identity, definition, presentation):
@@ -17,6 +18,7 @@ def metric_classification(identity, definition, presentation):
         return "DIAGNOSTIC_ONLY"
     if definition.get("producer") and definition.get("value_kind") == "scalar":
         from scenario.registry import registry
+
         if definition["producer"] in registry().metric_contracts:
             return "GATE_EVIDENCE"
     return None
@@ -32,14 +34,21 @@ def monitoring_audit(store, presentation):
     """
     audit = []
     for identity, definition in store.document["definitions"].items():
-        if "promql" in definition and identity.split('/')[-1] == 'up':
+        if "promql" in definition and identity.split("/")[-1] == "up":
             continue
         classification = metric_classification(identity, definition, presentation)
-        if classification is None and any(identity in plan["definition"].get("demand", {}).get("gate", [])
-                for plan in store.document.get("plans", {}).values()):
+        if classification is None and any(
+            identity in plan["definition"].get("demand", {}).get("gate", [])
+            for plan in store.document.get("plans", {}).values()
+        ):
             classification = "GATE_INPUT"
         if classification is None:
             raise ValueError("unclassified monitoring metric " + identity)
-        audit.append(dict(metric_id=identity, classification=classification,
-            series_count=len(store.document["metrics"].get(identity, []))))
+        audit.append(
+            dict(
+                metric_id=identity,
+                classification=classification,
+                series_count=len(store.document["metrics"].get(identity, [])),
+            )
+        )
     return audit

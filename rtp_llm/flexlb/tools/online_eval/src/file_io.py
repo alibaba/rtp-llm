@@ -1,8 +1,9 @@
 """Atomic UTF-8 text publication shared by reports and artifact rendering."""
-from pathlib import Path
-from contextlib import contextmanager
-import tempfile
+
 import json
+import tempfile
+from contextlib import contextmanager
+from pathlib import Path
 
 
 @contextmanager
@@ -11,7 +12,7 @@ def atomic_text(path, *, encoding=None):
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = None
     try:
-        with tempfile.NamedTemporaryFile(mode='w', encoding=encoding, dir=path.parent, delete=False) as stream:
+        with tempfile.NamedTemporaryFile(mode="w", encoding=encoding, dir=path.parent, delete=False) as stream:
             temporary = Path(stream.name)
             yield stream
         temporary.replace(path)
@@ -21,15 +22,14 @@ def atomic_text(path, *, encoding=None):
 
 
 def write_text(path, content):
-    with atomic_text(path, encoding='utf-8') as stream:
+    with atomic_text(path, encoding="utf-8") as stream:
         stream.write(content)
 
 
 def write_json(path, payload, *, indent=None):
     path = Path(path)
     with atomic_text(path) as stream:
-        json.dump(payload, stream, indent=indent, allow_nan=False,
-                  separators=(",", ":") if indent is None else None)
+        json.dump(payload, stream, indent=indent, allow_nan=False, separators=(",", ":") if indent is None else None)
         if indent is not None:
             stream.write("\n")
     return path

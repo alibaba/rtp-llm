@@ -5,15 +5,17 @@ from scenario.inputs import fields
 from scenario.windows import check_windows
 
 
-def metric_criterion(case, spec, *, metric, unit, windows, op, path,
-                     profiles=False, dimensions=None):
+def metric_criterion(case, spec, *, metric, unit, windows, op, path, profiles=False, dimensions=None):
     binding = dict(metric=metric, unit=unit, windows=list(windows), op=op)
-    fields(spec, {"expected"}, path,
-           optional=set(binding) | ({"expected_by_profile"} if profiles else set()))
+    fields(spec, {"expected"}, path, optional=set(binding) | ({"expected_by_profile"} if profiles else set()))
     declared = {**binding, **spec}
     check_windows(declared["windows"], available=windows, path=path + ".windows")
-    if (declared["metric"] != metric or declared["unit"] != unit
-            or set(declared["windows"]) != set(windows) or declared["op"] != op):
+    if (
+        declared["metric"] != metric
+        or declared["unit"] != unit
+        or set(declared["windows"]) != set(windows)
+        or declared["op"] != op
+    ):
         raise ValueError(path + ": metric, unit, windows or comparison does not match the measurement contract")
     validate_comparison(op, spec["expected"])
     if type(spec["expected"]) not in (int, float):
@@ -37,13 +39,19 @@ def compile_metric_checks(case, checks, rules, *, namespace, path="parameters.ch
     result = {}
     for name, (key, metric, op, unit, windows) in rules.items():
         result[key], _ = metric_criterion(
-            case, checks[name], metric=namespace + '/' + metric,
-            unit=unit, windows=windows, op=op, path=path + '.' + name,
+            case,
+            checks[name],
+            metric=namespace + "/" + metric,
+            unit=unit,
+            windows=windows,
+            op=op,
+            path=path + "." + name,
         )
     return result
 
 
 from dataclasses import dataclass
+
 from scenario.numeric_parameters import NONNEGATIVE
 
 
@@ -58,6 +66,7 @@ class CheckSpec:
 
     def __post_init__(self):
         from scenario.numeric_parameters import parameter_rules
+
         parameter_rules({"checks.threshold.expected": self.number})
         if self.op not in {"eq", "ne", "gt", "ge", "lt", "le"}:
             raise ValueError("invalid check comparison")
@@ -72,8 +81,10 @@ class CheckSpec:
 
 class CheckSet:
     """Declare threshold type and measurement binding together, once per check."""
+
     def __init__(self, namespace, specs):
         from types import MappingProxyType
+
         if not namespace or any(not isinstance(value, CheckSpec) for value in specs.values()):
             raise ValueError("invalid check declarations")
         self.namespace = namespace
@@ -89,7 +100,7 @@ class CheckSet:
 
     @property
     def input_fields(self):
-        return {name: {'expected': spec.number} for name, spec in self.specs.items()}
+        return {name: {"expected": spec.number} for name, spec in self.specs.items()}
 
     @property
     def criteria_fields(self):

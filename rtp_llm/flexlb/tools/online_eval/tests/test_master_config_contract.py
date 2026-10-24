@@ -61,17 +61,13 @@ class MasterConfigContractTest(unittest.TestCase):
                         )
                     )
                     self.assert_v3(config)
-                    self.assertEqual(
-                        9876, config["requestLifecycle"]["request"]["timeoutMs"]
-                    )
+                    self.assertEqual(9876, config["requestLifecycle"]["request"]["timeoutMs"])
                     self.assertEqual(
                         {"type": dispatcher.upper(), "maxInflightPerPrefillWorker": 7},
                         config["dispatcher"],
                     )
                     if decision == "single":
-                        self.assertEqual(
-                            {"type": "SINGLE"}, config["scheduler"]["decision"]
-                        )
+                        self.assertEqual({"type": "SINGLE"}, config["scheduler"]["decision"])
 
     def test_shared_concurrency_default_and_positive_integer_validation(self):
         for dispatcher in ("batch", "non_batch"):
@@ -89,9 +85,7 @@ class MasterConfigContractTest(unittest.TestCase):
                 2_147_483_648,
             ):
                 with self.assertRaises(ValueError):
-                    build_flexlb_config(
-                        dispatcher=dispatcher, max_inflight_per_prefill_worker=value
-                    )
+                    build_flexlb_config(dispatcher=dispatcher, max_inflight_per_prefill_worker=value)
 
     def test_removed_generator_arguments_are_not_silent_noops(self):
         for field in (
@@ -118,9 +112,7 @@ class MasterConfigContractTest(unittest.TestCase):
                     "decode": "10.0.0.3:9000",
                 },
             )
-            env = SimpleNamespace(
-                spec=spec, run_dir=Path(tmp), zk_connect_string="127.0.0.1:2181"
-            )
+            env = SimpleNamespace(spec=spec, run_dir=Path(tmp), zk_connect_string="127.0.0.1:2181")
             manager = EnvManager(Path(tmp), verbose=False)
             result = manager.master_lifecycle.master_environment(env)
             self.assertTrue({"FLEXLB_CONFIG", "MODEL_SERVICE_CONFIG"} <= set(result))
@@ -129,10 +121,9 @@ class MasterConfigContractTest(unittest.TestCase):
                 ["10.0.0.1:8000", "10.0.0.2:8000"],
                 model["hosts"]["mock.prefill.hosts.address"],
             )
-            self.assertEqual(
-                ["10.0.0.3:9000"], model["hosts"]["mock.decode.hosts.address"]
-            )
+            self.assertEqual(["10.0.0.3:9000"], model["hosts"]["mock.decode.hosts.address"])
             from adapters.zookeeper_config import ZooKeeperConfig
+
             spec.zk_consistency = ZooKeeperConfig()
             result = manager.master_lifecycle.master_environment(env, MasterSpec(name="A", http_port=18080))
             self.assertEqual(
@@ -146,11 +137,7 @@ class MasterConfigContractTest(unittest.TestCase):
             ["DECODE_ENGINE_OWNED"],
             ["DECODE_RESERVED", "DECODE_ENGINE_OWNED"],
         ):
-            config = json.loads(
-                build_flexlb_config(
-                    ordering="priority", preemption={"allowed_victim_stages": stages}
-                )
-            )
+            config = json.loads(build_flexlb_config(ordering="priority", preemption={"allowed_victim_stages": stages}))
             self.assertEqual(
                 stages,
                 config["scheduler"]["ordering"]["preemption"]["allowedVictimStages"],

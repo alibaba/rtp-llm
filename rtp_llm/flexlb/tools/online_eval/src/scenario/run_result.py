@@ -1,15 +1,16 @@
 """Execution and delivery state, projected to JSON only at external boundaries."""
+
 from __future__ import annotations
 
-from dataclasses import dataclass, field, asdict
-from enum import Enum
 import json
+from copy import deepcopy
+from dataclasses import asdict, dataclass, field
+from enum import Enum
 
 from analysis.checks import CheckResult
-from scenario.outcome import RunOutcome, OutcomeEvidence
-from scenario.plan import CompiledInstance
 from monitoring.quality import CollectionQuality
-from copy import deepcopy
+from scenario.outcome import OutcomeEvidence, RunOutcome
+from scenario.plan import CompiledInstance
 
 
 class StageStatus(str, Enum):
@@ -89,8 +90,13 @@ class FinalizationResult:
     duration_ms: int = 0
 
     def to_dict(self):
-        return dict(phase=self.phase.value, status=self.status.value, budget_s=self.budget_s,
-                    error=self.error, duration_ms=self.duration_ms)
+        return dict(
+            phase=self.phase.value,
+            status=self.status.value,
+            budget_s=self.budget_s,
+            error=self.error,
+            duration_ms=self.duration_ms,
+        )
 
 
 @dataclass
@@ -106,7 +112,11 @@ class WorkloadResult:
 
     @property
     def validity(self):
-        return "INVALID" if self.runtime_validity == "INVALID" or self.quality is not None and not self.quality.valid else "VALID"
+        return (
+            "INVALID"
+            if self.runtime_validity == "INVALID" or self.quality is not None and not self.quality.valid
+            else "VALID"
+        )
 
     def to_dict(self):
         result = deepcopy(self.details)
@@ -129,8 +139,10 @@ class ReportResult:
     reports: dict
 
     def to_dict(self):
-        return dict(report=str(next(iter(self.reports.values()))),
-                    reports={name: str(path) for name, path in self.reports.items()})
+        return dict(
+            report=str(next(iter(self.reports.values()))),
+            reports={name: str(path) for name, path in self.reports.items()},
+        )
 
 
 @dataclass
@@ -148,18 +160,21 @@ class RunResult:
     def adjudicate(self):
         stages, cleanup = self.execution.stages, self.execution.cleanup
         checks = [check for stage in stages for check in stage.checks]
-        self.outcome = RunOutcome.evaluate(OutcomeEvidence(
-            check_statuses=tuple(check.status for check in checks),
-            failed_checks=frozenset(stage.id + "." + check.id for stage in stages
-                                    for check in stage.checks if check.status == "FAIL"),
-            finding_confirmed=frozenset(self.execution.finding_confirmed),
-            finding_resolved=bool(self.execution.finding_resolved),
-            error_statuses=tuple(stage.status.value for stage in stages if stage.error),
-            cleanup_ok=all(row.status == StageStatus.PASS for row in cleanup),
-            empty_execution_status=self.execution.status if not stages else "PASS",
-            runtime_validity=self.workload.validity if self.workload else "VALID",
-            delivery_statuses=tuple(row.status.value for row in self.finalization),
-        ))
+        self.outcome = RunOutcome.evaluate(
+            OutcomeEvidence(
+                check_statuses=tuple(check.status for check in checks),
+                failed_checks=frozenset(
+                    stage.id + "." + check.id for stage in stages for check in stage.checks if check.status == "FAIL"
+                ),
+                finding_confirmed=frozenset(self.execution.finding_confirmed),
+                finding_resolved=bool(self.execution.finding_resolved),
+                error_statuses=tuple(stage.status.value for stage in stages if stage.error),
+                cleanup_ok=all(row.status == StageStatus.PASS for row in cleanup),
+                empty_execution_status=self.execution.status if not stages else "PASS",
+                runtime_validity=self.workload.validity if self.workload else "VALID",
+                delivery_statuses=tuple(row.status.value for row in self.finalization),
+            )
+        )
         if not self.error:
             detail = self.outcome.error_detail(check.status for check in checks)
             if detail is not None:
@@ -170,18 +185,32 @@ class RunResult:
         outcome = self.adjudicate()
         plan = self.plan
         metadata = plan.metadata.to_dict()
-        result = dict(id=plan.id, scenario_id=plan.scenario_id, variant_id=plan.variant_id,
-            profile=plan.profile, category=plan.category, source=plan.source, grade=plan.grade,
-            effective_axes=dict(plan.environment.axes), effective_capabilities=list(plan.environment.capabilities),
-            status=outcome.status, stages=[stage.to_dict() for stage in self.execution.stages],
-            cleanup=[row.to_dict() for row in self.execution.cleanup], error=self.error,
-            duration_ms=self.duration_ms, finding_confirmed=list(self.execution.finding_confirmed),
-            finding_resolved=list(self.execution.finding_resolved), source_path=plan.source_path,
+        result = dict(
+            id=plan.id,
+            scenario_id=plan.scenario_id,
+            variant_id=plan.variant_id,
+            profile=plan.profile,
+            category=plan.category,
+            source=plan.source,
+            grade=plan.grade,
+            effective_axes=dict(plan.environment.axes),
+            effective_capabilities=list(plan.environment.capabilities),
+            status=outcome.status,
+            stages=[stage.to_dict() for stage in self.execution.stages],
+            cleanup=[row.to_dict() for row in self.execution.cleanup],
+            error=self.error,
+            duration_ms=self.duration_ms,
+            finding_confirmed=list(self.execution.finding_confirmed),
+            finding_resolved=list(self.execution.finding_resolved),
+            source_path=plan.source_path,
             resource_budget=plan.resource_budget.to_metadata(),
-            resolved_config=json.loads(plan.environment.snapshot.master_json), clock_domain="monotonic",
-            test_kind=metadata["kind"], outcome=asdict(outcome))
+            resolved_config=json.loads(plan.environment.snapshot.master_json),
+            clock_domain="monotonic",
+            test_kind=metadata["kind"],
+            outcome=asdict(outcome),
+        )
         if self.artifacts:
-            result['artifacts'] = dict(self.artifacts)
+            result["artifacts"] = dict(self.artifacts)
         if plan.implementation is not None:
             result["implementation"] = plan.implementation.to_dict()
         if self.finalization_started:

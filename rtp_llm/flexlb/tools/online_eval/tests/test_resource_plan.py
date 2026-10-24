@@ -62,9 +62,7 @@ with tempfile.TemporaryDirectory() as d:
 
     def test_budget_rejects_non_integer_or_negative_counts(self):
         for initial, adds in [(True, 1), (2, False), (0, 0), (2, -1), (2, 1.5)]:
-            with self.subTest(initial=initial, adds=adds), self.assertRaises(
-                ResourcePlanError
-            ):
+            with self.subTest(initial=initial, adds=adds), self.assertRaises(ResourcePlanError):
                 JavaMockBudget(initial, adds)
 
     def test_every_manifest_interval_matches_probe_and_lock_ports(self):
@@ -72,11 +70,7 @@ with tempfile.TemporaryDirectory() as d:
         self.assertEqual(159, len(lease.ports()))
         self.assertEqual(("m18080_18085.lock", "g55150_55302.lock"), lease.lock_names())
         doc = lease.to_manifest()
-        ports = [
-            p
-            for interval in doc["intervals"]
-            for p in range(interval["first"], interval["last"] + 1)
-        ]
+        ports = [p for interval in doc["intervals"] for p in range(interval["first"], interval["last"] + 1)]
         self.assertEqual(list(lease.ports()), ports)
         self.assertEqual("55151", doc["child_env"]["FLEXLB_FT_MOCK_BASE_GRPC_PORT"])
         self.assertIn(55150, ports)
@@ -109,9 +103,7 @@ with tempfile.TemporaryDirectory() as d:
 
     def test_cross_lane_and_cross_side_overlap_rejected(self):
         with self.assertRaisesRegex(ResourcePlanError, "overlap"):
-            plan_lane_leases(
-                [[JavaMockBudget(6, 16)]] * 2, master_base=18080, mock_base=18091
-            )
+            plan_lane_leases([[JavaMockBudget(6, 16)]] * 2, master_base=18080, mock_base=18091)
 
     def test_port_limits_and_self_overlap_rejected(self):
         for master, base in [
@@ -121,9 +113,7 @@ with tempfile.TemporaryDirectory() as d:
             (18080, 65400),
             (18080, 18081),
         ]:
-            with self.subTest(master=master, base=base), self.assertRaises(
-                ResourcePlanError
-            ):
+            with self.subTest(master=master, base=base), self.assertRaises(ResourcePlanError):
                 LaneLease(0, master, base, 6)
 
     def test_empty_resources_are_not_a_valid_run(self):

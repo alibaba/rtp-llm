@@ -2,16 +2,16 @@
 
 import hashlib
 import json
-from pathlib import Path
-from types import SimpleNamespace
 import re
 import tempfile
 import unittest
+from pathlib import Path
+from types import SimpleNamespace
 
+from adapters.environment import _write_master_config
+from adapters.perf_presets import ROOT, load_performance_file, load_preset
 from flexlb_cfg import render_env
 from flexlb_profile_data import load_mock_calibration
-from adapters.perf_presets import ROOT, load_preset, load_performance_file
-from adapters.environment import _write_master_config
 from scenario.backend_spec import make_env_spec
 from scenario.environment_config import environment
 
@@ -51,14 +51,15 @@ def assert_snapshot_matches(path, expected):
 class MockCalibrationTest(unittest.TestCase):
     def test_default_preset_materializes_named_file_values(self):
         calibration = load_mock_calibration()
-        expected_sha = hashlib.sha256((ROOT / "data/performance/dsv4_l20_mock_calibration.json").read_bytes()).hexdigest()
+        expected_sha = hashlib.sha256(
+            (ROOT / "data/performance/dsv4_l20_mock_calibration.json").read_bytes()
+        ).hexdigest()
         performance, runtime = load_preset("default")
         self.assertEqual(runtime, {})
         for key in ("id", "model", "hardware", "status"):
             self.assertEqual(performance["calibration_" + key], calibration[key])
         self.assertEqual(performance["calibration_sha256"], expected_sha)
-        self.assertEqual({key: performance["decode"][key]
-                          for key in calibration["decode"]}, calibration["decode"])
+        self.assertEqual({key: performance["decode"][key] for key in calibration["decode"]}, calibration["decode"])
         config = json.loads(render_env("single-nonbatch"))
         expression = config["router"]["roles"]["prefill"]["executionTimeEstimator"]["expression"]
         self.assertEqual(expression, calibration["prefill_expression"])
@@ -66,7 +67,9 @@ class MockCalibrationTest(unittest.TestCase):
 
     def test_run_files_expose_effective_default_calibration(self):
         calibration = load_mock_calibration()
-        expected_sha = hashlib.sha256((ROOT / "data/performance/dsv4_l20_mock_calibration.json").read_bytes()).hexdigest()
+        expected_sha = hashlib.sha256(
+            (ROOT / "data/performance/dsv4_l20_mock_calibration.json").read_bytes()
+        ).hexdigest()
         with tempfile.TemporaryDirectory() as directory:
             plan = environment({"perf_preset": "default"}, "test", "single-nonbatch")
             spec = make_env_spec(plan, "single-nonbatch", {"master_base": 28000})
@@ -118,10 +121,16 @@ class MockCalibrationTest(unittest.TestCase):
                 self.assertEqual(performance["decode"][key], value)
             for key in ("id", "model", "hardware", "status"):
                 self.assertEqual(performance["calibration_" + key], calibration[key])
-            self.assertEqual(performance["calibration_sha256"],
-                             hashlib.sha256((ROOT / "data/performance/dsv4_l20_mock_calibration.json").read_bytes()).hexdigest())
+            self.assertEqual(
+                performance["calibration_sha256"],
+                hashlib.sha256((ROOT / "data/performance/dsv4_l20_mock_calibration.json").read_bytes()).hexdigest(),
+            )
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "drift.json"
-            path.write_text(json.dumps({"expression": expression.replace(expression.split(",", 1)[1].split("+", 1)[0].strip(), "-68.7", 1)}))
+            path.write_text(
+                json.dumps(
+                    {"expression": expression.replace(expression.split(",", 1)[1].split("+", 1)[0].strip(), "-68.7", 1)}
+                )
+            )
             with self.assertRaisesRegex(AssertionError, "stale mock expression snapshot"):
                 assert_snapshot_matches(path, expression)

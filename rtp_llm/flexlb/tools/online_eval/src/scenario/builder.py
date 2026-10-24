@@ -2,10 +2,12 @@
 
 import copy
 from dataclasses import replace
-from scenario.program import StageDefinition
-from monitoring.identity import METRIC_ID
+
 from document_io import DocumentError as ScenarioError
+from monitoring.identity import METRIC_ID
 from scenario.config_data import merge_data
+from scenario.program import StageDefinition
+
 
 def output(stage, field):
     """Refer to an earlier Python step's typed output; never evaluated as Python."""
@@ -21,6 +23,7 @@ class CaseBuilder:
         self.profiles = tuple(profiles)
         self.optional_numbers = frozenset(optional_numbers)
         from scenario.environment_view import EnvironmentView
+
         self.env = EnvironmentView(environment, self.profiles)
         self.steps: list[StageDefinition] = []
         self.read_parameters = set()

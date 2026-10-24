@@ -1,9 +1,11 @@
 """Inject immutable registries without maintaining a framework case-name list."""
+
 from pathlib import Path
+
 from scenario import registry
 
 
-def entry(name, definition, module='fixture.program', path=None):
+def entry(name, definition, module="fixture.program", path=None):
     return registry.RegisteredCase(name, module, Path(path or __file__), definition)
 
 

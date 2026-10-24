@@ -13,6 +13,7 @@ import shlex
 from pathlib import Path
 
 import yaml
+
 from flexlb_profile_data import REGISTERED_PROFILE_SPECS as PROFILE_SPECS
 
 _ROOT = Path(__file__).resolve().parent

@@ -5,17 +5,14 @@ import unittest
 from pathlib import Path
 
 from flexlb_cfg import render_env
-from scenario import load_scenarios
 from program_fixtures import compile_scenarios
+from scenario import load_scenarios
 from scenario.catalog import handlers
 
 
 class MasterConfigTests(unittest.TestCase):
     def test_request_completion_matches_expected_rendered_configuration(self):
-        path = (
-            Path(__file__).resolve().parents[1]
-            / "config/scenarios/request_completion.yaml"
-        )
+        path = Path(__file__).resolve().parents[1] / "config/scenarios/request_completion.yaml"
         plans = compile_scenarios(load_scenarios(path), handlers=handlers())
         self.assertEqual(4, len(plans))
         for plan in plans:

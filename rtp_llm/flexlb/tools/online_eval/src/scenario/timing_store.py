@@ -1,13 +1,14 @@
 """Locked, advisory duration estimates for lane scheduling."""
-from file_io import read_json
+
 import fcntl
 import math
 import os
 import sys
 from pathlib import Path
 
-from file_io import write_json
+from file_io import read_json, write_json
 from schema_contract import matches_schema
+
 
 def timing_path():
     return Path(
@@ -23,9 +24,9 @@ def read_timings(path):
         return {}
     try:
         data = read_json(path)
-        if not (matches_schema(data, "timings_schema_version", 1) or matches_schema(data, "run_summary_schema_version", 1)) or not isinstance(
-            data.get("instances"), list
-        ):
+        if not (
+            matches_schema(data, "timings_schema_version", 1) or matches_schema(data, "run_summary_schema_version", 1)
+        ) or not isinstance(data.get("instances"), list):
             raise ValueError("expected versioned instance timings")
         timings = {}
         for row in data["instances"]:
@@ -62,9 +63,6 @@ def write_timings(rows):
                 merged[row["id"]] = row["duration_ms"] / 1000
         doc = {
             "timings_schema_version": 1,
-            "instances": [
-                {"id": key, "duration_ms": value * 1000}
-                for (key, value) in sorted(merged.items())
-            ],
+            "instances": [{"id": key, "duration_ms": value * 1000} for (key, value) in sorted(merged.items())],
         }
         write_json(path, doc)

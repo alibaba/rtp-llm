@@ -7,18 +7,18 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+from analysis.statistics import counter_delta, select_window
 from reporting import (
-    write_bundle,
-    discover_reports,
-    read_bundle,
-    load_analysis,
-    render,
-    run_meta,
     compare_controls,
     details,
+    discover_reports,
+    load_analysis,
+    read_bundle,
+    render,
+    run_meta,
     table,
+    write_bundle,
 )
-from analysis.statistics import select_window, counter_delta
 from reporting.pairing import event_anchor, shifted_panel
 from reporting.renderer import render_context, render_sections
 from reporting.workload import write_report
@@ -27,54 +27,78 @@ from reporting.workload import write_report
 class ReportBundleTest(unittest.TestCase):
     def test_report_producers_do_not_declare_new_color_literals(self):
         source = Path(__file__).resolve().parents[1] / "src"
-        offenders = [str(path.relative_to(source)) for path in source.rglob("*.py")
-                     if path.name not in {"catalog.py", "css_colors.py"}
-                     and re.search(r"#[0-9a-fA-F]{6}\b", path.read_text())]
+        offenders = [
+            str(path.relative_to(source))
+            for path in source.rglob("*.py")
+            if path.name not in {"catalog.py", "css_colors.py"} and re.search(r"#[0-9a-fA-F]{6}\b", path.read_text())
+        ]
         self.assertEqual(offenders, [])
 
     def test_common_context_uses_actual_runs_and_omits_missing_fields(self):
-        spec = {"run_meta": run_meta(
-            {"id": "comparison"},
-            runs={
-                "old": run_meta({"id": "old"}, implementation={"master": {"source_commit": "abc"}}, workload=None),
-                "new": run_meta({"id": "new"}, implementation={"master": {"source_commit": "def"}}, workload={"sha256": "trace"}),
-            },
-        )}
+        spec = {
+            "run_meta": run_meta(
+                {"id": "comparison"},
+                runs={
+                    "old": run_meta({"id": "old"}, implementation={"master": {"source_commit": "abc"}}, workload=None),
+                    "new": run_meta(
+                        {"id": "new"}, implementation={"master": {"source_commit": "def"}}, workload={"sha256": "trace"}
+                    ),
+                },
+            )
+        }
         rendered = render_context(spec)
         self.assertIn('<details class="report-block report-context">', rendered)
         self.assertNotIn('class="report-block report-context" open', rendered)
-        self.assertIn('>old</h3>', rendered)
-        self.assertIn('>new</h3>', rendered)
-        self.assertIn('>master.source_commit</dt><dd>abc</dd>', rendered)
-        self.assertIn('>master.source_commit</dt><dd>def</dd>', rendered)
-        self.assertNotIn('null', rendered)
-        self.assertNotIn('未提供', rendered)
-        self.assertNotIn('schema_version', rendered)
+        self.assertIn(">old</h3>", rendered)
+        self.assertIn(">new</h3>", rendered)
+        self.assertIn(">master.source_commit</dt><dd>abc</dd>", rendered)
+        self.assertIn(">master.source_commit</dt><dd>def</dd>", rendered)
+        self.assertNotIn("null", rendered)
+        self.assertNotIn("未提供", rendered)
+        self.assertNotIn("schema_version", rendered)
         self.assertEqual(render_context({"meta": {"version": {"branch": None}}}), "")
 
     def test_freeform_subtitle_and_scrollable_evidence(self):
         page = render({"title": "实验 A", "subtitle": {"流量": "240 QPS", "结论": "PASS"}})
-        payload = json.JSONDecoder().raw_decode(page.split('const SPEC = ', 1)[1])[0]
-        self.assertEqual(payload['summary']['subtitle'], {'流量': '240 QPS', '结论': 'PASS'})
+        payload = json.JSONDecoder().raw_decode(page.split("const SPEC = ", 1)[1])[0]
+        self.assertEqual(payload["summary"]["subtitle"], {"流量": "240 QPS", "结论": "PASS"})
         self.assertNotIn('id="hint"', page)
         self.assertNotIn('id="meta"', page)
         self.assertIn('class="report-block attachment"', render_sections([details("证据", {"a": 1})]))
-        self.assertIn('max-height:280px;overflow:auto', page)
+        self.assertIn("max-height:280px;overflow:auto", page)
 
     def test_overlay_preserves_old_new_line_styles(self):
-        html = render({
-            "title": "A/B",
-            "panels": [{
-                "id": "ab", "title": "A/B", "timeX": True,
-                "axes": {"ratio": {"title": "命中率"}},
-                "series": [
-                    {"name": "old · hit", "axis": "ratio", "color": "#123456", "dash": [6, 4], "points": [{"x": 0, "y": 0.9}]},
-                    {"name": "new · hit", "axis": "ratio", "color": "#654321", "dash": [], "points": [{"x": 0, "y": 0.9}]},
+        html = render(
+            {
+                "title": "A/B",
+                "panels": [
+                    {
+                        "id": "ab",
+                        "title": "A/B",
+                        "timeX": True,
+                        "axes": {"ratio": {"title": "命中率"}},
+                        "series": [
+                            {
+                                "name": "old · hit",
+                                "axis": "ratio",
+                                "color": "#123456",
+                                "dash": [6, 4],
+                                "points": [{"x": 0, "y": 0.9}],
+                            },
+                            {
+                                "name": "new · hit",
+                                "axis": "ratio",
+                                "color": "#654321",
+                                "dash": [],
+                                "points": [{"x": 0, "y": 0.9}],
+                            },
+                        ],
+                    }
                 ],
-            }],
-        })
-        payload = json.JSONDecoder().raw_decode(html.split('const SPEC = ', 1)[1])[0]
-        self.assertEqual([s['dash'] for s in payload['panels'][0]['series']], [[6, 4], []])
+            }
+        )
+        payload = json.JSONDecoder().raw_decode(html.split("const SPEC = ", 1)[1])[0]
+        self.assertEqual([s["dash"] for s in payload["panels"][0]["series"]], [[6, 4], []])
 
     def test_relocated_bundle_renders_without_evidence_or_mutation(self):
         with tempfile.TemporaryDirectory() as d:
@@ -91,8 +115,13 @@ class ReportBundleTest(unittest.TestCase):
             )
             original = copy.deepcopy(spec)
             bundle = write_bundle(
-                root / "original", "run", "x", data, spec,
-                meta=run_meta({"id": "x"}), producer="test",
+                root / "original",
+                "run",
+                "x",
+                data,
+                spec,
+                meta=run_meta({"id": "x"}),
+                producer="test",
             )
             shutil.copytree(bundle, root / "relocated")
             shutil.rmtree(root / "original")
@@ -114,46 +143,38 @@ class ReportBundleTest(unittest.TestCase):
         a = {"config": {"qps": 10, "new_option": True}, "master": "old"}
         b = copy.deepcopy(a)
         b["master"] = "new"
-        self.assertTrue(
-            compare_controls(a, b, allowed=("/master",), required=("/config/qps",))[
-                "aligned"
-            ]
-        )
+        self.assertTrue(compare_controls(a, b, allowed=("/master",), required=("/config/qps",))["aligned"])
         b["config"]["new_option"] = False
         self.assertEqual(
             compare_controls(a, b, allowed=("/master",))["differences"][0]["path"],
             "/config/new_option",
         )
-        self.assertEqual(
-            compare_controls({}, {}, required=("/config/qps",))["status"], "UNKNOWN"
-        )
-        self.assertFalse(
-            compare_controls({"config": None}, {"config": None}, required=("/config",))[
-                "aligned"
-            ]
-        )
+        self.assertEqual(compare_controls({}, {}, required=("/config/qps",))["status"], "UNKNOWN")
+        self.assertFalse(compare_controls({"config": None}, {"config": None}, required=("/config",))["aligned"])
 
     def test_window_edges_and_counter_reset_are_explicit(self):
         points = [(0, 1), (1, 2), (2, 3)]
         self.assertEqual(select_window(points, 0, 2, time=lambda p: p[0]), points[:2])
-        self.assertEqual(
-            select_window(points, 0, 2, time=lambda p: p[0], include_end=True), points
-        )
+        self.assertEqual(select_window(points, 0, 2, time=lambda p: p[0], include_end=True), points)
         self.assertEqual(counter_delta([10, 12, 15]), (5, "AVAILABLE"))
         self.assertEqual(counter_delta([10, 2, 15]), (None, "COUNTER_RESET"))
         self.assertEqual(counter_delta([10, None]), (None, "MISSING_COUNTER"))
 
     def test_shared_pairing_supports_stage_and_event_anchors_without_zero_fill(self):
         self.assertEqual(event_anchor([dict(id="start", name="start", t=12)], "start"), 12)
-        self.assertIsNone(event_anchor([dict(id="start", name="start", t=12), dict(id="start", name="start", t=13)], "start"))
-        panel = dict(timeX=True, events=[dict(id="start", name="开始", t=12)], series=[dict(name="hit", color="#123456",
-                                  points=[dict(x=12, y=None), dict(x=13, y=2)])])
+        self.assertIsNone(
+            event_anchor([dict(id="start", name="start", t=12), dict(id="start", name="start", t=13)], "start")
+        )
+        panel = dict(
+            timeX=True,
+            events=[dict(id="start", name="开始", t=12)],
+            series=[dict(name="hit", color="#123456", points=[dict(x=12, y=None), dict(x=13, y=2)])],
+        )
         aligned = shifted_panel(panel, 12)
         self.assertEqual(panel["events"][0]["t"], 12)
         self.assertEqual(aligned["events"][0]["t"], 0)
         self.assertEqual(panel["series"][0]["points"][0]["x"], 12)
-        self.assertEqual(aligned["series"][0]["points"],
-                         [dict(x=0, y=None), dict(x=1, y=2)])
+        self.assertEqual(aligned["series"][0]["points"], [dict(x=0, y=None), dict(x=1, y=2)])
 
     def test_workload_presentation_cannot_change_status_or_read_telemetry(self):
         payload = dict(
@@ -172,9 +193,12 @@ class ReportBundleTest(unittest.TestCase):
             gate_report=None,
         )
         original = copy.deepcopy(payload)
-        with tempfile.TemporaryDirectory() as d, patch(
-            "monitoring.metric_store.MetricStore.series",
-            side_effect=AssertionError("renderer read telemetry"),
+        with (
+            tempfile.TemporaryDirectory() as d,
+            patch(
+                "monitoring.metric_store.MetricStore.series",
+                side_effect=AssertionError("renderer read telemetry"),
+            ),
         ):
             result = write_report(d, payload)
             self.assertEqual(load_analysis(result)["status"], "ERROR")
@@ -196,10 +220,18 @@ class ReportBundleTest(unittest.TestCase):
                 discover_reports(d, kind="timeline")
 
     def test_point_contract_preserves_gaps_and_rejects_legacy_data(self):
-        source = dict(title="points", timeAxis=dict(min=0, max=1), panels=[
-            dict(id="time", timeX=True, axes={"y": dict(title="count")},
-                 series=[dict(name="x", points=[dict(x=0, y=3), dict(x=1, y=None)])]),
-        ])
+        source = dict(
+            title="points",
+            timeAxis=dict(min=0, max=1),
+            panels=[
+                dict(
+                    id="time",
+                    timeX=True,
+                    axes={"y": dict(title="count")},
+                    series=[dict(name="x", points=[dict(x=0, y=3), dict(x=1, y=None)])],
+                ),
+            ],
+        )
         original = copy.deepcopy(source)
         with tempfile.TemporaryDirectory() as d:
             bundle = write_bundle(d, "run", "points", {}, source)
@@ -226,11 +258,22 @@ class ReportBundleTest(unittest.TestCase):
     def test_overlay_rejects_undeclared_series_axis(self):
         with tempfile.TemporaryDirectory() as d:
             with self.assertRaisesRegex(ValueError, "undeclared axis"):
-                write_bundle(d, "run", "bad-axis", {}, dict(panels=[
-                    dict(id="queue", timeX=True, axes={"count": {"title": "数量"}},
-                         series=[dict(name="waiting", axis="queue",
-                                      points=[dict(x=0, y=1)])]),
-                ]))
+                write_bundle(
+                    d,
+                    "run",
+                    "bad-axis",
+                    {},
+                    dict(
+                        panels=[
+                            dict(
+                                id="queue",
+                                timeX=True,
+                                axes={"count": {"title": "数量"}},
+                                series=[dict(name="waiting", axis="queue", points=[dict(x=0, y=1)])],
+                            ),
+                        ]
+                    ),
+                )
 
 
 if __name__ == "__main__":
