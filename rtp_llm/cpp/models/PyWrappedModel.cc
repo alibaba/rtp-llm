@@ -6,6 +6,7 @@
 #include "rtp_llm/cpp/cache/KVCacheManager.h"
 #include "rtp_llm/models_py/bindings/core/ExecOps.h"
 #include "rtp_llm/cpp/utils/DebugUtils.h"
+#include "rtp_llm/cpp/utils/ExecutionStageRecorder.h"
 #include "rtp_llm/cpp/utils/utils.h"
 #include "rtp_llm/cpp/model_utils/AttentionConfig.h"
 #include <algorithm>
@@ -20,7 +21,9 @@
 #include <cstdlib>
 #include <cstring>
 #include <iostream>
+#include <iomanip>
 #include <numeric>
+#include <sstream>
 #include "rtp_llm/cpp/utils/DevicePerfWrapper.h"
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
 #if USING_CUDA
@@ -35,6 +38,55 @@ namespace rtp_llm {
 
 namespace {
 
+void appendPrepareTensorMetadata(std::ostringstream& out, const char* name, const torch::Tensor& tensor) {
+    out << " " << name << "={";
+    if (tensor.defined()) {
+        // Tensor metadata only: never materialize a CPU mirror for diagnostics.
+        out << "device=" << tensor.device() << " dtype=" << tensor.scalar_type() << " shape=" << tensor.sizes()
+            << " bytes=" << tensor.nbytes();
+    } else {
+        out << "undefined";
+    }
+    out << "}";
+}
+
+void annotatePrepareInputs(ExecutionStageScope&  scope,
+                           const GptModelInputs& inputs,
+                           int64_t               model_id,
+                           bool                  skip_forward_event_sync) noexcept {
+    if (scope.id() == 0) {
+        return;
+    }
+    try {
+        std::ostringstream out;
+        // The request IDs may be device-resident or batched. Keep the scalar
+        // association unknown and use the existing host trace IDs instead.
+        out << "request_id=unknown model_id=" << model_id << " skip_forward_event_sync=" << skip_forward_event_sync
+            << " pd_separation=" << inputs.pd_separation << " trace_ids_count=" << inputs.trace_ids.size()
+            << " trace_ids=[";
+        constexpr size_t max_trace_ids      = 4;
+        constexpr size_t max_trace_id_chars = 256;
+        bool             truncated          = inputs.trace_ids.size() > max_trace_ids;
+        for (size_t index = 0; index < std::min(inputs.trace_ids.size(), max_trace_ids); ++index) {
+            if (index != 0) {
+                out << ",";
+            }
+            truncated |= inputs.trace_ids[index].size() > max_trace_id_chars;
+            out << std::quoted(inputs.trace_ids[index].substr(0, max_trace_id_chars));
+        }
+        out << "] trace_ids_truncated=" << truncated;
+        appendPrepareTensorMetadata(out, "request_ids", inputs.request_id);
+        appendPrepareTensorMetadata(out, "combo_tokens", inputs.combo_tokens);
+        appendPrepareTensorMetadata(out, "input_lengths", inputs.input_lengths);
+        appendPrepareTensorMetadata(out, "prefix_lengths", inputs.prefix_lengths);
+        appendPrepareTensorMetadata(out, "sequence_lengths", inputs.sequence_lengths);
+        appendPrepareTensorMetadata(out, "combo_position_ids", inputs.combo_position_ids);
+        appendPrepareTensorMetadata(out, "kv_cache_kernel_block_id", inputs.kv_cache_kernel_block_id);
+        scope.annotate(out.str());
+    } catch (...) {
+        // Diagnostic allocation/formatting failures must not affect inference.
+    }
+}
 
 // Pairs init() with a full drain on exceptional exits. DSpark's normal path
 // finishes only writer submissions here and leaves actual publication for the
@@ -1060,9 +1112,13 @@ void PyWrappedModel::prepareAttentionInputs(const GptModelInputs& inputs) {
 void PyWrappedModel::prepareAttentionInputs(const GptModelInputs& raw_inputs,
                                             bool                  skip_forward_event_sync,
                                             const GptModelInputs* publication_inputs) {
+    ExecutionStageScope prepare_trace("py_model.prepare_attention_inputs");
+    annotatePrepareInputs(prepare_trace, raw_inputs, model_id_, skip_forward_event_sync);
     RTP_LLM_PROFILE_SCOPE("py_model.prepareAttentionInputs");
     PreparedAttentionInputsGuard prepared_guard(prepared_attention_inputs_);
+    ExecutionStageScope          padding_trace("py_model.prepare_attention_inputs.sequence_parallel_padding");
     auto padded_inputs = sequence_parallel_padding_enabled_ ? padSequenceParallelInputs(raw_inputs) : GptModelInputs{};
+    padding_trace.finish("host_returned");
     const auto& inputs = sequence_parallel_padding_enabled_ ? padded_inputs : raw_inputs;
     d2d_copies_.clear();
     if (pinned_check_remaining_ > 0) {
@@ -1072,10 +1128,12 @@ void PyWrappedModel::prepareAttentionInputs(const GptModelInputs& raw_inputs,
     DevicePerfWrapper            wrapper(enable_device_perf_, "py model prepareAttentionInputs");
     torch_ext::PyAttentionInputs attention_inputs;
     {
+        ExecutionStageScope trace("py_model.prepare_attention_inputs.build");
         RTP_LLM_PROFILE_SCOPE("py_model.prepareAttentionInputs(build)");
         attention_inputs = buildPyAttentionInputs(inputs);
     }
     if (!inputs.warmup && inputs.pd_separation) {
+        ExecutionStageScope trace("py_model.prepare_attention_inputs.cache_store_params");
         // Compute may already carry SP padding. Publication must retain the
         // original request rows, without a dummy request or padded prefix.
         attention_inputs.cache_store_inputs =
@@ -1085,12 +1143,14 @@ void PyWrappedModel::prepareAttentionInputs(const GptModelInputs& raw_inputs,
         }
     }
     {
+        ExecutionStageScope trace("py_model.prepare_attention_inputs.padding_offset");
         RTP_LLM_PROFILE_SCOPE("py_model.prepareAttentionInputs(padding_offset)");
         calculatePaddingOffsetDeviceAware(attention_inputs);
         attention_inputs.padding_offset = tensorHoldHostAndToCuda(attention_inputs.padding_offset);
     }
     torch_ext::AttentionInputsByTag attention_inputs_by_tag;
     {
+        ExecutionStageScope trace("py_model.prepare_attention_inputs.setup_kv_cache");
         RTP_LLM_PROFILE_SCOPE("py_model.prepareAttentionInputs(setup_kv_cache)");
         attention_inputs_by_tag = setupKVCacheForAttentionInputs(attention_inputs, inputs);
     }
@@ -1104,8 +1164,10 @@ void PyWrappedModel::prepareAttentionInputs(const GptModelInputs& raw_inputs,
     // graph_runner->forward; the async-prepare extraction split those steps and broke the
     // implicit ordering.)
     {
+        ExecutionStageScope trace("py_model.prepare_attention_inputs.fused_copy");
         RTP_LLM_PROFILE_SCOPE("py_model.prepareAttentionInputs(fused_h2d)");
         fusedCopy(d2d_copies_);
+        trace.finish("host_returned");
     }
 
     graph_state_                         = CudaGraphState();
@@ -1128,6 +1190,7 @@ void PyWrappedModel::prepareAttentionInputs(const GptModelInputs& raw_inputs,
     const bool can_prepare_graph =
         enable_cuda_graph_ && runner != nullptr && runner->canRun(py_model_inputs, state, CudaGraphCheckMode::PREPARE);
     if (can_prepare_graph) {
+        ExecutionStageScope trace("py_model.prepare_attention_inputs.cuda_graph_prepare");
         RTP_LLM_PROFILE_SCOPE("py_model.prepareAttentionInputs(cuda_graph_prepare)");
         runner->prepareAttentionInputs(py_model_inputs, state, skip_forward_event_sync);
     }

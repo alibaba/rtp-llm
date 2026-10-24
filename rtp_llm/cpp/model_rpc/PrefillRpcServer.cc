@@ -9,6 +9,7 @@
 #include "rtp_llm/cpp/engine_base/Host.h"
 #include "rtp_llm/cpp/multimodal_processor/MultimodalError.h"
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
+#include "rtp_llm/models_py/bindings/core/ExecOps.h"
 #include "rtp_llm/cpp/telemetry/PhaseSpanSynthesizer.h"
 #include <algorithm>
 #include <chrono>
@@ -625,15 +626,22 @@ void PrefillRpcServer::remoteGenerate(PrefillGenerateContext& prefill_context) {
     auto sp_output_buffer = stream->getSPOutputBuffer();
 
     if (sp_output_buffer && !engine_->isDSpark()) {
-        auto all_probs_cpu =
-            sp_output_buffer->all_probs.is_cuda() ? sp_output_buffer->all_probs.cpu() : sp_output_buffer->all_probs;
+        auto all_probs_cpu = sp_output_buffer->all_probs;
+        if (all_probs_cpu.is_cuda()) {
+            GpuStageTrace trace(
+                "mtp.remote_generate.probs_d2h", sp_output_buffer->all_probs, -1, {}, prefill_context.request_id);
+            all_probs_cpu = sp_output_buffer->all_probs.cpu();
+        }
         torch::Tensor hidden_states_cpu;
         if (!sp_output_buffer->hidden_states.defined()) {
             // dummy hidden states, so datatype is not important
             hidden_states_cpu = torch::empty({0}, torch::TensorOptions().dtype(torch::kFloat16));
+        } else if (sp_output_buffer->hidden_states.is_cuda()) {
+            GpuStageTrace trace(
+                "mtp.remote_generate.hidden_d2h", sp_output_buffer->hidden_states, -1, {}, prefill_context.request_id);
+            hidden_states_cpu = sp_output_buffer->hidden_states.cpu();
         } else {
-            hidden_states_cpu = sp_output_buffer->hidden_states.is_cuda() ? sp_output_buffer->hidden_states.cpu() :
-                                                                            sp_output_buffer->hidden_states;
+            hidden_states_cpu = sp_output_buffer->hidden_states;
         }
         QueryConverter::transTensorPB(generate_request.mutable_propose_probs(), all_probs_cpu);
         QueryConverter::transTensorPB(generate_request.mutable_propose_hidden(), hidden_states_cpu);

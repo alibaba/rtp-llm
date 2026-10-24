@@ -51,6 +51,7 @@ cc_test(
     srcs = ["ModelInputsLoggerTest.cc"],
     copts = test_copts,
     deps = [
+        "//rtp_llm/cpp/utils:execution_stage_recorder",
         "//rtp_llm/cpp/models:model_inputs_logger",
         "@com_google_googletest//:gtest",
         "@com_google_googletest//:gtest_main",

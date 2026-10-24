@@ -36,6 +36,10 @@ __all__: list[str] = [
     "clear_comm_ops",
     "init_cpu_tp_broadcaster",
     "destroy_cpu_tp_broadcaster",
+    "GpuStageTrace",
+    "gpu_stage_trace_enabled",
+    "set_gpu_stage_trace_rank",
+    "dump_gpu_stage_trace",
     "rtp_llm_ops",
 ]
 class BertEmbeddingInputs:
@@ -537,3 +541,19 @@ def clear_comm_ops() -> None:
 
 def init_cpu_tp_broadcaster(tp_rank: int, tp_size: int, base_path: str) -> None: ...
 def destroy_cpu_tp_broadcaster() -> None: ...
+
+class GpuStageTrace:
+    def __init__(
+        self,
+        stage: str,
+        tensor: torch.Tensor,
+        device_id: int = -1,
+        details: str = "",
+        request_id: int = 0,
+    ) -> None: ...
+    def __enter__(self) -> GpuStageTrace: ...
+    def __exit__(self, error_type: typing.Any, error: typing.Any, traceback: typing.Any) -> bool: ...
+
+def gpu_stage_trace_enabled() -> bool: ...
+def set_gpu_stage_trace_rank(rank: int) -> None: ...
+def dump_gpu_stage_trace(reason: str = "manual") -> None: ...

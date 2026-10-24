@@ -149,6 +149,7 @@ cc_library(
     srcs = ["ModelInputsLogger.cc"],
     hdrs = ["ModelInputsLogger.h"],
     deps = [
+        "//rtp_llm/cpp/utils:execution_stage_recorder_hdr",
         "//rtp_llm/cpp/utils:core_utils",
         "//rtp_llm/models_py/bindings/core:op_data",
         "@havenask//aios/autil:env_util",
@@ -166,6 +167,7 @@ cc_library(
         "*.cc",
     ], exclude = ["ModelInputsLogger.cc"]),
     deps = [
+        "//rtp_llm/cpp/utils:execution_stage_recorder_hdr",
         ":model_inputs_logger",
         ":sample_infos",
         ":logits_processor",

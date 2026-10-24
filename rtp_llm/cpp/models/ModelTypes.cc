@@ -253,6 +253,7 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
     if (parallelism_config.tp_size <= 1) {
         return;
     }
+    GpuStageTrace sync_trace("tp_sync.inputs", {}, parallelism_config.local_rank);
 
     // Producers and async snapshots already use canonical tag order. Keep
     // the original tensors throughout packing/broadcast; no group-row copies.
@@ -266,7 +267,10 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
 
     // Python initializes intra-node UDS or cross-node Gloo for CPU control data;
     // execBroadcastCpu retains the synchronized GPU fallback if neither is registered.
-    execBroadcastCpu({{shape_hints_t}, 0});
+    {
+        GpuStageTrace trace("tp_sync.shape_hints", shape_hints_t, parallelism_config.local_rank);
+        execBroadcastCpu({{shape_hints_t}, 0});
+    }
 
     // multimodal features shape broadcast
     torch::Tensor mm_features_shape_t;
@@ -328,6 +332,7 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
             }
         }
         // CPU broadcast (UDS path; fallback handles cudaSyncAndCheck).
+        GpuStageTrace trace("tp_sync.mm_shapes", mm_features_shape_t, parallelism_config.local_rank);
         execBroadcastCpu({{mm_features_shape_t}, 0});
     }
 
@@ -343,6 +348,7 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
                     inputs.mm_extra_input.has_value() ? inputs.mm_extra_input.value()[i].numel() : 0;
             }
         }
+        GpuStageTrace trace("tp_sync.mm_extra_shapes", mm_extra_input_shape_t, parallelism_config.local_rank);
         execBroadcast({{mm_extra_input_shape_t}, 0});
         execSyncCommunication(false);
         cudaSyncAndCheck();
@@ -708,11 +714,13 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
 
     // Broadcast at most 2 packed buffers instead of N individual tensors.
     if (cpu_packed.defined()) {
+        GpuStageTrace trace("tp_sync.cpu_packed", cpu_packed, parallelism_config.local_rank);
         execBroadcastCpu({{cpu_packed}, 0});
     }
 
     if (gpu_packed.defined()) {
         // gpu no need to sync communication
+        GpuStageTrace trace("tp_sync.gpu_packed", gpu_packed, parallelism_config.local_rank);
         execBroadcast({{gpu_packed}, 0});
     }
 

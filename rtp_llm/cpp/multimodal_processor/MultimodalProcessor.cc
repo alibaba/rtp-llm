@@ -11,6 +11,7 @@
 #include "rtp_llm/cpp/multimodal_processor/MultimodalTokenUtils.h"
 #include "rtp_llm/cpp/pybind/PyUtils.h"
 #include "rtp_llm/cpp/multimodal_processor/MultimodalProcessor.h"
+#include "rtp_llm/models_py/bindings/core/ExecOps.h"
 
 namespace py = pybind11;
 
@@ -18,10 +19,11 @@ namespace rtp_llm {
 
 namespace {
 
-ErrorInfo pinMultimodalTensors(std::vector<torch::Tensor>& tensors, const char* tensor_name) {
+ErrorInfo pinMultimodalTensors(std::vector<torch::Tensor>& tensors, const char* tensor_name, int64_t request_id) {
 #if USING_CUDA
     try {
-        for (auto& tensor : tensors) {
+        for (size_t index = 0; index < tensors.size(); ++index) {
+            auto& tensor = tensors[index];
             if (!tensor.defined() || tensor.is_pinned()) {
                 continue;
             }
@@ -29,8 +31,16 @@ ErrorInfo pinMultimodalTensors(std::vector<torch::Tensor>& tensors, const char* 
                 auto options =
                     torch::TensorOptions().dtype(tensor.scalar_type()).device(torch::kCPU).pinned_memory(true);
                 // Downstream TP serialization can read the host tensor immediately.
+                GpuStageTrace trace("mm.pin.d2h",
+                                    tensor,
+                                    -1,
+                                    gpuStageTraceEnabled() ?
+                                        std::string("tensor=") + tensor_name + " index=" + std::to_string(index) :
+                                        "",
+                                    request_id);
                 tensor = tensor.to(options, /*non_blocking=*/false);
             } else {
+                GpuStageTrace trace("mm.pin.host", tensor, -1, tensor_name, request_id);
                 tensor = tensor.pin_memory();
             }
         }
@@ -41,6 +51,7 @@ ErrorInfo pinMultimodalTensors(std::vector<torch::Tensor>& tensors, const char* 
 #else
     (void)tensors;
     (void)tensor_name;
+    (void)request_id;
 #endif
     return ErrorInfo::OkStatus();
 }
@@ -369,8 +380,8 @@ ErrorInfo MultimodalProcessor::updateMultimodalFeatures(std::shared_ptr<rtp_llm:
                                             {},
                                             mm_embedding_res.mm_feature_hashes));
     RETURN_IF_STATUS_ERROR(checkExpandLength(expanded_ids));
-    RETURN_IF_STATUS_ERROR(pinMultimodalTensors(mm_features, "embedding"));
-    RETURN_IF_STATUS_ERROR(pinMultimodalTensors(mm_extra_input, "extra input"));
+    RETURN_IF_STATUS_ERROR(pinMultimodalTensors(mm_features, "embedding", input->request_id));
+    RETURN_IF_STATUS_ERROR(pinMultimodalTensors(mm_extra_input, "extra input", input->request_id));
     input->multimodal_features = std::move(mm_features);
     input->mm_position_ids     = std::move(mm_embedding_res.mm_position_ids);
     input->mm_extra_input      = std::move(mm_extra_input);

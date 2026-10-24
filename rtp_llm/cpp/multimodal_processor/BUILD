@@ -104,6 +104,7 @@ cc_library(
         "//rtp_llm/cpp/embedding_engine:embedding_engine",
         "//rtp_llm/cpp/model_rpc/proto:model_rpc_service_cc_proto",
         "//rtp_llm/cpp/pybind:py_utils",
+        "//rtp_llm/models_py/bindings/core:exec_ops_hdr",
     ] + select({
         "@//:using_cuda": [":feature_hash_kernel"],
         "//conditions:default": [],

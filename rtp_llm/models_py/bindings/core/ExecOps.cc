@@ -4,6 +4,7 @@
 #include "rtp_llm/cpp/disaggregate/cache_store/CacheStore.h"
 #include "rtp_llm/cpp/distribute/CpuTpBroadcaster.h"
 #include "rtp_llm/cpp/utils/Logger.h"
+#include "rtp_llm/cpp/utils/ExecutionStageRecorder.h"
 #include "rtp_llm/cpp/cache/CacheConfig.h"
 #include "rtp_llm/cpp/cache/CacheGroupType.h"
 #include "rtp_llm/cpp/cache/LinearKVCacheSpec.h"
@@ -79,6 +80,50 @@ static bool g_enable_comm_overlap = true;
 
 static int64_t g_device_id = 0;
 }  // anonymous namespace
+
+bool gpuStageTraceEnabled() noexcept {
+    try {
+        return executionStageRecorder().enabled();
+    } catch (...) {
+        return false;
+    }
+}
+
+GpuStageTrace::GpuStageTrace(const char*          stage,
+                             const torch::Tensor& tensor,
+                             int                  device_id,
+                             const std::string&   details,
+                             int64_t              request_id) noexcept:
+    scope_(stage, {}, request_id) {
+    try {
+        if (!scope_.id()) {
+            return;
+        }
+        std::ostringstream metadata;
+        metadata << details;
+        const int device_index = tensor.defined() && tensor.is_cuda() ? tensor.get_device() :
+                                 device_id >= 0                       ? device_id :
+                                                                        static_cast<int>(getDeviceId());
+        metadata << " device=" << device_index;
+        // Looking up a stream can lazily initialize runtime state. Diagnostics
+        // never call CUDA: report only stream handles obtained by the operation
+        // itself at call sites that already have one.
+        metadata << " stream=unobserved";
+        if (tensor.defined()) {
+            metadata << " tensor_device=" << tensor.device() << " dtype=" << tensor.scalar_type()
+                     << " shape=" << tensor.sizes() << " bytes=" << tensor.nbytes();
+        }
+        scope_.annotate(metadata.str());
+    } catch (...) {}
+}
+
+GpuStageTrace::~GpuStageTrace() {
+    finish();
+}
+
+void GpuStageTrace::finish(const char* phase) noexcept {
+    scope_.finish(phase);
+}
 
 // ============================================================
 // Runtime state query
@@ -877,6 +922,28 @@ OverallExpertStats execCreateMoeExpertStates(const ExpertStatsParams& params) {
 // ============================================================
 
 void registerExecCtxOps(pybind11::module& m) {
+    m.def("gpu_stage_trace_enabled", &gpuStageTraceEnabled);
+    m.def("set_gpu_stage_trace_rank", [](int rank) { executionStageRecorder().setRank(rank); });
+    m.def(
+        "dump_gpu_stage_trace",
+        [](const std::string& reason) { executionStageRecorder().dump(reason); },
+        py::arg("reason") = "manual",
+        py::call_guard<py::gil_scoped_release>());
+    py::class_<GpuStageTrace>(m, "GpuStageTrace")
+        .def(py::init<const char*, const torch::Tensor&, int, const std::string&, int64_t>(),
+             py::arg("stage"),
+             py::arg("tensor"),
+             py::arg("device_id")  = -1,
+             py::arg("details")    = "",
+             py::arg("request_id") = 0)
+        .def(
+            "__enter__",
+            [](GpuStageTrace& trace) -> GpuStageTrace& { return trace; },
+            py::return_value_policy::reference_internal)
+        .def("__exit__", [](GpuStageTrace& trace, py::object error_type, py::object, py::object) {
+            trace.finish(error_type.is_none() ? "returned" : "exception");
+            return false;
+        });
     m.def("get_device_id", &getDeviceId);
     m.def("preprocess_gemm_weight_by_key",
           &preprocessGemmWeightByKey,

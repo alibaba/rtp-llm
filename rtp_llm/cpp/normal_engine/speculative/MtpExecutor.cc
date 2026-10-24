@@ -23,6 +23,7 @@
 #include "rtp_llm/cpp/models/logits_processor/LogitsProcessorFactory.h"
 #include "rtp_llm/cpp/models/logits_processor/TreeLogitsProcessor.h"
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
+#include "rtp_llm/cpp/utils/ExecutionStageRecorder.h"
 #include <algorithm>
 #include <cstring>
 #include <sstream>
@@ -107,6 +108,7 @@ bool MtpExecutor::hasLinearCacheSnapshotCapacity(const std::list<GenerateStreamP
 }
 
 GptModelOutputs MtpExecutor::forwardModel(ModelBase* model, const GptModelInputs& inputs, ModelInputsModelRole role) {
+    ExecutionStageScope forward_trace("executor.mtp.forward_model");
     RTP_LLM_CHECK_WITH_INFO(model != nullptr, "model is null before forward");
     if (model_inputs_logger_) {
         model_inputs_logger_->log(inputs, role, model->model_id_);

@@ -3,6 +3,23 @@ load("@arch_config//:arch_select.bzl", "torch_deps")
 
 package(default_visibility = ["//:__subpackages__"])
 
+cc_library(
+    name = "execution_stage_recorder_hdr",
+    hdrs = ["ExecutionStageRecorder.h"],
+    visibility = ["//visibility:public"],
+)
+
+# Keep the implementation in librtp_compute_ops.so. Engine users need only the
+# header: statically linking another copy splits the singleton and TLS parents.
+cc_library(
+    name = "execution_stage_recorder",
+    srcs = ["ExecutionStageRecorder.cc"],
+    deps = [":execution_stage_recorder_hdr"],
+    copts = copts(),
+    linkopts = ["-pthread"],
+    visibility = ["//visibility:public"],
+)
+
 
 
 # KVCache utilities - simple inline functions, no external dependencies

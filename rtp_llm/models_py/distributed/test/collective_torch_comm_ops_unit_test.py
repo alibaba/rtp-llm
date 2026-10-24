@@ -12,7 +12,7 @@ from rtp_llm.models_py.distributed import collective_torch as collective
 
 
 class CollectiveTorchCommOpsUnitTest(unittest.TestCase):
-    def _registered_callbacks(self, config=None, process_group=None):
+    def _registered_callbacks(self, config=None, process_group=None, compute_ops=None):
         if process_group is None:
             process_group = MagicMock()
             process_group.size.return_value = 1
@@ -24,13 +24,18 @@ class CollectiveTorchCommOpsUnitTest(unittest.TestCase):
                 local_world_size=1,
                 tp_rank=0,
             )
-        compute_ops = SimpleNamespace(register_comm_ops=MagicMock())
+        if compute_ops is None:
+            compute_ops = SimpleNamespace(register_comm_ops=MagicMock())
 
-        with patch.dict(sys.modules, {"librtp_compute_ops": compute_ops}), patch.object(
-            collective,
-            "_group_map",
-            {collective.Group.DP_AND_TP: process_group},
-        ), patch.object(collective, "_parallelism_config", config):
+        with (
+            patch.dict(sys.modules, {"librtp_compute_ops": compute_ops}),
+            patch.object(
+                collective,
+                "_group_map",
+                {collective.Group.DP_AND_TP: process_group},
+            ),
+            patch.object(collective, "_parallelism_config", config),
+        ):
             collective._register_process_groups_to_cpp()
 
         compute_ops.register_comm_ops.assert_called_once()
@@ -38,6 +43,119 @@ class CollectiveTorchCommOpsUnitTest(unittest.TestCase):
 
     def _registered_allreduce(self):
         return self._registered_callbacks()[1]
+
+    def _traced_broadcast(self, enabled=True):
+        events = []
+
+        class Stage:
+            def __init__(self, name, tensor, device, details):
+                self.name = name
+                events.append(("begin", name))
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, error_type, error, traceback):
+                events.append(("end", self.name, error_type))
+                return False
+
+        compute_ops = SimpleNamespace(
+            register_comm_ops=MagicMock(),
+            gpu_stage_trace_enabled=lambda: enabled,
+            set_gpu_stage_trace_rank=MagicMock(),
+            GpuStageTrace=MagicMock(side_effect=Stage),
+        )
+        config = SimpleNamespace(
+            tp_size=8, dp_size=1, world_size=8, local_world_size=4, tp_rank=0
+        )
+        group = MagicMock()
+        group.size.return_value = 8
+        with patch.object(torch.distributed, "get_rank", return_value=0):
+            callback = self._registered_callbacks(config, group, compute_ops)[0]
+        return callback, compute_ops, events
+
+    def test_broadcast_trace_orders_copy_and_collective_stages(self):
+        callback, compute_ops, events = self._traced_broadcast()
+        cpu = MagicMock(is_cuda=False)
+        gpu = MagicMock(is_cuda=True)
+        cpu.to.side_effect = lambda *args: events.append(("copy", "h2d")) or gpu
+        cpu.copy_.side_effect = lambda *args: events.append(("copy", "d2h"))
+        with (
+            patch.object(torch.distributed, "get_global_rank", return_value=0),
+            patch.object(torch.cuda, "current_device", return_value=0),
+            patch.object(
+                torch.distributed,
+                "broadcast",
+                side_effect=lambda *args, **kwargs: events.append(("nccl",)),
+            ),
+        ):
+            callback([cpu], 0, collective._CPP_PARALLEL_MODE_TP)
+        self.assertEqual(
+            events,
+            [
+                ("begin", "tp_broadcast.h2d"),
+                ("copy", "h2d"),
+                ("end", "tp_broadcast.h2d", None),
+                ("begin", "tp_broadcast.nccl_call"),
+                ("nccl",),
+                ("end", "tp_broadcast.nccl_call", None),
+                ("begin", "tp_broadcast.d2h"),
+                ("copy", "d2h"),
+                ("end", "tp_broadcast.d2h", None),
+            ],
+        )
+        compute_ops.set_gpu_stage_trace_rank.assert_called_once_with(0)
+        self.assertIn("broadcast_call=1", compute_ops.GpuStageTrace.call_args.args[3])
+
+    def test_broadcast_trace_preserves_exception_and_skips_copyback(self):
+        callback, _, events = self._traced_broadcast()
+        cpu = MagicMock(is_cuda=False)
+        cpu.to.return_value = MagicMock(is_cuda=True)
+        with (
+            patch.object(torch.distributed, "get_global_rank", return_value=0),
+            patch.object(torch.cuda, "current_device", return_value=0),
+            patch.object(
+                torch.distributed,
+                "broadcast",
+                side_effect=RuntimeError("collective failed"),
+            ),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "collective failed"):
+                callback([cpu], 0, collective._CPP_PARALLEL_MODE_TP)
+        self.assertEqual(events[-1], ("end", "tp_broadcast.nccl_call", RuntimeError))
+        cpu.copy_.assert_not_called()
+
+    def test_broadcast_trace_disabled_preserves_fast_path(self):
+        callback, compute_ops, events = self._traced_broadcast(enabled=False)
+        gpu = MagicMock(is_cuda=True)
+        with (
+            patch.object(torch.distributed, "get_global_rank", return_value=0),
+            patch.object(torch.cuda, "current_device", return_value=0),
+            patch.object(torch.distributed, "broadcast") as broadcast,
+        ):
+            callback([gpu], 0, collective._CPP_PARALLEL_MODE_TP)
+        broadcast.assert_called_once()
+        gpu.to.assert_not_called()
+        compute_ops.GpuStageTrace.assert_not_called()
+        compute_ops.set_gpu_stage_trace_rank.assert_not_called()
+        self.assertEqual(events, [])
+
+    def test_broadcast_trace_gpu_tensor_does_not_report_host_copies(self):
+        callback, _, events = self._traced_broadcast()
+        gpu = MagicMock(is_cuda=True)
+        with (
+            patch.object(torch.distributed, "get_global_rank", return_value=0),
+            patch.object(torch.cuda, "current_device", return_value=0),
+            patch.object(torch.distributed, "broadcast"),
+        ):
+            callback([gpu], 0, collective._CPP_PARALLEL_MODE_TP)
+        self.assertEqual(
+            events,
+            [
+                ("begin", "tp_broadcast.nccl_call"),
+                ("end", "tp_broadcast.nccl_call", None),
+            ],
+        )
 
     def test_single_rank_allreduce_returns_input_without_dest(self):
         allreduce = self._registered_allreduce()

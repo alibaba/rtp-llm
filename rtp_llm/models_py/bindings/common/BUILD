@@ -6,6 +6,7 @@ cc_library(
     name = "fuse_copy_op",
     srcs = ["FusedCopyOp.cc"],
     deps = [
+        "//rtp_llm/cpp/utils:execution_stage_recorder_hdr",
         "//rtp_llm/models_py/bindings/core:exec_ops_hdr",
         "//rtp_llm/models_py/bindings/core:types_hdr",
         "//rtp_llm/models_py/bindings/common/kernels:fuse_copy_kernel",

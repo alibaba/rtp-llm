@@ -116,6 +116,7 @@ cc_library(
         ":device_data",
         "//rtp_llm/cpp/config:config_modules",
         "//rtp_llm/cpp/models:stats",
+        "//rtp_llm/cpp/utils:execution_stage_recorder_hdr",
         "//rtp_llm/models_py/bindings/common/kernels:fuse_copy_util",
     ] + torch_deps() + select({
         "@//:using_rocm": ["@local_config_rocm//rocm:rocm_headers"],
@@ -146,6 +147,7 @@ cc_library(
         "//rtp_llm/cpp/utils:signal_utils",
         "//rtp_llm/cpp/utils:kv_cache_utils",
         "//rtp_llm/cpp/utils:debug_utils",
+        "//rtp_llm/cpp/utils:execution_stage_recorder",
         "//rtp_llm/cpp/config:static_config",
         "//rtp_llm/cpp/model_utils:model_utils",
         "//rtp_llm/cpp/config:config_modules",
@@ -230,6 +232,7 @@ cc_library(
         "//rtp_llm/cpp/utils:signal_utils",
         "//rtp_llm/cpp/utils:kv_cache_utils",
         "//rtp_llm/cpp/utils:debug_utils",
+        "//rtp_llm/cpp/utils:execution_stage_recorder",
         "//rtp_llm/cpp/config:static_config",
         "//rtp_llm/cpp/model_utils:model_utils",
         "//rtp_llm/cpp/config:config_modules",

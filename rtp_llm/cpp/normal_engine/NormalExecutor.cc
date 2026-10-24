@@ -10,6 +10,7 @@
 #include <string>
 #include "rtp_llm/cpp/utils/StatusUtil.h"
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
+#include "rtp_llm/cpp/utils/ExecutionStageRecorder.h"
 #include "rtp_llm/cpp/models/ModelInputsLogger.h"
 #include "rtp_llm/cpp/models/ModelTypes.h"
 #include "rtp_llm/cpp/models/PyWrappedModel.h"
@@ -305,6 +306,7 @@ absl::Status NormalExecutor::process(const std::list<GenerateStreamPtr>& streams
         }
     }
     {
+        ExecutionStageScope forward_trace("executor.model_forward");
         bool force = tp_rank_ == 0 && enable_detail_log_;
         if (force) {
             RTP_LLM_LOG_INFO("model_input: %s", model_input.debugString(force).c_str());
