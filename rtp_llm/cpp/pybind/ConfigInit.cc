@@ -655,154 +655,85 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       self.kvcm_min_replica_count);
             },
             [](py::tuple t) {
-                const py::tuple kvcm_state = t;
-                const bool has_current_fields = t.size() == 74 && py::isinstance<py::int_>(t[1]) && t[1].cast<int>() == 10;
-                const bool has_combined_fields = t.size() == 73 && py::isinstance<py::int_>(t[1]) && t[1].cast<int>() == 9;
-                // Native pool v8 states store a float at 69; GDR v8 states store an int.
-                const bool has_legacy_kvcm_fields = t.size() == 71 && py::isinstance<py::int_>(t[1])
-                    && t[1].cast<int>() == 8 && py::isinstance<py::int_>(t[69]);
-                const bool has_kvcm_fields = has_current_fields || has_combined_fields || has_legacy_kvcm_fields;
-                if (has_kvcm_fields) {
-                    const size_t field_count = has_current_fields ? 72 : (has_combined_fields ? 71 : 69);
-                    t                        = t[py::slice(0, field_count, 1)].cast<py::tuple>();
-                    t[1]                     = py::int_(has_current_fields ? 9 : (has_combined_fields ? 8 : 7));
-                }
-                const py::tuple crc_state = t;
-                const bool      has_crc_field =
-                    (t.size() == 72 && py::isinstance<py::int_>(t[1]) && t[1].cast<int>() == 9)
-                    || (t.size() == 70 && py::isinstance<py::int_>(t[1]) && t[1].cast<int>() == 8);
-                if (has_crc_field) {
-                    const size_t field_count = t.size() - 1;
-                    t                        = t[py::slice(0, field_count, 1)].cast<py::tuple>();
-                    t[1]                     = py::int_(field_count == 71 ? 8 : 7);
-                }
-                const py::tuple pool_state = t;
-                const bool has_pool_fields = t.size() == 71 && py::isinstance<py::int_>(t[1]) && t[1].cast<int>() == 8;
-                if (has_pool_fields) {
-                    t    = t[py::slice(0, 69, 1)].cast<py::tuple>();
-                    t[1] = py::int_(7);
-                }
-                const py::tuple event_state = t;
-                const bool has_event_fields = t.size() == 69 && py::isinstance<py::int_>(t[1]) && t[1].cast<int>() == 7;
-                if (has_event_fields) {
-                    t    = t[py::slice(0, 64, 1)].cast<py::tuple>();
-                    t[1] = py::int_(6);
-                }
-                constexpr size_t kLegacyFieldCount               = 55;
-                constexpr size_t kQueueConfigFieldCount          = 64;
-                constexpr size_t kWriteSyncFieldCount            = 56;
-                constexpr size_t kQueueConfigWriteSyncFieldCount = 65;
-                constexpr size_t kPinnedHostFieldCount           = 64;
-                constexpr size_t kReserveRemovedFieldCount       = 63;
-                constexpr size_t kCurrentFieldCount              = 62;
-                if (t.size() < 2 || !py::isinstance<py::str>(t[0]) || !py::isinstance<py::int_>(t[1])) {
-                    throw std::runtime_error("invalid KVCacheConfig state");
-                }
-                const int  version = t[1].cast<int>();
-                const bool valid_legacy_state =
-                    version == 1 && (t.size() == kLegacyFieldCount + 2 || t.size() == kQueueConfigFieldCount + 2);
-                const bool valid_write_sync_state = version == 2 && t.size() == kWriteSyncFieldCount + 2;
-                const bool valid_queue_write_sync_state =
-                    version == 3 && t.size() == kQueueConfigWriteSyncFieldCount + 2;
-                const bool valid_pinned_host_state     = version == 4 && t.size() == kPinnedHostFieldCount + 2;
-                const bool valid_reserve_removed_state = version == 5 && t.size() == kReserveRemovedFieldCount + 2;
-                const bool valid_current_state         = version == 6 && t.size() == kCurrentFieldCount + 2;
-                if (t[0].cast<std::string>() != "KVCacheConfig"
-                    || (!valid_legacy_state && !valid_write_sync_state && !valid_queue_write_sync_state
-                        && !valid_pinned_host_state && !valid_reserve_removed_state && !valid_current_state)) {
+                if (t.size() != 74 || !py::isinstance<py::str>(t[0]) || !py::isinstance<py::int_>(t[1])
+                    || t[0].cast<std::string>() != "KVCacheConfig" || t[1].cast<int>() != 10) {
                     throw std::runtime_error("invalid KVCacheConfig state");
                 }
 
                 KVCacheConfig c;
-                // Legacy indices include host pinning (removed in v4) and the absolute reserve (removed in v5).
-                const auto value = [&](size_t index) {
-                    return t[index + 2 - (version >= 4 && index > 18 ? 1 : 0) - (version >= 5 && index > 49 ? 1 : 0)];
-                };
-                c.reuse_cache                          = value(0).cast<bool>();
-                c.multi_task_prompt                    = value(1).cast<std::string>();
-                c.multi_task_prompt_str                = value(2).cast<std::string>();
-                c.multi_task_prompt_tokens             = value(3).cast<std::map<std::string, std::vector<int>>>();
-                c.reserve_block_ratio                  = value(4).cast<int64_t>();
-                c.max_block_size_per_item              = value(5).cast<int>();
-                c.memory_cache_size_mb                 = value(6).cast<int64_t>();
-                c.memory_cache_sync_timeout_ms         = value(7).cast<int64_t>();
-                c.linear_step                          = value(8).cast<int>();
-                c.fp8_kv_cache                         = value(9).cast<int>();
-                c.ssm_state_dtype                      = value(10).cast<std::string>();
-                c.kv_cache_mem_mb                      = value(11).cast<int64_t>();
-                c.seq_size_per_block                   = value(12).cast<int>();
-                c.kernel_seq_size_per_block            = value(13).cast<int>();
-                c.test_block_num                       = value(14).cast<int>();
-                c.use_block_cache                      = value(15).cast<int>();
-                c.enable_device_cache                  = value(16).cast<bool>();
-                c.enable_memory_cache                  = value(17).cast<bool>();
-                c.enable_disk_cache                    = value(19).cast<bool>();
-                c.enable_remote_cache                  = value(20).cast<bool>();
-                c.disk_cache_paths                     = value(21).cast<std::string>();
-                c.disk_cache_size_mb                   = value(22).cast<int64_t>();
-                c.disk_cache_buffered_io               = value(23).cast<bool>();
-                c.disk_cache_sync_timeout_ms           = value(24).cast<int64_t>();
-                c.disk_cache_staging_block_count       = value(25).cast<int64_t>();
-                c.device_eviction_policy               = value(26).cast<std::string>();
-                c.memory_eviction_policy               = value(27).cast<std::string>();
-                c.disk_eviction_policy                 = value(28).cast<std::string>();
-                c.kvcm_enable_vipserver                = value(29).cast<bool>();
-                c.kvcm_vipserver_domain                = value(30).cast<std::string>();
-                c.kvcm_server_address                  = value(31).cast<std::string>();
-                c.kvcm_instance_group                  = value(32).cast<std::string>();
-                c.kvcm_meta_channel_retry_time         = value(33).cast<uint32_t>();
-                c.kvcm_meta_channel_connection_timeout = value(34).cast<uint32_t>();
-                c.kvcm_meta_channel_call_timeout       = value(35).cast<uint32_t>();
-                c.kvcm_storage_thread_num              = value(36).cast<uint32_t>();
-                c.kvcm_storage_queue_size              = value(37).cast<uint32_t>();
-                c.kvcm_put_timeout_ms                  = value(38).cast<int>();
-                c.kvcm_get_timeout_ms                  = value(39).cast<int>();
-                c.kvcm_model_sdk_config                = value(40).cast<std::string>();
-                c.kvcm_model_user_data                 = value(41).cast<std::string>();
-                c.kvcm_model_extra_info                = value(42).cast<std::string>();
-                c.kvcm_instance_id_salt                = value(43).cast<std::string>();
-                c.kvcm_asyncwrapper_thread_num         = value(44).cast<size_t>();
-                c.kvcm_asyncwrapper_queue_size         = value(45).cast<size_t>();
-                c.kvcm_get_broadcast_timeout           = value(46).cast<int>();
-                c.kvcm_put_broadcast_timeout           = value(47).cast<int>();
-                c.kvcm_client_config                   = value(48).cast<std::string>();
-                c.memory_cache_max_descriptors_per_transfer_batch = value(50).cast<int64_t>();
-                c.dsv4_fixed_pool_blocks                          = value(51).cast<uint32_t>();
-                c.dsv4_hca_state_pool_blocks                      = value(52).cast<uint32_t>();
-                c.dsv4_fixed_pool_use_memory                      = value(53).cast<bool>();
-                c.block_tree_full_prefix_scan_interval_ms         = value(54).cast<int64_t>();
-                if ((valid_legacy_state && t.size() == kQueueConfigFieldCount + 2) || valid_queue_write_sync_state
-                    || valid_pinned_host_state || valid_reserve_removed_state || valid_current_state) {
-                    c.block_tree_transfer_worker_count             = value(55).cast<int64_t>();
-                    c.block_tree_business_queue_max_size           = value(56).cast<int64_t>();
-                    c.block_tree_transfer_queue_max_size           = value(57).cast<int64_t>();
-                    c.block_tree_device_evict_low_watermark_ratio  = value(58).cast<double>();
-                    c.block_tree_device_evict_high_watermark_ratio = value(59).cast<double>();
-                    c.block_tree_memory_evict_low_watermark_ratio  = value(60).cast<double>();
-                    c.block_tree_memory_evict_high_watermark_ratio = value(61).cast<double>();
-                    c.block_tree_disk_evict_low_watermark_ratio    = value(62).cast<double>();
-                    c.block_tree_disk_evict_high_watermark_ratio   = value(63).cast<double>();
-                }
-                // Legacy write-sync fields are intentionally ignored.
-                if (has_event_fields) {
-                    c.kv_cache_event_publisher_type   = event_state[64].cast<std::string>();
-                    c.kv_cache_event_manager_endpoint = event_state[65].cast<std::string>();
-                    c.kv_cache_event_instance_group   = event_state[66].cast<std::string>();
-                    c.kv_cache_event_instance_id      = event_state[67].cast<std::string>();
-                    c.kv_cache_event_host_ip_port     = event_state[68].cast<std::string>();
-                }
-                if (has_pool_fields) {
-                    c.memory_cache_swa_block_ratio  = pool_state[69].cast<double>();
-                    c.dsv41_decoder_swa_pool_blocks = pool_state[70].cast<uint32_t>();
-                }
-                if (has_kvcm_fields) {
-                    const size_t offset = has_current_fields ? 72 : (has_combined_fields ? 71 : 69);
-                    c.kvcm_read_backend_type = kvcm_state[offset].cast<int32_t>();
-                    c.kvcm_min_replica_count = kvcm_state[offset + 1].cast<int32_t>();
-                }
-                if (has_crc_field) {
-                    c.enable_crc = crc_state[crc_state.size() - 1].cast<bool>();
-                }
+                c.reuse_cache                                     = t[2].cast<bool>();
+                c.multi_task_prompt                               = t[3].cast<std::string>();
+                c.multi_task_prompt_str                           = t[4].cast<std::string>();
+                c.multi_task_prompt_tokens =
+                    t[5].cast<std::map<std::string, std::vector<int>>>();
+                c.reserve_block_ratio                             = t[6].cast<int64_t>();
+                c.max_block_size_per_item                         = t[7].cast<int>();
+                c.memory_cache_size_mb                            = t[8].cast<int64_t>();
+                c.memory_cache_sync_timeout_ms                    = t[9].cast<int64_t>();
+                c.linear_step                                     = t[10].cast<int>();
+                c.fp8_kv_cache                                    = t[11].cast<int>();
+                c.ssm_state_dtype                                 = t[12].cast<std::string>();
+                c.kv_cache_mem_mb                                 = t[13].cast<int64_t>();
+                c.seq_size_per_block                              = t[14].cast<int>();
+                c.kernel_seq_size_per_block                       = t[15].cast<int>();
+                c.test_block_num                                  = t[16].cast<int>();
+                c.use_block_cache                                 = t[17].cast<int>();
+                c.enable_device_cache                             = t[18].cast<bool>();
+                c.enable_memory_cache                             = t[19].cast<bool>();
+                c.enable_disk_cache                               = t[20].cast<bool>();
+                c.enable_remote_cache                             = t[21].cast<bool>();
+                c.disk_cache_paths                                = t[22].cast<std::string>();
+                c.disk_cache_size_mb                              = t[23].cast<int64_t>();
+                c.disk_cache_buffered_io                          = t[24].cast<bool>();
+                c.disk_cache_sync_timeout_ms                      = t[25].cast<int64_t>();
+                c.disk_cache_staging_block_count                  = t[26].cast<int64_t>();
+                c.device_eviction_policy                          = t[27].cast<std::string>();
+                c.memory_eviction_policy                          = t[28].cast<std::string>();
+                c.disk_eviction_policy                            = t[29].cast<std::string>();
+                c.kvcm_enable_vipserver                           = t[30].cast<bool>();
+                c.kvcm_vipserver_domain                           = t[31].cast<std::string>();
+                c.kvcm_server_address                             = t[32].cast<std::string>();
+                c.kvcm_instance_group                             = t[33].cast<std::string>();
+                c.kvcm_meta_channel_retry_time                    = t[34].cast<uint32_t>();
+                c.kvcm_meta_channel_connection_timeout            = t[35].cast<uint32_t>();
+                c.kvcm_meta_channel_call_timeout                  = t[36].cast<uint32_t>();
+                c.kvcm_storage_thread_num                         = t[37].cast<uint32_t>();
+                c.kvcm_storage_queue_size                         = t[38].cast<uint32_t>();
+                c.kvcm_put_timeout_ms                             = t[39].cast<int>();
+                c.kvcm_get_timeout_ms                             = t[40].cast<int>();
+                c.kvcm_model_sdk_config                           = t[41].cast<std::string>();
+                c.kvcm_model_user_data                            = t[42].cast<std::string>();
+                c.kvcm_model_extra_info                           = t[43].cast<std::string>();
+                c.kvcm_instance_id_salt                           = t[44].cast<std::string>();
+                c.kvcm_asyncwrapper_thread_num                    = t[45].cast<size_t>();
+                c.kvcm_asyncwrapper_queue_size                    = t[46].cast<size_t>();
+                c.kvcm_get_broadcast_timeout                      = t[47].cast<int>();
+                c.kvcm_put_broadcast_timeout                      = t[48].cast<int>();
+                c.kvcm_client_config                              = t[49].cast<std::string>();
+                c.memory_cache_max_descriptors_per_transfer_batch = t[50].cast<int64_t>();
+                c.dsv4_fixed_pool_blocks                          = t[51].cast<uint32_t>();
+                c.dsv4_hca_state_pool_blocks                      = t[52].cast<uint32_t>();
+                c.dsv4_fixed_pool_use_memory                      = t[53].cast<bool>();
+                c.block_tree_full_prefix_scan_interval_ms         = t[54].cast<int64_t>();
+                c.block_tree_transfer_worker_count                = t[55].cast<int64_t>();
+                c.block_tree_business_queue_max_size              = t[56].cast<int64_t>();
+                c.block_tree_transfer_queue_max_size              = t[57].cast<int64_t>();
+                c.block_tree_device_evict_low_watermark_ratio     = t[58].cast<double>();
+                c.block_tree_device_evict_high_watermark_ratio    = t[59].cast<double>();
+                c.block_tree_memory_evict_low_watermark_ratio     = t[60].cast<double>();
+                c.block_tree_memory_evict_high_watermark_ratio    = t[61].cast<double>();
+                c.block_tree_disk_evict_low_watermark_ratio       = t[62].cast<double>();
+                c.block_tree_disk_evict_high_watermark_ratio      = t[63].cast<double>();
+                c.kv_cache_event_publisher_type                   = t[64].cast<std::string>();
+                c.kv_cache_event_manager_endpoint                 = t[65].cast<std::string>();
+                c.kv_cache_event_instance_group                   = t[66].cast<std::string>();
+                c.kv_cache_event_instance_id                      = t[67].cast<std::string>();
+                c.kv_cache_event_host_ip_port                     = t[68].cast<std::string>();
+                c.memory_cache_swa_block_ratio                    = t[69].cast<double>();
+                c.dsv41_decoder_swa_pool_blocks                   = t[70].cast<uint32_t>();
+                c.enable_crc                                      = t[71].cast<bool>();
+                c.kvcm_read_backend_type                          = t[72].cast<int32_t>();
+                c.kvcm_min_replica_count                          = t[73].cast<int32_t>();
                 return c;
             }));
 
