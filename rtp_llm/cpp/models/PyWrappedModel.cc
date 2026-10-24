@@ -129,6 +129,11 @@ void PyWrappedModel::cleanupAfterConstructionFailure() noexcept {
     try {
         generation_prefill_graph_runner_.reset();
         graph_runner_.reset();
+        // The constructor's GIL guard is still alive here; member destruction
+        // happens after it unwinds, so leave no Python references for that step.
+        held_attn_pyobj_   = py::object();
+        py_forward_method_ = py::object();
+        py_model_          = py::object();
     } catch (const std::exception& e) {
         RTP_LLM_LOG_ERROR("PyWrappedModel construction cleanup failed: %s", e.what());
     } catch (...) {

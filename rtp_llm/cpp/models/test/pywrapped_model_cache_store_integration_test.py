@@ -1079,20 +1079,25 @@ class PyWrappedModelCacheStoreIntegrationTest(unittest.TestCase):
     def test_late_constructor_failure_destroys_clean_graphs_without_cache_allocation(
         self,
     ) -> None:
-        model = LateInitializeFailureGenerationPrefillCaptureModel()
-        result = run_generation_prefill_capture_scenario(
-            model, "Python model initialization failed"
-        )
+        for release_gil in (False, True):
+            with self.subTest(release_gil_during_construction=release_gil):
+                model = LateInitializeFailureGenerationPrefillCaptureModel()
+                result = run_generation_prefill_capture_scenario(
+                    model,
+                    "Python model initialization failed",
+                    release_gil_during_construction=release_gil,
+                )
 
-        self.assertEqual(model.initialize_calls, 2)
-        self.assertEqual(model.prefill_forward_calls, 4)
-        self.assertTrue(result["saw_capture_error"])
-        self.assertIn(
-            "Python model initialization failed", result["capture_error_message"]
-        )
-        self.assertFalse(result["graph_enabled"])
-        self.assertEqual(result["available_during"], result["available_before"])
-        self.assertEqual(result["available_after"], result["available_before"])
+                self.assertEqual(model.initialize_calls, 2)
+                self.assertEqual(model.prefill_forward_calls, 4)
+                self.assertTrue(result["saw_capture_error"])
+                self.assertIn(
+                    "Python model initialization failed",
+                    result["capture_error_message"],
+                )
+                self.assertFalse(result["graph_enabled"])
+                self.assertEqual(result["available_during"], result["available_before"])
+                self.assertEqual(result["available_after"], result["available_before"])
 
     def test_pdfusion_target_verify_reaches_eplb_as_decode_with_prefill_shapes(self):
         class Model(CacheStoreForwardModel):
@@ -1145,6 +1150,45 @@ class PyWrappedModelCacheStoreIntegrationTest(unittest.TestCase):
             [sample.tolist() for sample in model.eligible_samples], [[[2, 2]]]
         )
         self.assertEqual(model.counts.tolist(), [[0, 0]])
+
+    def test_python_constructor_failure_without_outer_gil_releases_model(self) -> None:
+        class FailingModel:
+            def __init__(self, failure_stage):
+                self.failure_stage = failure_stage
+                self.initialize_calls = 0
+                self.eplb_calls = 0
+
+            def initialize(self, resources):
+                self.initialize_calls += 1
+                if self.failure_stage == "initialize":
+                    raise NotImplementedError("Python constructor failure: initialize")
+                return True
+
+            def get_eplb_layers(self):
+                self.eplb_calls += 1
+                raise NotImplementedError("Python constructor failure: get_eplb_layers")
+
+        for failure_stage in ("initialize", "get_eplb_layers"):
+            with self.subTest(failure_stage=failure_stage):
+                model = FailingModel(failure_stage)
+                references_before = sys.getrefcount(model)
+                expected_error = f"Python constructor failure: {failure_stage}"
+                result = run_generation_prefill_capture_scenario(
+                    model,
+                    expected_error,
+                    release_gil_during_construction=True,
+                    enable_eplb=failure_stage == "get_eplb_layers",
+                )
+                self.assertEqual(model.initialize_calls, 1)
+                self.assertEqual(
+                    model.eplb_calls, int(failure_stage == "get_eplb_layers")
+                )
+                self.assertTrue(result["saw_capture_error"])
+                self.assertIn(expected_error, result["capture_error_message"])
+                self.assertFalse(result["graph_enabled"])
+                self.assertEqual(result["available_during"], result["available_before"])
+                self.assertEqual(result["available_after"], result["available_before"])
+                self.assertEqual(sys.getrefcount(model), references_before)
 
     def test_dirty_generation_prefill_capture_does_not_retain_cache_manager(
         self,
