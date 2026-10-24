@@ -24,7 +24,8 @@ class Clock:
 
 
 @pytest.mark.parametrize("dual", [False, True])
-def test_declared_heap_reaches_single_and_dual_master_launch(tmp_path, monkeypatch, dual):
+@pytest.mark.parametrize("pv", [None, True, False])
+def test_declared_heap_reaches_single_and_dual_master_launch(tmp_path, monkeypatch, dual, pv):
     from adapters.environment import FlexEnv
     from adapters.environment_config import EnvSpec, MasterSpec
     import adapters.master_lifecycle as implementation
@@ -35,7 +36,8 @@ def test_declared_heap_reaches_single_and_dual_master_launch(tmp_path, monkeypat
     monkeypatch.setattr(implementation, "resolve_java21", lambda: "/java21/bin/java")
     monkeypatch.setattr(implementation, "wait_ready", lambda *args, **kwargs: True)
     spec = EnvSpec(label="heap", master_profile="single-nonbatch", master_jvm_heap="64g",
-                   master_jvm_args=["-Xmx1g", "-XX:ActiveProcessorCount=32"])
+                   master_jvm_args=["-Xmx1g", "-XX:ActiveProcessorCount=32"],
+                   master_pv_log=pv, diagnostic_events=True, master_debug_log=True)
     env = FlexEnv(spec, tmp_path, 20000)
     env.endpoint_file.write_text(json.dumps({"env": {"MODEL_SERVICE_CONFIG": "{}"}}))
     launch = Mock(side_effect=RuntimeError("captured launch"))
@@ -50,6 +52,8 @@ def test_declared_heap_reaches_single_and_dual_master_launch(tmp_path, monkeypat
     assert [item for item in argv if item.startswith("-Xmx")] == ["-Xmx64g"]
     assert argv.index("-Xmx64g") < argv.index("-jar")
     assert "-XX:ActiveProcessorCount=32" in argv
+    assert ("--logging.level.pvLogger=WARN" in argv) == (pv is False)
+    assert "--logging.level.flexlbLogger=DEBUG" in argv
     assert spec.master_jvm_args == ["-Xmx1g", "-XX:ActiveProcessorCount=32"]
 
 

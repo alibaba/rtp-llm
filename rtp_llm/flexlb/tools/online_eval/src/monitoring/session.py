@@ -18,7 +18,7 @@ import urllib.request
 import uuid
 from pathlib import Path
 
-from artifacts.json_io import write_json
+from file_io import write_json
 from monitoring.query_plan import DEFAULT_PLAN, load_plan, plan_hash
 from monitoring.client import PrometheusClient
 from monitoring.archive import export_metrics
@@ -135,7 +135,7 @@ class PrometheusSession:
             body_size_limit="32MB", static_configs=[dict(targets=[parsed.netloc])],
             metric_relabel_configs=[dict(source_labels=["__name__"], action="keep",
                 regex="(" + "|".join(probe.names.values()) + ")")]))
-        path.write_text(json.dumps(config))
+        write_json(path, config)
         with urllib.request.urlopen(urllib.request.Request(self.client.url + "/-/reload", data=b"", method="POST"), timeout=min(5, deadline.remaining())):
             pass
         self._write_session()
@@ -188,7 +188,7 @@ class PrometheusSession:
             },
             "scrape_configs": jobs,
         }
-        (self.directory / "prometheus.json").write_text(json.dumps(config, indent=2))
+        write_json(self.directory / "prometheus.json", config, indent=2)
         self.started, self.monotonic = time.time(), time.monotonic()
         self.log = (self.directory / "prometheus.log").open("w")
         prefix = "/" + uuid.uuid4().hex

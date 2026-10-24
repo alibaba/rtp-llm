@@ -41,6 +41,30 @@ def master_jvm_options(spec):
     return options
 
 
+def master_arguments(env, mspec=None):
+    """One JVM/logging policy for fixed and discovered Master instances."""
+    spec = env.spec
+    http = mspec.http_port if mspec else env.master_http_port
+    management = mspec.management() if mspec else env.master_management_port
+    argv = [resolve_java21(), *master_jvm_options(spec), *JAVA_MODULE_OPTS,
+            "-jar", str(API_JAR), f"--server.port={http}",
+            f"--management.server.port={management}",
+            f"--spring.profiles.active={spec.spring_profile}"]
+    if mspec:
+        log_dir = env.run_dir / (mspec.log_dir_name or f"logs_{mspec.name}")
+        argv.extend((f"--server.address={mspec.bind_ip}",
+                     f"--management.server.address={mspec.bind_ip}",
+                     f"--flexlb.log.path={log_dir}"))
+    if not (spec.master_pv_log if spec.master_pv_log is not None else spec.diagnostic_events):
+        argv.append("--logging.level.pvLogger=WARN")
+    if spec.master_debug_log:
+        argv.extend(("--logging.level.org.flexlb=DEBUG", "--logging.level.flexlbLogger=DEBUG"))
+    argv.extend(spec.master_extra_args)
+    if mspec:
+        argv.extend(mspec.extra_args)
+    return argv
+
+
 class MasterLifecycle:
     def __init__(self, log):
         self._log = log
@@ -168,34 +192,13 @@ class MasterLifecycle:
         # *foreign* master (mis-detected as "up").
         wait_ready(deadline, 'master ports available',
                    lambda: not self._master_ports_in_use(env))
-        java = resolve_java21()
         env.master_start_count += 1
         log_name = log_name or (
             "flexlb_master.log"
             if env.master_start_count == 1
             else f"flexlb_master_restart{env.master_start_count}.log"
         )
-        argv = [
-            java,
-            *master_jvm_options(spec),
-            *JAVA_MODULE_OPTS,
-            "-jar",
-            str(API_JAR),
-            f"--server.port={env.master_http_port}",
-            f"--management.server.port={env.master_management_port}",
-            f"--spring.profiles.active={spec.spring_profile}",
-        ]
-        if not (spec.master_pv_log if spec.master_pv_log is not None else spec.diagnostic_events):
-            argv.append("--logging.level.pvLogger=WARN")
-        if spec.master_debug_log:
-            argv.append("--logging.level.org.flexlb=DEBUG")
-            # flexlbLogger (org.flexlb.util.Logger's slf4j name —
-            # logback-spring.xml pins it at INFO with the FLEXLB file
-            # appender) carries the [priority-scheduler] DEBUG lines into
-            # ~/ai-whale/logs/flexlb.log; the org.flexlb switch alone never
-            # reaches it (logger-name mismatch, round-2 O1 finding).
-            argv.append("--logging.level.flexlbLogger=DEBUG")
-        argv.extend(spec.master_extra_args)
+        argv = master_arguments(env)
         # The JVM's stdout redirection (flexlb_master.log) captures only
         # the console appender's first buffered lines — implementation-
         # period finding: a config-rejected master leaves ~11 stdout
@@ -344,7 +347,6 @@ class MasterLifecycle:
         """
         deadline = startup_deadline(deadline, 240)
         deadline.check()
-        spec = env.spec
         if not API_JAR.is_file():
             raise RuntimeError(f"flexlb-api jar not found: {API_JAR} (build it first)")
         if env.masters.get(mspec.name) is not None:
@@ -353,7 +355,6 @@ class MasterLifecycle:
             )
         wait_ready(deadline, f'master/{mspec.name}/ports available',
                    lambda: not self._instance_ports_in_use(mspec))
-        java = resolve_java21()
         env.masters_start_count[mspec.name] = (
             env.masters_start_count.get(mspec.name, 0) + 1
         )
@@ -363,32 +364,7 @@ class MasterLifecycle:
             if n == 1
             else f"flexlb_master_{mspec.name}_restart{n}.log"
         )
-        # Per-instance log dir — logback-spring.xml's springProperty
-        # flexlb.log.path: two instances must never interleave one file.
-        log_dir = env.run_dir / (mspec.log_dir_name or f"logs_{mspec.name}")
-        argv = [
-            java,
-            *master_jvm_options(spec),
-            *JAVA_MODULE_OPTS,
-            "-jar",
-            str(API_JAR),
-            f"--server.port={mspec.http_port}",
-            f"--management.server.port={mspec.management()}",
-            f"--server.address={mspec.bind_ip}",
-            # Management port follows the main bind ip too: without it
-            # Spring binds 0.0.0.0 and the Tier-2/3 same-port pair would
-            # collide on the management port even though the main HTTP
-            # ports coexist on distinct addresses.
-            f"--management.server.address={mspec.bind_ip}",
-            f"--flexlb.log.path={log_dir}",
-            f"--spring.profiles.active={spec.spring_profile}",
-        ]
-        if not spec.diagnostic_events:
-            argv.append("--logging.level.pvLogger=WARN")
-        if spec.master_debug_log:
-            argv.append("--logging.level.org.flexlb=DEBUG")
-        argv.extend(spec.master_extra_args)
-        argv.extend(mspec.extra_args)
+        argv = master_arguments(env, mspec)
         proc = ProcessOps.start(
             argv, configure_master(env, self.master_environment(env, mspec), API_JAR), env.run_dir / log_name
         )
