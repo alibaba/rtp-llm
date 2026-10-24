@@ -1,6 +1,6 @@
 """Default-on Reindex Q-A/KV + BF16 index-head projection on B300.
 
-No JIT, weight duplication, pointer cache or forward-time validation kernels.
+DeepGEMM kernels are prepared before capture; no weight duplication or pointer cache.
 Unsupported configurations use the original projections. Reload is performed
 at init_rope_cache with inference quiesced, like the other graph-owned weights.
 Set DSV41_FUSED_FRONT_PROJECTION=0 to retain the original projections.
@@ -43,13 +43,17 @@ class FrontWeights:
             raise RuntimeError("front weight reload is not allowed during capture")
         incoming = _weights(attn)
         if any(_layout(a) != _layout(b) for a, b in zip(self.tensors, incoming)):
-            raise ValueError("front weight layout changed; rebuild model and CUDA Graphs")
+            raise ValueError(
+                "front weight layout changed; rebuild model and CUDA Graphs"
+            )
         # Validate every layout before copying anything; preserve graph addresses.
         with torch.no_grad():
             for old, new in zip(self.tensors, incoming):
                 if old.data_ptr() != new.data_ptr():
                     old.copy_(new)
-        attn.wq_a_wkv.weight, attn.wq_a_wkv.weight_scales, attn.index_weights = self.tensors
+        attn.wq_a_wkv.weight, attn.wq_a_wkv.weight_scales, attn.index_weights = (
+            self.tensors
+        )
 
 
 def prepare(attn):
@@ -63,17 +67,27 @@ def prepare(attn):
         return
     linear = getattr(attn, "wq_a_wkv", None)
     head = getattr(attn, "index_weights", None)
-    if (not isinstance(linear, V41MXFP8Linear) or (linear.N, linear.K) != (1792, 5120)
-        or head is None or head.shape != (32, 5120) or head.dtype != torch.bfloat16
-        or not head.is_cuda or not head.is_contiguous()):
+    if (
+        not isinstance(linear, V41MXFP8Linear)
+        or (linear.N, linear.K) != (1792, 5120)
+        or head is None
+        or head.shape != (32, 5120)
+        or head.dtype != torch.bfloat16
+        or not head.is_cuda
+        or not head.is_contiguous()
+    ):
         return
     props = torch.cuda.get_device_properties(head.device)
     if (props.major, props.minor, props.multi_processor_count) != (10, 3, 148):
         return
-    from rtp_llm.ops.compute_ops import rtp_llm_ops
+    import deep_gemm
 
-    op = getattr(rtp_llm_ops, "v41_front_gemm", None)
-    if op is not None:
+    op = getattr(deep_gemm, "dsv41_front_gemm", None)
+    configure = getattr(deep_gemm, "dsv41_front_gemm_config", None)
+    if callable(op) and callable(configure):
+        with torch.cuda.device(head.device):
+            for rows in (128, 256, 384, 512):
+                configure(rows)
         attn._front_weights = FrontWeights(attn, op)
 
 
@@ -85,18 +99,29 @@ def project(attn, x, *, quantized_input=None, pdl=False):
         return None
     linear = attn.wq_a_wkv
     rows = x.numel() // x.shape[-1]
-    if (rows not in (128, 256, 384, 512) or not x.is_contiguous()
+    if (
+        rows not in (128, 256, 384, 512)
+        or not x.is_contiguous()
         or not is_supported(linear, x, attn.q_norm, attn.q_lora_rank)
-        or not isinstance(attn.wq_b, V41MXFP8Linear) or attn.q_lora_rank != 1280
+        or not isinstance(attn.wq_b, V41MXFP8Linear)
+        or attn.q_lora_rank != 1280
         or os.environ.get("DSV41_FUSED_QUERY_QUANT", "1") != "1"
-        or os.environ.get("DSV4_FP8_QUANT_KERNEL", "auto").strip().lower() not in ("auto", "legacy")):
+        or os.environ.get("DSV4_FP8_QUANT_KERNEL", "auto").strip().lower()
+        not in ("auto", "legacy")
+    ):
         return None
-    if any(a.data_ptr() != b.data_ptr() or _layout(a) != _layout(b)
-           for a, b in zip(_weights(attn), state.tensors)):
+    if any(
+        a.data_ptr() != b.data_ptr() or _layout(a) != _layout(b)
+        for a, b in zip(_weights(attn), state.tensors)
+    ):
         raise RuntimeError("front weights replaced without init_rope_cache reload")
     xq, xs = linear._quantize_input(x) if quantized_input is None else quantized_input
     weight, scales, head = state.tensors
-    projected, raw_head = state.op(x.view(rows, 5120), xq.view(rows, 5120), xs, weight, scales, head)
+    projected, raw_head = state.op(
+        x.view(rows, 5120), xq.view(rows, 5120), xs, weight, scales, head
+    )
     projected = projected.view(*x.shape[:-1], 1792)
-    qr, quantized = query_norm_quant(projected[..., :1280], attn.q_norm, attn.eps, pdl=pdl)
+    qr, quantized = query_norm_quant(
+        projected[..., :1280], attn.q_norm, attn.eps, pdl=pdl
+    )
     return qr, projected[..., 1280:], quantized, raw_head
