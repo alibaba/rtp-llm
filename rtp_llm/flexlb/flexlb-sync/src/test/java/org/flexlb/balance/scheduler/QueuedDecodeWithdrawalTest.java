@@ -340,7 +340,7 @@ class QueuedDecodeWithdrawalTest {
         decode.close();
         var prepared = PrefillAdmissionResources.prepareMember(item);
         assertFalse(prepared.accepted());
-        registry.failDeliveryPreparation(item, prepared.boundary().cause());
+        registry.failDeliveryPreparation(item, prepared.blockReason().cause());
         verify(queue).requeue(item);
         assertFalse(item.future().isDone());
         assertNull(registry.requestSlot("29").activeItem());
@@ -367,7 +367,7 @@ class QueuedDecodeWithdrawalTest {
         var failure = PrefillAdmissionResources.rejectedPrefill(
                 item, PrefillState.CapacityStatus.ENDPOINT_RETIRED, null);
         assertFalse(failure.accepted());
-        registry.failDeliveryPreparation(item, failure.boundary().cause());
+        registry.failDeliveryPreparation(item, failure.blockReason().cause());
         verify(queue).requeue(item);
         assertFalse(item.future().isDone());
         assertNull(registry.requestSlot("34").activeItem());

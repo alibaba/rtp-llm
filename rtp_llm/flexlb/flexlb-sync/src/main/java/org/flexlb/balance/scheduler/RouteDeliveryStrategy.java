@@ -74,7 +74,7 @@ public final class RouteDeliveryStrategy implements DeliveryStrategy {
                 DeliveryBlockReason.Attempt<ScheduledRequest> attempt =
                         requests.prepareRouteMember(item, transaction, evaluator);
                 if (!attempt.accepted()) {
-                    blocked = new BlockedRequest(item, attempt.boundary());
+                    blocked = new BlockedRequest(item, attempt.blockReason());
                     break;
                 }
                 requestsPreparedForDelivery.add(item);
@@ -270,7 +270,7 @@ public final class RouteDeliveryStrategy implements DeliveryStrategy {
                 return failed(failure);
             }
             if (!memberAttempt.accepted()) {
-                return rejected(memberAttempt.boundary());
+                return rejected(memberAttempt.blockReason());
             }
             reservations.add(reservation);
             itemOwnedReservations.add(true);

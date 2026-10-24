@@ -478,7 +478,7 @@ class DefaultBatchDispatcherTest {
         DeliveryBlockReason.Attempt<?> rejected = dispatcher.tryPrepareSubmission();
         assertFalse(rejected.accepted());
         assertEquals(DeliveryBlockReason.Status.FAILED,
-                rejected.boundary().status());
+                rejected.blockReason().status());
         assertEquals(0, callback.failureCount.get());
         assertEquals(0, callback.successCount.get());
         assertEquals(0, callback.uncertainCount.get());
@@ -508,7 +508,7 @@ class DefaultBatchDispatcherTest {
         DeliveryBlockReason.Attempt<?> rejected = dispatcher.tryPrepareSubmission();
         assertFalse(rejected.accepted());
         assertEquals(DeliveryBlockReason.Status.FAILED,
-                rejected.boundary().status());
+                rejected.blockReason().status());
         running.close();
         queued.close();
     }
@@ -740,7 +740,7 @@ class DefaultBatchDispatcherTest {
         DeliveryBlockReason.Attempt<?> rejected = dispatcher.tryPrepareSubmission();
         assertFalse(rejected.accepted());
         assertEquals(DeliveryBlockReason.Status.FAILED,
-                rejected.boundary().status());
+                rejected.blockReason().status());
     }
 
     @Test
@@ -804,7 +804,7 @@ class DefaultBatchDispatcherTest {
         DeliveryBlockReason.Attempt<?> rejected = dispatcher.tryPrepareSubmission();
         assertFalse(rejected.accepted());
         assertEquals(DeliveryBlockReason.Status.UNAVAILABLE,
-                rejected.boundary().status());
+                rejected.blockReason().status());
 
         assertDoesNotThrow(() -> submit(
                 running, List.of(firstItem), 1L, 100,
@@ -967,8 +967,8 @@ class DefaultBatchDispatcherTest {
         DeliveryBlockReason.Attempt<?> rejected = dispatcher.tryPrepareSubmission();
         assertFalse(rejected.accepted());
         assertEquals(DeliveryBlockReason.Status.UNAVAILABLE,
-                rejected.boundary().status());
-        return rejected.boundary();
+                rejected.blockReason().status());
+        return rejected.blockReason();
     }
 
     private void submit(List<ScheduledRequest> items,

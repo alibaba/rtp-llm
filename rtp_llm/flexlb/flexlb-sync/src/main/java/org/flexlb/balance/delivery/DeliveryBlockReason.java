@@ -5,9 +5,9 @@ import org.flexlb.balance.projection.PrefillTtftEstimate;
 import java.util.Objects;
 
 /**
- * Materialized result of crossing one delivery-admission boundary.
- * A delivery wait may carry additional route-publication restrictions;
- * absent projection semantics leave routing forecasts unchanged.
+ * 一次投递准备没能继续的原因。
+ * 投递等待可以附带额外的路由发布限制；
+ * 没有 projectionSemantics 时，路由预估保持不变。
  */
 public record DeliveryBlockReason(
         Status status,
@@ -19,15 +19,14 @@ public record DeliveryBlockReason(
             new DeliveryBlockReason(Status.OWNERSHIP_LOST, null, null, null);
 
     public DeliveryBlockReason {
-        Objects.requireNonNull(status, "status");
-        boolean unavailable = status == Status.UNAVAILABLE;
-        boolean failed = status == Status.FAILED;
-        if (unavailable != (availability != null)
-                || failed != (cause != null)
-                || (!unavailable
-                        && (availability != null || projectionSemantics != null))) {
+        boolean valid = switch (status) {
+            case UNAVAILABLE -> availability != null && cause == null;
+            case FAILED -> cause != null && availability == null && projectionSemantics == null;
+            case OWNERSHIP_LOST -> availability == null && cause == null && projectionSemantics == null;
+        };
+        if (!valid) {
             throw new IllegalArgumentException(
-                    "capacity boundary status requires its exact payload");
+                    "delivery block reason status requires its exact payload");
         }
     }
 
@@ -35,22 +34,21 @@ public record DeliveryBlockReason(
             Availability availability,
             PrefillTtftEstimate.AdmissionBlockSemantics projectionSemantics) {
         return new DeliveryBlockReason(Status.UNAVAILABLE,
-                Objects.requireNonNull(availability, "availability"),
-                Objects.requireNonNull(projectionSemantics,
-                        "projectionSemantics"),
+                availability,
+                Objects.requireNonNull(projectionSemantics, "projectionSemantics"),
                 null);
     }
 
-    /** Park delivery without restricting publication into the worker queue. */
+    /**
+     * 暂停投递，但不限制请求继续发布到 worker 队列。
+     */
     public static DeliveryBlockReason deliveryUnavailable(Availability availability) {
         return new DeliveryBlockReason(Status.UNAVAILABLE,
-                Objects.requireNonNull(availability, "availability"),
-                null, null);
+                availability, null, null);
     }
 
     public static DeliveryBlockReason failed(Throwable cause) {
-        return new DeliveryBlockReason(Status.FAILED, null, null,
-                Objects.requireNonNull(cause, "cause"));
+        return new DeliveryBlockReason(Status.FAILED, null, null, cause);
     }
 
     public boolean unavailable() {
@@ -64,8 +62,8 @@ public record DeliveryBlockReason(
     }
 
     /**
-     * Non-blocking wake capability for the exact unavailable admission.
-     * Implementations must not acquire endpoint mutation locks while queried.
+     * 针对某一次不可用的准入，提供不阻塞的唤醒能力。
+     * 实现在被查询时不能获取 endpoint 的修改锁。
      */
     public interface Availability {
 
@@ -76,23 +74,24 @@ public record DeliveryBlockReason(
         void removeListener(Runnable listener);
     }
 
-    /** Either an accepted capability/value or one fully materialized boundary. */
-    public record Attempt<T>(T value, DeliveryBlockReason boundary) {
+    /**
+     * 要么是成功拿到的值（或能力），要么是一个被卡住的原因，二者有且只有一个。
+     */
+    public record Attempt<T>(T value, DeliveryBlockReason blockReason) {
 
         public Attempt {
-            if ((value == null) == (boundary == null)) {
+            if ((value == null) == (blockReason == null)) {
                 throw new IllegalArgumentException(
-                        "capacity attempt requires exactly one value or boundary");
+                        "attempt requires exactly one value or block reason");
             }
         }
 
         public static <T> Attempt<T> accepted(T value) {
-            return new Attempt<>(Objects.requireNonNull(value, "value"), null);
+            return new Attempt<>(value, null);
         }
 
-        public static <T> Attempt<T> rejected(DeliveryBlockReason boundary) {
-            return new Attempt<>(null,
-                    Objects.requireNonNull(boundary, "boundary"));
+        public static <T> Attempt<T> rejected(DeliveryBlockReason blockReason) {
+            return new Attempt<>(null, blockReason);
         }
 
         public boolean accepted() {

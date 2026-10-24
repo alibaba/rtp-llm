@@ -72,7 +72,7 @@ public final class BatchDeliveryStrategy implements DeliveryStrategy {
         if (!groupAttempt.accepted()) {
             return BatchTransaction.blocked(
                     this,
-                    new BlockedRequest(head, groupAttempt.boundary()));
+                    new BlockedRequest(head, groupAttempt.blockReason()));
         }
 
         BatchTransaction transaction = groupAttempt.value();
@@ -86,7 +86,7 @@ public final class BatchDeliveryStrategy implements DeliveryStrategy {
                 if (attempt.accepted()) {
                     admitted.add(item);
                 } else {
-                    blocked = new BlockedRequest(item, attempt.boundary());
+                    blocked = new BlockedRequest(item, attempt.blockReason());
                     break;
                 }
             }
@@ -122,7 +122,7 @@ public final class BatchDeliveryStrategy implements DeliveryStrategy {
         try {
             DeliveryBlockReason.Attempt<PreparedSubmission> submissionAttempt = prepareSubmission.get();
             if (!submissionAttempt.accepted()) {
-                return rejected(submissionAttempt.boundary());
+                return rejected(submissionAttempt.blockReason());
             }
             PreparedSubmission submission =
                     submissionAttempt.value();
@@ -434,10 +434,10 @@ public final class BatchDeliveryStrategy implements DeliveryStrategy {
                     members.add(memberAttempt.value());
                     result = acceptedItem;
                 } else {
-                    result = rejected(memberAttempt.boundary());
+                    result = rejected(memberAttempt.blockReason());
                 }
                 if (first && !result.accepted()) {
-                    return abortAdmission(result.boundary());
+                    return abortAdmission(result.blockReason());
                 }
                 return result;
             } catch (Throwable failure) {

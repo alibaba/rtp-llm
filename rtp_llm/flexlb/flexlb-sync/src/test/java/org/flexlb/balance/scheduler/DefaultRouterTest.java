@@ -242,8 +242,8 @@ class DefaultRouterTest {
 
             var delivery = PrefillAdmissionResources.prepareMember(item);
             assertFalse(delivery.accepted());
-            assertTrue(delivery.boundary().unavailable());
-            assertFalse(delivery.boundary().availability().isAvailable());
+            assertTrue(delivery.blockReason().unavailable());
+            assertFalse(delivery.blockReason().availability().isAvailable());
             verify(decode).shouldRetryDispatch("701", frozen.requirement().capacity());
             verify(decode).acquireDispatchPermit(reservation, frozen.requirement().capacity());
             verify(decode).reserve(any(), eq("701"), eq(requiredKv), eq(kvBudget), eq(73), isNull());
