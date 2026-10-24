@@ -281,12 +281,7 @@ std::vector<BlockInfo>
 HybridPoolKVCacheAllocator::convertIndexToBufferByTag(int layer_id, const std::string& tag, int block_id) const {
     const auto gid = static_cast<int>(config_.topology().groupIdForTag(tag));
     validateGroupIdForLayer(layer_id, gid);
-    auto bufs = kv_cache_groups_[static_cast<size_t>(gid)]->convertIndexToBuffer(layer_id, block_id);
-    for (size_t pi = 0; pi < bufs.size(); ++pi) {
-        RTP_LLM_LOG_WARNING("PROBE convertByTag tag=%s part=%zu/%zu bytes=%zu",
-                            tag.c_str(), pi, bufs.size(), bufs[pi].size_bytes);
-    }
-    return bufs;
+    return kv_cache_groups_[static_cast<size_t>(gid)]->convertIndexToBuffer(layer_id, block_id);
 }
 
 std::vector<BlockInfo> HybridPoolKVCacheAllocator::convertIndexToBufferByTag(
