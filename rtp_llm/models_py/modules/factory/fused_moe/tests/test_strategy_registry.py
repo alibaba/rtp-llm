@@ -71,6 +71,138 @@ def _config(strategy: str, quant_config=None) -> MoEConfigAdapter:
 
 
 class StrategyRegistryDiagnosticsTest(unittest.TestCase):
+    def test_new_recipes_do_not_inspect_legacy_parallelism(self):
+        for strategy_type in (
+            cuda_strategies.CudaMegaMoeFp8Strategy,
+            cuda_strategies.CudaMegaMoeFp8SEStrategy,
+            cuda_strategies.CudaMegaMoeFusedStrategy,
+        ):
+            config = _config(strategy_type.strategy_name)
+            config.parallelism_config = object()
+            checker = ConditionChecker("new recipe on legacy config")
+            strategy_type.check_conditions(checker, config)
+            self.assertFalse(checker.all_passed())
+
+    def test_prepared_and_native_fp4_use_the_same_executor(self):
+        from rtp_llm.config.mega_moe import MegaMoeExecutionPolicy
+        from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors.mega_moe import (
+            MegaMoeExecutor,
+        )
+        from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors.mega_moe_se import (
+            MegaMoeSEExecutor,
+        )
+
+        for strategy_type, executor_type in (
+            (cuda_strategies.CudaMegaMoeStrategy, MegaMoeExecutor),
+            (cuda_strategies.CudaMegaMoeSEStrategy, MegaMoeSEExecutor),
+        ):
+            registry = StrategyRegistry()
+            strategy = strategy_type()
+            registry.register(strategy)
+            for policy in (None, MegaMoeExecutionPolicy()):
+                with self.subTest(strategy=strategy.strategy_name, policy=policy):
+                    config = _config(strategy.strategy_name)
+                    config.moe_quant_method = (
+                        "FP8_FP4" if policy is None else "FP8_PER_BLOCK"
+                    )
+                    config.mega_moe_policy = policy
+                    config.ep_size = config.world_size = 4
+                    config.n_shared_experts = 1
+                    with patch(
+                        "rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors.mega_moe._mega_moe_available",
+                        return_value=True,
+                    ), patch(
+                        "rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors.mega_moe_se._mega_moe_se_available",
+                        return_value=True,
+                    ):
+                        chosen = registry.get_strategy(config)
+                        self.assertIs(chosen, strategy)
+                        self.assertIs(chosen.get_executor_class(), executor_type)
+                        self.assertFalse(
+                            chosen.create_router(config).supports_skip_tp_allreduce
+                        )
+                        config.world_size = 8
+                        with self.assertRaises(ValueError):
+                            registry.get_strategy(config)
+
+    def test_fp8_recipes_reuse_native_executors_and_check_the_fp8_kernel(self):
+        from rtp_llm.config.mega_moe import MegaMoeExecutionPolicy
+        from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors.mega_moe import (
+            MegaMoeExecutor,
+        )
+        from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors.mega_moe_se import (
+            MegaMoeSEExecutor,
+        )
+
+        for strategy_type, executor_type in (
+            (cuda_strategies.CudaMegaMoeFp8Strategy, MegaMoeExecutor),
+            (cuda_strategies.CudaMegaMoeFp8SEStrategy, MegaMoeSEExecutor),
+        ):
+            for available in (False, True):
+                with self.subTest(
+                    strategy=strategy_type.strategy_name, available=available
+                ):
+                    config = _config(strategy_type.strategy_name)
+                    config.mega_moe_policy = MegaMoeExecutionPolicy()
+                    config.n_shared_experts = 1
+                    registry = StrategyRegistry()
+                    registry.register(strategy_type())
+                    with patch(
+                        "rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors.mega_moe._mega_moe_available",
+                        return_value=available,
+                    ) as capability, patch(
+                        "rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors.mega_moe_se._mega_moe_se_available",
+                        return_value=False,
+                    ) as fp4_shared_capability:
+                        if available:
+                            chosen = registry.get_strategy(config)
+                            self.assertIs(chosen.get_executor_class(), executor_type)
+                        else:
+                            with self.assertRaises(ValueError):
+                                registry.get_strategy(config)
+                    capability.assert_called_once_with(
+                        kernel_name="fp8_fp8_mega_moe",
+                        allocator_name="get_symm_buffer_for_mega_moe_fp8",
+                        allow_single_rank=True,
+                    )
+                    fp4_shared_capability.assert_not_called()
+
+    def test_all_mega_recipes_use_the_public_registry_once(self):
+        from rtp_llm.config.mega_moe import MEGA_MOE_STRATEGIES, MegaMoeExecutionPolicy
+        from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors.mega_moe import (
+            MegaMoeExecutor,
+        )
+
+        registry = StrategyRegistry()
+        types = (
+            cuda_strategies.CudaMegaMoeStrategy,
+            cuda_strategies.CudaMegaMoeSEStrategy,
+            cuda_strategies.CudaMegaMoeFp8Strategy,
+            cuda_strategies.CudaMegaMoeFp8SEStrategy,
+            cuda_strategies.CudaMegaMoeFusedStrategy,
+        )
+        for strategy_type in types:
+            registry.register(strategy_type())
+        self.assertEqual(
+            {s.strategy_name for s in registry.list_strategies()}, MEGA_MOE_STRATEGIES
+        )
+        for name in MEGA_MOE_STRATEGIES:
+            config = _config(name)
+            config.mega_moe_policy = MegaMoeExecutionPolicy()
+            config.n_shared_experts = 1
+            with patch(
+                "rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors.mega_moe._mega_moe_available",
+                return_value=True,
+            ), patch(
+                "rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors.mega_moe_se._mega_moe_se_available",
+                return_value=True,
+            ):
+                chosen = registry.get_strategy(config)
+                self.assertEqual(chosen.strategy_name, name)
+                self.assertTrue(
+                    issubclass(chosen.get_executor_class(), MegaMoeExecutor)
+                )
+
     def test_no_quant_cpp_runtime_conditions_run_in_regular_ci(self):
         def conditions_pass(quant_config) -> bool:
             checker = ConditionChecker("CudaNoQuantCppStrategy.check_conditions()")

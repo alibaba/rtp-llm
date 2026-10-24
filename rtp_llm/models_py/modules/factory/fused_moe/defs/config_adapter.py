@@ -23,6 +23,9 @@ class MoEConfigAdapter:
         moe_config: Optional[MoeConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
         enable_cuda_graph: bool = False,
+        layer_id: int = -1,
+        max_generate_batch_size: int = 0,
+        mega_moe_policy=None,
     ):
         self.model_config = model_config
         self.parallelism_config = parallelism_config
@@ -57,7 +60,9 @@ class MoEConfigAdapter:
         self.dim = self.hidden_size
         # The generic adapter is not layer-bound. Executors with per-layer
         # state receive a typed runtime config from their layer implementation.
-        self.layer_id = -1
+        self.layer_id = layer_id
+        self.max_generate_batch_size = max_generate_batch_size
+        self.mega_moe_policy = mega_moe_policy
         self.moe_inter_dim = int(model_config.moe_inter_size)
         self.moe_w1_layout = model_config.moe_w1_layout
         self.n_routed_experts = self.expert_num

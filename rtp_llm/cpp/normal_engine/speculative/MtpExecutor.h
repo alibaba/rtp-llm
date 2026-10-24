@@ -281,6 +281,9 @@ private:
     // post-verify prefill roles; DSpARK supplies propose and commit construction
     // parameters to the same two slots.
     std::shared_ptr<ModelBase>                       draft_model_;
+    std::shared_ptr<ModelBase>                       seed_decode_draft_model_;
+    bool                                             mtp_indexer_share_enabled_ = false;
+    int64_t                                          mtp_indexer_topk_          = 0;
     std::shared_ptr<ModelBase>                       sp_prefill_draft_model_;
     std::unique_ptr<speculative::SpeculativeSampler> speculative_sampler_;
     std::unique_ptr<speculative::FastTopKSampler>    fast_topk_sampler_;

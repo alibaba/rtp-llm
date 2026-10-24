@@ -1,10 +1,12 @@
 import logging
 import os
 import unittest
+from unittest import mock
 
 import torch
 import torch.nn.functional as F
-from flashinfer import fp4_quantize
+from flashinfer import autotune, fp4_quantize
+from flashinfer.autotuner import AutoTuner
 
 from rtp_llm.config.quant_config import init_quant_config
 from rtp_llm.device.device_impl import CudaImpl
@@ -14,10 +16,72 @@ from rtp_llm.models_py.modules.factory.linear.impl.cuda.fp4_linear import (
 from rtp_llm.test.utils.numeric_util import calc_diff
 
 
+class CudaFp4GEMMLinearAutotuneTest(unittest.TestCase):
+    """Check caller-owned tuning state without launching FP4 kernels."""
+
+    def _assert_forward_tuning_mode(self, expected_mode):
+        for backend in ("cute-dsl", "cutlass", "trtllm"):
+            with self.subTest(backend=backend), mock.patch.dict(
+                os.environ, {"RTP_LLM_FP4_GEMM_BACKEND": backend}
+            ):
+                linear = CudaFp4GEMMLinear(
+                    weight=torch.zeros((8, 16), dtype=torch.uint8),
+                    weight_scales=torch.ones((8, 2), dtype=torch.uint8),
+                    input_scales=torch.tensor(1.0),
+                    weight_scale_2=torch.tensor(1.0),
+                )
+                input_tensor = torch.zeros((2, 32), dtype=torch.bfloat16)
+                expected_output = torch.ones((2, 8), dtype=input_tensor.dtype)
+                observed_modes = []
+
+                def quantize(*args, **kwargs):
+                    observed_modes.append(AutoTuner.get().is_tuning_mode)
+                    return (
+                        torch.zeros((2, 16), dtype=torch.uint8),
+                        torch.ones((2, 2), dtype=torch.uint8),
+                    )
+
+                def gemm(*args, **kwargs):
+                    observed_modes.append(AutoTuner.get().is_tuning_mode)
+                    return expected_output
+
+                module = CudaFp4GEMMLinear.__module__
+                with mock.patch(
+                    f"{module}.fp4_quantize", side_effect=quantize
+                ), mock.patch(f"{module}.mm_fp4", side_effect=gemm):
+                    for _ in range(2):
+                        output = linear(input_tensor)
+                        torch.testing.assert_close(output, expected_output)
+                        self.assertEqual(AutoTuner.get().is_tuning_mode, expected_mode)
+
+                self.assertEqual(observed_modes, [expected_mode] * 4)
+
+    def test_forward_does_not_enable_autotune_by_default(self):
+        self.assertFalse(AutoTuner.get().is_tuning_mode)
+        self._assert_forward_tuning_mode(False)
+
+    def test_forward_respects_disabled_autotune(self):
+        initial_mode = AutoTuner.get().is_tuning_mode
+        with autotune(False):
+            self._assert_forward_tuning_mode(False)
+        self.assertEqual(AutoTuner.get().is_tuning_mode, initial_mode)
+
+    def test_forward_preserves_enabled_autotune(self):
+        initial_mode = AutoTuner.get().is_tuning_mode
+        with autotune(True):
+            self._assert_forward_tuning_mode(True)
+        self.assertEqual(AutoTuner.get().is_tuning_mode, initial_mode)
+
+
 class CudaFp4GEMMLinearTest(unittest.TestCase):
 
     def setUp(self):
         """Setup test environment"""
+        backend_env = mock.patch.dict(
+            os.environ, {"RTP_LLM_FP4_GEMM_BACKEND": "cute-dsl"}
+        )
+        backend_env.start()
+        self.addCleanup(backend_env.stop)
         self.device = "cuda" if torch.cuda.is_available() else "cpu"
         if self.device == "cpu":
             self.skipTest("FP4 tests require CUDA")
@@ -267,6 +331,7 @@ class CudaFp4GEMMLinearTest(unittest.TestCase):
 
     def test_fp4_vs_bf16_accuracy(self):
         """Test accuracy comparison between FP4 linear and BF16 linear"""
+        self._test_fp4_vs_bf16_accuracy_backend("cute-dsl")
         # Create FP4 linear layer, cutlass backend
         self._test_fp4_vs_bf16_accuracy_backend("cutlass")
         self._test_fp4_vs_bf16_accuracy_backend("trtllm")
@@ -316,6 +381,7 @@ class CudaFp4GEMMLinearTest(unittest.TestCase):
 
     def test_fp4_vs_fp16_accuracy(self):
         """Test accuracy comparison between FP4 linear and BF16 linear"""
+        self._test_fp4_vs_fp16_accuracy_backend("cute-dsl")
         self._test_fp4_vs_fp16_accuracy_backend("cutlass")
         self._test_fp4_vs_fp16_accuracy_backend("sgl_cutlass")
 
