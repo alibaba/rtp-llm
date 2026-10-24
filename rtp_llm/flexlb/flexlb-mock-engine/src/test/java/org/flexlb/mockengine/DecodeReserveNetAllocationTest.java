@@ -108,7 +108,7 @@ class DecodeReserveNetAllocationTest {
                 shape(dModel, 900L, 3 * SPB, 26, List.of(1L, 2L, 3L)), -1, null));
         awaitDecodeQuiescence(decode, 30_000);
         assertEquals(0, cache.heldBlocks(), "the seeding stream completed and released its holds");
-        assertEquals(3, cache.lruKeyBlocks(), "the 3 prefix keys are parked in the decode LRU");
+        assertEquals(3, MockEngineTestSupport.lruKeyBlocks(cache), "the 3 prefix keys are parked in the decode LRU");
 
         // Reserve: rid 901 — 5-block total demand, 3-block prefix overlap,
         // routed to the D engine through role_addrs (Phase 1.6).

@@ -5,6 +5,8 @@ import org.flexlb.balance.projection.RouteProjection;
 
 import java.util.Arrays;
 
+import static com.google.common.base.Preconditions.checkArgument;
+
 /** Reusable columns for modeled Prefill candidates from one fleet snapshot. */
 final class PrefillCandidateSet {
 
@@ -16,7 +18,9 @@ final class PrefillCandidateSet {
     private long[] cacheHitTokens = new long[0];
     private long[] routingCacheMatchTokens = new long[0];
     private long[] ownershipVersions = new long[0];
+    private String[] admissionBlocks = new String[0];
     private int size;
+    boolean inUse;
     long minimumTtftRank;
     boolean hasKnownTtft;
     long maximumCacheHit;
@@ -25,6 +29,7 @@ final class PrefillCandidateSet {
     void reset(int expectedCapacity) {
         Arrays.fill(endpointAddresses, 0, size, null);
         Arrays.fill(endpoints, 0, size, null);
+        Arrays.fill(admissionBlocks, 0, size, null);
         ensureCapacity(expectedCapacity);
         size = 0;
         minimumTtftRank = Long.MAX_VALUE;
@@ -36,9 +41,8 @@ final class PrefillCandidateSet {
     void addCandidate(String address, PrefillEndpoint endpoint,
                       RouteProjection.CandidateView candidate,
                       long ownershipVersion) {
-        if (!candidate.selectable() && !candidate.engineWorkUnmodeled()) {
-            throw new IllegalArgumentException("candidate requires available capacity");
-        }
+        checkArgument(candidate.selectable() || candidate.engineWorkUnmodeled(),
+                "candidate requires available capacity");
         ensureCapacity(size + 1);
         endpointAddresses[size] = address;
         endpoints[size] = endpoint;
@@ -54,6 +58,9 @@ final class PrefillCandidateSet {
                 maximumRoutingCacheMatchTokens, routingCacheMatchTokens[size]);
         size++;
     }
+
+    void admissionBlock(String detail) { admissionBlocks[size - 1] = detail; }
+    String admissionBlock(int index) { return admissionBlocks[index]; }
 
     PrefillEndpoint endpoint(int index) { return endpoints[index]; }
     String endpointAddress(int index) { return endpointAddresses[index]; }
@@ -73,6 +80,7 @@ final class PrefillCandidateSet {
                 Math.max(INITIAL_CAPACITY, endpoints.length << 1));
         endpointAddresses = Arrays.copyOf(endpointAddresses, capacity);
         endpoints = Arrays.copyOf(endpoints, capacity);
+        admissionBlocks = Arrays.copyOf(admissionBlocks, capacity);
         projectedTtftMs = Arrays.copyOf(projectedTtftMs, capacity);
         incomingPrefillMs = Arrays.copyOf(incomingPrefillMs, capacity);
         cacheHitTokens = Arrays.copyOf(cacheHitTokens, capacity);

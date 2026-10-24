@@ -67,10 +67,12 @@ final class ArithmeticFormulaAst {
     }
 
     /** Pure evaluation for parameter initializers, constant folding and the JVM size-limit fallback. */
-    static double evaluate(Node node, double[] vars, List<double[]> items) {
+    static double evaluate(Node node, Object vars, List<?> items) {
         return switch (node) {
             case ConstantNode constant -> constant.value();
-            case VariableNode variable -> vars[variable.varIndex()];
+            case VariableNode variable -> vars instanceof double[] array
+                    ? array[variable.varIndex()]
+                    : ((ArithmeticFormula.Variables) vars).variable(variable.varIndex());
             case UnaryNode unary -> {
                 double value = evaluate(unary.operand(), vars, items);
                 yield unary.op() == '-' ? -value : value;
@@ -95,7 +97,7 @@ final class ArithmeticFormulaAst {
             case AggregateFuncNode aggregate -> {
                 if (items == null || items.isEmpty()) yield evaluate(aggregate.arg(), vars, null);
                 double total = 0.0;
-                for (double[] item : items) total += evaluate(aggregate.arg(), item, null);
+                for (Object item : items) total += evaluate(aggregate.arg(), item, null);
                 yield total;
             }
         };

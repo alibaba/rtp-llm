@@ -5,11 +5,12 @@ cd "$(dirname "$0")/.."
 output_dir="${1:-/tmp/flexlb-queue-perf-$(date +%Y%m%d-%H%M%S)}"
 mkdir -p "$output_dir"
 {
-    git rev-parse HEAD
-    git status --short
+    git -C "${FLEXLB_PERF_SOURCE_ROOT:-.}" rev-parse HEAD
+    git -C "${FLEXLB_PERF_SOURCE_ROOT:-.}" status --short
     uname -a
     java -version
 } > "$output_dir/environment.txt" 2>&1
+rg --files flexlb-*/src pom.xml flexlb-*/pom.xml | LC_ALL=C sort | xargs -d '\n' sha256sum > "$output_dir/source-sha256.txt"
 status=0
 for mode in BATCH NON_BATCH; do
     decision=FIXED_WINDOW
@@ -19,6 +20,7 @@ for mode in BATCH NON_BATCH; do
         '-Dtest=MasterBatchEndToEndPerformanceTest#masterMeetsRateSloAcrossEngineScaleMatrix' \
         -DfailIfNoTests=false -Dsurefire.failIfNoSpecifiedTests=false \
         "-Dflexlb.perf.heap=${FLEXLB_PERF_HEAP:-8g}" \
+        "-Dflexlb.perf.jvm-args=${FLEXLB_PERF_JVM_ARGS:-}" \
         "-Dflexlb.perf.delivery-mode=$mode" \
         "-Dflexlb.perf.decision-mode=$decision" \
         -Dflexlb.perf.engine-matrix-topologies=750x750 \
@@ -27,12 +29,17 @@ for mode in BATCH NON_BATCH; do
         "-Dflexlb.perf.engine-matrix-warmup-ms=${FLEXLB_PERF_WARMUP_MS:-10000}" \
         -Dflexlb.perf.engine-matrix-warmup-requests-per-prefill=16 \
         -Dflexlb.perf.engine-matrix-min-qps-ratio=0.98 \
+        -Dflexlb.perf.engine-matrix-max-client-p99-ms=50 \
+        -Dflexlb.perf.engine-matrix-max-server-p99-ms=50 \
+        -Dflexlb.perf.engine-matrix-max-batch-wait-p99-ms=50 \
         test > "$output_dir/$mode.log" 2>&1; then
         echo 0 > "$output_dir/$mode.exit"
     else
         echo "$?" > "$output_dir/$mode.exit"
         status=1
     fi
+    mkdir -p "$output_dir/$mode-reports"
+    cp flexlb-api/target/surefire-reports/*MasterBatchEndToEndPerformanceTest* "$output_dir/$mode-reports/" 2>/dev/null || true
     # Run the other mode even when one mode fails its throughput/latency gate.
     awk '/FlexLB offered traffic:|FlexLB client latency:|FlexLB Master engine-scale E2E:|\[ERROR\]   Master|BUILD SUCCESS|BUILD FAILURE/' \
         "$output_dir/$mode.log"

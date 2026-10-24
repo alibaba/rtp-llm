@@ -34,7 +34,8 @@ public class ChannelConfiguration {
                 config.getInternalRuntime().getGrpcClientExecutorThreads(),
                 5, TimeUnit.MINUTES,
                 new LinkedBlockingQueue<>(config.getInternalRuntime().getGrpcClientExecutorQueueCapacity()),
-                new NamedThreadFactory("engine-grpc-client-executor")
+                new NamedThreadFactory("engine-grpc-client-executor"),
+                new GrpcCallbackCallerRunsPolicy()
         );
     }
 
@@ -55,7 +56,7 @@ public class ChannelConfiguration {
                 5, TimeUnit.MINUTES,
                 new LinkedBlockingQueue<>(2000),
                 new NamedThreadFactory("flexlb-forwarder-channel-executor"),
-                new ThreadPoolExecutor.AbortPolicy()
+                new GrpcCallbackCallerRunsPolicy()
         );
     }
 
@@ -68,7 +69,7 @@ public class ChannelConfiguration {
         // cancels queue forever), which is a strictly worse retention mode
         // than the default unbounded MPSC queue. Load is bounded instead at
         // admission: the dispatch executor's admission permit bounds in-flight
-        // EnqueueBatch payloads (see DefaultBatchDispatcher).
+        // EnqueueBatch payloads (see DeliveryDispatcher).
         return new NioEventLoopGroup(
                 config.getInternalRuntime().getGrpcClientEventLoopThreads(),
                 null,

@@ -51,7 +51,6 @@
     "health": {
       "statusPollIntervalMs": 20,
       "statusRpcTimeoutMs": 5000,
-      "statusStaleAfterMs": 10000,
       "cleanupIntervalMs": 3000
     },
     "cacheStatus": {

@@ -87,14 +87,14 @@ class CancelMidFlightTest {
 
         // Assert no leak detected on any engine
         for (JavaMockEngineCluster.FastRpcService service : services.values()) {
-            assertFalse(service.isLeakDetected(),
+            assertFalse(MockEngineTestSupport.isLeakDetected(service),
                     "no leak should be detected on port " + service.getGrpcPort());
         }
 
         // Assert cancelled requests are not in "running" state on any engine
         for (long requestId : cancelledIds) {
             for (JavaMockEngineCluster.FastRpcService service : services.values()) {
-                String state = service.getRequestStates().get(requestId);
+                String state = MockEngineTestSupport.getRequestStates(service).get(requestId);
                 if (state != null) {
                     assertNotEquals("running", state,
                             "cancelled request " + requestId
@@ -109,7 +109,7 @@ class CancelMidFlightTest {
         for (long requestId : nonCancelledIds) {
             boolean found = false;
             for (JavaMockEngineCluster.FastRpcService service : services.values()) {
-                if ("completed".equals(service.getRequestStates().get(requestId))) {
+                if ("completed".equals(MockEngineTestSupport.getRequestStates(service).get(requestId))) {
                     found = true;
                     break;
                 }
@@ -119,7 +119,7 @@ class CancelMidFlightTest {
         }
 
         // Assert cancelled count on prefill engine is 5
-        assertEquals(5, prefillServices.get(0).getCancelledCount(),
+        assertEquals(5, MockEngineTestSupport.getCancelledCount(prefillServices.get(0)),
                 "prefill engine should have 5 cancelled requests");
 
         // Assert HTTP snapshot shows inflight == 0 and leak_detected == false

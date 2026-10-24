@@ -1,5 +1,6 @@
 import unittest
 from types import SimpleNamespace
+from unittest.mock import Mock, patch
 
 from rtp_llm.config.exceptions import (
     AdmissionRejectReason,
@@ -11,6 +12,7 @@ from rtp_llm.cpp.model_rpc.proto.flexlb_schedule_service_pb2 import (
     RESOURCE_EXHAUSTED,
     SAME_PRIORITY_AHEAD,
     SCHEDULE_FAILURE_REASON_UNSPECIFIED,
+    FlexlbScheduleRequestPB,
     FlexlbScheduleResponsePB,
     FlexlbServerStatusPB,
 )
@@ -54,22 +56,27 @@ class _FakeInput:
 
 
 class _CaptureMasterClient(MasterClient):
-    def __init__(self):
+    def __init__(self, host_service=None, responses=None):
         super().__init__(
-            host_service=_FakeHostService(),
+            host_service=host_service or _FakeHostService(),
             master_config=_FakeMasterConfig(),
         )
         self.calls = []
+        self.responses = iter(responses) if responses is not None else None
 
     async def _send_schedule_request(self, addr, request_pb, timeout_s, request_id):
         self.calls.append(
             {
                 "addr": addr,
-                "request_pb": request_pb,
+                "request_pb": FlexlbScheduleRequestPB.FromString(
+                    request_pb.SerializeToString()
+                ),
                 "timeout_s": timeout_s,
                 "request_id": request_id,
             }
         )
+        if self.responses is not None:
+            return next(self.responses)
         return FlexlbScheduleResponsePB(
             success=True,
             code=200,
@@ -314,6 +321,150 @@ class MasterClientBatchPayloadTest(unittest.IsolatedAsyncioTestCase):
             AdmissionRejectReason.INVALID,
             raised.exception.admission_reject_reason,
         )
+
+    async def test_omitted_input_stays_omitted_on_slave_fallback(self):
+        client = _CaptureMasterClient(
+            _FakeHostServiceWithSlave(),
+            [None, FlexlbScheduleResponsePB(code=200, success=True)],
+        )
+        with patch("rtp_llm.server.master_client.trans_input") as build:
+            response = await client.get_backend_role_addrs([1], 1024, _FakeInput(), 99)
+        self.assertTrue(response.is_ok)
+        build.assert_not_called()
+        self.assertEqual(
+            [c["request_pb"].generate_input for c in client.calls], [b"", b""]
+        )
+
+    async def test_provided_input_is_serialized_once_across_slave_fallback(self):
+        client = _CaptureMasterClient(
+            _FakeHostServiceWithSlave(),
+            [None, FlexlbScheduleResponsePB(code=200, success=True)],
+        )
+        payload = Mock(wraps=_FakeInputPB())
+        await client.get_backend_role_addrs(
+            [1], 1024, _FakeInput(), 99, input_pb=payload
+        )
+        payload.SerializeToString.assert_called_once_with()
+        self.assertEqual(
+            [c["request_pb"].generate_input for c in client.calls],
+            [b"serialized-input", b"serialized-input"],
+        )
+
+    async def test_vit_only_never_serializes_payload(self):
+        client = _CaptureMasterClient()
+        payload = Mock(wraps=_FakeInputPB())
+        await client.get_backend_role_addrs(
+            [1], 1024, _FakeInput(), 99, input_pb=payload, vit_only=True
+        )
+        payload.SerializeToString.assert_not_called()
+        self.assertEqual(client.calls[0]["request_pb"].generate_input, b"")
+
+    async def test_explicit_missing_input_rebuilds_once_without_failure_reporting(self):
+        for code, message in (
+            (8409, "generate input required"),
+            (8406, "missing serialized generate_input for batch dispatch"),
+        ):
+            for failover in (False, True):
+                with self.subTest(code=code, failover=failover):
+                    responses = [
+                        FlexlbScheduleResponsePB(code=code, error_message=message),
+                        FlexlbScheduleResponsePB(code=200, success=True),
+                    ]
+                    if failover:
+                        responses.insert(0, None)
+                    client = _CaptureMasterClient(
+                        _FakeHostServiceWithSlave(), responses
+                    )
+                    original = _FakeInput()
+                    with patch(
+                        "rtp_llm.server.master_client.trans_input",
+                        return_value=_FakeInputPB(),
+                    ) as build, patch(
+                        "rtp_llm.server.master_client.kmonitor.report"
+                    ) as report:
+                        response = await client.get_backend_role_addrs(
+                            [1], 1024, original, 99
+                        )
+                    self.assertTrue(response.is_ok)
+                    build.assert_called_once_with(original)
+                    report.assert_not_called()
+                    first, second = client.calls[-2:]
+                    self.assertEqual(first["addr"], second["addr"])
+                    self.assertEqual(first["request_pb"].generate_input, b"")
+                    self.assertEqual(
+                        second["request_pb"].generate_input, b"serialized-input"
+                    )
+                    second["request_pb"].ClearField("generate_input")
+                    self.assertEqual(first["request_pb"], second["request_pb"])
+                    self.assertGreater(second["timeout_s"], 0)
+                    self.assertLess(second["timeout_s"], first["timeout_s"])
+
+    async def test_ambiguous_or_admitted_rejection_does_not_rebuild(self):
+        with_lifecycle = FlexlbScheduleResponsePB(code=8409)
+        with_lifecycle.lifecycle.SetInParent()
+        for response in (
+            FlexlbScheduleResponsePB(
+                code=8406, error_message="another invalid request"
+            ),
+            FlexlbScheduleResponsePB(code=8409, success=True),
+            FlexlbScheduleResponsePB(code=8409, enqueued_by_master=True),
+            FlexlbScheduleResponsePB(
+                code=8409, server_status=[FlexlbServerStatusPB(role="PREFILL")]
+            ),
+            with_lifecycle,
+        ):
+            with self.subTest(response=str(response)):
+                client = _CaptureMasterClient(responses=[response])
+                with patch("rtp_llm.server.master_client.trans_input") as build:
+                    with self.assertRaises(FtRuntimeException):
+                        await client.get_backend_role_addrs([1], 1024, _FakeInput(), 99)
+                build.assert_not_called()
+                self.assertEqual(len(client.calls), 1)
+
+    async def test_provided_input_and_vit_only_do_not_trigger_rebuild(self):
+        for kwargs in ({"input_pb": _FakeInputPB()}, {"vit_only": True}):
+            with self.subTest(kwargs=kwargs):
+                client = _CaptureMasterClient(
+                    responses=[FlexlbScheduleResponsePB(code=8409)]
+                )
+                with patch("rtp_llm.server.master_client.trans_input") as build:
+                    with self.assertRaises(FtRuntimeException):
+                        await client.get_backend_role_addrs(
+                            [1], 1024, _FakeInput(), 99, **kwargs
+                        )
+                build.assert_not_called()
+                self.assertEqual(len(client.calls), 1)
+
+    async def test_repeated_missing_input_rejection_stops_after_one_rebuild(self):
+        client = _CaptureMasterClient(
+            responses=[FlexlbScheduleResponsePB(code=8409)] * 2
+        )
+        with patch(
+            "rtp_llm.server.master_client.trans_input", return_value=_FakeInputPB()
+        ) as build:
+            with self.assertRaises(FtRuntimeException) as raised:
+                await client.get_backend_role_addrs([1], 1024, _FakeInput(), 99)
+        build.assert_called_once()
+        self.assertEqual(len(client.calls), 2)
+        self.assertEqual(
+            raised.exception.exception_type,
+            ExceptionType.MASTER_GENERATE_INPUT_REQUIRED,
+        )
+
+    async def test_expired_deadline_does_not_resend(self):
+        client = _CaptureMasterClient(responses=[FlexlbScheduleResponsePB(code=8409)])
+        clock = SimpleNamespace(
+            time=lambda: 0, monotonic=Mock(side_effect=[10.0, 13.1])
+        )
+        with patch("rtp_llm.server.master_client.time", clock), patch(
+            "rtp_llm.server.master_client.trans_input", return_value=_FakeInputPB()
+        ):
+            with self.assertRaises(FtRuntimeException) as raised:
+                await client.get_backend_role_addrs([1], 1024, _FakeInput(), 99)
+        self.assertEqual(
+            raised.exception.exception_type, ExceptionType.DEADLINE_EXCEEDED
+        )
+        self.assertEqual(len(client.calls), 1)
 
 
 if __name__ == "__main__":

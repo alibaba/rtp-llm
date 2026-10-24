@@ -5,6 +5,8 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Set;
 
+import static com.google.common.base.Preconditions.checkState;
+
 /**
  * Block pool with token counting — the mock counterpart of the production
  * C++ BlockPool/KVCacheAllocator admission chain (KV capacity model v2).
@@ -219,17 +221,8 @@ final class MockLruBlockCache {
      * @param totalBlocksDemand the request's FULL block demand (ceil(inputLen/spb))
      * @param keys the request's hash-channel block keys (may be empty)
      * @return the lease ({@code hitKeys} = referenced reuse blocks,
-     *         {@code nakedBlocks} = net-new blocks), or {@code null} = LACK_MEM
-     *         (no state changed)
-     */
-    synchronized BlockLease acquireWithReuse(int totalBlocksDemand, List<Long> keys) {
-        return acquireWithReuseDetailed(totalBlocksDemand, keys).lease();
-    }
-
-    /**
-     * Detailed decode-flavoured admission (same semantics as
-     * {@link #acquireWithReuse}, plus the failure family on the LACK_MEM
-     * gate — see {@link AllocationFailure}). Failure changes no state.
+     *         {@code nakedBlocks} = net-new blocks), or the allocation failure
+     *         without changing state
      */
     synchronized AllocationOutcome acquireWithReuseDetailed(int totalBlocksDemand, List<Long> keys) {
         if (totalBlocksDemand <= 0) {
@@ -257,9 +250,7 @@ final class MockLruBlockCache {
         // Free-first allocation for the net-new part (same coupling as
         // acquire: eviction trades prefix reuse for capacity).
         while (freeBlocks() < netNew) {
-            if (!evictOne()) {
-                throw new IllegalStateException("capacity gate admitted without enough evictable blocks");
-            }
+            checkState(evictOne(), "capacity gate admitted without enough evictable blocks");
         }
         heldBlocks += netNew;
         return new AllocationOutcome(new BlockLease(hitKeys, netNew), null);
@@ -306,31 +297,6 @@ final class MockLruBlockCache {
     synchronized void release(BlockLease lease) {
         dereference(lease.hitKeys);
         heldBlocks -= lease.nakedBlocks;
-    }
-
-    /**
-     * Admit keys with NO holding lease — direct LRU insertion (unit tests and
-     * legacy callers). Capacity comes from free blocks / LRU tail eviction.
-     * @return true when the key set changed
-     */
-    synchronized boolean admit(List<Long> keys) {
-        if (totalBlocks == 0 || keys.isEmpty()) {
-            return false;
-        }
-        boolean changed = false;
-        for (Long key : keys) {
-            // containsKey guard: never clobber a live reference count — a key
-            // currently pinned by an in-flight request only gets its LRU order
-            // refreshed, exactly like the lease-based admit path.
-            if (!blocks.containsKey(key)) {
-                blocks.put(key, 0);
-                changed = true;
-            }
-        }
-        while (blocks.size() > totalBlocks && evictOne()) {
-            // evictOne already counted the eviction
-        }
-        return changed;
     }
 
     // ─────────────────────────── forced eviction (/cache_evict) ───────────────────────────
@@ -406,11 +372,6 @@ final class MockLruBlockCache {
             }
         }
         return referenced;
-    }
-
-    /** Indexed cache-key blocks (pure LRU + referenced). */
-    synchronized int lruKeyBlocks() {
-        return blocks.size();
     }
 
     /** Fully unallocated blocks. */

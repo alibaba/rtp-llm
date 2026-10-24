@@ -1,0 +1,3864 @@
+{
+  "date": "2026-10-11",
+  "scope": "All six FlexLB modules, reviewed against the existing dirty worktree; existing and concurrent refactors preserved.",
+  "review": {
+    "passes": 6,
+    "production_source_files_before": 234,
+    "named_types_before": 541,
+    "production_source_files_after": 228,
+    "named_types_after": 534,
+    "source_methods_indexed_after": 2444,
+    "basis": [
+      "Whole-source type/method/field reference indexing",
+      "JDK compiler AST inventory including named nested types",
+      "ASM invocation scan with inherited dispatch and method handles",
+      "Manual consumer tracing for Spring beans, lifecycle methods, Jackson contracts, internal KMonitor integration, and benchmark entry points",
+      "Repeated scans after removals to find orphaned adapters, fields and branches"
+    ],
+    "rounds": [
+      {
+        "round": 1,
+        "focus": "Configuration test factories and old mutable WorkerStatus DTO conversion"
+      },
+      {
+        "round": 2,
+        "focus": "Mock engine UT-only observation and mutation accessors"
+      },
+      {
+        "round": 3,
+        "focus": "Unused metric constants and forwarding overloads"
+      },
+      {
+        "round": 4,
+        "focus": "Orphaned decode override branch and additional UT overloads"
+      },
+      {
+        "round": 5,
+        "focus": "Unused MasterStatusProvider chain; verified no internal KMonitor consumer"
+      },
+      {
+        "round": 6,
+        "focus": "UT-only MockEngineCancelChannel and final fixed-point type/member scan"
+      }
+    ],
+    "per_source_file": [
+      {
+        "file": "flexlb-api/src/main/java/org/flexlb/Application.java",
+        "top_level_type": "Application",
+        "action": "retained_entry_point",
+        "lexical_type_mentions_in_other_production_files": 0,
+        "annotations": [
+          "EnableScheduling",
+          "Slf4j",
+          "SpringBootApplication"
+        ],
+        "changes": []
+      },
+      {
+        "file": "flexlb-api/src/main/java/org/flexlb/OpenTelemetryBootstrap.java",
+        "top_level_type": "OpenTelemetryBootstrap",
+        "action": "retained_production_reference_or_protocol",
+        "lexical_type_mentions_in_other_production_files": 1,
+        "annotations": [],
+        "changes": []
+      },
+      {
+        "file": "flexlb-api/src/main/java/org/flexlb/TraceConfig.java",
+        "top_level_type": "TraceConfig",
+        "action": "retained_production_reference_or_protocol",
+        "lexical_type_mentions_in_other_production_files": 4,
+        "annotations": [
+          "JsonAutoDetect",
+          "Override"
+        ],
+        "changes": []
+      },
+      {
+        "file": "flexlb-api/src/main/java/org/flexlb/config/CorsConfig.java",
+        "top_level_type": "CorsConfig",
+        "action": "retained_framework_registration_or_injected_interface",
+        "lexical_type_mentions_in_other_production_files": 0,
+        "annotations": [
+          "Bean",
+          "Configuration"
+        ],
+        "changes": []
+      },
+      {
+        "file": "flexlb-api/src/main/java/org/flexlb/config/NettyServerConfig.java",
+        "top_level_type": "NettyServerConfig",
+        "action": "retained_framework_registration_or_injected_interface",
+        "lexical_type_mentions_in_other_production_files": 0,
+        "annotations": [
+          "Bean",
+          "Configuration"
+        ],
+        "changes": []
+      },
+      {
+        "file": "flexlb-api/src/main/java/org/flexlb/httpserver/AppStateHookServer.java",
+        "top_level_type": "AppStateHookServer",
+        "action": "retained_framework_registration_or_injected_interface",
+        "lexical_type_mentions_in_other_production_files": 0,
+        "annotations": [
+          "Bean",
+          "Component",
+          "EventListener",
+          "Slf4j"
+        ],
+        "changes": []
+      },
+      {
+        "file": "flexlb-api/src/main/java/org/flexlb/httpserver/FlexlbGrpcForwarder.java",
+        "top_level_type": "FlexlbGrpcForwarder",
+        "action": "retained_production_reference_or_protocol",
+        "lexical_type_mentions_in_other_production_files": 8,
+        "annotations": [
+          "Component",
+          "Override",
+          "PreDestroy",
+          "Qualifier"
+        ],
+        "changes": []
+      },
+      {
+        "file": "flexlb-api/src/main/java/org/flexlb/httpserver/FlexlbGrpcServer.java",
+        "top_level_type": "FlexlbGrpcServer",
+        "action": "retained_production_reference_or_protocol",
+        "lexical_type_mentions_in_other_production_files": 6,
+        "annotations": [
+          "Autowired",
+          "Component",
+          "Override",
+          "PostConstruct",
+          "PreDestroy",
+          "Qualifier"
+        ],
+        "changes": []
+      },
+      {
+        "file": "flexlb-api/src/main/java/org/flexlb/httpserver/FlexlbServiceImpl.java",
+        "top_level_type": "FlexlbServiceImpl",
+        "action": "retained_production_reference_or_protocol",
+        "lexical_type_mentions_in_other_production_files": 2,
+        "annotations": [
+          "Autowired",
+          "Component",
+          "Lazy",
+          "Override"
+        ],
+        "changes": []
+      },
+      {
+        "file": "flexlb-api/src/main/java/org/flexlb/httpserver/HealthCheckServer.java",
+        "top_level_type": "HealthCheckServer",
+        "action": "retained_framework_registration_or_injected_interface",
+        "lexical_type_mentions_in_other_production_files": 0,
+        "annotations": [
+          "Bean",
+          "Component",
+          "Slf4j"
+        ],
+        "changes": []
+      },
+      {
+        "file": "flexlb-api/src/main/java/org/flexlb/httpserver/HttpLoadBalanceServer.java",
+        "top_level_type": "HttpLoadBalanceServer",
+        "action": "retained_framework_registration_or_injected_interface",
+        "lexical_type_mentions_in_other_production_files": 0,
+        "annotations": [
+          "Bean",
+          "Component",
+          "org"
+        ],
+        "changes": []
+      },
+      {
+        "file": "flexlb-api/src/main/java/org/flexlb/httpserver/ServerScheduleLatencyRecorder.java",
+        "top_level_type": "ServerScheduleLatencyRecorder",
+        "action": "retained_production_reference_or_protocol",
+        "lexical_type_mentions_in_other_production_files": 5,
+        "annotations": [
+          "Component",
+          "Scheduled",
+          "Slf4j"
+        ],
+        "changes": []
+      },
+      {
+        "file": "flexlb-api/src/main/java/org/flexlb/interceptor/GrpcQosHeaderInterceptor.java",
+        "top_level_type": "GrpcQosHeaderInterceptor",
+        "action": "retained_production_reference_or_protocol",
+        "lexical_type_mentions_in_other_production_files": 5,
+        "annotations": [
+          "Component",
+          "Override"
+        ],
+        "changes": []
+      },
+      {
+        "file": "flexlb-api/src/main/java/org/flexlb/interceptor/GrpcServerTimingInterceptor.java",
+        "top_level_type": "GrpcServerTimingInterceptor",
+        "action": "retained_production_reference_or_protocol",
+        "lexical_type_mentions_in_other_production_files": 7,
+        "annotations": [
+          "Component",
+          "Override"
+        ],
+        "changes": []
+      },
+      {
+        "file": "flexlb-api/src/main/java/org/flexlb/interceptor/GrpcTraceInterceptor.java",
+        "top_level_type": "GrpcTraceInterceptor",
+        "action": "retained_production_reference_or_protocol",
+        "lexical_type_mentions_in_other_production_files": 6,
+        "annotations": [
+          "Override"
+        ],
+        "changes": []
+      },
+      {
+        "file": "flexlb-api/src/main/java/org/flexlb/service/grace/ApplicationLifecycle.java",
+        "top_level_type": "ApplicationLifecycle",
+        "action": "retained_production_reference_or_protocol",
+        "lexical_type_mentions_in_other_production_files": 6,
+        "annotations": [
+          "Autowired",
+          "Component",
+          "EventListener",
+          "Order",
+          "Override",
+          "Slf4j"
+        ],
+        "changes": []
+      },
+      {
+        "file": "flexlb-cache/src/main/java/org/flexlb/cache/core/EngineLocalView.java",
+        "top_level_type": "EngineLocalView",
+        "action": "retained_production_reference_or_protocol",
+        "lexical_type_mentions_in_other_production_files": 1,
+        "annotations": [
+          "Autowired",
+          "Component",
+          "Slf4j"
+        ],
+        "changes": []
+      },
+      {
+        "file": "flexlb-cache/src/main/java/org/flexlb/cache/core/GlobalCacheIndex.java",
+        "top_level_type": "GlobalCacheIndex",
+        "action": "retained_production_reference_or_protocol",
+        "lexical_type_mentions_in_other_production_files": 1,
+        "annotations": [
+          "Component",
+          "Slf4j"
+        ],
+        "changes": []
+      },
+      {
+        "file": "flexlb-cache/src/main/java/org/flexlb/cache/core/KvCacheManager.java",
+        "top_level_type": "KvCacheManager",
+        "action": "retained_production_reference_or_protocol",
+        "lexical_type_mentions_in_other_production_files": 3,
+        "annotations": [
+          "Autowired",
+          "Component",
+          "PostConstruct",
+          "PreDestroy",
+          "Slf4j"
+        ],
+        "changes": []
+      },
+      {
+        "file": "flexlb-cache/src/main/java/org/flexlb/cache/core/RecentCacheKeyWindow.java",
+        "top_level_type": "RecentCacheKeyWindow",
+        "action": "retained_production_reference_or_protocol",
+        "lexical_type_mentions_in_other_production_files": 4,
+        "annotations": [
+          "Autowired",
+          "Component",
+          "Getter",
+          "Slf4j"
+        ],
+        "changes": []
+      },
+      {
+        "file": "flexlb-cache/src/main/java/org/flexlb/cache/domain/DiffResult.java",
+        "top_level_type": "DiffResult",
+        "action": "retained_production_reference_or_protocol",
+        "lexical_type_mentions_in_other_production_files": 6,
+        "annotations": [
+          "AllArgsConstructor",
+          "Builder",
+          "Data",
+          "NoArgsConstructor",
+          "Serial"
+        ],
+        "changes": []
+      },
+      {
+        "file": "flexlb-cache/src/main/java/org/flexlb/cache/domain/WorkerCacheUpdateResult.java",
+        "top_level_type": "WorkerCacheUpdateResult",
+        "action": "retained_production_reference_or_protocol",
+        "lexical_type_mentions_in_other_production_files": 14,
+        "annotations": [
+          "AllArgsConstructor",
+          "Builder",
+          "Data",
+          "NoArgsConstructor"
+        ],
+        "changes": []
+      },
+      {
+        "file": "flexlb-cache/src/main/java/org/flexlb/cache/monitor/CacheHitTheoryStats.java",
+        "top_level_type": "CacheHitTheoryStats",
+        "action": "retained_production_reference_or_protocol",
+        "lexical_type_mentions_in_other_production_files": 7,
+        "annotations": [],
+        "changes": []
+      },
+      {
+        "file": "flexlb-cache/src/main/java/org/flexlb/cache/monitor/CacheMetricsReporter.java",
+        "top_level_type": "CacheMetricsReporter",
+        "action": "retained_production_reference_or_protocol",
+        "lexical_type_mentions_in_other_production_files": 12,
+        "annotations": [
+          "Autowired",
+          "Component",
+          "PostConstruct",
+          "Slf4j"
+        ],
+        "changes": []
+      },
+      {
+        "file": "flexlb-cache/src/main/java/org/flexlb/cache/service/CacheAwareService.java",
+        "top_level_type": "CacheAwareService",
+        "action": "retained_production_reference_or_protocol",
+        "lexical_type_mentions_in_other_production_files": 23,
+        "annotations": [],
+        "changes": []
+      },
+      {
+        "file": "flexlb-cache/src/main/java/org/flexlb/cache/service/DynamicCacheIntervalService.java",
+        "top_level_type": "DynamicCacheIntervalService",
+        "action": "retained_production_reference_or_protocol",
+        "lexical_type_mentions_in_other_production_files": 13,
+        "annotations": [],
+        "changes": []
+      },
+      {
+        "file": "flexlb-cache/src/main/java/org/flexlb/cache/service/impl/DefaultCacheAwareService.java",
+        "top_level_type": "DefaultCacheAwareService",
+        "action": "retained_framework_registration_or_injected_interface",
+        "lexical_type_mentions_in_other_production_files": 0,
+        "annotations": [
+          "Autowired",
+          "Override",
+          "Service",
+          "Slf4j"
+        ],
+        "changes": []
+      },
+      {
+        "file": "flexlb-cache/src/main/java/org/flexlb/cache/service/impl/DefaultDynamicCacheIntervalService.java",
+        "top_level_type": "DefaultDynamicCacheIntervalService",
+        "action": "retained_framework_registration_or_injected_interface",
+        "lexical_type_mentions_in_other_production_files": 0,
+        "annotations": [
+          "Override",
+          "Service",
+          "Slf4j"
+        ],
+        "changes": []
+      },
+      {
+        "file": "flexlb-common/src/main/java/org/flexlb/balance/prediction/ArithmeticFormula.java",
+        "top_level_type": "ArithmeticFormula",
+        "action": "retained_production_reference_or_protocol",
+        "lexical_type_mentions_in_other_production_files": 12,
+        "annotations": [],
+        "changes": []
+      },
+      {
+        "file": "flexlb-common/src/main/java/org/flexlb/balance/prediction/ArithmeticFormulaAst.java",
+        "top_level_type": "ArithmeticFormulaAst",
+        "action": "retained_production_reference_or_protocol",
+        "lexical_type_mentions_in_other_production_files": 3,
+        "annotations": [],
+        "changes": []
+      },
+      {
+        "file": "flexlb-common/src/main/java/org/flexlb/balance/prediction/ArithmeticFormulaCompiler.java",
+        "top_level_type": "ArithmeticFormulaCompiler",
+        "action": "retained_production_reference_or_protocol",
+        "lexical_type_mentions_in_other_production_files": 6,
+        "annotations": [],
+        "changes": []
+      },
+      {
+        "file": "flexlb-common/src/main/java/org/flexlb/balance/prediction/ArithmeticFormulaParser.java",
+        "top_level_type": "ArithmeticFormulaParser",
+        "action": "retained_production_reference_or_protocol",
+        "lexical_type_mentions_in_other_production_files": 2,
+        "annotations": [],
+        "changes": []
+      },
+      {
+        "file": "flexlb-common/src/main/java/org/flexlb/balance/prediction/DecodeCostFormula.java",
+        "top_level_type": "DecodeCostFormula",
+        "action": "retained_production_reference_or_protocol",
+        "lexical_type_mentions_in_other_production_files": 9,
+        "annotations": [],
+        "changes": []
+      },
+      {
+        "file": "flexlb-common/src/main/java/org/flexlb/balance/prediction/PrefillTimeFormula.java",
+        "top_level_type": "PrefillTimeFormula",
+        "action": "retained_production_reference_or_protocol",
+        "lexical_type_mentions_in_other_production_files": 32,
+        "annotations": [],
+        "changes": []
+      },
+      {
+        "file": "flexlb-common/src/main/java/org/flexlb/config/ConfigService.java",
+        "top_level_type": "ConfigService",
+        "action": "retained_production_reference_or_protocol",
+        "lexical_type_mentions_in_other_production_files": 56,
+        "annotations": [
+          "Component",
+          "Slf4j"
+        ],
+        "changes": []
+      },
+      {
+        "file": "flexlb-common/src/main/java/org/flexlb/config/ConfigValidationException.java",
+        "top_level_type": "ConfigValidationException",
+        "action": "retained_production_reference_or_protocol",
+        "lexical_type_mentions_in_other_production_files": 31,
+        "annotations": [],
+        "changes": []
+      },
+      {
+        "file": "flexlb-common/src/main/java/org/flexlb/config/DecisionPolicyConfig.java",
+        "top_level_type": "DecisionPolicyConfig",
+        "action": "removed_or_moved_unused_members",
+        "lexical_type_mentions_in_other_production_files": 13,
+        "annotations": [
+          "Getter",
+          "Setter"
+        ],
+        "changes": [
+          {
+            "file": "flexlb-common/src/main/java/org/flexlb/config/DecisionPolicyConfig.java",
+            "method": "single",
+            "params": null
+          }
+        ]
+      },
+      {
+        "file": "flexlb-common/src/main/java/org/flexlb/config/DispatcherConfig.java",
+        "top_level_type": "DispatcherConfig",
+        "action": "removed_or_moved_unused_members",
+        "lexical_type_mentions_in_other_production_files": 15,
+        "annotations": [
+          "Getter",
+          "Setter"
+        ],
+        "changes": [
+          {
+            "file": "flexlb-common/src/main/java/org/flexlb/config/DispatcherConfig.java",
+            "method": "nonBatch",
+            "params": null
+          }
+        ]
+      },
+      {
+        "file": "flexlb-common/src/main/java/org/flexlb/config/FlexlbConfig.java",
+        "top_level_type": "FlexlbConfig",
+        "action": "removed_or_moved_unused_members",
+        "lexical_type_mentions_in_other_production_files": 50,
+        "annotations": [
+          "Getter",
+          "JsonIgnore",
+          "Setter"
+        ],
+        "changes": [
+          {
+            "file": "flexlb-common/src/main/java/org/flexlb/config/FlexlbConfig.java",
+            "method": "isSingleDecision",
+            "params": null
+          }
+        ]
+      },
+      {
+        "file": "flexlb-common/src/main/java/org/flexlb/config/FlexlbConfigValidator.java",
+        "top_level_type": "FlexlbConfigValidator",
+        "action": "retained_production_reference_or_protocol",
+        "lexical_type_mentions_in_other_production_files": 3,
+        "annotations": [],
+        "changes": []
+      },
+      {
+        "file": "flexlb-common/src/main/java/org/flexlb/config/InternalRuntimeSettings.java",
+        "top_level_type": "InternalRuntimeSettings",
+        "action": "retained_production_reference_or_protocol",
+        "lexical_type_mentions_in_other_production_files": 4,
+        "annotations": [
+          "Getter"
+        ],
+        "changes": []
+      },
+      {
+        "file": "flexlb-common/src/main/java/org/flexlb/config/MetricsCardinalityConfig.java",
+        "top_level_type": "MetricsCardinalityConfig",
+        "action": "retained_framework_registration_or_injected_interface",
+        "lexical_type_mentions_in_other_production_files": 0,
+        "annotations": [
+          "Bean",
+          "ConditionalOnClass",
+          "ConditionalOnProperty",
+          "Configuration"
+        ],
+        "changes": []
+      },
+      {
+        "file": "flexlb-common/src/main/java/org/flexlb/config/ModelMetaConfig.java",
+        "top_level_type": "ModelMetaConfig",
+        "action": "retained_production_reference_or_protocol",
+        "lexical_type_mentions_in_other_production_files": 10,
+        "annotations": [
+          "Component",
+          "Getter"
+        ],
+        "changes": []
+      },
+      {
+        "file": "flexlb-common/src/main/java/org/flexlb/config/MonitorClientConfig.java",
+        "top_level_type": "MonitorClientConfig",
+        "action": "retained_framework_registration_or_injected_interface",
+        "lexical_type_mentions_in_other_production_files": 0,
+        "annotations": [
+          "Bean",
+          "ConditionalOnClass",
+          "ConditionalOnMissingBean",
+          "ConditionalOnMissingClass",
+          "Configuration",
+          "Slf4j"
+        ],
+        "changes": []
+      },
+      {
+        "file": "flexlb-common/src/main/java/org/flexlb/config/MonitorDisableConfig.java",
+        "top_level_type": "MonitorDisableConfig",
+        "action": "retained_framework_registration_or_injected_interface",
+        "lexical_type_mentions_in_other_production_files": 0,
+        "annotations": [
+          "Bean",
+          "ConditionalOnClass",
+          "ConditionalOnProperty",
+          "Configuration",
+          "Primary"
+        ],
+        "changes": []
+      },
+      {
+        "file": "flexlb-common/src/main/java/org/flexlb/config/ObservabilityConfig.java",
+        "top_level_type": "ObservabilityConfig",
+        "action": "retained_production_reference_or_protocol",
+        "lexical_type_mentions_in_other_production_files": 4,
+        "annotations": [
+          "Getter",
+          "Setter"
+        ],
+        "changes": []
+      },
+      {
+        "file": "flexlb-common/src/main/java/org/flexlb/config/OtelPropagationConfiguration.java",
+        "top_level_type": "OtelPropagationConfiguration",
+        "action": "retained_framework_registration_or_injected_interface",
+        "lexical_type_mentions_in_other_production_files": 0,
+        "annotations": [
+          "Bean",
+          "Configuration"
+        ],
+        "changes": []
+      },
+      {
+        "file": "flexlb-common/src/main/java/org/flexlb/config/PreemptionConfig.java",
+        "top_level_type": "PreemptionConfig",
+        "action": "retained_production_reference_or_protocol",
+        "lexical_type_mentions_in_other_production_files": 8,
+        "annotations": [
+          "Getter",
+          "Setter"
+        ],
+        "changes": []
+      },
+      {
+        "file": "flexlb-common/src/main/java/org/flexlb/config/QueueOrderingConfig.java",
+        "top_level_type": "QueueOrderingConfig",
+        "action": "removed_or_moved_unused_members",
+        "lexical_type_mentions_in_other_production_files": 8,
+        "annotations": [
+          "Getter",
+          "Setter"
+        ],
+        "changes": [
+          {
+            "file": "flexlb-common/src/main/java/org/flexlb/config/QueueOrderingConfig.java",
+            "method": "priority",
+            "params": null
+          },
+          {
+            "file": "flexlb-common/src/main/java/org/flexlb/config/QueueOrderingConfig.java",
+            "method": "preemptionPolicy",
+            "params": null
+          }
+        ]
+      },
+      {
+        "file": "flexlb-common/src/main/java/org/flexlb/config/RequestLifecycleConfig.java",
+        "top_level_type": "RequestLifecycleConfig",
+        "action": "retained_production_reference_or_protocol",
+        "lexical_type_mentions_in_other_production_files": 3,
+        "annotations": [
+          "Getter",
+          "Setter"
+        ],
+        "changes": []
+      },
+      {
+        "file": "flexlb-common/src/main/java/org/flexlb/config/RoutingConfig.java",
+        "top_level_type": "RoutingConfig",
+        "action": "retained_production_reference_or_protocol",
+        "lexical_type_mentions_in_other_production_files": 21,
+        "annotations": [
+          "Getter",
+          "JsonIgnore",
+          "Setter"
+        ],
+        "changes": []
+      },
+      {
+        "file": "flexlb-common/src/main/java/org/flexlb/config/SchedulerConfig.java",
+        "top_level_type": "SchedulerConfig",
+        "action": "removed_or_moved_unused_members",
+        "lexical_type_mentions_in_other_production_files": 8,
+        "annotations": [
+          "Getter",
+          "Setter"
+        ],
+        "changes": [
+          {
+            "file": "flexlb-common/src/main/java/org/flexlb/config/SchedulerConfig.java",
+            "method": "direct",
+            "params": null
+          }
+        ]
+      },
+      {
+        "file": "flexlb-common/src/main/java/org/flexlb/config/ServiceDiscoveryConfiguration.java",
+        "top_level_type": "ServiceDiscoveryConfiguration",
+        "action": "retained_framework_registration_or_injected_interface",
+        "lexical_type_mentions_in_other_production_files": 0,
+        "annotations": [
+          "Bean",
+          "ConditionalOnMissingBean",
+          "Configuration"
+        ],
+        "changes": []
+      },
+      {
+        "file": "flexlb-common/src/main/java/org/flexlb/config/TrafficPolicyConfig.java",
+        "top_level_type": "TrafficPolicyConfig",
+        "action": "removed_or_moved_unused_members",
+        "lexical_type_mentions_in_other_production_files": 7,
+        "annotations": [
+          "Getter",
+          "Setter"
+        ],
+        "changes": [
+          {
+            "file": "flexlb-common/src/main/java/org/flexlb/config/TrafficPolicyConfig.java",
+            "method": "resolveTargetGroup",
+            "params": "Request request"
+          }
+        ]
+      },
+      {
+        "file": "flexlb-common/src/main/java/org/flexlb/config/VictimStage.java",
+        "top_level_type": "VictimStage",
+        "action": "retained_production_reference_or_protocol",
+        "lexical_type_mentions_in_other_production_files": 15,
+        "annotations": [],
+        "changes": []
+      },
+      {
+        "file": "flexlb-common/src/main/java/org/flexlb/config/WhitelistMetricsFilterConfig.java",
+        "top_level_type": "WhitelistMetricsFilterConfig",
+        "action": "retained_framework_registration_or_injected_interface",
+        "lexical_type_mentions_in_other_production_files": 0,
+        "annotations": [
+          "Bean",
+          "ConditionalOnClass",
+          "Configuration",
+          "Override",
+          "PostConstruct",
+          "Slf4j",
+          "Value"
+        ],
+        "changes": []
+      },
+      {
+        "file": "flexlb-common/src/main/java/org/flexlb/config/WorkerRegistryConfig.java",
+        "top_level_type": "WorkerRegistryConfig",
+        "action": "retained_production_reference_or_protocol",
+        "lexical_type_mentions_in_other_production_files": 5,
+        "annotations": [
+          "Getter",
+          "Setter"
+        ],
+        "changes": []
+      },
+      {
+        "file": "flexlb-common/src/main/java/org/flexlb/constant/CommonConstants.java",
+        "top_level_type": "CommonConstants",
+        "action": "retained_production_reference_or_protocol",
+        "lexical_type_mentions_in_other_production_files": 12,
+        "annotations": [],
+        "changes": []
+      },
+      {
+        "file": "flexlb-common/src/main/java/org/flexlb/constant/HttpHeaderNames.java",
+        "top_level_type": "HttpHeaderNames",
+        "action": "retained_production_reference_or_protocol",
+        "lexical_type_mentions_in_other_production_files": 5,
+        "annotations": [],
+        "changes": []
+      },
+      {
+        "file": "flexlb-common/src/main/java/org/flexlb/constant/MetricConstant.java",
+        "top_level_type": "MetricConstant",
+        "action": "removed_or_moved_unused_members",
+        "lexical_type_mentions_in_other_production_files": 120,
+        "annotations": [],
+        "changes": [
+          {
+            "file": "flexlb-common/src/main/java/org/flexlb/constant/MetricConstant.java",
+            "field": "ROUTING_QUEUE_ENTRY_QPS"
+          },
+          {
+            "file": "flexlb-common/src/main/java/org/flexlb/constant/MetricConstant.java",
+            "field": "ROUTING_QUEUE_TIMEOUT_QPS"
+          },
+          {
+            "file": "flexlb-common/src/main/java/org/flexlb/constant/MetricConstant.java",
+            "field": "ROUTING_QUEUE_REJECTED_QPS"
+          },
+          {
+            "file": "flexlb-common/src/main/java/org/flexlb/constant/MetricConstant.java",
+            "field": "ROUTING_ROUTE_EXECUTION_TIME_MS"
+          },
+          {
+            "file": "flexlb-common/src/main/java/org/flexlb/constant/MetricConstant.java",
+            "field": "ROUTING_SUCCESS_QPS"
+          },
+          {
+            "file": "flexlb-common/src/main/java/org/flexlb/constant/MetricConstant.java",
+            "field": "ROUTING_FAILURE_QPS"
+          },
+          {
+            "file": "flexlb-common/src/main/java/org/flexlb/constant/MetricConstant.java",
+            "field": "ROUTING_RETRY_QPS"
+          },
+          {
+            "file": "flexlb-common/src/main/java/org/flexlb/constant/MetricConstant.java",
+            "field": "WORKER_PERMIT_CAPACITY"
+          },
+          {
+            "file": "flexlb-common/src/main/java/org/flexlb/constant/MetricConstant.java",
+            "field": "AUTO_TPM_REQUEST_SLO_MS"
+          },
+          {
+            "file": "flexlb-common/src/main/java/org/flexlb/constant/MetricConstant.java",
+            "field": "AUTO_TPM_DEADLINE_MISS_COUNT"
+          }
+        ]
+      },
+      {
+        "file": "flexlb-common/src/main/java/org/flexlb/constant/ZkMasterEvent.java",
+        "top_level_type": "ZkMasterEvent",
+        "action": "retained_production_reference_or_protocol",
+        "lexical_type_mentions_in_other_production_files": 15,
+        "annotations": [],
+        "changes": []
+      },
+      {
+        "file": "flexlb-common/src/main/java/org/flexlb/dao/SchedulingMetadata.java",
+        "top_level_type": "SchedulingMetadata",
+        "action": "removed_or_moved_unused_members",
+        "lexical_type_mentions_in_other_production_files": 23,
+        "annotations": [],
+        "changes": [
+          {
+            "file": "flexlb-common/src/main/java/org/flexlb/dao/SchedulingMetadata.java",
+            "method": "source",
+            "params": null
+          },
+          {
+            "file": "flexlb-common/src/main/java/org/flexlb/dao/SchedulingMetadata.java",
+            "method": "expired",
+            "params": null
+          },
+          {
+            "file": "flexlb-common/src/main/java/org/flexlb/dao/SchedulingMetadata.java",
+            "field": "source",
+            "reason": "No production reader; normalization priority and expiry remain"
+          },
+          {
+            "file": "flexlb-common/src/main/java/org/flexlb/dao/SchedulingMetadata.java",
+            "removed_nested_type": "PrioritySource",
+            "reason": "Only used by the removed bookkeeping field"
+          }
+        ]
+      },
+      {
+        "file": "flexlb-common/src/main/java/org/flexlb/dao/loadbalance/AdmissionRejectReason.java",
+        "top_level_type": "AdmissionRejectReason",
+        "action": "retained_production_reference_or_protocol",
+        "lexical_type_mentions_in_other_production_files": 37,
+        "annotations": [],
+        "changes": []
+      },
+      {
+        "file": "flexlb-common/src/main/java/org/flexlb/dao/loadbalance/DebugInfo.java",
+        "top_level_type": "DebugInfo",
+        "action": "retained_production_reference_or_protocol",
+        "lexical_type_mentions_in_other_production_files": 5,
+        "annotations": [
+          "Data",
+          "JsonIgnoreProperties",
+          "JsonProperty"
+        ],
+        "changes": []
+      },
+      {
+        "file": "flexlb-common/src/main/java/org/flexlb/dao/loadbalance/LogLevelUpdateRequest.java",
+        "top_level_type": "LogLevelUpdateRequest",
+        "action": "retained_production_reference_or_protocol",
+        "lexical_type_mentions_in_other_production_files": 2,
+        "annotations": [
+          "Getter",
+          "JsonProperty",
+          "Setter"
+        ],
+        "changes": []
+      },
+      {
+        "file": "flexlb-common/src/main/java/org/flexlb/dao/loadbalance/QueueSnapshotResponse.java",
+        "top_level_type": "QueueSnapshotResponse",
+        "action": "retained_production_reference_or_protocol",
+        "lexical_type_mentions_in_other_production_files": 5,
+        "annotations": [
+          "AllArgsConstructor",
+          "Data",
+          "NoArgsConstructor"
+        ],
+        "changes": []
+      },
+      {
+        "file": "flexlb-common/src/main/java/org/flexlb/dao/loadbalance/Request.java",
+        "top_level_type": "Request",
+        "action": "retained_production_reference_or_protocol",
+        "lexical_type_mentions_in_other_production_files": 42,
+        "annotations": [
+          "Builder",
+          "Getter",
+          "Jacksonized",
+          "JsonAlias",
+          "JsonIgnore",
+          "JsonIgnoreProperties",
+          "JsonProperty",
+          "ToString"
+        ],
+        "changes": []
+      },
+      {
+        "file": "flexlb-common/src/main/java/org/flexlb/dao/loadbalance/Response.java",
+        "top_level_type": "Response",
+        "action": "retained_production_reference_or_protocol",
+        "lexical_type_mentions_in_other_production_files": 139,
+        "annotations": [
+          "Data",
+          "JsonIgnoreProperties",
+          "JsonProperty"
+        ],
+        "changes": []
+      },
+      {
+        "file": "flexlb-common/src/main/java/org/flexlb/dao/loadbalance/ServerStatus.java",
+        "top_level_type": "ServerStatus",
+        "action": "retained_production_reference_or_protocol",
+        "lexical_type_mentions_in_other_production_files": 39,
+        "annotations": [
+          "Data",
+          "JsonIgnoreProperties",
+          "JsonProperty"
+        ],
+        "changes": []
+      },
+      {
+        "file": "flexlb-common/src/main/java/org/flexlb/dao/loadbalance/StrategyErrorType.java",
+        "top_level_type": "StrategyErrorType",
+        "action": "retained_production_reference_or_protocol",
+        "lexical_type_mentions_in_other_production_files": 104,
+        "annotations": [
+          "Getter",
+          "Override"
+        ],
+        "changes": []
+      },
+      {
+        "file": "flexlb-common/src/main/java/org/flexlb/dao/master/CacheStatus.java",
+        "top_level_type": "CacheStatus",
+        "action": "retained_production_reference_or_protocol",
+        "lexical_type_mentions_in_other_production_files": 22,
+        "annotations": [
+          "AllArgsConstructor",
+          "Builder",
+          "Data",
+          "JsonIgnoreProperties",
+          "JsonProperty",
+          "NoArgsConstructor"
+        ],
+        "changes": []
+      },
+      {
+        "file": "flexlb-common/src/main/java/org/flexlb/dao/master/TaskInfo.java",
+        "top_level_type": "TaskInfo",
+        "action": "moved_to_test_sources",
+        "lexical_type_mentions_in_other_production_files": 0,
+        "annotations": [
+          "Data",
+          "JsonIgnoreProperties",
+          "JsonProperty"
+        ],
+        "changes": [
+          {
+            "file": "flexlb-common/src/main/java/org/flexlb/dao/master/TaskInfo.java",
+            "moved_to": "flexlb-common/src/testFixtures/java/org/flexlb/dao/master/TaskInfo.java"
+          }
+        ]
+      },
+      {
+        "file": "flexlb-common/src/main/java/org/flexlb/dao/master/WorkerHost.java",
+        "top_level_type": "WorkerHost",
+        "action": "removed_or_moved_unused_members",
+        "lexical_type_mentions_in_other_production_files": 32,
+        "annotations": [
+          "Getter"
+        ],
+        "changes": [
+          {
+            "file": "flexlb-common/src/main/java/org/flexlb/dao/master/WorkerHost.java",
+            "method": "of",
+            "params": "String site"
+          }
+        ]
+      },
+      {
+        "file": "flexlb-common/src/main/java/org/flexlb/dao/master/WorkerStatus.java",
+        "top_level_type": "WorkerStatus",
+        "action": "removed_or_moved_unused_members",
+        "lexical_type_mentions_in_other_production_files": 175,
+        "annotations": [
+          "JsonIgnore",
+          "Override"
+        ],
+        "changes": [
+          {
+            "file": "flexlb-common/src/main/java/org/flexlb/dao/master/WorkerStatus.java",
+            "method": "freezeStatusResponse",
+            "params": null
+          },
+          {
+            "file": "flexlb-common/src/main/java/org/flexlb/dao/master/WorkerStatus.java",
+            "method": "freezeTaskMap",
+            "params": null
+          },
+          {
+            "file": "flexlb-common/src/main/java/org/flexlb/dao/master/WorkerStatus.java",
+            "method": "copyOf",
+            "params": null
+          },
+          {
+            "file": "flexlb-common/src/main/java/org/flexlb/dao/master/WorkerStatus.java",
+            "method": "getCacheIndexedVersion",
+            "params": null
+          },
+          {
+            "file": "flexlb-common/src/main/java/org/flexlb/dao/master/WorkerStatus.java",
+            "method": "runningQueryLen",
+            "params": null
+          },
+          {
+            "file": "flexlb-common/src/main/java/org/flexlb/dao/master/WorkerStatus.java",
+            "method": "waitingQueryLen",
+            "params": null
+          }
+        ]
+      },
+      {
+        "file": "flexlb-common/src/main/java/org/flexlb/dao/master/WorkerStatusResponse.java",
+        "top_level_type": "WorkerStatusResponse",
+        "action": "moved_to_test_sources",
+        "lexical_type_mentions_in_other_production_files": 0,
+        "annotations": [
+          "Data",
+          "JsonIgnoreProperties",
+          "JsonProperty"
+        ],
+        "changes": [
+          {
+            "file": "flexlb-common/src/main/java/org/flexlb/dao/master/WorkerStatusResponse.java",
+            "moved_to": "flexlb-common/src/testFixtures/java/org/flexlb/dao/master/WorkerStatusResponse.java"
+          }
+        ]
+      },
+      {
+        "file": "flexlb-common/src/main/java/org/flexlb/dao/netty/HttpNettyChannelContext.java",
+        "top_level_type": "HttpNettyChannelContext",
+        "action": "retained_production_reference_or_protocol",
+        "lexical_type_mentions_in_other_production_files": 29,
+        "annotations": [
+          "AllArgsConstructor",
+          "Builder",
+          "Data",
+          "NoArgsConstructor"
+        ],
+        "changes": []
+      },
+      {
+        "file": "flexlb-common/src/main/java/org/flexlb/dao/route/Endpoint.java",
+        "top_level_type": "Endpoint",
+        "action": "retained_production_reference_or_protocol",
+        "lexical_type_mentions_in_other_production_files": 19,
+        "annotations": [
+          "Data",
+          "JsonIgnoreProperties",
+          "JsonProperty"
+        ],
+        "changes": []
+      },
+      {
+        "file": "flexlb-common/src/main/java/org/flexlb/dao/route/GroupRoleEndPoint.java",
+        "top_level_type": "GroupRoleEndPoint",
+        "action": "retained_production_reference_or_protocol",
+        "lexical_type_mentions_in_other_production_files": 4,
+        "annotations": [
+          "Data",
+          "JsonIgnoreProperties",
+          "JsonProperty"
+        ],
+        "changes": []
+      },
+      {
+        "file": "flexlb-common/src/main/java/org/flexlb/dao/route/RoleType.java",
+        "top_level_type": "RoleType",
+        "action": "retained_production_reference_or_protocol",
+        "lexical_type_mentions_in_other_production_files": 273,
+        "annotations": [
+          "Getter",
+          "JsonCreator",
+          "JsonValue"
+        ],
+        "changes": []
+      },
+      {
+        "file": "flexlb-common/src/main/java/org/flexlb/dao/route/ServiceRoute.java",
+        "top_level_type": "ServiceRoute",
+        "action": "retained_production_reference_or_protocol",
+        "lexical_type_mentions_in_other_production_files": 8,
+        "annotations": [
+          "Data",
+          "JsonIgnoreProperties",
+          "JsonProperty"
+        ],
+        "changes": []
+      },
+      {
+        "file": "flexlb-common/src/main/java/org/flexlb/discovery/LocalServiceDiscovery.java",
+        "top_level_type": "LocalServiceDiscovery",
+        "action": "retained_production_reference_or_protocol",
+        "lexical_type_mentions_in_other_production_files": 3,
+        "annotations": [
+          "Override",
+          "Slf4j"
+        ],
+        "changes": []
+      },
+      {
+        "file": "flexlb-common/src/main/java/org/flexlb/discovery/ServiceDiscovery.java",
+        "top_level_type": "ServiceDiscovery",
+        "action": "retained_production_reference_or_protocol",
+        "lexical_type_mentions_in_other_production_files": 10,
+        "annotations": [],
+        "changes": []
+      },
+      {
+        "file": "flexlb-common/src/main/java/org/flexlb/discovery/ServiceHostListener.java",
+        "top_level_type": "ServiceHostListener",
+        "action": "retained_production_reference_or_protocol",
+        "lexical_type_mentions_in_other_production_files": 4,
+        "annotations": [
+          "FunctionalInterface"
+        ],
+        "changes": []
+      },
+      {
+        "file": "flexlb-common/src/main/java/org/flexlb/enums/BackendServiceProtocolEnum.java",
+        "top_level_type": "BackendServiceProtocolEnum",
+        "action": "retained_production_reference_or_protocol",
+        "lexical_type_mentions_in_other_production_files": 4,
+        "annotations": [
+          "Getter"
+        ],
+        "changes": []
+      },
+      {
+        "file": "flexlb-common/src/main/java/org/flexlb/enums/BalanceStatusEnum.java",
+        "top_level_type": "BalanceStatusEnum",
+        "action": "retained_production_reference_or_protocol",
+        "lexical_type_mentions_in_other_production_files": 20,
+        "annotations": [
+          "Getter"
+        ],
+        "changes": []
+      },
+      {
+        "file": "flexlb-common/src/main/java/org/flexlb/enums/DecodeTaskPhase.java",
+        "top_level_type": "DecodeTaskPhase",
+        "action": "retained_production_reference_or_protocol",
+        "lexical_type_mentions_in_other_production_files": 38,
+        "annotations": [],
+        "changes": []
+      },
+      {
+        "file": "flexlb-common/src/main/java/org/flexlb/enums/FlexMetricType.java",
+        "top_level_type": "FlexMetricType",
+        "action": "retained_production_reference_or_protocol",
+        "lexical_type_mentions_in_other_production_files": 124,
+        "annotations": [
+          "Override"
+        ],
+        "changes": []
+      },
+      {
+        "file": "flexlb-common/src/main/java/org/flexlb/enums/FlexPriorityType.java",
+        "top_level_type": "FlexPriorityType",
+        "action": "retained_production_reference_or_protocol",
+        "lexical_type_mentions_in_other_production_files": 74,
+        "annotations": [],
+        "changes": []
+      },
+      {
+        "file": "flexlb-common/src/main/java/org/flexlb/enums/LogLevel.java",
+        "top_level_type": "LogLevel",
+        "action": "retained_production_reference_or_protocol",
+        "lexical_type_mentions_in_other_production_files": 7,
+        "annotations": [
+          "JsonProperty"
+        ],
+        "changes": []
+      },
+      {
+        "file": "flexlb-common/src/main/java/org/flexlb/enums/PriorityPreemptionProgress.java",
+        "top_level_type": "PriorityPreemptionProgress",
+        "action": "retained_production_reference_or_protocol",
+        "lexical_type_mentions_in_other_production_files": 12,
+        "annotations": [],
+        "changes": []
+      },
+      {
+        "file": "flexlb-common/src/main/java/org/flexlb/enums/StatusEnum.java",
+        "top_level_type": "StatusEnum",
+        "action": "retained_production_reference_or_protocol",
+        "lexical_type_mentions_in_other_production_files": 12,
+        "annotations": [
+          "Getter"
+        ],
+        "changes": []
+      },
+      {
+        "file": "flexlb-common/src/main/java/org/flexlb/enums/TaskPhase.java",
+        "top_level_type": "TaskPhase",
+        "action": "retained_production_reference_or_protocol",
+        "lexical_type_mentions_in_other_production_files": 60,
+        "annotations": [
+          "Getter",
+          "JsonCreator",
+          "JsonValue"
+        ],
+        "changes": []
+      },
+      {
+        "file": "flexlb-common/src/main/java/org/flexlb/exception/EngineAbnormalDisconnectException.java",
+        "top_level_type": "EngineAbnormalDisconnectException",
+        "action": "retained_production_reference_or_protocol",
+        "lexical_type_mentions_in_other_production_files": 2,
+        "annotations": [],
+        "changes": []
+      },
+      {
+        "file": "flexlb-common/src/main/java/org/flexlb/exception/EngineReadTimeoutException.java",
+        "top_level_type": "EngineReadTimeoutException",
+        "action": "retained_production_reference_or_protocol",
+        "lexical_type_mentions_in_other_production_files": 2,
+        "annotations": [],
+        "changes": []
+      },
+      {
+        "file": "flexlb-common/src/main/java/org/flexlb/exception/FlexLBException.java",
+        "top_level_type": "FlexLBException",
+        "action": "retained_production_reference_or_protocol",
+        "lexical_type_mentions_in_other_production_files": 22,
+        "annotations": [
+          "Getter"
+        ],
+        "changes": []
+      },
+      {
+        "file": "flexlb-common/src/main/java/org/flexlb/exception/JsonMapperException.java",
+        "top_level_type": "JsonMapperException",
+        "action": "retained_production_reference_or_protocol",
+        "lexical_type_mentions_in_other_production_files": 2,
+        "annotations": [],
+        "changes": []
+      },
+      {
+        "file": "flexlb-common/src/main/java/org/flexlb/exception/NettyCatchException.java",
+        "top_level_type": "NettyCatchException",
+        "action": "retained_production_reference_or_protocol",
+        "lexical_type_mentions_in_other_production_files": 2,
+        "annotations": [],
+        "changes": []
+      },
+      {
+        "file": "flexlb-common/src/main/java/org/flexlb/metric/FlexMetricTags.java",
+        "top_level_type": "FlexMetricTags",
+        "action": "retained_production_reference_or_protocol",
+        "lexical_type_mentions_in_other_production_files": 127,
+        "annotations": [
+          "Getter",
+          "Override"
+        ],
+        "changes": []
+      },
+      {
+        "file": "flexlb-common/src/main/java/org/flexlb/metric/FlexMonitor.java",
+        "top_level_type": "FlexMonitor",
+        "action": "retained_production_reference_or_protocol",
+        "lexical_type_mentions_in_other_production_files": 26,
+        "annotations": [
+          "Override"
+        ],
+        "changes": []
+      },
+      {
+        "file": "flexlb-common/src/main/java/org/flexlb/metric/FlexStatisticsType.java",
+        "top_level_type": "FlexStatisticsType",
+        "action": "retained_production_reference_or_protocol",
+        "lexical_type_mentions_in_other_production_files": 3,
+        "annotations": [],
+        "changes": []
+      },
+      {
+        "file": "flexlb-common/src/main/java/org/flexlb/metric/MasterStatusProvider.java",
+        "top_level_type": "MasterStatusProvider",
+        "action": "removed_no_production_consumer",
+        "lexical_type_mentions_in_other_production_files": 0,
+        "annotations": [],
+        "changes": [
+          {
+            "file": "flexlb-common/src/main/java/org/flexlb/metric/MasterStatusProvider.java",
+            "removed_class": "MasterStatusProvider",
+            "reason": "No production consumer remains; internal KMonitorAdapter also has no reference"
+          }
+        ]
+      },
+      {
+        "file": "flexlb-common/src/main/java/org/flexlb/metric/MicrometerFlexMonitor.java",
+        "top_level_type": "MicrometerFlexMonitor",
+        "action": "retained_production_reference_or_protocol",
+        "lexical_type_mentions_in_other_production_files": 4,
+        "annotations": [
+          "Override",
+          "Slf4j"
+        ],
+        "changes": []
+      },
+      {
+        "file": "flexlb-common/src/main/java/org/flexlb/metric/NoOpFlexMonitor.java",
+        "top_level_type": "NoOpFlexMonitor",
+        "action": "retained_production_reference_or_protocol",
+        "lexical_type_mentions_in_other_production_files": 4,
+        "annotations": [
+          "Override"
+        ],
+        "changes": []
+      },
+      {
+        "file": "flexlb-common/src/main/java/org/flexlb/metric/NoOpMasterStatusProvider.java",
+        "top_level_type": "NoOpMasterStatusProvider",
+        "action": "removed_no_production_consumer",
+        "lexical_type_mentions_in_other_production_files": 0,
+        "annotations": [
+          "Component",
+          "ConditionalOnMissingBean",
+          "Override"
+        ],
+        "changes": [
+          {
+            "file": "flexlb-common/src/main/java/org/flexlb/metric/NoOpMasterStatusProvider.java",
+            "removed_class": "NoOpMasterStatusProvider",
+            "reason": "No production consumer remains; internal KMonitorAdapter also has no reference"
+          }
+        ]
+      },
+      {
+        "file": "flexlb-common/src/main/java/org/flexlb/telemetry/FlexlbTrace.java",
+        "top_level_type": "FlexlbTrace",
+        "action": "removed_or_moved_unused_members",
+        "lexical_type_mentions_in_other_production_files": 66,
+        "annotations": [],
+        "changes": [
+          {
+            "file": "flexlb-common/src/main/java/org/flexlb/telemetry/FlexlbTrace.java",
+            "method": "finish(Span)"
+          }
+        ]
+      },
+      {
+        "file": "flexlb-common/src/main/java/org/flexlb/transport/GeneralHttpNettyService.java",
+        "top_level_type": "GeneralHttpNettyService",
+        "action": "retained_production_reference_or_protocol",
+        "lexical_type_mentions_in_other_production_files": 3,
+        "annotations": [
+          "Component",
+          "Slf4j"
+        ],
+        "changes": []
+      },
+      {
+        "file": "flexlb-common/src/main/java/org/flexlb/transport/HttpNettyClientHandler.java",
+        "top_level_type": "HttpNettyClientHandler",
+        "action": "retained_production_reference_or_protocol",
+        "lexical_type_mentions_in_other_production_files": 8,
+        "annotations": [
+          "ChannelHandler",
+          "Override",
+          "Slf4j",
+          "SuppressWarnings"
+        ],
+        "changes": []
+      },
+      {
+        "file": "flexlb-common/src/main/java/org/flexlb/transport/HttpNettyConfig.java",
+        "top_level_type": "HttpNettyConfig",
+        "action": "retained_framework_registration_or_injected_interface",
+        "lexical_type_mentions_in_other_production_files": 0,
+        "annotations": [
+          "Bean",
+          "Configuration",
+          "Override"
+        ],
+        "changes": []
+      },
+      {
+        "file": "flexlb-common/src/main/java/org/flexlb/util/CommonUtils.java",
+        "top_level_type": "CommonUtils",
+        "action": "retained_production_reference_or_protocol",
+        "lexical_type_mentions_in_other_production_files": 6,
+        "annotations": [
+          "NoArgsConstructor"
+        ],
+        "changes": []
+      },
+      {
+        "file": "flexlb-common/src/main/java/org/flexlb/util/IdUtils.java",
+        "top_level_type": "IdUtils",
+        "action": "retained_production_reference_or_protocol",
+        "lexical_type_mentions_in_other_production_files": 6,
+        "annotations": [],
+        "changes": []
+      },
+      {
+        "file": "flexlb-common/src/main/java/org/flexlb/util/JsonUtils.java",
+        "top_level_type": "JsonUtils",
+        "action": "removed_or_moved_unused_members",
+        "lexical_type_mentions_in_other_production_files": 13,
+        "annotations": [
+          "Slf4j"
+        ],
+        "changes": [
+          {
+            "file": "flexlb-common/src/main/java/org/flexlb/util/JsonUtils.java",
+            "method": "toObject",
+            "params": "TypeReference<T> type"
+          },
+          {
+            "file": "flexlb-common/src/main/java/org/flexlb/util/JsonUtils.java",
+            "method": "toString",
+            "params": null
+          }
+        ]
+      },
+      {
+        "file": "flexlb-common/src/main/java/org/flexlb/util/Logger.java",
+        "top_level_type": "Logger",
+        "action": "retained_production_reference_or_protocol",
+        "lexical_type_mentions_in_other_production_files": 190,
+        "annotations": [],
+        "changes": []
+      },
+      {
+        "file": "flexlb-common/src/main/java/org/flexlb/util/NettyUtils.java",
+        "top_level_type": "NettyUtils",
+        "action": "retained_production_reference_or_protocol",
+        "lexical_type_mentions_in_other_production_files": 10,
+        "annotations": [],
+        "changes": []
+      },
+      {
+        "file": "flexlb-common/src/main/java/org/flexlb/util/PriorityNormalizer.java",
+        "top_level_type": "PriorityNormalizer",
+        "action": "removed_or_moved_unused_members",
+        "lexical_type_mentions_in_other_production_files": 66,
+        "annotations": [],
+        "changes": [
+          {
+            "file": "flexlb-common/src/main/java/org/flexlb/util/PriorityNormalizer.java",
+            "method": "normalize(int,String)"
+          }
+        ]
+      },
+      {
+        "file": "flexlb-common/src/main/java/org/flexlb/util/PriorityOrdering.java",
+        "top_level_type": "PriorityOrdering",
+        "action": "retained_production_reference_or_protocol",
+        "lexical_type_mentions_in_other_production_files": 4,
+        "annotations": [],
+        "changes": []
+      },
+      {
+        "file": "flexlb-grpc/src/main/java/org/flexlb/engine/grpc/AbstractGrpcClient.java",
+        "top_level_type": "AbstractGrpcClient",
+        "action": "retained_production_reference_or_protocol",
+        "lexical_type_mentions_in_other_production_files": 1,
+        "annotations": [
+          "Getter",
+          "Override",
+          "PreDestroy",
+          "Scheduled"
+        ],
+        "changes": []
+      },
+      {
+        "file": "flexlb-grpc/src/main/java/org/flexlb/engine/grpc/EngineGrpcClient.java",
+        "top_level_type": "EngineGrpcClient",
+        "action": "retained_production_reference_or_protocol",
+        "lexical_type_mentions_in_other_production_files": 12,
+        "annotations": [
+          "Autowired",
+          "Component",
+          "Getter",
+          "Override",
+          "Qualifier",
+          "Value"
+        ],
+        "changes": []
+      },
+      {
+        "file": "flexlb-grpc/src/main/java/org/flexlb/engine/grpc/RoleTypeProtoConverter.java",
+        "top_level_type": "RoleTypeProtoConverter",
+        "action": "retained_production_reference_or_protocol",
+        "lexical_type_mentions_in_other_production_files": 12,
+        "annotations": [],
+        "changes": []
+      },
+      {
+        "file": "flexlb-grpc/src/main/java/org/flexlb/engine/grpc/config/ChannelConfiguration.java",
+        "top_level_type": "ChannelConfiguration",
+        "action": "retained_framework_registration_or_injected_interface",
+        "lexical_type_mentions_in_other_production_files": 0,
+        "annotations": [
+          "Bean",
+          "Configuration"
+        ],
+        "changes": []
+      },
+      {
+        "file": "flexlb-grpc/src/main/java/org/flexlb/engine/grpc/monitor/GrpcReporter.java",
+        "top_level_type": "GrpcReporter",
+        "action": "retained_production_reference_or_protocol",
+        "lexical_type_mentions_in_other_production_files": 5,
+        "annotations": [
+          "Component",
+          "PostConstruct"
+        ],
+        "changes": []
+      },
+      {
+        "file": "flexlb-grpc/src/main/java/org/flexlb/engine/grpc/nameresolver/CustomNameResolver.java",
+        "top_level_type": "CustomNameResolver",
+        "action": "retained_production_reference_or_protocol",
+        "lexical_type_mentions_in_other_production_files": 5,
+        "annotations": [],
+        "changes": []
+      },
+      {
+        "file": "flexlb-grpc/src/main/java/org/flexlb/engine/grpc/nameresolver/EngineAddressNameResolver.java",
+        "top_level_type": "EngineAddressNameResolver",
+        "action": "retained_framework_registration_or_injected_interface",
+        "lexical_type_mentions_in_other_production_files": 0,
+        "annotations": [
+          "Component",
+          "Override",
+          "PreDestroy",
+          "Scheduled",
+          "Slf4j"
+        ],
+        "changes": []
+      },
+      {
+        "file": "flexlb-mock-engine/src/main/java/org/flexlb/mockengine/DiscoveryFileStore.java",
+        "top_level_type": "DiscoveryFileStore",
+        "action": "retained_production_reference_or_protocol",
+        "lexical_type_mentions_in_other_production_files": 4,
+        "annotations": [],
+        "changes": []
+      },
+      {
+        "file": "flexlb-mock-engine/src/main/java/org/flexlb/mockengine/DynamicEngineManager.java",
+        "top_level_type": "DynamicEngineManager",
+        "action": "retained_production_reference_or_protocol",
+        "lexical_type_mentions_in_other_production_files": 8,
+        "annotations": [],
+        "changes": []
+      },
+      {
+        "file": "flexlb-mock-engine/src/main/java/org/flexlb/mockengine/FaultInjectionConfig.java",
+        "top_level_type": "FaultInjectionConfig",
+        "action": "removed_or_moved_unused_members",
+        "lexical_type_mentions_in_other_production_files": 14,
+        "annotations": [
+          "Override"
+        ],
+        "changes": [
+          {
+            "file": "flexlb-mock-engine/src/main/java/org/flexlb/mockengine/FaultInjectionConfig.java",
+            "method": "getEnqueueErrorCode",
+            "params": null
+          },
+          {
+            "file": "flexlb-mock-engine/src/main/java/org/flexlb/mockengine/FaultInjectionConfig.java",
+            "method": "enqueueErrorCode",
+            "params": null
+          },
+          {
+            "file": "flexlb-mock-engine/src/main/java/org/flexlb/mockengine/FaultInjectionConfig.java",
+            "field": "enqueueErrorCode",
+            "reason": "Builder/getter/copy/log only; no enqueue handler consumer"
+          }
+        ]
+      },
+      {
+        "file": "flexlb-mock-engine/src/main/java/org/flexlb/mockengine/JavaLoadClient.java",
+        "top_level_type": "JavaLoadClient",
+        "action": "retained_entry_point",
+        "lexical_type_mentions_in_other_production_files": 0,
+        "annotations": [],
+        "changes": []
+      },
+      {
+        "file": "flexlb-mock-engine/src/main/java/org/flexlb/mockengine/JavaMockEngineCluster.java",
+        "top_level_type": "JavaMockEngineCluster",
+        "action": "removed_or_moved_unused_members",
+        "lexical_type_mentions_in_other_production_files": 48,
+        "annotations": [
+          "Override"
+        ],
+        "changes": [
+          {
+            "file": "flexlb-mock-engine/src/main/java/org/flexlb/mockengine/JavaMockEngineCluster.java",
+            "method": "getDownstreamOwnershipCount",
+            "params": null
+          },
+          {
+            "file": "flexlb-mock-engine/src/main/java/org/flexlb/mockengine/JavaMockEngineCluster.java",
+            "method": "getUpstreamOwnershipCount",
+            "params": null
+          },
+          {
+            "file": "flexlb-mock-engine/src/main/java/org/flexlb/mockengine/JavaMockEngineCluster.java",
+            "method": "hasDownstreamOwnership",
+            "params": null
+          },
+          {
+            "file": "flexlb-mock-engine/src/main/java/org/flexlb/mockengine/JavaMockEngineCluster.java",
+            "method": "hasUpstreamOwnership",
+            "params": null
+          },
+          {
+            "file": "flexlb-mock-engine/src/main/java/org/flexlb/mockengine/JavaMockEngineCluster.java",
+            "method": "getTotalKvTokens",
+            "params": null
+          },
+          {
+            "file": "flexlb-mock-engine/src/main/java/org/flexlb/mockengine/JavaMockEngineCluster.java",
+            "method": "getMaxPrefillConcurrency",
+            "params": null
+          },
+          {
+            "file": "flexlb-mock-engine/src/main/java/org/flexlb/mockengine/JavaMockEngineCluster.java",
+            "method": "getActivePrefillRequestCount",
+            "params": null
+          },
+          {
+            "file": "flexlb-mock-engine/src/main/java/org/flexlb/mockengine/JavaMockEngineCluster.java",
+            "method": "getAcceptedCount",
+            "params": null
+          },
+          {
+            "file": "flexlb-mock-engine/src/main/java/org/flexlb/mockengine/JavaMockEngineCluster.java",
+            "method": "getCompletedCount",
+            "params": null
+          },
+          {
+            "file": "flexlb-mock-engine/src/main/java/org/flexlb/mockengine/JavaMockEngineCluster.java",
+            "method": "getCancelledCount",
+            "params": null
+          },
+          {
+            "file": "flexlb-mock-engine/src/main/java/org/flexlb/mockengine/JavaMockEngineCluster.java",
+            "method": "getActiveKvTokens",
+            "params": null
+          },
+          {
+            "file": "flexlb-mock-engine/src/main/java/org/flexlb/mockengine/JavaMockEngineCluster.java",
+            "method": "getOccupiedKvTokens",
+            "params": null
+          },
+          {
+            "file": "flexlb-mock-engine/src/main/java/org/flexlb/mockengine/JavaMockEngineCluster.java",
+            "method": "getCacheBlocks",
+            "params": null
+          },
+          {
+            "file": "flexlb-mock-engine/src/main/java/org/flexlb/mockengine/JavaMockEngineCluster.java",
+            "method": "getSeqSizePerBlock",
+            "params": null
+          },
+          {
+            "file": "flexlb-mock-engine/src/main/java/org/flexlb/mockengine/JavaMockEngineCluster.java",
+            "method": "isLeakDetected",
+            "params": null
+          },
+          {
+            "file": "flexlb-mock-engine/src/main/java/org/flexlb/mockengine/JavaMockEngineCluster.java",
+            "method": "getActiveDecodeCount",
+            "params": null
+          },
+          {
+            "file": "flexlb-mock-engine/src/main/java/org/flexlb/mockengine/JavaMockEngineCluster.java",
+            "method": "getActivePrefillBatchCount",
+            "params": null
+          },
+          {
+            "file": "flexlb-mock-engine/src/main/java/org/flexlb/mockengine/JavaMockEngineCluster.java",
+            "method": "getPrefillPendingQueueDepth",
+            "params": null
+          },
+          {
+            "file": "flexlb-mock-engine/src/main/java/org/flexlb/mockengine/JavaMockEngineCluster.java",
+            "method": "getRequestStates",
+            "params": null
+          },
+          {
+            "file": "flexlb-mock-engine/src/main/java/org/flexlb/mockengine/JavaMockEngineCluster.java",
+            "method": "setCompletionRetainWindow",
+            "params": null
+          },
+          {
+            "file": "flexlb-mock-engine/src/main/java/org/flexlb/mockengine/JavaMockEngineCluster.java",
+            "method": "isShuttingDown",
+            "params": null
+          }
+        ]
+      },
+      {
+        "file": "flexlb-mock-engine/src/main/java/org/flexlb/mockengine/MasterTargetRouter.java",
+        "top_level_type": "MasterTargetRouter",
+        "action": "retained_production_reference_or_protocol",
+        "lexical_type_mentions_in_other_production_files": 4,
+        "annotations": [],
+        "changes": []
+      },
+      {
+        "file": "flexlb-mock-engine/src/main/java/org/flexlb/mockengine/MockControlServer.java",
+        "top_level_type": "MockControlServer",
+        "action": "removed_or_moved_unused_members",
+        "lexical_type_mentions_in_other_production_files": 2,
+        "annotations": [
+          "FunctionalInterface",
+          "SuppressWarnings"
+        ],
+        "changes": [
+          {
+            "file": "flexlb-mock-engine/src/main/java/org/flexlb/mockengine/MockControlServer.java",
+            "method": "getPort",
+            "params": null
+          }
+        ]
+      },
+      {
+        "file": "flexlb-mock-engine/src/main/java/org/flexlb/mockengine/MockEngineCancelChannel.java",
+        "top_level_type": "MockEngineCancelChannel",
+        "action": "moved_to_test_sources",
+        "lexical_type_mentions_in_other_production_files": 0,
+        "annotations": [
+          "Override"
+        ],
+        "changes": [
+          {
+            "file": "flexlb-mock-engine/src/main/java/org/flexlb/mockengine/MockEngineCancelChannel.java",
+            "moved_to": "flexlb-mock-engine/src/test/java/org/flexlb/mockengine/MockEngineCancelChannel.java",
+            "reason": "Explicitly UT-only adapter; all constructors called from mock-engine tests"
+          }
+        ]
+      },
+      {
+        "file": "flexlb-mock-engine/src/main/java/org/flexlb/mockengine/MockLruBlockCache.java",
+        "top_level_type": "MockLruBlockCache",
+        "action": "removed_or_moved_unused_members",
+        "lexical_type_mentions_in_other_production_files": 24,
+        "annotations": [],
+        "changes": [
+          {
+            "file": "flexlb-mock-engine/src/main/java/org/flexlb/mockengine/MockLruBlockCache.java",
+            "method": "lruKeyBlocks",
+            "params": null
+          },
+          {
+            "file": "flexlb-mock-engine/src/main/java/org/flexlb/mockengine/MockLruBlockCache.java",
+            "method": "admit(List<Long>)"
+          }
+        ]
+      },
+      {
+        "file": "flexlb-mock-engine/src/main/java/org/flexlb/mockengine/MockPerformanceModel.java",
+        "top_level_type": "MockPerformanceModel",
+        "action": "removed_or_moved_unused_members",
+        "lexical_type_mentions_in_other_production_files": 60,
+        "annotations": [],
+        "changes": [
+          {
+            "file": "flexlb-mock-engine/src/main/java/org/flexlb/mockengine/MockPerformanceModel.java",
+            "method": "setOverrideDecodeStepMs",
+            "params": null
+          },
+          {
+            "file": "flexlb-mock-engine/src/main/java/org/flexlb/mockengine/MockPerformanceModel.java",
+            "method": "decodeMs",
+            "params": null
+          },
+          {
+            "file": "flexlb-mock-engine/src/main/java/org/flexlb/mockengine/MockPerformanceModel.java",
+            "field": "overrideDecodeStepMs and dead branch"
+          }
+        ]
+      },
+      {
+        "file": "flexlb-mock-engine/src/main/java/org/flexlb/mockengine/StabilityMonitor.java",
+        "top_level_type": "StabilityMonitor",
+        "action": "retained_entry_point",
+        "lexical_type_mentions_in_other_production_files": 0,
+        "annotations": [],
+        "changes": []
+      },
+      {
+        "file": "flexlb-sync/src/main/java/org/flexlb/balance/PlacementResult.java",
+        "top_level_type": "PlacementResult",
+        "action": "retained_production_reference_or_protocol",
+        "lexical_type_mentions_in_other_production_files": 63,
+        "annotations": [],
+        "changes": []
+      },
+      {
+        "file": "flexlb-sync/src/main/java/org/flexlb/balance/composition/DeliveryBindingConfiguration.java",
+        "top_level_type": "DeliveryBindingConfiguration",
+        "action": "retained_framework_registration_or_injected_interface",
+        "lexical_type_mentions_in_other_production_files": 0,
+        "annotations": [
+          "Bean",
+          "Configuration"
+        ],
+        "changes": []
+      },
+      {
+        "file": "flexlb-sync/src/main/java/org/flexlb/balance/delivery/CapacityBoundary.java",
+        "top_level_type": "CapacityBoundary",
+        "action": "retained_production_reference_or_protocol",
+        "lexical_type_mentions_in_other_production_files": 54,
+        "annotations": [],
+        "changes": []
+      },
+      {
+        "file": "flexlb-sync/src/main/java/org/flexlb/balance/delivery/DeliveryResult.java",
+        "top_level_type": "DeliveryResult",
+        "action": "retained_production_reference_or_protocol",
+        "lexical_type_mentions_in_other_production_files": 45,
+        "annotations": [],
+        "changes": []
+      },
+      {
+        "file": "flexlb-sync/src/main/java/org/flexlb/balance/endpoint/DecodeEndpoint.java",
+        "top_level_type": "DecodeEndpoint",
+        "action": "retained_production_reference_or_protocol",
+        "lexical_type_mentions_in_other_production_files": 52,
+        "annotations": [],
+        "changes": []
+      },
+      {
+        "file": "flexlb-sync/src/main/java/org/flexlb/balance/endpoint/DecodeResources.java",
+        "top_level_type": "DecodeResources",
+        "action": "retained_production_reference_or_protocol",
+        "lexical_type_mentions_in_other_production_files": 135,
+        "annotations": [],
+        "changes": []
+      },
+      {
+        "file": "flexlb-sync/src/main/java/org/flexlb/balance/endpoint/DecodeState.java",
+        "top_level_type": "DecodeState",
+        "action": "retained_production_reference_or_protocol",
+        "lexical_type_mentions_in_other_production_files": 9,
+        "annotations": [],
+        "changes": []
+      },
+      {
+        "file": "flexlb-sync/src/main/java/org/flexlb/balance/endpoint/EndpointGenerationLifecycle.java",
+        "top_level_type": "EndpointGenerationLifecycle",
+        "action": "retained_production_reference_or_protocol",
+        "lexical_type_mentions_in_other_production_files": 22,
+        "annotations": [
+          "Override"
+        ],
+        "changes": []
+      },
+      {
+        "file": "flexlb-sync/src/main/java/org/flexlb/balance/endpoint/EndpointRegistry.java",
+        "top_level_type": "EndpointRegistry",
+        "action": "retained_production_reference_or_protocol",
+        "lexical_type_mentions_in_other_production_files": 46,
+        "annotations": [
+          "Autowired",
+          "Component",
+          "Override",
+          "SuppressWarnings"
+        ],
+        "changes": []
+      },
+      {
+        "file": "flexlb-sync/src/main/java/org/flexlb/balance/endpoint/PrefillActiveIndex.java",
+        "top_level_type": "PrefillActiveIndex",
+        "action": "retained_production_reference_or_protocol",
+        "lexical_type_mentions_in_other_production_files": 7,
+        "annotations": [
+          "Override"
+        ],
+        "changes": []
+      },
+      {
+        "file": "flexlb-sync/src/main/java/org/flexlb/balance/endpoint/PrefillEndpoint.java",
+        "top_level_type": "PrefillEndpoint",
+        "action": "retained_production_reference_or_protocol",
+        "lexical_type_mentions_in_other_production_files": 47,
+        "annotations": [
+          "Override"
+        ],
+        "changes": []
+      },
+      {
+        "file": "flexlb-sync/src/main/java/org/flexlb/balance/endpoint/PrefillState.java",
+        "top_level_type": "PrefillState",
+        "action": "retained_production_reference_or_protocol",
+        "lexical_type_mentions_in_other_production_files": 75,
+        "annotations": [
+          "Override"
+        ],
+        "changes": []
+      },
+      {
+        "file": "flexlb-sync/src/main/java/org/flexlb/balance/endpoint/WorkerEndpoint.java",
+        "top_level_type": "WorkerEndpoint",
+        "action": "retained_production_reference_or_protocol",
+        "lexical_type_mentions_in_other_production_files": 81,
+        "annotations": [
+          "Override"
+        ],
+        "changes": []
+      },
+      {
+        "file": "flexlb-sync/src/main/java/org/flexlb/balance/eviction/DecodeCapacityAcquirer.java",
+        "top_level_type": "DecodeCapacityAcquirer",
+        "action": "retained_production_reference_or_protocol",
+        "lexical_type_mentions_in_other_production_files": 7,
+        "annotations": [
+          "Autowired",
+          "Component",
+          "Override",
+          "PreDestroy"
+        ],
+        "changes": []
+      },
+      {
+        "file": "flexlb-sync/src/main/java/org/flexlb/balance/eviction/DecodeEvictionProposal.java",
+        "top_level_type": "DecodeEvictionProposal",
+        "action": "retained_production_reference_or_protocol",
+        "lexical_type_mentions_in_other_production_files": 25,
+        "annotations": [],
+        "changes": []
+      },
+      {
+        "file": "flexlb-sync/src/main/java/org/flexlb/balance/eviction/EngineCancelChannel.java",
+        "top_level_type": "EngineCancelChannel",
+        "action": "retained_production_reference_or_protocol",
+        "lexical_type_mentions_in_other_production_files": 23,
+        "annotations": [],
+        "changes": []
+      },
+      {
+        "file": "flexlb-sync/src/main/java/org/flexlb/balance/eviction/EvictionPlanner.java",
+        "top_level_type": "EvictionPlanner",
+        "action": "retained_production_reference_or_protocol",
+        "lexical_type_mentions_in_other_production_files": 3,
+        "annotations": [],
+        "changes": []
+      },
+      {
+        "file": "flexlb-sync/src/main/java/org/flexlb/balance/eviction/GrpcEngineCancelChannel.java",
+        "top_level_type": "GrpcEngineCancelChannel",
+        "action": "retained_framework_registration_or_injected_interface",
+        "lexical_type_mentions_in_other_production_files": 0,
+        "annotations": [
+          "Component",
+          "Override",
+          "Slf4j"
+        ],
+        "changes": []
+      },
+      {
+        "file": "flexlb-sync/src/main/java/org/flexlb/balance/eviction/PriorityCostFunction.java",
+        "top_level_type": "PriorityCostFunction",
+        "action": "retained_production_reference_or_protocol",
+        "lexical_type_mentions_in_other_production_files": 6,
+        "annotations": [],
+        "changes": []
+      },
+      {
+        "file": "flexlb-sync/src/main/java/org/flexlb/balance/eviction/PriorityHarmProfile.java",
+        "top_level_type": "PriorityHarmProfile",
+        "action": "retained_production_reference_or_protocol",
+        "lexical_type_mentions_in_other_production_files": 6,
+        "annotations": [
+          "Override"
+        ],
+        "changes": []
+      },
+      {
+        "file": "flexlb-sync/src/main/java/org/flexlb/balance/planner/GroupPlanner.java",
+        "top_level_type": "GroupPlanner",
+        "action": "retained_production_reference_or_protocol",
+        "lexical_type_mentions_in_other_production_files": 88,
+        "annotations": [
+          "FunctionalInterface",
+          "Override"
+        ],
+        "changes": []
+      },
+      {
+        "file": "flexlb-sync/src/main/java/org/flexlb/balance/planner/GroupingPolicy.java",
+        "top_level_type": "GroupingPolicy",
+        "action": "retained_production_reference_or_protocol",
+        "lexical_type_mentions_in_other_production_files": 9,
+        "annotations": [],
+        "changes": []
+      },
+      {
+        "file": "flexlb-sync/src/main/java/org/flexlb/balance/prediction/FormulaPredictor.java",
+        "top_level_type": "FormulaPredictor",
+        "action": "retained_production_reference_or_protocol",
+        "lexical_type_mentions_in_other_production_files": 3,
+        "annotations": [
+          "Override"
+        ],
+        "changes": []
+      },
+      {
+        "file": "flexlb-sync/src/main/java/org/flexlb/balance/prediction/InvalidPrefillPredictionException.java",
+        "top_level_type": "InvalidPrefillPredictionException",
+        "action": "retained_production_reference_or_protocol",
+        "lexical_type_mentions_in_other_production_files": 6,
+        "annotations": [],
+        "changes": []
+      },
+      {
+        "file": "flexlb-sync/src/main/java/org/flexlb/balance/prediction/LearningPredictor.java",
+        "top_level_type": "LearningPredictor",
+        "action": "retained_production_reference_or_protocol",
+        "lexical_type_mentions_in_other_production_files": 2,
+        "annotations": [
+          "Override"
+        ],
+        "changes": []
+      },
+      {
+        "file": "flexlb-sync/src/main/java/org/flexlb/balance/prediction/PrefillBatchFeatures.java",
+        "top_level_type": "PrefillBatchFeatures",
+        "action": "retained_production_reference_or_protocol",
+        "lexical_type_mentions_in_other_production_files": 34,
+        "annotations": [
+          "Override"
+        ],
+        "changes": []
+      },
+      {
+        "file": "flexlb-sync/src/main/java/org/flexlb/balance/prediction/PrefillPredictionBoundary.java",
+        "top_level_type": "PrefillPredictionBoundary",
+        "action": "retained_production_reference_or_protocol",
+        "lexical_type_mentions_in_other_production_files": 20,
+        "annotations": [],
+        "changes": []
+      },
+      {
+        "file": "flexlb-sync/src/main/java/org/flexlb/balance/prediction/PrefillTimePredictor.java",
+        "top_level_type": "PrefillTimePredictor",
+        "action": "retained_production_reference_or_protocol",
+        "lexical_type_mentions_in_other_production_files": 47,
+        "annotations": [
+          "FunctionalInterface"
+        ],
+        "changes": []
+      },
+      {
+        "file": "flexlb-sync/src/main/java/org/flexlb/balance/prediction/PrefillTimeVariableBindings.java",
+        "top_level_type": "PrefillTimeVariableBindings",
+        "action": "retained_production_reference_or_protocol",
+        "lexical_type_mentions_in_other_production_files": 4,
+        "annotations": [],
+        "changes": []
+      },
+      {
+        "file": "flexlb-sync/src/main/java/org/flexlb/balance/preemption/CancelTarget.java",
+        "top_level_type": "CancelTarget",
+        "action": "retained_production_reference_or_protocol",
+        "lexical_type_mentions_in_other_production_files": 12,
+        "annotations": [],
+        "changes": []
+      },
+      {
+        "file": "flexlb-sync/src/main/java/org/flexlb/balance/preemption/PreemptionCancelPhase.java",
+        "top_level_type": "PreemptionCancelPhase",
+        "action": "retained_production_reference_or_protocol",
+        "lexical_type_mentions_in_other_production_files": 17,
+        "annotations": [],
+        "changes": []
+      },
+      {
+        "file": "flexlb-sync/src/main/java/org/flexlb/balance/preemption/VictimResolution.java",
+        "top_level_type": "VictimResolution",
+        "action": "retained_production_reference_or_protocol",
+        "lexical_type_mentions_in_other_production_files": 14,
+        "annotations": [],
+        "changes": []
+      },
+      {
+        "file": "flexlb-sync/src/main/java/org/flexlb/balance/projection/QueueSnapshot.java",
+        "top_level_type": "QueueSnapshot",
+        "action": "retained_production_reference_or_protocol",
+        "lexical_type_mentions_in_other_production_files": 13,
+        "annotations": [],
+        "changes": []
+      },
+      {
+        "file": "flexlb-sync/src/main/java/org/flexlb/balance/projection/RouteProjection.java",
+        "top_level_type": "RouteProjection",
+        "action": "retained_production_reference_or_protocol",
+        "lexical_type_mentions_in_other_production_files": 92,
+        "annotations": [],
+        "changes": []
+      },
+      {
+        "file": "flexlb-sync/src/main/java/org/flexlb/balance/projection/RouteTimelineProjector.java",
+        "top_level_type": "RouteTimelineProjector",
+        "action": "retained_production_reference_or_protocol",
+        "lexical_type_mentions_in_other_production_files": 2,
+        "annotations": [
+          "Override"
+        ],
+        "changes": []
+      },
+      {
+        "file": "flexlb-sync/src/main/java/org/flexlb/balance/projection/WorkSnapshot.java",
+        "top_level_type": "WorkSnapshot",
+        "action": "retained_production_reference_or_protocol",
+        "lexical_type_mentions_in_other_production_files": 37,
+        "annotations": [],
+        "changes": []
+      },
+      {
+        "file": "flexlb-sync/src/main/java/org/flexlb/balance/scheduler/AbstractRequestScheduler.java",
+        "top_level_type": "AbstractRequestScheduler",
+        "action": "retained_production_reference_or_protocol",
+        "lexical_type_mentions_in_other_production_files": 15,
+        "annotations": [
+          "Override"
+        ],
+        "changes": []
+      },
+      {
+        "file": "flexlb-sync/src/main/java/org/flexlb/balance/scheduler/BatchDeliveryStrategy.java",
+        "top_level_type": "BatchDeliveryStrategy",
+        "action": "retained_production_reference_or_protocol",
+        "lexical_type_mentions_in_other_production_files": 2,
+        "annotations": [
+          "Override"
+        ],
+        "changes": []
+      },
+      {
+        "file": "flexlb-sync/src/main/java/org/flexlb/balance/scheduler/CancelReason.java",
+        "top_level_type": "CancelReason",
+        "action": "retained_production_reference_or_protocol",
+        "lexical_type_mentions_in_other_production_files": 66,
+        "annotations": [],
+        "changes": []
+      },
+      {
+        "file": "flexlb-sync/src/main/java/org/flexlb/balance/scheduler/DefaultBatchDispatcher.java",
+        "top_level_type": "DefaultBatchDispatcher",
+        "action": "retained_production_reference_or_protocol",
+        "lexical_type_mentions_in_other_production_files": 8,
+        "annotations": [
+          "Autowired",
+          "Component",
+          "FunctionalInterface",
+          "Override",
+          "PreDestroy"
+        ],
+        "changes": []
+      },
+      {
+        "file": "flexlb-sync/src/main/java/org/flexlb/balance/scheduler/DeliveryClaimKind.java",
+        "top_level_type": "DeliveryClaimKind",
+        "action": "retained_production_reference_or_protocol",
+        "lexical_type_mentions_in_other_production_files": 38,
+        "annotations": [],
+        "changes": []
+      },
+      {
+        "file": "flexlb-sync/src/main/java/org/flexlb/balance/scheduler/DeliveryCleanupTask.java",
+        "top_level_type": "DeliveryCleanupTask",
+        "action": "retained_production_reference_or_protocol",
+        "lexical_type_mentions_in_other_production_files": 2,
+        "annotations": [],
+        "changes": []
+      },
+      {
+        "file": "flexlb-sync/src/main/java/org/flexlb/balance/scheduler/DeliveryStrategy.java",
+        "top_level_type": "DeliveryStrategy",
+        "action": "retained_production_reference_or_protocol",
+        "lexical_type_mentions_in_other_production_files": 12,
+        "annotations": [],
+        "changes": []
+      },
+      {
+        "file": "flexlb-sync/src/main/java/org/flexlb/balance/scheduler/DeliveryTransaction.java",
+        "top_level_type": "DeliveryTransaction",
+        "action": "retained_production_reference_or_protocol",
+        "lexical_type_mentions_in_other_production_files": 17,
+        "annotations": [
+          "Override"
+        ],
+        "changes": []
+      },
+      {
+        "file": "flexlb-sync/src/main/java/org/flexlb/balance/scheduler/DirectRequestScheduler.java",
+        "top_level_type": "DirectRequestScheduler",
+        "action": "retained_production_reference_or_protocol",
+        "lexical_type_mentions_in_other_production_files": 1,
+        "annotations": [
+          "Override"
+        ],
+        "changes": []
+      },
+      {
+        "file": "flexlb-sync/src/main/java/org/flexlb/balance/scheduler/ExpirationTimer.java",
+        "top_level_type": "ExpirationTimer",
+        "action": "retained_production_reference_or_protocol",
+        "lexical_type_mentions_in_other_production_files": 20,
+        "annotations": [
+          "Override"
+        ],
+        "changes": []
+      },
+      {
+        "file": "flexlb-sync/src/main/java/org/flexlb/balance/scheduler/GlobalQueueEntry.java",
+        "top_level_type": "GlobalQueueEntry",
+        "action": "retained_production_reference_or_protocol",
+        "lexical_type_mentions_in_other_production_files": 79,
+        "annotations": [],
+        "changes": []
+      },
+      {
+        "file": "flexlb-sync/src/main/java/org/flexlb/balance/scheduler/OrderedRequestQueue.java",
+        "top_level_type": "OrderedRequestQueue",
+        "action": "retained_production_reference_or_protocol",
+        "lexical_type_mentions_in_other_production_files": 2,
+        "annotations": [],
+        "changes": []
+      },
+      {
+        "file": "flexlb-sync/src/main/java/org/flexlb/balance/scheduler/PlacementAvailability.java",
+        "top_level_type": "PlacementAvailability",
+        "action": "retained_production_reference_or_protocol",
+        "lexical_type_mentions_in_other_production_files": 16,
+        "annotations": [
+          "Component",
+          "FunctionalInterface"
+        ],
+        "changes": []
+      },
+      {
+        "file": "flexlb-sync/src/main/java/org/flexlb/balance/scheduler/PlacementCapacityWaitQueue.java",
+        "top_level_type": "PlacementCapacityWaitQueue",
+        "action": "retained_production_reference_or_protocol",
+        "lexical_type_mentions_in_other_production_files": 2,
+        "annotations": [],
+        "changes": []
+      },
+      {
+        "file": "flexlb-sync/src/main/java/org/flexlb/balance/scheduler/PlacementConfiguration.java",
+        "top_level_type": "PlacementConfiguration",
+        "action": "retained_framework_registration_or_injected_interface",
+        "lexical_type_mentions_in_other_production_files": 0,
+        "annotations": [
+          "Bean",
+          "Configuration",
+          "Lazy"
+        ],
+        "changes": []
+      },
+      {
+        "file": "flexlb-sync/src/main/java/org/flexlb/balance/scheduler/PlacementKey.java",
+        "top_level_type": "PlacementKey",
+        "action": "retained_production_reference_or_protocol",
+        "lexical_type_mentions_in_other_production_files": 33,
+        "annotations": [],
+        "changes": []
+      },
+      {
+        "file": "flexlb-sync/src/main/java/org/flexlb/balance/scheduler/QueueExecutionSettings.java",
+        "top_level_type": "QueueExecutionSettings",
+        "action": "retained_production_reference_or_protocol",
+        "lexical_type_mentions_in_other_production_files": 7,
+        "annotations": [],
+        "changes": []
+      },
+      {
+        "file": "flexlb-sync/src/main/java/org/flexlb/balance/scheduler/QueuedRequestScheduler.java",
+        "top_level_type": "QueuedRequestScheduler",
+        "action": "retained_production_reference_or_protocol",
+        "lexical_type_mentions_in_other_production_files": 2,
+        "annotations": [
+          "Override"
+        ],
+        "changes": []
+      },
+      {
+        "file": "flexlb-sync/src/main/java/org/flexlb/balance/scheduler/RequestContext.java",
+        "top_level_type": "RequestContext",
+        "action": "retained_production_reference_or_protocol",
+        "lexical_type_mentions_in_other_production_files": 223,
+        "annotations": [
+          "FunctionalInterface",
+          "Getter",
+          "Override",
+          "Setter",
+          "ToString"
+        ],
+        "changes": []
+      },
+      {
+        "file": "flexlb-sync/src/main/java/org/flexlb/balance/scheduler/RequestContinuationExecutor.java",
+        "top_level_type": "RequestContinuationExecutor",
+        "action": "retained_production_reference_or_protocol",
+        "lexical_type_mentions_in_other_production_files": 2,
+        "annotations": [
+          "Override"
+        ],
+        "changes": []
+      },
+      {
+        "file": "flexlb-sync/src/main/java/org/flexlb/balance/scheduler/RequestExecution.java",
+        "top_level_type": "RequestExecution",
+        "action": "retained_production_reference_or_protocol",
+        "lexical_type_mentions_in_other_production_files": 10,
+        "annotations": [],
+        "changes": []
+      },
+      {
+        "file": "flexlb-sync/src/main/java/org/flexlb/balance/scheduler/RequestRepository.java",
+        "top_level_type": "RequestRepository",
+        "action": "retained_production_reference_or_protocol",
+        "lexical_type_mentions_in_other_production_files": 28,
+        "annotations": [
+          "Component"
+        ],
+        "changes": []
+      },
+      {
+        "file": "flexlb-sync/src/main/java/org/flexlb/balance/scheduler/RequestRoute.java",
+        "top_level_type": "RequestRoute",
+        "action": "retained_production_reference_or_protocol",
+        "lexical_type_mentions_in_other_production_files": 271,
+        "annotations": [
+          "Override"
+        ],
+        "changes": []
+      },
+      {
+        "file": "flexlb-sync/src/main/java/org/flexlb/balance/scheduler/RequestScheduler.java",
+        "top_level_type": "RequestScheduler",
+        "action": "retained_production_reference_or_protocol",
+        "lexical_type_mentions_in_other_production_files": 6,
+        "annotations": [],
+        "changes": []
+      },
+      {
+        "file": "flexlb-sync/src/main/java/org/flexlb/balance/scheduler/RequestState.java",
+        "top_level_type": "RequestState",
+        "action": "retained_production_reference_or_protocol",
+        "lexical_type_mentions_in_other_production_files": 36,
+        "annotations": [],
+        "changes": []
+      },
+      {
+        "file": "flexlb-sync/src/main/java/org/flexlb/balance/scheduler/RequestTaskScheduler.java",
+        "top_level_type": "RequestTaskScheduler",
+        "action": "retained_production_reference_or_protocol",
+        "lexical_type_mentions_in_other_production_files": 5,
+        "annotations": [
+          "FunctionalInterface"
+        ],
+        "changes": []
+      },
+      {
+        "file": "flexlb-sync/src/main/java/org/flexlb/balance/scheduler/RequestWorkerSelector.java",
+        "top_level_type": "RequestWorkerSelector",
+        "action": "retained_production_reference_or_protocol",
+        "lexical_type_mentions_in_other_production_files": 6,
+        "annotations": [
+          "Autowired",
+          "Component",
+          "Override"
+        ],
+        "changes": []
+      },
+      {
+        "file": "flexlb-sync/src/main/java/org/flexlb/balance/scheduler/ResponseCompletionExecutor.java",
+        "top_level_type": "ResponseCompletionExecutor",
+        "action": "retained_production_reference_or_protocol",
+        "lexical_type_mentions_in_other_production_files": 7,
+        "annotations": [
+          "Override"
+        ],
+        "changes": []
+      },
+      {
+        "file": "flexlb-sync/src/main/java/org/flexlb/balance/scheduler/RouteDeliveryStrategy.java",
+        "top_level_type": "RouteDeliveryStrategy",
+        "action": "retained_production_reference_or_protocol",
+        "lexical_type_mentions_in_other_production_files": 2,
+        "annotations": [
+          "Override"
+        ],
+        "changes": []
+      },
+      {
+        "file": "flexlb-sync/src/main/java/org/flexlb/balance/scheduler/SchedulerLifecycle.java",
+        "top_level_type": "SchedulerLifecycle",
+        "action": "retained_production_reference_or_protocol",
+        "lexical_type_mentions_in_other_production_files": 9,
+        "annotations": [],
+        "changes": []
+      },
+      {
+        "file": "flexlb-sync/src/main/java/org/flexlb/balance/scheduler/SchedulerRuntime.java",
+        "top_level_type": "SchedulerRuntime",
+        "action": "retained_production_reference_or_protocol",
+        "lexical_type_mentions_in_other_production_files": 6,
+        "annotations": [
+          "Autowired",
+          "Component",
+          "Override",
+          "PreDestroy",
+          "Scheduled"
+        ],
+        "changes": []
+      },
+      {
+        "file": "flexlb-sync/src/main/java/org/flexlb/balance/scheduler/TerminalOutcome.java",
+        "top_level_type": "TerminalOutcome",
+        "action": "retained_production_reference_or_protocol",
+        "lexical_type_mentions_in_other_production_files": 26,
+        "annotations": [],
+        "changes": []
+      },
+      {
+        "file": "flexlb-sync/src/main/java/org/flexlb/balance/scheduler/WorkerBatcher.java",
+        "top_level_type": "WorkerBatcher",
+        "action": "retained_production_reference_or_protocol",
+        "lexical_type_mentions_in_other_production_files": 7,
+        "annotations": [],
+        "changes": []
+      },
+      {
+        "file": "flexlb-sync/src/main/java/org/flexlb/balance/strategy/CostBasedPrefillStrategy.java",
+        "top_level_type": "CostBasedPrefillStrategy",
+        "action": "retained_production_reference_or_protocol",
+        "lexical_type_mentions_in_other_production_files": 3,
+        "annotations": [
+          "Component",
+          "Override"
+        ],
+        "changes": []
+      },
+      {
+        "file": "flexlb-sync/src/main/java/org/flexlb/balance/strategy/DecodeSelector.java",
+        "top_level_type": "DecodeSelector",
+        "action": "retained_production_reference_or_protocol",
+        "lexical_type_mentions_in_other_production_files": 3,
+        "annotations": [
+          "Component"
+        ],
+        "changes": []
+      },
+      {
+        "file": "flexlb-sync/src/main/java/org/flexlb/balance/strategy/EndpointRoundRobin.java",
+        "top_level_type": "EndpointRoundRobin",
+        "action": "retained_production_reference_or_protocol",
+        "lexical_type_mentions_in_other_production_files": 4,
+        "annotations": [],
+        "changes": []
+      },
+      {
+        "file": "flexlb-sync/src/main/java/org/flexlb/balance/strategy/PrefillCandidateSet.java",
+        "top_level_type": "PrefillCandidateSet",
+        "action": "retained_production_reference_or_protocol",
+        "lexical_type_mentions_in_other_production_files": 8,
+        "annotations": [],
+        "changes": []
+      },
+      {
+        "file": "flexlb-sync/src/main/java/org/flexlb/balance/strategy/VitWorkerSelector.java",
+        "top_level_type": "VitWorkerSelector",
+        "action": "retained_production_reference_or_protocol",
+        "lexical_type_mentions_in_other_production_files": 3,
+        "annotations": [
+          "Component"
+        ],
+        "changes": []
+      },
+      {
+        "file": "flexlb-sync/src/main/java/org/flexlb/balance/strategy/WorkerAssignment.java",
+        "top_level_type": "WorkerAssignment",
+        "action": "retained_production_reference_or_protocol",
+        "lexical_type_mentions_in_other_production_files": 37,
+        "annotations": [
+          "Override"
+        ],
+        "changes": []
+      },
+      {
+        "file": "flexlb-sync/src/main/java/org/flexlb/consistency/MasterStatusService.java",
+        "top_level_type": "MasterStatusService",
+        "action": "retained_production_reference_or_protocol",
+        "lexical_type_mentions_in_other_production_files": 13,
+        "annotations": [
+          "Component",
+          "Override",
+          "PreDestroy",
+          "Slf4j"
+        ],
+        "changes": []
+      },
+      {
+        "file": "flexlb-sync/src/main/java/org/flexlb/consistency/MasterStatusView.java",
+        "top_level_type": "MasterStatusView",
+        "action": "retained_production_reference_or_protocol",
+        "lexical_type_mentions_in_other_production_files": 5,
+        "annotations": [],
+        "changes": []
+      },
+      {
+        "file": "flexlb-sync/src/main/java/org/flexlb/consistency/ZkMasterStatusProvider.java",
+        "top_level_type": "ZkMasterStatusProvider",
+        "action": "removed_no_production_consumer",
+        "lexical_type_mentions_in_other_production_files": 0,
+        "annotations": [
+          "Component",
+          "Lazy",
+          "Override",
+          "Primary"
+        ],
+        "changes": [
+          {
+            "file": "flexlb-sync/src/main/java/org/flexlb/consistency/ZkMasterStatusProvider.java",
+            "removed_class": "ZkMasterStatusProvider",
+            "reason": "No production consumer remains; internal KMonitorAdapter also has no reference"
+          }
+        ]
+      },
+      {
+        "file": "flexlb-sync/src/main/java/org/flexlb/consistency/ZookeeperMasterElectService.java",
+        "top_level_type": "ZookeeperMasterElectService",
+        "action": "retained_production_reference_or_protocol",
+        "lexical_type_mentions_in_other_production_files": 3,
+        "annotations": [
+          "Component",
+          "Getter",
+          "Override",
+          "Scheduled",
+          "Slf4j",
+          "SuppressWarnings"
+        ],
+        "changes": []
+      },
+      {
+        "file": "flexlb-sync/src/main/java/org/flexlb/dao/pv/PvLogData.java",
+        "top_level_type": "PvLogData",
+        "action": "retained_production_reference_or_protocol",
+        "lexical_type_mentions_in_other_production_files": 3,
+        "annotations": [
+          "Getter"
+        ],
+        "changes": []
+      },
+      {
+        "file": "flexlb-sync/src/main/java/org/flexlb/domain/consistency/LBConsistencyConfig.java",
+        "top_level_type": "LBConsistencyConfig",
+        "action": "retained_production_reference_or_protocol",
+        "lexical_type_mentions_in_other_production_files": 7,
+        "annotations": [
+          "Getter",
+          "Setter"
+        ],
+        "changes": []
+      },
+      {
+        "file": "flexlb-sync/src/main/java/org/flexlb/domain/consistency/MasterChangeNotifyReq.java",
+        "top_level_type": "MasterChangeNotifyReq",
+        "action": "retained_production_reference_or_protocol",
+        "lexical_type_mentions_in_other_production_files": 7,
+        "annotations": [
+          "Getter",
+          "Setter"
+        ],
+        "changes": []
+      },
+      {
+        "file": "flexlb-sync/src/main/java/org/flexlb/domain/consistency/MasterChangeNotifyResp.java",
+        "top_level_type": "MasterChangeNotifyResp",
+        "action": "retained_production_reference_or_protocol",
+        "lexical_type_mentions_in_other_production_files": 12,
+        "annotations": [
+          "Getter",
+          "Setter",
+          "ToString"
+        ],
+        "changes": []
+      },
+      {
+        "file": "flexlb-sync/src/main/java/org/flexlb/domain/consistency/SyncLBStatusReq.java",
+        "top_level_type": "SyncLBStatusReq",
+        "action": "retained_production_reference_or_protocol",
+        "lexical_type_mentions_in_other_production_files": 2,
+        "annotations": [
+          "Getter",
+          "Setter"
+        ],
+        "changes": []
+      },
+      {
+        "file": "flexlb-sync/src/main/java/org/flexlb/domain/consistency/SyncLBStatusResp.java",
+        "top_level_type": "SyncLBStatusResp",
+        "action": "retained_production_reference_or_protocol",
+        "lexical_type_mentions_in_other_production_files": 7,
+        "annotations": [
+          "Getter",
+          "Setter"
+        ],
+        "changes": []
+      },
+      {
+        "file": "flexlb-sync/src/main/java/org/flexlb/service/RecentCacheKeyTraceReporter.java",
+        "top_level_type": "RecentCacheKeyTraceReporter",
+        "action": "retained_production_reference_or_protocol",
+        "lexical_type_mentions_in_other_production_files": 10,
+        "annotations": [
+          "Autowired",
+          "Component",
+          "PostConstruct",
+          "PreDestroy",
+          "Scheduled"
+        ],
+        "changes": []
+      },
+      {
+        "file": "flexlb-sync/src/main/java/org/flexlb/service/address/WorkerAddressService.java",
+        "top_level_type": "WorkerAddressService",
+        "action": "retained_production_reference_or_protocol",
+        "lexical_type_mentions_in_other_production_files": 6,
+        "annotations": [
+          "PreDestroy",
+          "Scheduled",
+          "Service"
+        ],
+        "changes": []
+      },
+      {
+        "file": "flexlb-sync/src/main/java/org/flexlb/service/grace/GracefulLifecycleReporter.java",
+        "top_level_type": "GracefulLifecycleReporter",
+        "action": "retained_production_reference_or_protocol",
+        "lexical_type_mentions_in_other_production_files": 12,
+        "annotations": [
+          "Component"
+        ],
+        "changes": []
+      },
+      {
+        "file": "flexlb-sync/src/main/java/org/flexlb/service/grpc/EngineStatusConverter.java",
+        "top_level_type": "EngineStatusConverter",
+        "action": "retained_production_reference_or_protocol",
+        "lexical_type_mentions_in_other_production_files": 4,
+        "annotations": [],
+        "changes": []
+      },
+      {
+        "file": "flexlb-sync/src/main/java/org/flexlb/service/grpc/WorkerStatusRpcClient.java",
+        "top_level_type": "WorkerStatusRpcClient",
+        "action": "retained_production_reference_or_protocol",
+        "lexical_type_mentions_in_other_production_files": 12,
+        "annotations": [
+          "Component"
+        ],
+        "changes": []
+      },
+      {
+        "file": "flexlb-sync/src/main/java/org/flexlb/service/monitor/DeliveryMetricsReporter.java",
+        "top_level_type": "DeliveryMetricsReporter",
+        "action": "retained_production_reference_or_protocol",
+        "lexical_type_mentions_in_other_production_files": 36,
+        "annotations": [
+          "Autowired",
+          "Component",
+          "PostConstruct",
+          "Slf4j"
+        ],
+        "changes": []
+      },
+      {
+        "file": "flexlb-sync/src/main/java/org/flexlb/service/monitor/EngineHealthReporter.java",
+        "top_level_type": "EngineHealthReporter",
+        "action": "retained_production_reference_or_protocol",
+        "lexical_type_mentions_in_other_production_files": 28,
+        "annotations": [
+          "Autowired",
+          "Component",
+          "PostConstruct",
+          "Scheduled"
+        ],
+        "changes": []
+      },
+      {
+        "file": "flexlb-sync/src/main/java/org/flexlb/service/monitor/RequestSchedulerReporter.java",
+        "top_level_type": "RequestSchedulerReporter",
+        "action": "retained_production_reference_or_protocol",
+        "lexical_type_mentions_in_other_production_files": 18,
+        "annotations": [
+          "Autowired",
+          "Component",
+          "PostConstruct",
+          "Slf4j"
+        ],
+        "changes": []
+      },
+      {
+        "file": "flexlb-sync/src/main/java/org/flexlb/service/monitor/ScheduledTaskConfiguration.java",
+        "top_level_type": "ScheduledTaskConfiguration",
+        "action": "retained_framework_registration_or_injected_interface",
+        "lexical_type_mentions_in_other_production_files": 0,
+        "annotations": [
+          "Bean",
+          "Configuration",
+          "EnableScheduling"
+        ],
+        "changes": []
+      },
+      {
+        "file": "flexlb-sync/src/main/java/org/flexlb/sync/runner/EngineSyncRunner.java",
+        "top_level_type": "EngineSyncRunner",
+        "action": "retained_production_reference_or_protocol",
+        "lexical_type_mentions_in_other_production_files": 2,
+        "annotations": [
+          "Override"
+        ],
+        "changes": []
+      },
+      {
+        "file": "flexlb-sync/src/main/java/org/flexlb/sync/runner/GrpcCacheStatusCheckRunner.java",
+        "top_level_type": "GrpcCacheStatusCheckRunner",
+        "action": "retained_production_reference_or_protocol",
+        "lexical_type_mentions_in_other_production_files": 1,
+        "annotations": [
+          "Override"
+        ],
+        "changes": []
+      },
+      {
+        "file": "flexlb-sync/src/main/java/org/flexlb/sync/runner/GrpcWorkerStatusRunner.java",
+        "top_level_type": "GrpcWorkerStatusRunner",
+        "action": "retained_production_reference_or_protocol",
+        "lexical_type_mentions_in_other_production_files": 1,
+        "annotations": [
+          "Override"
+        ],
+        "changes": []
+      },
+      {
+        "file": "flexlb-sync/src/main/java/org/flexlb/sync/runner/PollCompletion.java",
+        "top_level_type": "PollCompletion",
+        "action": "retained_production_reference_or_protocol",
+        "lexical_type_mentions_in_other_production_files": 2,
+        "annotations": [],
+        "changes": []
+      },
+      {
+        "file": "flexlb-sync/src/main/java/org/flexlb/sync/schedule/StaleWorkerCleaner.java",
+        "top_level_type": "StaleWorkerCleaner",
+        "action": "retained_framework_registration_or_injected_interface",
+        "lexical_type_mentions_in_other_production_files": 0,
+        "annotations": [
+          "Autowired",
+          "Component",
+          "Scheduled"
+        ],
+        "changes": []
+      },
+      {
+        "file": "flexlb-sync/src/main/java/org/flexlb/sync/synchronizer/WorkerStatusSynchronizer.java",
+        "top_level_type": "WorkerStatusSynchronizer",
+        "action": "retained_production_reference_or_protocol",
+        "lexical_type_mentions_in_other_production_files": 3,
+        "annotations": [
+          "Component",
+          "PreDestroy"
+        ],
+        "changes": []
+      },
+      {
+        "file": "flexlb-sync/src/main/java/org/flexlb/util/Failures.java",
+        "top_level_type": "Failures",
+        "action": "retained_production_reference_or_protocol",
+        "lexical_type_mentions_in_other_production_files": 187,
+        "annotations": [],
+        "changes": []
+      }
+    ],
+    "named_types_inventory": "/data0/luoli.hn/data0/work/rtp_llm_4/github-opensource/.codex-validation/cleanup-20261011/named-types-reviewed.json",
+    "retained_zero_static_reference_methods": [
+      {
+        "file": "flexlb-common/src/main/java/org/flexlb/config/QueueOrderingConfig.java",
+        "line": 20,
+        "method": "org/flexlb/config/QueueOrderingConfig#setType",
+        "reason": "Jackson/Lombok configuration setter"
+      },
+      {
+        "file": "flexlb-common/src/main/java/org/flexlb/dao/master/WorkerStatus.java",
+        "line": 514,
+        "method": "org/flexlb/dao/master/WorkerStatus#getAvailableConcurrency",
+        "reason": "WorkerStatus JSON/diagnostic getter contract"
+      },
+      {
+        "file": "flexlb-common/src/main/java/org/flexlb/dao/master/WorkerStatus.java",
+        "line": 518,
+        "method": "org/flexlb/dao/master/WorkerStatus#getAvailableKvCacheTokens",
+        "reason": "WorkerStatus JSON/diagnostic getter contract"
+      },
+      {
+        "file": "flexlb-common/src/main/java/org/flexlb/dao/master/WorkerStatus.java",
+        "line": 522,
+        "method": "org/flexlb/dao/master/WorkerStatus#getTotalKvCacheTokens",
+        "reason": "WorkerStatus JSON/diagnostic getter contract"
+      },
+      {
+        "file": "flexlb-common/src/main/java/org/flexlb/dao/master/WorkerStatus.java",
+        "line": 558,
+        "method": "org/flexlb/dao/master/WorkerStatus#getStepLatencyMs",
+        "reason": "WorkerStatus JSON/diagnostic getter contract"
+      },
+      {
+        "file": "flexlb-common/src/main/java/org/flexlb/dao/master/WorkerStatus.java",
+        "line": 562,
+        "method": "org/flexlb/dao/master/WorkerStatus#getIterateCount",
+        "reason": "WorkerStatus JSON/diagnostic getter contract"
+      },
+      {
+        "file": "flexlb-common/src/main/java/org/flexlb/dao/master/WorkerStatus.java",
+        "line": 566,
+        "method": "org/flexlb/dao/master/WorkerStatus#getDpSize",
+        "reason": "WorkerStatus JSON/diagnostic getter contract"
+      },
+      {
+        "file": "flexlb-common/src/main/java/org/flexlb/dao/master/WorkerStatus.java",
+        "line": 570,
+        "method": "org/flexlb/dao/master/WorkerStatus#getTpSize",
+        "reason": "WorkerStatus JSON/diagnostic getter contract"
+      },
+      {
+        "file": "flexlb-common/src/main/java/org/flexlb/dao/master/WorkerStatus.java",
+        "line": 574,
+        "method": "org/flexlb/dao/master/WorkerStatus#getDpRank",
+        "reason": "WorkerStatus JSON/diagnostic getter contract"
+      },
+      {
+        "file": "flexlb-common/src/main/java/org/flexlb/dao/master/WorkerStatus.java",
+        "line": 579,
+        "method": "org/flexlb/dao/master/WorkerStatus#getMaxSeqLen",
+        "reason": "WorkerStatus JSON/diagnostic getter contract"
+      },
+      {
+        "file": "flexlb-common/src/main/java/org/flexlb/dao/master/WorkerStatus.java",
+        "line": 584,
+        "method": "org/flexlb/dao/master/WorkerStatus#getMaxBatchTokensSize",
+        "reason": "WorkerStatus JSON/diagnostic getter contract"
+      },
+      {
+        "file": "flexlb-api/src/main/java/org/flexlb/Application.java",
+        "line": 20,
+        "method": "org/flexlb/Application#main",
+        "reason": "External process entry point"
+      },
+      {
+        "file": "flexlb-mock-engine/src/main/java/org/flexlb/mockengine/JavaLoadClient.java",
+        "line": 178,
+        "method": "org/flexlb/mockengine/JavaLoadClient#main",
+        "reason": "External process entry point"
+      },
+      {
+        "file": "flexlb-mock-engine/src/main/java/org/flexlb/mockengine/JavaMockEngineCluster.java",
+        "line": 121,
+        "method": "org/flexlb/mockengine/JavaMockEngineCluster#main",
+        "reason": "External process entry point"
+      },
+      {
+        "file": "flexlb-mock-engine/src/main/java/org/flexlb/mockengine/StabilityMonitor.java",
+        "line": 57,
+        "method": "org/flexlb/mockengine/StabilityMonitor#main",
+        "reason": "External process entry point"
+      }
+    ],
+    "screenshot_accessors": "SchedulerRuntime.requests/continuations/responseCompletions/timer currently have real production callers in AbstractRequestScheduler. Retained rather than deleting based on the screenshot usage counters."
+  },
+  "changes": {
+    "owned_production_files": [
+      "flexlb-common/src/main/java/org/flexlb/config/DecisionPolicyConfig.java",
+      "flexlb-common/src/main/java/org/flexlb/config/DispatcherConfig.java",
+      "flexlb-common/src/main/java/org/flexlb/config/FlexlbConfig.java",
+      "flexlb-common/src/main/java/org/flexlb/config/QueueOrderingConfig.java",
+      "flexlb-common/src/main/java/org/flexlb/config/SchedulerConfig.java",
+      "flexlb-common/src/main/java/org/flexlb/config/TrafficPolicyConfig.java",
+      "flexlb-common/src/main/java/org/flexlb/constant/MetricConstant.java",
+      "flexlb-common/src/main/java/org/flexlb/dao/SchedulingMetadata.java",
+      "flexlb-common/src/main/java/org/flexlb/dao/master/TaskInfo.java",
+      "flexlb-common/src/main/java/org/flexlb/dao/master/WorkerHost.java",
+      "flexlb-common/src/main/java/org/flexlb/dao/master/WorkerStatus.java",
+      "flexlb-common/src/main/java/org/flexlb/dao/master/WorkerStatusResponse.java",
+      "flexlb-common/src/main/java/org/flexlb/metric/MasterStatusProvider.java",
+      "flexlb-common/src/main/java/org/flexlb/metric/NoOpMasterStatusProvider.java",
+      "flexlb-common/src/main/java/org/flexlb/telemetry/FlexlbTrace.java",
+      "flexlb-common/src/main/java/org/flexlb/util/JsonUtils.java",
+      "flexlb-common/src/main/java/org/flexlb/util/PriorityNormalizer.java",
+      "flexlb-mock-engine/src/main/java/org/flexlb/mockengine/FaultInjectionConfig.java",
+      "flexlb-mock-engine/src/main/java/org/flexlb/mockengine/JavaMockEngineCluster.java",
+      "flexlb-mock-engine/src/main/java/org/flexlb/mockengine/MockControlServer.java",
+      "flexlb-mock-engine/src/main/java/org/flexlb/mockengine/MockEngineCancelChannel.java",
+      "flexlb-mock-engine/src/main/java/org/flexlb/mockengine/MockLruBlockCache.java",
+      "flexlb-mock-engine/src/main/java/org/flexlb/mockengine/MockPerformanceModel.java",
+      "flexlb-sync/src/main/java/org/flexlb/consistency/ZkMasterStatusProvider.java"
+    ],
+    "production_java_physical_lines_removed": 669,
+    "production_classes_deleted": [
+      "org.flexlb.metric.MasterStatusProvider",
+      "org.flexlb.metric.NoOpMasterStatusProvider",
+      "org.flexlb.consistency.ZkMasterStatusProvider"
+    ],
+    "classes_moved_to_test_sources": [
+      "org.flexlb.dao.master.TaskInfo",
+      "org.flexlb.dao.master.WorkerStatusResponse",
+      "org.flexlb.mockengine.MockEngineCancelChannel"
+    ],
+    "shared_fixture_source": "flexlb-common/src/testFixtures/java",
+    "shared_fixture_build": "build-helper:add-test-source in generate-test-sources; fixtures absent from target/classes",
+    "methods_removed_or_moved": 48,
+    "fields_or_constants_removed": 13,
+    "nested_type_removed": "SchedulingMetadata.PrioritySource",
+    "obsolete_test_classes_deleted": [
+      "NoOpMasterStatusProviderTest",
+      "ZkMasterStatusProviderTest"
+    ],
+    "manifest": [
+      {
+        "file": "flexlb-common/src/main/java/org/flexlb/config/DispatcherConfig.java",
+        "method": "nonBatch",
+        "params": null
+      },
+      {
+        "file": "flexlb-common/src/main/java/org/flexlb/config/DecisionPolicyConfig.java",
+        "method": "single",
+        "params": null
+      },
+      {
+        "file": "flexlb-common/src/main/java/org/flexlb/config/SchedulerConfig.java",
+        "method": "direct",
+        "params": null
+      },
+      {
+        "file": "flexlb-common/src/main/java/org/flexlb/config/QueueOrderingConfig.java",
+        "method": "priority",
+        "params": null
+      },
+      {
+        "file": "flexlb-common/src/main/java/org/flexlb/config/QueueOrderingConfig.java",
+        "method": "preemptionPolicy",
+        "params": null
+      },
+      {
+        "file": "flexlb-common/src/main/java/org/flexlb/config/FlexlbConfig.java",
+        "method": "isSingleDecision",
+        "params": null
+      },
+      {
+        "file": "flexlb-common/src/main/java/org/flexlb/dao/master/WorkerStatusResponse.java",
+        "moved_to": "flexlb-common/src/testFixtures/java/org/flexlb/dao/master/WorkerStatusResponse.java"
+      },
+      {
+        "file": "flexlb-common/src/main/java/org/flexlb/dao/master/TaskInfo.java",
+        "moved_to": "flexlb-common/src/testFixtures/java/org/flexlb/dao/master/TaskInfo.java"
+      },
+      {
+        "file": "flexlb-common/src/main/java/org/flexlb/dao/master/WorkerStatus.java",
+        "method": "freezeStatusResponse",
+        "params": null
+      },
+      {
+        "file": "flexlb-common/src/main/java/org/flexlb/dao/master/WorkerStatus.java",
+        "method": "freezeTaskMap",
+        "params": null
+      },
+      {
+        "file": "flexlb-common/src/main/java/org/flexlb/dao/master/WorkerStatus.java",
+        "method": "copyOf",
+        "params": null
+      },
+      {
+        "file": "flexlb-common/src/main/java/org/flexlb/telemetry/FlexlbTrace.java",
+        "method": "finish(Span)"
+      },
+      {
+        "file": "flexlb-common/src/main/java/org/flexlb/dao/master/WorkerStatus.java",
+        "method": "getCacheIndexedVersion",
+        "params": null
+      },
+      {
+        "file": "flexlb-mock-engine/src/main/java/org/flexlb/mockengine/JavaMockEngineCluster.java",
+        "method": "getDownstreamOwnershipCount",
+        "params": null
+      },
+      {
+        "file": "flexlb-mock-engine/src/main/java/org/flexlb/mockengine/JavaMockEngineCluster.java",
+        "method": "getUpstreamOwnershipCount",
+        "params": null
+      },
+      {
+        "file": "flexlb-mock-engine/src/main/java/org/flexlb/mockengine/JavaMockEngineCluster.java",
+        "method": "hasDownstreamOwnership",
+        "params": null
+      },
+      {
+        "file": "flexlb-mock-engine/src/main/java/org/flexlb/mockengine/JavaMockEngineCluster.java",
+        "method": "hasUpstreamOwnership",
+        "params": null
+      },
+      {
+        "file": "flexlb-mock-engine/src/main/java/org/flexlb/mockengine/JavaMockEngineCluster.java",
+        "method": "getTotalKvTokens",
+        "params": null
+      },
+      {
+        "file": "flexlb-mock-engine/src/main/java/org/flexlb/mockengine/JavaMockEngineCluster.java",
+        "method": "getMaxPrefillConcurrency",
+        "params": null
+      },
+      {
+        "file": "flexlb-mock-engine/src/main/java/org/flexlb/mockengine/JavaMockEngineCluster.java",
+        "method": "getActivePrefillRequestCount",
+        "params": null
+      },
+      {
+        "file": "flexlb-mock-engine/src/main/java/org/flexlb/mockengine/JavaMockEngineCluster.java",
+        "method": "getAcceptedCount",
+        "params": null
+      },
+      {
+        "file": "flexlb-mock-engine/src/main/java/org/flexlb/mockengine/JavaMockEngineCluster.java",
+        "method": "getCompletedCount",
+        "params": null
+      },
+      {
+        "file": "flexlb-mock-engine/src/main/java/org/flexlb/mockengine/JavaMockEngineCluster.java",
+        "method": "getCancelledCount",
+        "params": null
+      },
+      {
+        "file": "flexlb-mock-engine/src/main/java/org/flexlb/mockengine/JavaMockEngineCluster.java",
+        "method": "getActiveKvTokens",
+        "params": null
+      },
+      {
+        "file": "flexlb-mock-engine/src/main/java/org/flexlb/mockengine/JavaMockEngineCluster.java",
+        "method": "getOccupiedKvTokens",
+        "params": null
+      },
+      {
+        "file": "flexlb-mock-engine/src/main/java/org/flexlb/mockengine/JavaMockEngineCluster.java",
+        "method": "getCacheBlocks",
+        "params": null
+      },
+      {
+        "file": "flexlb-mock-engine/src/main/java/org/flexlb/mockengine/JavaMockEngineCluster.java",
+        "method": "getSeqSizePerBlock",
+        "params": null
+      },
+      {
+        "file": "flexlb-mock-engine/src/main/java/org/flexlb/mockengine/JavaMockEngineCluster.java",
+        "method": "isLeakDetected",
+        "params": null
+      },
+      {
+        "file": "flexlb-mock-engine/src/main/java/org/flexlb/mockengine/JavaMockEngineCluster.java",
+        "method": "getActiveDecodeCount",
+        "params": null
+      },
+      {
+        "file": "flexlb-mock-engine/src/main/java/org/flexlb/mockengine/JavaMockEngineCluster.java",
+        "method": "getActivePrefillBatchCount",
+        "params": null
+      },
+      {
+        "file": "flexlb-mock-engine/src/main/java/org/flexlb/mockengine/JavaMockEngineCluster.java",
+        "method": "getPrefillPendingQueueDepth",
+        "params": null
+      },
+      {
+        "file": "flexlb-mock-engine/src/main/java/org/flexlb/mockengine/JavaMockEngineCluster.java",
+        "method": "getRequestStates",
+        "params": null
+      },
+      {
+        "file": "flexlb-mock-engine/src/main/java/org/flexlb/mockengine/JavaMockEngineCluster.java",
+        "method": "setCompletionRetainWindow",
+        "params": null
+      },
+      {
+        "file": "flexlb-mock-engine/src/main/java/org/flexlb/mockengine/MockPerformanceModel.java",
+        "method": "setOverrideDecodeStepMs",
+        "params": null
+      },
+      {
+        "file": "flexlb-mock-engine/src/main/java/org/flexlb/mockengine/MockPerformanceModel.java",
+        "method": "decodeMs",
+        "params": null
+      },
+      {
+        "file": "flexlb-mock-engine/src/main/java/org/flexlb/mockengine/MockLruBlockCache.java",
+        "method": "lruKeyBlocks",
+        "params": null
+      },
+      {
+        "file": "flexlb-mock-engine/src/main/java/org/flexlb/mockengine/MockControlServer.java",
+        "method": "getPort",
+        "params": null
+      },
+      {
+        "file": "flexlb-mock-engine/src/main/java/org/flexlb/mockengine/FaultInjectionConfig.java",
+        "method": "getEnqueueErrorCode",
+        "params": null
+      },
+      {
+        "file": "flexlb-mock-engine/src/main/java/org/flexlb/mockengine/FaultInjectionConfig.java",
+        "method": "enqueueErrorCode",
+        "params": null
+      },
+      {
+        "file": "flexlb-common/src/main/java/org/flexlb/dao/SchedulingMetadata.java",
+        "method": "source",
+        "params": null
+      },
+      {
+        "file": "flexlb-common/src/main/java/org/flexlb/dao/SchedulingMetadata.java",
+        "method": "expired",
+        "params": null
+      },
+      {
+        "file": "flexlb-common/src/main/java/org/flexlb/util/PriorityNormalizer.java",
+        "method": "normalize(int,String)"
+      },
+      {
+        "file": "flexlb-common/src/main/java/org/flexlb/constant/MetricConstant.java",
+        "field": "ROUTING_QUEUE_ENTRY_QPS"
+      },
+      {
+        "file": "flexlb-common/src/main/java/org/flexlb/constant/MetricConstant.java",
+        "field": "ROUTING_QUEUE_TIMEOUT_QPS"
+      },
+      {
+        "file": "flexlb-common/src/main/java/org/flexlb/constant/MetricConstant.java",
+        "field": "ROUTING_QUEUE_REJECTED_QPS"
+      },
+      {
+        "file": "flexlb-common/src/main/java/org/flexlb/constant/MetricConstant.java",
+        "field": "ROUTING_ROUTE_EXECUTION_TIME_MS"
+      },
+      {
+        "file": "flexlb-common/src/main/java/org/flexlb/constant/MetricConstant.java",
+        "field": "ROUTING_SUCCESS_QPS"
+      },
+      {
+        "file": "flexlb-common/src/main/java/org/flexlb/constant/MetricConstant.java",
+        "field": "ROUTING_FAILURE_QPS"
+      },
+      {
+        "file": "flexlb-common/src/main/java/org/flexlb/constant/MetricConstant.java",
+        "field": "ROUTING_RETRY_QPS"
+      },
+      {
+        "file": "flexlb-common/src/main/java/org/flexlb/constant/MetricConstant.java",
+        "field": "WORKER_PERMIT_CAPACITY"
+      },
+      {
+        "file": "flexlb-common/src/main/java/org/flexlb/constant/MetricConstant.java",
+        "field": "AUTO_TPM_REQUEST_SLO_MS"
+      },
+      {
+        "file": "flexlb-common/src/main/java/org/flexlb/constant/MetricConstant.java",
+        "field": "AUTO_TPM_DEADLINE_MISS_COUNT"
+      },
+      {
+        "file": "flexlb-common/src/main/java/org/flexlb/util/JsonUtils.java",
+        "method": "toObject",
+        "params": "TypeReference<T> type"
+      },
+      {
+        "file": "flexlb-common/src/main/java/org/flexlb/dao/master/WorkerHost.java",
+        "method": "of",
+        "params": "String site"
+      },
+      {
+        "file": "flexlb-common/src/main/java/org/flexlb/dao/master/WorkerStatus.java",
+        "method": "runningQueryLen",
+        "params": null
+      },
+      {
+        "file": "flexlb-common/src/main/java/org/flexlb/dao/master/WorkerStatus.java",
+        "method": "waitingQueryLen",
+        "params": null
+      },
+      {
+        "file": "flexlb-mock-engine/src/main/java/org/flexlb/mockengine/MockLruBlockCache.java",
+        "method": "admit(List<Long>)"
+      },
+      {
+        "file": "flexlb-common/src/main/java/org/flexlb/config/TrafficPolicyConfig.java",
+        "method": "resolveTargetGroup",
+        "params": "Request request"
+      },
+      {
+        "file": "flexlb-mock-engine/src/main/java/org/flexlb/mockengine/JavaMockEngineCluster.java",
+        "method": "isShuttingDown",
+        "params": null
+      },
+      {
+        "file": "flexlb-mock-engine/src/main/java/org/flexlb/mockengine/MockPerformanceModel.java",
+        "field": "overrideDecodeStepMs and dead branch"
+      },
+      {
+        "file": "flexlb-common/src/main/java/org/flexlb/metric/MasterStatusProvider.java",
+        "removed_class": "MasterStatusProvider",
+        "reason": "No production consumer remains; internal KMonitorAdapter also has no reference"
+      },
+      {
+        "file": "flexlb-common/src/main/java/org/flexlb/metric/NoOpMasterStatusProvider.java",
+        "removed_class": "NoOpMasterStatusProvider",
+        "reason": "No production consumer remains; internal KMonitorAdapter also has no reference"
+      },
+      {
+        "file": "flexlb-sync/src/main/java/org/flexlb/consistency/ZkMasterStatusProvider.java",
+        "removed_class": "ZkMasterStatusProvider",
+        "reason": "No production consumer remains; internal KMonitorAdapter also has no reference"
+      },
+      {
+        "file": "flexlb-common/src/test/java/org/flexlb/metric/NoOpMasterStatusProviderTest.java",
+        "removed_class": "NoOpMasterStatusProviderTest",
+        "reason": "No production consumer remains; internal KMonitorAdapter also has no reference"
+      },
+      {
+        "file": "flexlb-sync/src/test/java/org/flexlb/consistency/ZkMasterStatusProviderTest.java",
+        "removed_class": "ZkMasterStatusProviderTest",
+        "reason": "No production consumer remains; internal KMonitorAdapter also has no reference"
+      },
+      {
+        "file": "flexlb-common/src/main/java/org/flexlb/util/JsonUtils.java",
+        "method": "toString",
+        "params": null
+      },
+      {
+        "file": "flexlb-mock-engine/src/main/java/org/flexlb/mockengine/MockEngineCancelChannel.java",
+        "moved_to": "flexlb-mock-engine/src/test/java/org/flexlb/mockengine/MockEngineCancelChannel.java",
+        "reason": "Explicitly UT-only adapter; all constructors called from mock-engine tests"
+      },
+      {
+        "file": "flexlb-common/src/main/java/org/flexlb/dao/SchedulingMetadata.java",
+        "field": "source",
+        "reason": "No production reader; normalization priority and expiry remain"
+      },
+      {
+        "file": "flexlb-common/src/main/java/org/flexlb/dao/SchedulingMetadata.java",
+        "removed_nested_type": "PrioritySource",
+        "reason": "Only used by the removed bookkeeping field"
+      },
+      {
+        "file": "flexlb-mock-engine/src/main/java/org/flexlb/mockengine/FaultInjectionConfig.java",
+        "field": "enqueueErrorCode",
+        "reason": "Builder/getter/copy/log only; no enqueue handler consumer"
+      }
+    ],
+    "cleanup_diff_relative_to_initial_worktree": "/data0/luoli.hn/data0/work/rtp_llm_4/github-opensource/.codex-validation/cleanup-20261011/cleanup-only.diff"
+  },
+  "validation": {
+    "container": "luoli_gpu",
+    "java_home": "/opt/flexlb-jdk21-20261002",
+    "command_script": "/data0/luoli.hn/data0/work/rtp_llm_4/github-opensource/.codex-validation/cleanup-20261011/run-validation.sh",
+    "functional": {
+      "command": "./mvnw -B -P opensource,!internal clean test",
+      "exit_code": 0,
+      "total": {
+        "tests": 2648,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 1
+      },
+      "modules": {
+        "flexlb-common": {
+          "tests": 226,
+          "failures": 0,
+          "errors": 0,
+          "skipped": 0
+        },
+        "flexlb-cache": {
+          "tests": 37,
+          "failures": 0,
+          "errors": 0,
+          "skipped": 0
+        },
+        "flexlb-grpc": {
+          "tests": 15,
+          "failures": 0,
+          "errors": 0,
+          "skipped": 0
+        },
+        "flexlb-sync": {
+          "tests": 1795,
+          "failures": 0,
+          "errors": 0,
+          "skipped": 0
+        },
+        "flexlb-api": {
+          "tests": 175,
+          "failures": 0,
+          "errors": 0,
+          "skipped": 1
+        },
+        "flexlb-mock-engine": {
+          "tests": 400,
+          "failures": 0,
+          "errors": 0,
+          "skipped": 0
+        }
+      },
+      "skipped": [
+        {
+          "test": "FollowerAsyncForwardingNettyTest.benchmarkFollowerCapacityAgainstDelayedMaster",
+          "reason": "Optional benchmark requires flexlb.forwarding.capacity.benchmark; original gate retained."
+        }
+      ],
+      "log": "/data0/luoli.hn/data0/work/rtp_llm_4/github-opensource/.codex-validation/cleanup-20261011/final-full-test.log",
+      "junit_reports": "/data0/luoli.hn/data0/work/rtp_llm_4/github-opensource/.codex-validation/cleanup-20261011/full-reports"
+    },
+    "sync_performance": {
+      "command": "./mvnw -B -P opensource,!internal,sync-performance-regression -pl flexlb-sync -am test",
+      "exit_code": 0,
+      "tests": 3,
+      "failures": 0,
+      "errors": 0,
+      "log": "/data0/luoli.hn/data0/work/rtp_llm_4/github-opensource/.codex-validation/cleanup-20261011/sync-performance.log"
+    },
+    "fleet_750p_750d": {
+      "topology": "750x750",
+      "target_qps": [
+        3000,
+        10000
+      ],
+      "warmup_ms": 10000,
+      "measurement_ms": 10000,
+      "minimum_qps_ratio": 0.98,
+      "maximum_server_client_and_batch_wait_p99_ms": 50,
+      "BATCH_FIXED_WINDOW": {
+        "exit_code": 1,
+        "log": "/data0/luoli.hn/data0/work/rtp_llm_4/github-opensource/.codex-validation/cleanup-20261011/750P750D-BATCH.log",
+        "results": [
+          {
+            "delivery": "BATCH",
+            "decision": "FIXED_WINDOW",
+            "prefill": "750",
+            "decode": "750",
+            "target_qps": "3000",
+            "requests": "30000",
+            "client_qps": "2996.8",
+            "master_qps": "3000.8",
+            "master_avg": "10.376ms",
+            "client_p50": "10.935ms",
+            "client_p90": "11.357ms",
+            "client_p95": "11.542ms",
+            "client_p99": "32.287ms",
+            "master_p50": "10ms",
+            "master_p90": "11ms",
+            "master_p95": "11ms",
+            "master_p99": "12ms",
+            "active_prefill_rpc": "750",
+            "active_prefill_route": "750",
+            "active_decode_route": "750",
+            "batch_wait_count": "30000",
+            "batch_wait_p50": "10ms",
+            "batch_wait_p90": "10ms",
+            "batch_wait_p95": "10ms",
+            "batch_wait_p99": "10ms",
+            "delivery_wait_count": "30000",
+            "delivery_wait_p50": "10ms",
+            "delivery_wait_p90": "11ms",
+            "delivery_wait_p95": "11ms",
+            "delivery_wait_p99": "11ms",
+            "dispatch_ack_count": "808",
+            "dispatch_ack_p99": "3ms",
+            "engine_batches": "29943",
+            "batch_full": "0",
+            "window_timeout": "29943",
+            "predicted_execution_cap": "0",
+            "single_request": "0",
+            "avg_batch": "1.00",
+            "max_batch": "6",
+            "grpc_queue_p99": "<1ms",
+            "route_submit_p99": "1ms",
+            "ack_response_count": "808",
+            "ack_response_p99": "<1ms",
+            "terminal_without_ack_count": "29192"
+          },
+          {
+            "delivery": "BATCH",
+            "decision": "FIXED_WINDOW",
+            "prefill": "750",
+            "decode": "750",
+            "target_qps": "10000",
+            "requests": "100000",
+            "client_qps": "9989.1",
+            "master_qps": "10009.4",
+            "master_avg": "11.037ms",
+            "client_p50": "11.030ms",
+            "client_p90": "11.654ms",
+            "client_p95": "12.348ms",
+            "client_p99": "129.343ms",
+            "master_p50": "10ms",
+            "master_p90": "11ms",
+            "master_p95": "12ms",
+            "master_p99": "24ms",
+            "active_prefill_rpc": "750",
+            "active_prefill_route": "750",
+            "active_decode_route": "750",
+            "batch_wait_count": "100000",
+            "batch_wait_p50": "10ms",
+            "batch_wait_p90": "10ms",
+            "batch_wait_p95": "10ms",
+            "batch_wait_p99": "10ms",
+            "delivery_wait_count": "100000",
+            "delivery_wait_p50": "10ms",
+            "delivery_wait_p90": "11ms",
+            "delivery_wait_p95": "11ms",
+            "delivery_wait_p99": "11ms",
+            "dispatch_ack_count": "10379",
+            "dispatch_ack_p99": "1ms",
+            "engine_batches": "96189",
+            "batch_full": "0",
+            "window_timeout": "96189",
+            "predicted_execution_cap": "0",
+            "single_request": "0",
+            "avg_batch": "1.04",
+            "max_batch": "10",
+            "grpc_queue_p99": "<1ms",
+            "route_submit_p99": "13ms",
+            "ack_response_count": "10379",
+            "ack_response_p99": "1ms",
+            "terminal_without_ack_count": "89621"
+          }
+        ]
+      },
+      "NON_BATCH_SINGLE": {
+        "exit_code": 0,
+        "log": "/data0/luoli.hn/data0/work/rtp_llm_4/github-opensource/.codex-validation/cleanup-20261011/750P750D-NON_BATCH.log",
+        "results": [
+          {
+            "delivery": "NON_BATCH",
+            "decision": "SINGLE",
+            "prefill": "750",
+            "decode": "750",
+            "target_qps": "3000",
+            "requests": "30000",
+            "client_qps": "2999.7",
+            "master_qps": "3000.4",
+            "master_avg": "0.007ms",
+            "client_p50": "0.371ms",
+            "client_p90": "0.444ms",
+            "client_p95": "0.469ms",
+            "client_p99": "1.004ms",
+            "master_p50": "<1ms",
+            "master_p90": "<1ms",
+            "master_p95": "<1ms",
+            "master_p99": "<1ms",
+            "active_prefill_rpc": "0",
+            "active_prefill_route": "750",
+            "active_decode_route": "750",
+            "batch_wait_count": "0",
+            "batch_wait_p50": "N/A",
+            "batch_wait_p90": "N/A",
+            "batch_wait_p95": "N/A",
+            "batch_wait_p99": "N/A",
+            "delivery_wait_count": "30000",
+            "delivery_wait_p50": "<1ms",
+            "delivery_wait_p90": "<1ms",
+            "delivery_wait_p95": "<1ms",
+            "delivery_wait_p99": "1ms",
+            "dispatch_ack_count": "0",
+            "dispatch_ack_p99": "N/A",
+            "engine_batches": "0",
+            "batch_full": "N/A",
+            "window_timeout": "N/A",
+            "predicted_execution_cap": "N/A",
+            "single_request": "N/A",
+            "avg_batch": "N/A",
+            "max_batch": "N/A",
+            "grpc_queue_p99": "<1ms",
+            "route_submit_p99": "<1ms",
+            "ack_response_count": "0",
+            "ack_response_p99": "N/A",
+            "terminal_without_ack_count": "0"
+          },
+          {
+            "delivery": "NON_BATCH",
+            "decision": "SINGLE",
+            "prefill": "750",
+            "decode": "750",
+            "target_qps": "10000",
+            "requests": "100000",
+            "client_qps": "9987.2",
+            "master_qps": "10003.1",
+            "master_avg": "0.043ms",
+            "client_p50": "0.375ms",
+            "client_p90": "0.483ms",
+            "client_p95": "0.682ms",
+            "client_p99": "12.888ms",
+            "master_p50": "<1ms",
+            "master_p90": "<1ms",
+            "master_p95": "<1ms",
+            "master_p99": "2ms",
+            "active_prefill_rpc": "0",
+            "active_prefill_route": "750",
+            "active_decode_route": "750",
+            "batch_wait_count": "0",
+            "batch_wait_p50": "N/A",
+            "batch_wait_p90": "N/A",
+            "batch_wait_p95": "N/A",
+            "batch_wait_p99": "N/A",
+            "delivery_wait_count": "100000",
+            "delivery_wait_p50": "<1ms",
+            "delivery_wait_p90": "<1ms",
+            "delivery_wait_p95": "<1ms",
+            "delivery_wait_p99": "1ms",
+            "dispatch_ack_count": "0",
+            "dispatch_ack_p99": "N/A",
+            "engine_batches": "0",
+            "batch_full": "N/A",
+            "window_timeout": "N/A",
+            "predicted_execution_cap": "N/A",
+            "single_request": "N/A",
+            "avg_batch": "N/A",
+            "max_batch": "N/A",
+            "grpc_queue_p99": "<1ms",
+            "route_submit_p99": "2ms",
+            "ack_response_count": "0",
+            "ack_response_p99": "N/A",
+            "terminal_without_ack_count": "0"
+          }
+        ]
+      },
+      "initial_attempts": {
+        "BATCH_FIXED_WINDOW": {
+          "exit_code": 1,
+          "log": "/data0/luoli.hn/data0/work/rtp_llm_4/github-opensource/.codex-validation/cleanup-20261011/attempt-1/750P750D-BATCH.log",
+          "results": [
+            {
+              "delivery": "BATCH",
+              "decision": "FIXED_WINDOW",
+              "prefill": "750",
+              "decode": "750",
+              "target_qps": "3000",
+              "requests": "30000",
+              "client_qps": "2996.8",
+              "master_qps": "3000.6",
+              "master_avg": "10.398ms",
+              "client_p50": "10.982ms",
+              "client_p90": "11.334ms",
+              "client_p95": "11.532ms",
+              "client_p99": "35.545ms",
+              "master_p50": "10ms",
+              "master_p90": "11ms",
+              "master_p95": "11ms",
+              "master_p99": "11ms",
+              "active_prefill_rpc": "750",
+              "active_prefill_route": "750",
+              "active_decode_route": "750",
+              "batch_wait_count": "30000",
+              "batch_wait_p50": "10ms",
+              "batch_wait_p90": "10ms",
+              "batch_wait_p95": "10ms",
+              "batch_wait_p99": "10ms",
+              "delivery_wait_count": "30000",
+              "delivery_wait_p50": "10ms",
+              "delivery_wait_p90": "11ms",
+              "delivery_wait_p95": "11ms",
+              "delivery_wait_p99": "11ms",
+              "dispatch_ack_count": "799",
+              "dispatch_ack_p99": "1ms",
+              "engine_batches": "29974",
+              "batch_full": "0",
+              "window_timeout": "29974",
+              "predicted_execution_cap": "0",
+              "single_request": "0",
+              "avg_batch": "1.00",
+              "max_batch": "3",
+              "grpc_queue_p99": "<1ms",
+              "route_submit_p99": "<1ms",
+              "ack_response_count": "799",
+              "ack_response_p99": "<1ms",
+              "terminal_without_ack_count": "29201"
+            },
+            {
+              "delivery": "BATCH",
+              "decision": "FIXED_WINDOW",
+              "prefill": "750",
+              "decode": "750",
+              "target_qps": "10000",
+              "requests": "100000",
+              "client_qps": "9989.1",
+              "master_qps": "10006.5",
+              "master_avg": "10.784ms",
+              "client_p50": "11.015ms",
+              "client_p90": "11.589ms",
+              "client_p95": "12.227ms",
+              "client_p99": "64.275ms",
+              "master_p50": "10ms",
+              "master_p90": "11ms",
+              "master_p95": "11ms",
+              "master_p99": "18ms",
+              "active_prefill_rpc": "750",
+              "active_prefill_route": "750",
+              "active_decode_route": "750",
+              "batch_wait_count": "100000",
+              "batch_wait_p50": "10ms",
+              "batch_wait_p90": "10ms",
+              "batch_wait_p95": "10ms",
+              "batch_wait_p99": "10ms",
+              "delivery_wait_count": "100000",
+              "delivery_wait_p50": "10ms",
+              "delivery_wait_p90": "11ms",
+              "delivery_wait_p95": "11ms",
+              "delivery_wait_p99": "11ms",
+              "dispatch_ack_count": "9872",
+              "dispatch_ack_p99": "1ms",
+              "engine_batches": "97137",
+              "batch_full": "2",
+              "window_timeout": "97135",
+              "predicted_execution_cap": "0",
+              "single_request": "0",
+              "avg_batch": "1.03",
+              "max_batch": "16",
+              "grpc_queue_p99": "<1ms",
+              "route_submit_p99": "5ms",
+              "ack_response_count": "9872",
+              "ack_response_p99": "<1ms",
+              "terminal_without_ack_count": "90128"
+            }
+          ]
+        },
+        "NON_BATCH_SINGLE": {
+          "exit_code": 0,
+          "log": "/data0/luoli.hn/data0/work/rtp_llm_4/github-opensource/.codex-validation/cleanup-20261011/attempt-1/750P750D-NON_BATCH.log",
+          "results": [
+            {
+              "delivery": "NON_BATCH",
+              "decision": "SINGLE",
+              "prefill": "750",
+              "decode": "750",
+              "target_qps": "3000",
+              "requests": "30000",
+              "client_qps": "2999.6",
+              "master_qps": "3000.6",
+              "master_avg": "0.004ms",
+              "client_p50": "0.391ms",
+              "client_p90": "0.476ms",
+              "client_p95": "0.508ms",
+              "client_p99": "0.634ms",
+              "master_p50": "<1ms",
+              "master_p90": "<1ms",
+              "master_p95": "<1ms",
+              "master_p99": "<1ms",
+              "active_prefill_rpc": "0",
+              "active_prefill_route": "750",
+              "active_decode_route": "750",
+              "batch_wait_count": "0",
+              "batch_wait_p50": "N/A",
+              "batch_wait_p90": "N/A",
+              "batch_wait_p95": "N/A",
+              "batch_wait_p99": "N/A",
+              "delivery_wait_count": "30000",
+              "delivery_wait_p50": "<1ms",
+              "delivery_wait_p90": "<1ms",
+              "delivery_wait_p95": "<1ms",
+              "delivery_wait_p99": "1ms",
+              "dispatch_ack_count": "0",
+              "dispatch_ack_p99": "N/A",
+              "engine_batches": "0",
+              "batch_full": "N/A",
+              "window_timeout": "N/A",
+              "predicted_execution_cap": "N/A",
+              "single_request": "N/A",
+              "avg_batch": "N/A",
+              "max_batch": "N/A",
+              "grpc_queue_p99": "<1ms",
+              "route_submit_p99": "<1ms",
+              "ack_response_count": "0",
+              "ack_response_p99": "N/A",
+              "terminal_without_ack_count": "0"
+            },
+            {
+              "delivery": "NON_BATCH",
+              "decision": "SINGLE",
+              "prefill": "750",
+              "decode": "750",
+              "target_qps": "10000",
+              "requests": "100000",
+              "client_qps": "9938.9",
+              "master_qps": "10003.5",
+              "master_avg": "0.081ms",
+              "client_p50": "0.377ms",
+              "client_p90": "0.478ms",
+              "client_p95": "0.556ms",
+              "client_p99": "22.606ms",
+              "master_p50": "<1ms",
+              "master_p90": "<1ms",
+              "master_p95": "<1ms",
+              "master_p99": "3ms",
+              "active_prefill_rpc": "0",
+              "active_prefill_route": "750",
+              "active_decode_route": "750",
+              "batch_wait_count": "0",
+              "batch_wait_p50": "N/A",
+              "batch_wait_p90": "N/A",
+              "batch_wait_p95": "N/A",
+              "batch_wait_p99": "N/A",
+              "delivery_wait_count": "100000",
+              "delivery_wait_p50": "<1ms",
+              "delivery_wait_p90": "<1ms",
+              "delivery_wait_p95": "<1ms",
+              "delivery_wait_p99": "1ms",
+              "dispatch_ack_count": "0",
+              "dispatch_ack_p99": "N/A",
+              "engine_batches": "0",
+              "batch_full": "N/A",
+              "window_timeout": "N/A",
+              "predicted_execution_cap": "N/A",
+              "single_request": "N/A",
+              "avg_batch": "N/A",
+              "max_batch": "N/A",
+              "grpc_queue_p99": "<1ms",
+              "route_submit_p99": "3ms",
+              "ack_response_count": "0",
+              "ack_response_p99": "N/A",
+              "terminal_without_ack_count": "0"
+            }
+          ]
+        }
+      }
+    },
+    "baseline_comparison": {
+      "scope": "Isolated original source snapshot captured before cleanup, including the original dirty worktree. Uses same 750x750 topology, 3000/10000 QPS, warmup, heap, and 50ms gates; adds GC/safepoint diagnostics. Separate source tree; current workspace left unchanged.",
+      "BATCH_FIXED_WINDOW": {
+        "exit_code": 1,
+        "log": "/data0/luoli.hn/data0/work/rtp_llm_4/github-opensource/.codex-validation/cleanup-20261011/baseline-750P750D-BATCH.log",
+        "results": [
+          {
+            "delivery": "BATCH",
+            "decision": "FIXED_WINDOW",
+            "prefill": "750",
+            "decode": "750",
+            "target_qps": "3000",
+            "requests": "30000",
+            "client_qps": "2996.8",
+            "master_qps": "3000.5",
+            "master_avg": "10.390ms",
+            "client_p50": "10.969ms",
+            "client_p90": "11.347ms",
+            "client_p95": "11.552ms",
+            "client_p99": "34.958ms",
+            "master_p50": "10ms",
+            "master_p90": "11ms",
+            "master_p95": "11ms",
+            "master_p99": "12ms",
+            "active_prefill_rpc": "750",
+            "active_prefill_route": "750",
+            "active_decode_route": "750",
+            "batch_wait_count": "30000",
+            "batch_wait_p50": "10ms",
+            "batch_wait_p90": "10ms",
+            "batch_wait_p95": "10ms",
+            "batch_wait_p99": "10ms",
+            "delivery_wait_count": "30000",
+            "delivery_wait_p50": "10ms",
+            "delivery_wait_p90": "11ms",
+            "delivery_wait_p95": "11ms",
+            "delivery_wait_p99": "11ms",
+            "dispatch_ack_count": "848",
+            "dispatch_ack_p99": "2ms",
+            "engine_batches": "29916",
+            "batch_full": "0",
+            "window_timeout": "29916",
+            "predicted_execution_cap": "0",
+            "single_request": "0",
+            "avg_batch": "1.00",
+            "max_batch": "14",
+            "grpc_queue_p99": "<1ms",
+            "route_submit_p99": "1ms",
+            "ack_response_count": "848",
+            "ack_response_p99": "<1ms",
+            "terminal_without_ack_count": "29152"
+          },
+          {
+            "delivery": "BATCH",
+            "decision": "FIXED_WINDOW",
+            "prefill": "750",
+            "decode": "750",
+            "target_qps": "10000",
+            "requests": "100000",
+            "client_qps": "9989.1",
+            "master_qps": "10004.9",
+            "master_avg": "10.780ms",
+            "client_p50": "10.953ms",
+            "client_p90": "11.443ms",
+            "client_p95": "12.375ms",
+            "client_p99": "80.966ms",
+            "master_p50": "10ms",
+            "master_p90": "11ms",
+            "master_p95": "11ms",
+            "master_p99": "21ms",
+            "active_prefill_rpc": "750",
+            "active_prefill_route": "750",
+            "active_decode_route": "750",
+            "batch_wait_count": "100000",
+            "batch_wait_p50": "10ms",
+            "batch_wait_p90": "10ms",
+            "batch_wait_p95": "10ms",
+            "batch_wait_p99": "10ms",
+            "delivery_wait_count": "100000",
+            "delivery_wait_p50": "10ms",
+            "delivery_wait_p90": "11ms",
+            "delivery_wait_p95": "11ms",
+            "delivery_wait_p99": "11ms",
+            "dispatch_ack_count": "10505",
+            "dispatch_ack_p99": "2ms",
+            "engine_batches": "97275",
+            "batch_full": "0",
+            "window_timeout": "97275",
+            "predicted_execution_cap": "0",
+            "single_request": "0",
+            "avg_batch": "1.03",
+            "max_batch": "12",
+            "grpc_queue_p99": "<1ms",
+            "route_submit_p99": "7ms",
+            "ack_response_count": "10505",
+            "ack_response_p99": "<1ms",
+            "terminal_without_ack_count": "89495"
+          }
+        ]
+      },
+      "result": "Original source also fails the 10000 QPS client P99 50ms gate (80.966ms). The gate failure therefore exists before cleanup; this is not evidence that the latency distribution is identical after cleanup.",
+      "gc_observation": "Baseline measured 10000 QPS window 12:27:37.597–12:27:47.608 contained a 118.416ms G1 young-GC pause at 12:27:45.810. This is a plausible contributor to client tail latency; not a proof of the sole cause.",
+      "baseline_runner": "/data0/luoli.hn/data0/work/rtp_llm_4/github-opensource/.codex-validation/cleanup-20261011/run-baseline.sh"
+    },
+    "source_seal": {
+      "verified_before_and_after": true,
+      "files": 501,
+      "digest": "569d03f953288261539434096864e2f2c9d109e13ee0b88b28cfa45587377ab1",
+      "before": "/data0/luoli.hn/data0/work/rtp_llm_4/github-opensource/.codex-validation/cleanup-20261011/final-source-before.json",
+      "after": "/data0/luoli.hn/data0/work/rtp_llm_4/github-opensource/.codex-validation/cleanup-20261011/final-source-after.json"
+    },
+    "production_bytecode_absence_verified": [
+      "TaskInfo",
+      "WorkerStatusResponse",
+      "MasterStatusProvider",
+      "NoOpMasterStatusProvider",
+      "ZkMasterStatusProvider",
+      "MockEngineCancelChannel"
+    ],
+    "diff_whitespace_check": "git diff --check passed"
+  },
+  "remaining_validation_failure": "750P/750D BATCH at 10000 QPS exceeds the strict 50ms client P99 gate in both cleanup runs and in the original-source baseline. Server P99, throughput and 3000 QPS gates pass. The threshold has not been relaxed."
+}

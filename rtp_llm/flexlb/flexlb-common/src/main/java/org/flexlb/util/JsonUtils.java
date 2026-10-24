@@ -2,7 +2,6 @@ package org.flexlb.util;
 
 import com.fasterxml.jackson.annotation.JsonInclude;
 import com.fasterxml.jackson.core.JsonProcessingException;
-import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.ObjectReader;
@@ -68,37 +67,6 @@ public class JsonUtils {
             return reader.readValue(content);
         } catch (IOException e) {
             throw StatusEnum.JSON_MAPPER_ERROR.toException(e);
-        }
-    }
-
-    /**
-     * Convert a json string to a java object.
-     *
-     * @param text The json string.
-     * @param type The type reference.
-     * @return The java object.
-     */
-    public static <T> T toObject(String text, TypeReference<T> type) throws FlexLBException {
-        ObjectReader reader = MAPPER.readerFor(type);
-        try {
-            return reader.readValue(text);
-        } catch (IOException e) {
-            throw StatusEnum.JSON_MAPPER_ERROR.toException(text, e);
-        }
-    }
-
-    /**
-     * Convert an object to json string.
-     *
-     * @param object The object.
-     * @return The json string.
-     * @throws FlexLBException Failed to convert.
-     */
-    public static String toString(Object object) throws FlexLBException {
-        try {
-            return WRITER.writeValueAsString(object);
-        } catch (JsonProcessingException error) {
-            throw StatusEnum.JSON_MAPPER_ERROR.toException("Failed to convert object to json string!", error);
         }
     }
 

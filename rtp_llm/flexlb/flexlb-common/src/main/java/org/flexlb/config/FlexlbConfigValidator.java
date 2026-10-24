@@ -13,14 +13,13 @@ import org.flexlb.util.PriorityNormalizer;
 /** Cross-field validation for the public configuration contract. */
 final class FlexlbConfigValidator {
 
-    private static final int MIN_STALE_TIMEOUT_TO_RPC_TIMEOUT_RATIO = 2;
 
     static void validateDocumentShape(JsonNode document) {
         JsonNode scheduler = document.path("scheduler");
         if (scheduler.isObject()) {
             String type = scheduler.path("type").asText("QUEUE");
             if ("DIRECT".equals(type)) {
-                rejectFieldsExcept(scheduler, "scheduler", "type");
+                rejectFieldsExcept(scheduler, "scheduler", "type", "nettyMemoryReporter");
             } else if ("QUEUE".equals(type)) {
                 validateOrderingShape(scheduler.path("ordering"));
                 validateDecisionShape(scheduler.path("decision"));
@@ -119,6 +118,7 @@ final class FlexlbConfigValidator {
                 "schemaVersion", "must equal " + FlexlbConfig.CURRENT_SCHEMA_VERSION);
         require(config.getScheduler() != null, "scheduler", "is required");
         require(config.getScheduler().getType() != null, "scheduler.type", "is required");
+        validateNettyMemoryReporter(config.getScheduler().getNettyMemoryReporter());
         require(config.getDispatcher() != null, "dispatcher", "is required");
         require(config.getRouter() != null, "router", "is required");
         require(config.getWorkerRegistry() != null, "workerRegistry", "is required");
@@ -137,9 +137,26 @@ final class FlexlbConfigValidator {
         nonNegative(grpc.getExecutorCoreSize(), "grpcServer.executorCoreSize");
         positive(grpc.getExecutorMaxSize(), "grpcServer.executorMaxSize");
         positive(grpc.getExecutorQueueSize(), "grpcServer.executorQueueSize");
+        nonNegative(grpc.getReceiveBudgetBytes(), "grpcServer.receiveBudgetBytes");
+        nonNegative(grpc.getMaxReceivingRequests(), "grpcServer.maxReceivingRequests");
+        nonNegative(grpc.getMaxReceivingControlRequests(), "grpcServer.maxReceivingControlRequests");
+        positive(grpc.getReceiveTimeoutMs(), "grpcServer.receiveTimeoutMs");
         positive(grpc.getShutdownQuietPeriodMs(), "grpcServer.shutdownQuietPeriodMs");
         require(grpc.getExecutorMaxSize() >= grpc.getExecutorCoreSize(),
                 "grpcServer.executorMaxSize", "must be at least executorCoreSize");
+    }
+
+    private static void validateNettyMemoryReporter(NettyMemoryReporterConfig memory) {
+        String path = "scheduler.nettyMemoryReporter";
+        require(memory != null, path, "is required");
+        require(memory.getIntervalMs() >= 1_000L, path + ".intervalMs", "must be at least 1000 ms");
+        var capture = memory.getAutoCapture();
+        require(capture != null, path + ".autoCapture", "is required");
+        positive(capture.getThresholdBytes(), path + ".autoCapture.thresholdBytes");
+        require(capture.getCooldownMs() >= 1_000L,
+                path + ".autoCapture.cooldownMs", "must be at least 1000 ms");
+        require(!capture.isEnabled() || memory.isEnabled(),
+                path + ".autoCapture.enabled", "requires nettyMemoryReporter.enabled=true");
     }
 
     private static void validateQueue(SchedulerConfig queue) {
@@ -279,11 +296,6 @@ final class FlexlbConfigValidator {
                 "workerRegistry.health.statusRpcTimeoutMs");
         positive(workers.getHealth().getCleanupIntervalMs(),
                 "workerRegistry.health.cleanupIntervalMs");
-        require(workers.getHealth().getStatusRpcTimeoutMs()
-                        <= workers.getHealth().getStatusStaleAfterMs()
-                                / MIN_STALE_TIMEOUT_TO_RPC_TIMEOUT_RATIO,
-                "workerRegistry.health.statusStaleAfterMs",
-                "must be at least twice statusRpcTimeoutMs");
         require(workers.getCacheStatus() != null,
                 "workerRegistry.cacheStatus", "is required");
         positive(workers.getCacheStatus().getTargetDiffSize(),

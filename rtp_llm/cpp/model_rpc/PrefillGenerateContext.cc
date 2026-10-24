@@ -197,26 +197,35 @@ bool PrefillGenerateContext::isRequestCancelled() const {
     return GenerateContext::isRequestCancelled() || (cancel_state && cancel_state->load());
 }
 
-PriorityPreemptionRequestResult PrefillGenerateContext::requestPriorityPreempt() {
-    PriorityPreemptionRequestResult result;
+CancellationRequestResult PrefillGenerateContext::requestCancellation(RequestCancelReasonPB reason) {
+    PrefillTerminalCause cause;
+    switch (reason) {
+        case REQUEST_CANCEL_REASON_UNSPECIFIED:
+        case REQUEST_CANCEL_REASON_PRIORITY_PREEMPTED: cause = PrefillTerminalCause::PRIORITY_PREEMPTION; break;
+        case REQUEST_CANCEL_REASON_CLIENT_CANCELLED: cause = PrefillTerminalCause::CLIENT_CANCELLED; break;
+        case REQUEST_CANCEL_REASON_DEADLINE_EXCEEDED: cause = PrefillTerminalCause::DEADLINE_EXCEEDED; break;
+        case REQUEST_CANCEL_REASON_SHUTDOWN: cause = PrefillTerminalCause::SHUTDOWN; break;
+        default: return CancellationRequestResult::REJECTED;
+    }
+    CancellationRequestResult result;
     {
         // The first-cause transition and the CANCELING overlay are one
         // observable operation relative to ordinary runtime-meta dequeue.
         std::lock_guard<std::mutex> lock(terminal_transition_mu_);
         auto                        expected = PrefillTerminalCause::ACTIVE;
         if (!terminal_cause_.compare_exchange_strong(expected,
-                                                     PrefillTerminalCause::PRIORITY_PREEMPTION,
+                                                     cause,
                                                      std::memory_order_acq_rel,
                                                      std::memory_order_acquire)) {
-            if (expected != PrefillTerminalCause::PRIORITY_PREEMPTION) {
-                return PriorityPreemptionRequestResult::REJECTED;
+            if (expected == PrefillTerminalCause::ACTIVE || expected == PrefillTerminalCause::OTHER) {
+                return CancellationRequestResult::REJECTED;
             }
-            result = PriorityPreemptionRequestResult::ALREADY_INSTALLED;
+            result = CancellationRequestResult::ALREADY_INSTALLED;
         } else {
             if (meta) {
-                meta->markPriorityPreemptionCanceling(task_identity_);
+                meta->markRequestCanceling(task_identity_);
             }
-            result = PriorityPreemptionRequestResult::INSTALLED;
+            result = CancellationRequestResult::INSTALLED;
         }
     }
     // seq_cst pairs with remoteAllocateResource's seq_cst publication/check:
@@ -230,8 +239,22 @@ PriorityPreemptionRequestResult PrefillGenerateContext::requestPriorityPreempt()
     return result;
 }
 
-bool PrefillGenerateContext::isPriorityPreempted() const {
-    return terminalCause() == PrefillTerminalCause::PRIORITY_PREEMPTION;
+bool PrefillGenerateContext::isCancellationRequested() const {
+    const auto cause = terminalCause();
+    return cause != PrefillTerminalCause::ACTIVE && cause != PrefillTerminalCause::OTHER;
+}
+
+ErrorInfo PrefillGenerateContext::cancellationError() const {
+    switch (terminalCause()) {
+        case PrefillTerminalCause::PRIORITY_PREEMPTION:
+            return ErrorInfo(ErrorCode::PRIORITY_PREEMPTED, "preempted by a higher-priority request");
+        case PrefillTerminalCause::DEADLINE_EXCEEDED:
+            return ErrorInfo(ErrorCode::GENERATE_TIMEOUT, "request deadline exceeded");
+        case PrefillTerminalCause::SHUTDOWN:
+            return ErrorInfo(ErrorCode::CANCELLED, "request cancelled during shutdown");
+        default:
+            return ErrorInfo(ErrorCode::CANCELLED, "request cancelled by client");
+    }
 }
 
 bool PrefillGenerateContext::tryMarkOtherTerminal() {
@@ -266,32 +289,32 @@ void PrefillGenerateContext::setLocalStreamSchedulerOwned(bool owned) {
     local_stream_scheduler_owned_ = owned;
 }
 
-bool PrefillGenerateContext::finalizePriorityPreemption() {
-    std::lock_guard<std::mutex> lock(priority_finalize_mu_);
-    if (priority_finalized_) {
+bool PrefillGenerateContext::finalizeCancellation() {
+    std::lock_guard<std::mutex> lock(cancel_finalize_mu_);
+    if (cancel_finalized_) {
         return true;
     }
-    if (!isPriorityPreempted()) {
+    if (!isCancellationRequested()) {
         return false;
     }
 
-    error_info = ErrorInfo(ErrorCode::PRIORITY_PREEMPTED, "preempted by a higher-priority request");
+    error_info = cancellationError();
     ErrorDetailsPB details;
-    details.set_error_code(static_cast<int64_t>(ErrorCode::PRIORITY_PREEMPTED));
+    details.set_error_code(static_cast<int64_t>(error_info.code()));
     details.set_error_message(error_info.ToString());
     std::string serialized_details;
     details.SerializeToString(&serialized_details);
     error_status =
-        grpc::Status(transErrorCodeToGrpc(ErrorCode::PRIORITY_PREEMPTED), error_info.ToString(), serialized_details);
+        grpc::Status(transErrorCodeToGrpc(error_info.code()), error_info.ToString(), serialized_details);
 
-    // TryCancel is only the stop trigger. Finish joins the existing P->D RPC
-    // execution; Decode's cancellation finalizer runs before Finish returns.
+    // TryCancel triggers downstream cleanup. Finish settles the local RPC operation;
+    // a cancelled client RPC alone is not proof that Decode has released resources.
     tryCancelDownstream();
-    (void)closeGrpcStream(ErrorCodeToString(ErrorCode::PRIORITY_PREEMPTED), true);
+    (void)closeGrpcStream(ErrorCodeToString(error_info.code()), true);
 
     const auto finalized_stream = stream_;
     if (finalized_stream) {
-        stream_->reportError(ErrorCode::PRIORITY_PREEMPTED, "preempted by a higher-priority request");
+        stream_->reportError(error_info.code(), error_info.ToString());
         // A Prefill stream is scheduler-owned once published. Retry on the
         // managed finalizer executor until the scheduler has completed its
         // terminal transition; never occupy a worker with an unbounded poll.
@@ -305,12 +328,12 @@ bool PrefillGenerateContext::finalizePriorityPreemption() {
     }
 
     if (meta) {
-        meta->markPriorityPreemptionCanceled(request_id,
-                                             static_cast<int64_t>(ErrorCode::PRIORITY_PREEMPTED),
-                                             "preempted by a higher-priority request",
-                                             finalized_stream);
+        meta->markRequestCanceled(request_id,
+                                  static_cast<int64_t>(error_info.code()),
+                                  error_info.ToString(),
+                                  finalized_stream);
     }
-    priority_finalized_ = true;
+    cancel_finalized_ = true;
     return true;
 }
 

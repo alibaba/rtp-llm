@@ -1,6 +1,7 @@
 package org.flexlb.engine.grpc;
 
 import io.grpc.ManagedChannel;
+import io.grpc.Deadline;
 import lombok.Getter;
 import org.flexlb.engine.grpc.monitor.GrpcReporter;
 import org.flexlb.engine.grpc.nameresolver.CustomNameResolver;
@@ -16,6 +17,7 @@ import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicReference;
 
 /**
  * @author zjw
@@ -105,7 +107,7 @@ public abstract class AbstractGrpcClient implements CustomNameResolver.Listener 
             if (invoker != null) {
                 removedChannelCount++;
                 try {
-                    invoker.shutdown();
+                    invoker.shutdown(CloseReason.DISCOVERY_REMOVED);
                 } catch (Exception e) {
                     Logger.error("shutdown channel for ipPort {} failed", invoker.getChannelKey(), e);
                 }
@@ -133,7 +135,7 @@ public abstract class AbstractGrpcClient implements CustomNameResolver.Listener 
         Invoker newInvoker = new Invoker(channelKey, managedChannel);
         Invoker existing = channelPool.putIfAbsent(channelKey, newInvoker);
         if (existing != null) {
-            newInvoker.shutdown();
+            newInvoker.shutdown(CloseReason.DUPLICATE_DISCARDED);
             return existing;
         }
         return newInvoker;
@@ -144,7 +146,7 @@ public abstract class AbstractGrpcClient implements CustomNameResolver.Listener 
         if (expectedInvoker == null) {
             Invoker existing = channelPool.putIfAbsent(channelKey, newInvoker);
             if (existing != null) {
-                newInvoker.shutdown();
+                newInvoker.shutdown(CloseReason.DUPLICATE_DISCARDED);
                 return existing;
             }
             return newInvoker;
@@ -152,11 +154,11 @@ public abstract class AbstractGrpcClient implements CustomNameResolver.Listener 
 
         boolean replaced = channelPool.replace(channelKey, expectedInvoker, newInvoker);
         if (!replaced) {
-            newInvoker.shutdown();
+            newInvoker.shutdown(CloseReason.DUPLICATE_DISCARDED);
             return channelPool.get(channelKey);
         }
 
-        expectedInvoker.shutdown();
+        expectedInvoker.shutdown(CloseReason.REPLACED);
         return newInvoker;
     }
 
@@ -167,7 +169,7 @@ public abstract class AbstractGrpcClient implements CustomNameResolver.Listener 
             Invoker invoker = channelPool.remove(channelKey);
             if (invoker != null) {
                 try {
-                    invoker.shutdown();
+                    invoker.shutdown(CloseReason.CLIENT_SHUTDOWN);
                 } catch (Exception e) {
                     Logger.error("shutdown channel for ipPort {} failed in pre-destroy", channelKey, e);
                 }
@@ -189,6 +191,17 @@ public abstract class AbstractGrpcClient implements CustomNameResolver.Listener 
         }
 
         throw new IllegalArgumentException("Invalid service key format: " + serviceKey);
+    }
+
+    public enum CloseReason {
+        DISCOVERY_REMOVED,
+        REPLACED,
+        CLIENT_SHUTDOWN,
+        DUPLICATE_DISCARDED
+    }
+
+    /** A local close request; it does not establish the cause of a preceding transport failure. */
+    public record CloseObservation(CloseReason reason, long nanoTime, boolean forced) {
     }
 
     /**
@@ -213,10 +226,20 @@ public abstract class AbstractGrpcClient implements CustomNameResolver.Listener 
         }
 
         public GrpcFutureStubWrapper withDeadlineAfter(long timeout, TimeUnit unit) {
+            return withDeadline(Deadline.after(timeout, unit));
+        }
+
+        public GrpcFutureStubWrapper withDeadline(Deadline deadline) {
             return new GrpcFutureStubWrapper(
-                    rpcServiceFutureStub.withDeadlineAfter(timeout, unit),
-                    multimodalFutureStub.withDeadlineAfter(timeout, unit)
+                    rpcServiceFutureStub.withDeadline(deadline),
+                    multimodalFutureStub.withDeadline(deadline)
             );
+        }
+
+        public GrpcFutureStubWrapper withTrace(GrpcCallTrace trace) {
+            return new GrpcFutureStubWrapper(
+                    rpcServiceFutureStub.withOption(GrpcCallTrace.CALL_TRACE, trace),
+                    multimodalFutureStub.withOption(GrpcCallTrace.CALL_TRACE, trace));
         }
     }
 
@@ -228,6 +251,7 @@ public abstract class AbstractGrpcClient implements CustomNameResolver.Listener 
         private final long createTime;
         private volatile long lastUsedTime;
         private volatile long expireTime;
+        private final AtomicReference<CloseObservation> closeObservation = new AtomicReference<>();
 
         public Invoker(String channelKey, ManagedChannel channel) {
             this.channelKey = channelKey;
@@ -250,21 +274,65 @@ public abstract class AbstractGrpcClient implements CustomNameResolver.Listener 
             return expireTime > 0 ? expireTime - createTime : System.nanoTime() / 1000 - createTime;
         }
 
-        public void shutdown() {
+        public CloseObservation getCloseObservation() {
+            return closeObservation.get();
+        }
+
+        public void shutdown(CloseReason reason) {
             if (channel == null) {
                 return;
             }
             try {
+                closeObservation.compareAndSet(null, new CloseObservation(reason, System.nanoTime(), false));
+            } catch (RuntimeException | Error ignored) {
+                // Recording diagnostics must not prevent closing a channel under memory pressure.
+            }
+            logCloseSafely(reason, false, "requested", null);
+            try {
                 channel.shutdown();
+                if (reason == CloseReason.REPLACED || reason == CloseReason.DUPLICATE_DISCARDED) {
+                    // These paths can run from a saturated gRPC callback on its Netty eventloop.
+                    // Waiting here stalls the same loop needed to finish channel termination.
+                    if (!channel.isTerminated()) {
+                        forceShutdown(reason);
+                    }
+                    return;
+                }
                 if (!channel.awaitTermination(1000, TimeUnit.MILLISECONDS)) {
-                    channel.shutdownNow();
+                    logCloseSafely(reason, true, "graceful_timeout", null);
+                    forceShutdown(reason);
                 }
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
-                channel.shutdownNow();
+                logCloseSafely(reason, true, "interrupted", e);
+                forceShutdown(reason);
             } catch (Exception e) {
-                Logger.warn("shutdown grpc channel {} failed", channelKey, e);
-                channel.shutdownNow();
+                logCloseSafely(reason, true, "shutdown_failed", e);
+                forceShutdown(reason);
+            }
+        }
+
+        private void forceShutdown(CloseReason reason) {
+            try {
+                // A graceful request does not cancel active calls. Record the distinct forced action.
+                closeObservation.updateAndGet(previous -> previous != null && previous.forced()
+                        ? previous : new CloseObservation(reason, System.nanoTime(), true));
+            } catch (RuntimeException | Error ignored) {
+                // Diagnostics must not prevent releasing the channel.
+            }
+            channel.shutdownNow();
+        }
+
+        private void logCloseSafely(CloseReason reason, boolean force, String trigger, Throwable failure) {
+            try {
+                String format = "event=engine_grpc_channel_close reason={} channelKey={} createTimeUs={} force={} trigger={}";
+                if (force) {
+                    Logger.warn(format, reason, channelKey, createTime, true, trigger, failure);
+                } else {
+                    Logger.info(format, reason, channelKey, createTime, false, trigger);
+                }
+            } catch (RuntimeException | Error ignored) {
+                // Logging failures cannot prevent shutdown or its forceful fallback.
             }
         }
     }

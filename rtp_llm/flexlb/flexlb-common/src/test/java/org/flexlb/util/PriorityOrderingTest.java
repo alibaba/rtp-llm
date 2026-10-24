@@ -10,10 +10,11 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 class PriorityOrderingTest {
 
     private static final Comparator<Node> REFERENCE =
-            PriorityOrdering.<Node>strict().thenComparingLong(Node::requestId);
+            Comparator.comparingInt(Node::priority).reversed()
+                    .thenComparingLong(Node::enqueueSeq).thenComparingLong(Node::requestId);
 
     @Test
-    void primitiveTotalOrderMatchesStrictComparatorAcrossRandomKeys() {
+    void primitiveTotalOrderMatchesReferenceComparatorAcrossRandomKeys() {
         Random random = new Random(0x5EEDBEEFL);
         for (int i = 0; i < 100_000; i++) {
             Node left = new Node(random.nextInt(), random.nextLong(), random.nextLong());
@@ -46,7 +47,6 @@ class PriorityOrderingTest {
         assertEquals(expected, actual);
     }
 
-    private record Node(int priority, long enqueueSeq, long requestId)
-            implements Prioritized {
+    private record Node(int priority, long enqueueSeq, long requestId) {
     }
 }

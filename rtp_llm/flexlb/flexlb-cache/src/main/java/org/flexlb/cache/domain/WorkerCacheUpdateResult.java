@@ -16,10 +16,5 @@ import lombok.NoArgsConstructor;
 @AllArgsConstructor
 public class WorkerCacheUpdateResult {
     private boolean success;
-    private String engineIpPort;
-    private long cacheBlockCount;
-    private long availableKvCache;
-    private long totalKvCache;
-    private long cacheVersion;
     private String errorMessage;
 }

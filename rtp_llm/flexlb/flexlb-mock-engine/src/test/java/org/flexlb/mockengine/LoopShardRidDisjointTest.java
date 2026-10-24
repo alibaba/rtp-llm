@@ -34,7 +34,7 @@ class LoopShardRidDisjointTest {
         String sourceRid = "rid-" + idx;
         return new JavaLoadClient.TraceRecord(
                 JavaLoadClient.stableRequestId(sourceRid), sourceRid, "trace-" + idx,
-                idx * 100L, 128, 16, Collections.emptyList(), Collections.nCopies(128, 0));
+                idx * 100L, 128, 16, Collections.emptyList(), Collections.nCopies(128, 0), 0);
     }
 
     private JavaLoadClient loopClient(int shardIndex) {
@@ -43,7 +43,7 @@ class LoopShardRidDisjointTest {
                 0, 16, 10.0, 1, tempDir.resolve("out").toString(), NUM_SHARDS, shardIndex, 0,
                 120_000L, 500.0, false, true, 1, 1, 0L, 120, true,
                 "engine_service", "",
-                false, 10, 1000, 0, 0, "", false, "", true);
+                false, 10, 1000, 0, 0, "", false, "", true, 0, 0, "replay", 0.0, 0.0, true, List.of());
         return new JavaLoadClient(config);
     }
 

@@ -5,6 +5,7 @@ import org.flexlb.dao.route.RoleType;
 import org.flexlb.enums.FlexMetricType;
 import org.flexlb.metric.FlexMetricTags;
 import org.flexlb.metric.FlexMonitor;
+import org.flexlb.metric.SafeFlexMonitor;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
 
@@ -67,6 +68,7 @@ public class CacheMetricsReporter {
 
     @PostConstruct
     public void init() {
+        monitor = SafeFlexMonitor.wrap(monitor);
         registerCacheMetrics();
         log.info("CacheMetricsReporter initialized and metrics registered");
     }

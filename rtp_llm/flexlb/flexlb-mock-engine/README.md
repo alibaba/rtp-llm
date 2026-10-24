@@ -331,25 +331,26 @@ endpoints.json, `/metrics` `engine_ip` label); Linux routes all of 127.0.0.0/8 t
 macOS only reaches 127.0.0.1 by default — disable the flag for local macOS runs that connect
 across engine addresses.
 
-### Cancel channel
+### Worker cancellation
 
-- **`MockEngineCancelChannel`** (`src/main/java/org/flexlb/mockengine/MockEngineCancelChannel.java`):
-  an in-process test channel exposing the same cancel contract the cluster's
-  `FastRpcService.cancelRequest` implements, so tests can drive cancellation
-  without going through gRPC.
+Production cleanup and preemption use `EngineGrpcClient.cancelAsync`. It performs capability
+checks and returns cancellation evidence; retry, request state and resource settlement
+remain in the scheduling workflows.
+
+- **`MockEngineClients`** (`src/test/java/org/flexlb/mockengine/MockEngineClients.java`)
+  supplies test fixtures at the same client boundary. `inProcess` drives the mock engine
+  directly; `overHttp` uses its test control endpoint. The AutoTPM harness uses one client
+  mock for both batch delivery and cancellation.
 - **`POST /cancel_request`** on the MockControlServer (control port
-  `baseGrpcPort - 1`, body `{"engine"|"port": ..., "request_id": ...}`): a
-  test-only cancel injection that drives the same three-branch
-  `cancelRequest` contract —
-  1. **found**: the request is removed and a CANCELLED completion surfaces in
-     the next WorkerStatus finished list (WorkerStatus stays the sole
-     release-confirmation source);
-  2. **already finished**: reported via the `already_finished` flag;
-  3. **unknown / not found**: `{"status": "NOT_FOUND", "found": false}`.
-  The response carries `{status, found, phase, already_finished, engine,
-  port, request_id}` with `phase` as the TaskPhase enum name (null unless
-  found). A **Decode** target returns HTTP 501 `UNIMPLEMENTED`, matching the
-  production role contract (decode engines do not accept client cancels).
+  `baseGrpcPort - 1`, body `{"engine"|"port": ..., "request_id": ...}`) injects a
+  test-only priority cancellation into `FastRpcService.cancelRequest`:
+  1. **ACCEPTED**: the cancel intent is accepted. Resource release still requires
+     completion evidence; the acknowledgement alone does not prove cleanup.
+  2. **NOT_FOUND**: the addressed engine has already finished the request.
+  3. **TOMBSTONED**: the engine fenced an absent request id against a racing Enqueue.
+     The client exposes this as `REQUEST_FENCED`, without implying downstream cleanup.
+  The response also carries `{found, phase, already_finished, engine, port, request_id}`.
+  A Decode target returns HTTP 501 `UNIMPLEMENTED`, matching the Prefill-owned Cancel contract.
 
 ### Priority preemption (auto-tpm)
 
@@ -598,7 +599,7 @@ Representative additions beyond the v2 baseline suite (full list under
 
 - `AutoTpmE2EHarness` — E2E harness for the auto-tpm scenarios
 - `PriorityLatencyE2ETest` — priority-driven latency differentiation E2E
-- `MockEngineCancelChannelTest` — in-process cancel channel contract
+- `EngineCancelIntegrationTest` — cancellation, fencing and fault injection through the client fixture
 - `DecodePendingQueueHardGateTest` — unconditional decode hard gate semantics
 - `PrefillBudgetRegroupTest` — in-engine dual-budget prefill regroup (#8):
   over-budget master batch split (2 batches / 4 requests / max 2),

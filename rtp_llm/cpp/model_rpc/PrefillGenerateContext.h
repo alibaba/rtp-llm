@@ -17,11 +17,14 @@ namespace rtp_llm {
 
 enum class PrefillTerminalCause : uint8_t {
     ACTIVE              = 0,
-    PRIORITY_PREEMPTION = 1,
+    PRIORITY_PREEMPTION  = 1,
     OTHER               = 2,
+    CLIENT_CANCELLED    = 3,
+    DEADLINE_EXCEEDED   = 4,
+    SHUTDOWN            = 5,
 };
 
-enum class PriorityPreemptionRequestResult : uint8_t {
+enum class CancellationRequestResult : uint8_t {
     INSTALLED         = 0,
     ALREADY_INSTALLED = 1,
     REJECTED          = 2,
@@ -95,16 +98,17 @@ public:
     void         setStream(const std::shared_ptr<GenerateStream>& stream) override;
     void         reset() override;
     bool         isRequestCancelled() const override;
-    PriorityPreemptionRequestResult requestPriorityPreempt();
-    bool         isPriorityPreempted() const;
+    CancellationRequestResult requestCancellation(RequestCancelReasonPB reason);
+    ErrorInfo    cancellationError() const;
+    bool         isCancellationRequested() const;
     // Virtual so lifecycle tests can pause immediately after terminal publication.
     virtual bool         tryMarkOtherTerminal();
     PrefillTerminalCause terminalCause() const;
     void         tryCancelDownstream();
-    bool         finalizePriorityPreemption();
+    bool         finalizeCancellation();
     void         setLocalStreamSchedulerOwned(bool owned);
     // Linearizes ordinary runtime-meta removal with installation of the
-    // priority-preemption first cause and its CANCELING overlay.
+    // cancellation first cause and its CANCELING overlay.
     void         dequeueStreamFromRuntimeMeta();
     void         nextStage();
     grpc::Status closeGrpcStream(const std::string& attempt_error_override = "", bool override_transport_error = false);
@@ -172,8 +176,8 @@ private:
 
     std::atomic<PrefillTerminalCause> terminal_cause_{PrefillTerminalCause::ACTIVE};
     std::mutex                        terminal_transition_mu_;
-    std::mutex        priority_finalize_mu_;
-    bool              priority_finalized_{false};
+    std::mutex        cancel_finalize_mu_;
+    bool              cancel_finalized_{false};
     bool              local_stream_scheduler_owned_{false};
 };
 

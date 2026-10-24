@@ -113,14 +113,14 @@ if [ -z $SETENV_SETTED ]; then
         # 使用G1GC
         SERVICE_OPTS="${SERVICE_OPTS} -XX:+UseG1GC"
         SERVICE_OPTS="${SERVICE_OPTS} -XX:+UnlockExperimentalVMOptions"
-        SERVICE_OPTS="${SERVICE_OPTS} -XX:MaxGCPauseMillis=150"
+        SERVICE_OPTS="${SERVICE_OPTS} -XX:MaxGCPauseMillis=${FLEXLB_JVM_GC_PAUSE_MS:-150}"
         SERVICE_OPTS="${SERVICE_OPTS} -XX:InitiatingHeapOccupancyPercent=40"
         SERVICE_OPTS="${SERVICE_OPTS} -XX:G1HeapRegionSize=32M"
-        SERVICE_OPTS="${SERVICE_OPTS} -XX:G1NewSizePercent=20"
+        SERVICE_OPTS="${SERVICE_OPTS} -XX:G1NewSizePercent=${FLEXLB_JVM_G1_MIN_YOUNG_PERCENT:-20}"
         SERVICE_OPTS="${SERVICE_OPTS} -XX:+ExplicitGCInvokesConcurrent"
         SERVICE_OPTS="${SERVICE_OPTS} -XX:SurvivorRatio=8"
         SERVICE_OPTS="${SERVICE_OPTS} -Dsun.rmi.dgc.server.gcInterval=2592000000 -Dsun.rmi.dgc.client.gcInterval=2592000000"
-        SERVICE_OPTS="${SERVICE_OPTS} -XX:ParallelGCThreads=24 -XX:ConcGCThreads=8"
+        SERVICE_OPTS="${SERVICE_OPTS} ${FLEXLB_JVM_GC_OPTS:--XX:ParallelGCThreads=24 -XX:ConcGCThreads=8}"
         if [[ "$JAVA_VERSION" -lt 9 ]]; then
             SERVICE_OPTS="${SERVICE_OPTS} -Xloggc:${MIDDLEWARE_LOGS}/gc.log -XX:+PrintGCDetails -XX:+PrintGCDateStamps"
         else

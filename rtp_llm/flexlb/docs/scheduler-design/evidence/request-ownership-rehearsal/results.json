@@ -1,0 +1,216 @@
+{
+  "scope": "Sequentially consistent bounded protocol model; no Java execution or extraction",
+  "omissions": [
+    "JVM memory visibility",
+    "real locks and reentrancy",
+    "executor failures",
+    "network/RPC outcomes",
+    "batch/preemption full transactions",
+    "performance"
+  ],
+  "corrected_design": [
+    {
+      "name": "response/explicit_selection",
+      "visited_prefixes": 125,
+      "complete_traces": 35,
+      "violations": 0,
+      "deadlocks": 0,
+      "first_counterexample": null
+    },
+    {
+      "name": "retirement/drain_pins",
+      "visited_prefixes": 17,
+      "complete_traces": 5,
+      "violations": 0,
+      "deadlocks": 0,
+      "first_counterexample": null
+    },
+    {
+      "name": "publication/reservation_drain",
+      "visited_prefixes": 27,
+      "complete_traces": 7,
+      "violations": 0,
+      "deadlocks": 0,
+      "first_counterexample": null
+    },
+    {
+      "name": "admission/publish_True",
+      "visited_prefixes": 14,
+      "complete_traces": 4,
+      "violations": 0,
+      "deadlocks": 0,
+      "first_counterexample": null
+    },
+    {
+      "name": "admission/publish_False",
+      "visited_prefixes": 14,
+      "complete_traces": 4,
+      "violations": 0,
+      "deadlocks": 0,
+      "first_counterexample": null
+    },
+    {
+      "name": "identity/exact_object",
+      "visited_prefixes": 5,
+      "complete_traces": 2,
+      "violations": 0,
+      "deadlocks": 0,
+      "first_counterexample": null
+    },
+    {
+      "name": "deadline/remember",
+      "visited_prefixes": 9,
+      "complete_traces": 3,
+      "violations": 0,
+      "deadlocks": 0,
+      "first_counterexample": null
+    },
+    {
+      "name": "deadline/remember_cancel",
+      "visited_prefixes": 35,
+      "complete_traces": 12,
+      "violations": 0,
+      "deadlocks": 0,
+      "first_counterexample": null
+    },
+    {
+      "name": "cancel/two_completion_dimensions",
+      "visited_prefixes": 5,
+      "complete_traces": 1,
+      "violations": 0,
+      "deadlocks": 0,
+      "first_counterexample": null
+    }
+  ],
+  "rejected_simplifications": [
+    {
+      "name": "response/eager_ack",
+      "visited_prefixes": 92,
+      "complete_traces": 25,
+      "violations": 1,
+      "deadlocks": 0,
+      "first_counterexample": {
+        "trace": [
+          "ack_observed",
+          "inactivity_terminal"
+        ],
+        "reason": "ACK observation was incorrectly treated as the response-selection boundary",
+        "state": {
+          "ack": true,
+          "terminal": true,
+          "clean": false,
+          "winner": "success",
+          "future": null,
+          "selected_at_delivery_boundary": false,
+          "timeout_before_selection": true,
+          "publications": 0
+        }
+      }
+    },
+    {
+      "name": "retirement/ignore_pins",
+      "visited_prefixes": 18,
+      "complete_traces": 5,
+      "violations": 1,
+      "deadlocks": 0,
+      "first_counterexample": {
+        "trace": [
+          "try_acquire",
+          "close_gate",
+          "cleanup"
+        ],
+        "reason": "Retirement cleanup overlaps an admitted handoff",
+        "state": {
+          "pin": true,
+          "retiring": true,
+          "clean": true
+        }
+      }
+    },
+    {
+      "name": "publication/queue_only_close",
+      "visited_prefixes": 28,
+      "complete_traces": 7,
+      "violations": 1,
+      "deadlocks": 0,
+      "first_counterexample": {
+        "trace": [
+          "reserve",
+          "begin_close",
+          "finish_close"
+        ],
+        "reason": "Close returned while an accepted obligation exists",
+        "state": {
+          "accepted": true,
+          "reserved": 1,
+          "queued": 0,
+          "closing": true,
+          "closed": true,
+          "done": false,
+          "lost": false
+        }
+      }
+    },
+    {
+      "name": "identity/request_id_only",
+      "visited_prefixes": 5,
+      "complete_traces": 1,
+      "violations": 1,
+      "deadlocks": 0,
+      "first_counterexample": {
+        "trace": [
+          "replace_route_or_request_generation",
+          "old_callback"
+        ],
+        "reason": "Old identity callback settled the new route/generation",
+        "state": {
+          "generation": "new",
+          "active": false,
+          "replaced": true
+        }
+      }
+    },
+    {
+      "name": "deadline/forget",
+      "visited_prefixes": 9,
+      "complete_traces": 3,
+      "violations": 1,
+      "deadlocks": 0,
+      "first_counterexample": {
+        "trace": [
+          "fire",
+          "fire",
+          "install"
+        ],
+        "reason": "Fire-before-install lost a deadline",
+        "state": {
+          "state": "armed",
+          "fired": true,
+          "installed": true,
+          "deliveries": 0
+        }
+      }
+    },
+    {
+      "name": "cancel/cleanup_first",
+      "visited_prefixes": 2,
+      "complete_traces": 0,
+      "violations": 1,
+      "deadlocks": 1,
+      "first_counterexample": {
+        "trace": [
+          "choose_cancel"
+        ],
+        "reason": "No enabled event: bounded actors cannot finish",
+        "state": {
+          "cancel": true,
+          "future": null,
+          "returned": false,
+          "clean": false
+        }
+      }
+    }
+  ],
+  "total_complete_corrected_traces": 73,
+  "total_corrected_prefixes": 251
+}

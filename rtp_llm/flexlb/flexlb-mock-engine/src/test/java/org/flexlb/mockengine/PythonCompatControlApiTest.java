@@ -324,8 +324,8 @@ class PythonCompatControlApiTest {
                 inputWithDecode(1, 10, BASE_PORT + 1), probeCache);
 
         assertEquals(10L, perf.prefillMs(List.of(shape)), "baseline prefill should be 10ms");
-        assertEquals(1L, perf.decodeMs(1, 1), "baseline decode should be 1ms");
-        assertEquals(1, prefill.getMaxPrefillConcurrency(), "default max_prefill_concurrency");
+        assertEquals(1L, MockEngineTestSupport.decodeMs(perf, 1, 1), "baseline decode should be 1ms");
+        assertEquals(1, MockEngineTestSupport.getMaxPrefillConcurrency(prefill), "default max_prefill_concurrency");
 
         httpPost("/set_perf",
                 "{\"engine\":\"prefill-0\",\"prefill_fixed_ms\":50,"
@@ -333,9 +333,9 @@ class PythonCompatControlApiTest {
 
         assertEquals(50L, perf.prefillMs(List.of(shape)),
                 "prefill_fixed_ms must take effect");
-        assertEquals(2L, perf.decodeMs(1, 1),
+        assertEquals(2L, MockEngineTestSupport.decodeMs(perf, 1, 1),
                 "decode_scale must double decode latency");
-        assertEquals(3, prefill.getMaxPrefillConcurrency());
+        assertEquals(3, MockEngineTestSupport.getMaxPrefillConcurrency(prefill));
 
         // worker_status available_concurrency mirrors Python:
         // max(0, max_prefill_concurrency - running) == 3 when idle.
@@ -532,17 +532,17 @@ class PythonCompatControlApiTest {
                                 int expected, long timeoutMs) throws InterruptedException {
         long deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(timeoutMs);
         while (System.nanoTime() < deadline) {
-            if (service.getCompletedCount() >= expected) {
+            if (MockEngineTestSupport.getCompletedCount(service) >= expected) {
                 return;
             }
             Thread.sleep(5);
         }
         fail("timeout waiting for " + expected + " completions on port "
-                + service.getGrpcPort() + ", got " + service.getCompletedCount());
+                + service.getGrpcPort() + ", got " + MockEngineTestSupport.getCompletedCount(service));
     }
 
     private String httpGet(String path) throws Exception {
-        return MockEngineTestSupport.httpGet(controlServer.getPort(), path);
+        return MockEngineTestSupport.httpGet(MockEngineTestSupport.controlPort(controlServer), path);
     }
 
     private void httpPost(String path, String body) throws Exception {
@@ -552,7 +552,7 @@ class PythonCompatControlApiTest {
     }
 
     private HttpResponse<String> httpPostResponse(String path, String body) throws Exception {
-        return MockEngineTestSupport.httpPostResponse(controlServer.getPort(), path, body);
+        return MockEngineTestSupport.httpPostResponse(MockEngineTestSupport.controlPort(controlServer), path, body);
     }
 
 }

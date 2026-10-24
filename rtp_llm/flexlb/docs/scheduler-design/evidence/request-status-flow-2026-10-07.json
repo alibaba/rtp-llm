@@ -1,0 +1,353 @@
+{
+  "date": "2026-10-07",
+  "source": {
+    "base_commit": "dd438e141ce2371276723ce82844f0b4fa09a019",
+    "sha256": "451ababe06ce15f711d245f2e2be3dbea2f7d690714ad1725cca15613245e5d6",
+    "files": 508,
+    "changed": [
+      "rtp_llm/flexlb/flexlb-sync/src/main/java/org/flexlb/balance/endpoint/DecodeEndpoint.java",
+      "rtp_llm/flexlb/flexlb-sync/src/main/java/org/flexlb/balance/endpoint/PrefillEndpoint.java",
+      "rtp_llm/flexlb/flexlb-sync/src/main/java/org/flexlb/balance/scheduler/AbstractRequestScheduler.java",
+      "rtp_llm/flexlb/flexlb-sync/src/main/java/org/flexlb/balance/scheduler/BalanceContext.java",
+      "rtp_llm/flexlb/flexlb-sync/src/test/java/org/flexlb/balance/endpoint/DecodeEndpointAdmissionTest.java",
+      "rtp_llm/flexlb/flexlb-sync/src/test/java/org/flexlb/balance/endpoint/DecodeEndpointTest.java",
+      "rtp_llm/flexlb/flexlb-sync/src/test/java/org/flexlb/balance/scheduler/DeliveryClaimTest.java",
+      "rtp_llm/flexlb/flexlb-sync/src/test/java/org/flexlb/balance/scheduler/DeliverySettlementTest.java",
+      "rtp_llm/flexlb/flexlb-sync/src/test/java/org/flexlb/balance/scheduler/RequestContextLifecycleTest.java",
+      "rtp_llm/flexlb/flexlb-sync/src/test/java/org/flexlb/balance/scheduler/RequestDeliveryLockContractTest.java",
+      "rtp_llm/flexlb/flexlb-sync/src/test/java/org/flexlb/balance/scheduler/RequestInactivityTest.java",
+      "rtp_llm/flexlb/flexlb-sync/src/test/java/org/flexlb/balance/scheduler/RequestLifetimeTest.java"
+    ],
+    "verified_before_and_after": true,
+    "scope": "Committed base plus this status-flow change only; concurrent unstaged refactors excluded."
+  },
+  "changes": [
+    "Pass a single status and its resolved Context to scheduler; remove singleton lists and repeated repository lookup.",
+    "Reduce matching ACTIVE status synchronously and skip empty continuations while preserving deadline, preemption, capacity and cleanup effects."
+  ],
+  "tests": {
+    "local_focused": {
+      "tests": 266,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0
+    },
+    "local_sync_reactor": {
+      "tests": 1960,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0
+    },
+    "remote_frozen_sync_reactor": {
+      "tests": 1960,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0
+    }
+  },
+  "reviews": {
+    "count": 3,
+    "blocking_findings": 0,
+    "areas": [
+      "identity and lock contract",
+      "resource and request boundaries",
+      "regression coverage and performance cost"
+    ]
+  },
+  "performance": {
+    "environment": {
+      "ssh": "luoli.hn@11.163.39.110",
+      "host_checkout": "/home/luoli.hn/work/rtp_llm_4/github-opensource",
+      "container": "luoli_gpu",
+      "jvm": "-Xms64g -Xmx64g"
+    },
+    "topology": "750P/750D",
+    "target_qps": [
+      3000,
+      10000
+    ],
+    "warmup_ms": 10000,
+    "measurement_ms": 10000,
+    "min_qps_ratio": 0.98,
+    "max_p99_ms": 50,
+    "runs": [
+      {
+        "mode": "BATCH",
+        "exit_code": 0,
+        "suite": {
+          "tests": "2",
+          "failures": "0",
+          "errors": "0",
+          "skipped": "0",
+          "time": "63.046"
+        },
+        "metrics": [
+          {
+            "delivery": "BATCH",
+            "decision": "FIXED_WINDOW",
+            "prefill": "750",
+            "decode": "750",
+            "target_qps": "3000",
+            "requests": "30000",
+            "client_qps": "2996.8",
+            "master_qps": "3000.7",
+            "master_avg": "10.200ms",
+            "client_p50": "10.788ms",
+            "client_p90": "11.141ms",
+            "client_p95": "11.301ms",
+            "client_p99": "22.375ms",
+            "master_p50": "10ms",
+            "master_p90": "11ms",
+            "master_p95": "11ms",
+            "master_p99": "11ms",
+            "active_prefill_rpc": "750",
+            "active_prefill_route": "750",
+            "active_decode_route": "750",
+            "batch_wait_count": "30000",
+            "batch_wait_p50": "10ms",
+            "batch_wait_p90": "10ms",
+            "batch_wait_p95": "10ms",
+            "batch_wait_p99": "10ms",
+            "delivery_wait_count": "30000",
+            "delivery_wait_p50": "10ms",
+            "delivery_wait_p90": "11ms",
+            "delivery_wait_p95": "11ms",
+            "delivery_wait_p99": "11ms",
+            "dispatch_ack_count": "504",
+            "dispatch_ack_p99": "<1ms",
+            "engine_batches": "29925",
+            "batch_full": "0",
+            "window_timeout": "29925",
+            "predicted_execution_cap": "0",
+            "single_request": "0",
+            "avg_batch": "1.00",
+            "max_batch": "5",
+            "grpc_queue_p99": "<1ms",
+            "route_submit_p99": "<1ms",
+            "ack_response_count": "504",
+            "ack_response_p99": "<1ms",
+            "terminal_without_ack_count": "29496",
+            "latency_and_throughput_pass": true
+          },
+          {
+            "delivery": "BATCH",
+            "decision": "FIXED_WINDOW",
+            "prefill": "750",
+            "decode": "750",
+            "target_qps": "10000",
+            "requests": "100000",
+            "client_qps": "9985.6",
+            "master_qps": "10006.4",
+            "master_avg": "10.459ms",
+            "client_p50": "10.851ms",
+            "client_p90": "11.285ms",
+            "client_p95": "11.486ms",
+            "client_p99": "45.285ms",
+            "master_p50": "10ms",
+            "master_p90": "11ms",
+            "master_p95": "11ms",
+            "master_p99": "20ms",
+            "active_prefill_rpc": "750",
+            "active_prefill_route": "750",
+            "active_decode_route": "750",
+            "batch_wait_count": "100000",
+            "batch_wait_p50": "10ms",
+            "batch_wait_p90": "10ms",
+            "batch_wait_p95": "10ms",
+            "batch_wait_p99": "10ms",
+            "delivery_wait_count": "100000",
+            "delivery_wait_p50": "10ms",
+            "delivery_wait_p90": "11ms",
+            "delivery_wait_p95": "11ms",
+            "delivery_wait_p99": "11ms",
+            "dispatch_ack_count": "7566",
+            "dispatch_ack_p99": "1ms",
+            "engine_batches": "98373",
+            "batch_full": "0",
+            "window_timeout": "98373",
+            "predicted_execution_cap": "0",
+            "single_request": "0",
+            "avg_batch": "1.02",
+            "max_batch": "9",
+            "grpc_queue_p99": "<1ms",
+            "route_submit_p99": "7ms",
+            "ack_response_count": "7566",
+            "ack_response_p99": "<1ms",
+            "terminal_without_ack_count": "92434",
+            "latency_and_throughput_pass": true
+          }
+        ],
+        "log_sha256": "1d9c29398554b64c90babca21ff432e0215edf3b8b1a03b45e99fe0b16515626",
+        "raw_log": "/tmp/flexlb-status-flow-20261007/remote-data/BATCH.log"
+      },
+      {
+        "mode": "NON_BATCH",
+        "exit_code": 0,
+        "suite": {
+          "tests": "2",
+          "failures": "0",
+          "errors": "0",
+          "skipped": "0",
+          "time": "59.283"
+        },
+        "metrics": [
+          {
+            "delivery": "NON_BATCH",
+            "decision": "SINGLE",
+            "prefill": "750",
+            "decode": "750",
+            "target_qps": "3000",
+            "requests": "30000",
+            "client_qps": "2999.7",
+            "master_qps": "3000.5",
+            "master_avg": "0.005ms",
+            "client_p50": "0.379ms",
+            "client_p90": "0.452ms",
+            "client_p95": "0.478ms",
+            "client_p99": "0.618ms",
+            "master_p50": "<1ms",
+            "master_p90": "<1ms",
+            "master_p95": "<1ms",
+            "master_p99": "<1ms",
+            "active_prefill_rpc": "0",
+            "active_prefill_route": "750",
+            "active_decode_route": "750",
+            "batch_wait_count": "0",
+            "batch_wait_p50": "N/A",
+            "batch_wait_p90": "N/A",
+            "batch_wait_p95": "N/A",
+            "batch_wait_p99": "N/A",
+            "delivery_wait_count": "30000",
+            "delivery_wait_p50": "<1ms",
+            "delivery_wait_p90": "<1ms",
+            "delivery_wait_p95": "<1ms",
+            "delivery_wait_p99": "<1ms",
+            "dispatch_ack_count": "0",
+            "dispatch_ack_p99": "N/A",
+            "engine_batches": "0",
+            "batch_full": "N/A",
+            "window_timeout": "N/A",
+            "predicted_execution_cap": "N/A",
+            "single_request": "N/A",
+            "avg_batch": "N/A",
+            "max_batch": "N/A",
+            "grpc_queue_p99": "<1ms",
+            "route_submit_p99": "<1ms",
+            "ack_response_count": "0",
+            "ack_response_p99": "N/A",
+            "terminal_without_ack_count": "0",
+            "latency_and_throughput_pass": true
+          },
+          {
+            "delivery": "NON_BATCH",
+            "decision": "SINGLE",
+            "prefill": "750",
+            "decode": "750",
+            "target_qps": "10000",
+            "requests": "100000",
+            "client_qps": "9995.3",
+            "master_qps": "10001.4",
+            "master_avg": "0.043ms",
+            "client_p50": "0.356ms",
+            "client_p90": "0.471ms",
+            "client_p95": "0.680ms",
+            "client_p99": "17.898ms",
+            "master_p50": "<1ms",
+            "master_p90": "<1ms",
+            "master_p95": "<1ms",
+            "master_p99": "1ms",
+            "active_prefill_rpc": "0",
+            "active_prefill_route": "750",
+            "active_decode_route": "750",
+            "batch_wait_count": "0",
+            "batch_wait_p50": "N/A",
+            "batch_wait_p90": "N/A",
+            "batch_wait_p95": "N/A",
+            "batch_wait_p99": "N/A",
+            "delivery_wait_count": "100000",
+            "delivery_wait_p50": "<1ms",
+            "delivery_wait_p90": "<1ms",
+            "delivery_wait_p95": "<1ms",
+            "delivery_wait_p99": "1ms",
+            "dispatch_ack_count": "0",
+            "dispatch_ack_p99": "N/A",
+            "engine_batches": "0",
+            "batch_full": "N/A",
+            "window_timeout": "N/A",
+            "predicted_execution_cap": "N/A",
+            "single_request": "N/A",
+            "avg_batch": "N/A",
+            "max_batch": "N/A",
+            "grpc_queue_p99": "<1ms",
+            "route_submit_p99": "1ms",
+            "ack_response_count": "0",
+            "ack_response_p99": "N/A",
+            "terminal_without_ack_count": "0",
+            "latency_and_throughput_pass": true
+          }
+        ],
+        "log_sha256": "b2deed4df9b95d63ee0f547abc0fe6ba6c7f12af2473c09a0f1108e1ad9d677b",
+        "raw_log": "/tmp/flexlb-status-flow-20261007/remote-data/NON_BATCH.log"
+      }
+    ],
+    "all_four_cells_pass": true,
+    "script": "#!/bin/sh\nset -eu\nexport JAVA_HOME=/opt/flexlb-jdk21-20261002\nexport PATH=\"$JAVA_HOME/bin:$PATH\"\nexport MAVEN_OPTS=\"-Duser.home=/data0/luoli.hn/data0 -Dmaven.repo.local=/data0/luoli.hn/data0/.m2/repository\"\ncd /data0/luoli.hn/data0/work/rtp_llm_4/github-opensource/rtp_llm/flexlb\nout=/tmp/flexlb-status-flow-20261007\nmkdir -p \"$out\"\n{ date -Iseconds; uname -a; java -version; getconf _NPROCESSORS_ONLN; free -g; uptime; } > \"$out/environment.txt\" 2>&1\nfor module in flexlb-common flexlb-cache flexlb-grpc flexlb-sync flexlb-api flexlb-mock-engine; do\n rm -rf \"$module/target/classes\" \"$module/target/test-classes\"\ndone\nrm -rf flexlb-grpc/target/generated-sources/protobuf flexlb-grpc/target/proto-java\npython3 /tmp/flexlb-status-flow-20261007/check-seal.py > \"$out/source-before.sha256\"\ntimeout --kill-after=15s 900s ./mvnw -B -P 'opensource,!internal' -pl flexlb-sync -am test > \"$out/remote-ut.log\" 2>&1\nvmstat -w -t 1 > \"$out/vmstat.log\" &\nobserver=$!\ntrap 'kill \"$observer\" 2>/dev/null || true' EXIT\nstatus=0\nfor mode in BATCH NON_BATCH; do\n decision=FIXED_WINDOW\n if [ \"$mode\" = NON_BATCH ]; then decision=SINGLE; fi\n set +e\n timeout --kill-after=15s 900s ./mvnw -B -P 'opensource,!internal,api-performance-regression' -pl flexlb-api -am \\\n '-Dtest=MasterBatchEndToEndPerformanceTest#masterMeetsRateSloAcrossEngineScaleMatrix' \\\n -DfailIfNoTests=false -Dsurefire.failIfNoSpecifiedTests=false \\\n -Dflexlb.perf.heap=64g \"-Dflexlb.perf.delivery-mode=$mode\" \"-Dflexlb.perf.decision-mode=$decision\" \\\n -Dflexlb.perf.engine-matrix-topologies=750x750 -Dflexlb.perf.engine-matrix-target-qps=3000,10000 \\\n -Dflexlb.perf.engine-matrix-duration-ms=10000 -Dflexlb.perf.engine-matrix-warmup-ms=10000 \\\n -Dflexlb.perf.engine-matrix-warmup-requests-per-prefill=16 \\\n -Dflexlb.perf.engine-matrix-min-qps-ratio=0.98 \\\n -Dflexlb.perf.engine-matrix-max-server-p99-ms=50 \\\n -Dflexlb.perf.engine-matrix-max-client-p99-ms=50 \\\n -Dflexlb.perf.engine-matrix-max-batch-wait-p99-ms=50 \\\n test > \"$out/$mode.log\" 2>&1\n result=$?\n set -e\n echo \"$result\" > \"$out/$mode.exit\"\n if [ \"$result\" -ne 0 ]; then status=1; fi\n report=flexlb-api/target/surefire-reports/TEST-org.flexlb.httpserver.MasterBatchEndToEndPerformanceTest.xml\n if [ -f \"$report\" ]; then cp \"$report\" \"$out/$mode.xml\"; fi\n awk '/FlexLB offered traffic:|FlexLB client latency:|FlexLB Master engine-scale E2E:|\\[ERROR\\]|BUILD SUCCESS|BUILD FAILURE/' \"$out/$mode.log\"\ndone\npython3 /tmp/flexlb-status-flow-20261007/check-seal.py > \"$out/source-after.sha256\"\necho \"$status\" > \"$out/matrix.exit\"\nexit \"$status\"\n"
+  },
+  "limits": [
+    "Mock-worker gRPC E2E, not production GPU inference.",
+    "Shared remote host without CPU isolation.",
+    "No interleaved baseline run; these results establish threshold acceptance, not a causal P99 improvement.",
+    "Continuation executor already coalesces requests; skipping empty continuation does not imply one fewer executor task per heartbeat."
+  ],
+  "behavior_equivalence_review": {
+    "baseline_commit": "dd438e141ce2371276723ce82844f0b4fa09a019",
+    "optimized_commit": "c96852bd1c1e30f85ba5aecceeb25d2746b1a615",
+    "production_changes_in_this_followup": false,
+    "method": "Run the same externally observable behavior regression cases against two frozen production snapshots. Adapt only test entry signatures to the original list API. Baseline omits four optimization-specific cases that assert internal continuation omission or exercise the new resolved-context API.",
+    "baseline": {
+      "counts": {
+        "tests": 199,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 0
+      },
+      "log_sha256": "f2fbae43f8ba3168af2f049df223a37ae00a8fd0383dbcf714769ccf52c45212",
+      "log": "/tmp/flexlb-status-equivalence-20261007/before.log"
+    },
+    "optimized": {
+      "counts": {
+        "tests": 203,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 0
+      },
+      "log_sha256": "d8786d285182757d918d01911bef5392d4e534e01ca2a3995a2f9bf63400bd02",
+      "log": "/tmp/flexlb-status-equivalence-20261007/after.log"
+    },
+    "shared_working_tree": {
+      "counts": {
+        "tests": 203,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 0
+      },
+      "log_sha256": "3702b47bec30991bcd0c7128dfd6472c5ffdb3770839cd58c73bf59838494e37",
+      "log": "/tmp/flexlb-status-equivalence-20261007/latest.log"
+    },
+    "common_behavior_cases": 199,
+    "extra_optimized_cases": 4,
+    "new_regressions": [
+      "Matching Prefill/Decode ACTIVE status cancels the actual scheduled visibility callback, retains resource tracking and keeps the successful response.",
+      "Late Prefill ACTIVE/COMPLETED and Decode ACTIVE/TERMINAL statuses update neither the archived Context nor the new Context using its request ID."
+    ],
+    "invariants": [
+      "Exact Prefill route/endpoint and Decode reservation/endpoint checks are unchanged and run before status reduction.",
+      "Archive sets FINISHED and clears route before removing Context from active repository.",
+      "Worker liveness and acceptance facts are reduced before any empty-continuation return.",
+      "Prefill only skips when work, obsolete deadline, cleanup resume, queue cancellation and pending decision timer are all absent.",
+      "Decode only skips ACTIVE with no work, obsolete deadline, capacity release or pending decision timer; TERMINAL always retains settlement.",
+      "Skipped Decode ACTIVE delivery settlement would return without mutating or notifying."
+    ],
+    "validation_scope": "Behavior regression evidence and complete review of the four changed production files; this is not a formal proof of all concurrent executions."
+  }
+}

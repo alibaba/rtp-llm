@@ -18,6 +18,23 @@ import static org.mockito.Mockito.when;
 class DefaultCacheAwareServiceTest {
 
     @Test
+    void reportingFailureCannotTurnAnAppliedCacheUpdateIntoFailure() {
+        var cache = mock(KvCacheManager.class);
+        var metrics = mock(CacheMetricsReporter.class);
+        org.mockito.Mockito.doThrow(new IllegalStateException("monitor unavailable"))
+                .when(metrics).reportUpdateEngineBlockCacheRT(org.mockito.ArgumentMatchers.anyString(), anyLong(), org.mockito.ArgumentMatchers.anyString());
+        var worker = org.flexlb.dao.master.WorkerStatus.createDiscovered(
+                RoleType.PREFILL, null, "127.0.0.1", 8080, 8081, null);
+        var status = new org.flexlb.dao.master.CacheStatus();
+        status.setCachedKeys(java.util.Set.of(1L));
+        worker.cacheMutationLock.lock();
+        try { worker.publishCacheStatus(status); } finally { worker.cacheMutationLock.unlock(); }
+        var result = new DefaultCacheAwareService(cache, metrics).updateEngineBlockCache(worker);
+        org.junit.jupiter.api.Assertions.assertTrue(result.isSuccess());
+        verify(cache).updateEngineCache("127.0.0.1:8080", RoleType.PREFILL.getCode(), java.util.Set.of(1L));
+    }
+
+    @Test
     void cacheLookupFailureIsNotConvertedIntoACacheMiss() {
         KvCacheManager cache = mock(KvCacheManager.class);
         CacheMetricsReporter metrics = mock(CacheMetricsReporter.class);

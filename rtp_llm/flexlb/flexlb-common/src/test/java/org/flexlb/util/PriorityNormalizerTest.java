@@ -14,9 +14,9 @@ class PriorityNormalizerTest {
 
     @Test
     void unset_proto_and_missing_header_yield_the_builtin_default() {
-        assertEquals(PriorityNormalizer.DEFAULT_PRIORITY, PriorityNormalizer.normalize(0, null));
-        assertEquals(PriorityNormalizer.DEFAULT_PRIORITY, PriorityNormalizer.normalize(0, ""));
-        assertEquals(PriorityNormalizer.DEFAULT_PRIORITY, PriorityNormalizer.normalize(0, "   "));
+        assertEquals(PriorityNormalizer.DEFAULT_PRIORITY, PriorityNormalizer.normalize(0, null, PriorityNormalizer.DEFAULT_PRIORITY));
+        assertEquals(PriorityNormalizer.DEFAULT_PRIORITY, PriorityNormalizer.normalize(0, "", PriorityNormalizer.DEFAULT_PRIORITY));
+        assertEquals(PriorityNormalizer.DEFAULT_PRIORITY, PriorityNormalizer.normalize(0, "   ", PriorityNormalizer.DEFAULT_PRIORITY));
     }
 
     @Test
@@ -43,13 +43,13 @@ class PriorityNormalizerTest {
     @ParameterizedTest
     @ValueSource(ints = {-1, 0, 101, 200})
     void invalid_proto_priority_falls_back_to_default_50(int protoPriority) {
-        assertEquals(50, PriorityNormalizer.normalize(protoPriority, null));
+        assertEquals(50, PriorityNormalizer.normalize(protoPriority, null, PriorityNormalizer.DEFAULT_PRIORITY));
     }
 
     @ParameterizedTest
     @ValueSource(strings = {"0", "-1", "101", "abc", "5o", "30.0"})
     void invalid_header_value_falls_back_to_default_50(String header) {
-        assertEquals(50, PriorityNormalizer.normalize(0, header));
+        assertEquals(50, PriorityNormalizer.normalize(0, header, PriorityNormalizer.DEFAULT_PRIORITY));
     }
 
     @Test
@@ -70,18 +70,18 @@ class PriorityNormalizerTest {
     @ParameterizedTest
     @ValueSource(ints = {1, 30, 45, 50, 70, 100})
     void valid_proto_priority_is_kept(int priority) {
-        assertEquals(priority, PriorityNormalizer.normalize(priority, null));
+        assertEquals(priority, PriorityNormalizer.normalize(priority, null, PriorityNormalizer.DEFAULT_PRIORITY));
     }
 
     @ParameterizedTest
     @ValueSource(ints = {1, 30, 45, 50, 70, 100})
     void valid_header_priority_is_kept_when_proto_unset(int priority) {
-        assertEquals(priority, PriorityNormalizer.normalize(0, String.valueOf(priority)));
+        assertEquals(priority, PriorityNormalizer.normalize(0, String.valueOf(priority), PriorityNormalizer.DEFAULT_PRIORITY));
     }
 
     @Test
     void header_value_is_trimmed_before_parsing() {
-        assertEquals(70, PriorityNormalizer.normalize(0, " 70 "));
+        assertEquals(70, PriorityNormalizer.normalize(0, " 70 ", PriorityNormalizer.DEFAULT_PRIORITY));
     }
 
     // ==================== resolution order: proto > header > default ====================

@@ -156,7 +156,7 @@ final class MockEngineTestCluster implements AutoCloseable {
         if (controlServer == null) {
             throw new IllegalStateException("control server was not requested");
         }
-        return controlServer.getPort();
+        return MockEngineTestSupport.controlPort(controlServer);
     }
 
     JsonNode snapshot() throws IOException, InterruptedException {
@@ -166,7 +166,7 @@ final class MockEngineTestCluster implements AutoCloseable {
 
     long totalCompleted() {
         return services.values().stream()
-                .mapToLong(JavaMockEngineCluster.FastRpcService::getCompletedCount)
+                .mapToLong(MockEngineTestSupport::getCompletedCount)
                 .sum();
     }
 

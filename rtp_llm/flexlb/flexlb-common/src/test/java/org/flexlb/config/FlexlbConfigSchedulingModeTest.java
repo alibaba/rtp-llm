@@ -1,5 +1,7 @@
 package org.flexlb.config;
 
+import org.flexlb.config.ConfigTestSupport;
+
 import org.junit.jupiter.api.Test;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -22,7 +24,7 @@ class FlexlbConfigSchedulingModeTest {
         assertTrue(config.isDirect());
         assertFalse(config.isQueue());
         assertFalse(config.isPriorityOrdering());
-        assertFalse(config.isSingleDecision());
+        assertFalse(ConfigTestSupport.isSingleDecision(config));
         assertFalse(config.isFixedWindowDecision());
         assertEquals(DispatcherConfig.Type.NON_BATCH,
                 config.getDispatcher().getType());
@@ -69,7 +71,7 @@ class FlexlbConfigSchedulingModeTest {
                 }
                 """);
 
-        DecisionPolicyConfig decision = config.fixedWindowDecision();
+        DecisionPolicyConfig decision = config.decisionPolicy();
         assertEquals(4, decision.getMaxRequests());
         assertEquals(25L, decision.getMaxCollectionWaitMs());
         assertEquals(80L, decision.getMaxPredictedExecutionMs().longValue());
@@ -84,9 +86,9 @@ class FlexlbConfigSchedulingModeTest {
                 }
                 """);
         assertTrue(batch.isFixedWindowDecision());
-        assertEquals(8, batch.fixedWindowDecision().getMaxRequests());
-        assertEquals(300L, batch.fixedWindowDecision().getMaxCollectionWaitMs());
-        assertNull(batch.fixedWindowDecision().getMaxPredictedExecutionMs());
+        assertEquals(8, batch.decisionPolicy().getMaxRequests());
+        assertEquals(300L, batch.decisionPolicy().getMaxCollectionWaitMs());
+        assertNull(batch.decisionPolicy().getMaxPredictedExecutionMs());
         assertEquals(2, batch.getDispatcher().getMaxInflightPerPrefillWorker());
 
         FlexlbConfig nonBatchDefault = ConfigTestFixtures.parse("""
@@ -105,7 +107,7 @@ class FlexlbConfigSchedulingModeTest {
                   "dispatcher":{"type":"NON_BATCH"}
                 }
                 """);
-        assertTrue(nonBatchSingle.isSingleDecision());
+        assertTrue(ConfigTestSupport.isSingleDecision(nonBatchSingle));
         assertEquals(DecisionPolicyConfig.Type.SINGLE,
                 nonBatchSingle.decisionPolicy().getType());
         DispatcherConfig dispatcher = nonBatchSingle.getDispatcher();
@@ -122,8 +124,8 @@ class FlexlbConfigSchedulingModeTest {
                 }
                 """);
 
-        assertEquals(4096, config.fixedWindowDecision().getMaxRequests());
-        assertEquals(4096, config.fixedWindowDecision().resolveMaxRequests());
+        assertEquals(4096, config.decisionPolicy().getMaxRequests());
+        assertEquals(4096, config.decisionPolicy().resolveMaxRequests());
     }
 
     @Test
@@ -301,7 +303,7 @@ class FlexlbConfigSchedulingModeTest {
                                    boolean batchDispatch) {
         assertTrue(config.isQueue());
         assertEquals(priority, config.isPriorityOrdering());
-        assertEquals(single, config.isSingleDecision());
+        assertEquals(single, ConfigTestSupport.isSingleDecision(config));
         assertEquals(!single, config.isFixedWindowDecision());
         assertEquals(batchDispatch ? DispatcherConfig.Type.BATCH
                         : DispatcherConfig.Type.NON_BATCH,

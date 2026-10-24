@@ -20,7 +20,7 @@ import java.util.concurrent.atomic.AtomicLong;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
-import static org.junit.jupiter.api.Assertions.assertSame;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -39,6 +39,17 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 @DisplayName("WorkerStatus status-commit contract")
 class WorkerStatusTest {
 
+    @Test
+    void skippedDiscoveryTicksDoNotSkipTheNextDueCachePoll() {
+        WorkerStatus status = discovered();
+        assertFalse(status.shouldPollCache(1L, 5L));
+        assertTrue(status.shouldPollCache(7L, 5L));
+        assertFalse(status.shouldPollCache(8L, 5L));
+        assertTrue(status.shouldPollCache(11L, 5L));
+        assertFalse(status.shouldPollCache(8L, 5L));
+        assertThrows(IllegalArgumentException.class, () -> status.shouldPollCache(12L, 0L));
+    }
+
     private static WorkerStatus discovered() {
         return WorkerStatus.createDiscovered(
                 RoleType.PREFILL, "group-a", "10.0.0.1", 8080, 9090, "site-a");
@@ -53,7 +64,7 @@ class WorkerStatusTest {
         status.lock.lock();
         try {
             WorkerStatus.StatusObservation observation =
-                    status.freezeStatusResponse(response);
+                    WorkerStatusTestSupport.freezeStatusResponse(status, response);
             WorkerStatus.PreparedStatus prepared =
                     status.prepareNewStatus(observation);
             status.publishPreparedStatus(prepared);
@@ -197,7 +208,7 @@ class WorkerStatusTest {
             status.lock.lock();
             try {
                 WorkerStatus.StatusObservation observation =
-                        status.freezeStatusResponse(stale);
+                        WorkerStatusTestSupport.freezeStatusResponse(status, stale);
                 assertThrows(IllegalArgumentException.class,
                         () -> status.prepareNewStatus(observation));
             } finally {
@@ -210,7 +221,7 @@ class WorkerStatusTest {
         void prepareRequiresGenerationLock() {
             WorkerStatus status = discovered();
             WorkerStatus.StatusObservation observation =
-                    status.freezeStatusResponse(responseWithMarker(1L));
+                    WorkerStatusTestSupport.freezeStatusResponse(status, responseWithMarker(1L));
             assertThrows(IllegalStateException.class,
                     () -> status.prepareNewStatus(observation));
         }
@@ -223,7 +234,7 @@ class WorkerStatusTest {
             status.lock.lock();
             try {
                 prepared = status.prepareNewStatus(
-                        status.freezeStatusResponse(responseWithMarker(1L)));
+                        WorkerStatusTestSupport.freezeStatusResponse(status, responseWithMarker(1L)));
             } finally {
                 status.lock.unlock();
             }
@@ -244,9 +255,9 @@ class WorkerStatusTest {
             status.lock.lock();
             try {
                 first = status.prepareNewStatus(
-                        status.freezeStatusResponse(responseWithMarker(2L)));
+                        WorkerStatusTestSupport.freezeStatusResponse(status, responseWithMarker(2L)));
                 second = status.prepareNewStatus(
-                        status.freezeStatusResponse(responseWithMarker(3L)));
+                        WorkerStatusTestSupport.freezeStatusResponse(status, responseWithMarker(3L)));
             } finally {
                 status.lock.unlock();
             }
@@ -273,7 +284,7 @@ class WorkerStatusTest {
                 assertTrue(status
                         .beginRetirementAfterEndpointGateClosed());
                 WorkerStatus.StatusObservation observation =
-                        status.freezeStatusResponse(responseWithMarker(2L));
+                        WorkerStatusTestSupport.freezeStatusResponse(status, responseWithMarker(2L));
                 assertThrows(IllegalStateException.class,
                         () -> status.prepareNewStatus(observation));
             } finally {
@@ -322,7 +333,7 @@ class WorkerStatusTest {
                         try {
                             long next = version.getAndIncrement();
                             WorkerStatus.StatusObservation observation =
-                                    status.freezeStatusResponse(
+                                    WorkerStatusTestSupport.freezeStatusResponse(status,
                                             responseWithMarker(next));
                             status.publishPreparedStatus(
                                     status.prepareNewStatus(observation));
@@ -398,28 +409,37 @@ class WorkerStatusTest {
             try {
                 WorkerStatus.PollHealth health = status.recordSuccessfulPoll(true);
                 assertTrue(health.reportedAlive());
-                assertEquals(0L, health.consecutiveTransportFailures());
+                assertEquals(0L, health.consecutiveWorkerFailures());
             } finally {
                 status.lock.unlock();
             }
         }
 
         @Test
-        @DisplayName("Transport failures accumulate without rewriting liveness")
-        void transportFailuresAccumulate() {
+        void onlyDistinctValidNotAliveResponsesCountAndAliveResetsTheStreak() {
             WorkerStatus status = discovered();
-            status.lock.lock();
-            try {
-                status.recordSuccessfulPoll(true);
-                WorkerStatus.PollHealth afterFirst = status.recordTransportFailure();
-                WorkerStatus.PollHealth afterSecond = status.recordTransportFailure();
-                assertEquals(1L, afterFirst.consecutiveTransportFailures());
-                assertEquals(2L, afterSecond.consecutiveTransportFailures());
-                assertTrue(afterSecond.reportedAlive());
-            } finally {
-                status.lock.unlock();
+            try (var lease = status.tryBeginStatusPoll()) {
+                status.recordStatusRpcResult(lease, true, false);
+                status.recordStatusRpcResult(lease, true, false);
+                assertEquals(1L, status.pollHealth().consecutiveWorkerFailures());
             }
-            assertSame(status.pollHealth(), status.pollHealth());
+            try (var lease = status.tryBeginStatusPoll()) {
+                status.recordStatusRpcResult(lease, false, false);
+                assertEquals(1L, status.pollHealth().consecutiveWorkerFailures());
+            }
+            try (var lease = status.tryBeginStatusPoll()) {
+                status.recordStatusRpcResult(lease, true, true);
+                assertEquals(0L, status.pollHealth().consecutiveWorkerFailures());
+            }
+            for (int i = 0; i < 3; i++) {
+                try (var lease = status.tryBeginStatusPoll()) {
+                    status.recordStatusRpcResult(lease, true, false);
+                }
+            }
+            assertEquals(WorkerStatus.RetirementReason.CONSECUTIVE_WORKER_FAILURES, status.retirementReason());
+            assertNull(status.tryBeginStatusPoll());
+            assertFalse(status.isAvailableForScheduling());
         }
+
     }
 }

@@ -2047,7 +2047,7 @@ if kv_used:
     kv_ts = [{"t": t, **row} for t, row in rel_axis(kv_rows)]
 
 # G3 per-engine batcher queue gauge. The metric carries role + engineIp
-# tags (BatchSchedulerReporter#reportBatcherQueueSize), so the plain
+# tags (DeliveryMetricsReporter#reportBatcherQueueSize), so the plain
 # prom_ts_extract sum below folds PREFILL + DECODE workers into one
 # cluster total — kept for backward compatibility only; the per-role
 # totals and per-engine series below carry the real breakdown.

@@ -626,7 +626,7 @@ class DynamicEngineScaleTest {
 
     private HttpResponse<String> post(String path, String body) throws Exception {
         return HTTP_CLIENT.send(HttpRequest.newBuilder()
-                .uri(URI.create("http://127.0.0.1:" + controlServer.getPort() + path))
+                .uri(URI.create("http://127.0.0.1:" + MockEngineTestSupport.controlPort(controlServer) + path))
                 .header("Content-Type", "application/json")
                 .POST(HttpRequest.BodyPublishers.ofString(body))
                 .build(), HttpResponse.BodyHandlers.ofString());
@@ -634,7 +634,7 @@ class DynamicEngineScaleTest {
 
     private JsonNode getJson(String path) throws Exception {
         HttpResponse<String> response = HTTP_CLIENT.send(HttpRequest.newBuilder()
-                .uri(URI.create("http://127.0.0.1:" + controlServer.getPort() + path))
+                .uri(URI.create("http://127.0.0.1:" + MockEngineTestSupport.controlPort(controlServer) + path))
                 .GET().build(), HttpResponse.BodyHandlers.ofString());
         assertEquals(200, response.statusCode(), "GET " + path + " failed");
         return MAPPER.readTree(response.body());
