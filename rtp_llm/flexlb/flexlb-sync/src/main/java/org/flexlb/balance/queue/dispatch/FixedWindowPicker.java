@@ -59,7 +59,7 @@ public final class FixedWindowPicker implements QueuePicker {
             return ProcessQueueResult.NO_ACTION;
         }
 
-        // Cheap advisory gates avoid sorting while the worker cannot dispatch.
+        // 先做几项开销很小的检查，Prefill 当前发不出去时就不必复制并排序整个队列。
         ScheduledRequest observedHead;
         int observedSize;
         long observedOldestEnqueuedAtMs = Long.MAX_VALUE;
@@ -118,8 +118,7 @@ public final class FixedWindowPicker implements QueuePicker {
                     observedSchedulingInputVersion);
         }
 
-        // The ordered snapshot is the selection linearization point;
-        // prediction intentionally runs after releasing the queue lock.
+        // 选请求以这份排好序的快照为准；耗时预测放在释放队列锁之后做，避免长时间占着锁。
         ActiveQueueSnapshot snapshot = snapshotActiveQueue();
         ScheduledRequest head = snapshot.head();
         if (head == null) {

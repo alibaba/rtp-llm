@@ -82,8 +82,8 @@ public final class GroupCommitter {
             return admitted == null
                     ? ProcessQueueResult.NO_ACTION : admitted;
         } catch (EndpointRetiredException retired) {
-            // The resources are closed, no handoff happened and the head is still queued: requeue it
-            // instead of letting the exception stop the loop and fail every queued request.
+            // 资源已经释放、请求也没交出去，队首还在队列里：按交付失败交给 commitBoundary 处理，
+            // 而不是让异常抛出去停掉调度线程、让所有排队请求一起失败。
             return commitBoundary(new BlockedRequest(
                     candidates.get(0), DeliveryBlockReason.failed(retired)));
         }
@@ -183,7 +183,7 @@ public final class GroupCommitter {
                 }
             }
             precedingWork = transaction.commit();
-            // Committed requests no longer count toward either waiting limit.
+            // 这些请求已经交付，不再计入两种排队上限。
             var routingRole = prefillEndpoint.getStatus().getRole();
             for (ScheduledRequest item : items) {
                 prefillEndpoint.reportSubQueueResidence(item);
@@ -262,7 +262,9 @@ public final class GroupCommitter {
         return result;
     }
 
-    /** Caller holds the queue lock. */
+    /**
+     * 调用方持有队列锁。
+     */
     private ProcessQueueResult resolveEmptyCapacityUnderLock(
             ScheduledRequest item,
             DeliveryBlockReason unavailable,
@@ -275,7 +277,9 @@ public final class GroupCommitter {
         return ProcessQueueResult.capacityBlocked(item, unavailable);
     }
 
-    /** Caller holds the queue lock. */
+    /**
+     * 调用方持有队列锁。
+     */
     private boolean removeSelectionBoundaryUnderLock(
             BlockedRequest blocked,
             long nowMs) {

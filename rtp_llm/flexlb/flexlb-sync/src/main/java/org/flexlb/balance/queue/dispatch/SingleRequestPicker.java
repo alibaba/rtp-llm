@@ -60,8 +60,7 @@ public final class SingleRequestPicker implements QueuePicker {
                     snapshot.schedulingInputVersion());
         }
 
-        // Worker status and delivery ledgers advance independently. Re-read
-        // the advisory gate immediately before hard-capacity admission.
+        // Prefill 状态和投递记账是分别更新的。检查投递容量之前，再读一次最新的 KV 容量。
         capacity = BatchCapacityView.of(prefillEndpoint, config);
         if (!shape.fitsKv(capacity.kvCapacityFor(shape))) {
             return ProcessQueueResult.awaitingPrefillKvCapacity(

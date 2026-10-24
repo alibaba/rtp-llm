@@ -33,36 +33,30 @@ import java.util.concurrent.TimeUnit;
 import java.util.function.Supplier;
 
 /**
- * Per-worker scheduling queue that owns queue state, grouping, hard-capacity
- * admission and delivery handoff.
- *
- * <p>One instance belongs to each Prefill worker. Exact requests enter this
- * concrete runtime and are grouped by the configured decision mode. A group
- * may independently be delivered through
- * EnqueueBatch or as individual route decisions.
- *
- * <p>The active queue is the single source of truth for queued requests.
- * PRIORITY ordering uses
- * the explicit priority comparator ({@link #PRIORITY_QUEUE_ORDER}); FIFO uses
- * a unique monotonic enqueue sequence. A monotonic mutation generation lets
- * snapshots and diagnostics identify queue-state changes.
+ * 一台 Prefill 节点的调度队列：保存排队请求，按配置把请求凑组，检查投递容量后交付给 Prefill。
+ * <p>
+ * 每台 Prefill 节点一个实例。请求入队后按配置的模式（单请求或 FIXED_WINDOW）选出来，
+ * 一组请求可以通过 EnqueueBatch 一起交付，也可以逐个按单请求选路交付。
+ * <p>
+ * 排队请求只保存在 PrefillState 的排队索引里。PRIORITY 模式按 {@link #PRIORITY_QUEUE_ORDER} 排序，
+ * FIFO 模式按入队序号排序。队列每次变化都会推进队列版本，快照和诊断信息用它判断队列有没有变。
  */
 public final class PrefillQueue {
 
     /**
-     * PRIORITY queue order: delegates to
-     * {@link PriorityOrdering#STRICT} (priority desc → enqueue-seq asc for
-     * same-priority FIFO) with {@code requestId} as the final deterministic
-     * tie-break.
-     *
-     * <p>{@link #FIFO_QUEUE_ORDER} preserves enqueue order.
+     * PRIORITY 模式的排队顺序：按 {@link PriorityOrdering#STRICT} 比较，优先级高的在前，
+     * 同优先级按入队序号先来先出，最后按 {@code requestId} 比较，保证顺序固定。
+     * <p>
+     * {@link #FIFO_QUEUE_ORDER} 只按入队顺序。
      */
     public static final Comparator<ScheduledRequest> PRIORITY_QUEUE_ORDER =
             (left, right) -> PriorityOrdering.compareWithRequestId(
                     left.priority(), left.enqueueSeq(), left.requestId(),
                     right.priority(), right.enqueueSeq(), right.requestId());
 
-    /** FIFO order: unique monotonic enqueue sequence. */
+    /**
+     * FIFO 模式的排队顺序：按入队序号，序号唯一且递增。
+     */
     public static final Comparator<ScheduledRequest> FIFO_QUEUE_ORDER =
             Comparator.comparingLong(ScheduledRequest::enqueueSeq);
 
@@ -73,7 +67,9 @@ public final class PrefillQueue {
     private static final Comparator<GroupPlanner.Item> FIFO_ESTIMATE_ORDER =
             Comparator.comparingLong(GroupPlanner.Item::enqueueSeq)
                     .thenComparing(GroupPlanner.Item::requestId);
-    /** Initial queue index allocation; unrelated to admission limits. */
+    /**
+     * 排队索引的初始容量，和排队上限无关。
+     */
     private static final int INITIAL_QUEUE_ALLOCATION = 16;
 
     private final String key;
@@ -81,7 +77,9 @@ public final class PrefillQueue {
     private final PrefillTtftEstimator ttftEstimator;
     private final QueueState queueState;
     private final LoadViewCache loadViewCache;
-    /** Canonical request ownership guarded exclusively by the queue lock. */
+    /**
+     * 这台 Prefill 上的请求记录和资源预留，只在持有队列锁时读写。
+     */
     private final PrefillState prefillState;
     private final PrefillQueueLifecycle lifecycle;
     private final PrefillQueueEnqueuer enqueuer;
@@ -220,9 +218,8 @@ public final class PrefillQueue {
     }
 
     /**
-     * Snapshot of the current active queue depth bucketed by normalized
-     * scheduling priority. Only priorities present in the queue appear in the
-     * result, matching the tagged queue-depth metric behavior.
+     * 按归一化后的调度优先级统计当前排队请求数。
+     * 只返回队列里有请求的优先级，和按优先级打标的排队数监控保持一致。
      */
     public Map<Integer, Integer> queueSizeByPriority() {
         Map<Integer, Integer> sizeByPriority = new HashMap<>();
@@ -242,12 +239,14 @@ public final class PrefillQueue {
         return prefillState;
     }
 
-    /** Immutable delivery semantics used by a pure route estimate. */
+    /**
+     * 选路估算 TTFT 时用的投递规则，创建后不会变化。
+     */
     public PrefillTtftEstimate.TtftEstimationRule ttftEstimationRule() {
         return ttftEstimator.ttftEstimationRule();
     }
 
-    // ==================== endpoint queue operations ====================
+    // ==================== 对外的队列操作 ====================
 
     public boolean removeQueued(
             ScheduledRequest exactItem,
@@ -273,7 +272,7 @@ public final class PrefillQueue {
                         "[request-scheduler] exact queue remove: worker={} reason={} request_id={}",
                         key, reason, item.requestId());
             } catch (Throwable ignoredLoggingFailure) {
-                // Diagnostics cannot turn a committed exact removal into failure.
+                // 请求已经移出队列，打日志失败也不能让这次移除变成失败。
             }
         }
         return removed;
@@ -303,7 +302,7 @@ public final class PrefillQueue {
         }
     }
 
-    // ==================== Queue ownership and load view ====================
+    // ==================== 排队快照和负载视图 ====================
 
     private List<ScheduledRequest> activeItemsInSchedulingOrder() {
         return queueState.activeIndex().capture().items();
@@ -313,13 +312,15 @@ public final class PrefillQueue {
         return loadViewCache.capture();
     }
 
-    // ==================== Internal: Run loop ====================
+    // ==================== 调度线程 ====================
 
     private void runLoop() {
         loop.run();
     }
 
-    /** Wake decisions whose advisory worker-status or predictor input changed. */
+    /**
+     * Prefill 状态或耗时预测器的输入变了：推进调度输入版本，唤醒在等调度输入变化的调度线程。
+     */
     public void signalSchedulingInputsChanged() {
         queueState.lock();
         try {

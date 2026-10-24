@@ -29,12 +29,16 @@ public final class PrefillQueueLifecycle {
     }
 
     /**
-     * Serialized queue runtime for this worker.
+     * 这台 Prefill 的调度线程，所有调度都在这一个线程里依次执行。
      */
     private final Thread workerThread;
-    /** Constructed before this endpoint generation can begin retirement. */
+    /**
+     * 正常停止时交给排队请求的失败原因，在这台 Prefill 开始下线之前就创建好。
+     */
     private final CancellationException normalStopFailure;
-    /** Fixed diagnostic for an impossible exact stop acknowledgement loss. */
+    /**
+     * 停止时请求记录已经不在、没法确认移除时用的固定异常，正常不会发生。
+     */
     private final IllegalStateException stopAcknowledgementFailure;
     private boolean terminationStarted;
     private boolean terminationFinished;
@@ -70,8 +74,7 @@ public final class PrefillQueueLifecycle {
         this.stopAcknowledgementFailure = new IllegalStateException(
                 "FlexLB worker stop callback lost its exact retained owner: "
                         + key);
-        // Waiting queue runtimes use virtual threads so a large endpoint fleet
-        // does not consume one OS thread per worker.
+        // 调度线程用虚拟线程，Prefill 节点很多时也不会每台占一个系统线程。
         this.workerThread = Thread.ofVirtual()
                 .name("flexlb-batcher-" + key)
                 .uncaughtExceptionHandler(
@@ -145,7 +148,7 @@ public final class PrefillQueueLifecycle {
             Logger.error("PrefillQueue[{}] stopped after an unexpected loop failure",
                     key, loopFailure);
         } catch (Throwable ignoredLoggingFailure) {
-            // The exact stop transaction must still run.
+            // 打日志失败也要继续执行停止流程。
         }
         Throwable cleanupFailure = stopAndDrain(
                 loopFailure,
@@ -155,7 +158,7 @@ public final class PrefillQueueLifecycle {
                 Logger.error("PrefillQueue[{}] failure cleanup exposed invariants",
                         key, cleanupFailure);
             } catch (Throwable ignoredLoggingFailure) {
-                // Cleanup is already complete.
+                // 清理已经做完了。
             }
         }
     }
@@ -256,12 +259,11 @@ public final class PrefillQueueLifecycle {
                         Logger.error("PrefillQueue[{}] shutdown callback failed request_id={}",
                                 key, item.requestId(), callbackFailure);
                     } catch (Throwable ignoredLoggingFailure) {
-                        // Cleanup ownership cannot depend on diagnostics.
+                        // 打日志失败不能影响清理。
                     }
                     cleanupFailure = appendCleanupFailure(
                             cleanupFailure, callbackFailure);
-                    // Do not acknowledge: generation retirement still owns
-                    // this exact pending identity and will handle it again.
+                    // 不确认移除：这台 Prefill 下线时还会再处理这个请求。
                     continue;
                 }
                 try {
@@ -271,9 +273,7 @@ public final class PrefillQueueLifecycle {
                                 stopAcknowledgementFailure);
                     }
                 } catch (Throwable acknowledgementFailure) {
-                    // The terminal fact was already delivered. If the exact
-                    // entry remains, generation retirement converges it as a
-                    // stale/idempotent replay.
+                    // 失败通知已经发出去了。如果请求记录还在，Prefill 下线时会再处理一次，重复处理没有副作用。
                     cleanupFailure = appendCleanupFailure(
                             cleanupFailure, acknowledgementFailure);
                 }
@@ -293,9 +293,8 @@ public final class PrefillQueueLifecycle {
     }
 
     /**
-     * Detach one exact ACTIVE queue index after the stop gate is closed while
-     * retaining its canonical entry. The callback result decides whether that
-     * entry is acknowledged or carried into generation retirement.
+     * 停止接收新请求后，从排队索引里取出下一个请求，但保留它在 PrefillState 里的记录。
+     * 之后按失败通知是否成功，决定确认移除这条记录，还是留给 Prefill 下线时处理。
      */
     private ScheduledRequest detachNextStoppedItem() {
         ScheduledRequest item;
@@ -315,7 +314,9 @@ public final class PrefillQueueLifecycle {
         return item;
     }
 
-    /** Acknowledge only the retained owner whose terminal callback returned. */
+    /**
+     * 失败通知成功后，确认移除这个请求在 PrefillState 里保留的记录。
+     */
     private boolean acknowledgeStoppedItem(ScheduledRequest item) {
         queueState.lock();
         try {
@@ -331,8 +332,7 @@ public final class PrefillQueueLifecycle {
         if (first == null) {
             return next;
         }
-        // Preserve cleanup totality under allocation failure. The first causal
-        // failure is sufficient; later leaves were still all attempted.
+        // 只保留第一个异常，不再挂后面的异常，避免内存不足时连挂异常都失败；后面的请求仍然都会处理到。
         return first;
     }
 
@@ -345,11 +345,13 @@ public final class PrefillQueueLifecycle {
         try {
             primary.addSuppressed(leaf);
         } catch (Throwable ignoredAggregationFailure) {
-            // The start transaction already drained every acquired leaf.
+            // 挂异常失败也不影响结果：所有请求在这之前都已经处理过了。
         }
     }
 
-    /** Caller holds the queue lock. */
+    /**
+     * 调用方持有队列锁。
+     */
     private void stopAcceptingUnderLock() {
         if (!queueState.isLockedByCurrentThread()) {
             throw new IllegalStateException(
@@ -358,7 +360,9 @@ public final class PrefillQueueLifecycle {
         queueState.markStopped();
     }
 
-    /** Caller holds the queue lock. */
+    /**
+     * 调用方持有队列锁。
+     */
     private ScheduledRequest detachNextStopTerminalUnderLock() {
         ScheduledRequest item =
                 prefillState.detachNextActiveForStopUnderLock();
@@ -369,7 +373,9 @@ public final class PrefillQueueLifecycle {
         return item;
     }
 
-    /** Caller holds the queue lock. */
+    /**
+     * 调用方持有队列锁。
+     */
     private boolean acknowledgeStopTerminalUnderLock(
             ScheduledRequest item) {
         return prefillState.acknowledgeStopTerminalUnderLock(item);

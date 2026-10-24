@@ -46,9 +46,8 @@ public final class PrefillQueueLoop {
                     Thread.currentThread().interrupt();
                     return;
                 } catch (Throwable t) {
-                    // Every expected delivery failure is terminalized inside the
-                    // typed cycle. An escaping Throwable is therefore an invariant
-                    // failure; retrying the same ACTIVE state can only spin.
+                    // 预期内的交付失败在每一轮里都已经处理掉了，能抛到这里说明状态出了问题；
+                    // 重试只会对着同样的排队状态空转，所以直接停掉整个队列。
                     lifecycle.stopAfterUnexpectedLoopFailure(t);
                     return;
                 }
@@ -69,9 +68,8 @@ public final class PrefillQueueLoop {
             queueWaitRecorder.record(result.request(), result.waitReason());
         }
         if (result.placementCapacityChanged()) {
-            // Only a committed removal creates a new queue seat. Advisory
-            // waits and delivery-capacity misses must not feed placement back
-            // into itself.
+            // 只有请求真正离开队列才会空出排队位置。等待中或投递容量不够时不通知选路，
+            // 否则选路会反复放请求进来又等。
             prefillEndpoint.signalPlacementCapacityChanged();
         }
         if (result.capacityBlocked()) {
@@ -94,11 +92,10 @@ public final class PrefillQueueLoop {
     }
 
     /**
-     * Wait while the exact active head is blocked by the exact rejecting
-     * resource. Offers wake the condition: a new higher-priority head exits the
-     * wait immediately, while a tail offer leaves the predicate true. Capacity
-     * is checked after listener installation while the queue lock is held, closing
-     * the release-before-await race without polling.
+     * 队首被某项投递容量挡住时，等这项容量空出来、队首变化或请求超时。
+     * <p>
+     * 新请求入队也会唤醒等待：新请求优先级更高、成了新队首时立刻结束等待；排在后面的不影响。
+     * 先在持有队列锁时登记容量释放的通知，再检查容量，这样不会漏掉开始等待前发生的释放，也不用轮询。
      */
     private void awaitBlockedHeadCapacity(
             ProcessQueueResult blocked)
@@ -134,8 +131,7 @@ public final class PrefillQueueLoop {
     }
 
     /**
-     * Wait for the exact queue/input generation captured by the policy or
-     * for its deadline. Every predicate and signal is serialized by the queue lock.
+     * 等到队列版本或调度输入版本和拿快照时不同，或者到了唤醒时间。所有检查和唤醒都在队列锁内进行。
      */
     private void awaitSchedulingChange(
             ProcessQueueResult waiting)

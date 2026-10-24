@@ -8,6 +8,9 @@ public final class QueueFailures {
     private QueueFailures() {
     }
 
+    /**
+     * 把后一个异常挂到第一个异常下面并返回第一个异常；第一个为 null 时返回后一个。
+     */
     public static Throwable appendFailure(
             Throwable first,
             Throwable next) {
@@ -20,7 +23,10 @@ public final class QueueFailures {
         return first;
     }
 
-    /** Release the publish-time reservation only while it is still item-owned. */
+    /**
+     * 把收集到的异常转成要抛出的异常：RuntimeException 原样返回，Error 直接抛出，
+     * 其他异常包成 IllegalStateException。
+     */
     public static RuntimeException propagateCommitFailure(
             Throwable failure) {
         if (failure instanceof RuntimeException runtimeFailure) {

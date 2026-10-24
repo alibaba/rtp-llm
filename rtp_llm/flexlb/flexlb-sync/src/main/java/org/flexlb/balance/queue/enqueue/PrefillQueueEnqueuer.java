@@ -56,7 +56,7 @@ public final class PrefillQueueEnqueuer {
                 if (subQueueCountAdded) {
                     attempt = enqueueUnderLock(item);
                 } else {
-                    // Shared queue full: replace only a waiting request on this endpoint.
+                    // 共享排队名额已满：只能替换掉这台 Prefill 上一个还在排队的请求。
                     attempt = new EnqueueAttempt(false, null, null);
                     if (!queueState.isStopped() && config.allowsPreemption(VictimStage.PREFILL_QUEUED)) {
                         ScheduledRequest victim = prefillState.oneQueuedPreemptionVictimUnderLock(item.priority());
@@ -67,7 +67,7 @@ public final class PrefillQueueEnqueuer {
                     }
                 }
             } else {
-                // BATCH counts waiting requests but does not apply the shared limit.
+                // BATCH 模式会统计排队请求数，但不受共享排队名额限制。
                 prefillEndpoint.increaseEngineSubQueueCount();
                 subQueueCountAdded = true;
                 attempt = enqueueUnderLock(item);
@@ -148,7 +148,9 @@ public final class PrefillQueueEnqueuer {
         }
     }
 
-    /** Caller holds the queue lock. */
+    /**
+     * 调用方持有队列锁。
+     */
     private EnqueueAttempt enqueueUnderLock(ScheduledRequest item) {
         if (queueState.isStopped()) {
             return new EnqueueAttempt(false, null, null);
@@ -164,9 +166,8 @@ public final class PrefillQueueEnqueuer {
 
         PrefillState.ReservationResult<PrefillState.RouteReservation> result;
         try {
-            // The queue lock is reentrant and is also PrefillState's ownership lock,
-            // so ACTIVE publication and exact route-ownership acquisition are
-            // one endpoint-local transaction.
+            // 队列锁可重入，同时也是 PrefillState 的锁，所以登记进排队索引和预留 Prefill 资源
+            // 在同一把锁里完成，其他线程看不到只做了一半的状态。
             result = prefillEndpoint.reserveRouteOwnership(
                     item,
                     0L);
@@ -194,7 +195,9 @@ public final class PrefillQueueEnqueuer {
         return new EnqueueAttempt(true, null, null);
     }
 
-    /** Undo an ACTIVE publication which never escaped the queue lock. */
+    /**
+     * 撤回刚登记进排队索引的请求。这个请求还没在队列锁外被其他线程看到。
+     */
     private void rollbackFreshActiveUnderLock(
             ScheduledRequest item,
             PrefillState.RouteReservation reservation) {
@@ -210,7 +213,9 @@ public final class PrefillQueueEnqueuer {
         queueState.incrementQueueVersion();
     }
 
-    /** Caller holds the queue lock. */
+    /**
+     * 调用方持有队列锁。
+     */
     private boolean publishActiveIndexUnderLock(ScheduledRequest item) {
         boolean published = prefillState.enqueueActiveUnderLock(item, 0L);
         if (published) {
