@@ -385,6 +385,12 @@ torch_ext::PyAttentionInputs PyWrappedModel::buildPyAttentionInputs(const GptMod
         py_attn_inputs.sequence_lengths_plus_1_device = plus_1_to_device(inputs.sequence_lengths);
     }
 
+    if (host_input_metadata_builder_) {
+        RTP_LLM_PROFILE_SCOPE("py_model.buildHostInputMetadata");
+        RTP_LLM_CHECK_WITH_INFO(py_attn_inputs.is_prefill, "native host input metadata requires prefill");
+        py_attn_inputs.host_model_metadata = host_input_metadata_builder_->build(
+            inputs.combo_tokens, py_attn_inputs.input_lengths, inputs.text_tokens_mask, py_attn_inputs.cu_seqlens);
+    }
     return py_attn_inputs;
 }
 
@@ -1092,6 +1098,14 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
         if (inputs.engram_token_windows.defined()) {
             buffer_holder_.hold_host(inputs.engram_token_windows);
             py_model_inputs.engram_token_windows = inputs.engram_token_windows.to(torch::kCUDA, /*non_blocking=*/true);
+        }
+        if (requires_host_input_metadata_ && inputs.combo_tokens.defined()
+            && inputs.combo_tokens.device().is_cpu()) {
+            py_model_inputs.input_ids_host = inputs.combo_tokens;
+        }
+        if (requires_host_input_metadata_ && inputs.text_tokens_mask.defined()
+            && inputs.text_tokens_mask.device().is_cpu()) {
+            py_model_inputs.text_tokens_mask_host = inputs.text_tokens_mask;
         }
         PyModelOutputs py_model_outputs;
         torch::Tensor  hidden_states;

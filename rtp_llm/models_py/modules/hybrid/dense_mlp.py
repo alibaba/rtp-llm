@@ -104,3 +104,46 @@ class DenseMLP(nn.Module):
         if not skip_allreduce and ffn_tp_size > 1:
             output = all_reduce(output, group=Group.TP)
         return output
+
+    def forward_without_output_bias(
+        self,
+        x: torch.Tensor,
+        quantized_x: Optional[tuple[torch.Tensor, torch.Tensor]] = None,
+    ) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
+        ffn_tp_size = self.parallelism_config.get_ffn_tp_size()
+        quantized_activation = None
+        if (
+            not self.is_gated
+            and self.activation_type == ActivationType.Gelu
+            and ffn_tp_size == 1
+            and self.up_proj.supports_fused_bias_gelu_quant
+            and self.down_proj.supports_fused_bias_gelu_quant
+            and self.up_proj.fused_activation_quant_format is not None
+            and self.up_proj.fused_activation_quant_format
+            == self.down_proj.fused_activation_quant_format
+        ):
+            if quantized_x is not None:
+                quantized_activation = (
+                    self.up_proj.forward_quantized_with_bias_gelu_quantized(
+                        *quantized_x
+                    )
+                )
+            else:
+                quantized_activation = self.up_proj.forward_with_bias_gelu_quantized(x)
+        if quantized_activation is not None:
+            output = self.down_proj.forward_quantized(
+                *quantized_activation, apply_bias=False
+            )
+            return output, self.down_proj.bias
+        elif not self.is_gated and self.activation_type == ActivationType.Gelu:
+            activated = self.up_proj.forward_with_bias_gelu(x)
+        else:
+            up = self.up_proj(x)
+            activated = self.act_fn(up)
+        if ffn_tp_size > 1 or not self.down_proj.supports_deferred_bias:
+            output = self.down_proj(activated)
+            if ffn_tp_size > 1:
+                output = all_reduce(output, group=Group.TP)
+            return output, None
+        output = self.down_proj.forward_without_bias(activated)
+        return output, self.down_proj.bias

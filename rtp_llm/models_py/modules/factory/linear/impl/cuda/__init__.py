@@ -18,11 +18,20 @@ if is_cuda():
     from .fp8_gemm_linear import CudaFp8GEMMLinear
     from .fp8_per_tensor_linear import CudaFp8PerTensorLinear
 
-    major, minor = get_sm()
+    major, _ = get_sm()
     if major >= 10:
         from .fp4_linear import CudaFp4GEMMLinear
 
         LinearFactory.register(CudaFp4GEMMLinear)
+
+    # Selection checks the weight device. The current device at import time may
+    # differ from the device that later owns an SM120 weight.
+    try:
+        from .fp8_vllm_blockwise_sm120_linear import CudaFp8VllmBlockwiseLinear
+
+        LinearFactory.register(CudaFp8VllmBlockwiseLinear)
+    except ImportError as e:
+        logger.warning("CudaFp8VllmBlockwiseLinear unavailable: %s", e)
 
     LinearFactory.register(CudaFp8PerTensorLinear)
     LinearFactory.register(CudaFp8GEMMLinear)
