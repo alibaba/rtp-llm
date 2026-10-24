@@ -19,25 +19,6 @@ from scenario.registry import write_views as write_views
 ROOT = Path(__file__).resolve().parents[1]
 
 
-def payload(series=None, gates=None):
-    return dict(
-        id="example",
-        status="PASS",
-        workload={"runtime_validity": "VALID"},
-        implementation={},
-        configuration={},
-        configuration_sha256=None,
-        clock_anchor={"epoch_s": 10},
-        request_sources=[],
-        series=series or {},
-        statistic_sources={k: dict(unit="count") for k in series or {}},
-        checks=[dict(stage="observe", id="cache", status="PASS")],
-        iterations=[],
-        traffic_manifests=[],
-        gate_reports=gates or [],
-    )
-
-
 class WorkloadReportViewsTest(unittest.TestCase):
     def test_case_metric_ids_and_axes_are_validated(self):
         presentation = view("cache_scale_in.yaml")
@@ -125,11 +106,11 @@ class WorkloadReportViewsTest(unittest.TestCase):
             self.assertEqual([3, None], [point["y"] for point in panels["inflight"]["series"][0]["points"]])
             self.assertEqual([1, 0], [point["y"] for point in panels["inflight"]["series"][-2]["points"]])
             balance = panels["prefill_balance"]["series"]
-            self.assertTrue(all(not curve["points"] for curve in balance[:3]))
+            self.assertEqual([curve["points"] for curve in balance[:3]], [[], [], []])
             self.assertEqual(["A · HTTP 可回读", "B · HTTP 可回读"], [curve["name"] for curve in balance[3:]])
             self.assertEqual([1, 0], [point["y"] for point in balance[3]["points"]])
             self.assertEqual([0], [point["y"] for point in balance[4]["points"]])
-            self.assertTrue(all(curve["axis"] == "up" for curve in balance[3:]))
+            self.assertEqual([curve["axis"] for curve in balance[3:]], ["up"] * len(balance[3:]))
             self.assertTrue(all(panel["axes"]["up"]["position"] == "right" and panel["events"] for panel in panels.values()))
             self.assertAlmostEqual(-0.1, panels["request_qps"]["events"][0]["t"])
             self.assertAlmostEqual(3.9, spec["timeAxis"]["max"])
@@ -212,11 +193,10 @@ class WorkloadReportViewsTest(unittest.TestCase):
     def test_selected_view_renders_verified_frozen_gate_once(self):
         from artifacts.gate import freeze_gate
         from cases.cache_scale_in.analysis import analyze
-        from metric_fixtures import freeze_metrics
-        from test_cache_scale_gate import CacheGateTest
+        from metric_fixtures import cache_evidence, freeze_metrics
 
         with tempfile.TemporaryDirectory() as d:
-            e = CacheGateTest().evidence(0.8)
+            e = cache_evidence(0.8)
             decision = analyze(e)
             freeze_gate(d, "cache", e, decision)
             freeze_metrics(d, "cache_scale_in")
@@ -282,10 +262,10 @@ class WorkloadReportViewsTest(unittest.TestCase):
     def test_failed_run_does_not_hide_corrupt_frozen_gate(self):
         from artifacts.gate import freeze_gate
         from cases.cache_scale_in.analysis import analyze
-        from test_cache_scale_gate import CacheGateTest
+        from metric_fixtures import cache_evidence
 
         with tempfile.TemporaryDirectory() as d:
-            e = CacheGateTest().evidence(0.8)
+            e = cache_evidence(0.8)
             freeze_gate(d, "cache", e, analyze(e))
             (Path(d) / "cache-gate-result.json").write_text("{}")
             data = payload()
@@ -350,3 +330,5 @@ class WorkloadReportViewsTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+from metric_fixtures import workload_payload as payload

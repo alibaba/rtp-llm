@@ -99,7 +99,7 @@ def test_uncalibrated_fidelity_profile_retains_unavailable_identity(tmp_path):
     import json
 
     from analysis.fidelity_audit import run
-    from test_traffic_fidelity import fixture
+    from metric_fixtures import fidelity_fixture as fixture
 
     raw, profile = fixture()
     profile["calibration"] = {}

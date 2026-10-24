@@ -4,10 +4,10 @@ import tempfile
 import unittest
 
 from program_fixtures import compile_scenarios
+from runtime_fixtures import Backend, Clock, source
 from scenario import ScenarioError
 from scenario.contracts import StageHandler, StageOutput
 from scenario.runtime import execute_instance
-from test_scenario_runtime import Backend, Clock, source
 
 
 class ScalarCheckTest(unittest.TestCase):

@@ -2,9 +2,9 @@
 
 import json
 import tempfile
-import threading
 import time
 import unittest
+from contextlib import ExitStack
 from pathlib import Path
 from types import SimpleNamespace as NS
 from unittest.mock import Mock, patch
@@ -14,98 +14,6 @@ from scenario.backend import BoundedOps
 from scenario.lease import validate_lease
 from scenario.request_batch import RequestBatch
 from scenario.runtime import Deadline, RuntimeContext, StageTimeout, interruptible
-
-
-class Stream:
-    def __init__(self, hanging=False, error=None):
-        self.hanging, self.error = hanging, error
-        self.cancelled = threading.Event()
-
-    def cancel(self):
-        self.cancelled.set()
-        return True
-
-    def __iter__(self):
-        if self.hanging:
-            self.cancelled.wait(2)
-            if not self.cancelled.is_set():
-                raise RuntimeError("test stream cancellation was not issued")
-            return
-        if self.error:
-            raise self.error
-        yield NS(HasField=lambda key: False, flatten_output=NS(finished=[True]))
-
-
-class Ops:
-    def __init__(self, batch=True, hanging=False):
-        self.batch, self.hanging = batch, hanging
-        self.streams, self.fetch_count, self.generate_count, self.counter = [], 0, 0, 0
-        self.responses = []
-        self.schedule_pb2_grpc = NS(FlexlbServiceStub=lambda channel: NS(Schedule=NS(future=self.future)))
-        self.pb2_grpc = NS(RpcServiceStub=lambda channel: NS(FetchResponse=self.fetch, GenerateStreamCall=self.generate))
-        self.pb2 = NS(FetchRequestPB=lambda **kw: kw)
-
-    def future(self, req, timeout, metadata=None):
-        self.last_schedule = (req, timeout, metadata)
-        response = NS(code=200, success=True, error_message="", enqueued_by_master=self.batch)
-        self.responses.append(response)
-        return NS(result=lambda timeout: response, cancel=lambda: True)
-
-    def next_request_id(self):
-        self.counter += 1
-        return self.counter
-
-    def _channel(self, target):
-        return target
-
-    def master_target(self):
-        return "master"
-
-    def build_schedule_request(self, rid, **shape):
-        return (rid, shape)
-
-    def prefill_addr(self, response):
-        return "prefill"
-
-    def build_generate_input(self, rid, **shape):
-        return (rid, shape)
-
-    def _copy_role_addrs(self, inp, response):
-        pass
-
-    def fetch(self, req, timeout):
-        self.fetch_count += 1
-        stream = Stream(self.hanging)
-        self.streams.append(stream)
-        return stream
-
-    def generate(self, req, timeout):
-        self.generate_count += 1
-        stream = Stream(self.hanging)
-        self.streams.append(stream)
-        return stream
-
-
-def lease_manifest():
-    m, b = 28000, 55000
-    env = dict(
-        FLEXLB_FT_MASTER_HTTP_PORT=str(m),
-        FLEXLB_FT_MASTER_MANAGEMENT_PORT=str(m + 1),
-        FLEXLB_FT_HA_MASTER_A_HTTP_PORT=str(m),
-        FLEXLB_FT_HA_MASTER_B_HTTP_PORT=str(m + 3),
-        FLEXLB_FT_MOCK_BASE_GRPC_PORT=str(b),
-    )
-    return dict(
-        lease_schema_version=1,
-        lane=0,
-        backend="java_mock",
-        master_base=m,
-        mock_base=b,
-        worker_capacity=6,
-        intervals=[dict(side="master", first=m, last=m + 5), dict(side="mock", first=b - 1, last=b + 151)],
-        lock_names=[f"m{m}_{m + 5}.lock", f"g{b - 1}_{b + 151}.lock"],
-        child_env=env,
-    )
 
 
 class BackendTest(unittest.TestCase):
@@ -347,17 +255,15 @@ class BackendTest(unittest.TestCase):
             ready.sleep(0.001)
         for stream in ctx.ops.streams:
             stream.cancel = Mock(return_value=True)  # acknowledged, still blocked
-        patches = [patch.object(e["thread"], "is_alive", return_value=False) for e in requests.entries]
-        for p in patches:
-            p.start()
         try:
-            rows = ctx.cleanup(0.02)
-            self.assertEqual(rows[0]["status"], "TIMEOUT")
-            persisted = json.loads(requests.artifact.read_text())
-            self.assertTrue(all(r["consumer_exit_s"] is None for r in persisted))
+            with ExitStack() as patches:
+                for entry in requests.entries:
+                    patches.enter_context(patch.object(entry["thread"], "is_alive", return_value=False))
+                rows = ctx.cleanup(0.02)
+                self.assertEqual(rows[0]["status"], "TIMEOUT")
+                persisted = json.loads(requests.artifact.read_text())
+                self.assertEqual([row["consumer_exit_s"] for row in persisted], [None] * len(persisted))
         finally:
-            for p in patches:
-                p.stop()
             for stream in ctx.ops.streams:
                 stream.cancelled.set()
             for entry in requests.entries:
@@ -381,3 +287,5 @@ class BackendTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+from runtime_fixtures import Ops, lease_manifest

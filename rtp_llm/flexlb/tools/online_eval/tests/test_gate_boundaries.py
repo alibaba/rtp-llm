@@ -10,21 +10,20 @@ from unittest import mock
 
 import pytest
 
-import test_cache_scale_gate as cache_fixtures
 from cases.cache_scale_in.analysis import analyze as analyze_cache
 from cases.cache_scale_in.report import write_report as cache_report
 from cases.master_ha_failover.analysis import HA_METRICS, measure_client_metric
 from cases.master_performance.analysis import analyze as analyze_performance
 from cases.master_performance.report import write_report as performance_report
 from delivery_fixtures import publish_cache, publish_performance
+from metric_fixtures import cache_evidence, performance_evidence
 from reporting import load_analysis
-from test_performance_gate import evidence as performance_evidence
 
 ROOT = Path(__file__).resolve().parents[1]
 
 
 def test_analyzers_run_without_io_or_execution_and_presentation_imports():
-    documents = [performance_evidence(), cache_fixtures.CacheGateTest().evidence(0.8)]
+    documents = [performance_evidence(), cache_evidence(0.8)]
     script = """
 import builtins, json, socket, sys
 from pathlib import Path
@@ -53,7 +52,7 @@ assert not any(name.split('.')[0] in {'reporting', 'runtime'} or name.startswith
 
 @pytest.mark.parametrize("kind", ["cache", "performance"])
 def test_report_uses_frozen_verdict_without_republishing_metrics(kind):
-    evidence = cache_fixtures.CacheGateTest().evidence(0.8) if kind == "cache" else performance_evidence()
+    evidence = cache_evidence(0.8) if kind == "cache" else performance_evidence()
     analyze = analyze_cache if kind == "cache" else analyze_performance
     publish = publish_cache if kind == "cache" else publish_performance
     render = cache_report if kind == "cache" else performance_report

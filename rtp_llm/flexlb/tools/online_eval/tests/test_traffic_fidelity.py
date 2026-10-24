@@ -23,17 +23,6 @@ from traffic.synthetic.derivation import derive_parameters
 from traffic.synthetic.generator import iter_requests
 
 
-def fixture():
-    rng = random.Random(17)
-    events = [[i, 512 * 512, -1, 0] for i in range(32)]
-    for i in range(32, 4032):
-        blocks = rng.randint(20, 500)
-        shared = 0 if i % 10 == 0 else int(blocks * 0.85)
-        events.append([i, blocks * 512, i % 32 if shared else -1, shared])
-    raw = encode(events, dict(source_start=0, source_end=4031))
-    return raw, derive_parameters(decode_model(raw), {}, None, model_sha256=hashlib.sha256(raw).hexdigest())
-
-
 class TrafficFidelityTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -193,3 +182,6 @@ def test_shape_diagnostics_reject_invalid_observations_and_use_declared_bins():
         grid = histogram(dict(blocks=[1, 4096], shared=[0, 2000]))
         assert len(grid) == 8 and all(len(row) == 4 for row in grid)
         assert sum(map(sum, grid)) == 2
+
+
+from metric_fixtures import fidelity_fixture as fixture

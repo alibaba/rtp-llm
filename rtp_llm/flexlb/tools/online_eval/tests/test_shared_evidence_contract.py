@@ -9,7 +9,7 @@ import pytest
 from adapters.flow_control import read_status, stop_sending, validate_drain
 from artifacts.provenance import validate_gate_provenance
 from ha_fixtures import client_resource
-from test_performance_gate import evidence
+from metric_fixtures import performance_evidence as evidence
 
 
 @pytest.mark.parametrize(

@@ -255,7 +255,7 @@ def test_later_collection_error_preserves_positive_collateral_failure(tmp_path, 
 
     def capture(self, **kwargs):
         from adapters.master_diagnostics import DiagnosticCapture, validate_snapshot
-        from test_master_diagnostics import payload
+        from metric_fixtures import diagnostic_payload as payload
 
         snapshots.append(True)
         if len(snapshots) > 3 and late_failure == "timeout":
@@ -480,12 +480,12 @@ def test_invalid_measurement_cannot_become_valid_functional_pass(failure):
 
 @pytest.mark.parametrize("recovery", [False, True])
 def test_shared_producer_and_automatic_report_render_frozen_gate(tmp_path, monkeypatch, recovery):
+    from metric_fixtures import workload_payload as payload
     from monitoring.metric_store import MetricStore
     from monitoring.query_plan import definitions
     from reporting.core import load_analysis, read_bundle
     from scenario.registry import load_metric_plan as load_plan
     from scenario.registry import write_views as write_views
-    from test_workload_report_views import payload
 
     evidence = pressure_evidence(recovery)
     import time

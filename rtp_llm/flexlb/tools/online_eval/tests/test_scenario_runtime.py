@@ -9,80 +9,6 @@ from scenario.contracts import CheckResult, StageHandler, StageOutput
 from scenario.runtime import RuntimeContext, execute_instance
 
 
-def source():
-    return {
-        "implementation": {},
-        "id": "lifecycle",
-        "description": "Request lifecycle",
-        "category": "status",
-        "profiles": ["batch-window"],
-        "environment": {},
-        "execution": {"timeout_s": 3, "stage_timeout_s": 2, "cleanup_timeout_s": 5},
-        "stages": [
-            {"id": "setup", "action": "setup"},
-            {"id": "submit", "action": "request"},
-            {"id": "wait", "action": "wait", "params": {"requests": {"$ref": "stages.submit.output.requests"}}},
-            {
-                "id": "check",
-                "action": "check",
-                "params": {"actual": {"$ref": "stages.wait.output.completed"}, "op": "eq", "expected": True},
-            },
-        ],
-    }
-
-
-class Clock:
-    now = 0
-
-    def __call__(self):
-        return self.now
-
-    def sleep(self, seconds):
-        self.now += seconds
-
-
-class Backend:
-    def __init__(self, clock):
-        self.clock = clock
-        self.calls = []
-        self.fail_setup = self.fail_submit = self.fail_cleanup = self.timeout_wait = False
-        self.completed = True
-
-    def setup(self, ctx, environment, deadline):
-        self.calls.append("setup")
-        if self.fail_setup:
-            raise RuntimeError("partial setup")
-        return object(), object()
-
-    def start_requests(self, ctx, params, deadline):
-        self.calls.append("submit")
-        records = [1]
-
-        def cleanup(d):
-            self.calls.append("request_cleanup")
-            d.sleep(0.5)
-            if self.fail_cleanup:
-                raise RuntimeError("cancel failed")
-
-        handle = ctx.register_resource("requests", records, cleanup)
-        if self.fail_submit:
-            raise RuntimeError("partial submit")
-        return handle
-
-    def wait_requests(self, ctx, resource, deadline):
-        self.calls.append("wait")
-        if self.timeout_wait:
-            deadline.sleep(4)
-        return {"completed": self.completed, "error_count": int(not self.completed)}
-
-    def cancel_requests(self, ctx, resource, deadline):
-        return len(resource)
-
-    def teardown(self, ctx, deadline):
-        self.calls.append("teardown")
-        deadline.sleep(0.5)
-
-
 class RuntimeTest(unittest.TestCase):
     def setUp(self):
         self.clock = Clock()
@@ -224,3 +150,5 @@ class RuntimeTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+from runtime_fixtures import Backend, Clock, source

@@ -126,7 +126,7 @@ def test_produced_null_series_is_absent_with_explicit_environment_identity(tmp_p
 
 def test_performance_publication_uses_frozen_environment_epoch(tmp_path):
     from cases.master_performance.analysis import analyze
-    from test_performance_gate import evidence
+    from metric_fixtures import performance_evidence as evidence
 
     e = evidence()
     e["provenance"]["env_epoch"] = 4
@@ -173,9 +173,9 @@ def test_environment_identity_is_frozen_before_provenance_acquisition():
 def test_cache_publication_retains_prometheus_origin_and_environment_epoch(tmp_path):
     from cases.cache_scale_in.analysis import analyze
     from cases.cache_scale_in.metrics import produce
-    from test_cache_scale_gate import CacheGateTest
+    from metric_fixtures import cache_evidence
 
-    e = CacheGateTest().evidence()
+    e = cache_evidence()
     e["provenance"]["env_epoch"] = 5
     from metric_fixtures import freeze_metrics
 

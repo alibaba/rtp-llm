@@ -5,9 +5,9 @@ import json
 import pytest
 
 from program_fixtures import ScenarioCompiler
+from runtime_fixtures import source
 from scenario.execution_plan import freeze_plan, load_plan
 from scenario.registry import discover, registry, using_cases
-from test_scenario_runtime import source
 
 
 @pytest.fixture

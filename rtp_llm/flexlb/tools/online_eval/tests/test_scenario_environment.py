@@ -12,6 +12,7 @@ from unittest.mock import patch
 from environment_expectations import configuration
 from flexlb_cfg import render_env
 from program_fixtures import compile_scenarios
+from runtime_fixtures import lease_manifest, source
 from scenario.actions.environment import _validate, mutate_config, reconfigure, startup_probe
 from scenario.backend import JavaMockBackend
 from scenario.catalog import handlers
@@ -19,8 +20,6 @@ from scenario.contracts import PlanContext
 from scenario.environment_config import environment
 from scenario.runtime import Deadline, RuntimeContext
 from scenario.stage_execution import _core_action
-from test_scenario_backend import lease_manifest
-from test_scenario_runtime import source
 
 PROFILE = "single-nonbatch"
 

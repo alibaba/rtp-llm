@@ -9,10 +9,10 @@ from pathlib import Path
 from adapters.environment_config import default_perf
 from adapters.perf_presets import ROOT, capture_defaults, load_performance_file, load_preset, preset_names
 from program_fixtures import compile_scenarios
+from runtime_fixtures import source
 from scenario.backend_spec import make_env_spec
 from scenario.catalog import handlers
 from scenario.environment_config import environment
-from test_scenario_runtime import source
 
 
 def spec(raw):

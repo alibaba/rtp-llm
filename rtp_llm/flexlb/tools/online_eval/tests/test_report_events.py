@@ -10,13 +10,13 @@ import pytest
 from cases.cache_scale_in.analysis import analyze
 from delivery_fixtures import publish_cache
 from document_io import DocumentError as ScenarioError
+from metric_fixtures import cache_evidence
+from metric_fixtures import workload_payload as payload
 from monitoring.metric_store import MetricStore
 from reporting.events import attach_events, project_events
 from scenario.registry import view as view
 from scenario.registry import write_views as write_views
 from scenario.runtime import RuntimeContext
-from test_cache_scale_gate import CacheGateTest
-from test_workload_report_views import payload
 
 
 def presentation():
@@ -106,7 +106,7 @@ def test_runtime_case_event_records_both_clocks_and_isolates_returned_record(tmp
 
 
 def test_canonical_reassembly_keeps_native_chart_origin_for_case_events(tmp_path):
-    evidence = CacheGateTest().evidence()
+    evidence = cache_evidence()
     evidence["events"] = [dict(id="withdraw_start", epoch_s=1020, t=20)]
     from metric_fixtures import freeze_metrics
 

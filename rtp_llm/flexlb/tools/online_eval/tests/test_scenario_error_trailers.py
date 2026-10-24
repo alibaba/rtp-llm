@@ -9,9 +9,9 @@ from types import SimpleNamespace as NS
 from google.protobuf import descriptor_pb2, descriptor_pool, message_factory
 
 from adapters.rpc_error_evidence import error_trailer_evidence
+from runtime_fixtures import Ops, Stream
 from scenario.request_batch import RequestBatch
 from scenario.runtime import Deadline, RuntimeContext
-from test_scenario_backend import Ops, Stream
 
 
 def details_type():

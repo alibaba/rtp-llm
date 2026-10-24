@@ -17,10 +17,10 @@ from pathlib import Path
 from unittest import mock
 
 from adapters import port_windows as ports
+from runtime_fixtures import catalog
 from scenario import instance_runner as runner
 from scenario import result_validation
 from scenario.instance_plan import parse_catalog
-from test_instance_plan import catalog
 
 
 class InstanceRunnerTest(unittest.TestCase):

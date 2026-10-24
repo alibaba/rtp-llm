@@ -17,16 +17,7 @@ def profile(path, capacities=(128, 256, 512, 1024)):
 
 from cases.cache_scale_in.analysis import align_send_counters, analyze
 from cases.cache_scale_in.report import prepare_report as read_report
-from delivery_fixtures import publish_cache
 from metric_fixtures import freeze_metrics
-
-
-def write_report(directory, evidence, result, prepared=None):
-    freeze_metrics(directory, "cache_scale_in")
-    bundle = publish_cache(directory, evidence, result, report_options={"prepared": prepared})
-    return json.loads((bundle / "report-spec.json").read_text())
-
-
 from program_fixtures import compile_scenarios
 from scenario import load_scenarios
 from scenario.catalog import handlers
@@ -61,7 +52,7 @@ class CacheGateTest(unittest.TestCase):
         template = view("cache_scale_in.yaml").to_dict()
         template["charts"]["curves"]["derived/survivor_hit_ratio"]["name"] = "YAML survivor"
         prepared = dict(curves=[], audit=[], sources={}, gaps={}, errors=[], monitoring_status="OK", monitor_warnings=[])
-        evidence = self.evidence()
+        evidence = cache_evidence()
         with (
             tempfile.TemporaryDirectory() as d,
             mock.patch(
@@ -94,7 +85,7 @@ class CacheGateTest(unittest.TestCase):
                     }
                 )
             )
-            result = prepare_report(d, self.evidence())
+            result = prepare_report(d, cache_evidence())
             from monitoring.metric_store import MetricStore
 
             store = MetricStore.read(d)
@@ -139,7 +130,7 @@ class CacheGateTest(unittest.TestCase):
                 return_value=ViewDefinition.read(template, subtitle_fields={"expected_behavior", "observed_behavior"}),
             ),
         ):
-            evidence = self.evidence()
+            evidence = cache_evidence()
             spec = metric_spec(d, evidence, analyze(evidence), prepared)
         self.assertEqual(spec["title"], "cache_scale_in : default : batch-window")
         self.assertEqual(spec["panels"][0]["title"], "YAML panel")
@@ -196,16 +187,16 @@ class CacheGateTest(unittest.TestCase):
         self.assertIn("Client error QPS", sparse[1]["caption"])
 
     def test_status_reporting_is_observation_only(self):
-        reference = analyze(self.evidence())
+        reference = analyze(cache_evidence())
         self.assertEqual(reference["verdict"], "PASS")
         for qps, latency in ((0, 1000000), (None, None)):
-            evidence = self.evidence()
+            evidence = cache_evidence()
             for row in evidence["samples"]:
                 for engine in row["engines"].values():
                     engine["worker_status_qps"] = qps
                     engine["worker_status_rt_us"] = latency
             self.assertEqual(analyze(evidence), reference)
-        evidence = self.evidence()
+        evidence = cache_evidence()
         for row in evidence["samples"]:
             for engine in row["engines"].values():
                 engine.pop("worker_status_qps")
@@ -218,69 +209,14 @@ class CacheGateTest(unittest.TestCase):
         self.assertEqual(panel["curve_ids"], ["mock/worker_status_qps_fleet", "mock/worker_status_rt_us_fleet"])
         self.assertFalse(any("derived/status_" in key for key in presentation["charts"]["curves"]))
 
-    def evidence(self, hit=0.8):
-        rows = []
-        for t in range(81):
-            engines = {}
-            for name in ["p0", "p1"] if t <= 20 else ["p0"]:
-                engines[name] = dict(
-                    grpc_addr=name,
-                    hit_tokens_total=800 * min(t, 20) + hit * 1000 * max(t - 20, 0),
-                    context_tokens_total=1000 * t,
-                    context_requests_total=10 * t,
-                    cache_evictions=t,
-                    waiting=100 if t > 20 else 0,
-                    running=1,
-                    prefill_ms_avg=200,
-                    worker_status_qps=50,
-                    worker_status_rt_us=100,
-                )
-            rows.append(
-                dict(
-                    t=t,
-                    epoch_s=t + 1000,
-                    engines=engines,
-                    started=t * 10,
-                    terminal=t * 8,
-                    master_p=2 if t < 20 else 1,
-                    waiting=100,
-                    running=1,
-                )
-            )
-        return dict(
-            provenance=dict(instance="cache_scale_in::default::batch-window", env_epoch=1),
-            samples=rows,
-            criteria=dict(
-                max_gap_s=2,
-                baseline_min_hit=0.7,
-                min_completed=10,
-                qps=10,
-                qps_tolerance=0.1,
-                absolute_min_hit=0.4,
-                max_drop=0.25,
-                observe_s=60,
-                window_s=10,
-                step_s=1,
-                sustain_s=15,
-            ),
-            baseline_start=10,
-            baseline_end=20,
-            initial_engines=["p0", "p1"],
-            survivors=["p0"],
-            post_start=20,
-            post_end=80,
-            max_pacing_lag_ms=0,
-            events=[dict(id="withdraw_start", t=20, epoch_s=1020)],
-        )
-
     def test_healthy_overload_and_removed_counters(self):
-        result = analyze(self.evidence())
+        result = analyze(cache_evidence())
         self.assertEqual(result["verdict"], "PASS")
         self.assertAlmostEqual(result["windows"][-1]["hit"], 0.8)
         self.assertEqual(result["windows"][-1]["evictions"], 10)
 
     def test_buffered_journal_does_not_distort_actual_send_rate(self):
-        evidence = self.evidence()
+        evidence = cache_evidence()
         evidence["samples"][40]["started"] -= 120
         self.assertEqual(analyze(evidence)["verdict"], "INVALID")
         issued = [dict(send_start_epoch_ms=1000000 + (i + 0.5) * 100) for i in range(800)]
@@ -292,19 +228,19 @@ class CacheGateTest(unittest.TestCase):
         self.assertEqual(analyze(evidence)["verdict"], "INVALID")
 
     def test_negative_control_requires_collapse_and_valid_evidence(self):
-        collapsed = self.evidence(hit=0.3)
+        collapsed = cache_evidence(hit=0.3)
         collapsed["criteria"]["expected_behavior"] = "collapse"
         result = analyze(collapsed)
         self.assertEqual(result["verdict"], "PASS")
         self.assertEqual(result["observed_behavior"], "collapse")
-        healthy = self.evidence()
+        healthy = cache_evidence()
         healthy["criteria"]["expected_behavior"] = "collapse"
         self.assertEqual(analyze(healthy)["verdict"], "FAIL")
         collapsed["errors"] = ["stable warm baseline not reached"]
         self.assertEqual(analyze(collapsed)["verdict"], "INVALID")
 
     def test_negative_control_requires_verified_policy_intervention(self):
-        evidence = self.evidence(hit=0.3)
+        evidence = cache_evidence(hit=0.3)
         evidence["criteria"].update(expected_behavior="collapse", post_affinity_ms=0)
         self.assertEqual(analyze(evidence)["verdict"], "INVALID")
         evidence["affinity_transition"] = dict(
@@ -315,12 +251,12 @@ class CacheGateTest(unittest.TestCase):
         self.assertEqual(analyze(evidence)["verdict"], "INVALID")
 
     def test_persistent_collapse_fails(self):
-        result = analyze(self.evidence(0.1))
+        result = analyze(cache_evidence(0.1))
         self.assertEqual(result["verdict"], "FAIL")
         self.assertEqual(result["first_collapse_s"], 45)
 
     def test_short_dip_is_not_sustained_collapse(self):
-        e = self.evidence()
+        e = cache_evidence()
         for r in e["samples"]:
             t = r["t"]
             for engine in r["engines"].values():
@@ -328,7 +264,7 @@ class CacheGateTest(unittest.TestCase):
         self.assertEqual(analyze(e)["verdict"], "PASS")
 
     def test_no_completions_is_invalid_not_healthy(self):
-        e = self.evidence()
+        e = cache_evidence()
         for r in e["samples"][21:]:
             for engine in r["engines"].values():
                 engine.update(hit_tokens_total=16000, context_tokens_total=20000, context_requests_total=200)
@@ -336,7 +272,7 @@ class CacheGateTest(unittest.TestCase):
 
     def test_missing_cache_data_and_off_target_load_are_invalid(self):
         for fault in ("reset", "gap", "missing-survivor", "rate"):
-            e = self.evidence()
+            e = cache_evidence()
             if fault == "reset":
                 e["samples"][40]["engines"]["p0"]["hit_tokens_total"] = 0
             if fault == "gap":
@@ -349,7 +285,7 @@ class CacheGateTest(unittest.TestCase):
             self.assertEqual(analyze(e)["verdict"], "INVALID", fault)
 
     def test_missing_diagnostic_counters_do_not_hide_valid_hit_window(self):
-        evidence = self.evidence(0.1)
+        evidence = cache_evidence(0.1)
         for row in evidence["samples"]:
             row["terminal"] = None
             row["engines"]["p0"].pop("cache_evictions")
@@ -363,7 +299,7 @@ class CacheGateTest(unittest.TestCase):
         self.assertTrue(result["windows"][0]["diagnostic_gaps"])
 
     def test_report_uses_same_verdict_and_data(self):
-        e = self.evidence(0.1)
+        e = cache_evidence(0.1)
         with tempfile.TemporaryDirectory() as d:
             write_report(d, e, analyze(e))
             from reporting import discover_reports
@@ -373,7 +309,7 @@ class CacheGateTest(unittest.TestCase):
             self.assertIn("Prefill 缓存命中率 · P 数量", (Path(d) / "reports/run/cache-scale-in/report.html").read_text())
 
     def test_report_includes_warmup_and_survivor_transition(self):
-        e = self.evidence(0.1)
+        e = cache_evidence(0.1)
         result = analyze(e)
         with tempfile.TemporaryDirectory() as d:
             write_report(d, e, result)
@@ -388,7 +324,7 @@ class CacheGateTest(unittest.TestCase):
             self.assertEqual(analyze(e), result)
 
     def test_report_uses_friendly_monitor_labels_and_audits_missing_series(self):
-        e = self.evidence(0.8)
+        e = cache_evidence(0.8)
         with tempfile.TemporaryDirectory() as d:
             root = Path(d)
             telemetry = root / "telemetry" / "1"
@@ -439,7 +375,7 @@ class CacheGateTest(unittest.TestCase):
         self.assertEqual(config["router"]["roles"]["prefill"]["executionTimeEstimator"]["expression"], expression)
 
     def test_report_keeps_withdrawal_failures_visible_when_cache_passes(self):
-        evidence = self.evidence(0.8)
+        evidence = cache_evidence(0.8)
         evidence["client_attribution"] = dict(
             complete=True,
             issued_count=100,
@@ -489,7 +425,7 @@ class CacheGateTest(unittest.TestCase):
             compile_scenarios([("test", configure_program(changed, "test"))], handlers=handlers())
 
     def test_drain_outcome_does_not_change_survivor_windows(self):
-        evidence = self.evidence()
+        evidence = cache_evidence()
         before = analyze(evidence)
         evidence["removals"] = [dict(drained=False, remaining_work={"owners": 12})]
         after = analyze(evidence)
@@ -502,7 +438,7 @@ class CacheGateTest(unittest.TestCase):
     def test_failures_and_removal_diagnostics_do_not_decide_cache_gate(self):
         from cases.cache_scale_in.analysis import MEASUREMENT_POLICY, attribute_client, topology_ready
 
-        evidence = self.evidence()
+        evidence = cache_evidence()
         evidence["measurement_policy"] = MEASUREMENT_POLICY
         for row in evidence["samples"]:
             for engine in row["engines"].values():
@@ -555,7 +491,7 @@ class CacheGateTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             source = Path(directory) / "source" / "evidence.json"
             source.parent.mkdir()
-            source.write_text(json.dumps(self.evidence()))
+            source.write_text(json.dumps(cache_evidence()))
             frozen = source.read_bytes()
             destination = Path(directory) / "new"
             argv = ["cache_gate", str(source), "--reinterpret", "--output", str(destination)]
@@ -652,3 +588,7 @@ class WorkloadTest(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     materialize(Path(d) / "out.jsonl", spec, "g", d)
                 self.assertFalse((Path(d) / "out.jsonl").exists())
+
+
+from delivery_fixtures import cache_report as write_report
+from metric_fixtures import cache_evidence

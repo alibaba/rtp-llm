@@ -14,11 +14,11 @@ from cases.master_performance.analysis import analyze
 from cases.master_performance.metrics import produce
 from cases.master_performance.panels import prepare_curves, report_panels
 from document_io import DocumentError as ScenarioError
+from metric_fixtures import performance_evidence as evidence
 from monitoring.contracts import MetricContractError
 from monitoring.query_plan import queries_for_targets
 from scenario.registry import load_metric_plan as load_plan
 from scenario.registry import view as view
-from test_performance_gate import evidence
 
 ROOT = Path(__file__).resolve().parents[1]
 CLIENT_CURVES = {"client/actual_send_qps": 7.5, "client/success_qps": 6, "client/error_qps": 1.5}

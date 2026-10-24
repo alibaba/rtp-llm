@@ -12,10 +12,6 @@ from adapters.load_client import FRAMEWORK_CLIENT_ENV_VARS, bind_environment, cl
 from scenario.runtime import Deadline
 
 
-def settings():
-    return dict(playback=dict(mode="uniform", qps=5, duration_s=10), limits=dict(max_concurrency=8))
-
-
 @pytest.mark.parametrize("field", sorted(FRAMEWORK_CLIENT_ENV_VARS))
 def test_authored_framework_settings_are_rejected_even_if_they_match(field):
     with pytest.raises(ValueError, match="unknown client fields"):
@@ -128,3 +124,6 @@ def test_routing_sources_are_exclusive_and_static_list_is_removed():
         validate_environment({"GRPC_TARGETS": "a:7003,b:7003"})
     with mock.patch.dict("os.environ", {"GRPC_TARGETS": "stale:7003"}):
         assert "GRPC_TARGETS" not in ClientOps(None)._base_env({"GRPC_TARGET": "a:7003"})
+
+
+from program_fixtures import settings

@@ -15,8 +15,8 @@ from cases.master_performance.replay import performance_main
 from delivery_fixtures import publish_performance
 
 render_view = VIEW.renderer
+from metric_fixtures import performance_evidence as evidence
 from scenario.registry import view as view
-from test_performance_gate import evidence
 
 
 def run_cli(source, destination, *options):

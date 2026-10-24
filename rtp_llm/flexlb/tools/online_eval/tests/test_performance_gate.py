@@ -7,21 +7,13 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+from artifacts.gate_inputs import trace_workload_sha
 from cases.master_performance.analysis import analyze
 from cases.master_performance.inputs import validate
-from delivery_fixtures import publish_performance
 from metric_fixtures import freeze_metrics
+from program_fixtures import compile_scenarios
 from reporting.view_model import ViewDefinition
 from runtime.deadline import Deadline
-
-
-def report(directory, evidence, result):
-    freeze_metrics(directory, "master_performance")
-    return publish_performance(directory, evidence, result)
-
-
-from artifacts.gate_inputs import trace_workload_sha
-from program_fixtures import compile_scenarios
 from scenario import load_scenarios
 from scenario.catalog import handlers
 
@@ -37,61 +29,6 @@ def metric_curves(directory, evidence, result, presentation=None):
     from scenario.registry import view as view
 
     return prepare_curves(directory, evidence, presentation or view("master_performance.yaml"))
-
-
-def evidence():
-    # Small arithmetic fixture only; never a runnable benchmark.
-    c = {
-        "warmup_s": 5,
-        "measure_s": 30,
-        "sample_s": 1,
-        "max_gap_s": 3,
-        "qps": 10,
-        "qps_tolerance": 0.1,
-        "min_requests": 250,
-        "max_pacing_lag_ms": 100,
-        "min_input_tps": 9000,
-        "min_output_tps": 70,
-        "min_goodput_rps": 9,
-        "min_slo_fraction": 0.95,
-        "max_error_rate": 0,
-        "max_ttft_p99_ms": 1000,
-        "max_e2e_p99_ms": 2000,
-        "max_tpot_p99_ms": 150,
-        "slo_ttft_ms": 1000,
-        "slo_e2e_ms": 2000,
-        "slo_tpot_ms": 150,
-        "max_inflight_growth_rps": 0.2,
-    }
-    c.update(measure_s=10, min_requests=80, warmup_s=0)
-    issued = []
-    records = []
-    for i in range(100):
-        r = dict(rid=str(i), send_start_epoch_ms=100000 + i * 100, input_len=1024, output_len=8, pacing_lag_ms=0)
-        issued.append(r)
-        records.append(dict(r, status="ok", total_ms=100, ttft_ms=50, observed_output_tokens=8))
-    return dict(
-        performance_evidence_schema_version=2,
-        criteria=c,
-        errors=[],
-        window=dict(start_epoch_ms=100000, end_epoch_ms=110000),
-        samples=[dict(epoch_ms=100000 + i * 1000) for i in range(11)],
-        flow=dict(complete=True, errors=[], issued=issued, records=records),
-        provenance=dict(
-            env_epoch=1,
-            instance="master_performance::default::batch-window",
-            configuration_sha256="f" * 64,
-            master_artifact=dict(jar_sha256="a" * 64),
-            mock_jar_sha256="b" * 64,
-            actual_master_config=dict(dispatcher=dict(type="BATCH")),
-            performance=dict(prefill=dict(fixed_ms=100)),
-            topology=dict(prefill=2, decode=4),
-            capacity=dict(prefill_cache_blocks=1000, decode_cache_blocks=1000),
-            trace=dict(sha256="c" * 64, workload_sha256="d" * 64),
-            client_environment=dict(FETCH_OUTPUT_STREAM="true"),
-            analyzer_sha256="e" * 64,
-        ),
-    )
 
 
 class PerformanceGateTest(unittest.TestCase):
@@ -653,3 +590,7 @@ class PerformanceGateTest(unittest.TestCase):
         plan = json.loads(result.stdout[result.stdout.index("\n{") + 1 :])
         self.assertEqual(len(plan["instances"]), 1)
         self.assertNotIn("master_performance::", result.stdout)
+
+
+from delivery_fixtures import performance_report as report
+from metric_fixtures import performance_evidence as evidence

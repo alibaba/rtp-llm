@@ -5,11 +5,10 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from program_fixtures import compile_scenarios
+from program_fixtures import compile_scenarios, scenario
 from scenario import ScenarioError
 from scenario.backend_spec import configure_master_sync_log, make_env_spec
 from scenario.contracts import StageHandler
-from test_scenario_compile import scenario
 
 
 class VariantProgramsTest(unittest.TestCase):

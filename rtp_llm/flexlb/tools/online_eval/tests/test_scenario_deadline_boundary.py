@@ -39,10 +39,10 @@ def test_policy_hook_cannot_consume_budget_and_still_start_operation(tmp_path):
     from types import SimpleNamespace
 
     from program_fixtures import compile_scenarios
+    from runtime_fixtures import Backend, Clock, source
     from scenario.context import RuntimeContext
     from scenario.plan import CompiledInstance
     from scenario.stage_execution import StageExecutor
-    from test_scenario_runtime import Backend, Clock, source
 
     clock = Clock()
     backend = Backend(clock)

@@ -8,6 +8,7 @@ import pytest
 
 from document_io import DocumentError as ScenarioError
 from program_fixtures import ScenarioCompiler
+from runtime_fixtures import Backend, Clock, source
 from scenario.backend_spec import make_env_spec
 from scenario.environment_config import environment
 from scenario.environment_snapshot import EnvironmentSnapshot
@@ -15,7 +16,6 @@ from scenario.execution_plan import ExecutionPlanCodec, _sha
 from scenario.plan import CompiledInstance, ExecutionPlan
 from scenario.runtime import ScenarioRunner
 from scenario.stage_parameters import RequestParameters
-from test_scenario_runtime import Backend, Clock, source
 from traffic import prefix_lineage, prefix_lineage_v3
 from traffic.lineage_model import LengthSemantics, LineageExpander
 

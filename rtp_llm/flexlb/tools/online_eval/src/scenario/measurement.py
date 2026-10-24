@@ -1,5 +1,6 @@
 """Continuous-measurement hooks over the common scenario executor."""
 
+from file_io import write_json
 from monitoring.collection_plan import instance_plan
 from monitoring.run_monitor import RunMonitor
 from scenario.run_result import EvidenceResult, ReportResult, WorkloadResult
@@ -72,8 +73,6 @@ class WorkloadPolicy:
 
             joined = join_evidence(payload, monitor.environments)
             joined_path = ctx.artifact_dir / "request-engine-evidence.json"
-            from file_io import write_json
-
             write_json(joined_path, joined)
             payload["request_engine_join"] = str(joined_path)
         payload["collection_profile"] = monitor.profile
@@ -81,8 +80,6 @@ class WorkloadPolicy:
         from artifacts.provenance import collect
 
         payload["runtime_provenance"] = collect(ctx.artifact_dir, monitor.environments, monitor.environment_metadata)
-        from file_io import write_json
-
         write_json(evidence, payload)
         workload.details.update(
             evidence=str(evidence), capture_metrics=monitor.options["capture_metrics"], runtime_configuration=dict(monitor.options)

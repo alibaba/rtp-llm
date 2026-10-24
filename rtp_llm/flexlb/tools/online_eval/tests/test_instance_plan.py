@@ -5,58 +5,6 @@ from runtime.resource_plan import ResourcePlanError
 from scenario.instance_plan import InstancePlanError, parse_catalog, plan_instances, select_instances
 
 
-def catalog():
-    document = {
-        "instance_catalog_schema_version": 1,
-        "instances": [
-            {
-                "id": f"scenario{i}::default::batch-window",
-                "scenario_id": f"scenario{i}",
-                "variant_id": "default",
-                "profile": "batch-window",
-                "category": "cancel" if i % 2 else "kv",
-                "source_path": f"config/scenarios/scenario{i}.yaml",
-                "source": "yaml",
-                "tags": [],
-                "requires": [],
-                "estimated_duration_s": i + 1,
-                "metadata": {"kind": "functional", "description": "Fixture"},
-                "execution": {
-                    "timeout_s": 60,
-                    "stage_timeout_s": 30,
-                    "cleanup_timeout_s": 10,
-                    "finalize_timeout_s": 20,
-                    "report_timeout_s": 10,
-                    "archive_timeout_s": 10,
-                    "collection": "diagnostic",
-                },
-                "resource_budget": {
-                    "backend": "java_mock",
-                    "initial_workers": 6,
-                    "max_dynamic_additions": 0,
-                    "bounded": True,
-                    "mock_control_offset": -1,
-                    "victim_control_offset": 149,
-                    "victim_grpc_offset": 150,
-                    "reserved_tail_offset": 151,
-                },
-            }
-            for i in range(7)
-        ],
-    }
-
-    for row in document["instances"]:
-        from program_fixtures import compile_scenarios
-        from test_scenario_runtime import source
-
-        declaration = source()
-        declaration.update(id=row["scenario_id"], category=row["category"], description=row["metadata"]["description"])
-        compiled = compile_scenarios([(row["source_path"], declaration)])[0]
-        compiled.update(copy.deepcopy(row))
-        row["compiled"] = compiled
-    return document
-
-
 def parse(payload=None):
     return parse_catalog(payload or catalog(), source="yaml", profile="batch-window")
 
@@ -141,3 +89,5 @@ class InstancePlanTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+from runtime_fixtures import catalog

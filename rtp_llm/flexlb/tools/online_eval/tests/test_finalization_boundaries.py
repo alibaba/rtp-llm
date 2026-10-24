@@ -7,13 +7,12 @@ from unittest import mock
 import pytest
 
 from adapters.resource_evidence import ResourceEvidence
+from metric_fixtures import cache_evidence, performance_evidence
 from program_fixtures import compile_scenarios
+from runtime_fixtures import Backend, Clock, source
 from scenario.measurement import WorkloadPolicy, execute_workload
 from scenario.run_result import EvidenceResult
 from scenario.runtime import Deadline, RuntimeContext
-from test_cache_scale_gate import CacheGateTest
-from test_performance_gate import evidence as performance_evidence
-from test_scenario_runtime import Backend, Clock, source
 
 
 def plan():
@@ -36,7 +35,7 @@ def test_online_gate_never_calls_metric_or_html_delivery(tmp_path, kind):
 
     case = "cache_scale_in" if kind == "cache" else "master_performance"
     module = __import__("cases." + case + ".actions", fromlist=["actions"])
-    e = CacheGateTest().evidence(0.8) if kind == "cache" else performance_evidence()
+    e = cache_evidence(0.8) if kind == "cache" else performance_evidence()
     snapshot = e["flow"] if kind == "performance" else dict(issued=[], records=[], complete=True, errors=[], status=dict(submitted=0))
     flow = SimpleNamespace(directory=tmp_path, evidence_snapshot=lambda: snapshot)
     (tmp_path / "client_lifecycle.jsonl").write_text("")
@@ -188,7 +187,7 @@ def test_committed_gate_corruption_never_falls_back_to_default(tmp_path, damage)
     from cases.cache_scale_in.analysis import analyze
     from scenario.registry import write_views as write_views
 
-    e = CacheGateTest().evidence(0.8)
+    e = cache_evidence(0.8)
     result_path = freeze_gate(tmp_path, "cache", e, analyze(e))
     if damage == "missing":
         result_path.unlink()

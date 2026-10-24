@@ -142,7 +142,7 @@ def test_case_calculation_contract_rejects_wrong_source_and_unknown_output(tmp_p
 
 
 def test_new_request_projection_needs_no_case_code():
-    from test_performance_gate import evidence
+    from metric_fixtures import performance_evidence as evidence
 
     data = evidence()
     definition = calculation_spec()
@@ -152,7 +152,7 @@ def test_new_request_projection_needs_no_case_code():
 
 
 def test_publication_rejects_forged_measurement_and_preserves_frozen_calculation(tmp_path):
-    from test_performance_gate import evidence
+    from metric_fixtures import performance_evidence as evidence
 
     data = evidence()
     from metric_fixtures import freeze_metrics
@@ -196,7 +196,7 @@ def test_old_plan_shape_is_rejected(tmp_path):
 
 
 def test_invalid_journal_publishes_missing_samples_without_zero_fallback(tmp_path):
-    from test_performance_gate import evidence
+    from metric_fixtures import performance_evidence as evidence
 
     data = evidence()
     data["flow"]["complete"] = False

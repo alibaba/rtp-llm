@@ -75,9 +75,9 @@ def test_report_schema_does_not_import_execution():
 
 
 def test_default_publication_decodes_run_once(tmp_path):
+    from metric_fixtures import workload_payload as payload
     from reporting.run_model import RunPresentation
     from reporting.workload import write_report
-    from test_workload_report_views import payload
 
     with patch.object(RunPresentation, "read", wraps=RunPresentation.read) as read:
         write_report(tmp_path, payload())

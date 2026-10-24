@@ -8,13 +8,14 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-import test_cache_scale_gate as cache_fixtures
 from cases.cache_scale_in.analysis import analyze as analyze_cache
 from cases.master_performance.analysis import analyze as analyze_performance
+from delivery_fixtures import cache_report as write_report
+from delivery_fixtures import performance_report as report
+from metric_fixtures import cache_evidence
+from metric_fixtures import performance_evidence as evidence
 from reporting import load_analysis, read_bundle, run_meta, write_bundle
 from reporting.comparison import compare, main
-from test_cache_scale_gate import write_report
-from test_performance_gate import evidence, report
 
 
 class ReportComparisonTest(unittest.TestCase):
@@ -279,7 +280,7 @@ class ReportComparisonTest(unittest.TestCase):
     def test_cache_outcomes_and_prepared_curves_are_frozen(self):
         paths, expected = [], []
         for name, hit in (("a", 0.1), ("b", 0.8)):
-            e = cache_fixtures.CacheGateTest().evidence(hit)
+            e = cache_evidence(hit)
             e["events"].append(dict(id="checkpoint", name="checkpoint", epoch_s=1020, t=20))
             result = analyze_cache(e)
             expected.append(result)

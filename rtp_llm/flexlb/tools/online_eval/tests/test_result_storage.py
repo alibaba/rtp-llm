@@ -9,13 +9,13 @@ import pytest
 from analysis.checks import CheckResult
 from analysis.gates import gate_result
 from artifacts.gate import freeze_gate, gate_check
+from delivery_fixtures import experiment_definition as definition
 from monitoring.metric_store import MetricStore
 from reporting import render
 from reporting.experiment import ExperimentReader, publish_run
 from reporting.run_model import RunPresentation
 from reporting.workload import build_spec
 from scenario.registry import view as view
-from test_experiment_container import definition
 
 
 @pytest.mark.parametrize(

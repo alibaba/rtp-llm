@@ -13,25 +13,8 @@ from monitoring.metric_store import MetricStore
 from program_fixtures import compile_scenarios
 from reporting import render, write_bundle
 from reporting.experiment import ArtifactRole, ExperimentReader, publish_run
+from runtime_fixtures import Backend, Clock, source
 from scenario.runtime import execute_instance
-from test_scenario_runtime import Backend, Clock, source
-
-
-def definition():
-    return dict(
-        experiment_definition_schema_version=1, plan={"id": "case::default::profile"}, dependencies={"renderer.py": "a" * 64}, views={}
-    )
-
-
-def execution():
-    return dict(
-        id="case::default::profile",
-        test_kind="functional",
-        status="PASS",
-        outcome=dict(gate="PASS", validity="VALID", delivery="PASS"),
-        stages=[],
-        cleanup=[],
-    )
 
 
 def frozen_spec():
@@ -214,9 +197,9 @@ def test_failed_publication_preserves_existing_primary_and_removes_temporary(tmp
 
 
 def test_unrendered_default_view_uses_frozen_declaration_and_metrics(tmp_path):
+    from metric_fixtures import workload_payload as payload
     from reporting.workload import build_spec
     from scenario.registry import view as view
-    from test_workload_report_views import payload
 
     key = "1/mock/count/{}"
     store = MetricStore(
@@ -342,3 +325,7 @@ def test_failed_republish_preserves_previous_raw_attachment(tmp_path):
         reader.verify_raw(previous["raw"])
     with ExperimentReader(previous["raw"]) as reader, reader.open("run/engine.log") as stream:
         assert stream.read() == b"previous log"
+
+
+from delivery_fixtures import experiment_definition as definition
+from delivery_fixtures import experiment_execution as execution

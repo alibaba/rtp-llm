@@ -12,18 +12,18 @@ from runtime.deadline import Deadline
 
 
 def fixture():
-    from test_cache_scale_gate import CacheGateTest
+    from metric_fixtures import cache_evidence
 
     # Existing gate semantics and thresholds are reused without patching analyze.
-    return CacheGateTest().evidence()
+    return cache_evidence()
 
 
 def prepare(hit=0.8):
     e = fixture()
     if hit != 0.8:
-        from test_cache_scale_gate import CacheGateTest
+        from metric_fixtures import cache_evidence
 
-        e = CacheGateTest().evidence(hit=hit)
+        e = cache_evidence(hit=hit)
     e["clock"] = dict(origin_epoch_s=1000, origin_monotonic_s=50)
     dense = copy.deepcopy(e["samples"])
     fields = {key: dict(metric="mock/" + key, labels={"role": "prefill"}) for key in dense[0]["engines"]["p0"] if key != "grpc_addr"}

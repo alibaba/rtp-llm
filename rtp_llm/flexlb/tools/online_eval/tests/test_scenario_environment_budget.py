@@ -9,12 +9,12 @@ from unittest.mock import Mock, patch
 
 from adapters.java_mock_resources import JavaMockBudget, ResourcePlanError, plan_lane_leases
 from program_fixtures import compile_scenarios
+from runtime_fixtures import source
 from scenario.backend import BoundedOps, JavaMockBackend
 from scenario.catalog import handlers
 from scenario.contracts import StageHandler
 from scenario.lease import validate_lease
 from scenario.runtime import Deadline, RuntimeContext
-from test_scenario_runtime import source
 
 
 def program():

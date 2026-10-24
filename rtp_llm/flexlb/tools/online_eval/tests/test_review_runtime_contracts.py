@@ -152,8 +152,8 @@ def test_live_zero_warmup_starts_with_a_real_covered_sample(tmp_path):
     from unittest.mock import patch
 
     from cases.master_performance.actions import observe
+    from metric_fixtures import performance_evidence as evidence
     from scenario.context import RuntimeContext
-    from test_performance_gate import evidence
 
     now = [1.0]
 

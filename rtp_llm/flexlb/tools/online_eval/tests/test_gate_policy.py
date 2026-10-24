@@ -3,8 +3,8 @@ from types import SimpleNamespace
 
 from cases.master_ha_failover.actions import _client_check
 from cases.master_performance.inputs import for_profile
+from metric_fixtures import performance_evidence as evidence
 from monitoring.quality import bounded_collection_gaps
-from test_performance_gate import evidence
 
 
 def test_collection_quality_projects_mixed_gap_classes_without_losing_order():

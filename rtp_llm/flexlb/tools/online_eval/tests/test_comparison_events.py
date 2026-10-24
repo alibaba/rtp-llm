@@ -5,9 +5,9 @@ import json
 
 import pytest
 
+from delivery_fixtures import demo_runs
 from reporting.comparison import compare
 from reporting.pairing import merge_nearby_events
-from test_gate_line_comparison import demo_runs
 
 
 def event(run, t, identity="checkpoint", name="门禁开始"):

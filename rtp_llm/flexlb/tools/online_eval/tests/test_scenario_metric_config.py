@@ -3,10 +3,10 @@
 import unittest
 
 from program_fixtures import compile_scenarios
+from runtime_fixtures import source
 from scenario.backend_spec import make_env_spec
 from scenario.catalog import handlers
 from scenario.environment_config import environment
-from test_scenario_runtime import source
 
 
 class MetricConfigTest(unittest.TestCase):

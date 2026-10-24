@@ -10,7 +10,7 @@ from monitoring.identity import NAME
 from scenario.builder import CaseBuilder
 from scenario.config_data import leaf_paths, merge_data, merge_environment, path_in_scope
 from scenario.declarations import CaseDeclaration, VariantDeclaration
-from scenario.execution_policy import DEFAULT_BUDGETS
+from scenario.execution_policy import DEFAULT_BUDGETS, EXECUTION_BUDGETS
 from scenario.program import ProgramPlan, VariantPlan
 
 
@@ -54,8 +54,6 @@ def configure_program(config, source) -> ProgramPlan:
     implementation["numeric_parameters"] = numeric_contracts
     if axes:
         implementation["variant_axes"] = axes
-    from scenario.execution_policy import EXECUTION_BUDGETS
-
     metadata = {key: copy.deepcopy(value) for key, value in config.metadata.items() if key != "kind"}
     metadata.setdefault("category", "")
     for key in ("tags", "requires", "findings"):
@@ -156,15 +154,12 @@ def _variant_contract(config, builder, source):
             raise ScenarioError(f"{source}.reporting: {exc}") from exc
     if metadata["kind"] == "workload":
         from monitoring.collection_plan import frozen_plan, select_plan
-        from monitoring.query_plan import DEFAULT_PLAN, validate_export_filter
+        from monitoring.query_plan import DEFAULT_PLAN, definitions, validate_export_filter
         from scenario.registry import load_metric_plan as load_plan
         from scenario.registry import view as view
 
         name = execution["monitoring"].get("query_plan", DEFAULT_PLAN)
         selected = select_plan(load_plan(name), builder.metric_dependencies, [view(report) for report in variant.get("reports", [])])
-        from monitoring.query_plan import definitions
-        from scenario.registry import registry
-
         for definition in definitions(selected).values():
             if definition.get("producer"):
                 source = definition["producer"]
@@ -199,24 +194,20 @@ def _bind_metric_dependencies(requirements, execution):
 
 
 def _bind_reports(config, variant, source, stages):
+    # Resolve case views after program discovery, avoiding recursive case initialization.
+    from reporting.events import validate_stage_sources
+    from reporting.view_config import DEFAULT_VIEW
+    from scenario.registry import registry, view
     from scenario.registry import report_declaration as declaration
-    from scenario.registry import view
 
     reports = list(config.reports) if config.reports is not None else None
     kind = variant["metadata"]["kind"]
     if reports is not None:
         variant["reports"] = declaration(reports, kind=kind, path=source + ".reports")
-        from scenario.registry import view as view
-
         for report_name in reports:
-            from reporting.view_config import DEFAULT_VIEW
-            from scenario.registry import registry
-
             if report_name != DEFAULT_VIEW:
                 registry().capability("view", report_name, case=config.case)
             presentation = view(report_name)
-            from reporting.events import validate_stage_sources
-
             validate_stage_sources(presentation, {stage.id for stage in stages}, source + ".reports")
             required_plan = presentation.metrics.query_plan if presentation.metrics else None
             if required_plan and required_plan != variant["execution"]["monitoring"].get("query_plan"):

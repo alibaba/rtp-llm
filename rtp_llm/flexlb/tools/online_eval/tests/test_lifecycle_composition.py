@@ -10,12 +10,12 @@ from cases.request_completion.actions import execute, validate
 from document_io import load_document
 from program_fixtures import compile_scenarios
 from runtime.deadline import Deadline, StageTimeout
+from runtime_fixtures import Backend, Clock
 from scenario.catalog import handlers
 from scenario.context import RuntimeContext
 from scenario.program_compiler import configure_program
 from scenario.runtime import execute_instance
 from scenario.stage_execution import _validate_output
-from test_scenario_runtime import Backend, Clock
 
 ROOT = Path(__file__).resolve().parents[1]
 

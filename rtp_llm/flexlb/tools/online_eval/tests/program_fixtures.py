@@ -6,8 +6,9 @@ this shape, and there is no versioned program document or file reader.
 
 import copy
 from dataclasses import asdict, fields
+from pathlib import Path
 
-from document_io import DocumentError
+from document_io import DocumentError, load_document
 from scenario.compiler import ScenarioCompiler as Compiler
 from scenario.program import ProgramPlan, StageDefinition, VariantPlan
 
@@ -79,3 +80,34 @@ def mutable_program(value):
     result["profiles"] = list(value.profiles)
     result["stages"] = [{key: child for key, child in asdict(step).items() if child is not None} for step in value.variants[0].stages]
     return result
+
+
+def scenario():
+    return {
+        "implementation": {},
+        "id": "completion",
+        "description": "A submitted request reaches terminal state",
+        "category": "status",
+        "environment": {"backend": "java_mock"},
+        "stages": [
+            {"id": "setup", "action": "setup"},
+            {"id": "submit", "action": "request", "params": {"output_len": 2}},
+            {"id": "finish", "action": "wait", "params": {"requests": {"$ref": "stages.submit.output.requests"}}},
+            {
+                "id": "complete",
+                "action": "check",
+                "params": {"actual": {"$ref": "stages.finish.output.completed"}, "op": "eq", "expected": True},
+            },
+        ],
+    }
+
+
+ROOT = Path(__file__).resolve().parents[1]
+
+
+def config(name):
+    return load_document(ROOT / "config/scenarios" / (name + ".yaml"))
+
+
+def settings():
+    return dict(playback=dict(mode="uniform", qps=5, duration_s=10), limits=dict(max_concurrency=8))

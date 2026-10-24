@@ -9,43 +9,6 @@ from adapters.debug_client import DebugUnavailable
 from adapters.master_diagnostics import DiagnosticCapture, MasterDiagnosticsClient, validate_snapshot
 
 
-def payload():
-    return dict(
-        schema_version=2,
-        instance_id="process-1",
-        snapshot_id="sample-1",
-        status="ok",
-        capture_started_at_ms=1,
-        capture_finished_at_ms=2,
-        capabilities={"workers": dict(version=1, features=["poll_health", "applied_observation", "cache_progress"])},
-        components={
-            "workers": dict(
-                status="ok",
-                capture_started_at_ms=1,
-                capture_finished_at_ms=2,
-                coverage=dict(scope="prefill_decode_endpoint_registry", complete=True, truncated=False, returned_count=1),
-                rows=[
-                    dict(
-                        worker_id="prefill:a",
-                        address="a",
-                        role="prefill",
-                        generation="9007199254740993",
-                        lifecycle_state="active",
-                        last_reported_alive=True,
-                        poll_response_age_ms=10,
-                        applied_observation_age_ms=20,
-                        applied_status_version="1",
-                        received_cache_version="2",
-                        indexed_cache_version="2",
-                        index_initialized=True,
-                        cached_key_count=3,
-                    )
-                ],
-            )
-        },
-    )
-
-
 def test_generation_is_preserved_and_workers_are_domain_rows():
     with patch("urllib.request.urlopen", return_value=io.BytesIO(json.dumps(payload()).encode())):
         capture = MasterDiagnosticsClient("http://localhost").snapshot(include=("workers",))
@@ -101,3 +64,6 @@ def test_duplicate_rows_are_not_a_complete_fleet():
 def test_transport_failure_is_explicit():
     with patch("urllib.request.urlopen", side_effect=TimeoutError("unavailable")), pytest.raises(DebugUnavailable):
         MasterDiagnosticsClient("http://localhost").snapshot()
+
+
+from metric_fixtures import diagnostic_payload as payload

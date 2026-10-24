@@ -4,9 +4,10 @@ from pathlib import Path
 import pytest
 
 from artifacts.retention import prune_tsdb
+from delivery_fixtures import experiment_definition as definition
+from delivery_fixtures import experiment_execution as execution
 from reporting.experiment import ExperimentReader, publish_run
 from runtime.deadline import Deadline
-from test_experiment_container import definition, execution
 
 
 def archived(tmp_path):

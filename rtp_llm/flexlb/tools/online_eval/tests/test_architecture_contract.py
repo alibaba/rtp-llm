@@ -79,7 +79,7 @@ def test_plan_executes_compiled_values_after_scene_changes_and_rejects_code_drif
     scene = tmp_path / "scene.yaml"
     scene.write_text("count: 1")
     from program_fixtures import compile_scenarios
-    from test_scenario_runtime import source
+    from runtime_fixtures import source
 
     compiled = compile_scenarios([("fixture", source())])
     path = tmp_path / "plan.json"
@@ -135,8 +135,7 @@ def test_child_uses_frozen_steps_without_loading_yaml(tmp_path, monkeypatch):
     from pathlib import Path
 
     from program_fixtures import compile_scenarios
-    from test_scenario_backend import lease_manifest
-    from test_scenario_runtime import Backend, Clock, source
+    from runtime_fixtures import Backend, Clock, lease_manifest, source
 
     module_path = Path(__file__).resolve().parents[1] / "src/scenario/child_cli.py"
     spec = importlib.util.spec_from_file_location("frozen_child", module_path)

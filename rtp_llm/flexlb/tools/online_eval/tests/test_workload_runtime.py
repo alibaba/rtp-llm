@@ -7,12 +7,12 @@ from pathlib import Path
 from unittest import mock
 
 from program_fixtures import compile_scenarios
+from runtime_fixtures import Backend, Clock, source
 from scenario import load_scenarios
 from scenario.catalog import handlers
 from scenario.measurement import execute_workload
 from scenario.runtime import execute_instance
 from scenario.suites import classify, preselect_documents
-from test_scenario_runtime import Backend, Clock, source
 
 ROOT = Path(__file__).resolve().parents[1]
 

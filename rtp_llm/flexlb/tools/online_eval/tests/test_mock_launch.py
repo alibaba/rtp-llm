@@ -103,8 +103,7 @@ def test_typed_client_configuration_is_reused_and_projects_the_same_wire_environ
 
 def test_flow_admission_retains_one_typed_client_configuration():
     from adapters.java_flow_spec import JavaFlowSpec
-    from test_client_environment import settings
-    from test_program_inputs import config
+    from program_fixtures import config, settings
 
     data = config("master_performance")["parameters"]["traffic"]
     data = {key: value for key, value in data.items() if key != "kind"}

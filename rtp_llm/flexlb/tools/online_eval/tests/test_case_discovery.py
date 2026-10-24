@@ -16,7 +16,7 @@ from scenario.environment_config import environment
 from scenario.environment_snapshot import EnvironmentSnapshot
 
 
-def test_new_directory_is_discovered_without_framework_registration(tmp_path):
+def test_new_directory_is_discovered_without_framework_registration(tmp_path, monkeypatch):
     package = tmp_path / "discovery_fixture"
     case = package / "new_case"
     case.mkdir(parents=True)
@@ -24,7 +24,7 @@ def test_new_directory_is_discovered_without_framework_registration(tmp_path):
         'from scenario.registry import CaseDefinition\ndef build(case): pass\nCASE = CaseDefinition({"default": build})\n'
     )
     (package / "helpers.py").write_text('raise AssertionError("helpers must not be imported")')
-    sys.path.insert(0, str(tmp_path))
+    monkeypatch.syspath_prepend(str(tmp_path))
     try:
         importlib.invalidate_caches()
         snapshot = registry.discover(package, package="discovery_fixture")
@@ -33,7 +33,6 @@ def test_new_directory_is_discovered_without_framework_registration(tmp_path):
         with pytest.raises(TypeError):
             snapshot.cases["new_case"] = None
     finally:
-        sys.path.remove(str(tmp_path))
         for name in list(sys.modules):
             if name.startswith("discovery_fixture"):
                 del sys.modules[name]

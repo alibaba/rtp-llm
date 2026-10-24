@@ -27,6 +27,19 @@ def main():
             if any(name.split(".")[0] in packages for name in names):
                 print(f"{path}:{node.lineno}: shared leaf must not import a business package", file=sys.stderr)
                 return 1
+    # Shared constructors live in support modules, never in collected test modules.
+    for path in sorted((root / "tests").glob("*.py")):
+        for node in ast.walk(ast.parse(path.read_text(), filename=str(path))):
+            names = (
+                [node.module or ""]
+                if isinstance(node, ast.ImportFrom)
+                else [item.name for item in node.names]
+                if isinstance(node, ast.Import)
+                else []
+            )
+            if any(name.split(".")[0].startswith("test_") for name in names):
+                print(f"{path}:{node.lineno}: import shared fixtures instead of collected tests", file=sys.stderr)
+                return 1
     commands = (
         [sys.executable, "-m", "ruff", "check", "."],
         [sys.executable, "-m", "ruff", "format", "--check", "."],

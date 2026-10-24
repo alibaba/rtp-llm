@@ -8,17 +8,12 @@ from unittest.mock import patch
 import pytest
 
 from document_io import DocumentError as ScenarioError
-from document_io import load_document
 from program_fixtures import compile_scenarios
 from scenario.catalog import handlers
 from scenario.program_compiler import configure_program
 
 ROOT = Path(__file__).resolve().parents[1]
 CASES = ("request_completion", "master_performance", "cache_scale_in", "master_ha_failover")
-
-
-def config(name):
-    return load_document(ROOT / "config/scenarios" / (name + ".yaml"))
 
 
 @pytest.mark.parametrize("name", CASES)
@@ -137,3 +132,6 @@ def test_ha_waits_cannot_be_redeclared_as_observation_inputs():
     data["parameters"]["observation"]["settle"] = {"wait_s": 5}
     with pytest.raises(ScenarioError, match="unknown configuration fields"):
         configure_program(data, "ha.yaml")
+
+
+from program_fixtures import config

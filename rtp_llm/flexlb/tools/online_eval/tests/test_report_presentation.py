@@ -56,10 +56,9 @@ class ReportPresentationTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             from artifacts.gate import freeze_gate
             from cases.cache_scale_in.analysis import analyze
-            from metric_fixtures import freeze_metrics
-            from test_cache_scale_gate import CacheGateTest
+            from metric_fixtures import cache_evidence, freeze_metrics
 
-            evidence = CacheGateTest().evidence(0.3)
+            evidence = cache_evidence(0.3)
             original = analyze(evidence)
             freeze_gate(directory, "cache", evidence, original)
             freeze_metrics(directory, "cache_scale_in")

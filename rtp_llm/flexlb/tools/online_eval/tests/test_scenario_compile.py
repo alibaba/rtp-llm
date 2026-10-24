@@ -16,26 +16,6 @@ from program_fixtures import compile_scenarios
 from scenario import ScenarioError, load_scenarios
 
 
-def scenario():
-    return {
-        "implementation": {},
-        "id": "completion",
-        "description": "A submitted request reaches terminal state",
-        "category": "status",
-        "environment": {"backend": "java_mock"},
-        "stages": [
-            {"id": "setup", "action": "setup"},
-            {"id": "submit", "action": "request", "params": {"output_len": 2}},
-            {"id": "finish", "action": "wait", "params": {"requests": {"$ref": "stages.submit.output.requests"}}},
-            {
-                "id": "complete",
-                "action": "check",
-                "params": {"actual": {"$ref": "stages.finish.output.completed"}, "op": "eq", "expected": True},
-            },
-        ],
-    }
-
-
 class CompileTest(unittest.TestCase):
     def compile(self, doc, profile=None):
         return compile_scenarios([("test.yaml", doc)], profile)
@@ -241,3 +221,5 @@ class LoaderTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+from program_fixtures import scenario
