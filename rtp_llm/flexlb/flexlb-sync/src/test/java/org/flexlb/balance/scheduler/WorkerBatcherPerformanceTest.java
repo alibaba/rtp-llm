@@ -2,6 +2,7 @@ package org.flexlb.balance.scheduler;
 
 import org.flexlb.balance.delivery.DeliveryBlockReason;
 import org.flexlb.balance.delivery.DeliveryStrategy;
+import org.flexlb.balance.delivery.DeliveryTransaction;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.planner.GroupPlanner;
 import org.flexlb.balance.prediction.PrefillTimePredictor;
@@ -315,10 +316,9 @@ class WorkerBatcherPerformanceTest {
                 };
 
         @Override
-        public Transaction prepare(
-                List<ScheduledRequest> candidates,
-                PrefillTimePredictor.Evaluator evaluator,
-                OptionalLong plannedPrediction) {
+        public DeliveryTransaction prepare(List<ScheduledRequest> candidates,
+                                           PrefillTimePredictor.Evaluator evaluator,
+                                           OptionalLong plannedPrediction) {
             return WorkerBatcherTestSupport.boundaryOnly(
                     candidates.getFirst(),
                     DeliveryBlockReason.unavailable(

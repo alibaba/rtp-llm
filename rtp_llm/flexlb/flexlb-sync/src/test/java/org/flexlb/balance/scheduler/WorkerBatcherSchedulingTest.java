@@ -2,6 +2,7 @@ package org.flexlb.balance.scheduler;
 
 import org.flexlb.balance.delivery.DeliveryBlockReason;
 import org.flexlb.balance.delivery.DeliveryStrategy;
+import org.flexlb.balance.delivery.DeliveryTransaction;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.endpoint.PrefillState;
 import org.flexlb.balance.planner.GroupPlanner;
@@ -404,19 +405,15 @@ class WorkerBatcherSchedulingTest {
     }
 
     @ParameterizedTest
-    @CsvSource({
-            "NON_BATCH,SINGLE,1,0,single_request",
-            "BATCH,SINGLE,1,0,single_request",
-            "NON_BATCH,FIXED_WINDOW,2,60000,batch_full",
-            "BATCH,FIXED_WINDOW,2,60000,batch_full",
-            "NON_BATCH,FIXED_WINDOW,1,0,fixed_window_timeout",
-            "BATCH,FIXED_WINDOW,1,0,fixed_window_timeout"
-    })
+    @CsvSource({"NON_BATCH,SINGLE,1,0,single_request", "BATCH,SINGLE,1,0,single_request",
+            "NON_BATCH,FIXED_WINDOW,2,60000,batch_full", "BATCH,FIXED_WINDOW,2,60000,batch_full",
+            "NON_BATCH,FIXED_WINDOW,1,0,fixed_window_timeout", "BATCH,FIXED_WINDOW,1,0,fixed_window_timeout"})
     void committedGroupIsVisibleBeforeDeliveryPublication(String dispatcher,
                                                           String policy,
                                                           int count,
                                                           long windowMs,
-                                                          String expectedReason) throws Exception {
+                                                          String expectedReason)
+            throws Exception {
         FlexlbConfig config = singleConfig();
         if (dispatcher.equals("NON_BATCH")) {
             config.setDispatcher(org.flexlb.config.DispatcherConfig.nonBatch());
@@ -438,15 +435,17 @@ class WorkerBatcherSchedulingTest {
         when(delivery.prepare(org.mockito.ArgumentMatchers.anyList(), org.mockito.ArgumentMatchers.any(),
                 org.mockito.ArgumentMatchers.any())).thenAnswer(invocation -> {
             List<ScheduledRequest> members = List.copyOf(invocation.getArgument(0));
-            var transaction = mock(DeliveryStrategy.Transaction.class);
-            when(transaction.items()).thenReturn(members);
-            org.mockito.Mockito.doAnswer(ignored -> {
-                for (ScheduledRequest member : members) {
-                    published.add(member.ctx().getDecisionGroup());
-                    member.future().complete(new Response());
-                }
-                return null;
-            }).when(transaction).handoff(
+                    var transaction = mock(DeliveryTransaction.class);
+                    when(transaction.items()).thenReturn(members);
+                    org.mockito.Mockito.doAnswer(ignored -> {
+                        for (ScheduledRequest member : members) {
+                            published.add(member.ctx().getDecisionGroup());
+                            member.future().complete(new Response());
+                        }
+                        return null;
+                    })
+                            .when(transaction)
+                            .handoff(
                     org.mockito.ArgumentMatchers.anyString(),
                     org.mockito.ArgumentMatchers.anyInt(),
                     org.mockito.ArgumentMatchers.any());
@@ -487,16 +486,17 @@ class WorkerBatcherSchedulingTest {
         when(delivery.prepare(org.mockito.ArgumentMatchers.anyList(), org.mockito.ArgumentMatchers.any(),
                 org.mockito.ArgumentMatchers.any())).thenAnswer(invocation -> {
             List<ScheduledRequest> members = List.copyOf(invocation.getArgument(0));
-            var transaction = mock(DeliveryStrategy.Transaction.class);
-            when(transaction.items()).thenReturn(members);
+                    var transaction = mock(DeliveryTransaction.class);
+                    when(transaction.items()).thenReturn(members);
             if (members.get(0) == retiredItem) {
-                when(transaction.commitUnderLock())
-                        .thenThrow(new EndpointRetiredException("Prefill", retiredItem));
+                        when(transaction.commitUnderLock()).thenThrow(new EndpointRetiredException("Prefill", retiredItem));
             } else {
-                org.mockito.Mockito.doAnswer(ignored -> {
-                    members.forEach(member -> member.future().complete(new Response()));
-                    return null;
-                }).when(transaction).handoff(
+                        org.mockito.Mockito.doAnswer(ignored -> {
+                            members.forEach(member -> member.future().complete(new Response()));
+                            return null;
+                        })
+                                .when(transaction)
+                                .handoff(
                         org.mockito.ArgumentMatchers.anyString(),
                         org.mockito.ArgumentMatchers.anyInt(),
                         org.mockito.ArgumentMatchers.any());
@@ -748,10 +748,9 @@ class WorkerBatcherSchedulingTest {
         }
 
         @Override
-        public Transaction prepare(
-                List<ScheduledRequest> candidates,
-                PrefillTimePredictor.Evaluator evaluator,
-                OptionalLong plannedPrediction) {
+        public DeliveryTransaction prepare(List<ScheduledRequest> candidates,
+                                           PrefillTimePredictor.Evaluator evaluator,
+                                           OptionalLong plannedPrediction) {
             int attempt = attempts.incrementAndGet();
             if (attempt == 1) {
                 firstAttempt.countDown();
@@ -775,10 +774,9 @@ class WorkerBatcherSchedulingTest {
         private final AtomicInteger attempts = new AtomicInteger();
 
         @Override
-        public Transaction prepare(
-                List<ScheduledRequest> candidates,
-                PrefillTimePredictor.Evaluator evaluator,
-                OptionalLong plannedPrediction) {
+        public DeliveryTransaction prepare(List<ScheduledRequest> candidates,
+                                           PrefillTimePredictor.Evaluator evaluator,
+                                           OptionalLong plannedPrediction) {
             if (attempts.incrementAndGet() == 1) {
                 firstPrepareEntered.countDown();
                 await(allowFirstPrepare);
@@ -805,10 +803,9 @@ class WorkerBatcherSchedulingTest {
         private final AtomicInteger prepareCalls = new AtomicInteger();
 
         @Override
-        public Transaction prepare(
-                List<ScheduledRequest> candidates,
-                PrefillTimePredictor.Evaluator evaluator,
-                OptionalLong plannedPrediction) {
+        public DeliveryTransaction prepare(List<ScheduledRequest> candidates,
+                                           PrefillTimePredictor.Evaluator evaluator,
+                                           OptionalLong plannedPrediction) {
             prepareCalls.incrementAndGet();
             return WorkerBatcherTestSupport.boundaryOnly(
                     candidates.getFirst(),

@@ -4,6 +4,7 @@ import org.flexlb.balance.delivery.BlockedRequest;
 import org.flexlb.balance.delivery.DeliveryBlockReason;
 import org.flexlb.balance.delivery.DeliveryMetrics;
 import org.flexlb.balance.delivery.DeliveryStrategy;
+import org.flexlb.balance.delivery.DeliveryTransaction;
 import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.endpoint.PrefillState;
@@ -208,9 +209,8 @@ final class StrategyTestSupport {
                         Mockito.anyList(), Mockito.any(), Mockito.any()))
                 .thenAnswer(invocation -> {
                     List<ScheduledRequest> candidates = invocation.getArgument(0);
-                    DeliveryStrategy.Transaction transaction =
-                            Mockito.mock(DeliveryStrategy.Transaction.class);
-                    Mockito.when(transaction.items()).thenReturn(List.of());
+            DeliveryTransaction transaction = Mockito.mock(DeliveryTransaction.class);
+            Mockito.when(transaction.items()).thenReturn(List.of());
                     Mockito.when(transaction.blocked())
                             .thenReturn(new BlockedRequest(candidates.getFirst(), PARKED_BOUNDARY));
                     return transaction;

@@ -4,6 +4,7 @@ import org.flexlb.balance.delivery.DeliveryBlockReason;
 import org.flexlb.balance.delivery.DeliveryMetrics;
 import org.flexlb.balance.delivery.DeliveryResult;
 import org.flexlb.balance.delivery.DeliveryStrategy;
+import org.flexlb.balance.delivery.DeliveryTransaction;
 import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.endpoint.PrefillState;
@@ -102,18 +103,16 @@ public final class DeliveryStrategyTestSupport {
     static final class TestContext {
 
         private boolean commit = true;
-        private DeliveryStrategy.Transaction preparedSelection;
+        private DeliveryTransaction preparedSelection;
         private TestBoundary committedBoundary;
         private TestBoundary emptyBoundary;
 
-        String deliver(
-                DeliveryStrategy strategy,
-                List<ScheduledRequest> candidates,
-                String decisionReason,
-                int remainingQueueDepth,
-                OptionalLong plannedPredictionMs) {
-            try (DeliveryStrategy.Transaction transaction = strategy.prepare(
-                    candidates, EVALUATOR, plannedPredictionMs)) {
+        String deliver(DeliveryStrategy strategy,
+                       List<ScheduledRequest> candidates,
+                       String decisionReason,
+                       int remainingQueueDepth,
+                       OptionalLong plannedPredictionMs) {
+            try (DeliveryTransaction transaction = strategy.prepare(candidates, EVALUATOR, plannedPredictionMs)) {
                 if (transaction.items().isEmpty()) {
                     emptyBoundary = new TestBoundary(
                             transaction.blocked().item(),
@@ -139,7 +138,7 @@ public final class DeliveryStrategyTestSupport {
             commit = value;
         }
 
-        DeliveryStrategy.Transaction preparedSelection() {
+        DeliveryTransaction preparedSelection() {
             return preparedSelection;
         }
 

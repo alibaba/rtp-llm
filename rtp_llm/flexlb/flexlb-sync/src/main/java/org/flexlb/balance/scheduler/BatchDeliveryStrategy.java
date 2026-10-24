@@ -5,6 +5,7 @@ import org.flexlb.balance.delivery.DeliveryBlockReason;
 import org.flexlb.balance.delivery.DeliveryMetrics;
 import org.flexlb.balance.delivery.DeliveryResult;
 import org.flexlb.balance.delivery.DeliveryStrategy;
+import org.flexlb.balance.delivery.DeliveryTransaction;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.endpoint.PrefillState;
 import org.flexlb.balance.prediction.PrefillBatchFeatures;
@@ -50,10 +51,9 @@ public final class BatchDeliveryStrategy implements DeliveryStrategy {
     }
 
     @Override
-    public Transaction prepare(
-            List<ScheduledRequest> candidates,
-            PrefillTimePredictor.Evaluator evaluator,
-            OptionalLong plannedPredictionMs) {
+    public DeliveryTransaction prepare(List<ScheduledRequest> candidates,
+                                       PrefillTimePredictor.Evaluator evaluator,
+                                       OptionalLong plannedPredictionMs) {
         if (candidates.isEmpty()) {
             throw new IllegalArgumentException(
                     "batch delivery requires at least one candidate");
@@ -352,7 +352,7 @@ public final class BatchDeliveryStrategy implements DeliveryStrategy {
     }
 
     /** One owner and one explicit state machine for the complete batch flow. */
-    static final class BatchTransaction implements Transaction {
+    static final class BatchTransaction implements DeliveryTransaction {
         private enum Phase {
             PREPARED,
             COMMITTED,
@@ -515,25 +515,23 @@ public final class BatchDeliveryStrategy implements DeliveryStrategy {
         }
 
         @Override
-        public synchronized void handoff(
-                String decisionReason, int remainingQueueDepth,
-                WorkSnapshot precedingWork) {
+        public synchronized void handoff(String decisionReason, int remainingQueueDepth, WorkSnapshot precedingWork) {
             requirePhase(Phase.COMMITTED, "submit delivery");
             phase = Phase.SUBMITTED;
             try {
                 // The strategy retains admission ownership while waiting for
                 // an executor. Request claims are acquired only when it runs.
-                submission.submit(sender -> deliver(
-                        decisionReason, remainingQueueDepth, precedingWork, sender));
+                submission.submit(sender -> deliver(decisionReason, remainingQueueDepth, precedingWork, sender));
             } catch (Throwable failure) {
                 failUnsentDelivery(failure);
                 throw propagate(failure);
             }
         }
 
-        private void deliver(
-                String decisionReason, int remainingQueueDepth,
-                WorkSnapshot precedingWork, BatchSender sender) {
+        private void deliver(String decisionReason,
+                                    int remainingQueueDepth,
+                                    WorkSnapshot precedingWork,
+                                    BatchSender sender) {
             requirePhase(Phase.SUBMITTED, "deliver");
             try {
                 owner.deliverCommitted(this, decisionReason, remainingQueueDepth,

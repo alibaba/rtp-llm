@@ -3,6 +3,7 @@ package org.flexlb.balance.scheduler;
 import org.flexlb.balance.delivery.BlockedRequest;
 import org.flexlb.balance.delivery.DeliveryBlockReason;
 import org.flexlb.balance.delivery.DeliveryStrategy;
+import org.flexlb.balance.delivery.DeliveryTransaction;
 import org.flexlb.balance.endpoint.DecodeEndpoint.DecodeRoutingView;
 import org.flexlb.balance.endpoint.PrefillActiveIndex;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
@@ -1234,18 +1235,15 @@ public final class WorkerBatcher {
 
     // ==================== Delivery ownership ====================
 
-    private BatcherCycleResult admitAndDeliverCapacityFeasiblePrefix(
-            List<ScheduledRequest> candidates,
-            String decisionReason,
-            PrefillTimePredictor.Evaluator evaluator,
-            OptionalLong plannedCommittedPredictionMs) {
+    private BatcherCycleResult admitAndDeliverCapacityFeasiblePrefix(List<ScheduledRequest> candidates,
+                                                                     String decisionReason,
+                                                                     PrefillTimePredictor.Evaluator evaluator,
+                                                                     OptionalLong plannedCommittedPredictionMs) {
         if (candidates.isEmpty() || !selectionStillOwned(candidates)) {
             return BatcherCycleResult.NO_ACTION;
         }
-        try (DeliveryStrategy.Transaction transaction =
-                deliveryStrategy.prepare(
-                        candidates, evaluator,
-                        plannedCommittedPredictionMs)) {
+        try (DeliveryTransaction transaction =
+                deliveryStrategy.prepare(candidates, evaluator, plannedCommittedPredictionMs)) {
             if (transaction.items().isEmpty()) {
                 return commitBoundary(transaction.blocked());
             }
@@ -1261,26 +1259,21 @@ public final class WorkerBatcher {
         }
     }
 
-    private void handoff(
-            DeliveryStrategy.Transaction transaction,
-            String decisionReason,
-            int remainingQueueDepth,
-            WorkSnapshot precedingWork) {
+    private void handoff(DeliveryTransaction transaction,
+                         String decisionReason,
+                         int remainingQueueDepth,
+                         WorkSnapshot precedingWork) {
         Throwable deliveryFailure = null;
         try {
             String groupId = java.util.UUID.randomUUID().toString();
             long committedAtMs = System.currentTimeMillis();
             for (ScheduledRequest item : transaction.items()) {
                 var context = item.ctx();
-                context.setDecisionGroup(new org.flexlb.dao.pv.DecisionGroup(
-                        groupId,
+                context.setDecisionGroup(new org.flexlb.dao.pv.DecisionGroup(groupId,
                         context.getConfig().decisionPolicy().getType().name(),
                         context.getConfig().getDispatcher().getType().name(),
-                        item.prefillEp().getStatus().getMetricIpPort(),
-                        transaction.items().size(),
-                        decisionReason,
-                        committedAtMs,
-                        Math.max(0L, committedAtMs - item.enqueuedAtMs())));
+                        item.prefillEp().getStatus().getMetricIpPort(), transaction.items().size(), decisionReason,
+                        committedAtMs, Math.max(0L, committedAtMs - item.enqueuedAtMs())));
             }
             transaction.handoff(decisionReason, remainingQueueDepth, precedingWork);
         } catch (Throwable failure) {
@@ -1336,8 +1329,7 @@ public final class WorkerBatcher {
         }
     }
 
-    private BatcherCycleResult commitPreparedSelection(DeliveryStrategy.Transaction transaction,
-                                                       String decisionReason) {
+    private BatcherCycleResult commitPreparedSelection(DeliveryTransaction transaction, String decisionReason) {
         List<ScheduledRequest> items = transaction.items();
         if (items.isEmpty()) {
             throw new IllegalStateException(

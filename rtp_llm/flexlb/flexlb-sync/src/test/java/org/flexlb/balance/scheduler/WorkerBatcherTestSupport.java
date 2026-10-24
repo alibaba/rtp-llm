@@ -2,7 +2,7 @@ package org.flexlb.balance.scheduler;
 
 import org.flexlb.balance.delivery.BlockedRequest;
 import org.flexlb.balance.delivery.DeliveryBlockReason;
-import org.flexlb.balance.delivery.DeliveryStrategy;
+import org.flexlb.balance.delivery.DeliveryTransaction;
 import org.flexlb.balance.projection.WorkSnapshot;
 
 import java.util.List;
@@ -12,10 +12,8 @@ final class WorkerBatcherTestSupport {
     private WorkerBatcherTestSupport() {
     }
 
-    static DeliveryStrategy.Transaction boundaryOnly(
-            ScheduledRequest item,
-            DeliveryBlockReason boundary) {
-        return new DeliveryStrategy.Transaction() {
+    static DeliveryTransaction boundaryOnly(ScheduledRequest item, DeliveryBlockReason boundary) {
+        return new DeliveryTransaction() {
             @Override
             public List<ScheduledRequest> items() {
                 return List.of();
@@ -33,9 +31,7 @@ final class WorkerBatcherTestSupport {
             }
 
             @Override
-            public void handoff(
-                    String decisionReason, int remainingQueueDepth,
-                    WorkSnapshot precedingWork) {
+            public void handoff(String decisionReason, int remainingQueueDepth, WorkSnapshot precedingWork) {
                 throw new IllegalStateException(
                         "boundary-only preparation cannot hand off");
             }

@@ -4,6 +4,7 @@ import org.flexlb.balance.delivery.BlockedRequest;
 import org.flexlb.balance.delivery.DeliveryBlockReason;
 import org.flexlb.balance.delivery.DeliveryResult;
 import org.flexlb.balance.delivery.DeliveryStrategy;
+import org.flexlb.balance.delivery.DeliveryTransaction;
 import org.flexlb.balance.projection.estimator.NonBatchTtftEstimator;
 import org.flexlb.balance.scheduler.PlacementAvailability;
 import org.flexlb.balance.scheduler.QueueCapacity;
@@ -130,8 +131,8 @@ class WorkerBatcherRequestCapacityTest {
             doAnswer(invocation -> {
                 List<ScheduledRequest> candidates = invocation.getArgument(0);
                 if (candidates.getFirst().requestId().equals("1")) {
-                    DeliveryStrategy.Transaction transaction = live.prepare(candidates,
-                            invocation.getArgument(1), invocation.getArgument(2));
+                    DeliveryTransaction transaction =
+                            live.prepare(candidates, invocation.getArgument(1), invocation.getArgument(2));
                     assertEquals(1, transaction.items().size());
                     prepared.countDown();
                     assertTrue(resume.await(5, TimeUnit.SECONDS));
@@ -343,7 +344,7 @@ class WorkerBatcherRequestCapacityTest {
             CountDownLatch failed = new CountDownLatch(1);
             doAnswer(invocation -> {
                 List<ScheduledRequest> candidates = invocation.getArgument(0);
-                DeliveryStrategy.Transaction transaction = mock(DeliveryStrategy.Transaction.class);
+                DeliveryTransaction transaction = mock(DeliveryTransaction.class);
                 when(transaction.items()).thenReturn(List.of());
                 when(transaction.blocked()).thenReturn(new BlockedRequest(
                         candidates.getFirst(),

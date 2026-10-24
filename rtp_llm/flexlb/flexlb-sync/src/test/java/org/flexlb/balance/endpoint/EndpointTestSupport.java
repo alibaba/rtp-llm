@@ -5,6 +5,7 @@ import org.flexlb.balance.delivery.DeliveryBlockReason;
 import org.flexlb.balance.delivery.DeliveryMetrics;
 import org.flexlb.balance.delivery.DeliveryResult;
 import org.flexlb.balance.delivery.DeliveryStrategy;
+import org.flexlb.balance.delivery.DeliveryTransaction;
 import org.flexlb.balance.projection.PrefillTtftEstimate;
 import org.flexlb.balance.projection.estimator.BatchTtftEstimator;
 import org.flexlb.balance.projection.estimator.NonBatchTtftEstimator;
@@ -184,11 +185,8 @@ public final class EndpointTestSupport {
                         org.mockito.Mockito.any()))
                 .thenAnswer(invocation -> {
                     List<ScheduledRequest> candidates = invocation.getArgument(0);
-                    DeliveryStrategy.Transaction transaction =
-                            org.mockito.Mockito.mock(
-                                    DeliveryStrategy.Transaction.class);
-                    org.mockito.Mockito.when(transaction.items())
-                            .thenReturn(List.of());
+                    DeliveryTransaction transaction = org.mockito.Mockito.mock(DeliveryTransaction.class);
+                    org.mockito.Mockito.when(transaction.items()).thenReturn(List.of());
                     org.mockito.Mockito.when(transaction.blocked())
                             .thenReturn(new BlockedRequest(candidates.getFirst(), PARKED_BOUNDARY));
                     return transaction;

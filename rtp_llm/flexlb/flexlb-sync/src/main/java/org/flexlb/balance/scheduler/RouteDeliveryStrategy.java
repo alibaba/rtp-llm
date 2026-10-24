@@ -4,6 +4,7 @@ import org.flexlb.balance.delivery.BlockedRequest;
 import org.flexlb.balance.delivery.DeliveryBlockReason;
 import org.flexlb.balance.delivery.DeliveryMetrics;
 import org.flexlb.balance.delivery.DeliveryStrategy;
+import org.flexlb.balance.delivery.DeliveryTransaction;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.endpoint.PrefillState;
 import org.flexlb.balance.prediction.PrefillPredictionBoundary;
@@ -38,10 +39,9 @@ public final class RouteDeliveryStrategy implements DeliveryStrategy {
     }
 
     @Override
-    public Transaction prepare(
-            List<ScheduledRequest> candidates,
-            PrefillTimePredictor.Evaluator evaluator,
-            OptionalLong plannedPredictionMs) {
+    public DeliveryTransaction prepare(List<ScheduledRequest> candidates,
+                                       PrefillTimePredictor.Evaluator evaluator,
+                                       OptionalLong plannedPredictionMs) {
         if (candidates.isEmpty()) {
             throw new IllegalArgumentException(
                     "route delivery requires at least one candidate");
@@ -97,11 +97,10 @@ public final class RouteDeliveryStrategy implements DeliveryStrategy {
         }
     }
 
-    private void deliver(
-            RouteTransaction transaction,
-            PrefillAdmissionResources.CommittedAdmissionOwner admission,
-            int remainingQueueDepth,
-            WorkSnapshot precedingWork) {
+    private void deliver(RouteTransaction transaction,
+                         PrefillAdmissionResources.CommittedAdmissionOwner admission,
+                         int remainingQueueDepth,
+                         WorkSnapshot precedingWork) {
         List<ScheduledRequest> items = transaction.items();
         Throwable deliveryFailure = null;
         List<ScheduledRequest> delivered = new ArrayList<>(items.size());
@@ -195,7 +194,7 @@ public final class RouteDeliveryStrategy implements DeliveryStrategy {
     }
 
     /** Ordered route callback payload and sole owner of its exact members. */
-    static final class RouteTransaction implements Transaction {
+    static final class RouteTransaction implements DeliveryTransaction {
         private final RouteDeliveryStrategy owner;
         private final PrefillEndpoint prefill;
         private List<ScheduledRequest> items = List.of();
@@ -310,7 +309,7 @@ public final class RouteDeliveryStrategy implements DeliveryStrategy {
                         "route admission reservation/member ownership diverged");
             }
             // Validate every item-owned capability before transferring any of
-            // them.  commitUnderLock runs under the endpoint queue lock, so an
+            // them.  commit runs under the endpoint queue lock, so an
             // ACTIVE terminal path cannot remove a validated item between this
             // pass and the transfer pass below.
             for (int index = 0; index < reservations.size(); index++) {
