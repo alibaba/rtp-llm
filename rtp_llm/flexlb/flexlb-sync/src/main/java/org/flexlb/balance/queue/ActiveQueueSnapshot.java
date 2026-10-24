@@ -1,4 +1,6 @@
-package org.flexlb.balance.scheduler;
+package org.flexlb.balance.queue;
+
+import org.flexlb.balance.scheduler.ScheduledRequest;
 
 import java.util.List;
 

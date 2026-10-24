@@ -1,9 +1,8 @@
-package org.flexlb.balance.scheduler;
+package org.flexlb.balance.queue;
 
 import org.flexlb.balance.delivery.DeliveryBlockReason;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.estimate.QueueView.AdmissionBlock;
-import org.flexlb.balance.queue.QueueState;
 
 /**
  * 记录队首请求因投递容量不足而交付不了，以及容量空出来时唤醒调度线程。

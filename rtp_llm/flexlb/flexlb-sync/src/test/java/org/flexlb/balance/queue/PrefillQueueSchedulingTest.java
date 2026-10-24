@@ -1,4 +1,4 @@
-package org.flexlb.balance.scheduler;
+package org.flexlb.balance.queue;
 
 import org.flexlb.balance.delivery.DeliveryBlockReason;
 import org.flexlb.balance.delivery.DeliveryGroup;
@@ -11,6 +11,11 @@ import org.flexlb.balance.estimate.PrefillTtftEstimate;
 import org.flexlb.balance.estimate.PrefillTtftEstimator;
 import org.flexlb.balance.planner.GroupPlanner;
 import org.flexlb.balance.prediction.PrefillTimePredictor;
+import org.flexlb.balance.scheduler.EndpointEventHandler;
+import org.flexlb.balance.scheduler.EndpointRetiredException;
+import org.flexlb.balance.scheduler.QueueCapacity;
+import org.flexlb.balance.scheduler.ScheduledRequest;
+import org.flexlb.balance.scheduler.SchedulingTestConfig;
 import org.flexlb.config.DecisionPolicyConfig;
 import org.flexlb.config.DispatcherConfig;
 import org.flexlb.config.FlexlbConfig;

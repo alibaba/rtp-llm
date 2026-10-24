@@ -1,8 +1,9 @@
-package org.flexlb.balance.scheduler;
+package org.flexlb.balance.queue;
 
 import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.endpoint.PrefillState;
-import org.flexlb.balance.queue.QueueState;
+import org.flexlb.balance.scheduler.QueueCapacity;
+import org.flexlb.balance.scheduler.ScheduledRequest;
 
 /**
  * 把一个还在排队的请求从队列里移除：释放它预留的 Prefill 资源，归还引擎排队名额，并上报它在队列里待了多久。

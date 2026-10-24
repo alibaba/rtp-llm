@@ -1,4 +1,4 @@
-package org.flexlb.balance.scheduler;
+package org.flexlb.balance.queue;
 
 import org.flexlb.balance.endpoint.PrefillState;
 

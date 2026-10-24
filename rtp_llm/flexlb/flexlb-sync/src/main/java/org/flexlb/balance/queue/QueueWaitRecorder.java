@@ -1,9 +1,8 @@
-package org.flexlb.balance.scheduler;
+package org.flexlb.balance.queue;
 
 import org.flexlb.balance.endpoint.DecodeEndpoint.DecodeRoutingView;
 import org.flexlb.balance.endpoint.PrefillState;
-import org.flexlb.balance.queue.QueueState;
-import org.flexlb.balance.queue.QueueWaitSnapshot;
+import org.flexlb.balance.scheduler.ScheduledRequest;
 import org.flexlb.util.PriorityNormalizer;
 
 import java.util.Map;

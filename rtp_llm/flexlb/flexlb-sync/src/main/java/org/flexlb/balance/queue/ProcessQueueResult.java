@@ -1,6 +1,7 @@
-package org.flexlb.balance.scheduler;
+package org.flexlb.balance.queue;
 
 import org.flexlb.balance.delivery.DeliveryBlockReason;
+import org.flexlb.balance.scheduler.ScheduledRequest;
 
 import java.util.Objects;
 

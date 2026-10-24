@@ -1,7 +1,6 @@
-package org.flexlb.balance.scheduler;
+package org.flexlb.balance.queue;
 
 import org.flexlb.balance.endpoint.PrefillEndpoint;
-import org.flexlb.balance.queue.QueueState;
 
 /**
  * 一台 Prefill 排队队列的调度线程主循环。

@@ -1,4 +1,4 @@
-package org.flexlb.balance.scheduler;
+package org.flexlb.balance.queue;
 
 /**
  * 每一轮从队列里选出要交付的请求并交给 {@link GroupCommitter} 交付。

@@ -1,8 +1,10 @@
-package org.flexlb.balance.scheduler;
+package org.flexlb.balance.queue;
 
 import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.endpoint.PrefillState;
-import org.flexlb.balance.queue.QueueState;
+import org.flexlb.balance.scheduler.EndpointEventHandler;
+import org.flexlb.balance.scheduler.QueueCapacity;
+import org.flexlb.balance.scheduler.ScheduledRequest;
 import org.flexlb.config.DispatcherConfig;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.config.VictimStage;

@@ -1,10 +1,9 @@
-package org.flexlb.balance.scheduler;
+package org.flexlb.balance.queue;
 
 import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.planner.GroupPlanner;
 import org.flexlb.balance.prediction.PrefillTimePredictor;
-import org.flexlb.balance.queue.BatchCapacityView;
-import org.flexlb.balance.queue.QueueState;
+import org.flexlb.balance.scheduler.ScheduledRequest;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.util.Logger;
 

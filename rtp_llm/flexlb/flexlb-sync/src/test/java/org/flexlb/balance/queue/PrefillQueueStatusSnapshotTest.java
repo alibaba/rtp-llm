@@ -1,9 +1,11 @@
-package org.flexlb.balance.scheduler;
+package org.flexlb.balance.queue;
 
 import org.flexlb.balance.delivery.DeliveryStrategy;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.estimate.PrefillTtftEstimator;
 import org.flexlb.balance.planner.GroupPlanner;
+import org.flexlb.balance.scheduler.EndpointEventHandler;
+import org.flexlb.balance.scheduler.QueueCapacity;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.master.WorkerStatusResponse;
