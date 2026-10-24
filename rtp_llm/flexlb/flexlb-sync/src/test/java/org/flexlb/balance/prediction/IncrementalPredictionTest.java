@@ -98,11 +98,11 @@ class IncrementalPredictionTest {
             items.sort(order);
             var queue = new QueueView(1000, order, new GroupPlanner.Constraints(64, 200_000, 300_000, 700, 700),
                     items, null);
-            var inputs = new PrefillTtftEstimate.Inputs(queue, new WorkView(1000, List.of(), List.of(), 0));
+            var inputs = new PrefillTtftEstimate.LoadView(queue, new WorkView(1000, List.of(), List.of(), 0));
             var probe = new PrefillTtftEstimate.Probe("999", trial % 5, 1000, 100_000,
                     1 + random.nextInt(32768), 0, 0);
-            assertEquals(PrefillTtftEstimate.project(inputs, probe, full, policy),
-                    PrefillTtftEstimate.project(inputs, probe, model, policy));
+            assertEquals(PrefillTtftEstimate.estimate(inputs, probe, full, policy),
+                    PrefillTtftEstimate.estimate(inputs, probe, model, policy));
         }
     }
 

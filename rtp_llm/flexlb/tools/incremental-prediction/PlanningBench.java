@@ -19,7 +19,7 @@ public class PlanningBench {
     static final Comparator<GroupPlanner.Item> ORDER = Comparator.comparingInt(GroupPlanner.Item::priority)
             .thenComparingLong(GroupPlanner.Item::enqueueSeq);
     static FormulaPredictor model;
-    static PrefillTtftEstimate.DeliveryProjection policy;
+    static PrefillTtftEstimate.TtftEstimationRule policy;
     static GroupPlanner.Constraints constraints(int size) {
         return new GroupPlanner.Constraints(size, 1_000_000, 2_000_000, 700, 700);
     }
@@ -69,9 +69,9 @@ public class PlanningBench {
             bench("select_" + size, () -> select(inputs.get(index[0]++ & 63), size));
         }
         for (int depth : new int[]{0, 32, 128, 512}) {
-            var endpoints = new ArrayList<PrefillTtftEstimate.Inputs>();
+            var endpoints = new ArrayList<PrefillTtftEstimate.LoadView>();
             for (int i = 0; i < 5; i++) {
-                endpoints.add(new PrefillTtftEstimate.Inputs(new QueueView(1000, true, ORDER,
+                endpoints.add(new PrefillTtftEstimate.LoadView(new QueueView(1000, true, ORDER,
                         constraints(64), items(depth, i), null),
                         new WorkView(1000, List.of(), List.of(), 0)));
             }
@@ -83,8 +83,8 @@ public class PlanningBench {
                 var probe = probes.get(index[0]++ & 63);
                 double total = 0;
                 for (var endpoint : endpoints) {
-                    var candidate = PrefillTtftEstimate.project(endpoint, probe, model, policy);
-                    total += candidate.requiredProjectedTtftMs();
+                    var candidate = PrefillTtftEstimate.estimate(endpoint, probe, model, policy);
+                    total += candidate.requiredEstimatedTtftMs();
                 }
                 return total;
             });

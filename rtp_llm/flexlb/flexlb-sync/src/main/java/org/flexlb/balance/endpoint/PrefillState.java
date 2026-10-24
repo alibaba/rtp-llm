@@ -496,7 +496,7 @@ public final class PrefillState {
         }
     }
 
-    /** Immutable leaves copied under the ownership lock; projection runs outside it. */
+    /** Immutable leaves copied under the ownership lock; load view is built outside it. */
     public static final class WorkCapture {
         private final long capturedAtMs;
         private final List<WorkView.RequestWork> requests;
@@ -512,7 +512,7 @@ public final class PrefillState {
             this.unknownRequestCount = unknownRequestCount;
         }
 
-        /** Shared lazy projection; callers never hold the endpoint ownership lock. */
+        /** Shared lazy load view; callers never hold the endpoint ownership lock. */
         public WorkView materialize() {
             WorkView snapshot = materialized;
             if (snapshot != null) {
@@ -587,7 +587,7 @@ public final class PrefillState {
     private Map<String, RequestEntry> requests = new HashMap<>();
     private final LongSupplier clock;
     private final Runnable capacityAvailable;
-    /** Monotonic ownership/work revision used by projection snapshots. */
+    /** Monotonic ownership/work revision used by load views. */
     private volatile long mutationVersion;
     /** Published at ownership mutation boundaries; admission still checks under the lock. */
     private volatile long outstandingRequestCount;
@@ -653,7 +653,7 @@ public final class PrefillState {
         return mutationVersion;
     }
 
-    /** Advisory revision read for the lock-free projection-cache fast path. */
+    /** Advisory revision read for the lock-free load-view cache fast path. */
     public long mutationVersion() {
         return mutationVersion;
     }
@@ -1251,7 +1251,7 @@ public final class PrefillState {
         }
         // The caller removes this entry or commits it before releasing the lock.
         // Keep its admission origin until then: removing queued-only work must
-        // not invalidate the immutable committed-work projection.
+        // not invalidate the immutable committed-work view.
     }
 
     /**
@@ -1281,7 +1281,7 @@ public final class PrefillState {
 
     /**
      * Reconcile ownership and publish its matching WorkerStatus before the
-     * canonical queue lock is released. Projection readers therefore observe
+     * canonical queue lock is released. Load view readers therefore observe
      * either the previous pair or the fully reduced new pair.
      */
     public StatusReconciliation reconcileWorkerStatus(

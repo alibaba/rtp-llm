@@ -130,7 +130,7 @@ class PrefillEndpointTest {
 
         assertEquals(1, endpoint.getInflightBatchCount());
         assertEquals(1,
-                endpoint.captureRouteProjectionInputs().work().batches().size());
+                endpoint.captureLoadView().work().batches().size());
         assertEquals(1, endpoint.observedRequestCount());
     }
 
@@ -142,7 +142,7 @@ class PrefillEndpointTest {
 
         assertEquals(0, endpoint.getInflightBatchCount());
         assertEquals(0,
-                endpoint.captureRouteProjectionInputs().work().batches().size());
+                endpoint.captureLoadView().work().batches().size());
     }
 
     @Test
@@ -158,13 +158,13 @@ class PrefillEndpointTest {
         assertEquals(1, endpoint.getLocallyOwnedRequestCount());
         assertEquals(1, endpoint.getInflightBatchCount());
         assertEquals(1, endpoint.observedRequestCount());
-        assertEquals(1, endpoint.captureRouteProjectionInputs().work().batches().size());
+        assertEquals(1, endpoint.captureLoadView().work().batches().size());
 
         assertTrue(endpoint.expireCommittedItem(sibling));
         assertFalse(endpoint.expireCommittedItem(sibling));
         assertEquals(0, endpoint.getLocallyOwnedRequestCount());
         assertEquals(0, endpoint.getInflightBatchCount());
-        assertEquals(0, endpoint.captureRouteProjectionInputs().work().batches().size());
+        assertEquals(0, endpoint.captureLoadView().work().batches().size());
         assertEquals(0, endpoint.observedRequestCount());
     }
 
@@ -208,9 +208,9 @@ class PrefillEndpointTest {
         assertTrue(expiration ? endpoint.expireCommittedItem(item2) : endpoint.releaseCommittedItem(item2));
         assertEquals(1, endpoint.getInflightBatchCount());
         assertEquals(1,
-                endpoint.captureRouteProjectionInputs().work().batches().size());
+                endpoint.captureLoadView().work().batches().size());
         assertEquals(1, endpoint.observedRequestCount());
-        WorkView remaining = endpoint.captureRouteProjectionInputs().work();
+        WorkView remaining = endpoint.captureLoadView().work();
         assertFalse(remaining.hasUnknownWork());
         assertEquals(100L, remaining.totalRemainingWorkMs().orElseThrow());
     }
@@ -223,7 +223,7 @@ class PrefillEndpointTest {
         assertTrue(endpoint.releaseCommittedItem(item1));
         assertEquals(0, endpoint.getInflightBatchCount());
         assertEquals(0,
-                endpoint.captureRouteProjectionInputs().work().batches().size());
+                endpoint.captureLoadView().work().batches().size());
     }
 
     @ParameterizedTest
@@ -245,7 +245,7 @@ class PrefillEndpointTest {
                     invalidPredictorEndpoint, 1L, 2L));
 
             WorkView snapshot = invalidPredictorEndpoint
-                    .captureRouteProjectionInputs().work();
+                    .captureLoadView().work();
             assertEquals(1, invalidPredictorEndpoint.observedRequestCount(),
                     "membership settlement must not depend on prediction");
             assertEquals(List.of("1"), snapshot.batches().getFirst().requestIds());
@@ -275,7 +275,7 @@ class PrefillEndpointTest {
         field.set(endpoint, failingPredictor);
 
         assertDoesNotThrow(() -> reportRejectedBatchMember(endpoint, 1L, 2L));
-        assertEquals(360L, endpoint.captureRouteProjectionInputs().work().totalRemainingWorkMs().orElseThrow());
+        assertEquals(360L, endpoint.captureLoadView().work().totalRemainingWorkMs().orElseThrow());
         assertEquals(1L, endpoint.observedRequestCount());
         assertTrue(endpoint.releaseCommittedItem(survivor));
         assertEquals(0L, endpoint.observedRequestCount());
@@ -292,7 +292,7 @@ class PrefillEndpointTest {
         org.mockito.Mockito.doReturn(hitCache).when(survivor).hitCache();
 
         assertDoesNotThrow(() -> reportRejectedBatchMember(endpoint, 1L, 2L));
-        assertEquals(expectedMs, endpoint.captureRouteProjectionInputs().work().totalRemainingWorkMs().orElseThrow());
+        assertEquals(expectedMs, endpoint.captureLoadView().work().totalRemainingWorkMs().orElseThrow());
         assertTrue(endpoint.releaseCommittedItem(survivor));
         assertEquals(0L, endpoint.observedRequestCount());
     }
@@ -642,14 +642,14 @@ class PrefillEndpointTest {
         registerDirect(endpoint, 101L, 100L);
         assertEquals(1, endpoint.getInflightBatchCount());
         assertEquals(1,
-                endpoint.captureRouteProjectionInputs().work().batches().size());
+                endpoint.captureLoadView().work().batches().size());
         assertEquals(1, endpoint.getIndividuallyTrackedRequestCount());
 
         calibrate(Map.of("101", priorityCanceledTask(101L, -1L)), Map.of());
 
         assertEquals(1, endpoint.getInflightBatchCount());
         assertEquals(1,
-                endpoint.captureRouteProjectionInputs().work().batches().size());
+                endpoint.captureLoadView().work().batches().size());
         assertEquals(0, endpoint.getIndividuallyTrackedRequestCount());
         assertEquals(1, endpoint.observedRequestCount());
 
@@ -661,7 +661,7 @@ class PrefillEndpointTest {
         assertEquals(0, endpoint.getInflightBatchCount(),
                 "the matching QUEUE batch id must survive until its own member finishes");
         assertEquals(0,
-                endpoint.captureRouteProjectionInputs().work().batches().size());
+                endpoint.captureLoadView().work().batches().size());
     }
 
     @Test
@@ -715,12 +715,12 @@ class PrefillEndpointTest {
 
         assertEquals(0, endpoint.getInflightBatchCount());
         assertEquals(0,
-                endpoint.captureRouteProjectionInputs().work().batches().size());
+                endpoint.captureLoadView().work().batches().size());
         assertEquals(0, endpoint.observedRequestCount());
 
         assertEquals(0, endpoint.getInflightBatchCount());
         assertEquals(0,
-                endpoint.captureRouteProjectionInputs().work().batches().size());
+                endpoint.captureLoadView().work().batches().size());
         assertEquals(0, endpoint.observedRequestCount());
     }
 
@@ -817,7 +817,7 @@ class PrefillEndpointTest {
         assertFalse(endpoint.expireCommittedItem(item));
         assertEquals(0, endpoint.getInflightBatchCount());
         assertEquals(0,
-                endpoint.captureRouteProjectionInputs().work().batches().size());
+                endpoint.captureLoadView().work().batches().size());
         assertEquals(0, endpoint.observedRequestCount());
     }
 
@@ -1052,8 +1052,8 @@ class PrefillEndpointTest {
 
         assertEquals(6, endpoint.observedRequestCount(),
                 "an unseen local shadow cannot prove identity with scalar Engine work");
-        assertTrue(endpoint.captureRouteProjectionInputs().work().hasUnknownWork());
-        assertTrue(endpoint.captureRouteProjectionInputs().work().totalRemainingWorkMs().isEmpty());
+        assertTrue(endpoint.captureLoadView().work().hasUnknownWork());
+        assertTrue(endpoint.captureLoadView().work().totalRemainingWorkMs().isEmpty());
     }
 
     @Test
@@ -1095,8 +1095,8 @@ class PrefillEndpointTest {
             ScheduledRequest active = createScheduledRequest(handoffEndpoint, 111L, 500L, 0L);
             assertTrue(EndpointTestSupport.offer(handoffEndpoint, active));
 
-            org.flexlb.balance.estimate.PrefillTtftEstimate.Inputs snapshot =
-                    handoffEndpoint.captureRouteProjectionInputs();
+            org.flexlb.balance.estimate.PrefillTtftEstimate.LoadView snapshot =
+                    handoffEndpoint.captureLoadView();
             assertEquals(1, snapshot.queue().activeItems().size());
             assertEquals("111",
                     snapshot.queue().activeItems().getFirst().requestId());
@@ -1121,7 +1121,7 @@ class PrefillEndpointTest {
             assertEquals(1L, handoffEndpoint.observedRequestCount());
             assertEquals(0, handoffEndpoint.queuedRequestCount());
             assertEquals(1,
-                    handoffEndpoint.captureRouteProjectionInputs()
+                    handoffEndpoint.captureLoadView()
                             .work().requests().size());
         } finally {
             handoffEndpoint.close();
@@ -1800,7 +1800,7 @@ class PrefillEndpointTest {
     private static WorkView.BatchWork onlyBatchWork(
             PrefillEndpoint target) {
         List<WorkView.BatchWork> batches =
-                target.captureRouteProjectionInputs().work().batches();
+                target.captureLoadView().work().batches();
         assertEquals(1, batches.size());
         return batches.get(0);
     }

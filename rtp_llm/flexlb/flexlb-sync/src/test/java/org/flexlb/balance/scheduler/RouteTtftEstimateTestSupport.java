@@ -13,7 +13,7 @@ import java.util.Comparator;
 import java.util.List;
 
 /** Frozen-value builders shared by canonical route-projection tests. */
-final class RouteProjectionTestSupport {
+final class RouteTtftEstimateTestSupport {
 
     static final long NOW_MS = 10_000L;
 
@@ -26,9 +26,9 @@ final class RouteProjectionTestSupport {
                     .thenComparingLong(GroupPlanner.Item::enqueueSeq)
                     .thenComparing(GroupPlanner.Item::requestId);
 
-    static final PrefillTtftEstimate.DeliveryProjection ROUTE =
+    static final PrefillTtftEstimate.TtftEstimationRule ROUTE =
             new NonBatchTtftEstimator().ttftEstimationRule();
-    static final PrefillTtftEstimate.DeliveryProjection BATCH =
+    static final PrefillTtftEstimate.TtftEstimationRule BATCH =
             new BatchTtftEstimator().ttftEstimationRule();
 
     static final PrefillTimePredictor.Evaluator TOKEN_EVALUATOR =
@@ -51,7 +51,7 @@ final class RouteProjectionTestSupport {
                 }
             };
 
-    private RouteProjectionTestSupport() {
+    private RouteTtftEstimateTestSupport() {
     }
 
     static GroupPlanner.Constraints constraints(
@@ -150,17 +150,17 @@ final class RouteProjectionTestSupport {
                 NOW_MS, requests, batches, unknownRequestCount);
     }
 
-    static PrefillTtftEstimate.Candidate project(
+    static PrefillTtftEstimate.Candidate estimate(
             QueueView queue,
             WorkView work,
             PrefillTimePredictor.Evaluator evaluator,
             PrefillTtftEstimate.Probe probe,
-            PrefillTtftEstimate.DeliveryProjection deliveryProjection) {
-        return PrefillTtftEstimate.project(
-                new PrefillTtftEstimate.Inputs(
+            PrefillTtftEstimate.TtftEstimationRule ttftEstimationRule) {
+        return PrefillTtftEstimate.estimate(
+                new PrefillTtftEstimate.LoadView(
                         queue, work),
                 probe,
                 evaluator,
-                deliveryProjection);
+                ttftEstimationRule);
     }
 }

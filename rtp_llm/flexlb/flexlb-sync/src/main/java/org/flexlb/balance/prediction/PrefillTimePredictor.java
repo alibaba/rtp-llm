@@ -18,7 +18,7 @@ public interface PrefillTimePredictor {
          *
          * <p>Independent endpoint predictors may return the same object only
          * when their predictions are guaranteed identical for equal inputs.
-         * Projection uses this identity to reuse an equal singleton prediction
+         * Estimate uses this identity to reuse an equal singleton prediction
          * while it still evaluates every endpoint's queue and cache state.
          */
         default Object snapshotIdentity() {

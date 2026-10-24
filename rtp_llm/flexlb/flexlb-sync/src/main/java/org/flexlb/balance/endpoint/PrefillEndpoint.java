@@ -119,14 +119,14 @@ public class PrefillEndpoint extends WorkerEndpoint {
         runtime.start();
     }
 
-    /** Capture the canonical queue/work inputs for one pure route projection. */
-    public PrefillTtftEstimate.Inputs captureRouteProjectionInputs() {
-        return runtime.captureRouteProjectionInputs();
+    /** Capture the canonical queue/work inputs for one pure route estimate. */
+    public PrefillTtftEstimate.LoadView captureLoadView() {
+        return runtime.captureLoadView();
     }
 
     /** Stable delivery semantics selected once for this endpoint generation. */
-    public PrefillTtftEstimate.DeliveryProjection deliveryProjection() {
-        return runtime.deliveryProjection();
+    public PrefillTtftEstimate.TtftEstimationRule ttftEstimationRule() {
+        return runtime.ttftEstimationRule();
     }
 
     /** Publish one exact route after validating its generation pin. */
@@ -470,7 +470,7 @@ public class PrefillEndpoint extends WorkerEndpoint {
                 logger.warn("Prefill status committed but completion reporting failed: engine={}",
                         getIp(), reportingFailure);
             } catch (Throwable ignoredLoggingFailure) {
-                // Status facts must still reach the exact scheduler projection.
+                // Status facts must still reach the exact scheduler estimate.
             }
         }
     }

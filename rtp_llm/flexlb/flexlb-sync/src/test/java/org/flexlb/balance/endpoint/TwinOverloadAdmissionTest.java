@@ -136,10 +136,10 @@ class TwinOverloadAdmissionTest {
         PrefillEndpoint endpoint = prefill(config);
         applyStatus(endpoint, tasks(101L, 8, 70L, TaskPhase.RUNNING), Map.of());
         assertEquals(8, endpoint.observedRequestCount());
-        assertTrue(endpoint.captureRouteProjectionInputs().work().totalRemainingWorkMs().isEmpty());
+        assertTrue(endpoint.captureLoadView().work().totalRemainingWorkMs().isEmpty());
         applyStatus(endpoint, Map.of(), tasks(101L, 8, 70L, TaskPhase.RUNNING));
         assertEquals(0, endpoint.observedRequestCount());
-        assertEquals(0L, endpoint.captureRouteProjectionInputs().work().totalRemainingWorkMs().orElseThrow());
+        assertEquals(0L, endpoint.captureLoadView().work().totalRemainingWorkMs().orElseThrow());
     }
 
     @Test

@@ -498,7 +498,7 @@ class PrefillQueueRequestCapacityTest {
                 prepared.countDown();
                 return fixture.parked.prepare(invocation.getArgument(0));
             }).when(fixture.delivery).prepare(any());
-            assertEquals(2, fixture.endpoint.captureRouteProjectionInputs().queue().constraints().maxRequests());
+            assertEquals(2, fixture.endpoint.captureLoadView().queue().constraints().maxRequests());
             assertTrue(EndpointTestSupport.offer(fixture.endpoint, item(config, fixture.endpoint, 1L)));
             assertFalse(prepared.await(100L, TimeUnit.MILLISECONDS));
             assertTrue(EndpointTestSupport.offer(fixture.endpoint, item(config, fixture.endpoint, 2L)));

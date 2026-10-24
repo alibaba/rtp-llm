@@ -12,24 +12,24 @@ import java.util.List;
 import java.util.OptionalLong;
 import java.util.concurrent.atomic.AtomicInteger;
 
-import static org.flexlb.balance.scheduler.RouteProjectionTestSupport.BATCH;
-import static org.flexlb.balance.scheduler.RouteProjectionTestSupport.NOW_MS;
-import static org.flexlb.balance.scheduler.RouteProjectionTestSupport.ROUTE;
-import static org.flexlb.balance.scheduler.RouteProjectionTestSupport.TOKEN_EVALUATOR;
-import static org.flexlb.balance.scheduler.RouteProjectionTestSupport.constraints;
-import static org.flexlb.balance.scheduler.RouteProjectionTestSupport.item;
-import static org.flexlb.balance.scheduler.RouteProjectionTestSupport.noCommittedWork;
-import static org.flexlb.balance.scheduler.RouteProjectionTestSupport.probe;
-import static org.flexlb.balance.scheduler.RouteProjectionTestSupport.project;
-import static org.flexlb.balance.scheduler.RouteProjectionTestSupport.queue;
-import static org.flexlb.balance.scheduler.RouteProjectionTestSupport.work;
+import static org.flexlb.balance.scheduler.RouteTtftEstimateTestSupport.BATCH;
+import static org.flexlb.balance.scheduler.RouteTtftEstimateTestSupport.NOW_MS;
+import static org.flexlb.balance.scheduler.RouteTtftEstimateTestSupport.ROUTE;
+import static org.flexlb.balance.scheduler.RouteTtftEstimateTestSupport.TOKEN_EVALUATOR;
+import static org.flexlb.balance.scheduler.RouteTtftEstimateTestSupport.constraints;
+import static org.flexlb.balance.scheduler.RouteTtftEstimateTestSupport.estimate;
+import static org.flexlb.balance.scheduler.RouteTtftEstimateTestSupport.item;
+import static org.flexlb.balance.scheduler.RouteTtftEstimateTestSupport.noCommittedWork;
+import static org.flexlb.balance.scheduler.RouteTtftEstimateTestSupport.probe;
+import static org.flexlb.balance.scheduler.RouteTtftEstimateTestSupport.queue;
+import static org.flexlb.balance.scheduler.RouteTtftEstimateTestSupport.work;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /** Canonical frozen-snapshot route timeline and candidate contract. */
-class RouteProjectionTest {
+class RouteTtftEstimateTest {
 
     @Test
     void disabledExecutionBudgetDoesNotConstructAnUnusedPrefixPredictor() {
@@ -51,8 +51,8 @@ class RouteProjectionTest {
         };
         QueueView snapshot = queue(false, constraints(2, 0L), List.of(
                 item(1L, 50, 1L, 10L), item(2L, 50, 2L, 10L), item(3L, 50, 3L, 10L)));
-        for (PrefillTtftEstimate.DeliveryProjection delivery : List.of(BATCH, ROUTE)) {
-            assertModeled(project(snapshot, noCommittedWork(), evaluator,
+        for (PrefillTtftEstimate.TtftEstimationRule delivery : List.of(BATCH, ROUTE)) {
+            assertModeled(estimate(snapshot, noCommittedWork(), evaluator,
                     probe(99L, 50, 20L, 0L), delivery), 50L);
         }
     }
@@ -74,8 +74,8 @@ class RouteProjectionTest {
                 }
                 var limits = new GroupPlanner.Constraints(
                         3, Long.MAX_VALUE, Long.MAX_VALUE, budget, 0L);
-                for (PrefillTtftEstimate.DeliveryProjection delivery : List.of(BATCH, ROUTE)) {
-                    var result = project(queue(true, limits, active), noCommittedWork(),
+                for (PrefillTtftEstimate.TtftEstimationRule delivery : List.of(BATCH, ROUTE)) {
+                    var result = estimate(queue(true, limits, active), noCommittedWork(),
                             TOKEN_EVALUATOR, probe(99L, 101 - 2 * position, 7L, 0L), delivery);
                     assertModeled(result, precedingMs + 7L);
                 }
@@ -94,8 +94,8 @@ class RouteProjectionTest {
                 item(6L, 90, 6L, 600L, NOW_MS + 10L),
                 item(7L, 80, 7L, 50L),
                 item(8L, 60, 8L, 700L, NOW_MS + 5L)));
-        for (PrefillTtftEstimate.DeliveryProjection delivery : List.of(BATCH, ROUTE)) {
-            assertModeled(project(snapshot, noCommittedWork(), TOKEN_EVALUATOR,
+        for (PrefillTtftEstimate.TtftEstimationRule delivery : List.of(BATCH, ROUTE)) {
+            assertModeled(estimate(snapshot, noCommittedWork(), TOKEN_EVALUATOR,
                     probe(99L, 70, 80L, 0L), delivery), 159L);
         }
     }
@@ -107,7 +107,7 @@ class RouteProjectionTest {
                         "1", WorkView.Phase.ENGINE_RUNNING, 100L)),
                 List.of(), 0L);
 
-        PrefillTtftEstimate.Candidate result = project(
+        PrefillTtftEstimate.Candidate result = estimate(
                 queue(false, constraints(4, 30L), List.of()),
                 committed,
                 TOKEN_EVALUATOR,
@@ -120,7 +120,7 @@ class RouteProjectionTest {
 
     @Test
     void singleRequestGroupNeverPaysCollectionWindow() {
-        PrefillTtftEstimate.Candidate result = project(
+        PrefillTtftEstimate.Candidate result = estimate(
                 queue(false, constraints(1, 30L), List.of()),
                 noCommittedWork(),
                 TOKEN_EVALUATOR,
@@ -136,7 +136,7 @@ class RouteProjectionTest {
                 item(1L, 50, 1L, 10L),
                 item(2L, 50, 2L, 10L));
 
-        PrefillTtftEstimate.Candidate result = project(
+        PrefillTtftEstimate.Candidate result = estimate(
                 queue(false, constraints(2, 30L), active),
                 noCommittedWork(),
                 TOKEN_EVALUATOR,
@@ -161,7 +161,7 @@ class RouteProjectionTest {
                         WorkView.Phase.ENGINE_RUNNING, 40L)),
                 0L);
 
-        PrefillTtftEstimate.Candidate result = project(queue(false, constraints(1, 0L), List.of()), committed,
+        PrefillTtftEstimate.Candidate result = estimate(queue(false, constraints(1, 0L), List.of()), committed,
                 TOKEN_EVALUATOR, probe(99L, 50, 20L, 0L), ROUTE);
 
         assertModeled(result, 120L);
@@ -174,7 +174,7 @@ class RouteProjectionTest {
                 NOW_MS + 1L, List.of(), List.of(), 0L);
 
         assertThrows(IllegalArgumentException.class,
-                () -> new PrefillTtftEstimate.Inputs(queue, later));
+                () -> new PrefillTtftEstimate.LoadView(queue, later));
     }
 
     @Test
@@ -185,10 +185,10 @@ class RouteProjectionTest {
         PrefillTtftEstimate.Probe probe = probe(
                 99L, 90, 20L, 0L);
 
-        PrefillTtftEstimate.Candidate fifo = project(
+        PrefillTtftEstimate.Candidate fifo = estimate(
                 queue(false, constraints(2, 0L), active),
                 noCommittedWork(), TOKEN_EVALUATOR, probe, BATCH);
-        PrefillTtftEstimate.Candidate priority = project(
+        PrefillTtftEstimate.Candidate priority = estimate(
                 queue(true, constraints(2, 0L), active),
                 noCommittedWork(), TOKEN_EVALUATOR, probe, BATCH);
 
@@ -206,7 +206,7 @@ class RouteProjectionTest {
                 item(1L, 100, 1L, 10L),
                 item(2L, 10, 2L, 100L));
 
-        PrefillTtftEstimate.Candidate result = project(
+        PrefillTtftEstimate.Candidate result = estimate(
                 queue(true, constraints(3, 0L), active),
                 noCommittedWork(), TOKEN_EVALUATOR,
                 probe(99L, 90, 20L, 0L),
@@ -221,7 +221,7 @@ class RouteProjectionTest {
                 item(1L, 100, 1L, 10L),
                 item(2L, 10, 2L, 100L));
 
-        PrefillTtftEstimate.Candidate result = project(
+        PrefillTtftEstimate.Candidate result = estimate(
                 queue(true, constraints(3, 0L), active),
                 noCommittedWork(), TOKEN_EVALUATOR,
                 probe(99L, 90, 20L, 0L),
@@ -239,21 +239,21 @@ class RouteProjectionTest {
                 "100", 50, NOW_MS, Long.MAX_VALUE,
                 1_000L, 800L, 900L);
 
-        PrefillTtftEstimate.Candidate cold = project(
+        PrefillTtftEstimate.Candidate cold = estimate(
                 queue(false, constraints(1, 0L), List.of()),
                 noCommittedWork(), TOKEN_EVALUATOR,
                 coldProbe, ROUTE);
-        PrefillTtftEstimate.Candidate warm = project(
+        PrefillTtftEstimate.Candidate warm = estimate(
                 queue(false, constraints(1, 0L), List.of()),
                 noCommittedWork(), TOKEN_EVALUATOR,
                 warmProbe, ROUTE);
 
         assertEquals(1_000L, cold.incomingPrefillMs());
-        assertEquals(OptionalLong.of(1_000L), cold.projectedTtftMs());
+        assertEquals(OptionalLong.of(1_000L), cold.estimatedTtftMs());
         assertEquals(0L, cold.cacheHitTokens());
         assertEquals(123L, cold.routingCacheMatchTokens());
         assertEquals(440L, warm.incomingPrefillMs());
-        assertEquals(OptionalLong.of(440L), warm.projectedTtftMs());
+        assertEquals(OptionalLong.of(440L), warm.estimatedTtftMs());
         assertEquals(800L, warm.cacheHitTokens());
         assertEquals(900L, warm.routingCacheMatchTokens());
     }
@@ -266,7 +266,7 @@ class RouteProjectionTest {
                         .mapToLong(PrefillBatchFeatures.Item::seqLen)
                         .sum());
 
-        PrefillTtftEstimate.Candidate result = project(
+        PrefillTtftEstimate.Candidate result = estimate(
                 queue(true, constraints(1, 0L), List.of()),
                 noCommittedWork(), invalid,
                 probe(99L, 50, 20L, 0L),
@@ -286,7 +286,7 @@ class RouteProjectionTest {
                     (tokens, hits) -> tokens,
                     ignored -> invalidValue);
 
-            PrefillTtftEstimate.Candidate result = project(
+            PrefillTtftEstimate.Candidate result = estimate(
                     queue(true, constraints(1, 0L), List.of()),
                     noCommittedWork(), invalid,
                     probe(99L, 50, 20L, 0L),
@@ -305,7 +305,7 @@ class RouteProjectionTest {
                 (tokens, hits) -> tokens,
                 ignored -> Double.NaN);
 
-        PrefillTtftEstimate.Candidate result = project(
+        PrefillTtftEstimate.Candidate result = estimate(
                 queue(true, predictionBounded, List.of()),
                 noCommittedWork(), invalid,
                 probe(99L, 50, 20L, 0L),
@@ -316,7 +316,7 @@ class RouteProjectionTest {
 
     @Test
     void unknownRequestWorkIsIgnoredWhileKnownAndQueuedWorkContributeToTtft() {
-        PrefillTtftEstimate.Candidate candidate = project(
+        PrefillTtftEstimate.Candidate candidate = estimate(
                 queue(true, constraints(1, 0L), List.of(item(2L, 50, 1L, 40L))),
                 work(List.of(new WorkView.RequestWork(
                         "1", WorkView.Phase.ENGINE_QUEUED, 30L)), List.of(), 1L),
@@ -340,7 +340,7 @@ class RouteProjectionTest {
                         OptionalLong.empty())),
                 0L);
 
-        PrefillTtftEstimate.Candidate result = project(
+        PrefillTtftEstimate.Candidate result = estimate(
                 queue(true, constraints(1, 0L), List.of()),
                 unknown, TOKEN_EVALUATOR,
                 probe(99L, 50, 20L, 0L),
@@ -351,7 +351,7 @@ class RouteProjectionTest {
 
     @Test
     void nonPositiveExistingExpiryIsTerminalAndDoesNotBlockProbe() {
-        PrefillTtftEstimate.Candidate result = project(
+        PrefillTtftEstimate.Candidate result = estimate(
                 queue(false, constraints(1, 0L), List.of(
                         item(1L, 50, 1L, 100L, 0L))),
                 noCommittedWork(), TOKEN_EVALUATOR,
@@ -365,7 +365,7 @@ class RouteProjectionTest {
 
     @Test
     void probeExpiringExactlyAtCollectionDeadlineIsNotDispatched() {
-        PrefillTtftEstimate.Candidate result = project(
+        PrefillTtftEstimate.Candidate result = estimate(
                 queue(false, constraints(4, 30L), List.of()),
                 noCommittedWork(), TOKEN_EVALUATOR,
                 probe(99L, 50, NOW_MS, NOW_MS + 30L,
@@ -379,7 +379,7 @@ class RouteProjectionTest {
 
     @Test
     void existingMemberExpiringInsideWindowIsRemovedBeforeService() {
-        PrefillTtftEstimate.Candidate result = project(
+        PrefillTtftEstimate.Candidate result = estimate(
                 queue(false, constraints(4, 30L), List.of(
                         item(1L, 50, 1L, 10L, NOW_MS + 10L))),
                 noCommittedWork(), TOKEN_EVALUATOR,
@@ -403,8 +403,8 @@ class RouteProjectionTest {
                 item(7L, 50, 7L, 50L),
                 item(8L, 50, 8L, 700L, NOW_MS + 5L)));
 
-        for (PrefillTtftEstimate.DeliveryProjection delivery : List.of(BATCH, ROUTE)) {
-            PrefillTtftEstimate.Candidate result = project(
+        for (PrefillTtftEstimate.TtftEstimationRule delivery : List.of(BATCH, ROUTE)) {
+            PrefillTtftEstimate.Candidate result = estimate(
                     snapshot, noCommittedWork(), TOKEN_EVALUATOR,
                     probe(99L, 50, 80L, 0L), delivery);
 
@@ -421,12 +421,12 @@ class RouteProjectionTest {
         GroupPlanner.Constraints strict = new GroupPlanner.Constraints(
                 1, 100L, 1_000_000L, 0L, 0L);
 
-        PrefillTtftEstimate.Candidate afterInvalidHead = project(
+        PrefillTtftEstimate.Candidate afterInvalidHead = estimate(
                 queue(false, strict, List.of(item(1L, 50, 1L, 100L))),
                 noCommittedWork(), TOKEN_EVALUATOR,
                 probe(99L, 50, 20L, 0L),
                 ROUTE);
-        PrefillTtftEstimate.Candidate invalidProbe = project(
+        PrefillTtftEstimate.Candidate invalidProbe = estimate(
                 queue(false, strict, List.of()),
                 noCommittedWork(), TOKEN_EVALUATOR,
                 probe(100L, 50, 100L, 0L),
@@ -440,7 +440,7 @@ class RouteProjectionTest {
 
     @Test
     void projectionNeverTouchesRouteSuffixAfterProbeCompletion() {
-        PrefillTtftEstimate.Candidate result = project(
+        PrefillTtftEstimate.Candidate result = estimate(
                 queue(true, constraints(3, 0L), List.of(
                         item(1L, 100, 1L, 10L),
                         item(2L, 10, 2L, 999L))),
@@ -449,13 +449,13 @@ class RouteProjectionTest {
                 ROUTE);
 
         assertEquals(PrefillTtftEstimate.Candidate.State.MODELED, result.state());
-        assertEquals(OptionalLong.of(30L), result.projectedTtftMs());
+        assertEquals(OptionalLong.of(30L), result.estimatedTtftMs());
         assertEquals("SERIAL_FROZEN_QUEUE", result.detail());
     }
 
     @Test
     void projectionNeverTouchesLaterBatchGroup() {
-        PrefillTtftEstimate.Candidate result = project(
+        PrefillTtftEstimate.Candidate result = estimate(
                 queue(true, constraints(1, 0L), List.of(
                         item(1L, 10, 1L, 999L))),
                 noCommittedWork(), suffixFailingBatchEvaluator(),
@@ -463,7 +463,7 @@ class RouteProjectionTest {
                 BATCH);
 
         assertEquals(PrefillTtftEstimate.Candidate.State.MODELED, result.state());
-        assertEquals(OptionalLong.of(20L), result.projectedTtftMs());
+        assertEquals(OptionalLong.of(20L), result.estimatedTtftMs());
     }
 
     @Test
@@ -477,7 +477,7 @@ class RouteProjectionTest {
                 true, splitByComputeShape, List.of(expiringSuffix));
         PrefillTtftEstimate.Probe probe = probe(
                 99L, 90, NOW_MS - 30L, Long.MAX_VALUE, 20L, 0L);
-        PrefillTtftEstimate.Candidate result = project(
+        PrefillTtftEstimate.Candidate result = estimate(
                 snapshot, noCommittedWork(), TOKEN_EVALUATOR, probe, ROUTE);
 
         assertModeled(result, 20L);
@@ -488,7 +488,7 @@ class RouteProjectionTest {
         GroupPlanner.Constraints kvLimited = new GroupPlanner.Constraints(
                 1, 1_000_000L, 50L, 0L, 30L);
 
-        PrefillTtftEstimate.Candidate result = project(
+        PrefillTtftEstimate.Candidate result = estimate(
                 queue(true, kvLimited, List.of(
                         item(1L, 10, 1L, 100L))),
                 noCommittedWork(), TOKEN_EVALUATOR,
@@ -496,20 +496,20 @@ class RouteProjectionTest {
                 ROUTE);
 
         assertEquals(PrefillTtftEstimate.Candidate.State.MODELED, result.state());
-        assertEquals(OptionalLong.of(20L), result.projectedTtftMs());
+        assertEquals(OptionalLong.of(20L), result.estimatedTtftMs());
         assertEquals(PrefillTtftEstimate.Candidate.InitialHeadDisposition.AFTER_PROBE,
                 result.initialHeadDisposition());
     }
 
     @Test
     void duplicateIncomingIdentityIsRejectedAtActiveAndCommittedBoundaries() {
-        PrefillTtftEstimate.Candidate active = project(
+        PrefillTtftEstimate.Candidate active = estimate(
                 queue(false, constraints(1, 0L), List.of(
                         item(99L, 50, 1L, 20L))),
                 noCommittedWork(), TOKEN_EVALUATOR,
                 probe(99L, 50, 20L, 0L),
                 ROUTE);
-        PrefillTtftEstimate.Candidate committed = project(
+        PrefillTtftEstimate.Candidate committed = estimate(
                 queue(false, constraints(1, 0L), List.of()),
                 work(List.of(new WorkView.RequestWork(
                                 "99",
@@ -543,7 +543,7 @@ class RouteProjectionTest {
                             .sum();
                 });
 
-        PrefillTtftEstimate.Candidate result = project(
+        PrefillTtftEstimate.Candidate result = estimate(
                 queue(false,
                         new GroupPlanner.Constraints(
                                 1, 1_000_000L, 1_000_000L,
@@ -553,7 +553,7 @@ class RouteProjectionTest {
                 probe(99L, 50, 20L, 0L),
                 BATCH);
 
-        assertEquals(OptionalLong.of(20L), result.projectedTtftMs());
+        assertEquals(OptionalLong.of(20L), result.estimatedTtftMs());
         assertEquals(1, singleCalls.get());
         assertEquals(1, batchCalls.get(),
                 "singleton projection evaluates one frozen predictor exactly once");
@@ -577,9 +577,9 @@ class RouteProjectionTest {
         PrefillTtftEstimate.Probe probe = probe(
                 100L, 50, 20L, 0L);
 
-        assertTrue(project(empty, noCommittedWork(), first, probe, BATCH)
+        assertTrue(estimate(empty, noCommittedWork(), first, probe, BATCH)
                 .selectable());
-        assertTrue(project(empty, noCommittedWork(), second, probe, BATCH)
+        assertTrue(estimate(empty, noCommittedWork(), second, probe, BATCH)
                 .selectable());
         assertEquals(1, singleCalls.get());
         assertEquals(1, batchCalls.get());
@@ -615,14 +615,14 @@ class RouteProjectionTest {
             PrefillTtftEstimate.Candidate result,
             long ttftMs) {
         assertEquals(PrefillTtftEstimate.Candidate.State.MODELED, result.state());
-        assertEquals(OptionalLong.of(ttftMs), result.projectedTtftMs());
+        assertEquals(OptionalLong.of(ttftMs), result.estimatedTtftMs());
         assertTrue(result.selectable());
     }
 
     private static void assertInvalidPrediction(PrefillTtftEstimate.Candidate result) {
         assertEquals(PrefillTtftEstimate.Candidate.State.UNAVAILABLE, result.state());
         assertEquals("PREDICTOR_RETURNED_INVALID_VALUE", result.detail());
-        assertEquals(OptionalLong.empty(), result.projectedTtftMs());
+        assertEquals(OptionalLong.empty(), result.estimatedTtftMs());
         assertFalse(result.selectable());
     }
 

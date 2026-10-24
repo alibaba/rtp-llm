@@ -99,9 +99,9 @@ public final class PrefillQueue {
 
         private static BatcherCycleResult capacityBlocked(ScheduledRequest item, DeliveryBlockReason unavailable) {
             return new BatcherCycleResult(false, Objects.requireNonNull(item, "item"), unavailable, 0L, 0L, 0L,
-                    unavailable.projectionSemantics() == null
+                    unavailable.estimateSemantics() == null
                             ? "Prefill delivery capacity exhausted"
-                            : unavailable.projectionSemantics().blockedDetail());
+                            : unavailable.estimateSemantics().blockedDetail());
         }
 
         private static BatcherCycleResult awaitingSchedulingChange(
@@ -146,11 +146,11 @@ public final class PrefillQueue {
     public static final Comparator<ScheduledRequest> FIFO_QUEUE_ORDER =
             Comparator.comparingLong(ScheduledRequest::enqueueSeq);
 
-    private static final Comparator<GroupPlanner.Item> PRIORITY_PROJECTION_ORDER =
+    private static final Comparator<GroupPlanner.Item> PRIORITY_ESTIMATE_ORDER =
             (left, right) -> PriorityOrdering.compareWithRequestId(
                     left.priority(), left.enqueueSeq(), left.requestId(),
                     right.priority(), right.enqueueSeq(), right.requestId());
-    private static final Comparator<GroupPlanner.Item> FIFO_PROJECTION_ORDER =
+    private static final Comparator<GroupPlanner.Item> FIFO_ESTIMATE_ORDER =
             Comparator.comparingLong(GroupPlanner.Item::enqueueSeq)
                     .thenComparing(GroupPlanner.Item::requestId);
     private static final GroupPlanner.ItemAccess<ScheduledRequest>
@@ -180,7 +180,7 @@ public final class PrefillQueue {
     private final DeliveryStrategy deliveryStrategy;
     private final PrefillTtftEstimator ttftEstimator;
     private final PrefillActiveIndex activeIndex;
-    private final Comparator<GroupPlanner.Item> projectionOrder;
+    private final Comparator<GroupPlanner.Item> estimateOrder;
     /**
      * Monotonic queue mutation generation, bumped on enqueue, removal,
      * delivery and drain. It is exposed in diagnostic snapshots.
@@ -188,18 +188,18 @@ public final class PrefillQueue {
     private final AtomicLong queueVersion = new AtomicLong();
     /**
      * Generation of non-queue scheduling inputs: worker status, prediction and
-     * delivery-capacity blocks. Invalidates both decisions and route projections.
+     * delivery-capacity blocks. Invalidates both decisions and route estimates.
      * Writes hold queueLock; volatile supports the lock-free cache check.
      * Updated only through schedulingInputsChangedUnderLock().
      */
     private volatile long schedulingInputVersion;
     /**
-     * Immutable projection inputs reused while this endpoint's queue and
+     * Immutable load view reused while this endpoint's queue and
      * scheduling inputs are unchanged. Route decisions still evaluate every
      * live endpoint, but do not rebuild identical queue snapshots for each
      * request in the global planner.
      */
-    private volatile ProjectionSource projectionSource;
+    private volatile LoadViewCache loadViewCache;
     /**
      * Guards queue mutations and exact ownership publication.
      *
@@ -271,9 +271,9 @@ public final class PrefillQueue {
         this.ttftEstimator = ttftEstimator;
         Comparator<ScheduledRequest> queueOrder = priorityOrdering
                 ? PRIORITY_QUEUE_ORDER : FIFO_QUEUE_ORDER;
-        this.projectionOrder =
+        this.estimateOrder =
                 priorityOrdering
-                        ? PRIORITY_PROJECTION_ORDER : FIFO_PROJECTION_ORDER;
+                        ? PRIORITY_ESTIMATE_ORDER : FIFO_ESTIMATE_ORDER;
         this.activeIndex = PrefillActiveIndex.ordered(INITIAL_QUEUE_ALLOCATION, queueOrder);
         this.prefillState = new PrefillState(queueLock, activeIndex, capacityAvailableSignal);
         this.normalStopFailure = new CancellationException(
@@ -532,8 +532,8 @@ public final class PrefillQueue {
         return prefillState;
     }
 
-    /** Immutable delivery semantics used by a pure route projection. */
-    public PrefillTtftEstimate.DeliveryProjection deliveryProjection() {
+    /** Immutable delivery semantics used by a pure route estimate. */
+    public PrefillTtftEstimate.TtftEstimationRule ttftEstimationRule() {
         return ttftEstimator.ttftEstimationRule();
     }
 
@@ -559,7 +559,7 @@ public final class PrefillQueue {
         return new AdmissionBlock(
                 blocked.request().requestId(),
                 blocked.request().enqueueSeq(),
-                blocked.unavailable().projectionSemantics());
+                blocked.unavailable().estimateSemantics());
     }
 
     public Throwable stopAndAwait() {
@@ -878,7 +878,7 @@ public final class PrefillQueue {
         }
     }
 
-    // ==================== Queue ownership and projection ====================
+    // ==================== Queue ownership and load view ====================
 
     private int maxDecisionRequests() {
         return fixedWindowDecision == null ? 1 : fixedWindowDecision.resolveMaxRequests();
@@ -1035,7 +1035,7 @@ public final class PrefillQueue {
         }
     }
 
-    private record ProjectionVersion(
+    private record LoadViewVersion(
             long queue,
             long schedulingInputs,
             long ownership,
@@ -1043,14 +1043,14 @@ public final class PrefillQueue {
     }
 
     /** Captured under queueLock; the shared result is built without that lock. */
-    private final class ProjectionSource {
-        private final ProjectionVersion version;
+    private final class LoadViewCache {
+        private final LoadViewVersion version;
         private PrefillState.Snapshot ownership;
         private final GroupPlanner.Constraints constraints;
         private final AdmissionBlock admissionBlock;
-        private volatile PrefillTtftEstimate.Inputs materialized;
+        private volatile PrefillTtftEstimate.LoadView materialized;
 
-        private ProjectionSource(ProjectionVersion version, PrefillState.Snapshot ownership,
+        private LoadViewCache(LoadViewVersion version, PrefillState.Snapshot ownership,
                                  GroupPlanner.Constraints constraints, AdmissionBlock admissionBlock) {
             this.version = version;
             this.ownership = ownership;
@@ -1058,18 +1058,18 @@ public final class PrefillQueue {
             this.admissionBlock = admissionBlock;
         }
 
-        private PrefillTtftEstimate.Inputs materialize() {
-            PrefillTtftEstimate.Inputs result = materialized;
+        private PrefillTtftEstimate.LoadView materialize() {
+            PrefillTtftEstimate.LoadView result = materialized;
             if (result != null) {
                 return result;
             }
             synchronized (this) {
                 if (materialized == null) {
                     var queueSnapshot = new org.flexlb.balance.estimate.QueueView(ownership.capturedAtMs(),
-                            projectionOrder, constraints, ownership.active().projectedItems(), admissionBlock);
-                    materialized = new PrefillTtftEstimate.Inputs(
+                            estimateOrder, constraints, ownership.active().plannerItems(), admissionBlock);
+                    materialized = new PrefillTtftEstimate.LoadView(
                             queueSnapshot, ownership.work().materialize(), version.ownership());
-                    // The cached projection must not retain completed request contexts.
+                    // The cached estimate must not retain completed request contexts.
                     ownership = null;
                 }
                 return materialized;
@@ -1077,15 +1077,15 @@ public final class PrefillQueue {
         }
     }
 
-    public PrefillTtftEstimate.Inputs captureRouteProjectionInputs() {
-        ProjectionSource source = projectionSource;
-        if (source == null || !isCurrentProjection(source.version)) {
+    public PrefillTtftEstimate.LoadView captureLoadView() {
+        LoadViewCache source = loadViewCache;
+        if (source == null || !isLoadViewCurrent(source.version)) {
             queueLock.lock();
             try {
-                source = projectionSource;
-                if (source == null || !isCurrentProjection(source.version)) {
-                    source = captureProjectionSourceUnderLock();
-                    projectionSource = source;
+                source = loadViewCache;
+                if (source == null || !isLoadViewCurrent(source.version)) {
+                    source = captureLoadViewCacheUnderLock();
+                    loadViewCache = source;
                 }
             } finally {
                 queueLock.unlock();
@@ -1096,7 +1096,7 @@ public final class PrefillQueue {
         return source.materialize();
     }
 
-    private boolean isCurrentProjection(ProjectionVersion version) {
+    private boolean isLoadViewCurrent(LoadViewVersion version) {
         return version.queue() == queueVersion.get()
                 && version.schedulingInputs() == schedulingInputVersion
                 && version.ownership() == prefillState.mutationVersion()
@@ -1104,14 +1104,14 @@ public final class PrefillQueue {
     }
 
     /** Caller holds queueLock. */
-    private ProjectionSource captureProjectionSourceUnderLock() {
+    private LoadViewCache captureLoadViewCacheUnderLock() {
         long fixedWaitMs = collectionWindowMs();
-        ProjectionVersion version = new ProjectionVersion(
+        LoadViewVersion version = new LoadViewVersion(
                 queueVersion.get(), schedulingInputVersion,
                 prefillState.mutationVersionUnderLock(), fixedWaitMs);
         BatchCapacitySnapshot capacity = batchCapacitySnapshot();
         PrefillState.Snapshot ownership = prefillState.snapshotUnderLock();
-        return new ProjectionSource(
+        return new LoadViewCache(
                 version, ownership,
                 new GroupPlanner.Constraints(
                         maxDecisionRequests(), capacity.batchTokenCapacity(),
@@ -1894,7 +1894,7 @@ public final class PrefillQueue {
         prefillEndpoint.signalPlacementCapacityChanged();
     }
 
-    /** Own the blocked head, its listener and projection invalidation under queueLock. */
+    /** Own the blocked head, its listener and estimate invalidation under queueLock. */
     private void setCapacityBlockedHeadUnderLock(
             BatcherCycleResult blocked) {
         if (!queueLock.isHeldByCurrentThread()) {
@@ -1925,7 +1925,7 @@ public final class PrefillQueue {
 
     /**
      * Record an input change independently of waking a thread. The generation
-     * rejects cached and unfinished projections as well as stale decision waits.
+     * rejects cached and unfinished estimates as well as stale decision waits.
      */
     private void schedulingInputsChangedUnderLock() {
         if (!queueLock.isHeldByCurrentThread()) {

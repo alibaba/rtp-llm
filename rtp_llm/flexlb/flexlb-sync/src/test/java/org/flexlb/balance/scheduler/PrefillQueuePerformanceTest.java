@@ -151,7 +151,7 @@ class PrefillQueuePerformanceTest {
             PrefillQueue runtime = runtimeWithDepth(depth);
             try {
                 for (int warmup = 0; warmup < 100; warmup++) {
-                    assertEquals(depth, runtime.captureRouteProjectionInputs()
+                    assertEquals(depth, runtime.captureLoadView()
                             .queue().activeItems().size());
                 }
 
@@ -166,8 +166,8 @@ class PrefillQueuePerformanceTest {
                     for (int operation = 0;
                          operation < operations;
                          operation++) {
-                        PrefillTtftEstimate.Inputs inputs =
-                                runtime.captureRouteProjectionInputs();
+                        PrefillTtftEstimate.LoadView inputs =
+                                runtime.captureLoadView();
                         checksum += inputs.queue().activeItems().size();
                         checksum += inputs.ownershipVersion();
                     }
@@ -336,8 +336,8 @@ class PrefillQueuePerformanceTest {
         }
 
         @Override
-        public PrefillTtftEstimate.DeliveryProjection ttftEstimationRule() {
-            return mock(PrefillTtftEstimate.DeliveryProjection.class);
+        public PrefillTtftEstimate.TtftEstimationRule ttftEstimationRule() {
+            return mock(PrefillTtftEstimate.TtftEstimationRule.class);
         }
 
     }

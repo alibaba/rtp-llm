@@ -28,7 +28,7 @@ import static org.flexlb.balance.scheduler.PrefillAdmissionResources.rejectedPre
 import static org.flexlb.balance.scheduler.PrefillAdmissionResources.rollbackMember;
 import static org.flexlb.balance.scheduler.PrefillAdmissionResources.rollbackReservation;
 
-/** EnqueueBatch admission, ownership, transport, telemetry, and projection. */
+/** EnqueueBatch admission, ownership, transport, telemetry, and estimate. */
 public final class BatchDeliveryStrategy implements DeliveryStrategy {
 
     private final Supplier<DeliveryBlockReason.Attempt<PreparedSubmission>>

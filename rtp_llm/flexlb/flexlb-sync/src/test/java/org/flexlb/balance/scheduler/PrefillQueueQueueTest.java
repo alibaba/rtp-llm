@@ -158,14 +158,14 @@ class PrefillQueueQueueTest {
     @Test
     void activeQueueMutationsReuseImmutableCommittedWork() {
         PrefillQueue runtime = runningRuntime();
-        var before = runtime.captureRouteProjectionInputs();
+        var before = runtime.captureLoadView();
         ScheduledRequest queued = item(905L, 50, Long.MAX_VALUE, 1L, 128L);
         assertEquals(ACCEPTED, runtime.offerWithResult(queued));
-        var after = runtime.captureRouteProjectionInputs();
+        var after = runtime.captureLoadView();
         assertTrue(after.ownershipVersion() > before.ownershipVersion());
         assertSame(before.work(), after.work());
         assertTrue(runtime.removeQueued(queued, "test cleanup"));
-        assertSame(before.work(), runtime.captureRouteProjectionInputs().work());
+        assertSame(before.work(), runtime.captureLoadView().work());
     }
 
     @Test
@@ -285,8 +285,8 @@ class PrefillQueueQueueTest {
         }
 
         @Override
-        public PrefillTtftEstimate.DeliveryProjection ttftEstimationRule() {
-            return mock(PrefillTtftEstimate.DeliveryProjection.class);
+        public PrefillTtftEstimate.TtftEstimationRule ttftEstimationRule() {
+            return mock(PrefillTtftEstimate.TtftEstimationRule.class);
         }
     }
 }

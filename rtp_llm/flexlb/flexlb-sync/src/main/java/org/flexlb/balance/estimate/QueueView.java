@@ -7,7 +7,7 @@ import java.util.List;
 import java.util.Objects;
 
 /**
- * Immutable scheduling inputs captured for a route-time what-if projection.
+ * Immutable scheduling inputs captured for a route-time what-if estimate.
  *
  * <p>The active items are already in production queue order. This object is
  * materialized from the canonical ownership registry at one linearization

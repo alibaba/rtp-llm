@@ -95,19 +95,19 @@ class PrefillActiveIndexTest {
                 var capture = i % 2 == 0 ? old : current;
                 tasks.add(pool.submit(() -> {
                     assertTrue(start.await(5, TimeUnit.SECONDS));
-                    return capture.projectedItems();
+                    return capture.plannerItems();
                 }));
             }
             start.countDown();
             for (int i = 0; i < tasks.size(); i++) {
-                assertSame((i % 2 == 0 ? old : current).projectedItems(),
+                assertSame((i % 2 == 0 ? old : current).plannerItems(),
                         tasks.get(i).get(5, TimeUnit.SECONDS));
             }
         }
-        assertSame(old.projectedItems().getFirst(), current.projectedItems().getFirst());
+        assertSame(old.plannerItems().getFirst(), current.plannerItems().getFirst());
         verify(first, times(1)).seqLen();
         assertThrows(UnsupportedOperationException.class, () -> current.items().clear());
-        assertThrows(UnsupportedOperationException.class, () -> current.projectedItems().clear());
+        assertThrows(UnsupportedOperationException.class, () -> current.plannerItems().clear());
     }
 
     @Test
@@ -119,9 +119,9 @@ class PrefillActiveIndexTest {
         index.add(first);
         index.add(second);
         var captured = index.capture();
-        assertThrows(IllegalStateException.class, captured::projectedItems);
-        assertEquals(2, captured.projectedItems().size());
-        assertSame(captured.projectedItems(), captured.projectedItems());
+        assertThrows(IllegalStateException.class, captured::plannerItems);
+        assertEquals(2, captured.plannerItems().size());
+        assertSame(captured.plannerItems(), captured.plannerItems());
         verify(first, times(1)).seqLen();
     }
 

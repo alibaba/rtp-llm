@@ -130,7 +130,7 @@ class PdfusionSchedulingTest {
             PrefillEndpoint endpoint = (PrefillEndpoint) endpoints.get(
                     RoleType.PDFUSION, worker.getLogicalIpPort());
             assertEquals(1, endpoint.observedRequestCount());
-            var committedWork = endpoint.captureRouteProjectionInputs().work();
+            var committedWork = endpoint.captureLoadView().work();
             assertTrue(committedWork.containsRequest(Long.toString(requestId)));
             TaskInfo finished = new TaskInfo();
             finished.setRequestId(Long.toString(requestId));
@@ -153,7 +153,7 @@ class PdfusionSchedulingTest {
             assertEquals(0, endpoint.getInflightBatchCount());
             assertTrue(committedWork.containsRequest(Long.toString(requestId)),
                     "published snapshots stay immutable");
-            assertTrue(!endpoint.captureRouteProjectionInputs().work()
+            assertTrue(!endpoint.captureLoadView().work()
                     .containsRequest(Long.toString(requestId)));
             assertEquals(RequestState.Phase.COMPLETED, lifecycle.getRequestState(Long.toString(requestId), 0L).state());
             assertEquals(0, lifecycle.trackedRequestCount());

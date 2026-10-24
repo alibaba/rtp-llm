@@ -12,7 +12,7 @@ import java.util.OptionalLong;
  * {@link #unknownRequestCount()}. A committed batch whose repack prediction is
  * unavailable retains its request identities and carries an empty
  * {@link BatchWork#remainingWorkMs()}. Neither form of unknown work may be
- * converted into fabricated milliseconds by a load projection.
+ * converted into fabricated milliseconds by a load estimate.
  */
 public final class WorkView {
 
@@ -110,7 +110,7 @@ public final class WorkView {
         return unknownRequestCount;
     }
 
-    /** Lifecycle phase visible to a projection. Only ENGINE_RUNNING consumes time. */
+    /** Lifecycle phase visible to a estimate. Only ENGINE_RUNNING consumes time. */
     public enum Phase {
         COMMITTED,
         ENGINE_QUEUED,

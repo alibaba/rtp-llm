@@ -14,9 +14,9 @@ used only to access that lock during fixture setup and controlled mutations.
 Cases cover 10/100 endpoints, 32/1024 active requests, 1/64 planner threads, and
 maxRequests=1024 with a 700 ms prediction budget. Each round changes scheduling
 inputs or removes/reinserts one member per endpoint, then runs concurrent scans.
-Each scan includes `captureRouteProjectionInputs`; projection cases also run the
+Each scan includes `captureLoadView`; estimate cases also run the
 actual formula and route timeline. Capture-only scans repeat eight times per
-invalidation; projection scans repeat twice. Membership never changes midway
+invalidation; estimate scans repeat twice. Membership never changes midway
 through a scan, so checksums are deterministic. Concurrent mutation correctness
 is covered separately by the scheduler and endpoint tests.
 
@@ -29,7 +29,7 @@ GC/JIT CPU is excluded. Bytes/op includes both planners and coordinator. Pool
 submission and coordination overhead is included in wall time. This is a local
 algorithm benchmark, not an online CPU-utilization or TTFT forecast.
 
-`ProjectionDifferential` independently compares complete selected memberships,
+`EstimateDifferential` independently compares complete selected memberships,
 raw predictions, readiness plans, and candidate records in 2,000 seeded cases,
 including priority/FIFO, collection expiry, overflow-scale tokens, probe positions,
 committed work, and both delivery policies. The runner verifies identical hashes.

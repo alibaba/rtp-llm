@@ -13,16 +13,16 @@ import java.util.List;
  */
 public final class NonBatchTtftEstimator implements PrefillTtftEstimator {
 
-    private static final PrefillTtftEstimate.DeliveryProjection PROJECTION =
-            new RouteProjectionPolicy();
+    private static final PrefillTtftEstimate.TtftEstimationRule ESTIMATION_RULE =
+            new NonBatchTtftEstimationRule();
 
     @Override
     public GroupPlanner.PrefixPrediction<ScheduledRequest> newGroupPredictor(
             PrefillTimePredictor.Evaluator evaluator) {
-        return (added, items) -> projectGroupDurationMs(items, evaluator);
+        return (added, items) -> estimateGroupDurationMs(items, evaluator);
     }
 
-    private static double projectGroupDurationMs(
+    private static double estimateGroupDurationMs(
             List<ScheduledRequest> items,
             PrefillTimePredictor.Evaluator evaluator) {
         double totalMs = 0.0;
@@ -34,12 +34,12 @@ public final class NonBatchTtftEstimator implements PrefillTtftEstimator {
     }
 
     @Override
-    public PrefillTtftEstimate.DeliveryProjection ttftEstimationRule() {
-        return PROJECTION;
+    public PrefillTtftEstimate.TtftEstimationRule ttftEstimationRule() {
+        return ESTIMATION_RULE;
     }
 
-    private static final class RouteProjectionPolicy
-            implements PrefillTtftEstimate.DeliveryProjection {
+    private static final class NonBatchTtftEstimationRule
+            implements PrefillTtftEstimate.TtftEstimationRule {
 
         private static final ThreadLocal<RoutePlanning> PLANNING =
                 ThreadLocal.withInitial(RoutePlanning::new);

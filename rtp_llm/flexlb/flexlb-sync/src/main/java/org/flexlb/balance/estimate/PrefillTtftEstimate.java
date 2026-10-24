@@ -20,10 +20,10 @@ public final class PrefillTtftEstimate {
     }
 
     /**
-     * Pure immutable delivery projection SPI. Implementations live with the
-     * delivery strategy, while projection owns the input and result vocabulary.
+     * Pure immutable TTFT estimation rule SPI. Implementations live with the
+     * delivery strategy, while this class owns the input and result vocabulary.
      */
-    public interface DeliveryProjection {
+    public interface TtftEstimationRule {
 
         /** Exact service completion for an otherwise empty endpoint queue. */
         long singletonCompletionOffsetMs(
@@ -138,11 +138,11 @@ public final class PrefillTtftEstimate {
         }
     }
 
-    /** Read-only projection result. Invocation-scoped views must not be retained. */
+    /** Read-only estimate result. Invocation-scoped views must not be retained. */
     public interface CandidateView {
         Candidate.State state();
 
-        long projectedTtftMsValue();
+        long estimatedTtftMsValue();
 
         long incomingPrefillMs();
 
@@ -162,14 +162,14 @@ public final class PrefillTtftEstimate {
 
         default boolean selectable() {
             return state() == Candidate.State.MODELED
-                    && projectedTtftMsValue() != Candidate.UNKNOWN;
+                    && estimatedTtftMsValue() != Candidate.UNKNOWN;
         }
     }
 
-    /** Complete immutable projection used outside the full-fleet hot path. */
+    /** Complete immutable estimate used outside the full-fleet hot path. */
     public record Candidate(
             State state,
-            long projectedTtftMsValue,
+            long estimatedTtftMsValue,
             long incomingPrefillMs,
             InitialHeadDisposition initialHeadDisposition,
             String detail,
@@ -180,11 +180,11 @@ public final class PrefillTtftEstimate {
         public static final long UNKNOWN = -1L;
 
         public Candidate {
-            requireKnownOrUnknown(projectedTtftMsValue, "projectedTtftMs");
+            requireKnownOrUnknown(estimatedTtftMsValue, "estimatedTtftMs");
             if ((state == State.MODELED)
-                    != (projectedTtftMsValue != UNKNOWN)) {
+                    != (estimatedTtftMsValue != UNKNOWN)) {
                 throw new IllegalArgumentException(
-                        "only MODELED projections may carry a projected TTFT");
+                        "only MODELED estimates may carry a estimated TTFT");
             }
             if (incomingPrefillMs < 0L) {
                 throw new IllegalArgumentException(
@@ -203,16 +203,16 @@ public final class PrefillTtftEstimate {
             }
         }
 
-        public OptionalLong projectedTtftMs() {
-            return optional(projectedTtftMsValue);
+        public OptionalLong estimatedTtftMs() {
+            return optional(estimatedTtftMsValue);
         }
 
-        public long requiredProjectedTtftMs() {
-            if (projectedTtftMsValue == UNKNOWN) {
+        public long requiredEstimatedTtftMs() {
+            if (estimatedTtftMsValue == UNKNOWN) {
                 throw new IllegalStateException(
-                        "candidate projected TTFT is unknown");
+                        "candidate estimated TTFT is unknown");
             }
-            return projectedTtftMsValue;
+            return estimatedTtftMsValue;
         }
 
         public boolean engineWorkUnmodeled() {
@@ -221,7 +221,7 @@ public final class PrefillTtftEstimate {
 
         public boolean selectable() {
             return state == State.MODELED
-                    && projectedTtftMsValue != UNKNOWN;
+                    && estimatedTtftMsValue != UNKNOWN;
         }
 
         private static void requireKnownOrUnknown(long value, String name) {
@@ -251,20 +251,20 @@ public final class PrefillTtftEstimate {
     }
 
     /** Queue and committed work captured under one ownership lock. */
-    public record Inputs(
+    public record LoadView(
             QueueView queue,
             WorkView work,
             long ownershipVersion) {
 
-        public Inputs(
+        public LoadView(
                 QueueView queue,
                 WorkView work) {
             this(queue, work, 0L);
         }
 
-        public Inputs {
+        public LoadView {
             // Committed work may reuse an older clock base while its ownership
-            // is unchanged. The projector rebases running duration to queue time.
+            // is unchanged. The timelineEstimator rebases running duration to queue time.
             if (queue.capturedAtMs() < work.capturedAtMs()) {
                 throw new IllegalArgumentException(
                         "work snapshot cannot be newer than its queue capture");
@@ -276,35 +276,35 @@ public final class PrefillTtftEstimate {
         }
     }
 
-    public static Candidate project(
-            Inputs inputs,
+    public static Candidate estimate(
+            LoadView inputs,
             Probe probe,
             PrefillTimePredictor.Evaluator evaluator,
-            DeliveryProjection deliveryProjection) {
-        return project(inputs, probe, evaluator, deliveryProjection,
+            TtftEstimationRule ttftEstimationRule) {
+        return estimate(inputs, probe, evaluator, ttftEstimationRule,
                 inputs.queue().capturedAtMs());
     }
 
-    public static Candidate project(
-            Inputs inputs,
+    public static Candidate estimate(
+            LoadView inputs,
             Probe probe,
             PrefillTimePredictor.Evaluator evaluator,
-            DeliveryProjection deliveryProjection,
+            TtftEstimationRule ttftEstimationRule,
             long planningAtMs) {
-        CandidateView view = projectView(
+        CandidateView view = estimateView(
                 inputs, probe.requestId(), probe.priority(),
                 probe.enqueuedAtMs(), probe.expiresAtMs(), probe.seqLen(),
                 probe.hitCache(), probe.routingCacheMatchTokens(),
-                evaluator, deliveryProjection, planningAtMs);
+                evaluator, ttftEstimationRule, planningAtMs);
         return immutable(view);
     }
 
     /**
-     * Allocation-free full-fleet projection. The returned view is overwritten
-     * by the next projection on the same thread and must be copied immediately.
+     * Allocation-free full-fleet estimate. The returned view is overwritten
+     * by the next estimate on the same thread and must be copied immediately.
      */
-    public static CandidateView projectView(
-            Inputs inputs,
+    public static CandidateView estimateView(
+            LoadView inputs,
             String requestId,
             int priority,
             long enqueuedAtMs,
@@ -313,27 +313,27 @@ public final class PrefillTtftEstimate {
             long hitCache,
             long routingCacheMatchTokens,
             PrefillTimePredictor.Evaluator evaluator,
-            DeliveryProjection deliveryProjection,
+            TtftEstimationRule ttftEstimationRule,
             long planningAtMs) {
-        return session().projectView(
+        return session().estimateView(
                 inputs, requestId, priority, enqueuedAtMs, expiresAtMs,
                 seqLen, hitCache, routingCacheMatchTokens,
-                evaluator, deliveryProjection, planningAtMs);
+                evaluator, ttftEstimationRule, planningAtMs);
     }
 
-    /** Reusable projector owned by one planner thread for one fleet traversal. */
+    /** Reusable timelineEstimator owned by one planner thread for one fleet traversal. */
     public static Session session() {
         return SESSIONS.get();
     }
 
     public static final class Session {
-        private final QueueTimelineEstimator projector =
+        private final QueueTimelineEstimator timelineEstimator =
                 new QueueTimelineEstimator();
 
         private Session() {
         }
 
-        public CandidateView projectView(Inputs inputs,
+        public CandidateView estimateView(LoadView inputs,
                                          String requestId,
                                          int priority,
                                          long enqueuedAtMs,
@@ -342,19 +342,19 @@ public final class PrefillTtftEstimate {
                                          long hitCache,
                                          long routingCacheMatchTokens,
                                          PrefillTimePredictor.Evaluator evaluator,
-                                         DeliveryProjection deliveryProjection,
+                                         TtftEstimationRule ttftEstimationRule,
                                          long planningAtMs) {
-            CandidateView candidate = projectViewForSelection(
+            CandidateView candidate = estimateViewForSelection(
                     inputs, requestId, priority, enqueuedAtMs, expiresAtMs,
                     seqLen, hitCache, routingCacheMatchTokens,
-                    evaluator, deliveryProjection, planningAtMs);
+                    evaluator, ttftEstimationRule, planningAtMs);
             return applyAdmissionPolicy(inputs.queue(), candidate);
         }
 
         /**
-         * Projects endpoint work while leaving observed capacity waits to the delivery step.
+         * Estimates endpoint work while leaving observed capacity waits to the delivery step.
          */
-        public CandidateView projectViewForSelection(Inputs inputs,
+        public CandidateView estimateViewForSelection(LoadView inputs,
                                                      String requestId,
                                                      int priority,
                                                      long enqueuedAtMs,
@@ -363,13 +363,13 @@ public final class PrefillTtftEstimate {
                                                      long hitCache,
                                                      long routingCacheMatchTokens,
                                                      PrefillTimePredictor.Evaluator evaluator,
-                                                     DeliveryProjection deliveryProjection,
+                                                     TtftEstimationRule ttftEstimationRule,
                                                      long planningAtMs) {
-            projector.reset(requestId, priority, enqueuedAtMs, expiresAtMs,
+            timelineEstimator.reset(requestId, priority, enqueuedAtMs, expiresAtMs,
                     seqLen, hitCache, routingCacheMatchTokens);
-            return projector.project(
+            return timelineEstimator.estimate(
                     inputs.queue(), inputs.work(), evaluator,
-                    deliveryProjection, planningAtMs);
+                    ttftEstimationRule, planningAtMs);
         }
     }
 
@@ -398,7 +398,7 @@ public final class PrefillTtftEstimate {
                     observation.semantics().blockedDetail(),
                     blockerRole(observation.semantics()));
             case NONE -> throw new IllegalStateException(
-                    "admission-blocked ACTIVE head was not projected");
+                    "admission-blocked ACTIVE head was not estimated");
             case AFTER_PROBE -> applyAfterProbeAdmission(
                     observation.semantics(), candidate);
         };
@@ -433,12 +433,12 @@ public final class PrefillTtftEstimate {
     private static Candidate copyAdmissionResult(
             CandidateView source,
             Candidate.State state,
-            long projectedTtftMs,
+            long estimatedTtftMs,
             String detail,
             RoleType blockerRole) {
         return new Candidate(
                 state,
-                projectedTtftMs,
+                estimatedTtftMs,
                 source.incomingPrefillMs(),
                 source.initialHeadDisposition(),
                 detail,
@@ -452,7 +452,7 @@ public final class PrefillTtftEstimate {
                 ? candidate
                 : new Candidate(
                         source.state(),
-                        source.projectedTtftMsValue(),
+                        source.estimatedTtftMsValue(),
                         source.incomingPrefillMs(),
                         source.initialHeadDisposition(),
                         source.detail(),

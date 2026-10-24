@@ -7,12 +7,12 @@ import java.util.Objects;
 /**
  * 一次投递准备没能继续的原因。
  * 投递等待可以附带额外的路由发布限制；
- * 没有 projectionSemantics 时，路由预估保持不变。
+ * 没有 estimateSemantics 时，路由预估保持不变。
  */
 public record DeliveryBlockReason(
         Status status,
         Availability availability,
-        PrefillTtftEstimate.AdmissionBlockSemantics projectionSemantics,
+        PrefillTtftEstimate.AdmissionBlockSemantics estimateSemantics,
         Throwable cause) {
 
     public static final DeliveryBlockReason OWNERSHIP_LOST =
@@ -21,8 +21,8 @@ public record DeliveryBlockReason(
     public DeliveryBlockReason {
         boolean valid = switch (status) {
             case UNAVAILABLE -> availability != null && cause == null;
-            case FAILED -> cause != null && availability == null && projectionSemantics == null;
-            case OWNERSHIP_LOST -> availability == null && cause == null && projectionSemantics == null;
+            case FAILED -> cause != null && availability == null && estimateSemantics == null;
+            case OWNERSHIP_LOST -> availability == null && cause == null && estimateSemantics == null;
         };
         if (!valid) {
             throw new IllegalArgumentException(
@@ -32,10 +32,10 @@ public record DeliveryBlockReason(
 
     public static DeliveryBlockReason unavailable(
             Availability availability,
-            PrefillTtftEstimate.AdmissionBlockSemantics projectionSemantics) {
+            PrefillTtftEstimate.AdmissionBlockSemantics estimateSemantics) {
         return new DeliveryBlockReason(Status.UNAVAILABLE,
                 availability,
-                Objects.requireNonNull(projectionSemantics, "projectionSemantics"),
+                Objects.requireNonNull(estimateSemantics, "estimateSemantics"),
                 null);
     }
 

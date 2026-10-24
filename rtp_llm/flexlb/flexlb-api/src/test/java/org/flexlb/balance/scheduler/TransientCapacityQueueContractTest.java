@@ -686,9 +686,9 @@ class TransientCapacityQueueContractTest {
                     .toList());
 
             assertTrue(fixture.submission.awaitCommands(2, 2, TimeUnit.SECONDS));
-            awaitCondition(() -> fixture.prefillEndpoint.captureRouteProjectionInputs()
+            awaitCondition(() -> fixture.prefillEndpoint.captureLoadView()
                     .queue().admissionBlock() != null, 2_000L);
-            assertTrue(fixture.prefillEndpoint.captureRouteProjectionInputs()
+            assertTrue(fixture.prefillEndpoint.captureLoadView()
                     .queue().admissionBlock() != null,
                     "the third group must observe both batch credits in use before more requests arrive");
             assertEquals(2, fixture.prefillEndpoint.getInflightBatchCount());

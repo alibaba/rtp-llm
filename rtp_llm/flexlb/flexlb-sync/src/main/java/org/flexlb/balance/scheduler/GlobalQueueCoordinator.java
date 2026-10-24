@@ -40,7 +40,7 @@ import java.util.concurrent.locks.ReentrantLock;
  * receives it. A bounded set of in-flight requests controls how many
  * independent routes can be prepared together; request collection and grouping
  * remain exclusively endpoint-runtime concerns. The queue lock protects only
- * index operations; route projection and RPCs are never performed while it is
+ * index operations; route estimate and RPCs are never performed while it is
  * held.</p>
  *
  * <p>Ready requests receive planning slots in FIFO/priority order. A request

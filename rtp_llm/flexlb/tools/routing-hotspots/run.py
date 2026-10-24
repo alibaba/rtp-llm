@@ -20,7 +20,7 @@ report = root / 'flexlb-sync/target/surefire-reports/TEST-org.flexlb.balance.pre
 classpath = ET.parse(report).find(".//property[@name='java.class.path']").attrib['value']
 java = Path(os.environ['JAVA_HOME']) / 'bin'
 source = Path(__file__).with_name('SnapshotBench.java')
-verification = Path(__file__).with_name('ProjectionDifferential.java')
+verification = Path(__file__).with_name('EstimateDifferential.java')
 verification_signatures = []
 formula = root / 'flexlb-sync/src/test/resources/prediction/deepseek-v4.txt'
 for variant, directory in [('before', baseline), ('after', root)]:
@@ -32,7 +32,7 @@ for variant, directory in [('before', baseline), ('after', root)]:
                     '-d', str(destination), str(source), str(verification)], check=True)
     verified = subprocess.check_output([str(java / 'java'), '-Xms512m', '-Xmx512m',
                                        '-cp', str(destination) + os.pathsep + runtime,
-                                       'ProjectionDifferential', str(formula)], text=True)
+                                       'EstimateDifferential', str(formula)], text=True)
     (destination / 'verification.txt').write_text(verified)
     verification_signatures.append([line for line in verified.splitlines() if line.startswith('VERIFY ')])
 assert verification_signatures[0] and verification_signatures[0] == verification_signatures[1]

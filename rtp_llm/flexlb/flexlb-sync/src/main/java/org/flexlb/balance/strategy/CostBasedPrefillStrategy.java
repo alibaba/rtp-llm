@@ -110,7 +110,7 @@ public class CostBasedPrefillStrategy {
             // transferring ownership for a stale generation.
             return PlacementResult.blocked(roleType);
         }
-        long selectedTtft = survivors.projectedTtftMs(selectedIndex);
+        long selectedTtft = survivors.estimatedTtftMs(selectedIndex);
         SelectedRole selectedRole = buildSelectedRole(
                 best,
                 roleType,
@@ -242,11 +242,11 @@ public class CostBasedPrefillStrategy {
 
     private static RoutingDecision.Candidate snapshotCandidate(
             PrefillCandidateSet candidates, int index, boolean selected) {
-        long projectedTtftMs = candidates.projectedTtftMs(index);
+        long estimatedTtftMs = candidates.estimatedTtftMs(index);
         return new RoutingDecision.Candidate(
                 candidates.endpointAddress(index),
                 selected,
-                projectedTtftMs < 0L ? null : projectedTtftMs,
+                estimatedTtftMs < 0L ? null : estimatedTtftMs,
                 null,
                 candidates.prefillMs(index),
                 candidates.cacheHit(index),
@@ -255,7 +255,7 @@ public class CostBasedPrefillStrategy {
                 null,
                 null,
                 null,
-                projectedTtftMs < 0L ? "UNMODELED_ENGINE_WORK" : "MODELED",
+                estimatedTtftMs < 0L ? "UNMODELED_ENGINE_WORK" : "MODELED",
                 candidates.ownershipVersion(index));
     }
 
@@ -303,7 +303,7 @@ public class CostBasedPrefillStrategy {
      * Select one Prefill endpoint from the registered target-group candidates.
      */
     int selectBestCandidate(PrefillCandidateSet survivors,
-                            long minProjectedTtftMs,
+                            long minEstimatedTtftMs,
                             RoleType roleType,
                             String group,
                             long seqLen,
@@ -320,12 +320,12 @@ public class CostBasedPrefillStrategy {
             double minimumHitRate = normalizedHitRate(cacheAffinity.getMinPrefixHitPercent());
             int fastestHigherHitIndex = -1;
             affinityCutoffMs = saturatingAdd(
-                    minProjectedTtftMs,
+                    minEstimatedTtftMs,
                     maxExtraTtftMs);
             affinityReason = maxHitTokens > 0L ? "FASTEST_IS_CACHE_BEST" : "NO_CACHE_ANYWHERE";
             for (int i = 0; i < survivors.size(); i++) {
                 if (survivors.ttftRank(i)
-                        == minProjectedTtftMs) {
+                        == minEstimatedTtftMs) {
                     referenceHitTokens = Math.max(
                             referenceHitTokens,
                             survivors.cacheHit(i));
@@ -345,12 +345,12 @@ public class CostBasedPrefillStrategy {
                         continue;
                     }
                     minimumHitRateMet = true;
-                    if (survivors.projectedTtftMs(i) >= 0L
+                    if (survivors.estimatedTtftMs(i) >= 0L
                             && (fastestHigherHitIndex < 0
                                 || survivors.ttftRank(i) < survivors.ttftRank(fastestHigherHitIndex))) {
                         fastestHigherHitIndex = i;
                     }
-                    if (survivors.projectedTtftMs(i) >= 0L && survivors.ttftRank(i) <= affinityCutoffMs) {
+                    if (survivors.estimatedTtftMs(i) >= 0L && survivors.ttftRank(i) <= affinityCutoffMs) {
                         preferredCandidates.set(i);
                     }
                 }
@@ -359,9 +359,9 @@ public class CostBasedPrefillStrategy {
                         : minimumHitRateMet ? "OVER_CAP" : "LOW_CACHE_HIT";
             }
             Long fastestHigherHitTtftMs = fastestHigherHitIndex < 0
-                    ? null : survivors.projectedTtftMs(fastestHigherHitIndex);
+                    ? null : survivors.estimatedTtftMs(fastestHigherHitIndex);
             survivors.recordCacheAffinity(new RoutingDecision.CacheAffinity(
-                    minProjectedTtftMs, maxExtraTtftMs, minimumHitRate, affinityCutoffMs,
+                    minEstimatedTtftMs, maxExtraTtftMs, minimumHitRate, affinityCutoffMs,
                     fastestHigherHitIndex < 0 ? null : survivors.endpointAddress(fastestHigherHitIndex),
                     fastestHigherHitTtftMs,
                     fastestHigherHitIndex < 0 ? null : survivors.cacheHit(fastestHigherHitIndex),
@@ -374,7 +374,7 @@ public class CostBasedPrefillStrategy {
             selectedIndex = selectCacheLeader(survivors, preferredCandidates, roleType, group);
         } else {
             selectedIndex = selectBaselineCandidate(
-                    survivors, minProjectedTtftMs, roleType, group);
+                    survivors, minEstimatedTtftMs, roleType, group);
         }
 
         if (affinityReason != null) {
@@ -382,13 +382,13 @@ public class CostBasedPrefillStrategy {
             if (Logger.isDebugEnabled()) {
                 Logger.debug(
                         "CostBasedPrefill cache-affinity decision - role: {}, group: {}, "
-                                + "selected: {}, minProjectedTtftMs: {}, "
-                                + "selectedProjectedTtftMs: {}, ttftCutoffMs: {}, "
+                                + "selected: {}, minEstimatedTtftMs: {}, "
+                                + "selectedEstimatedTtftMs: {}, ttftCutoffMs: {}, "
                                 + "hitTokens: {}, reason: {}",
                         roleType,
                         group,
                         survivors.endpointAddress(selectedIndex),
-                        minProjectedTtftMs,
+                        minEstimatedTtftMs,
                         survivors.ttftRank(selectedIndex),
                         affinityCutoffMs,
                         survivors.cacheHit(selectedIndex),
@@ -415,32 +415,32 @@ public class CostBasedPrefillStrategy {
                                         RoleType role, String group) {
         return tieRotation.next(role, group, survivors.size(),
                 i -> survivors.ttftRank(i) == minimumTtftMs
-                        && (!survivors.hasKnownTtft || survivors.projectedTtftMs(i) >= 0L),
+                        && (!survivors.hasKnownTtft || survivors.estimatedTtftMs(i) >= 0L),
                 survivors::endpointAddress);
     }
 
-    /** Fairly rotate only endpoints with the same best cache hit and projected TTFT. */
+    /** Fairly rotate only endpoints with the same best cache hit and estimated TTFT. */
     private int selectCacheLeader(PrefillCandidateSet survivors,
                                   BitSet preferredCandidates,
                                   RoleType role,
                                   String group) {
         long bestHit = Long.MIN_VALUE;
-        long bestProjectedTtftMs = Long.MAX_VALUE;
+        long bestEstimatedTtftMs = Long.MAX_VALUE;
         for (int candidateIndex = 0;
                 candidateIndex < survivors.size(); candidateIndex++) {
             if (!contains(preferredCandidates, candidateIndex)) {
                 continue;
             }
             long hit = survivors.cacheHit(candidateIndex);
-            long projectedTtftMs = survivors.ttftRank(candidateIndex);
+            long estimatedTtftMs = survivors.ttftRank(candidateIndex);
             if (hit > bestHit
-                    || hit == bestHit && projectedTtftMs < bestProjectedTtftMs) {
+                    || hit == bestHit && estimatedTtftMs < bestEstimatedTtftMs) {
                 bestHit = hit;
-                bestProjectedTtftMs = projectedTtftMs;
+                bestEstimatedTtftMs = estimatedTtftMs;
             }
         }
         long selectedHit = bestHit;
-        long selectedTtft = bestProjectedTtftMs;
+        long selectedTtft = bestEstimatedTtftMs;
         return tieRotation.next(role, group, survivors.size(),
                 i -> contains(preferredCandidates, i) && survivors.cacheHit(i) == selectedHit
                         && survivors.ttftRank(i) == selectedTtft,
@@ -480,7 +480,7 @@ public class CostBasedPrefillStrategy {
         PrefillCandidateSet candidates = CANDIDATES.get();
         candidates.reset(eligibleSize);
         long planningAtMs = System.currentTimeMillis();
-        PrefillTtftEstimate.Session projectionSession = PrefillTtftEstimate.session();
+        PrefillTtftEstimate.Session estimateSession = PrefillTtftEstimate.session();
 
         // Use one endpoint snapshot for both service prediction and decision-group planning.
         for (int i = 0; i < discovery.candidates().size(); i++) {
@@ -492,10 +492,10 @@ public class CostBasedPrefillStrategy {
             CacheTokenMatch cacheMatch = calculateCacheMatch(ep, cacheMatchResult, request, balanceContext.getConfig());
             long cacheHit = cacheMatch.effectiveHitTokens();
             long routingCacheMatchTokens = cacheMatch.routingHitTokens();
-            PrefillTtftEstimate.Inputs projectionInputs = ep.captureRouteProjectionInputs();
-            PrefillTtftEstimate.CandidateView projection =
-                    projectionSession.projectViewForSelection(
-                            projectionInputs,
+            PrefillTtftEstimate.LoadView loadView = ep.captureLoadView();
+            PrefillTtftEstimate.CandidateView estimate =
+                    estimateSession.estimateViewForSelection(
+                            loadView,
                             request.getRequestId(),
                             balanceContext.getPriority(),
                             planningAtMs,
@@ -507,15 +507,15 @@ public class CostBasedPrefillStrategy {
                             cacheHit,
                             routingCacheMatchTokens,
                             ep.getPredictor().evaluator(),
-                            ep.deliveryProjection(),
+                            ep.ttftEstimationRule(),
                             planningAtMs);
-            candidates.addCandidate(endpointAddress, ep, projection, projectionInputs.ownershipVersion());
+            candidates.addCandidate(endpointAddress, ep, estimate, loadView.ownershipVersion());
             if (Logger.isTraceEnabled()) {
-                Logger.trace("Prefill projection - ip: " + endpointAddress
+                Logger.trace("Prefill estimate - ip: " + endpointAddress
                         + ", order: "
                         + (balanceContext.getConfig().isPriorityOrdering() ? "PRIORITY" : "FIFO")
                         + ", hitCache: " + cacheHit
-                        + ", ttftMs: " + projection.projectedTtftMsValue());
+                        + ", ttftMs: " + estimate.estimatedTtftMsValue());
             }
         }
 
@@ -623,7 +623,7 @@ public class CostBasedPrefillStrategy {
             RoleType roleType,
             PrefillEndpoint endpoint,
             FlexlbConfig config,
-            long projectedTtftMs,
+            long estimatedTtftMs,
             long executionTimeMs) {
         String deliveryMode = config.getDispatcher().typeName();
         try {
@@ -631,7 +631,7 @@ public class CostBasedPrefillStrategy {
                     roleType,
                     endpoint.getStatus().getMetricIpPort(),
                     deliveryMode,
-                    projectedTtftMs,
+                    estimatedTtftMs,
                     executionTimeMs);
         } catch (RuntimeException telemetryFailure) {
             Logger.warn(
@@ -654,7 +654,7 @@ public class CostBasedPrefillStrategy {
             PrefillEndpoint ep,
             RoleType roleType,
             String requestId,
-            long projectedTtftMs,
+            long estimatedTtftMs,
             long selectedPrefillMs,
             long bestCacheHit,
             long placementVersion,
@@ -675,7 +675,7 @@ public class CostBasedPrefillStrategy {
             ServerStatus result = new ServerStatus();
             result.setRole(roleType);
             result.setRequestId(requestId);
-            if (projectedTtftMs >= 0L) { result.setPrefillTime(projectedTtftMs); }
+            if (estimatedTtftMs >= 0L) { result.setPrefillTime(estimatedTtftMs); }
             result.setGroup(topology.group());
             result.setServerIp(topology.ip());
             result.setHttpPort(topology.port());

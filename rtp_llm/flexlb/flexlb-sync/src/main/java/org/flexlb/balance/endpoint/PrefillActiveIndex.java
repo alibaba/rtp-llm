@@ -51,7 +51,7 @@ public sealed interface PrefillActiveIndex extends Iterable<ScheduledRequest> pe
         private static final Capture EMPTY = new Capture(List.of());
         private final List<Entry> entries;
         private volatile List<ScheduledRequest> items;
-        private volatile List<GroupPlanner.Item> projectedItems;
+        private volatile List<GroupPlanner.Item> plannerItems;
 
         private Capture(Collection<Entry> entries) {
             this.entries = List.copyOf(entries);
@@ -72,20 +72,20 @@ public sealed interface PrefillActiveIndex extends Iterable<ScheduledRequest> pe
             }
         }
 
-        public List<GroupPlanner.Item> projectedItems() {
-            List<GroupPlanner.Item> result = projectedItems;
+        public List<GroupPlanner.Item> plannerItems() {
+            List<GroupPlanner.Item> result = plannerItems;
             if (result != null) {
                 return result;
             }
             synchronized (this) {
-                if (projectedItems == null) {
+                if (plannerItems == null) {
                     List<GroupPlanner.Item> resultItems = new ArrayList<>(entries.size());
                     for (Entry entry : entries) {
-                        resultItems.add(entry.projectedItem());
+                        resultItems.add(entry.plannerItem());
                     }
-                    projectedItems = List.copyOf(resultItems);
+                    plannerItems = List.copyOf(resultItems);
                 }
-                return projectedItems;
+                return plannerItems;
             }
         }
     }
@@ -94,26 +94,26 @@ public sealed interface PrefillActiveIndex extends Iterable<ScheduledRequest> pe
     final class Entry {
         private final ScheduledRequest request;
         private final long sequence;
-        private volatile GroupPlanner.Item projectedItem;
+        private volatile GroupPlanner.Item plannerItem;
 
         private Entry(ScheduledRequest request, long sequence) {
             this.request = request;
             this.sequence = sequence;
         }
 
-        private GroupPlanner.Item projectedItem() {
-            GroupPlanner.Item result = projectedItem;
+        private GroupPlanner.Item plannerItem() {
+            GroupPlanner.Item result = plannerItem;
             if (result != null) {
                 return result;
             }
             synchronized (this) {
-                if (projectedItem == null) {
-                    projectedItem = new GroupPlanner.Item(
+                if (plannerItem == null) {
+                    plannerItem = new GroupPlanner.Item(
                             request.requestId(), request.priority(), request.enqueueSeq(),
                             request.enqueuedAtMs(), request.expiresAtMs(), request.seqLen(),
                             request.hitCache());
                 }
-                return projectedItem;
+                return plannerItem;
             }
         }
     }

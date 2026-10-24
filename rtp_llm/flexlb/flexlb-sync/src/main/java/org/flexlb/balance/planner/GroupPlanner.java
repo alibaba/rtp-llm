@@ -12,7 +12,7 @@ import java.util.function.ToDoubleFunction;
  * <p>The planner consumes an already ordered, immutable point-in-time view. It
  * performs no queue mutation, capacity reservation, clock read, or delivery.
  * The real batcher supplies live items through an {@link ItemAccess}; a
- * route-time projection instead uses {@link Item}s, including a
+ * route-time estimate instead uses {@link Item}s, including a
  * virtual incoming probe that has never entered the live queue.
  */
 public final class GroupPlanner {
@@ -41,7 +41,7 @@ public final class GroupPlanner {
     }
 
     /**
-     * Immutable input suitable for route-time projection. Ordering fields are
+     * Immutable input suitable for route-time estimate. Ordering fields are
      * carried even though this planner deliberately requires its input to have
      * already been sorted by the queue's production comparator.
      */
@@ -106,7 +106,7 @@ public final class GroupPlanner {
         }
     }
 
-    /** Adapter that lets the pure planner operate on either live or projected items. */
+    /** Adapter that lets the pure planner operate on either live or estimated items. */
     public interface ItemAccess<T> {
         long enqueuedAtMs(T item);
 
@@ -293,7 +293,7 @@ public final class GroupPlanner {
                 selection.selectedPredictionMs(), reason);
     }
 
-    /** Convenience entry point for projections whose clock is already frozen. */
+    /** Convenience entry point for estimates whose clock is already frozen. */
     public static <T> Plan<T> plan(
             Iterable<T> orderedItems,
             ItemAccess<T> access,

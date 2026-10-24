@@ -82,7 +82,7 @@ flexlb-sync/
 │   ├── eviction/                  # priority-only exact-route preemption
 │   ├── planner/                   # endpoint-local decision-group formation
 │   ├── prediction/                # Prefill execution-time estimators
-│   ├── projection/                # frozen queue/TTFT projections
+│   ├── estimate/                  # frozen queue/TTFT estimates
 │   ├── scheduler/
 │   │   ├── DefaultRouter.java       # one-pass multi-role routing
 │   │   ├── GlobalQueueCoordinator.java # model-wide ordering/commit

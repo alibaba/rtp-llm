@@ -19,7 +19,7 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 
 /**
  * Exact-value behavior contracts for the frozen
- * {@link PrefillTtftEstimate.DeliveryProjection} SPI as implemented by
+ * {@link PrefillTtftEstimate.TtftEstimationRule} SPI as implemented by
  * {@link NonBatchDeliveryStrategy} and {@link BatchDeliveryStrategy}.
  *
  * <p>Route service is a lazy cumulative prefix sum (asking for member i
@@ -27,7 +27,7 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
  * prefix length via {@code batchDurationMs(items[0..i+1])}.
  */
 @DisplayName("Delivery projection contracts")
-class NonBatchDeliveryProjectionTest {
+class NonBatchDeliveryEstimateTest {
 
     private static GroupPlanner.Item item(long id, long seqLen) {
         return new GroupPlanner.Item(
@@ -47,7 +47,7 @@ class NonBatchDeliveryProjectionTest {
     @DisplayName("Route projection: lazy cumulative cursor")
     class RouteService {
 
-        private final PrefillTtftEstimate.DeliveryProjection projection =
+        private final PrefillTtftEstimate.TtftEstimationRule projection =
                 new NonBatchTtftEstimator().ttftEstimationRule();
 
         @Test
@@ -131,7 +131,7 @@ class NonBatchDeliveryProjectionTest {
     @DisplayName("Batch projection: per-prefix independent prediction")
     class BatchService {
 
-        private final PrefillTtftEstimate.DeliveryProjection projection =
+        private final PrefillTtftEstimate.TtftEstimationRule projection =
                 new BatchTtftEstimator().ttftEstimationRule();
 
         @Test

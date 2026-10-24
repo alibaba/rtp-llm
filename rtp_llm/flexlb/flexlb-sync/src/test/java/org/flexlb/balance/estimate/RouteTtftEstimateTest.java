@@ -18,7 +18,7 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /** Contract tests for the canonical route-projection value boundary. */
-class RouteProjectionTest {
+class RouteTtftEstimateTest {
 
     @Test
     void unchangedRunningWorkCanReuseItsEarlierClockBase() {
@@ -27,29 +27,29 @@ class RouteProjectionTest {
         WorkView current = new WorkView(20L, List.of(new WorkView.RequestWork(
                 "1", WorkView.Phase.ENGINE_RUNNING, 993L)), List.of(), 0L);
         assertEquals(
-                PrefillTtftEstimate.project(new PrefillTtftEstimate.Inputs(emptyQueue(20L), current),
-                        probe(), new CountingEvaluator(), routeProjection()),
-                PrefillTtftEstimate.project(new PrefillTtftEstimate.Inputs(emptyQueue(20L), cached),
-                        probe(), new CountingEvaluator(), routeProjection()));
+                PrefillTtftEstimate.estimate(new PrefillTtftEstimate.LoadView(emptyQueue(20L), current),
+                        probe(), new CountingEvaluator(), routeEstimationRule()),
+                PrefillTtftEstimate.estimate(new PrefillTtftEstimate.LoadView(emptyQueue(20L), cached),
+                        probe(), new CountingEvaluator(), routeEstimationRule()));
     }
 
     @Test
     void queueAndWorkComeFromOneCanonicalInput() {
-        PrefillTtftEstimate.Inputs inputs = inputs(13L);
+        PrefillTtftEstimate.LoadView inputs = inputs(13L);
         CountingEvaluator evaluator = new CountingEvaluator();
 
-        PrefillTtftEstimate.Candidate result = PrefillTtftEstimate.project(
+        PrefillTtftEstimate.Candidate result = PrefillTtftEstimate.estimate(
                 inputs,
                 probe(),
                 evaluator,
-                routeProjection());
+                routeEstimationRule());
 
         assertTrue(result.selectable());
         assertEquals(20L, result.incomingPrefillMs());
         assertTrue(evaluator.invocations() > 0);
 
         assertThrows(IllegalArgumentException.class,
-                () -> new PrefillTtftEstimate.Inputs(
+                () -> new PrefillTtftEstimate.LoadView(
                         emptyQueue(13L), emptyWork(14L)));
     }
 
@@ -66,11 +66,11 @@ class RouteProjectionTest {
         }
 
         assertNotSame(captured, predictor.evaluator());
-        PrefillTtftEstimate.Candidate result = PrefillTtftEstimate.project(
+        PrefillTtftEstimate.Candidate result = PrefillTtftEstimate.estimate(
                 inputs(31L),
                 probe(),
                 captured,
-                routeProjection());
+                routeEstimationRule());
         assertTrue(result.selectable());
         assertEquals(before, captured.estimateMs(20L, 0L),
                 "a projection-owned evaluator cannot change mid-call");
@@ -92,23 +92,23 @@ class RouteProjectionTest {
                 PrefillTtftEstimate.Candidate.State.MODELED, OptionalLong.of(10L));
         PrefillTtftEstimate.Candidate unmodeled = candidate(
                 PrefillTtftEstimate.Candidate.State.UNMODELED_ENGINE_WORK, OptionalLong.empty());
-        assertEquals(10L, modeled.requiredProjectedTtftMs());
+        assertEquals(10L, modeled.requiredEstimatedTtftMs());
         assertTrue(unmodeled.engineWorkUnmodeled());
     }
 
     private static PrefillTtftEstimate.Candidate candidate(
             PrefillTtftEstimate.Candidate.State state,
-            OptionalLong projectedTtftMs) {
+            OptionalLong estimatedTtftMs) {
         return new PrefillTtftEstimate.Candidate(
                 state,
-                projectedTtftMs.orElse(PrefillTtftEstimate.Candidate.UNKNOWN),
+                estimatedTtftMs.orElse(PrefillTtftEstimate.Candidate.UNKNOWN),
                 0L,
                 PrefillTtftEstimate.Candidate.InitialHeadDisposition.NONE,
                 state.name(), null, 0L, 0L);
     }
 
-    private static PrefillTtftEstimate.Inputs inputs(long capturedAtMs) {
-        return new PrefillTtftEstimate.Inputs(
+    private static PrefillTtftEstimate.LoadView inputs(long capturedAtMs) {
+        return new PrefillTtftEstimate.LoadView(
                 emptyQueue(capturedAtMs), emptyWork(capturedAtMs));
     }
 
@@ -133,7 +133,7 @@ class RouteProjectionTest {
                 20L, 0L, 0L);
     }
 
-    private static PrefillTtftEstimate.DeliveryProjection routeProjection() {
+    private static PrefillTtftEstimate.TtftEstimationRule routeEstimationRule() {
         return new NonBatchTtftEstimator().ttftEstimationRule();
     }
 

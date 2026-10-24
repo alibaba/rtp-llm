@@ -137,7 +137,7 @@ class PrefillQueueSchedulingTest {
     void projectionCacheTracksCapacityBlockAndWake() {
         FlexlbConfig config = singleConfig();
         PrefillEndpoint endpoint = stableEndpoint(stableStatus());
-        ProjectionCacheBlock delivery = new ProjectionCacheBlock();
+        EstimateCacheBlock delivery = new EstimateCacheBlock();
         PrefillQueue runtime = runningRuntime(config, endpoint, delivery);
         ScheduledRequest head = item(
                 config, endpoint, 11L, 50, System.currentTimeMillis());
@@ -145,19 +145,19 @@ class PrefillQueueSchedulingTest {
         try {
             assertEquals(ACCEPTED, runtime.offerWithResult(head));
             await(delivery.firstPrepareEntered);
-            assertNull(runtime.captureRouteProjectionInputs()
+            assertNull(runtime.captureLoadView()
                     .queue().admissionBlock(),
                     "cache is warmed before the delivery miss is published");
 
             delivery.allowFirstPrepare.countDown();
             await(delivery.firstCapacity.subscribed);
-            assertNotNull(runtime.captureRouteProjectionInputs()
+            assertNotNull(runtime.captureLoadView()
                     .queue().admissionBlock(),
                     "publishing the block must invalidate the warm cache");
 
             delivery.firstCapacity.release();
             await(delivery.secondPrepareEntered);
-            assertNull(runtime.captureRouteProjectionInputs()
+            assertNull(runtime.captureLoadView()
                     .queue().admissionBlock(),
                     "capacity wake must invalidate the cached block");
         } finally {
@@ -184,7 +184,7 @@ class PrefillQueueSchedulingTest {
         assertEquals(ACCEPTED, runtime.offerWithResult(item(config, endpoint, 31L, 50, now)));
         await(delivery.firstCapacity.subscribed);
 
-        PrefillTtftEstimate.Inputs inputs = runtime.captureRouteProjectionInputs();
+        PrefillTtftEstimate.LoadView inputs = runtime.captureLoadView();
         assertEquals(1, inputs.queue().activeItems().size());
         assertNotNull(inputs.queue().admissionBlock());
         assertEquals(Long.MAX_VALUE, inputs.queue().constraints().batchKvCapacity());
@@ -240,7 +240,7 @@ class PrefillQueueSchedulingTest {
         PrefillEndpoint endpoint = stableEndpoint(status);
         PrefillQueue runtime = runningRuntime(config, endpoint, new EventDrivenBlock());
 
-        assertEquals(Long.MAX_VALUE, runtime.captureRouteProjectionInputs()
+        assertEquals(Long.MAX_VALUE, runtime.captureLoadView()
                 .queue().constraints().batchKvCapacity());
     }
 
@@ -256,12 +256,12 @@ class PrefillQueueSchedulingTest {
 
         assertEquals(ACCEPTED, runtime.offerWithResult(head));
         await(delivery.firstCapacity.subscribed);
-        PrefillTtftEstimate.Inputs inputs = runtime.captureRouteProjectionInputs();
+        PrefillTtftEstimate.LoadView inputs = runtime.captureLoadView();
         assertNotNull(inputs.queue().admissionBlock());
         assertNull(inputs.queue().admissionBlock().semantics(),
                 "batch capacity waits must not impose publication restrictions");
-        PrefillTtftEstimate.DeliveryProjection projection = new BatchTtftEstimator().ttftEstimationRule();
-        PrefillTtftEstimate.Candidate candidate = PrefillTtftEstimate.project(
+        PrefillTtftEstimate.TtftEstimationRule projection = new BatchTtftEstimator().ttftEstimationRule();
+        PrefillTtftEstimate.Candidate candidate = PrefillTtftEstimate.estimate(
                 inputs, new PrefillTtftEstimate.Probe("22", 50, now + 1L, Long.MAX_VALUE, 10L, 0L, 0L),
                 endpoint.getPredictor().evaluator(), projection, now);
         assertTrue(candidate.selectable(),
@@ -280,7 +280,7 @@ class PrefillQueueSchedulingTest {
     void concurrentReadersShareOneVersionWithoutHoldingQueueLock() throws Exception {
         FlexlbConfig config = singleConfig();
         PrefillEndpoint endpoint = stableEndpoint(stableStatus());
-        ProjectionCacheBlock delivery = new ProjectionCacheBlock();
+        EstimateCacheBlock delivery = new EstimateCacheBlock();
         PrefillQueue runtime = runningRuntime(config, endpoint, delivery);
         ScheduledRequest head = spy(item(config, endpoint, 13L, 50, System.currentTimeMillis()));
         CountDownLatch materializing = new CountDownLatch(1);
@@ -296,14 +296,14 @@ class PrefillQueueSchedulingTest {
                 16, Thread.ofPlatform().name("projection-reader-", 0).factory())) {
             assertEquals(ACCEPTED, runtime.offerWithResult(head));
             await(delivery.firstPrepareEntered);
-            var first = readers.submit(runtime::captureRouteProjectionInputs);
+            var first = readers.submit(runtime::captureLoadView);
             await(materializing);
             var started = new CountDownLatch(15);
-            var followers = new java.util.ArrayList<java.util.concurrent.Future<PrefillTtftEstimate.Inputs>>();
+            var followers = new java.util.ArrayList<java.util.concurrent.Future<PrefillTtftEstimate.LoadView>>();
             for (int i = 0; i < 15; i++) {
                 followers.add(readers.submit(() -> {
                     started.countDown();
-                    return runtime.captureRouteProjectionInputs();
+                    return runtime.captureLoadView();
                 }));
             }
             await(started);
@@ -326,7 +326,7 @@ class PrefillQueueSchedulingTest {
     void capacityBlockInvalidatesAnUnfinishedProjectionCapture() throws Exception {
         FlexlbConfig config = singleConfig();
         PrefillEndpoint endpoint = stableEndpoint(stableStatus());
-        ProjectionCacheBlock delivery = new ProjectionCacheBlock();
+        EstimateCacheBlock delivery = new EstimateCacheBlock();
         PrefillQueue runtime = runningRuntime(config, endpoint, delivery);
         ScheduledRequest head = spy(item(
                 config, endpoint, 12L, 50, System.currentTimeMillis()));
@@ -344,10 +344,10 @@ class PrefillQueueSchedulingTest {
         try {
             assertEquals(ACCEPTED, runtime.offerWithResult(head));
             await(delivery.firstPrepareEntered);
-            CompletableFuture<PrefillTtftEstimate.Inputs> oldCapture =
+            CompletableFuture<PrefillTtftEstimate.LoadView> oldCapture =
                     CompletableFuture.supplyAsync(() -> {
                         capturingThread.set(Thread.currentThread());
-                        return runtime.captureRouteProjectionInputs();
+                        return runtime.captureLoadView();
                     });
             await(materializingSnapshot);
             delivery.allowFirstPrepare.countDown();
@@ -355,7 +355,7 @@ class PrefillQueueSchedulingTest {
             finishSnapshot.countDown();
             assertNull(oldCapture.get(2, TimeUnit.SECONDS).queue().admissionBlock(),
                     "the snapshot was taken before the block was published");
-            assertNotNull(runtime.captureRouteProjectionInputs().queue().admissionBlock(),
+            assertNotNull(runtime.captureLoadView().queue().admissionBlock(),
                     "a late snapshot must not overwrite capacity-block invalidation");
         } finally {
             finishSnapshot.countDown();
@@ -527,20 +527,20 @@ class PrefillQueueSchedulingTest {
         runtimes.add(runtime);
         runtime.start();
 
-        var before = runtime.captureRouteProjectionInputs();
+        var before = runtime.captureLoadView();
         assertEquals(100L, before.queue().constraints().collectionWindowMs());
-        assertSame(before, runtime.captureRouteProjectionInputs());
+        assertSame(before, runtime.captureLoadView());
         FlexlbConfig updated = fixedConfig();
         updated.decisionPolicy().setMaxCollectionWaitMs(500L);
         current.set(updated);
-        var after = runtime.captureRouteProjectionInputs();
+        var after = runtime.captureLoadView();
         assertEquals(500L, after.queue().constraints().collectionWindowMs());
-        assertSame(after, runtime.captureRouteProjectionInputs());
+        assertSame(after, runtime.captureLoadView());
         assertEquals(before.queue().activeItems(), after.queue().activeItems());
         assertEquals(100L, before.queue().constraints().collectionWindowMs());
 
         current.set(initial);
-        assertEquals(100L, runtime.captureRouteProjectionInputs().queue().constraints().collectionWindowMs());
+        assertEquals(100L, runtime.captureLoadView().queue().constraints().collectionWindowMs());
     }
 
     @ParameterizedTest
@@ -563,12 +563,12 @@ class PrefillQueueSchedulingTest {
         updated.decisionPolicy().setMaxCollectionWaitMs(increaseWindow ? 60_000L : 0L);
         current.set(updated);
         assertEquals(increaseWindow ? 60_000L : 0L,
-                runtime.captureRouteProjectionInputs().queue().constraints().collectionWindowMs());
+                runtime.captureLoadView().queue().constraints().collectionWindowMs());
         assertEquals(ACCEPTED, runtime.offerWithResult(
                 item(initial, endpoint, 77L, 50, System.currentTimeMillis())));
         if (increaseWindow) {
             current.set(initial);
-            assertEquals(0L, runtime.captureRouteProjectionInputs().queue().constraints().collectionWindowMs());
+            assertEquals(0L, runtime.captureLoadView().queue().constraints().collectionWindowMs());
             runtime.signalSchedulingInputsChanged();
         }
         await(delivery.firstAttempt);
@@ -717,8 +717,8 @@ class PrefillQueueSchedulingTest {
         }
 
         @Override
-        public PrefillTtftEstimate.DeliveryProjection ttftEstimationRule() {
-            return mock(PrefillTtftEstimate.DeliveryProjection.class);
+        public PrefillTtftEstimate.TtftEstimationRule ttftEstimationRule() {
+            return mock(PrefillTtftEstimate.TtftEstimationRule.class);
         }
     }
 
@@ -760,7 +760,7 @@ class PrefillQueueSchedulingTest {
         }
     }
 
-    private static final class ProjectionCacheBlock extends BoundaryDelivery {
+    private static final class EstimateCacheBlock extends BoundaryDelivery {
 
         private final TestAvailability firstCapacity = new TestAvailability();
         private final TestAvailability parkedCapacity = new TestAvailability();

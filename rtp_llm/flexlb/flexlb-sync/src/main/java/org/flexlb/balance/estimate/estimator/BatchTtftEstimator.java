@@ -13,8 +13,8 @@ import java.util.List;
  */
 public final class BatchTtftEstimator implements PrefillTtftEstimator {
 
-    private static final PrefillTtftEstimate.DeliveryProjection PROJECTION =
-            new BatchProjection();
+    private static final PrefillTtftEstimate.TtftEstimationRule ESTIMATION_RULE =
+            new BatchTtftEstimationRule();
 
     @Override
     public GroupPlanner.PrefixPrediction<ScheduledRequest> newGroupPredictor(
@@ -27,12 +27,12 @@ public final class BatchTtftEstimator implements PrefillTtftEstimator {
     }
 
     @Override
-    public PrefillTtftEstimate.DeliveryProjection ttftEstimationRule() {
-        return PROJECTION;
+    public PrefillTtftEstimate.TtftEstimationRule ttftEstimationRule() {
+        return ESTIMATION_RULE;
     }
 
-    private static final class BatchProjection
-            implements PrefillTtftEstimate.DeliveryProjection {
+    private static final class BatchTtftEstimationRule
+            implements PrefillTtftEstimate.TtftEstimationRule {
 
         private static final ThreadLocal<BatchPlanning> PLANNING =
                 ThreadLocal.withInitial(BatchPlanning::new);

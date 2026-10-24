@@ -95,10 +95,10 @@ public class SnapshotBench {
         long started = System.nanoTime(), checksum = 0;
         for (int i = 0; i < repetitions; i++) {
             for (var endpoint : endpoints) {
-                var inputs = endpoint.runtime.captureRouteProjectionInputs();
+                var inputs = endpoint.runtime.captureLoadView();
                 checksum += inputs.queue().activeItems().size();
-                if (project) checksum += PrefillTtftEstimate.project(inputs, PROBE, model,
-                        estimator.ttftEstimationRule()).requiredProjectedTtftMs();
+                if (project) checksum += PrefillTtftEstimate.estimate(inputs, PROBE, model,
+                        estimator.ttftEstimationRule()).requiredEstimatedTtftMs();
             }
         }
         return new Sample(System.nanoTime() - started, CPU.getCurrentThreadCpuTime() - cpu,

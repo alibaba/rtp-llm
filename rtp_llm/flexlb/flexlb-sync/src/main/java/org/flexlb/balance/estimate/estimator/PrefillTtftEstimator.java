@@ -19,5 +19,5 @@ public interface PrefillTtftEstimator {
     /**
      * 预估 TTFT 的规则：本投递模式下，请求前面排着的工作量怎么折算成等待时间。
      */
-    PrefillTtftEstimate.DeliveryProjection ttftEstimationRule();
+    PrefillTtftEstimate.TtftEstimationRule ttftEstimationRule();
 }

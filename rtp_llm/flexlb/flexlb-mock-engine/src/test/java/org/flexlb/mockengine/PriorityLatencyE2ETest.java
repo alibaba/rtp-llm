@@ -88,7 +88,7 @@ class PriorityLatencyE2ETest {
                                 + response.getCode() + ": " + response.getErrorMessage()
                                 + ", arrivals=" + h.engineArrivalOrder.size()
                                 + ", queued=" + h.scheduler.getQueuedRequestCount()
-                                + ", prefillWork=" + h.prefillEndpoint(0).captureRouteProjectionInputs().work()
+                                + ", prefillWork=" + h.prefillEndpoint(0).captureLoadView().work()
                                 + ", decode=" + h.decodeEndpoint(0).resourceSnapshot());
             }
             assertEquals(total, h.engineArrivalOrder.size(),

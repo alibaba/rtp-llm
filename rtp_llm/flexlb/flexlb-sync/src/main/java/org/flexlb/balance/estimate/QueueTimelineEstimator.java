@@ -13,7 +13,7 @@ import java.util.List;
 import java.util.NoSuchElementException;
 import java.util.PriorityQueue;
 
-/** Pure frozen-snapshot TTFT projection shared by endpoint selection policies. */
+/** Pure frozen-snapshot TTFT estimate shared by endpoint selection policies. */
 final class QueueTimelineEstimator {
 
     private static final String INVALID_PREDICTION_DETAIL =
@@ -26,7 +26,7 @@ final class QueueTimelineEstimator {
     private long seqLen;
     private long hitCache;
     private long routingCacheMatchTokens;
-    private final ProjectedCandidate result = new ProjectedCandidate();
+    private final EstimatedCandidate result = new EstimatedCandidate();
 
     QueueTimelineEstimator() {
     }
@@ -49,27 +49,27 @@ final class QueueTimelineEstimator {
     }
 
     /**
-     * Project one endpoint under a frozen serial-work model.
+     * Estimate one endpoint under a frozen serial-work model.
      *
      * <p>Already committed work forms the engine cursor. Collection deadlines
      * and that cursor overlap via {@code max(cursor, readyAt)}. The snapshot's
-     * frozen delivery projection defines each group's completion shape.
+     * frozen TTFT estimation rule defines each group's completion shape.
      */
-    PrefillTtftEstimate.CandidateView project(QueueView queue,
+    PrefillTtftEstimate.CandidateView estimate(QueueView queue,
                                           WorkView committed,
                                           PrefillTimePredictor.Evaluator evaluator,
-                                          PrefillTtftEstimate.DeliveryProjection deliveryProjection,
+                                          PrefillTtftEstimate.TtftEstimationRule ttftEstimationRule,
                                           long planningAtMs) {
-        long projectionAtMs = Math.max(queue.capturedAtMs(), planningAtMs);
-        if (expiresAtMs <= 0L || projectionAtMs >= expiresAtMs) {
+        long estimateAtMs = Math.max(queue.capturedAtMs(), planningAtMs);
+        if (expiresAtMs <= 0L || estimateAtMs >= expiresAtMs) {
             return unavailable("INCOMING_EXPIRED");
         }
 
         predictions.reset(evaluator);
         try {
-            return projectWithPredictions(
-                    queue, committed, deliveryProjection,
-                    projectionAtMs, predictions);
+            return estimateWithPredictions(
+                    queue, committed, ttftEstimationRule,
+                    estimateAtMs, predictions);
         } catch (PredictionFailure predictionFailure) {
             return unavailable(predictionFailure.detail("PREDICTION_FAILED"));
         } finally {
@@ -77,10 +77,10 @@ final class QueueTimelineEstimator {
         }
     }
 
-    private PrefillTtftEstimate.CandidateView projectWithPredictions(QueueView queue,
+    private PrefillTtftEstimate.CandidateView estimateWithPredictions(QueueView queue,
                                                                  WorkView committed,
-                                                                 PrefillTtftEstimate.DeliveryProjection deliveryProjection,
-                                                                 long projectionAtMs,
+                                                                 PrefillTtftEstimate.TtftEstimationRule ttftEstimationRule,
+                                                                 long estimateAtMs,
                                                                  PredictionBoundary predictions) {
         if (containsCommittedRequest(committed, requestId)) {
             return unavailable("INCOMING_ALREADY_COMMITTED");
@@ -95,12 +95,12 @@ final class QueueTimelineEstimator {
                     predictionFailure.detail("SINGLE_PREDICTION_FAILED"));
         }
 
-        long committedMs = knownRemainingWorkMsAt(committed, projectionAtMs);
+        long committedMs = knownRemainingWorkMsAt(committed, estimateAtMs);
 
         /*
          * With no active endpoint queue, known committed work only advances
          * the serial engine cursor. The incoming request is still a singleton
-         * decision, so the generic ProjectedQueue/readiness machinery is
+         * decision, so the generic EstimateQueue/readiness machinery is
          * exactly equivalent to committedMs + singleton completion offset.
          */
         if (queue.activeItems().isEmpty()) {
@@ -110,8 +110,8 @@ final class QueueTimelineEstimator {
             if (expiresAtMs <= collectionDeadline) {
                 return unavailable("INCOMING_EXPIRED_BEFORE_DISPATCH");
             }
-            return projectIdleSingleton(
-                    deliveryProjection, predictions,
+            return estimateIdleSingleton(
+                    ttftEstimationRule, predictions,
                     incomingPrefillMs, committedMs);
         }
 
@@ -128,8 +128,8 @@ final class QueueTimelineEstimator {
                 queue.activeItems().size());
         for (GroupPlanner.Item item : queue.activeItems()) {
             // Expired work is a terminal queue mutation, not work ahead of a
-            // new request in this snapshot projection.
-            if (expiredAt(item, projectionAtMs)) {
+            // new request in this snapshot estimate.
+            if (expiredAt(item, estimateAtMs)) {
                 if (item == initialActiveHead) {
                     initialHeadDisposition =
                             PrefillTtftEstimate.Candidate.InitialHeadDisposition.TERMINAL_PRUNED;
@@ -141,7 +141,7 @@ final class QueueTimelineEstimator {
             }
             eligibleActive.add(item);
         }
-        ProjectedQueue ordered = ProjectedQueue.create(
+        EstimateQueue ordered = EstimateQueue.create(
                 eligibleActive,
                 probe,
                 initialActiveHead,
@@ -151,7 +151,7 @@ final class QueueTimelineEstimator {
             initialHeadDisposition = ordered.initialHeadDisposition();
         }
         long cursorMs = committedMs;
-        long decisionNowMs = projectionAtMs;
+        long decisionNowMs = estimateAtMs;
 
         while (!ordered.isEmpty()) {
             ExpirationPrune expiration = ordered.pruneExpired(decisionNowMs);
@@ -179,7 +179,7 @@ final class QueueTimelineEstimator {
             final PrefillTtftEstimate.GroupPlanning planning;
             try {
                 planning = queue.constraints().predictedExecutionBudgetMs() > 0L
-                        ? deliveryProjection.planning(predictions) : null;
+                        ? ttftEstimationRule.planning(predictions) : null;
                 plan = GroupPlanner.plan(
                         ordered,
                         GroupPlanner.itemAccess(),
@@ -193,7 +193,7 @@ final class QueueTimelineEstimator {
             }
             if (plan.items().isEmpty()) {
                 throw new IllegalStateException(
-                        "non-empty projected queue produced an empty group");
+                        "non-empty estimate queue produced an empty group");
             }
 
             if (!plan.ready()) {
@@ -207,12 +207,12 @@ final class QueueTimelineEstimator {
                 continue;
             }
 
-            long readyInMs = elapsedFromNow(projectionAtMs, decisionNowMs);
+            long readyInMs = elapsedFromNow(estimateAtMs, decisionNowMs);
             long startMs = Math.max(cursorMs, readyInMs);
 
             try {
                 PrefillTtftEstimate.GroupService service =
-                        deliveryProjection.service(plan, predictions, planning);
+                        ttftEstimationRule.service(plan, predictions, planning);
                 if (probePosition < plan.items().size()) {
                     return candidate(
                             PrefillTtftEstimate.Candidate.State.MODELED,
@@ -229,11 +229,11 @@ final class QueueTimelineEstimator {
             ordered.removePlannedPrefix(plan.items().size());
         }
         throw new IllegalStateException(
-                "projected queue exhausted before planning the probe");
+                "estimate queue exhausted before planning the probe");
     }
 
-    private PrefillTtftEstimate.CandidateView projectIdleSingleton(
-            PrefillTtftEstimate.DeliveryProjection deliveryProjection,
+    private PrefillTtftEstimate.CandidateView estimateIdleSingleton(
+            PrefillTtftEstimate.TtftEstimationRule ttftEstimationRule,
             PredictionBoundary predictions,
             long incomingPrefillMs,
             long committedMs) {
@@ -241,7 +241,7 @@ final class QueueTimelineEstimator {
         try {
             completionMs = saturatedAdd(
                     committedMs,
-                    deliveryProjection.singletonCompletionOffsetMs(
+                    ttftEstimationRule.singletonCompletionOffsetMs(
                             seqLen, hitCache, predictions));
         } catch (PredictionFailure predictionFailure) {
             return unavailable(
@@ -260,10 +260,10 @@ final class QueueTimelineEstimator {
         return committed.containsRequest(requestId);
     }
 
-    /** Remaining committed work normalized to the projection's common clock. */
+    /** Remaining committed work normalized to the estimate's common clock. */
     private static long knownRemainingWorkMsAt(
-            WorkView committed, long projectionAtMs) {
-        return committed.knownRemainingWorkMsAt(projectionAtMs);
+            WorkView committed, long estimateAtMs) {
+        return committed.knownRemainingWorkMsAt(estimateAtMs);
     }
 
     private static boolean expiredAt(
@@ -280,9 +280,9 @@ final class QueueTimelineEstimator {
     /**
      * Ordered snapshot plus probe. Prefix consumption advances an index; expiry
      * clears individual slots. Deadlines are indexed only when collection reaches
-     * the first expiry; ordinary projections need only the queue order.
+     * the first expiry; ordinary estimates need only the queue order.
      */
-    private static final class ProjectedQueue implements Iterable<GroupPlanner.Item> {
+    private static final class EstimateQueue implements Iterable<GroupPlanner.Item> {
 
         private final GroupPlanner.Item[] itemsInQueueOrder;
         private final long earliestExpiryMs;
@@ -293,7 +293,7 @@ final class QueueTimelineEstimator {
         // Number of live, unconsumed items before the probe; holes do not count.
         private int itemsBeforeProbe;
 
-        private ProjectedQueue(
+        private EstimateQueue(
                 GroupPlanner.Item[] itemsInQueueOrder,
                 int probeIndex,
                 int initialHeadIndex,
@@ -305,7 +305,7 @@ final class QueueTimelineEstimator {
             this.initialHeadIndex = initialHeadIndex;
         }
 
-        private static ProjectedQueue create(
+        private static EstimateQueue create(
                 List<GroupPlanner.Item> eligibleActive,
                 GroupPlanner.Item probe,
                 GroupPlanner.Item initialActiveHead,
@@ -330,7 +330,7 @@ final class QueueTimelineEstimator {
                 probeIndex = index;
                 itemsInQueueOrder[index] = probe;
             }
-            return new ProjectedQueue(itemsInQueueOrder, probeIndex, initialHeadIndex, earliestExpiryMs);
+            return new EstimateQueue(itemsInQueueOrder, probeIndex, initialHeadIndex, earliestExpiryMs);
         }
 
         private int probePosition() {
@@ -353,7 +353,7 @@ final class QueueTimelineEstimator {
 
         private GroupPlanner.Item head() {
             if (isEmpty()) {
-                throw new IllegalStateException("projected queue is empty");
+                throw new IllegalStateException("estimate queue is empty");
             }
             return itemsInQueueOrder[headIndex];
         }
@@ -389,7 +389,7 @@ final class QueueTimelineEstimator {
             for (int removed = 0; removed < count; removed++) {
                 if (isEmpty()) {
                     throw new IllegalStateException(
-                            "planner selected beyond the projected queue prefix");
+                            "planner selected beyond the estimate queue prefix");
                 }
                 if (headIndex < probeIndex) {
                     itemsBeforeProbe--;
@@ -469,22 +469,22 @@ final class QueueTimelineEstimator {
 
     private PrefillTtftEstimate.CandidateView candidate(
             PrefillTtftEstimate.Candidate.State state,
-            long projectedTtftMs,
+            long estimatedTtftMs,
             long incomingPrefillMs,
             PrefillTtftEstimate.Candidate.InitialHeadDisposition headDisposition,
             String detail) {
         result.reset(
-                state, projectedTtftMs, incomingPrefillMs,
+                state, estimatedTtftMs, incomingPrefillMs,
                 headDisposition, detail, null,
                 hitCache, routingCacheMatchTokens);
         return result;
     }
 
-    /** Reused only by the owning projection thread. */
-    private static final class ProjectedCandidate
+    /** Reused only by the owning estimate thread. */
+    private static final class EstimatedCandidate
             implements PrefillTtftEstimate.CandidateView {
         private PrefillTtftEstimate.Candidate.State state;
-        private long projectedTtftMsValue;
+        private long estimatedTtftMsValue;
         private long incomingPrefillMs;
         private PrefillTtftEstimate.Candidate.InitialHeadDisposition headDisposition;
         private String detail;
@@ -494,7 +494,7 @@ final class QueueTimelineEstimator {
 
         private void reset(
                 PrefillTtftEstimate.Candidate.State exactState,
-                long exactProjectedTtftMs,
+                long exactEstimatedTtftMs,
                 long exactIncomingPrefillMs,
                 PrefillTtftEstimate.Candidate.InitialHeadDisposition exactHeadDisposition,
                 String exactDetail,
@@ -502,7 +502,7 @@ final class QueueTimelineEstimator {
                 long exactCacheHitTokens,
                 long exactRoutingCacheMatchTokens) {
             state = exactState;
-            projectedTtftMsValue = exactProjectedTtftMs;
+            estimatedTtftMsValue = exactEstimatedTtftMs;
             incomingPrefillMs = exactIncomingPrefillMs;
             headDisposition = exactHeadDisposition;
             detail = exactDetail;
@@ -517,8 +517,8 @@ final class QueueTimelineEstimator {
         }
 
         @Override
-        public long projectedTtftMsValue() {
-            return projectedTtftMsValue;
+        public long estimatedTtftMsValue() {
+            return estimatedTtftMsValue;
         }
 
         @Override
@@ -560,7 +560,7 @@ final class QueueTimelineEstimator {
     }
 
     /**
-     * The sole boundary between projection math and an external predictor.
+     * The sole boundary between estimate math and an external predictor.
      * Predictor failures remain distinguishable from invalid returned values,
      * while every numeric output is validated before it reaches scheduling.
      */

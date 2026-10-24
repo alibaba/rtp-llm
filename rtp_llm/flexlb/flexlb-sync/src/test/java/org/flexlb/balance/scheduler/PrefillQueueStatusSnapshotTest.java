@@ -37,7 +37,7 @@ class PrefillQueueStatusSnapshotTest {
                 mock(PrefillTtftEstimator.class),
                 mock(EndpointEventProjector.class), new QueueCapacity());
 
-        assertEquals(2_097_152L, runtime.captureRouteProjectionInputs()
+        assertEquals(2_097_152L, runtime.captureLoadView()
                 .queue().constraints().batchTokenCapacity());
     }
 
@@ -59,7 +59,7 @@ class PrefillQueueStatusSnapshotTest {
                 mock(PrefillTtftEstimator.class),
                 mock(EndpointEventProjector.class), new QueueCapacity());
 
-        assertEquals(150L, runtime.captureRouteProjectionInputs()
+        assertEquals(150L, runtime.captureLoadView()
                 .queue().constraints().batchTokenCapacity());
     }
 
@@ -96,7 +96,7 @@ class PrefillQueueStatusSnapshotTest {
                 mock(EndpointEventProjector.class), new QueueCapacity());
 
         GroupPlanner.Constraints capacity = runtime
-                .captureRouteProjectionInputs().queue().constraints();
+                .captureLoadView().queue().constraints();
         assertEquals(700L, capacity.batchTokenCapacity());
         assertEquals(Long.MAX_VALUE, capacity.batchKvCapacity());
         assertTrue(publishedSecond.get());

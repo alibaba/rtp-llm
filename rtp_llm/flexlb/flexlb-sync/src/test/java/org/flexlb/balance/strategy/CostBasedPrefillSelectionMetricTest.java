@@ -355,7 +355,7 @@ class CostBasedPrefillSelectionMetricTest {
                 assertTrue(selected.prefillWorkMs() > 0L);
             }
         }
-        assertEquals(1, endpoint.captureRouteProjectionInputs().queue().activeItems().size(),
+        assertEquals(1, endpoint.captureLoadView().queue().activeItems().size(),
                 "selection must not evict a lower-priority queued request");
     }
 
@@ -689,7 +689,7 @@ class CostBasedPrefillSelectionMetricTest {
         } finally {
             status.lock.unlock();
         }
-        assertTrue(endpoint.captureRouteProjectionInputs().work().hasUnknownWork());
+        assertTrue(endpoint.captureLoadView().work().hasUnknownWork());
 
         context.getRequest().setRequestId("40001");
         var result = strategy.select(context, RoleType.PREFILL, null);
@@ -719,7 +719,7 @@ class CostBasedPrefillSelectionMetricTest {
         } finally {
             status.lock.unlock();
         }
-        assertTrue(endpoint.captureRouteProjectionInputs().work().hasUnknownWork());
+        assertTrue(endpoint.captureLoadView().work().hasUnknownWork());
 
         try (SelectedRole selected = select()) {
             assertEquals("10.0.0.2", selected.serverStatus().getServerIp());

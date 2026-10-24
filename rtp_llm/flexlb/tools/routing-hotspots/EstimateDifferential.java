@@ -9,7 +9,7 @@ import org.flexlb.balance.estimate.*;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
 
 /** Run identically against both revisions; compare complete selections and candidates. */
-public class ProjectionDifferential {
+public class EstimateDifferential {
     static void add(MessageDigest digest, Object value) {
         digest.update(value.toString().getBytes(StandardCharsets.UTF_8));
         digest.update((byte) '\n');
@@ -56,12 +56,12 @@ public class ProjectionDifferential {
             var committed = new WorkView(1000, trial % 4 == 0
                     ? List.of(new WorkView.RequestWork(9999, WorkView.Phase.ENGINE_RUNNING, 500))
                     : List.of(), List.of(), 0);
-            var inputs = new PrefillTtftEstimate.Inputs(new QueueView(1000, order, limits, items, null), committed);
+            var inputs = new PrefillTtftEstimate.LoadView(new QueueView(1000, order, limits, items, null), committed);
             var probe = new PrefillTtftEstimate.Probe(trial % 50 == 0 ? 1 : 999999,
                     random.nextInt(10), 1000, trial % 7 == 0 ? 1015 : Long.MAX_VALUE,
                     2048, 256, 256);
             for (var policy : List.of(batchPolicy, routePolicy)) {
-                var candidate = PrefillTtftEstimate.project(inputs, probe, model, policy);
+                var candidate = PrefillTtftEstimate.estimate(inputs, probe, model, policy);
                 add(digest, candidate);
                 states.merge(candidate.state().name(), 1, Integer::sum);
             }
