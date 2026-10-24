@@ -12,8 +12,7 @@ public final class Logger {
     public static final String LOGGER_NAME = "flexlbLogger";
     private static final org.slf4j.Logger log = LoggerFactory.getLogger(LOGGER_NAME);
 
-    private Logger() {
-    }
+    private Logger() {}
 
     public static boolean isDebugEnabled() {
         return log.isDebugEnabled();
@@ -44,7 +43,8 @@ public final class Logger {
             Object fourthArgument,
             Object fifthArgument) {
         if (log.isTraceEnabled()) {
-            log.trace(format,
+            log.trace(
+                    format,
                     firstArgument,
                     secondArgument,
                     thirdArgument,
@@ -119,7 +119,13 @@ public final class Logger {
             Object fourthArgument,
             Object fifthArgument) {
         if (log.isDebugEnabled()) {
-            log.debug(format, firstArgument, secondArgument, thirdArgument, fourthArgument, fifthArgument);
+            log.debug(
+                    format,
+                    firstArgument,
+                    secondArgument,
+                    thirdArgument,
+                    fourthArgument,
+                    fifthArgument);
         }
     }
 
@@ -132,7 +138,8 @@ public final class Logger {
             Object fifthArgument,
             Object sixthArgument) {
         if (log.isDebugEnabled()) {
-            log.debug(format,
+            log.debug(
+                    format,
                     firstArgument,
                     secondArgument,
                     thirdArgument,
@@ -207,7 +214,13 @@ public final class Logger {
             Object fourthArgument,
             Object fifthArgument) {
         if (log.isWarnEnabled()) {
-            log.warn(format, firstArgument, secondArgument, thirdArgument, fourthArgument, fifthArgument);
+            log.warn(
+                    format,
+                    firstArgument,
+                    secondArgument,
+                    thirdArgument,
+                    fourthArgument,
+                    fifthArgument);
         }
     }
 
@@ -244,207 +257,774 @@ public final class Logger {
             log.error(format, firstArgument, secondArgument, thirdArgument, fourthArgument);
         }
     }
-    public static void debug(String format, Object argument1, Object argument2, Object argument3, Object argument4, Object argument5, Object argument6, Object argument7) {
+
+    public static void debug(
+            String format,
+            Object argument1,
+            Object argument2,
+            Object argument3,
+            Object argument4,
+            Object argument5,
+            Object argument6,
+            Object argument7) {
         if (log.isDebugEnabled()) {
-            log.debug(format, argument1, argument2, argument3, argument4, argument5, argument6, argument7);
+            log.debug(
+                    format, argument1, argument2, argument3, argument4, argument5, argument6,
+                    argument7);
         }
     }
 
-    public static void debug(String format, Object argument1, Object argument2, Object argument3, Object argument4, Object argument5, Object argument6, Object argument7, Object argument8) {
+    public static void debug(
+            String format,
+            Object argument1,
+            Object argument2,
+            Object argument3,
+            Object argument4,
+            Object argument5,
+            Object argument6,
+            Object argument7,
+            Object argument8) {
         if (log.isDebugEnabled()) {
-            log.debug(format, argument1, argument2, argument3, argument4, argument5, argument6, argument7, argument8);
+            log.debug(
+                    format, argument1, argument2, argument3, argument4, argument5, argument6,
+                    argument7, argument8);
         }
     }
 
-    public static void debug(String format, Object argument1, Object argument2, Object argument3, Object argument4, Object argument5, Object argument6, Object argument7, Object argument8, Object argument9) {
+    public static void debug(
+            String format,
+            Object argument1,
+            Object argument2,
+            Object argument3,
+            Object argument4,
+            Object argument5,
+            Object argument6,
+            Object argument7,
+            Object argument8,
+            Object argument9) {
         if (log.isDebugEnabled()) {
-            log.debug(format, argument1, argument2, argument3, argument4, argument5, argument6, argument7, argument8, argument9);
+            log.debug(
+                    format, argument1, argument2, argument3, argument4, argument5, argument6,
+                    argument7, argument8, argument9);
         }
     }
 
-    public static void debug(String format, Object argument1, Object argument2, Object argument3, Object argument4, Object argument5, Object argument6, Object argument7, Object argument8, Object argument9, Object argument10) {
+    public static void debug(
+            String format,
+            Object argument1,
+            Object argument2,
+            Object argument3,
+            Object argument4,
+            Object argument5,
+            Object argument6,
+            Object argument7,
+            Object argument8,
+            Object argument9,
+            Object argument10) {
         if (log.isDebugEnabled()) {
-            log.debug(format, argument1, argument2, argument3, argument4, argument5, argument6, argument7, argument8, argument9, argument10);
+            log.debug(
+                    format,
+                    argument1,
+                    argument2,
+                    argument3,
+                    argument4,
+                    argument5,
+                    argument6,
+                    argument7,
+                    argument8,
+                    argument9,
+                    argument10);
         }
     }
 
-    public static void debug(String format, Object argument1, Object argument2, Object argument3, Object argument4, Object argument5, Object argument6, Object argument7, Object argument8, Object argument9, Object argument10, Object argument11) {
+    public static void debug(
+            String format,
+            Object argument1,
+            Object argument2,
+            Object argument3,
+            Object argument4,
+            Object argument5,
+            Object argument6,
+            Object argument7,
+            Object argument8,
+            Object argument9,
+            Object argument10,
+            Object argument11) {
         if (log.isDebugEnabled()) {
-            log.debug(format, argument1, argument2, argument3, argument4, argument5, argument6, argument7, argument8, argument9, argument10, argument11);
+            log.debug(
+                    format,
+                    argument1,
+                    argument2,
+                    argument3,
+                    argument4,
+                    argument5,
+                    argument6,
+                    argument7,
+                    argument8,
+                    argument9,
+                    argument10,
+                    argument11);
         }
     }
 
-    public static void debug(String format, Object argument1, Object argument2, Object argument3, Object argument4, Object argument5, Object argument6, Object argument7, Object argument8, Object argument9, Object argument10, Object argument11, Object argument12) {
+    public static void debug(
+            String format,
+            Object argument1,
+            Object argument2,
+            Object argument3,
+            Object argument4,
+            Object argument5,
+            Object argument6,
+            Object argument7,
+            Object argument8,
+            Object argument9,
+            Object argument10,
+            Object argument11,
+            Object argument12) {
         if (log.isDebugEnabled()) {
-            log.debug(format, argument1, argument2, argument3, argument4, argument5, argument6, argument7, argument8, argument9, argument10, argument11, argument12);
+            log.debug(
+                    format,
+                    argument1,
+                    argument2,
+                    argument3,
+                    argument4,
+                    argument5,
+                    argument6,
+                    argument7,
+                    argument8,
+                    argument9,
+                    argument10,
+                    argument11,
+                    argument12);
         }
     }
 
-    public static void debug(String format, Object argument1, Object argument2, Object argument3, Object argument4, Object argument5, Object argument6, Object argument7, Object argument8, Object argument9, Object argument10, Object argument11, Object argument12, Object argument13) {
+    public static void debug(
+            String format,
+            Object argument1,
+            Object argument2,
+            Object argument3,
+            Object argument4,
+            Object argument5,
+            Object argument6,
+            Object argument7,
+            Object argument8,
+            Object argument9,
+            Object argument10,
+            Object argument11,
+            Object argument12,
+            Object argument13) {
         if (log.isDebugEnabled()) {
-            log.debug(format, argument1, argument2, argument3, argument4, argument5, argument6, argument7, argument8, argument9, argument10, argument11, argument12, argument13);
+            log.debug(
+                    format,
+                    argument1,
+                    argument2,
+                    argument3,
+                    argument4,
+                    argument5,
+                    argument6,
+                    argument7,
+                    argument8,
+                    argument9,
+                    argument10,
+                    argument11,
+                    argument12,
+                    argument13);
         }
     }
 
-    public static void info(String format, Object argument1, Object argument2, Object argument3, Object argument4) {
+    public static void info(
+            String format, Object argument1, Object argument2, Object argument3, Object argument4) {
         if (log.isInfoEnabled()) {
             log.info(format, argument1, argument2, argument3, argument4);
         }
     }
 
-    public static void info(String format, Object argument1, Object argument2, Object argument3, Object argument4, Object argument5) {
+    public static void info(
+            String format,
+            Object argument1,
+            Object argument2,
+            Object argument3,
+            Object argument4,
+            Object argument5) {
         if (log.isInfoEnabled()) {
             log.info(format, argument1, argument2, argument3, argument4, argument5);
         }
     }
 
-    public static void info(String format, Object argument1, Object argument2, Object argument3, Object argument4, Object argument5, Object argument6) {
+    public static void info(
+            String format,
+            Object argument1,
+            Object argument2,
+            Object argument3,
+            Object argument4,
+            Object argument5,
+            Object argument6) {
         if (log.isInfoEnabled()) {
             log.info(format, argument1, argument2, argument3, argument4, argument5, argument6);
         }
     }
 
-    public static void info(String format, Object argument1, Object argument2, Object argument3, Object argument4, Object argument5, Object argument6, Object argument7) {
+    public static void info(
+            String format,
+            Object argument1,
+            Object argument2,
+            Object argument3,
+            Object argument4,
+            Object argument5,
+            Object argument6,
+            Object argument7) {
         if (log.isInfoEnabled()) {
-            log.info(format, argument1, argument2, argument3, argument4, argument5, argument6, argument7);
+            log.info(
+                    format, argument1, argument2, argument3, argument4, argument5, argument6,
+                    argument7);
         }
     }
 
-    public static void info(String format, Object argument1, Object argument2, Object argument3, Object argument4, Object argument5, Object argument6, Object argument7, Object argument8) {
+    public static void info(
+            String format,
+            Object argument1,
+            Object argument2,
+            Object argument3,
+            Object argument4,
+            Object argument5,
+            Object argument6,
+            Object argument7,
+            Object argument8) {
         if (log.isInfoEnabled()) {
-            log.info(format, argument1, argument2, argument3, argument4, argument5, argument6, argument7, argument8);
+            log.info(
+                    format, argument1, argument2, argument3, argument4, argument5, argument6,
+                    argument7, argument8);
         }
     }
 
-    public static void info(String format, Object argument1, Object argument2, Object argument3, Object argument4, Object argument5, Object argument6, Object argument7, Object argument8, Object argument9) {
+    public static void info(
+            String format,
+            Object argument1,
+            Object argument2,
+            Object argument3,
+            Object argument4,
+            Object argument5,
+            Object argument6,
+            Object argument7,
+            Object argument8,
+            Object argument9) {
         if (log.isInfoEnabled()) {
-            log.info(format, argument1, argument2, argument3, argument4, argument5, argument6, argument7, argument8, argument9);
+            log.info(
+                    format, argument1, argument2, argument3, argument4, argument5, argument6,
+                    argument7, argument8, argument9);
         }
     }
 
-    public static void info(String format, Object argument1, Object argument2, Object argument3, Object argument4, Object argument5, Object argument6, Object argument7, Object argument8, Object argument9, Object argument10) {
+    public static void info(
+            String format,
+            Object argument1,
+            Object argument2,
+            Object argument3,
+            Object argument4,
+            Object argument5,
+            Object argument6,
+            Object argument7,
+            Object argument8,
+            Object argument9,
+            Object argument10) {
         if (log.isInfoEnabled()) {
-            log.info(format, argument1, argument2, argument3, argument4, argument5, argument6, argument7, argument8, argument9, argument10);
+            log.info(
+                    format,
+                    argument1,
+                    argument2,
+                    argument3,
+                    argument4,
+                    argument5,
+                    argument6,
+                    argument7,
+                    argument8,
+                    argument9,
+                    argument10);
         }
     }
 
-    public static void info(String format, Object argument1, Object argument2, Object argument3, Object argument4, Object argument5, Object argument6, Object argument7, Object argument8, Object argument9, Object argument10, Object argument11) {
+    public static void info(
+            String format,
+            Object argument1,
+            Object argument2,
+            Object argument3,
+            Object argument4,
+            Object argument5,
+            Object argument6,
+            Object argument7,
+            Object argument8,
+            Object argument9,
+            Object argument10,
+            Object argument11) {
         if (log.isInfoEnabled()) {
-            log.info(format, argument1, argument2, argument3, argument4, argument5, argument6, argument7, argument8, argument9, argument10, argument11);
+            log.info(
+                    format,
+                    argument1,
+                    argument2,
+                    argument3,
+                    argument4,
+                    argument5,
+                    argument6,
+                    argument7,
+                    argument8,
+                    argument9,
+                    argument10,
+                    argument11);
         }
     }
 
-    public static void info(String format, Object argument1, Object argument2, Object argument3, Object argument4, Object argument5, Object argument6, Object argument7, Object argument8, Object argument9, Object argument10, Object argument11, Object argument12) {
+    public static void info(
+            String format,
+            Object argument1,
+            Object argument2,
+            Object argument3,
+            Object argument4,
+            Object argument5,
+            Object argument6,
+            Object argument7,
+            Object argument8,
+            Object argument9,
+            Object argument10,
+            Object argument11,
+            Object argument12) {
         if (log.isInfoEnabled()) {
-            log.info(format, argument1, argument2, argument3, argument4, argument5, argument6, argument7, argument8, argument9, argument10, argument11, argument12);
+            log.info(
+                    format,
+                    argument1,
+                    argument2,
+                    argument3,
+                    argument4,
+                    argument5,
+                    argument6,
+                    argument7,
+                    argument8,
+                    argument9,
+                    argument10,
+                    argument11,
+                    argument12);
         }
     }
 
-    public static void info(String format, Object argument1, Object argument2, Object argument3, Object argument4, Object argument5, Object argument6, Object argument7, Object argument8, Object argument9, Object argument10, Object argument11, Object argument12, Object argument13) {
+    public static void info(
+            String format,
+            Object argument1,
+            Object argument2,
+            Object argument3,
+            Object argument4,
+            Object argument5,
+            Object argument6,
+            Object argument7,
+            Object argument8,
+            Object argument9,
+            Object argument10,
+            Object argument11,
+            Object argument12,
+            Object argument13) {
         if (log.isInfoEnabled()) {
-            log.info(format, argument1, argument2, argument3, argument4, argument5, argument6, argument7, argument8, argument9, argument10, argument11, argument12, argument13);
+            log.info(
+                    format,
+                    argument1,
+                    argument2,
+                    argument3,
+                    argument4,
+                    argument5,
+                    argument6,
+                    argument7,
+                    argument8,
+                    argument9,
+                    argument10,
+                    argument11,
+                    argument12,
+                    argument13);
         }
     }
 
-    public static void warn(String format, Object argument1, Object argument2, Object argument3, Object argument4, Object argument5, Object argument6) {
+    public static void warn(
+            String format,
+            Object argument1,
+            Object argument2,
+            Object argument3,
+            Object argument4,
+            Object argument5,
+            Object argument6) {
         if (log.isWarnEnabled()) {
             log.warn(format, argument1, argument2, argument3, argument4, argument5, argument6);
         }
     }
 
-    public static void warn(String format, Object argument1, Object argument2, Object argument3, Object argument4, Object argument5, Object argument6, Object argument7) {
+    public static void warn(
+            String format,
+            Object argument1,
+            Object argument2,
+            Object argument3,
+            Object argument4,
+            Object argument5,
+            Object argument6,
+            Object argument7) {
         if (log.isWarnEnabled()) {
-            log.warn(format, argument1, argument2, argument3, argument4, argument5, argument6, argument7);
+            log.warn(
+                    format, argument1, argument2, argument3, argument4, argument5, argument6,
+                    argument7);
         }
     }
 
-    public static void warn(String format, Object argument1, Object argument2, Object argument3, Object argument4, Object argument5, Object argument6, Object argument7, Object argument8) {
+    public static void warn(
+            String format,
+            Object argument1,
+            Object argument2,
+            Object argument3,
+            Object argument4,
+            Object argument5,
+            Object argument6,
+            Object argument7,
+            Object argument8) {
         if (log.isWarnEnabled()) {
-            log.warn(format, argument1, argument2, argument3, argument4, argument5, argument6, argument7, argument8);
+            log.warn(
+                    format, argument1, argument2, argument3, argument4, argument5, argument6,
+                    argument7, argument8);
         }
     }
 
-    public static void warn(String format, Object argument1, Object argument2, Object argument3, Object argument4, Object argument5, Object argument6, Object argument7, Object argument8, Object argument9) {
+    public static void warn(
+            String format,
+            Object argument1,
+            Object argument2,
+            Object argument3,
+            Object argument4,
+            Object argument5,
+            Object argument6,
+            Object argument7,
+            Object argument8,
+            Object argument9) {
         if (log.isWarnEnabled()) {
-            log.warn(format, argument1, argument2, argument3, argument4, argument5, argument6, argument7, argument8, argument9);
+            log.warn(
+                    format, argument1, argument2, argument3, argument4, argument5, argument6,
+                    argument7, argument8, argument9);
         }
     }
 
-    public static void warn(String format, Object argument1, Object argument2, Object argument3, Object argument4, Object argument5, Object argument6, Object argument7, Object argument8, Object argument9, Object argument10) {
+    public static void warn(
+            String format,
+            Object argument1,
+            Object argument2,
+            Object argument3,
+            Object argument4,
+            Object argument5,
+            Object argument6,
+            Object argument7,
+            Object argument8,
+            Object argument9,
+            Object argument10) {
         if (log.isWarnEnabled()) {
-            log.warn(format, argument1, argument2, argument3, argument4, argument5, argument6, argument7, argument8, argument9, argument10);
+            log.warn(
+                    format,
+                    argument1,
+                    argument2,
+                    argument3,
+                    argument4,
+                    argument5,
+                    argument6,
+                    argument7,
+                    argument8,
+                    argument9,
+                    argument10);
         }
     }
 
-    public static void warn(String format, Object argument1, Object argument2, Object argument3, Object argument4, Object argument5, Object argument6, Object argument7, Object argument8, Object argument9, Object argument10, Object argument11) {
+    public static void warn(
+            String format,
+            Object argument1,
+            Object argument2,
+            Object argument3,
+            Object argument4,
+            Object argument5,
+            Object argument6,
+            Object argument7,
+            Object argument8,
+            Object argument9,
+            Object argument10,
+            Object argument11) {
         if (log.isWarnEnabled()) {
-            log.warn(format, argument1, argument2, argument3, argument4, argument5, argument6, argument7, argument8, argument9, argument10, argument11);
+            log.warn(
+                    format,
+                    argument1,
+                    argument2,
+                    argument3,
+                    argument4,
+                    argument5,
+                    argument6,
+                    argument7,
+                    argument8,
+                    argument9,
+                    argument10,
+                    argument11);
         }
     }
 
-    public static void warn(String format, Object argument1, Object argument2, Object argument3, Object argument4, Object argument5, Object argument6, Object argument7, Object argument8, Object argument9, Object argument10, Object argument11, Object argument12) {
+    public static void warn(
+            String format,
+            Object argument1,
+            Object argument2,
+            Object argument3,
+            Object argument4,
+            Object argument5,
+            Object argument6,
+            Object argument7,
+            Object argument8,
+            Object argument9,
+            Object argument10,
+            Object argument11,
+            Object argument12) {
         if (log.isWarnEnabled()) {
-            log.warn(format, argument1, argument2, argument3, argument4, argument5, argument6, argument7, argument8, argument9, argument10, argument11, argument12);
+            log.warn(
+                    format,
+                    argument1,
+                    argument2,
+                    argument3,
+                    argument4,
+                    argument5,
+                    argument6,
+                    argument7,
+                    argument8,
+                    argument9,
+                    argument10,
+                    argument11,
+                    argument12);
         }
     }
 
-    public static void warn(String format, Object argument1, Object argument2, Object argument3, Object argument4, Object argument5, Object argument6, Object argument7, Object argument8, Object argument9, Object argument10, Object argument11, Object argument12, Object argument13) {
+    public static void warn(
+            String format,
+            Object argument1,
+            Object argument2,
+            Object argument3,
+            Object argument4,
+            Object argument5,
+            Object argument6,
+            Object argument7,
+            Object argument8,
+            Object argument9,
+            Object argument10,
+            Object argument11,
+            Object argument12,
+            Object argument13) {
         if (log.isWarnEnabled()) {
-            log.warn(format, argument1, argument2, argument3, argument4, argument5, argument6, argument7, argument8, argument9, argument10, argument11, argument12, argument13);
+            log.warn(
+                    format,
+                    argument1,
+                    argument2,
+                    argument3,
+                    argument4,
+                    argument5,
+                    argument6,
+                    argument7,
+                    argument8,
+                    argument9,
+                    argument10,
+                    argument11,
+                    argument12,
+                    argument13);
         }
     }
 
-    public static void error(String format, Object argument1, Object argument2, Object argument3, Object argument4, Object argument5) {
+    public static void error(
+            String format,
+            Object argument1,
+            Object argument2,
+            Object argument3,
+            Object argument4,
+            Object argument5) {
         if (log.isErrorEnabled()) {
             log.error(format, argument1, argument2, argument3, argument4, argument5);
         }
     }
 
-    public static void error(String format, Object argument1, Object argument2, Object argument3, Object argument4, Object argument5, Object argument6) {
+    public static void error(
+            String format,
+            Object argument1,
+            Object argument2,
+            Object argument3,
+            Object argument4,
+            Object argument5,
+            Object argument6) {
         if (log.isErrorEnabled()) {
             log.error(format, argument1, argument2, argument3, argument4, argument5, argument6);
         }
     }
 
-    public static void error(String format, Object argument1, Object argument2, Object argument3, Object argument4, Object argument5, Object argument6, Object argument7) {
+    public static void error(
+            String format,
+            Object argument1,
+            Object argument2,
+            Object argument3,
+            Object argument4,
+            Object argument5,
+            Object argument6,
+            Object argument7) {
         if (log.isErrorEnabled()) {
-            log.error(format, argument1, argument2, argument3, argument4, argument5, argument6, argument7);
+            log.error(
+                    format, argument1, argument2, argument3, argument4, argument5, argument6,
+                    argument7);
         }
     }
 
-    public static void error(String format, Object argument1, Object argument2, Object argument3, Object argument4, Object argument5, Object argument6, Object argument7, Object argument8) {
+    public static void error(
+            String format,
+            Object argument1,
+            Object argument2,
+            Object argument3,
+            Object argument4,
+            Object argument5,
+            Object argument6,
+            Object argument7,
+            Object argument8) {
         if (log.isErrorEnabled()) {
-            log.error(format, argument1, argument2, argument3, argument4, argument5, argument6, argument7, argument8);
+            log.error(
+                    format, argument1, argument2, argument3, argument4, argument5, argument6,
+                    argument7, argument8);
         }
     }
 
-    public static void error(String format, Object argument1, Object argument2, Object argument3, Object argument4, Object argument5, Object argument6, Object argument7, Object argument8, Object argument9) {
+    public static void error(
+            String format,
+            Object argument1,
+            Object argument2,
+            Object argument3,
+            Object argument4,
+            Object argument5,
+            Object argument6,
+            Object argument7,
+            Object argument8,
+            Object argument9) {
         if (log.isErrorEnabled()) {
-            log.error(format, argument1, argument2, argument3, argument4, argument5, argument6, argument7, argument8, argument9);
+            log.error(
+                    format, argument1, argument2, argument3, argument4, argument5, argument6,
+                    argument7, argument8, argument9);
         }
     }
 
-    public static void error(String format, Object argument1, Object argument2, Object argument3, Object argument4, Object argument5, Object argument6, Object argument7, Object argument8, Object argument9, Object argument10) {
+    public static void error(
+            String format,
+            Object argument1,
+            Object argument2,
+            Object argument3,
+            Object argument4,
+            Object argument5,
+            Object argument6,
+            Object argument7,
+            Object argument8,
+            Object argument9,
+            Object argument10) {
         if (log.isErrorEnabled()) {
-            log.error(format, argument1, argument2, argument3, argument4, argument5, argument6, argument7, argument8, argument9, argument10);
+            log.error(
+                    format,
+                    argument1,
+                    argument2,
+                    argument3,
+                    argument4,
+                    argument5,
+                    argument6,
+                    argument7,
+                    argument8,
+                    argument9,
+                    argument10);
         }
     }
 
-    public static void error(String format, Object argument1, Object argument2, Object argument3, Object argument4, Object argument5, Object argument6, Object argument7, Object argument8, Object argument9, Object argument10, Object argument11) {
+    public static void error(
+            String format,
+            Object argument1,
+            Object argument2,
+            Object argument3,
+            Object argument4,
+            Object argument5,
+            Object argument6,
+            Object argument7,
+            Object argument8,
+            Object argument9,
+            Object argument10,
+            Object argument11) {
         if (log.isErrorEnabled()) {
-            log.error(format, argument1, argument2, argument3, argument4, argument5, argument6, argument7, argument8, argument9, argument10, argument11);
+            log.error(
+                    format,
+                    argument1,
+                    argument2,
+                    argument3,
+                    argument4,
+                    argument5,
+                    argument6,
+                    argument7,
+                    argument8,
+                    argument9,
+                    argument10,
+                    argument11);
         }
     }
 
-    public static void error(String format, Object argument1, Object argument2, Object argument3, Object argument4, Object argument5, Object argument6, Object argument7, Object argument8, Object argument9, Object argument10, Object argument11, Object argument12) {
+    public static void error(
+            String format,
+            Object argument1,
+            Object argument2,
+            Object argument3,
+            Object argument4,
+            Object argument5,
+            Object argument6,
+            Object argument7,
+            Object argument8,
+            Object argument9,
+            Object argument10,
+            Object argument11,
+            Object argument12) {
         if (log.isErrorEnabled()) {
-            log.error(format, argument1, argument2, argument3, argument4, argument5, argument6, argument7, argument8, argument9, argument10, argument11, argument12);
+            log.error(
+                    format,
+                    argument1,
+                    argument2,
+                    argument3,
+                    argument4,
+                    argument5,
+                    argument6,
+                    argument7,
+                    argument8,
+                    argument9,
+                    argument10,
+                    argument11,
+                    argument12);
         }
     }
 
-    public static void error(String format, Object argument1, Object argument2, Object argument3, Object argument4, Object argument5, Object argument6, Object argument7, Object argument8, Object argument9, Object argument10, Object argument11, Object argument12, Object argument13) {
+    public static void error(
+            String format,
+            Object argument1,
+            Object argument2,
+            Object argument3,
+            Object argument4,
+            Object argument5,
+            Object argument6,
+            Object argument7,
+            Object argument8,
+            Object argument9,
+            Object argument10,
+            Object argument11,
+            Object argument12,
+            Object argument13) {
         if (log.isErrorEnabled()) {
-            log.error(format, argument1, argument2, argument3, argument4, argument5, argument6, argument7, argument8, argument9, argument10, argument11, argument12, argument13);
+            log.error(
+                    format,
+                    argument1,
+                    argument2,
+                    argument3,
+                    argument4,
+                    argument5,
+                    argument6,
+                    argument7,
+                    argument8,
+                    argument9,
+                    argument10,
+                    argument11,
+                    argument12,
+                    argument13);
         }
     }
 
@@ -467,14 +1047,11 @@ public final class Logger {
      * Updates the runtime FlexLB log level. A null value restores the INFO default.
      */
     public static void setLevel(LogLevel level) {
-        Level logbackLevel = level == null
-                ? Level.INFO
-                : Level.toLevel(level.name(), Level.INFO);
+        Level logbackLevel = level == null ? Level.INFO : Level.toLevel(level.name(), Level.INFO);
         logbackLogger().setLevel(logbackLevel);
     }
 
     private static ch.qos.logback.classic.Logger logbackLogger() {
         return (ch.qos.logback.classic.Logger) LoggerFactory.getLogger("flexlbLogger");
     }
-
 }

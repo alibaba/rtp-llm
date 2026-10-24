@@ -37,7 +37,8 @@ public class RoutingServiceDiscovery implements ServiceDiscovery {
             ServiceDiscoveryProvider previous = providers.putIfAbsent(provider.getType(), provider);
             if (previous != null) {
                 throw new IllegalStateException(
-                        "Multiple service discovery providers registered for type: " + provider.getType().getValue());
+                        "Multiple service discovery providers registered for type: "
+                                + provider.getType().getValue());
             }
         }
         log.info("Registered service discovery providers: {}", providers.keySet());
@@ -59,9 +60,10 @@ public class RoutingServiceDiscovery implements ServiceDiscovery {
     @Override
     public void listen(Endpoint endpoint, ServiceHostListener listener) {
         bindRuntimeConfig(endpoint);
-        ServiceHostListener normalizedListener = listener == null
-                ? null
-                : hosts -> listener.onHostsChanged(normalizeHosts(hosts, endpoint));
+        ServiceHostListener normalizedListener =
+                listener == null
+                        ? null
+                        : hosts -> listener.onHostsChanged(normalizeHosts(hosts, endpoint));
         validatedProviderFor(endpoint).listen(endpoint, normalizedListener);
     }
 
@@ -71,7 +73,10 @@ public class RoutingServiceDiscovery implements ServiceDiscovery {
             try {
                 provider.shutdown();
             } catch (Exception e) {
-                log.error("Failed to shut down service discovery provider: {}", provider.getType().getValue(), e);
+                log.error(
+                        "Failed to shut down service discovery provider: {}",
+                        provider.getType().getValue(),
+                        e);
             }
         }
     }
@@ -90,13 +95,16 @@ public class RoutingServiceDiscovery implements ServiceDiscovery {
         }
         if (discovery.getType() == null) {
             throw new IllegalArgumentException(
-                    "endpoint discovery type must be configured for address: " + endpoint.getAddress());
+                    "endpoint discovery type must be configured for address: "
+                            + endpoint.getAddress());
         }
         ServiceDiscoveryProvider provider = providers.get(discovery.getType());
         if (provider == null) {
             throw new IllegalArgumentException(
-                    "No service discovery provider available for type: " + discovery.getType().getValue()
-                            + ", address: " + endpoint.getAddress());
+                    "No service discovery provider available for type: "
+                            + discovery.getType().getValue()
+                            + ", address: "
+                            + endpoint.getAddress());
         }
         return provider;
     }
@@ -107,41 +115,42 @@ public class RoutingServiceDiscovery implements ServiceDiscovery {
         }
     }
 
-    private List<WorkerHost> normalizeHosts(
-            List<WorkerHost> discoveredHosts,
-            Endpoint endpoint) {
+    private List<WorkerHost> normalizeHosts(List<WorkerHost> discoveredHosts, Endpoint endpoint) {
         if (discoveredHosts == null || discoveredHosts.isEmpty()) {
             return List.of();
         }
 
-        boolean grpcEndpoint = BackendServiceProtocolEnum.GRPC.getName()
-                .equals(endpoint.getProtocol());
+        boolean grpcEndpoint =
+                BackendServiceProtocolEnum.GRPC.getName().equals(endpoint.getProtocol());
         int multiEngineNum = endpoint.getMultiEngineNum();
         List<WorkerHost> normalizedHosts = new ArrayList<>(discoveredHosts.size() * multiEngineNum);
         for (WorkerHost host : discoveredHosts) {
             int discoveredPort = host.getPort();
             int httpPort = grpcEndpoint ? discoveredPort - 1 : discoveredPort;
             int grpcPort = grpcEndpoint ? discoveredPort : discoveredPort + 1;
-            int workerStatusBasePort = endpoint.getWorkerStatusPort() == null
-                    ? grpcPort
-                    : endpoint.getWorkerStatusPort();
+            int workerStatusBasePort =
+                    endpoint.getWorkerStatusPort() == null
+                            ? grpcPort
+                            : endpoint.getWorkerStatusPort();
             requireValidPort(httpPort, "httpPort");
             requireValidPort(grpcPort, "grpcPort");
             requireValidPort(httpPort + 5, "httpServerPort");
             requireValidPort(workerStatusBasePort, "workerStatusPort");
-            requireValidPort((long) workerStatusBasePort + multiEngineNum - 1, "lastWorkerStatusPort");
+            requireValidPort(
+                    (long) workerStatusBasePort + multiEngineNum - 1, "lastWorkerStatusPort");
             for (int engineIndex = 0; engineIndex < multiEngineNum; engineIndex++) {
-                normalizedHosts.add(new WorkerHost(
-                        host.getIp(),
-                        httpPort,
-                        grpcPort,
-                        httpPort + 5,
-                        workerStatusBasePort + engineIndex,
-                        host.getSite(),
-                        endpoint.getGroup(),
-                        host.getDeploymentName(),
-                        engineIndex,
-                        multiEngineNum));
+                normalizedHosts.add(
+                        new WorkerHost(
+                                host.getIp(),
+                                httpPort,
+                                grpcPort,
+                                httpPort + 5,
+                                workerStatusBasePort + engineIndex,
+                                host.getSite(),
+                                endpoint.getGroup(),
+                                host.getDeploymentName(),
+                                engineIndex,
+                                multiEngineNum));
             }
         }
         return normalizedHosts;

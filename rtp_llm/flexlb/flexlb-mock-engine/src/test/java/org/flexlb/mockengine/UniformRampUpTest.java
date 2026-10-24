@@ -38,32 +38,72 @@ class UniformRampUpTest {
 
     private static final ObjectMapper MAPPER = new ObjectMapper();
 
-    @TempDir
-    Path tempDir;
+    @TempDir Path tempDir;
 
     private Path writeTrace(int n) throws IOException {
         Path trace = tempDir.resolve("trace.jsonl");
         StringBuilder sb = new StringBuilder();
         for (int i = 0; i < n; i++) {
-            sb.append("{\"request_id\":\"rid-").append(i)
-                    .append("\",\"il\":32,\"ol\":4,\"ts\":").append(i * 1000L)
+            sb.append("{\"request_id\":\"rid-")
+                    .append(i)
+                    .append("\",\"il\":32,\"ol\":4,\"ts\":")
+                    .append(i * 1000L)
                     .append("}\n");
         }
         Files.writeString(trace, sb.toString());
         return trace;
     }
 
-    private JavaLoadClient.Config config(String traceFile, String outDir,
-                                         int durationS, int limit, int numShards, int shardIndex,
-                                         boolean loop, String sendMode, double sendModeQps,
-                                         double rampUpSeconds) {
+    private JavaLoadClient.Config config(
+            String traceFile,
+            String outDir,
+            int durationS,
+            int limit,
+            int numShards,
+            int shardIndex,
+            boolean loop,
+            String sendMode,
+            double sendModeQps,
+            double rampUpSeconds) {
         return new JavaLoadClient.Config(
-                traceFile, "127.0.0.1:7001", "127.0.0.1:7003",
-                durationS, 16, 1000.0, 1, outDir, numShards, shardIndex, limit,
-                120_000L, 500.0, false, loop, 1, 1, 0L, 120, true,
-                "engine_service", "",
-                false, 10, 1000, 0, 0, "", false, "", true, 0, 0, sendMode, sendModeQps,
-                rampUpSeconds, true, List.of());
+                traceFile,
+                "127.0.0.1:7001",
+                "127.0.0.1:7003",
+                durationS,
+                16,
+                1000.0,
+                1,
+                outDir,
+                numShards,
+                shardIndex,
+                limit,
+                120_000L,
+                500.0,
+                false,
+                loop,
+                1,
+                1,
+                0L,
+                120,
+                true,
+                "engine_service",
+                "",
+                false,
+                10,
+                1000,
+                0,
+                0,
+                "",
+                false,
+                "",
+                true,
+                0,
+                0,
+                sendMode,
+                sendModeQps,
+                rampUpSeconds,
+                true,
+                List.of());
     }
 
     private List<JsonNode> readPerRequest(Path outDir) throws IOException {
@@ -97,9 +137,21 @@ class UniformRampUpTest {
 
     @Test
     void negativeRampUpSecondsRejected() {
-        IllegalArgumentException e = assertThrows(IllegalArgumentException.class,
-                () -> config("trace.jsonl", tempDir.resolve("out").toString(),
-                        0, 0, 1, 0, false, "uniform", 50.0, -1.0));
+        IllegalArgumentException e =
+                assertThrows(
+                        IllegalArgumentException.class,
+                        () ->
+                                config(
+                                        "trace.jsonl",
+                                        tempDir.resolve("out").toString(),
+                                        0,
+                                        0,
+                                        1,
+                                        0,
+                                        false,
+                                        "uniform",
+                                        50.0,
+                                        -1.0));
         assertTrue(e.getMessage().contains("RAMP_UP_SECONDS"), e.getMessage());
     }
 
@@ -111,7 +163,10 @@ class UniformRampUpTest {
     void scheduleDegeneratesToFixedIntervalWhenRampDisabled() {
         double qps = 100.0;
         for (int i = 0; i <= 500; i++) {
-            assertEquals(i / qps, JavaLoadClient.uniformDueSeconds(i, qps, 0.0), 1e-12,
+            assertEquals(
+                    i / qps,
+                    JavaLoadClient.uniformDueSeconds(i, qps, 0.0),
+                    1e-12,
                     "fixed-interval mismatch at index " + i);
         }
     }
@@ -123,11 +178,11 @@ class UniformRampUpTest {
         // schedule pieces meet continuously).
         double qps = 100.0, ramp = 10.0;
         assertEquals(10.0, JavaLoadClient.uniformDueSeconds(500, qps, ramp), 1e-9);
-        assertTrue(JavaLoadClient.uniformDueSeconds(499, qps, ramp) < 10.0,
+        assertTrue(
+                JavaLoadClient.uniformDueSeconds(499, qps, ramp) < 10.0,
                 "last ramp-phase request must still be due before the boundary");
         // First steady-phase request resumes at exactly the fixed interval.
-        assertEquals(10.0 + 1.0 / qps,
-                JavaLoadClient.uniformDueSeconds(501, qps, ramp), 1e-9);
+        assertEquals(10.0 + 1.0 / qps, JavaLoadClient.uniformDueSeconds(501, qps, ramp), 1e-9);
     }
 
     @Test
@@ -142,8 +197,8 @@ class UniformRampUpTest {
             double t1 = JavaLoadClient.uniformDueSeconds(i + 1, qps, ramp);
             double discreteRate = 1.0 / (t1 - t0);
             double expected = qps * ((t0 + t1) / 2.0) / ramp;
-            assertEquals(expected, discreteRate, 1e-9,
-                    "instantaneous rate mismatch at ramp index " + i);
+            assertEquals(
+                    expected, discreteRate, 1e-9, "instantaneous rate mismatch at ramp index " + i);
         }
         // Steady phase: the interval is exactly 1/qps again.
         double t500 = JavaLoadClient.uniformDueSeconds(500, qps, ramp);
@@ -162,34 +217,50 @@ class UniformRampUpTest {
         // 100 QPS single shard, 2s linear ramp, 3s total:
         //   ramp window sends ≈ 100*2/2 = 100 (triangle integral),
         //   steady window adds ≈ 100, total ≈ 200.
-        JavaLoadClient client = new JavaLoadClient(config(trace.toString(), outDir.toString(),
-                3, 0, 1, 0, false, "uniform", 100.0, 2.0));
+        JavaLoadClient client =
+                new JavaLoadClient(
+                        config(
+                                trace.toString(),
+                                outDir.toString(),
+                                3,
+                                0,
+                                1,
+                                0,
+                                false,
+                                "uniform",
+                                100.0,
+                                2.0));
         client.run();
 
         List<Double> dues = readRelativeDues(outDir);
-        assertTrue(dues.size() >= 195 && dues.size() <= 205,
+        assertTrue(
+                dues.size() >= 195 && dues.size() <= 205,
                 "expected ~200 sends (100 ramp + 100 steady), got " + dues.size());
 
         long rampSends = dues.stream().filter(d -> d <= 2.0).count();
-        assertTrue(rampSends >= 98 && rampSends <= 102,
+        assertTrue(
+                rampSends >= 98 && rampSends <= 102,
                 "expected ~100 sends within the 2s ramp window, got " + rampSends);
 
         // Ramp phase: intervals shrink over time (rate climbs linearly).
         double early = dues.get(9) - dues.get(8);
         double late = dues.get(99) - dues.get(98);
-        assertTrue(early > late,
-                "ramp interval must shrink: early=" + early + "s late=" + late + "s");
+        assertTrue(
+                early > late, "ramp interval must shrink: early=" + early + "s late=" + late + "s");
 
         // Steady phase: last ~50 intervals are the fixed 10ms again.
         for (int i = Math.max(1, dues.size() - 50); i < dues.size(); i++) {
-            assertEquals(0.01, dues.get(i) - dues.get(i - 1), 1e-6,
+            assertEquals(
+                    0.01,
+                    dues.get(i) - dues.get(i - 1),
+                    1e-6,
                     "non-fixed interval in steady phase at index " + i);
         }
 
         // The ramp shape itself is fully recovered from the raw dues; the
         // client writes no summary.json anymore.
-        assertFalse(Files.exists(outDir.resolve("summary.json")),
-                "client must not write summary.json");
+        assertFalse(
+                Files.exists(outDir.resolve("summary.json")), "client must not write summary.json");
     }
 
     @Test
@@ -198,16 +269,31 @@ class UniformRampUpTest {
         Path outDir = tempDir.resolve("noramp_out");
         // RAMP_UP_SECONDS=0: fixed 20ms interval, byte-identical to the
         // pre-ramp uniform behavior; 50 QPS for 2s -> 100 sends.
-        JavaLoadClient client = new JavaLoadClient(config(trace.toString(), outDir.toString(),
-                2, 0, 1, 0, false, "uniform", 50.0, 0.0));
+        JavaLoadClient client =
+                new JavaLoadClient(
+                        config(
+                                trace.toString(),
+                                outDir.toString(),
+                                2,
+                                0,
+                                1,
+                                0,
+                                false,
+                                "uniform",
+                                50.0,
+                                0.0));
         client.run();
 
         List<Double> dues = readRelativeDues(outDir);
         int expected = 50 * 2;
-        assertTrue(dues.size() >= expected - 1 && dues.size() <= expected + 1,
+        assertTrue(
+                dues.size() >= expected - 1 && dues.size() <= expected + 1,
                 "expected " + expected + "±1 sends, got " + dues.size());
         for (int i = 1; i < dues.size(); i++) {
-            assertEquals(0.02, dues.get(i) - dues.get(i - 1), 1e-6,
+            assertEquals(
+                    0.02,
+                    dues.get(i) - dues.get(i - 1),
+                    1e-6,
                     "non-uniform interval at index " + i);
         }
     }

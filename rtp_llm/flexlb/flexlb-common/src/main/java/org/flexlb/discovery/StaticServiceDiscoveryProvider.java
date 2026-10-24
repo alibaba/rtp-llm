@@ -13,7 +13,8 @@ import java.util.concurrent.ConcurrentMap;
  */
 public final class StaticServiceDiscoveryProvider implements ServiceDiscoveryProvider {
 
-    private final ConcurrentMap<Endpoint, List<WorkerHost>> hostsByEndpoint = new ConcurrentHashMap<>();
+    private final ConcurrentMap<Endpoint, List<WorkerHost>> hostsByEndpoint =
+            new ConcurrentHashMap<>();
 
     @Override
     public ServiceDiscoveryType getType() {
@@ -37,7 +38,8 @@ public final class StaticServiceDiscoveryProvider implements ServiceDiscoveryPro
         }
         if (endpoint.getDiscovery() == null) {
             throw new IllegalArgumentException(
-                    "static-env discovery must be configured for address: " + endpoint.getAddress());
+                    "static-env discovery must be configured for address: "
+                            + endpoint.getAddress());
         }
     }
 
@@ -61,15 +63,14 @@ public final class StaticServiceDiscoveryProvider implements ServiceDiscoveryPro
         List<String> hosts = endpoint.getDiscovery().getHosts();
         if (hosts == null || hosts.isEmpty()) {
             throw new IllegalArgumentException(
-                    "static-env discovery hosts must be configured for address: " + endpoint.getAddress());
+                    "static-env discovery hosts must be configured for address: "
+                            + endpoint.getAddress());
         }
         return parseHosts(hosts);
     }
 
     private List<WorkerHost> parseHosts(List<String> configuredHosts) {
-        return configuredHosts.stream()
-                .map(this::parseHost)
-                .toList();
+        return configuredHosts.stream().map(this::parseHost).toList();
     }
 
     private WorkerHost parseHost(String hostConfig) {

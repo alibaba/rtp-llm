@@ -53,8 +53,15 @@ public class JvmGcMetricsReporter {
         String pid = Long.toString(ProcessHandle.current().pid());
         for (GarbageCollectorMXBean collector : collectors) {
             if (collector instanceof NotificationEmitter) {
-                collectorTags.put(collector.getName(), FlexMetricTags.of(
-                        "gc", gcType(collector.getName()), "collector", collector.getName(), "pid", pid));
+                collectorTags.put(
+                        collector.getName(),
+                        FlexMetricTags.of(
+                                "gc",
+                                gcType(collector.getName()),
+                                "collector",
+                                collector.getName(),
+                                "pid",
+                                pid));
             } else {
                 log.warn("GC collector does not provide notifications: {}", collector.getName());
             }
@@ -64,15 +71,17 @@ public class JvmGcMetricsReporter {
             if (!(collector instanceof NotificationEmitter emitter)) {
                 continue;
             }
-            NotificationListener listener = (notification, handback) -> {
-                if (!GarbageCollectionNotificationInfo.GARBAGE_COLLECTION_NOTIFICATION
-                        .equals(notification.getType())
-                        || !(notification.getUserData() instanceof CompositeData data)) {
-                    return;
-                }
-                GarbageCollectionNotificationInfo info = GarbageCollectionNotificationInfo.from(data);
-                reportPause(info.getGcName(), info.getGcInfo().getDuration());
-            };
+            NotificationListener listener =
+                    (notification, handback) -> {
+                        if (!GarbageCollectionNotificationInfo.GARBAGE_COLLECTION_NOTIFICATION
+                                        .equals(notification.getType())
+                                || !(notification.getUserData() instanceof CompositeData data)) {
+                            return;
+                        }
+                        GarbageCollectionNotificationInfo info =
+                                GarbageCollectionNotificationInfo.from(data);
+                        reportPause(info.getGcName(), info.getGcInfo().getDuration());
+                    };
             emitter.addNotificationListener(listener, null, null);
             listeners.add(new ListenerRegistration(emitter, listener));
         }
@@ -121,5 +130,6 @@ public class JvmGcMetricsReporter {
         listeners.clear();
     }
 
-    private record ListenerRegistration(NotificationEmitter emitter, NotificationListener listener) { }
+    private record ListenerRegistration(
+            NotificationEmitter emitter, NotificationListener listener) {}
 }

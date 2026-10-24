@@ -8,5 +8,4 @@ public class DeploymentIdentityConstants {
     public static final String WHALE_BIZ_NAME = "BIZ_NAME";
     public static final String WHALE_DEPLOYMENT_NAME = "DEPLOYMENT_NAME";
     public static final String WHALE_ZONE_NAME = "ZONE_NAME";
-
 }

@@ -23,7 +23,8 @@ public class AsyncConfiguration {
                 TimeUnit.MILLISECONDS,
                 new SynchronousQueue<>(),
                 new NamedThreadFactory("do-finally-executor"),
-                // Finish requests on the caller during transient saturation; shutdown may discard late tasks.
+                // Finish requests on the caller during transient saturation; shutdown may discard
+                // late tasks.
                 new ThreadPoolExecutor.CallerRunsPolicy());
     }
 }

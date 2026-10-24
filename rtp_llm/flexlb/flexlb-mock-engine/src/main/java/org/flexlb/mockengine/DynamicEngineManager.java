@@ -63,14 +63,18 @@ final class DynamicEngineManager {
     private static final int MAX_DETACHED_REMOVALS = 64;
 
     /** Outcome of a successful add — the fields the HTTP response reports. */
-    record AddedEngine(String engineName, int grpcPort) {
-    }
+    record AddedEngine(String engineName, int grpcPort) {}
 
     /** Outcome of a successful remove — counters are sampled when the drain
      * STARTS (the "at removal time" report), plus the drain result. */
-    record RemovedEngine(String engineName, int grpcPort, int runningAtRemoval,
-                         int waitingAtRemoval, String mode, boolean drained, long drainMs) {
-    }
+    record RemovedEngine(
+            String engineName,
+            int grpcPort,
+            int runningAtRemoval,
+            int waitingAtRemoval,
+            String mode,
+            boolean drained,
+            long drainMs) {}
 
     /** Thrown for caller-input problems (bad role, port conflict, unknown engine). */
     static final class EngineOperationException extends Exception {
@@ -90,14 +94,19 @@ final class DynamicEngineManager {
     private final EventLoopGroup workerGroup;
     private final ScheduledExecutorService scheduler;
     private final JavaMockEngineCluster.ClusterStats stats;
+
     /** Null when the cluster runs without --discovery-file (add/remove still work, file not maintained). */
     private final DiscoveryFileStore discoveryFileStore;
+
     /** Cluster-shared engine_events.jsonl writer (null = event stream disabled); wired onto every dynamically added engine. */
     private final JavaMockEngineCluster.EngineEventLog engineEventLog;
+
     /** Cluster-single mutation lock: serializes add/remove including the file rewrite. */
     private final Object mutationLock = new Object();
+
     /** Monotonic id for dynamically added engine names, appended to the role index. */
     private final AtomicInteger dynamicId = new AtomicInteger();
+
     /**
      * Ports mid-graceful-drain: excluded from EVERY discovery-file rewrite
      * (including rewrites triggered by concurrent add_engine) until the
@@ -105,6 +114,7 @@ final class DynamicEngineManager {
      * the master's routing view. Guarded by {@link #mutationLock}.
      */
     private final Set<Integer> pendingRemovalPorts = new HashSet<>();
+
     /**
      * Per-engine drain futures for idempotent concurrent removals (grpc port
      * → outcome). Every caller that hits an in-progress drain awaits the SAME
@@ -112,6 +122,7 @@ final class DynamicEngineManager {
      * post-teardown state. Guarded by {@link #mutationLock}.
      */
     private final Map<Integer, CompletableFuture<RemovedEngine>> drainingFutures = new HashMap<>();
+
     /**
      * Outcomes of engines this control plane already detached (grpc port →
      * outcome), so a concurrent remove that resolved after the detach joins the
@@ -119,12 +130,14 @@ final class DynamicEngineManager {
      * because one cluster's control plane outlives many scale-in events.
      * Guarded by {@link #mutationLock}.
      */
-    private final Map<Integer, RemovedEngine> detachedRemovals = new LinkedHashMap<>() {
-        @Override
-        protected boolean removeEldestEntry(Map.Entry<Integer, RemovedEngine> eldest) {
-            return size() > MAX_DETACHED_REMOVALS;
-        }
-    };
+    private final Map<Integer, RemovedEngine> detachedRemovals =
+            new LinkedHashMap<>() {
+                @Override
+                protected boolean removeEldestEntry(Map.Entry<Integer, RemovedEngine> eldest) {
+                    return size() > MAX_DETACHED_REMOVALS;
+                }
+            };
+
     /**
      * Monotonic GLOBAL engine index for unique advertisement IPs
      * ({@code --unique-engine-ips}): initialized to the initial engine count
@@ -135,16 +148,17 @@ final class DynamicEngineManager {
      */
     private final AtomicInteger nextEngineIndex;
 
-    DynamicEngineManager(JavaMockEngineCluster.Config config,
-                         MockPerformanceModel performance,
-                         Map<Integer, JavaMockEngineCluster.FastRpcService> services,
-                         Map<Integer, Server> serversByPort,
-                         EventLoopGroup bossGroup,
-                         EventLoopGroup workerGroup,
-                         ScheduledExecutorService scheduler,
-                         JavaMockEngineCluster.ClusterStats stats,
-                         DiscoveryFileStore discoveryFileStore,
-                         JavaMockEngineCluster.EngineEventLog engineEventLog) {
+    DynamicEngineManager(
+            JavaMockEngineCluster.Config config,
+            MockPerformanceModel performance,
+            Map<Integer, JavaMockEngineCluster.FastRpcService> services,
+            Map<Integer, Server> serversByPort,
+            EventLoopGroup bossGroup,
+            EventLoopGroup workerGroup,
+            ScheduledExecutorService scheduler,
+            JavaMockEngineCluster.ClusterStats stats,
+            DiscoveryFileStore discoveryFileStore,
+            JavaMockEngineCluster.EngineEventLog engineEventLog) {
         this.config = config;
         this.performance = performance;
         this.services = services;
@@ -167,7 +181,8 @@ final class DynamicEngineManager {
      * @param role         "prefill" or "decode" (case-insensitive)
      * @param explicitPort requested gRPC port, or null to auto-allocate max+1
      */
-    AddedEngine addEngine(String role, Integer explicitPort) throws EngineOperationException, IOException {
+    AddedEngine addEngine(String role, Integer explicitPort)
+            throws EngineOperationException, IOException {
         String roleName = normalizeRole(role);
         synchronized (mutationLock) {
             int grpcPort = resolvePort(explicitPort);
@@ -175,10 +190,20 @@ final class DynamicEngineManager {
             // previous detachment so it can never be replayed for this one.
             detachedRemovals.remove(grpcPort);
             String engineName = nextEngineName(roleName);
-            JavaMockEngineCluster.FastRpcService service = JavaMockEngineCluster.startEngine(
-                    config, performance, serversByPort, bossGroup, workerGroup,
-                    services, scheduler, stats, roleName, engineName, grpcPort,
-                    nextEngineIndex.getAndIncrement());
+            JavaMockEngineCluster.FastRpcService service =
+                    JavaMockEngineCluster.startEngine(
+                            config,
+                            performance,
+                            serversByPort,
+                            bossGroup,
+                            workerGroup,
+                            services,
+                            scheduler,
+                            stats,
+                            roleName,
+                            engineName,
+                            grpcPort,
+                            nextEngineIndex.getAndIncrement());
             service.setEngineEventLog(engineEventLog);
             try {
                 rewriteDiscoveryFileLocked();
@@ -186,8 +211,14 @@ final class DynamicEngineManager {
                 // Engine is up but the file update failed: roll the engine back so
                 // the discovery view stays consistent with the hosted engine set.
                 rollbackEngine(grpcPort, service);
-                throw new IOException("engine " + engineName + " started on port " + grpcPort
-                        + " but discovery file rewrite failed, engine rolled back: " + e.getMessage(), e);
+                throw new IOException(
+                        "engine "
+                                + engineName
+                                + " started on port "
+                                + grpcPort
+                                + " but discovery file rewrite failed, engine rolled back: "
+                                + e.getMessage(),
+                        e);
             }
             return new AddedEngine(engineName, grpcPort);
         }
@@ -203,7 +234,8 @@ final class DynamicEngineManager {
      * @param drainTimeoutMs graceful drain bound; on expiry the removal
      *                      falls back to the abrupt teardown (drained=false)
      */
-    RemovedEngine removeEngine(JavaMockEngineCluster.FastRpcService service, String mode, long drainTimeoutMs)
+    RemovedEngine removeEngine(
+            JavaMockEngineCluster.FastRpcService service, String mode, long drainTimeoutMs)
             throws EngineOperationException, IOException {
         int port = service.getGrpcPort();
         CompletableFuture<RemovedEngine> drain;
@@ -223,8 +255,8 @@ final class DynamicEngineManager {
                 runningAtRemoval = service.getRunningCount();
                 waitingAtRemoval = removalWaitingCount(service);
                 if ("abrupt".equalsIgnoreCase(mode)) {
-                    return detachLocked(service, "abrupt", false, 0L,
-                            runningAtRemoval, waitingAtRemoval);
+                    return detachLocked(
+                            service, "abrupt", false, 0L, runningAtRemoval, waitingAtRemoval);
                 }
                 // Phase 1 (lock held): strip the discovery entry FIRST so the
                 // master stops routing new requests; the engine keeps serving
@@ -236,18 +268,27 @@ final class DynamicEngineManager {
                     rewriteDiscoveryFileLocked();
                 } catch (IOException e) {
                     pendingRemovalPorts.remove(port);
-                    throw new IOException("engine " + service.getEngineName()
-                            + " removal aborted (engine NOT removed): discovery file rewrite failed: "
-                            + e.getMessage(), e);
+                    throw new IOException(
+                            "engine "
+                                    + service.getEngineName()
+                                    + " removal aborted (engine NOT removed): discovery file rewrite failed: "
+                                    + e.getMessage(),
+                            e);
                 }
                 drain = new CompletableFuture<>();
                 drainingFutures.put(port, drain);
                 final int sampledRunning = runningAtRemoval;
                 final int sampledWaiting = waitingAtRemoval;
-                Thread drainer = new Thread(
-                        () -> runGracefulDrain(service, drain, drainTimeoutMs,
-                                sampledRunning, sampledWaiting),
-                        "engine-drain-" + service.getEngineName());
+                Thread drainer =
+                        new Thread(
+                                () ->
+                                        runGracefulDrain(
+                                                service,
+                                                drain,
+                                                drainTimeoutMs,
+                                                sampledRunning,
+                                                sampledWaiting),
+                                "engine-drain-" + service.getEngineName());
                 drainer.setDaemon(true);
                 drainer.start();
             }
@@ -258,16 +299,21 @@ final class DynamicEngineManager {
             return drain.get(drainTimeoutMs + 30_000, TimeUnit.MILLISECONDS);
         } catch (ExecutionException e) {
             Throwable cause = e.getCause() == null ? e : e.getCause();
-            throw new IOException("engine " + service.getEngineName()
-                    + " graceful removal failed: " + cause, cause);
+            throw new IOException(
+                    "engine " + service.getEngineName() + " graceful removal failed: " + cause,
+                    cause);
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
-            throw new EngineOperationException(503,
-                    "graceful removal of engine " + service.getEngineName() + " interrupted");
+            throw new EngineOperationException(
+                    503, "graceful removal of engine " + service.getEngineName() + " interrupted");
         } catch (TimeoutException e) {
-            throw new EngineOperationException(504,
-                    "graceful removal of engine " + service.getEngineName() + " did not settle within "
-                            + (drainTimeoutMs + 30_000) + "ms");
+            throw new EngineOperationException(
+                    504,
+                    "graceful removal of engine "
+                            + service.getEngineName()
+                            + " did not settle within "
+                            + (drainTimeoutMs + 30_000)
+                            + "ms");
         }
     }
 
@@ -296,11 +342,12 @@ final class DynamicEngineManager {
      * then publish the outcome to every awaiting caller.  The "at removal"
      * counters are the drain-START samples taken by {@link #removeEngine}.
      */
-    private void runGracefulDrain(JavaMockEngineCluster.FastRpcService service,
-                                  CompletableFuture<RemovedEngine> outcome,
-                                  long drainTimeoutMs,
-                                  int runningAtRemoval,
-                                  int waitingAtRemoval) {
+    private void runGracefulDrain(
+            JavaMockEngineCluster.FastRpcService service,
+            CompletableFuture<RemovedEngine> outcome,
+            long drainTimeoutMs,
+            int runningAtRemoval,
+            int waitingAtRemoval) {
         long start = System.nanoTime();
         long deadline = start + TimeUnit.MILLISECONDS.toNanos(drainTimeoutMs);
         boolean drained = false;
@@ -320,8 +367,14 @@ final class DynamicEngineManager {
         try {
             RemovedEngine result;
             synchronized (mutationLock) {
-                result = detachLocked(service, "graceful", drained, drainMs,
-                        runningAtRemoval, waitingAtRemoval);
+                result =
+                        detachLocked(
+                                service,
+                                "graceful",
+                                drained,
+                                drainMs,
+                                runningAtRemoval,
+                                waitingAtRemoval);
             }
             outcome.complete(result);
         } catch (Throwable failure) {
@@ -342,12 +395,14 @@ final class DynamicEngineManager {
      * already empty, so the cut is bloodless; the abrupt path (and the
      * graceful timeout fallback) relies on the sweep to net the counters out.
      */
-    private RemovedEngine detachLocked(JavaMockEngineCluster.FastRpcService service,
-                                       String mode,
-                                       boolean drained,
-                                       long drainMs,
-                                       int runningAtRemoval,
-                                       int waitingAtRemoval) throws IOException {
+    private RemovedEngine detachLocked(
+            JavaMockEngineCluster.FastRpcService service,
+            String mode,
+            boolean drained,
+            long drainMs,
+            int runningAtRemoval,
+            int waitingAtRemoval)
+            throws IOException {
         int port = service.getGrpcPort();
         pendingRemovalPorts.remove(port);
         drainingFutures.remove(port);
@@ -386,11 +441,24 @@ final class DynamicEngineManager {
         } catch (IOException e) {
             // Engine is already gone; report the failure so the operator can
             // retry (a stale entry would keep the master retrying a dead port).
-            throw new IOException("engine " + service.getEngineName() + " removed from port " + port
-                    + " but discovery file rewrite failed: " + e.getMessage(), e);
+            throw new IOException(
+                    "engine "
+                            + service.getEngineName()
+                            + " removed from port "
+                            + port
+                            + " but discovery file rewrite failed: "
+                            + e.getMessage(),
+                    e);
         }
-        RemovedEngine outcome = new RemovedEngine(service.getEngineName(), port,
-                runningAtRemoval, waitingAtRemoval, mode, drained, drainMs);
+        RemovedEngine outcome =
+                new RemovedEngine(
+                        service.getEngineName(),
+                        port,
+                        runningAtRemoval,
+                        waitingAtRemoval,
+                        mode,
+                        drained,
+                        drainMs);
         detachedRemovals.put(port, outcome);
         return outcome;
     }
@@ -412,8 +480,9 @@ final class DynamicEngineManager {
         return switch (role.toLowerCase()) {
             case "prefill" -> "prefill";
             case "decode" -> "decode";
-            default -> throw new EngineOperationException(400,
-                    "unknown role '" + role + "', expected prefill|decode");
+            default ->
+                    throw new EngineOperationException(
+                            400, "unknown role '" + role + "', expected prefill|decode");
         };
     }
 
@@ -421,15 +490,21 @@ final class DynamicEngineManager {
         int grpcPort;
         if (explicitPort != null) {
             if (explicitPort <= 0 || explicitPort > 65_535) {
-                throw new EngineOperationException(400, "port must be in [1, 65535]: " + explicitPort);
+                throw new EngineOperationException(
+                        400, "port must be in [1, 65535]: " + explicitPort);
             }
             grpcPort = explicitPort;
         } else {
-            grpcPort = services.keySet().stream().mapToInt(Integer::intValue).max().orElse(1024) + 1;
+            grpcPort =
+                    services.keySet().stream().mapToInt(Integer::intValue).max().orElse(1024) + 1;
         }
         if (services.containsKey(grpcPort)) {
-            throw new EngineOperationException(409,
-                    "port " + grpcPort + " already in use by engine " + services.get(grpcPort).getEngineName());
+            throw new EngineOperationException(
+                    409,
+                    "port "
+                            + grpcPort
+                            + " already in use by engine "
+                            + services.get(grpcPort).getEngineName());
         }
         return grpcPort;
     }
@@ -442,7 +517,8 @@ final class DynamicEngineManager {
             String name = service.getEngineName();
             if (name.startsWith(prefix)) {
                 try {
-                    maxIndex = Math.max(maxIndex, Integer.parseInt(name.substring(prefix.length())));
+                    maxIndex =
+                            Math.max(maxIndex, Integer.parseInt(name.substring(prefix.length())));
                 } catch (NumberFormatException ignored) {
                     // Non-indexed name (e.g. "prefill-<port>" from the test constructor) — skip.
                 }

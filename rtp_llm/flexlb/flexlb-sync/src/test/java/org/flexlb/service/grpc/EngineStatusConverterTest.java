@@ -18,35 +18,58 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class EngineStatusConverterTest {
 
-    private final WorkerStatus owner = WorkerStatus.createDiscovered(
-            RoleType.PREFILL, "default", "127.0.0.1", 8001, 18002, "test");
+    private final WorkerStatus owner =
+            WorkerStatus.createDiscovered(
+                    RoleType.PREFILL, "default", "127.0.0.1", 8001, 18002, "test");
 
     @Test
     void preservesAllActiveTaskPhasesAndKeepsFinishedTasksSeparate() {
-        var status = statusBuilder()
-                .setRunningQueryLen(2)
-                .setWaitingQueryLen(4)
-                .addRunningTaskInfo(EngineRpcService.TaskInfoPB.newBuilder()
-                        .setRequestIdStr("running").setPhase(EngineRpcService.TaskPhase.TASK_PHASE_RUNNING))
-                .addRunningTaskInfo(EngineRpcService.TaskInfoPB.newBuilder()
-                        .setRequestIdStr("received").setPhase(EngineRpcService.TaskPhase.TASK_PHASE_RECEIVED))
-                .addRunningTaskInfo(EngineRpcService.TaskInfoPB.newBuilder()
-                        .setRequestIdStr("allocated").setPhase(EngineRpcService.TaskPhase.TASK_PHASE_KV_ALLOCATED))
-                .addRunningTaskInfo(EngineRpcService.TaskInfoPB.newBuilder()
-                        .setRequestIdStr("pending").setPhase(EngineRpcService.TaskPhase.TASK_PHASE_PENDING)
-                        .setIsWaiting(true))
-                .addRunningTaskInfo(EngineRpcService.TaskInfoPB.newBuilder()
-                        .setRequestIdStr("legacy-waiting").setIsWaiting(true))
-                .addRunningTaskInfo(EngineRpcService.TaskInfoPB.newBuilder()
-                        .setRequestIdStr("legacy-running"))
-                .addFinishedTaskList(EngineRpcService.TaskInfoPB.newBuilder()
-                        .setRequestIdStr("finished").setPhase(EngineRpcService.TaskPhase.TASK_PHASE_RUNNING))
-                .build();
+        var status =
+                statusBuilder()
+                        .setRunningQueryLen(2)
+                        .setWaitingQueryLen(4)
+                        .addRunningTaskInfo(
+                                EngineRpcService.TaskInfoPB.newBuilder()
+                                        .setRequestIdStr("running")
+                                        .setPhase(EngineRpcService.TaskPhase.TASK_PHASE_RUNNING))
+                        .addRunningTaskInfo(
+                                EngineRpcService.TaskInfoPB.newBuilder()
+                                        .setRequestIdStr("received")
+                                        .setPhase(EngineRpcService.TaskPhase.TASK_PHASE_RECEIVED))
+                        .addRunningTaskInfo(
+                                EngineRpcService.TaskInfoPB.newBuilder()
+                                        .setRequestIdStr("allocated")
+                                        .setPhase(
+                                                EngineRpcService.TaskPhase.TASK_PHASE_KV_ALLOCATED))
+                        .addRunningTaskInfo(
+                                EngineRpcService.TaskInfoPB.newBuilder()
+                                        .setRequestIdStr("pending")
+                                        .setPhase(EngineRpcService.TaskPhase.TASK_PHASE_PENDING)
+                                        .setIsWaiting(true))
+                        .addRunningTaskInfo(
+                                EngineRpcService.TaskInfoPB.newBuilder()
+                                        .setRequestIdStr("legacy-waiting")
+                                        .setIsWaiting(true))
+                        .addRunningTaskInfo(
+                                EngineRpcService.TaskInfoPB.newBuilder()
+                                        .setRequestIdStr("legacy-running"))
+                        .addFinishedTaskList(
+                                EngineRpcService.TaskInfoPB.newBuilder()
+                                        .setRequestIdStr("finished")
+                                        .setPhase(EngineRpcService.TaskPhase.TASK_PHASE_RUNNING))
+                        .build();
 
         var observation = EngineStatusConverter.convertToStatusObservation(owner, status);
         var activeTasks = observation.activeTasks();
 
-        assertEquals(Set.of("running", "received", "allocated", "pending", "legacy-waiting", "legacy-running"),
+        assertEquals(
+                Set.of(
+                        "running",
+                        "received",
+                        "allocated",
+                        "pending",
+                        "legacy-waiting",
+                        "legacy-running"),
                 activeTasks.keySet());
         assertEquals(TaskPhase.RUNNING, activeTasks.get("running").phase());
         assertEquals(TaskPhase.RECEIVED, activeTasks.get("received").phase());
@@ -109,8 +132,10 @@ class EngineStatusConverterTest {
         var statusWire = CodedOutputStream.newInstance(statusBytes);
         statusWire.writeByteArray(27, bytes.toByteArray());
         statusWire.flush();
-        var status = EngineRpcService.WorkerStatusPB.parseFrom(statusBytes.toByteArray())
-                .toBuilder().setRole("RoleType.DECODE").build();
+        var status =
+                EngineRpcService.WorkerStatusPB.parseFrom(statusBytes.toByteArray()).toBuilder()
+                        .setRole("RoleType.DECODE")
+                        .build();
 
         var observation = EngineStatusConverter.convertToStatusObservation(owner, status);
         var step = observation.engine().lastStepMetrics();
@@ -122,16 +147,27 @@ class EngineStatusConverterTest {
         assertEquals(0, step.prefillTokens());
         assertEquals(32000, step.tokenBudget());
         assertEquals(0.002, step.budgetFillRatio());
-        assertNull(EngineStatusConverter.convertToStatusObservation(owner, statusBuilder().build())
-                .engine().lastStepMetrics());
+        assertNull(
+                EngineStatusConverter.convertToStatusObservation(owner, statusBuilder().build())
+                        .engine()
+                        .lastStepMetrics());
     }
 
     @Test
     void preservesStringTaskIdsAndBatchId() {
-        var runningTask = EngineRpcService.TaskInfoPB.newBuilder().setRequestId(123).setRequestIdStr("123")
-                .setBatchId(42).setPhase(EngineRpcService.TaskPhase.TASK_PHASE_RUNNING).build();
+        var runningTask =
+                EngineRpcService.TaskInfoPB.newBuilder()
+                        .setRequestId(123)
+                        .setRequestIdStr("123")
+                        .setBatchId(42)
+                        .setPhase(EngineRpcService.TaskPhase.TASK_PHASE_RUNNING)
+                        .build();
         var finishedTask = EngineRpcService.TaskInfoPB.newBuilder().setRequestId(456).build();
-        var status = statusBuilder().addRunningTaskInfo(runningTask).addFinishedTaskList(finishedTask).build();
+        var status =
+                statusBuilder()
+                        .addRunningTaskInfo(runningTask)
+                        .addFinishedTaskList(finishedTask)
+                        .build();
 
         var observation = EngineStatusConverter.convertToStatusObservation(owner, status);
 
@@ -142,9 +178,11 @@ class EngineStatusConverterTest {
 
     @Test
     void convertsKvCacheGroupMode() {
-        var status = statusBuilder()
-                .setKvCacheGroupMode(EngineRpcService.KvCacheGroupModePB.KV_CACHE_GROUP_MODE_WITH_MAMBA)
-                .build();
+        var status =
+                statusBuilder()
+                        .setKvCacheGroupMode(
+                                EngineRpcService.KvCacheGroupModePB.KV_CACHE_GROUP_MODE_WITH_MAMBA)
+                        .build();
 
         var observation = EngineStatusConverter.convertToStatusObservation(owner, status);
 
@@ -153,11 +191,12 @@ class EngineStatusConverterTest {
 
     @Test
     void preservesPrefixLengthValidityFromWorkerStatus() {
-        var runningTask = EngineRpcService.TaskInfoPB.newBuilder()
-                .setRequestId(1)
-                .setPrefixLength(128)
-                .setPrefixLengthValid(true)
-                .build();
+        var runningTask =
+                EngineRpcService.TaskInfoPB.newBuilder()
+                        .setRequestId(1)
+                        .setPrefixLength(128)
+                        .setPrefixLengthValid(true)
+                        .build();
         var status = statusBuilder().addRunningTaskInfo(runningTask).build();
 
         var observation = EngineStatusConverter.convertToStatusObservation(owner, status);
@@ -169,20 +208,21 @@ class EngineStatusConverterTest {
 
     @Test
     void preservesPrefillTimingAndCacheBreakdownFromWorkerStatus() {
-        var finishedTask = EngineRpcService.TaskInfoPB.newBuilder()
-                .setRequestId(1)
-                .setInputQueueEnqueueTimeMs(1000)
-                .setInputQueueDrainTimeMs(1100)
-                .setRemoteKvWaitMs(200)
-                .setFirstTokenTimeMs(1500)
-                .setHbmLocalMatchTokens(512)
-                .setRemoteKvAddedMatchTokens(256)
-                .setFirstPrefillStepId(7)
-                .setLastPrefillStepId(9)
-                .setPrefillStepCount(3)
-                .setPrefillNonfinalChunkTokensMin(128)
-                .setPrefillNonfinalChunkTokensMax(256)
-                .build();
+        var finishedTask =
+                EngineRpcService.TaskInfoPB.newBuilder()
+                        .setRequestId(1)
+                        .setInputQueueEnqueueTimeMs(1000)
+                        .setInputQueueDrainTimeMs(1100)
+                        .setRemoteKvWaitMs(200)
+                        .setFirstTokenTimeMs(1500)
+                        .setHbmLocalMatchTokens(512)
+                        .setRemoteKvAddedMatchTokens(256)
+                        .setFirstPrefillStepId(7)
+                        .setLastPrefillStepId(9)
+                        .setPrefillStepCount(3)
+                        .setPrefillNonfinalChunkTokensMin(128)
+                        .setPrefillNonfinalChunkTokensMax(256)
+                        .build();
         var status = statusBuilder().addFinishedTaskList(finishedTask).build();
 
         var observation = EngineStatusConverter.convertToStatusObservation(owner, status);
@@ -203,10 +243,11 @@ class EngineStatusConverterTest {
 
     @Test
     void preservesCacheMatchMetadataFromWorkerStatus() {
-        var status = statusBuilder()
-                .setBlockHashLookaheadTokens(1)
-                .setCacheMatchRollbackBlocks(1)
-                .build();
+        var status =
+                statusBuilder()
+                        .setBlockHashLookaheadTokens(1)
+                        .setCacheMatchRollbackBlocks(1)
+                        .build();
 
         var observation = EngineStatusConverter.convertToStatusObservation(owner, status);
 
@@ -216,15 +257,24 @@ class EngineStatusConverterTest {
 
     @Test
     void preservesOptionalPrefillProgressAndDistinguishesMissingFromZero() {
-        var status = statusBuilder()
-                .addRunningTaskInfo(EngineRpcService.TaskInfoPB.newBuilder().setRequestIdStr("old-engine"))
-                .addRunningTaskInfo(EngineRpcService.TaskInfoPB.newBuilder().setRequestIdStr("prefilling")
-                        .setCompletedPrefillTokens(128).setRemainingPrefillTokens(256)
-                        .setLastCompletedPrefillStepId(7))
-                .addFinishedTaskList(EngineRpcService.TaskInfoPB.newBuilder().setRequestIdStr("finished")
-                        .setCompletedPrefillTokens(384).setRemainingPrefillTokens(0)
-                        .setLastCompletedPrefillStepId(9))
-                .build();
+        var status =
+                statusBuilder()
+                        .addRunningTaskInfo(
+                                EngineRpcService.TaskInfoPB.newBuilder()
+                                        .setRequestIdStr("old-engine"))
+                        .addRunningTaskInfo(
+                                EngineRpcService.TaskInfoPB.newBuilder()
+                                        .setRequestIdStr("prefilling")
+                                        .setCompletedPrefillTokens(128)
+                                        .setRemainingPrefillTokens(256)
+                                        .setLastCompletedPrefillStepId(7))
+                        .addFinishedTaskList(
+                                EngineRpcService.TaskInfoPB.newBuilder()
+                                        .setRequestIdStr("finished")
+                                        .setCompletedPrefillTokens(384)
+                                        .setRemainingPrefillTokens(0)
+                                        .setLastCompletedPrefillStepId(9))
+                        .build();
 
         var observation = EngineStatusConverter.convertToStatusObservation(owner, status);
         var missing = observation.activeTasks().get("old-engine").telemetry();
@@ -243,26 +293,35 @@ class EngineStatusConverterTest {
 
     @Test
     void fallsBackToLegacyIdWhenWorkerStringIdIsBlank() {
-        var status = statusBuilder().addRunningTaskInfo(EngineRpcService.TaskInfoPB.newBuilder()
-                .setRequestId(123).setRequestIdStr(" "));
-        assertEquals(Set.of("123"), EngineStatusConverter.convertToStatusObservation(owner, status.build())
-                .activeTasks().keySet());
+        var status =
+                statusBuilder()
+                        .addRunningTaskInfo(
+                                EngineRpcService.TaskInfoPB.newBuilder()
+                                        .setRequestId(123)
+                                        .setRequestIdStr(" "));
+        assertEquals(
+                Set.of("123"),
+                EngineStatusConverter.convertToStatusObservation(owner, status.build())
+                        .activeTasks()
+                        .keySet());
     }
 
     @Test
     void preservesCanonicalWorkerResourceFields() {
-        var status = statusBuilder()
-                .setDpSize(2)
-                .setDpRank(1)
-                .setAvailableKvCache(2_000_000)
-                .setTotalKvCache(2_100_000)
-                .setMaxSeqLen(131_072)
-                .setMaxBatchTokensSize(262_144)
-                .setBlockSize(1152)
-                .setBlockHashLookaheadTokens(1)
-                .setKvCacheGroupMode(EngineRpcService.KvCacheGroupModePB.KV_CACHE_GROUP_MODE_WITH_MAMBA)
-                .setCacheMatchRollbackBlocks(1)
-                .build();
+        var status =
+                statusBuilder()
+                        .setDpSize(2)
+                        .setDpRank(1)
+                        .setAvailableKvCache(2_000_000)
+                        .setTotalKvCache(2_100_000)
+                        .setMaxSeqLen(131_072)
+                        .setMaxBatchTokensSize(262_144)
+                        .setBlockSize(1152)
+                        .setBlockHashLookaheadTokens(1)
+                        .setKvCacheGroupMode(
+                                EngineRpcService.KvCacheGroupModePB.KV_CACHE_GROUP_MODE_WITH_MAMBA)
+                        .setCacheMatchRollbackBlocks(1)
+                        .build();
 
         var observation = EngineStatusConverter.convertToStatusObservation(owner, status);
         var engine = observation.engine();

@@ -20,7 +20,8 @@ public final class ModelServiceConfigParser {
         } catch (ConfigValidationException error) {
             throw error;
         } catch (Exception error) {
-            throw new ConfigValidationException(CONFIG_NAME, "Invalid MODEL_SERVICE_CONFIG JSON: " + error.getMessage(), error);
+            throw new ConfigValidationException(
+                    CONFIG_NAME, "Invalid MODEL_SERVICE_CONFIG JSON: " + error.getMessage(), error);
         }
     }
 }

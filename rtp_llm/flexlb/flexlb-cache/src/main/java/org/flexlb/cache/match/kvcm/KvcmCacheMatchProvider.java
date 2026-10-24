@@ -32,8 +32,13 @@ public class KvcmCacheMatchProvider implements CacheMatchProvider {
      * the logical {@code ip:port@engineIndex} identity reported by the Subscriber.
      */
     @Override
-    public Map<String, HostCacheMatch> findMatchingEngines(String requestId, List<Long> blockCacheKeys, long blockSize,
-                                                           RoleType roleType, String group) {
-        return kvcmGrpcClient.findMatchingEngines(requestId, blockCacheKeys, blockSize, roleType, group);
+    public Map<String, HostCacheMatch> findMatchingEngines(
+            String requestId,
+            List<Long> blockCacheKeys,
+            long blockSize,
+            RoleType roleType,
+            String group) {
+        return kvcmGrpcClient.findMatchingEngines(
+                requestId, blockCacheKeys, blockSize, roleType, group);
     }
 }

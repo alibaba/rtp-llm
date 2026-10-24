@@ -28,17 +28,19 @@ class MicrometerFlexMonitorTest {
 
             monitor.prepare("test.timer", tags);
 
-            Timer prepared = registry.find("flexlb.test.timer")
-                    .tags("role", "PREFILL", "engineIp", "127.0.0.1")
-                    .timer();
+            Timer prepared =
+                    registry.find("flexlb.test.timer")
+                            .tags("role", "PREFILL", "engineIp", "127.0.0.1")
+                            .timer();
             assertNotNull(prepared);
             assertEquals(0L, prepared.count());
 
             monitor.report("test.timer", tags, 12.0D);
 
-            Timer reported = registry.find("flexlb.test.timer")
-                    .tags("role", "PREFILL", "engineIp", "127.0.0.1")
-                    .timer();
+            Timer reported =
+                    registry.find("flexlb.test.timer")
+                            .tags("role", "PREFILL", "engineIp", "127.0.0.1")
+                            .timer();
             assertEquals(prepared, reported);
             assertEquals(1L, reported.count());
             assertEquals(12.0D, reported.totalTime(TimeUnit.MILLISECONDS), 0.001D);

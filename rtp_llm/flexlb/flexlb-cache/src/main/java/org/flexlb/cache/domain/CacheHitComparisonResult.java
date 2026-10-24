@@ -12,8 +12,18 @@ import org.flexlb.dao.master.WorkerIdentity;
  *                       {@code ip:port@engineIndex}; omitted from PV JSON itself
  */
 @JsonPropertyOrder({
-        "event", "requestId", "source", "role", "group", "worker", "state", "inputTokens",
-        "actualHitTokens", "kvcmPrediction", "localSyncPrediction", "localStandbyPrediction"
+    "event",
+    "requestId",
+    "source",
+    "role",
+    "group",
+    "worker",
+    "state",
+    "inputTokens",
+    "actualHitTokens",
+    "kvcmPrediction",
+    "localSyncPrediction",
+    "localStandbyPrediction"
 })
 public record CacheHitComparisonResult(
         String event,
@@ -39,8 +49,6 @@ public record CacheHitComparisonResult(
      * Prediction tokens used for one cache-match source. Local and global prediction tokens are
      * {@code -1} when that source does not calculate separate local and global values.
      */
-    public record CachePrediction(long predictedHitTokens,
-                                  long localPredictionTokens,
-                                  long globalPredictionTokens) {
-    }
+    public record CachePrediction(
+            long predictedHitTokens, long localPredictionTokens, long globalPredictionTokens) {}
 }

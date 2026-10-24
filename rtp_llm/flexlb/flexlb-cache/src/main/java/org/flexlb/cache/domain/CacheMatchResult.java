@@ -20,8 +20,11 @@ public record CacheMatchResult(
         long blockSize,
         boolean querySucceeded) {
 
-    public CacheMatchResult(Map<String, HostCacheMatch> hostMatches, CacheMatchSource source,
-                            long queryTimeUs, long blockSize) {
+    public CacheMatchResult(
+            Map<String, HostCacheMatch> hostMatches,
+            CacheMatchSource source,
+            long queryTimeUs,
+            long blockSize) {
         this(hostMatches, source, queryTimeUs, blockSize, true);
     }
 
@@ -70,5 +73,4 @@ public record CacheMatchResult(
         }
         return exactHostMatch(workerStatus.getPhysicalIpPort());
     }
-
 }

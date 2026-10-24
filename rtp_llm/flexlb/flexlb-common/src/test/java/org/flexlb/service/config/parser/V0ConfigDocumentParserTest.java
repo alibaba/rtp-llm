@@ -22,14 +22,27 @@ class V0ConfigDocumentParserTest {
     void resolvesExactlyOneParserFromDocumentVersionBeforeEnvironmentVersion() throws Exception {
         new StandardConfigDocumentParser();
         new V0ConfigDocumentParser();
-        assertThat(ConfigDocumentParserResolver.resolve("{\"schemaVersion\":0,\"enableQueueing\":true}").schemaVersion()).isEqualTo(ConfigSchemaVersion.V0_COMPATIBILITY);
-        new EnvironmentVariables(ConfigDocumentParserResolver.CONFIG_SCHEMA_VERSION_ENV, "0").execute(() -> {
-            assertThat(ConfigDocumentParserResolver.resolve(
-                    "{\"schemaVersion\":" + ConfigSchemaVersion.STANDARD + "}"))
-                    .extracting(ConfigDocumentParser::schemaVersion)
-                    .isEqualTo(ConfigSchemaVersion.STANDARD);
-            assertThat(ConfigDocumentParserResolver.resolve("{\"enableQueueing\":true}").schemaVersion()).isEqualTo(ConfigSchemaVersion.V0_COMPATIBILITY);
-        });
+        assertThat(
+                        ConfigDocumentParserResolver.resolve(
+                                        "{\"schemaVersion\":0,\"enableQueueing\":true}")
+                                .schemaVersion())
+                .isEqualTo(ConfigSchemaVersion.V0_COMPATIBILITY);
+        new EnvironmentVariables(ConfigDocumentParserResolver.CONFIG_SCHEMA_VERSION_ENV, "0")
+                .execute(
+                        () -> {
+                            assertThat(
+                                            ConfigDocumentParserResolver.resolve(
+                                                    "{\"schemaVersion\":"
+                                                            + ConfigSchemaVersion.STANDARD
+                                                            + "}"))
+                                    .extracting(ConfigDocumentParser::schemaVersion)
+                                    .isEqualTo(ConfigSchemaVersion.STANDARD);
+                            assertThat(
+                                            ConfigDocumentParserResolver.resolve(
+                                                            "{\"enableQueueing\":true}")
+                                                    .schemaVersion())
+                                    .isEqualTo(ConfigSchemaVersion.V0_COMPATIBILITY);
+                        });
     }
 
     @Test
@@ -42,13 +55,20 @@ class V0ConfigDocumentParserTest {
     @Test
     void rejectsMissingV0CompatibilityDocument() {
         V0ConfigDocumentParser parser = new V0ConfigDocumentParser();
-        assertThatThrownBy(() -> parser.parse(null, null)).isInstanceOf(IllegalArgumentException.class).hasMessage("V0 compatibility configuration document must not be null or blank");
-        assertThatThrownBy(() -> parser.parse("   ", null)).isInstanceOf(IllegalArgumentException.class).hasMessage("V0 compatibility configuration document must not be null or blank");
+        assertThatThrownBy(() -> parser.parse(null, null))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessage("V0 compatibility configuration document must not be null or blank");
+        assertThatThrownBy(() -> parser.parse("   ", null))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessage("V0 compatibility configuration document must not be null or blank");
     }
 
     @Test
     void convertsV0NacosDocumentIntoCurrentSplitContracts() {
-        NormalizedConfig converted = new V0ConfigDocumentParser().parse("""
+        NormalizedConfig converted =
+                new V0ConfigDocumentParser()
+                        .parse(
+                                """
                 {
                   "enableQueueing": true,
                   "fallbackBatchTokenCapacity": 4194304,
@@ -105,21 +125,28 @@ class V0ConfigDocumentParserTest {
                   "prefillQueueSizeThreshold": 1024,
                   "enableStdoutLog": true
                 }
-                """, null);
+                """,
+                                null);
 
         ConfigService.register(new CompatibilitySource(converted));
-        ConfigService service = new ConfigService(List.of(new StandardConfigDocumentParser(), new V0ConfigDocumentParser()));
+        ConfigService service =
+                new ConfigService(
+                        List.of(new StandardConfigDocumentParser(), new V0ConfigDocumentParser()));
         var behavior = service.loadBalanceConfig();
         var modelService = service.modelServiceConfig();
 
         assertThat(behavior.isQueue()).isTrue();
         assertThat(converted.sourceSchemaVersion()).isEqualTo(ConfigSchemaVersion.V0_COMPATIBILITY);
         assertThat(behavior.getFallbackBatchTokenCapacity()).isEqualTo(4_194_304L);
-        assertThat(behavior.getDispatcher().getType())
-                .isEqualTo(DispatcherConfig.Type.NON_BATCH);
+        assertThat(behavior.getDispatcher().getType()).isEqualTo(DispatcherConfig.Type.NON_BATCH);
         assertThat(behavior.getCacheMatching()).isInstanceOf(KvcmCacheMatchingConfig.class);
-        assertThat(behavior.getRouter().getRoles().getPrefill().getCacheAffinity()
-                .getMaxOutstandingUncachedTokens()).isEqualTo(50000);
+        assertThat(
+                        behavior.getRouter()
+                                .getRoles()
+                                .getPrefill()
+                                .getCacheAffinity()
+                                .getMaxOutstandingUncachedTokens())
+                .isEqualTo(50000);
         assertThat(behavior.getConsistency()).isInstanceOf(ZookeeperConsistencyConfig.class);
         assertThat(((ZookeeperConsistencyConfig) behavior.getConsistency()).getConnectString())
                 .isEqualTo("zk.example:2181");

@@ -47,10 +47,11 @@ class GrpcTraceInterceptorTest {
     void setUp() {
         GlobalOpenTelemetry.resetForTest();
         exporter = new RecordingExporter();
-        SdkTracerProvider provider = SdkTracerProvider.builder()
-                .setSampler(Sampler.alwaysOn())
-                .addSpanProcessor(SimpleSpanProcessor.create(exporter))
-                .build();
+        SdkTracerProvider provider =
+                SdkTracerProvider.builder()
+                        .setSampler(Sampler.alwaysOn())
+                        .addSpanProcessor(SimpleSpanProcessor.create(exporter))
+                        .build();
         sdk = OpenTelemetrySdk.builder().setTracerProvider(provider).build();
         GlobalOpenTelemetry.set(sdk);
         FlexlbTrace.configure(sdk, "");
@@ -71,18 +72,27 @@ class GrpcTraceInterceptorTest {
         String traceparent = "00-11111111111111111111111111111111-2222222222222222-01";
         headers.put(Metadata.Key.of("traceparent", Metadata.ASCII_STRING_MARSHALLER), traceparent);
         headers.put(Metadata.Key.of("tracestate", Metadata.ASCII_STRING_MARSHALLER), "vendor=one");
-        ServerCallHandler<Object, Object> next = (call, incoming) -> {
-            var context = GrpcTraceInterceptor.getOtelContext();
-            assertEquals(traceparent, FlexlbTrace.inject(context).get("traceparent"));
-            assertEquals("vendor=one", FlexlbTrace.inject(context).get("tracestate"));
-            FlexlbTrace.markBusinessError(context, 500, "FLEXLB_INTERNAL_ERROR");
-            call.close(Status.INTERNAL, new Metadata());
-            return new Listener<>() {};
-        };
+        ServerCallHandler<Object, Object> next =
+                (call, incoming) -> {
+                    var context = GrpcTraceInterceptor.getOtelContext();
+                    assertEquals(traceparent, FlexlbTrace.inject(context).get("traceparent"));
+                    assertEquals("vendor=one", FlexlbTrace.inject(context).get("tracestate"));
+                    FlexlbTrace.markBusinessError(context, 500, "FLEXLB_INTERNAL_ERROR");
+                    call.close(Status.INTERNAL, new Metadata());
+                    return new Listener<>() {};
+                };
         try {
-            interceptAndComplete(new GrpcTraceInterceptor(), FlexlbServiceGrpc.getScheduleMethod(), headers, next);
+            interceptAndComplete(
+                    new GrpcTraceInterceptor(),
+                    FlexlbServiceGrpc.getScheduleMethod(),
+                    headers,
+                    next);
             try (Scope ignored = upstream.makeCurrent()) {
-                interceptAndComplete(new GrpcTraceInterceptor(), FlexlbServiceGrpc.getScheduleMethod(), headers, next);
+                interceptAndComplete(
+                        new GrpcTraceInterceptor(),
+                        FlexlbServiceGrpc.getScheduleMethod(),
+                        headers,
+                        next);
                 Terminals t = intercept();
                 FlexlbTrace.markBusinessError(t.handlerContext(), 500, "FLEXLB_INTERNAL_ERROR");
                 t.handlerCall().close(Status.INTERNAL, new Metadata());
@@ -95,24 +105,27 @@ class GrpcTraceInterceptorTest {
             upstream.end();
         }
         assertEquals(1, exporter.spans.size());
-        assertEquals(io.opentelemetry.api.trace.StatusCode.UNSET, exporter.spans.get(0).getStatus().getStatusCode());
+        assertEquals(
+                io.opentelemetry.api.trace.StatusCode.UNSET,
+                exporter.spans.get(0).getStatus().getStatusCode());
         assertTrue(exporter.spans.get(0).getAttributes().isEmpty());
     }
 
     @Test
     void namesEachRpcFromItsMethodAndPreservesRemoteParent() {
         Metadata headers = new Metadata();
-        headers.put(Metadata.Key.of("traceparent", Metadata.ASCII_STRING_MARSHALLER),
+        headers.put(
+                Metadata.Key.of("traceparent", Metadata.ASCII_STRING_MARSHALLER),
                 "00-11111111111111111111111111111111-2222222222222222-01");
         ServerInterceptor interceptor = new GrpcTraceInterceptor();
-        ServerCallHandler<Object, Object> next =
-                (call, requestHeaders) -> new Listener<>() {};
+        ServerCallHandler<Object, Object> next = (call, requestHeaders) -> new Listener<>() {};
 
         interceptAndComplete(interceptor, FlexlbServiceGrpc.getScheduleMethod(), headers, next);
-        interceptAndComplete(interceptor, FlexlbServiceGrpc.getGetRequestStateMethod(), headers, next);
+        interceptAndComplete(
+                interceptor, FlexlbServiceGrpc.getGetRequestStateMethod(), headers, next);
 
-        Map<String, SpanData> spans = exporter.spans.stream()
-                .collect(Collectors.toMap(SpanData::getName, span -> span));
+        Map<String, SpanData> spans =
+                exporter.spans.stream().collect(Collectors.toMap(SpanData::getName, span -> span));
         assertEquals(2, spans.size());
         assertTrue(spans.containsKey("rtp_llm.flexlb.schedule"));
         assertTrue(spans.containsKey("rtp_llm.flexlb.get_request_state"));
@@ -137,8 +150,7 @@ class GrpcTraceInterceptorTest {
         @SuppressWarnings({"rawtypes", "unchecked"})
         MethodDescriptor<Object, Object> scheduleMethod =
                 (MethodDescriptor) FlexlbServiceGrpc.getScheduleMethod();
-        when(call.getMethodDescriptor()).thenReturn(
-                scheduleMethod);
+        when(call.getMethodDescriptor()).thenReturn(scheduleMethod);
         ServerCall.Listener<Object> listener =
                 new GrpcTraceInterceptor().interceptCall(call, headers, next);
 
@@ -149,10 +161,16 @@ class GrpcTraceInterceptorTest {
         assertEquals(1, exporter.spans.size());
         SpanData span = exporter.spans.get(0);
         assertEquals(io.opentelemetry.api.trace.StatusCode.ERROR, span.getStatus().getStatusCode());
-        assertEquals("FLEXLB_BUSINESS_REJECTED",
-                span.getAttributes().get(io.opentelemetry.api.common.AttributeKey.stringKey("error.type")));
-        assertEquals(8402L,
-                span.getAttributes().get(io.opentelemetry.api.common.AttributeKey.longKey("flexlb.schedule.code")));
+        assertEquals(
+                "FLEXLB_BUSINESS_REJECTED",
+                span.getAttributes()
+                        .get(io.opentelemetry.api.common.AttributeKey.stringKey("error.type")));
+        assertEquals(
+                8402L,
+                span.getAttributes()
+                        .get(
+                                io.opentelemetry.api.common.AttributeKey.longKey(
+                                        "flexlb.schedule.code")));
         assertTrue(span.getEvents().isEmpty());
     }
 
@@ -164,10 +182,11 @@ class GrpcTraceInterceptorTest {
         // -javaagent is loaded here. The interceptor must take the existing-span
         // branch, keep ownsSpan=false, and neither end that span nor lose the
         // business rejection recorded while its owner still holds it.
-        Span upstreamSpan = GlobalOpenTelemetry.getTracer("upstream")
-                .spanBuilder("rtp_llm.flexlb.schedule")
-                .setSpanKind(SpanKind.SERVER)
-                .startSpan();
+        Span upstreamSpan =
+                GlobalOpenTelemetry.getTracer("upstream")
+                        .spanBuilder("rtp_llm.flexlb.schedule")
+                        .setSpanKind(SpanKind.SERVER)
+                        .startSpan();
 
         AtomicReference<io.opentelemetry.context.Context> capturedContext = new AtomicReference<>();
         ServerCallHandler<Object, Object> next =
@@ -197,10 +216,16 @@ class GrpcTraceInterceptorTest {
         assertEquals(1, exporter.spans.size());
         SpanData span = exporter.spans.get(0);
         assertEquals(io.opentelemetry.api.trace.StatusCode.ERROR, span.getStatus().getStatusCode());
-        assertEquals("FLEXLB_BUSINESS_REJECTED",
-                span.getAttributes().get(io.opentelemetry.api.common.AttributeKey.stringKey("error.type")));
-        assertEquals(8402L,
-                span.getAttributes().get(io.opentelemetry.api.common.AttributeKey.longKey("flexlb.schedule.code")));
+        assertEquals(
+                "FLEXLB_BUSINESS_REJECTED",
+                span.getAttributes()
+                        .get(io.opentelemetry.api.common.AttributeKey.stringKey("error.type")));
+        assertEquals(
+                8402L,
+                span.getAttributes()
+                        .get(
+                                io.opentelemetry.api.common.AttributeKey.longKey(
+                                        "flexlb.schedule.code")));
         assertTrue(span.getEvents().isEmpty());
     }
 
@@ -216,9 +241,11 @@ class GrpcTraceInterceptorTest {
         FlexlbTrace.configure(io.opentelemetry.api.OpenTelemetry.noop(), "");
         try {
             Metadata headers = new Metadata();
-            headers.put(Metadata.Key.of("traceparent", Metadata.ASCII_STRING_MARSHALLER),
+            headers.put(
+                    Metadata.Key.of("traceparent", Metadata.ASCII_STRING_MARSHALLER),
                     "00-11111111111111111111111111111111-2222222222222222-01");
-            AtomicReference<io.opentelemetry.context.Context> capturedContext = new AtomicReference<>();
+            AtomicReference<io.opentelemetry.context.Context> capturedContext =
+                    new AtomicReference<>();
             ServerCallHandler<Object, Object> next =
                     (call, requestHeaders) -> {
                         capturedContext.set(GrpcTraceInterceptor.getOtelContext());
@@ -241,7 +268,8 @@ class GrpcTraceInterceptorTest {
             Map<String, String> carrier =
                     org.flexlb.telemetry.FlexlbTrace.inject(capturedContext.get());
             String traceparent = carrier.get("traceparent");
-            assertTrue(traceparent != null
+            assertTrue(
+                    traceparent != null
                             && traceparent.contains("11111111111111111111111111111111")
                             && traceparent.contains("2222222222222222"),
                     "downstream traceparent must preserve the remote trace/span: " + traceparent);
@@ -363,10 +391,11 @@ class GrpcTraceInterceptorTest {
         assertEquals("INTERNAL", stringAttr(span, "rpc.response.status_code"));
     }
 
-    private static void interceptAndComplete(ServerInterceptor interceptor,
-                                              MethodDescriptor<?, ?> method,
-                                              Metadata headers,
-                                              ServerCallHandler<Object, Object> next) {
+    private static void interceptAndComplete(
+            ServerInterceptor interceptor,
+            MethodDescriptor<?, ?> method,
+            Metadata headers,
+            ServerCallHandler<Object, Object> next) {
         @SuppressWarnings("unchecked")
         ServerCall<Object, Object> call = mock(ServerCall.class);
         when(call.getMethodDescriptor()).thenReturn((MethodDescriptor<Object, Object>) method);
@@ -383,11 +412,12 @@ class GrpcTraceInterceptorTest {
     private Terminals intercept() {
         AtomicReference<ServerCall<Object, Object>> handlerCall = new AtomicReference<>();
         AtomicReference<io.opentelemetry.context.Context> handlerContext = new AtomicReference<>();
-        ServerCallHandler<Object, Object> next = (call, requestHeaders) -> {
-            handlerCall.set(call);
-            handlerContext.set(GrpcTraceInterceptor.getOtelContext());
-            return new Listener<>() {};
-        };
+        ServerCallHandler<Object, Object> next =
+                (call, requestHeaders) -> {
+                    handlerCall.set(call);
+                    handlerContext.set(GrpcTraceInterceptor.getOtelContext());
+                    return new Listener<>() {};
+                };
         @SuppressWarnings("unchecked")
         ServerCall<Object, Object> call = mock(ServerCall.class);
         @SuppressWarnings({"rawtypes", "unchecked"})
@@ -399,10 +429,10 @@ class GrpcTraceInterceptorTest {
         return new Terminals(listener, handlerCall.get(), handlerContext.get());
     }
 
-    private record Terminals(ServerCall.Listener<Object> listener,
-                             ServerCall<Object, Object> handlerCall,
-                             io.opentelemetry.context.Context handlerContext) {
-    }
+    private record Terminals(
+            ServerCall.Listener<Object> listener,
+            ServerCall<Object, Object> handlerCall,
+            io.opentelemetry.context.Context handlerContext) {}
 
     private static String stringAttr(SpanData span, String key) {
         return span.getAttributes().get(io.opentelemetry.api.common.AttributeKey.stringKey(key));

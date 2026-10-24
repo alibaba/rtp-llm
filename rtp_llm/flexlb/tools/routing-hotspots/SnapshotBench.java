@@ -1,22 +1,37 @@
 import com.sun.management.ThreadMXBean;
+import org.flexlb.balance.delivery.CapacityBoundary;
+import org.flexlb.balance.delivery.DeliveryMetrics;
+import org.flexlb.balance.endpoint.PrefillActiveIndex;
+import org.flexlb.balance.prediction.FormulaPredictor;
+import org.flexlb.balance.projection.RouteProjection;
+import org.flexlb.balance.scheduler.BatchDeliveryStrategy;
+import org.flexlb.balance.scheduler.EndpointEventProjector;
+import org.flexlb.balance.scheduler.RequestRegistry;
+import org.flexlb.balance.scheduler.ScheduledRequest;
+import org.flexlb.balance.scheduler.SchedulingTestConfig;
+import org.flexlb.balance.scheduler.WorkerBatcher;
+import org.flexlb.config.ConfigService;
+import org.flexlb.config.FlexlbConfig;
+import org.flexlb.dao.BalanceContext;
+import org.flexlb.dao.SchedulingMetadata;
+import org.flexlb.dao.loadbalance.Request;
+import org.flexlb.service.monitor.BatchSchedulerReporter;
+import org.flexlb.service.monitor.RequestSchedulerReporter;
+
 import java.lang.management.ManagementFactory;
 import java.lang.reflect.Field;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.util.*;
-import java.util.concurrent.*;
+import java.util.ArrayList;
+import java.util.Comparator;
+import java.util.List;
+import java.util.Locale;
+import java.util.Random;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 import java.util.concurrent.locks.ReentrantLock;
-import org.flexlb.balance.delivery.*;
-import org.flexlb.balance.endpoint.PrefillActiveIndex;
-import org.flexlb.balance.prediction.FormulaPredictor;
-import org.flexlb.balance.projection.RouteProjection;
-import org.flexlb.balance.scheduler.*;
-import org.flexlb.config.FlexlbConfig;
-import org.flexlb.dao.*;
-import org.flexlb.dao.loadbalance.Request;
-import org.flexlb.config.ConfigService;
-import org.flexlb.service.monitor.BatchSchedulerReporter;
-import org.flexlb.service.monitor.RequestSchedulerReporter;
 
 /** Same source on both revisions; includes real WorkerBatcher snapshot capture. */
 public class SnapshotBench {
@@ -25,8 +40,8 @@ public class SnapshotBench {
     static FormulaPredictor model;
     static BatchDeliveryStrategy strategy;
     static RequestRegistry registry;
-    static final RouteProjection.Probe PROBE = new RouteProjection.Probe(
-            Long.MAX_VALUE, 0, 1, Long.MAX_VALUE, 2048, 0, 0);
+    static final RouteProjection.Probe PROBE =
+            new RouteProjection.Probe(Long.MAX_VALUE, 0, 1, Long.MAX_VALUE, 2048, 0, 0);
 
     record Endpoint(WorkerBatcher runtime, ReentrantLock lock, ScheduledRequest member) {
         void changeMembership() {
@@ -41,6 +56,7 @@ public class SnapshotBench {
             }
         }
     }
+
     record Sample(long ns, long cpu, long bytes, long checksum) {}
 
     static ScheduledRequest request(FlexlbConfig config, long id, int priority, long tokens) {
@@ -51,8 +67,8 @@ public class SnapshotBench {
         var context = new BalanceContext(config);
         context.setRequest(request);
         context.setSchedulingMetadata(SchedulingMetadata.explicit(priority, Long.MAX_VALUE));
-        return new ScheduledRequest(context, new CompletableFuture<>(), null,
-                null, null, null, null, null, 1L);
+        return new ScheduledRequest(
+                context, new CompletableFuture<>(), null, null, null, null, null, null, 1L);
     }
 
     static FlexlbConfig config() {
@@ -68,8 +84,13 @@ public class SnapshotBench {
     static Endpoint endpoint(int depth, int seed) throws Exception {
         var config = config();
         // No scheduler thread or RPCs. Mutations still use the real ownership ledger and lock.
-        var runtime = new WorkerBatcher("bench-" + seed, null, config, strategy,
-                new EndpointEventProjector(registry));
+        var runtime =
+                new WorkerBatcher(
+                        "bench-" + seed,
+                        null,
+                        config,
+                        strategy,
+                        new EndpointEventProjector(registry));
         Field lockField = WorkerBatcher.class.getDeclaredField("queueLock");
         lockField.setAccessible(true);
         var lock = (ReentrantLock) lockField.get(runtime);
@@ -79,7 +100,8 @@ public class SnapshotBench {
         try {
             for (int i = 0; i < depth; i++) {
                 last = request(config, i, 1 + i % 4, 100 + random.nextInt(4096));
-                if (!runtime.ownedState().enqueueActiveUnderLock(last, 0)) throw new AssertionError();
+                if (!runtime.ownedState().enqueueActiveUnderLock(last, 0))
+                    throw new AssertionError();
             }
         } finally {
             lock.unlock();
@@ -95,21 +117,36 @@ public class SnapshotBench {
             for (var endpoint : endpoints) {
                 var inputs = endpoint.runtime.captureRouteProjectionInputs();
                 checksum += inputs.queue().activeItems().size();
-                if (project) checksum += RouteProjection.project(inputs, PROBE, model,
-                        strategy.projectionPolicy()).requiredProjectedTtftMs();
+                if (project)
+                    checksum +=
+                            RouteProjection.project(
+                                            inputs, PROBE, model, strategy.projectionPolicy())
+                                    .requiredProjectedTtftMs();
             }
         }
-        return new Sample(System.nanoTime() - started, CPU.getCurrentThreadCpuTime() - cpu,
-                CPU.getThreadAllocatedBytes(id) - bytes, checksum);
+        return new Sample(
+                System.nanoTime() - started,
+                CPU.getCurrentThreadCpuTime() - cpu,
+                CPU.getThreadAllocatedBytes(id) - bytes,
+                checksum);
     }
 
-    static void fleet(int count, int depth, int planners, String mode, boolean project) throws Exception {
+    static void fleet(int count, int depth, int planners, String mode, boolean project)
+            throws Exception {
         var endpoints = new ArrayList<Endpoint>();
         for (int i = 0; i < count; i++) endpoints.add(endpoint(depth, i));
         int repetitions = project ? 2 : 8;
         long expected = read(endpoints, project, repetitions).checksum;
-        String name = "fleet" + count + "_depth" + depth + "_p" + planners + "_" + mode
-                + (project ? "_project" : "_capture");
+        String name =
+                "fleet"
+                        + count
+                        + "_depth"
+                        + depth
+                        + "_p"
+                        + planners
+                        + "_"
+                        + mode
+                        + (project ? "_project" : "_capture");
         System.out.println("VERIFY " + name + " checksum=" + expected);
         try (var pool = Executors.newFixedThreadPool(planners)) {
             for (int round = 0; round < 5; round++) {
@@ -125,10 +162,12 @@ public class SnapshotBench {
                     var gate = new CountDownLatch(1);
                     var tasks = new ArrayList<Future<Sample>>();
                     for (int i = 0; i < planners; i++) {
-                        tasks.add(pool.submit(() -> {
-                            gate.await();
-                            return read(endpoints, project, repetitions);
-                        }));
+                        tasks.add(
+                                pool.submit(
+                                        () -> {
+                                            gate.await();
+                                            return read(endpoints, project, repetitions);
+                                        }));
                     }
                     gate.countDown();
                     for (var task : tasks) {
@@ -144,19 +183,27 @@ public class SnapshotBench {
                 cpu += CPU.getCurrentThreadCpuTime() - mainCpu;
                 bytes += CPU.getThreadAllocatedBytes(Thread.currentThread().threadId()) - allocated;
                 sink = checksum;
-                if (round >= 2) System.out.printf(Locale.ROOT,
-                        "%s round=%d ns/op=%.2f cpu_ns/op=%.2f bytes/op=%.2f%n",
-                        name, round, (double) elapsed / operations, (double) cpu / operations,
-                        (double) bytes / operations);
+                if (round >= 2)
+                    System.out.printf(
+                            Locale.ROOT,
+                            "%s round=%d ns/op=%.2f cpu_ns/op=%.2f bytes/op=%.2f%n",
+                            name,
+                            round,
+                            (double) elapsed / operations,
+                            (double) cpu / operations,
+                            (double) bytes / operations);
             }
         }
     }
 
     static void writes(int depth) {
         var config = config();
-        var index = PrefillActiveIndex.ordered(depth,
-                Comparator.comparingInt(ScheduledRequest::priority).reversed()
-                        .thenComparingLong(ScheduledRequest::enqueueSeq));
+        var index =
+                PrefillActiveIndex.ordered(
+                        depth,
+                        Comparator.comparingInt(ScheduledRequest::priority)
+                                .reversed()
+                                .thenComparingLong(ScheduledRequest::enqueueSeq));
         var members = new ArrayList<ScheduledRequest>();
         for (int i = 0; i < depth; i++) {
             var item = request(config, i, i % 4, 100);
@@ -174,10 +221,15 @@ public class SnapshotBench {
             long elapsed = System.nanoTime() - started;
             cpu = CPU.getCurrentThreadCpuTime() - cpu;
             bytes = CPU.getThreadAllocatedBytes(Thread.currentThread().threadId()) - bytes;
-            if (round >= 2) System.out.printf(Locale.ROOT,
-                    "index_remove_add_depth%d round=%d ns/op=%.2f cpu_ns/op=%.2f bytes/op=%.2f%n",
-                    depth, round, (double) elapsed / operations, (double) cpu / operations,
-                    (double) bytes / operations);
+            if (round >= 2)
+                System.out.printf(
+                        Locale.ROOT,
+                        "index_remove_add_depth%d round=%d ns/op=%.2f cpu_ns/op=%.2f bytes/op=%.2f%n",
+                        depth,
+                        round,
+                        (double) elapsed / operations,
+                        (double) cpu / operations,
+                        (double) bytes / operations);
         }
     }
 
@@ -185,21 +237,25 @@ public class SnapshotBench {
         model = new FormulaPredictor(Files.readString(formula));
         var constructor = ConfigService.class.getDeclaredConstructor(String.class);
         constructor.setAccessible(true);
-        var service = constructor.newInstance(
-                "{\"requestLifecycle\":{\"request\":{\"timeoutMs\":60000},\"decision\":{\"lifetime\":2.0}}}");
+        var service =
+                constructor.newInstance(
+                        "{\"requestLifecycle\":{\"request\":{\"timeoutMs\":60000},\"decision\":{\"lifetime\":2.0}}}");
         var reporter = new BatchSchedulerReporter(null);
         registry = new RequestRegistry(service, reporter, new RequestSchedulerReporter(null));
-        strategy = new BatchDeliveryStrategy(
-                () -> CapacityBoundary.Attempt.rejected(CapacityBoundary.OWNERSHIP_LOST),
-                () -> 1L, registry, new DeliveryMetrics(reporter));
+        strategy =
+                new BatchDeliveryStrategy(
+                        () -> CapacityBoundary.Attempt.rejected(CapacityBoundary.OWNERSHIP_LOST),
+                        () -> 1L,
+                        registry,
+                        new DeliveryMetrics(reporter));
     }
 
     public static void main(String[] args) throws Exception {
         initialize(Path.of(args[0]));
-        for (int depth : new int[]{32, 1024}) {
+        for (int depth : new int[] {32, 1024}) {
             writes(depth);
-            for (int count : new int[]{10, 100}) {
-                for (int planners : new int[]{1, 64}) {
+            for (int count : new int[] {10, 100}) {
+                for (int planners : new int[] {1, 64}) {
                     fleet(count, depth, planners, "status", false);
                     fleet(count, depth, planners, "membership", false);
                     fleet(count, depth, planners, "status", true);

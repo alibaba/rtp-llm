@@ -13,13 +13,15 @@ class KMonitorPrometheusPropertiesTemplateTest {
     @Test
     void packagesTurboOnlyKMonitorTemplateInApplicationClasspath() throws IOException {
         Properties properties = new Properties();
-        InputStream resource = getClass().getResourceAsStream("/kmonitor-prometheus.properties.example");
+        InputStream resource =
+                getClass().getResourceAsStream("/kmonitor-prometheus.properties.example");
         assertThat(resource).isNotNull();
         try (InputStream stream = resource) {
             properties.load(stream);
         }
 
-        assertThat(properties.stringPropertyNames()).noneMatch(name -> name.startsWith("kmonitor.sink.flume"));
+        assertThat(properties.stringPropertyNames())
+                .noneMatch(name -> name.startsWith("kmonitor.sink.flume"));
         assertThat(properties.getProperty("kmonitor.instance.flexlb.sinks"))
                 .isEqualTo("org.flexlb.monitor.prometheus.KMonitorPrometheusExporter");
         assertThat(properties.getProperty("kmonitor.instance.system_kmonitor.sinks"))

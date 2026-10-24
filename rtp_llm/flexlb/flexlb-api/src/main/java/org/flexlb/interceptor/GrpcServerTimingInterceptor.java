@@ -40,6 +40,7 @@ public class GrpcServerTimingInterceptor implements ServerInterceptor {
      * Accessed by {@code FlexlbServiceImpl} via {@link #get()}.
      */
     public static final Context.Key<Long> GRPC_ENTRY_TIME_KEY = Context.key("grpcEntryTime");
+
     public static final Context.Key<Long> GRPC_ENTRY_NANOS_KEY = Context.key("grpcEntryNanos");
 
     /**
@@ -71,9 +72,12 @@ public class GrpcServerTimingInterceptor implements ServerInterceptor {
     public ServerStreamTracer.Factory requestSizeTracerFactory() {
         return new ServerStreamTracer.Factory() {
             @Override
-            public ServerStreamTracer newServerStreamTracer(String fullMethodName, Metadata headers) {
-                if (!FlexlbServiceGrpc.getScheduleMethod().getFullMethodName().equals(fullMethodName)) {
-                    return new ServerStreamTracer() { };
+            public ServerStreamTracer newServerStreamTracer(
+                    String fullMethodName, Metadata headers) {
+                if (!FlexlbServiceGrpc.getScheduleMethod()
+                        .getFullMethodName()
+                        .equals(fullMethodName)) {
+                    return new ServerStreamTracer() {};
                 }
                 RequestMessageSize size = new RequestMessageSize();
                 return new ServerStreamTracer() {
@@ -83,7 +87,8 @@ public class GrpcServerTimingInterceptor implements ServerInterceptor {
                     }
 
                     @Override
-                    public void inboundMessageRead(int seqNo, long wireBytes, long uncompressedBytes) {
+                    public void inboundMessageRead(
+                            int seqNo, long wireBytes, long uncompressedBytes) {
                         size.messageReceived = true;
                     }
 
@@ -103,17 +108,18 @@ public class GrpcServerTimingInterceptor implements ServerInterceptor {
 
     @Override
     public <ReqT, RespT> ServerCall.Listener<ReqT> interceptCall(
-            ServerCall<ReqT, RespT> call, Metadata headers,
-            ServerCallHandler<ReqT, RespT> next) {
-        if (call.getMethodDescriptor().getFullMethodName()
+            ServerCall<ReqT, RespT> call, Metadata headers, ServerCallHandler<ReqT, RespT> next) {
+        if (call.getMethodDescriptor()
+                .getFullMethodName()
                 .equals(FlexlbServiceGrpc.getScheduleMethod().getFullMethodName())) {
             lastScheduleArrivalNanos.updateAndGet(previous -> System.nanoTime());
         }
         long grpcEntryTime = System.currentTimeMillis();
         long grpcEntryNanos = System.nanoTime();
-        Context ctx = Context.current()
-                .withValue(GRPC_ENTRY_TIME_KEY, grpcEntryTime)
-                .withValue(GRPC_ENTRY_NANOS_KEY, grpcEntryNanos);
+        Context ctx =
+                Context.current()
+                        .withValue(GRPC_ENTRY_TIME_KEY, grpcEntryTime)
+                        .withValue(GRPC_ENTRY_NANOS_KEY, grpcEntryNanos);
         return Contexts.interceptCall(ctx, call, headers, next);
     }
 }

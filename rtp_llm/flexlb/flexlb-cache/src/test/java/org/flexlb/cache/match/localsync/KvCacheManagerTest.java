@@ -33,33 +33,31 @@ import static org.mockito.Mockito.when;
 @ExtendWith(MockitoExtension.class)
 class KvCacheManagerTest {
 
-    @Mock
-    private GlobalCacheIndex globalCacheIndex;
+    @Mock private GlobalCacheIndex globalCacheIndex;
 
-    @Mock
-    private EngineLocalView engineLocalView;
+    @Mock private EngineLocalView engineLocalView;
 
-    @Mock
-    private WorkerStatusProvider workerStatusProvider;
+    @Mock private WorkerStatusProvider workerStatusProvider;
 
-    @Mock
-    private CacheMetricsReporter cacheMetricsReporter;
+    @Mock private CacheMetricsReporter cacheMetricsReporter;
 
-    @InjectMocks
-    private KvCacheManager kvCacheManager;
+    @InjectMocks private KvCacheManager kvCacheManager;
 
     @Test
     void engineLocalViewCreatesPoolForDiffAndClosesItOnShutdown() {
         EngineLocalView view = new EngineLocalView();
-        ReflectionTestUtils.setField(view, "dynamicIntervalManager", mock(DynamicCacheIntervalService.class));
+        ReflectionTestUtils.setField(
+                view, "dynamicIntervalManager", mock(DynamicCacheIntervalService.class));
         assertNull(ReflectionTestUtils.getField(view, "customPool"));
 
         try {
-            assertEquals(Set.of(11L), view.calculateDiff("10.0.0.1:8080", Set.of(11L)).getAddedBlocks());
+            assertEquals(
+                    Set.of(11L), view.calculateDiff("10.0.0.1:8080", Set.of(11L)).getAddedBlocks());
             ForkJoinPool pool = (ForkJoinPool) ReflectionTestUtils.getField(view, "customPool");
             view.shutdown();
             assertTrue(pool.isShutdown());
-            assertThrows(IllegalStateException.class,
+            assertThrows(
+                    IllegalStateException.class,
                     () -> view.calculateDiff("10.0.0.1:8080", Set.of(12L)));
         } finally {
             view.shutdown();
@@ -69,15 +67,17 @@ class KvCacheManagerTest {
     @Test
     void diffFallsBackWhenPoolClosesBeforeSubmission() {
         EngineLocalView view = new EngineLocalView();
-        ForkJoinPool closingPool = new ForkJoinPool(1) {
-            @Override
-            public ForkJoinTask<?> submit(Runnable task) {
-                shutdown();
-                return super.submit(task);
-            }
-        };
+        ForkJoinPool closingPool =
+                new ForkJoinPool(1) {
+                    @Override
+                    public ForkJoinTask<?> submit(Runnable task) {
+                        shutdown();
+                        return super.submit(task);
+                    }
+                };
         ReflectionTestUtils.setField(view, "customPool", closingPool);
-        ReflectionTestUtils.setField(view, "dynamicIntervalManager", mock(DynamicCacheIntervalService.class));
+        ReflectionTestUtils.setField(
+                view, "dynamicIntervalManager", mock(DynamicCacheIntervalService.class));
         try {
             view.addOrUpdateCacheBlock("engine", 11L);
 
@@ -97,8 +97,8 @@ class KvCacheManagerTest {
         when(workerStatusProvider.getWorkerStatuses(RoleType.PREFILL, "rtp"))
                 .thenReturn(List.of(workerStatus(0, 1)));
 
-        Map<String, Integer> matches = manager.findMatchingEngines(
-                List.of(11L, 22L, 33L), RoleType.PREFILL, "rtp");
+        Map<String, Integer> matches =
+                manager.findMatchingEngines(List.of(11L, 22L, 33L), RoleType.PREFILL, "rtp");
 
         assertEquals(Map.of("10.0.0.1:8080@0", 2), matches);
         assertFalse(matches.containsKey("10.0.0.1:8080"));
@@ -112,14 +112,12 @@ class KvCacheManagerTest {
 
         kvCacheManager.updateEngineCache(status, "PREFILL", Set.of());
 
-        verify(cacheMetricsReporter).reportCacheDiffMetrics(
-                "10.0.0.1:8080", "PREFILL", 0, 0);
+        verify(cacheMetricsReporter).reportCacheDiffMetrics("10.0.0.1:8080", "PREFILL", 0, 0);
     }
 
     @Test
     void removesStaleCacheWhenActiveWorkerIsReplacedAtTheSameCount() {
-        when(engineLocalView.getAllEngineIpPorts())
-                .thenReturn(Set.of("10.0.0.1:8080"));
+        when(engineLocalView.getAllEngineIpPorts()).thenReturn(Set.of("10.0.0.1:8080"));
 
         kvCacheManager.removeStaleEngineCaches(List.of("10.0.0.2:8080"));
 
@@ -130,12 +128,10 @@ class KvCacheManagerTest {
 
     @Test
     void keepsLogicalCacheWhenItsPhysicalEngineRemainsDiscoverable() {
-        when(engineLocalView.getAllEngineIpPorts())
-                .thenReturn(Set.of("10.0.0.1:8080@0"));
+        when(engineLocalView.getAllEngineIpPorts()).thenReturn(Set.of("10.0.0.1:8080@0"));
         when(engineLocalView.calculateDiff("10.0.0.1:8080@0", Set.of()))
                 .thenReturn(DiffResult.empty("10.0.0.1:8080@0"));
-        kvCacheManager.updateEngineCache(
-                workerStatus(0, 1), "PREFILL", Set.of());
+        kvCacheManager.updateEngineCache(workerStatus(0, 1), "PREFILL", Set.of());
 
         kvCacheManager.removeStaleEngineCaches(List.of("10.0.0.1:8080"));
 
@@ -145,12 +141,10 @@ class KvCacheManagerTest {
 
     @Test
     void removesLogicalCacheWhenItsPhysicalEngineDisappears() {
-        when(engineLocalView.getAllEngineIpPorts())
-                .thenReturn(Set.of("10.0.0.1:8080@0"));
+        when(engineLocalView.getAllEngineIpPorts()).thenReturn(Set.of("10.0.0.1:8080@0"));
         when(engineLocalView.calculateDiff("10.0.0.1:8080@0", Set.of()))
                 .thenReturn(DiffResult.empty("10.0.0.1:8080@0"));
-        kvCacheManager.updateEngineCache(
-                workerStatus(0, 1), "PREFILL", Set.of());
+        kvCacheManager.updateEngineCache(workerStatus(0, 1), "PREFILL", Set.of());
 
         kvCacheManager.removeStaleEngineCaches(List.of("10.0.0.2:8080"));
 
@@ -163,8 +157,7 @@ class KvCacheManagerTest {
         String logicalIpPort = "10.0.0.1:8080@0";
         when(engineLocalView.calculateDiff(logicalIpPort, Set.of()))
                 .thenReturn(DiffResult.empty(logicalIpPort));
-        kvCacheManager.updateEngineCache(
-                workerStatus(0, 1), "PREFILL", Set.of());
+        kvCacheManager.updateEngineCache(workerStatus(0, 1), "PREFILL", Set.of());
 
         kvCacheManager.removeEngineCache(logicalIpPort);
         when(engineLocalView.getAllEngineIpPorts()).thenReturn(Set.of(logicalIpPort));
@@ -182,10 +175,8 @@ class KvCacheManagerTest {
                 .thenReturn(DiffResult.empty("10.0.0.1:8080@0"));
         when(engineLocalView.calculateDiff("10.0.0.1:8080@1", Set.of()))
                 .thenReturn(DiffResult.empty("10.0.0.1:8080@1"));
-        kvCacheManager.updateEngineCache(
-                workerStatus(0, 2), "PREFILL", Set.of());
-        kvCacheManager.updateEngineCache(
-                workerStatus(1, 2), "PREFILL", Set.of());
+        kvCacheManager.updateEngineCache(workerStatus(0, 2), "PREFILL", Set.of());
+        kvCacheManager.updateEngineCache(workerStatus(1, 2), "PREFILL", Set.of());
 
         kvCacheManager.removeStaleEngineCaches(List.of("10.0.0.1:8080"));
 
@@ -203,10 +194,8 @@ class KvCacheManagerTest {
                 .thenReturn(DiffResult.empty("10.0.0.1:8080@0"));
         when(engineLocalView.calculateDiff("10.0.0.1:8080@1", Set.of()))
                 .thenReturn(DiffResult.empty("10.0.0.1:8080@1"));
-        kvCacheManager.updateEngineCache(
-                workerStatus(0, 2), "PREFILL", Set.of());
-        kvCacheManager.updateEngineCache(
-                workerStatus(1, 2), "PREFILL", Set.of());
+        kvCacheManager.updateEngineCache(workerStatus(0, 2), "PREFILL", Set.of());
+        kvCacheManager.updateEngineCache(workerStatus(1, 2), "PREFILL", Set.of());
 
         kvCacheManager.removeStaleEngineCaches(List.of("10.0.0.2:8080"));
 
@@ -218,8 +207,7 @@ class KvCacheManagerTest {
 
     @Test
     void treatsUnmappedLogicalKeyAsStaleEvenWhenItsPhysicalEngineRemainsDiscoverable() {
-        when(engineLocalView.getAllEngineIpPorts())
-                .thenReturn(Set.of("10.0.0.1:8080@0"));
+        when(engineLocalView.getAllEngineIpPorts()).thenReturn(Set.of("10.0.0.1:8080@0"));
 
         kvCacheManager.removeStaleEngineCaches(List.of("10.0.0.1:8080"));
 
@@ -236,33 +224,36 @@ class KvCacheManagerTest {
 
     private static WorkerStatus workerStatus(int engineIndex, int multiEngineNum) {
         return WorkerStatus.createDiscovered(
-                RoleType.PREFILL, "rtp", "10.0.0.1", 8080, 9090,
-                "test-site", "rtp-deploy", engineIndex, multiEngineNum);
+                RoleType.PREFILL,
+                "rtp",
+                "10.0.0.1",
+                8080,
+                9090,
+                "test-site",
+                "rtp-deploy",
+                engineIndex,
+                multiEngineNum);
     }
 
     private KvCacheManager kvCacheManagerWithRealIndexes() {
         KvCacheManager manager = new KvCacheManager();
         EngineLocalView localView = new EngineLocalView();
         ReflectionTestUtils.setField(
-                localView, "dynamicIntervalManager",
+                localView,
+                "dynamicIntervalManager",
                 new DynamicCacheIntervalService() {
                     @Override
-                    public void updateDiffStatistics(int diffSize) {
-                    }
+                    public void updateDiffStatistics(int diffSize) {}
 
                     @Override
                     public long getCurrentIntervalMs() {
                         return 0;
                     }
                 });
-        ReflectionTestUtils.setField(
-                manager, "globalCacheIndex", new GlobalCacheIndex());
-        ReflectionTestUtils.setField(
-                manager, "engineLocalView", localView);
-        ReflectionTestUtils.setField(
-                manager, "workerStatusProvider", workerStatusProvider);
-        ReflectionTestUtils.setField(
-                manager, "cacheMetricsReporter", cacheMetricsReporter);
+        ReflectionTestUtils.setField(manager, "globalCacheIndex", new GlobalCacheIndex());
+        ReflectionTestUtils.setField(manager, "engineLocalView", localView);
+        ReflectionTestUtils.setField(manager, "workerStatusProvider", workerStatusProvider);
+        ReflectionTestUtils.setField(manager, "cacheMetricsReporter", cacheMetricsReporter);
         return manager;
     }
 }

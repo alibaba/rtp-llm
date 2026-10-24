@@ -43,18 +43,28 @@ class ApplicationLifecycleTest {
         var grpc = mock(FlexlbGrpcServer.class);
         var draining = new CountDownLatch(1);
         var complete = new CountDownLatch(1);
-        doAnswer(invocation -> {
-            verify(consistency).offline();
-            draining.countDown();
-            assertTrue(complete.await(3, TimeUnit.SECONDS));
-            return null;
-        }).when(grpc).drain();
+        doAnswer(
+                        invocation -> {
+                            verify(consistency).offline();
+                            draining.countDown();
+                            assertTrue(complete.await(3, TimeUnit.SECONDS));
+                            return null;
+                        })
+                .when(grpc)
+                .drain();
         var destroyed = new AtomicBoolean();
         var context = new AnnotationConfigApplicationContext();
-        var lifecycle = new ApplicationLifecycle(consistency, grpc,
-                mock(GracefulLifecycleReporter.class), context.getEnvironment(), new ApplicationWarmupState(), 0L);
+        var lifecycle =
+                new ApplicationLifecycle(
+                        consistency,
+                        grpc,
+                        mock(GracefulLifecycleReporter.class),
+                        context.getEnvironment(),
+                        new ApplicationWarmupState(),
+                        0L);
         context.registerBean(ApplicationLifecycle.class, () -> lifecycle);
-        context.registerBean("servingResource", DisposableBean.class, () -> () -> destroyed.set(true));
+        context.registerBean(
+                "servingResource", DisposableBean.class, () -> () -> destroyed.set(true));
         context.refresh();
         var closing = CompletableFuture.runAsync(context::close);
         try {
@@ -74,9 +84,15 @@ class ApplicationLifecycleTest {
         var consistency = mock(LBStatusConsistencyService.class);
         var grpc = mock(FlexlbGrpcServer.class);
         try (var context = new AnnotationConfigApplicationContext();
-             var child = new AnnotationConfigApplicationContext()) {
-            var lifecycle = new ApplicationLifecycle(consistency, grpc,
-                    mock(GracefulLifecycleReporter.class), context.getEnvironment(), new ApplicationWarmupState(), 0L);
+                var child = new AnnotationConfigApplicationContext()) {
+            var lifecycle =
+                    new ApplicationLifecycle(
+                            consistency,
+                            grpc,
+                            mock(GracefulLifecycleReporter.class),
+                            context.getEnvironment(),
+                            new ApplicationWarmupState(),
+                            0L);
             context.registerBean(ApplicationLifecycle.class, () -> lifecycle);
             context.refresh();
             context.publishEvent(new ContextClosedEvent(child));
@@ -90,26 +106,34 @@ class ApplicationLifecycleTest {
     void springCanWireProductionConstructor() {
         try (var context = new AnnotationConfigApplicationContext()) {
             context.setAllowCircularReferences(false);
-            context.registerBean(LBStatusConsistencyService.class,
-                    () -> mock(LBStatusConsistencyService.class));
-            context.registerBean(CacheMatchConfiguration.class, () -> {
-                var configuration = mock(CacheMatchConfiguration.class);
-                when(configuration.getKvcmRuntimeConfig()).thenReturn(new KvcmCacheMatchingConfig());
-                return configuration;
-            });
-            context.registerBean(KvcmMetaServiceClient.class, () -> mock(KvcmMetaServiceClient.class));
+            context.registerBean(
+                    LBStatusConsistencyService.class, () -> mock(LBStatusConsistencyService.class));
+            context.registerBean(
+                    CacheMatchConfiguration.class,
+                    () -> {
+                        var configuration = mock(CacheMatchConfiguration.class);
+                        when(configuration.getKvcmRuntimeConfig())
+                                .thenReturn(new KvcmCacheMatchingConfig());
+                        return configuration;
+                    });
+            context.registerBean(
+                    KvcmMetaServiceClient.class, () -> mock(KvcmMetaServiceClient.class));
             context.registerBean(KvcmLeaderResolver.class, () -> mock(KvcmLeaderResolver.class));
-            context.registerBean(KvcmWorkerMetadataResolver.class, () -> mock(KvcmWorkerMetadataResolver.class));
+            context.registerBean(
+                    KvcmWorkerMetadataResolver.class, () -> mock(KvcmWorkerMetadataResolver.class));
             context.registerBean(GrpcReporter.class, () -> mock(GrpcReporter.class));
             context.registerBean(KvcmMetricsReporter.class, () -> mock(KvcmMetricsReporter.class));
-            context.registerBean(FlexlbGrpcServer.class, () -> {
-                // Preserve the server-to-client dependency while mocking the transport.
-                context.getBean(KvcmGrpcClient.class);
-                return mock(FlexlbGrpcServer.class);
-            });
-            context.registerBean(GracefulLifecycleReporter.class,
-                    () -> mock(GracefulLifecycleReporter.class));
-            context.register(ApplicationLifecycle.class, ApplicationWarmupState.class, KvcmGrpcClient.class);
+            context.registerBean(
+                    FlexlbGrpcServer.class,
+                    () -> {
+                        // Preserve the server-to-client dependency while mocking the transport.
+                        context.getBean(KvcmGrpcClient.class);
+                        return mock(FlexlbGrpcServer.class);
+                    });
+            context.registerBean(
+                    GracefulLifecycleReporter.class, () -> mock(GracefulLifecycleReporter.class));
+            context.register(
+                    ApplicationLifecycle.class, ApplicationWarmupState.class, KvcmGrpcClient.class);
             context.refresh();
             assertNotNull(context.getBean(ApplicationLifecycle.class));
             assertFalse(context.getBean(ApplicationWarmupState.class).isWarmupFinished());
@@ -133,7 +157,8 @@ class ApplicationLifecycleTest {
         var environment = mock(Environment.class);
         when(environment.getActiveProfiles()).thenReturn(new String[0]);
         var warmupState = new ApplicationWarmupState();
-        var lifecycle = new ApplicationLifecycle(consistency, grpc, reporter, environment, warmupState, 0L);
+        var lifecycle =
+                new ApplicationLifecycle(consistency, grpc, reporter, environment, warmupState, 0L);
         assertFalse(warmupState.isWarmupFinished());
         assertFalse(lifecycle.isHealthy());
         lifecycle.online();
@@ -155,13 +180,22 @@ class ApplicationLifecycleTest {
         var environment = mock(Environment.class);
         when(environment.getActiveProfiles()).thenReturn(new String[0]);
         var warmupState = new ApplicationWarmupState();
-        var lifecycle = new ApplicationLifecycle(consistency, mock(FlexlbGrpcServer.class),
-                mock(GracefulLifecycleReporter.class), environment, warmupState, 0L);
-        doAnswer(invocation -> {
-            assertFalse(warmupState.isWarmupFinished());
-            assertFalse(lifecycle.isHealthy());
-            return null;
-        }).when(consistency).start();
+        var lifecycle =
+                new ApplicationLifecycle(
+                        consistency,
+                        mock(FlexlbGrpcServer.class),
+                        mock(GracefulLifecycleReporter.class),
+                        environment,
+                        warmupState,
+                        0L);
+        doAnswer(
+                        invocation -> {
+                            assertFalse(warmupState.isWarmupFinished());
+                            assertFalse(lifecycle.isHealthy());
+                            return null;
+                        })
+                .when(consistency)
+                .start();
 
         lifecycle.online();
         assertTrue(warmupState.isWarmupFinished());

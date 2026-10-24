@@ -85,15 +85,18 @@ public class EngineGrpcClient implements EngineAddressResolver.Listener {
                 if (kvcmEnabled && serviceType.isCacheStatusService()) {
                     continue;
                 }
-                int port = serviceType.isStatusService()
-                        ? host.getWorkerStatusPort()
-                        : host.getGrpcPort();
+                int port =
+                        serviceType.isStatusService()
+                                ? host.getWorkerStatusPort()
+                                : host.getGrpcPort();
                 activeKeys.add(new EngineChannelKey(ip, port, serviceType));
             }
         }
 
-        Logger.info("engine address update, host count:{}, channel pool size:{}",
-                hosts.size(), channelPool.size());
+        Logger.info(
+                "engine address update, host count:{}, channel pool size:{}",
+                hosts.size(),
+                channelPool.size());
         for (EngineChannelKey key : activeKeys) {
             try {
                 channelPool.getOrCreate(key);
@@ -143,59 +146,59 @@ public class EngineGrpcClient implements EngineAddressResolver.Listener {
             CompletableFuture<R> result) {
         try {
             pooledChannel.markUsed();
-            GrpcFutureStubWrapper stub = createFutureStub(pooledChannel.getChannel())
-                    .withDeadlineAfter(requestTimeoutMs, TimeUnit.MILLISECONDS);
+            GrpcFutureStubWrapper stub =
+                    createFutureStub(pooledChannel.getChannel())
+                            .withDeadlineAfter(requestTimeoutMs, TimeUnit.MILLISECONDS);
             ListenableFuture<R> response = grpcCall.apply(stub);
-            Futures.addCallback(response, new FutureCallback<>() {
-                @Override
-                public void onSuccess(R value) {
-                    reportCall(serviceType, value, startTime, retry);
-                    result.complete(value);
-                }
-
-                @Override
-                public void onFailure(Throwable error) {
-                    if (retryOnBrokenConnection
-                            && error instanceof StatusRuntimeException statusError
-                            && isConnectionBrokenError(statusError)) {
-                        try {
-                            pooledChannel.markExpired();
-                            grpcReporter.reportConnectionDuration(
-                                    serviceType.getOperationName(),
-                                    pooledChannel.getConnectionDurationUs());
-                            GrpcChannelPool.PooledChannel replacement =
-                                    channelPool.replace(channelKey, pooledChannel);
-                            invokeAsync(
-                                    channelKey,
-                                    replacement,
-                                    grpcCall,
-                                    requestTimeoutMs,
-                                    serviceType,
-                                    false,
-                                    true,
-                                    startTime,
-                                    result);
-                        } catch (Exception retryError) {
-                            result.completeExceptionally(retryError);
+            Futures.addCallback(
+                    response,
+                    new FutureCallback<>() {
+                        @Override
+                        public void onSuccess(R value) {
+                            reportCall(serviceType, value, startTime, retry);
+                            result.complete(value);
                         }
-                        return;
-                    }
-                    result.completeExceptionally(error);
-                }
-            }, Runnable::run);
+
+                        @Override
+                        public void onFailure(Throwable error) {
+                            if (retryOnBrokenConnection
+                                    && error instanceof StatusRuntimeException statusError
+                                    && isConnectionBrokenError(statusError)) {
+                                try {
+                                    pooledChannel.markExpired();
+                                    grpcReporter.reportConnectionDuration(
+                                            serviceType.getOperationName(),
+                                            pooledChannel.getConnectionDurationUs());
+                                    GrpcChannelPool.PooledChannel replacement =
+                                            channelPool.replace(channelKey, pooledChannel);
+                                    invokeAsync(
+                                            channelKey,
+                                            replacement,
+                                            grpcCall,
+                                            requestTimeoutMs,
+                                            serviceType,
+                                            false,
+                                            true,
+                                            startTime,
+                                            result);
+                                } catch (Exception retryError) {
+                                    result.completeExceptionally(retryError);
+                                }
+                                return;
+                            }
+                            result.completeExceptionally(error);
+                        }
+                    },
+                    Runnable::run);
         } catch (Exception error) {
             result.completeExceptionally(error);
         }
     }
 
     private <R> void reportCall(
-            ServiceType serviceType,
-            R response,
-            long startTime,
-            boolean retry) {
-        int responseSize = response instanceof MessageLite messageLite
-                ? messageLite.getSerializedSize()
-                : 0;
+            ServiceType serviceType, R response, long startTime, boolean retry) {
+        int responseSize =
+                response instanceof MessageLite messageLite ? messageLite.getSerializedSize() : 0;
         grpcReporter.reportCallMetrics(
                 serviceType.getOperationName(),
                 TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startTime),
@@ -207,25 +210,21 @@ public class EngineGrpcClient implements EngineAddressResolver.Listener {
         String message = e.getMessage();
         return message != null
                 && (message.contains("end-of-stream mid-frame")
-                || message.contains("Connection reset")
-                || message.contains("Broken pipe")
-                || message.contains("http2 exception")
-                || message.contains("Incomplete header block fragment"));
+                        || message.contains("Connection reset")
+                        || message.contains("Broken pipe")
+                        || message.contains("http2 exception")
+                        || message.contains("Incomplete header block fragment"));
     }
 
     static boolean retriesBrokenConnections(ServiceType serviceType) {
-        return serviceType != ServiceType.BATCH_ENQUEUE
-                && serviceType != ServiceType.ENGINE_CANCEL;
+        return serviceType != ServiceType.BATCH_ENQUEUE && serviceType != ServiceType.ENGINE_CANCEL;
     }
 
     /**
      * Queries worker status asynchronously, recreating a broken connection and retrying once.
      */
     public CompletableFuture<EngineRpcService.WorkerStatusPB> getWorkerStatusAsync(
-            String ip,
-            int port,
-            EngineRpcService.StatusVersionPB request,
-            long requestTimeoutMs) {
+            String ip, int port, EngineRpcService.StatusVersionPB request, long requestTimeoutMs) {
         return executeGrpcCallAsync(
                 ip,
                 port,
@@ -238,10 +237,7 @@ public class EngineGrpcClient implements EngineAddressResolver.Listener {
      * Queries cache status asynchronously, recreating a broken connection and retrying once.
      */
     public CompletableFuture<EngineRpcService.CacheStatusPB> getCacheStatusAsync(
-            String ip,
-            int port,
-            EngineRpcService.CacheVersionPB request,
-            long requestTimeoutMs) {
+            String ip, int port, EngineRpcService.CacheVersionPB request, long requestTimeoutMs) {
         return executeGrpcCallAsync(
                 ip,
                 port,
@@ -254,10 +250,7 @@ public class EngineGrpcClient implements EngineAddressResolver.Listener {
      * Queries multimodal worker status asynchronously, recreating a broken connection and retrying once.
      */
     public CompletableFuture<EngineRpcService.WorkerStatusPB> getMultimodalWorkerStatusAsync(
-            String ip,
-            int port,
-            EngineRpcService.StatusVersionPB request,
-            long requestTimeoutMs) {
+            String ip, int port, EngineRpcService.StatusVersionPB request, long requestTimeoutMs) {
         return executeGrpcCallAsync(
                 ip,
                 port,
@@ -270,10 +263,7 @@ public class EngineGrpcClient implements EngineAddressResolver.Listener {
      * Queries multimodal cache status asynchronously, recreating a broken connection and retrying once.
      */
     public CompletableFuture<EngineRpcService.CacheStatusPB> getMultimodalCacheStatusAsync(
-            String ip,
-            int port,
-            EngineRpcService.CacheVersionPB request,
-            long requestTimeoutMs) {
+            String ip, int port, EngineRpcService.CacheVersionPB request, long requestTimeoutMs) {
         return executeGrpcCallAsync(
                 ip,
                 port,
@@ -286,9 +276,7 @@ public class EngineGrpcClient implements EngineAddressResolver.Listener {
      * Enqueues a batch asynchronously without transport retry because replay may duplicate accepted work.
      */
     public CompletableFuture<EngineRpcService.EnqueueBatchResponsePB> batchEnqueueAsync(
-            String ip,
-            int port,
-            EngineRpcService.EnqueueBatchRequestPB request) {
+            String ip, int port, EngineRpcService.EnqueueBatchRequestPB request) {
         return batchEnqueueAsync(ip, port, request, enqueueTimeoutMillis);
     }
 
@@ -309,10 +297,7 @@ public class EngineGrpcClient implements EngineAddressResolver.Listener {
      * Cancels a request asynchronously without transport retry because the original cancel may have succeeded.
      */
     public CompletableFuture<EngineRpcService.CancelResponsePB> cancelAsync(
-            String ip,
-            int port,
-            EngineRpcService.CancelRequestPB request,
-            long requestTimeoutMs) {
+            String ip, int port, EngineRpcService.CancelRequestPB request, long requestTimeoutMs) {
         return executeGrpcCallAsync(
                 ip,
                 port,
@@ -357,8 +342,9 @@ public class EngineGrpcClient implements EngineAddressResolver.Listener {
         }
     }
 
-    private record GrpcFutureStubWrapper(RpcServiceGrpc.RpcServiceFutureStub rpcServiceStub,
-                                         MultimodalRpcServiceGrpc.MultimodalRpcServiceFutureStub multimodalRpcServiceStub) {
+    private record GrpcFutureStubWrapper(
+            RpcServiceGrpc.RpcServiceFutureStub rpcServiceStub,
+            MultimodalRpcServiceGrpc.MultimodalRpcServiceFutureStub multimodalRpcServiceStub) {
 
         GrpcFutureStubWrapper withDeadlineAfter(long timeout, TimeUnit unit) {
             return new GrpcFutureStubWrapper(

@@ -10,8 +10,7 @@ import java.util.Map;
 
 public final class WorkerStatusTestSupport {
 
-    private WorkerStatusTestSupport() {
-    }
+    private WorkerStatusTestSupport() {}
 
     public static WorkerStatus workerStatus(String ip, int port, RoleType role) {
         return workerStatus(ip, port, role, false, null, 0);
@@ -29,8 +28,8 @@ public final class WorkerStatusTestSupport {
             boolean alive,
             CacheStatus cacheStatus,
             int cacheMatchRollbackBlocks) {
-        WorkerStatus workerStatus = WorkerStatus.createDiscovered(
-                role, "default", ip, port, port + 1, "");
+        WorkerStatus workerStatus =
+                WorkerStatus.createDiscovered(role, "default", ip, port, port + 1, "");
         publishObservation(workerStatus, role, alive, cacheMatchRollbackBlocks);
         if (cacheStatus != null) {
             workerStatus.lock.lock();
@@ -44,10 +43,7 @@ public final class WorkerStatusTestSupport {
     }
 
     private static void publishObservation(
-            WorkerStatus workerStatus,
-            RoleType role,
-            boolean alive,
-            int cacheMatchRollbackBlocks) {
+            WorkerStatus workerStatus, RoleType role, boolean alive, int cacheMatchRollbackBlocks) {
         WorkerStatusResponse response = new WorkerStatusResponse();
         response.setRole(role);
         response.setAlive(alive);
@@ -62,8 +58,7 @@ public final class WorkerStatusTestSupport {
         try {
             WorkerStatus.StatusObservation observation =
                     workerStatus.freezeStatusResponse(response);
-            WorkerStatus.PreparedStatus prepared =
-                    workerStatus.prepareNewStatus(observation);
+            WorkerStatus.PreparedStatus prepared = workerStatus.prepareNewStatus(observation);
             workerStatus.publishPreparedStatus(prepared);
             workerStatus.recordSuccessfulPoll(alive);
         } finally {

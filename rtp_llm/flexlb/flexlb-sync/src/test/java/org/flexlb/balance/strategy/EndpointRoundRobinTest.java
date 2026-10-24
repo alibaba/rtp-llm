@@ -38,12 +38,16 @@ class EndpointRoundRobinTest {
                 selected.add(executor.submit(() -> pick(rotation, "g", List.of("c", "a", "b"))));
             }
             var counts = new java.util.HashMap<String, Integer>();
-            for (var future : selected) { counts.merge(future.get(), 1, Integer::sum); }
+            for (var future : selected) {
+                counts.merge(future.get(), 1, Integer::sum);
+            }
             assertEquals(java.util.Map.of("a", 40, "b", 40, "c", 40), counts);
         }
     }
 
     private static String pick(EndpointRoundRobin rotation, String group, List<String> candidates) {
-        return candidates.get(rotation.next(RoleType.PREFILL, group, candidates.size(), i -> true, candidates::get));
+        return candidates.get(
+                rotation.next(
+                        RoleType.PREFILL, group, candidates.size(), i -> true, candidates::get));
     }
 }

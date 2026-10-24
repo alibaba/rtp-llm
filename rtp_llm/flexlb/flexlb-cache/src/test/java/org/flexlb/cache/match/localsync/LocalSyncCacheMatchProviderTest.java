@@ -36,11 +36,12 @@ class LocalSyncCacheMatchProviderTest {
     void subscribesToAddressCleanupOnlyInLocalSyncMode() {
         EngineAddressResolver addressResolver = mock(EngineAddressResolver.class);
         KvCacheManager kvCacheManager = mock(KvCacheManager.class);
-        LocalSyncCacheMatchProvider provider = new LocalSyncCacheMatchProvider(
-                kvCacheManager,
-                mock(CacheMetricsReporter.class),
-                addressResolver,
-                localSync(modelMetaConfig(false)));
+        LocalSyncCacheMatchProvider provider =
+                new LocalSyncCacheMatchProvider(
+                        kvCacheManager,
+                        mock(CacheMetricsReporter.class),
+                        addressResolver,
+                        localSync(modelMetaConfig(false)));
         verify(addressResolver).subscribe(provider);
 
         provider.onAddressUpdate(List.of(new WorkerHost("10.0.0.1", 8080)));
@@ -76,10 +77,10 @@ class LocalSyncCacheMatchProviderTest {
         assertEquals(100L, result.getAvailableKvCache());
         assertEquals(200L, result.getTotalKvCache());
         assertEquals(3L, result.getCacheVersion());
-        verify(kvCacheManager).updateEngineCache(
-                workerStatus, "PREFILL", Set.of(11L, 22L));
-        verify(metricsReporter).reportUpdateEngineBlockCacheRT(
-                eq("127.0.0.1:8080"), eq("PREFILL"), anyLong(), eq("1"));
+        verify(kvCacheManager).updateEngineCache(workerStatus, "PREFILL", Set.of(11L, 22L));
+        verify(metricsReporter)
+                .reportUpdateEngineBlockCacheRT(
+                        eq("127.0.0.1:8080"), eq("PREFILL"), anyLong(), eq("1"));
     }
 
     @Test
@@ -88,8 +89,7 @@ class LocalSyncCacheMatchProviderTest {
         CacheMetricsReporter metricsReporter = mock(CacheMetricsReporter.class);
         LocalSyncCacheMatchProvider provider =
                 new LocalSyncCacheMatchProvider(kvCacheManager, metricsReporter);
-        WorkerStatus workerStatus = workerStatus(
-                "127.0.0.1", 8080, RoleType.PREFILL, false, null);
+        WorkerStatus workerStatus = workerStatus("127.0.0.1", 8080, RoleType.PREFILL, false, null);
 
         WorkerCacheUpdateResult result = provider.updateFromWorkerStatus(workerStatus);
 
@@ -97,8 +97,9 @@ class LocalSyncCacheMatchProviderTest {
         assertEquals("127.0.0.1:8080@0", result.getLogicalIpPort());
         assertEquals("Worker Cache Status is null", result.getErrorMessage());
         verifyNoInteractions(kvCacheManager);
-        verify(metricsReporter).reportUpdateEngineBlockCacheRT(
-                eq("127.0.0.1:8080"), eq("PREFILL"), anyLong(), eq("0"));
+        verify(metricsReporter)
+                .reportUpdateEngineBlockCacheRT(
+                        eq("127.0.0.1:8080"), eq("PREFILL"), anyLong(), eq("0"));
     }
 
     @Test
@@ -114,8 +115,9 @@ class LocalSyncCacheMatchProviderTest {
         assertFalse(result.isSuccess());
         assertEquals("Worker Cached Keys is null", result.getErrorMessage());
         verifyNoInteractions(kvCacheManager);
-        verify(metricsReporter).reportUpdateEngineBlockCacheRT(
-                eq("127.0.0.1:8080"), eq("PREFILL"), anyLong(), eq("0"));
+        verify(metricsReporter)
+                .reportUpdateEngineBlockCacheRT(
+                        eq("127.0.0.1:8080"), eq("PREFILL"), anyLong(), eq("0"));
     }
 
     @Test
@@ -130,10 +132,10 @@ class LocalSyncCacheMatchProviderTest {
 
         assertTrue(result.isSuccess());
         assertEquals(0, result.getCacheBlockCount());
-        verify(kvCacheManager).updateEngineCache(
-                workerStatus, "PREFILL", Set.of());
-        verify(metricsReporter).reportUpdateEngineBlockCacheRT(
-                eq("127.0.0.1:8080"), eq("PREFILL"), anyLong(), eq("1"));
+        verify(kvCacheManager).updateEngineCache(workerStatus, "PREFILL", Set.of());
+        verify(metricsReporter)
+                .reportUpdateEngineBlockCacheRT(
+                        eq("127.0.0.1:8080"), eq("PREFILL"), anyLong(), eq("1"));
     }
 
     @Test
@@ -151,22 +153,31 @@ class LocalSyncCacheMatchProviderTest {
 
         assertFalse(result.isSuccess());
         assertEquals("cache update failed", result.getErrorMessage());
-        verify(metricsReporter).reportUpdateEngineBlockCacheRT(
-                eq("127.0.0.1:8080"), eq("PREFILL"), anyLong(), eq("0"));
+        verify(metricsReporter)
+                .reportUpdateEngineBlockCacheRT(
+                        eq("127.0.0.1:8080"), eq("PREFILL"), anyLong(), eq("0"));
     }
 
     private WorkerStatus workerStatusFixture() {
-        return workerStatus("127.0.0.1", 8080, RoleType.PREFILL, false,
+        return workerStatus(
+                "127.0.0.1",
+                8080,
+                RoleType.PREFILL,
+                false,
                 CacheStatus.builder()
-                .cachedKeys(Set.of(11L, 22L))
-                .availableKvCache(100L)
-                .totalKvCache(200L)
-                .version(3L)
-                .build());
+                        .cachedKeys(Set.of(11L, 22L))
+                        .availableKvCache(100L)
+                        .totalKvCache(200L)
+                        .version(3L)
+                        .build());
     }
 
     private WorkerStatus workerStatusWithCachedKeys(Set<Long> cachedKeys) {
-        return workerStatus("127.0.0.1", 8080, RoleType.PREFILL, false,
+        return workerStatus(
+                "127.0.0.1",
+                8080,
+                RoleType.PREFILL,
+                false,
                 CacheStatus.builder().cachedKeys(cachedKeys).build());
     }
 

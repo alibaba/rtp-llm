@@ -43,20 +43,22 @@ public class ApplicationLifecycle implements ApplicationContextAware {
     private volatile boolean shutdownCompletedSuccessfully;
 
     @Autowired
-    public ApplicationLifecycle(LBStatusConsistencyService consistency,
-                                FlexlbGrpcServer grpcServer,
-                                GracefulLifecycleReporter reporter,
-                                Environment environment,
-                                ApplicationWarmupState warmupState) {
+    public ApplicationLifecycle(
+            LBStatusConsistencyService consistency,
+            FlexlbGrpcServer grpcServer,
+            GracefulLifecycleReporter reporter,
+            Environment environment,
+            ApplicationWarmupState warmupState) {
         this(consistency, grpcServer, reporter, environment, warmupState, DEFAULT_WARM_UP_WAIT_MS);
     }
 
-    ApplicationLifecycle(LBStatusConsistencyService consistency,
-                         FlexlbGrpcServer grpcServer,
-                         GracefulLifecycleReporter reporter,
-                         Environment environment,
-                         ApplicationWarmupState warmupState,
-                         long warmUpWaitMs) {
+    ApplicationLifecycle(
+            LBStatusConsistencyService consistency,
+            FlexlbGrpcServer grpcServer,
+            GracefulLifecycleReporter reporter,
+            Environment environment,
+            ApplicationWarmupState warmupState,
+            long warmUpWaitMs) {
         this.consistency = consistency;
         this.grpcServer = grpcServer;
         this.reporter = reporter;
@@ -66,8 +68,7 @@ public class ApplicationLifecycle implements ApplicationContextAware {
     }
 
     public synchronized void online() {
-        if (Arrays.stream(environment.getActiveProfiles())
-                .anyMatch("test"::equals)) {
+        if (Arrays.stream(environment.getActiveProfiles()).anyMatch("test"::equals)) {
             log.info("test env, skip online lifecycle");
             return;
         }
@@ -78,8 +79,7 @@ public class ApplicationLifecycle implements ApplicationContextAware {
         long consistencyStartedAt = System.currentTimeMillis();
         try {
             consistency.start();
-            reporter.reportZkNodeOnline(
-                    System.currentTimeMillis() - consistencyStartedAt);
+            reporter.reportZkNodeOnline(System.currentTimeMillis() - consistencyStartedAt);
         } catch (Exception e) {
             Logger.error("application online registration failed", e);
         }
@@ -88,8 +88,7 @@ public class ApplicationLifecycle implements ApplicationContextAware {
         long warmUpStartedAt = System.currentTimeMillis();
         try {
             Thread.sleep(warmUpWaitMs);
-            reporter.reportWarmerComplete(
-                    System.currentTimeMillis() - warmUpStartedAt);
+            reporter.reportWarmerComplete(System.currentTimeMillis() - warmUpStartedAt);
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
             log.error("application warm up interrupted", e);
@@ -108,8 +107,7 @@ public class ApplicationLifecycle implements ApplicationContextAware {
             long consistencyStartedAt = System.currentTimeMillis();
             try {
                 consistency.offline();
-                reporter.reportZkNodeOffline(
-                        System.currentTimeMillis() - consistencyStartedAt);
+                reporter.reportZkNodeOffline(System.currentTimeMillis() - consistencyStartedAt);
             } catch (Throwable failure) {
                 Logger.error("application offline deregistration failed", failure);
             }
@@ -142,5 +140,4 @@ public class ApplicationLifecycle implements ApplicationContextAware {
     public boolean shutdownCompletedSuccessfully() {
         return shutdownCompletedSuccessfully;
     }
-
 }

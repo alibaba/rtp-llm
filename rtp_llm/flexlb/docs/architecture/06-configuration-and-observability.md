@@ -32,11 +32,11 @@ native allocation 的实际占用仍取决于负载。
 `ConfigService` 是统一读取入口。`ConfigSourceSelection` 在启动时根据 FlexLB 进程的
 环境变量选择唯一的行为配置字符串来源，先判断 UniConfig，再判断 Nacos：
 
-| 条件（按顺序判断） | 字符串来源 | 动态更新方式 |
-|---|---|---|
-| `FLEXLB_UNICONF_ENABLE=true` | `UniConfigConfigSource` | 轮询本机 Turbo UniConfig HTTP 接口 |
-| 否则，`FLEXLB_NACOS_SERVER_ADDR` 非空 | `NacosConfigSource` | Nacos listener |
-| 否则 | `EnvironmentConfigSource` | 启动时读取 `FLEXLB_CONFIG` |
+| 条件（按顺序判断）                    | 字符串来源                | 动态更新方式                       |
+| ------------------------------------- | ------------------------- | ---------------------------------- |
+| `FLEXLB_UNICONF_ENABLE=true`          | `UniConfigConfigSource`   | 轮询本机 Turbo UniConfig HTTP 接口 |
+| 否则，`FLEXLB_NACOS_SERVER_ADDR` 非空 | `NacosConfigSource`       | Nacos listener                     |
+| 否则                                  | `EnvironmentConfigSource` | 启动时读取 `FLEXLB_CONFIG`         |
 
 `true` 忽略大小写和两端空白。开启 UniConfig 后，即使配置了 Nacos 地址，也不会
 创建 Nacos 客户端或 listener。使用外部来源时，环境变量中的 `FLEXLB_CONFIG` 不参与
@@ -140,12 +140,12 @@ Java 还可能等待接近 30 秒才发现新内容。因此两段等待叠加�
 
 ### Nacos 连接
 
-| 环境变量 | 默认值 | 说明 |
-|---|---|---|
-| `FLEXLB_NACOS_SERVER_ADDR` | 无 | 仅在 UniConfig 未开启且地址非空时启用 Nacos |
-| `FLEXLB_NACOS_DATA_ID` | 部署标识 | 显式 DataId |
-| `FLEXLB_NACOS_GROUP` | `DEFAULT_GROUP` | Nacos group |
-| `FLEXLB_NACOS_NAMESPACE` | 空 | Nacos namespace |
+| 环境变量                   | 默认值          | 说明                                        |
+| -------------------------- | --------------- | ------------------------------------------- |
+| `FLEXLB_NACOS_SERVER_ADDR` | 无              | 仅在 UniConfig 未开启且地址非空时启用 Nacos |
+| `FLEXLB_NACOS_DATA_ID`     | 部署标识        | 显式 DataId                                 |
+| `FLEXLB_NACOS_GROUP`       | `DEFAULT_GROUP` | Nacos group                                 |
+| `FLEXLB_NACOS_NAMESPACE`   | 空              | Nacos namespace                             |
 
 未显式配置 DataId 时，部署标识优先使用
 `SPECTRUM_WORKSPACE_ID`、`SPECTRUM_APPLICATION_NAME`、

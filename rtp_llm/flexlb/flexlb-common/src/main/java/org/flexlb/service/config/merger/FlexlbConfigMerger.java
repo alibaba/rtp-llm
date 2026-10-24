@@ -14,8 +14,8 @@ import java.util.Set;
 public final class FlexlbConfigMerger {
 
     private static final String FLEXLB_CONFIG = "FLEXLB_CONFIG";
-    private static final Set<String> REPLACE_ON_TYPE_CHANGE_PATHS = Set.of(
-            "cacheMatching", "consistency", "scheduler.ordering", "scheduler.decision");
+    private static final Set<String> REPLACE_ON_TYPE_CHANGE_PATHS =
+            Set.of("cacheMatching", "consistency", "scheduler.ordering", "scheduler.decision");
 
     private FlexlbConfigMerger() {}
 
@@ -42,7 +42,8 @@ public final class FlexlbConfigMerger {
         } catch (ConfigValidationException error) {
             throw error;
         } catch (Exception error) {
-            throw new ConfigValidationException(sourceName, "Invalid FlexLB configuration: " + error.getMessage(), error);
+            throw new ConfigValidationException(
+                    sourceName, "Invalid FlexLB configuration: " + error.getMessage(), error);
         }
     }
 
@@ -54,13 +55,15 @@ public final class FlexlbConfigMerger {
             JsonNode parsed = JsonUtils.readStrictTree(content);
             JsonUtils.rejectJsonNull(parsed, "$", sourceName);
             if (!(parsed instanceof ObjectNode overrides)) {
-                throw new ConfigValidationException(sourceName, "configuration must be a JSON object");
+                throw new ConfigValidationException(
+                        sourceName, "configuration must be a JSON object");
             }
             return overrides;
         } catch (ConfigValidationException error) {
             throw error;
         } catch (Exception error) {
-            throw new ConfigValidationException(sourceName, "Invalid configuration JSON: " + error.getMessage(), error);
+            throw new ConfigValidationException(
+                    sourceName, "Invalid configuration JSON: " + error.getMessage(), error);
         }
     }
 
@@ -71,7 +74,8 @@ public final class FlexlbConfigMerger {
             JsonNode current = target.get(field.getKey());
             JsonNode replacement = field.getValue();
             String path = parentPath.isEmpty() ? field.getKey() : parentPath + "." + field.getKey();
-            if (current instanceof ObjectNode currentObject && replacement instanceof ObjectNode replacementObject
+            if (current instanceof ObjectNode currentObject
+                    && replacement instanceof ObjectNode replacementObject
                     && hasCompatibleType(path, currentObject, replacementObject)) {
                 deepMerge(currentObject, replacementObject, path);
             } else {
@@ -80,7 +84,8 @@ public final class FlexlbConfigMerger {
         }
     }
 
-    private static boolean hasCompatibleType(String path, ObjectNode current, ObjectNode replacement) {
+    private static boolean hasCompatibleType(
+            String path, ObjectNode current, ObjectNode replacement) {
         if (!REPLACE_ON_TYPE_CHANGE_PATHS.contains(path)) {
             return true;
         }

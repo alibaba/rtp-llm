@@ -26,16 +26,21 @@ class LocalServiceDiscoveryTest {
     private static final String PREFILL_DOMAIN = "mock.prefill.hosts.address";
     private static final String DECODE_DOMAIN = "mock.decode.hosts.address";
 
-    @TempDir
-    Path tempDir;
+    @TempDir Path tempDir;
 
     @Test
     void parsesHostsForKnownDomains() throws Exception {
         Path file = tempDir.resolve("discovery.json");
-        writeAtomically(file, "{"
-                + "\"" + PREFILL_DOMAIN + "\": [\"127.0.0.1:55150\", \"127.0.0.1:55151\"],"
-                + "\"" + DECODE_DOMAIN + "\": [\"127.0.0.1:55160\"]"
-                + "}");
+        writeAtomically(
+                file,
+                "{"
+                        + "\""
+                        + PREFILL_DOMAIN
+                        + "\": [\"127.0.0.1:55150\", \"127.0.0.1:55151\"],"
+                        + "\""
+                        + DECODE_DOMAIN
+                        + "\": [\"127.0.0.1:55160\"]"
+                        + "}");
 
         LocalServiceDiscovery discovery = new LocalServiceDiscovery(file);
 
@@ -59,7 +64,8 @@ class LocalServiceDiscoveryTest {
 
         LocalServiceDiscovery discovery = new LocalServiceDiscovery(file);
 
-        assertTrue(discovery.getHosts("mock.unknown.hosts.address").isEmpty(),
+        assertTrue(
+                discovery.getHosts("mock.unknown.hosts.address").isEmpty(),
                 "a valid file without the requested domain must return an empty list");
     }
 
@@ -73,7 +79,10 @@ class LocalServiceDiscoveryTest {
         Files.delete(file);
 
         List<WorkerHost> hosts = discovery.getHosts(PREFILL_DOMAIN);
-        assertEquals(1, hosts.size(), "missing file must serve the last good snapshot, not an empty list");
+        assertEquals(
+                1,
+                hosts.size(),
+                "missing file must serve the last good snapshot, not an empty list");
         assertEquals("127.0.0.1:55150", hosts.get(0).getIpPort());
     }
 
@@ -101,10 +110,12 @@ class LocalServiceDiscoveryTest {
 
         // New file has one valid + one invalid entry — the whole parse must fail
         // so callers never observe a half list.
-        writeAtomically(file, "{\"" + PREFILL_DOMAIN + "\": [\"127.0.0.1:55150\", \"not-a-host\"]}");
+        writeAtomically(
+                file, "{\"" + PREFILL_DOMAIN + "\": [\"127.0.0.1:55150\", \"not-a-host\"]}");
 
         List<WorkerHost> hosts = discovery.getHosts(PREFILL_DOMAIN);
-        assertEquals(1, hosts.size(), "a snapshot with any invalid entry must be rejected entirely");
+        assertEquals(
+                1, hosts.size(), "a snapshot with any invalid entry must be rejected entirely");
         assertEquals("127.0.0.1:55150", hosts.get(0).getIpPort());
     }
 
@@ -116,10 +127,16 @@ class LocalServiceDiscoveryTest {
         assertEquals(1, discovery.getHosts(PREFILL_DOMAIN).size());
 
         // Atomic-rename style hot update: write a tmp sibling then move over.
-        writeAtomically(file, "{"
-                + "\"" + PREFILL_DOMAIN + "\": [\"127.0.0.1:55150\", \"127.0.0.1:55151\", \"127.0.0.1:55152\"],"
-                + "\"" + DECODE_DOMAIN + "\": [\"127.0.0.1:55160\"]"
-                + "}");
+        writeAtomically(
+                file,
+                "{"
+                        + "\""
+                        + PREFILL_DOMAIN
+                        + "\": [\"127.0.0.1:55150\", \"127.0.0.1:55151\", \"127.0.0.1:55152\"],"
+                        + "\""
+                        + DECODE_DOMAIN
+                        + "\": [\"127.0.0.1:55160\"]"
+                        + "}");
 
         List<WorkerHost> hosts = discovery.getHosts(PREFILL_DOMAIN);
         assertEquals(3, hosts.size(), "hot update must be visible on the next getHosts call");
@@ -135,10 +152,13 @@ class LocalServiceDiscoveryTest {
         assertEquals(1, discovery.getHosts(PREFILL_DOMAIN).size());
 
         writeAtomically(file, "{corrupt");
-        assertEquals(1, discovery.getHosts(PREFILL_DOMAIN).size(), "fallback during corruption window");
+        assertEquals(
+                1, discovery.getHosts(PREFILL_DOMAIN).size(), "fallback during corruption window");
 
         writeAtomically(file, "{\"" + PREFILL_DOMAIN + "\": [\"127.0.0.1:55200\"]}");
-        assertEquals("127.0.0.1:55200", discovery.getHosts(PREFILL_DOMAIN).get(0).getIpPort(),
+        assertEquals(
+                "127.0.0.1:55200",
+                discovery.getHosts(PREFILL_DOMAIN).get(0).getIpPort(),
                 "once the file is valid again the new snapshot must win");
     }
 
@@ -147,11 +167,14 @@ class LocalServiceDiscoveryTest {
         Path file = tempDir.resolve("does-not-exist.json");
         LocalServiceDiscovery discovery = new LocalServiceDiscovery(file);
 
-        IllegalStateException e = assertThrows(IllegalStateException.class,
-                () -> discovery.getHosts(PREFILL_DOMAIN),
-                "first read failure with no fallback must throw (misconfiguration should be loud)");
+        IllegalStateException e =
+                assertThrows(
+                        IllegalStateException.class,
+                        () -> discovery.getHosts(PREFILL_DOMAIN),
+                        "first read failure with no fallback must throw (misconfiguration should be loud)");
         assertNotNull(e.getMessage());
-        assertTrue(e.getMessage().contains("no previous snapshot"),
+        assertTrue(
+                e.getMessage().contains("no previous snapshot"),
                 "exception should explain the missing-fallback condition");
     }
 
@@ -172,7 +195,8 @@ class LocalServiceDiscoveryTest {
         Path tmp = file.resolveSibling(file.getFileName() + ".tmp");
         Files.writeString(tmp, content, StandardCharsets.UTF_8);
         try {
-            Files.move(tmp, file, StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING);
+            Files.move(
+                    tmp, file, StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING);
         } catch (java.nio.file.AtomicMoveNotSupportedException e) {
             Files.move(tmp, file, StandardCopyOption.REPLACE_EXISTING);
         }

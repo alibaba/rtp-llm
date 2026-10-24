@@ -22,11 +22,13 @@ public class ServiceDiscoveryConfiguration {
             List<ServiceDiscoveryProvider> providers,
             ObjectProvider<ConfigService> configServiceProvider) {
         ServiceDiscoveryRuntimeConfig defaults = new ServiceDiscoveryRuntimeConfig();
-        return new RoutingServiceDiscovery(providers, () -> {
-            ConfigService configService = configServiceProvider.getIfAvailable();
-            return configService == null
-                    ? defaults
-                    : configService.loadBalanceConfig().getServiceDiscovery();
-        });
+        return new RoutingServiceDiscovery(
+                providers,
+                () -> {
+                    ConfigService configService = configServiceProvider.getIfAvailable();
+                    return configService == null
+                            ? defaults
+                            : configService.loadBalanceConfig().getServiceDiscovery();
+                });
     }
 }

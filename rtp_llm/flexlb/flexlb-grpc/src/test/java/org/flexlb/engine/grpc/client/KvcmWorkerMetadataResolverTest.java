@@ -26,68 +26,72 @@ class KvcmWorkerMetadataResolverTest {
 
     @Test
     void resolvesNamespaceAndQueryTypeFromOneWorkerStatusRefresh() {
-        WorkerStatus workerStatus = workerStatus(
-                "prefill-deployment", KvCacheGroupMode.WITH_MAMBA);
-        KvcmWorkerMetadataResolver resolver = new KvcmWorkerMetadataResolver(
-                configuration(null), provider(List.of(workerStatus)));
+        WorkerStatus workerStatus = workerStatus("prefill-deployment", KvCacheGroupMode.WITH_MAMBA);
+        KvcmWorkerMetadataResolver resolver =
+                new KvcmWorkerMetadataResolver(
+                        configuration(null), provider(List.of(workerStatus)));
 
         resolver.refreshNamespacesAndQueryTypes();
 
-        assertEquals("prefill-deployment_2192",
+        assertEquals(
+                "prefill-deployment_2192",
                 resolver.resolveNamespace(RoleType.PREFILL, "default", 2192));
-        assertEquals(QueryType.QT_PREFIX_MATCH_WITH_MAMBA,
+        assertEquals(
+                QueryType.QT_PREFIX_MATCH_WITH_MAMBA,
                 resolver.resolveQueryType(RoleType.PREFILL, "default"));
-        assertEquals(QueryType.QT_PREFIX_MATCH_WITH_MAMBA,
+        assertEquals(
+                QueryType.QT_PREFIX_MATCH_WITH_MAMBA,
                 resolver.resolveQueryType(RoleType.PREFILL, null));
     }
 
     @Test
     void configuredNamespaceTakesPriorityWhileQueryTypeStillUsesWorkerStatus() {
-        WorkerStatus workerStatus = workerStatus(
-                "ignored-deployment", KvCacheGroupMode.FULL_ATTENTION_ONLY);
-        KvcmWorkerMetadataResolver resolver = new KvcmWorkerMetadataResolver(
-                configuration("configured-namespace"), provider(List.of(workerStatus)));
+        WorkerStatus workerStatus =
+                workerStatus("ignored-deployment", KvCacheGroupMode.FULL_ATTENTION_ONLY);
+        KvcmWorkerMetadataResolver resolver =
+                new KvcmWorkerMetadataResolver(
+                        configuration("configured-namespace"), provider(List.of(workerStatus)));
 
         resolver.refreshNamespacesAndQueryTypes();
 
-        assertEquals("configured-namespace_1024",
+        assertEquals(
+                "configured-namespace_1024",
                 resolver.resolveNamespace(RoleType.PREFILL, "default", 1024));
-        assertEquals(QueryType.QT_PREFIX_MATCH,
-                resolver.resolveQueryType(RoleType.PREFILL, "default"));
+        assertEquals(
+                QueryType.QT_PREFIX_MATCH, resolver.resolveQueryType(RoleType.PREFILL, "default"));
     }
 
     @Test
     void unspecifiedModeDoesNotOverwriteLastTrustedQueryType() {
-        WorkerStatus workerStatus = workerStatus(
-                "prefill-deployment", KvCacheGroupMode.WITH_MAMBA);
-        KvcmWorkerMetadataResolver resolver = new KvcmWorkerMetadataResolver(
-                configuration(null), provider(List.of(workerStatus)));
+        WorkerStatus workerStatus = workerStatus("prefill-deployment", KvCacheGroupMode.WITH_MAMBA);
+        KvcmWorkerMetadataResolver resolver =
+                new KvcmWorkerMetadataResolver(
+                        configuration(null), provider(List.of(workerStatus)));
         resolver.refreshNamespacesAndQueryTypes();
 
         publishMode(workerStatus, KvCacheGroupMode.UNSPECIFIED, 2L);
         resolver.refreshNamespacesAndQueryTypes();
 
-        assertEquals(QueryType.QT_PREFIX_MATCH_WITH_MAMBA,
+        assertEquals(
+                QueryType.QT_PREFIX_MATCH_WITH_MAMBA,
                 resolver.resolveQueryType(RoleType.PREFILL, "default"));
     }
 
     private WorkerStatus workerStatus(String deploymentName, KvCacheGroupMode mode) {
-        WorkerStatus workerStatus = WorkerStatus.createDiscovered(
-                RoleType.PREFILL,
-                "default",
-                "127.0.0.1",
-                8080,
-                8081,
-                "test",
-                deploymentName);
+        WorkerStatus workerStatus =
+                WorkerStatus.createDiscovered(
+                        RoleType.PREFILL,
+                        "default",
+                        "127.0.0.1",
+                        8080,
+                        8081,
+                        "test",
+                        deploymentName);
         publishMode(workerStatus, mode, 1L);
         return workerStatus;
     }
 
-    private void publishMode(
-            WorkerStatus workerStatus,
-            KvCacheGroupMode mode,
-            long statusVersion) {
+    private void publishMode(WorkerStatus workerStatus, KvCacheGroupMode mode, long statusVersion) {
         WorkerStatusResponse response = new WorkerStatusResponse();
         response.setRole(RoleType.PREFILL);
         response.setAlive(true);
@@ -99,8 +103,8 @@ class KvcmWorkerMetadataResolverTest {
 
         workerStatus.lock.lock();
         try {
-            WorkerStatus.PreparedStatus prepared = workerStatus.prepareNewStatus(
-                    workerStatus.freezeStatusResponse(response));
+            WorkerStatus.PreparedStatus prepared =
+                    workerStatus.prepareNewStatus(workerStatus.freezeStatusResponse(response));
             workerStatus.publishPreparedStatus(prepared);
             workerStatus.recordSuccessfulPoll(true);
         } finally {

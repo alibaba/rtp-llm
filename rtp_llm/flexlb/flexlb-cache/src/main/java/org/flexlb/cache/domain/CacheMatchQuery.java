@@ -12,5 +12,4 @@ public record CacheMatchQuery(
         List<Long> blockCacheKeys,
         long blockSize,
         RoleType roleType,
-        String group) {
-}
+        String group) {}

@@ -1,4 +1,3 @@
 package org.flexlb.config;
 
-public final class NoConsistencyConfig implements ConsistencyConfig {
-}
+public final class NoConsistencyConfig implements ConsistencyConfig {}

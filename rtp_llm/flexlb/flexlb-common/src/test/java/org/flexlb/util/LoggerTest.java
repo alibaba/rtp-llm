@@ -45,8 +45,8 @@ class LoggerTest {
         Logger.setLevel(null);
 
         assertEquals(LogLevel.INFO, Logger.getLevel());
-        assertEquals(Level.INFO, logbackLevel(),
-                "logback level should reset to INFO when passed null");
+        assertEquals(
+                Level.INFO, logbackLevel(), "logback level should reset to INFO when passed null");
     }
 
     @ParameterizedTest
@@ -56,7 +56,9 @@ class LoggerTest {
         Logger.setLevel(inputLevel);
 
         assertEquals(inputLevel, Logger.getLevel());
-        assertEquals(expectedLogbackLevel, logbackLevel(),
+        assertEquals(
+                expectedLogbackLevel,
+                logbackLevel(),
                 "logback level should match after setLevel(" + inputLevel + ")");
     }
 
@@ -66,8 +68,7 @@ class LoggerTest {
                 Arguments.of(LogLevel.DEBUG, Level.DEBUG),
                 Arguments.of(LogLevel.INFO, Level.INFO),
                 Arguments.of(LogLevel.WARN, Level.WARN),
-                Arguments.of(LogLevel.ERROR, Level.ERROR)
-        );
+                Arguments.of(LogLevel.ERROR, Level.ERROR));
     }
 
     @Test
@@ -120,11 +121,13 @@ class LoggerTest {
     @Test
     @DisplayName("LogLevel.valueOf throws IllegalArgumentException for invalid values")
     void logLevelValueOf_invalidValue() {
-        assertThrows(IllegalArgumentException.class,
+        assertThrows(
+                IllegalArgumentException.class,
                 () -> LogLevel.valueOf("INVALID".toUpperCase().trim()),
                 "Should throw for invalid log level");
 
-        assertThrows(IllegalArgumentException.class,
+        assertThrows(
+                IllegalArgumentException.class,
                 () -> LogLevel.valueOf("".toUpperCase().trim()),
                 "Should throw for empty string");
     }
@@ -132,13 +135,15 @@ class LoggerTest {
     @Test
     @DisplayName("Static method calls work without creating instances")
     void staticMethods_workWithoutInstances() {
-        assertDoesNotThrow(() -> {
-            Logger.info("Test info message");
-            Logger.debug("Test debug message");
-            Logger.warn("Test warn message");
-            Logger.error("Test error message");
-            Logger.trace("Test trace message");
-        }, "Static logging methods should work");
+        assertDoesNotThrow(
+                () -> {
+                    Logger.info("Test info message");
+                    Logger.debug("Test debug message");
+                    Logger.warn("Test warn message");
+                    Logger.error("Test error message");
+                    Logger.trace("Test trace message");
+                },
+                "Static logging methods should work");
 
         assertNotNull(Logger.class, "Logger class should be loaded");
         assertDoesNotThrow(Logger::getLevel, "getLevel should work");
@@ -174,7 +179,14 @@ class LoggerTest {
     @DisplayName("LogLevel accepts normalized case and whitespace")
     void logLevelAcceptsNormalizedInput() {
         String[] testInputs = {"debug", "DEBUG", "Debug", "  INFO  ", "warn", "ERROR"};
-        LogLevel[] expectedOutputs = {LogLevel.DEBUG, LogLevel.DEBUG, LogLevel.DEBUG, LogLevel.INFO, LogLevel.WARN, LogLevel.ERROR};
+        LogLevel[] expectedOutputs = {
+            LogLevel.DEBUG,
+            LogLevel.DEBUG,
+            LogLevel.DEBUG,
+            LogLevel.INFO,
+            LogLevel.WARN,
+            LogLevel.ERROR
+        };
 
         for (int i = 0; i < testInputs.length; i++) {
             String input = testInputs[i];
@@ -191,31 +203,26 @@ class LoggerTest {
                 Arguments.of("Trace", LogLevel.TRACE),
                 Arguments.of("TrAcE", LogLevel.TRACE),
                 Arguments.of("  trace  ", LogLevel.TRACE),
-
                 Arguments.of("debug", LogLevel.DEBUG),
                 Arguments.of("DEBUG", LogLevel.DEBUG),
                 Arguments.of("Debug", LogLevel.DEBUG),
                 Arguments.of("DeBuG", LogLevel.DEBUG),
                 Arguments.of("  DEBUG  ", LogLevel.DEBUG),
-
                 Arguments.of("info", LogLevel.INFO),
                 Arguments.of("INFO", LogLevel.INFO),
                 Arguments.of("Info", LogLevel.INFO),
                 Arguments.of("InFo", LogLevel.INFO),
                 Arguments.of("  info  ", LogLevel.INFO),
-
                 Arguments.of("warn", LogLevel.WARN),
                 Arguments.of("WARN", LogLevel.WARN),
                 Arguments.of("Warn", LogLevel.WARN),
                 Arguments.of("WaRn", LogLevel.WARN),
                 Arguments.of("  WARN  ", LogLevel.WARN),
-
                 Arguments.of("error", LogLevel.ERROR),
                 Arguments.of("ERROR", LogLevel.ERROR),
                 Arguments.of("Error", LogLevel.ERROR),
                 Arguments.of("ErRoR", LogLevel.ERROR),
-                Arguments.of("  ERROR  ", LogLevel.ERROR)
-        );
+                Arguments.of("  ERROR  ", LogLevel.ERROR));
     }
 
     private static ch.qos.logback.classic.Level logbackLevel() {

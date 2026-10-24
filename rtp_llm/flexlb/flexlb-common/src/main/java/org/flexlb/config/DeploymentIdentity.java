@@ -21,19 +21,28 @@ public class DeploymentIdentity {
     private final String spectrumWorkspaceId;
     private final String spectrumDeploymentName;
     private final String deploymentId;
+
     @Getter(AccessLevel.NONE)
     private final String missingIdentityMessage;
 
     public DeploymentIdentity() {
         String spectrumWorkspaceId = StringUtils.trimToNull(System.getenv(SPECTRUM_WORKSPACE_ID));
         String applicationName = StringUtils.trimToNull(System.getenv(SPECTRUM_APPLICATION_NAME));
-        String spectrumDeploymentName = StringUtils.trimToNull(System.getenv(SPECTRUM_DEPLOYMENT_NAME));
+        String spectrumDeploymentName =
+                StringUtils.trimToNull(System.getenv(SPECTRUM_DEPLOYMENT_NAME));
 
-        if (spectrumWorkspaceId != null && applicationName != null && spectrumDeploymentName != null) {
+        if (spectrumWorkspaceId != null
+                && applicationName != null
+                && spectrumDeploymentName != null) {
             this.spectrumWorkspaceId = spectrumWorkspaceId;
             this.spectrumDeploymentName = spectrumDeploymentName;
-            deploymentId = SPECTRUM_IDENTITY_PREFIX + spectrumWorkspaceId + ":" + applicationName + ":"
-                    + spectrumDeploymentName;
+            deploymentId =
+                    SPECTRUM_IDENTITY_PREFIX
+                            + spectrumWorkspaceId
+                            + ":"
+                            + applicationName
+                            + ":"
+                            + spectrumDeploymentName;
             missingIdentityMessage = null;
             return;
         }
@@ -53,13 +62,31 @@ public class DeploymentIdentity {
         this.spectrumWorkspaceId = null;
         this.spectrumDeploymentName = null;
         deploymentId = null;
-        missingIdentityMessage = "Deployment identity requires a complete Spectrum or runtime triplet: "
-                + SPECTRUM_WORKSPACE_ID + "=" + spectrumWorkspaceId + ", "
-                + SPECTRUM_APPLICATION_NAME + "=" + applicationName + ", "
-                + SPECTRUM_DEPLOYMENT_NAME + "=" + spectrumDeploymentName + "; "
-                + WHALE_BIZ_NAME + "=" + bizName + ", "
-                + WHALE_DEPLOYMENT_NAME + "=" + runtimeDeploymentName + ", "
-                + WHALE_ZONE_NAME + "=" + zoneName;
+        missingIdentityMessage =
+                "Deployment identity requires a complete Spectrum or runtime triplet: "
+                        + SPECTRUM_WORKSPACE_ID
+                        + "="
+                        + spectrumWorkspaceId
+                        + ", "
+                        + SPECTRUM_APPLICATION_NAME
+                        + "="
+                        + applicationName
+                        + ", "
+                        + SPECTRUM_DEPLOYMENT_NAME
+                        + "="
+                        + spectrumDeploymentName
+                        + "; "
+                        + WHALE_BIZ_NAME
+                        + "="
+                        + bizName
+                        + ", "
+                        + WHALE_DEPLOYMENT_NAME
+                        + "="
+                        + runtimeDeploymentName
+                        + ", "
+                        + WHALE_ZONE_NAME
+                        + "="
+                        + zoneName;
     }
 
     public boolean isSpectrum() {

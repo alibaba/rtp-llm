@@ -18,5 +18,4 @@ public record CacheMatchStatus(
         long lastSwitchTimeMs,
         String lastSwitchReason,
         long localStandbyEntries,
-        long localStandbyMaximumEntries) {
-}
+        long localStandbyMaximumEntries) {}

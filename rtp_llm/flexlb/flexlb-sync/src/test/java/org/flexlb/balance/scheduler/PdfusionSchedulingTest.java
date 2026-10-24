@@ -46,10 +46,14 @@ import static org.mockito.Mockito.when;
 class PdfusionSchedulingTest {
     @ParameterizedTest
     @CsvSource({
-            "false,false,false,false", "false,false,false,true", "false,false,true,false", "false,false,true,true",
-            "false,true,false,false", "false,true,false,true", "false,true,true,false", "false,true,true,true",
-            "true,false,false,false"})
-    void fusionNeedsOnlyItsOwnRole(boolean direct, boolean priority, boolean window, boolean batch) throws Exception {
+        "false,false,false,false", "false,false,false,true", "false,false,true,false",
+                "false,false,true,true",
+        "false,true,false,false", "false,true,false,true", "false,true,true,false",
+                "false,true,true,true",
+        "true,false,false,false"
+    })
+    void fusionNeedsOnlyItsOwnRole(boolean direct, boolean priority, boolean window, boolean batch)
+            throws Exception {
         FlexlbConfig config = SchedulingTestConfig.batchConfig();
         SchedulingTestConfig.useNonBatchDispatcher(config);
         if (priority) {
@@ -75,20 +79,46 @@ class PdfusionSchedulingTest {
         RequestSchedulerReporter requestReporter = mock(RequestSchedulerReporter.class);
         RequestRegistry lifecycle = new RequestRegistry(service, reporter, requestReporter);
         PlacementAvailability availability = new PlacementAvailability();
-        DeliveryStrategy delivery = batch
-                ? new BatchDeliveryStrategy(() -> CapacityBoundary.Attempt.accepted(
-                        new BatchDeliveryStrategy.PreparedSubmission() {
-                            public void submit(BatchDeliveryStrategy.Delivery delivery) {
-                                delivery.run((items, id, predicted, reason, observer) ->
-                                        items.forEach(item -> observer.accept(item, DeliveryResult.delivered())));
-                            }
-                            public void close() { }
-                        }), new AtomicLong()::incrementAndGet,
-                        lifecycle, new DeliveryMetrics(reporter))
-                : new RouteDeliveryStrategy(lifecycle, new DeliveryMetrics(reporter));
-        EndpointRegistry endpoints = new EndpointRegistry(service, new EndpointEventProjector(lifecycle), reporter,
-                delivery, availability);
-        WorkerStatus worker = WorkerStatus.createDiscovered(RoleType.PDFUSION, "g1", "127.0.0.1", 8080, 8081, "test");
+        DeliveryStrategy delivery =
+                batch
+                        ? new BatchDeliveryStrategy(
+                                () ->
+                                        CapacityBoundary.Attempt.accepted(
+                                                new BatchDeliveryStrategy.PreparedSubmission() {
+                                                    public void submit(
+                                                            BatchDeliveryStrategy.Delivery
+                                                                    delivery) {
+                                                        delivery.run(
+                                                                (items,
+                                                                        id,
+                                                                        predicted,
+                                                                        reason,
+                                                                        observer) ->
+                                                                        items.forEach(
+                                                                                item ->
+                                                                                        observer
+                                                                                                .accept(
+                                                                                                        item,
+                                                                                                        DeliveryResult
+                                                                                                                .delivered())));
+                                                    }
+
+                                                    public void close() {}
+                                                }),
+                                new AtomicLong()::incrementAndGet,
+                                lifecycle,
+                                new DeliveryMetrics(reporter))
+                        : new RouteDeliveryStrategy(lifecycle, new DeliveryMetrics(reporter));
+        EndpointRegistry endpoints =
+                new EndpointRegistry(
+                        service,
+                        new EndpointEventProjector(lifecycle),
+                        reporter,
+                        delivery,
+                        availability);
+        WorkerStatus worker =
+                WorkerStatus.createDiscovered(
+                        RoleType.PDFUSION, "g1", "127.0.0.1", 8080, 8081, "test");
         WorkerStatusResponse status = new WorkerStatusResponse();
         status.setRole(RoleType.PDFUSION);
         status.setAlive(true);
@@ -100,7 +130,9 @@ class PdfusionSchedulingTest {
         status.setMaxBatchTokensSize(10000L);
         worker.lock.lock();
         try {
-            endpoints.publishPreparedEndpoint(worker.getLogicalIpPort(), worker,
+            endpoints.publishPreparedEndpoint(
+                    worker.getLogicalIpPort(),
+                    worker,
                     worker.prepareNewStatus(worker.freezeStatusResponse(status)));
             worker.recordSuccessfulPoll(true);
         } finally {
@@ -112,31 +144,51 @@ class PdfusionSchedulingTest {
                 .thenReturn(CacheMatchResult.empty(CacheMatchSource.LOCAL_SYNC));
         ModelMetaConfig model = mock(ModelMetaConfig.class);
         when(model.requiredRoles()).thenReturn(List.of(RoleType.PDFUSION));
-        DefaultRouter router = new DefaultRouter(new CostBasedPrefillStrategy(directory, cache, mock(EngineHealthReporter.class)),
-                new DecodeSelector(directory), new RandomStrategy(directory), mock(EncoderStrategy.class), service, model);
-        RequestScheduler scheduler = new RequestScheduler(service, router, endpoints, reporter,
-                mock(EvictionManager.class), lifecycle, availability);
-        SchedulerRuntime runtime = direct
-                ? new SchedulerRuntime(lifecycle, endpoints, reporter, requestReporter)
-                : new SchedulerRuntime(lifecycle, endpoints, reporter, requestReporter, scheduler);
+        DefaultRouter router =
+                new DefaultRouter(
+                        new CostBasedPrefillStrategy(
+                                directory, cache, mock(EngineHealthReporter.class)),
+                        new DecodeSelector(directory),
+                        new RandomStrategy(directory),
+                        mock(EncoderStrategy.class),
+                        service,
+                        model);
+        RequestScheduler scheduler =
+                new RequestScheduler(
+                        service,
+                        router,
+                        endpoints,
+                        reporter,
+                        mock(EvictionManager.class),
+                        lifecycle,
+                        availability);
+        SchedulerRuntime runtime =
+                direct
+                        ? new SchedulerRuntime(lifecycle, endpoints, reporter, requestReporter)
+                        : new SchedulerRuntime(
+                                lifecycle, endpoints, reporter, requestReporter, scheduler);
         try {
             long requestId = 920001L;
             var context = RequestLifecycleTestSupport.context(config, requestId);
             Response response = scheduler.submit(context).get(3, TimeUnit.SECONDS);
-            assertTrue(response.isSuccess(), "PDFUSION route failed: " + response.getErrorMessage());
-            assertEquals(List.of(RoleType.PDFUSION), response.getServerStatus().stream()
-                    .map(ServerStatus::getRole).toList());
+            assertTrue(
+                    response.isSuccess(), "PDFUSION route failed: " + response.getErrorMessage());
+            assertEquals(
+                    List.of(RoleType.PDFUSION),
+                    response.getServerStatus().stream().map(ServerStatus::getRole).toList());
             assertEquals(0, endpoints.getEndpointCount(RoleType.DECODE));
             assertEquals(1, lifecycle.trackedRequestCount());
-            PrefillEndpoint endpoint = (PrefillEndpoint) endpoints.get(
-                    RoleType.PDFUSION, worker.getLogicalIpPort());
+            PrefillEndpoint endpoint =
+                    (PrefillEndpoint) endpoints.get(RoleType.PDFUSION, worker.getLogicalIpPort());
             assertEquals(1, endpoint.observedRequestCount());
             var committedWork = endpoint.captureRouteProjectionInputs().work();
             assertTrue(committedWork.containsRequest(Long.toString(requestId)));
             TaskInfo finished = new TaskInfo();
             finished.setRequestId(Long.toString(requestId));
-            finished.setBatchId(direct ? 0L : lifecycle.getRequestState(
-                    Long.toString(requestId), 0L).batchId());
+            finished.setBatchId(
+                    direct
+                            ? 0L
+                            : lifecycle.getRequestState(Long.toString(requestId), 0L).batchId());
             finished.setPhase(TaskPhase.RUNNING);
             finished.setErrorCode(0L);
             status.setStatusVersion(2L);
@@ -145,27 +197,31 @@ class PdfusionSchedulingTest {
             Runnable projection;
             worker.lock.lock();
             try {
-                projection = endpoint.applyPreparedStatus(worker,
-                        worker.prepareNewStatus(worker.freezeStatusResponse(status)));
+                projection =
+                        endpoint.applyPreparedStatus(
+                                worker,
+                                worker.prepareNewStatus(worker.freezeStatusResponse(status)));
             } finally {
                 worker.lock.unlock();
             }
             projection.run();
             assertEquals(0, endpoint.observedRequestCount());
             assertEquals(0, endpoint.getInflightBatchCount());
-            assertTrue(committedWork.containsRequest(Long.toString(requestId)),
+            assertTrue(
+                    committedWork.containsRequest(Long.toString(requestId)),
                     "published snapshots stay immutable");
-            assertTrue(!endpoint.captureRouteProjectionInputs().work()
-                    .containsRequest(Long.toString(requestId)));
+            assertTrue(
+                    !endpoint.captureRouteProjectionInputs()
+                            .work()
+                            .containsRequest(Long.toString(requestId)));
             if (!direct) {
-                assertEquals(RequestState.Phase.COMPLETED,
-                        lifecycle.getRequestState(
-                                Long.toString(requestId), 0L).state());
+                assertEquals(
+                        RequestState.Phase.COMPLETED,
+                        lifecycle.getRequestState(Long.toString(requestId), 0L).state());
                 assertEquals(0, lifecycle.trackedRequestCount());
             }
         } finally {
             runtime.shutdown();
         }
     }
-
 }

@@ -21,18 +21,23 @@ public class MetricConstant {
     /**
      * Engine status check success period
      */
-    public static final String ENGINE_STATUS_CHECK_SUCCESS_PERIOD = "app.engine.health.check.success.period";
+    public static final String ENGINE_STATUS_CHECK_SUCCESS_PERIOD =
+            "app.engine.health.check.success.period";
 
-    public static final String ENGINE_PREFILL_WORKER_NUMBER = "app.engine.health.check.engine.prefill.worker.number";
+    public static final String ENGINE_PREFILL_WORKER_NUMBER =
+            "app.engine.health.check.engine.prefill.worker.number";
 
-    public static final String ENGINE_DECODE_WORKER_NUMBER = "app.engine.health.check.engine.decode.worker.number";
+    public static final String ENGINE_DECODE_WORKER_NUMBER =
+            "app.engine.health.check.engine.decode.worker.number";
 
-    public static final String ENGINE_ENCODER_WORKER_NUMBER = "app.engine.health.check.engine.encoder.worker.number";
+    public static final String ENGINE_ENCODER_WORKER_NUMBER =
+            "app.engine.health.check.engine.encoder.worker.number";
 
     /**
      * Successful service-discovery host count before cache fallback or logical worker expansion.
      */
-    public static final String ENGINE_SERVICE_DISCOVERY_RAW_HOST_COUNT = "app.engine.health.check.engine.worker.number.service.discovery.result";
+    public static final String ENGINE_SERVICE_DISCOVERY_RAW_HOST_COUNT =
+            "app.engine.health.check.engine.worker.number.service.discovery.result";
 
     public static final String ENGINE_STATUS_VISITOR_RT = "app.engine.health.check.visitor.rt";
 
@@ -46,27 +51,31 @@ public class MetricConstant {
             "app.engine.health.check.fail.total";
 
     /** Failed WorkerStatus gRPC check latency in microseconds. */
-    public static final String ENGINE_STATUS_CHECK_FAIL_RT =
-            "app.engine.health.check.fail.rt";
+    public static final String ENGINE_STATUS_CHECK_FAIL_RT = "app.engine.health.check.fail.rt";
 
     /**
      * Master load balancing service total QPS
      */
-    public static final String ENGINE_BALANCING_MASTER_ALL_QPS = "app.engine.balancing.master.all.qps";
+    public static final String ENGINE_BALANCING_MASTER_ALL_QPS =
+            "app.engine.balancing.master.all.qps";
 
-    public static final String ENGINE_BALANCING_MASTER_ALL_RT = "app.engine.balancing.master.all.rt";
+    public static final String ENGINE_BALANCING_MASTER_ALL_RT =
+            "app.engine.balancing.master.all.rt";
 
-    public static final String ENGINE_BALANCING_MASTER_SELECT_DETAIL = "app.engine.balancing.master.select.detail";
+    public static final String ENGINE_BALANCING_MASTER_SELECT_DETAIL =
+            "app.engine.balancing.master.select.detail";
 
     public static final String ENGINE_BALANCING_MASTER_WORKER_SELECT_DETAIL =
             "app.engine.balancing.master.worker.select.detail";
 
-    public static final String ENGINE_BALANCING_MASTER_DISPATCH_REASON = "app.engine.balancing.master.dispatch.reason";
+    public static final String ENGINE_BALANCING_MASTER_DISPATCH_REASON =
+            "app.engine.balancing.master.dispatch.reason";
 
     /**
      * Batch dispatch size (number of requests per batch)
      */
-    public static final String ENGINE_BALANCING_MASTER_BATCH_SIZE = "app.engine.balancing.master.batch.size";
+    public static final String ENGINE_BALANCING_MASTER_BATCH_SIZE =
+            "app.engine.balancing.master.batch.size";
 
     /**
      * Batch dispatch total token count per batch (sum of seqLen across picked items)
@@ -106,7 +115,8 @@ public class MetricConstant {
     /**
      * Estimated uncached Encoder tokens across running, waiting, and locally pending requests.
      */
-    public static final String ENCODER_UNCACHED_TOKEN_LOAD = "app.flexlb.encoder.uncached.token.load";
+    public static final String ENCODER_UNCACHED_TOKEN_LOAD =
+            "app.flexlb.encoder.uncached.token.load";
 
     /**
      * FlexLB scheduler total load per decode worker (confirmed running + scheduler inflight)
@@ -116,7 +126,8 @@ public class MetricConstant {
     /**
      * Sum of input tokens plus max_new_tokens for local Decode reservations, including queued requests.
      */
-    public static final String DECODE_INPUT_AND_MAX_OUTPUT_KV_RESERVED_TOKENS = "app.flexlb.decode.inflight.kv.reserved.tokens";
+    public static final String DECODE_INPUT_AND_MAX_OUTPUT_KV_RESERVED_TOKENS =
+            "app.flexlb.decode.inflight.kv.reserved.tokens";
 
     /**
      * Sum of input tokens for local Decode reservations, including queued requests.
@@ -130,8 +141,7 @@ public class MetricConstant {
      * the scheduler's own ledger (leak signature: max age creeping toward the
      * TTL window); PREFILL/DECODE + real engineIp mark per-worker ledgers.
      */
-    public static final String INFLIGHT_MAX_AGE_MS =
-            "app.flexlb.inflight.max.age.ms";
+    public static final String INFLIGHT_MAX_AGE_MS = "app.flexlb.inflight.max.age.ms";
 
     /**
      * FlexLB inflight TTL expired count — number of inflight entries evicted by
@@ -189,7 +199,8 @@ public class MetricConstant {
     /**
      * Engine running queue time (from EP authoritative value)
      */
-    public static final String ENGINE_RUNNING_QUEUE_TIME = "app.engine.health.check.running.queue.time";
+    public static final String ENGINE_RUNNING_QUEUE_TIME =
+            "app.engine.health.check.running.queue.time";
 
     /**
      * FlexLB batcher queue size — number of pending (not-yet-batched) requests
@@ -203,12 +214,14 @@ public class MetricConstant {
     /**
      * Engine finished task list size
      */
-    public static final String ENGINE_FINISHED_TASK_LIST_SIZE = "app.engine.health.check.finished.task.list.size";
+    public static final String ENGINE_FINISHED_TASK_LIST_SIZE =
+            "app.engine.health.check.finished.task.list.size";
 
     /**
      * Engine running task info size
      */
-    public static final String ENGINE_RUNNING_TASK_INFO_SIZE = "app.engine.health.check.running.task.info.size";
+    public static final String ENGINE_RUNNING_TASK_INFO_SIZE =
+            "app.engine.health.check.running.task.info.size";
 
     /**
      * Prefill master node monitoring
@@ -228,23 +241,27 @@ public class MetricConstant {
     /**
      * Load balancing service thread pool status
      */
-    public static final String ENGINE_BALANCING_THREAD_POOL_INFO = "app.engine.balancing.thread.pool.info";
+    public static final String ENGINE_BALANCING_THREAD_POOL_INFO =
+            "app.engine.balancing.thread.pool.info";
 
     /**
      * Load balancing service NioEventLoopGroup status
      */
-    public static final String ENGINE_BALANCING_EVENT_LOOP_GROUP_INFO = "app.engine.balancing.event.loop.group.info";
+    public static final String ENGINE_BALANCING_EVENT_LOOP_GROUP_INFO =
+            "app.engine.balancing.event.loop.group.info";
 
     /**
      * Engine worker info service step latency variance
      */
-    public static final String ENGINE_WORKER_INFO_STEP_LATENCY_VAR = "app.engine.worker.info.step.latency.var";
+    public static final String ENGINE_WORKER_INFO_STEP_LATENCY_VAR =
+            "app.engine.worker.info.step.latency.var";
 
     /**
      * Variance of each role's observable logical endpoint load. Prefill reports
      * committed work-ms while Decode and status-only roles report active task counts.
      */
-    public static final String ENGINE_WORKER_INFO_RUNNING_QUERY_LEN_VAR = "app.engine.worker.info.running.query.len.var";
+    public static final String ENGINE_WORKER_INFO_RUNNING_QUERY_LEN_VAR =
+            "app.engine.worker.info.running.query.len.var";
 
     public static final String ENGINE_WORKER_STATUS_ENGINE_OBSERVED_WAITING_TO_RUNNING_MS =
             "app.engine.worker.status.engine.waiting.to.running.ms";
@@ -285,12 +302,10 @@ public class MetricConstant {
     /* ------------------------ Routing Observability -------------------------- */
 
     /** Failed KVCM query attempts after the configured retry budget is exhausted. */
-    public static final String KVCM_QUERY_FAILURE_QPS =
-            "app.cache.kvcm.query.failure.qps";
+    public static final String KVCM_QUERY_FAILURE_QPS = "app.cache.kvcm.query.failure.qps";
 
     /** KVCM retry attempts issued after an initial query failure. */
-    public static final String KVCM_QUERY_RETRY_QPS =
-            "app.cache.kvcm.query.retry.qps";
+    public static final String KVCM_QUERY_RETRY_QPS = "app.cache.kvcm.query.retry.qps";
 
     /** Optimizer trace queries that could not be dispatched or returned an error. */
     public static final String OPTIMIZER_TRACE_QUERY_FAILED_QPS =
@@ -339,37 +354,46 @@ public class MetricConstant {
 
     public static final String CACHE_KVCM_PREDICTED_TOKENS = "app.cache.kvcm.predicted.tokens";
     public static final String CACHE_KVCM_PREDICTED_RATIO = "app.cache.kvcm.predicted.ratio";
-    public static final String CACHE_LOCAL_STANDBY_PREDICTED_TOKENS = "app.cache.local.standby.predicted.tokens";
-    public static final String CACHE_LOCAL_STANDBY_PREDICTED_RATIO = "app.cache.local.standby.predicted.ratio";
+    public static final String CACHE_LOCAL_STANDBY_PREDICTED_TOKENS =
+            "app.cache.local.standby.predicted.tokens";
+    public static final String CACHE_LOCAL_STANDBY_PREDICTED_RATIO =
+            "app.cache.local.standby.predicted.ratio";
 
     public static final String CACHE_HIT_COMPARISON_ACTUAL_TOKENS =
             "app.cache.hit.comparison.actual.tokens";
+
     /**
      * Accumulated KVCM predicted hit tokens from the same requests that have returned valid feedback.
      */
     public static final String CACHE_HIT_COMPARISON_KVCM_PREDICTED_TOKENS =
             "app.cache.hit.comparison.kvcm.predicted.tokens";
+
     /**
      * Accumulated input tokens from requests with valid cache-hit feedback.
      */
     public static final String CACHE_HIT_COMPARISON_INPUT_TOKENS =
             "app.cache.hit.comparison.input.tokens";
+
     public static final String CACHE_HIT_COMPARISON_DELTA_TOKENS =
             "app.cache.hit.comparison.delta.tokens";
     public static final String CACHE_HIT_COMPARISON_LOCAL_STANDBY_DELTA_TOKENS =
             "app.cache.hit.comparison.local.standby.delta.tokens";
+
     /**
      * Per-request actual hit ratio minus Local Standby predicted hit ratio.
      */
     public static final String CACHE_HIT_COMPARISON_LOCAL_STANDBY_DELTA_RATIO =
             "app.cache.hit.comparison.local.standby.delta.ratio";
+
     public static final String CACHE_HIT_COMPARISON_ACTUAL_RATIO =
             "app.cache.hit.comparison.actual.ratio";
+
     /**
      * Accumulated KVCM local match tokens for selected prefill requests.
      */
     public static final String CACHE_KVCM_SELECTED_LOCAL_MATCH_TOKENS =
             "app.cache.kvcm.selected.local.match.tokens";
+
     /**
      * Accumulated KVCM global match tokens (including local matches) for selected prefill requests.
      */
@@ -381,6 +405,7 @@ public class MetricConstant {
      */
     public static final String CACHE_KVCM_SELECTED_INPUT_TOKENS =
             "app.cache.kvcm.selected.input.tokens";
+
     public static final String CACHE_HIT_COMPARISON_KVCM_LOCAL_DELTA_TOKENS =
             "app.cache.hit.comparison.kvcm.local.delta.tokens";
     public static final String CACHE_HIT_COMPARISON_KVCM_GLOBAL_MATCH_DELTA_TOKENS =
@@ -391,10 +416,8 @@ public class MetricConstant {
             "app.cache.local.standby.mapping.count";
     public static final String CACHE_LOCAL_STANDBY_BLOCK_SIZE =
             "app.cache.local.standby.block.size";
-    public static final String CACHE_MATCH_ACTIVE_SOURCE =
-            "app.cache.match.active.source";
-    public static final String CACHE_MATCH_SOURCE_CHANGE_QPS =
-            "app.cache.match.source.change.qps";
+    public static final String CACHE_MATCH_ACTIVE_SOURCE = "app.cache.match.active.source";
+    public static final String CACHE_MATCH_SOURCE_CHANGE_QPS = "app.cache.match.source.change.qps";
     public static final String CACHE_MATCH_STANDBY_FALLBACK_QPS =
             "app.cache.match.standby.fallback.qps";
 
@@ -436,24 +459,28 @@ public class MetricConstant {
     /**
      * Find matching engines response time
      */
-    public static final String CACHE_FIND_MATCHING_ENGINES_RT = "app.cache.find.matching.engines.rt";
+    public static final String CACHE_FIND_MATCHING_ENGINES_RT =
+            "app.cache.find.matching.engines.rt";
 
     /**
      * Update cache response time
      */
-    public static final String CACHE_UPDATE_ENGINE_BLOCK_CACHE_RT = "app.cache.update.engine.block.cache.rt";
+    public static final String CACHE_UPDATE_ENGINE_BLOCK_CACHE_RT =
+            "app.cache.update.engine.block.cache.rt";
 
     /**
      * Cache status check response time
      */
     public static final String CACHE_STATUS_CHECK_VISITOR_RT = "app.cache.status.check.visitor.rt";
 
-    public static final String CACHE_STATUS_CHECK_VISITOR_SUCCESS_QPS = "app.cache.status.check.visitor.success.qps";
+    public static final String CACHE_STATUS_CHECK_VISITOR_SUCCESS_QPS =
+            "app.cache.status.check.visitor.success.qps";
 
     /**
      * Cache status check success period
      */
-    public static final String CACHE_STATUS_CHECK_SUCCESS_PERIOD = "app.cache.status.check.success.period";
+    public static final String CACHE_STATUS_CHECK_SUCCESS_PERIOD =
+            "app.cache.status.check.success.period";
 
     /**
      * Cache status check failure information
@@ -478,7 +505,8 @@ public class MetricConstant {
     /**
      * Remaining available KV cache token count
      */
-    public static final String CACHE_AVAILABLE_KV_CACHE_TOKENS = "app.cache.available.kv.cache.tokens";
+    public static final String CACHE_AVAILABLE_KV_CACHE_TOKENS =
+            "app.cache.available.kv.cache.tokens";
 
     /**
      * Worker-reported total KV cache token capacity, tagged by role and bare engine IP.
@@ -498,7 +526,8 @@ public class MetricConstant {
     /**
      * Removed blocks count in cache diff calculation
      */
-    public static final String CACHE_DIFF_REMOVED_BLOCKS_SIZE = "app.cache.diff.removed.blocks.size";
+    public static final String CACHE_DIFF_REMOVED_BLOCKS_SIZE =
+            "app.cache.diff.removed.blocks.size";
 
     /**
      * Engine view map size (current number of engines)
@@ -562,7 +591,8 @@ public class MetricConstant {
     /**
      * Routing execution time in milliseconds
      */
-    public static final String ROUTING_ROUTE_EXECUTION_TIME_MS = "app.routing.route.execution.time.ms";
+    public static final String ROUTING_ROUTE_EXECUTION_TIME_MS =
+            "app.routing.route.execution.time.ms";
 
     /**
      * Routing success QPS
@@ -626,7 +656,8 @@ public class MetricConstant {
     /**
      * gRPC server executor active thread count (gauge)
      */
-    public static final String GRPC_SERVER_EXECUTOR_ACTIVE_THREADS = "grpc.server.executor.active.threads";
+    public static final String GRPC_SERVER_EXECUTOR_ACTIVE_THREADS =
+            "grpc.server.executor.active.threads";
 
     /**
      * gRPC server executor queue size (gauge)
@@ -641,19 +672,22 @@ public class MetricConstant {
     /**
      * gRPC server executor maximum pool size (gauge)
      */
-    public static final String GRPC_SERVER_EXECUTOR_MAX_POOL_SIZE = "grpc.server.executor.max.pool.size";
+    public static final String GRPC_SERVER_EXECUTOR_MAX_POOL_SIZE =
+            "grpc.server.executor.max.pool.size";
 
     /**
      * gRPC server executor rejected task counter. Rejection uses AbortPolicy.
      */
-    public static final String GRPC_SERVER_EXECUTOR_REJECTED_TASKS = "grpc.server.executor.caller.runs";
+    public static final String GRPC_SERVER_EXECUTOR_REJECTED_TASKS =
+            "grpc.server.executor.caller.runs";
 
     /* ------------------------ Dispatch Executor Monitoring ---------------------------- */
 
     /**
      * Dispatch executor active thread count (gauge)
      */
-    public static final String DISPATCH_EXECUTOR_ACTIVE_THREADS = "dispatch.executor.active.threads";
+    public static final String DISPATCH_EXECUTOR_ACTIVE_THREADS =
+            "dispatch.executor.active.threads";
 
     /**
      * Dispatch executor queue size (gauge)
@@ -670,7 +704,8 @@ public class MetricConstant {
     /**
      * Request registration or terminal cleanup failures, tagged by the failing stage.
      */
-    public static final String REQUEST_LIFECYCLE_FAILURES_TOTAL = "auto_tpm.request.lifecycle.failures.total";
+    public static final String REQUEST_LIFECYCLE_FAILURES_TOTAL =
+            "auto_tpm.request.lifecycle.failures.total";
 
     /**
      * Auto-TPM request count by priority (QPS), tags: priority
@@ -726,7 +761,8 @@ public class MetricConstant {
     /**
      * Auto-TPM decode shadow hard KV reserved tokens (gauge), tags: endpoint
      */
-    public static final String AUTO_TPM_DECODE_SHADOW_KV_RESERVED = "auto_tpm.decode.shadow_kv_reserved";
+    public static final String AUTO_TPM_DECODE_SHADOW_KV_RESERVED =
+            "auto_tpm.decode.shadow_kv_reserved";
 
     /**
      * Auto-TPM TTFT approximation in ms (timer), tags: priority.
@@ -807,5 +843,6 @@ public class MetricConstant {
      * Count once per failed attempt, with mode (return/rpc) and a bounded
      * reason describing the target check that failed.
      */
-    public static final String AUTO_TPM_PREEMPTION_TARGET_INVALID_COUNT = "auto_tpm.preemption.target_invalid.count";
+    public static final String AUTO_TPM_PREEMPTION_TARGET_INVALID_COUNT =
+            "auto_tpm.preemption.target_invalid.count";
 }

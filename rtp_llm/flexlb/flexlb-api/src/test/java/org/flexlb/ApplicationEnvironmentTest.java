@@ -32,26 +32,29 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 class ApplicationEnvironmentTest {
 
     @SystemStub
-    private EnvironmentVariables environment = new EnvironmentVariables(
-            "FLEXLB_MONITOR_PROVIDER", "kmonitor", "SERVER_PORT", "19001");
+    private EnvironmentVariables environment =
+            new EnvironmentVariables("FLEXLB_MONITOR_PROVIDER", "kmonitor", "SERVER_PORT", "19001");
 
     private String originalIgnoreGetenv;
 
     @BeforeEach
     void enableEnvironmentVariables() {
-        originalIgnoreGetenv = SpringProperties.getProperty(AbstractEnvironment.IGNORE_GETENV_PROPERTY_NAME);
+        originalIgnoreGetenv =
+                SpringProperties.getProperty(AbstractEnvironment.IGNORE_GETENV_PROPERTY_NAME);
         SpringProperties.setProperty(AbstractEnvironment.IGNORE_GETENV_PROPERTY_NAME, null);
     }
 
     @AfterEach
     void restoreEnvironmentVariableSetting() {
-        SpringProperties.setProperty(AbstractEnvironment.IGNORE_GETENV_PROPERTY_NAME, originalIgnoreGetenv);
+        SpringProperties.setProperty(
+                AbstractEnvironment.IGNORE_GETENV_PROPERTY_NAME, originalIgnoreGetenv);
     }
 
     @Test
     void startupReadsEnvironmentVariablesAndKeepsMonitoringEnabled(@TempDir Path logDirectory) {
         try (var context = startContext(logDirectory)) {
-            assertEquals("kmonitor", context.getEnvironment().getProperty("flexlb.monitor.provider"));
+            assertEquals(
+                    "kmonitor", context.getEnvironment().getProperty("flexlb.monitor.provider"));
             assertEquals("19001", context.getEnvironment().getProperty("server.port"));
             assertEquals(19001, context.getBean(ServerProperties.class).getPort());
             assertFalse(context.containsBean("noOpFlexMonitor"));
@@ -66,12 +69,15 @@ class ApplicationEnvironmentTest {
         }
     }
 
-    private ConfigurableApplicationContext startContext(Path logDirectory, String... extraArguments) {
-        List<String> arguments = new ArrayList<>(List.of(
-                "--spring.config.location=classpath:/application.yml",
-                "--spring.main.web-application-type=none",
-                "--flexlb.log.path=" + logDirectory,
-                "--flexlb.log.app-path=" + logDirectory));
+    private ConfigurableApplicationContext startContext(
+            Path logDirectory, String... extraArguments) {
+        List<String> arguments =
+                new ArrayList<>(
+                        List.of(
+                                "--spring.config.location=classpath:/application.yml",
+                                "--spring.main.web-application-type=none",
+                                "--flexlb.log.path=" + logDirectory,
+                                "--flexlb.log.app-path=" + logDirectory));
         arguments.addAll(Arrays.asList(extraArguments));
         return new SpringApplicationBuilder(EnvironmentConfiguration.class)
                 .web(WebApplicationType.NONE)
@@ -83,6 +89,5 @@ class ApplicationEnvironmentTest {
     @Configuration(proxyBeanMethods = false)
     @EnableConfigurationProperties(ServerProperties.class)
     @Import(MonitorDisableConfig.class)
-    static class EnvironmentConfiguration {
-    }
+    static class EnvironmentConfiguration {}
 }

@@ -70,10 +70,16 @@ final class NacosConfigSource implements ConfigSource {
             if (client == null) {
                 client = createClient(config);
             }
-            configContent = client.getConfig(config.getDataId(), config.getGroup(), CONFIG_READ_TIMEOUT_MS);
+            configContent =
+                    client.getConfig(config.getDataId(), config.getGroup(), CONFIG_READ_TIMEOUT_MS);
             if (StringUtils.isBlank(configContent)) {
-                throw new IllegalStateException("Nacos configuration is missing or blank: dataId=" + config.getDataId()
-                        + ", group=" + config.getGroup() + ", namespace=" + config.getNamespace());
+                throw new IllegalStateException(
+                        "Nacos configuration is missing or blank: dataId="
+                                + config.getDataId()
+                                + ", group="
+                                + config.getGroup()
+                                + ", namespace="
+                                + config.getNamespace());
             }
             listener = createListener();
             client.addListener(config.getDataId(), config.getGroup(), listener);
@@ -112,7 +118,8 @@ final class NacosConfigSource implements ConfigSource {
         }
     }
 
-    private com.alibaba.nacos.api.config.ConfigService createClient(NacosConfig config) throws Exception {
+    private com.alibaba.nacos.api.config.ConfigService createClient(NacosConfig config)
+            throws Exception {
         Properties properties = new Properties();
         properties.put(PropertyKeyConst.SERVER_ADDR, config.getServerAddr());
         properties.put(PropertyKeyConst.IS_USE_CLOUD_NAMESPACE_PARSING, Boolean.FALSE.toString());
@@ -137,5 +144,4 @@ final class NacosConfigSource implements ConfigSource {
             }
         };
     }
-
 }

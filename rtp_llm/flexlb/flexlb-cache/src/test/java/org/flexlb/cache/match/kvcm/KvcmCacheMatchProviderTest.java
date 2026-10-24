@@ -22,16 +22,17 @@ class KvcmCacheMatchProviderTest {
     void delegatesCacheMatchingToKvcmClient() {
         KvcmGrpcClient client = mock(KvcmGrpcClient.class);
         when(client.findMatchingEngines(
-                "request-1", List.of(11L), 2192, RoleType.PREFILL, "default"))
+                        "request-1", List.of(11L), 2192, RoleType.PREFILL, "default"))
                 .thenReturn(Map.of("10.0.0.1:8080@1", new HostCacheMatch(1, 1)));
         KvcmCacheMatchProvider provider = new KvcmCacheMatchProvider(client);
 
-        Map<String, HostCacheMatch> result = provider.findMatchingEngines(
-                "request-1", List.of(11L), 2192, RoleType.PREFILL, "default");
+        Map<String, HostCacheMatch> result =
+                provider.findMatchingEngines(
+                        "request-1", List.of(11L), 2192, RoleType.PREFILL, "default");
 
         assertEquals(1, result.get("10.0.0.1:8080@1").localMatchBlocks());
-        verify(client).findMatchingEngines(
-                "request-1", List.of(11L), 2192, RoleType.PREFILL, "default");
+        verify(client)
+                .findMatchingEngines("request-1", List.of(11L), 2192, RoleType.PREFILL, "default");
     }
 
     @Test
@@ -39,16 +40,23 @@ class KvcmCacheMatchProviderTest {
         KvcmGrpcClient client = mock(KvcmGrpcClient.class);
         KvcmQueryException failure = new KvcmQueryException("unavailable");
         when(client.findMatchingEngines(
-                "request-1", List.of(11L), 2192, RoleType.PREFILL, "default"))
+                        "request-1", List.of(11L), 2192, RoleType.PREFILL, "default"))
                 .thenThrow(failure);
         KvcmCacheMatchProvider provider = new KvcmCacheMatchProvider(client);
 
-        KvcmQueryException thrown = assertThrows(KvcmQueryException.class,
-                () -> provider.findMatchingEngines(
-                        "request-1", List.of(11L), 2192, RoleType.PREFILL, "default"));
+        KvcmQueryException thrown =
+                assertThrows(
+                        KvcmQueryException.class,
+                        () ->
+                                provider.findMatchingEngines(
+                                        "request-1",
+                                        List.of(11L),
+                                        2192,
+                                        RoleType.PREFILL,
+                                        "default"));
         assertSame(failure, thrown);
 
-        verify(client).findMatchingEngines(
-                "request-1", List.of(11L), 2192, RoleType.PREFILL, "default");
+        verify(client)
+                .findMatchingEngines("request-1", List.of(11L), 2192, RoleType.PREFILL, "default");
     }
 }

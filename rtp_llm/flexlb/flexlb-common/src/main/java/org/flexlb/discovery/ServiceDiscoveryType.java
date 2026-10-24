@@ -21,8 +21,10 @@ public enum ServiceDiscoveryType {
         return Arrays.stream(values())
                 .filter(type -> type.value.equalsIgnoreCase(value))
                 .findFirst()
-                .orElseThrow(() -> new IllegalArgumentException(
-                        "Unsupported service discovery type: " + value));
+                .orElseThrow(
+                        () ->
+                                new IllegalArgumentException(
+                                        "Unsupported service discovery type: " + value));
     }
 
     @JsonValue

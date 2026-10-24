@@ -53,8 +53,7 @@ class EncoderStrategyTest {
     @Test
     void returnsNoSelectionWhenNoLiveWorkerExists() {
         endpoint("dead", 8001, false, -1, 0, 0, 0);
-        when(directory.endpointAddressSnapshot(RoleType.ENCODER))
-                .thenReturn(List.of("dead"));
+        when(directory.endpointAddressSnapshot(RoleType.ENCODER)).thenReturn(List.of("dead"));
 
         assertNull(strategy.select(context(), "group"));
     }
@@ -128,8 +127,14 @@ class EncoderStrategyTest {
         }
     }
 
-    private EncoderEndpoint endpoint(String address, int port, boolean alive, long kv,
-                                     long running, long waiting, int pending) {
+    private EncoderEndpoint endpoint(
+            String address,
+            int port,
+            boolean alive,
+            long kv,
+            long running,
+            long waiting,
+            int pending) {
         WorkerEndpoint.GenerationPin pin = mock(WorkerEndpoint.GenerationPin.class);
         EncoderEndpoint endpoint = mock(EncoderEndpoint.class);
         WorkerStatus status = mock(WorkerStatus.class);
@@ -143,8 +148,10 @@ class EncoderStrategyTest {
         when(endpoint.pendingEncoderRequestCount()).thenReturn(pending);
         when(status.getGenerationId()).thenReturn(1L);
         when(status.isAlive()).thenReturn(alive);
-        when(status.topologySnapshot()).thenReturn(new WorkerStatus.TopologySnapshot(
-                "group", address, port, port + 1, "site"));
+        when(status.topologySnapshot())
+                .thenReturn(
+                        new WorkerStatus.TopologySnapshot(
+                                "group", address, port, port + 1, "site"));
         when(status.committedEngineObservation()).thenReturn(engine);
         when(engine.availableKvCacheTokens()).thenReturn(kv);
         when(engine.runningQueryLen()).thenReturn(running);

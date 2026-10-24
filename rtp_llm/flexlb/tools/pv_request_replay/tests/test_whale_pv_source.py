@@ -13,7 +13,6 @@ from pathlib import Path
 from typing import Any, Sequence
 from unittest.mock import Mock, patch
 
-
 TOOL_DIR = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(TOOL_DIR))
 
@@ -208,24 +207,34 @@ def request_ids(lines: list[str]) -> list[str]:
 
 class WindowFilterTest(unittest.TestCase):
     def test_rotation_starting_within_end_second_is_included(self) -> None:
-        files = {f"{LOG_DIR}/pv.log": [
-            line_at("2026-09-19 20:01:00.500", "end-second"),
-        ]}
+        files = {
+            f"{LOG_DIR}/pv.log": [
+                line_at("2026-09-19 20:01:00.500", "end-second"),
+            ]
+        }
         self.assertEqual(["end-second"], request_ids(fetch(files)))
 
     def test_invalid_windows_are_rejected_before_running_remote_commands(self) -> None:
         now = datetime.now().astimezone()
         pod = source.WhalePod(
-            role="master_part", pod_name=POD, namespace=NAMESPACE, cluster=CLUSTER,
-            ip="10.68.129.10", health_status="HT_ALIVE", service_status="SVT_AVAILABLE",
+            role="master_part",
+            pod_name=POD,
+            namespace=NAMESPACE,
+            cluster=CLUSTER,
+            ip="10.68.129.10",
+            health_status="HT_ALIVE",
+            service_status="SVT_AVAILABLE",
         )
-        for end, message in ((now + timedelta(days=1), "future"),
-                             (now - timedelta(seconds=1), "start")):
+        for end, message in (
+            (now + timedelta(days=1), "future"),
+            (now - timedelta(seconds=1), "start"),
+        ):
             with self.subTest(end=end):
                 runner = Mock()
                 with self.assertRaisesRegex(ValueError, message):
-                    source.fetch_pod_window(runner, pod, "load-balancer", LOG_DIR,
-                                            "pv.log", now, end)
+                    source.fetch_pod_window(
+                        runner, pod, "load-balancer", LOG_DIR, "pv.log", now, end
+                    )
                 runner.assert_not_called()
 
     def test_both_bounds_use_their_own_v_flag(self) -> None:

@@ -30,8 +30,7 @@ public final class BlockCacheKeyCalculator {
             ThreadLocal.withInitial(BlockCacheKeyCalculator::newSha256Digest);
     private static final byte[] NONE_HASH = calculateNoneHash();
 
-    private BlockCacheKeyCalculator() {
-    }
+    private BlockCacheKeyCalculator() {}
 
     public static List<Long> calculate(TokenIds inputIds, long blockSize, int lookaheadTokens) {
         if (inputIds == null) {
@@ -50,7 +49,8 @@ public final class BlockCacheKeyCalculator {
         return calculateBlockCacheKeys(inputIds, (int) blockSize, lookaheadTokens);
     }
 
-    private static List<Long> calculateBlockCacheKeys(TokenIds inputIds, int blockSize, int lookaheadTokens) {
+    private static List<Long> calculateBlockCacheKeys(
+            TokenIds inputIds, int blockSize, int lookaheadTokens) {
         int fullBlockCount = inputIds.size() / blockSize;
         List<Long> blockCacheKeys = new ArrayList<>(fullBlockCount);
         byte[] parentHash = NONE_HASH;
@@ -98,11 +98,13 @@ public final class BlockCacheKeyCalculator {
         generator.writeString(HASH_SEED);
     }
 
-    static void writeBlock(CBORGenerator generator,
-                           byte[] parentHash,
-                           TokenIds inputIds,
-                           int tokenOffset,
-                           int blockSize) throws IOException {
+    static void writeBlock(
+            CBORGenerator generator,
+            byte[] parentHash,
+            TokenIds inputIds,
+            int tokenOffset,
+            int blockSize)
+            throws IOException {
         // Supplying array sizes forces definite-length arrays, as required by canonical CBOR.
         generator.writeStartArray(null, 3);
         generator.writeBinary(parentHash);

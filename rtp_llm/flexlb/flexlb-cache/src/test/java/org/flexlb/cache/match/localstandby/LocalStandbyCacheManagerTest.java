@@ -35,20 +35,34 @@ class LocalStandbyCacheManagerTest {
     @Test
     void capacityWarningsAreRateLimitedAcrossConcurrentRequests() {
         CacheMetricsReporter reporter = mock(CacheMetricsReporter.class);
-        LocalStandbyCacheManager manager = new LocalStandbyCacheManager(
-                configuration(300_000, 1, 10.0), mock(WorkerStatusProvider.class), reporter);
+        LocalStandbyCacheManager manager =
+                new LocalStandbyCacheManager(
+                        configuration(300_000, 1, 10.0),
+                        mock(WorkerStatusProvider.class),
+                        reporter);
         manager.addRoutedRequestBlocks("worker", List.of(1L));
-        var logger = (ch.qos.logback.classic.Logger) LoggerFactory.getLogger(LocalStandbyCacheManager.class);
+        var logger =
+                (ch.qos.logback.classic.Logger)
+                        LoggerFactory.getLogger(LocalStandbyCacheManager.class);
         ListAppender<ILoggingEvent> appender = new ListAppender<>();
         appender.start();
         logger.addAppender(appender);
         try {
-            IntStream.range(0, 32).parallel().forEach(index ->
-                    manager.addRoutedRequestBlocks("worker-" + index, List.of(100L + index)));
+            IntStream.range(0, 32)
+                    .parallel()
+                    .forEach(
+                            index ->
+                                    manager.addRoutedRequestBlocks(
+                                            "worker-" + index, List.of(100L + index)));
 
-            assertEquals(1, appender.list.stream()
-                    .filter(event -> event.getFormattedMessage().contains("reached its capacity limit"))
-                    .count());
+            assertEquals(
+                    1,
+                    appender.list.stream()
+                            .filter(
+                                    event ->
+                                            event.getFormattedMessage()
+                                                    .contains("reached its capacity limit"))
+                            .count());
             verify(reporter, times(32)).reportLocalStandbyCapacityRejected();
         } finally {
             logger.detachAppender(appender);
@@ -64,10 +78,11 @@ class LocalStandbyCacheManagerTest {
         WorkerStatus worker2 = worker("10.0.0.2", 8080);
         when(workerStatusProvider.getWorkerStatuses(RoleType.PREFILL, "default"))
                 .thenReturn(List.of(worker1, worker2));
-        LocalStandbyCacheManager manager = new LocalStandbyCacheManager(
-                configuration(300_000),
-                workerStatusProvider,
-                mock(CacheMetricsReporter.class));
+        LocalStandbyCacheManager manager =
+                new LocalStandbyCacheManager(
+                        configuration(300_000),
+                        workerStatusProvider,
+                        mock(CacheMetricsReporter.class));
 
         manager.addRoutedRequestBlocks(worker1.getLogicalIpPort(), List.of(11L, 22L, 33L));
         manager.addRoutedRequestBlocks(worker2.getLogicalIpPort(), List.of(11L, 33L));
@@ -89,22 +104,21 @@ class LocalStandbyCacheManagerTest {
         WorkerStatus worker = worker("10.0.0.1", 8080, RoleType.PDFUSION, 1);
         when(workerStatusProvider.getWorkerStatuses(RoleType.PDFUSION, "default"))
                 .thenReturn(List.of(worker));
-        LocalStandbyCacheManager manager = new LocalStandbyCacheManager(
-                configuration(300_000),
-                workerStatusProvider,
-                mock(CacheMetricsReporter.class));
+        LocalStandbyCacheManager manager =
+                new LocalStandbyCacheManager(
+                        configuration(300_000),
+                        workerStatusProvider,
+                        mock(CacheMetricsReporter.class));
 
         manager.addRoutedRequestBlocks(worker.getLogicalIpPort(), List.of(11L, 22L, 33L));
 
         assertEquals(
                 2,
-                manager.findMatchingEngines(
-                                List.of(11L, 22L, 33L), RoleType.PDFUSION, "default")
+                manager.findMatchingEngines(List.of(11L, 22L, 33L), RoleType.PDFUSION, "default")
                         .get(worker.getLogicalIpPort()));
         assertEquals(
                 0,
-                manager.findMatchingEngines(
-                                List.of(11L), RoleType.PDFUSION, "default")
+                manager.findMatchingEngines(List.of(11L), RoleType.PDFUSION, "default")
                         .get(worker.getLogicalIpPort()));
         manager.shutdown();
     }
@@ -115,16 +129,16 @@ class LocalStandbyCacheManagerTest {
         WorkerStatus worker = worker("10.0.0.1", 8080);
         when(workerStatusProvider.getWorkerStatuses(RoleType.PDFUSION, "default"))
                 .thenReturn(List.of(worker));
-        LocalStandbyCacheManager manager = new LocalStandbyCacheManager(
-                configuration(300_000),
-                workerStatusProvider,
-                mock(CacheMetricsReporter.class));
+        LocalStandbyCacheManager manager =
+                new LocalStandbyCacheManager(
+                        configuration(300_000),
+                        workerStatusProvider,
+                        mock(CacheMetricsReporter.class));
         manager.addRoutedRequestBlocks(worker.getLogicalIpPort(), List.of(11L, 22L, 33L));
 
         assertEquals(
                 3,
-                manager.findMatchingEngines(
-                                List.of(11L, 22L, 33L), RoleType.PDFUSION, "default")
+                manager.findMatchingEngines(List.of(11L, 22L, 33L), RoleType.PDFUSION, "default")
                         .get(worker.getLogicalIpPort()));
         manager.shutdown();
     }
@@ -135,10 +149,9 @@ class LocalStandbyCacheManagerTest {
         WorkerStatus worker = worker("10.0.0.1", 8080);
         when(workerStatusProvider.getWorkerStatuses(RoleType.PREFILL, "default"))
                 .thenReturn(List.of(worker));
-        LocalStandbyCacheManager manager = new LocalStandbyCacheManager(
-                configuration(20),
-                workerStatusProvider,
-                mock(CacheMetricsReporter.class));
+        LocalStandbyCacheManager manager =
+                new LocalStandbyCacheManager(
+                        configuration(20), workerStatusProvider, mock(CacheMetricsReporter.class));
         manager.addRoutedRequestBlocks(worker.getLogicalIpPort(), List.of(11L));
 
         Thread.sleep(30);
@@ -154,21 +167,20 @@ class LocalStandbyCacheManagerTest {
     @Test
     void derivesMaximumEntriesFromHbmCapacityAndConfiguredMultiplier() {
         WorkerStatusProvider workerStatusProvider = mock(WorkerStatusProvider.class);
-        WorkerStatus worker = workerStatus(
-                "10.0.0.1",
-                8080,
-                RoleType.PREFILL,
-                true,
-                CacheStatus.builder()
-                .totalKvCache(10_000)
-                .blockSize(100)
-                .build());
+        WorkerStatus worker =
+                workerStatus(
+                        "10.0.0.1",
+                        8080,
+                        RoleType.PREFILL,
+                        true,
+                        CacheStatus.builder().totalKvCache(10_000).blockSize(100).build());
         when(workerStatusProvider.getWorkerStatuses(RoleType.PREFILL, "default"))
                 .thenReturn(List.of(worker));
-        LocalStandbyCacheManager manager = new LocalStandbyCacheManager(
-                configuration(300_000, 2_000, 10.0),
-                workerStatusProvider,
-                mock(CacheMetricsReporter.class));
+        LocalStandbyCacheManager manager =
+                new LocalStandbyCacheManager(
+                        configuration(300_000, 2_000, 10.0),
+                        workerStatusProvider,
+                        mock(CacheMetricsReporter.class));
 
         manager.refreshCapacityLimits();
         manager.addRoutedRequestBlocks(worker.getLogicalIpPort(), List.of(11L));
@@ -184,10 +196,11 @@ class LocalStandbyCacheManagerTest {
         WorkerStatus worker2 = workerWithCacheCapacity("10.0.0.2", 8080, 20_000, 100);
         when(workerStatusProvider.getWorkerStatuses(RoleType.PREFILL, "default"))
                 .thenReturn(List.of(worker1, worker2));
-        LocalStandbyCacheManager manager = new LocalStandbyCacheManager(
-                configuration(300_000, 1_000, 10.0),
-                workerStatusProvider,
-                mock(CacheMetricsReporter.class));
+        LocalStandbyCacheManager manager =
+                new LocalStandbyCacheManager(
+                        configuration(300_000, 1_000, 10.0),
+                        workerStatusProvider,
+                        mock(CacheMetricsReporter.class));
         manager.refreshCapacityLimits();
 
         assertEquals(1_000, manager.maximumEntryCount());
@@ -201,14 +214,14 @@ class LocalStandbyCacheManagerTest {
         WorkerStatus worker = worker("10.0.0.1", 8080);
         when(workerStatusProvider.getWorkerStatuses(RoleType.PREFILL, "default"))
                 .thenReturn(List.of(worker));
-        LocalStandbyCacheManager manager = new LocalStandbyCacheManager(
-                configuration(300_000, 10, 10.0),
-                workerStatusProvider,
-                cacheMetricsReporter);
+        LocalStandbyCacheManager manager =
+                new LocalStandbyCacheManager(
+                        configuration(300_000, 10, 10.0),
+                        workerStatusProvider,
+                        cacheMetricsReporter);
 
         manager.addRoutedRequestBlocks(
-                worker.getLogicalIpPort(),
-                List.of(1L, 2L, 3L, 4L, 5L, 6L, 7L, 8L, 9L, 10L, 11L));
+                worker.getLogicalIpPort(), List.of(1L, 2L, 3L, 4L, 5L, 6L, 7L, 8L, 9L, 10L, 11L));
 
         manager.reportMappingCount();
         verify(cacheMetricsReporter).reportLocalStandbyCapacityRejected();
@@ -231,10 +244,7 @@ class LocalStandbyCacheManagerTest {
                 port,
                 RoleType.PREFILL,
                 true,
-                CacheStatus.builder()
-                .totalKvCache(totalKvCache)
-                .blockSize(blockSize)
-                .build());
+                CacheStatus.builder().totalKvCache(totalKvCache).blockSize(blockSize).build());
     }
 
     private CacheMatchConfiguration configuration(long expirationMs) {
@@ -245,9 +255,7 @@ class LocalStandbyCacheManagerTest {
     }
 
     private CacheMatchConfiguration configuration(
-            long expirationMs,
-            long maximumEntries,
-            double capacityMultiplier) {
+            long expirationMs, long maximumEntries, double capacityMultiplier) {
         KvcmConfig kvcmTopology = new KvcmConfig();
 
         ServiceRoute route = new ServiceRoute();
@@ -260,13 +268,15 @@ class LocalStandbyCacheManagerTest {
 
         ModelMetaConfig config = new ModelMetaConfig();
         config.putServiceRoute(route.getServiceId(), route);
-        return kvcm(config, runtime -> {
-            LocalStandbyConfig standby = runtime.getLocalStandby();
-            standby.setTtlMs(expirationMs);
-            standby.setMinimumTtlMs(
-                    Math.min(expirationMs, LocalStandbyConfig.DEFAULT_MINIMUM_TTL_MS));
-            standby.setMaximumEntries(maximumEntries);
-            standby.setCapacityMultiplier(capacityMultiplier);
-        });
+        return kvcm(
+                config,
+                runtime -> {
+                    LocalStandbyConfig standby = runtime.getLocalStandby();
+                    standby.setTtlMs(expirationMs);
+                    standby.setMinimumTtlMs(
+                            Math.min(expirationMs, LocalStandbyConfig.DEFAULT_MINIMUM_TTL_MS));
+                    standby.setMaximumEntries(maximumEntries);
+                    standby.setCapacityMultiplier(capacityMultiplier);
+                });
     }
 }

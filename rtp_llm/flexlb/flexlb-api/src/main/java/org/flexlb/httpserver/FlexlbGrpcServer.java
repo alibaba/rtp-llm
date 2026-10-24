@@ -40,6 +40,7 @@ public class FlexlbGrpcServer {
      * to backend inference engine ports (HTTP+1→gRPC).
      */
     static final int FLEXLB_GRPC_PORT_OFFSET = 2;
+
     private static final int DEFAULT_HTTP_PORT = 7001;
     private final long quietPeriodNanos;
 
@@ -56,18 +57,23 @@ public class FlexlbGrpcServer {
     private volatile ThreadPoolExecutor grpcExecutor;
     private final RejectedExecutionHandler rejectionHandler;
 
-    public FlexlbGrpcServer(FlexlbServiceImpl flexlbServiceImpl,
-                            ConfigService configService,
-                            Environment environment,
-                            @Qualifier("grpcServerEventLoopGroup") EventLoopGroup grpcServerEventLoopGroup,
-                            FlexMonitor monitor,
-                            GrpcServerTimingInterceptor grpcServerTimingInterceptor,
-                            GrpcQosHeaderInterceptor grpcQosHeaderInterceptor) {
+    public FlexlbGrpcServer(
+            FlexlbServiceImpl flexlbServiceImpl,
+            ConfigService configService,
+            Environment environment,
+            @Qualifier("grpcServerEventLoopGroup") EventLoopGroup grpcServerEventLoopGroup,
+            FlexMonitor monitor,
+            GrpcServerTimingInterceptor grpcServerTimingInterceptor,
+            GrpcQosHeaderInterceptor grpcQosHeaderInterceptor) {
         this.flexlbServiceImpl = flexlbServiceImpl;
         this.configService = configService;
         this.environment = environment;
-        this.quietPeriodNanos = TimeUnit.MILLISECONDS.toNanos(
-                configService.loadBalanceConfig().getGrpcServer().getShutdownQuietPeriodMs());
+        this.quietPeriodNanos =
+                TimeUnit.MILLISECONDS.toNanos(
+                        configService
+                                .loadBalanceConfig()
+                                .getGrpcServer()
+                                .getShutdownQuietPeriodMs());
         this.grpcServerEventLoopGroup = grpcServerEventLoopGroup;
         this.monitor = Objects.requireNonNull(monitor, "monitor");
         this.rejectionHandler = new ReportingAbortHandler(this.monitor);
@@ -87,51 +93,73 @@ public class FlexlbGrpcServer {
         int httpPort = Integer.parseInt(portStr);
         int port = httpPort + FLEXLB_GRPC_PORT_OFFSET;
 
-        FlexlbConfig.GrpcServerConfig executorConfig = configService.loadBalanceConfig().getGrpcServer();
-        Logger.info("FlexLB gRPC executor config: coreSize={}, maxSize={}, queueSize={}",
-                executorConfig.getExecutorCoreSize(), executorConfig.getExecutorMaxSize(),
+        FlexlbConfig.GrpcServerConfig executorConfig =
+                configService.loadBalanceConfig().getGrpcServer();
+        Logger.info(
+                "FlexLB gRPC executor config: coreSize={}, maxSize={}, queueSize={}",
+                executorConfig.getExecutorCoreSize(),
+                executorConfig.getExecutorMaxSize(),
                 executorConfig.getExecutorQueueSize());
 
-        this.bossGroup = new NioEventLoopGroup(1, new DefaultThreadFactory("flexlb-grpc-server-boss"));
-        this.grpcExecutor = new ThreadPoolExecutor(
-                executorConfig.getExecutorCoreSize(), executorConfig.getExecutorMaxSize(),
-                60L, TimeUnit.SECONDS,
-                new LinkedBlockingQueue<>(executorConfig.getExecutorQueueSize()),
-                new DefaultThreadFactory("flexlb-grpc-executor"),
-                rejectionHandler
-        );
+        this.bossGroup =
+                new NioEventLoopGroup(1, new DefaultThreadFactory("flexlb-grpc-server-boss"));
+        this.grpcExecutor =
+                new ThreadPoolExecutor(
+                        executorConfig.getExecutorCoreSize(),
+                        executorConfig.getExecutorMaxSize(),
+                        60L,
+                        TimeUnit.SECONDS,
+                        new LinkedBlockingQueue<>(executorConfig.getExecutorQueueSize()),
+                        new DefaultThreadFactory("flexlb-grpc-executor"),
+                        rejectionHandler);
 
         // Register monitoring metrics for the gRPC server executor
         registerMetrics();
         reportExecutorMetrics();
 
-        server = NettyServerBuilder.forPort(port)
-                .channelType(NioServerSocketChannel.class)
-                .bossEventLoopGroup(bossGroup)
-                .workerEventLoopGroup(grpcServerEventLoopGroup)
-                .executor(grpcExecutor)
-                .addStreamTracerFactory(grpcServerTimingInterceptor.requestSizeTracerFactory())
-                .addService(ServerInterceptors.intercept(flexlbServiceImpl,
-                        new GrpcTraceInterceptor(), grpcServerTimingInterceptor, grpcQosHeaderInterceptor))
-                .maxInboundMessageSize(org.flexlb.constant.GrpcConstants.MAX_MESSAGE_SIZE)
-                .flowControlWindow(4 * 1024 * 1024)
-                .build()
-                .start();
+        server =
+                NettyServerBuilder.forPort(port)
+                        .channelType(NioServerSocketChannel.class)
+                        .bossEventLoopGroup(bossGroup)
+                        .workerEventLoopGroup(grpcServerEventLoopGroup)
+                        .executor(grpcExecutor)
+                        .addStreamTracerFactory(
+                                grpcServerTimingInterceptor.requestSizeTracerFactory())
+                        .addService(
+                                ServerInterceptors.intercept(
+                                        flexlbServiceImpl,
+                                        new GrpcTraceInterceptor(),
+                                        grpcServerTimingInterceptor,
+                                        grpcQosHeaderInterceptor))
+                        .maxInboundMessageSize(org.flexlb.constant.GrpcConstants.MAX_MESSAGE_SIZE)
+                        .flowControlWindow(4 * 1024 * 1024)
+                        .build()
+                        .start();
 
         Logger.info("FlexLB gRPC server started on port {}", port);
     }
 
     private void registerMetrics() {
-        monitor.register(MetricConstant.GRPC_SERVER_EXECUTOR_ACTIVE_THREADS,
-                FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
-        monitor.register(MetricConstant.GRPC_SERVER_EXECUTOR_QUEUE_SIZE,
-                FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
-        monitor.register(MetricConstant.GRPC_SERVER_EXECUTOR_POOL_SIZE,
-                FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
-        monitor.register(MetricConstant.GRPC_SERVER_EXECUTOR_MAX_POOL_SIZE,
-                FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
-        monitor.register(MetricConstant.GRPC_SERVER_EXECUTOR_REJECTED_TASKS,
-                FlexMetricType.COUNTER, FlexPriorityType.PRECISE);
+        monitor.register(
+                MetricConstant.GRPC_SERVER_EXECUTOR_ACTIVE_THREADS,
+                FlexMetricType.GAUGE,
+                FlexPriorityType.PRECISE);
+        monitor.register(
+                MetricConstant.GRPC_SERVER_EXECUTOR_QUEUE_SIZE,
+                FlexMetricType.GAUGE,
+                FlexPriorityType.PRECISE);
+        monitor.register(
+                MetricConstant.GRPC_SERVER_EXECUTOR_POOL_SIZE,
+                FlexMetricType.GAUGE,
+                FlexPriorityType.PRECISE);
+        monitor.register(
+                MetricConstant.GRPC_SERVER_EXECUTOR_MAX_POOL_SIZE,
+                FlexMetricType.GAUGE,
+                FlexPriorityType.PRECISE);
+        monitor.register(
+                MetricConstant.GRPC_SERVER_EXECUTOR_REJECTED_TASKS,
+                FlexMetricType.COUNTER,
+                FlexPriorityType.PRECISE);
     }
 
     @Scheduled(fixedRate = 2000)
@@ -140,10 +168,12 @@ public class FlexlbGrpcServer {
         if (executor == null) {
             return;
         }
-        monitor.report(MetricConstant.GRPC_SERVER_EXECUTOR_ACTIVE_THREADS, executor.getActiveCount());
+        monitor.report(
+                MetricConstant.GRPC_SERVER_EXECUTOR_ACTIVE_THREADS, executor.getActiveCount());
         monitor.report(MetricConstant.GRPC_SERVER_EXECUTOR_QUEUE_SIZE, executor.getQueue().size());
         monitor.report(MetricConstant.GRPC_SERVER_EXECUTOR_POOL_SIZE, executor.getPoolSize());
-        monitor.report(MetricConstant.GRPC_SERVER_EXECUTOR_MAX_POOL_SIZE, executor.getMaximumPoolSize());
+        monitor.report(
+                MetricConstant.GRPC_SERVER_EXECUTOR_MAX_POOL_SIZE, executor.getMaximumPoolSize());
         monitor.report(MetricConstant.GRPC_SERVER_EXECUTOR_REJECTED_TASKS, 0.0);
     }
 
@@ -156,14 +186,19 @@ public class FlexlbGrpcServer {
         }
         boolean interrupted = false;
         long startedAt = System.nanoTime();
-        Logger.info("keep serving until no new requests for {} ms",
+        Logger.info(
+                "keep serving until no new requests for {} ms",
                 TimeUnit.NANOSECONDS.toMillis(quietPeriodNanos));
         try {
             while (!server.isShutdown()) {
-                long lastArrival = Math.max(startedAt, grpcServerTimingInterceptor.getLastScheduleArrivalNanos());
+                long lastArrival =
+                        Math.max(
+                                startedAt,
+                                grpcServerTimingInterceptor.getLastScheduleArrivalNanos());
                 long remaining = quietPeriodNanos - (System.nanoTime() - lastArrival);
                 if (remaining <= 0) {
-                    Logger.info("Schedule quiet period elapsed; shutting down gRPC and waiting for accepted RPCs");
+                    Logger.info(
+                            "Schedule quiet period elapsed; shutting down gRPC and waiting for accepted RPCs");
                     server.shutdown();
                     break;
                 }

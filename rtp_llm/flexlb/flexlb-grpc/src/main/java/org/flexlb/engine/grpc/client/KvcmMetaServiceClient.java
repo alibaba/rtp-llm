@@ -29,18 +29,14 @@ public class KvcmMetaServiceClient {
     }
 
     public GetClusterInfoResponse getClusterInfo(
-            GrpcTarget target,
-            GetClusterInfoRequest request,
-            long requestTimeoutMs) {
+            GrpcTarget target, GetClusterInfoRequest request, long requestTimeoutMs) {
         return MetaServiceGrpc.newBlockingStub(channelFor(target))
                 .withDeadlineAfter(requestTimeoutMs, TimeUnit.MILLISECONDS)
                 .getClusterInfo(request);
     }
 
     public GetHostCacheStateResponse getHostCacheState(
-            GrpcTarget target,
-            GetHostCacheStateRequest request,
-            Deadline queryDeadline) {
+            GrpcTarget target, GetHostCacheStateRequest request, Deadline queryDeadline) {
         return MetaServiceGrpc.newBlockingStub(channelFor(target))
                 .withDeadline(queryDeadline)
                 .getHostCacheState(request);

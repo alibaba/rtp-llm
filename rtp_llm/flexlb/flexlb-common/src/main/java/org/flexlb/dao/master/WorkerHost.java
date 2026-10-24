@@ -17,34 +17,44 @@ public class WorkerHost {
      * Host IP address
      */
     private final String ip;
+
     /**
      * HTTP port
      */
     private final int httpPort;
+
     /**
      * gRPC port (typically httpPort + 1)
      */
     private final int grpcPort;
+
     /**
      * C++ HTTP service port
      */
     private final int httpServerPort;
+
     /** Per-engine gRPC port for worker control RPCs. */
     private final int workerStatusPort;
+
     /** Logical engine index behind the shared frontend. */
     private final int engineIndex;
+
     /** Expected number of logical engines for this physical frontend. */
     private final int multiEngineNum;
+
     @Getter(AccessLevel.NONE)
     private final WorkerIdentity workerIdentity;
+
     /**
      * Data center/site information
      */
     private final String site;
+
     /**
      * Worker group name
      */
     private final String group;
+
     /** Deployment name reported by service discovery. */
     private final String deploymentName;
 
@@ -58,24 +68,55 @@ public class WorkerHost {
      * @param site           Data center/site information
      * @param group          Worker group name
      */
-    public WorkerHost(String ip, int httpPort, int grpcPort, int httpServerPort, String site, String group) {
+    public WorkerHost(
+            String ip, int httpPort, int grpcPort, int httpServerPort, String site, String group) {
         this(ip, httpPort, grpcPort, httpServerPort, grpcPort, site, group, "");
     }
 
-    public WorkerHost(String ip, int httpPort, int grpcPort, int httpServerPort,
-                      String site, String group, String deploymentName) {
+    public WorkerHost(
+            String ip,
+            int httpPort,
+            int grpcPort,
+            int httpServerPort,
+            String site,
+            String group,
+            String deploymentName) {
         this(ip, httpPort, grpcPort, httpServerPort, grpcPort, site, group, deploymentName);
     }
 
-    public WorkerHost(String ip, int httpPort, int grpcPort, int httpServerPort, int workerStatusPort,
-                      String site, String group, String deploymentName) {
-        this(ip, httpPort, grpcPort, httpServerPort, workerStatusPort,
-                site, group, deploymentName, 0, 1);
+    public WorkerHost(
+            String ip,
+            int httpPort,
+            int grpcPort,
+            int httpServerPort,
+            int workerStatusPort,
+            String site,
+            String group,
+            String deploymentName) {
+        this(
+                ip,
+                httpPort,
+                grpcPort,
+                httpServerPort,
+                workerStatusPort,
+                site,
+                group,
+                deploymentName,
+                0,
+                1);
     }
 
-    public WorkerHost(String ip, int httpPort, int grpcPort, int httpServerPort, int workerStatusPort,
-                      String site, String group, String deploymentName,
-                      int engineIndex, int multiEngineNum) {
+    public WorkerHost(
+            String ip,
+            int httpPort,
+            int grpcPort,
+            int httpServerPort,
+            int workerStatusPort,
+            String site,
+            String group,
+            String deploymentName,
+            int engineIndex,
+            int multiEngineNum) {
         this.ip = ip;
         this.httpPort = httpPort;
         this.grpcPort = grpcPort;
@@ -160,5 +201,4 @@ public class WorkerHost {
     public static WorkerHost of(String ip, int port, String site, String deploymentName) {
         return new WorkerHost(ip, port, port + 1, port + 5, site, "", deploymentName);
     }
-
 }

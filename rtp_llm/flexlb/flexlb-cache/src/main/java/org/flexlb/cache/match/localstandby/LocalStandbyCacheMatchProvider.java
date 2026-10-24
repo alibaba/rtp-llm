@@ -37,9 +37,10 @@ public class LocalStandbyCacheMatchProvider implements CacheMatchProvider {
     private final ThreadPoolExecutor asyncMatchExecutor;
     private final ThreadPoolExecutor updateExecutor;
 
-    public LocalStandbyCacheMatchProvider(CacheMatchConfiguration configuration,
-                                        LocalStandbyCacheManager cacheManager,
-                                        CacheMetricsReporter cacheMetricsReporter) {
+    public LocalStandbyCacheMatchProvider(
+            CacheMatchConfiguration configuration,
+            LocalStandbyCacheManager cacheManager,
+            CacheMetricsReporter cacheMetricsReporter) {
         this.cacheMetricsReporter = cacheMetricsReporter;
         LocalStandbyConfig config = configuration.getLocalStandbyConfig();
         this.enabled = configuration.isLocalStandbyEnabled();
@@ -47,7 +48,8 @@ public class LocalStandbyCacheMatchProvider implements CacheMatchProvider {
         if (enabled) {
             int queueCapacity = config.getAsyncQueueCapacity();
             if (queueCapacity <= 0) {
-                throw new IllegalArgumentException("Local Standby asyncQueueCapacity must be positive");
+                throw new IllegalArgumentException(
+                        "Local Standby asyncQueueCapacity must be positive");
             }
             this.asyncMatchExecutor = createExecutor(queueCapacity, "local-standby-cache-matcher");
             this.updateExecutor = createExecutor(queueCapacity, "local-standby-cache-updater");
@@ -63,67 +65,91 @@ public class LocalStandbyCacheMatchProvider implements CacheMatchProvider {
     }
 
     @Override
-    public Map<String, HostCacheMatch> findMatchingEngines(String requestId, List<Long> blockCacheKeys,
-                                                         long blockSize, RoleType roleType, String group) {
+    public Map<String, HostCacheMatch> findMatchingEngines(
+            String requestId,
+            List<Long> blockCacheKeys,
+            long blockSize,
+            RoleType roleType,
+            String group) {
         cacheMetricsReporter.reportLocalStandbyBlockSize(roleType, blockSize);
-        return HostCacheMatch.fromLocalMatches(cacheManager.findMatchingEngines(blockCacheKeys, roleType, group));
+        return HostCacheMatch.fromLocalMatches(
+                cacheManager.findMatchingEngines(blockCacheKeys, roleType, group));
     }
 
     public CompletableFuture<CacheMatchResult> asyncLocalStandbyMatch(CacheMatchQuery query) {
         if (!enabled || query == null || query.blockSize() <= 0) {
-            return CompletableFuture.completedFuture(CacheMatchResult.empty(CacheMatchSource.LOCAL_STANDBY));
+            return CompletableFuture.completedFuture(
+                    CacheMatchResult.empty(CacheMatchSource.LOCAL_STANDBY));
         }
 
         long startTimeNs = System.nanoTime();
         try {
-            return CompletableFuture.supplyAsync(() -> {
+            return CompletableFuture.supplyAsync(
+                    () -> {
                         if (query.blockCacheKeys() == null || query.blockCacheKeys().isEmpty()) {
                             long queryTimeUs = (System.nanoTime() - startTimeNs) / 1_000;
-                            return new CacheMatchResult(Map.of(), CacheMatchSource.LOCAL_STANDBY,
-                                    queryTimeUs, query.blockSize());
+                            return new CacheMatchResult(
+                                    Map.of(),
+                                    CacheMatchSource.LOCAL_STANDBY,
+                                    queryTimeUs,
+                                    query.blockSize());
                         }
 
-                        Map<String, HostCacheMatch> matches = findMatchingEngines(
-                                query.requestId(),
-                                query.blockCacheKeys(),
-                                query.blockSize(),
-                                query.roleType(),
-                                query.group());
+                        Map<String, HostCacheMatch> matches =
+                                findMatchingEngines(
+                                        query.requestId(),
+                                        query.blockCacheKeys(),
+                                        query.blockSize(),
+                                        query.roleType(),
+                                        query.group());
                         long queryTimeUs = (System.nanoTime() - startTimeNs) / 1_000;
                         return new CacheMatchResult(
-                                matches, CacheMatchSource.LOCAL_STANDBY, queryTimeUs, query.blockSize());
-                    }, asyncMatchExecutor
-                    );
+                                matches,
+                                CacheMatchSource.LOCAL_STANDBY,
+                                queryTimeUs,
+                                query.blockSize());
+                    },
+                    asyncMatchExecutor);
         } catch (RejectedExecutionException e) {
             log.warn("Local Standby match queue is full, requestId={}", query.requestId());
             long queryTimeUs = (System.nanoTime() - startTimeNs) / 1_000;
-            return CompletableFuture.completedFuture(CacheMatchResult.failed(CacheMatchSource.LOCAL_STANDBY, queryTimeUs));
+            return CompletableFuture.completedFuture(
+                    CacheMatchResult.failed(CacheMatchSource.LOCAL_STANDBY, queryTimeUs));
         }
     }
 
     public void updateFromRoutedRequest(Request request, List<ServerStatus> selectedWorkers) {
-        if (!enabled || request == null || request.getBlockSize() <= 0
-                || request.getBlockCacheKeys() == null || request.getBlockCacheKeys().isEmpty()
-                || selectedWorkers == null || selectedWorkers.isEmpty()) {
+        if (!enabled
+                || request == null
+                || request.getBlockSize() <= 0
+                || request.getBlockCacheKeys() == null
+                || request.getBlockCacheKeys().isEmpty()
+                || selectedWorkers == null
+                || selectedWorkers.isEmpty()) {
             return;
         }
         List<Long> blockCacheKeys = List.copyOf(request.getBlockCacheKeys());
         List<ServerStatus> workers = new ArrayList<>(selectedWorkers);
         try {
             CompletableFuture.runAsync(
-                            () -> updateCacheMetadataNow(blockCacheKeys, workers),
-                            updateExecutor)
-                    .exceptionally(error -> {
-                        log.warn("Failed to update Local Standby cache metadata, requestId={}", request.getRequestId(), error);
-                        return null;
-                    });
+                            () -> updateCacheMetadataNow(blockCacheKeys, workers), updateExecutor)
+                    .exceptionally(
+                            error -> {
+                                log.warn(
+                                        "Failed to update Local Standby cache metadata, requestId={}",
+                                        request.getRequestId(),
+                                        error);
+                                return null;
+                            });
         } catch (RejectedExecutionException e) {
-            log.warn("Local standby cache metadata update queue is full, requestId={}", request.getRequestId());
+            log.warn(
+                    "Local standby cache metadata update queue is full, requestId={}",
+                    request.getRequestId());
         }
     }
 
-    private void updateCacheMetadataNow(List<Long> blockCacheKeys,
-                                        List<ServerStatus> selectedWorkers) {
+    private void updateCacheMetadataNow(
+            List<Long> blockCacheKeys, List<ServerStatus> selectedWorkers) {
         for (ServerStatus selectedWorker : selectedWorkers) {
             if (selectedWorker == null || !selectedWorker.isSuccess()) {
                 continue;
@@ -132,9 +158,7 @@ public class LocalStandbyCacheMatchProvider implements CacheMatchProvider {
             if (workerRole != RoleType.PREFILL && workerRole != RoleType.PDFUSION) {
                 continue;
             }
-            cacheManager.addRoutedRequestBlocks(
-                    selectedWorker.getLogicalIpPort(),
-                    blockCacheKeys);
+            cacheManager.addRoutedRequestBlocks(selectedWorker.getLogicalIpPort(), blockCacheKeys);
         }
     }
 

@@ -47,14 +47,14 @@ public class GrpcEngineCancelChannel implements EngineCancelChannel {
     }
 
     @Override
-    public CompletableFuture<CancelAck> cancel(CancelTarget target,
-                                               String requestId,
-                                               long timeoutMs) {
+    public CompletableFuture<CancelAck> cancel(
+            CancelTarget target, String requestId, long timeoutMs) {
         if (target == null || !target.isRoutable()) {
             // No routable endpoint — report the transport-failure branch: the
             // intent never reached the engine, but release is still settled by
             // the WorkerStatus report (iron rule 4).
-            log.debug("[auto-tpm] cancel has no prefill control owner for request_id={}, not routed",
+            log.debug(
+                    "[auto-tpm] cancel has no prefill control owner for request_id={}, not routed",
                     requestId);
             return CompletableFuture.completedFuture(CancelAck.FAILED);
         }
@@ -71,25 +71,29 @@ public class GrpcEngineCancelChannel implements EngineCancelChannel {
             Context fork = Context.current().fork();
             Context previous = fork.attach();
             try {
-                return engineGrpcClient.cancelAsync(
+                return engineGrpcClient
+                        .cancelAsync(
                                 target.prefillIp(),
                                 target.prefillGrpcPort(),
                                 requestPB,
                                 Math.max(1, timeoutMs))
                         .thenApply(GrpcEngineCancelChannel::mapResponse)
-                        .exceptionally(t -> {
-                            log.debug(
-                                    "[auto-tpm] cancel rpc failed for request_id={}: {}",
-                                    requestId, t.getMessage());
-                            return CancelAck.FAILED;
-                        });
+                        .exceptionally(
+                                t -> {
+                                    log.debug(
+                                            "[auto-tpm] cancel rpc failed for request_id={}: {}",
+                                            requestId,
+                                            t.getMessage());
+                                    return CancelAck.FAILED;
+                                });
             } finally {
                 fork.detach(previous);
             }
         } catch (RuntimeException | Error failure) {
             log.debug(
                     "[auto-tpm] cancel setup failed for request_id={}: {}",
-                    requestId, failure.getMessage());
+                    requestId,
+                    failure.getMessage());
             return CompletableFuture.failedFuture(failure);
         }
     }
@@ -102,5 +106,4 @@ public class GrpcEngineCancelChannel implements EngineCancelChannel {
             case CANCEL_STATUS_UNSPECIFIED, UNRECOGNIZED -> CancelAck.FAILED;
         };
     }
-
 }

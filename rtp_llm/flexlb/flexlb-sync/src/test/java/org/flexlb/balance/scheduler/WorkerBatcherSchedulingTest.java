@@ -58,14 +58,12 @@ class WorkerBatcherSchedulingTest {
 
     @Test
     @Timeout(value = 10, unit = TimeUnit.SECONDS)
-    void blockedExactHeadWaitsForItsCapacityEventWithoutPolling()
-            throws Exception {
+    void blockedExactHeadWaitsForItsCapacityEventWithoutPolling() throws Exception {
         FlexlbConfig config = singleConfig();
         PrefillEndpoint endpoint = stableEndpoint(stableStatus());
         EventDrivenBlock delivery = new EventDrivenBlock();
         WorkerBatcher runtime = runningRuntime(config, endpoint, delivery);
-        ScheduledRequest head = item(
-                config, endpoint, 1L, 50, System.currentTimeMillis());
+        ScheduledRequest head = item(config, endpoint, 1L, 50, System.currentTimeMillis());
 
         assertTrue(runtime.offer(head));
         await(delivery.firstAttempt);
@@ -74,15 +72,13 @@ class WorkerBatcherSchedulingTest {
         var firstWait = runtime.waitDiagnostics();
         assertEquals(1, firstWait.get("queueDepth"));
         assertEquals(Map.of(50, 1), firstWait.get("priorityCounts"));
-        assertThrows(UnsupportedOperationException.class,
-                () -> firstWait.put("cause", "modified"));
+        assertThrows(UnsupportedOperationException.class, () -> firstWait.put("cause", "modified"));
         Map<?, ?> firstCounts = (Map<?, ?>) firstWait.get("priorityCounts");
         assertThrows(UnsupportedOperationException.class, firstCounts::clear);
         assertTrue(runtime.offer(item(config, endpoint, 2L, 30, System.currentTimeMillis())));
 
         TimeUnit.MILLISECONDS.sleep(100L);
-        assertEquals(1, delivery.attempts.get(),
-                "a capacity miss must not be polled");
+        assertEquals(1, delivery.attempts.get(), "a capacity miss must not be polled");
         assertSame(head, runtime.captureQueueSnapshot().items().getFirst());
 
         delivery.firstCapacity.release();
@@ -90,13 +86,16 @@ class WorkerBatcherSchedulingTest {
         await(delivery.parkedCapacity.subscribed);
         assertEquals(2, runtime.waitDiagnostics().get("queueDepth"));
         assertEquals(Map.of(50, 1, 30, 1), runtime.waitDiagnostics().get("priorityCounts"));
-        assertEquals(1, firstWait.get("queueDepth"), "later decisions must not mutate an earlier snapshot");
+        assertEquals(
+                1,
+                firstWait.get("queueDepth"),
+                "later decisions must not mutate an earlier snapshot");
         assertTrue(delivery.firstCapacity.listeners.isEmpty());
         assertEquals(1, delivery.parkedCapacity.listeners.size());
 
         TimeUnit.MILLISECONDS.sleep(100L);
-        assertEquals(2, delivery.attempts.get(),
-                "one capacity signal must trigger exactly one retry");
+        assertEquals(
+                2, delivery.attempts.get(), "one capacity signal must trigger exactly one retry");
         assertSame(head, runtime.captureQueueSnapshot().items().getFirst());
         assertNull(runtime.stopAndAwait());
         assertTrue(delivery.parkedCapacity.listeners.isEmpty());
@@ -109,17 +108,14 @@ class WorkerBatcherSchedulingTest {
         PrefillEndpoint endpoint = stableEndpoint(stableStatus());
         EventDrivenBlock delivery = new EventDrivenBlock();
         WorkerBatcher runtime = runningRuntime(config, endpoint, delivery);
-        assertTrue(runtime.offer(item(
-                config, endpoint, 12L, 50, System.currentTimeMillis())));
+        assertTrue(runtime.offer(item(config, endpoint, 12L, 50, System.currentTimeMillis())));
         await(delivery.firstCapacity.subscribed);
-        delivery.firstCapacity.removeFailure =
-                new IllegalStateException("listener removal failed");
+        delivery.firstCapacity.removeFailure = new IllegalStateException("listener removal failed");
 
         // Release on this thread; removal runs on the scheduling thread.
         delivery.firstCapacity.release();
         await(delivery.firstCapacity.removed);
-        CompletableFuture.supplyAsync(runtime::captureQueueSnapshot)
-                .get(2, TimeUnit.SECONDS);
+        CompletableFuture.supplyAsync(runtime::captureQueueSnapshot).get(2, TimeUnit.SECONDS);
         assertNull(runtime.stopAndAwait());
         assertTrue(runtime.captureQueueSnapshot().items().isEmpty());
     }
@@ -131,26 +127,25 @@ class WorkerBatcherSchedulingTest {
         PrefillEndpoint endpoint = stableEndpoint(stableStatus());
         ProjectionCacheBlock delivery = new ProjectionCacheBlock();
         WorkerBatcher runtime = runningRuntime(config, endpoint, delivery);
-        ScheduledRequest head = item(
-                config, endpoint, 11L, 50, System.currentTimeMillis());
+        ScheduledRequest head = item(config, endpoint, 11L, 50, System.currentTimeMillis());
 
         try {
             assertTrue(runtime.offer(head));
             await(delivery.firstPrepareEntered);
-            assertNull(runtime.captureRouteProjectionInputs()
-                    .queue().admissionBlock(),
+            assertNull(
+                    runtime.captureRouteProjectionInputs().queue().admissionBlock(),
                     "cache is warmed before the delivery miss is published");
 
             delivery.allowFirstPrepare.countDown();
             await(delivery.firstCapacity.subscribed);
-            assertNotNull(runtime.captureRouteProjectionInputs()
-                    .queue().admissionBlock(),
+            assertNotNull(
+                    runtime.captureRouteProjectionInputs().queue().admissionBlock(),
                     "publishing the block must invalidate the warm cache");
 
             delivery.firstCapacity.release();
             await(delivery.secondPrepareEntered);
-            assertNull(runtime.captureRouteProjectionInputs()
-                    .queue().admissionBlock(),
+            assertNull(
+                    runtime.captureRouteProjectionInputs().queue().admissionBlock(),
                     "capacity wake must invalidate the cached block");
         } finally {
             delivery.allowFirstPrepare.countDown();
@@ -172,22 +167,35 @@ class WorkerBatcherSchedulingTest {
         await(delivery.firstCapacity.subscribed);
         RouteProjection.Inputs inputs = runtime.captureRouteProjectionInputs();
         assertNotNull(inputs.queue().admissionBlock());
-        assertNull(inputs.queue().admissionBlock().semantics(),
+        assertNull(
+                inputs.queue().admissionBlock().semantics(),
                 "batch capacity waits must not impose publication restrictions");
-        RouteProjection.DeliveryProjection projection = new BatchDeliveryStrategy(
-                () -> { throw new AssertionError("projection cannot prepare delivery"); },
-                () -> 0L, mock(RequestRegistry.class), mock(DeliveryMetrics.class))
-                .projectionPolicy();
-        RouteProjection.Candidate candidate = RouteProjection.project(
-                inputs, new RouteProjection.Probe("22", 50, now + 1L, Long.MAX_VALUE, 10L, 0L, 0L),
-                endpoint.getPredictor().evaluator(), projection, now);
-        assertTrue(candidate.selectable(),
+        RouteProjection.DeliveryProjection projection =
+                new BatchDeliveryStrategy(
+                                () -> {
+                                    throw new AssertionError("projection cannot prepare delivery");
+                                },
+                                () -> 0L,
+                                mock(RequestRegistry.class),
+                                mock(DeliveryMetrics.class))
+                        .projectionPolicy();
+        RouteProjection.Candidate candidate =
+                RouteProjection.project(
+                        inputs,
+                        new RouteProjection.Probe("22", 50, now + 1L, Long.MAX_VALUE, 10L, 0L, 0L),
+                        endpoint.getPredictor().evaluator(),
+                        projection,
+                        now);
+        assertTrue(
+                candidate.selectable(),
                 "a delivery-only wait must leave incoming backlog selectable");
 
         ScheduledRequest backlog = item(config, endpoint, 22L, 50, now + 1L);
         assertTrue(runtime.offer(backlog));
         TimeUnit.MILLISECONDS.sleep(100L);
-        assertEquals(1, delivery.attempts.get(),
+        assertEquals(
+                1,
+                delivery.attempts.get(),
                 "publishing backlog must not retry the capacity-blocked head");
         assertEquals(List.of(head, backlog), runtime.captureQueueSnapshot().items());
     }
@@ -202,26 +210,33 @@ class WorkerBatcherSchedulingTest {
         ScheduledRequest head = spy(item(config, endpoint, 13L, 50, System.currentTimeMillis()));
         CountDownLatch materializing = new CountDownLatch(1);
         CountDownLatch finish = new CountDownLatch(1);
-        doAnswer(invocation -> {
-            if (Thread.currentThread().getName().startsWith("projection-reader")) {
-                materializing.countDown();
-                await(finish);
-            }
-            return invocation.callRealMethod();
-        }).when(head).seqLen();
-        try (var readers = java.util.concurrent.Executors.newFixedThreadPool(
-                16, Thread.ofPlatform().name("projection-reader-", 0).factory())) {
+        doAnswer(
+                        invocation -> {
+                            if (Thread.currentThread().getName().startsWith("projection-reader")) {
+                                materializing.countDown();
+                                await(finish);
+                            }
+                            return invocation.callRealMethod();
+                        })
+                .when(head)
+                .seqLen();
+        try (var readers =
+                java.util.concurrent.Executors.newFixedThreadPool(
+                        16, Thread.ofPlatform().name("projection-reader-", 0).factory())) {
             assertTrue(runtime.offer(head));
             await(delivery.firstPrepareEntered);
             var first = readers.submit(runtime::captureRouteProjectionInputs);
             await(materializing);
             var started = new CountDownLatch(15);
-            var followers = new java.util.ArrayList<java.util.concurrent.Future<RouteProjection.Inputs>>();
+            var followers =
+                    new java.util.ArrayList<java.util.concurrent.Future<RouteProjection.Inputs>>();
             for (int i = 0; i < 15; i++) {
-                followers.add(readers.submit(() -> {
-                    started.countDown();
-                    return runtime.captureRouteProjectionInputs();
-                }));
+                followers.add(
+                        readers.submit(
+                                () -> {
+                                    started.countDown();
+                                    return runtime.captureRouteProjectionInputs();
+                                }));
             }
             await(started);
             // A normal queue reader must progress while materialization is blocked.
@@ -245,34 +260,39 @@ class WorkerBatcherSchedulingTest {
         PrefillEndpoint endpoint = stableEndpoint(stableStatus());
         ProjectionCacheBlock delivery = new ProjectionCacheBlock();
         WorkerBatcher runtime = runningRuntime(config, endpoint, delivery);
-        ScheduledRequest head = spy(item(
-                config, endpoint, 12L, 50, System.currentTimeMillis()));
+        ScheduledRequest head = spy(item(config, endpoint, 12L, 50, System.currentTimeMillis()));
         AtomicReference<Thread> capturingThread = new AtomicReference<>();
         CountDownLatch materializingSnapshot = new CountDownLatch(1);
         CountDownLatch finishSnapshot = new CountDownLatch(1);
-        doAnswer(invocation -> {
-            if (Thread.currentThread() == capturingThread.get()) {
-                materializingSnapshot.countDown();
-                await(finishSnapshot);
-            }
-            return invocation.callRealMethod();
-        }).when(head).seqLen();
+        doAnswer(
+                        invocation -> {
+                            if (Thread.currentThread() == capturingThread.get()) {
+                                materializingSnapshot.countDown();
+                                await(finishSnapshot);
+                            }
+                            return invocation.callRealMethod();
+                        })
+                .when(head)
+                .seqLen();
 
         try {
             assertTrue(runtime.offer(head));
             await(delivery.firstPrepareEntered);
             CompletableFuture<RouteProjection.Inputs> oldCapture =
-                    CompletableFuture.supplyAsync(() -> {
-                        capturingThread.set(Thread.currentThread());
-                        return runtime.captureRouteProjectionInputs();
-                    });
+                    CompletableFuture.supplyAsync(
+                            () -> {
+                                capturingThread.set(Thread.currentThread());
+                                return runtime.captureRouteProjectionInputs();
+                            });
             await(materializingSnapshot);
             delivery.allowFirstPrepare.countDown();
             await(delivery.firstCapacity.subscribed);
             finishSnapshot.countDown();
-            assertNull(oldCapture.get(2, TimeUnit.SECONDS).queue().admissionBlock(),
+            assertNull(
+                    oldCapture.get(2, TimeUnit.SECONDS).queue().admissionBlock(),
                     "the snapshot was taken before the block was published");
-            assertNotNull(runtime.captureRouteProjectionInputs().queue().admissionBlock(),
+            assertNotNull(
+                    runtime.captureRouteProjectionInputs().queue().admissionBlock(),
                     "a late snapshot must not overwrite capacity-block invalidation");
         } finally {
             finishSnapshot.countDown();
@@ -283,13 +303,11 @@ class WorkerBatcherSchedulingTest {
 
     @Test
     @Timeout(value = 10, unit = TimeUnit.SECONDS)
-    void removingCapturedMemberDuringPredictionInvalidatesWholeSelection()
-            throws Exception {
+    void removingCapturedMemberDuringPredictionInvalidatesWholeSelection() throws Exception {
         FlexlbConfig config = fixedConfig();
         CountDownLatch firstStatusRead = new CountDownLatch(1);
         CountDownLatch allowFirstStatusRead = new CountDownLatch(1);
-        WorkerStatus status = gatedFirstStatusRead(
-                firstStatusRead, allowFirstStatusRead);
+        WorkerStatus status = gatedFirstStatusRead(firstStatusRead, allowFirstStatusRead);
         PrefillEndpoint endpoint = stableEndpoint(status);
         PredictionGate delivery = new PredictionGate();
         WorkerBatcher runtime = runningRuntime(config, endpoint, delivery);
@@ -304,15 +322,15 @@ class WorkerBatcherSchedulingTest {
             allowFirstStatusRead.countDown();
             await(delivery.groupPredictionEntered);
 
-            assertTrue(runtime.removeQueued(
-                    revoked, "test revoke during prediction"));
+            assertTrue(runtime.removeQueued(revoked, "test revoke during prediction"));
             delivery.allowGroupPrediction.countDown();
             await(delivery.nextDecisionStarted);
 
-            assertEquals(0, delivery.prepareCalls.get(),
+            assertEquals(
+                    0,
+                    delivery.prepareCalls.get(),
                     "a selection containing a revoked identity cannot prepare");
-            List<ScheduledRequest> remaining =
-                    runtime.captureQueueSnapshot().items();
+            List<ScheduledRequest> remaining = runtime.captureQueueSnapshot().items();
             assertEquals(1, remaining.size());
             assertSame(first, remaining.getFirst());
         } finally {
@@ -323,18 +341,16 @@ class WorkerBatcherSchedulingTest {
 
     @ParameterizedTest
     @CsvSource({
-            "NON_BATCH,SINGLE,1,0,single_request",
-            "BATCH,SINGLE,1,0,single_request",
-            "NON_BATCH,FIXED_WINDOW,2,60000,batch_full",
-            "BATCH,FIXED_WINDOW,2,60000,batch_full",
-            "NON_BATCH,FIXED_WINDOW,1,0,fixed_window_timeout",
-            "BATCH,FIXED_WINDOW,1,0,fixed_window_timeout"
+        "NON_BATCH,SINGLE,1,0,single_request",
+        "BATCH,SINGLE,1,0,single_request",
+        "NON_BATCH,FIXED_WINDOW,2,60000,batch_full",
+        "BATCH,FIXED_WINDOW,2,60000,batch_full",
+        "NON_BATCH,FIXED_WINDOW,1,0,fixed_window_timeout",
+        "BATCH,FIXED_WINDOW,1,0,fixed_window_timeout"
     })
-    void committedGroupIsVisibleBeforeDeliveryPublication(String dispatcher,
-                                                          String policy,
-                                                          int count,
-                                                          long windowMs,
-                                                          String expectedReason) throws Exception {
+    void committedGroupIsVisibleBeforeDeliveryPublication(
+            String dispatcher, String policy, int count, long windowMs, String expectedReason)
+            throws Exception {
         FlexlbConfig config = singleConfig();
         if (dispatcher.equals("NON_BATCH")) {
             config.setDispatcher(org.flexlb.config.DispatcherConfig.nonBatch());
@@ -346,34 +362,46 @@ class WorkerBatcherSchedulingTest {
         }
         PrefillEndpoint endpoint = stableEndpoint(stableStatus());
         when(endpoint.reserveRouteOwnership(
-                org.mockito.ArgumentMatchers.any(),
-                org.mockito.ArgumentMatchers.anyLong()))
-                .thenAnswer(ignored -> new org.flexlb.balance.endpoint.PrefillState.ReservationResult<>(
-                        org.flexlb.balance.endpoint.PrefillState.CapacityStatus.ACQUIRED,
-                        mock(org.flexlb.balance.endpoint.PrefillState.RouteReservation.class)));
+                        org.mockito.ArgumentMatchers.any(), org.mockito.ArgumentMatchers.anyLong()))
+                .thenAnswer(
+                        ignored ->
+                                new org.flexlb.balance.endpoint.PrefillState.ReservationResult<>(
+                                        org.flexlb.balance.endpoint.PrefillState.CapacityStatus
+                                                .ACQUIRED,
+                                        mock(
+                                                org.flexlb.balance.endpoint.PrefillState
+                                                        .RouteReservation.class)));
         DeliveryStrategy delivery = mock(DeliveryStrategy.class);
         List<org.flexlb.dao.pv.DecisionGroup> published = new CopyOnWriteArrayList<>();
-        when(delivery.prepare(org.mockito.ArgumentMatchers.anyList(), org.mockito.ArgumentMatchers.any(),
-                org.mockito.ArgumentMatchers.any())).thenAnswer(invocation -> {
-            List<ScheduledRequest> members = List.copyOf(invocation.getArgument(0));
-            var transaction = mock(DeliveryStrategy.Transaction.class);
-            when(transaction.items()).thenReturn(members);
-            org.mockito.Mockito.doAnswer(ignored -> {
-                for (ScheduledRequest member : members) {
-                    published.add(member.ctx().getDecisionGroup());
-                    member.future().complete(new Response());
-                }
-                return null;
-            }).when(transaction).handoff(
-                    org.mockito.ArgumentMatchers.anyString(),
-                    org.mockito.ArgumentMatchers.anyInt(),
-                    org.mockito.ArgumentMatchers.any());
-            return transaction;
-        });
+        when(delivery.prepare(
+                        org.mockito.ArgumentMatchers.anyList(),
+                        org.mockito.ArgumentMatchers.any(),
+                        org.mockito.ArgumentMatchers.any()))
+                .thenAnswer(
+                        invocation -> {
+                            List<ScheduledRequest> members = List.copyOf(invocation.getArgument(0));
+                            var transaction = mock(DeliveryStrategy.Transaction.class);
+                            when(transaction.items()).thenReturn(members);
+                            org.mockito.Mockito.doAnswer(
+                                            ignored -> {
+                                                for (ScheduledRequest member : members) {
+                                                    published.add(member.ctx().getDecisionGroup());
+                                                    member.future().complete(new Response());
+                                                }
+                                                return null;
+                                            })
+                                    .when(transaction)
+                                    .handoff(
+                                            org.mockito.ArgumentMatchers.anyString(),
+                                            org.mockito.ArgumentMatchers.anyInt(),
+                                            org.mockito.ArgumentMatchers.any());
+                            return transaction;
+                        });
         WorkerBatcher runtime = runningRuntime(config, endpoint, delivery);
         List<ScheduledRequest> requests = new ArrayList<>();
         for (int i = 0; i < count; i++) {
-            ScheduledRequest request = item(config, endpoint, 100L + i, 50, System.currentTimeMillis());
+            ScheduledRequest request =
+                    item(config, endpoint, 100L + i, 50, System.currentTimeMillis());
             requests.add(request);
             assertTrue(runtime.offer(request));
         }
@@ -399,8 +427,13 @@ class WorkerBatcherSchedulingTest {
         FlexlbConfig initial = fixedConfig();
         initial.decisionPolicy().setMaxCollectionWaitMs(100L);
         AtomicReference<FlexlbConfig> current = new AtomicReference<>(initial);
-        WorkerBatcher runtime = new WorkerBatcher("hot-window-projection", stableEndpoint(stableStatus()),
-                current::get, mock(DeliveryStrategy.class), mock(EndpointEventProjector.class));
+        WorkerBatcher runtime =
+                new WorkerBatcher(
+                        "hot-window-projection",
+                        stableEndpoint(stableStatus()),
+                        current::get,
+                        mock(DeliveryStrategy.class),
+                        mock(EndpointEventProjector.class));
         runtimes.add(runtime);
         runtime.start();
 
@@ -417,7 +450,9 @@ class WorkerBatcherSchedulingTest {
         assertEquals(100L, before.queue().constraints().collectionWindowMs());
 
         current.set(initial);
-        assertEquals(100L, runtime.captureRouteProjectionInputs().queue().constraints().collectionWindowMs());
+        assertEquals(
+                100L,
+                runtime.captureRouteProjectionInputs().queue().constraints().collectionWindowMs());
     }
 
     @ParameterizedTest
@@ -430,8 +465,13 @@ class WorkerBatcherSchedulingTest {
         AtomicReference<FlexlbConfig> current = new AtomicReference<>(initial);
         PrefillEndpoint endpoint = stableEndpoint(stableStatus());
         EventDrivenBlock delivery = new EventDrivenBlock();
-        WorkerBatcher runtime = new WorkerBatcher("hot-window-delivery", endpoint, current::get, delivery,
-                mock(EndpointEventProjector.class));
+        WorkerBatcher runtime =
+                new WorkerBatcher(
+                        "hot-window-delivery",
+                        endpoint,
+                        current::get,
+                        delivery,
+                        mock(EndpointEventProjector.class));
         runtimes.add(runtime);
         runtime.start();
 
@@ -439,21 +479,32 @@ class WorkerBatcherSchedulingTest {
         updated.decisionPolicy().setMaxPredictedExecutionMs(null);
         updated.decisionPolicy().setMaxCollectionWaitMs(increaseWindow ? 60_000L : 0L);
         current.set(updated);
-        assertEquals(increaseWindow ? 60_000L : 0L,
+        assertEquals(
+                increaseWindow ? 60_000L : 0L,
                 runtime.captureRouteProjectionInputs().queue().constraints().collectionWindowMs());
         assertTrue(runtime.offer(item(initial, endpoint, 77L, 50, System.currentTimeMillis())));
         if (increaseWindow) {
             current.set(initial);
-            assertEquals(0L, runtime.captureRouteProjectionInputs().queue().constraints().collectionWindowMs());
+            assertEquals(
+                    0L,
+                    runtime.captureRouteProjectionInputs()
+                            .queue()
+                            .constraints()
+                            .collectionWindowMs());
             runtime.signalSchedulingInputsChanged();
         }
         await(delivery.firstAttempt);
     }
 
-    private WorkerBatcher runningRuntime(FlexlbConfig config, PrefillEndpoint endpoint, DeliveryStrategy delivery) {
-        WorkerBatcher runtime = new WorkerBatcher(
-                "scheduling-test", endpoint, () -> config, delivery,
-                mock(EndpointEventProjector.class));
+    private WorkerBatcher runningRuntime(
+            FlexlbConfig config, PrefillEndpoint endpoint, DeliveryStrategy delivery) {
+        WorkerBatcher runtime =
+                new WorkerBatcher(
+                        "scheduling-test",
+                        endpoint,
+                        () -> config,
+                        delivery,
+                        mock(EndpointEventProjector.class));
         runtimes.add(runtime);
         runtime.start();
         return runtime;
@@ -470,8 +521,7 @@ class WorkerBatcherSchedulingTest {
     private static FlexlbConfig fixedConfig() {
         FlexlbConfig config = org.flexlb.balance.scheduler.SchedulingTestConfig.newConfig();
         SchedulingTestConfig.useFifoQueue(config);
-        DecisionPolicyConfig decision =
-                SchedulingTestConfig.useFixedWindowDecision(config);
+        DecisionPolicyConfig decision = SchedulingTestConfig.useFixedWindowDecision(config);
         decision.setMaxRequests(2);
         decision.setMaxCollectionWaitMs(60_000L);
         decision.setMaxPredictedExecutionMs(500L);
@@ -491,8 +541,7 @@ class WorkerBatcherSchedulingTest {
         request.setSeqLen(10L);
         BalanceContext context = new BalanceContext(config);
         context.setRequest(request);
-        context.setSchedulingMetadata(
-                SchedulingMetadata.explicit(priority, Long.MAX_VALUE));
+        context.setSchedulingMetadata(SchedulingMetadata.explicit(priority, Long.MAX_VALUE));
         return new ScheduledRequest(
                 context,
                 new CompletableFuture<Response>(),
@@ -507,8 +556,7 @@ class WorkerBatcherSchedulingTest {
 
     private static PrefillEndpoint stableEndpoint(WorkerStatus status) {
         PrefillTimePredictor predictor = mock(PrefillTimePredictor.class);
-        when(predictor.evaluator())
-                .thenReturn(mock(PrefillTimePredictor.Evaluator.class));
+        when(predictor.evaluator()).thenReturn(mock(PrefillTimePredictor.Evaluator.class));
         PrefillEndpoint endpoint = mock(PrefillEndpoint.class);
         when(endpoint.getStatus()).thenReturn(status);
         when(endpoint.getPredictor()).thenReturn(predictor);
@@ -523,17 +571,18 @@ class WorkerBatcherSchedulingTest {
     }
 
     private static WorkerStatus gatedFirstStatusRead(
-            CountDownLatch entered,
-            CountDownLatch proceed) {
+            CountDownLatch entered, CountDownLatch proceed) {
         WorkerStatus status = mock(WorkerStatus.class);
         AtomicBoolean first = new AtomicBoolean(true);
-        when(status.committedEngineObservation()).thenAnswer(ignored -> {
-            if (first.compareAndSet(true, false)) {
-                entered.countDown();
-                await(proceed);
-            }
-            return capacity();
-        });
+        when(status.committedEngineObservation())
+                .thenAnswer(
+                        ignored -> {
+                            if (first.compareAndSet(true, false)) {
+                                entered.countDown();
+                                await(proceed);
+                            }
+                            return capacity();
+                        });
         return status;
     }
 
@@ -557,18 +606,15 @@ class WorkerBatcherSchedulingTest {
 
     private static void await(CountDownLatch latch) {
         try {
-            assertTrue(latch.await(5, TimeUnit.SECONDS),
-                    "worker did not reach the expected boundary");
+            assertTrue(
+                    latch.await(5, TimeUnit.SECONDS), "worker did not reach the expected boundary");
         } catch (InterruptedException interruption) {
             Thread.currentThread().interrupt();
-            throw new AssertionError(
-                    "interrupted while awaiting worker boundary",
-                    interruption);
+            throw new AssertionError("interrupted while awaiting worker boundary", interruption);
         }
     }
 
-    private static CapacityBoundary unavailable(
-            CapacityBoundary.Availability availability) {
+    private static CapacityBoundary unavailable(CapacityBoundary.Availability availability) {
         return CapacityBoundary.unavailable(
                 availability,
                 new RouteProjection.AdmissionBlockSemantics(
@@ -582,8 +628,7 @@ class WorkerBatcherSchedulingTest {
 
         @Override
         public double projectGroupDurationMs(
-                List<ScheduledRequest> items,
-                PrefillTimePredictor.Evaluator evaluator) {
+                List<ScheduledRequest> items, PrefillTimePredictor.Evaluator evaluator) {
             return 0.0;
         }
 
@@ -663,14 +708,10 @@ class WorkerBatcherSchedulingTest {
 
     private static final class PredictionGate extends BoundaryDelivery {
 
-        private final CountDownLatch groupPredictionEntered =
-                new CountDownLatch(1);
-        private final CountDownLatch allowGroupPrediction =
-                new CountDownLatch(1);
-        private final CountDownLatch nextDecisionStarted =
-                new CountDownLatch(1);
-        private final AtomicBoolean groupPredictionReturned =
-                new AtomicBoolean();
+        private final CountDownLatch groupPredictionEntered = new CountDownLatch(1);
+        private final CountDownLatch allowGroupPrediction = new CountDownLatch(1);
+        private final CountDownLatch nextDecisionStarted = new CountDownLatch(1);
+        private final AtomicBoolean groupPredictionReturned = new AtomicBoolean();
         private final AtomicInteger prepareCalls = new AtomicInteger();
 
         @Override
@@ -680,14 +721,12 @@ class WorkerBatcherSchedulingTest {
                 OptionalLong plannedPrediction) {
             prepareCalls.incrementAndGet();
             return WorkerBatcherTestSupport.boundaryOnly(
-                    candidates.getFirst(),
-                    unavailable(new TestAvailability()));
+                    candidates.getFirst(), unavailable(new TestAvailability()));
         }
 
         @Override
         public double projectGroupDurationMs(
-                List<ScheduledRequest> items,
-                PrefillTimePredictor.Evaluator evaluator) {
+                List<ScheduledRequest> items, PrefillTimePredictor.Evaluator evaluator) {
             if (groupPredictionReturned.get()) {
                 nextDecisionStarted.countDown();
             }
@@ -700,12 +739,10 @@ class WorkerBatcherSchedulingTest {
         }
     }
 
-    private static final class TestAvailability
-            implements CapacityBoundary.Availability {
+    private static final class TestAvailability implements CapacityBoundary.Availability {
 
         private final AtomicBoolean available = new AtomicBoolean();
-        private final CopyOnWriteArrayList<Runnable> listeners =
-                new CopyOnWriteArrayList<>();
+        private final CopyOnWriteArrayList<Runnable> listeners = new CopyOnWriteArrayList<>();
         private final CountDownLatch subscribed = new CountDownLatch(1);
         private final CountDownLatch removed = new CountDownLatch(1);
         private volatile RuntimeException removeFailure;

@@ -22,11 +22,11 @@ import java.util.concurrent.CompletableFuture;
 public class RouteService {
 
     private final RequestScheduler requestScheduler;
-    @Autowired
-    private DefaultRouter router;
+    @Autowired private DefaultRouter router;
     private final TheoryCacheHitReporter theoryCacheHitReporter;
 
-    public RouteService(RequestScheduler requestScheduler, TheoryCacheHitReporter theoryCacheHitReporter) {
+    public RouteService(
+            RequestScheduler requestScheduler, TheoryCacheHitReporter theoryCacheHitReporter) {
         this.requestScheduler = requestScheduler;
         this.theoryCacheHitReporter = theoryCacheHitReporter;
     }
@@ -38,56 +38,70 @@ public class RouteService {
      */
     public CompletableFuture<Response> route(BalanceContext balanceContext) {
         if (balanceContext.getRequest() != null && balanceContext.getRequest().isVitRouteOnly()) {
-            return CompletableFuture.completedFuture(router == null
-                    ? Response.error(StrategyErrorType.NO_VIT_WORKER) : router.routeVit(balanceContext));
+            return CompletableFuture.completedFuture(
+                    router == null
+                            ? Response.error(StrategyErrorType.NO_VIT_WORKER)
+                            : router.routeVit(balanceContext));
         }
         // Reject stale metadata before the scheduler creates request lifecycle ownership.
-        if (balanceContext.getRequest() != null && balanceContext.getRequest().getSelectedVit() != null
+        if (balanceContext.getRequest() != null
+                && balanceContext.getRequest().getSelectedVit() != null
                 && getRequestState(balanceContext.getRequestId(), 0) == null
                 && (router == null || !router.selectedVitIsValid(balanceContext))) {
-            return CompletableFuture.completedFuture(Response.error(StrategyErrorType.VIT_ROUTE_STALE));
+            return CompletableFuture.completedFuture(
+                    Response.error(StrategyErrorType.VIT_ROUTE_STALE));
         }
         FlexlbConfig flexlbConfig = balanceContext.getConfig();
-        FlexlbTrace.setScheduleAttribute(balanceContext.getTraceContext(),
-                FlexlbTrace.SCHEDULE_MODE, flexlbConfig.isDirect() ? "DIRECT"
+        FlexlbTrace.setScheduleAttribute(
+                balanceContext.getTraceContext(),
+                FlexlbTrace.SCHEDULE_MODE,
+                flexlbConfig.isDirect()
+                        ? "DIRECT"
                         : flexlbConfig.getDispatcher().getType() == DispatcherConfig.Type.BATCH
-                                ? "BATCH" : "QUEUE");
+                                ? "BATCH"
+                                : "QUEUE");
 
         CompletableFuture<Response> resultFuture = routeScheduled(balanceContext);
 
         // Observe the scheduler-owned future without replacing it with a
         // dependent stage. Returning the exact source preserves external
         // cancel propagation and keeps one publication owner end to end.
-        resultFuture.whenComplete((result, throwable) -> {
-            if (throwable != null) {
-                return;
-            }
-            try {
-                balanceContext.setResponse(result);
-                if (result != null && result.isSuccess()) {
-                    theoryCacheHitReporter.report(balanceContext);
-                }
-            } catch (RuntimeException completionSideEffectFailure) {
-                Logger.warn("Route completion side effect failed: request_id={}",
-                        balanceContext.getRequestId(), completionSideEffectFailure);
-            }
-        });
+        resultFuture.whenComplete(
+                (result, throwable) -> {
+                    if (throwable != null) {
+                        return;
+                    }
+                    try {
+                        balanceContext.setResponse(result);
+                        if (result != null && result.isSuccess()) {
+                            theoryCacheHitReporter.report(balanceContext);
+                        }
+                    } catch (RuntimeException completionSideEffectFailure) {
+                        Logger.warn(
+                                "Route completion side effect failed: request_id={}",
+                                balanceContext.getRequestId(),
+                                completionSideEffectFailure);
+                    }
+                });
         return resultFuture;
     }
 
     private CompletableFuture<Response> routeScheduled(BalanceContext balanceContext) {
         if (requestScheduler == null) {
-            return CompletableFuture.failedFuture(new IllegalStateException(
-                    "RequestScheduler is required for the configured scheduling path"));
+            return CompletableFuture.failedFuture(
+                    new IllegalStateException(
+                            "RequestScheduler is required for the configured scheduling path"));
         }
         if (balanceContext.getRequestPhase() != RequestPhase.ENCODER
                 && balanceContext.getConfig().getDispatcher().requiresGenerateInput()
                 && !hasValidGenerateInput(balanceContext)) {
-            Logger.warn("{} dispatcher rejected request without serialized generate input: request_id={}",
+            Logger.warn(
+                    "{} dispatcher rejected request without serialized generate input: request_id={}",
                     balanceContext.getConfig().getDispatcher().typeName(),
                     balanceContext.getRequestId());
             return CompletableFuture.completedFuture(
-                    Response.buildErrorResponse(StrategyErrorType.INVALID_REQUEST,
+                    Response.buildErrorResponse(
+                            StrategyErrorType.INVALID_REQUEST,
                             "missing serialized generate_input for batch dispatch"));
         }
         return submitScheduled(balanceContext);
@@ -100,8 +114,9 @@ public class RouteService {
      */
     private CompletableFuture<Response> submitScheduled(BalanceContext balanceContext) {
         if (requestScheduler == null) {
-            return CompletableFuture.failedFuture(new IllegalStateException(
-                    "RequestScheduler is required for the configured scheduling path"));
+            return CompletableFuture.failedFuture(
+                    new IllegalStateException(
+                            "RequestScheduler is required for the configured scheduling path"));
         }
         CompletableFuture<Response> resultFuture = requestScheduler.submit(balanceContext);
         balanceContext.setFuture(resultFuture);
@@ -113,9 +128,9 @@ public class RouteService {
         return generateInput != null && !generateInput.isEmpty();
     }
 
-    public RequestState getRequestState(String requestId,
-                                                    long expectedBatchId) {
-        return requestScheduler == null ? null
+    public RequestState getRequestState(String requestId, long expectedBatchId) {
+        return requestScheduler == null
+                ? null
                 : requestScheduler.getRequestState(requestId, expectedBatchId);
     }
 
@@ -124,7 +139,8 @@ public class RouteService {
      */
     public RequestState getRequestState(
             String requestId, long expectedBatchId, RequestPhase phase) {
-        return requestScheduler == null ? null
+        return requestScheduler == null
+                ? null
                 : requestScheduler.getRequestState(requestId, expectedBatchId, phase);
     }
 
@@ -135,10 +151,9 @@ public class RouteService {
      * reducer there gives BATCH enqueue and QUEUE route-decision delivery the
      * same idempotency and generation-fencing semantics.</p>
      */
-    public RequestState cancelRequest(String requestId,
-                                                   long expectedBatchId,
-                                                   CancelReason reason) {
-        return requestScheduler == null ? null
+    public RequestState cancelRequest(String requestId, long expectedBatchId, CancelReason reason) {
+        return requestScheduler == null
+                ? null
                 : requestScheduler.cancelRequest(requestId, expectedBatchId, reason);
     }
 
@@ -147,8 +162,8 @@ public class RouteService {
      */
     public RequestState cancelRequest(
             String requestId, long expectedBatchId, CancelReason reason, RequestPhase phase) {
-        return requestScheduler == null ? null
+        return requestScheduler == null
+                ? null
                 : requestScheduler.cancelRequest(requestId, expectedBatchId, reason, phase);
     }
-
 }

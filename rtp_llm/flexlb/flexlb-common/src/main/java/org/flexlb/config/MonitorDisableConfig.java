@@ -35,11 +35,12 @@ public class MonitorDisableConfig {
         }
 
         @ConditionalOnProperty(name = "flexlb.monitor.enabled", havingValue = "false")
-        static class MonitoringDisabled {
-        }
+        static class MonitoringDisabled {}
 
-        @ConditionalOnProperty(name = "flexlb.monitor.provider", havingValue = "noop", matchIfMissing = true)
-        static class NoOpProvider {
-        }
+        @ConditionalOnProperty(
+                name = "flexlb.monitor.provider",
+                havingValue = "noop",
+                matchIfMissing = true)
+        static class NoOpProvider {}
     }
 }

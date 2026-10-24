@@ -45,7 +45,6 @@ from collect_pv_log import (
     _rotation_sort_key,
 )
 
-
 POD_NAME_LABEL_SUFFIX = "/pod-name"
 NAMESPACE_LABEL_SUFFIX = "namespace"
 EXEC_STDOUT_LIMIT = 1048576
@@ -89,7 +88,9 @@ def default_runner(command: Sequence[str]) -> str:
                     "command output is not UTF-8; inspect the remote log encoding "
                     "and provide a UTF-8 snapshot"
                 ) from error
-        detail = (result.stderr or result.stdout).decode("utf-8", errors="replace").strip()
+        detail = (
+            (result.stderr or result.stdout).decode("utf-8", errors="replace").strip()
+        )
         if attempt < 2 and "请等待" not in detail:
             time.sleep(attempt + 1)
             continue
@@ -218,7 +219,9 @@ def resolve_role_pods(
                     namespace=namespace,
                     cluster=cluster,
                     ip=status.get("ip"),
-                    health_status=(status.get("health_info") or {}).get("health_status"),
+                    health_status=(status.get("health_info") or {}).get(
+                        "health_status"
+                    ),
                     service_status=(status.get("service_info") or {}).get("status"),
                 )
             )
@@ -229,9 +232,7 @@ def resolve_role_pods(
     return pods
 
 
-def _exec(
-    runner: CommandRunner, pod: WhalePod, container: str, script: str
-) -> str:
+def _exec(runner: CommandRunner, pod: WhalePod, container: str, script: str) -> str:
     return runner(
         [
             "asicli",
@@ -287,9 +288,7 @@ def _list_log_files(
 def _file_bounds(
     runner: CommandRunner, pod: WhalePod, container: str, path: str
 ) -> tuple[datetime | None, datetime | None]:
-    output = _exec(
-        runner, pod, container, f"head -n 1 '{path}'; tail -n 1 '{path}'"
-    )
+    output = _exec(runner, pod, container, f"head -n 1 '{path}'; tail -n 1 '{path}'")
     lines = [line for line in output.splitlines() if line.strip()]
     if not lines:
         return None, None
@@ -420,8 +419,9 @@ def fetch_pod_window(
         if first is None:
             files.append({**entry, "status": "empty", "selected_line_count": 0})
             continue
-        if ((last or first).replace(microsecond=0) < window_start
-                or first.replace(microsecond=0) > window_end):
+        if (last or first).replace(microsecond=0) < window_start or first.replace(
+            microsecond=0
+        ) > window_end:
             files.append(
                 {**entry, "status": "outside_window", "selected_line_count": 0}
             )

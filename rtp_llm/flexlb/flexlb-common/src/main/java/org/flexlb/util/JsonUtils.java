@@ -31,47 +31,49 @@ public class JsonUtils {
 
     private static final ObjectMapper MAPPER = new ObjectMapper();
 
-    private static final ObjectMapper STRICT_MAPPER = JsonMapper.builder()
-            .enable(JsonParser.Feature.STRICT_DUPLICATE_DETECTION)
-            .enable(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES)
-            .enable(DeserializationFeature.FAIL_ON_IGNORED_PROPERTIES)
-            .enable(DeserializationFeature.FAIL_ON_NULL_FOR_PRIMITIVES)
-            .enable(DeserializationFeature.FAIL_ON_NUMBERS_FOR_ENUMS)
-            .enable(DeserializationFeature.FAIL_ON_TRAILING_TOKENS)
-            .disable(DeserializationFeature.ACCEPT_FLOAT_AS_INT)
-            .disable(MapperFeature.ALLOW_COERCION_OF_SCALARS)
-            .serializationInclusion(JsonInclude.Include.NON_NULL)
-            .build();
+    private static final ObjectMapper STRICT_MAPPER =
+            JsonMapper.builder()
+                    .enable(JsonParser.Feature.STRICT_DUPLICATE_DETECTION)
+                    .enable(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES)
+                    .enable(DeserializationFeature.FAIL_ON_IGNORED_PROPERTIES)
+                    .enable(DeserializationFeature.FAIL_ON_NULL_FOR_PRIMITIVES)
+                    .enable(DeserializationFeature.FAIL_ON_NUMBERS_FOR_ENUMS)
+                    .enable(DeserializationFeature.FAIL_ON_TRAILING_TOKENS)
+                    .disable(DeserializationFeature.ACCEPT_FLOAT_AS_INT)
+                    .disable(MapperFeature.ALLOW_COERCION_OF_SCALARS)
+                    .serializationInclusion(JsonInclude.Include.NON_NULL)
+                    .build();
 
-    private static final Set<String> MODEL_BEHAVIOR_FIELDS = Set.of(
-            "connect_timeout_ms",
-            "connectTimeoutMs",
-            "read_timeout_ms",
-            "readTimeoutMs",
-            "poll_interval_ms",
-            "pollIntervalMs",
-            "max_idle_connections",
-            "maxIdleConnections",
-            "keep_alive_duration_ms",
-            "keepAliveDurationMs",
-            "request_timeout_ms",
-            "requestTimeoutMs",
-            "leader_refresh_interval_ms",
-            "leaderRefreshIntervalMs",
-            "heartbeat_failure_threshold",
-            "heartbeatFailureThreshold",
-            "query_failure_threshold",
-            "queryFailureThreshold",
-            "max_query_retry_count",
-            "maxQueryRetryCount",
-            "recovery_success_threshold",
-            "recoverySuccessThreshold",
-            "global_kvs_host_count",
-            "globalKvsHostCount",
-            "enable_p2p",
-            "enableP2p",
-            "local_standby",
-            "localStandby");
+    private static final Set<String> MODEL_BEHAVIOR_FIELDS =
+            Set.of(
+                    "connect_timeout_ms",
+                    "connectTimeoutMs",
+                    "read_timeout_ms",
+                    "readTimeoutMs",
+                    "poll_interval_ms",
+                    "pollIntervalMs",
+                    "max_idle_connections",
+                    "maxIdleConnections",
+                    "keep_alive_duration_ms",
+                    "keepAliveDurationMs",
+                    "request_timeout_ms",
+                    "requestTimeoutMs",
+                    "leader_refresh_interval_ms",
+                    "leaderRefreshIntervalMs",
+                    "heartbeat_failure_threshold",
+                    "heartbeatFailureThreshold",
+                    "query_failure_threshold",
+                    "queryFailureThreshold",
+                    "max_query_retry_count",
+                    "maxQueryRetryCount",
+                    "recovery_success_threshold",
+                    "recoverySuccessThreshold",
+                    "global_kvs_host_count",
+                    "globalKvsHostCount",
+                    "enable_p2p",
+                    "enableP2p",
+                    "local_standby",
+                    "localStandby");
 
     private static final ObjectWriter WRITER;
 
@@ -122,7 +124,8 @@ public class JsonUtils {
             }
             return res;
         } catch (Exception e) {
-            throw StatusEnum.JSON_MAPPER_ERROR.toException("msg=" + e.getMessage() + ", text=" + input, e);
+            throw StatusEnum.JSON_MAPPER_ERROR.toException(
+                    "msg=" + e.getMessage() + ", text=" + input, e);
         }
     }
 
@@ -142,7 +145,8 @@ public class JsonUtils {
             }
             return res;
         } catch (Exception e) {
-            throw StatusEnum.JSON_MAPPER_ERROR.toException("msg=" + e.getMessage() + ", text=" + text, e);
+            throw StatusEnum.JSON_MAPPER_ERROR.toException(
+                    "msg=" + e.getMessage() + ", text=" + text, e);
         }
     }
 
@@ -204,7 +208,8 @@ public class JsonUtils {
     }
 
     public static <T> List<T> toList(String text, Class<T> valueType) throws FlexLBException {
-        CollectionType type = MAPPER.getTypeFactory().constructCollectionType(List.class, valueType);
+        CollectionType type =
+                MAPPER.getTypeFactory().constructCollectionType(List.class, valueType);
         ObjectReader reader = MAPPER.readerFor(type);
         try {
             return reader.readValue(text);
@@ -224,7 +229,8 @@ public class JsonUtils {
         try {
             return WRITER.writeValueAsString(object);
         } catch (JsonProcessingException error) {
-            throw StatusEnum.JSON_MAPPER_ERROR.toException("Failed to convert object to json string!", error);
+            throw StatusEnum.JSON_MAPPER_ERROR.toException(
+                    "Failed to convert object to json string!", error);
         }
     }
 
@@ -263,7 +269,8 @@ public class JsonUtils {
         return STRICT_MAPPER.readTree(document);
     }
 
-    public static <T> T strictTreeToValue(JsonNode tree, Class<T> valueType) throws JsonProcessingException {
+    public static <T> T strictTreeToValue(JsonNode tree, Class<T> valueType)
+            throws JsonProcessingException {
         return STRICT_MAPPER.treeToValue(tree, valueType);
     }
 
@@ -296,7 +303,8 @@ public class JsonUtils {
         }
     }
 
-    public static void forEachField(JsonNode node, String path, String parentField, JsonFieldConsumer consumer) {
+    public static void forEachField(
+            JsonNode node, String path, String parentField, JsonFieldConsumer consumer) {
         if (node == null || !node.isContainerNode()) {
             return;
         }
@@ -316,14 +324,25 @@ public class JsonUtils {
     }
 
     public static void rejectModelBehaviorFields(JsonNode node, String sourceName) {
-        forEachField(node, "$", null, (fieldPath, parentField, fieldName) -> {
-            boolean rootBehavior = "$.load_balance".equals(fieldPath);
-            boolean enableBehavior = "enabled".equals(fieldName) && ("kvcm".equals(parentField) || "optimizer".equals(parentField));
-            if (rootBehavior || enableBehavior || MODEL_BEHAVIOR_FIELDS.contains(fieldName)) {
-                throw new ConfigValidationException(sourceName,
-                        fieldPath + " is a FlexLB behavior field; configure it in FLEXLB_CONFIG");
-            }
-        });
+        forEachField(
+                node,
+                "$",
+                null,
+                (fieldPath, parentField, fieldName) -> {
+                    boolean rootBehavior = "$.load_balance".equals(fieldPath);
+                    boolean enableBehavior =
+                            "enabled".equals(fieldName)
+                                    && ("kvcm".equals(parentField)
+                                            || "optimizer".equals(parentField));
+                    if (rootBehavior
+                            || enableBehavior
+                            || MODEL_BEHAVIOR_FIELDS.contains(fieldName)) {
+                        throw new ConfigValidationException(
+                                sourceName,
+                                fieldPath
+                                        + " is a FlexLB behavior field; configure it in FLEXLB_CONFIG");
+                    }
+                });
     }
 
     @FunctionalInterface

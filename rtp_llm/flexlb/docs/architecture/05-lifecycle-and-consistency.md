@@ -26,11 +26,11 @@ KVCM 客户端通过 `isWarmupFinished()` 读取状态。该状态类不依赖 g
 
 以下 HTTP 端点由 `AppStateHookServer` 提供，仅允许 loopback 或本机地址访问：
 
-| 端点 | 行为 |
-|---|---|
-| `GET /hook/process_ok` | `ApplicationReadyEvent` 后返回 200，否则 503 |
-| `GET /hook/after_start` | 同步执行 `ApplicationLifecycle.online()`，上报 `online_complete` |
-| `GET /hook/pre_stop` | 在 boundedElastic 上执行 `ApplicationLifecycle.offline()`，排空完成后返回 200 |
+| 端点                    | 行为                                                                          |
+| ----------------------- | ----------------------------------------------------------------------------- |
+| `GET /hook/process_ok`  | `ApplicationReadyEvent` 后返回 200，否则 503                                  |
+| `GET /hook/after_start` | 同步执行 `ApplicationLifecycle.online()`，上报 `online_complete`              |
+| `GET /hook/pre_stop`    | 在 boundedElastic 上执行 `ApplicationLifecycle.offline()`，排空完成后返回 200 |
 
 **上线顺序**（`test` profile 下跳过）：
 

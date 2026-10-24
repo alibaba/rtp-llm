@@ -47,8 +47,7 @@ import static org.springframework.web.reactive.function.server.RouterFunctions.r
 
 @Component
 public class HttpLoadBalanceServer {
-    private static final Path SCHEDULER_SNAPSHOT_DIR =
-            Paths.get("/tmp/flexlb-scheduler-snapshots");
+    private static final Path SCHEDULER_SNAPSHOT_DIR = Paths.get("/tmp/flexlb-scheduler-snapshots");
     private static final String SCHEDULER_SNAPSHOT_PREFIX = "scheduler-snapshot-";
     private static final int MAX_SNAPSHOT_FILES = 10;
 
@@ -60,14 +59,15 @@ public class HttpLoadBalanceServer {
     private final MasterEngineSynchronizer masterEngineSynchronizer;
     private final ServerScheduleLatencyRecorder serverLatencyRecorder;
 
-    public HttpLoadBalanceServer(LBStatusConsistencyService lbStatusConsistencyService,
-                                 ConfigService configService,
-                                 RequestScheduler requestScheduler,
-                                 EndpointRegistry endpointRegistry,
-                                 WorkerDirectory workerDirectory,
-                                 @org.springframework.beans.factory.annotation.Autowired(required = false)
-                                 MasterEngineSynchronizer masterEngineSynchronizer,
-                                 ServerScheduleLatencyRecorder serverLatencyRecorder) {
+    public HttpLoadBalanceServer(
+            LBStatusConsistencyService lbStatusConsistencyService,
+            ConfigService configService,
+            RequestScheduler requestScheduler,
+            EndpointRegistry endpointRegistry,
+            WorkerDirectory workerDirectory,
+            @org.springframework.beans.factory.annotation.Autowired(required = false)
+                    MasterEngineSynchronizer masterEngineSynchronizer,
+            ServerScheduleLatencyRecorder serverLatencyRecorder) {
         this.lbStatusConsistencyService = lbStatusConsistencyService;
         this.configService = configService;
         this.requestScheduler = requestScheduler;
@@ -79,20 +79,33 @@ public class HttpLoadBalanceServer {
 
     @Bean
     public RouterFunction<ServerResponse> loadBalancePrefill() {
-        return route()
-                .POST("/rtp_llm/master/info", accept(MediaType.APPLICATION_JSON),
+        return route().POST(
+                        "/rtp_llm/master/info",
+                        accept(MediaType.APPLICATION_JSON),
                         this::responseMasterInfo)
-                .POST("/rtp_llm/schedule_snapshot", accept(MediaType.APPLICATION_JSON),
+                .POST(
+                        "/rtp_llm/schedule_snapshot",
+                        accept(MediaType.APPLICATION_JSON),
                         this::dumpLBStatus)
-                .POST("/rtp_llm/notify_master", accept(MediaType.APPLICATION_JSON),
+                .POST(
+                        "/rtp_llm/notify_master",
+                        accept(MediaType.APPLICATION_JSON),
                         this::notifyParticipant)
-                .POST("/rtp_llm/update_log_level", accept(MediaType.APPLICATION_JSON),
+                .POST(
+                        "/rtp_llm/update_log_level",
+                        accept(MediaType.APPLICATION_JSON),
                         this::debugMode)
-                .POST("/rtp_llm/update_traffic_policy", accept(MediaType.APPLICATION_JSON),
+                .POST(
+                        "/rtp_llm/update_traffic_policy",
+                        accept(MediaType.APPLICATION_JSON),
                         this::updateTrafficPolicy)
-                .GET("/rtp_llm/queue_snapshot", accept(MediaType.APPLICATION_JSON),
+                .GET(
+                        "/rtp_llm/queue_snapshot",
+                        accept(MediaType.APPLICATION_JSON),
                         this::queueSnapshot)
-                .GET("/rtp_llm/inflight_status", accept(MediaType.APPLICATION_JSON),
+                .GET(
+                        "/rtp_llm/inflight_status",
+                        accept(MediaType.APPLICATION_JSON),
                         this::inflightStatus)
                 .GET("/rtp_llm/server_latency", this::serverLatency)
                 .POST("/rtp_llm/server_latency/reset", this::resetServerLatency)
@@ -100,33 +113,45 @@ public class HttpLoadBalanceServer {
     }
 
     private Mono<ServerResponse> debugMode(ServerRequest serverRequest) {
-        return serverRequest.bodyToMono(LogLevelUpdateRequest.class)
-                .flatMap(logLevelUpdateRequest -> {
-                    Logger.setLevel(logLevelUpdateRequest.getLogLevel());
-                    return ServerResponse.ok()
-                            .contentType(MediaType.APPLICATION_JSON)
-                            .body(Mono.just("Success! logLevel=" + Logger.getLevel()), String.class);
-                }).onErrorResume(e -> {
-                    Logger.error("update logLevel error", e);
-                    return ServerResponse.status(500)
-                            .contentType(MediaType.APPLICATION_JSON)
-                            .body(Mono.just(e.getMessage()), String.class);
-                });
+        return serverRequest
+                .bodyToMono(LogLevelUpdateRequest.class)
+                .flatMap(
+                        logLevelUpdateRequest -> {
+                            Logger.setLevel(logLevelUpdateRequest.getLogLevel());
+                            return ServerResponse.ok()
+                                    .contentType(MediaType.APPLICATION_JSON)
+                                    .body(
+                                            Mono.just("Success! logLevel=" + Logger.getLevel()),
+                                            String.class);
+                        })
+                .onErrorResume(
+                        e -> {
+                            Logger.error("update logLevel error", e);
+                            return ServerResponse.status(500)
+                                    .contentType(MediaType.APPLICATION_JSON)
+                                    .body(Mono.just(e.getMessage()), String.class);
+                        });
     }
 
     private Mono<ServerResponse> updateTrafficPolicy(ServerRequest serverRequest) {
-        return serverRequest.bodyToMono(TrafficPolicyConfig.class)
-                .flatMap(trafficPolicyConfig -> {
-                    configService.updateTrafficPolicy(trafficPolicyConfig);
-                    return ServerResponse.ok()
-                            .contentType(MediaType.APPLICATION_JSON)
-                            .body(Mono.just(trafficPolicyConfig), TrafficPolicyConfig.class);
-                }).onErrorResume(e -> {
-                    Logger.error("update traffic policy error", e);
-                    return ServerResponse.status(500)
-                            .contentType(MediaType.APPLICATION_JSON)
-                            .body(Mono.just(e.getMessage()), String.class);
-                });
+        return serverRequest
+                .bodyToMono(TrafficPolicyConfig.class)
+                .flatMap(
+                        trafficPolicyConfig -> {
+                            configService.updateTrafficPolicy(trafficPolicyConfig);
+                            return ServerResponse.ok()
+                                    .contentType(MediaType.APPLICATION_JSON)
+                                    .body(
+                                            Mono.just(trafficPolicyConfig),
+                                            TrafficPolicyConfig.class);
+                        })
+                .onErrorResume(
+                        e -> {
+                            Logger.error("update traffic policy error", e);
+                            return ServerResponse.status(500)
+                                    .contentType(MediaType.APPLICATION_JSON)
+                                    .body(Mono.just(e.getMessage()), String.class);
+                        });
     }
 
     private Map<String, Response.WorkerRoleSummary> buildWorkerSummary() {
@@ -150,63 +175,78 @@ public class HttpLoadBalanceServer {
 
     private Mono<ServerResponse> responseMasterInfo(ServerRequest request) {
         return request.bodyToMono(Request.class)
-                .flatMap((Function<Request, Mono<ServerResponse>>) req -> {
-                    Response result = new Response();
-                    result.setRealMasterHost(lbStatusConsistencyService.getMasterHostIpPort());
-                    result.setQueueLength(requestScheduler.getQueuedRequestCount());
-                    result.setCode(200);
-                    result.setSuccess(true);
-                    result.setWorkerSummary(buildWorkerSummary());
-                    result.setReady(masterEngineSynchronizer == null || masterEngineSynchronizer.isReady());
-                    return ServerResponse.ok()
-                            .contentType(MediaType.APPLICATION_JSON)
-                            .body(Mono.just(result), Response.class);
-                }).onErrorResume(e -> {
-                    Logger.error("responseMasterInfo error", e);
-                    Response errorResponse = new Response();
-                    errorResponse.setSuccess(false);
-                    errorResponse.setCode(500);
-                    errorResponse.setErrorMessage(e.getMessage());
-                    return ServerResponse.status(500)
-                            .contentType(MediaType.APPLICATION_JSON)
-                            .body(Mono.just(errorResponse), Response.class);
-                });
+                .flatMap(
+                        (Function<Request, Mono<ServerResponse>>)
+                                req -> {
+                                    Response result = new Response();
+                                    result.setRealMasterHost(
+                                            lbStatusConsistencyService.getMasterHostIpPort());
+                                    result.setQueueLength(requestScheduler.getQueuedRequestCount());
+                                    result.setCode(200);
+                                    result.setSuccess(true);
+                                    result.setWorkerSummary(buildWorkerSummary());
+                                    result.setReady(
+                                            masterEngineSynchronizer == null
+                                                    || masterEngineSynchronizer.isReady());
+                                    return ServerResponse.ok()
+                                            .contentType(MediaType.APPLICATION_JSON)
+                                            .body(Mono.just(result), Response.class);
+                                })
+                .onErrorResume(
+                        e -> {
+                            Logger.error("responseMasterInfo error", e);
+                            Response errorResponse = new Response();
+                            errorResponse.setSuccess(false);
+                            errorResponse.setCode(500);
+                            errorResponse.setErrorMessage(e.getMessage());
+                            return ServerResponse.status(500)
+                                    .contentType(MediaType.APPLICATION_JSON)
+                                    .body(Mono.just(errorResponse), Response.class);
+                        });
     }
 
     public Mono<ServerResponse> notifyParticipant(ServerRequest request) {
         return request.bodyToMono(MasterChangeNotifyReq.class)
-                .flatMap(masterChangeNotifyReq -> {
-                    MasterChangeNotifyResp resp = lbStatusConsistencyService.handleMasterChange(masterChangeNotifyReq);
-                    return ServerResponse.ok()
-                            .contentType(MediaType.APPLICATION_JSON)
-                            .body(Mono.just(resp), MasterChangeNotifyResp.class);
-                }).onErrorResume((Function<Throwable, Mono<ServerResponse>>) e -> {
-                    Logger.error("notifyParticipant error", e);
-                    return ServerResponse.status(500)
-                            .contentType(MediaType.APPLICATION_JSON)
-                            .body(Mono.just(e.getMessage()), String.class);
-                });
+                .flatMap(
+                        masterChangeNotifyReq -> {
+                            MasterChangeNotifyResp resp =
+                                    lbStatusConsistencyService.handleMasterChange(
+                                            masterChangeNotifyReq);
+                            return ServerResponse.ok()
+                                    .contentType(MediaType.APPLICATION_JSON)
+                                    .body(Mono.just(resp), MasterChangeNotifyResp.class);
+                        })
+                .onErrorResume(
+                        (Function<Throwable, Mono<ServerResponse>>)
+                                e -> {
+                                    Logger.error("notifyParticipant error", e);
+                                    return ServerResponse.status(500)
+                                            .contentType(MediaType.APPLICATION_JSON)
+                                            .body(Mono.just(e.getMessage()), String.class);
+                                });
     }
 
     public Mono<ServerResponse> dumpLBStatus(ServerRequest request) {
         return request.bodyToMono(SyncLBStatusReq.class)
-                .flatMap(syncLBStatusReq -> {
-                    SyncLBStatusResp resp = lbStatusConsistencyService.dumpLBStatus();
-                    return ServerResponse.ok()
-                            .contentType(MediaType.APPLICATION_JSON)
-                            .body(Mono.just(resp), SyncLBStatusResp.class);
-                }).onErrorResume(e -> {
-                    Logger.error("dumpLBStatus error", e);
-                    return ServerResponse.status(500)
-                            .contentType(MediaType.APPLICATION_JSON)
-                            .body(Mono.just(e.getMessage()), String.class);
-                });
+                .flatMap(
+                        syncLBStatusReq -> {
+                            SyncLBStatusResp resp = lbStatusConsistencyService.dumpLBStatus();
+                            return ServerResponse.ok()
+                                    .contentType(MediaType.APPLICATION_JSON)
+                                    .body(Mono.just(resp), SyncLBStatusResp.class);
+                        })
+                .onErrorResume(
+                        e -> {
+                            Logger.error("dumpLBStatus error", e);
+                            return ServerResponse.status(500)
+                                    .contentType(MediaType.APPLICATION_JSON)
+                                    .body(Mono.just(e.getMessage()), String.class);
+                        });
     }
 
     public Mono<ServerResponse> queueSnapshot(ServerRequest request) {
         try {
-            List<RequestState> snapshot =
-                    requestScheduler.snapshotActiveRequests();
+            List<RequestState> snapshot = requestScheduler.snapshotActiveRequests();
             QueueSnapshotResponse response = persistSchedulerSnapshot(snapshot);
             return ServerResponse.ok()
                     .contentType(MediaType.APPLICATION_JSON)
@@ -219,14 +259,13 @@ public class HttpLoadBalanceServer {
         }
     }
 
-    private QueueSnapshotResponse persistSchedulerSnapshot(
-            List<RequestState> snapshot) throws IOException {
+    private QueueSnapshotResponse persistSchedulerSnapshot(List<RequestState> snapshot)
+            throws IOException {
         Files.createDirectories(SCHEDULER_SNAPSHOT_DIR);
         cleanOldSchedulerSnapshots();
 
         long timestamp = System.currentTimeMillis();
-        Path file = SCHEDULER_SNAPSHOT_DIR.resolve(
-                SCHEDULER_SNAPSHOT_PREFIX + timestamp + ".json");
+        Path file = SCHEDULER_SNAPSHOT_DIR.resolve(SCHEDULER_SNAPSHOT_PREFIX + timestamp + ".json");
         Files.writeString(file, JsonUtils.toFormattedString(snapshot));
         return new QueueSnapshotResponse(
                 file.toAbsolutePath().toString(), timestamp, snapshot.size());
@@ -235,11 +274,14 @@ public class HttpLoadBalanceServer {
     private void cleanOldSchedulerSnapshots() throws IOException {
         List<Path> files;
         try (Stream<Path> entries = Files.list(SCHEDULER_SNAPSHOT_DIR)) {
-            files = entries
-                    .filter(path -> path.getFileName().toString()
-                            .startsWith(SCHEDULER_SNAPSHOT_PREFIX))
-                    .sorted()
-                    .toList();
+            files =
+                    entries.filter(
+                                    path ->
+                                            path.getFileName()
+                                                    .toString()
+                                                    .startsWith(SCHEDULER_SNAPSHOT_PREFIX))
+                            .sorted()
+                            .toList();
         }
         for (int index = 0; index <= files.size() - MAX_SNAPSHOT_FILES; index++) {
             Files.deleteIfExists(files.get(index));
@@ -253,13 +295,19 @@ public class HttpLoadBalanceServer {
             result.put("scheduler_tracked", trackedRequests);
             result.put("scheduler_inflight", trackedRequests);
             result.put("scheduler_blocked", requestScheduler.getBlockedRequestCount());
-            result.put("decode_max_engine_requests",
-                    configService.loadBalanceConfig().getRouter().getRoles()
-                            .getDecode().getAvailability().getMaxEngineRequests());
+            result.put(
+                    "decode_max_engine_requests",
+                    configService
+                            .loadBalanceConfig()
+                            .getRouter()
+                            .getRoles()
+                            .getDecode()
+                            .getAvailability()
+                            .getMaxEngineRequests());
 
             List<Map<String, Object>> prefillList = new ArrayList<>();
-            for (Map.Entry<String, PrefillEndpoint> entry
-                    : endpointRegistry.snapshotPrefillEndpoints().entrySet()) {
+            for (Map.Entry<String, PrefillEndpoint> entry :
+                    endpointRegistry.snapshotPrefillEndpoints().entrySet()) {
                 PrefillEndpoint endpoint = entry.getValue();
                 WorkerStatus.CacheIndexSnapshot cacheIndex =
                         endpoint.getStatus().cacheIndexSnapshot();
@@ -268,28 +316,25 @@ public class HttpLoadBalanceServer {
                 ep.put("ip_port", entry.getKey());
                 ep.put("inflight_batches", endpoint.getInflightBatchCount());
                 ep.put("inflight_requests", endpoint.getLocallyOwnedRequestCount());
-                ep.put("inflight_route_requests",
-                        endpoint.getIndividuallyTrackedRequestCount());
-                ep.put("cache_version",
-                        cacheStatus == null ? -1L : cacheStatus.getVersion());
+                ep.put("inflight_route_requests", endpoint.getIndividuallyTrackedRequestCount());
+                ep.put("cache_version", cacheStatus == null ? -1L : cacheStatus.getVersion());
                 ep.put("cache_indexed", cacheIndex.indexInitialized());
                 ep.put("cache_indexed_version", cacheIndex.indexedVersion());
-                ep.put("cache_key_size",
-                        cacheStatus == null ? 0 : cacheStatus.getCacheKeySize());
+                ep.put("cache_key_size", cacheStatus == null ? 0 : cacheStatus.getCacheKeySize());
                 prefillList.add(ep);
             }
             result.put("prefill_endpoints", prefillList);
 
             List<Map<String, Object>> decodeList = new ArrayList<>();
-            for (Map.Entry<String, DecodeEndpoint> entry
-                    : endpointRegistry.snapshotDecodeEndpoints().entrySet()) {
-                DecodeEndpoint.LayeredAdmissionView view =
-                        entry.getValue().resourceSnapshot();
+            for (Map.Entry<String, DecodeEndpoint> entry :
+                    endpointRegistry.snapshotDecodeEndpoints().entrySet()) {
+                DecodeEndpoint.LayeredAdmissionView view = entry.getValue().resourceSnapshot();
                 Map<String, Object> ep = new LinkedHashMap<>();
                 ep.put("ip_port", entry.getKey());
                 ep.put("reserved_total", view.reserved().size());
                 ep.put("master_queued", view.queuedCount());
-                ep.put("engine_may_have_seen",
+                ep.put(
+                        "engine_may_have_seen",
                         Math.max(0, view.reserved().size() - view.queuedCount()));
                 ep.put("confirmed_accepted", view.acceptedCount());
                 ep.put("confirmed_running", view.runningCount());
@@ -297,14 +342,11 @@ public class HttpLoadBalanceServer {
                 ep.put("engine_load", view.routing().engineLoad());
                 ep.put("active_dispatch_permits", view.activeDispatchPermits());
                 ep.put("engine_capacity_used", view.engineCapacityUsed());
-                ep.put("engine_facing_kv_used",
-                        view.routing().engineFacingKvUsed());
-                ep.put("engine_facing_kv_available",
-                        view.routing().engineFacingKvAvailable());
+                ep.put("engine_facing_kv_used", view.routing().engineFacingKvUsed());
+                ep.put("engine_facing_kv_available", view.routing().engineFacingKvAvailable());
                 ep.put("total_kv", view.routing().totalKv());
                 ep.put("inflight_hard_kv", view.routing().inputKvReserved());
-                ep.put("inflight_expected_kv",
-                        view.routing().inputAndMaxOutputKvReserved());
+                ep.put("inflight_expected_kv", view.routing().inputAndMaxOutputKvReserved());
                 decodeList.add(ep);
             }
             result.put("decode_endpoints", decodeList);

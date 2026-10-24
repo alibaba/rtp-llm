@@ -12,7 +12,9 @@ class TrafficPolicyConfigTest {
 
     @Test
     void first_matching_rule_wins_and_match_constraints_are_anded() {
-        TrafficPolicyConfig config = parseGroupSelector("""
+        TrafficPolicyConfig config =
+                parseGroupSelector(
+                        """
                 {
                   "rules": [
                     {
@@ -40,7 +42,9 @@ class TrafficPolicyConfigTest {
 
     @Test
     void falls_back_to_default_targets_and_weighted_choice_is_retry_stable() {
-        TrafficPolicyConfig config = parseGroupSelector("""
+        TrafficPolicyConfig config =
+                parseGroupSelector(
+                        """
                 {
                   "defaultTargets": [
                     {"group": "blue", "weight": 90},
@@ -58,14 +62,22 @@ class TrafficPolicyConfigTest {
 
     @Test
     void rejects_duplicate_shapes_and_invalid_rules() {
-        assertThrows(ConfigValidationException.class, () -> parseGroupSelector("""
+        assertThrows(
+                ConfigValidationException.class,
+                () ->
+                        parseGroupSelector(
+                                """
                 {
                   "defaultGroup":"blue",
                   "defaultTargets":[{"group":"blue","weight":1}],
                   "rules":[]
                 }
                 """));
-        assertThrows(ConfigValidationException.class, () -> parseGroupSelector("""
+        assertThrows(
+                ConfigValidationException.class,
+                () ->
+                        parseGroupSelector(
+                                """
                 {
                   "rules":[{
                     "name":"unconditional",
@@ -74,7 +86,11 @@ class TrafficPolicyConfigTest {
                   }]
                 }
                 """));
-        assertThrows(ConfigValidationException.class, () -> parseGroupSelector("""
+        assertThrows(
+                ConfigValidationException.class,
+                () ->
+                        parseGroupSelector(
+                                """
                 {
                   "rules":[{
                     "name":"bad-range",
@@ -83,13 +99,21 @@ class TrafficPolicyConfigTest {
                   }]
                 }
                 """));
-        assertThrows(ConfigValidationException.class, () -> parseGroupSelector("""
+        assertThrows(
+                ConfigValidationException.class,
+                () ->
+                        parseGroupSelector(
+                                """
                 {
                   "defaultTargets":[{"group":"blue","weight":0}],
                   "rules":[]
                 }
                 """));
-        assertThrows(ConfigValidationException.class, () -> parseGroupSelector("""
+        assertThrows(
+                ConfigValidationException.class,
+                () ->
+                        parseGroupSelector(
+                                """
                 {
                   "rules":[{
                     "name":"duplicate-key",
@@ -98,7 +122,11 @@ class TrafficPolicyConfigTest {
                   }]
                 }
                 """));
-        assertThrows(ConfigValidationException.class, () -> parseGroupSelector("""
+        assertThrows(
+                ConfigValidationException.class,
+                () ->
+                        parseGroupSelector(
+                                """
                 {
                   "rules":[{
                     "name":"blank-key",

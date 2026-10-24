@@ -57,10 +57,13 @@ class GrpcChannelFactoryTest {
             appender.stop();
         }
 
-        assertFalse(appender.list.stream()
-                .map(ILoggingEvent::getFormattedMessage)
-                .anyMatch(message -> message.contains("Unknown channel option")
-                        && message.contains("TCP_USER_TIMEOUT")));
+        assertFalse(
+                appender.list.stream()
+                        .map(ILoggingEvent::getFormattedMessage)
+                        .anyMatch(
+                                message ->
+                                        message.contains("Unknown channel option")
+                                                && message.contains("TCP_USER_TIMEOUT")));
     }
 
     private static AnnotationConfigApplicationContext createChannelContext() {

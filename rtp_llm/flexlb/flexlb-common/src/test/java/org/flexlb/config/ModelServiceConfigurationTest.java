@@ -15,13 +15,13 @@ import static org.mockito.Mockito.when;
 
 class ModelServiceConfigurationTest {
 
-    private final ApplicationContextRunner contextRunner = new ApplicationContextRunner()
-            .withUserConfiguration(
-                    ServiceDiscoveryConfiguration.class,
-                    ModelServiceConfiguration.class)
-            .withBean("environmentConfigSource", Object.class, Object::new)
-            .withBean("nacosConfigSource", Object.class, Object::new)
-            .withBean("uniConfigConfigSource", Object.class, Object::new);
+    private final ApplicationContextRunner contextRunner =
+            new ApplicationContextRunner()
+                    .withUserConfiguration(
+                            ServiceDiscoveryConfiguration.class, ModelServiceConfiguration.class)
+                    .withBean("environmentConfigSource", Object.class, Object::new)
+                    .withBean("nacosConfigSource", Object.class, Object::new)
+                    .withBean("uniConfigConfigSource", Object.class, Object::new);
 
     @Test
     void failsWhenModelServiceConfigIsMissing() {
@@ -30,43 +30,51 @@ class ModelServiceConfigurationTest {
 
         contextRunner
                 .withBean(ConfigService.class, () -> configService)
-                .run(context -> {
-                    assertThat(context).hasFailed();
-                    assertThat(context.getStartupFailure())
-                            .hasRootCauseMessage("MODEL_SERVICE_CONFIG must not be blank");
-                });
+                .run(
+                        context -> {
+                            assertThat(context).hasFailed();
+                            assertThat(context.getStartupFailure())
+                                    .hasRootCauseMessage("MODEL_SERVICE_CONFIG must not be blank");
+                        });
     }
 
     @Test
     void loadsAndValidatesEndpointDiscoveryTopology() {
         withModelConfig(staticModelConfig())
-                .run(context -> {
-                    assertThat(context).hasNotFailed();
-                    ModelMetaConfig config = context.getBean(ModelMetaConfig.class);
-                    var endpoint = config.getServiceRoute("test-service")
-                            .getAllEndpoints().getFirst();
-                    assertThat(endpoint.getDiscovery().getType())
-                            .isEqualTo(ServiceDiscoveryType.STATIC_ENV);
-                    assertThat(endpoint.getDiscovery().getHosts())
-                            .containsExactly("127.0.0.1:8080");
-                    assertThat(endpoint.getWorkerStatusPort()).isEqualTo(18002);
-                    assertThat(endpoint.getMultiEngineNum()).isEqualTo(1);
-                });
+                .run(
+                        context -> {
+                            assertThat(context).hasNotFailed();
+                            ModelMetaConfig config = context.getBean(ModelMetaConfig.class);
+                            var endpoint =
+                                    config.getServiceRoute("test-service")
+                                            .getAllEndpoints()
+                                            .getFirst();
+                            assertThat(endpoint.getDiscovery().getType())
+                                    .isEqualTo(ServiceDiscoveryType.STATIC_ENV);
+                            assertThat(endpoint.getDiscovery().getHosts())
+                                    .containsExactly("127.0.0.1:8080");
+                            assertThat(endpoint.getWorkerStatusPort()).isEqualTo(18002);
+                            assertThat(endpoint.getMultiEngineNum()).isEqualTo(1);
+                        });
     }
 
     @Test
     void loadsMultiEngineEndpointConfiguration() {
-        withModelConfig(staticModelConfig().replace(
-                "\"worker_status_port\":18002,",
-                "\"worker_status_port\":18002,\"multi_engine_num\":2,"))
-                .run(context -> {
-                    assertThat(context).hasNotFailed();
-                    var endpoint = context.getBean(ModelMetaConfig.class)
-                            .getServiceRoute("test-service")
-                            .getAllEndpoints()
-                            .getFirst();
-                    assertThat(endpoint.getMultiEngineNum()).isEqualTo(2);
-                });
+        withModelConfig(
+                        staticModelConfig()
+                                .replace(
+                                        "\"worker_status_port\":18002,",
+                                        "\"worker_status_port\":18002,\"multi_engine_num\":2,"))
+                .run(
+                        context -> {
+                            assertThat(context).hasNotFailed();
+                            var endpoint =
+                                    context.getBean(ModelMetaConfig.class)
+                                            .getServiceRoute("test-service")
+                                            .getAllEndpoints()
+                                            .getFirst();
+                            assertThat(endpoint.getMultiEngineNum()).isEqualTo(2);
+                        });
     }
 
     @ParameterizedTest
@@ -87,26 +95,30 @@ class ModelServiceConfigurationTest {
 
     @Test
     void acceptsMultiEngineWorkerStatusPortRangeEndingAtMaximumTcpPort() {
-        String config = staticModelConfig().replace(
-                "\"worker_status_port\":18002,",
-                "\"worker_status_port\":65534,\"multi_engine_num\":2,");
+        String config =
+                staticModelConfig()
+                        .replace(
+                                "\"worker_status_port\":18002,",
+                                "\"worker_status_port\":65534,\"multi_engine_num\":2,");
 
         withModelConfig(config).run(context -> assertThat(context).hasNotFailed());
     }
 
     @Test
     void rejectsMultiEngineEndpointWithoutWorkerStatusPort() {
-        String config = staticModelConfig()
-                .replace("\"worker_status_port\":18002,", "\"multi_engine_num\":2,");
+        String config =
+                staticModelConfig()
+                        .replace("\"worker_status_port\":18002,", "\"multi_engine_num\":2,");
 
         withModelConfig(config)
-                .run(context -> {
-                    assertThat(context).hasFailed();
-                    assertThat(context.getStartupFailure())
-                            .hasRootCauseMessage(
-                                    "MODEL_SERVICE_CONFIG endpoint worker_status_port must be configured "
-                                            + "when multi_engine_num is greater than one: service-a");
-                });
+                .run(
+                        context -> {
+                            assertThat(context).hasFailed();
+                            assertThat(context.getStartupFailure())
+                                    .hasRootCauseMessage(
+                                            "MODEL_SERVICE_CONFIG endpoint worker_status_port must be configured "
+                                                    + "when multi_engine_num is greater than one: service-a");
+                        });
     }
 
     @Test
@@ -118,41 +130,46 @@ class ModelServiceConfigurationTest {
 
     @Test
     void rejectsEndpointWithoutDiscovery() {
-        String config = """
+        String config =
+                """
                 {"service_id":"test-service","role_endpoints":[{"group":"default",
                 "pd_fusion_endpoint":{"address":"service-a","protocol":"http","path":"/"}}]}
                 """;
 
         withModelConfig(config)
-                .run(context -> {
-                    assertThat(context).hasFailed();
-                    assertThat(context.getStartupFailure())
-                            .hasRootCauseMessage(
-                                    "endpoint discovery must be configured for address: service-a");
-                });
+                .run(
+                        context -> {
+                            assertThat(context).hasFailed();
+                            assertThat(context.getStartupFailure())
+                                    .hasRootCauseMessage(
+                                            "endpoint discovery must be configured for address: service-a");
+                        });
     }
 
     @Test
     void rejectsDiscoveryTypeWithoutProvider() {
-        String config = """
+        String config =
+                """
                 {"service_id":"test-service","role_endpoints":[{"group":"default",
                 "pd_fusion_endpoint":{"address":"v-test","protocol":"http","path":"/",
                 "discovery":{"type":"dashscope","base_url":"http://127.0.0.1:8880"}}}]}
                 """;
 
         withModelConfig(config)
-                .run(context -> {
-                    assertThat(context).hasFailed();
-                    assertThat(context.getStartupFailure())
-                            .hasRootCauseMessage(
-                                    "No service discovery provider available for type: "
-                                            + "dashscope, address: v-test");
-                });
+                .run(
+                        context -> {
+                            assertThat(context).hasFailed();
+                            assertThat(context.getStartupFailure())
+                                    .hasRootCauseMessage(
+                                            "No service discovery provider available for type: "
+                                                    + "dashscope, address: v-test");
+                        });
     }
 
     @Test
     void loadsKvcmTopology() {
-        String config = """
+        String config =
+                """
                 {"service_id":"test-service","kvcm":{"address":"kvcm-service",
                 "port":7381,
                 "discovery":{"type":"static-env","hosts":["127.0.0.1:8080"]}},
@@ -162,59 +179,65 @@ class ModelServiceConfigurationTest {
                 """;
 
         withModelConfig(config)
-                .run(context -> {
-                    assertThat(context).hasNotFailed();
-                    var route = context.getBean(ModelMetaConfig.class)
-                            .getServiceRoute("test-service");
-                    assertThat(route.getKvcm()).isNotNull();
-                    assertThat(route.getKvcm().getPort()).isEqualTo(7381);
-                    assertThat(route.getAllEndpoints()).hasSize(1);
-                });
+                .run(
+                        context -> {
+                            assertThat(context).hasNotFailed();
+                            var route =
+                                    context.getBean(ModelMetaConfig.class)
+                                            .getServiceRoute("test-service");
+                            assertThat(route.getKvcm()).isNotNull();
+                            assertThat(route.getKvcm().getPort()).isEqualTo(7381);
+                            assertThat(route.getAllEndpoints()).hasSize(1);
+                        });
     }
 
     @Test
     void loadsOptimizerTopology() {
         withModelConfig(modelConfig(validOptimizerConfig()))
-                .run(context -> {
-                    assertThat(context).hasNotFailed();
-                    OptimizerConfig optimizer = context.getBean(ModelMetaConfig.class)
-                            .getServiceRoute("test-service")
-                            .getOptimizer();
-                    assertThat(optimizer.getAddress()).isEqualTo("optimizer-service");
-                    assertThat(optimizer.getPort()).isEqualTo(9090);
-                    assertThat(optimizer.getPath()).isEqualTo("/custom/optimizer");
-                    assertThat(optimizer.toEndpoint().getProtocol()).isEqualTo("http");
-                    assertThat(optimizer.toEndpoint().getDiscovery().getType())
-                            .isEqualTo(ServiceDiscoveryType.STATIC_ENV);
-                });
+                .run(
+                        context -> {
+                            assertThat(context).hasNotFailed();
+                            OptimizerConfig optimizer =
+                                    context.getBean(ModelMetaConfig.class)
+                                            .getServiceRoute("test-service")
+                                            .getOptimizer();
+                            assertThat(optimizer.getAddress()).isEqualTo("optimizer-service");
+                            assertThat(optimizer.getPort()).isEqualTo(9090);
+                            assertThat(optimizer.getPath()).isEqualTo("/custom/optimizer");
+                            assertThat(optimizer.toEndpoint().getProtocol()).isEqualTo("http");
+                            assertThat(optimizer.toEndpoint().getDiscovery().getType())
+                                    .isEqualTo(ServiceDiscoveryType.STATIC_ENV);
+                        });
     }
 
     @Test
     void appliesOptimizerTopologyDefaults() {
-        withModelConfig(modelConfig(
-                validOptimizerConfig().replace(
-                        ",\"port\":9090,\"path\":\"/custom/optimizer\"", "")))
-                .run(context -> {
-                    assertThat(context).hasNotFailed();
-                    OptimizerConfig optimizer = context.getBean(ModelMetaConfig.class)
-                            .getServiceRoute("test-service")
-                            .getOptimizer();
-                    assertThat(optimizer.getPath()).isEqualTo(OptimizerConfig.DEFAULT_PATH);
-                    assertThat(optimizer.getPort()).isEqualTo(OptimizerConfig.DEFAULT_PORT);
-                });
+        withModelConfig(
+                        modelConfig(
+                                validOptimizerConfig()
+                                        .replace(
+                                                ",\"port\":9090,\"path\":\"/custom/optimizer\"",
+                                                "")))
+                .run(
+                        context -> {
+                            assertThat(context).hasNotFailed();
+                            OptimizerConfig optimizer =
+                                    context.getBean(ModelMetaConfig.class)
+                                            .getServiceRoute("test-service")
+                                            .getOptimizer();
+                            assertThat(optimizer.getPath()).isEqualTo(OptimizerConfig.DEFAULT_PATH);
+                            assertThat(optimizer.getPort()).isEqualTo(OptimizerConfig.DEFAULT_PORT);
+                        });
     }
 
     @Test
     void rejectsOptimizerWithInvalidPathOrDiscovery() {
         assertOptimizerRejected(
-                validOptimizerConfig().replace(
-                        "\"path\":\"/custom/optimizer\"",
-                        "\"path\":\"custom/optimizer\""),
+                validOptimizerConfig()
+                        .replace("\"path\":\"/custom/optimizer\"", "\"path\":\"custom/optimizer\""),
                 "MODEL_SERVICE_CONFIG online_optimizer.path must start with '/'");
         assertOptimizerRejected(
-                validOptimizerConfig().replace(
-                        "\"hosts\":[\"127.0.0.1:8082\"]",
-                        "\"hosts\":[]"),
+                validOptimizerConfig().replace("\"hosts\":[\"127.0.0.1:8082\"]", "\"hosts\":[]"),
                 "static-env discovery hosts must be configured for address: optimizer-service");
     }
 
@@ -229,19 +252,22 @@ class ModelServiceConfigurationTest {
 
     private void assertOptimizerRejected(String optimizerConfig, String message) {
         withModelConfig(modelConfig(optimizerConfig))
-                .run(context -> {
-                    assertThat(context).hasFailed();
-                    assertThat(context.getStartupFailure()).hasRootCauseMessage(message);
-                });
+                .run(
+                        context -> {
+                            assertThat(context).hasFailed();
+                            assertThat(context.getStartupFailure()).hasRootCauseMessage(message);
+                        });
     }
 
     private void assertEndpointRejected(String endpointFields, String message) {
-        String config = staticModelConfig().replace("\"worker_status_port\":18002,", endpointFields);
+        String config =
+                staticModelConfig().replace("\"worker_status_port\":18002,", endpointFields);
         withModelConfig(config)
-                .run(context -> {
-                    assertThat(context).hasFailed();
-                    assertThat(context.getStartupFailure()).hasRootCauseMessage(message);
-                });
+                .run(
+                        context -> {
+                            assertThat(context).hasFailed();
+                            assertThat(context.getStartupFailure()).hasRootCauseMessage(message);
+                        });
     }
 
     private ApplicationContextRunner withModelConfig(String configJson) {
@@ -257,7 +283,8 @@ class ModelServiceConfigurationTest {
                 "role_endpoints":[{"group":"default",
                 "pd_fusion_endpoint":{"address":"service-a","protocol":"http","path":"/",
                 "discovery":{"type":"static-env","hosts":["127.0.0.1:8080"]}}}]}
-                """.formatted(optimizerConfig);
+                """
+                .formatted(optimizerConfig);
     }
 
     private String validOptimizerConfig() {

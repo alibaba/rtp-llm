@@ -27,9 +27,11 @@ class RoutingServiceDiscoveryTest {
         Endpoint missingProvider = endpoint();
         missingProvider.getDiscovery().setType(ServiceDiscoveryType.VIPSERVER);
 
-        for (Endpoint endpoint : new Endpoint[] {null, missingDiscovery, missingType, missingProvider}) {
+        for (Endpoint endpoint :
+                new Endpoint[] {null, missingDiscovery, missingType, missingProvider}) {
             assertThrows(IllegalArgumentException.class, () -> discovery.getHosts(endpoint));
-            assertThrows(IllegalArgumentException.class, () -> discovery.listen(endpoint, hosts -> { }));
+            assertThrows(
+                    IllegalArgumentException.class, () -> discovery.listen(endpoint, hosts -> {}));
         }
     }
 
@@ -41,16 +43,14 @@ class RoutingServiceDiscoveryTest {
 
         discovery.validate(endpoint);
         discovery.getHosts(endpoint);
-        discovery.listen(endpoint, hosts -> {
-        });
+        discovery.listen(endpoint, hosts -> {});
 
         assertEquals(1, provider.validationCount.get());
     }
 
     @Test
     void normalizesDiscoveredHostsWithEndpointProtocolAndGroup() {
-        WorkerHost discoveredHost =
-                WorkerHost.of("10.0.0.1", 8081, "site-a", "deployment-a");
+        WorkerHost discoveredHost = WorkerHost.of("10.0.0.1", 8081, "site-a", "deployment-a");
         RecordingProvider provider = new RecordingProvider(List.of(discoveredHost));
         RoutingServiceDiscovery discovery = new RoutingServiceDiscovery(List.of(provider));
         Endpoint endpoint = endpoint();
@@ -118,14 +118,19 @@ class RoutingServiceDiscoveryTest {
         List<WorkerHost> hosts = discovery.getHosts(endpoint);
 
         assertEquals(2, hosts.size());
-        assertIterableEquals(List.of(0, 1), hosts.stream().map(WorkerHost::getEngineIndex).toList());
-        assertIterableEquals(List.of(18002, 18003),
+        assertIterableEquals(
+                List.of(0, 1), hosts.stream().map(WorkerHost::getEngineIndex).toList());
+        assertIterableEquals(
+                List.of(18002, 18003),
                 hosts.stream().map(WorkerHost::getWorkerStatusPort).toList());
-        assertIterableEquals(List.of("10.0.0.1:8080@0", "10.0.0.1:8080@1"),
+        assertIterableEquals(
+                List.of("10.0.0.1:8080@0", "10.0.0.1:8080@1"),
                 hosts.stream().map(WorkerHost::getLogicalIpPort).toList());
-        assertIterableEquals(List.of("10.0.0.1:8080", "10.0.0.1:8080"),
+        assertIterableEquals(
+                List.of("10.0.0.1:8080", "10.0.0.1:8080"),
                 hosts.stream().map(WorkerHost::getPhysicalIpPort).toList());
-        assertIterableEquals(List.of(2, 2), hosts.stream().map(WorkerHost::getMultiEngineNum).toList());
+        assertIterableEquals(
+                List.of(2, 2), hosts.stream().map(WorkerHost::getMultiEngineNum).toList());
     }
 
     @Test
@@ -133,12 +138,16 @@ class RoutingServiceDiscoveryTest {
         Endpoint endpoint = endpoint();
         endpoint.setProtocol("grpc");
         for (int discoveredPort : List.of(0, 1, 65535, Integer.MAX_VALUE)) {
-            RoutingServiceDiscovery discovery = new RoutingServiceDiscovery(List.of(
-                    new RecordingProvider(List.of(WorkerHost.of("10.0.0.1", discoveredPort)))));
+            RoutingServiceDiscovery discovery =
+                    new RoutingServiceDiscovery(
+                            List.of(
+                                    new RecordingProvider(
+                                            List.of(WorkerHost.of("10.0.0.1", discoveredPort)))));
             assertThrows(IllegalArgumentException.class, () -> discovery.getHosts(endpoint));
         }
-        RoutingServiceDiscovery discovery = new RoutingServiceDiscovery(List.of(
-                new RecordingProvider(List.of(WorkerHost.of("10.0.0.1", 8081)))));
+        RoutingServiceDiscovery discovery =
+                new RoutingServiceDiscovery(
+                        List.of(new RecordingProvider(List.of(WorkerHost.of("10.0.0.1", 8081)))));
         endpoint.setWorkerStatusPort(65535);
         endpoint.setMultiEngineNum(2);
         assertThrows(IllegalArgumentException.class, () -> discovery.getHosts(endpoint));
@@ -195,7 +204,6 @@ class RoutingServiceDiscoveryTest {
         }
 
         @Override
-        public void shutdown() {
-        }
+        public void shutdown() {}
     }
 }

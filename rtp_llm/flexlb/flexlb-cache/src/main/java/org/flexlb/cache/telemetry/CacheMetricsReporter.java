@@ -75,8 +75,7 @@ public class CacheMetricsReporter {
      */
     private static final long LONG_OBJECT_BYTES = 24;
 
-    @Autowired
-    private FlexMonitor monitor;
+    @Autowired private FlexMonitor monitor;
 
     @PostConstruct
     public void init() {
@@ -99,11 +98,19 @@ public class CacheMetricsReporter {
         // Cache hit rate metrics
         monitor.register(CACHE_HIT_COUNT, FlexMetricType.COUNTER);
         monitor.register(CACHE_HIT_RATIO, FlexMetricType.GAUGE);
-        monitor.register(CACHE_KVCM_PREDICTED_TOKENS, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
-        monitor.register(CACHE_KVCM_PREDICTED_RATIO, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
+        monitor.register(
+                CACHE_KVCM_PREDICTED_TOKENS, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
+        monitor.register(
+                CACHE_KVCM_PREDICTED_RATIO, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
         monitor.register(CACHE_LOCAL_STANDBY_BLOCK_SIZE, FlexMetricType.GAUGE);
-        monitor.register(CACHE_LOCAL_STANDBY_PREDICTED_TOKENS, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
-        monitor.register(CACHE_LOCAL_STANDBY_PREDICTED_RATIO, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
+        monitor.register(
+                CACHE_LOCAL_STANDBY_PREDICTED_TOKENS,
+                FlexMetricType.GAUGE,
+                FlexPriorityType.PRECISE);
+        monitor.register(
+                CACHE_LOCAL_STANDBY_PREDICTED_RATIO,
+                FlexMetricType.GAUGE,
+                FlexPriorityType.PRECISE);
         monitor.register(CACHE_INPUT_TOKENS, FlexMetricType.COUNTER);
         monitor.register(CACHE_KVCM_SELECTED_LOCAL_MATCH_TOKENS, FlexMetricType.COUNTER);
         monitor.register(CACHE_KVCM_SELECTED_GLOBAL_MATCH_TOKENS, FlexMetricType.COUNTER);
@@ -115,15 +122,16 @@ public class CacheMetricsReporter {
         monitor.register(CACHE_ROUTING_CANDIDATE_MAX_HIT_TOKENS, FlexMetricType.QPS);
         monitor.register(CACHE_AFFINITY_DECISION, FlexMetricType.QPS);
         monitor.register(CACHE_REQUEST_TOTAL, FlexMetricType.QPS);
-        monitor.register(CACHE_LOCAL_STANDBY_CAPACITY_REJECTED_QPS,
-                FlexMetricType.QPS, FlexPriorityType.PRECISE);
+        monitor.register(
+                CACHE_LOCAL_STANDBY_CAPACITY_REJECTED_QPS,
+                FlexMetricType.QPS,
+                FlexPriorityType.PRECISE);
         monitor.register(CACHE_LOCAL_STANDBY_MAPPING_COUNT, FlexMetricType.GAUGE);
-        monitor.register(CACHE_MATCH_ACTIVE_SOURCE,
-                FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
-        monitor.register(CACHE_MATCH_SOURCE_CHANGE_QPS,
-                FlexMetricType.QPS, FlexPriorityType.PRECISE);
-        monitor.register(CACHE_MATCH_STANDBY_FALLBACK_QPS,
-                FlexMetricType.QPS, FlexPriorityType.PRECISE);
+        monitor.register(CACHE_MATCH_ACTIVE_SOURCE, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
+        monitor.register(
+                CACHE_MATCH_SOURCE_CHANGE_QPS, FlexMetricType.QPS, FlexPriorityType.PRECISE);
+        monitor.register(
+                CACHE_MATCH_STANDBY_FALLBACK_QPS, FlexMetricType.QPS, FlexPriorityType.PRECISE);
 
         // Cache service response time metrics
         monitor.register(CACHE_FIND_MATCHING_ENGINES_RT, FlexMetricType.GAUGE);
@@ -182,7 +190,8 @@ public class CacheMetricsReporter {
      * @param inputTokens Number of input tokens
      * @param hitRatio    Hit fraction for this request
      */
-    public void reportCacheHitMetrics(RoleType roleType, String ipIndex, long hitTokens, long inputTokens, double hitRatio) {
+    public void reportCacheHitMetrics(
+            RoleType roleType, String ipIndex, long hitTokens, long inputTokens, double hitRatio) {
         if (roleType == null) {
             return;
         }
@@ -197,7 +206,8 @@ public class CacheMetricsReporter {
         monitor.report(CACHE_REQUEST_TOTAL, baseTags, 1.0);
     }
 
-    public void reportKvcmPrediction(RoleType roleType, String ipIndex, long hitTokens, long inputTokens) {
+    public void reportKvcmPrediction(
+            RoleType roleType, String ipIndex, long hitTokens, long inputTokens) {
         if (roleType == null) {
             return;
         }
@@ -208,14 +218,16 @@ public class CacheMetricsReporter {
         }
     }
 
-    public void reportLocalStandbyPrediction(RoleType roleType, String ipIndex, long hitTokens, long inputTokens) {
+    public void reportLocalStandbyPrediction(
+            RoleType roleType, String ipIndex, long hitTokens, long inputTokens) {
         if (roleType == null) {
             return;
         }
         FlexMetricTags tags = FlexMetricTags.of("role", roleType.name(), "engineIp", ipIndex);
         monitor.report(CACHE_LOCAL_STANDBY_PREDICTED_TOKENS, tags, hitTokens);
         if (inputTokens > 0) {
-            monitor.report(CACHE_LOCAL_STANDBY_PREDICTED_RATIO, tags, hitTokens / (double) inputTokens);
+            monitor.report(
+                    CACHE_LOCAL_STANDBY_PREDICTED_RATIO, tags, hitTokens / (double) inputTokens);
         }
     }
 
@@ -228,11 +240,12 @@ public class CacheMetricsReporter {
      * @param globalMatchTokens tokens matched across local and remote caches
      * @param inputTokens       request input tokens
      */
-    public void reportKvcmSelectedMatch(RoleType roleType,
-                                        String ipIndex,
-                                        long localMatchTokens,
-                                        long globalMatchTokens,
-                                        long inputTokens) {
+    public void reportKvcmSelectedMatch(
+            RoleType roleType,
+            String ipIndex,
+            long localMatchTokens,
+            long globalMatchTokens,
+            long inputTokens) {
         if (roleType == null) {
             return;
         }
@@ -248,7 +261,10 @@ public class CacheMetricsReporter {
         if (roleType == null) {
             return;
         }
-        monitor.report(CACHE_LOCAL_STANDBY_BLOCK_SIZE, FlexMetricTags.of("role", roleType.name()), blockSize);
+        monitor.report(
+                CACHE_LOCAL_STANDBY_BLOCK_SIZE,
+                FlexMetricTags.of("role", roleType.name()),
+                blockSize);
     }
 
     public void reportLocalStandbyCapacityRejected() {
@@ -268,8 +284,8 @@ public class CacheMetricsReporter {
         }
     }
 
-    public void reportCacheMatchSourceChange(CacheMatchSource previousSource,
-                                             CacheMatchSource currentSource) {
+    public void reportCacheMatchSourceChange(
+            CacheMatchSource previousSource, CacheMatchSource currentSource) {
         reportActiveCacheMatchSource(currentSource);
         monitor.report(
                 CACHE_MATCH_SOURCE_CHANGE_QPS,
@@ -280,10 +296,7 @@ public class CacheMetricsReporter {
     }
 
     public void reportStandbyFallback(String reason) {
-        monitor.report(
-                CACHE_MATCH_STANDBY_FALLBACK_QPS,
-                FlexMetricTags.of("reason", reason),
-                1.0);
+        monitor.report(CACHE_MATCH_STANDBY_FALLBACK_QPS, FlexMetricTags.of("reason", reason), 1.0);
     }
 
     /**
@@ -293,37 +306,35 @@ public class CacheMetricsReporter {
         if (roleType == null) {
             return;
         }
-        monitor.report(CACHE_ROUTING_SELECTED_MATCH_HIT_TOKENS,
-                FlexMetricTags.of("role", roleType.name()), hitTokens);
+        monitor.report(
+                CACHE_ROUTING_SELECTED_MATCH_HIT_TOKENS,
+                FlexMetricTags.of("role", roleType.name()),
+                hitTokens);
     }
 
     /**
      * Report the request-level maximum cache match across available candidates.
      *
      */
-    public void reportRoutingCandidateMaxCacheMatchMetrics(RoleType roleType,
-                                                           long hitTokens) {
+    public void reportRoutingCandidateMaxCacheMatchMetrics(RoleType roleType, long hitTokens) {
         if (roleType == null) {
             return;
         }
 
-        FlexMetricTags tags = FlexMetricTags.of(
-                "role", roleType.name()
-        );
+        FlexMetricTags tags = FlexMetricTags.of("role", roleType.name());
         monitor.report(CACHE_ROUTING_CANDIDATE_MAX_HIT_TOKENS, tags, hitTokens);
     }
 
     /** Report the outcome of a cache-affinity routing decision. */
-    public void reportCacheAffinityDecision(RoleType roleType,
-                                            String engineIp,
-                                            String decision) {
+    public void reportCacheAffinityDecision(RoleType roleType, String engineIp, String decision) {
         if (roleType == null || engineIp == null || decision == null) {
             return;
         }
-        FlexMetricTags tags = FlexMetricTags.of(
-                "role", roleType.name(),
-                "engineIp", engineIp,
-                "decision", decision);
+        FlexMetricTags tags =
+                FlexMetricTags.of(
+                        "role", roleType.name(),
+                        "engineIp", engineIp,
+                        "decision", decision);
         monitor.report(CACHE_AFFINITY_DECISION, tags, 1.0);
     }
 
@@ -379,23 +390,30 @@ public class CacheMetricsReporter {
             return 0L;
         }
 
-        // ConcurrentHashMap base structure overhead (object header 12 + fields 44 = 56 bytes aligned)
+        // ConcurrentHashMap base structure overhead (object header 12 + fields 44 = 56 bytes
+        // aligned)
         long baseStructureSize = 56L;
 
-        // KeySetView instance overhead (object header 12 + reference field 8 + padding 4 = 24 bytes)
+        // KeySetView instance overhead (object header 12 + reference field 8 + padding 4 = 24
+        // bytes)
         long keySetViewOverhead = 24L;
 
         // table array overhead (capacity calculated based on 75% load factor)
         int initialCapacity = Math.max(16, (cacheCount * 4 + 3) / 3);
-        long tableArraySize = alignTo8Bytes(16L + initialCapacity * 4L); // Reference is 4 bytes with compressed oops
+        long tableArraySize =
+                alignTo8Bytes(
+                        16L + initialCapacity * 4L); // Reference is 4 bytes with compressed oops
 
-        // Each ConcurrentHashMap.Node overhead (object header 12 + 4 fields 16 + padding 4 = 32 bytes)
+        // Each ConcurrentHashMap.Node overhead (object header 12 + 4 fields 16 + padding 4 = 32
+        // bytes)
         long nodeSize = 32L;
 
         // Boolean.TRUE not counted
 
-        return baseStructureSize + keySetViewOverhead + tableArraySize +
-                cacheCount * (nodeSize + LONG_OBJECT_BYTES);
+        return baseStructureSize
+                + keySetViewOverhead
+                + tableArraySize
+                + cacheCount * (nodeSize + LONG_OBJECT_BYTES);
     }
 
     /**
@@ -412,14 +430,17 @@ public class CacheMetricsReporter {
             return 0L;
         }
 
-        // ConcurrentHashMap base structure overhead (object header 12 + fields 44 = 56 bytes aligned)
+        // ConcurrentHashMap base structure overhead (object header 12 + fields 44 = 56 bytes
+        // aligned)
         long chmBaseSize = 56L;
 
-        // table array overhead (capacity calculated using a 75% load factor and 4-byte compressed references)
+        // table array overhead (capacity calculated using a 75% load factor and 4-byte compressed
+        // references)
         int initialCapacity = Math.max(16, (int) Math.ceil(totalBlocks / 0.75));
         long tableArraySize = alignTo8Bytes(16L + initialCapacity * 4L);
 
-        // Each ConcurrentHashMap.Node overhead (object header 12 + 4 fields 16 + padding 4 = 32 bytes)
+        // Each ConcurrentHashMap.Node overhead (object header 12 + 4 fields 16 + padding 4 = 32
+        // bytes)
         long nodeSize = 32L;
 
         // Each Set<String> overhead (ConcurrentHashMap.KeySetView)
@@ -430,11 +451,13 @@ public class CacheMetricsReporter {
         // Assume average IP:Port length is 15 characters (e.g., "192.168.1.1:8080")
         long stringSize = getStringObjectSize();
 
-        // Total bytes = base structure + array + all nodes + all keys + all value sets + all strings
-        return chmBaseSize + tableArraySize +
-                totalBlocks * (nodeSize + LONG_OBJECT_BYTES) +
-                totalBlocks * (setWrapperSize + setStructureSize) +
-                totalMappings * stringSize;
+        // Total bytes = base structure + array + all nodes + all keys + all value sets + all
+        // strings
+        return chmBaseSize
+                + tableArraySize
+                + totalBlocks * (nodeSize + LONG_OBJECT_BYTES)
+                + totalBlocks * (setWrapperSize + setStructureSize)
+                + totalMappings * stringSize;
     }
 
     /**
@@ -447,7 +470,10 @@ public class CacheMetricsReporter {
     public void reportFindMatchingEnginesRT(RoleType roleType, long startTime, String success) {
         FlexMetricTags tags = FlexMetricTags.of("role", roleType.name(), "success", success);
 
-        monitor.report(CACHE_FIND_MATCHING_ENGINES_RT, tags, ((double) System.nanoTime() / 1000) - startTime);
+        monitor.report(
+                CACHE_FIND_MATCHING_ENGINES_RT,
+                tags,
+                ((double) System.nanoTime() / 1000) - startTime);
     }
 
     /**
@@ -460,9 +486,13 @@ public class CacheMetricsReporter {
      */
     public void reportUpdateEngineBlockCacheRT(
             String ipIndex, String role, long startTime, String success) {
-        FlexMetricTags tags = FlexMetricTags.of("engineIp", ipIndex, "role", role, "success", success);
+        FlexMetricTags tags =
+                FlexMetricTags.of("engineIp", ipIndex, "role", role, "success", success);
 
-        monitor.report(CACHE_UPDATE_ENGINE_BLOCK_CACHE_RT, tags, ((double) System.nanoTime() / 1000) - startTime);
+        monitor.report(
+                CACHE_UPDATE_ENGINE_BLOCK_CACHE_RT,
+                tags,
+                ((double) System.nanoTime() / 1000) - startTime);
     }
 
     /**
@@ -479,14 +509,14 @@ public class CacheMetricsReporter {
             return;
         }
 
-        FlexMetricTags tags = FlexMetricTags.of(
-                "engineIp", ipIndex,
-                "role", role != null ? role : "unknown");
+        FlexMetricTags tags =
+                FlexMetricTags.of("engineIp", ipIndex, "role", role != null ? role : "unknown");
 
         reportCacheDiffMetrics(tags, addedBlocksSize, removedBlocksSize);
     }
 
-    private void reportCacheDiffMetrics(FlexMetricTags tags, int addedBlocksSize, int removedBlocksSize) {
+    private void reportCacheDiffMetrics(
+            FlexMetricTags tags, int addedBlocksSize, int removedBlocksSize) {
 
         monitor.report(CACHE_DIFF_ADDED_BLOCKS_SIZE, tags, addedBlocksSize);
         monitor.report(CACHE_DIFF_REMOVED_BLOCKS_SIZE, tags, removedBlocksSize);

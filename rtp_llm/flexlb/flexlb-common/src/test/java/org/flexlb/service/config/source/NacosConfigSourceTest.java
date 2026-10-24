@@ -38,113 +38,169 @@ class NacosConfigSourceTest {
     private static final String CONFIG_SCHEMA_VERSION_ENV = "FLEXLB_CONFIG_SCHEMA_VERSION";
 
     @Test
-    void selectedNacosIgnoresEnvironmentBehaviorAndRetainsIndependentModelTopology() throws Exception {
+    void selectedNacosIgnoresEnvironmentBehaviorAndRetainsIndependentModelTopology()
+            throws Exception {
         com.alibaba.nacos.api.config.ConfigService client =
                 mock(com.alibaba.nacos.api.config.ConfigService.class);
         when(client.getConfig("flexlb-test", DEFAULT_NACOS_GROUP, 3000L))
                 .thenReturn("{\"schemaVersion\":3,\"fallbackBatchTokenCapacity\":1048585}");
         new EnvironmentVariables(
-                "FLEXLB_UNICONF_ENABLE", "false",
-                "UNICONF_ENABLE", "true",
-                NACOS_SERVER_ADDR, "127.0.0.1:8848",
-                NACOS_DATA_ID, "flexlb-test",
-                WHALE_BIZ_NAME, "dash_pd", WHALE_DEPLOYMENT_NAME, "flexlb-test", WHALE_ZONE_NAME, "master",
-                "FLEXLB_CONFIG", "{\"schemaVersion\":1,\"enableFallback\":true}",
-                "MODEL_SERVICE_CONFIG", "{\"service_id\":\"test-model\",\"role_endpoints\":[]}")
+                        "FLEXLB_UNICONF_ENABLE",
+                        "false",
+                        "UNICONF_ENABLE",
+                        "true",
+                        NACOS_SERVER_ADDR,
+                        "127.0.0.1:8848",
+                        NACOS_DATA_ID,
+                        "flexlb-test",
+                        WHALE_BIZ_NAME,
+                        "dash_pd",
+                        WHALE_DEPLOYMENT_NAME,
+                        "flexlb-test",
+                        WHALE_ZONE_NAME,
+                        "master",
+                        "FLEXLB_CONFIG",
+                        "{\"schemaVersion\":1,\"enableFallback\":true}",
+                        "MODEL_SERVICE_CONFIG",
+                        "{\"service_id\":\"test-model\",\"role_endpoints\":[]}")
                 .remove(NACOS_GROUP)
                 .remove(SPECTRUM_WORKSPACE_ID)
                 .remove(SPECTRUM_APPLICATION_NAME)
                 .remove(SPECTRUM_DEPLOYMENT_NAME)
-                .execute(() -> {
-                    DeploymentIdentity identity = new DeploymentIdentity();
-                    EnvironmentConfigSource environmentSource = new EnvironmentConfigSource();
-                    environmentSource.initialize();
-                    UniConfigConfigSource uniConfigSource = new UniConfigConfigSource(identity);
-                    uniConfigSource.initialize();
-                    NacosConfigSource source = new NacosConfigSource(identity);
-                    ReflectionTestUtils.setField(source, "client", client);
-                    source.initialize();
-                    ConfigService configService = new ConfigService(List.of(new StandardConfigDocumentParser(), new V0ConfigDocumentParser()));
-                    try {
-                        assertThat(configService.loadBalanceConfig().getFallbackBatchTokenCapacity())
-                                .isEqualTo(1048585L);
-                        assertThat(configService.loadBalanceConfig().isEnableFallback()).isFalse();
-                        assertThat(configService.modelServiceConfig().getServiceId()).isEqualTo("test-model");
-                    } finally {
-                        configService.close();
-                    }
-                });
+                .execute(
+                        () -> {
+                            DeploymentIdentity identity = new DeploymentIdentity();
+                            EnvironmentConfigSource environmentSource =
+                                    new EnvironmentConfigSource();
+                            environmentSource.initialize();
+                            UniConfigConfigSource uniConfigSource =
+                                    new UniConfigConfigSource(identity);
+                            uniConfigSource.initialize();
+                            NacosConfigSource source = new NacosConfigSource(identity);
+                            ReflectionTestUtils.setField(source, "client", client);
+                            source.initialize();
+                            ConfigService configService =
+                                    new ConfigService(
+                                            List.of(
+                                                    new StandardConfigDocumentParser(),
+                                                    new V0ConfigDocumentParser()));
+                            try {
+                                assertThat(
+                                                configService
+                                                        .loadBalanceConfig()
+                                                        .getFallbackBatchTokenCapacity())
+                                        .isEqualTo(1048585L);
+                                assertThat(configService.loadBalanceConfig().isEnableFallback())
+                                        .isFalse();
+                                assertThat(configService.modelServiceConfig().getServiceId())
+                                        .isEqualTo("test-model");
+                            } finally {
+                                configService.close();
+                            }
+                        });
     }
 
     @Test
     void isDisabledWhenNacosAddressIsNotConfigured() throws Exception {
-        NacosConfigSource source = new EnvironmentVariables(WHALE_BIZ_NAME, "dash_pd", WHALE_DEPLOYMENT_NAME, "flexlb-test", WHALE_ZONE_NAME, "master")
-                .remove(NACOS_SERVER_ADDR)
-                .execute(() -> new NacosConfigSource(new DeploymentIdentity()));
+        NacosConfigSource source =
+                new EnvironmentVariables(
+                                WHALE_BIZ_NAME,
+                                "dash_pd",
+                                WHALE_DEPLOYMENT_NAME,
+                                "flexlb-test",
+                                WHALE_ZONE_NAME,
+                                "master")
+                        .remove(NACOS_SERVER_ADDR)
+                        .execute(() -> new NacosConfigSource(new DeploymentIdentity()));
 
         source.initialize();
-        ConfigService configService = new ConfigService(List.of(new StandardConfigDocumentParser(), new V0ConfigDocumentParser()));
+        ConfigService configService =
+                new ConfigService(
+                        List.of(new StandardConfigDocumentParser(), new V0ConfigDocumentParser()));
 
         assertThat(source.priority()).isEqualTo(2);
-        assertThat(configService.loadBalanceConfig().getObservability()
-                .getLogging().getLevel()).isEqualTo(LogLevel.INFO);
+        assertThat(configService.loadBalanceConfig().getObservability().getLogging().getLevel())
+                .isEqualTo(LogLevel.INFO);
         configService.close();
     }
 
     @Test
     void failsFastWhenDataIdCannotBeResolved() {
-        EnvironmentVariables environment = new EnvironmentVariables(NACOS_SERVER_ADDR, "127.0.0.1:8848")
-                .remove(NACOS_DATA_ID)
-                .remove(WHALE_BIZ_NAME)
-                .remove(WHALE_DEPLOYMENT_NAME)
-                .remove(WHALE_ZONE_NAME)
-                .remove(SPECTRUM_WORKSPACE_ID)
-                .remove(SPECTRUM_APPLICATION_NAME)
-                .remove(SPECTRUM_DEPLOYMENT_NAME);
+        EnvironmentVariables environment =
+                new EnvironmentVariables(NACOS_SERVER_ADDR, "127.0.0.1:8848")
+                        .remove(NACOS_DATA_ID)
+                        .remove(WHALE_BIZ_NAME)
+                        .remove(WHALE_DEPLOYMENT_NAME)
+                        .remove(WHALE_ZONE_NAME)
+                        .remove(SPECTRUM_WORKSPACE_ID)
+                        .remove(SPECTRUM_APPLICATION_NAME)
+                        .remove(SPECTRUM_DEPLOYMENT_NAME);
 
-        assertThatThrownBy(() -> environment.execute(() -> new NacosConfigSource(new DeploymentIdentity())))
+        assertThatThrownBy(
+                        () ->
+                                environment.execute(
+                                        () -> new NacosConfigSource(new DeploymentIdentity())))
                 .isInstanceOf(IllegalStateException.class)
                 .hasMessageContaining(WHALE_BIZ_NAME);
     }
 
     @Test
     void usesBizDeploymentAndZoneWhenDataIdIsNotConfigured() throws Exception {
-        NacosConfigSource source = new EnvironmentVariables(
-                NACOS_SERVER_ADDR, "127.0.0.1:8848",
-                WHALE_BIZ_NAME, "dash_pd", WHALE_DEPLOYMENT_NAME, "flexlb-hongyi-test-v1-flexlb-standalone", WHALE_ZONE_NAME, "master")
-                .remove(NACOS_DATA_ID)
-                .remove(SPECTRUM_WORKSPACE_ID)
-                .remove(SPECTRUM_APPLICATION_NAME)
-                .remove(SPECTRUM_DEPLOYMENT_NAME)
-                .execute(() -> new NacosConfigSource(new DeploymentIdentity()));
+        NacosConfigSource source =
+                new EnvironmentVariables(
+                                NACOS_SERVER_ADDR,
+                                "127.0.0.1:8848",
+                                WHALE_BIZ_NAME,
+                                "dash_pd",
+                                WHALE_DEPLOYMENT_NAME,
+                                "flexlb-hongyi-test-v1-flexlb-standalone",
+                                WHALE_ZONE_NAME,
+                                "master")
+                        .remove(NACOS_DATA_ID)
+                        .remove(SPECTRUM_WORKSPACE_ID)
+                        .remove(SPECTRUM_APPLICATION_NAME)
+                        .remove(SPECTRUM_DEPLOYMENT_NAME)
+                        .execute(() -> new NacosConfigSource(new DeploymentIdentity()));
 
         assertThat(source)
                 .extracting("config")
-                .isEqualTo(new NacosConfig(
-                        "127.0.0.1:8848",
-                        "dash_pd:flexlb-hongyi-test-v1-flexlb-standalone:master",
-                        null,
-                        null));
+                .isEqualTo(
+                        new NacosConfig(
+                                "127.0.0.1:8848",
+                                "dash_pd:flexlb-hongyi-test-v1-flexlb-standalone:master",
+                                null,
+                                null));
     }
 
     @Test
     void usesSpectrumIdentityWhenDataIdIsNotConfigured() throws Exception {
-        NacosConfigSource source = new EnvironmentVariables(
-                NACOS_SERVER_ADDR, "127.0.0.1:8848",
-                SPECTRUM_WORKSPACE_ID, "df4a7748",
-                SPECTRUM_APPLICATION_NAME, "flexlb-test",
-                SPECTRUM_DEPLOYMENT_NAME, "flexlb-test-wlcb",
-                WHALE_BIZ_NAME, "dash_pd", WHALE_DEPLOYMENT_NAME, "legacy-role", WHALE_ZONE_NAME, "master")
-                .remove(NACOS_DATA_ID)
-                .execute(() -> new NacosConfigSource(new DeploymentIdentity()));
+        NacosConfigSource source =
+                new EnvironmentVariables(
+                                NACOS_SERVER_ADDR,
+                                "127.0.0.1:8848",
+                                SPECTRUM_WORKSPACE_ID,
+                                "df4a7748",
+                                SPECTRUM_APPLICATION_NAME,
+                                "flexlb-test",
+                                SPECTRUM_DEPLOYMENT_NAME,
+                                "flexlb-test-wlcb",
+                                WHALE_BIZ_NAME,
+                                "dash_pd",
+                                WHALE_DEPLOYMENT_NAME,
+                                "legacy-role",
+                                WHALE_ZONE_NAME,
+                                "master")
+                        .remove(NACOS_DATA_ID)
+                        .execute(() -> new NacosConfigSource(new DeploymentIdentity()));
 
         assertThat(source)
                 .extracting("config")
-                .isEqualTo(new NacosConfig(
-                        "127.0.0.1:8848",
-                        "spectrum:df4a7748:flexlb-test:flexlb-test-wlcb",
-                        null,
-                        null));
+                .isEqualTo(
+                        new NacosConfig(
+                                "127.0.0.1:8848",
+                                "spectrum:df4a7748:flexlb-test:flexlb-test-wlcb",
+                                null,
+                                null));
     }
 
     @Test
@@ -152,34 +208,55 @@ class NacosConfigSourceTest {
         com.alibaba.nacos.api.config.ConfigService client =
                 mock(com.alibaba.nacos.api.config.ConfigService.class);
         when(client.getConfig(
-                org.mockito.ArgumentMatchers.eq("flexlb-test"),
-                org.mockito.ArgumentMatchers.eq(DEFAULT_NACOS_GROUP),
-                org.mockito.ArgumentMatchers.eq(3000L)))
+                        org.mockito.ArgumentMatchers.eq("flexlb-test"),
+                        org.mockito.ArgumentMatchers.eq(DEFAULT_NACOS_GROUP),
+                        org.mockito.ArgumentMatchers.eq(3000L)))
                 .thenReturn("{\"enableQueueing\":true}");
         new EnvironmentVariables(
-                NACOS_SERVER_ADDR, "127.0.0.1:8848",
-                NACOS_DATA_ID, "flexlb-test",
-                WHALE_BIZ_NAME, "dash_pd", WHALE_DEPLOYMENT_NAME, "flexlb-test", WHALE_ZONE_NAME, "master",
-                CONFIG_SCHEMA_VERSION_ENV, "0")
-                .execute(() -> {
-                    NacosConfigSource source = new NacosConfigSource(new DeploymentIdentity());
-                    ReflectionTestUtils.setField(source, "client", client);
-                    source.initialize();
-                    assertThat(source.name()).isEqualTo("Nacos");
-                    assertThat(source.loadConfig().sourceSchemaVersion()).isEqualTo(0);
-                    ConfigService configService = new ConfigService(List.of(new StandardConfigDocumentParser(), new V0ConfigDocumentParser()));
-                    configService.close();
-                });
+                        NACOS_SERVER_ADDR,
+                        "127.0.0.1:8848",
+                        NACOS_DATA_ID,
+                        "flexlb-test",
+                        WHALE_BIZ_NAME,
+                        "dash_pd",
+                        WHALE_DEPLOYMENT_NAME,
+                        "flexlb-test",
+                        WHALE_ZONE_NAME,
+                        "master",
+                        CONFIG_SCHEMA_VERSION_ENV,
+                        "0")
+                .execute(
+                        () -> {
+                            NacosConfigSource source =
+                                    new NacosConfigSource(new DeploymentIdentity());
+                            ReflectionTestUtils.setField(source, "client", client);
+                            source.initialize();
+                            assertThat(source.name()).isEqualTo("Nacos");
+                            assertThat(source.loadConfig().sourceSchemaVersion()).isEqualTo(0);
+                            ConfigService configService =
+                                    new ConfigService(
+                                            List.of(
+                                                    new StandardConfigDocumentParser(),
+                                                    new V0ConfigDocumentParser()));
+                            configService.close();
+                        });
     }
 
     @Test
     void rejectsUnknownNacosConfigCompatibilityModes() {
-        EnvironmentVariables environment = new EnvironmentVariables(
-                WHALE_BIZ_NAME, "dash_pd", WHALE_DEPLOYMENT_NAME, "flexlb-test", WHALE_ZONE_NAME, "master",
-                CONFIG_SCHEMA_VERSION_ENV, "CURRENT");
+        EnvironmentVariables environment =
+                new EnvironmentVariables(
+                        WHALE_BIZ_NAME,
+                        "dash_pd",
+                        WHALE_DEPLOYMENT_NAME,
+                        "flexlb-test",
+                        WHALE_ZONE_NAME,
+                        "master",
+                        CONFIG_SCHEMA_VERSION_ENV,
+                        "CURRENT");
 
-        assertThatThrownBy(() -> environment.execute(() ->
-                ConfigDocumentParserResolver.resolve("{}")))
+        assertThatThrownBy(
+                        () -> environment.execute(() -> ConfigDocumentParserResolver.resolve("{}")))
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining(CONFIG_SCHEMA_VERSION_ENV);
     }
@@ -190,35 +267,54 @@ class NacosConfigSourceTest {
                 mock(com.alibaba.nacos.api.config.ConfigService.class);
         ArgumentCaptor<Listener> listenerCaptor = ArgumentCaptor.forClass(Listener.class);
         when(client.getConfig(
-                org.mockito.ArgumentMatchers.eq("flexlb-test"),
-                org.mockito.ArgumentMatchers.eq("FLEXLB_GROUP"),
-                org.mockito.ArgumentMatchers.eq(3000L)))
+                        org.mockito.ArgumentMatchers.eq("flexlb-test"),
+                        org.mockito.ArgumentMatchers.eq("FLEXLB_GROUP"),
+                        org.mockito.ArgumentMatchers.eq(3000L)))
                 .thenReturn("{\"enableQueueing\":true}");
         new EnvironmentVariables(
-                NACOS_SERVER_ADDR, "127.0.0.1:8848",
-                NACOS_DATA_ID, "flexlb-test",
-                NACOS_GROUP, "FLEXLB_GROUP",
-                WHALE_BIZ_NAME, "dash_pd", WHALE_DEPLOYMENT_NAME, "flexlb-test", WHALE_ZONE_NAME, "master",
-                CONFIG_SCHEMA_VERSION_ENV, "0")
-                .execute(() -> {
-                    NacosConfigSource source = new NacosConfigSource(new DeploymentIdentity());
-                    ReflectionTestUtils.setField(source, "client", client);
-                    source.initialize();
-                    assertThat(source.name()).isEqualTo("Nacos");
-                    verify(client).addListener(
-                            org.mockito.ArgumentMatchers.eq("flexlb-test"),
-                            org.mockito.ArgumentMatchers.eq("FLEXLB_GROUP"),
-                            listenerCaptor.capture());
+                        NACOS_SERVER_ADDR,
+                        "127.0.0.1:8848",
+                        NACOS_DATA_ID,
+                        "flexlb-test",
+                        NACOS_GROUP,
+                        "FLEXLB_GROUP",
+                        WHALE_BIZ_NAME,
+                        "dash_pd",
+                        WHALE_DEPLOYMENT_NAME,
+                        "flexlb-test",
+                        WHALE_ZONE_NAME,
+                        "master",
+                        CONFIG_SCHEMA_VERSION_ENV,
+                        "0")
+                .execute(
+                        () -> {
+                            NacosConfigSource source =
+                                    new NacosConfigSource(new DeploymentIdentity());
+                            ReflectionTestUtils.setField(source, "client", client);
+                            source.initialize();
+                            assertThat(source.name()).isEqualTo("Nacos");
+                            verify(client)
+                                    .addListener(
+                                            org.mockito.ArgumentMatchers.eq("flexlb-test"),
+                                            org.mockito.ArgumentMatchers.eq("FLEXLB_GROUP"),
+                                            listenerCaptor.capture());
 
-                    listenerCaptor.getValue().receiveConfigInfo("""
+                            listenerCaptor
+                                    .getValue()
+                                    .receiveConfigInfo(
+                                            """
                             {"schemaVersion":3,"requestLifecycle":{"request":{"timeoutMs":60000}},"scheduler":{"type":"QUEUE"},"dispatcher":{"type":"BATCH"}}
                             """);
 
-                    assertThat(source.name()).isEqualTo("Nacos");
-                    assertThat(source.loadConfig().sourceSchemaVersion()).isEqualTo(3);
-                    ConfigService configService = new ConfigService(List.of(new StandardConfigDocumentParser(), new V0ConfigDocumentParser()));
-                    configService.close();
-                });
+                            assertThat(source.name()).isEqualTo("Nacos");
+                            assertThat(source.loadConfig().sourceSchemaVersion()).isEqualTo(3);
+                            ConfigService configService =
+                                    new ConfigService(
+                                            List.of(
+                                                    new StandardConfigDocumentParser(),
+                                                    new V0ConfigDocumentParser()));
+                            configService.close();
+                        });
     }
 
     @Test
@@ -227,31 +323,34 @@ class NacosConfigSourceTest {
                 mock(com.alibaba.nacos.api.config.ConfigService.class);
         ArgumentCaptor<Listener> listenerCaptor = ArgumentCaptor.forClass(Listener.class);
         when(client.getConfig(
-                org.mockito.ArgumentMatchers.eq("flexlb-test"),
-                org.mockito.ArgumentMatchers.eq("FLEXLB_GROUP"),
-                org.mockito.ArgumentMatchers.eq(3000L)))
-                .thenReturn("{\"schemaVersion\":3,\"observability\":{\"logging\":{\"level\":\"warn\"}}}");
+                        org.mockito.ArgumentMatchers.eq("flexlb-test"),
+                        org.mockito.ArgumentMatchers.eq("FLEXLB_GROUP"),
+                        org.mockito.ArgumentMatchers.eq(3000L)))
+                .thenReturn(
+                        "{\"schemaVersion\":3,\"observability\":{\"logging\":{\"level\":\"warn\"}}}");
         NacosConfigSource source = createSource(client, "test-namespace");
 
         source.initialize();
-        verify(client).addListener(
-                org.mockito.ArgumentMatchers.eq("flexlb-test"),
-                org.mockito.ArgumentMatchers.eq("FLEXLB_GROUP"),
-                listenerCaptor.capture());
-        ConfigService configService = new ConfigService(List.of(new StandardConfigDocumentParser(), new V0ConfigDocumentParser()));
+        verify(client)
+                .addListener(
+                        org.mockito.ArgumentMatchers.eq("flexlb-test"),
+                        org.mockito.ArgumentMatchers.eq("FLEXLB_GROUP"),
+                        listenerCaptor.capture());
+        ConfigService configService =
+                new ConfigService(
+                        List.of(new StandardConfigDocumentParser(), new V0ConfigDocumentParser()));
 
-        assertThat(configService.loadBalanceConfig().getObservability()
-                .getLogging().getLevel()).isEqualTo(LogLevel.WARN);
-        listenerCaptor.getValue().receiveConfigInfo(
-                "{\"schemaVersion\":3,\"observability\":{\"logging\":{\"level\":\"error\"}}}");
+        assertThat(configService.loadBalanceConfig().getObservability().getLogging().getLevel())
+                .isEqualTo(LogLevel.WARN);
+        listenerCaptor
+                .getValue()
+                .receiveConfigInfo(
+                        "{\"schemaVersion\":3,\"observability\":{\"logging\":{\"level\":\"error\"}}}");
         configService.close();
 
-        assertThat(configService.loadBalanceConfig().getObservability()
-                .getLogging().getLevel()).isEqualTo(LogLevel.ERROR);
-        verify(client).removeListener(
-                "flexlb-test",
-                "FLEXLB_GROUP",
-                listenerCaptor.getValue());
+        assertThat(configService.loadBalanceConfig().getObservability().getLogging().getLevel())
+                .isEqualTo(LogLevel.ERROR);
+        verify(client).removeListener("flexlb-test", "FLEXLB_GROUP", listenerCaptor.getValue());
         verify(client).shutDown();
     }
 
@@ -260,13 +359,16 @@ class NacosConfigSourceTest {
         com.alibaba.nacos.api.config.ConfigService client =
                 mock(com.alibaba.nacos.api.config.ConfigService.class);
         when(client.getConfig(
-                org.mockito.ArgumentMatchers.eq("flexlb-test"),
-                org.mockito.ArgumentMatchers.eq("FLEXLB_GROUP"),
-                org.mockito.ArgumentMatchers.eq(3000L)))
-                .thenReturn("{\"schemaVersion\":3,\"observability\":{\"logging\":{\"level\":\"warn\"}}}");
+                        org.mockito.ArgumentMatchers.eq("flexlb-test"),
+                        org.mockito.ArgumentMatchers.eq("FLEXLB_GROUP"),
+                        org.mockito.ArgumentMatchers.eq(3000L)))
+                .thenReturn(
+                        "{\"schemaVersion\":3,\"observability\":{\"logging\":{\"level\":\"warn\"}}}");
         NacosConfigSource source = createSource(client, "");
         source.initialize();
-        ConfigService configService = new ConfigService(List.of(new StandardConfigDocumentParser(), new V0ConfigDocumentParser()));
+        ConfigService configService =
+                new ConfigService(
+                        List.of(new StandardConfigDocumentParser(), new V0ConfigDocumentParser()));
         doThrow(new RuntimeException("remove failed"))
                 .when(client)
                 .removeListener(
@@ -280,15 +382,25 @@ class NacosConfigSourceTest {
         configService.close();
     }
 
-    private NacosConfigSource createSource(com.alibaba.nacos.api.config.ConfigService client,
-                                         String namespace) throws Exception {
-        NacosConfigSource source = new EnvironmentVariables(
-                NACOS_SERVER_ADDR, "127.0.0.1:8848",
-                NACOS_DATA_ID, "flexlb-test",
-                NACOS_GROUP, "FLEXLB_GROUP",
-                NACOS_NAMESPACE, namespace,
-                WHALE_BIZ_NAME, "dash_pd", WHALE_DEPLOYMENT_NAME, "flexlb-test", WHALE_ZONE_NAME, "master")
-                .execute(() -> new NacosConfigSource(new DeploymentIdentity()));
+    private NacosConfigSource createSource(
+            com.alibaba.nacos.api.config.ConfigService client, String namespace) throws Exception {
+        NacosConfigSource source =
+                new EnvironmentVariables(
+                                NACOS_SERVER_ADDR,
+                                "127.0.0.1:8848",
+                                NACOS_DATA_ID,
+                                "flexlb-test",
+                                NACOS_GROUP,
+                                "FLEXLB_GROUP",
+                                NACOS_NAMESPACE,
+                                namespace,
+                                WHALE_BIZ_NAME,
+                                "dash_pd",
+                                WHALE_DEPLOYMENT_NAME,
+                                "flexlb-test",
+                                WHALE_ZONE_NAME,
+                                "master")
+                        .execute(() -> new NacosConfigSource(new DeploymentIdentity()));
         ReflectionTestUtils.setField(source, "client", client);
         return source;
     }

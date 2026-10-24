@@ -9,40 +9,40 @@ FlexLB 是面向 AI 模型推理负载（RTP-LLM）的高性能智能负载均�
 
 ## 文档索引
 
-| 文档 | 内容 |
-|---|---|
-| [01-routing-and-balancing](01-routing-and-balancing.md) | Router / LoadBalancer 模式、角色多阶段路由与 group 链、回滚机制、四种策略算法 |
-| [02-queue-scheduling](02-queue-scheduling.md) | PriorityScheduler / WorkerBatcher / RouteService、请求生命周期与取消 |
-| [03-resource-management](03-resource-management.md) | EndpointRegistry、worker 可用性与本地资源预留 |
-| [04-worker-sync-and-cache](04-worker-sync-and-cache.md) | Worker 状态 gRPC 同步、本地乐观预测、KV cache 三种匹配源（LOCAL_SYNC / KVCM / LOCAL_STANDBY） |
-| [05-lifecycle-and-consistency](05-lifecycle-and-consistency.md) | 生命周期 Hook 与 /hook/* 端点、ZooKeeper LeaderSelector 主选举、slave 转发 |
-| [06-configuration-and-observability](06-configuration-and-observability.md) | 全量配置字段与默认值、HTTP 端点、日志架构、指标体系 |
+| 文档                                                                        | 内容                                                                                          |
+| --------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------- |
+| [01-routing-and-balancing](01-routing-and-balancing.md)                     | Router / LoadBalancer 模式、角色多阶段路由与 group 链、回滚机制、四种策略算法                 |
+| [02-queue-scheduling](02-queue-scheduling.md)                               | PriorityScheduler / WorkerBatcher / RouteService、请求生命周期与取消                          |
+| [03-resource-management](03-resource-management.md)                         | EndpointRegistry、worker 可用性与本地资源预留                                                 |
+| [04-worker-sync-and-cache](04-worker-sync-and-cache.md)                     | Worker 状态 gRPC 同步、本地乐观预测、KV cache 三种匹配源（LOCAL_SYNC / KVCM / LOCAL_STANDBY） |
+| [05-lifecycle-and-consistency](05-lifecycle-and-consistency.md)             | 生命周期 Hook 与 /hook/\* 端点、ZooKeeper LeaderSelector 主选举、slave 转发                   |
+| [06-configuration-and-observability](06-configuration-and-observability.md) | 全量配置字段与默认值、HTTP 端点、日志架构、指标体系                                           |
 
 ## 技术栈
 
-| 类别 | 技术 |
-|---|---|
-| 语言 | Java 21 |
-| 框架 | Spring Boot 2.7.18（WebFlux 响应式，HTTP 端点返回 `Mono`/`Flux`） |
-| 响应式 | Project Reactor 2024.0.10 |
-| RPC | gRPC 1.65.0（worker 状态同步 + KVCM meta service） |
-| 协调 | Apache Curator 5.4.0（ZooKeeper LeaderSelector 主选举） |
-| 本地缓存 | Caffeine |
-| 网络 | Netty 4.1.127.Final |
-| 观测 | FlexMonitor 抽象（默认 NoOp，internal profile 下 KMonitor）、OpenTelemetry W3C 传播 |
-| 测试 | JUnit 5 + Mockito 5.20.0 |
+| 类别     | 技术                                                                                |
+| -------- | ----------------------------------------------------------------------------------- |
+| 语言     | Java 21                                                                             |
+| 框架     | Spring Boot 2.7.18（WebFlux 响应式，HTTP 端点返回 `Mono`/`Flux`）                   |
+| 响应式   | Project Reactor 2024.0.10                                                           |
+| RPC      | gRPC 1.65.0（worker 状态同步 + KVCM meta service）                                  |
+| 协调     | Apache Curator 5.4.0（ZooKeeper LeaderSelector 主选举）                             |
+| 本地缓存 | Caffeine                                                                            |
+| 网络     | Netty 4.1.127.Final                                                                 |
+| 观测     | FlexMonitor 抽象（默认 NoOp，internal profile 下 KMonitor）、OpenTelemetry W3C 传播 |
+| 测试     | JUnit 5 + Mockito 5.20.0                                                            |
 
 ## 模块划分
 
 多模块 Maven 工程：
 
-| 模块 | 职责 |
-|---|---|
-| **flexlb-api** | Web 层：`HttpLoadBalanceServer`（调度）、`FlexlbControlServer`（控制）、`HealthCheckServer`、`AppStateHookServer`（生命周期 hook）；主端口 7001 |
-| **flexlb-common** | 共享模型（`WorkerStatus`、`Request`/`Response`、`RoleType`、`BalanceContext`）、`FlexlbConfig`/`ConfigService`、`FlexMonitor` 指标抽象 |
-| **flexlb-grpc** | 引擎 gRPC 客户端（worker status / cache status）+ KVCM meta-service 客户端（`KvcmGrpcClient`、leader 解析、健康探测） |
-| **flexlb-sync** | 核心：路由与策略、排队调度、动态资源管理、worker 状态同步、主选举、生命周期 Hook、监控上报 |
-| **flexlb-cache** | KV cache 匹配：LOCAL_SYNC 两级索引（`KvCacheManager`/`GlobalCacheIndex`/`EngineLocalView`）、KVCM provider、Local Standby 兜底索引、failover 编排 |
+| 模块              | 职责                                                                                                                                              |
+| ----------------- | ------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **flexlb-api**    | Web 层：`HttpLoadBalanceServer`（调度）、`FlexlbControlServer`（控制）、`HealthCheckServer`、`AppStateHookServer`（生命周期 hook）；主端口 7001   |
+| **flexlb-common** | 共享模型（`WorkerStatus`、`Request`/`Response`、`RoleType`、`BalanceContext`）、`FlexlbConfig`/`ConfigService`、`FlexMonitor` 指标抽象            |
+| **flexlb-grpc**   | 引擎 gRPC 客户端（worker status / cache status）+ KVCM meta-service 客户端（`KvcmGrpcClient`、leader 解析、健康探测）                             |
+| **flexlb-sync**   | 核心：路由与策略、排队调度、动态资源管理、worker 状态同步、主选举、生命周期 Hook、监控上报                                                        |
+| **flexlb-cache**  | KV cache 匹配：LOCAL_SYNC 两级索引（`KvCacheManager`/`GlobalCacheIndex`/`EngineLocalView`）、KVCM provider、Local Standby 兜底索引、failover 编排 |
 
 flexlb-sync 内部包结构（`org.flexlb`）：
 

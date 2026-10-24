@@ -30,7 +30,8 @@ class BlockCacheKeyCalculatorConcurrencyTest {
             int firstTokenId = variant * 100_000;
             int[] inputIds = IntStream.range(firstTokenId, firstTokenId + TOKEN_COUNT).toArray();
             inputs.add(inputIds);
-            expectedResults.add(BlockCacheKeyCalculator.calculate(TokenIds.wrap(inputIds), BLOCK_SIZE, 0));
+            expectedResults.add(
+                    BlockCacheKeyCalculator.calculate(TokenIds.wrap(inputIds), BLOCK_SIZE, 0));
         }
 
         ExecutorService executor = Executors.newFixedThreadPool(THREAD_COUNT);
@@ -39,10 +40,13 @@ class BlockCacheKeyCalculatorConcurrencyTest {
         try {
             for (int requestIndex = 0; requestIndex < REQUEST_COUNT; requestIndex++) {
                 int inputIndex = requestIndex % INPUT_VARIANT_COUNT;
-                futures.add(executor.submit(() -> {
-                    startGate.await();
-                    return BlockCacheKeyCalculator.calculate(TokenIds.wrap(inputs.get(inputIndex)), BLOCK_SIZE, 0);
-                }));
+                futures.add(
+                        executor.submit(
+                                () -> {
+                                    startGate.await();
+                                    return BlockCacheKeyCalculator.calculate(
+                                            TokenIds.wrap(inputs.get(inputIndex)), BLOCK_SIZE, 0);
+                                }));
             }
 
             startGate.countDown();

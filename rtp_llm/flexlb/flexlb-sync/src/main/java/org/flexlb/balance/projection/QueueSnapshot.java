@@ -25,8 +25,7 @@ public record QueueSnapshot(
         activeItems = List.copyOf(activeItems);
         if (admissionBlock != null) {
             if (activeItems.isEmpty()) {
-                throw new IllegalArgumentException(
-                        "admission block requires an ACTIVE head");
+                throw new IllegalArgumentException("admission block requires an ACTIVE head");
             }
             GroupPlanner.Item head = activeItems.getFirst();
             if (!Objects.equals(head.requestId(), admissionBlock.requestId())
@@ -42,9 +41,5 @@ public record QueueSnapshot(
      * Null semantics mean the wait only limits delivery, not queue publication.
      */
     public record AdmissionBlock(
-            String requestId,
-            long enqueueSeq,
-            RouteProjection.AdmissionBlockSemantics semantics) {
-    }
-
+            String requestId, long enqueueSeq, RouteProjection.AdmissionBlockSemantics semantics) {}
 }

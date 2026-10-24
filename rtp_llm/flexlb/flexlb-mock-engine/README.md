@@ -26,40 +26,42 @@ bash run_online_eval.sh
 ## Configuration
 
 ### Performance JSON
-| Key | Default | Description |
-|-----|---------|-------------|
-| sleep_scale | 1.0 | Global timing multiplier (0.1=fast, 1.0=realistic) |
-| prefill.fixed_ms | null | Fixed prefill latency (bypasses formula) |
-| prefill.min_ms | null | Floor for the final (post-scale) prefill sleep in ms; guards against sleep_scale making prefill unrealistically fast |
-| prefill.scale | 1.0 | Prefill-specific multiplier |
-| prefill.max_waiting_batches | 0 | Engine-side queued-batch cap; ≤ 0 means unbounded. A positive cap injects Engine backpressure rejection. FlexLB uses `dispatcher.maxInflightPerPrefillWorker` (default 2): batches in BATCH, requests in NON_BATCH. Waiting work remains in Master queues and expires by queue TTL. These are different failure paths. |
-| prefill.max_batch_tokens | 1048576 | In-engine dual-budget regroup (#8): token ceiling for one EXECUTION batch — admission stops once Σ(computeTokens + hitTokens) over admitted members reaches the budget (members join while admitted < budget, production FIFOScheduler.cc:371-481 semantics; the budget is a STOP, never a mid-batch cut). Default 1_048_576 mirrors the production `max_batch_tokens_size` the mock already reports via WorkerStatus. Explicit `0` disables the token dimension |
-| prefill.max_batch_requests | 32 | In-engine dual-budget regroup (#8): request-count ceiling for one execution batch. Mock default 32 is independent of the master FIXED_WINDOW `maxRequests` default 8. Explicit `0` disables the request dimension. `max_batch_tokens=0` AND `max_batch_requests=0` together disable the regroup entirely — master batches then execute verbatim (the pre-#8 behaviour) |
-| decode.scale | 1.0 | Decode-specific multiplier |
-| decode.step_base_ms | 19.5 | Per-step decode latency intercept of the linear production fit: step_ms = step_base_ms + step_per_running_ms × running (production DSv4 fit, task #68). Applies when no `step_ms_by_batch` curve is declared |
-| decode.step_per_running_ms | 0.175 | Per-step decode latency slope per running stream (production DSv4 fit) |
-| decode.tokens_per_step | 2.6 | MTP acceptance fold: tokens produced per running stream per decode step (production DSv4 accepts 2.54–2.88). Steps for output_len tokens = ceil(output_len / tokens_per_step) |
-| decode.step_ms_by_batch | null | Explicit per-step latency curve [[batch, step_ms], ...]; when declared it overrides the linear fit (mutually exclusive with step_base_ms/step_per_running_ms). Absent → linear production fit |
-| ~~decode.per_token_ms~~ | — | REMOVED (task #69): fixed per-token latency was a V3-era no-MTP single-stream caliber that overstated low-batch decode ~5.5× and full-batch ~2.8×. Declaring it now fails fast with a migration hint |
-| jitter_pct | 0.0 | Random jitter (±%) |
+
+| Key                         | Default | Description                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
+| --------------------------- | ------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| sleep_scale                 | 1.0     | Global timing multiplier (0.1=fast, 1.0=realistic)                                                                                                                                                                                                                                                                                                                                                                                                               |
+| prefill.fixed_ms            | null    | Fixed prefill latency (bypasses formula)                                                                                                                                                                                                                                                                                                                                                                                                                         |
+| prefill.min_ms              | null    | Floor for the final (post-scale) prefill sleep in ms; guards against sleep_scale making prefill unrealistically fast                                                                                                                                                                                                                                                                                                                                             |
+| prefill.scale               | 1.0     | Prefill-specific multiplier                                                                                                                                                                                                                                                                                                                                                                                                                                      |
+| prefill.max_waiting_batches | 0       | Engine-side queued-batch cap; ≤ 0 means unbounded. A positive cap injects Engine backpressure rejection. FlexLB uses `dispatcher.maxInflightPerPrefillWorker` (default 2): batches in BATCH, requests in NON_BATCH. Waiting work remains in Master queues and expires by queue TTL. These are different failure paths.                                                                                                                                           |
+| prefill.max_batch_tokens    | 1048576 | In-engine dual-budget regroup (#8): token ceiling for one EXECUTION batch — admission stops once Σ(computeTokens + hitTokens) over admitted members reaches the budget (members join while admitted < budget, production FIFOScheduler.cc:371-481 semantics; the budget is a STOP, never a mid-batch cut). Default 1_048_576 mirrors the production `max_batch_tokens_size` the mock already reports via WorkerStatus. Explicit `0` disables the token dimension |
+| prefill.max_batch_requests  | 32      | In-engine dual-budget regroup (#8): request-count ceiling for one execution batch. Mock default 32 is independent of the master FIXED_WINDOW `maxRequests` default 8. Explicit `0` disables the request dimension. `max_batch_tokens=0` AND `max_batch_requests=0` together disable the regroup entirely — master batches then execute verbatim (the pre-#8 behaviour)                                                                                           |
+| decode.scale                | 1.0     | Decode-specific multiplier                                                                                                                                                                                                                                                                                                                                                                                                                                       |
+| decode.step_base_ms         | 19.5    | Per-step decode latency intercept of the linear production fit: step_ms = step_base_ms + step_per_running_ms × running (production DSv4 fit, task #68). Applies when no `step_ms_by_batch` curve is declared                                                                                                                                                                                                                                                     |
+| decode.step_per_running_ms  | 0.175   | Per-step decode latency slope per running stream (production DSv4 fit)                                                                                                                                                                                                                                                                                                                                                                                           |
+| decode.tokens_per_step      | 2.6     | MTP acceptance fold: tokens produced per running stream per decode step (production DSv4 accepts 2.54–2.88). Steps for output_len tokens = ceil(output_len / tokens_per_step)                                                                                                                                                                                                                                                                                    |
+| decode.step_ms_by_batch     | null    | Explicit per-step latency curve [[batch, step_ms], ...]; when declared it overrides the linear fit (mutually exclusive with step_base_ms/step_per_running_ms). Absent → linear production fit                                                                                                                                                                                                                                                                    |
+| ~~decode.per_token_ms~~     | —       | REMOVED (task #69): fixed per-token latency was a V3-era no-MTP single-stream caliber that overstated low-batch decode ~5.5× and full-batch ~2.8×. Declaring it now fails fast with a migration hint                                                                                                                                                                                                                                                             |
+| jitter_pct                  | 0.0     | Random jitter (±%)                                                                                                                                                                                                                                                                                                                                                                                                                                               |
 
 ### Runtime HTTP API
-| Endpoint | Method | Description |
-|----------|--------|-------------|
-| /health | GET | Engine health check |
-| /snapshot | GET | JSON snapshot of engine state |
-| /metrics | GET | Prometheus-format metrics |
-| /inject | POST | Inject fault (type, delay_ms, n, etc.) |
-| /clear_inject | POST | Clear all fault injections |
-| /set_perf | POST | Override prefill_fixed_ms, decode_scale, max_prefill_concurrency, max_waiting_batches |
-| /set_kv_pressure | POST | Set KV pressure (`active_kv_tokens` absolute) |
-| /set_queue_depth | POST | Set queue depth limit (real enqueue rejection) |
-| /stop_engine | POST | Stop engine (simulate crash) |
-| /start_engine | POST | Restart stopped engine (auto-clears faults) |
-| /cancel_request | POST | Cancel an in-flight request by request id |
-| /add_engine | POST | Dynamically add an engine to the running cluster |
-| /remove_engine | POST | Dynamically remove an engine (graceful drain by default; `mode=abrupt` keeps the legacy immediate teardown) |
-| /requests | GET | List recent request/task records |
+
+| Endpoint         | Method | Description                                                                                                 |
+| ---------------- | ------ | ----------------------------------------------------------------------------------------------------------- |
+| /health          | GET    | Engine health check                                                                                         |
+| /snapshot        | GET    | JSON snapshot of engine state                                                                               |
+| /metrics         | GET    | Prometheus-format metrics                                                                                   |
+| /inject          | POST   | Inject fault (type, delay_ms, n, etc.)                                                                      |
+| /clear_inject    | POST   | Clear all fault injections                                                                                  |
+| /set_perf        | POST   | Override prefill_fixed_ms, decode_scale, max_prefill_concurrency, max_waiting_batches                       |
+| /set_kv_pressure | POST   | Set KV pressure (`active_kv_tokens` absolute)                                                               |
+| /set_queue_depth | POST   | Set queue depth limit (real enqueue rejection)                                                              |
+| /stop_engine     | POST   | Stop engine (simulate crash)                                                                                |
+| /start_engine    | POST   | Restart stopped engine (auto-clears faults)                                                                 |
+| /cancel_request  | POST   | Cancel an in-flight request by request id                                                                   |
+| /add_engine      | POST   | Dynamically add an engine to the running cluster                                                            |
+| /remove_engine   | POST   | Dynamically remove an engine (graceful drain by default; `mode=abrupt` keeps the legacy immediate teardown) |
+| /requests        | GET    | List recent request/task records                                                                            |
 
 The control server listens on `baseGrpcPort - 1` of the mock cluster.
 
@@ -102,22 +104,22 @@ line (interval configurable via `--stats-interval-ms`, default 5000 ms; the
 `run_online_eval.sh` env passthrough is `JAVA_MOCK_STATS_INTERVAL_MS`) reports
 symmetric P/D queue states:
 
-| Field | Unit | Meaning |
-|-------|------|---------|
-| `ts_epoch_ms` | epoch ms | Sampling wall-clock timestamp (`System.currentTimeMillis()`), aligns with client `send_start_epoch_ms` |
-| `prefill_waiting` | requests | Queued (not running) prefill requests, sum over prefill engines |
-| `prefill_running` | batches | Running prefill batches (a batch may hold several requests), sum |
+| Field                  | Unit     | Meaning                                                                                                            |
+| ---------------------- | -------- | ------------------------------------------------------------------------------------------------------------------ |
+| `ts_epoch_ms`          | epoch ms | Sampling wall-clock timestamp (`System.currentTimeMillis()`), aligns with client `send_start_epoch_ms`             |
+| `prefill_waiting`      | requests | Queued (not running) prefill requests, sum over prefill engines                                                    |
+| `prefill_running`      | batches  | Running prefill batches (a batch may hold several requests), sum                                                   |
 | `prefill_running_reqs` | requests | Requests inside running prefill batches, sum over prefill engines (running-request companion to `prefill_running`) |
-| `max_prefill_waiting` | requests | Peak single-engine queued prefill requests |
-| `decode_waiting` | requests | Queued (not running) decode requests, sum over decode engines |
-| `decode_running` | requests | Running decode requests, sum |
-| `decode_run_min` | requests | Min single-engine running decode requests (mean = `decode_running` / n_decode) |
-| `decode_run_max` | requests | Max single-engine running decode requests |
-| `max_decode_waiting` | requests | Peak single-engine queued decode requests (symmetric with `max_prefill_waiting`) |
-| `decode_done` | requests | Decode requests completed since the previous sample (window counter) |
-| `decode_exec_p50` | ms | Window p50 of decode execution time (end − running-start; bounded reservoir approximation) |
-| `decode_exec_p95` | ms | Window p95 of decode execution time |
-| `decode_exec_max` | ms | Window max of decode execution time (exact) |
+| `max_prefill_waiting`  | requests | Peak single-engine queued prefill requests                                                                         |
+| `decode_waiting`       | requests | Queued (not running) decode requests, sum over decode engines                                                      |
+| `decode_running`       | requests | Running decode requests, sum                                                                                       |
+| `decode_run_min`       | requests | Min single-engine running decode requests (mean = `decode_running` / n_decode)                                     |
+| `decode_run_max`       | requests | Max single-engine running decode requests                                                                          |
+| `max_decode_waiting`   | requests | Peak single-engine queued decode requests (symmetric with `max_prefill_waiting`)                                   |
+| `decode_done`          | requests | Decode requests completed since the previous sample (window counter)                                               |
+| `decode_exec_p50`      | ms       | Window p50 of decode execution time (end − running-start; bounded reservoir approximation)                         |
+| `decode_exec_p95`      | ms       | Window p95 of decode execution time                                                                                |
+| `decode_exec_max`      | ms       | Window max of decode execution time (exact)                                                                        |
 
 The old `prefill_pending` (waiting + running mixed) and `max_prefill_pending` fields
 are gone. All other pre-existing fields are unchanged (additive-only evolution).
@@ -235,71 +237,71 @@ name, same naming scheme as the cluster) or `{"port": N}` (gRPC port).
 
 ## Test Suite (313 test methods)
 
-| Test | Methods | Description |
-|------|---------|-------------|
-| JavaLoadClientParityTest | 14 | Load client parity with the legacy Python client |
-| PythonCompatControlApiTest | 11 | Python control-plane compatibility layer |
-| ComprehensiveFaultInjectionTest | 8 | All fault types |
-| ClusterConfigParamTest | 7 | Cluster CLI/config parameters |
-| InflightLeakTest | 6 | Inflight leak detection |
-| FaultInjectionConfigTest | 5 | Builder pattern |
-| JavaMockEngineClusterTest | 3 | Core engine functionality |
-| CodeReviewFixTest | 3 | Review-fix regressions |
-| ConcurrentDoubleSchedulingTest | 2 | Double-scheduling guard |
-| MultiShardRoutingTest | 2 | Multi-shard routing |
-| CancelMidFlightTest | 1 | Cancel mid-flight requests |
-| EngineCrashRecoveryTest | 1 | Engine crash/restart recovery |
-| HighConcurrencyStressTest | 1 | 500 requests @ 100 concurrency |
-| InflightTtlExpiryTest | 1 | TTL cleanup mechanism |
-| MatrixSweepTest | 1 | P/D config × concurrency sweep |
-| MetricsValidationTest | 3 | /metrics + /snapshot validation, KV block-pool tracking + pressure-surface consistency |
-| TpsMetricsAccountingTest | 3 | rtp_llm_* TPS series: completion-event accounting, drain semantics, cancelled exclusion, hit_tokens_total |
-| BlockPoolMetricsObservabilityTest | 6 | Block-pool series in both /metrics modes: three-state gauges over a request's life, prefill-602 vs decode-terminal-fail counter split, decode reuse accumulation (cumulative, never drained), decode admission-failure terminal semantics, P-enqueue reservation reject/adopt/release lifecycle |
-| CacheKeyHitMetricsTest | 2 | Cache key-hit counters: prefix-match run accumulation (hit/requested key sums across requests, /metrics + /snapshot terminal fields) and empty-block-hash 0/0 contribution |
-| RealisticTimingTest | 1 | Real timing verification |
-| PrefillBudgetRegroupTest | 6 | In-engine dual-budget prefill regroup (#8): over-budget master-batch split, arrival order across the split, == boundary verbatim, 0/0 off switch, cross-batch regroup under the request cap, direct path under the token budget |
+| Test                              | Methods | Description                                                                                                                                                                                                                                                                                     |
+| --------------------------------- | ------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| JavaLoadClientParityTest          | 14      | Load client parity with the legacy Python client                                                                                                                                                                                                                                                |
+| PythonCompatControlApiTest        | 11      | Python control-plane compatibility layer                                                                                                                                                                                                                                                        |
+| ComprehensiveFaultInjectionTest   | 8       | All fault types                                                                                                                                                                                                                                                                                 |
+| ClusterConfigParamTest            | 7       | Cluster CLI/config parameters                                                                                                                                                                                                                                                                   |
+| InflightLeakTest                  | 6       | Inflight leak detection                                                                                                                                                                                                                                                                         |
+| FaultInjectionConfigTest          | 5       | Builder pattern                                                                                                                                                                                                                                                                                 |
+| JavaMockEngineClusterTest         | 3       | Core engine functionality                                                                                                                                                                                                                                                                       |
+| CodeReviewFixTest                 | 3       | Review-fix regressions                                                                                                                                                                                                                                                                          |
+| ConcurrentDoubleSchedulingTest    | 2       | Double-scheduling guard                                                                                                                                                                                                                                                                         |
+| MultiShardRoutingTest             | 2       | Multi-shard routing                                                                                                                                                                                                                                                                             |
+| CancelMidFlightTest               | 1       | Cancel mid-flight requests                                                                                                                                                                                                                                                                      |
+| EngineCrashRecoveryTest           | 1       | Engine crash/restart recovery                                                                                                                                                                                                                                                                   |
+| HighConcurrencyStressTest         | 1       | 500 requests @ 100 concurrency                                                                                                                                                                                                                                                                  |
+| InflightTtlExpiryTest             | 1       | TTL cleanup mechanism                                                                                                                                                                                                                                                                           |
+| MatrixSweepTest                   | 1       | P/D config × concurrency sweep                                                                                                                                                                                                                                                                  |
+| MetricsValidationTest             | 3       | /metrics + /snapshot validation, KV block-pool tracking + pressure-surface consistency                                                                                                                                                                                                          |
+| TpsMetricsAccountingTest          | 3       | rtp*llm*\* TPS series: completion-event accounting, drain semantics, cancelled exclusion, hit_tokens_total                                                                                                                                                                                      |
+| BlockPoolMetricsObservabilityTest | 6       | Block-pool series in both /metrics modes: three-state gauges over a request's life, prefill-602 vs decode-terminal-fail counter split, decode reuse accumulation (cumulative, never drained), decode admission-failure terminal semantics, P-enqueue reservation reject/adopt/release lifecycle |
+| CacheKeyHitMetricsTest            | 2       | Cache key-hit counters: prefix-match run accumulation (hit/requested key sums across requests, /metrics + /snapshot terminal fields) and empty-block-hash 0/0 contribution                                                                                                                      |
+| RealisticTimingTest               | 1       | Real timing verification                                                                                                                                                                                                                                                                        |
+| PrefillBudgetRegroupTest          | 6       | In-engine dual-budget prefill regroup (#8): over-budget master-batch split, arrival order across the split, == boundary verbatim, 0/0 off switch, cross-batch regroup under the request cap, direct path under the token budget                                                                 |
 
 ## JavaLoadClient
 
 Standalone replay/load client (`org.flexlb.mockengine.JavaLoadClient`), configured
 entirely through environment variables (`Config.fromEnv`):
 
-| Env var | Default | Description |
-|---------|---------|-------------|
-| TRACE_FILE | "" | Replay trace jsonl path (empty = no trace replay) |
-| TARGET_ADDR | 127.0.0.1:7001 | flexlb-api HTTP address |
-| GRPC_TARGET | derived | flexlb gRPC address (default: TARGET_ADDR host, port+2) |
-| DURATION_S | 0 | Max run duration in seconds (0 = until trace exhausts) |
-| MAX_CONCURRENCY | 999999999 | Client-side concurrent request cap |
-| REPLAY_SPEED | 10.0 | Trace replay speed multiplier |
-| LOAD_CLIENT_WORKERS | 1 | Replay worker count |
-| OUTPUT_DIR | load_client_output | Output dir (per_request.jsonl, server_latency.json) |
-| NUM_SHARDS | 1 | Number of trace shards |
-| SHARD_INDEX | 0 | Shard index replayed by this instance |
-| LIMIT | 0 | Max requests to replay (0 = all) |
-| TIMEOUT_MS | 3600000 | Global run timeout in ms |
-| SLA_TTFT_MS | 500.0 | TTFT SLA threshold for the report |
-| FETCH_OUTPUT_STREAM | true | Client reads engine output streams after Schedule; 0 skips the client-side stream read while the engine still executes prefill+decode in full (BATCH dispatcher only) |
-| LOOP | false | Loop the trace |
-| N_CHANNELS | 8 | gRPC channels |
-| EVENT_LOOP_THREADS | 32 | Netty event-loop threads |
-| START_AT_EPOCH_MS | 0 | Aligned start epoch ms (0 = start immediately) |
-| RESPONSE_TIMEOUT | 120 | Per-request response timeout in seconds |
-| SKIP_SERVER_LATENCY | false | Skip /server_latency sampling |
-| MODEL | engine_service | Model name on requests |
-| API_KEY | "" | API key header |
-| GRADIENT | false | Gradient (ramp-up) replay mode |
-| GRADIENT_START_SPEED | 10 | Gradient start speed |
-| GRADIENT_MAX_SPEED | 1000 | Gradient max speed |
-| MAX_INPUT_LEN | 0 | Truncate input tokens beyond this length (0 = off) |
-| MAX_OUTPUT_LEN | 0 | Truncate output tokens beyond this length (0 = off) |
-| PUSHGATEWAY_URL | "" | Push Prometheus metrics to this Pushgateway |
-| ENABLE_FALLBACK | false | Enable fallback prefill via ENDPOINTS_FILE |
-| ENDPOINTS_FILE | "" | endpoints.json written by JavaMockEngineCluster |
-| DRY_RUN | false | Parse and validate only, no traffic |
-| PRIORITY | 50 | Env-level default QoS priority (per-record trace priority overrides; explicit 0 = leave unset on the wire) |
-| SEND_MODE | replay | Arrival process: replay (trace ts pacing) / uniform (fixed interval) |
-| SEND_MODE_QPS | 0 | uniform mode total target QPS (per shard = QPS / NUM_SHARDS) |
+| Env var              | Default            | Description                                                                                                                                                           |
+| -------------------- | ------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| TRACE_FILE           | ""                 | Replay trace jsonl path (empty = no trace replay)                                                                                                                     |
+| TARGET_ADDR          | 127.0.0.1:7001     | flexlb-api HTTP address                                                                                                                                               |
+| GRPC_TARGET          | derived            | flexlb gRPC address (default: TARGET_ADDR host, port+2)                                                                                                               |
+| DURATION_S           | 0                  | Max run duration in seconds (0 = until trace exhausts)                                                                                                                |
+| MAX_CONCURRENCY      | 999999999          | Client-side concurrent request cap                                                                                                                                    |
+| REPLAY_SPEED         | 10.0               | Trace replay speed multiplier                                                                                                                                         |
+| LOAD_CLIENT_WORKERS  | 1                  | Replay worker count                                                                                                                                                   |
+| OUTPUT_DIR           | load_client_output | Output dir (per_request.jsonl, server_latency.json)                                                                                                                   |
+| NUM_SHARDS           | 1                  | Number of trace shards                                                                                                                                                |
+| SHARD_INDEX          | 0                  | Shard index replayed by this instance                                                                                                                                 |
+| LIMIT                | 0                  | Max requests to replay (0 = all)                                                                                                                                      |
+| TIMEOUT_MS           | 3600000            | Global run timeout in ms                                                                                                                                              |
+| SLA_TTFT_MS          | 500.0              | TTFT SLA threshold for the report                                                                                                                                     |
+| FETCH_OUTPUT_STREAM  | true               | Client reads engine output streams after Schedule; 0 skips the client-side stream read while the engine still executes prefill+decode in full (BATCH dispatcher only) |
+| LOOP                 | false              | Loop the trace                                                                                                                                                        |
+| N_CHANNELS           | 8                  | gRPC channels                                                                                                                                                         |
+| EVENT_LOOP_THREADS   | 32                 | Netty event-loop threads                                                                                                                                              |
+| START_AT_EPOCH_MS    | 0                  | Aligned start epoch ms (0 = start immediately)                                                                                                                        |
+| RESPONSE_TIMEOUT     | 120                | Per-request response timeout in seconds                                                                                                                               |
+| SKIP_SERVER_LATENCY  | false              | Skip /server_latency sampling                                                                                                                                         |
+| MODEL                | engine_service     | Model name on requests                                                                                                                                                |
+| API_KEY              | ""                 | API key header                                                                                                                                                        |
+| GRADIENT             | false              | Gradient (ramp-up) replay mode                                                                                                                                        |
+| GRADIENT_START_SPEED | 10                 | Gradient start speed                                                                                                                                                  |
+| GRADIENT_MAX_SPEED   | 1000               | Gradient max speed                                                                                                                                                    |
+| MAX_INPUT_LEN        | 0                  | Truncate input tokens beyond this length (0 = off)                                                                                                                    |
+| MAX_OUTPUT_LEN       | 0                  | Truncate output tokens beyond this length (0 = off)                                                                                                                   |
+| PUSHGATEWAY_URL      | ""                 | Push Prometheus metrics to this Pushgateway                                                                                                                           |
+| ENABLE_FALLBACK      | false              | Enable fallback prefill via ENDPOINTS_FILE                                                                                                                            |
+| ENDPOINTS_FILE       | ""                 | endpoints.json written by JavaMockEngineCluster                                                                                                                       |
+| DRY_RUN              | false              | Parse and validate only, no traffic                                                                                                                                   |
+| PRIORITY             | 50                 | Env-level default QoS priority (per-record trace priority overrides; explicit 0 = leave unset on the wire)                                                            |
+| SEND_MODE            | replay             | Arrival process: replay (trace ts pacing) / uniform (fixed interval)                                                                                                  |
+| SEND_MODE_QPS        | 0                  | uniform mode total target QPS (per shard = QPS / NUM_SHARDS)                                                                                                          |
 
 ## Architecture
 
@@ -346,10 +348,10 @@ across engine addresses.
      release-confirmation source);
   2. **already finished**: reported via the `already_finished` flag;
   3. **unknown / not found**: `{"status": "NOT_FOUND", "found": false}`.
-  The response carries `{status, found, phase, already_finished, engine,
-  port, request_id}` with `phase` as the TaskPhase enum name (null unless
-  found). A **Decode** target returns HTTP 501 `UNIMPLEMENTED`, matching the
-  production role contract (decode engines do not accept client cancels).
+     The response carries `{status, found, phase, already_finished, engine,
+port, request_id}` with `phase` as the TaskPhase enum name (null unless
+     found). A **Decode** target returns HTTP 501 `UNIMPLEMENTED`, matching the
+     production role contract (decode engines do not accept client cancels).
 
 ### Priority preemption (auto-tpm)
 
@@ -362,7 +364,7 @@ End-to-end QoS priority, from trace to engine terminal record:
   a per-record `priority` field in the trace **overrides** the env default;
   the winner is put on the wire via `ScheduleRequest.setPriority`. Shard summaries
   expose `priority_stats` (per-priority `{total, completed, rejected,
-  avg_schedule_ms}`, built by `priorityBreakdown`).
+avg_schedule_ms}`, built by `priorityBreakdown`).
 - **Engine side**: on eviction, the finished TaskInfo carries error code
   **8429 (`PRIORITY_PREEMPTED_ERROR_CODE`, "preempted by higher-priority
   request")** — an idempotent terminal record that masters can re-observe safely
@@ -398,7 +400,7 @@ master-side curves are indistinguishable from production:
   recovers, `cache_keys` stay). Decode provisions its blocks at run start (opt-in
   queued-mode provisions at enqueue) by re-matching the request's block keys
   against its **OWN LRU** (KV v2 fix #5, production `reuse_block_size =
-  generate_stream->reuseBlockSize()`) and allocating the **NET demand**
+generate_stream->reuseBlockSize()`) and allocating the **NET demand**
   `ceil(inputLen/spb) − hitBlocks` (floor 0): reused blocks are referenced in the
   LRU layer (ref+1, never re-allocated into the running layer), and the
   prefix-match read itself refreshes LRU recency — decode positive feedback, the
@@ -463,9 +465,9 @@ master-side curves are indistinguishable from production:
   consistently lowers availability across ALL surfaces (`getCacheStatus`,
   `WorkerStatus.availableKvCache`, `/snapshot`, `/metrics`).
 
-**Baseline caliber (IMPORTANT)**: v2 changes the *shape* of the available/active KV
+**Baseline caliber (IMPORTANT)**: v2 changes the _shape_ of the available/active KV
 curves (prefill now occupies capacity while running; LRU holdings reduce available;
-decode grows per step). KV v2 fix #5 further changes the decode *pressure level*:
+decode grows per step). KV v2 fix #5 further changes the decode _pressure level_:
 decode admission now deducts local LRU reuse (net allocation = `total − hit_blocks`,
 net-demand gate), so under prefix-heavy traffic the decode pool fills later and
 less than the pre-fix caliber — which allocated the full `ceil(inputLen/spb)` per
@@ -510,7 +512,7 @@ the description above is the actual (and only) behavior:
 
 - `max_waiting_batches > 0`: cap enabled — excess queued batches are
   rejected with backpressure (`prefill waiting queue full (backpressure):
-  waiting=N cap=M`);
+waiting=N cap=M`);
 - `0` / absent (default `DEFAULT_MAX_WAITING_PREFILL_BATCHES = 0`):
   **unbounded** queue (`<= 0` disables the cap) — production-aligned, see the
   cap paragraph above.

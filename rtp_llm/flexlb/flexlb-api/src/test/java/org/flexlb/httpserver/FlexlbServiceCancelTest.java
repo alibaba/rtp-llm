@@ -47,32 +47,32 @@ class FlexlbServiceCancelTest {
         routeService = mock(RouteService.class);
         consistencyService = mock(LBStatusConsistencyService.class);
         forwarder = mock(FlexlbGrpcForwarder.class);
-        service = new FlexlbServiceImpl(
-                routeService,
-                consistencyService,
-                mock(EngineHealthReporter.class),
-                forwarder,
-                mock(ConfigService.class),
-                mock(BatchSchedulerReporter.class),
-                mock(ServerScheduleLatencyRecorder.class),
-                mock(RequestSchedulerReporter.class));
+        service =
+                new FlexlbServiceImpl(
+                        routeService,
+                        consistencyService,
+                        mock(EngineHealthReporter.class),
+                        forwarder,
+                        mock(ConfigService.class),
+                        mock(BatchSchedulerReporter.class),
+                        mock(ServerScheduleLatencyRecorder.class),
+                        mock(RequestSchedulerReporter.class));
     }
 
     @Test
     void localCancelReturnsAuthoritativePendingLifecycle() {
-        RequestState pending = snapshot(
-                101L, RequestState.Phase.CANCEL_REQUESTED, 301L);
-        when(routeService.cancelRequest(
-                "101", 301L, CancelReason.DEADLINE_EXCEEDED))
+        RequestState pending = snapshot(101L, RequestState.Phase.CANCEL_REQUESTED, 301L);
+        when(routeService.cancelRequest("101", 301L, CancelReason.DEADLINE_EXCEEDED))
                 .thenReturn(pending);
         StreamObserver<FlexlbScheduleProtocol.FlexlbCancelResponsePB> observer =
                 mock(StreamObserver.class);
 
-        service.cancel(cancelRequest(
-                "101",
-                301L,
-                FlexlbScheduleProtocol.CancelReasonPB
-                        .CANCEL_REASON_DEADLINE_EXCEEDED), observer);
+        service.cancel(
+                cancelRequest(
+                        "101",
+                        301L,
+                        FlexlbScheduleProtocol.CancelReasonPB.CANCEL_REASON_DEADLINE_EXCEEDED),
+                observer);
 
         org.mockito.ArgumentCaptor<FlexlbScheduleProtocol.FlexlbCancelResponsePB> response =
                 org.mockito.ArgumentCaptor.forClass(
@@ -82,27 +82,25 @@ class FlexlbServiceCancelTest {
         verify(observer, never()).onError(any());
         assertTrue(response.getValue().getFound());
         assertEquals(
-                FlexlbScheduleProtocol.RequestStatePB
-                        .REQUEST_STATE_CANCEL_REQUESTED,
+                FlexlbScheduleProtocol.RequestStatePB.REQUEST_STATE_CANCEL_REQUESTED,
                 response.getValue().getLifecycle().getState());
         assertEquals(301L, response.getValue().getLifecycle().getBatchId());
     }
 
     @Test
     void localCancelPreservesExistingTerminalLifecycle() {
-        RequestState completed = snapshot(
-                102L, RequestState.Phase.COMPLETED, 0);
-        when(routeService.cancelRequest(
-                "102", 0, CancelReason.CLIENT_CANCELLED))
+        RequestState completed = snapshot(102L, RequestState.Phase.COMPLETED, 0);
+        when(routeService.cancelRequest("102", 0, CancelReason.CLIENT_CANCELLED))
                 .thenReturn(completed);
         StreamObserver<FlexlbScheduleProtocol.FlexlbCancelResponsePB> observer =
                 mock(StreamObserver.class);
 
-        service.cancel(cancelRequest(
-                "102",
-                0,
-                FlexlbScheduleProtocol.CancelReasonPB
-                        .CANCEL_REASON_CLIENT_CANCELLED), observer);
+        service.cancel(
+                cancelRequest(
+                        "102",
+                        0,
+                        FlexlbScheduleProtocol.CancelReasonPB.CANCEL_REASON_CLIENT_CANCELLED),
+                observer);
 
         org.mockito.ArgumentCaptor<FlexlbScheduleProtocol.FlexlbCancelResponsePB> response =
                 org.mockito.ArgumentCaptor.forClass(
@@ -116,15 +114,15 @@ class FlexlbServiceCancelTest {
 
     @Test
     void unknownRequestIsTheOnlyLocalNotFoundResponse() {
-        when(routeService.cancelRequest(
-                "103", 0, CancelReason.CLIENT_CANCELLED))
-                .thenReturn(null);
+        when(routeService.cancelRequest("103", 0, CancelReason.CLIENT_CANCELLED)).thenReturn(null);
         StreamObserver<FlexlbScheduleProtocol.FlexlbCancelResponsePB> observer =
                 mock(StreamObserver.class);
 
-        service.cancel(FlexlbScheduleProtocol.FlexlbCancelRequestPB.newBuilder()
-                .setRequestIdStr("103")
-                .build(), observer);
+        service.cancel(
+                FlexlbScheduleProtocol.FlexlbCancelRequestPB.newBuilder()
+                        .setRequestIdStr("103")
+                        .build(),
+                observer);
 
         org.mockito.ArgumentCaptor<FlexlbScheduleProtocol.FlexlbCancelResponsePB> response =
                 org.mockito.ArgumentCaptor.forClass(
@@ -143,7 +141,8 @@ class FlexlbServiceCancelTest {
                 FlexlbScheduleProtocol.FlexlbCancelRequestPB.newBuilder()
                         .setRequestId(7003)
                         .build();
-        StreamObserver<FlexlbScheduleProtocol.FlexlbCancelResponsePB> observer = mock(StreamObserver.class);
+        StreamObserver<FlexlbScheduleProtocol.FlexlbCancelResponsePB> observer =
+                mock(StreamObserver.class);
         doThrow(new IllegalStateException("completion failed")).when(observer).onError(any());
         var logger = (ch.qos.logback.classic.Logger) LoggerFactory.getLogger("flexlbLogger");
         ListAppender<ILoggingEvent> appender = new ListAppender<>();
@@ -151,10 +150,17 @@ class FlexlbServiceCancelTest {
         logger.addAppender(appender);
         try {
             service.cancel(request, observer);
-            assertEquals(2, appender.list.stream()
-                    .filter(event -> event.getFormattedMessage().startsWith("FlexlbService.cancel error"))
-                    .filter(event -> event.getFormattedMessage().contains("request_id=7003"))
-                    .count());
+            assertEquals(
+                    2,
+                    appender.list.stream()
+                            .filter(
+                                    event ->
+                                            event.getFormattedMessage()
+                                                    .startsWith("FlexlbService.cancel error"))
+                            .filter(
+                                    event ->
+                                            event.getFormattedMessage().contains("request_id=7003"))
+                            .count());
             verify(observer).onError(any());
         } finally {
             logger.detachAppender(appender);
@@ -175,73 +181,69 @@ class FlexlbServiceCancelTest {
                 cancelRequest(
                         "104",
                         0,
-                        FlexlbScheduleProtocol.CancelReasonPB
-                                .CANCEL_REASON_CLIENT_CANCELLED);
+                        FlexlbScheduleProtocol.CancelReasonPB.CANCEL_REASON_CLIENT_CANCELLED);
 
-        assertTimeoutPreemptively(
-                Duration.ofSeconds(1),
-                () -> service.cancel(request, observer));
+        assertTimeoutPreemptively(Duration.ofSeconds(1), () -> service.cancel(request, observer));
 
         verify(observer, never()).onNext(any());
         FlexlbScheduleProtocol.FlexlbCancelResponsePB masterResponse =
-                FlexlbScheduleProtocol.FlexlbCancelResponsePB.newBuilder()
-                        .setFound(false)
-                        .build();
-        assertTrue(pending.complete(
-                FlexlbGrpcForwarder.CancelForwardResult.forwarded(
-                        masterResponse, "10.0.0.2:7001")));
+                FlexlbScheduleProtocol.FlexlbCancelResponsePB.newBuilder().setFound(false).build();
+        assertTrue(
+                pending.complete(
+                        FlexlbGrpcForwarder.CancelForwardResult.forwarded(
+                                masterResponse, "10.0.0.2:7001")));
 
         verify(observer, times(1)).onNext(masterResponse);
         verify(observer, times(1)).onCompleted();
-        verify(routeService).cancelRequest(
-                "104", 0L, CancelReason.CLIENT_CANCELLED);
+        verify(routeService).cancelRequest("104", 0L, CancelReason.CLIENT_CANCELLED);
     }
 
     @Test
     void attemptedForwardFailureNeverRetriesLocally() {
         when(consistencyService.isNeedConsistency()).thenReturn(true);
         when(consistencyService.isMaster()).thenReturn(false);
-        when(forwarder.forwardCancelToMaster(any())).thenReturn(
-                CompletableFuture.completedFuture(
-                        FlexlbGrpcForwarder.CancelForwardResult.failed(
-                                "UNAVAILABLE", "10.0.0.2:7001")));
+        when(forwarder.forwardCancelToMaster(any()))
+                .thenReturn(
+                        CompletableFuture.completedFuture(
+                                FlexlbGrpcForwarder.CancelForwardResult.failed(
+                                        "UNAVAILABLE", "10.0.0.2:7001")));
         StreamObserver<FlexlbScheduleProtocol.FlexlbCancelResponsePB> observer =
                 mock(StreamObserver.class);
 
-        service.cancel(cancelRequest(
-                "105",
-                0,
-                FlexlbScheduleProtocol.CancelReasonPB
-                        .CANCEL_REASON_CLIENT_CANCELLED), observer);
+        service.cancel(
+                cancelRequest(
+                        "105",
+                        0,
+                        FlexlbScheduleProtocol.CancelReasonPB.CANCEL_REASON_CLIENT_CANCELLED),
+                observer);
 
         org.mockito.ArgumentCaptor<Throwable> error =
                 org.mockito.ArgumentCaptor.forClass(Throwable.class);
         verify(observer).onError(error.capture());
-        assertEquals(Status.Code.UNAVAILABLE,
-                Status.fromThrowable(error.getValue()).getCode());
+        assertEquals(Status.Code.UNAVAILABLE, Status.fromThrowable(error.getValue()).getCode());
         verify(observer, never()).onNext(any());
-        verify(routeService, times(1)).cancelRequest(
-                "105", 0L, CancelReason.CLIENT_CANCELLED);
+        verify(routeService, times(1)).cancelRequest("105", 0L, CancelReason.CLIENT_CANCELLED);
     }
 
     @Test
     void noSelectedMasterReturnsInitialLocalMissWithoutRetry() {
         when(consistencyService.isNeedConsistency()).thenReturn(true);
         when(consistencyService.isMaster()).thenReturn(false);
-        when(forwarder.forwardCancelToMaster(any())).thenReturn(
-                CompletableFuture.completedFuture(
-                        FlexlbGrpcForwarder.CancelForwardResult.noMaster()));
+        when(forwarder.forwardCancelToMaster(any()))
+                .thenReturn(
+                        CompletableFuture.completedFuture(
+                                FlexlbGrpcForwarder.CancelForwardResult.noMaster()));
         StreamObserver<FlexlbScheduleProtocol.FlexlbCancelResponsePB> observer =
                 mock(StreamObserver.class);
 
-        service.cancel(cancelRequest(
-                "106",
-                0,
-                FlexlbScheduleProtocol.CancelReasonPB
-                        .CANCEL_REASON_CLIENT_CANCELLED), observer);
+        service.cancel(
+                cancelRequest(
+                        "106",
+                        0,
+                        FlexlbScheduleProtocol.CancelReasonPB.CANCEL_REASON_CLIENT_CANCELLED),
+                observer);
 
-        verify(routeService, times(1)).cancelRequest(
-                "106", 0, CancelReason.CLIENT_CANCELLED);
+        verify(routeService, times(1)).cancelRequest("106", 0, CancelReason.CLIENT_CANCELLED);
         org.mockito.ArgumentCaptor<FlexlbScheduleProtocol.FlexlbCancelResponsePB> response =
                 org.mockito.ArgumentCaptor.forClass(
                         FlexlbScheduleProtocol.FlexlbCancelResponsePB.class);
@@ -261,29 +263,33 @@ class FlexlbServiceCancelTest {
         FlexlbScheduleProtocol.FlexlbCancelResponsePB masterResponse =
                 FlexlbScheduleProtocol.FlexlbCancelResponsePB.newBuilder()
                         .setFound(true)
-                        .setLifecycle(FlexlbScheduleProtocol.RequestLifecyclePB.newBuilder()
-                                .setRequestIdStr("107")
-                                .setState(FlexlbScheduleProtocol.RequestStatePB
-                                        .REQUEST_STATE_CANCEL_REQUESTED))
+                        .setLifecycle(
+                                FlexlbScheduleProtocol.RequestLifecyclePB.newBuilder()
+                                        .setRequestIdStr("107")
+                                        .setState(
+                                                FlexlbScheduleProtocol.RequestStatePB
+                                                        .REQUEST_STATE_CANCEL_REQUESTED))
                         .build();
         FlexlbGrpcForwarder.CancelForwardResult result =
-                FlexlbGrpcForwarder.CancelForwardResult.forwarded(
-                        masterResponse, "10.0.0.2:7001");
-        when(unusualStage.whenComplete(any())).thenAnswer(invocation -> {
-            BiConsumer<FlexlbGrpcForwarder.CancelForwardResult, Throwable> callback =
-                    invocation.getArgument(0);
-            callback.accept(result, null);
-            throw new IllegalStateException("registration failed after callback");
-        });
+                FlexlbGrpcForwarder.CancelForwardResult.forwarded(masterResponse, "10.0.0.2:7001");
+        when(unusualStage.whenComplete(any()))
+                .thenAnswer(
+                        invocation -> {
+                            BiConsumer<FlexlbGrpcForwarder.CancelForwardResult, Throwable>
+                                    callback = invocation.getArgument(0);
+                            callback.accept(result, null);
+                            throw new IllegalStateException("registration failed after callback");
+                        });
         when(forwarder.forwardCancelToMaster(any())).thenReturn(unusualStage);
         StreamObserver<FlexlbScheduleProtocol.FlexlbCancelResponsePB> observer =
                 mock(StreamObserver.class);
 
-        service.cancel(cancelRequest(
-                "107",
-                0,
-                FlexlbScheduleProtocol.CancelReasonPB
-                        .CANCEL_REASON_CLIENT_CANCELLED), observer);
+        service.cancel(
+                cancelRequest(
+                        "107",
+                        0,
+                        FlexlbScheduleProtocol.CancelReasonPB.CANCEL_REASON_CLIENT_CANCELLED),
+                observer);
 
         verify(observer, times(1)).onNext(masterResponse);
         verify(observer, times(1)).onCompleted();
@@ -291,9 +297,7 @@ class FlexlbServiceCancelTest {
     }
 
     private static FlexlbScheduleProtocol.FlexlbCancelRequestPB cancelRequest(
-            String requestId,
-            long batchId,
-            FlexlbScheduleProtocol.CancelReasonPB reason) {
+            String requestId, long batchId, FlexlbScheduleProtocol.CancelReasonPB reason) {
         return FlexlbScheduleProtocol.FlexlbCancelRequestPB.newBuilder()
                 .setRequestIdStr(requestId)
                 .setBatchId(batchId)
@@ -301,12 +305,15 @@ class FlexlbServiceCancelTest {
                 .build();
     }
 
-    private static RequestState snapshot(long requestId,
-                                         RequestState.Phase state,
-                                         long batchId) {
+    private static RequestState snapshot(long requestId, RequestState.Phase state, long batchId) {
         return new RequestState(
-                Long.toString(requestId), requestId, state,
+                Long.toString(requestId),
+                requestId,
+                state,
                 batchId > 0 ? DeliveryClaimKind.BATCH_ENQUEUE : DeliveryClaimKind.NONE,
-                batchId, 1L, 2L, state.name());
+                batchId,
+                1L,
+                2L,
+                state.name());
     }
 }

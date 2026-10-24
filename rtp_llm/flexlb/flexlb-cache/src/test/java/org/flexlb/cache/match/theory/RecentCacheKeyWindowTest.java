@@ -25,12 +25,14 @@ class RecentCacheKeyWindowTest {
 
     @Test
     void rejectsInvalidWindowAndCapacityBeforeAllocatingThePool() {
-        for (long duration : new long[]{0L, -1L}) {
-            assertThrows(IllegalArgumentException.class,
+        for (long duration : new long[] {0L, -1L}) {
+            assertThrows(
+                    IllegalArgumentException.class,
                     () -> new RecentCacheKeyWindow(duration, 10L, () -> 0L));
         }
-        for (long capacity : new long[]{0L, -1L, (long) Integer.MAX_VALUE + 1L}) {
-            assertThrows(IllegalArgumentException.class,
+        for (long capacity : new long[] {0L, -1L, (long) Integer.MAX_VALUE + 1L}) {
+            assertThrows(
+                    IllegalArgumentException.class,
                     () -> new RecentCacheKeyWindow(1000L, capacity, () -> 0L));
         }
     }
@@ -96,7 +98,8 @@ class RecentCacheKeyWindowTest {
         AtomicLong now = new AtomicLong(0L);
         RecentCacheKeyWindow window = new RecentCacheKeyWindow(1000L, 10L, now::get);
 
-        RecentCacheKeyWindow.Snapshot snapshot = window.record(java.util.Arrays.asList(1L, null, 2L));
+        RecentCacheKeyWindow.Snapshot snapshot =
+                window.record(java.util.Arrays.asList(1L, null, 2L));
 
         assertEquals(2L, snapshot.getRequestOccurrences());
         assertEquals(0L, snapshot.getRequestHitOccurrences());

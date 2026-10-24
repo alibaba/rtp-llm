@@ -84,14 +84,14 @@ KVCM 开启时不创建 `GetCacheStatus` channel。该规则对所有 discovery 
 
 worker 地址表示由不可变 `WorkerIdentity` 一次性预计算并保存，调用方不再解析或临时拼接：
 
-| 表示 | 格式 | 用途 |
-|---|---|---|
-| raw IP | `ip` | 网络连接与服务发现 |
-| raw port | `port` | 共享 frontend 端口 |
-| raw engine index | `engineIndex` | 逻辑引擎序号 |
-| physical IP-port | `ip:port` | 共享 frontend 身份、发现侧 cache 退役匹配 |
-| logical IP-port | `ip:port@index` | 路由、rollback、KVCM 与 cache key |
-| metric IP-port | N=1 为 `ip:port`；N>1 为 `ip:port@index` | Encoder、step、阶段耗时与缓存预测对照的 `engineIp` 标签 |
+| 表示             | 格式                                     | 用途                                                    |
+| ---------------- | ---------------------------------------- | ------------------------------------------------------- |
+| raw IP           | `ip`                                     | 网络连接与服务发现                                      |
+| raw port         | `port`                                   | 共享 frontend 端口                                      |
+| raw engine index | `engineIndex`                            | 逻辑引擎序号                                            |
+| physical IP-port | `ip:port`                                | 共享 frontend 身份、发现侧 cache 退役匹配               |
+| logical IP-port  | `ip:port@index`                          | 路由、rollback、KVCM 与 cache key                       |
+| metric IP-port   | N=1 为 `ip:port`；N>1 为 `ip:port@index` | Encoder、step、阶段耗时与缓存预测对照的 `engineIp` 标签 |
 
 `WorkerHost` 在服务发现展开时持有该 identity；N=1 的内部 logical identity 仍保留 `@0`。仅在
 metrics 边界通过 `WorkerStatus.getMetricIpPort()`（或 `ServerStatus` 对应方法）选择兼容地址，
@@ -182,7 +182,7 @@ cache 版本做增量；响应恒更新 KV token 总量，版本更新时把 `ca
 - `KvcmGrpcClient`（flexlb-grpc）：向 KVCM **leader** 发 `GetHostCacheState`
   （namespace = `deploymentName_blockSize`，QueryType 按 worker `kvCacheGroupMode` 映射
   QT_PREFIX_MATCH / QT_PREFIX_MATCH_WITH_MAMBA），响应 `HostCacheMatch{host_ip_port, local,
-  global}`；`global` 是 local、P2P 与远端 pool 来源联合后的前缀命中块数，已包含 `local`。
+global}`；`global` 是 local、P2P 与远端 pool 来源联合后的前缀命中块数，已包含 `local`。
   请求侧 `medium` 默认空列表（空表示匹配全部介质，取值原样透传给 KVCM）；
   `globalKvsHostCount` 默认 3，映射到 PB 的 `global_kvs_host_count = 7`（int32），按 local
   降序取前 N 个逻辑引擎计算远端命中，0 表示只算本地；`enableP2p` 默认 `false`，
@@ -213,7 +213,7 @@ cache 版本做增量；响应恒更新 KV token 总量，版本更新时把 `ca
   不等待索引写入完成；更新失败不影响调度响应。转发成功的 follower 不写入，
   follower 在本地兜底调度成功时写入自己的索引。master/follower 之间不复制。
 - `LocalStandbyCacheIndex`：`ConcurrentHashMap<Long blockHash, ConcurrentHashMap<worker,
-  lastUpdatedNanos>>`，TTL 过期（用量超 `ttlReductionStartRatio(0.8)` 后 TTL 从
+lastUpdatedNanos>>`，TTL 过期（用量超 `ttlReductionStartRatio(0.8)` 后 TTL 从
   `ttlMs(300s)` 线性降至 `minimumTtlMs(100s)`），容量上限
   `min(存活 worker HBM 估算块数 × capacityMultiplier(10), maximumEntries(200万))`，
   达到上限拒绝新映射。启动时要求 `0 < minimumTtlMs <= ttlMs`，压力比例为 `[0, 1]`

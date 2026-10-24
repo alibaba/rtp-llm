@@ -39,8 +39,9 @@ class GrpcChannelPoolTest {
         when(firstChannel.getState(true)).thenReturn(ConnectivityState.TRANSIENT_FAILURE);
         when(secondChannel.getState(true)).thenReturn(ConnectivityState.READY);
         AtomicInteger created = new AtomicInteger();
-        GrpcChannelPool<String> pool = new GrpcChannelPool<>(ignored ->
-                created.getAndIncrement() == 0 ? firstChannel : secondChannel);
+        GrpcChannelPool<String> pool =
+                new GrpcChannelPool<>(
+                        ignored -> created.getAndIncrement() == 0 ? firstChannel : secondChannel);
 
         GrpcChannelPool.PooledChannel first = pool.getOrCreate("target");
         GrpcChannelPool.PooledChannel second = pool.getOrCreate("target");
@@ -55,15 +56,18 @@ class GrpcChannelPoolTest {
     void createsOnlyOneChannelForConcurrentRequests() {
         ManagedChannel channel = mock(ManagedChannel.class);
         AtomicInteger created = new AtomicInteger();
-        GrpcChannelPool<String> pool = new GrpcChannelPool<>(ignored -> {
-            created.incrementAndGet();
-            return channel;
-        });
+        GrpcChannelPool<String> pool =
+                new GrpcChannelPool<>(
+                        ignored -> {
+                            created.incrementAndGet();
+                            return channel;
+                        });
 
-        List<GrpcChannelPool.PooledChannel> results = IntStream.range(0, 100)
-                .parallel()
-                .mapToObj(ignored -> pool.getOrCreate("target"))
-                .toList();
+        List<GrpcChannelPool.PooledChannel> results =
+                IntStream.range(0, 100)
+                        .parallel()
+                        .mapToObj(ignored -> pool.getOrCreate("target"))
+                        .toList();
 
         assertEquals(1, created.get());
         for (GrpcChannelPool.PooledChannel result : results) {
@@ -77,8 +81,9 @@ class GrpcChannelPoolTest {
         ManagedChannel secondChannel = mock(ManagedChannel.class);
         when(firstChannel.isTerminated()).thenReturn(true);
         AtomicInteger created = new AtomicInteger();
-        GrpcChannelPool<String> pool = new GrpcChannelPool<>(ignored ->
-                created.getAndIncrement() == 0 ? firstChannel : secondChannel);
+        GrpcChannelPool<String> pool =
+                new GrpcChannelPool<>(
+                        ignored -> created.getAndIncrement() == 0 ? firstChannel : secondChannel);
 
         GrpcChannelPool.PooledChannel first = pool.getOrCreate("target");
         GrpcChannelPool.PooledChannel second = pool.getOrCreate("target");
@@ -92,8 +97,8 @@ class GrpcChannelPoolTest {
     void removesStaleChannels() {
         ManagedChannel firstChannel = mock(ManagedChannel.class);
         ManagedChannel secondChannel = mock(ManagedChannel.class);
-        GrpcChannelPool<String> pool = new GrpcChannelPool<>(key ->
-                "first".equals(key) ? firstChannel : secondChannel);
+        GrpcChannelPool<String> pool =
+                new GrpcChannelPool<>(key -> "first".equals(key) ? firstChannel : secondChannel);
         pool.getOrCreate("first");
         pool.getOrCreate("second");
 
@@ -109,11 +114,14 @@ class GrpcChannelPoolTest {
         ManagedChannel firstPort = mock(ManagedChannel.class);
         ManagedChannel secondPort = mock(ManagedChannel.class);
         ManagedChannel inactiveHost = mock(ManagedChannel.class);
-        GrpcChannelPool<String> pool = new GrpcChannelPool<>(key -> switch (key) {
-            case "10.0.0.1:8081" -> firstPort;
-            case "10.0.0.1:18002" -> secondPort;
-            default -> inactiveHost;
-        });
+        GrpcChannelPool<String> pool =
+                new GrpcChannelPool<>(
+                        key ->
+                                switch (key) {
+                                    case "10.0.0.1:8081" -> firstPort;
+                                    case "10.0.0.1:18002" -> secondPort;
+                                    default -> inactiveHost;
+                                });
         pool.getOrCreate("10.0.0.1:8081");
         pool.getOrCreate("10.0.0.1:18002");
         pool.getOrCreate("10.0.0.2:8081");
@@ -132,8 +140,9 @@ class GrpcChannelPoolTest {
         ManagedChannel firstChannel = mock(ManagedChannel.class);
         ManagedChannel secondChannel = mock(ManagedChannel.class);
         AtomicInteger created = new AtomicInteger();
-        GrpcChannelPool<String> pool = new GrpcChannelPool<>(ignored ->
-                created.getAndIncrement() == 0 ? firstChannel : secondChannel);
+        GrpcChannelPool<String> pool =
+                new GrpcChannelPool<>(
+                        ignored -> created.getAndIncrement() == 0 ? firstChannel : secondChannel);
         GrpcChannelPool.PooledChannel first = pool.getOrCreate("target");
 
         GrpcChannelPool.PooledChannel replacement = pool.replace("target", first);
@@ -156,5 +165,4 @@ class GrpcChannelPoolTest {
         verify(channel).awaitTermination(1, TimeUnit.SECONDS);
         verify(channel).shutdownNow();
     }
-
 }

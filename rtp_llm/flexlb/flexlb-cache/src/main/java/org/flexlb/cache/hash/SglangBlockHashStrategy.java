@@ -19,10 +19,12 @@ public final class SglangBlockHashStrategy implements BlockHashStrategy {
             throw new IllegalArgumentException("input_ids must not be null");
         }
         if (blockSize <= 0 || blockSize > Integer.MAX_VALUE) {
-            throw new IllegalArgumentException("block_size must be between 1 and " + Integer.MAX_VALUE);
+            throw new IllegalArgumentException(
+                    "block_size must be between 1 and " + Integer.MAX_VALUE);
         }
         if (lookaheadTokens < 0 || lookaheadTokens > 1) {
-            throw new IllegalArgumentException("SGLang block hashing supports only 0 or 1 lookahead token");
+            throw new IllegalArgumentException(
+                    "SGLang block hashing supports only 0 or 1 lookahead token");
         }
         int logicalLength = inputIds.size() - lookaheadTokens;
         if (logicalLength <= 0) {
@@ -35,7 +37,9 @@ public final class SglangBlockHashStrategy implements BlockHashStrategy {
         MessageDigest digest = SHA_256.get();
         byte[] parentHash = null;
 
-        for (int tokenOffset = 0; tokenOffset + pageSize <= logicalLength; tokenOffset += pageSize) {
+        for (int tokenOffset = 0;
+                tokenOffset + pageSize <= logicalLength;
+                tokenOffset += pageSize) {
             digest.reset();
             if (parentHash != null) {
                 digest.update(parentHash);

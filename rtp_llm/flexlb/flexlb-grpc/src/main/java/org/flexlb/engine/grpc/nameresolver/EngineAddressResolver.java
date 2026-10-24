@@ -36,7 +36,8 @@ public class EngineAddressResolver {
     private volatile List<WorkerHost> allHosts = List.of();
     private final List<Endpoint> serviceEndpoints;
 
-    public EngineAddressResolver(ServiceDiscovery serviceDiscovery, ModelMetaConfig modelMetaConfig) {
+    public EngineAddressResolver(
+            ServiceDiscovery serviceDiscovery, ModelMetaConfig modelMetaConfig) {
         this.serviceDiscovery = serviceDiscovery;
         this.serviceEndpoints = initServiceEndpoints(modelMetaConfig);
         log.info("EngineAddressResolver start subscribe endpoints:{} ", serviceEndpoints);
@@ -46,7 +47,9 @@ public class EngineAddressResolver {
 
     @Scheduled(fixedDelay = 30000) // Execute every 30 seconds
     public void periodicHostUpdate() {
-        Logger.info("EngineAddressResolver performing periodic host update for endpoints: {}", serviceEndpoints);
+        Logger.info(
+                "EngineAddressResolver performing periodic host update for endpoints: {}",
+                serviceEndpoints);
         fetchAllDomainsHosts();
     }
 
@@ -65,11 +68,14 @@ public class EngineAddressResolver {
                 hosts = serviceDiscovery.getHosts(endpoint);
             } catch (Exception e) {
                 throw new IllegalStateException(
-                        "Failed to fetch initial engine hosts for endpoint: " + endpoint.getAddress(), e);
+                        "Failed to fetch initial engine hosts for endpoint: "
+                                + endpoint.getAddress(),
+                        e);
             }
             if (hosts == null || hosts.isEmpty()) {
                 throw new IllegalStateException(
-                        "No initial engine hosts discovered for endpoint: " + endpoint.getAddress());
+                        "No initial engine hosts discovered for endpoint: "
+                                + endpoint.getAddress());
             }
             initialHosts.put(endpoint, List.copyOf(hosts));
         }
@@ -80,12 +86,17 @@ public class EngineAddressResolver {
         for (Endpoint endpoint : serviceEndpoints) {
             try {
                 List<WorkerHost> hosts = serviceDiscovery.getHosts(endpoint);
-                Logger.info("Fetched {} hosts for address: {}",
-                        hosts != null ? hosts.size() : 0, endpoint.getAddress());
+                Logger.info(
+                        "Fetched {} hosts for address: {}",
+                        hosts != null ? hosts.size() : 0,
+                        endpoint.getAddress());
                 updateEndpointHosts(endpoint, hosts);
             } catch (Exception e) {
-                Logger.error("Failed to fetch hosts for address: {}, error: {}",
-                        endpoint.getAddress(), e.getMessage(), e);
+                Logger.error(
+                        "Failed to fetch hosts for address: {}, error: {}",
+                        endpoint.getAddress(),
+                        e.getMessage(),
+                        e);
             }
         }
     }
@@ -94,27 +105,44 @@ public class EngineAddressResolver {
         Map<AddressSource, Endpoint> uniqueSources = new LinkedHashMap<>();
         modelMetaConfig.getServiceRoutes().stream()
                 .flatMap(serviceRoute -> serviceRoute.getAllEndpoints().stream())
-                .forEach(endpoint -> uniqueSources.putIfAbsent(AddressSource.from(endpoint), endpoint));
+                .forEach(
+                        endpoint ->
+                                uniqueSources.putIfAbsent(AddressSource.from(endpoint), endpoint));
         List<Endpoint> endpoints = List.copyOf(uniqueSources.values());
         if (CollectionUtils.isEmpty(endpoints)) {
-            throw new IllegalArgumentException("MODEL_SERVICE_CONFIG must contain at least one role endpoint");
+            throw new IllegalArgumentException(
+                    "MODEL_SERVICE_CONFIG must contain at least one role endpoint");
         }
         return endpoints;
     }
 
     private record DiscoverySource(ServiceDiscoveryType type, String baseUrl, List<String> hosts) {
         private static DiscoverySource from(DiscoveryConfig discovery) {
-            return discovery == null ? null : new DiscoverySource(
-                    discovery.getType(), discovery.getBaseUrl(),
-                    discovery.getHosts() == null ? List.of() : List.copyOf(discovery.getHosts()));
+            return discovery == null
+                    ? null
+                    : new DiscoverySource(
+                            discovery.getType(),
+                            discovery.getBaseUrl(),
+                            discovery.getHosts() == null
+                                    ? List.of()
+                                    : List.copyOf(discovery.getHosts()));
         }
     }
 
-    private record AddressSource(String address, String protocol, String path,
-                                 Integer workerStatusPort, int multiEngineNum, DiscoverySource discovery) {
+    private record AddressSource(
+            String address,
+            String protocol,
+            String path,
+            Integer workerStatusPort,
+            int multiEngineNum,
+            DiscoverySource discovery) {
         private static AddressSource from(Endpoint endpoint) {
-            return new AddressSource(endpoint.getAddress(), endpoint.getProtocol(), endpoint.getPath(),
-                    endpoint.getWorkerStatusPort(), endpoint.getMultiEngineNum(),
+            return new AddressSource(
+                    endpoint.getAddress(),
+                    endpoint.getProtocol(),
+                    endpoint.getPath(),
+                    endpoint.getWorkerStatusPort(),
+                    endpoint.getMultiEngineNum(),
                     DiscoverySource.from(endpoint.getDiscovery()));
         }
     }
@@ -143,8 +171,10 @@ public class EngineAddressResolver {
         for (List<WorkerHost> hosts : domainHostsMap.values()) {
             aggregatedHosts.addAll(hosts);
         }
-        Logger.info("Address {} hosts updated, total aggregated hosts: {}",
-                endpoint.getAddress(), aggregatedHosts.size());
+        Logger.info(
+                "Address {} hosts updated, total aggregated hosts: {}",
+                endpoint.getAddress(),
+                aggregatedHosts.size());
         // Update global host list and notify listener
         this.allHosts = List.copyOf(aggregatedHosts);
         for (Listener listener : listeners) {

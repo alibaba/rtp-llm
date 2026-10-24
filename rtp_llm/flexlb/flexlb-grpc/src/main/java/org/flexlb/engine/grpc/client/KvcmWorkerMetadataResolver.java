@@ -32,19 +32,19 @@ public class KvcmWorkerMetadataResolver {
     private final WorkerStatusProvider workerStatusProvider;
     private final ConcurrentMap<String, ConcurrentMap<RoleType, String>> namespaceByGroupAndRole =
             new ConcurrentHashMap<>();
-    private final ConcurrentMap<String, ConcurrentMap<RoleType, QueryType>> queryTypeByGroupAndRole =
-            new ConcurrentHashMap<>();
+    private final ConcurrentMap<String, ConcurrentMap<RoleType, QueryType>>
+            queryTypeByGroupAndRole = new ConcurrentHashMap<>();
     private final ConcurrentMap<RoleType, QueryType> queryTypeByRoleForCrossGroupRouting =
             new ConcurrentHashMap<>();
 
     public KvcmWorkerMetadataResolver(
-            CacheMatchConfiguration configuration,
-            WorkerStatusProvider workerStatusProvider) {
+            CacheMatchConfiguration configuration, WorkerStatusProvider workerStatusProvider) {
         this.serviceRoute = configuration.getKvcmServiceRoute();
         KvcmConfig config = configuration.getKvcmConfig();
-        this.configuredNamespace = configuration.isKvcmEnabled()
-                ? StringUtils.trimToNull(config.getNamespace())
-                : null;
+        this.configuredNamespace =
+                configuration.isKvcmEnabled()
+                        ? StringUtils.trimToNull(config.getNamespace())
+                        : null;
         this.workerStatusProvider = workerStatusProvider;
     }
 
@@ -86,10 +86,12 @@ public class KvcmWorkerMetadataResolver {
                 }
 
                 ResolvedWorkerMetadata metadata =
-                        resolveWorkerMetadata(workerStatusProvider.getWorkerStatuses(roleType, group));
+                        resolveWorkerMetadata(
+                                workerStatusProvider.getWorkerStatuses(roleType, group));
                 if (configuredNamespace == null && metadata.namespace() != null) {
                     ConcurrentMap<RoleType, String> namespaceByRole =
-                            namespaceByGroupAndRole.computeIfAbsent(group, ignored -> new ConcurrentHashMap<>());
+                            namespaceByGroupAndRole.computeIfAbsent(
+                                    group, ignored -> new ConcurrentHashMap<>());
                     if (!metadata.namespace().equals(namespaceByRole.get(roleType))) {
                         namespaceByRole.put(roleType, metadata.namespace());
                         namespaceChanged = true;
@@ -97,7 +99,8 @@ public class KvcmWorkerMetadataResolver {
                 }
                 if (metadata.queryType() != null) {
                     ConcurrentMap<RoleType, QueryType> queryTypeByRole =
-                            queryTypeByGroupAndRole.computeIfAbsent(group, ignored -> new ConcurrentHashMap<>());
+                            queryTypeByGroupAndRole.computeIfAbsent(
+                                    group, ignored -> new ConcurrentHashMap<>());
                     if (metadata.queryType() != queryTypeByRole.get(roleType)) {
                         queryTypeByRole.put(roleType, metadata.queryType());
                         queryTypeChanged = true;
@@ -125,7 +128,8 @@ public class KvcmWorkerMetadataResolver {
             if (workerStatus == null) {
                 continue;
             }
-            if (configuredNamespace == null && namespace == null
+            if (configuredNamespace == null
+                    && namespace == null
                     && StringUtils.isNotBlank(workerStatus.getDeploymentName())) {
                 namespace = workerStatus.getDeploymentName();
             }
@@ -153,7 +157,8 @@ public class KvcmWorkerMetadataResolver {
     private void refreshCrossGroupQueryTypes() {
         for (RoleType roleType : RoleType.values()) {
             QueryType resolvedQueryType = null;
-            for (ConcurrentMap<RoleType, QueryType> queryTypeByRole : queryTypeByGroupAndRole.values()) {
+            for (ConcurrentMap<RoleType, QueryType> queryTypeByRole :
+                    queryTypeByGroupAndRole.values()) {
                 QueryType candidate = queryTypeByRole.get(roleType);
                 if (candidate == null) {
                     continue;
@@ -162,8 +167,11 @@ public class KvcmWorkerMetadataResolver {
                     resolvedQueryType = candidate;
                 } else if (resolvedQueryType != candidate) {
                     queryTypeByRoleForCrossGroupRouting.put(roleType, DEFAULT_QUERY_TYPE);
-                    log.warn("KVCM query type differs across groups for role={}; "
-                            + "cross-group routing will use {}", roleType, DEFAULT_QUERY_TYPE);
+                    log.warn(
+                            "KVCM query type differs across groups for role={}; "
+                                    + "cross-group routing will use {}",
+                            roleType,
+                            DEFAULT_QUERY_TYPE);
                     resolvedQueryType = null;
                     break;
                 }
@@ -174,6 +182,5 @@ public class KvcmWorkerMetadataResolver {
         }
     }
 
-    private record ResolvedWorkerMetadata(String namespace, QueryType queryType) {
-    }
+    private record ResolvedWorkerMetadata(String namespace, QueryType queryType) {}
 }

@@ -16,11 +16,8 @@ from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
 
-
 SHANGHAI = ZoneInfo("Asia/Shanghai")
-LOG_TIME_RE = re.compile(
-    r"^(?P<time>\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}[.,]\d{3,6})"
-)
+LOG_TIME_RE = re.compile(r"^(?P<time>\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}[.,]\d{3,6})")
 SAFE_NAME_RE = re.compile(r"[^A-Za-z0-9_.-]+")
 CommandRunner = Callable[[Sequence[str]], str]
 
@@ -254,11 +251,19 @@ def _remote_time_bounds(
         workspace, instance, command_runner, "tail", "-n", "1", remote_path
     )
     first = next(
-        (timestamp for line in first_output.splitlines() if (timestamp := _parse_log_time(line))),
+        (
+            timestamp
+            for line in first_output.splitlines()
+            if (timestamp := _parse_log_time(line))
+        ),
         None,
     )
     last = next(
-        (timestamp for line in last_output.splitlines() if (timestamp := _parse_log_time(line))),
+        (
+            timestamp
+            for line in last_output.splitlines()
+            if (timestamp := _parse_log_time(line))
+        ),
         None,
     )
     return first, last
@@ -479,9 +484,7 @@ def _fetch_remote_file(
     return fetched, source_manifest
 
 
-def _local_files(
-    value: str | Path | Iterable[str | Path], log_name: str
-) -> list[Path]:
+def _local_files(value: str | Path | Iterable[str | Path], log_name: str) -> list[Path]:
     if isinstance(value, (str, Path)):
         candidates = [Path(value)]
     else:
@@ -989,8 +992,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--output-dir", required=True)
     parser.add_argument("--log-dir", default="/home/admin/logs")
     parser.add_argument("--log-name", default="pv.log")
-    parser.add_argument("--lead-grace", type=_parse_duration, default=timedelta(minutes=5))
-    parser.add_argument("--tail-grace", type=_parse_duration, default=timedelta(minutes=10))
+    parser.add_argument(
+        "--lead-grace", type=_parse_duration, default=timedelta(minutes=5)
+    )
+    parser.add_argument(
+        "--tail-grace", type=_parse_duration, default=timedelta(minutes=10)
+    )
     parser.add_argument("--page-lines", type=int, default=50)
     parser.add_argument("--workers", type=int, default=4)
     parser.add_argument("--strict", action="store_true")

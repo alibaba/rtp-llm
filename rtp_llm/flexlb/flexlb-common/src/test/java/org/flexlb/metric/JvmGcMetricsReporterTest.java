@@ -33,9 +33,13 @@ class JvmGcMetricsReporterTest {
     @Test
     void recordsWindowCountsAndEventWeightedMeanWithoutIdleSamples() {
         MicrometerFlexMonitor monitor = new MicrometerFlexMonitor(registry);
-        JvmGcMetricsReporter reporter = new JvmGcMetricsReporter(monitor,
-                List.of(collector("G1 Young Generation"), collector("G1 Old Generation"),
-                        collector("G1 Concurrent GC")));
+        JvmGcMetricsReporter reporter =
+                new JvmGcMetricsReporter(
+                        monitor,
+                        List.of(
+                                collector("G1 Young Generation"),
+                                collector("G1 Old Generation"),
+                                collector("G1 Concurrent GC")));
         reporter.init();
         try {
             double countBefore = counter(registry, JVM_GC_COLLECTION_COUNT, "young").count();
@@ -46,8 +50,10 @@ class JvmGcMetricsReporterTest {
             reporter.reportHeartbeat();
             reporter.reportPause("G1 Old Generation", 100L);
 
-            double windowCount = counter(registry, JVM_GC_COLLECTION_COUNT, "young").count() - countBefore;
-            double windowTime = counter(registry, JVM_GC_PAUSE_TOTAL_MS, "young").count() - timeBefore;
+            double windowCount =
+                    counter(registry, JVM_GC_COLLECTION_COUNT, "young").count() - countBefore;
+            double windowTime =
+                    counter(registry, JVM_GC_PAUSE_TOTAL_MS, "young").count() - timeBefore;
             assertEquals(2.0D, windowCount);
             assertEquals(20.0D, windowTime / windowCount);
             assertEquals(1.0D, counter(registry, JVM_GC_COLLECTION_COUNT, "full").count());
@@ -60,8 +66,10 @@ class JvmGcMetricsReporterTest {
 
     @Test
     void retainsZeroDurationCollectionsAndIgnoresInvalidEvents() {
-        JvmGcMetricsReporter reporter = new JvmGcMetricsReporter(new MicrometerFlexMonitor(registry),
-                List.of(collector("G1 Young Generation")));
+        JvmGcMetricsReporter reporter =
+                new JvmGcMetricsReporter(
+                        new MicrometerFlexMonitor(registry),
+                        List.of(collector("G1 Young Generation")));
         reporter.init();
         try {
             reporter.reportPause("G1 Young Generation", 0L);
@@ -80,16 +88,20 @@ class JvmGcMetricsReporterTest {
         FlexMonitor monitor = mock(FlexMonitor.class);
         JvmGcMetricsReporter reporter = new JvmGcMetricsReporter(monitor, List.of(bean));
         reporter.init();
-        ArgumentCaptor<NotificationListener> listener = ArgumentCaptor.forClass(NotificationListener.class);
-        verify((NotificationEmitter) bean).addNotificationListener(listener.capture(), isNull(), isNull());
+        ArgumentCaptor<NotificationListener> listener =
+                ArgumentCaptor.forClass(NotificationListener.class);
+        verify((NotificationEmitter) bean)
+                .addNotificationListener(listener.capture(), isNull(), isNull());
         listener.getValue().handleNotification(new Notification("unrelated", "test", 1L), null);
         reporter.close();
         verify((NotificationEmitter) bean).removeNotificationListener(listener.getValue());
     }
 
     private static GarbageCollectorMXBean collector(String name) {
-        GarbageCollectorMXBean bean = mock(GarbageCollectorMXBean.class,
-                withSettings().extraInterfaces(NotificationEmitter.class));
+        GarbageCollectorMXBean bean =
+                mock(
+                        GarbageCollectorMXBean.class,
+                        withSettings().extraInterfaces(NotificationEmitter.class));
         when(bean.getName()).thenReturn(name);
         return bean;
     }

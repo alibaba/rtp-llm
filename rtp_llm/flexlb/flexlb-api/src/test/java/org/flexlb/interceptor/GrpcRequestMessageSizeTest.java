@@ -26,28 +26,44 @@ class GrpcRequestMessageSizeTest {
     void transportMeasuresUncompressedBytesAndIsolatesConcurrentCalls() throws Exception {
         var interceptor = new GrpcServerTimingInterceptor();
         Map<String, Long> measuredSizes = new ConcurrentHashMap<>();
-        var service = new FlexlbServiceGrpc.FlexlbServiceImplBase() {
-            @Override
-            public void schedule(FlexlbScheduleRequestPB request,
-                                 StreamObserver<FlexlbScheduleResponsePB> observer) {
-                measuredSizes.put(request.getRequestIdStr(), GrpcServerTimingInterceptor.getRequestMessageBytes());
-                assertNotNull(GrpcServerTimingInterceptor.getNanos());
-                observer.onNext(FlexlbScheduleResponsePB.newBuilder().setSuccess(true).build());
-                observer.onCompleted();
-            }
-        };
-        var server = NettyServerBuilder.forPort(0)
-                .addStreamTracerFactory(interceptor.requestSizeTracerFactory())
-                .addService(ServerInterceptors.intercept(service, interceptor)).build().start();
-        var channel = NettyChannelBuilder.forAddress("127.0.0.1", server.getPort()).usePlaintext().build();
+        var service =
+                new FlexlbServiceGrpc.FlexlbServiceImplBase() {
+                    @Override
+                    public void schedule(
+                            FlexlbScheduleRequestPB request,
+                            StreamObserver<FlexlbScheduleResponsePB> observer) {
+                        measuredSizes.put(
+                                request.getRequestIdStr(),
+                                GrpcServerTimingInterceptor.getRequestMessageBytes());
+                        assertNotNull(GrpcServerTimingInterceptor.getNanos());
+                        observer.onNext(
+                                FlexlbScheduleResponsePB.newBuilder().setSuccess(true).build());
+                        observer.onCompleted();
+                    }
+                };
+        var server =
+                NettyServerBuilder.forPort(0)
+                        .addStreamTracerFactory(interceptor.requestSizeTracerFactory())
+                        .addService(ServerInterceptors.intercept(service, interceptor))
+                        .build()
+                        .start();
+        var channel =
+                NettyChannelBuilder.forAddress("127.0.0.1", server.getPort())
+                        .usePlaintext()
+                        .build();
         try {
-            var stub = FlexlbServiceGrpc.newFutureStub(channel).withDeadlineAfter(5, TimeUnit.SECONDS);
-            var pending = new ArrayList<com.google.common.util.concurrent.ListenableFuture<FlexlbScheduleResponsePB>>();
+            var stub =
+                    FlexlbServiceGrpc.newFutureStub(channel).withDeadlineAfter(5, TimeUnit.SECONDS);
+            var pending =
+                    new ArrayList<
+                            com.google.common.util.concurrent.ListenableFuture<
+                                    FlexlbScheduleResponsePB>>();
             var requests = new ArrayList<FlexlbScheduleRequestPB>();
             for (int i = 0; i < 20; i++) {
-                var request = FlexlbScheduleRequestPB.newBuilder()
-                        .setRequestIdStr("request-" + i + "-" + "x".repeat(i * 300))
-                        .build();
+                var request =
+                        FlexlbScheduleRequestPB.newBuilder()
+                                .setRequestIdStr("request-" + i + "-" + "x".repeat(i * 300))
+                                .build();
                 requests.add(request);
                 pending.add((i % 2 == 0 ? stub : stub.withCompression("gzip")).schedule(request));
             }
@@ -55,7 +71,9 @@ class GrpcRequestMessageSizeTest {
                 future.get(5, TimeUnit.SECONDS);
             }
             for (var request : requests) {
-                assertEquals((long) request.getSerializedSize(), measuredSizes.get(request.getRequestIdStr()));
+                assertEquals(
+                        (long) request.getSerializedSize(),
+                        measuredSizes.get(request.getRequestIdStr()));
             }
             var empty = FlexlbScheduleRequestPB.getDefaultInstance();
             stub.schedule(empty).get(5, TimeUnit.SECONDS);
@@ -69,8 +87,12 @@ class GrpcRequestMessageSizeTest {
 
     @Test
     void unknownSizeDoesNotBecomeAZeroSample() {
-        var tracer = new GrpcServerTimingInterceptor().requestSizeTracerFactory()
-                .newServerStreamTracer(FlexlbServiceGrpc.getScheduleMethod().getFullMethodName(), new Metadata());
+        var tracer =
+                new GrpcServerTimingInterceptor()
+                        .requestSizeTracerFactory()
+                        .newServerStreamTracer(
+                                FlexlbServiceGrpc.getScheduleMethod().getFullMethodName(),
+                                new Metadata());
         var context = tracer.filterContext(Context.ROOT);
         context.run(() -> assertNull(GrpcServerTimingInterceptor.getRequestMessageBytes()));
         tracer.inboundMessageRead(0, 17, -1);

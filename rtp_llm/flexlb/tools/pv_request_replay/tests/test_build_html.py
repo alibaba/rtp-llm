@@ -11,7 +11,6 @@ from pathlib import Path
 
 from openpyxl import Workbook
 
-
 TOOL_DIR = Path(__file__).resolve().parents[1]
 MODULE_SPEC = importlib.util.spec_from_file_location(
     "pv_request_replay_build_html", TOOL_DIR / "build_html.py"
@@ -48,23 +47,43 @@ class BuildHtmlTest(unittest.TestCase):
         if not node:
             self.skipTest("Node is required to execute the replay renderers")
         template = (TOOL_DIR / "replay_template.html").read_text()
-        attack = '\"><img src=x onerror=alert(1)>&'
+        attack = '"><img src=x onerror=alert(1)>&'
         requests = [
-            {"id": attack + suffix, "requestId": attack + suffix, "host": attack,
-             "reason": attack, "percentile": attack, "route": 1000,
-             "enqueue": 1000, "drain": drain, "firstToken": 10000, "uncache": 1000}
+            {
+                "id": attack + suffix,
+                "requestId": attack + suffix,
+                "host": attack,
+                "reason": attack,
+                "percentile": attack,
+                "route": 1000,
+                "enqueue": 1000,
+                "drain": drain,
+                "firstToken": 10000,
+                "uncache": 1000,
+            }
             for suffix, drain in (("-running", 1000), ("-waiting", 2000))
         ]
-        replay = {"meta": {"start": 1000, "end": 10000, "requestCount": 2,
-                           "hostCount": 1, "source": "test"},
-                  "hosts": [attack], "requests": requests,
-                  "candidates": {request["id"]: [{"host": attack, "port": 8001,
-                                                   "selected": True, "rank": 1}]
-                                 for request in requests}}
+        replay = {
+            "meta": {
+                "start": 1000,
+                "end": 10000,
+                "requestCount": 2,
+                "hostCount": 1,
+                "source": "test",
+            },
+            "hosts": [attack],
+            "requests": requests,
+            "candidates": {
+                request["id"]: [
+                    {"host": attack, "port": 8001, "selected": True, "rank": 1}
+                ]
+                for request in requests
+            },
+        }
         script = template.split("<script>", 1)[1].split("</script>", 1)[0]
         script = script.replace("__REPLAY_DATA__", json.dumps(replay))
         before, after = script.rsplit("  })();", 1)
-        checks = '''
+        checks = """
         for (const selector of ['#summary', '#request-detail', '#host-grid',
                                 '#decision-microscope', '#host-filter']) {
           const html = nodes.get(selector).innerHTML;
@@ -85,8 +104,8 @@ class BuildHtmlTest(unittest.TestCase):
         renderDecisionMicroscope();
         if (nodes.get('#decision-microscope').innerHTML.includes('<img'))
           throw new Error('Unescaped current candidate');
-        '''
-        bootstrap = '''
+        """
+        bootstrap = """
         const nodes = new Map();
         const context = new Proxy({}, {get: () => () => {}});
         const element = () => ({innerHTML: '', textContent: '', value: '', style: {},
@@ -101,9 +120,13 @@ class BuildHtmlTest(unittest.TestCase):
         global.window = {addEventListener() {}};
         global.devicePixelRatio = 1;
         global.setTimeout = () => 0;
-        '''
-        result = subprocess.run([node, "-e", bootstrap + before + checks + "  })();" + after],
-                                capture_output=True, text=True, timeout=10)
+        """
+        result = subprocess.run(
+            [node, "-e", bootstrap + before + checks + "  })();" + after],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
         self.assertEqual(result.returncode, 0, result.stderr)
 
     def test_builds_self_contained_replay_from_workbook(self) -> None:
@@ -132,8 +155,8 @@ class BuildHtmlTest(unittest.TestCase):
             self.assertIn("空格</kbd> 播放 / 暂停", html)
             self.assertNotIn("recorded decision candidates", html)
             self.assertNotIn("目标机器：", html)
-            self.assertIn("event.code === 'ArrowLeft'", html)
-            self.assertIn("event.code === 'ArrowRight'", html)
+            self.assertRegex(html, r"""event\.code\s*===\s*['"]ArrowLeft['"]""")
+            self.assertRegex(html, r"""event\.code\s*===\s*['"]ArrowRight['"]""")
 
             replay = self._embedded_replay(html)
             self.assertEqual(replay["meta"]["source"], "input.xlsx")
@@ -162,16 +185,28 @@ class BuildHtmlTest(unittest.TestCase):
                 )
                 self.assertEqual(result.returncode, 0, result.stderr)
 
-    def test_current_candidate_card_keeps_milliseconds_weight_and_missing_values(self) -> None:
+    def test_current_candidate_card_keeps_milliseconds_weight_and_missing_values(
+        self,
+    ) -> None:
         node = shutil.which("node")
         if not node:
             self.skipTest("Node is required to execute the card renderer")
         template = (TOOL_DIR / "replay_template.html").read_text()
         declarations = []
         for name in ("nf", "number", "milliseconds", "work", "tokenWork", "pct"):
-            declarations.append(re.search(r"    const " + name + r" = .*;", template).group(0))
-        helpers = template[template.index("    function escaped("):template.index("    function renderDecisionMicroscope(")]
-        script = "\n".join(declarations) + helpers + "\n" + '''
+            declarations.append(
+                re.search(r"\bconst " + name + r"\s*=[\s\S]*?;", template).group(0)
+            )
+        helpers = template[
+            template.index("    function escaped(") : template.index(
+                "    function renderDecisionMicroscope("
+            )
+        ]
+        script = (
+            "\n".join(declarations)
+            + helpers
+            + "\n"
+            + """
         const prefill = currentDecisionCard({role: 'PREFILL', host: 'worker', port: 8001,
           projectedTtftMs: 12, projectedDrainMs: 0, incomingPrefillMs: null,
           policy: {minimumTtftMs: 12}, pendingRequests: 0});
@@ -179,28 +214,51 @@ class BuildHtmlTest(unittest.TestCase):
         if (!prefill.includes('12 ms') || !prefill.includes('0 ms') || !prefill.includes('本请求 Prefill 耗时<b>—</b>'))
           throw new Error('Current estimates lost their units or unknown values');
         if (!decode.includes('-0.250000')) throw new Error('Decode weight rounded to zero');
-        '''
-        result = subprocess.run([node, "-e", script], capture_output=True, text=True, timeout=10)
+        """
+        )
+        result = subprocess.run(
+            [node, "-e", script], capture_output=True, text=True, timeout=10
+        )
         self.assertEqual(result.returncode, 0, result.stderr)
 
-    def test_cache_comparison_card_preserves_zero_signed_delta_and_unknown(self) -> None:
+    def test_cache_comparison_card_preserves_zero_signed_delta_and_unknown(
+        self,
+    ) -> None:
         node = shutil.which("node")
         if not node:
             self.skipTest("Node is required to execute the card renderer")
         template = (TOOL_DIR / "replay_template.html").read_text()
-        declarations = [re.search(r"    const " + name + r" = .*;", template).group(0)
-                        for name in ("nf", "number", "work", "tokenWork")]
-        helpers = template[template.index("    function escaped("):template.index("    function currentDecisionCard(")]
-        renderer = template[template.index("    function renderCacheComparison("):template.index("    function renderRequestDetail(")]
-        script = "\n".join(declarations) + helpers + renderer + "\n" + '''
+        declarations = [
+            re.search(r"\bconst " + name + r"\s*=[\s\S]*?;", template).group(0)
+            for name in ("nf", "number", "work", "tokenWork")
+        ]
+        helpers = template[
+            template.index("    function escaped(") : template.index(
+                "    function currentDecisionCard("
+            )
+        ]
+        renderer = template[
+            template.index("    function renderCacheComparison(") : template.index(
+                "    function renderRequestDetail("
+            )
+        ]
+        script = (
+            "\n".join(declarations)
+            + helpers
+            + renderer
+            + "\n"
+            + """
         const html = renderCacheComparison({actualHit: 0, cacheComparison: {
           source: '<Standby>', kvcm: {hit: null, delta: null},
           local_standby: {hit: 300, delta: -300}}});
         if (!html.includes('实际命中 0 Token') || !html.includes('差值 -300 Token')
           || !html.includes('— · 差值 —') || !html.includes('&lt;Standby&gt;'))
           throw new Error('Cache comparison lost zero, signed delta, unknown, or source escaping');
-        '''
-        result = subprocess.run([node, "-e", script], capture_output=True, text=True, timeout=10)
+        """
+        )
+        result = subprocess.run(
+            [node, "-e", script], capture_output=True, text=True, timeout=10
+        )
         self.assertEqual(result.returncode, 0, result.stderr)
 
     def test_builds_replay_from_legacy_requests_header_row(self) -> None:
@@ -221,8 +279,8 @@ class BuildHtmlTest(unittest.TestCase):
     def _embedded_replay(html: str) -> dict:
         prefix = "const REPLAY = "
         start = html.index(prefix) + len(prefix)
-        end = html.index(";\n  (() =>", start)
-        return json.loads(html[start:end])
+        replay, _ = json.JSONDecoder().raw_decode(html[start:])
+        return replay
 
     @staticmethod
     def _write_workbook(path: Path, legacy_requests_header: bool = False) -> None:

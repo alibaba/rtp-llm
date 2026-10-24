@@ -20,20 +20,27 @@ public class FlexlbLogManager {
     private final LogbackStdoutController stdoutController;
 
     @Autowired
-    public FlexlbLogManager(LoggingSystem loggingSystem, LoggerGroups loggerGroups, ConfigService configService) {
+    public FlexlbLogManager(
+            LoggingSystem loggingSystem, LoggerGroups loggerGroups, ConfigService configService) {
         this(loggingSystem, loggerGroups, configService, new LogbackStdoutController());
     }
 
-    FlexlbLogManager(LoggingSystem loggingSystem, LoggerGroups loggerGroups, ConfigService configService,
-                     LogbackStdoutController stdoutController) {
+    FlexlbLogManager(
+            LoggingSystem loggingSystem,
+            LoggerGroups loggerGroups,
+            ConfigService configService,
+            LogbackStdoutController stdoutController) {
         this.loggingSystem = loggingSystem;
-        this.loggerGroup = Objects.requireNonNull(
-                loggerGroups.get(LOG_GROUP_NAME), "Logging group 'flexlb' is not configured");
+        this.loggerGroup =
+                Objects.requireNonNull(
+                        loggerGroups.get(LOG_GROUP_NAME),
+                        "Logging group 'flexlb' is not configured");
         this.stdoutController = stdoutController;
-        configService.addUpdateListener(config -> {
-            setLogLevel(config.getObservability().getLogging().getLevel());
-            setStdoutLogEnabled(config.getObservability().getLogging().isStdoutEnabled());
-        });
+        configService.addUpdateListener(
+                config -> {
+                    setLogLevel(config.getObservability().getLogging().getLevel());
+                    setStdoutLogEnabled(config.getObservability().getLogging().isStdoutEnabled());
+                });
     }
 
     public LogLevel setLogLevel(LogLevel logLevel) {

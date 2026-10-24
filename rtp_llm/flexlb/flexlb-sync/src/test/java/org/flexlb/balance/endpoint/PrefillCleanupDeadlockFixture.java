@@ -18,10 +18,15 @@ import static org.mockito.Mockito.when;
 public final class PrefillCleanupDeadlockFixture {
     private final AtomicLong clock = new AtomicLong(100);
     private final ReentrantLock lock = new ReentrantLock();
-    private final PrefillState state = new PrefillState(lock,
-            PrefillActiveIndex.ordered(4, Comparator.comparing(ScheduledRequest::requestId)),
-            clock::get, () -> { });
-    private final EndpointGenerationLifecycle generation = new EndpointGenerationLifecycle(() -> { });
+    private final PrefillState state =
+            new PrefillState(
+                    lock,
+                    PrefillActiveIndex.ordered(
+                            4, Comparator.comparing(ScheduledRequest::requestId)),
+                    clock::get,
+                    () -> {});
+    private final EndpointGenerationLifecycle generation =
+            new EndpointGenerationLifecycle(() -> {});
     private final ScheduledRequest next;
 
     public PrefillCleanupDeadlockFixture(long requestId, boolean batch) {
@@ -29,7 +34,9 @@ public final class PrefillCleanupDeadlockFixture {
         next = item(requestId + 1);
         if (batch) {
             enqueue(first);
-            try (var reservation = state.reserveBatch(first, 1L, 2, generation.tryAcquireHandoff()).reservation()) {
+            try (var reservation =
+                    state.reserveBatch(first, 1L, 2, generation.tryAcquireHandoff())
+                            .reservation()) {
                 assertNotNull(reservation);
                 try (var handoff = reservation.commit(List.of(first), 20L)) {
                     assertNotNull(handoff);
@@ -38,8 +45,11 @@ public final class PrefillCleanupDeadlockFixture {
         } else {
             try (var reservation = state.reserveUnqueuedRoute(first, 20L, 0L).reservation()) {
                 assertNotNull(reservation);
-                try (var handoff = state.commitRouteGroup(
-                        List.of(first), List.of(reservation), generation.tryAcquireHandoff())) {
+                try (var handoff =
+                        state.commitRouteGroup(
+                                List.of(first),
+                                List.of(reservation),
+                                generation.tryAcquireHandoff())) {
                     assertNotNull(handoff);
                 }
             }
@@ -59,15 +69,19 @@ public final class PrefillCleanupDeadlockFixture {
     }
 
     public void reserveNextBatch() {
-        try (var reservation = state.reserveBatch(next, 2L, 2, generation.tryAcquireHandoff()).reservation()) {
+        try (var reservation =
+                state.reserveBatch(next, 2L, 2, generation.tryAcquireHandoff()).reservation()) {
             assertNotNull(reservation);
         }
     }
 
     private void enqueue(ScheduledRequest item) {
         lock.lock();
-        try { assertTrue(state.enqueueActiveUnderLock(item, Long.MAX_VALUE)); }
-        finally { lock.unlock(); }
+        try {
+            assertTrue(state.enqueueActiveUnderLock(item, Long.MAX_VALUE));
+        } finally {
+            lock.unlock();
+        }
     }
 
     private static ScheduledRequest item(long id) {

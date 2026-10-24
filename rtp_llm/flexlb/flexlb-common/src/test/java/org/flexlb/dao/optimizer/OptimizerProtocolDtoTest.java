@@ -9,7 +9,8 @@ class OptimizerProtocolDtoTest {
 
     @Test
     void deserializesTraceQueryResponse() {
-        String json = """
+        String json =
+                """
                 {
                   "header": {"status": {"code": "OK"}},
                   "total_blocks": "10",
@@ -28,7 +29,8 @@ class OptimizerProtocolDtoTest {
                 }
                 """;
 
-        OptimizerTraceQueryResponse response = JsonUtils.toObject(json, OptimizerTraceQueryResponse.class);
+        OptimizerTraceQueryResponse response =
+                JsonUtils.toObject(json, OptimizerTraceQueryResponse.class);
 
         assertEquals(OptimizerErrorCode.OK, response.getHeader().getStatus().getCode());
         assertEquals(10L, response.getTotalBlocks());
@@ -44,14 +46,23 @@ class OptimizerProtocolDtoTest {
 
     @Test
     void mapsUnknownTraceQueryErrorCodesToUnknownError() {
-        OptimizerTraceQueryResponse namedResponse = JsonUtils.toObject("""
+        OptimizerTraceQueryResponse namedResponse =
+                JsonUtils.toObject(
+                        """
                 {"header":{"status":{"code":"NODE_NOT_REGISTERED"}}}
-                """, OptimizerTraceQueryResponse.class);
-        OptimizerTraceQueryResponse numericResponse = JsonUtils.toObject("""
+                """,
+                        OptimizerTraceQueryResponse.class);
+        OptimizerTraceQueryResponse numericResponse =
+                JsonUtils.toObject(
+                        """
                 {"header":{"status":{"code":999}}}
-                """, OptimizerTraceQueryResponse.class);
+                """,
+                        OptimizerTraceQueryResponse.class);
 
-        assertEquals(OptimizerErrorCode.UNKNOWN_ERROR, namedResponse.getHeader().getStatus().getCode());
-        assertEquals(OptimizerErrorCode.UNKNOWN_ERROR, numericResponse.getHeader().getStatus().getCode());
+        assertEquals(
+                OptimizerErrorCode.UNKNOWN_ERROR, namedResponse.getHeader().getStatus().getCode());
+        assertEquals(
+                OptimizerErrorCode.UNKNOWN_ERROR,
+                numericResponse.getHeader().getStatus().getCode());
     }
 }

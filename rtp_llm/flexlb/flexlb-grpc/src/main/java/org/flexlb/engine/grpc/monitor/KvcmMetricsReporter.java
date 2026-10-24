@@ -31,9 +31,7 @@ public class KvcmMetricsReporter {
 
     public void reportQueryRetry(int attempt) {
         monitor.report(
-                KVCM_QUERY_RETRY_QPS,
-                FlexMetricTags.of("attempt", String.valueOf(attempt)),
-                1.0);
+                KVCM_QUERY_RETRY_QPS, FlexMetricTags.of("attempt", String.valueOf(attempt)), 1.0);
     }
 
     /**

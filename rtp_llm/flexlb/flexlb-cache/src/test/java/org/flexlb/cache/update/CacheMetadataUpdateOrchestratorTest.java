@@ -34,9 +34,7 @@ class CacheMetadataUpdateOrchestratorTest {
     void routesWorkerStatusUpdatesToLocalSync() {
         when(configuration.isLocalSyncEnabled()).thenReturn(true);
         WorkerStatus workerStatus = workerStatus("127.0.0.1", 8080, RoleType.PREFILL);
-        WorkerCacheUpdateResult expected = WorkerCacheUpdateResult.builder()
-                .success(true)
-                .build();
+        WorkerCacheUpdateResult expected = WorkerCacheUpdateResult.builder().success(true).build();
         when(localSyncProvider.updateFromWorkerStatus(workerStatus)).thenReturn(expected);
 
         WorkerCacheUpdateResult actual = orchestrator().updateFromWorkerStatus(workerStatus);
@@ -72,8 +70,7 @@ class CacheMetadataUpdateOrchestratorTest {
     void ignoresRequestMetadataWhenLocalStandbyIsDisabled() {
         when(configuration.isLocalStandbyEnabled()).thenReturn(false);
 
-        orchestrator().updateFromRoutedRequest(
-                new Request(), List.of(new ServerStatus()));
+        orchestrator().updateFromRoutedRequest(new Request(), List.of(new ServerStatus()));
 
         verifyNoInteractions(localStandbyProvider);
     }

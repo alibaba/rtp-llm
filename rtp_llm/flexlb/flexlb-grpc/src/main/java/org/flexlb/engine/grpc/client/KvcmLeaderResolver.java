@@ -36,7 +36,10 @@ public class KvcmLeaderResolver {
     private final KvcmMetaServiceClient metaServiceClient;
     private final AtomicReference<GrpcTarget> leader = new AtomicReference<>();
 
-    public KvcmLeaderResolver(CacheMatchConfiguration configuration, RoutingServiceDiscovery serviceDiscovery, KvcmMetaServiceClient metaServiceClient) {
+    public KvcmLeaderResolver(
+            CacheMatchConfiguration configuration,
+            RoutingServiceDiscovery serviceDiscovery,
+            KvcmMetaServiceClient metaServiceClient) {
         this.configuration = configuration;
         this.topologyConfig = configuration.getKvcmConfig();
         this.enabled = configuration.isKvcmEnabled();
@@ -57,22 +60,25 @@ public class KvcmLeaderResolver {
         List<WorkerHost> discoveredHosts = serviceDiscovery.getHosts(kvcmEndpoint);
         Set<GrpcTarget> bootstrapTargets = new LinkedHashSet<>();
         for (WorkerHost discoveredHost : discoveredHosts) {
-            // Discovery supplies candidate IPs; the configured port is used only for GetClusterInfo.
-            bootstrapTargets.add(new GrpcTarget(
-                    discoveredHost.getIp(), topologyConfig.getPort()));
+            // Discovery supplies candidate IPs; the configured port is used only for
+            // GetClusterInfo.
+            bootstrapTargets.add(new GrpcTarget(discoveredHost.getIp(), topologyConfig.getPort()));
         }
         for (GrpcTarget bootstrapTarget : bootstrapTargets) {
             try {
-                GetClusterInfoResponse response = metaServiceClient.getClusterInfo(
-                        bootstrapTarget,
-                        GetClusterInfoRequest.newBuilder()
-                                .setTraceId(IdUtils.fastUuid())
-                                .build(),
-                        configuration.getKvcmRuntimeConfig().getRequestTimeoutMs());
+                GetClusterInfoResponse response =
+                        metaServiceClient.getClusterInfo(
+                                bootstrapTarget,
+                                GetClusterInfoRequest.newBuilder()
+                                        .setTraceId(IdUtils.fastUuid())
+                                        .build(),
+                                configuration.getKvcmRuntimeConfig().getRequestTimeoutMs());
                 ErrorCode code = response.getHeader().getStatus().getCode();
                 if (code != ErrorCode.OK || !response.hasLeaderEndpoint()) {
-                    log.warn("KVCM bootstrap target {} did not return a leader, code={}",
-                            bootstrapTarget, code);
+                    log.warn(
+                            "KVCM bootstrap target {} did not return a leader, code={}",
+                            bootstrapTarget,
+                            code);
                     continue;
                 }
                 MetaNodeEndpoint endpoint = response.getLeaderEndpoint();
@@ -81,8 +87,10 @@ public class KvcmLeaderResolver {
                 }
                 int leaderPort = endpoint.getMetaRpcPort();
                 if (leaderPort <= 0) {
-                    log.warn("KVCM bootstrap target {} returned an invalid leader meta RPC port: {}",
-                            bootstrapTarget, leaderPort);
+                    log.warn(
+                            "KVCM bootstrap target {} returned an invalid leader meta RPC port: {}",
+                            bootstrapTarget,
+                            leaderPort);
                     continue;
                 }
 
@@ -97,7 +105,10 @@ public class KvcmLeaderResolver {
                 metaServiceClient.removeStaleChannels(activeTargets);
                 return true;
             } catch (Exception e) {
-                log.warn("Failed to query KVCM cluster info from bootstrap target: {}", bootstrapTarget, e);
+                log.warn(
+                        "Failed to query KVCM cluster info from bootstrap target: {}",
+                        bootstrapTarget,
+                        e);
             }
         }
         return false;

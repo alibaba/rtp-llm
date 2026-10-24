@@ -8,17 +8,15 @@ java_version() {
     # remove \r for Cygwin
     local lines=$("${JAVA_HOME}"/bin/java -version 2>&1 | tr '\r' '\n')
     for line in $lines; do
-      if [[ (-z $local_java_version) && ($line = *"version \""*) ]]
-      then
-        local ver=$(echo $line | sed -e 's/.*version "\(.*\)"\(.*\)/\1/; 1q')
-        # on macOS, sed doesn't support '?'
-        if [[ $ver = "1."* ]]
-        then
-          local_java_version=$(echo $ver | sed -e 's/1\.\([0-9]*\)\(.*\)/\1/; 1q')
-        else
-          local_java_version=$(echo $ver | sed -e 's/\([0-9]*\)\(.*\)/\1/; 1q')
+        if [[ (-z $local_java_version) && ($line = *"version \""*) ]]; then
+            local ver=$(echo $line | sed -e 's/.*version "\(.*\)"\(.*\)/\1/; 1q')
+            # on macOS, sed doesn't support '?'
+            if [[ $ver = "1."* ]]; then
+                local_java_version=$(echo $ver | sed -e 's/1\.\([0-9]*\)\(.*\)/\1/; 1q')
+            else
+                local_java_version=$(echo $ver | sed -e 's/\([0-9]*\)\(.*\)/\1/; 1q')
+            fi
         fi
-      fi
     done
     echo "$local_java_version"
 }
@@ -102,9 +100,9 @@ configure_default_jvm_memory() {
         maxDirectMemory=2g
     fi
     maxDirectMemory=${FLEXLB_JVM_MAX_DIRECT:-$maxDirectMemory}
-    heap_limit_mb=$((total_mb - NATIVE_MEMORY_HEADROOM_MB
-        - $(jvm_memory_mb "$maxDirectMemory") - $(jvm_memory_mb "$maxMetaspace")
-        - $(jvm_memory_mb "$reservedCodeCache")))
+    heap_limit_mb=$((total_mb - NATIVE_MEMORY_HEADROOM_MB - \
+        $(jvm_memory_mb "$maxDirectMemory") - $(jvm_memory_mb "$maxMetaspace") - \
+        $(jvm_memory_mb "$reservedCodeCache")))
     if [ "$(jvm_memory_mb "$DEFAULT_JVM_XMS")" -gt "$heap_limit_mb" ]; then
         # A cgroup limit just above a profile boundary must not inherit a heap
         # that consumes the whole container before direct/native allocations.
@@ -124,9 +122,9 @@ jvm_memory_mb() {
         return 1
     fi
     case "$unit" in
-        g|G) echo "$((number * 1024))" ;;
-        m|M) echo "$number" ;;
-        k|K) echo "$(((number + 1023) / 1024))" ;;
+        g | G) echo "$((number * 1024))" ;;
+        m | M) echo "$number" ;;
+        k | K) echo "$(((number + 1023) / 1024))" ;;
         *) echo "$(((number + 1048575) / 1048576))" ;;
     esac
 }
@@ -154,9 +152,9 @@ validate_jvm_memory_budget() {
         echo "ERROR: JVM initial heap $heap_start exceeds maximum heap $heap_max" >&2
         return 1
     fi
-    budget_mb=$((heap_max_mb + $(jvm_memory_mb "$maxDirectMemory")
-        + $(jvm_memory_mb "$maxMetaspace") + $(jvm_memory_mb "$reservedCodeCache")
-        + NATIVE_MEMORY_HEADROOM_MB))
+    budget_mb=$((heap_max_mb + $(jvm_memory_mb "$maxDirectMemory") + \
+    $(jvm_memory_mb "$maxMetaspace") + $(jvm_memory_mb "$reservedCodeCache") + \
+    NATIVE_MEMORY_HEADROOM_MB))
     if [ "$budget_mb" -gt "$total_mb" ]; then
         echo "ERROR: JVM memory budget ${budget_mb}MB exceeds container limit ${total_mb}MB: heap=$heap_max direct=$maxDirectMemory metaspace=$maxMetaspace code_cache=$reservedCodeCache native_headroom=${NATIVE_MEMORY_HEADROOM_MB}MB" >&2
         return 1
@@ -169,7 +167,10 @@ if [ -z $SETENV_SETTED ]; then
 
     # app
     # set ${APP_NAME}, if empty $(basename "${APP_HOME}") will be used.
-    APP_HOME=$(cd $(dirname ${BASH_SOURCE[0]})/.. || exit; pwd)
+    APP_HOME=$(
+        cd $(dirname ${BASH_SOURCE[0]})/.. || exit
+        pwd
+    )
     # Force APP_NAME to be FlexLB to match tgz structure
     APP_NAME=FlexLB
     echo "setenv.sh setting APP_NAME to: ${APP_NAME}"
@@ -184,7 +185,7 @@ if [ -z $SETENV_SETTED ]; then
     export PATH=${PATH}:${JAVA_HOME}/bin
     ulimit -c unlimited
 
-    echo "INFO: OS max open files: "`ulimit -n`
+    echo "INFO: OS max open files: "$(ulimit -n)
 
     JAVA_VERSION=$(java_version)
     echo "INFO: java version: $JAVA_VERSION"
@@ -212,22 +213,22 @@ if [ -z $SETENV_SETTED ]; then
 
         # Match HotSpot G1 ergonomics to the CPU quota visible to this container.
         if [ "$CPU_COUNT" -le 8 ]; then
-          parallelGCThreads=$CPU_COUNT
+            parallelGCThreads=$CPU_COUNT
         else
-          parallelGCThreads=$((8 + (CPU_COUNT - 8) * 5 / 8))
+            parallelGCThreads=$((8 + (CPU_COUNT - 8) * 5 / 8))
         fi
         concGCThreads=$((parallelGCThreads / 4))
         if [ "$concGCThreads" -lt 1 ]; then
-          concGCThreads=1
+            concGCThreads=1
         fi
 
         export SERVICE_PID=$APP_HOME/.default/${APP_NAME}.pid
         export MIDDLEWARE_LOGS="${HOME}/logs"
         export MIDDLEWARE_SNAPSHOTS="${HOME}/snapshots"
         mkdir -p "$APP_HOME"/.default "$APP_HOME"/logs \
-          "$MIDDLEWARE_LOGS" "$MIDDLEWARE_SNAPSHOTS" || exit 1
+            "$MIDDLEWARE_LOGS" "$MIDDLEWARE_SNAPSHOTS" || exit 1
 
-        if [ -z "$SERVICE_TMPDIR" ] ; then
+        if [ -z "$SERVICE_TMPDIR" ]; then
             # Define the java.io.tmpdir to use for Service(pandora boot)
             SERVICE_TMPDIR="${APP_HOME}"/.default/temp
         fi
@@ -279,15 +280,15 @@ if [ -z $SETENV_SETTED ]; then
 
         # JDK17 JMPS opts
         if [[ "$JAVA_VERSION" -ge 17 ]]; then
-          SERVICE_OPTS="${SERVICE_OPTS} --add-modules ALL-SYSTEM"
-          SERVICE_OPTS="${SERVICE_OPTS} --add-opens java.base/java.lang=ALL-UNNAMED"
-          SERVICE_OPTS="${SERVICE_OPTS} --add-opens java.base/java.lang.invoke=ALL-UNNAMED"
-          SERVICE_OPTS="${SERVICE_OPTS} --add-opens java.base/java.util=ALL-UNNAMED"
-          SERVICE_OPTS="${SERVICE_OPTS} --add-opens java.base/java.util.concurrent=ALL-UNNAMED"
-          SERVICE_OPTS="${SERVICE_OPTS} --add-opens=java.base/jdk.internal.misc=ALL-UNNAMED"
-          SERVICE_OPTS="${SERVICE_OPTS} --add-opens java.base/java.nio=ALL-UNNAMED"
-          SERVICE_OPTS="${SERVICE_OPTS} --add-opens java.base/sun.nio.ch=ALL-UNNAMED"
-          SERVICE_OPTS="${SERVICE_OPTS} --add-opens java.instrument/sun.instrument=ALL-UNNAMED"
+            SERVICE_OPTS="${SERVICE_OPTS} --add-modules ALL-SYSTEM"
+            SERVICE_OPTS="${SERVICE_OPTS} --add-opens java.base/java.lang=ALL-UNNAMED"
+            SERVICE_OPTS="${SERVICE_OPTS} --add-opens java.base/java.lang.invoke=ALL-UNNAMED"
+            SERVICE_OPTS="${SERVICE_OPTS} --add-opens java.base/java.util=ALL-UNNAMED"
+            SERVICE_OPTS="${SERVICE_OPTS} --add-opens java.base/java.util.concurrent=ALL-UNNAMED"
+            SERVICE_OPTS="${SERVICE_OPTS} --add-opens=java.base/jdk.internal.misc=ALL-UNNAMED"
+            SERVICE_OPTS="${SERVICE_OPTS} --add-opens java.base/java.nio=ALL-UNNAMED"
+            SERVICE_OPTS="${SERVICE_OPTS} --add-opens java.base/sun.nio.ch=ALL-UNNAMED"
+            SERVICE_OPTS="${SERVICE_OPTS} --add-opens java.instrument/sun.instrument=ALL-UNNAMED"
         fi
 
         # debug opts

@@ -7,12 +7,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from flexlb_ft import harness
-from flexlb_ft.harness import (
-    EnvManager,
-    EnvSpec,
-    FlexEnv,
-    port_in_use,
-)
+from flexlb_ft.harness import EnvManager, EnvSpec, FlexEnv, port_in_use
 
 
 class PortProbeTest(unittest.TestCase):
@@ -45,11 +40,16 @@ class MasterEnvironmentTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             run_dir = Path(tmp) / "env"
             log_directory = run_dir / "master_logs"
-            log_properties = [f"--flexlb.log.path={log_directory}",
-                              f"--flexlb.log.app-path={log_directory}"]
+            log_properties = [
+                f"--flexlb.log.path={log_directory}",
+                f"--flexlb.log.app-path={log_directory}",
+            ]
             env = FlexEnv(
-                EnvSpec(master_profile="none", discovery="none",
-                        master_extra_args=log_properties),
+                EnvSpec(
+                    master_profile="none",
+                    discovery="none",
+                    master_extra_args=log_properties,
+                ),
                 run_dir,
                 44999,
             )
@@ -61,8 +61,11 @@ class MasterEnvironmentTest(unittest.TestCase):
                 patch.object(harness, "resolve_java21", return_value="/fixture/java"),
                 patch.object(manager, "_master_ports_in_use", return_value=[]),
                 patch.object(Path, "home", return_value=Path(tmp)),
-                patch.object(harness.ProcessOps, "start",
-                             side_effect=RuntimeError("launch captured")) as start_process,
+                patch.object(
+                    harness.ProcessOps,
+                    "start",
+                    side_effect=RuntimeError("launch captured"),
+                ) as start_process,
                 self.assertRaisesRegex(RuntimeError, "launch captured"),
             ):
                 manager.start_master(env)
@@ -70,9 +73,13 @@ class MasterEnvironmentTest(unittest.TestCase):
             for property_argument in log_properties:
                 self.assertIn(property_argument, argv)
 
-            logback = ET.parse(harness.FLEXLB_DIR / "flexlb-api/src/main/resources/logback-spring.xml")
-            sources = {element.attrib["name"]: element.attrib["source"]
-                       for element in logback.findall("springProperty")}
+            logback = ET.parse(
+                harness.FLEXLB_DIR / "flexlb-api/src/main/resources/logback-spring.xml"
+            )
+            sources = {
+                element.attrib["name"]: element.attrib["source"]
+                for element in logback.findall("springProperty")
+            }
             self.assertEqual("flexlb.log.path", sources["LOG_PATH"])
             self.assertEqual("flexlb.log.app-path", sources["APP_LOG_PATH"])
 

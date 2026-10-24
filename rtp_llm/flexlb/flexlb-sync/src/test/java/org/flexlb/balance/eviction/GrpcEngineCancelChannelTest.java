@@ -28,7 +28,8 @@ class GrpcEngineCancelChannelTest {
         EngineGrpcClient client = mock(EngineGrpcClient.class);
         GrpcEngineCancelChannel channel = new GrpcEngineCancelChannel(client);
 
-        assertThrows(CompletionException.class, () -> channel.cancel(TARGET, requestId, 100L).join());
+        assertThrows(
+                CompletionException.class, () -> channel.cancel(TARGET, requestId, 100L).join());
 
         verifyNoInteractions(client);
     }
@@ -37,17 +38,29 @@ class GrpcEngineCancelChannelTest {
     @ValueSource(longs = {0L, 7L, 9007199254740993L, Long.MIN_VALUE, Long.MAX_VALUE})
     void sendsTheExactEngineInt64IdAtTheCancellationBoundary(long requestId) {
         EngineGrpcClient client = mock(EngineGrpcClient.class);
-        when(client.cancelAsync(eq(TARGET.prefillIp()), eq(TARGET.prefillGrpcPort()), any(), eq(100L)))
-                .thenReturn(CompletableFuture.completedFuture(EngineRpcService.CancelResponsePB.newBuilder()
-                        .setStatus(EngineRpcService.CancelStatusPB.CANCEL_STATUS_ACCEPTED).build()));
+        when(client.cancelAsync(
+                        eq(TARGET.prefillIp()), eq(TARGET.prefillGrpcPort()), any(), eq(100L)))
+                .thenReturn(
+                        CompletableFuture.completedFuture(
+                                EngineRpcService.CancelResponsePB.newBuilder()
+                                        .setStatus(
+                                                EngineRpcService.CancelStatusPB
+                                                        .CANCEL_STATUS_ACCEPTED)
+                                        .build()));
         GrpcEngineCancelChannel channel = new GrpcEngineCancelChannel(client);
 
-        assertEquals(EngineCancelChannel.CancelAck.ACCEPTED,
+        assertEquals(
+                EngineCancelChannel.CancelAck.ACCEPTED,
                 channel.cancel(TARGET, Long.toString(requestId), 100L).join());
 
         ArgumentCaptor<EngineRpcService.CancelRequestPB> request =
                 ArgumentCaptor.forClass(EngineRpcService.CancelRequestPB.class);
-        verify(client).cancelAsync(eq(TARGET.prefillIp()), eq(TARGET.prefillGrpcPort()), request.capture(), eq(100L));
+        verify(client)
+                .cancelAsync(
+                        eq(TARGET.prefillIp()),
+                        eq(TARGET.prefillGrpcPort()),
+                        request.capture(),
+                        eq(100L));
         assertEquals(requestId, request.getValue().getRequestId());
     }
 }

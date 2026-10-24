@@ -5,9 +5,7 @@ public record VictimTerminal(String requestId) {
 
     public VictimTerminal {
         if (requestId == null || requestId.isBlank()) {
-            throw new IllegalArgumentException(
-                    "requestId must not be blank");
+            throw new IllegalArgumentException("requestId must not be blank");
         }
     }
-
 }

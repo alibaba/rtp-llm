@@ -9,7 +9,6 @@ from datetime import datetime
 from pathlib import Path
 from unittest import mock
 
-
 TOOL_DIR = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(TOOL_DIR))
 MODULE_SPEC = importlib.util.spec_from_file_location(
@@ -106,23 +105,38 @@ class GenerateReplayTest(unittest.TestCase):
             other = root / "other.log"
             recorded.touch()
             other.touch()
-            (root / "collect_manifest.json").write_text(json.dumps({
-                "status": "complete",
-                "snapshots": [{"path": "recorded.log", "instance": "master-7"}],
-                "sources": [{"path": "other.log", "instance": "other-master"}],
-            }), encoding="utf-8")
+            (root / "collect_manifest.json").write_text(
+                json.dumps(
+                    {
+                        "status": "complete",
+                        "snapshots": [{"path": "recorded.log", "instance": "master-7"}],
+                        "sources": [{"path": "other.log", "instance": "other-master"}],
+                    }
+                ),
+                encoding="utf-8",
+            )
             with (
-                mock.patch.object(GENERATE, "build_workbook", return_value={
-                    "request_count": 1, "complete_request_count": 1,
-                }) as workbook_builder,
+                mock.patch.object(
+                    GENERATE,
+                    "build_workbook",
+                    return_value={
+                        "request_count": 1,
+                        "complete_request_count": 1,
+                    },
+                ) as workbook_builder,
                 mock.patch.object(GENERATE, "build_html", return_value={}),
             ):
                 manifest = GENERATE.run_build(
-                    root, root / "output", datetime(2026, 8, 11, 1),
-                    datetime(2026, 8, 11, 2), TOOL_DIR / "replay_template.html",
+                    root,
+                    root / "output",
+                    datetime(2026, 8, 11, 1),
+                    datetime(2026, 8, 11, 2),
+                    TOOL_DIR / "replay_template.html",
                 )
-            self.assertEqual([GENERATE.PvSource(recorded.resolve(), "master-7")],
-                             workbook_builder.call_args.kwargs["sources"])
+            self.assertEqual(
+                [GENERATE.PvSource(recorded.resolve(), "master-7")],
+                workbook_builder.call_args.kwargs["sources"],
+            )
             self.assertEqual([str(recorded.resolve())], manifest["input"]["snapshots"])
 
 

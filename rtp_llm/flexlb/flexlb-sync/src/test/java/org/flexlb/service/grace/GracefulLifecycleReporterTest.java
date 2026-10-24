@@ -23,8 +23,7 @@ class GracefulLifecycleReporterTest {
         assertEquals(FlexMetricType.GAUGE, monitor.registeredMetricType);
         assertEquals(FlexPriorityType.PRECISE, monitor.registeredPriorityType);
         assertEquals(
-                FlexMetricTags.of("type", "process_ok", "duration_ms", "0"),
-                monitor.reportedTags);
+                FlexMetricTags.of("type", "process_ok", "duration_ms", "0"), monitor.reportedTags);
         assertTrue(monitor.reportedValue >= beforeReport);
         assertTrue(monitor.reportedValue <= afterReport);
     }
@@ -36,22 +35,20 @@ class GracefulLifecycleReporterTest {
         private double reportedValue;
 
         @Override
-        public void register(String metricName, FlexMetricType metricType) {
-        }
+        public void register(String metricName, FlexMetricType metricType) {}
 
         @Override
-        public void register(String metricName, FlexMetricType metricType, FlexPriorityType priorityType) {
+        public void register(
+                String metricName, FlexMetricType metricType, FlexPriorityType priorityType) {
             registeredMetricType = metricType;
             registeredPriorityType = priorityType;
         }
 
         @Override
-        public void register(String metricName, FlexMetricType metricType, int statisticsType) {
-        }
+        public void register(String metricName, FlexMetricType metricType, int statisticsType) {}
 
         @Override
-        public void report(String metricName, double value) {
-        }
+        public void report(String metricName, double value) {}
 
         @Override
         public void report(String metricName, FlexMetricTags metricsTags, double value) {

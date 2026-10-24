@@ -43,12 +43,13 @@ import static org.mockito.Mockito.when;
 
 @Timeout(10)
 class FlexlbGrpcExecutorMetricsTest {
-    private static final List<String> METRICS = List.of(
-            MetricConstant.GRPC_SERVER_EXECUTOR_ACTIVE_THREADS,
-            MetricConstant.GRPC_SERVER_EXECUTOR_QUEUE_SIZE,
-            MetricConstant.GRPC_SERVER_EXECUTOR_POOL_SIZE,
-            MetricConstant.GRPC_SERVER_EXECUTOR_MAX_POOL_SIZE,
-            MetricConstant.GRPC_SERVER_EXECUTOR_REJECTED_TASKS);
+    private static final List<String> METRICS =
+            List.of(
+                    MetricConstant.GRPC_SERVER_EXECUTOR_ACTIVE_THREADS,
+                    MetricConstant.GRPC_SERVER_EXECUTOR_QUEUE_SIZE,
+                    MetricConstant.GRPC_SERVER_EXECUTOR_POOL_SIZE,
+                    MetricConstant.GRPC_SERVER_EXECUTOR_MAX_POOL_SIZE,
+                    MetricConstant.GRPC_SERVER_EXECUTOR_REJECTED_TASKS);
 
     @Test
     void skipsReportingBeforeExecutorCreationAndRegistersExpectedMetricTypes() {
@@ -60,9 +61,13 @@ class FlexlbGrpcExecutorMetricsTest {
 
         ReflectionTestUtils.invokeMethod(server, "registerMetrics");
         for (String metric : METRICS) {
-            verify(monitor).register(metric, metric.equals(MetricConstant.GRPC_SERVER_EXECUTOR_REJECTED_TASKS)
-                            ? FlexMetricType.COUNTER : FlexMetricType.GAUGE,
-                    FlexPriorityType.PRECISE);
+            verify(monitor)
+                    .register(
+                            metric,
+                            metric.equals(MetricConstant.GRPC_SERVER_EXECUTOR_REJECTED_TASKS)
+                                    ? FlexMetricType.COUNTER
+                                    : FlexMetricType.GAUGE,
+                            FlexPriorityType.PRECISE);
         }
         verifyNoMoreInteractions(monitor);
     }
@@ -71,10 +76,15 @@ class FlexlbGrpcExecutorMetricsTest {
     @Timeout(15)
     void registersAndRunsExecutorMetricsThroughSpringScheduling() throws Exception {
         assertTrue(Application.class.isAnnotationPresent(EnableScheduling.class));
-        assertEquals(2_000L, FlexlbGrpcServer.class.getDeclaredMethod("reportExecutorMetrics")
-                .getAnnotation(Scheduled.class).fixedRate());
+        assertEquals(
+                2_000L,
+                FlexlbGrpcServer.class
+                        .getDeclaredMethod("reportExecutorMetrics")
+                        .getAnnotation(Scheduled.class)
+                        .fixedRate());
         try (Fixture fixture = new Fixture();
-             AnnotationConfigApplicationContext context = new AnnotationConfigApplicationContext()) {
+                AnnotationConfigApplicationContext context =
+                        new AnnotationConfigApplicationContext()) {
             FlexlbGrpcServer scheduledServer = spy(fixture.server);
             doNothing().when(scheduledServer).start();
             context.register(SchedulingConfiguration.class);
@@ -84,8 +94,8 @@ class FlexlbGrpcExecutorMetricsTest {
             fixture.blockFirstTaskAndQueueSecond();
             long timeoutAt = System.nanoTime() + TimeUnit.SECONDS.toNanos(6);
             while (!(fixture.hasValue(MetricConstant.GRPC_SERVER_EXECUTOR_ACTIVE_THREADS, 1)
-                    && fixture.hasValue(MetricConstant.GRPC_SERVER_EXECUTOR_QUEUE_SIZE, 1)
-                    && fixture.hasValue(MetricConstant.GRPC_SERVER_EXECUTOR_POOL_SIZE, 1))
+                            && fixture.hasValue(MetricConstant.GRPC_SERVER_EXECUTOR_QUEUE_SIZE, 1)
+                            && fixture.hasValue(MetricConstant.GRPC_SERVER_EXECUTOR_POOL_SIZE, 1))
                     && System.nanoTime() < timeoutAt) {
                 Thread.sleep(10);
             }
@@ -115,7 +125,8 @@ class FlexlbGrpcExecutorMetricsTest {
         try (Fixture fixture = new Fixture()) {
             fixture.report();
             for (String metric : METRICS) {
-                fixture.assertValue(metric,
+                fixture.assertValue(
+                        metric,
                         metric.equals(MetricConstant.GRPC_SERVER_EXECUTOR_MAX_POOL_SIZE) ? 1 : 0);
             }
 
@@ -134,13 +145,16 @@ class FlexlbGrpcExecutorMetricsTest {
     }
 
     @Test
-    void reportsActualSaturationAndShutdownRejectionsWithoutRunningRejectedTasks() throws Exception {
+    void reportsActualSaturationAndShutdownRejectionsWithoutRunningRejectedTasks()
+            throws Exception {
         try (Fixture fixture = new Fixture()) {
             fixture.blockFirstTaskAndQueueSecond();
-            Runnable rejectedTask = () -> {
-                throw new AssertionError("Rejected tasks must not execute on the caller");
-            };
-            assertThrows(RejectedExecutionException.class, () -> fixture.executor.execute(rejectedTask));
+            Runnable rejectedTask =
+                    () -> {
+                        throw new AssertionError("Rejected tasks must not execute on the caller");
+                    };
+            assertThrows(
+                    RejectedExecutionException.class, () -> fixture.executor.execute(rejectedTask));
             fixture.assertValue(MetricConstant.GRPC_SERVER_EXECUTOR_REJECTED_TASKS, 1);
             fixture.report();
             fixture.assertValue(MetricConstant.GRPC_SERVER_EXECUTOR_REJECTED_TASKS, 1);
@@ -148,7 +162,8 @@ class FlexlbGrpcExecutorMetricsTest {
             fixture.assertValue(MetricConstant.GRPC_SERVER_EXECUTOR_REJECTED_TASKS, 1);
 
             fixture.executor.shutdown();
-            assertThrows(RejectedExecutionException.class, () -> fixture.executor.execute(rejectedTask));
+            assertThrows(
+                    RejectedExecutionException.class, () -> fixture.executor.execute(rejectedTask));
             fixture.assertValue(MetricConstant.GRPC_SERVER_EXECUTOR_REJECTED_TASKS, 2);
             fixture.report();
             fixture.assertValue(MetricConstant.GRPC_SERVER_EXECUTOR_REJECTED_TASKS, 2);
@@ -161,13 +176,15 @@ class FlexlbGrpcExecutorMetricsTest {
     @Test
     void monitorFailureStillAbortsTheRejectedTask() {
         FlexMonitor monitor = mock(FlexMonitor.class);
-        doThrow(new IllegalStateException("monitor unavailable")).when(monitor)
+        doThrow(new IllegalStateException("monitor unavailable"))
+                .when(monitor)
                 .report(MetricConstant.GRPC_SERVER_EXECUTOR_REJECTED_TASKS, 1.0);
         FlexlbGrpcServer server = newServer(monitor);
         RejectedExecutionHandler handler =
                 (RejectedExecutionHandler) ReflectionTestUtils.getField(server, "rejectionHandler");
-        ThreadPoolExecutor executor = new ThreadPoolExecutor(1, 1, 1, TimeUnit.MINUTES,
-                new LinkedBlockingQueue<>(1), handler);
+        ThreadPoolExecutor executor =
+                new ThreadPoolExecutor(
+                        1, 1, 1, TimeUnit.MINUTES, new LinkedBlockingQueue<>(1), handler);
         executor.shutdown();
         Runnable task = mock(Runnable.class);
 
@@ -178,7 +195,9 @@ class FlexlbGrpcExecutorMetricsTest {
     }
 
     private static FlexlbGrpcServer newServer(FlexMonitor monitor) {
-        FlexlbConfig loadBalanceConfig = ConfigService.parse("""
+        FlexlbConfig loadBalanceConfig =
+                ConfigService.parse(
+                        """
                 {"requestLifecycle":{"request":{"timeoutMs":60000}}}
                 """);
         ConfigService config = mock(ConfigService.class);
@@ -195,24 +214,32 @@ class FlexlbGrpcExecutorMetricsTest {
 
         Fixture() {
             RejectedExecutionHandler rejectionHandler =
-                    (RejectedExecutionHandler) ReflectionTestUtils.getField(server, "rejectionHandler");
-            executor = new ThreadPoolExecutor(1, 1, 1, TimeUnit.MINUTES,
-                    new LinkedBlockingQueue<>(1), rejectionHandler);
+                    (RejectedExecutionHandler)
+                            ReflectionTestUtils.getField(server, "rejectionHandler");
+            executor =
+                    new ThreadPoolExecutor(
+                            1,
+                            1,
+                            1,
+                            TimeUnit.MINUTES,
+                            new LinkedBlockingQueue<>(1),
+                            rejectionHandler);
             ReflectionTestUtils.setField(server, "grpcExecutor", executor);
             ReflectionTestUtils.invokeMethod(server, "registerMetrics");
         }
 
         void blockFirstTaskAndQueueSecond() throws InterruptedException {
-            executor.execute(() -> {
-                started.countDown();
-                try {
-                    release.await();
-                } catch (InterruptedException interrupted) {
-                    Thread.currentThread().interrupt();
-                }
-            });
+            executor.execute(
+                    () -> {
+                        started.countDown();
+                        try {
+                            release.await();
+                        } catch (InterruptedException interrupted) {
+                            Thread.currentThread().interrupt();
+                        }
+                    });
             assertTrue(started.await(3, TimeUnit.SECONDS), "first task must be running");
-            executor.execute(() -> { });
+            executor.execute(() -> {});
         }
 
         void finishTasks() throws InterruptedException {
@@ -231,9 +258,10 @@ class FlexlbGrpcExecutorMetricsTest {
         }
 
         void assertValue(String metric, double expected) {
-            double value = metric.equals(MetricConstant.GRPC_SERVER_EXECUTOR_REJECTED_TASKS)
-                    ? registry.get("flexlb." + metric).counter().count()
-                    : registry.get("flexlb." + metric).gauge().value();
+            double value =
+                    metric.equals(MetricConstant.GRPC_SERVER_EXECUTOR_REJECTED_TASKS)
+                            ? registry.get("flexlb." + metric).counter().count()
+                            : registry.get("flexlb." + metric).gauge().value();
             assertEquals(expected, value, metric);
         }
 

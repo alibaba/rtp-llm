@@ -34,21 +34,45 @@ class CacheHitFeedbackTrackerTest {
         WorkerStatus worker = workerStatus("127.0.0.1", 8080, RoleType.PREFILL);
         LocalStandbyComparisonService comparisonService = mock(LocalStandbyComparisonService.class);
         when(comparisonService.captureComparison("broken", RoleType.PREFILL))
-                .thenReturn(feedback -> { throw new IllegalStateException("comparison failed"); });
+                .thenReturn(
+                        feedback -> {
+                            throw new IllegalStateException("comparison failed");
+                        });
         when(comparisonService.captureComparison("healthy", RoleType.PREFILL))
                 .thenReturn(feedback -> CompletableFuture.completedFuture(null));
         CacheHitFeedbackTracker tracker = new CacheHitFeedbackTracker(comparisonService);
         for (String requestId : List.of("broken", "healthy")) {
-            tracker.track(requestId, RoleType.PREFILL, "default", worker,
-                    100, 0, CacheMatchResult.empty(CacheMatchSource.KVCM));
+            tracker.track(
+                    requestId,
+                    RoleType.PREFILL,
+                    "default",
+                    worker,
+                    100,
+                    0,
+                    CacheMatchResult.empty(CacheMatchSource.KVCM));
         }
-        WorkerStatus.TaskTelemetry telemetry = new WorkerStatus.TaskTelemetry(
-                true, 1, 2, 3, 4, 5, 0, 6, 0, 0, 0, 0, 0, 0, 0);
+        WorkerStatus.TaskTelemetry telemetry =
+                new WorkerStatus.TaskTelemetry(true, 1, 2, 3, 4, 5, 0, 6, 0, 0, 0, 0, 0, 0, 0);
         Map<String, WorkerStatus.TaskObservation> tasks = new LinkedHashMap<>();
         for (String requestId : List.of("broken", "healthy")) {
-            tasks.put(requestId, new WorkerStatus.TaskObservation(
-                    requestId, 0, 0, 100, 0, 0, 0, 0, 0, "", 0,
-                    TaskPhase.RUNNING, 0, null, telemetry));
+            tasks.put(
+                    requestId,
+                    new WorkerStatus.TaskObservation(
+                            requestId,
+                            0,
+                            0,
+                            100,
+                            0,
+                            0,
+                            0,
+                            0,
+                            0,
+                            "",
+                            0,
+                            TaskPhase.RUNNING,
+                            0,
+                            null,
+                            telemetry));
         }
         WorkerStatus.StatusObservation status = mock(WorkerStatus.StatusObservation.class);
         when(status.role()).thenReturn(RoleType.PREFILL);
@@ -66,18 +90,40 @@ class CacheHitFeedbackTrackerTest {
         WorkerStatus worker = workerStatus("127.0.0.1", 8080, RoleType.PREFILL);
         LocalStandbyComparisonService comparisonService = mock(LocalStandbyComparisonService.class);
         AtomicInteger comparisons = new AtomicInteger();
-        when(comparisonService.captureComparison("request-1", RoleType.PREFILL)).thenReturn(feedback -> {
-            comparisons.incrementAndGet();
-            return CompletableFuture.completedFuture(null);
-        });
+        when(comparisonService.captureComparison("request-1", RoleType.PREFILL))
+                .thenReturn(
+                        feedback -> {
+                            comparisons.incrementAndGet();
+                            return CompletableFuture.completedFuture(null);
+                        });
         CacheHitFeedbackTracker tracker = new CacheHitFeedbackTracker(comparisonService);
-        tracker.track("request-1", RoleType.PREFILL, "default", worker,
-                100, 0, CacheMatchResult.empty(CacheMatchSource.KVCM));
-        WorkerStatus.TaskTelemetry telemetry = new WorkerStatus.TaskTelemetry(
-                true, 1, 2, 3, 4, 5, 0, 6, 0, 0, 0, 0, 0, 0, 0);
-        WorkerStatus.TaskObservation task = new WorkerStatus.TaskObservation(
-                "request-1", 0, 0, 100, 0, 0, 0, 0, 0, "", 0,
-                TaskPhase.RUNNING, 0, null, telemetry);
+        tracker.track(
+                "request-1",
+                RoleType.PREFILL,
+                "default",
+                worker,
+                100,
+                0,
+                CacheMatchResult.empty(CacheMatchSource.KVCM));
+        WorkerStatus.TaskTelemetry telemetry =
+                new WorkerStatus.TaskTelemetry(true, 1, 2, 3, 4, 5, 0, 6, 0, 0, 0, 0, 0, 0, 0);
+        WorkerStatus.TaskObservation task =
+                new WorkerStatus.TaskObservation(
+                        "request-1",
+                        0,
+                        0,
+                        100,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        "",
+                        0,
+                        TaskPhase.RUNNING,
+                        0,
+                        null,
+                        telemetry);
         WorkerStatus.StatusObservation status = mock(WorkerStatus.StatusObservation.class);
         when(status.role()).thenReturn(RoleType.PREFILL);
         when(status.activeTasks()).thenReturn(Map.of(task.requestId(), task));
@@ -85,22 +131,23 @@ class CacheHitFeedbackTrackerTest {
         CountDownLatch firstLogStarted = new CountDownLatch(1);
         CountDownLatch releaseFirstLog = new CountDownLatch(1);
         AtomicInteger workerLogs = new AtomicInteger();
-        AppenderBase<ILoggingEvent> appender = new AppenderBase<>() {
-            @Override
-            protected void append(ILoggingEvent event) {
-                if (event.getFormattedMessage().contains("prefill_worker_status")) {
-                    if (workerLogs.incrementAndGet() == 1) {
-                        firstLogStarted.countDown();
-                        try {
-                            assertTrue(releaseFirstLog.await(5, TimeUnit.SECONDS));
-                        } catch (InterruptedException error) {
-                            Thread.currentThread().interrupt();
-                            throw new AssertionError(error);
+        AppenderBase<ILoggingEvent> appender =
+                new AppenderBase<>() {
+                    @Override
+                    protected void append(ILoggingEvent event) {
+                        if (event.getFormattedMessage().contains("prefill_worker_status")) {
+                            if (workerLogs.incrementAndGet() == 1) {
+                                firstLogStarted.countDown();
+                                try {
+                                    assertTrue(releaseFirstLog.await(5, TimeUnit.SECONDS));
+                                } catch (InterruptedException error) {
+                                    Thread.currentThread().interrupt();
+                                    throw new AssertionError(error);
+                                }
+                            }
                         }
                     }
-                }
-            }
-        };
+                };
         appender.start();
         var logger = (ch.qos.logback.classic.Logger) LoggerFactory.getLogger("pvLogger");
         logger.addAppender(appender);
@@ -111,15 +158,18 @@ class CacheHitFeedbackTrackerTest {
                 CountDownLatch otherReportsCompleted = new CountDownLatch(16);
                 List<java.util.concurrent.Future<?>> others = new ArrayList<>();
                 for (int i = 0; i < 16; i++) {
-                    others.add(executor.submit(() -> {
-                        try {
-                            assertTrue(tracker.observe(worker, status).isEmpty());
-                        } finally {
-                            otherReportsCompleted.countDown();
-                        }
-                    }));
+                    others.add(
+                            executor.submit(
+                                    () -> {
+                                        try {
+                                            assertTrue(tracker.observe(worker, status).isEmpty());
+                                        } finally {
+                                            otherReportsCompleted.countDown();
+                                        }
+                                    }));
                 }
-                assertTrue(otherReportsCompleted.await(2, TimeUnit.SECONDS),
+                assertTrue(
+                        otherReportsCompleted.await(2, TimeUnit.SECONDS),
                         "Duplicate observations must not wait to write another worker PV");
                 for (var other : others) {
                     other.get(2, TimeUnit.SECONDS);

@@ -320,9 +320,7 @@ def write_timing_baseline(payload: dict, path: Path | None = None) -> tuple[Path
 def family_weights(profile: str) -> dict[str, float]:
     """Per-category total cost = per-case seconds x live case count."""
     counts = category_case_counts(profile)
-    return {
-        cat: CATEGORY_WEIGHTS[cat] * count for cat, count in counts.items()
-    }
+    return {cat: CATEGORY_WEIGHTS[cat] * count for cat, count in counts.items()}
 
 
 def plan_lanes(weights: dict[str, float], parallel: int) -> list[list[str]]:

@@ -8,7 +8,6 @@ from datetime import timedelta
 from pathlib import Path
 from typing import Sequence
 
-
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import collect_pv_log as collector  # noqa: E402
@@ -16,7 +15,7 @@ import collect_pv_log as collector  # noqa: E402
 
 def log_line(timestamp: str, request_id: str) -> str:
     return (
-        f'{timestamp} [routing-queue-worker] INFO pvLogger - '
+        f"{timestamp} [routing-queue-worker] INFO pvLogger - "
         f'{{"requestId":"{request_id}"}}\n'
     )
 
@@ -150,7 +149,9 @@ class CollectPvLogTest(unittest.TestCase):
             self.assertEqual("Asia/Shanghai", manifest["timezone"])
             self.assertEqual(2, len(manifest["snapshots"]))
             snapshot = next(
-                item for item in manifest["snapshots"] if item["instance"] == "instance/a"
+                item
+                for item in manifest["snapshots"]
+                if item["instance"] == "instance/a"
             )
             self.assertEqual(3, snapshot["line_count"])
             self.assertIn("instance_a", snapshot["path"])
@@ -190,7 +191,9 @@ class CollectPvLogTest(unittest.TestCase):
                 local_inputs={"local": source},
             )
 
-            self.assertEqual("2026-08-11 02:00:00.000", manifest["requested_window"]["start"])
+            self.assertEqual(
+                "2026-08-11 02:00:00.000", manifest["requested_window"]["start"]
+            )
             self.assertEqual(1, manifest["snapshots"][0]["line_count"])
 
     def test_remote_collection_resolves_running_and_pages_truncated_tail(self) -> None:
@@ -252,7 +255,9 @@ class CollectPvLogTest(unittest.TestCase):
                 )
             )
 
-    def test_remote_collection_recovers_newline_terminated_partial_boundary(self) -> None:
+    def test_remote_collection_recovers_newline_terminated_partial_boundary(
+        self,
+    ) -> None:
         path = "/home/admin/logs/pv.log"
         files = {
             path: [
@@ -283,10 +288,7 @@ class CollectPvLogTest(unittest.TestCase):
             source = manifest["instances"][0]["source_files"][0]
             self.assertFalse(source["snapshot_truncated"])
             self.assertTrue(
-                any(
-                    page["boundary_verified"] is False
-                    for page in source["pages"]
-                )
+                any(page["boundary_verified"] is False for page in source["pages"])
             )
             snapshot = Path(temp_dir) / manifest["snapshots"][0]["path"]
             self.assertEqual("".join(files[path]), snapshot.read_text())
@@ -336,10 +338,7 @@ class CollectPvLogTest(unittest.TestCase):
                 if "--" not in command:
                     continue
                 remote = command[command.index("--") + 1 :]
-                if (
-                    remote[:2] == ["tail", "-n"]
-                    and remote[2].startswith("+")
-                ):
+                if remote[:2] == ["tail", "-n"] and remote[2].startswith("+"):
                     fetched_paths.append(remote[3])
             # The collector re-reads the last apparent line of a response to
             # verify that the transport did not add a newline to a partial
@@ -387,9 +386,7 @@ class CollectPvLogTest(unittest.TestCase):
             f"{log_dir}/pv.log.2026-08-11.2.log": [
                 log_line("2026-08-11 02:00:10.000", "middle")
             ],
-            f"{log_dir}/pv.log": [
-                log_line("2026-08-11 02:00:20.000", "last")
-            ],
+            f"{log_dir}/pv.log": [log_line("2026-08-11 02:00:20.000", "last")],
         }
         fake = FakeDashctl(files, response_limit=10_000)
         with tempfile.TemporaryDirectory() as temp_dir:

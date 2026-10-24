@@ -8,7 +8,8 @@ option java_outer_classname = "KvcmMetaServiceProto";
 
 // Wire-compatible subset of
 // KVCacheManager/github-opensource/kv_cache_manager/protocol/protobuf/meta_service.proto.
-// FlexLB vendors only the RPCs required for leader discovery and cache matching.
+// FlexLB vendors only the RPCs required for leader discovery and cache
+// matching.
 enum ErrorCode {
   UNSPECIFIED = 0;
   OK = 1;
@@ -79,17 +80,18 @@ message GetHostCacheStateRequest {
   repeated string medium = 5;           // Empty means all storage media.
   reserved 6;
   reserved "p2p_host_count";
-  // Number of logical engines with the longest local match to compute remote hits for.
-  // Zero computes local matches only.
+  // Number of logical engines with the longest local match to compute remote
+  // hits for. Zero computes local matches only.
   int32 global_kvs_host_count = 7;
   bool enable_p2p = 8;
 }
 
 message HostCacheMatch {
-  // Logical worker identity emitted by the KVCM subscriber: ip:port@engineIndex.
-  // A legacy physical ip:port key is accepted only for an unambiguous N=1 worker.
+  // Logical worker identity emitted by the KVCM subscriber:
+  // ip:port@engineIndex. A legacy physical ip:port key is accepted only for an
+  // unambiguous N=1 worker.
   string host_ip_port = 1;
-  int64 local = 2;                    // Local continuous prefix matches.
+  int64 local = 2;  // Local continuous prefix matches.
   reserved 3, 4;
   reserved "p2p_1_fetch", "p2p_1_total_match";
   // Continuous prefix matches from local, P2P and remote pool sources combined,
@@ -104,5 +106,6 @@ message GetHostCacheStateResponse {
 
 service MetaService {
   rpc GetClusterInfo(GetClusterInfoRequest) returns (GetClusterInfoResponse);
-  rpc GetHostCacheState(GetHostCacheStateRequest) returns (GetHostCacheStateResponse);
+  rpc GetHostCacheState(GetHostCacheStateRequest)
+      returns (GetHostCacheStateResponse);
 }

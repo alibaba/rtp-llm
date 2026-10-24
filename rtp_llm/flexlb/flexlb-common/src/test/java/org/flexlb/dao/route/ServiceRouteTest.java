@@ -12,7 +12,8 @@ import org.junit.jupiter.api.Test;
 import java.util.List;
 
 class ServiceRouteTest {
-    private static final String ROUTE_JSON = """
+    private static final String ROUTE_JSON =
+            """
             {
               "service_id": "aigc.text-generation.generation.engine_service",
               "prefill_endpoint": {
@@ -61,8 +62,8 @@ class ServiceRouteTest {
 
     @Test
     void testConfigLoaderList() {
-        List<ServiceRoute> serviceRoutes = JsonUtils.toObject("[" + ROUTE_JSON + "]", new TypeReference<>() {
-        });
+        List<ServiceRoute> serviceRoutes =
+                JsonUtils.toObject("[" + ROUTE_JSON + "]", new TypeReference<>() {});
         assertStandardRoute(serviceRoutes.getFirst());
     }
 
@@ -86,7 +87,8 @@ class ServiceRouteTest {
 
     @Test
     void should_load_pd_fusion_and_vit_endpoints() throws Exception {
-        String json = """
+        String json =
+                """
                 {
                   "service_id": "test.service",
                   "role_endpoints": [{
@@ -99,15 +101,18 @@ class ServiceRouteTest {
 
         ServiceRoute serviceRoute = objectMapper.readValue(json, ServiceRoute.class);
 
-        Assertions.assertTrue(serviceRoute.getAllRoleTypes().containsAll(
-                List.of(RoleType.PDFUSION, RoleType.VIT)));
+        Assertions.assertTrue(
+                serviceRoute
+                        .getAllRoleTypes()
+                        .containsAll(List.of(RoleType.PDFUSION, RoleType.VIT)));
         Assertions.assertEquals(1, serviceRoute.getRoleEndpoints(RoleType.PDFUSION).size());
         Assertions.assertEquals(1, serviceRoute.getRoleEndpoints(RoleType.VIT).size());
     }
 
     @Test
     void should_load_encoder_endpoint_as_independent_role() throws Exception {
-        String json = """
+        String json =
+                """
                 {
                   "service_id": "test.service",
                   "role_endpoints": [{
@@ -123,17 +128,21 @@ class ServiceRouteTest {
         config.putServiceRoute(route.getServiceId(), route);
 
         Assertions.assertEquals(List.of(RoleType.VIT, RoleType.ENCODER), config.requiredRoles());
-        Assertions.assertEquals("encoder", route.getRoleEndpoints(RoleType.ENCODER).getFirst().getAddress());
-        Assertions.assertEquals("g1", route.getRoleEndpoints(RoleType.ENCODER).getFirst().getGroup());
-        Assertions.assertEquals("vit", route.getRoleEndpoints(RoleType.VIT).getFirst().getAddress());
+        Assertions.assertEquals(
+                "encoder", route.getRoleEndpoints(RoleType.ENCODER).getFirst().getAddress());
+        Assertions.assertEquals(
+                "g1", route.getRoleEndpoints(RoleType.ENCODER).getFirst().getGroup());
+        Assertions.assertEquals(
+                "vit", route.getRoleEndpoints(RoleType.VIT).getFirst().getAddress());
         Assertions.assertEquals(RoleType.ENCODER, RoleType.fromString("ENCODER"));
-        Assertions.assertEquals(StrategyErrorType.NO_ENCODER_WORKER,
-                RoleType.ENCODER.getErrorType());
+        Assertions.assertEquals(
+                StrategyErrorType.NO_ENCODER_WORKER, RoleType.ENCODER.getErrorType());
     }
 
     @Test
     void usesDefaultDashScopeBaseUrlWhenOmitted() throws Exception {
-        String json = """
+        String json =
+                """
                 {
                   "address": "v-test",
                   "discovery": {"type": "dashscope"}
@@ -143,13 +152,13 @@ class ServiceRouteTest {
         Endpoint endpoint = objectMapper.readValue(json, Endpoint.class);
 
         Assertions.assertEquals(
-                DiscoveryConfig.DEFAULT_DASHSCOPE_BASE_URL,
-                endpoint.getDiscovery().getBaseUrl());
+                DiscoveryConfig.DEFAULT_DASHSCOPE_BASE_URL, endpoint.getDiscovery().getBaseUrl());
     }
 
     @Test
     void loadsKvcmConfigurationWithCodeDefaults() throws Exception {
-        String json = """
+        String json =
+                """
                 {
                   "service_id": "test-service",
                   "kvcm": {
@@ -168,8 +177,7 @@ class ServiceRouteTest {
         Assertions.assertEquals("vllm-test-0", serviceRoute.getKvcm().getNamespace());
         Assertions.assertEquals("grpc", serviceRoute.getKvcm().toEndpoint().getProtocol());
         Assertions.assertEquals(
-                KvcmConfig.DEFAULT_BOOTSTRAP_PORT,
-                serviceRoute.getKvcm().getPort());
+                KvcmConfig.DEFAULT_BOOTSTRAP_PORT, serviceRoute.getKvcm().getPort());
     }
 
     private void assertServiceRoute(ServiceRoute serviceRoute) {

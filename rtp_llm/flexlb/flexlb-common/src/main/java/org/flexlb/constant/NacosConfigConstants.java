@@ -7,5 +7,4 @@ public class NacosConfigConstants {
     public static final String NACOS_GROUP = "FLEXLB_NACOS_GROUP";
     public static final String NACOS_NAMESPACE = "FLEXLB_NACOS_NAMESPACE";
     public static final String DEFAULT_NACOS_GROUP = "DEFAULT_GROUP";
-
 }

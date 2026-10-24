@@ -17,8 +17,8 @@ class ServerStatusTest {
 
     @Test
     void deserializesNullPreemptionIdsAsEmptyListAndCopiesThem() throws Exception {
-        ServerStatus status = objectMapper.readValue(
-                "{\"preempt_request_ids\":null}", ServerStatus.class);
+        ServerStatus status =
+                objectMapper.readValue("{\"preempt_request_ids\":null}", ServerStatus.class);
 
         assertEquals(List.of(), status.getPreemptRequestIds());
         assertEquals(List.of(), ServerStatus.copyOf(status).getPreemptRequestIds());

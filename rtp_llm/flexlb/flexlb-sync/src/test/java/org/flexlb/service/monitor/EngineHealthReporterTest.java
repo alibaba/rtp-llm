@@ -68,70 +68,142 @@ class EngineHealthReporterTest {
         when(loopResources.onServer(true)).thenReturn(mock(EventLoopGroup.class));
         when(loopResources.onServerSelect(true)).thenReturn(mock(EventLoopGroup.class));
         when(engineGrpcClient.getEventLoopGroup()).thenReturn(mock(EventLoopGroup.class));
-        reporter = new EngineHealthReporter(
-                monitor, cacheMetricsReporter, engineGrpcClient,
-                loopResources, workerDirectory);
+        reporter =
+                new EngineHealthReporter(
+                        monitor,
+                        cacheMetricsReporter,
+                        engineGrpcClient,
+                        loopResources,
+                        workerDirectory);
     }
 
     @Test
     void reportsStepSamplesWithEngineIdentityAndPhase() {
         reporter.init();
-        WorkerStatus worker = WorkerStatus.createDiscovered(
-                RoleType.PDFUSION, "test-group", "10.0.0.1", 8080, 8081, null, null, 1, 2);
-        for (int prefillRequests : new int[]{2, 0}) {
-            var step = new WorkerStatus.StepMetrics(42, 1700000000000L, 16000,
-                    prefillRequests, prefillRequests > 0 ? 15000 : 0, 32000, 0.5);
+        WorkerStatus worker =
+                WorkerStatus.createDiscovered(
+                        RoleType.PDFUSION, "test-group", "10.0.0.1", 8080, 8081, null, null, 1, 2);
+        for (int prefillRequests : new int[] {2, 0}) {
+            var step =
+                    new WorkerStatus.StepMetrics(
+                            42,
+                            1700000000000L,
+                            16000,
+                            prefillRequests,
+                            prefillRequests > 0 ? 15000 : 0,
+                            32000,
+                            0.5);
             reporter.reportWorkerStepMetrics(worker, step);
-            var tags = FlexMetricTags.of("engineIp", "10.0.0.1:8080@1",
-                    "role", "PDFUSION", "group", "test-group", "phase", prefillRequests > 0 ? "prefill" : "decode");
-            verify(monitor).report(MetricConstant.ENGINE_WORKER_STEP_TOTAL_SCHEDULED_TOKENS, tags, 16000.0);
-            verify(monitor).report(MetricConstant.ENGINE_WORKER_STEP_PREFILL_REQUEST_COUNT, tags, (double) prefillRequests);
-            verify(monitor).report(MetricConstant.ENGINE_WORKER_STEP_PREFILL_TOKENS, tags, prefillRequests > 0 ? 15000.0 : 0.0);
+            var tags =
+                    FlexMetricTags.of(
+                            "engineIp",
+                            "10.0.0.1:8080@1",
+                            "role",
+                            "PDFUSION",
+                            "group",
+                            "test-group",
+                            "phase",
+                            prefillRequests > 0 ? "prefill" : "decode");
+            verify(monitor)
+                    .report(
+                            MetricConstant.ENGINE_WORKER_STEP_TOTAL_SCHEDULED_TOKENS,
+                            tags,
+                            16000.0);
+            verify(monitor)
+                    .report(
+                            MetricConstant.ENGINE_WORKER_STEP_PREFILL_REQUEST_COUNT,
+                            tags,
+                            (double) prefillRequests);
+            verify(monitor)
+                    .report(
+                            MetricConstant.ENGINE_WORKER_STEP_PREFILL_TOKENS,
+                            tags,
+                            prefillRequests > 0 ? 15000.0 : 0.0);
             verify(monitor).report(MetricConstant.ENGINE_WORKER_STEP_TOKEN_BUDGET, tags, 32000.0);
             verify(monitor).report(MetricConstant.ENGINE_WORKER_STEP_BUDGET_FILL_RATIO, tags, 0.5);
         }
-        verify(monitor).register(MetricConstant.ENGINE_WORKER_STEP_BUDGET_FILL_RATIO,
-                FlexMetricType.GAUGE, FlexStatisticsType.SUMMARY);
+        verify(monitor)
+                .register(
+                        MetricConstant.ENGINE_WORKER_STEP_BUDGET_FILL_RATIO,
+                        FlexMetricType.GAUGE,
+                        FlexStatisticsType.SUMMARY);
     }
 
     @Test
     void shouldRegisterCacheHitComparisonMetrics() {
         reporter.init();
 
-        verify(monitor).register(MetricConstant.CACHE_HIT_COMPARISON_INPUT_TOKENS, FlexMetricType.COUNTER, FlexPriorityType.PRECISE);
-        verify(monitor).register(MetricConstant.CACHE_HIT_COMPARISON_ACTUAL_TOKENS, FlexMetricType.COUNTER, FlexPriorityType.PRECISE);
-        verify(monitor).register(MetricConstant.CACHE_HIT_COMPARISON_KVCM_PREDICTED_TOKENS,
-                FlexMetricType.COUNTER, FlexPriorityType.PRECISE);
-        verify(monitor).register(MetricConstant.CACHE_HIT_COMPARISON_DELTA_TOKENS, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
-        verify(monitor).register(MetricConstant.CACHE_HIT_COMPARISON_KVCM_LOCAL_DELTA_TOKENS,
-                FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
-        verify(monitor).register(MetricConstant.CACHE_HIT_COMPARISON_KVCM_GLOBAL_MATCH_DELTA_TOKENS,
-                FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
-        verify(monitor).register(MetricConstant.CACHE_HIT_COMPARISON_LOCAL_STANDBY_DELTA_TOKENS,
-                FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
-        verify(monitor).register(MetricConstant.CACHE_HIT_COMPARISON_LOCAL_STANDBY_DELTA_RATIO,
-                FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
-        verify(monitor).register(MetricConstant.CACHE_HIT_COMPARISON_ACTUAL_RATIO,
-                FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
+        verify(monitor)
+                .register(
+                        MetricConstant.CACHE_HIT_COMPARISON_INPUT_TOKENS,
+                        FlexMetricType.COUNTER,
+                        FlexPriorityType.PRECISE);
+        verify(monitor)
+                .register(
+                        MetricConstant.CACHE_HIT_COMPARISON_ACTUAL_TOKENS,
+                        FlexMetricType.COUNTER,
+                        FlexPriorityType.PRECISE);
+        verify(monitor)
+                .register(
+                        MetricConstant.CACHE_HIT_COMPARISON_KVCM_PREDICTED_TOKENS,
+                        FlexMetricType.COUNTER,
+                        FlexPriorityType.PRECISE);
+        verify(monitor)
+                .register(
+                        MetricConstant.CACHE_HIT_COMPARISON_DELTA_TOKENS,
+                        FlexMetricType.GAUGE,
+                        FlexPriorityType.PRECISE);
+        verify(monitor)
+                .register(
+                        MetricConstant.CACHE_HIT_COMPARISON_KVCM_LOCAL_DELTA_TOKENS,
+                        FlexMetricType.GAUGE,
+                        FlexPriorityType.PRECISE);
+        verify(monitor)
+                .register(
+                        MetricConstant.CACHE_HIT_COMPARISON_KVCM_GLOBAL_MATCH_DELTA_TOKENS,
+                        FlexMetricType.GAUGE,
+                        FlexPriorityType.PRECISE);
+        verify(monitor)
+                .register(
+                        MetricConstant.CACHE_HIT_COMPARISON_LOCAL_STANDBY_DELTA_TOKENS,
+                        FlexMetricType.GAUGE,
+                        FlexPriorityType.PRECISE);
+        verify(monitor)
+                .register(
+                        MetricConstant.CACHE_HIT_COMPARISON_LOCAL_STANDBY_DELTA_RATIO,
+                        FlexMetricType.GAUGE,
+                        FlexPriorityType.PRECISE);
+        verify(monitor)
+                .register(
+                        MetricConstant.CACHE_HIT_COMPARISON_ACTUAL_RATIO,
+                        FlexMetricType.GAUGE,
+                        FlexPriorityType.PRECISE);
     }
 
     @Test
     void shouldRegisterStatusCheckFailureMetrics() {
         reporter.init();
 
-        verify(monitor).register(MetricConstant.ENGINE_STATUS_CHECK_FAIL_TOTAL,
-                FlexMetricType.COUNTER, FlexPriorityType.PRECISE);
-        verify(monitor).register(MetricConstant.ENGINE_STATUS_CHECK_FAIL_RT,
-                FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
+        verify(monitor)
+                .register(
+                        MetricConstant.ENGINE_STATUS_CHECK_FAIL_TOTAL,
+                        FlexMetricType.COUNTER,
+                        FlexPriorityType.PRECISE);
+        verify(monitor)
+                .register(
+                        MetricConstant.ENGINE_STATUS_CHECK_FAIL_RT,
+                        FlexMetricType.GAUGE,
+                        FlexPriorityType.PRECISE);
     }
 
     @Test
     void shouldReportStatusCheckFailureCountAndLatencyWithSameTags() {
         BalanceStatusEnum failure = BalanceStatusEnum.WORKER_STATUS_GRPC_TIMEOUT;
-        FlexMetricTags expectedTags = FlexMetricTags.of(
-                "code", String.valueOf(failure.getCode()),
-                "engineIp", "10.0.0.1:8080@0",
-                "role", RoleType.PREFILL.getCode());
+        FlexMetricTags expectedTags =
+                FlexMetricTags.of(
+                        "code", String.valueOf(failure.getCode()),
+                        "engineIp", "10.0.0.1:8080@0",
+                        "role", RoleType.PREFILL.getCode());
 
         reporter.reportStatusCheckerFail(failure, "10.0.0.1:8080@0", RoleType.PREFILL);
         reporter.reportStatusCheckFailureLatency(
@@ -148,25 +220,32 @@ class EngineHealthReporterTest {
 
         reporter.reportStatusCheckerFail(failure, null);
 
-        FlexMetricTags tags = FlexMetricTags.of("code", String.valueOf(failure.getCode()),
-                "engineIp", "", "role", "");
+        FlexMetricTags tags =
+                FlexMetricTags.of(
+                        "code", String.valueOf(failure.getCode()), "engineIp", "", "role", "");
         verify(monitor).report(MetricConstant.ENGINE_STATUS_CHECK_FAIL, tags, 1.0);
         verify(monitor).report(MetricConstant.ENGINE_STATUS_CHECK_FAIL_TOTAL, tags, 1.0);
     }
 
     @Test
     void lifecycleMetricsRetainMissingLabelsAsEmptyValues() {
-        WorkerStatus.TaskTelemetry task = new WorkerStatus.TaskTelemetry(
-                true, 900, 0, 0, 1000, 1042, 0, 1100,
-                0, 0, 1, 1, 1, 0, 0);
+        WorkerStatus.TaskTelemetry task =
+                new WorkerStatus.TaskTelemetry(
+                        true, 900, 0, 0, 1000, 1042, 0, 1100, 0, 0, 1, 1, 1, 0, 0);
 
         reporter.reportPrefillWorkerStatusTask(null, null, null, task);
 
         FlexMetricTags tags = FlexMetricTags.of("engineIp", "", "role", "", "group", "");
-        verify(monitor).report(MetricConstant.ENGINE_WORKER_STATUS_ENGINE_OBSERVED_WAITING_TO_RUNNING_MS,
-                tags, 42.0);
-        verify(monitor).report(MetricConstant.ENGINE_WORKER_STATUS_ENGINE_OBSERVED_RECEIVED_TO_WAITING_MS,
-                tags, 100.0);
+        verify(monitor)
+                .report(
+                        MetricConstant.ENGINE_WORKER_STATUS_ENGINE_OBSERVED_WAITING_TO_RUNNING_MS,
+                        tags,
+                        42.0);
+        verify(monitor)
+                .report(
+                        MetricConstant.ENGINE_WORKER_STATUS_ENGINE_OBSERVED_RECEIVED_TO_WAITING_MS,
+                        tags,
+                        100.0);
     }
 
     @Test
@@ -181,8 +260,11 @@ class EngineHealthReporterTest {
         verify(monitor).report(MetricConstant.ENCODER_PENDING_REQUEST_COUNT, tags, 0.0);
         verify(monitor).report(MetricConstant.ENCODER_SELECTION_LOAD, tags, 7.0);
         verify(monitor).report(MetricConstant.ENCODER_UNCACHED_TOKEN_LOAD, tags, 0.0);
-        verify(monitor).report(MetricConstant.CACHE_TOTAL_KV_CACHE_TOKENS,
-                FlexMetricTags.of("engineIp", "10.0.0.1", "role", "ENCODER"), 1000.0);
+        verify(monitor)
+                .report(
+                        MetricConstant.CACHE_TOTAL_KV_CACHE_TOKENS,
+                        FlexMetricTags.of("engineIp", "10.0.0.1", "role", "ENCODER"),
+                        1000.0);
     }
 
     @Test
@@ -190,10 +272,16 @@ class EngineHealthReporterTest {
         reporter.init();
 
         verify(monitor).register(MetricConstant.REQUEST_BLOCK_SIZE, FlexMetricType.GAUGE);
-        verify(monitor).register(MetricConstant.REQUEST_SEQ_LEN,
-                FlexMetricType.GAUGE, FlexStatisticsType.SUMMARY);
-        verify(monitor).register(MetricConstant.REQUEST_MESSAGE_BYTES,
-                FlexMetricType.GAUGE, FlexStatisticsType.SUMMARY);
+        verify(monitor)
+                .register(
+                        MetricConstant.REQUEST_SEQ_LEN,
+                        FlexMetricType.GAUGE,
+                        FlexStatisticsType.SUMMARY);
+        verify(monitor)
+                .register(
+                        MetricConstant.REQUEST_MESSAGE_BYTES,
+                        FlexMetricType.GAUGE,
+                        FlexStatisticsType.SUMMARY);
     }
 
     @Test
@@ -226,20 +314,26 @@ class EngineHealthReporterTest {
         response.setCode(200);
         response.setServerStatus(List.of(serverStatus));
         BalanceContext context = new BalanceContext(new FlexlbConfig());
-        context.recordSelectionReason(
-                RoleType.PREFILL, "LEAST_RECENTLY_USED_IN_POOL");
+        context.recordSelectionReason(RoleType.PREFILL, "LEAST_RECENTLY_USED_IN_POOL");
         context.setResponse(response);
 
         reporter.reportBalancingService(context);
 
-        verify(monitor).report(MetricConstant.ENGINE_BALANCING_MASTER_SELECT_DETAIL,
-                FlexMetricTags.of("role", "PREFILL", "success", "true", "code", "200"), 1.0);
-        verify(monitor).report(MetricConstant.ENGINE_BALANCING_MASTER_WORKER_SELECT_DETAIL, FlexMetricTags.of(
-                "role", "PREFILL",
-                "reason", "LEAST_RECENTLY_USED_IN_POOL",
-                "engineIp", "10.0.0.1:8080",
-                "success", "true",
-                "code", "200"), 1.0);
+        verify(monitor)
+                .report(
+                        MetricConstant.ENGINE_BALANCING_MASTER_SELECT_DETAIL,
+                        FlexMetricTags.of("role", "PREFILL", "success", "true", "code", "200"),
+                        1.0);
+        verify(monitor)
+                .report(
+                        MetricConstant.ENGINE_BALANCING_MASTER_WORKER_SELECT_DETAIL,
+                        FlexMetricTags.of(
+                                "role", "PREFILL",
+                                "reason", "LEAST_RECENTLY_USED_IN_POOL",
+                                "engineIp", "10.0.0.1:8080",
+                                "success", "true",
+                                "code", "200"),
+                        1.0);
     }
 
     @Test
@@ -257,101 +351,180 @@ class EngineHealthReporterTest {
 
         reporter.reportBalancingService(context);
 
-        verify(monitor).report(MetricConstant.ENGINE_BALANCING_MASTER_ALL_QPS,
-                FlexMetricTags.of("code", "200"), 1.0);
-        verify(monitor).report(MetricConstant.ENGINE_BALANCING_MASTER_WORKER_SELECT_DETAIL, FlexMetricTags.of(
-                "role", "PREFILL",
-                "reason", "UNKNOWN",
-                "engineIp", "10.0.0.1:8080",
-                "success", "true",
-                "code", "200"), 1.0);
+        verify(monitor)
+                .report(
+                        MetricConstant.ENGINE_BALANCING_MASTER_ALL_QPS,
+                        FlexMetricTags.of("code", "200"),
+                        1.0);
+        verify(monitor)
+                .report(
+                        MetricConstant.ENGINE_BALANCING_MASTER_WORKER_SELECT_DETAIL,
+                        FlexMetricTags.of(
+                                "role", "PREFILL",
+                                "reason", "UNKNOWN",
+                                "engineIp", "10.0.0.1:8080",
+                                "success", "true",
+                                "code", "200"),
+                        1.0);
     }
 
     @Test
     void shouldReportCacheAffinityDecisionBySelectedEngine() {
         reporter.reportCacheAffinityDecision(RoleType.PREFILL, "10.0.0.1:8080@0", "CACHE_LEADER");
 
-        verify(cacheMetricsReporter).reportCacheAffinityDecision(
-                RoleType.PREFILL, "10.0.0.1:8080@0", "CACHE_LEADER");
+        verify(cacheMetricsReporter)
+                .reportCacheAffinityDecision(RoleType.PREFILL, "10.0.0.1:8080@0", "CACHE_LEADER");
     }
 
     @Test
     void shouldSkipUnknownRequestPayloadMetrics() {
         reporter.reportRequestPayload(new BalanceContext());
 
-        verify(monitor, never()).report(eq(MetricConstant.REQUEST_BLOCK_SIZE), any(FlexMetricTags.class), anyDouble());
-        verify(monitor, never()).report(eq(MetricConstant.REQUEST_SEQ_LEN), any(FlexMetricTags.class), anyDouble());
-        verify(monitor, never()).report(eq(MetricConstant.REQUEST_MESSAGE_BYTES), any(FlexMetricTags.class), anyDouble());
-        verify(monitor, never()).report(eq("app.request.body.bytes"), any(FlexMetricTags.class), anyDouble());
+        verify(monitor, never())
+                .report(
+                        eq(MetricConstant.REQUEST_BLOCK_SIZE),
+                        any(FlexMetricTags.class),
+                        anyDouble());
+        verify(monitor, never())
+                .report(eq(MetricConstant.REQUEST_SEQ_LEN), any(FlexMetricTags.class), anyDouble());
+        verify(monitor, never())
+                .report(
+                        eq(MetricConstant.REQUEST_MESSAGE_BYTES),
+                        any(FlexMetricTags.class),
+                        anyDouble());
+        verify(monitor, never())
+                .report(eq("app.request.body.bytes"), any(FlexMetricTags.class), anyDouble());
     }
 
     @Test
     void shouldRegisterEngineObservedWaitingToRunningMetric() {
         reporter.init();
 
-        verify(monitor).register(MetricConstant.ENGINE_WORKER_STATUS_ENGINE_OBSERVED_WAITING_TO_RUNNING_MS,
-                FlexMetricType.GAUGE, FlexStatisticsType.SUMMARY);
+        verify(monitor)
+                .register(
+                        MetricConstant.ENGINE_WORKER_STATUS_ENGINE_OBSERVED_WAITING_TO_RUNNING_MS,
+                        FlexMetricType.GAUGE,
+                        FlexStatisticsType.SUMMARY);
     }
 
     @Test
     void shouldRegisterEngineObservedReceivedToWaitingMetric() {
         reporter.init();
 
-        verify(monitor).register(MetricConstant.ENGINE_WORKER_STATUS_ENGINE_OBSERVED_RECEIVED_TO_WAITING_MS,
-                FlexMetricType.GAUGE, FlexStatisticsType.SUMMARY);
+        verify(monitor)
+                .register(
+                        MetricConstant.ENGINE_WORKER_STATUS_ENGINE_OBSERVED_RECEIVED_TO_WAITING_MS,
+                        FlexMetricType.GAUGE,
+                        FlexStatisticsType.SUMMARY);
     }
 
     @Test
     void shouldReportPrefillWorkerStatusTaskMetrics() {
         reporter.init();
-        WorkerStatus.TaskTelemetry task = new WorkerStatus.TaskTelemetry(
-                true, 900, 1000, 1100, 1200, 1600, 200, 1900,
-                512, 256, 1, 3, 3, 128, 256);
+        WorkerStatus.TaskTelemetry task =
+                new WorkerStatus.TaskTelemetry(
+                        true, 900, 1000, 1100, 1200, 1600, 200, 1900, 512, 256, 1, 3, 3, 128, 256);
 
-        reporter.reportPrefillWorkerStatusTask(
-                "10.0.0.1:8080@0", "PREFILL", "test-group", task);
+        reporter.reportPrefillWorkerStatusTask("10.0.0.1:8080@0", "PREFILL", "test-group", task);
 
-        FlexMetricTags expectedTags = FlexMetricTags.of(
-                "engineIp", "10.0.0.1:8080@0",
-                "role", "PREFILL",
-                "group", "test-group");
-        verify(monitor).report(MetricConstant.ENGINE_WORKER_STATUS_INPUT_QUEUE_WAIT_MS, expectedTags, 100.0);
-        verify(monitor).report(MetricConstant.ENGINE_WORKER_STATUS_SCHEDULER_TO_RUNNING_MS, expectedTags, 400.0);
-        verify(monitor).report(MetricConstant.ENGINE_WORKER_STATUS_ENGINE_OBSERVED_RECEIVED_TO_WAITING_MS, expectedTags, 300.0);
-        verify(monitor).report(MetricConstant.ENGINE_WORKER_STATUS_ENGINE_OBSERVED_WAITING_TO_RUNNING_MS, expectedTags, 400.0);
-        verify(monitor).report(MetricConstant.ENGINE_WORKER_STATUS_SCHEDULER_WAIT_MS, expectedTags, 200.0);
-        verify(monitor).report(MetricConstant.ENGINE_WORKER_STATUS_REMOTE_KV_WAIT_MS, expectedTags, 200.0);
-        verify(monitor).report(MetricConstant.ENGINE_WORKER_STATUS_RUNNING_TO_FIRST_TOKEN_MS, expectedTags, 300.0);
-        verify(monitor).report(MetricConstant.ENGINE_WORKER_STATUS_HBM_LOCAL_MATCH_TOKENS, expectedTags, 512.0);
-        verify(monitor).report(MetricConstant.ENGINE_WORKER_STATUS_REMOTE_KV_ADDED_MATCH_TOKENS, expectedTags, 256.0);
-        verify(monitor).report(MetricConstant.ENGINE_WORKER_STATUS_PREFILL_STEP_COUNT, expectedTags, 3.0);
-        verify(monitor).report(MetricConstant.ENGINE_WORKER_STATUS_PREFILL_NONFINAL_CHUNK_TOKENS_MIN, expectedTags, 128.0);
-        verify(monitor).report(MetricConstant.ENGINE_WORKER_STATUS_PREFILL_NONFINAL_CHUNK_TOKENS_MAX, expectedTags, 256.0);
-        verify(monitor).register(MetricConstant.ENGINE_WORKER_STATUS_PREFILL_NONFINAL_CHUNK_TOKENS_MIN,
-                FlexMetricType.GAUGE, FlexPriorityType.TRIVIAL);
-        verify(monitor).register(MetricConstant.ENGINE_WORKER_STATUS_PREFILL_NONFINAL_CHUNK_TOKENS_MAX,
-                FlexMetricType.GAUGE, FlexPriorityType.TRIVIAL);
+        FlexMetricTags expectedTags =
+                FlexMetricTags.of(
+                        "engineIp", "10.0.0.1:8080@0",
+                        "role", "PREFILL",
+                        "group", "test-group");
+        verify(monitor)
+                .report(
+                        MetricConstant.ENGINE_WORKER_STATUS_INPUT_QUEUE_WAIT_MS,
+                        expectedTags,
+                        100.0);
+        verify(monitor)
+                .report(
+                        MetricConstant.ENGINE_WORKER_STATUS_SCHEDULER_TO_RUNNING_MS,
+                        expectedTags,
+                        400.0);
+        verify(monitor)
+                .report(
+                        MetricConstant.ENGINE_WORKER_STATUS_ENGINE_OBSERVED_RECEIVED_TO_WAITING_MS,
+                        expectedTags,
+                        300.0);
+        verify(monitor)
+                .report(
+                        MetricConstant.ENGINE_WORKER_STATUS_ENGINE_OBSERVED_WAITING_TO_RUNNING_MS,
+                        expectedTags,
+                        400.0);
+        verify(monitor)
+                .report(MetricConstant.ENGINE_WORKER_STATUS_SCHEDULER_WAIT_MS, expectedTags, 200.0);
+        verify(monitor)
+                .report(MetricConstant.ENGINE_WORKER_STATUS_REMOTE_KV_WAIT_MS, expectedTags, 200.0);
+        verify(monitor)
+                .report(
+                        MetricConstant.ENGINE_WORKER_STATUS_RUNNING_TO_FIRST_TOKEN_MS,
+                        expectedTags,
+                        300.0);
+        verify(monitor)
+                .report(
+                        MetricConstant.ENGINE_WORKER_STATUS_HBM_LOCAL_MATCH_TOKENS,
+                        expectedTags,
+                        512.0);
+        verify(monitor)
+                .report(
+                        MetricConstant.ENGINE_WORKER_STATUS_REMOTE_KV_ADDED_MATCH_TOKENS,
+                        expectedTags,
+                        256.0);
+        verify(monitor)
+                .report(MetricConstant.ENGINE_WORKER_STATUS_PREFILL_STEP_COUNT, expectedTags, 3.0);
+        verify(monitor)
+                .report(
+                        MetricConstant.ENGINE_WORKER_STATUS_PREFILL_NONFINAL_CHUNK_TOKENS_MIN,
+                        expectedTags,
+                        128.0);
+        verify(monitor)
+                .report(
+                        MetricConstant.ENGINE_WORKER_STATUS_PREFILL_NONFINAL_CHUNK_TOKENS_MAX,
+                        expectedTags,
+                        256.0);
+        verify(monitor)
+                .register(
+                        MetricConstant.ENGINE_WORKER_STATUS_PREFILL_NONFINAL_CHUNK_TOKENS_MIN,
+                        FlexMetricType.GAUGE,
+                        FlexPriorityType.TRIVIAL);
+        verify(monitor)
+                .register(
+                        MetricConstant.ENGINE_WORKER_STATUS_PREFILL_NONFINAL_CHUNK_TOKENS_MAX,
+                        FlexMetricType.GAUGE,
+                        FlexPriorityType.TRIVIAL);
     }
 
     @Test
     void shouldExcludeRequestsWithoutNonfinalChunksFromChunkMetrics() {
-        WorkerStatus.TaskTelemetry task = new WorkerStatus.TaskTelemetry(
-                true, 900, 1000, 1100, 1200, 1600, 0, 1900,
-                0, 0, 1, 1, 1, 0, 0);
+        WorkerStatus.TaskTelemetry task =
+                new WorkerStatus.TaskTelemetry(
+                        true, 900, 1000, 1100, 1200, 1600, 0, 1900, 0, 0, 1, 1, 1, 0, 0);
 
-        reporter.reportPrefillWorkerStatusTask(
-                "10.0.0.1:8080@0", "PREFILL", "test-group", task);
+        reporter.reportPrefillWorkerStatusTask("10.0.0.1:8080@0", "PREFILL", "test-group", task);
 
-        FlexMetricTags expectedTags = FlexMetricTags.of(
-                "engineIp", "10.0.0.1:8080@0",
-                "role", "PREFILL",
-                "group", "test-group");
-        verify(monitor).report(MetricConstant.ENGINE_WORKER_STATUS_PREFILL_STEP_COUNT, expectedTags, 1.0);
-        verify(monitor).report(MetricConstant.ENGINE_WORKER_STATUS_HBM_LOCAL_MATCH_TOKENS, expectedTags, 0.0);
-        verify(monitor, never()).report(
-                eq(MetricConstant.ENGINE_WORKER_STATUS_PREFILL_NONFINAL_CHUNK_TOKENS_MIN), any(), anyDouble());
-        verify(monitor, never()).report(
-                eq(MetricConstant.ENGINE_WORKER_STATUS_PREFILL_NONFINAL_CHUNK_TOKENS_MAX), any(), anyDouble());
+        FlexMetricTags expectedTags =
+                FlexMetricTags.of(
+                        "engineIp", "10.0.0.1:8080@0",
+                        "role", "PREFILL",
+                        "group", "test-group");
+        verify(monitor)
+                .report(MetricConstant.ENGINE_WORKER_STATUS_PREFILL_STEP_COUNT, expectedTags, 1.0);
+        verify(monitor)
+                .report(
+                        MetricConstant.ENGINE_WORKER_STATUS_HBM_LOCAL_MATCH_TOKENS,
+                        expectedTags,
+                        0.0);
+        verify(monitor, never())
+                .report(
+                        eq(MetricConstant.ENGINE_WORKER_STATUS_PREFILL_NONFINAL_CHUNK_TOKENS_MIN),
+                        any(),
+                        anyDouble());
+        verify(monitor, never())
+                .report(
+                        eq(MetricConstant.ENGINE_WORKER_STATUS_PREFILL_NONFINAL_CHUNK_TOKENS_MAX),
+                        any(),
+                        anyDouble());
     }
 
     @Test
@@ -361,49 +534,80 @@ class EngineHealthReporterTest {
         reporter.reportPrefillBalanceMasterEvent(ZkMasterEvent.MASTER_TAKE_LEADERSHIP);
 
         long afterReport = System.currentTimeMillis();
-        verify(monitor).report(MetricConstant.ZK_MASTER_EVENT,
-                FlexMetricTags.of("event", ZkMasterEvent.MASTER_TAKE_LEADERSHIP.name()), 1.0);
-        verify(monitor).report(
-                eq(MetricConstant.ZK_MASTER_EVENT_TIME_MS),
-                eq(FlexMetricTags.of("event", ZkMasterEvent.MASTER_TAKE_LEADERSHIP.name())),
-                doubleThat(value -> value >= beforeReport && value <= afterReport));
+        verify(monitor)
+                .report(
+                        MetricConstant.ZK_MASTER_EVENT,
+                        FlexMetricTags.of("event", ZkMasterEvent.MASTER_TAKE_LEADERSHIP.name()),
+                        1.0);
+        verify(monitor)
+                .report(
+                        eq(MetricConstant.ZK_MASTER_EVENT_TIME_MS),
+                        eq(FlexMetricTags.of("event", ZkMasterEvent.MASTER_TAKE_LEADERSHIP.name())),
+                        doubleThat(value -> value >= beforeReport && value <= afterReport));
     }
 
     @Test
     void keepsLegacyMetricTypesAndRegistersIndependentDetailMetrics() {
         reporter.init();
 
-        verify(monitor).register(MetricConstant.ZK_MASTER_EVENT, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
-        verify(monitor).register(MetricConstant.ZK_MASTER_EVENT_TIME_MS,
-                FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
-        verify(monitor).register(MetricConstant.ENGINE_BALANCING_MASTER_SELECT_DETAIL,
-                FlexMetricType.QPS, FlexPriorityType.PRECISE);
-        verify(monitor).register(MetricConstant.ENGINE_BALANCING_MASTER_WORKER_SELECT_DETAIL,
-                FlexMetricType.QPS, FlexPriorityType.PRECISE);
+        verify(monitor)
+                .register(
+                        MetricConstant.ZK_MASTER_EVENT,
+                        FlexMetricType.GAUGE,
+                        FlexPriorityType.PRECISE);
+        verify(monitor)
+                .register(
+                        MetricConstant.ZK_MASTER_EVENT_TIME_MS,
+                        FlexMetricType.GAUGE,
+                        FlexPriorityType.PRECISE);
+        verify(monitor)
+                .register(
+                        MetricConstant.ENGINE_BALANCING_MASTER_SELECT_DETAIL,
+                        FlexMetricType.QPS,
+                        FlexPriorityType.PRECISE);
+        verify(monitor)
+                .register(
+                        MetricConstant.ENGINE_BALANCING_MASTER_WORKER_SELECT_DETAIL,
+                        FlexMetricType.QPS,
+                        FlexPriorityType.PRECISE);
     }
 
     @Test
     void remoteKvZeroRemainsALegitimateDurationWithoutTimestampPresence() {
-        WorkerStatus.TaskTelemetry task = new WorkerStatus.TaskTelemetry(
-                true, 0, 0, 0, 0, 0, 0, 1900, 0, 0, 1, 1, 1, 0, 0);
+        WorkerStatus.TaskTelemetry task =
+                new WorkerStatus.TaskTelemetry(true, 0, 0, 0, 0, 0, 0, 1900, 0, 0, 1, 1, 1, 0, 0);
 
         reporter.reportPrefillWorkerStatusTask("10.0.0.1:8080", "PREFILL", "test-group", task);
 
-        FlexMetricTags tags = FlexMetricTags.of("engineIp", "10.0.0.1:8080", "role", "PREFILL", "group", "test-group");
+        FlexMetricTags tags =
+                FlexMetricTags.of(
+                        "engineIp", "10.0.0.1:8080", "role", "PREFILL", "group", "test-group");
         verify(monitor).report(MetricConstant.ENGINE_WORKER_STATUS_REMOTE_KV_WAIT_MS, tags, 0.0);
-        verify(monitor, never()).report(eq(MetricConstant.ENGINE_WORKER_STATUS_ENGINE_OBSERVED_WAITING_TO_RUNNING_MS),
-                any(), anyDouble());
-        verify(monitor, never()).report(eq(MetricConstant.ENGINE_WORKER_STATUS_SCHEDULER_WAIT_MS), any(), anyDouble());
+        verify(monitor, never())
+                .report(
+                        eq(
+                                MetricConstant
+                                        .ENGINE_WORKER_STATUS_ENGINE_OBSERVED_WAITING_TO_RUNNING_MS),
+                        any(),
+                        anyDouble());
+        verify(monitor, never())
+                .report(
+                        eq(MetricConstant.ENGINE_WORKER_STATUS_SCHEDULER_WAIT_MS),
+                        any(),
+                        anyDouble());
     }
 
     @Test
     void zeroRemoteKvWaitPreservesFullSchedulerWait() {
-        WorkerStatus.TaskTelemetry task = new WorkerStatus.TaskTelemetry(
-                true, 900, 1000, 1100, 1200, 1600, 0, 1900, 0, 0, 1, 1, 1, 0, 0);
+        WorkerStatus.TaskTelemetry task =
+                new WorkerStatus.TaskTelemetry(
+                        true, 900, 1000, 1100, 1200, 1600, 0, 1900, 0, 0, 1, 1, 1, 0, 0);
 
         reporter.reportPrefillWorkerStatusTask("10.0.0.1:8080", "PREFILL", "test-group", task);
 
-        FlexMetricTags tags = FlexMetricTags.of("engineIp", "10.0.0.1:8080", "role", "PREFILL", "group", "test-group");
+        FlexMetricTags tags =
+                FlexMetricTags.of(
+                        "engineIp", "10.0.0.1:8080", "role", "PREFILL", "group", "test-group");
         verify(monitor).report(MetricConstant.ENGINE_WORKER_STATUS_REMOTE_KV_WAIT_MS, tags, 0.0);
         verify(monitor).report(MetricConstant.ENGINE_WORKER_STATUS_SCHEDULER_WAIT_MS, tags, 400.0);
     }
@@ -414,9 +618,10 @@ class EngineHealthReporterTest {
 
         reporter.reportStatusCheckerSuccess(workerStatus, null, 3, 4);
 
-        FlexMetricTags expectedTags = FlexMetricTags.of(
-                "engineIp", "10.0.0.1",
-                "role", "PREFILL");
+        FlexMetricTags expectedTags =
+                FlexMetricTags.of(
+                        "engineIp", "10.0.0.1",
+                        "role", "PREFILL");
         verify(monitor).report(MetricConstant.ENGINE_RUNNING_TASK_INFO_SIZE, expectedTags, 3.0);
         verify(monitor).report(MetricConstant.ENGINE_FINISHED_TASK_LIST_SIZE, expectedTags, 4.0);
     }
@@ -424,7 +629,8 @@ class EngineHealthReporterTest {
     @Test
     void reportsEncoderSelectionInputsFromWorkerStatus() {
         reporter.init();
-        WorkerStatus workerStatus = workerStatus("10.0.0.1", RoleType.ENCODER, 800, 1000, null, 3, 4);
+        WorkerStatus workerStatus =
+                workerStatus("10.0.0.1", RoleType.ENCODER, 800, 1000, null, 3, 4);
         EncoderEndpoint endpoint = mock(EncoderEndpoint.class);
         when(endpoint.pendingEncoderRequestCount()).thenReturn(2);
         when(endpoint.inflightUncachedTokenEstimate()).thenReturn(640L);
@@ -432,32 +638,44 @@ class EngineHealthReporterTest {
 
         reporter.reportStatusCheckerSuccess(workerStatus, endpoint, 3, 1);
 
-        FlexMetricTags tags = FlexMetricTags.of(
-                "engineIp", "10.0.0.1:8080", "role", "ENCODER");
-        verify(monitor).register(MetricConstant.ENCODER_PENDING_REQUEST_COUNT,
-                FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
-        verify(monitor).register(MetricConstant.ENCODER_SELECTION_LOAD,
-                FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
-        verify(monitor).register(MetricConstant.ENCODER_UNCACHED_TOKEN_LOAD,
-                FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
+        FlexMetricTags tags = FlexMetricTags.of("engineIp", "10.0.0.1:8080", "role", "ENCODER");
+        verify(monitor)
+                .register(
+                        MetricConstant.ENCODER_PENDING_REQUEST_COUNT,
+                        FlexMetricType.GAUGE,
+                        FlexPriorityType.PRECISE);
+        verify(monitor)
+                .register(
+                        MetricConstant.ENCODER_SELECTION_LOAD,
+                        FlexMetricType.GAUGE,
+                        FlexPriorityType.PRECISE);
+        verify(monitor)
+                .register(
+                        MetricConstant.ENCODER_UNCACHED_TOKEN_LOAD,
+                        FlexMetricType.GAUGE,
+                        FlexPriorityType.PRECISE);
         verify(monitor).report(MetricConstant.ENCODER_PENDING_REQUEST_COUNT, tags, 2.0);
         verify(monitor).report(MetricConstant.ENCODER_SELECTION_LOAD, tags, 9.0);
         verify(monitor).report(MetricConstant.ENCODER_UNCACHED_TOKEN_LOAD, tags, 640.0);
-        verify(monitor).report(MetricConstant.CACHE_AVAILABLE_KV_CACHE_TOKENS,
-                FlexMetricTags.of("engineIp", "10.0.0.1", "role", "ENCODER"), 800.0);
+        verify(monitor)
+                .report(
+                        MetricConstant.CACHE_AVAILABLE_KV_CACHE_TOKENS,
+                        FlexMetricTags.of("engineIp", "10.0.0.1", "role", "ENCODER"),
+                        800.0);
     }
 
     @Test
     void shouldKeepBareIpForMultiEngineWorkerTaskCounts() {
-        WorkerStatus workerStatus = WorkerStatus.createDiscovered(
-                RoleType.PREFILL, null, "10.0.0.1", 8080, 8081,
-                null, null, 1, 2);
+        WorkerStatus workerStatus =
+                WorkerStatus.createDiscovered(
+                        RoleType.PREFILL, null, "10.0.0.1", 8080, 8081, null, null, 1, 2);
 
         reporter.reportStatusCheckerSuccess(workerStatus, null, 3, 4);
 
-        FlexMetricTags expectedTags = FlexMetricTags.of(
-                "engineIp", "10.0.0.1",
-                "role", "PREFILL");
+        FlexMetricTags expectedTags =
+                FlexMetricTags.of(
+                        "engineIp", "10.0.0.1",
+                        "role", "PREFILL");
         verify(monitor).report(MetricConstant.ENGINE_RUNNING_TASK_INFO_SIZE, expectedTags, 3.0);
     }
 
@@ -467,9 +685,10 @@ class EngineHealthReporterTest {
 
         reporter.reportStatusCheckerSuccess(workerStatus, null, 0, 0);
 
-        FlexMetricTags expectedTags = FlexMetricTags.of(
-                "engineIp", "10.0.0.1",
-                "role", "PREFILL");
+        FlexMetricTags expectedTags =
+                FlexMetricTags.of(
+                        "engineIp", "10.0.0.1",
+                        "role", "PREFILL");
         verify(monitor).report(MetricConstant.CACHE_USED_KV_CACHE_TOKENS, expectedTags, 200.0);
         verify(monitor).report(MetricConstant.CACHE_AVAILABLE_KV_CACHE_TOKENS, expectedTags, 800.0);
         verify(monitor).report(MetricConstant.CACHE_TOTAL_KV_CACHE_TOKENS, expectedTags, 1000.0);
@@ -483,10 +702,14 @@ class EngineHealthReporterTest {
 
         reporter.reportCacheStatusCheckerFail(workerStatus, failure);
 
-        verify(monitor).report(MetricConstant.CACHE_STATUS_CHECK_FAIL, FlexMetricTags.of(
-                "engineIp", "10.0.0.1:8080",
-                "code", String.valueOf(failure.getCode()),
-                "role", "PREFILL"), 1.0);
+        verify(monitor)
+                .report(
+                        MetricConstant.CACHE_STATUS_CHECK_FAIL,
+                        FlexMetricTags.of(
+                                "engineIp", "10.0.0.1:8080",
+                                "code", String.valueOf(failure.getCode()),
+                                "role", "PREFILL"),
+                        1.0);
     }
 
     @Test
@@ -495,10 +718,21 @@ class EngineHealthReporterTest {
 
         reporter.reportCacheStatusCheckerSuccess(workerStatus, 0L);
 
-        verify(monitor, never()).report(eq(MetricConstant.CACHE_BLOCK_SIZE), any(FlexMetricTags.class), anyDouble());
-        verify(monitor, never()).report(eq(MetricConstant.CACHE_LOCAL_STANDBY_BLOCK_SIZE),
-                any(FlexMetricTags.class), anyDouble());
-        verify(monitor, never()).report(eq(MetricConstant.CACHE_USED_KV_CACHE_RATIO), any(FlexMetricTags.class), anyDouble());
+        verify(monitor, never())
+                .report(
+                        eq(MetricConstant.CACHE_BLOCK_SIZE),
+                        any(FlexMetricTags.class),
+                        anyDouble());
+        verify(monitor, never())
+                .report(
+                        eq(MetricConstant.CACHE_LOCAL_STANDBY_BLOCK_SIZE),
+                        any(FlexMetricTags.class),
+                        anyDouble());
+        verify(monitor, never())
+                .report(
+                        eq(MetricConstant.CACHE_USED_KV_CACHE_RATIO),
+                        any(FlexMetricTags.class),
+                        anyDouble());
     }
 
     @Test
@@ -507,32 +741,78 @@ class EngineHealthReporterTest {
 
         reporter.reportStatusCheckerSuccess(workerStatus, null, 0, 0);
 
-        verify(monitor, never()).report(eq(MetricConstant.CACHE_LOCAL_STANDBY_BLOCK_SIZE),
-                any(FlexMetricTags.class), anyDouble());
+        verify(monitor, never())
+                .report(
+                        eq(MetricConstant.CACHE_LOCAL_STANDBY_BLOCK_SIZE),
+                        any(FlexMetricTags.class),
+                        anyDouble());
     }
 
     @Test
     void shouldReportOneSharedBlockSizePerRoleAcrossAllRoles() {
         WorkerStatus prefill = workerStatusWithCacheStatus();
-        WorkerStatus decode = workerStatus("10.0.0.2", RoleType.DECODE, 800L, 1000L,
-                CacheStatus.builder().blockSize(128).build());
-        WorkerStatus fusion = workerStatus("10.0.0.3", RoleType.PDFUSION, 800L, 1000L,
-                CacheStatus.builder().blockSize(256).build());
-        WorkerStatus encoder = workerStatus("10.0.0.4", RoleType.ENCODER, 800L, 1000L,
-                CacheStatus.builder().blockSize(32).build());
+        WorkerStatus decode =
+                workerStatus(
+                        "10.0.0.2",
+                        RoleType.DECODE,
+                        800L,
+                        1000L,
+                        CacheStatus.builder().blockSize(128).build());
+        WorkerStatus fusion =
+                workerStatus(
+                        "10.0.0.3",
+                        RoleType.PDFUSION,
+                        800L,
+                        1000L,
+                        CacheStatus.builder().blockSize(256).build());
+        WorkerStatus encoder =
+                workerStatus(
+                        "10.0.0.4",
+                        RoleType.ENCODER,
+                        800L,
+                        1000L,
+                        CacheStatus.builder().blockSize(32).build());
         when(workerDirectory.getWorkerStatuses(RoleType.PREFILL, null))
-                .thenReturn(List.of(WorkerStatus.createDiscovered(
-                        RoleType.PREFILL, null, "10.0.0.5", 8080, 8081, "test-site"), prefill, prefill));
+                .thenReturn(
+                        List.of(
+                                WorkerStatus.createDiscovered(
+                                        RoleType.PREFILL,
+                                        null,
+                                        "10.0.0.5",
+                                        8080,
+                                        8081,
+                                        "test-site"),
+                                prefill,
+                                prefill));
         when(workerDirectory.getWorkerStatuses(RoleType.DECODE, null)).thenReturn(List.of(decode));
-        when(workerDirectory.getWorkerStatuses(RoleType.PDFUSION, null)).thenReturn(List.of(fusion));
-        when(workerDirectory.getWorkerStatuses(RoleType.ENCODER, null)).thenReturn(List.of(encoder));
+        when(workerDirectory.getWorkerStatuses(RoleType.PDFUSION, null))
+                .thenReturn(List.of(fusion));
+        when(workerDirectory.getWorkerStatuses(RoleType.ENCODER, null))
+                .thenReturn(List.of(encoder));
 
-        org.springframework.test.util.ReflectionTestUtils.invokeMethod(reporter, "reportWorkerBlockSizes");
+        org.springframework.test.util.ReflectionTestUtils.invokeMethod(
+                reporter, "reportWorkerBlockSizes");
 
-        verify(monitor).report(MetricConstant.CACHE_BLOCK_SIZE, FlexMetricTags.of("role", "PREFILL"), 64.0);
-        verify(monitor).report(MetricConstant.CACHE_BLOCK_SIZE, FlexMetricTags.of("role", "DECODE"), 128.0);
-        verify(monitor).report(MetricConstant.CACHE_BLOCK_SIZE, FlexMetricTags.of("role", "PDFUSION"), 256.0);
-        verify(monitor).report(MetricConstant.CACHE_BLOCK_SIZE, FlexMetricTags.of("role", "ENCODER"), 32.0);
+        verify(monitor)
+                .report(
+                        MetricConstant.CACHE_BLOCK_SIZE,
+                        FlexMetricTags.of("role", "PREFILL"),
+                        64.0);
+        verify(monitor)
+                .report(
+                        MetricConstant.CACHE_BLOCK_SIZE,
+                        FlexMetricTags.of("role", "DECODE"),
+                        128.0);
+        verify(monitor)
+                .report(
+                        MetricConstant.CACHE_BLOCK_SIZE,
+                        FlexMetricTags.of("role", "PDFUSION"),
+                        256.0);
+        verify(monitor)
+                .report(
+                        MetricConstant.CACHE_BLOCK_SIZE,
+                        FlexMetricTags.of("role", "ENCODER"),
+                        32.0);
     }
 
     @Test
@@ -541,20 +821,33 @@ class EngineHealthReporterTest {
                 .thenReturn(List.of(workerStatusWithCacheStatus()));
         when(workerDirectory.getWorkerStatuses(RoleType.DECODE, null)).thenReturn(List.of());
 
-        try (AnnotationConfigApplicationContext context = new AnnotationConfigApplicationContext()) {
+        try (AnnotationConfigApplicationContext context =
+                new AnnotationConfigApplicationContext()) {
             context.register(SchedulingConfiguration.class);
             context.registerBean(EngineHealthReporter.class, () -> reporter);
             context.refresh();
-            Runnable task = context.getBean(ScheduledAnnotationBeanPostProcessor.class).getScheduledTasks().stream()
-                    .map(scheduled -> scheduled.getTask().getRunnable())
-                    .filter(runnable -> runnable instanceof ScheduledMethodRunnable method
-                            && method.getMethod().getName().equals("reportWorkerBlockSizes"))
-                    .findFirst().orElseThrow();
+            Runnable task =
+                    context
+                            .getBean(ScheduledAnnotationBeanPostProcessor.class)
+                            .getScheduledTasks()
+                            .stream()
+                            .map(scheduled -> scheduled.getTask().getRunnable())
+                            .filter(
+                                    runnable ->
+                                            runnable instanceof ScheduledMethodRunnable method
+                                                    && method.getMethod()
+                                                            .getName()
+                                                            .equals("reportWorkerBlockSizes"))
+                            .findFirst()
+                            .orElseThrow();
 
             task.run();
 
-            verify(monitor).report(MetricConstant.CACHE_BLOCK_SIZE,
-                    FlexMetricTags.of("role", "PREFILL"), 64.0);
+            verify(monitor)
+                    .report(
+                            MetricConstant.CACHE_BLOCK_SIZE,
+                            FlexMetricTags.of("role", "PREFILL"),
+                            64.0);
         }
     }
 
@@ -570,15 +863,34 @@ class EngineHealthReporterTest {
     @Test
     void shouldSkipWorkerBlockSizeBeforeStatusIsAvailable() {
         when(workerDirectory.getWorkerStatuses(RoleType.PREFILL, null))
-                .thenReturn(List.of(WorkerStatus.createDiscovered(
-                        RoleType.PREFILL, null, "10.0.0.1", 8080, 8081, "test-site")));
+                .thenReturn(
+                        List.of(
+                                WorkerStatus.createDiscovered(
+                                        RoleType.PREFILL,
+                                        null,
+                                        "10.0.0.1",
+                                        8080,
+                                        8081,
+                                        "test-site")));
         when(workerDirectory.getWorkerStatuses(RoleType.DECODE, null))
-                .thenReturn(List.of(WorkerStatus.createDiscovered(
-                        RoleType.DECODE, null, "10.0.0.2", 8080, 8081, "test-site")));
+                .thenReturn(
+                        List.of(
+                                WorkerStatus.createDiscovered(
+                                        RoleType.DECODE,
+                                        null,
+                                        "10.0.0.2",
+                                        8080,
+                                        8081,
+                                        "test-site")));
 
-        org.springframework.test.util.ReflectionTestUtils.invokeMethod(reporter, "reportWorkerBlockSizes");
+        org.springframework.test.util.ReflectionTestUtils.invokeMethod(
+                reporter, "reportWorkerBlockSizes");
 
-        verify(monitor, never()).report(eq(MetricConstant.CACHE_BLOCK_SIZE), any(FlexMetricTags.class), anyDouble());
+        verify(monitor, never())
+                .report(
+                        eq(MetricConstant.CACHE_BLOCK_SIZE),
+                        any(FlexMetricTags.class),
+                        anyDouble());
     }
 
     @Test
@@ -587,11 +899,15 @@ class EngineHealthReporterTest {
 
         reporter.reportCacheStatusCheckerSuccess(workerStatus, 0L);
 
-        FlexMetricTags expectedTags = FlexMetricTags.of(
-                "engineIp", "10.0.0.1:8080",
-                "role", "PREFILL");
-        verify(monitor, never()).report(eq(MetricConstant.CACHE_LOCAL_STANDBY_BLOCK_SIZE),
-                any(FlexMetricTags.class), anyDouble());
+        FlexMetricTags expectedTags =
+                FlexMetricTags.of(
+                        "engineIp", "10.0.0.1:8080",
+                        "role", "PREFILL");
+        verify(monitor, never())
+                .report(
+                        eq(MetricConstant.CACHE_LOCAL_STANDBY_BLOCK_SIZE),
+                        any(FlexMetricTags.class),
+                        anyDouble());
     }
 
     @Test
@@ -600,8 +916,11 @@ class EngineHealthReporterTest {
 
         reporter.reportCacheStatusCheckerSuccess(workerStatus, 0L);
 
-        verify(monitor, never()).report(eq(MetricConstant.CACHE_LOCAL_STANDBY_BLOCK_SIZE),
-                any(FlexMetricTags.class), anyDouble());
+        verify(monitor, never())
+                .report(
+                        eq(MetricConstant.CACHE_LOCAL_STANDBY_BLOCK_SIZE),
+                        any(FlexMetricTags.class),
+                        anyDouble());
     }
 
     @Test
@@ -610,203 +929,353 @@ class EngineHealthReporterTest {
 
         reporter.reportCacheStatusCheckerSuccess(workerStatus, 0L);
 
-        FlexMetricTags expectedTags = FlexMetricTags.of(
-                "engineIp", "10.0.0.1",
-                "role", "PREFILL");
+        FlexMetricTags expectedTags =
+                FlexMetricTags.of(
+                        "engineIp", "10.0.0.1",
+                        "role", "PREFILL");
         verify(monitor).report(MetricConstant.CACHE_KEY_SIZE, expectedTags, 7.0);
     }
 
     @Test
     void shouldReportActualCacheHitsWithoutPredictions() {
-        CacheHitComparisonResult comparison = new CacheHitComparisonResult(
-                "cache_hit_comparison", "request-1", "KVCM", "PREFILL", "test-group",
-                new WorkerIdentity("10.0.0.1", 8080, 0), "running", 200, 120,
-                null, null, null);
+        CacheHitComparisonResult comparison =
+                new CacheHitComparisonResult(
+                        "cache_hit_comparison",
+                        "request-1",
+                        "KVCM",
+                        "PREFILL",
+                        "test-group",
+                        new WorkerIdentity("10.0.0.1", 8080, 0),
+                        "running",
+                        200,
+                        120,
+                        null,
+                        null,
+                        null);
 
         reporter.reportCacheHitComparisonMetrics(comparison);
 
-        verify(monitor).report(eq(MetricConstant.CACHE_HIT_COMPARISON_INPUT_TOKENS),
-                any(FlexMetricTags.class), eq(200.0));
-        verify(monitor).report(eq(MetricConstant.CACHE_HIT_COMPARISON_ACTUAL_TOKENS),
-                any(FlexMetricTags.class), eq(120.0));
-        verify(monitor, never()).report(eq(MetricConstant.CACHE_HIT_COMPARISON_DELTA_TOKENS),
-                any(FlexMetricTags.class), anyDouble());
+        verify(monitor)
+                .report(
+                        eq(MetricConstant.CACHE_HIT_COMPARISON_INPUT_TOKENS),
+                        any(FlexMetricTags.class),
+                        eq(200.0));
+        verify(monitor)
+                .report(
+                        eq(MetricConstant.CACHE_HIT_COMPARISON_ACTUAL_TOKENS),
+                        any(FlexMetricTags.class),
+                        eq(120.0));
+        verify(monitor, never())
+                .report(
+                        eq(MetricConstant.CACHE_HIT_COMPARISON_DELTA_TOKENS),
+                        any(FlexMetricTags.class),
+                        anyDouble());
     }
 
     @Test
     void shouldReportCacheHitComparisonTokenMetricsWithStableDimensions() {
-        CacheHitComparisonResult comparison = new CacheHitComparisonResult(
-                "cache_hit_comparison", "request-1", "KVCM", "PREFILL", "test-group",
-                new WorkerIdentity("10.0.0.1", 8080, 0),
-                "running", 200,
-                120,
-                new CacheHitComparisonResult.CachePrediction(100, -1, -1),
-                null,
-                new CacheHitComparisonResult.CachePrediction(80, -1, -1));
+        CacheHitComparisonResult comparison =
+                new CacheHitComparisonResult(
+                        "cache_hit_comparison",
+                        "request-1",
+                        "KVCM",
+                        "PREFILL",
+                        "test-group",
+                        new WorkerIdentity("10.0.0.1", 8080, 0),
+                        "running",
+                        200,
+                        120,
+                        new CacheHitComparisonResult.CachePrediction(100, -1, -1),
+                        null,
+                        new CacheHitComparisonResult.CachePrediction(80, -1, -1));
 
         reporter.reportCacheHitComparisonMetrics(comparison);
 
-        FlexMetricTags expectedTags = FlexMetricTags.of(
-                "engineIp", "10.0.0.1:8080@0",
-                "role", "PREFILL",
-                "group", "test-group",
-                "taskState", "running",
-                "cacheMatchSource", "KVCM");
-        verify(monitor).report(MetricConstant.CACHE_HIT_COMPARISON_ACTUAL_TOKENS, expectedTags, 120.0);
-        verify(monitor).report(MetricConstant.CACHE_HIT_COMPARISON_KVCM_PREDICTED_TOKENS, expectedTags, 100.0);
-        verify(monitor).report(MetricConstant.CACHE_HIT_COMPARISON_DELTA_TOKENS, expectedTags, 20.0);
-        verify(monitor).report(MetricConstant.CACHE_HIT_COMPARISON_LOCAL_STANDBY_DELTA_TOKENS, expectedTags, 40.0);
-        verify(monitor).report(MetricConstant.CACHE_HIT_COMPARISON_LOCAL_STANDBY_DELTA_RATIO, expectedTags, 0.2);
+        FlexMetricTags expectedTags =
+                FlexMetricTags.of(
+                        "engineIp", "10.0.0.1:8080@0",
+                        "role", "PREFILL",
+                        "group", "test-group",
+                        "taskState", "running",
+                        "cacheMatchSource", "KVCM");
+        verify(monitor)
+                .report(MetricConstant.CACHE_HIT_COMPARISON_ACTUAL_TOKENS, expectedTags, 120.0);
+        verify(monitor)
+                .report(
+                        MetricConstant.CACHE_HIT_COMPARISON_KVCM_PREDICTED_TOKENS,
+                        expectedTags,
+                        100.0);
+        verify(monitor)
+                .report(MetricConstant.CACHE_HIT_COMPARISON_DELTA_TOKENS, expectedTags, 20.0);
+        verify(monitor)
+                .report(
+                        MetricConstant.CACHE_HIT_COMPARISON_LOCAL_STANDBY_DELTA_TOKENS,
+                        expectedTags,
+                        40.0);
+        verify(monitor)
+                .report(
+                        MetricConstant.CACHE_HIT_COMPARISON_LOCAL_STANDBY_DELTA_RATIO,
+                        expectedTags,
+                        0.2);
         verify(monitor).report(MetricConstant.CACHE_HIT_COMPARISON_ACTUAL_RATIO, expectedTags, 0.6);
-        verify(monitor).report(MetricConstant.CACHE_HIT_COMPARISON_INPUT_TOKENS, expectedTags, 200.0);
-        assertEquals(Map.of(
-                "engineIp", "10.0.0.1:8080@0",
-                "role", "PREFILL",
-                "group", "test-group",
-                "taskState", "running",
-                "cacheMatchSource", "KVCM"), expectedTags.getTags());
+        verify(monitor)
+                .report(MetricConstant.CACHE_HIT_COMPARISON_INPUT_TOKENS, expectedTags, 200.0);
+        assertEquals(
+                Map.of(
+                        "engineIp", "10.0.0.1:8080@0",
+                        "role", "PREFILL",
+                        "group", "test-group",
+                        "taskState", "running",
+                        "cacheMatchSource", "KVCM"),
+                expectedTags.getTags());
     }
 
     @Test
     void shouldReportSelectedKvcmGlobalMatchDetails() {
         reporter.reportKvcmSelectedMatch(RoleType.PREFILL, "10.0.0.1:8080@0", 40, 100, 200);
 
-        verify(cacheMetricsReporter).reportKvcmSelectedMatch(
-                RoleType.PREFILL, "10.0.0.1:8080@0", 40, 100, 200);
+        verify(cacheMetricsReporter)
+                .reportKvcmSelectedMatch(RoleType.PREFILL, "10.0.0.1:8080@0", 40, 100, 200);
     }
 
     @Test
     void shouldNotReportLocalStandbyMetricsWhenPredictionIsUnavailable() {
-        CacheHitComparisonResult comparison = new CacheHitComparisonResult(
-                "cache_hit_comparison", "request-1", "LOCAL_SYNC", "PREFILL", "test-group",
-                new WorkerIdentity("10.0.0.1", 8080, 0),
-                "running", 200,
-                120,
-                null,
-                new CacheHitComparisonResult.CachePrediction(100, -1, -1),
-                null);
+        CacheHitComparisonResult comparison =
+                new CacheHitComparisonResult(
+                        "cache_hit_comparison",
+                        "request-1",
+                        "LOCAL_SYNC",
+                        "PREFILL",
+                        "test-group",
+                        new WorkerIdentity("10.0.0.1", 8080, 0),
+                        "running",
+                        200,
+                        120,
+                        null,
+                        new CacheHitComparisonResult.CachePrediction(100, -1, -1),
+                        null);
 
         reporter.reportCacheHitComparisonMetrics(comparison);
 
-        FlexMetricTags expectedTags = FlexMetricTags.of(
-                "engineIp", "10.0.0.1:8080@0",
-                "role", "PREFILL",
-                "group", "test-group",
-                "taskState", "running",
-                "cacheMatchSource", "LOCAL_SYNC");
-        verify(monitor).report(MetricConstant.CACHE_HIT_COMPARISON_ACTUAL_TOKENS, expectedTags, 120.0);
-        verify(monitor, never()).report(
-                org.mockito.ArgumentMatchers.eq(MetricConstant.CACHE_HIT_COMPARISON_KVCM_PREDICTED_TOKENS),
-                org.mockito.ArgumentMatchers.any(FlexMetricTags.class),
-                org.mockito.ArgumentMatchers.anyDouble());
-        verify(monitor).report(MetricConstant.CACHE_HIT_COMPARISON_DELTA_TOKENS, expectedTags, 20.0);
-        verify(monitor, never()).report(
-                org.mockito.ArgumentMatchers.eq(MetricConstant.CACHE_HIT_COMPARISON_LOCAL_STANDBY_DELTA_TOKENS),
-                org.mockito.ArgumentMatchers.any(FlexMetricTags.class),
-                org.mockito.ArgumentMatchers.anyDouble());
-        verify(monitor, never()).report(
-                org.mockito.ArgumentMatchers.eq(MetricConstant.CACHE_HIT_COMPARISON_KVCM_LOCAL_DELTA_TOKENS),
-                org.mockito.ArgumentMatchers.any(FlexMetricTags.class),
-                org.mockito.ArgumentMatchers.anyDouble());
-        verify(monitor, never()).report(
-                org.mockito.ArgumentMatchers.eq(MetricConstant.CACHE_HIT_COMPARISON_KVCM_GLOBAL_MATCH_DELTA_TOKENS),
-                org.mockito.ArgumentMatchers.any(FlexMetricTags.class),
-                org.mockito.ArgumentMatchers.anyDouble());
+        FlexMetricTags expectedTags =
+                FlexMetricTags.of(
+                        "engineIp", "10.0.0.1:8080@0",
+                        "role", "PREFILL",
+                        "group", "test-group",
+                        "taskState", "running",
+                        "cacheMatchSource", "LOCAL_SYNC");
+        verify(monitor)
+                .report(MetricConstant.CACHE_HIT_COMPARISON_ACTUAL_TOKENS, expectedTags, 120.0);
+        verify(monitor, never())
+                .report(
+                        org.mockito.ArgumentMatchers.eq(
+                                MetricConstant.CACHE_HIT_COMPARISON_KVCM_PREDICTED_TOKENS),
+                        org.mockito.ArgumentMatchers.any(FlexMetricTags.class),
+                        org.mockito.ArgumentMatchers.anyDouble());
+        verify(monitor)
+                .report(MetricConstant.CACHE_HIT_COMPARISON_DELTA_TOKENS, expectedTags, 20.0);
+        verify(monitor, never())
+                .report(
+                        org.mockito.ArgumentMatchers.eq(
+                                MetricConstant.CACHE_HIT_COMPARISON_LOCAL_STANDBY_DELTA_TOKENS),
+                        org.mockito.ArgumentMatchers.any(FlexMetricTags.class),
+                        org.mockito.ArgumentMatchers.anyDouble());
+        verify(monitor, never())
+                .report(
+                        org.mockito.ArgumentMatchers.eq(
+                                MetricConstant.CACHE_HIT_COMPARISON_KVCM_LOCAL_DELTA_TOKENS),
+                        org.mockito.ArgumentMatchers.any(FlexMetricTags.class),
+                        org.mockito.ArgumentMatchers.anyDouble());
+        verify(monitor, never())
+                .report(
+                        org.mockito.ArgumentMatchers.eq(
+                                MetricConstant.CACHE_HIT_COMPARISON_KVCM_GLOBAL_MATCH_DELTA_TOKENS),
+                        org.mockito.ArgumentMatchers.any(FlexMetricTags.class),
+                        org.mockito.ArgumentMatchers.anyDouble());
     }
 
     @Test
     void shouldReportKvcmLocalAndGlobalDeltasWhenAvailable() {
-        CacheHitComparisonResult comparison = new CacheHitComparisonResult(
-                "cache_hit_comparison", "request-1", "KVCM", "PREFILL", "test-group",
-                new WorkerIdentity("10.0.0.1", 8080, 0),
-                "running", 200,
-                120,
-                new CacheHitComparisonResult.CachePrediction(60, 40, 100),
-                null,
-                null);
+        CacheHitComparisonResult comparison =
+                new CacheHitComparisonResult(
+                        "cache_hit_comparison",
+                        "request-1",
+                        "KVCM",
+                        "PREFILL",
+                        "test-group",
+                        new WorkerIdentity("10.0.0.1", 8080, 0),
+                        "running",
+                        200,
+                        120,
+                        new CacheHitComparisonResult.CachePrediction(60, 40, 100),
+                        null,
+                        null);
 
         reporter.reportCacheHitComparisonMetrics(comparison);
 
-        FlexMetricTags expectedTags = FlexMetricTags.of(
-                "engineIp", "10.0.0.1:8080@0",
-                "role", "PREFILL",
-                "group", "test-group",
-                "taskState", "running",
-                "cacheMatchSource", "KVCM");
-        verify(monitor).report(MetricConstant.CACHE_HIT_COMPARISON_KVCM_LOCAL_DELTA_TOKENS, expectedTags, 80.0);
-        verify(monitor).report(MetricConstant.CACHE_HIT_COMPARISON_KVCM_GLOBAL_MATCH_DELTA_TOKENS, expectedTags, 20.0);
+        FlexMetricTags expectedTags =
+                FlexMetricTags.of(
+                        "engineIp", "10.0.0.1:8080@0",
+                        "role", "PREFILL",
+                        "group", "test-group",
+                        "taskState", "running",
+                        "cacheMatchSource", "KVCM");
+        verify(monitor)
+                .report(
+                        MetricConstant.CACHE_HIT_COMPARISON_KVCM_LOCAL_DELTA_TOKENS,
+                        expectedTags,
+                        80.0);
+        verify(monitor)
+                .report(
+                        MetricConstant.CACHE_HIT_COMPARISON_KVCM_GLOBAL_MATCH_DELTA_TOKENS,
+                        expectedTags,
+                        20.0);
     }
 
     @ParameterizedTest
     @ValueSource(longs = {0, -1})
     void shouldRetainAbsoluteDeltaWithoutInputDenominator(long inputTokens) {
-        CacheHitComparisonResult comparison = new CacheHitComparisonResult(
-                "cache_hit_comparison", "request-1", "KVCM", "PREFILL", "test-group",
-                new WorkerIdentity("10.0.0.1", 8080, 0),
-                "running", inputTokens,
-                120,
-                new CacheHitComparisonResult.CachePrediction(100, -1, -1),
-                null,
-                new CacheHitComparisonResult.CachePrediction(80, -1, -1));
+        CacheHitComparisonResult comparison =
+                new CacheHitComparisonResult(
+                        "cache_hit_comparison",
+                        "request-1",
+                        "KVCM",
+                        "PREFILL",
+                        "test-group",
+                        new WorkerIdentity("10.0.0.1", 8080, 0),
+                        "running",
+                        inputTokens,
+                        120,
+                        new CacheHitComparisonResult.CachePrediction(100, -1, -1),
+                        null,
+                        new CacheHitComparisonResult.CachePrediction(80, -1, -1));
 
         reporter.reportCacheHitComparisonMetrics(comparison);
 
-        verify(monitor).report(eq(MetricConstant.CACHE_HIT_COMPARISON_DELTA_TOKENS),
-                any(FlexMetricTags.class), eq(20.0));
-        verify(monitor, never()).report(
-                org.mockito.ArgumentMatchers.eq(MetricConstant.CACHE_HIT_COMPARISON_ACTUAL_RATIO),
-                org.mockito.ArgumentMatchers.any(FlexMetricTags.class),
-                org.mockito.ArgumentMatchers.anyDouble());
-        verify(monitor, never()).report(
-                org.mockito.ArgumentMatchers.eq(MetricConstant.CACHE_HIT_COMPARISON_INPUT_TOKENS),
-                org.mockito.ArgumentMatchers.any(FlexMetricTags.class),
-                org.mockito.ArgumentMatchers.anyDouble());
-        verify(monitor, never()).report(
-                org.mockito.ArgumentMatchers.eq(MetricConstant.CACHE_HIT_COMPARISON_ACTUAL_TOKENS),
-                org.mockito.ArgumentMatchers.any(FlexMetricTags.class),
-                org.mockito.ArgumentMatchers.anyDouble());
-        verify(monitor, never()).report(
-                org.mockito.ArgumentMatchers.eq(MetricConstant.CACHE_HIT_COMPARISON_KVCM_PREDICTED_TOKENS),
-                org.mockito.ArgumentMatchers.any(FlexMetricTags.class),
-                org.mockito.ArgumentMatchers.anyDouble());
+        verify(monitor)
+                .report(
+                        eq(MetricConstant.CACHE_HIT_COMPARISON_DELTA_TOKENS),
+                        any(FlexMetricTags.class),
+                        eq(20.0));
+        verify(monitor, never())
+                .report(
+                        org.mockito.ArgumentMatchers.eq(
+                                MetricConstant.CACHE_HIT_COMPARISON_ACTUAL_RATIO),
+                        org.mockito.ArgumentMatchers.any(FlexMetricTags.class),
+                        org.mockito.ArgumentMatchers.anyDouble());
+        verify(monitor, never())
+                .report(
+                        org.mockito.ArgumentMatchers.eq(
+                                MetricConstant.CACHE_HIT_COMPARISON_INPUT_TOKENS),
+                        org.mockito.ArgumentMatchers.any(FlexMetricTags.class),
+                        org.mockito.ArgumentMatchers.anyDouble());
+        verify(monitor, never())
+                .report(
+                        org.mockito.ArgumentMatchers.eq(
+                                MetricConstant.CACHE_HIT_COMPARISON_ACTUAL_TOKENS),
+                        org.mockito.ArgumentMatchers.any(FlexMetricTags.class),
+                        org.mockito.ArgumentMatchers.anyDouble());
+        verify(monitor, never())
+                .report(
+                        org.mockito.ArgumentMatchers.eq(
+                                MetricConstant.CACHE_HIT_COMPARISON_KVCM_PREDICTED_TOKENS),
+                        org.mockito.ArgumentMatchers.any(FlexMetricTags.class),
+                        org.mockito.ArgumentMatchers.anyDouble());
     }
 
     @ParameterizedTest
     @ValueSource(ints = {1, 2})
     void comparisonUsesObservedWorkersMetricIdentity(int multiEngineNum) {
-        WorkerStatus worker = WorkerStatus.createDiscovered(RoleType.PREFILL, "test-group", "10.0.0.1",
-                8080, 8081, "test-site", null, 0, multiEngineNum);
-        CacheHitComparisonResult comparison = new CacheHitComparisonResult(
-                "cache_hit_comparison", "request-1", "KVCM", "PREFILL", "test-group",
-                worker.getWorkerIdentity(), "running", 200, 120, null, null, null);
+        WorkerStatus worker =
+                WorkerStatus.createDiscovered(
+                        RoleType.PREFILL,
+                        "test-group",
+                        "10.0.0.1",
+                        8080,
+                        8081,
+                        "test-site",
+                        null,
+                        0,
+                        multiEngineNum);
+        CacheHitComparisonResult comparison =
+                new CacheHitComparisonResult(
+                        "cache_hit_comparison",
+                        "request-1",
+                        "KVCM",
+                        "PREFILL",
+                        "test-group",
+                        worker.getWorkerIdentity(),
+                        "running",
+                        200,
+                        120,
+                        null,
+                        null,
+                        null);
 
         reporter.reportCacheHitComparisonMetrics(worker, comparison);
 
         String metricAddress = multiEngineNum == 1 ? "10.0.0.1:8080" : "10.0.0.1:8080@0";
-        verify(monitor).report(MetricConstant.CACHE_HIT_COMPARISON_ACTUAL_TOKENS,
-                FlexMetricTags.of("engineIp", metricAddress, "role", "PREFILL", "group", "test-group",
-                        "taskState", "running", "cacheMatchSource", "KVCM"), 120.0);
+        verify(monitor)
+                .report(
+                        MetricConstant.CACHE_HIT_COMPARISON_ACTUAL_TOKENS,
+                        FlexMetricTags.of(
+                                "engineIp",
+                                metricAddress,
+                                "role",
+                                "PREFILL",
+                                "group",
+                                "test-group",
+                                "taskState",
+                                "running",
+                                "cacheMatchSource",
+                                "KVCM"),
+                        120.0);
         assertEquals("10.0.0.1:8080@0", comparison.worker());
     }
 
     @Test
     void comparisonWithoutMetadataKeepsMissingDimensionsAsEmptyValues() {
-        CacheHitComparisonResult comparison = new CacheHitComparisonResult(
-                "cache_hit_comparison", "request-1", null, null, null, null, null,
-                200, 120, null, null, null);
+        CacheHitComparisonResult comparison =
+                new CacheHitComparisonResult(
+                        "cache_hit_comparison",
+                        "request-1",
+                        null,
+                        null,
+                        null,
+                        null,
+                        null,
+                        200,
+                        120,
+                        null,
+                        null,
+                        null);
 
         reporter.reportCacheHitComparisonMetrics(comparison);
 
-        verify(monitor).report(MetricConstant.CACHE_HIT_COMPARISON_ACTUAL_TOKENS,
-                FlexMetricTags.of("engineIp", "", "role", "", "group", "", "taskState", "", "cacheMatchSource", ""), 120.0);
+        verify(monitor)
+                .report(
+                        MetricConstant.CACHE_HIT_COMPARISON_ACTUAL_TOKENS,
+                        FlexMetricTags.of(
+                                "engineIp",
+                                "",
+                                "role",
+                                "",
+                                "group",
+                                "",
+                                "taskState",
+                                "",
+                                "cacheMatchSource",
+                                ""),
+                        120.0);
     }
 
     private WorkerStatus workerStatusWithCacheStatus() {
-        return workerStatus("10.0.0.1", RoleType.PREFILL, 800L, 1000L,
-                CacheStatus.builder()
-                .blockSize(64)
-                .cacheKeySize(7)
-                .build());
+        return workerStatus(
+                "10.0.0.1",
+                RoleType.PREFILL,
+                800L,
+                1000L,
+                CacheStatus.builder().blockSize(64).cacheKeySize(7).build());
     }
 
     private WorkerStatus workerStatus(String ip, RoleType role) {
@@ -819,19 +1288,20 @@ class EngineHealthReporterTest {
             long availableKvCacheTokens,
             long totalKvCacheTokens,
             CacheStatus cacheStatus) {
-        return workerStatus(ip, role, availableKvCacheTokens, totalKvCacheTokens,
-                cacheStatus, 0L, 0L);
+        return workerStatus(
+                ip, role, availableKvCacheTokens, totalKvCacheTokens, cacheStatus, 0L, 0L);
     }
 
-    private WorkerStatus workerStatus(String ip,
-                                      RoleType role,
-                                      long availableKvCacheTokens,
-                                      long totalKvCacheTokens,
-                                      CacheStatus cacheStatus,
-                                      long runningQueryLen,
-                                      long waitingQueryLen) {
-        WorkerStatus workerStatus = WorkerStatus.createDiscovered(
-                role, null, ip, 8080, 8081, "test-site");
+    private WorkerStatus workerStatus(
+            String ip,
+            RoleType role,
+            long availableKvCacheTokens,
+            long totalKvCacheTokens,
+            CacheStatus cacheStatus,
+            long runningQueryLen,
+            long waitingQueryLen) {
+        WorkerStatus workerStatus =
+                WorkerStatus.createDiscovered(role, null, ip, 8080, 8081, "test-site");
         WorkerStatusResponse response = new WorkerStatusResponse();
         response.setRole(role);
         response.setCacheStatus(cacheStatus);
@@ -850,8 +1320,8 @@ class EngineHealthReporterTest {
             if (cacheStatus != null) {
                 workerStatus.publishCacheStatus(cacheStatus);
             }
-            WorkerStatus.PreparedStatus prepared = workerStatus.prepareNewStatus(
-                    workerStatus.freezeStatusResponse(response));
+            WorkerStatus.PreparedStatus prepared =
+                    workerStatus.prepareNewStatus(workerStatus.freezeStatusResponse(response));
             workerStatus.publishPreparedStatus(prepared);
             workerStatus.recordSuccessfulPoll(true);
         } finally {

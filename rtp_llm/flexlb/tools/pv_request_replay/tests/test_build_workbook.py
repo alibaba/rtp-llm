@@ -11,20 +11,17 @@ from zoneinfo import ZoneInfo
 
 from openpyxl import load_workbook
 
-
 TOOL_DIR = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(TOOL_DIR))
-import build_workbook as workbook_module  # noqa: E402
 import build_html as html_module  # noqa: E402
-
+import build_workbook as workbook_module  # noqa: E402
 
 SHANGHAI = ZoneInfo("Asia/Shanghai")
 
 
 def epoch_ms(hour: int, minute: int, second: int = 0) -> int:
     return int(
-        datetime(2026, 8, 11, hour, minute, second, tzinfo=SHANGHAI).timestamp()
-        * 1000
+        datetime(2026, 8, 11, hour, minute, second, tzinfo=SHANGHAI).timestamp() * 1000
     )
 
 
@@ -48,9 +45,7 @@ def route_record(
         "selectionReasons": {role: "SHORTEST_TTFT"},
         "response": {
             "code": 200,
-            "server_status": [
-                {"role": role, "server_ip": worker, "code": 200}
-            ],
+            "server_status": [{"role": role, "server_ip": worker, "code": 200}],
         },
         "shortestTtftDecisions": [
             {
@@ -107,13 +102,24 @@ def status_record(request_id: str, worker: str, request_time_ms: int) -> dict:
 
 class CurrentRoutingDecisionTest(unittest.TestCase):
     def test_log_timestamps_accept_comma_and_microsecond_precision(self):
-        for timestamp in ("2026-08-11 01:45:00.123", "2026-08-11 01:45:00,123",
-                          "2026-08-11 01:45:00.123456", "2026-08-11 01:45:00,123456"):
+        for timestamp in (
+            "2026-08-11 01:45:00.123",
+            "2026-08-11 01:45:00,123",
+            "2026-08-11 01:45:00.123456",
+            "2026-08-11 01:45:00,123456",
+        ):
             with self.subTest(timestamp=timestamp):
-                self.assertEqual(workbook_module.log_time_from_content(timestamp + " INFO pvLogger"),
-                                 timestamp.replace(",", "."))
-                self.assertIsNotNone(html_module.timestamp_ms(
-                    workbook_module.log_time_from_content(timestamp + " INFO pvLogger")))
+                self.assertEqual(
+                    workbook_module.log_time_from_content(timestamp + " INFO pvLogger"),
+                    timestamp.replace(",", "."),
+                )
+                self.assertIsNotNone(
+                    html_module.timestamp_ms(
+                        workbook_module.log_time_from_content(
+                            timestamp + " INFO pvLogger"
+                        )
+                    )
+                )
 
     def test_null_or_malformed_response_keeps_top_level_outcome(self):
         for response in (None, [], "invalid"):
@@ -131,9 +137,16 @@ class CurrentRoutingDecisionTest(unittest.TestCase):
                     try:
                         sheet = workbook["Requests"]
                         headers = [cell.value for cell in sheet[1]]
-                        values = next(record for record in (dict(zip(headers, values))
-                            for values in sheet.iter_rows(min_row=2, values_only=True))
-                            if record.get("request_id") == "malformed-response")
+                        values = next(
+                            record
+                            for record in (
+                                dict(zip(headers, values))
+                                for values in sheet.iter_rows(
+                                    min_row=2, values_only=True
+                                )
+                            )
+                            if record.get("request_id") == "malformed-response"
+                        )
                         self.assertEqual(values["route_response_code"], 200)
                     finally:
                         workbook.close()
@@ -142,10 +155,24 @@ class CurrentRoutingDecisionTest(unittest.TestCase):
 
     def test_malformed_candidates_are_skipped_when_building_workbook(self):
         route = route_record("malformed-candidate", epoch_ms(1, 45), "10.0.0.8")
-        route["routingDecisions"] = [{"role": "PREFILL", "candidates": [None, "invalid",
-            {"endpoint": "10.0.0.8:8001@1", "selected": True, "routingMatchTokens": 512}]}]
-        self.assertEqual(workbook_module.get_route_cache_selection(route),
-                         {"hitCacheTokens": 512, "selectedIp": "10.0.0.8"})
+        route["routingDecisions"] = [
+            {
+                "role": "PREFILL",
+                "candidates": [
+                    None,
+                    "invalid",
+                    {
+                        "endpoint": "10.0.0.8:8001@1",
+                        "selected": True,
+                        "routingMatchTokens": 512,
+                    },
+                ],
+            }
+        ]
+        self.assertEqual(
+            workbook_module.get_route_cache_selection(route),
+            {"hitCacheTokens": 512, "selectedIp": "10.0.0.8"},
+        )
         with tempfile.TemporaryDirectory() as directory:
             source = Path(directory) / "pv.log"
             source.write_text(pv_line("2026-08-11 01:45:00.010", route))
@@ -153,28 +180,58 @@ class CurrentRoutingDecisionTest(unittest.TestCase):
             workbook_module.build_workbook([source], destination)
             workbook = load_workbook(destination)
             try:
-                records = list(workbook["Routing Decisions"].iter_rows(min_row=2, values_only=True))
+                records = list(
+                    workbook["Routing Decisions"].iter_rows(min_row=2, values_only=True)
+                )
                 self.assertEqual(len(records), 1)
                 self.assertIn("10.0.0.8:8001@1", records[0])
             finally:
                 workbook.close()
 
-        legacy_route = {"shortestTtftDecisions": [{"role": "PREFILL", "workers": [None, "invalid",
-            {"ip": "10.0.0.8", "selected": True, "routingMatchTokens": 512}]}]}
-        self.assertEqual(workbook_module.get_route_cache_selection(legacy_route),
-                         {"hitCacheTokens": 512, "selectedIp": "10.0.0.8"})
+        legacy_route = {
+            "shortestTtftDecisions": [
+                {
+                    "role": "PREFILL",
+                    "workers": [
+                        None,
+                        "invalid",
+                        {"ip": "10.0.0.8", "selected": True, "routingMatchTokens": 512},
+                    ],
+                }
+            ]
+        }
+        self.assertEqual(
+            workbook_module.get_route_cache_selection(legacy_route),
+            {"hitCacheTokens": 512, "selectedIp": "10.0.0.8"},
+        )
         legacy_route["shortestTtftDecisions"][0]["workers"] = None
         self.assertEqual(workbook_module.get_route_cache_selection(legacy_route), {})
 
     def test_selected_ipv6_candidate_uses_the_normalized_host(self):
-        for endpoint, host in (("10.0.0.8:8001@1", "10.0.0.8"),
-                               ("[2001:db8::1]:8001@1", "2001:db8::1")):
+        for endpoint, host in (
+            ("10.0.0.8:8001@1", "10.0.0.8"),
+            ("[2001:db8::1]:8001@1", "2001:db8::1"),
+        ):
             with self.subTest(endpoint=endpoint):
-                route = {"routingDecisions": [{"role": "PREFILL", "candidates": [
-                    {"endpoint": endpoint, "selected": True, "routingMatchTokens": 512}]}]}
+                route = {
+                    "routingDecisions": [
+                        {
+                            "role": "PREFILL",
+                            "candidates": [
+                                {
+                                    "endpoint": endpoint,
+                                    "selected": True,
+                                    "routingMatchTokens": 512,
+                                }
+                            ],
+                        }
+                    ]
+                }
 
-                self.assertEqual(workbook_module.get_route_cache_selection(route),
-                                 {"hitCacheTokens": 512, "selectedIp": host})
+                self.assertEqual(
+                    workbook_module.get_route_cache_selection(route),
+                    {"hitCacheTokens": 512, "selectedIp": host},
+                )
 
     def test_compact_pv_uses_top_level_outcome_and_selected_candidate(self):
         route = route_record("compact", epoch_ms(1, 45), "10.0.0.8")
@@ -183,11 +240,24 @@ class CurrentRoutingDecisionTest(unittest.TestCase):
         route.pop("selectionReasons", None)
         route.pop("cacheMatchSelections", None)
         route.pop("shortestTtftDecisions", None)
-        route["routingDecisions"] = [{"role": "PREFILL", "selectionReason": "CACHE_LEADER",
-            "candidates": [{"endpoint": "10.0.0.8:8001@1", "selected": True,
-                            "routingMatchTokens": 512, "projectedTtftMs": 20}]}]
+        route["routingDecisions"] = [
+            {
+                "role": "PREFILL",
+                "selectionReason": "CACHE_LEADER",
+                "candidates": [
+                    {
+                        "endpoint": "10.0.0.8:8001@1",
+                        "selected": True,
+                        "routingMatchTokens": 512,
+                        "projectedTtftMs": 20,
+                    }
+                ],
+            }
+        ]
         self.assertTrue(workbook_module.route_success(route))
-        self.assertEqual(workbook_module.get_route_cache_selection(route)["hitCacheTokens"], 512)
+        self.assertEqual(
+            workbook_module.get_route_cache_selection(route)["hitCacheTokens"], 512
+        )
         with tempfile.TemporaryDirectory() as directory:
             source = Path(directory) / "pv.log"
             source.write_text(pv_line("2026-08-11 01:45:00.010", route))
@@ -196,11 +266,19 @@ class CurrentRoutingDecisionTest(unittest.TestCase):
             workbook = load_workbook(destination)
             sheet = workbook["Requests"]
             headers = [cell.value for cell in sheet[1]]
-            values = next(record for record in (dict(zip(headers, row))
-                for row in sheet.iter_rows(min_row=2, values_only=True)) if record.get("request_id") == "compact")
+            values = next(
+                record
+                for record in (
+                    dict(zip(headers, row))
+                    for row in sheet.iter_rows(min_row=2, values_only=True)
+                )
+                if record.get("request_id") == "compact"
+            )
             self.assertEqual(values["route_response_code"], 200)
             self.assertEqual(values["route_predicted_hit_tokens"], 512)
-            self.assertEqual(values["flexlb_predicted_prefill_time (routing prediction)"], 20)
+            self.assertEqual(
+                values["flexlb_predicted_prefill_time (routing prediction)"], 20
+            )
             self.assertIn("CACHE_LEADER", values.values())
             self.assertTrue(html_module._build_replay(destination)["candidates"])
             workbook.close()
@@ -209,16 +287,37 @@ class CurrentRoutingDecisionTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             route = route_record("same-id", epoch_ms(1, 45), "10.0.0.8")
             del route["shortestTtftDecisions"]
-            route["routingDecisions"] = [{"role": "PREFILL", "strategy": "CostBasedPrefill", "candidates": [
-                {"endpoint": "10.0.0.8:8001@1", "selected": True, "projectedTtftMs": 20}]}]
+            route["routingDecisions"] = [
+                {
+                    "role": "PREFILL",
+                    "strategy": "CostBasedPrefill",
+                    "candidates": [
+                        {
+                            "endpoint": "10.0.0.8:8001@1",
+                            "selected": True,
+                            "projectedTtftMs": 20,
+                        }
+                    ],
+                }
+            ]
             source = Path(directory) / "pv.log"
             source.write_text(pv_line("2026-08-11 01:45:00.010", route))
             destination = Path(directory) / "analysis.xlsx"
-            workbook_module.build_workbook([workbook_module.PvSource(source, "instance-a"),
-                                            workbook_module.PvSource(source, "instance-b")], destination)
+            workbook_module.build_workbook(
+                [
+                    workbook_module.PvSource(source, "instance-a"),
+                    workbook_module.PvSource(source, "instance-b"),
+                ],
+                destination,
+            )
             replay = html_module._build_replay(destination)
-            self.assertEqual(set(replay["candidates"]), {"instance-a::same-id", "instance-b::same-id"})
-            self.assertEqual([len(items) for items in replay["candidates"].values()], [1, 1])
+            self.assertEqual(
+                set(replay["candidates"]),
+                {"instance-a::same-id", "instance-b::same-id"},
+            )
+            self.assertEqual(
+                [len(items) for items in replay["candidates"].values()], [1, 1]
+            )
             candidate = replay["candidates"]["instance-a::same-id"][0]
             self.assertEqual(candidate["endpoint"], "10.0.0.8:8001@1")
             self.assertEqual(candidate["host"], "10.0.0.8")
@@ -231,32 +330,69 @@ class CurrentRoutingDecisionTest(unittest.TestCase):
                 current = route_record("current", epoch_ms(1, 45), "10.0.0.8")
                 del current["shortestTtftDecisions"]
                 current["selectionReasons"] = {"PREFILL": "BEST_ONLY"}
-                current["decisionGroup"] = {"id": "group-1", "policy": "SINGLE", "committedSize": 1}
+                current["decisionGroup"] = {
+                    "id": "group-1",
+                    "policy": "SINGLE",
+                    "committedSize": 1,
+                }
                 current["routingDecisions"] = [
-                    {"role": "PREFILL", "strategy": "CostBasedPrefill", "selectionReason": "BEST_ONLY",
-                     "selectedEndpoint": "10.0.0.8:8001", "snapshotTruncated": True,
-                     "candidateWorkerCount": 40, "prefillPolicy": {"minimumTtftMs": 12},
-                     "rejections": {"OUTLIER": 2}, "candidates": [
-                         {"endpoint": "10.0.0.8:8001", "selected": True, "projectedTtftMs": 12,
-                          "projectedDrainMs": 3, "incomingPrefillMs": 9, "effectiveHitTokens": 100,
-                          "pendingRequests": 0},
-                         {"endpoint": "10.0.0.9:8001", "selected": False,
-                          "predictionState": "UNMODELED_ENGINE_WORK"}]},
-                    {"role": "DECODE", "strategy": "CostBasedDecode", "candidates": [
-                        {"endpoint": "10.0.0.10:8001", "selected": True, "usedKvTokens": 55,
-                         "availableKvTokens": 100, "logWeight": -0.5}]}]
+                    {
+                        "role": "PREFILL",
+                        "strategy": "CostBasedPrefill",
+                        "selectionReason": "BEST_ONLY",
+                        "selectedEndpoint": "10.0.0.8:8001",
+                        "snapshotTruncated": True,
+                        "candidateWorkerCount": 40,
+                        "prefillPolicy": {"minimumTtftMs": 12},
+                        "rejections": {"OUTLIER": 2},
+                        "candidates": [
+                            {
+                                "endpoint": "10.0.0.8:8001",
+                                "selected": True,
+                                "projectedTtftMs": 12,
+                                "projectedDrainMs": 3,
+                                "incomingPrefillMs": 9,
+                                "effectiveHitTokens": 100,
+                                "pendingRequests": 0,
+                            },
+                            {
+                                "endpoint": "10.0.0.9:8001",
+                                "selected": False,
+                                "predictionState": "UNMODELED_ENGINE_WORK",
+                            },
+                        ],
+                    },
+                    {
+                        "role": "DECODE",
+                        "strategy": "CostBasedDecode",
+                        "candidates": [
+                            {
+                                "endpoint": "10.0.0.10:8001",
+                                "selected": True,
+                                "usedKvTokens": 55,
+                                "availableKvTokens": 100,
+                                "logWeight": -0.5,
+                            }
+                        ],
+                    },
+                ]
                 source = Path(directory) / "pv.log"
                 content = pv_line("2026-08-11 01:45:00.010", current)
                 if mixed:
-                    content += pv_line("2026-08-11 01:45:00.010",
-                                       route_record("legacy", epoch_ms(1, 45), "10.0.0.8"))
+                    content += pv_line(
+                        "2026-08-11 01:45:00.010",
+                        route_record("legacy", epoch_ms(1, 45), "10.0.0.8"),
+                    )
                 source.write_text(content)
                 destination = Path(directory) / "replay.xlsx"
                 workbook_module.build_workbook(source, destination)
                 workbook = load_workbook(destination, data_only=True)
                 sheet = workbook["Routing Decisions"]
                 headers = [cell.value for cell in sheet[1]]
-                records = [dict(zip(headers, values)) for values in sheet.iter_rows(min_row=2, values_only=True)]
+                records = [
+                    dict(zip(headers, values))
+                    for values in sheet.iter_rows(min_row=2, values_only=True)
+                ]
                 self.assertEqual(len(records), 3)
                 self.assertEqual(records[0]["projectedTtftMs"], 12)
                 self.assertEqual(records[0]["pendingRequests"], 0)
@@ -268,20 +404,35 @@ class CurrentRoutingDecisionTest(unittest.TestCase):
                 self.assertEqual(records[0]["decisionGroup.id"], "group-1")
                 requests = workbook["Requests"]
                 columns = [cell.value for cell in requests[1]]
-                request_rows = [dict(zip(columns, values)) for values in requests.iter_rows(min_row=2, values_only=True)]
-                row = next(item for item in request_rows if item.get("request_id") == "current")
+                request_rows = [
+                    dict(zip(columns, values))
+                    for values in requests.iter_rows(min_row=2, values_only=True)
+                ]
+                row = next(
+                    item for item in request_rows if item.get("request_id") == "current"
+                )
                 self.assertEqual(row["selected projected TTFT ms"], 12)
                 self.assertIsNone(row.get("selected snapshot estimated TTFT"))
                 self.assertEqual(row["decision_snapshot_status"], "COST_BASED")
                 workbook.close()
                 output_html = Path(directory) / "replay.html"
-                summary = html_module.build_html(destination, TOOL_DIR / "replay_template.html", output_html)
+                summary = html_module.build_html(
+                    destination, TOOL_DIR / "replay_template.html", output_html
+                )
                 payload = html_module._build_replay(destination)
-                current_request = next(request for request in payload["requests"] if request["requestId"] == "current")
+                current_request = next(
+                    request
+                    for request in payload["requests"]
+                    if request["requestId"] == "current"
+                )
                 candidates = payload["candidates"][current_request["id"]]
                 self.assertEqual(len(candidates), 3)
                 self.assertEqual(candidates[0]["schema"], "routingDecisions")
-                prefill = next(item for item in candidates if item["role"] == "PREFILL" and item["selected"])
+                prefill = next(
+                    item
+                    for item in candidates
+                    if item["role"] == "PREFILL" and item["selected"]
+                )
                 self.assertEqual(prefill["projectedTtftMs"], 12)
                 self.assertNotIn("estimatedTtft", prefill)
                 self.assertEqual(prefill["decisionGroup"]["id"], "group-1")
@@ -290,32 +441,62 @@ class CurrentRoutingDecisionTest(unittest.TestCase):
 
 
 class CacheComparisonReplayTest(unittest.TestCase):
-    def test_raw_feedback_preserves_all_predictions_and_valid_zero_through_workbook_and_html(self):
+    def test_raw_feedback_preserves_all_predictions_and_valid_zero_through_workbook_and_html(
+        self,
+    ):
         for source, actual, kvcm in (("KVCM", 500, True), ("LOCAL_STANDBY", 0, False)):
-            with self.subTest(source=source), tempfile.TemporaryDirectory() as directory:
+            with self.subTest(
+                source=source
+            ), tempfile.TemporaryDirectory() as directory:
                 route = route_record("feedback", epoch_ms(1, 45), "10.0.0.1")
-                cache = {"event": "cache_hit_comparison", "requestId": "feedback",
-                         "source": source, "inputTokens": 1000,
-                         "routing": {"hit": 400 if kvcm else 300}, "actual": {"hit": actual},
-                         "kvcm": {"hit": 400, "delta": 100,
-                                  "local": {"hit": 200, "delta": 300},
-                                  "global": {"hit": 600, "delta": -100}} if kvcm else None,
-                         "localStandby": {"hit": 300, "delta": actual - 300}}
+                cache = {
+                    "event": "cache_hit_comparison",
+                    "requestId": "feedback",
+                    "source": source,
+                    "inputTokens": 1000,
+                    "routing": {"hit": 400 if kvcm else 300},
+                    "actual": {"hit": actual},
+                    "kvcm": (
+                        {
+                            "hit": 400,
+                            "delta": 100,
+                            "local": {"hit": 200, "delta": 300},
+                            "global": {"hit": 600, "delta": -100},
+                        }
+                        if kvcm
+                        else None
+                    ),
+                    "localStandby": {"hit": 300, "delta": actual - 300},
+                }
                 status = status_record("feedback", "10.0.0.1", epoch_ms(1, 45))
                 log = Path(directory) / "pv.log"
-                log.write_text("".join(pv_line("2026-08-11 01:45:02.000", item)
-                                       for item in (route, status, cache)))
+                log.write_text(
+                    "".join(
+                        pv_line("2026-08-11 01:45:02.000", item)
+                        for item in (route, status, cache)
+                    )
+                )
                 xlsx = Path(directory) / "replay.xlsx"
                 workbook_module.build_workbook(log, xlsx)
                 workbook = load_workbook(xlsx, data_only=True)
                 sheet = workbook["Requests"]
                 headers = [cell.value for cell in sheet[1]]
-                row = next(item for item in (dict(zip(headers, values)) for values in
-                           sheet.iter_rows(min_row=2, values_only=True)) if item.get("request_id") == "feedback")
+                row = next(
+                    item
+                    for item in (
+                        dict(zip(headers, values))
+                        for values in sheet.iter_rows(min_row=2, values_only=True)
+                    )
+                    if item.get("request_id") == "feedback"
+                )
                 self.assertEqual(row["actual_hit_tokens"], actual)
                 self.assertEqual(row["local_standby_delta_tokens"], actual - 300)
-                self.assertEqual(row["kvcm_global_delta_tokens"], -100 if kvcm else None)
-                self.assertEqual(row["kvcm_minus_standby_tokens"], 100 if kvcm else None)
+                self.assertEqual(
+                    row["kvcm_global_delta_tokens"], -100 if kvcm else None
+                )
+                self.assertEqual(
+                    row["kvcm_minus_standby_tokens"], 100 if kvcm else None
+                )
                 workbook.close()
                 output = Path(directory) / "replay.html"
                 html_module.build_html(xlsx, TOOL_DIR / "replay_template.html", output)
@@ -325,18 +506,31 @@ class CacheComparisonReplayTest(unittest.TestCase):
                 comparison = request["cacheComparison"]
                 self.assertEqual(comparison["source"], source)
                 self.assertEqual(comparison["kvcm_local"]["hit"], 200 if kvcm else None)
-                self.assertEqual(comparison["kvcm_global"]["hit"], 600 if kvcm else None)
-                self.assertEqual(comparison["local_standby"], {"hit": 300, "delta": actual - 300})
+                self.assertEqual(
+                    comparison["kvcm_global"]["hit"], 600 if kvcm else None
+                )
+                self.assertEqual(
+                    comparison["local_standby"], {"hit": 300, "delta": actual - 300}
+                )
                 self.assertIn("renderCacheComparison", output.read_text())
 
     def test_worker_actual_hit_survives_missing_prediction_feedback(self):
         for valid, expected in ((True, 0), (False, None)):
             with self.subTest(valid=valid), tempfile.TemporaryDirectory() as directory:
                 route = route_record("actual-only", epoch_ms(1, 45), "10.0.0.1")
-                status = {"event": "prefill_worker_status", "requestId": "actual-only",
-                          "prefixLengthValid": valid, "actualHitTokens": 0}
+                status = {
+                    "event": "prefill_worker_status",
+                    "requestId": "actual-only",
+                    "prefixLengthValid": valid,
+                    "actualHitTokens": 0,
+                }
                 log = Path(directory) / "pv.log"
-                log.write_text("".join(pv_line("2026-08-11 01:45:02.000", item) for item in (route, status)))
+                log.write_text(
+                    "".join(
+                        pv_line("2026-08-11 01:45:02.000", item)
+                        for item in (route, status)
+                    )
+                )
                 xlsx = Path(directory) / "replay.xlsx"
                 workbook_module.build_workbook(log, xlsx)
                 request = html_module._build_replay(xlsx)["requests"][0]
@@ -344,10 +538,17 @@ class CacheComparisonReplayTest(unittest.TestCase):
                 self.assertIsNone(request["cacheComparison"]["kvcm"]["hit"])
 
     def test_absent_feedback_keeps_predictions_and_actual_unknown(self):
-        request = html_module.compact_request({"request_id": "unknown", "route_log_time (decision)": "2026-08-11 01:45:00.000"})
+        request = html_module.compact_request(
+            {
+                "request_id": "unknown",
+                "route_log_time (decision)": "2026-08-11 01:45:00.000",
+            }
+        )
         self.assertIsNone(request["actualHit"])
         for key in ("kvcm", "kvcm_local", "kvcm_global", "local_standby"):
-            self.assertEqual(request["cacheComparison"][key], {"hit": None, "delta": None})
+            self.assertEqual(
+                request["cacheComparison"][key], {"hit": None, "delta": None}
+            )
 
 
 class BuildWorkbookTest(unittest.TestCase):
@@ -496,7 +697,9 @@ class BuildWorkbookTest(unittest.TestCase):
         decode_only = {
             "response": {"server_status": [{"role": "DECODE", "server_ip": "decode"}]},
             "cacheMatchSelections": [{"role": "DECODE", "selectedIp": "decode"}],
-            "shortestTtftDecisions": [{"role": "DECODE", "workers": [{"ip": "decode"}]}],
+            "shortestTtftDecisions": [
+                {"role": "DECODE", "workers": [{"ip": "decode"}]}
+            ],
         }
         self.assertEqual(workbook_module.get_prefill_server_status(decode_only), {})
         self.assertEqual(workbook_module.get_route_cache_selection(decode_only), {})
@@ -523,8 +726,12 @@ class BuildWorkbookTest(unittest.TestCase):
             "cacheMatchSelections": [{"selectedIp": "one"}, {"selectedIp": "two"}],
             "shortestTtftDecisions": [{"workers": []}, {"workers": []}],
         }
-        self.assertEqual(workbook_module.get_prefill_server_status(ambiguous_legacy), {})
-        self.assertEqual(workbook_module.get_route_cache_selection(ambiguous_legacy), {})
+        self.assertEqual(
+            workbook_module.get_prefill_server_status(ambiguous_legacy), {}
+        )
+        self.assertEqual(
+            workbook_module.get_route_cache_selection(ambiguous_legacy), {}
+        )
         self.assertEqual(workbook_module.get_prefill_decision(ambiguous_legacy), {})
 
     def test_pdfusion_is_replayed_as_a_prefill_equivalent_role(self) -> None:
@@ -534,9 +741,7 @@ class BuildWorkbookTest(unittest.TestCase):
             {"role": "PDFUSION", "selectedIp": "10.0.0.7", "hitCacheTokens": 800}
         ]
 
-        self.assertEqual(
-            workbook_module.get_prefill_equivalent_role(route), "PDFUSION"
-        )
+        self.assertEqual(workbook_module.get_prefill_equivalent_role(route), "PDFUSION")
         self.assertEqual(
             workbook_module.get_prefill_server_status(route)["server_ip"], "10.0.0.7"
         )
@@ -553,7 +758,10 @@ class BuildWorkbookTest(unittest.TestCase):
                 "".join(
                     [
                         pv_line("2026-08-11 01:45:00.010", route),
-                        pv_line("2026-08-11 01:45:00.020", cache_record("fusion-request", 800)),
+                        pv_line(
+                            "2026-08-11 01:45:00.020",
+                            cache_record("fusion-request", 800),
+                        ),
                     ]
                 ),
                 encoding="utf-8",
@@ -568,7 +776,9 @@ class BuildWorkbookTest(unittest.TestCase):
         self.assertEqual(len(rows[0]["_decision_workers"]), 1)
         self.assertEqual(selection_counts["SHORTEST_TTFT"], 1)
 
-    def test_prefill_keeps_priority_when_prefill_and_pdfusion_are_both_present(self) -> None:
+    def test_prefill_keeps_priority_when_prefill_and_pdfusion_are_both_present(
+        self,
+    ) -> None:
         request_time_ms = epoch_ms(1, 45)
         route = route_record("mixed-request", request_time_ms, "10.0.0.8")
         fusion_worker = "10.0.0.9"
@@ -595,9 +805,7 @@ class BuildWorkbookTest(unittest.TestCase):
         self.assertEqual(
             workbook_module.get_route_cache_selection(route)["selectedIp"], "10.0.0.8"
         )
-        self.assertEqual(
-            workbook_module.get_prefill_decision(route)["role"], "PREFILL"
-        )
+        self.assertEqual(workbook_module.get_prefill_decision(route)["role"], "PREFILL")
 
         with tempfile.TemporaryDirectory() as temporary_directory:
             source = Path(temporary_directory) / "pv.log"
@@ -627,7 +835,10 @@ class BuildWorkbookTest(unittest.TestCase):
                 json.dumps(
                     {
                         "snapshots": [
-                            {"instance": "instance-from-manifest", "path": str(snapshot)}
+                            {
+                                "instance": "instance-from-manifest",
+                                "path": str(snapshot),
+                            }
                         ]
                     }
                 ),
@@ -662,81 +873,152 @@ class PvInputValidationTest(unittest.TestCase):
                 with self.subTest(payload=payload):
                     manifest.write_text(json.dumps(payload), encoding="utf-8")
                     sources = workbook_module.discover_sources(root)
-                    self.assertEqual(sources, [workbook_module.PvSource(snapshot.resolve(), "instance-a")])
-                    with self.assertRaisesRegex(ValueError, "No usable snapshots in manifest"):
+                    self.assertEqual(
+                        sources,
+                        [workbook_module.PvSource(snapshot.resolve(), "instance-a")],
+                    )
+                    with self.assertRaisesRegex(
+                        ValueError, "No usable snapshots in manifest"
+                    ):
                         workbook_module.discover_sources(manifest)
 
     def test_non_object_pv_records_are_skipped_without_losing_valid_routes(self):
         with tempfile.TemporaryDirectory() as directory:
             source = Path(directory) / "pv.log"
-            invalid_lines = [pv_line("2026-08-11 01:45:00.010", payload)
-                             for payload in ([], [1, 2], "invalid", 123, True, None)]
+            invalid_lines = [
+                pv_line("2026-08-11 01:45:00.010", payload)
+                for payload in ([], [1, 2], "invalid", 123, True, None)
+            ]
             for line in invalid_lines:
                 self.assertIsNone(workbook_module.parse_pv_record(line))
-            source.write_text("".join(invalid_lines) + pv_line("2026-08-11 01:45:00.020",
-                route_record("valid", epoch_ms(1, 45), "10.0.0.8")), encoding="utf-8")
+            source.write_text(
+                "".join(invalid_lines)
+                + pv_line(
+                    "2026-08-11 01:45:00.020",
+                    route_record("valid", epoch_ms(1, 45), "10.0.0.8"),
+                ),
+                encoding="utf-8",
+            )
             rows, event_counts, _ = workbook_module.build_rows(
-                [workbook_module.PvSource(source, "instance-a")])
+                [workbook_module.PvSource(source, "instance-a")]
+            )
             self.assertEqual([row["request_id"] for row in rows], ["valid"])
             self.assertEqual(event_counts["route"], 1)
 
-    def test_zero_route_time_takes_priority_over_missing_time_in_both_input_orders(self):
+    def test_zero_route_time_takes_priority_over_missing_time_in_both_input_orders(
+        self,
+    ):
         zero_time = {"requestTimeMs": 0}
         missing_time = {}
         for records in ((zero_time, missing_time), (missing_time, zero_time)):
             with self.subTest(records=records):
                 events = {}
                 for record in records:
-                    event_time = "2026-08-11 01:45:00.020" if record is missing_time else "2026-08-11 01:45:00.010"
-                    workbook_module._store_route(events, ("instance-a", "request-a"), event_time, record)
+                    event_time = (
+                        "2026-08-11 01:45:00.020"
+                        if record is missing_time
+                        else "2026-08-11 01:45:00.010"
+                    )
+                    workbook_module._store_route(
+                        events, ("instance-a", "request-a"), event_time, record
+                    )
                 self.assertIs(events[("instance-a", "request-a")][1], zero_time)
 
 
 class ObservedOverlapTest(unittest.TestCase):
-    def test_overlap_annotations_match_predecessor_scan_with_ties_and_missing_telemetry(self):
+    def test_overlap_annotations_match_predecessor_scan_with_ties_and_missing_telemetry(
+        self,
+    ):
         randomizer = random.Random(1457)
-        copied_fields = ("request_id", "actual_hit_rate_pct", "uncache_tokens",
-                         "prefill_engine_ttft_ms", "first_token_time")
+        copied_fields = (
+            "request_id",
+            "actual_hit_rate_pct",
+            "uncache_tokens",
+            "prefill_engine_ttft_ms",
+            "first_token_time",
+        )
         for sample in range(50):
-            rows = [{"request_id": f"request-{index}",
-                     "request_time_ms": randomizer.choice([None, *range(26)]),
-                     "first_token_time_ms": randomizer.choice([None, *range(71)]),
-                     "actual_hit_rate_pct": randomizer.choice([None, 0, 89.9, 90, 100]),
-                     "uncache_tokens": index * 10,
-                     "prefill_engine_ttft_ms": index * 20,
-                     "first_token_time": f"first-token-{index}"}
-                    for index in range(60)]
-            rows.sort(key=lambda row: (row["request_time_ms"] is None,
-                                      row["request_time_ms"] or 0, row["request_id"]))
+            rows = [
+                {
+                    "request_id": f"request-{index}",
+                    "request_time_ms": randomizer.choice([None, *range(26)]),
+                    "first_token_time_ms": randomizer.choice([None, *range(71)]),
+                    "actual_hit_rate_pct": randomizer.choice([None, 0, 89.9, 90, 100]),
+                    "uncache_tokens": index * 10,
+                    "prefill_engine_ttft_ms": index * 20,
+                    "first_token_time": f"first-token-{index}",
+                }
+                for index in range(60)
+            ]
+            rows.sort(
+                key=lambda row: (
+                    row["request_time_ms"] is None,
+                    row["request_time_ms"] or 0,
+                    row["request_id"],
+                )
+            )
             original_rows = [dict(row) for row in rows]
             workbook_module.observed_overlap(rows)
             for index, row in enumerate(rows):
                 decision_ms = row["request_time_ms"]
-                active = [previous for previous in original_rows[:index]
-                          if decision_ms is not None and previous["first_token_time_ms"] is not None
-                          and previous["first_token_time_ms"] > decision_ms]
-                low_hit = [previous for previous in active
-                           if previous["actual_hit_rate_pct"] is not None
-                           and previous["actual_hit_rate_pct"] < 90]
+                active = [
+                    previous
+                    for previous in original_rows[:index]
+                    if decision_ms is not None
+                    and previous["first_token_time_ms"] is not None
+                    and previous["first_token_time_ms"] > decision_ms
+                ]
+                low_hit = [
+                    previous
+                    for previous in active
+                    if previous["actual_hit_rate_pct"] is not None
+                    and previous["actual_hit_rate_pct"] < 90
+                ]
                 with self.subTest(sample=sample, index=index):
                     self.assertEqual(row["host_sequence_no"], index + 1)
                     self.assertEqual(row["prior_before_first_token_count"], len(active))
-                    self.assertEqual(row["prior_low_hit_before_first_token_count"], len(low_hit))
-                    for prefix, candidates in (("previous_", active), ("low_hit_predecessor_", low_hit)):
-                        latest = max(candidates, key=lambda candidate: candidate["request_time_ms"] or -1) if candidates else {}
+                    self.assertEqual(
+                        row["prior_low_hit_before_first_token_count"], len(low_hit)
+                    )
+                    for prefix, candidates in (
+                        ("previous_", active),
+                        ("low_hit_predecessor_", low_hit),
+                    ):
+                        latest = (
+                            max(
+                                candidates,
+                                key=lambda candidate: candidate["request_time_ms"]
+                                or -1,
+                            )
+                            if candidates
+                            else {}
+                        )
                         for field in copied_fields:
                             self.assertEqual(row[prefix + field], latest.get(field))
-                    expected_evidence = ("Earlier low-hit request had not reached first token" if low_hit
-                                         else "Earlier request had not reached first token" if active
-                                         else "No earlier route record still before first token")
-                    self.assertEqual(row["same_host_predecessor_evidence"], expected_evidence)
+                    expected_evidence = (
+                        "Earlier low-hit request had not reached first token"
+                        if low_hit
+                        else (
+                            "Earlier request had not reached first token"
+                            if active
+                            else "No earlier route record still before first token"
+                        )
+                    )
+                    self.assertEqual(
+                        row["same_host_predecessor_evidence"], expected_evidence
+                    )
 
     def test_large_overlapping_window_keeps_counts_and_latest_low_hit_predecessor(self):
         count = 10_000
-        rows = [{"request_id": str(index), "request_time_ms": index + 1,
-                 "first_token_time_ms": count + 1,
-                 "actual_hit_rate_pct": 50 if index % 2 == 0 else 100}
-                for index in range(count)]
+        rows = [
+            {
+                "request_id": str(index),
+                "request_time_ms": index + 1,
+                "first_token_time_ms": count + 1,
+                "actual_hit_rate_pct": 50 if index % 2 == 0 else 100,
+            }
+            for index in range(count)
+        ]
         workbook_module.observed_overlap(rows)
         self.assertEqual(rows[-1]["prior_before_first_token_count"], count - 1)
         self.assertEqual(rows[-1]["prior_low_hit_before_first_token_count"], count // 2)

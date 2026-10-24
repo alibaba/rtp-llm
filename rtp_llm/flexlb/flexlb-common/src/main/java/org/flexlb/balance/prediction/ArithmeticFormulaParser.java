@@ -28,17 +28,23 @@ final class ArithmeticFormulaParser {
     private int pos;
     private int aggregateDepth;
 
-    ArithmeticFormulaParser(String input, Map<String, Integer> variables,
-           Set<String> aggregateExcludedVariables, boolean allowAggregates) {
+    ArithmeticFormulaParser(
+            String input,
+            Map<String, Integer> variables,
+            Set<String> aggregateExcludedVariables,
+            boolean allowAggregates) {
         this.input = input;
         this.variables = Map.copyOf(Objects.requireNonNull(variables, "variables"));
-        this.aggregateExcludedVariables = Set.copyOf(
-                Objects.requireNonNull(aggregateExcludedVariables, "aggregateExcludedVariables"));
+        this.aggregateExcludedVariables =
+                Set.copyOf(
+                        Objects.requireNonNull(
+                                aggregateExcludedVariables, "aggregateExcludedVariables"));
         this.allowAggregates = allowAggregates;
         int count = 0;
         for (int index : this.variables.values()) {
             if (index < 0 || index == Integer.MAX_VALUE) {
-                throw new IllegalArgumentException("Variable index is outside its domain: " + index);
+                throw new IllegalArgumentException(
+                        "Variable index is outside its domain: " + index);
             }
             count = Math.max(count, index + 1);
         }
@@ -164,8 +170,13 @@ final class ArithmeticFormulaParser {
         ConstantNode existing = parameters.get(paramName);
         if (existing != null) {
             if (existing.value() != initialValue) {
-                throw error("Inconsistent initial value for parameter '" + paramName
-                        + "': " + existing.value() + " vs " + initialValue);
+                throw error(
+                        "Inconsistent initial value for parameter '"
+                                + paramName
+                                + "': "
+                                + existing.value()
+                                + " vs "
+                                + initialValue);
             }
             return existing;
         }
@@ -280,7 +291,6 @@ final class ArithmeticFormulaParser {
     }
 
     private IllegalArgumentException error(String msg) {
-        return new IllegalArgumentException(
-                msg + " at pos " + pos + " in: " + input);
+        return new IllegalArgumentException(msg + " at pos " + pos + " in: " + input);
     }
 }

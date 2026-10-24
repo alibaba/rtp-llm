@@ -42,37 +42,58 @@ class ConfigSourceSelectionTest {
     @ParameterizedTest
     @NullAndEmptySource
     @ValueSource(strings = {"   "})
-    void startupFailsWhenOnlyTheHippoRoleConfigExistsAfterRuntimeUpgrade(String missingConfig) throws Exception {
-        com.alibaba.nacos.api.config.ConfigService client = mock(com.alibaba.nacos.api.config.ConfigService.class);
+    void startupFailsWhenOnlyTheHippoRoleConfigExistsAfterRuntimeUpgrade(String missingConfig)
+            throws Exception {
+        com.alibaba.nacos.api.config.ConfigService client =
+                mock(com.alibaba.nacos.api.config.ConfigService.class);
         String deploymentId = "dash_pd:ea118_RTX_PRO_5000_72GB:master";
         when(client.getConfig(anyString(), eq(DEFAULT_NACOS_GROUP), eq(3000L)))
-                .thenAnswer(invocation -> "legacy-role".equals(invocation.getArgument(0))
-                        ? "{\"schemaVersion\":3,\"enableFallback\":true}" : missingConfig);
+                .thenAnswer(
+                        invocation ->
+                                "legacy-role".equals(invocation.getArgument(0))
+                                        ? "{\"schemaVersion\":3,\"enableFallback\":true}"
+                                        : missingConfig);
 
         try (MockedStatic<NacosFactory> factory = mockStatic(NacosFactory.class)) {
-            factory.when(() -> NacosFactory.createConfigService(any(Properties.class))).thenReturn(client);
+            factory.when(() -> NacosFactory.createConfigService(any(Properties.class)))
+                    .thenReturn(client);
             new EnvironmentVariables(
-                    "FLEXLB_UNICONF_ENABLE", "false",
-                    NACOS_SERVER_ADDR, "127.0.0.1:8848",
-                    "HIPPO_ROLE", "legacy-role",
-                    "BIZ_NAME", "dash_pd",
-                    "DEPLOYMENT_NAME", "ea118_RTX_PRO_5000_72GB",
-                    "ZONE_NAME", "master",
-                    "FLEXLB_CONFIG", "{\"schemaVersion\":3,\"enableFallback\":true}")
+                            "FLEXLB_UNICONF_ENABLE",
+                            "false",
+                            NACOS_SERVER_ADDR,
+                            "127.0.0.1:8848",
+                            "HIPPO_ROLE",
+                            "legacy-role",
+                            "BIZ_NAME",
+                            "dash_pd",
+                            "DEPLOYMENT_NAME",
+                            "ea118_RTX_PRO_5000_72GB",
+                            "ZONE_NAME",
+                            "master",
+                            "FLEXLB_CONFIG",
+                            "{\"schemaVersion\":3,\"enableFallback\":true}")
                     .remove(NACOS_DATA_ID)
                     .remove(NACOS_GROUP)
                     .remove(SPECTRUM_WORKSPACE_ID)
                     .remove(SPECTRUM_APPLICATION_NAME)
                     .remove(SPECTRUM_DEPLOYMENT_NAME)
-                    .execute(() -> new ApplicationContextRunner()
-                            .withUserConfiguration(DeploymentIdentity.class, NacosConfigSource.class)
-                            .run(context -> {
-                                assertThat(context).hasFailed();
-                                assertThat(context.getStartupFailure())
-                                        .hasRootCauseInstanceOf(IllegalStateException.class)
-                                        .hasStackTraceContaining(deploymentId)
-                                        .hasStackTraceContaining("Nacos configuration is missing or blank");
-                            }));
+                    .execute(
+                            () ->
+                                    new ApplicationContextRunner()
+                                            .withUserConfiguration(
+                                                    DeploymentIdentity.class,
+                                                    NacosConfigSource.class)
+                                            .run(
+                                                    context -> {
+                                                        assertThat(context).hasFailed();
+                                                        assertThat(context.getStartupFailure())
+                                                                .hasRootCauseInstanceOf(
+                                                                        IllegalStateException.class)
+                                                                .hasStackTraceContaining(
+                                                                        deploymentId)
+                                                                .hasStackTraceContaining(
+                                                                        "Nacos configuration is missing or blank");
+                                                    }));
         }
         verify(client).getConfig(deploymentId, DEFAULT_NACOS_GROUP, 3000L);
         verify(client, never()).getConfig("legacy-role", DEFAULT_NACOS_GROUP, 3000L);
@@ -83,31 +104,53 @@ class ConfigSourceSelectionTest {
     @Test
     void springInitializesSourcesBeforeLoadingTheEnvironmentFallback() throws Exception {
         new EnvironmentVariables(
-                "FLEXLB_UNICONF_ENABLE", "false",
-                "UNICONF_ENABLE", "true",
-                WHALE_BIZ_NAME, "dash_pd", WHALE_DEPLOYMENT_NAME, "flexlb-test", WHALE_ZONE_NAME, "master",
-                "FLEXLB_CONFIG", "{\"schemaVersion\":3,\"enableFallback\":true,"
-                        + "\"fallbackBatchTokenCapacity\":1048576}")
+                        "FLEXLB_UNICONF_ENABLE",
+                        "false",
+                        "UNICONF_ENABLE",
+                        "true",
+                        WHALE_BIZ_NAME,
+                        "dash_pd",
+                        WHALE_DEPLOYMENT_NAME,
+                        "flexlb-test",
+                        WHALE_ZONE_NAME,
+                        "master",
+                        "FLEXLB_CONFIG",
+                        "{\"schemaVersion\":3,\"enableFallback\":true,"
+                                + "\"fallbackBatchTokenCapacity\":1048576}")
                 .remove(NACOS_SERVER_ADDR)
                 .remove(SPECTRUM_WORKSPACE_ID)
                 .remove(SPECTRUM_APPLICATION_NAME)
                 .remove(SPECTRUM_DEPLOYMENT_NAME)
                 .remove("MODEL_SERVICE_CONFIG")
-                .execute(() -> new ApplicationContextRunner()
-                        .withUserConfiguration(ConfigService.class, DeploymentIdentity.class,
-                                EnvironmentConfigSource.class, NacosConfigSource.class, UniConfigConfigSource.class,
-                                StandardConfigDocumentParser.class, V0ConfigDocumentParser.class)
-                        .run(context -> {
-                            assertThat(context).hasNotFailed();
-                            assertThat(context.getBean(ConfigService.class).loadBalanceConfig().isEnableFallback()).isTrue();
-                        }));
+                .execute(
+                        () ->
+                                new ApplicationContextRunner()
+                                        .withUserConfiguration(
+                                                ConfigService.class,
+                                                DeploymentIdentity.class,
+                                                EnvironmentConfigSource.class,
+                                                NacosConfigSource.class,
+                                                UniConfigConfigSource.class,
+                                                StandardConfigDocumentParser.class,
+                                                V0ConfigDocumentParser.class)
+                                        .run(
+                                                context -> {
+                                                    assertThat(context).hasNotFailed();
+                                                    assertThat(
+                                                                    context.getBean(
+                                                                                    ConfigService
+                                                                                            .class)
+                                                                            .loadBalanceConfig()
+                                                                            .isEnableFallback())
+                                                            .isTrue();
+                                                }));
     }
 
     @Test
     void environmentSourceDoesNotRequireDeploymentIdentity() throws Exception {
         new EnvironmentVariables(
-                "FLEXLB_UNICONF_ENABLE", "false",
-                "FLEXLB_CONFIG", "{\"schemaVersion\":3,\"enableFallback\":true}")
+                        "FLEXLB_UNICONF_ENABLE", "false",
+                        "FLEXLB_CONFIG", "{\"schemaVersion\":3,\"enableFallback\":true}")
                 .remove(NACOS_SERVER_ADDR)
                 .remove(WHALE_BIZ_NAME)
                 .remove(WHALE_DEPLOYMENT_NAME)
@@ -116,31 +159,43 @@ class ConfigSourceSelectionTest {
                 .remove(SPECTRUM_APPLICATION_NAME)
                 .remove(SPECTRUM_DEPLOYMENT_NAME)
                 .remove("MODEL_SERVICE_CONFIG")
-                .execute(() -> new ApplicationContextRunner()
-                        .withUserConfiguration(ConfigService.class, DeploymentIdentity.class,
-                                EnvironmentConfigSource.class, NacosConfigSource.class,
-                                UniConfigConfigSource.class,
-                                StandardConfigDocumentParser.class,
-                                V0ConfigDocumentParser.class)
-                        .run(context -> assertThat(context).hasNotFailed()));
+                .execute(
+                        () ->
+                                new ApplicationContextRunner()
+                                        .withUserConfiguration(
+                                                ConfigService.class,
+                                                DeploymentIdentity.class,
+                                                EnvironmentConfigSource.class,
+                                                NacosConfigSource.class,
+                                                UniConfigConfigSource.class,
+                                                StandardConfigDocumentParser.class,
+                                                V0ConfigDocumentParser.class)
+                                        .run(context -> assertThat(context).hasNotFailed()));
     }
 
     @ParameterizedTest
     @CsvSource({
-            "true, false, nacos:8848, UNICONFIG",
-            "' TRUE ', , , UNICONFIG",
-            "false, true, nacos:8848, NACOS",
-            ", true, ' nacos:8848 ', NACOS",
-            "false, true, , ENVIRONMENT",
-            ", true, '   ', ENVIRONMENT",
-            ", , , ENVIRONMENT"
+        "true, false, nacos:8848, UNICONFIG",
+        "' TRUE ', , , UNICONFIG",
+        "false, true, nacos:8848, NACOS",
+        ", true, ' nacos:8848 ', NACOS",
+        "false, true, , ENVIRONMENT",
+        ", true, '   ', ENVIRONMENT",
+        ", , , ENVIRONMENT"
     })
-    void selectsOneBehaviorSource(String flexlbUniconfEnable, String turboUniconfEnable, String nacosAddress,
-                                 ConfigSourceSelection expected) throws Exception {
+    void selectsOneBehaviorSource(
+            String flexlbUniconfEnable,
+            String turboUniconfEnable,
+            String nacosAddress,
+            ConfigSourceSelection expected)
+            throws Exception {
         new EnvironmentVariables()
                 .set("FLEXLB_UNICONF_ENABLE", flexlbUniconfEnable)
                 .set("UNICONF_ENABLE", turboUniconfEnable)
                 .set(NACOS_SERVER_ADDR, nacosAddress)
-                .execute(() -> assertThat(ConfigSourceSelection.fromEnvironment()).isEqualTo(expected));
+                .execute(
+                        () ->
+                                assertThat(ConfigSourceSelection.fromEnvironment())
+                                        .isEqualTo(expected));
     }
 }

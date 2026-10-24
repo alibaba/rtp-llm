@@ -37,9 +37,8 @@ public class CacheMatchFailoverManager {
         this.kvcmEnabled = configuration.isKvcmEnabled();
         this.kvcmGrpcClient = kvcmGrpcClient;
         this.cacheMetricsReporter = cacheMetricsReporter;
-        CacheMatchSource initialSource = kvcmEnabled
-                ? CacheMatchSource.KVCM
-                : CacheMatchSource.LOCAL_SYNC;
+        CacheMatchSource initialSource =
+                kvcmEnabled ? CacheMatchSource.KVCM : CacheMatchSource.LOCAL_SYNC;
         this.activeSource = new AtomicReference<>(initialSource);
         this.cacheMetricsReporter.reportActiveCacheMatchSource(initialSource);
         if (kvcmEnabled) {
@@ -88,7 +87,8 @@ public class CacheMatchFailoverManager {
         // Keep the current source unchanged and wait for an explicit manual fallback.
         cacheMetricsReporter.reportActiveCacheMatchSource(activeSource());
         if (manualFallbackWarningLogged.compareAndSet(false, true)) {
-            log.warn("KVCM is unavailable but automatic failover is disabled; manual failover is required, reason={}, "
+            log.warn(
+                    "KVCM is unavailable but automatic failover is disabled; manual failover is required, reason={}, "
                             + "consecutiveQueryFailures={}, consecutiveHeartbeatFailures={}",
                     health.lastStateChangeReason(),
                     health.consecutiveQueryFailures(),
@@ -112,7 +112,9 @@ public class CacheMatchFailoverManager {
         }
         manualFallbackActive.set(false);
         updateFromKvcmHealth(health);
-        log.info("Manual cache failover cleared; active cache source follows KVCM health, source={}", activeSource());
+        log.info(
+                "Manual cache failover cleared; active cache source follows KVCM health, source={}",
+                activeSource());
     }
 
     public long lastFailoverTimeMs() {
@@ -146,5 +148,4 @@ public class CacheMatchFailoverManager {
             }
         }
     }
-
 }

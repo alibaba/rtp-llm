@@ -23,11 +23,18 @@ public class TheoryCacheKeyHistory {
     private final long configuredMaxKeyOccurrences;
     private RecentCacheKeyWindow historyWindow;
 
-    public TheoryCacheKeyHistory(ConfigService configService, WorkerStatusProvider workerStatusProvider) {
+    public TheoryCacheKeyHistory(
+            ConfigService configService, WorkerStatusProvider workerStatusProvider) {
         this.workerStatusProvider = workerStatusProvider;
-        var historyConfig = configService.loadBalanceConfig().getObservability().getCacheHit().getRecentKeyWindow();
+        var historyConfig =
+                configService
+                        .loadBalanceConfig()
+                        .getObservability()
+                        .getCacheHit()
+                        .getRecentKeyWindow();
         this.historyDurationMs = historyConfig.getDurationMs();
-        this.configuredMaxKeyOccurrences = Math.min(Integer.MAX_VALUE - 8L, historyConfig.getMaxKeyOccurrences());
+        this.configuredMaxKeyOccurrences =
+                Math.min(Integer.MAX_VALUE - 8L, historyConfig.getMaxKeyOccurrences());
     }
 
     /**
@@ -40,27 +47,39 @@ public class TheoryCacheKeyHistory {
             if (estimatedHistoryCapacity.isEmpty()) {
                 return null;
             }
-            historyWindow = new RecentCacheKeyWindow(
-                    historyDurationMs, estimatedHistoryCapacity.getAsLong(), System::currentTimeMillis);
+            historyWindow =
+                    new RecentCacheKeyWindow(
+                            historyDurationMs,
+                            estimatedHistoryCapacity.getAsLong(),
+                            System::currentTimeMillis);
         }
         return historyWindow.record(cacheKeys);
     }
 
     private OptionalLong estimateHistoryCapacity() {
-        Collection<WorkerStatus> prefillWorkers = workerStatusProvider.getWorkerStatuses(RoleType.PREFILL, null);
+        Collection<WorkerStatus> prefillWorkers =
+                workerStatusProvider.getWorkerStatuses(RoleType.PREFILL, null);
         if (prefillWorkers.isEmpty()) {
             return OptionalLong.empty();
         }
         WorkerStatus representativePrefillWorker = prefillWorkers.iterator().next();
-        WorkerStatus.EngineObservation prefillCapacitySnapshot = representativePrefillWorker.committedEngineObservation();
-        if (prefillCapacitySnapshot.totalKvCacheTokens() <= 0L || prefillCapacitySnapshot.blockSize() <= 0L) {
+        WorkerStatus.EngineObservation prefillCapacitySnapshot =
+                representativePrefillWorker.committedEngineObservation();
+        if (prefillCapacitySnapshot.totalKvCacheTokens() <= 0L
+                || prefillCapacitySnapshot.blockSize() <= 0L) {
             return OptionalLong.empty();
         }
-        long workerKvBlockCapacity = prefillCapacitySnapshot.totalKvCacheTokens() / prefillCapacitySnapshot.blockSize();
+        long workerKvBlockCapacity =
+                prefillCapacitySnapshot.totalKvCacheTokens() / prefillCapacitySnapshot.blockSize();
         // Cap each multiplication before scaling to keep the estimate within long range.
-        long cappedWorkerBlockCapacity = Math.min(configuredMaxKeyOccurrences, workerKvBlockCapacity);
-        long cappedFleetBlockCapacity = Math.min(configuredMaxKeyOccurrences, cappedWorkerBlockCapacity * prefillWorkers.size());
-        long estimatedHistoryKeyOccurrences = Math.min(configuredMaxKeyOccurrences, cappedFleetBlockCapacity * 10L);
+        long cappedWorkerBlockCapacity =
+                Math.min(configuredMaxKeyOccurrences, workerKvBlockCapacity);
+        long cappedFleetBlockCapacity =
+                Math.min(
+                        configuredMaxKeyOccurrences,
+                        cappedWorkerBlockCapacity * prefillWorkers.size());
+        long estimatedHistoryKeyOccurrences =
+                Math.min(configuredMaxKeyOccurrences, cappedFleetBlockCapacity * 10L);
         return estimatedHistoryKeyOccurrences > 0L
                 ? OptionalLong.of(estimatedHistoryKeyOccurrences)
                 : OptionalLong.empty();

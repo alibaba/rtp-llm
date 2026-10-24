@@ -22,16 +22,21 @@ public final class ConfigDocumentParserResolver {
     public static synchronized void register(ConfigDocumentParser parser) {
         ConfigDocumentParser registered = PARSERS.get(parser.schemaVersion());
         if (registered != null && registered.getClass() != parser.getClass()) {
-            throw new IllegalStateException("Multiple ConfigDocumentParsers registered for schemaVersion " + parser.schemaVersion());
+            throw new IllegalStateException(
+                    "Multiple ConfigDocumentParsers registered for schemaVersion "
+                            + parser.schemaVersion());
         }
         PARSERS.put(parser.schemaVersion(), parser);
     }
 
     public static ConfigDocumentParser resolve(String rawFlexlbConfig) {
-        int schemaVersion = declaredVersion(rawFlexlbConfig).orElseGet(ConfigDocumentParserResolver::environmentVersion);
+        int schemaVersion =
+                declaredVersion(rawFlexlbConfig)
+                        .orElseGet(ConfigDocumentParserResolver::environmentVersion);
         ConfigDocumentParser parser = PARSERS.get(schemaVersion);
         if (parser == null) {
-            throw new IllegalArgumentException("No ConfigDocumentParser registered for schemaVersion " + schemaVersion);
+            throw new IllegalArgumentException(
+                    "No ConfigDocumentParser registered for schemaVersion " + schemaVersion);
         }
         return parser;
     }
@@ -63,7 +68,8 @@ public final class ConfigDocumentParserResolver {
         try {
             return Integer.parseInt(configuredVersion);
         } catch (NumberFormatException error) {
-            throw new IllegalArgumentException(CONFIG_SCHEMA_VERSION_ENV + " must be an integer", error);
+            throw new IllegalArgumentException(
+                    CONFIG_SCHEMA_VERSION_ENV + " must be an integer", error);
         }
     }
 }

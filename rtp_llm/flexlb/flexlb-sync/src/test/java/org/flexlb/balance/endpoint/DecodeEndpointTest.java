@@ -25,34 +25,29 @@ class DecodeEndpointTest {
 
     private WorkerStatus status;
     private DecodeEndpoint endpoint;
-    private final Map<Long, DecodeEndpoint.ReservationHandle> reservations =
-            new HashMap<>();
+    private final Map<Long, DecodeEndpoint.ReservationHandle> reservations = new HashMap<>();
 
     @BeforeEach
     void setUp() {
-        status = EndpointTestSupport.workerStatus(
-                RoleType.DECODE, "10.0.0.1", 8080, 8081);
-        endpoint = new DecodeEndpoint(
-                status, EndpointTestSupport.noopEventSink());
+        status = EndpointTestSupport.workerStatus(RoleType.DECODE, "10.0.0.1", 8080, 8081);
+        endpoint = new DecodeEndpoint(status, EndpointTestSupport.noopEventSink());
     }
 
     @Test
     void batchMetricsKeepSiblingEngineReservationsSeparate() {
-        WorkerStatus firstStatus = WorkerStatus.createDiscovered(
-                RoleType.DECODE, null, "10.0.0.1", 8080, 8081,
-                null, null, 0, 2);
-        WorkerStatus siblingStatus = WorkerStatus.createDiscovered(
-                RoleType.DECODE, null, "10.0.0.1", 8080, 8081,
-                null, null, 1, 2);
-        DecodeEndpoint first = new DecodeEndpoint(
-                firstStatus, EndpointTestSupport.noopEventSink());
-        DecodeEndpoint sibling = new DecodeEndpoint(
-                siblingStatus, EndpointTestSupport.noopEventSink());
+        WorkerStatus firstStatus =
+                WorkerStatus.createDiscovered(
+                        RoleType.DECODE, null, "10.0.0.1", 8080, 8081, null, null, 0, 2);
+        WorkerStatus siblingStatus =
+                WorkerStatus.createDiscovered(
+                        RoleType.DECODE, null, "10.0.0.1", 8080, 8081, null, null, 1, 2);
+        DecodeEndpoint first = new DecodeEndpoint(firstStatus, EndpointTestSupport.noopEventSink());
+        DecodeEndpoint sibling =
+                new DecodeEndpoint(siblingStatus, EndpointTestSupport.noopEventSink());
         SimpleMeterRegistry registry = new SimpleMeterRegistry();
         try {
             BatchSchedulerReporter reporter =
-                    new BatchSchedulerReporter(
-                            new MicrometerFlexMonitor(registry));
+                    new BatchSchedulerReporter(new MicrometerFlexMonitor(registry));
             reporter.init();
             reserve(first, 100L, 500, 500);
             reserve(sibling, 200L, 300, 300);
@@ -61,18 +56,30 @@ class DecodeEndpointTest {
             first.reportBatchMetrics(reporter);
             sibling.reportBatchMetrics(reporter);
 
-            Gauge firstInflight = registry.find("flexlb.app.flexlb.inflight.request.count")
-                    .tags("role", "DECODE", "engineIp", "10.0.0.1:8080@0").gauge();
-            Gauge secondInflight = registry.find("flexlb.app.flexlb.inflight.request.count")
-                    .tags("role", "DECODE", "engineIp", "10.0.0.1:8080@1").gauge();
+            Gauge firstInflight =
+                    registry.find("flexlb.app.flexlb.inflight.request.count")
+                            .tags("role", "DECODE", "engineIp", "10.0.0.1:8080@0")
+                            .gauge();
+            Gauge secondInflight =
+                    registry.find("flexlb.app.flexlb.inflight.request.count")
+                            .tags("role", "DECODE", "engineIp", "10.0.0.1:8080@1")
+                            .gauge();
             assertNotNull(firstInflight, "engine 0 must expose its own inflight gauge");
             assertNotNull(secondInflight, "engine 1 must expose its own inflight gauge");
             assertEquals(1.0, firstInflight.value());
             assertEquals(2.0, secondInflight.value());
-            assertEquals(500.0, registry.get("flexlb.app.flexlb.decode.inflight.kv.reserved.tokens")
-                    .tags("role", "DECODE", "engineIp", "10.0.0.1:8080@0").gauge().value());
-            assertEquals(700.0, registry.get("flexlb.app.flexlb.decode.inflight.kv.reserved.tokens")
-                    .tags("role", "DECODE", "engineIp", "10.0.0.1:8080@1").gauge().value());
+            assertEquals(
+                    500.0,
+                    registry.get("flexlb.app.flexlb.decode.inflight.kv.reserved.tokens")
+                            .tags("role", "DECODE", "engineIp", "10.0.0.1:8080@0")
+                            .gauge()
+                            .value());
+            assertEquals(
+                    700.0,
+                    registry.get("flexlb.app.flexlb.decode.inflight.kv.reserved.tokens")
+                            .tags("role", "DECODE", "engineIp", "10.0.0.1:8080@1")
+                            .gauge()
+                            .value());
         } finally {
             registry.close();
             first.close();
@@ -270,7 +277,8 @@ class DecodeEndpointTest {
 
     /** Expiration removes the queued phase and all incremental counters together. */
     @Test
-    void evictExpiredRequests_prunesQueuedPhase_andRestoresEngineLoad() throws InterruptedException {
+    void evictExpiredRequests_prunesQueuedPhase_andRestoresEngineLoad()
+            throws InterruptedException {
         updateStatus(null, null, 10000);
         reserve(100L, 500, 500);
         reserve(101L, 500, 500);
@@ -308,8 +316,10 @@ class DecodeEndpointTest {
         counter.set(value);
     }
 
-    private void updateStatus(Map<String, TaskInfo> running, Map<String, TaskInfo> finished,
-                              long availableKvCacheTokens) {
+    private void updateStatus(
+            Map<String, TaskInfo> running,
+            Map<String, TaskInfo> finished,
+            long availableKvCacheTokens) {
         WorkerStatusResponse response = new WorkerStatusResponse();
         response.setRunningTaskInfo(running);
         response.setFinishedTaskInfo(finished);
@@ -323,7 +333,8 @@ class DecodeEndpointTest {
         try (WorkerEndpoint.GenerationPin pin = endpoint.tryPinGeneration()) {
             assertNotNull(pin);
             DecodeEndpoint.ReservationHandle reservation =
-                    endpoint.reserveUnqueued(pin, Long.toString(requestId), requiredKv, kvBudget, 0);
+                    endpoint.reserveUnqueued(
+                            pin, Long.toString(requestId), requiredKv, kvBudget, 0);
             reservations.put(requestId, reservation);
             return reservation;
         }
@@ -333,14 +344,12 @@ class DecodeEndpointTest {
             DecodeEndpoint target, long requestId, long requiredKv, long kvBudget) {
         try (WorkerEndpoint.GenerationPin pin = target.tryPinGeneration()) {
             assertNotNull(pin);
-            return target.reserveUnqueued(
-                    pin, Long.toString(requestId), requiredKv, kvBudget, 0);
+            return target.reserveUnqueued(pin, Long.toString(requestId), requiredKv, kvBudget, 0);
         }
     }
 
     private void release(long requestId) {
-        DecodeEndpoint.ReservationHandle reservation =
-                reservations.get(requestId);
+        DecodeEndpoint.ReservationHandle reservation = reservations.get(requestId);
         if (reservation != null) {
             endpoint.release(reservation, DecodeEndpoint.ReleaseReason.LOCAL_ROLLBACK);
         }
@@ -361,9 +370,10 @@ class DecodeEndpointTest {
 
     private DecodeEndpoint.EngineDispatchPermit acquirePermit(long requestId) {
         DecodeEndpoint.EngineDispatchPermitAcquisition acquisition =
-                endpoint.acquireDispatchPermit(reservations.get(requestId), new DecodeEndpoint.AdmissionCapacity(0, 100L));
-        assertEquals(DecodeEndpoint.EngineDispatchPermitAcquireStatus.ACQUIRED,
-                acquisition.status());
+                endpoint.acquireDispatchPermit(
+                        reservations.get(requestId), new DecodeEndpoint.AdmissionCapacity(0, 100L));
+        assertEquals(
+                DecodeEndpoint.EngineDispatchPermitAcquireStatus.ACQUIRED, acquisition.status());
         assertNotNull(acquisition.permit());
         return acquisition.permit();
     }

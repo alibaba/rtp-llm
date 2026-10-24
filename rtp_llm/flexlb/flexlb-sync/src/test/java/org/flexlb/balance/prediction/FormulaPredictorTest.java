@@ -21,28 +21,27 @@ class FormulaPredictorTest {
 
     @Test
     void parseRejectsUnknownVariable() {
-        assertThrows(IllegalArgumentException.class, () ->
-                new FormulaPredictor("unknown_var + 5"));
+        assertThrows(IllegalArgumentException.class, () -> new FormulaPredictor("unknown_var + 5"));
     }
 
     @Test
     void parseRejectsMalformed() {
-        assertThrows(IllegalArgumentException.class, () ->
-                new FormulaPredictor("sum(computeTokens) +"));
+        assertThrows(
+                IllegalArgumentException.class, () -> new FormulaPredictor("sum(computeTokens) +"));
     }
 
     @Test
     void parseRejectsShortLegacyVariables() {
-        assertThrows(IllegalArgumentException.class, () ->
-                new FormulaPredictor("c + p + sum_c + n"));
+        assertThrows(
+                IllegalArgumentException.class, () -> new FormulaPredictor("c + p + sum_c + n"));
     }
 
     @Test
     void parseRejectsBatchScopedVariablesInsideSum() {
-        assertThrows(IllegalArgumentException.class, () ->
-                new FormulaPredictor("sum(totalComputeTokens)"));
-        assertThrows(IllegalArgumentException.class, () ->
-                new FormulaPredictor("sum(batchSize)"));
+        assertThrows(
+                IllegalArgumentException.class,
+                () -> new FormulaPredictor("sum(totalComputeTokens)"));
+        assertThrows(IllegalArgumentException.class, () -> new FormulaPredictor("sum(batchSize)"));
     }
 
     @Test
@@ -50,16 +49,16 @@ class FormulaPredictorTest {
         // Mirrors formula_text([1, 1, 1, 1, 1, 1]) in
         // deepseek_v4_prefill_formula_fit.py. Keep this production-parser guard
         // aligned with the fitter's exported expression grammar.
-        FormulaPredictor predictor = new FormulaPredictor(
-                "1 * sum(1) + 1 * sum(inputTokens / 1024.0)"
-                        + " + 1 * sum(hitCacheTokens / 1024.0)"
-                        + " + 1 * sum((inputTokens / 1024.0) * (inputTokens / 1024.0))"
-                        + " + 1 * sum((inputTokens / 1024.0) * (hitCacheTokens / 1024.0))"
-                        + " + 1 * sum((hitCacheTokens / 1024.0) * (hitCacheTokens / 1024.0))");
+        FormulaPredictor predictor =
+                new FormulaPredictor(
+                        "1 * sum(1) + 1 * sum(inputTokens / 1024.0)"
+                                + " + 1 * sum(hitCacheTokens / 1024.0)"
+                                + " + 1 * sum((inputTokens / 1024.0) * (inputTokens / 1024.0))"
+                                + " + 1 * sum((inputTokens / 1024.0) * (hitCacheTokens / 1024.0))"
+                                + " + 1 * sum((hitCacheTokens / 1024.0) * (hitCacheTokens / 1024.0))");
 
         assertEquals(4, predictor.evaluator().estimateMs(1024, 512));
-        PrefillBatchFeatures features = batchFeatures(
-                item(1024, 512), item(2048, 1024));
+        PrefillBatchFeatures features = batchFeatures(item(1024, 512), item(2048, 1024));
         // Per-item feature sums are 4.25 and 11.0; batch prediction retains fractions.
         assertEquals(15.25, predictor.evaluator().predictBatchMs(features));
     }
@@ -103,15 +102,13 @@ class FormulaPredictorTest {
 
     @Test
     void estimateMsSumFunctionInSingleMode() {
-        FormulaPredictor p = new FormulaPredictor(
-                "sum(computeTokens) + 0.3*sum(hitCacheTokens)");
+        FormulaPredictor p = new FormulaPredictor("sum(computeTokens) + 0.3*sum(hitCacheTokens)");
         assertEquals(360, p.evaluator().estimateMs(500, 200));
     }
 
     @Test
     void estimateMsHitCacheRequestCount() {
-        FormulaPredictor p = new FormulaPredictor(
-                "sum(hitCacheTokens) + 100*sum(hasHitCache)");
+        FormulaPredictor p = new FormulaPredictor("sum(hitCacheTokens) + 100*sum(hasHitCache)");
 
         assertEquals(300, p.evaluator().estimateMs(500, 200));
         assertEquals(0, p.evaluator().estimateMs(500, 0));
@@ -119,10 +116,11 @@ class FormulaPredictorTest {
 
     @Test
     void estimateMsReadablePositivePartFormula() {
-        FormulaPredictor p = new FormulaPredictor(
-                "max(computeTokens - 2048, 0) + 2*max(computeTokens - 24576, 0)"
-                        + " + sum(max(computeTokens - 2048, 0))"
-                        + " + 3*sum(max(computeTokens - 24576, 0))");
+        FormulaPredictor p =
+                new FormulaPredictor(
+                        "max(computeTokens - 2048, 0) + 2*max(computeTokens - 24576, 0)"
+                                + " + sum(max(computeTokens - 2048, 0))"
+                                + " + 3*sum(max(computeTokens - 24576, 0))");
 
         // tokens=30000, hitCacheTokens=1000, computeTokens=29000, positive parts=(26952,4424).
         assertEquals(76024, p.evaluator().estimateMs(30000, 1000));
@@ -131,8 +129,9 @@ class FormulaPredictorTest {
 
     @Test
     void estimateMsReadableTokenVariables() {
-        FormulaPredictor p = new FormulaPredictor(
-                "inputTokens - hitCacheTokens + computeTokens + 10*hasHitCache");
+        FormulaPredictor p =
+                new FormulaPredictor(
+                        "inputTokens - hitCacheTokens + computeTokens + 10*hasHitCache");
 
         assertEquals(610, p.evaluator().estimateMs(500, 200));
         assertEquals(1000, p.evaluator().estimateMs(500, 0));
@@ -142,12 +141,13 @@ class FormulaPredictorTest {
     void estimateMsFullFormula() {
         // inputTokens=500, hitCacheTokens=200, computeTokens=300
         // = 10 + 30 + 900 + 60 + 100 + 5 = 1105
-        FormulaPredictor p = new FormulaPredictor(
-                "10 + 0.1*sum(computeTokens)"
-                        + " + 0.01*sum(computeTokens^2)"
-                        + " + 0.001*sum(computeTokens * hitCacheTokens)"
-                        + " + 0.5*sum(hitCacheTokens)"
-                        + " + 5*batchSize");
+        FormulaPredictor p =
+                new FormulaPredictor(
+                        "10 + 0.1*sum(computeTokens)"
+                                + " + 0.01*sum(computeTokens^2)"
+                                + " + 0.001*sum(computeTokens * hitCacheTokens)"
+                                + " + 0.5*sum(hitCacheTokens)"
+                                + " + 5*batchSize");
         assertEquals(1105, p.evaluator().estimateMs(500, 200));
     }
 
@@ -159,12 +159,13 @@ class FormulaPredictorTest {
 
     @Test
     void estimateMsLargeValuesNoOverflow() {
-        FormulaPredictor p = new FormulaPredictor(
-                "100 + sum(computeTokens)"
-                        + " + 0.001*sum(computeTokens^2)"
-                        + " + 0.0001*sum(computeTokens * hitCacheTokens)"
-                        + " + 0.5*sum(hitCacheTokens)"
-                        + " + 10*batchSize");
+        FormulaPredictor p =
+                new FormulaPredictor(
+                        "100 + sum(computeTokens)"
+                                + " + 0.001*sum(computeTokens^2)"
+                                + " + 0.0001*sum(computeTokens * hitCacheTokens)"
+                                + " + 0.5*sum(hitCacheTokens)"
+                                + " + 10*batchSize");
         long result = p.evaluator().estimateMs(100_000, 50_000);
         assertTrue(result >= 0, "Should not overflow or produce negative values");
     }
@@ -172,8 +173,13 @@ class FormulaPredictorTest {
     @Test
     void batchPredictionPreservesFractionalMilliseconds() {
         FormulaPredictor predictor = new FormulaPredictor("0.5");
-        assertEquals(0.5, predictor.evaluator().predictBatchMs(
-                new PrefillBatchFeatures(List.of(new PrefillBatchFeatures.Item(1L, 0L)))));
+        assertEquals(
+                0.5,
+                predictor
+                        .evaluator()
+                        .predictBatchMs(
+                                new PrefillBatchFeatures(
+                                        List.of(new PrefillBatchFeatures.Item(1L, 0L)))));
     }
 
     // ---- predictBatchMs ----
@@ -186,12 +192,13 @@ class FormulaPredictorTest {
 
     @Test
     void predictBatchMsSingleItemMatchesEstimateMs() {
-        FormulaPredictor p = new FormulaPredictor(
-                "10 + 0.1*sum(computeTokens)"
-                        + " + 0.01*sum(computeTokens^2)"
-                        + " + 0.001*sum(computeTokens * hitCacheTokens)"
-                        + " + 0.5*sum(hitCacheTokens)"
-                        + " + 5*batchSize");
+        FormulaPredictor p =
+                new FormulaPredictor(
+                        "10 + 0.1*sum(computeTokens)"
+                                + " + 0.01*sum(computeTokens^2)"
+                                + " + 0.001*sum(computeTokens * hitCacheTokens)"
+                                + " + 0.5*sum(hitCacheTokens)"
+                                + " + 5*batchSize");
         long single = p.evaluator().estimateMs(500, 200);
 
         PrefillBatchFeatures features = batchFeatures(item(500, 200));
@@ -208,15 +215,15 @@ class FormulaPredictorTest {
         // sum(computeTokens * hitCacheTokens)=80000, sum(hitCacheTokens)=300, batchSize=2
         // = 10 + 0.1*500 + 0.01*130000 + 0.001*80000 + 0.5*300 + 5*2
         // = 10 + 50 + 1300 + 80 + 150 + 10 = 1600
-        FormulaPredictor p = new FormulaPredictor(
-                "10 + 0.1*sum(computeTokens)"
-                        + " + 0.01*sum(computeTokens^2)"
-                        + " + 0.001*sum(computeTokens * hitCacheTokens)"
-                        + " + 0.5*sum(hitCacheTokens)"
-                        + " + 5*batchSize");
+        FormulaPredictor p =
+                new FormulaPredictor(
+                        "10 + 0.1*sum(computeTokens)"
+                                + " + 0.01*sum(computeTokens^2)"
+                                + " + 0.001*sum(computeTokens * hitCacheTokens)"
+                                + " + 0.5*sum(hitCacheTokens)"
+                                + " + 5*batchSize");
 
-        PrefillBatchFeatures features = batchFeatures(
-                item(500, 200), item(300, 100));
+        PrefillBatchFeatures features = batchFeatures(item(500, 200), item(300, 100));
         long result = (long) p.evaluator().predictBatchMs(features);
 
         assertEquals(1600, result);
@@ -224,12 +231,12 @@ class FormulaPredictorTest {
 
     @Test
     void predictBatchMsExposesExplicitBatchTotalsAndMaxima() {
-        FormulaPredictor p = new FormulaPredictor(
-                "batchSize + totalInputTokens + totalHitCacheTokens + totalComputeTokens"
-                        + " + maxInputTokens + maxComputeTokens");
+        FormulaPredictor p =
+                new FormulaPredictor(
+                        "batchSize + totalInputTokens + totalHitCacheTokens + totalComputeTokens"
+                                + " + maxInputTokens + maxComputeTokens");
 
-        PrefillBatchFeatures features = batchFeatures(
-                item(500, 200), item(300, 100));
+        PrefillBatchFeatures features = batchFeatures(item(500, 200), item(300, 100));
 
         // 2 + 800 + 300 + 500 + 500 + 300
         assertEquals(2402, p.evaluator().predictBatchMs(features));
@@ -239,12 +246,12 @@ class FormulaPredictorTest {
 
     @Test
     void batchTotalSquareIsNotPerRequestSquareSum() {
-        FormulaPredictor p = new FormulaPredictor(
-                "totalComputeTokens^2 - sum(computeTokens^2)");
+        FormulaPredictor p = new FormulaPredictor("totalComputeTokens^2 - sum(computeTokens^2)");
 
-        PrefillBatchFeatures features = batchFeatures(
-                item(500, 200), // compute=300
-                item(300, 100)); // compute=200
+        PrefillBatchFeatures features =
+                batchFeatures(
+                        item(500, 200), // compute=300
+                        item(300, 100)); // compute=200
 
         // (300 + 200)^2 - (300^2 + 200^2) = 120000.
         assertEquals(120000, p.evaluator().predictBatchMs(features));
@@ -252,11 +259,9 @@ class FormulaPredictorTest {
 
     @Test
     void predictBatchMsAggregatesHitCacheRequestCount() {
-        FormulaPredictor p = new FormulaPredictor(
-                "sum(hitCacheTokens) + 100*sum(hasHitCache)");
+        FormulaPredictor p = new FormulaPredictor("sum(hitCacheTokens) + 100*sum(hasHitCache)");
 
-        PrefillBatchFeatures features = batchFeatures(
-                item(500, 200), item(300, 0), item(400, 400));
+        PrefillBatchFeatures features = batchFeatures(item(500, 200), item(300, 0), item(400, 400));
         long result = (long) p.evaluator().predictBatchMs(features);
 
         assertEquals(800, result);
@@ -264,13 +269,15 @@ class FormulaPredictorTest {
 
     @Test
     void predictBatchMsAggregatesReadablePositivePartFormula() {
-        FormulaPredictor p = new FormulaPredictor(
-                "sum(max(computeTokens - 2048, 0))"
-                        + " + 2*sum(max(computeTokens - 24576, 0))");
+        FormulaPredictor p =
+                new FormulaPredictor(
+                        "sum(max(computeTokens - 2048, 0))"
+                                + " + 2*sum(max(computeTokens - 24576, 0))");
 
-        PrefillBatchFeatures features = batchFeatures(
-                item(30000, 1000), // computeTokens=29000, positive parts=(26952,4424)
-                item(4096, 0));    // computeTokens=4096, positive parts=(2048,0)
+        PrefillBatchFeatures features =
+                batchFeatures(
+                        item(30000, 1000), // computeTokens=29000, positive parts=(26952,4424)
+                        item(4096, 0)); // computeTokens=4096, positive parts=(2048,0)
         long result = (long) p.evaluator().predictBatchMs(features);
 
         assertEquals(37848, result);
@@ -278,40 +285,45 @@ class FormulaPredictorTest {
 
     @Test
     void predictBatchMsRecommendedFormulaUsesBatchBoundedCacheTerms() {
-        FormulaPredictor p = new FormulaPredictor(
-                "174.374677211 + 52.642812003*log(batchSize + 1)"
-                        + " + 0.000746856881262*sum(2048*log(1 + exp((computeTokens - 8192)/2048)))"
-                        + " + 0.0074536400604*sum(4096*log(1 + exp((computeTokens - 24576)/4096)))"
-                        + " + 5.73664292066e-05*sum(8192*log(1 + exp((computeTokens - 65536)/8192)))"
-                        + " + 0.00111135741393*sum(8192*log(1 + exp((computeTokens - 81920)/8192)))"
-                        + " + 0.00424878987222*sum((hitCacheTokens/(inputTokens + 1))"
-                        + " * (4096*log(1 + exp((computeTokens - 24576)/4096))))"
-                        + " + 0.000489415479845*sum((log(hitCacheTokens + 1)/max(log(inputTokens + 1), 1))"
-                        + " * (4096*log(1 + exp((computeTokens - 24576)/4096))))"
-                        + " + 18.7646922156*(sum(hasHitCache)/batchSize)"
-                        + " + 4.59475450657*(sum(hitCacheTokens/(inputTokens + 1))/batchSize)"
-                        + " - 41.7583481006*(sum(log(hitCacheTokens + 1)/max(log(inputTokens + 1), 1))/batchSize)"
-                        + " - 5.4218960925*(sum(hitCacheTokens/(hitCacheTokens + 4096))/batchSize)");
+        FormulaPredictor p =
+                new FormulaPredictor(
+                        "174.374677211 + 52.642812003*log(batchSize + 1)"
+                                + " + 0.000746856881262*sum(2048*log(1 + exp((computeTokens - 8192)/2048)))"
+                                + " + 0.0074536400604*sum(4096*log(1 + exp((computeTokens - 24576)/4096)))"
+                                + " + 5.73664292066e-05*sum(8192*log(1 + exp((computeTokens - 65536)/8192)))"
+                                + " + 0.00111135741393*sum(8192*log(1 + exp((computeTokens - 81920)/8192)))"
+                                + " + 0.00424878987222*sum((hitCacheTokens/(inputTokens + 1))"
+                                + " * (4096*log(1 + exp((computeTokens - 24576)/4096))))"
+                                + " + 0.000489415479845*sum((log(hitCacheTokens + 1)/max(log(inputTokens + 1), 1))"
+                                + " * (4096*log(1 + exp((computeTokens - 24576)/4096))))"
+                                + " + 18.7646922156*(sum(hasHitCache)/batchSize)"
+                                + " + 4.59475450657*(sum(hitCacheTokens/(inputTokens + 1))/batchSize)"
+                                + " - 41.7583481006*(sum(log(hitCacheTokens + 1)/max(log(inputTokens + 1), 1))/batchSize)"
+                                + " - 5.4218960925*(sum(hitCacheTokens/(hitCacheTokens + 4096))/batchSize)");
 
         List<PrefillBatchFeatures.Item> fullHitBatch = new ArrayList<>();
         for (int i = 0; i < 64; i++) {
             fullHitBatch.add(item(102400, 101376));
         }
 
-        assertEquals(187, (long) p.evaluator().predictBatchMs(batchFeatures(fullHitBatch.subList(0, 1))));
-        assertEquals(246, (long) p.evaluator().predictBatchMs(batchFeatures(fullHitBatch.subList(0, 5))));
+        assertEquals(
+                187,
+                (long) p.evaluator().predictBatchMs(batchFeatures(fullHitBatch.subList(0, 1))));
+        assertEquals(
+                246,
+                (long) p.evaluator().predictBatchMs(batchFeatures(fullHitBatch.subList(0, 5))));
         assertEquals(383, (long) p.evaluator().predictBatchMs(batchFeatures(fullHitBatch)));
         assertEquals(886, (long) p.evaluator().predictBatchMs(batchFeatures(item(102400, 0))));
     }
 
     @Test
     void predictBatchMsSumEvaluatesExpressionPerRequest() {
-        FormulaPredictor p = new FormulaPredictor(
-                "sum(max(computeTokens - 2048, 0))");
+        FormulaPredictor p = new FormulaPredictor("sum(max(computeTokens - 2048, 0))");
 
-        PrefillBatchFeatures features = batchFeatures(
-                item(3000, 0), // max(3000-2048,0)=952
-                item(1000, 0)); // max(1000-2048,0)=0
+        PrefillBatchFeatures features =
+                batchFeatures(
+                        item(3000, 0), // max(3000-2048,0)=952
+                        item(1000, 0)); // max(1000-2048,0)=0
 
         assertEquals(952, p.evaluator().predictBatchMs(features));
     }
@@ -340,8 +352,9 @@ class FormulaPredictorTest {
 
     @Test
     void predictBatchMsLargeBatch() {
-        FormulaPredictor p = new FormulaPredictor(
-                "100 + 0.5*sum(computeTokens) + 0.1*sum(hitCacheTokens) + 3*batchSize");
+        FormulaPredictor p =
+                new FormulaPredictor(
+                        "100 + 0.5*sum(computeTokens) + 0.1*sum(hitCacheTokens) + 3*batchSize");
         List<PrefillBatchFeatures.Item> items = new ArrayList<>();
         for (int i = 0; i < 100; i++) {
             items.add(item(1000, 200));
@@ -363,25 +376,25 @@ class FormulaPredictorTest {
      */
     private static final String DSV4_PRODUCTION_EXPRESSION =
             "max(196, -68.612174288157 + 0.993068319341 * (max(0, 287.3980926717 + 2.30134977837751 * batchSize + "
-            + "0.158123254797307 * sum(hitCacheTokens / 1024.) + 0.575522710053703 * sum(computeTokens / 1024.) + "
-            + "0.0517623430739831 * sum(computeTokens / 1024. * computeTokens / 1024.) + 0.0395308136993267 * "
-            + "sum(hitCacheTokens / 1024. * computeTokens / 1024.) + 0.0104363634681015 * sum(hitCacheTokens / 1024. * "
-            + "hitCacheTokens / 1024.) + 0.575522710053703 * max(sum(computeTokens / 1024.) - 16, 0) + 2.82077211814514 "
-            + "* max(sum(computeTokens / 1024.) - 32, 0) - 0.0254671429192862 * max(sum(computeTokens / 1024.) - 64, 0) "
-            + "+ 2.15779213792494 * max(sum(computeTokens / 1024.) - 96, 0) + 0.247806025472364 * "
-            + "max(sum(hitCacheTokens / 1024.) - 32, 0) - 0.444522654549492 * max(sum(hitCacheTokens / 1024.) - 64, 0) "
-            + "- 0.427317020061895 * max(sum(hitCacheTokens / 1024.) - 128, 0) + 0.347029077528455 * "
-            + "max(sum(hitCacheTokens / 1024.) - 256, 0) - 0.298742307762735 * max(sum(hitCacheTokens / 1024.) - 384, "
-            + "0) + 2.30134977837751 * max(batchSize - 8, 0) - 3.54884859699154 * max(batchSize - 16, 0) - "
-            + "11.3438560779984 * max(batchSize - 24, 0) + 0.879751992138183 * sum(max(computeTokens / 1024. - 2, 0)) + "
-            + "0.636364578079591 * sum(max(computeTokens / 1024. - 4, 0)) - 0.0513345988517118 * sum(max(computeTokens "
-            + "/ 1024. - 8, 0)) - 0.332584389129357 * sum(max(hitCacheTokens / 1024. - 2, 0)) + 0.305819761192588 * "
-            + "sum(max(hitCacheTokens / 1024. - 4, 0)) - 0.287610979974721 * sum(max(hitCacheTokens / 1024. - 8, 0)) + "
-            + "0.191310200712013 * sum(max(hitCacheTokens / 1024. - 12, 0)) + 0.0130251644478961 * max(batchSize - 8, "
-            + "0) * sum(hitCacheTokens / 1024.) + 0.00981382840761646 * max(batchSize - 16, 0) * sum(hitCacheTokens / "
-            + "1024.) - 0.0299132587297009 * max(batchSize - 24, 0) * sum(hitCacheTokens / 1024.) + 0.0447455122487382 "
-            + "* max(batchSize - 8, 0) * sum(computeTokens / 1024.) + 0.0104635312001851 * max(batchSize - 16, 0) * "
-            + "sum(computeTokens / 1024.) + 0.0542737877321807 * max(batchSize - 24, 0) * sum(computeTokens / 1024.))))";
+                    + "0.158123254797307 * sum(hitCacheTokens / 1024.) + 0.575522710053703 * sum(computeTokens / 1024.) + "
+                    + "0.0517623430739831 * sum(computeTokens / 1024. * computeTokens / 1024.) + 0.0395308136993267 * "
+                    + "sum(hitCacheTokens / 1024. * computeTokens / 1024.) + 0.0104363634681015 * sum(hitCacheTokens / 1024. * "
+                    + "hitCacheTokens / 1024.) + 0.575522710053703 * max(sum(computeTokens / 1024.) - 16, 0) + 2.82077211814514 "
+                    + "* max(sum(computeTokens / 1024.) - 32, 0) - 0.0254671429192862 * max(sum(computeTokens / 1024.) - 64, 0) "
+                    + "+ 2.15779213792494 * max(sum(computeTokens / 1024.) - 96, 0) + 0.247806025472364 * "
+                    + "max(sum(hitCacheTokens / 1024.) - 32, 0) - 0.444522654549492 * max(sum(hitCacheTokens / 1024.) - 64, 0) "
+                    + "- 0.427317020061895 * max(sum(hitCacheTokens / 1024.) - 128, 0) + 0.347029077528455 * "
+                    + "max(sum(hitCacheTokens / 1024.) - 256, 0) - 0.298742307762735 * max(sum(hitCacheTokens / 1024.) - 384, "
+                    + "0) + 2.30134977837751 * max(batchSize - 8, 0) - 3.54884859699154 * max(batchSize - 16, 0) - "
+                    + "11.3438560779984 * max(batchSize - 24, 0) + 0.879751992138183 * sum(max(computeTokens / 1024. - 2, 0)) + "
+                    + "0.636364578079591 * sum(max(computeTokens / 1024. - 4, 0)) - 0.0513345988517118 * sum(max(computeTokens "
+                    + "/ 1024. - 8, 0)) - 0.332584389129357 * sum(max(hitCacheTokens / 1024. - 2, 0)) + 0.305819761192588 * "
+                    + "sum(max(hitCacheTokens / 1024. - 4, 0)) - 0.287610979974721 * sum(max(hitCacheTokens / 1024. - 8, 0)) + "
+                    + "0.191310200712013 * sum(max(hitCacheTokens / 1024. - 12, 0)) + 0.0130251644478961 * max(batchSize - 8, "
+                    + "0) * sum(hitCacheTokens / 1024.) + 0.00981382840761646 * max(batchSize - 16, 0) * sum(hitCacheTokens / "
+                    + "1024.) - 0.0299132587297009 * max(batchSize - 24, 0) * sum(hitCacheTokens / 1024.) + 0.0447455122487382 "
+                    + "* max(batchSize - 8, 0) * sum(computeTokens / 1024.) + 0.0104635312001851 * max(batchSize - 16, 0) * "
+                    + "sum(computeTokens / 1024.) + 0.0542737877321807 * max(batchSize - 24, 0) * sum(computeTokens / 1024.))))";
 
     @Test
     void dsv4ProductionFitPredictsProductionScalePrefillLatency() {
@@ -393,16 +406,14 @@ class FormulaPredictorTest {
         long v512 = p.evaluator().estimateMs(512, 0);
         long v32k = p.evaluator().estimateMs(32768, 0);
         long v48k = p.evaluator().estimateMs(49152, 0);
-        assertTrue(v512 >= 210 && v512 <= 230,
-                "512 all-miss expected ~219ms, got " + v512);
-        assertTrue(v32k >= 330 && v32k <= 350,
-                "32768 all-miss expected ~342ms, got " + v32k);
-        assertTrue(v48k >= 480 && v48k <= 510,
-                "49152 all-miss expected ~494ms, got " + v48k);
+        assertTrue(v512 >= 210 && v512 <= 230, "512 all-miss expected ~219ms, got " + v512);
+        assertTrue(v32k >= 330 && v32k <= 350, "32768 all-miss expected ~342ms, got " + v32k);
+        assertTrue(v48k >= 480 && v48k <= 510, "49152 all-miss expected ~494ms, got " + v48k);
 
         // Cache hits shorten the prediction: 32768 with half cached ~274ms.
         long v32kHalf = p.evaluator().estimateMs(32768, 16384);
-        assertTrue(v32kHalf >= 260 && v32kHalf <= 290,
+        assertTrue(
+                v32kHalf >= 260 && v32kHalf <= 290,
                 "32768 half-cached expected ~274ms, got " + v32kHalf);
         assertTrue(v32kHalf < v32k, "cache hits must reduce the prediction");
     }
@@ -422,10 +433,8 @@ class FormulaPredictorTest {
         // batchSize stairs engage only in batch mode: a 32-request batch of
         // 512-token all-miss requests predicts above a single request but
         // stays in the same order of magnitude (continuous-batching fit).
-        assertTrue(batch > single,
-                "batch of 32 should exceed a single request, got " + batch);
-        assertTrue(batch < single * 4,
-                "batch penalty should stay moderate, got " + batch);
+        assertTrue(batch > single, "batch of 32 should exceed a single request, got " + batch);
+        assertTrue(batch < single * 4, "batch penalty should stay moderate, got " + batch);
     }
 
     // ---- power operator ----
@@ -454,8 +463,9 @@ class FormulaPredictorTest {
 
     @Test
     void nestedFunctions() {
-        FormulaPredictor p = new FormulaPredictor(
-                "sqrt(pow(sum(computeTokens), 2) + pow(sum(hitCacheTokens), 2))");
+        FormulaPredictor p =
+                new FormulaPredictor(
+                        "sqrt(pow(sum(computeTokens), 2) + pow(sum(hitCacheTokens), 2))");
         // inputTokens=7, hitCacheTokens=4, computeTokens=3, sqrt(9+16) = 5
         assertEquals(5, p.evaluator().estimateMs(7, 4));
     }
@@ -474,8 +484,7 @@ class FormulaPredictorTest {
     @DisplayName("learn method accepts immutable batch features without error")
     void learnAcceptsBatchInfo() {
         FormulaPredictor p = new FormulaPredictor("100");
-        PrefillBatchFeatures features = batchFeatures(
-                item(100, 20), item(200, 50));
+        PrefillBatchFeatures features = batchFeatures(item(100, 20), item(200, 50));
         p.learn(features, 150, 300);
     }
 
@@ -503,7 +512,9 @@ class FormulaPredictorTest {
     void paramSameNameReused() {
         // param(w0, 1) * computeTokens + param(w0, 1) * hitCacheTokens
         // inputTokens=100, hitCache=50, computeTokens=50 → 1*50 + 1*50 = 100
-        FormulaPredictor p = new FormulaPredictor("param(w0, 1) * computeTokens + param(w0, 1) * hitCacheTokens");
+        FormulaPredictor p =
+                new FormulaPredictor(
+                        "param(w0, 1) * computeTokens + param(w0, 1) * hitCacheTokens");
         assertEquals(100, p.evaluator().estimateMs(100, 50));
     }
 
@@ -514,9 +525,9 @@ class FormulaPredictorTest {
         // item1: (500,200) → computeTokens=300
         // item2: (300,100) → computeTokens=200
         // sum(computeTokens) = 500 → 10 + 0.5*500 = 260
-        FormulaPredictor p = new FormulaPredictor("param(w0, 10) + param(w1, 0.5) * sum(computeTokens)");
-        PrefillBatchFeatures features = batchFeatures(
-                item(500, 200), item(300, 100));
+        FormulaPredictor p =
+                new FormulaPredictor("param(w0, 10) + param(w1, 0.5) * sum(computeTokens)");
+        PrefillBatchFeatures features = batchFeatures(item(500, 200), item(300, 100));
         assertEquals(260, p.evaluator().predictBatchMs(features));
     }
 
@@ -533,10 +544,10 @@ class FormulaPredictorTest {
     @Test
     @DisplayName("thread-local formula cursors isolate concurrent single and batch evaluations")
     void formulaCursorsAreConcurrentSafe() throws Exception {
-        FormulaPredictor single = new FormulaPredictor(
-                "2*computeTokens + 3*hitCacheTokens + batchSize");
-        FormulaPredictor batch = new FormulaPredictor(
-                "batchSize + sum(2*computeTokens + 3*hitCacheTokens)");
+        FormulaPredictor single =
+                new FormulaPredictor("2*computeTokens + 3*hitCacheTokens + batchSize");
+        FormulaPredictor batch =
+                new FormulaPredictor("batchSize + sum(2*computeTokens + 3*hitCacheTokens)");
         int threadCount = 8;
         ExecutorService executor = Executors.newFixedThreadPool(threadCount);
         CountDownLatch start = new CountDownLatch(1);
@@ -545,24 +556,28 @@ class FormulaPredictorTest {
             for (int thread = 0; thread < threadCount; thread++) {
                 long seqLen = 1_000L + thread * 37L;
                 long hitCache = 100L + thread * 11L;
-                PrefillBatchFeatures features = batchFeatures(
-                        item(seqLen, hitCache),
-                        item(seqLen / 2L, hitCache / 2L));
+                PrefillBatchFeatures features =
+                        batchFeatures(item(seqLen, hitCache), item(seqLen / 2L, hitCache / 2L));
                 long expectedSingle = 2L * (seqLen - hitCache) + 3L * hitCache + 1L;
                 long batchExpected = features.batchSize();
                 for (PrefillBatchFeatures.Item item : features.items()) {
-                    batchExpected += 2L * (item.seqLen() - item.hitCache())
-                            + 3L * item.hitCache();
+                    batchExpected += 2L * (item.seqLen() - item.hitCache()) + 3L * item.hitCache();
                 }
                 long expectedBatch = batchExpected;
-                futures.add(executor.submit(() -> {
-                    start.await();
-                    for (int iteration = 0; iteration < 2_000; iteration++) {
-                        assertEquals(expectedSingle, single.evaluator().estimateMs(seqLen, hitCache));
-                        assertEquals(expectedBatch, (long) batch.evaluator().predictBatchMs(features));
-                    }
-                    return null;
-                }));
+                futures.add(
+                        executor.submit(
+                                () -> {
+                                    start.await();
+                                    for (int iteration = 0; iteration < 2_000; iteration++) {
+                                        assertEquals(
+                                                expectedSingle,
+                                                single.evaluator().estimateMs(seqLen, hitCache));
+                                        assertEquals(
+                                                expectedBatch,
+                                                (long) batch.evaluator().predictBatchMs(features));
+                                    }
+                                    return null;
+                                }));
             }
             start.countDown();
             for (Future<?> future : futures) {
@@ -581,10 +596,8 @@ class FormulaPredictorTest {
 
         assertThrows(NullPointerException.class, () -> direct.evaluate(null, List.of()));
 
-        FormulaPredictor first = new FormulaPredictor(
-                "sum(computeTokens) + 2*sum(hitCacheTokens)");
-        FormulaPredictor second = new FormulaPredictor(
-                "sum(max(computeTokens - 10, 0))");
+        FormulaPredictor first = new FormulaPredictor("sum(computeTokens) + 2*sum(hitCacheTokens)");
+        FormulaPredictor second = new FormulaPredictor("sum(max(computeTokens - 10, 0))");
         assertEquals(500, first.evaluator().estimateMs(400, 100));
         assertEquals(290, second.evaluator().estimateMs(400, 100));
         assertEquals(500, first.evaluator().estimateMs(400, 100));
@@ -595,26 +608,21 @@ class FormulaPredictorTest {
         String sharedExpression = "sum(computeTokens) + batchSize";
         FormulaPredictor first = new FormulaPredictor(sharedExpression);
         FormulaPredictor second = new FormulaPredictor(sharedExpression);
-        FormulaPredictor different = new FormulaPredictor(
-                "sum(computeTokens) + 2*batchSize");
+        FormulaPredictor different = new FormulaPredictor("sum(computeTokens) + 2*batchSize");
 
         org.junit.jupiter.api.Assertions.assertSame(
-                first.evaluator().snapshotIdentity(),
-                second.evaluator().snapshotIdentity());
+                first.evaluator().snapshotIdentity(), second.evaluator().snapshotIdentity());
         org.junit.jupiter.api.Assertions.assertNotSame(
-                first.evaluator().snapshotIdentity(),
-                different.evaluator().snapshotIdentity());
+                first.evaluator().snapshotIdentity(), different.evaluator().snapshotIdentity());
     }
 
     // ---- helpers ----
 
-    private static PrefillBatchFeatures batchFeatures(
-            PrefillBatchFeatures.Item... items) {
+    private static PrefillBatchFeatures batchFeatures(PrefillBatchFeatures.Item... items) {
         return new PrefillBatchFeatures(List.of(items));
     }
 
-    private static PrefillBatchFeatures batchFeatures(
-            List<PrefillBatchFeatures.Item> items) {
+    private static PrefillBatchFeatures batchFeatures(List<PrefillBatchFeatures.Item> items) {
         return new PrefillBatchFeatures(items);
     }
 

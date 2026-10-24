@@ -37,36 +37,35 @@ import static org.mockito.Mockito.when;
 @ExtendWith(MockitoExtension.class)
 class FlexlbControlServerTest {
 
-    @Mock
-    private GeneralHttpNettyService generalHttpNettyService;
-    @Mock
-    private LBStatusConsistencyService lbStatusConsistencyService;
-    @Mock
-    private CacheMatchQueryOrchestrator cacheMatchQueryOrchestrator;
-    @Mock
-    private FlexlbLogManager flexlbLogManager;
+    @Mock private GeneralHttpNettyService generalHttpNettyService;
+    @Mock private LBStatusConsistencyService lbStatusConsistencyService;
+    @Mock private CacheMatchQueryOrchestrator cacheMatchQueryOrchestrator;
+    @Mock private FlexlbLogManager flexlbLogManager;
     private WebTestClient webTestClient;
 
     @BeforeEach
     void setUp() {
-        FlexlbControlServer server = new FlexlbControlServer(
-                generalHttpNettyService,
-                lbStatusConsistencyService,
-                cacheMatchQueryOrchestrator,
-                flexlbLogManager);
-        webTestClient = WebTestClient.bindToRouterFunction(
-                server.flexlbControlRoutes()).build();
+        FlexlbControlServer server =
+                new FlexlbControlServer(
+                        generalHttpNettyService,
+                        lbStatusConsistencyService,
+                        cacheMatchQueryOrchestrator,
+                        flexlbLogManager);
+        webTestClient = WebTestClient.bindToRouterFunction(server.flexlbControlRoutes()).build();
     }
 
     @Test
     void updatesFlexlbLogGroupThroughFlexlbEndpoint() {
-        webTestClient.post()
+        webTestClient
+                .post()
                 .uri("/flexlb/update_log_level")
                 .contentType(MediaType.APPLICATION_JSON)
                 .bodyValue(Map.of("log_level", "debug"))
                 .exchange()
-                .expectStatus().isOk()
-                .expectBody(String.class).isEqualTo("Success! logLevel=DEBUG");
+                .expectStatus()
+                .isOk()
+                .expectBody(String.class)
+                .isEqualTo("Success! logLevel=DEBUG");
 
         verify(flexlbLogManager).setLogLevel(LogLevel.DEBUG);
     }
@@ -75,31 +74,39 @@ class FlexlbControlServerTest {
     void returnsCacheMatchStatus() {
         when(cacheMatchQueryOrchestrator.status()).thenReturn(cacheMatchStatus());
 
-        webTestClient.get()
+        webTestClient
+                .get()
                 .uri("/flexlb/cache_match/status")
                 .exchange()
-                .expectStatus().isOk()
+                .expectStatus()
+                .isOk()
                 .expectBody()
-                .jsonPath("$.configuredMode").isEqualTo("KVCM")
-                .jsonPath("$.autoSwitchEnabled").isEqualTo(true)
-                .jsonPath("$.effectiveSource").isEqualTo("KVCM")
-                .jsonPath("$.kvcmHealthState").isEqualTo("HEALTHY")
-                .jsonPath("$.localStandbyEntries").isEqualTo(123)
-                .jsonPath("$.localStandbyMaximumEntries").isEqualTo(456);
+                .jsonPath("$.configuredMode")
+                .isEqualTo("KVCM")
+                .jsonPath("$.autoSwitchEnabled")
+                .isEqualTo(true)
+                .jsonPath("$.effectiveSource")
+                .isEqualTo("KVCM")
+                .jsonPath("$.kvcmHealthState")
+                .isEqualTo("HEALTHY")
+                .jsonPath("$.localStandbyEntries")
+                .isEqualTo(123)
+                .jsonPath("$.localStandbyMaximumEntries")
+                .isEqualTo(456);
     }
 
     @Test
     void activatesCacheMatchFailover() {
         when(cacheMatchQueryOrchestrator.status()).thenReturn(cacheMatchStatus());
 
-        webTestClient.post()
+        webTestClient
+                .post()
                 .uri("/flexlb/cache_match/failover")
                 .contentType(MediaType.APPLICATION_JSON)
-                .bodyValue(Map.of(
-                        "action",
-                        CacheMatchFailoverAction.ACTIVATE_FALLBACK.name()))
+                .bodyValue(Map.of("action", CacheMatchFailoverAction.ACTIVATE_FALLBACK.name()))
                 .exchange()
-                .expectStatus().isOk();
+                .expectStatus()
+                .isOk();
 
         verify(cacheMatchQueryOrchestrator)
                 .applyFailoverAction(CacheMatchFailoverAction.ACTIVATE_FALLBACK);
@@ -109,14 +116,14 @@ class FlexlbControlServerTest {
     void recoversKvcmPrimary() {
         when(cacheMatchQueryOrchestrator.status()).thenReturn(cacheMatchStatus());
 
-        webTestClient.post()
+        webTestClient
+                .post()
                 .uri("/flexlb/cache_match/failover")
                 .contentType(MediaType.APPLICATION_JSON)
-                .bodyValue(Map.of(
-                        "action",
-                        CacheMatchFailoverAction.RECOVER_PRIMARY.name()))
+                .bodyValue(Map.of("action", CacheMatchFailoverAction.RECOVER_PRIMARY.name()))
                 .exchange()
-                .expectStatus().isOk();
+                .expectStatus()
+                .isOk();
 
         verify(cacheMatchQueryOrchestrator)
                 .applyFailoverAction(CacheMatchFailoverAction.RECOVER_PRIMARY);
@@ -124,41 +131,49 @@ class FlexlbControlServerTest {
 
     @Test
     void rejectsUnknownFailoverAction() {
-        webTestClient.post()
+        webTestClient
+                .post()
                 .uri("/flexlb/cache_match/failover")
                 .contentType(MediaType.APPLICATION_JSON)
                 .bodyValue(Map.of("action", "UNKNOWN"))
                 .exchange()
-                .expectStatus().isBadRequest();
+                .expectStatus()
+                .isBadRequest();
 
-        verify(cacheMatchQueryOrchestrator, never())
-                .applyFailoverAction(any());
+        verify(cacheMatchQueryOrchestrator, never()).applyFailoverAction(any());
     }
 
     @ParameterizedTest
     @ValueSource(strings = {"{}", "{\"action\":null}"})
     void rejectsMissingFailoverActionBeforeApplyingOrForwarding(String body) {
-        webTestClient.post()
+        webTestClient
+                .post()
                 .uri("/flexlb/cache_match/failover")
                 .contentType(MediaType.APPLICATION_JSON)
                 .bodyValue(body.getBytes(StandardCharsets.UTF_8))
                 .exchange()
-                .expectStatus().isBadRequest()
-                .expectBody(String.class).isEqualTo("action is required");
+                .expectStatus()
+                .isBadRequest()
+                .expectBody(String.class)
+                .isEqualTo("action is required");
 
-        verifyNoInteractions(cacheMatchQueryOrchestrator, generalHttpNettyService, lbStatusConsistencyService);
+        verifyNoInteractions(
+                cacheMatchQueryOrchestrator, generalHttpNettyService, lbStatusConsistencyService);
     }
 
     @Test
     void rejectsEmptyFailoverActionBeforeApplyingOrForwarding() {
-        webTestClient.post()
+        webTestClient
+                .post()
                 .uri("/flexlb/cache_match/failover")
                 .contentType(MediaType.APPLICATION_JSON)
                 .bodyValue("{\"action\":\"\"}".getBytes(StandardCharsets.UTF_8))
                 .exchange()
-                .expectStatus().isBadRequest();
+                .expectStatus()
+                .isBadRequest();
 
-        verifyNoInteractions(cacheMatchQueryOrchestrator, generalHttpNettyService, lbStatusConsistencyService);
+        verifyNoInteractions(
+                cacheMatchQueryOrchestrator, generalHttpNettyService, lbStatusConsistencyService);
     }
 
     @Test
@@ -167,45 +182,44 @@ class FlexlbControlServerTest {
                 .when(cacheMatchQueryOrchestrator)
                 .applyFailoverAction(CacheMatchFailoverAction.RECOVER_PRIMARY);
 
-        webTestClient.post()
+        webTestClient
+                .post()
                 .uri("/flexlb/cache_match/failover")
                 .contentType(MediaType.APPLICATION_JSON)
-                .bodyValue(Map.of(
-                        "action",
-                        CacheMatchFailoverAction.RECOVER_PRIMARY.name()))
+                .bodyValue(Map.of("action", CacheMatchFailoverAction.RECOVER_PRIMARY.name()))
                 .exchange()
-                .expectStatus().is5xxServerError();
+                .expectStatus()
+                .is5xxServerError();
     }
 
     @Test
     void forwardsCacheMatchFailoverOnFollower() {
         when(lbStatusConsistencyService.isNeedConsistency()).thenReturn(true);
         when(lbStatusConsistencyService.isMaster()).thenReturn(false);
-        when(lbStatusConsistencyService.getMasterHostIpPort())
-                .thenReturn("10.0.0.1:7001");
+        when(lbStatusConsistencyService.getMasterHostIpPort()).thenReturn("10.0.0.1:7001");
         when(generalHttpNettyService.request(
-                any(CacheMatchFailoverRequest.class),
-                any(URI.class),
-                eq("/flexlb/cache_match/failover"),
-                eq(CacheMatchStatus.class)))
+                        any(CacheMatchFailoverRequest.class),
+                        any(URI.class),
+                        eq("/flexlb/cache_match/failover"),
+                        eq(CacheMatchStatus.class)))
                 .thenReturn(Mono.just(cacheMatchStatus()));
 
-        webTestClient.post()
+        webTestClient
+                .post()
                 .uri("/flexlb/cache_match/failover")
                 .contentType(MediaType.APPLICATION_JSON)
-                .bodyValue(Map.of(
-                        "action",
-                        CacheMatchFailoverAction.ACTIVATE_FALLBACK.name()))
+                .bodyValue(Map.of("action", CacheMatchFailoverAction.ACTIVATE_FALLBACK.name()))
                 .exchange()
-                .expectStatus().isOk();
+                .expectStatus()
+                .isOk();
 
-        verify(generalHttpNettyService).request(
-                any(CacheMatchFailoverRequest.class),
-                any(URI.class),
-                eq("/flexlb/cache_match/failover"),
-                eq(CacheMatchStatus.class));
-        verify(cacheMatchQueryOrchestrator, never())
-                .applyFailoverAction(any());
+        verify(generalHttpNettyService)
+                .request(
+                        any(CacheMatchFailoverRequest.class),
+                        any(URI.class),
+                        eq("/flexlb/cache_match/failover"),
+                        eq(CacheMatchStatus.class));
+        verify(cacheMatchQueryOrchestrator, never()).applyFailoverAction(any());
     }
 
     private CacheMatchStatus cacheMatchStatus() {

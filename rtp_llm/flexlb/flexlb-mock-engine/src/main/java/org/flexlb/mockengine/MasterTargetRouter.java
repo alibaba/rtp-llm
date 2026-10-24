@@ -95,16 +95,24 @@ final class MasterTargetRouter {
     static final class ScheduleOutcome {
         /** Master response, or null when no target produced one. */
         final FlexlbScheduleProtocol.FlexlbScheduleResponsePB response;
+
         /** Actually-served (or last-attempted, when none served) target address. */
         final String lastTarget;
+
         /** True when the same request was retried on another target. */
         final boolean failover;
+
         final ErrorKind errorKind;
+
         /** Transport-layer exception of the last UNAVAILABLE attempt (null otherwise). */
         final Exception failure;
 
-        ScheduleOutcome(FlexlbScheduleProtocol.FlexlbScheduleResponsePB response,
-                String lastTarget, boolean failover, ErrorKind errorKind, Exception failure) {
+        ScheduleOutcome(
+                FlexlbScheduleProtocol.FlexlbScheduleResponsePB response,
+                String lastTarget,
+                boolean failover,
+                ErrorKind errorKind,
+                Exception failure) {
             this.response = response;
             this.lastTarget = lastTarget;
             this.failover = failover;
@@ -120,7 +128,9 @@ final class MasterTargetRouter {
         final FlexlbServiceGrpc.FlexlbServiceBlockingStub[] stubs;
         final AtomicInteger rr = new AtomicInteger();
 
-        TargetPool(String target, ManagedChannel[] channels,
+        TargetPool(
+                String target,
+                ManagedChannel[] channels,
                 FlexlbServiceGrpc.FlexlbServiceBlockingStub[] stubs) {
             this.target = target;
             this.channels = channels;
@@ -134,6 +144,7 @@ final class MasterTargetRouter {
     }
 
     private final List<TargetPool> pools;
+
     /** Index into {@link #pools} of the current sticky target. */
     private volatile int sticky;
 
@@ -149,15 +160,16 @@ final class MasterTargetRouter {
             FlexlbServiceGrpc.FlexlbServiceBlockingStub[] stubs =
                     new FlexlbServiceGrpc.FlexlbServiceBlockingStub[nChannels];
             for (int i = 0; i < nChannels; i++) {
-                ManagedChannel channel = NettyChannelBuilder.forTarget(target)
-                        .eventLoopGroup(eventLoopGroup)
-                        .channelType(NioSocketChannel.class)
-                        .maxInboundMessageSize(16 * 1024 * 1024)
-                        .flowControlWindow(1024 * 1024)
-                        .keepAliveTime(30, TimeUnit.SECONDS)
-                        .keepAliveTimeout(10, TimeUnit.SECONDS)
-                        .usePlaintext()
-                        .build();
+                ManagedChannel channel =
+                        NettyChannelBuilder.forTarget(target)
+                                .eventLoopGroup(eventLoopGroup)
+                                .channelType(NioSocketChannel.class)
+                                .maxInboundMessageSize(16 * 1024 * 1024)
+                                .flowControlWindow(1024 * 1024)
+                                .keepAliveTime(30, TimeUnit.SECONDS)
+                                .keepAliveTimeout(10, TimeUnit.SECONDS)
+                                .usePlaintext()
+                                .build();
                 channels[i] = channel;
                 stubs[i] = FlexlbServiceGrpc.newBlockingStub(channel);
             }
@@ -170,7 +182,8 @@ final class MasterTargetRouter {
      * Test constructor: injects stub arrays directly (channels may be null —
      * {@link #shutdown()} skips them).
      */
-    MasterTargetRouter(List<String> targets, List<FlexlbServiceGrpc.FlexlbServiceBlockingStub[]> stubs) {
+    MasterTargetRouter(
+            List<String> targets, List<FlexlbServiceGrpc.FlexlbServiceBlockingStub[]> stubs) {
         this.pools = new ArrayList<>(targets.size());
         for (int i = 0; i < targets.size(); i++) {
             pools.add(new TargetPool(targets.get(i), null, stubs.get(i)));
@@ -187,14 +200,15 @@ final class MasterTargetRouter {
      * flow; the method never throws — every failure is folded into the
      * returned {@link ScheduleOutcome}.
      */
-    ScheduleOutcome schedule(FlexlbScheduleProtocol.FlexlbScheduleRequestPB request, long timeoutMs) {
+    ScheduleOutcome schedule(
+            FlexlbScheduleProtocol.FlexlbScheduleRequestPB request, long timeoutMs) {
         int start = sticky;
         Exception lastFailure = null;
         for (int attempt = 0; attempt < pools.size(); attempt++) {
             int idx = Math.floorMod(start + attempt, pools.size());
             TargetPool pool = pools.get(idx);
-            FlexlbServiceGrpc.FlexlbServiceBlockingStub stub = pool.nextStub()
-                    .withDeadlineAfter(timeoutMs, TimeUnit.MILLISECONDS);
+            FlexlbServiceGrpc.FlexlbServiceBlockingStub stub =
+                    pool.nextStub().withDeadlineAfter(timeoutMs, TimeUnit.MILLISECONDS);
             try {
                 FlexlbScheduleProtocol.FlexlbScheduleResponsePB response = stub.schedule(request);
                 // Any response (code 200 or business error) proves the target
@@ -203,7 +217,8 @@ final class MasterTargetRouter {
                 // practice (idx == sticky) — it only moves when transport
                 // failover delivered us to another target first.
                 sticky = idx;
-                return new ScheduleOutcome(response, pool.target, attempt > 0, ErrorKind.NONE, null);
+                return new ScheduleOutcome(
+                        response, pool.target, attempt > 0, ErrorKind.NONE, null);
             } catch (StatusRuntimeException e) {
                 Status.Code code = e.getStatus().getCode();
                 if (code == Status.Code.UNAVAILABLE) {
@@ -214,8 +229,10 @@ final class MasterTargetRouter {
                 }
                 // DEADLINE_EXCEEDED and every other gRPC status: terminal for
                 // this request — no retry, no switch, no direct fallback.
-                ErrorKind kind = code == Status.Code.DEADLINE_EXCEEDED
-                        ? ErrorKind.DEADLINE : ErrorKind.BUSINESS;
+                ErrorKind kind =
+                        code == Status.Code.DEADLINE_EXCEEDED
+                                ? ErrorKind.DEADLINE
+                                : ErrorKind.BUSINESS;
                 return new ScheduleOutcome(null, pool.target, attempt > 0, kind, e);
             } catch (RuntimeException e) {
                 // Non-gRPC failure: conservative — only UNAVAILABLE retries.
@@ -228,8 +245,12 @@ final class MasterTargetRouter {
         // while the outage lasts, matching the "fallback <= 1 per request"
         // case-test assertions).
         int lastIdx = Math.floorMod(start + pools.size() - 1, pools.size());
-        return new ScheduleOutcome(null, pools.get(lastIdx).target, pools.size() > 1,
-                ErrorKind.TRANSPORT, lastFailure);
+        return new ScheduleOutcome(
+                null,
+                pools.get(lastIdx).target,
+                pools.size() > 1,
+                ErrorKind.TRANSPORT,
+                lastFailure);
     }
 
     /** Shuts down every target pool's channels (no-op for test-constructed pools). */

@@ -28,7 +28,8 @@ public class CacheMetadataUpdateOrchestrator {
         this.configuration = configuration;
         this.localSyncProvider = localSyncProvider;
         this.localStandbyProvider = localStandbyProvider;
-        log.info("Cache metadata update orchestrator initialized: "
+        log.info(
+                "Cache metadata update orchestrator initialized: "
                         + "localSyncEnabled={}, localStandbyEnabled={}",
                 configuration.isLocalSyncEnabled(),
                 configuration.isLocalStandbyEnabled());
@@ -53,8 +54,7 @@ public class CacheMetadataUpdateOrchestrator {
         }
     }
 
-    public void updateFromRoutedRequest(
-            Request request, List<ServerStatus> selectedWorkers) {
+    public void updateFromRoutedRequest(Request request, List<ServerStatus> selectedWorkers) {
         if (configuration.isLocalStandbyEnabled()) {
             localStandbyProvider.updateFromRoutedRequest(request, selectedWorkers);
         }

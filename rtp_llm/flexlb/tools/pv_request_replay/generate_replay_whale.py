@@ -48,7 +48,6 @@ from whale_pv_source import (
     resolve_role_pods,
 )
 
-
 ROOT = Path(__file__).resolve().parent
 DEFAULT_OUTPUT_ROOT = ROOT / "outputs"
 DEFAULT_SERVICE = os.environ.get("FLEXLB_REPLAY_WHALE_SERVICE", "")
@@ -85,9 +84,7 @@ def resolve_pods(args: argparse.Namespace) -> list[WhalePod]:
         deployment_id = resolve_deployment_id(
             default_runner, args.service, args.deployment, args.context
         )
-    pods = resolve_role_pods(
-        default_runner, deployment_id, args.role, args.context
-    )
+    pods = resolve_role_pods(default_runner, deployment_id, args.role, args.context)
     if not args.instance:
         return pods
     wanted = set(args.instance)
@@ -117,7 +114,10 @@ def run_collect(args: argparse.Namespace, output_dir: Path) -> dict[str, Any]:
     )
     whale_manifest.update(
         {
-            "requested_window": {"start": time_text(args.start), "end": time_text(args.end)},
+            "requested_window": {
+                "start": time_text(args.start),
+                "end": time_text(args.end),
+            },
             "collection_window": {
                 "start": time_text(collection_start),
                 "end": time_text(collection_end),
@@ -186,8 +186,12 @@ def add_whale_arguments(parser: argparse.ArgumentParser) -> None:
         help="lines per asicli exec read; lower it if a chunk hits the stdout cap",
     )
     parser.add_argument("--output-dir", type=Path)
-    parser.add_argument("--lead-grace", type=parse_duration, default=timedelta(minutes=5))
-    parser.add_argument("--tail-grace", type=parse_duration, default=timedelta(minutes=10))
+    parser.add_argument(
+        "--lead-grace", type=parse_duration, default=timedelta(minutes=5)
+    )
+    parser.add_argument(
+        "--tail-grace", type=parse_duration, default=timedelta(minutes=10)
+    )
     parser.add_argument("--workers", type=int, default=4)
     parser.add_argument(
         "--strict",

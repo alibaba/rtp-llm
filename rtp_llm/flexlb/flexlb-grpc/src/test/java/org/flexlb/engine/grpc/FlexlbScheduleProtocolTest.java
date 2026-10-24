@@ -33,19 +33,22 @@ class FlexlbScheduleProtocolTest {
         coded.writeString(16, "image");
         coded.flush();
 
-        var request = FlexlbScheduleProtocol.FlexlbScheduleRequestPB.parseFrom(output.toByteArray());
+        var request =
+                FlexlbScheduleProtocol.FlexlbScheduleRequestPB.parseFrom(output.toByteArray());
         assertEquals(java.util.List.of(123L), request.getBlockCacheKeysList());
         assertEquals(4096L, request.getCacheKeyBlockSize());
         assertEquals(java.util.List.of("image"), request.getCacheAffinityKeysList());
         assertEquals(123L, request.getRequestId());
         assertEquals("client-keys", RequestId.parse(request));
-        assertEquals(request, FlexlbScheduleProtocol.FlexlbScheduleRequestPB
-                .parseFrom(request.toByteArray()));
+        assertEquals(
+                request,
+                FlexlbScheduleProtocol.FlexlbScheduleRequestPB.parseFrom(request.toByteArray()));
     }
 
     @Test
     void scheduleContractIsSeparatedButKeepsOriginalWireServiceName() {
-        assertNull(EngineRpcService.getDescriptor().findMessageTypeByName("FlexlbScheduleRequestPB"));
+        assertNull(
+                EngineRpcService.getDescriptor().findMessageTypeByName("FlexlbScheduleRequestPB"));
         assertNull(EngineRpcService.getDescriptor().findServiceByName("FlexlbService"));
 
         var service = FlexlbScheduleProtocol.getDescriptor().findServiceByName("FlexlbService");
@@ -64,16 +67,18 @@ class FlexlbScheduleProtocolTest {
         assertNotNull(preemptionProgress);
         assertEquals("priority_preemption_progress", preemptionProgress.getName());
         assertEquals(Descriptors.FieldDescriptor.Type.ENUM, preemptionProgress.getType());
-        assertEquals(EngineRpcService.PriorityPreemptionProgressPB.PRIORITY_PREEMPTION_NONE,
-                EngineRpcService.TaskInfoPB.getDefaultInstance()
-                        .getPriorityPreemptionProgress());
+        assertEquals(
+                EngineRpcService.PriorityPreemptionProgressPB.PRIORITY_PREEMPTION_NONE,
+                EngineRpcService.TaskInfoPB.getDefaultInstance().getPriorityPreemptionProgress());
         Descriptors.FieldDescriptor taskPriority =
                 EngineRpcService.TaskInfoPB.getDescriptor().findFieldByNumber(15);
         assertEquals("priority", taskPriority.getName());
         assertEquals(Descriptors.FieldDescriptor.Type.INT32, taskPriority.getType());
-        assertEquals(Descriptors.FieldDescriptor.Type.STRING,
+        assertEquals(
+                Descriptors.FieldDescriptor.Type.STRING,
                 EngineRpcService.WorkerStatusPB.getDescriptor().findFieldByNumber(1).getType());
-        assertNull(FlexlbScheduleProtocol.FlexlbServerStatusPB.getDescriptor().findFieldByNumber(5));
+        assertNull(
+                FlexlbScheduleProtocol.FlexlbServerStatusPB.getDescriptor().findFieldByNumber(5));
     }
 
     @Test
@@ -88,12 +93,13 @@ class FlexlbScheduleProtocolTest {
 
         var absent = FlexlbScheduleProtocol.FlexlbServerStatusPB.parseFrom(new byte[0]);
         assertFalse(absent.hasField(field));
-        for (int index : new int[]{0, 1}) {
+        for (int index : new int[] {0, 1}) {
             ByteArrayOutputStream output = new ByteArrayOutputStream();
             CodedOutputStream coded = CodedOutputStream.newInstance(output);
             coded.writeInt32(9, index);
             coded.flush();
-            var parsed = FlexlbScheduleProtocol.FlexlbServerStatusPB.parseFrom(output.toByteArray());
+            var parsed =
+                    FlexlbScheduleProtocol.FlexlbServerStatusPB.parseFrom(output.toByteArray());
             assertTrue(parsed.hasField(field));
             assertEquals(index, parsed.getField(field));
             assertArrayEquals(output.toByteArray(), parsed.toByteArray());
@@ -102,11 +108,12 @@ class FlexlbScheduleProtocolTest {
 
     @Test
     void historicalEmbeddedGenerateInputWireParsesAsOpaquePayload() throws Exception {
-        EngineRpcService.GenerateInputPB input = EngineRpcService.GenerateInputPB.newBuilder()
-                .setRequestId(123L)
-                .addTokenIds(1)
-                .addTokenIds(2)
-                .build();
+        EngineRpcService.GenerateInputPB input =
+                EngineRpcService.GenerateInputPB.newBuilder()
+                        .setRequestId(123L)
+                        .addTokenIds(1)
+                        .addTokenIds(2)
+                        .build();
 
         ByteArrayOutputStream output = new ByteArrayOutputStream();
         CodedOutputStream coded = CodedOutputStream.newInstance(output);
@@ -123,60 +130,79 @@ class FlexlbScheduleProtocolTest {
 
     @Test
     void scheduleRolesAndRequestPhaseHaveStableWireFields() throws Exception {
-        assertEquals(0, FlexlbScheduleProtocol.ScheduleRolePB.SCHEDULE_ROLE_UNSPECIFIED.getNumber());
+        assertEquals(
+                0, FlexlbScheduleProtocol.ScheduleRolePB.SCHEDULE_ROLE_UNSPECIFIED.getNumber());
         assertEquals(1, FlexlbScheduleProtocol.ScheduleRolePB.SCHEDULE_ROLE_ENCODER.getNumber());
         assertEquals(2, FlexlbScheduleProtocol.ScheduleRolePB.SCHEDULE_ROLE_PREFILL.getNumber());
         assertEquals(3, FlexlbScheduleProtocol.ScheduleRolePB.SCHEDULE_ROLE_DECODE.getNumber());
         assertEquals(4, FlexlbScheduleProtocol.ScheduleRolePB.SCHEDULE_ROLE_PDFUSION.getNumber());
-        var schedule = FlexlbScheduleProtocol.FlexlbScheduleRequestPB.newBuilder()
-                .setRequestIdStr("request-1")
-                .addScheduleRoles(FlexlbScheduleProtocol.ScheduleRolePB.SCHEDULE_ROLE_ENCODER)
-                .addScheduleRoles(FlexlbScheduleProtocol.ScheduleRolePB.SCHEDULE_ROLE_PREFILL)
-                .build();
-        assertEquals(19, schedule.getDescriptorForType()
-                .findFieldByName("schedule_roles").getNumber());
-        assertEquals(schedule.getScheduleRolesList(),
+        var schedule =
+                FlexlbScheduleProtocol.FlexlbScheduleRequestPB.newBuilder()
+                        .setRequestIdStr("request-1")
+                        .addScheduleRoles(
+                                FlexlbScheduleProtocol.ScheduleRolePB.SCHEDULE_ROLE_ENCODER)
+                        .addScheduleRoles(
+                                FlexlbScheduleProtocol.ScheduleRolePB.SCHEDULE_ROLE_PREFILL)
+                        .build();
+        assertEquals(
+                19, schedule.getDescriptorForType().findFieldByName("schedule_roles").getNumber());
+        assertEquals(
+                schedule.getScheduleRolesList(),
                 FlexlbScheduleProtocol.FlexlbScheduleRequestPB.parseFrom(schedule.toByteArray())
                         .getScheduleRolesList());
 
-        var cancel = FlexlbScheduleProtocol.FlexlbCancelRequestPB.newBuilder()
-                .setPhase(FlexlbScheduleProtocol.RequestPhasePB.REQUEST_PHASE_ENCODER)
-                .build();
+        var cancel =
+                FlexlbScheduleProtocol.FlexlbCancelRequestPB.newBuilder()
+                        .setPhase(FlexlbScheduleProtocol.RequestPhasePB.REQUEST_PHASE_ENCODER)
+                        .build();
         assertEquals(5, cancel.getDescriptorForType().findFieldByName("phase").getNumber());
-        assertEquals(cancel.getPhase(), FlexlbScheduleProtocol.FlexlbCancelRequestPB
-                .parseFrom(cancel.toByteArray()).getPhase());
-        assertEquals(FlexlbScheduleProtocol.RequestPhasePB.REQUEST_PHASE_UNSPECIFIED,
+        assertEquals(
+                cancel.getPhase(),
+                FlexlbScheduleProtocol.FlexlbCancelRequestPB.parseFrom(cancel.toByteArray())
+                        .getPhase());
+        assertEquals(
+                FlexlbScheduleProtocol.RequestPhasePB.REQUEST_PHASE_UNSPECIFIED,
                 FlexlbScheduleProtocol.FlexlbCancelRequestPB.getDefaultInstance().getPhase());
 
-        var query = FlexlbScheduleProtocol.GetRequestStateRequestPB.newBuilder()
-                .setPhase(FlexlbScheduleProtocol.RequestPhasePB.REQUEST_PHASE_GENERATION)
-                .build();
+        var query =
+                FlexlbScheduleProtocol.GetRequestStateRequestPB.newBuilder()
+                        .setPhase(FlexlbScheduleProtocol.RequestPhasePB.REQUEST_PHASE_GENERATION)
+                        .build();
         assertEquals(4, query.getDescriptorForType().findFieldByName("phase").getNumber());
-        assertEquals(query.getPhase(), FlexlbScheduleProtocol.GetRequestStateRequestPB
-                .parseFrom(query.toByteArray()).getPhase());
+        assertEquals(
+                query.getPhase(),
+                FlexlbScheduleProtocol.GetRequestStateRequestPB.parseFrom(query.toByteArray())
+                        .getPhase());
     }
 
     @Test
     void encoderCacheHitLengthDistinguishesOmittedFromKnownZero() throws Exception {
-        var omitted = FlexlbScheduleProtocol.FlexlbScheduleRequestPB.newBuilder()
-                .setSeqLen(1000)
-                .build();
-        var knownMiss = FlexlbScheduleProtocol.FlexlbScheduleRequestPB.newBuilder()
-                .setSeqLen(1000)
-                .setEncoderCacheHitLen(0)
-                .build();
-        var partialHit = FlexlbScheduleProtocol.FlexlbScheduleRequestPB.newBuilder()
-                .setSeqLen(1000)
-                .setEncoderCacheHitLen(200)
-                .build();
+        var omitted =
+                FlexlbScheduleProtocol.FlexlbScheduleRequestPB.newBuilder().setSeqLen(1000).build();
+        var knownMiss =
+                FlexlbScheduleProtocol.FlexlbScheduleRequestPB.newBuilder()
+                        .setSeqLen(1000)
+                        .setEncoderCacheHitLen(0)
+                        .build();
+        var partialHit =
+                FlexlbScheduleProtocol.FlexlbScheduleRequestPB.newBuilder()
+                        .setSeqLen(1000)
+                        .setEncoderCacheHitLen(200)
+                        .build();
 
         assertFalse(omitted.hasEncoderCacheHitLen());
-        assertTrue(FlexlbScheduleProtocol.FlexlbScheduleRequestPB.parseFrom(knownMiss.toByteArray())
-                .hasEncoderCacheHitLen());
-        assertEquals(200, FlexlbScheduleProtocol.FlexlbScheduleRequestPB.parseFrom(partialHit.toByteArray())
-                .getEncoderCacheHitLen());
-        assertEquals(20, partialHit.getDescriptorForType()
-                .findFieldByName("encoder_cache_hit_len").getNumber());
+        assertTrue(
+                FlexlbScheduleProtocol.FlexlbScheduleRequestPB.parseFrom(knownMiss.toByteArray())
+                        .hasEncoderCacheHitLen());
+        assertEquals(
+                200,
+                FlexlbScheduleProtocol.FlexlbScheduleRequestPB.parseFrom(partialHit.toByteArray())
+                        .getEncoderCacheHitLen());
+        assertEquals(
+                20,
+                partialHit
+                        .getDescriptorForType()
+                        .findFieldByName("encoder_cache_hit_len")
+                        .getNumber());
     }
-
 }

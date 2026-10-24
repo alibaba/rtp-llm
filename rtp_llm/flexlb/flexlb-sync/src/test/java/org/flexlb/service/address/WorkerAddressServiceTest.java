@@ -39,21 +39,18 @@ import static org.mockito.Mockito.when;
 @ExtendWith(MockitoExtension.class)
 class WorkerAddressServiceTest {
 
-    @Mock
-    private EngineHealthReporter engineHealthReporter;
-    @Mock
-    private ModelMetaConfig modelMetaConfig;
-    @Mock
-    private ServiceDiscovery serviceDiscovery;
-    @Mock
-    private ConfigService configService;
+    @Mock private EngineHealthReporter engineHealthReporter;
+    @Mock private ModelMetaConfig modelMetaConfig;
+    @Mock private ServiceDiscovery serviceDiscovery;
+    @Mock private ConfigService configService;
     private WorkerAddressService workerAddressService;
 
     @BeforeEach
     void setUp() {
         when(configService.loadBalanceConfig()).thenReturn(SchedulingTestConfig.newConfig());
-        workerAddressService = new WorkerAddressService(engineHealthReporter, modelMetaConfig,
-                serviceDiscovery, configService);
+        workerAddressService =
+                new WorkerAddressService(
+                        engineHealthReporter, modelMetaConfig, serviceDiscovery, configService);
     }
 
     @AfterEach
@@ -65,7 +62,8 @@ class WorkerAddressServiceTest {
     void firstDiscoveryWithoutCacheReturnsNoWorkers() {
         Endpoint endpoint = endpoint("vip");
         configure(endpoint);
-        when(serviceDiscovery.getHosts(endpoint)).thenReturn(List.of())
+        when(serviceDiscovery.getHosts(endpoint))
+                .thenReturn(List.of())
                 .thenThrow(new IllegalStateException("unreachable"));
         assertTrue(refresh().isEmpty());
         assertTrue(refresh().isEmpty());
@@ -93,15 +91,18 @@ class WorkerAddressServiceTest {
         Endpoint endpoint = endpoint("vip");
         configure(endpoint);
         List<WorkerHost> hosts = List.of(WorkerHost.of("10.0.0.1", 8080));
-        when(serviceDiscovery.getHosts(endpoint)).thenReturn(hosts)
+        when(serviceDiscovery.getHosts(endpoint))
+                .thenReturn(hosts)
                 .thenThrow(new IllegalStateException("unreachable"));
 
         assertEquals(hosts, refresh());
         assertEquals(hosts, refresh());
-        verify(engineHealthReporter).reportStatusCheckerFail(
-                BalanceStatusEnum.SERVICE_DISCOVERY_ERROR, null);
-        verify(engineHealthReporter).reportRawServiceDiscoveryHostCount("model", RoleType.PREFILL, 1);
-        verify(engineHealthReporter, never()).reportRawServiceDiscoveryHostCount("model", RoleType.PREFILL, 0);
+        verify(engineHealthReporter)
+                .reportStatusCheckerFail(BalanceStatusEnum.SERVICE_DISCOVERY_ERROR, null);
+        verify(engineHealthReporter)
+                .reportRawServiceDiscoveryHostCount("model", RoleType.PREFILL, 1);
+        verify(engineHealthReporter, never())
+                .reportRawServiceDiscoveryHostCount("model", RoleType.PREFILL, 0);
     }
 
     @Test
@@ -114,8 +115,10 @@ class WorkerAddressServiceTest {
         assertEquals(hosts, refresh());
         assertEquals(hosts, refresh());
 
-        verify(engineHealthReporter).reportRawServiceDiscoveryHostCount("model", RoleType.PREFILL, 1);
-        verify(engineHealthReporter).reportRawServiceDiscoveryHostCount("model", RoleType.PREFILL, 0);
+        verify(engineHealthReporter)
+                .reportRawServiceDiscoveryHostCount("model", RoleType.PREFILL, 1);
+        verify(engineHealthReporter)
+                .reportRawServiceDiscoveryHostCount("model", RoleType.PREFILL, 0);
     }
 
     @Test
@@ -129,27 +132,31 @@ class WorkerAddressServiceTest {
         assertEquals(oldHosts, refresh());
         CountDownLatch release = new CountDownLatch(1);
         CountDownLatch interrupted = new CountDownLatch(1);
-        when(serviceDiscovery.getHosts(endpoint)).thenAnswer(ignored -> {
-            try {
-                assertTrue(release.await(5, TimeUnit.SECONDS));
-            } catch (InterruptedException expected) {
-                interrupted.countDown();
-                assertTrue(release.await(5, TimeUnit.SECONDS));
-            }
-            return lateHosts;
-        });
+        when(serviceDiscovery.getHosts(endpoint))
+                .thenAnswer(
+                        ignored -> {
+                            try {
+                                assertTrue(release.await(5, TimeUnit.SECONDS));
+                            } catch (InterruptedException expected) {
+                                interrupted.countDown();
+                                assertTrue(release.await(5, TimeUnit.SECONDS));
+                            }
+                            return lateHosts;
+                        });
         try {
             assertEquals(oldHosts, refresh());
             assertTrue(interrupted.await(5, TimeUnit.SECONDS));
-            verify(engineHealthReporter).reportStatusCheckerFail(
-                    BalanceStatusEnum.SERVICE_DISCOVERY_TIMEOUT, null);
+            verify(engineHealthReporter)
+                    .reportStatusCheckerFail(BalanceStatusEnum.SERVICE_DISCOVERY_TIMEOUT, null);
             doReturn(recoveredHosts).when(serviceDiscovery).getHosts(endpoint);
             assertEquals(recoveredHosts, refresh());
         } finally {
             release.countDown();
             workerAddressService.destroy();
-            ThreadPoolExecutor executor = (ThreadPoolExecutor) ReflectionTestUtils.getField(
-                    workerAddressService, "serviceDiscoveryExecutor");
+            ThreadPoolExecutor executor =
+                    (ThreadPoolExecutor)
+                            ReflectionTestUtils.getField(
+                                    workerAddressService, "serviceDiscoveryExecutor");
             assertTrue(executor.awaitTermination(5, TimeUnit.SECONDS));
         }
         // A rejected query reads the cache after the late task has finished.
@@ -163,26 +170,29 @@ class WorkerAddressServiceTest {
         List<WorkerHost> hosts = List.of(WorkerHost.of("10.0.0.1", 8080));
         when(serviceDiscovery.getHosts(endpoint)).thenReturn(hosts);
         assertEquals(hosts, refresh());
-        ThreadPoolExecutor executor = (ThreadPoolExecutor) ReflectionTestUtils.getField(
-                workerAddressService, "serviceDiscoveryExecutor");
+        ThreadPoolExecutor executor =
+                (ThreadPoolExecutor)
+                        ReflectionTestUtils.getField(
+                                workerAddressService, "serviceDiscoveryExecutor");
         executor.setCorePoolSize(1);
         executor.setMaximumPoolSize(1);
         CountDownLatch started = new CountDownLatch(1);
         CountDownLatch release = new CountDownLatch(1);
-        executor.submit(() -> {
-            started.countDown();
-            assertTrue(release.await(5, TimeUnit.SECONDS));
-            return null;
-        });
+        executor.submit(
+                () -> {
+                    started.countDown();
+                    assertTrue(release.await(5, TimeUnit.SECONDS));
+                    return null;
+                });
         try {
             assertTrue(started.await(5, TimeUnit.SECONDS));
-            while (executor.getQueue().offer(() -> { })) {
+            while (executor.getQueue().offer(() -> {})) {
                 // Fill the bounded queue while its only worker is occupied.
             }
             assertEquals(hosts, refresh());
             verify(serviceDiscovery).getHosts(endpoint);
-            verify(engineHealthReporter).reportStatusCheckerFail(
-                    BalanceStatusEnum.SERVICE_DISCOVERY_ERROR, null);
+            verify(engineHealthReporter)
+                    .reportStatusCheckerFail(BalanceStatusEnum.SERVICE_DISCOVERY_ERROR, null);
         } finally {
             executor.getQueue().clear();
             release.countDown();
@@ -197,11 +207,13 @@ class WorkerAddressServiceTest {
         when(serviceDiscovery.getHosts(endpoint)).thenReturn(hosts);
         assertEquals(hosts, refresh());
         Thread refreshThread = Thread.currentThread();
-        when(serviceDiscovery.getHosts(endpoint)).thenAnswer(ignored -> {
-            refreshThread.interrupt();
-            new CountDownLatch(1).await(5, TimeUnit.SECONDS);
-            return List.of();
-        });
+        when(serviceDiscovery.getHosts(endpoint))
+                .thenAnswer(
+                        ignored -> {
+                            refreshThread.interrupt();
+                            new CountDownLatch(1).await(5, TimeUnit.SECONDS);
+                            return List.of();
+                        });
         try {
             assertEquals(hosts, refresh());
             assertTrue(Thread.currentThread().isInterrupted());
@@ -223,8 +235,10 @@ class WorkerAddressServiceTest {
 
         assertEquals(List.of(a, b), refresh());
         assertEquals(List.of(a, c), refresh());
-        verify(engineHealthReporter).reportRawServiceDiscoveryHostCount("model", RoleType.PREFILL, 2);
-        verify(engineHealthReporter).reportRawServiceDiscoveryHostCount("model", RoleType.PREFILL, 1);
+        verify(engineHealthReporter)
+                .reportRawServiceDiscoveryHostCount("model", RoleType.PREFILL, 2);
+        verify(engineHealthReporter)
+                .reportRawServiceDiscoveryHostCount("model", RoleType.PREFILL, 1);
     }
 
     @Test
@@ -254,7 +268,8 @@ class WorkerAddressServiceTest {
         configure(first, second);
         WorkerHost a = new WorkerHost("10.0.0.1", 8080, 8081, 8085, "site", "group-a");
         WorkerHost b = new WorkerHost("10.0.0.1", 8080, 8081, 8085, 18002, "site", "group-b", "");
-        when(serviceDiscovery.getHosts(first)).thenReturn(List.of(), List.of(), List.of(), List.of(a));
+        when(serviceDiscovery.getHosts(first))
+                .thenReturn(List.of(), List.of(), List.of(), List.of(a));
         when(serviceDiscovery.getHosts(second)).thenReturn(List.of(), List.of(b));
 
         Logger logger = (Logger) LoggerFactory.getLogger("syncLogger");
@@ -265,25 +280,39 @@ class WorkerAddressServiceTest {
         logger.setLevel(Level.INFO);
         try {
             assertTrue(refresh().isEmpty());
-            assertEquals(List.of("group-a", "group-b"), events.list.stream()
-                    .filter(event -> event.getLevel() == Level.WARN)
-                    .map(event -> event.getArgumentArray()[2])
-                    .toList());
+            assertEquals(
+                    List.of("group-a", "group-b"),
+                    events.list.stream()
+                            .filter(event -> event.getLevel() == Level.WARN)
+                            .map(event -> event.getArgumentArray()[2])
+                            .toList());
 
             assertEquals(List.of(b), refresh());
             assertEquals(List.of(b), refresh());
-            assertEquals(2L, events.list.stream().filter(event -> event.getLevel() == Level.WARN).count(),
+            assertEquals(
+                    2L,
+                    events.list.stream().filter(event -> event.getLevel() == Level.WARN).count(),
                     "recovering another endpoint must not reset an empty endpoint's warning deadline");
-            assertEquals(List.of("group-b"), events.list.stream()
-                    .filter(event -> event.getFormattedMessage().startsWith("Worker discovery recovered"))
-                    .map(event -> event.getArgumentArray()[2])
-                    .toList());
+            assertEquals(
+                    List.of("group-b"),
+                    events.list.stream()
+                            .filter(
+                                    event ->
+                                            event.getFormattedMessage()
+                                                    .startsWith("Worker discovery recovered"))
+                            .map(event -> event.getArgumentArray()[2])
+                            .toList());
 
             assertEquals(List.of(a, b), refresh());
-            assertEquals(List.of("group-b", "group-a"), events.list.stream()
-                    .filter(event -> event.getFormattedMessage().startsWith("Worker discovery recovered"))
-                    .map(event -> event.getArgumentArray()[2])
-                    .toList());
+            assertEquals(
+                    List.of("group-b", "group-a"),
+                    events.list.stream()
+                            .filter(
+                                    event ->
+                                            event.getFormattedMessage()
+                                                    .startsWith("Worker discovery recovered"))
+                            .map(event -> event.getArgumentArray()[2])
+                            .toList());
         } finally {
             logger.detachAppender(events);
             logger.setLevel(originalLevel);
@@ -307,7 +336,8 @@ class WorkerAddressServiceTest {
     void explicitlyRemovedEndpointDoesNotReuseDiscoveryCache() {
         Endpoint endpoint = endpoint("vip");
         configure(endpoint);
-        when(serviceDiscovery.getHosts(endpoint)).thenReturn(List.of(WorkerHost.of("10.0.0.1", 8080)));
+        when(serviceDiscovery.getHosts(endpoint))
+                .thenReturn(List.of(WorkerHost.of("10.0.0.1", 8080)));
         assertEquals(1, refresh().size());
         configure();
         assertTrue(refresh().isEmpty());
@@ -315,7 +345,10 @@ class WorkerAddressServiceTest {
 
     private void configure(Endpoint... endpoints) {
         when(modelMetaConfig.endpointsWithGroup("model", RoleType.PREFILL))
-                .thenReturn(Arrays.stream(endpoints).map(endpoint -> Pair.of(endpoint.getGroup(), endpoint)).toList());
+                .thenReturn(
+                        Arrays.stream(endpoints)
+                                .map(endpoint -> Pair.of(endpoint.getGroup(), endpoint))
+                                .toList());
     }
 
     private List<WorkerHost> refresh() {

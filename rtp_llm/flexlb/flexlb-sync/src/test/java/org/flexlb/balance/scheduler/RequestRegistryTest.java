@@ -61,10 +61,9 @@ class RequestRegistryTest {
         ConfigService configService = mock(ConfigService.class);
         when(configService.loadBalanceConfig()).thenReturn(config);
         requestReporter = mock(RequestSchedulerReporter.class);
-        lifecycle = new RequestRegistry(
-                configService,
-                mock(BatchSchedulerReporter.class),
-                requestReporter);
+        lifecycle =
+                new RequestRegistry(
+                        configService, mock(BatchSchedulerReporter.class), requestReporter);
     }
 
     @AfterEach
@@ -90,12 +89,14 @@ class RequestRegistryTest {
 
         for (var response : responses.entrySet()) {
             String requestId = response.getKey();
-            RequestState cancelled = lifecycle.cancelRequest(requestId, 0L, CancelReason.CLIENT_CANCELLED);
+            RequestState cancelled =
+                    lifecycle.cancelRequest(requestId, 0L, CancelReason.CLIENT_CANCELLED);
             assertEquals(requestId, cancelled.requestId());
-            assertEquals(StrategyErrorType.REQUEST_CANCELLED.getErrorCode(),
+            assertEquals(
+                    StrategyErrorType.REQUEST_CANCELLED.getErrorCode(),
                     response.getValue().get(5, TimeUnit.SECONDS).getCode());
-            assertEquals(RequestState.Phase.CANCELLED,
-                    lifecycle.getRequestState(requestId, 0L).state());
+            assertEquals(
+                    RequestState.Phase.CANCELLED, lifecycle.getRequestState(requestId, 0L).state());
         }
         assertEquals(0, lifecycle.trackedRequestCount());
     }
@@ -134,8 +135,7 @@ class RequestRegistryTest {
 
         assertFalse(canonical.isDone());
         assertTrue(duplicate.isDone());
-        assertEquals(StrategyErrorType.INVALID_REQUEST.getErrorCode(),
-                duplicate.join().getCode());
+        assertEquals(StrategyErrorType.INVALID_REQUEST.getErrorCode(), duplicate.join().getCode());
         assertSame(canonical, lifecycle.requestSlot("101").future());
         assertEquals(1, lifecycle.trackedRequestCount());
     }
@@ -154,17 +154,17 @@ class RequestRegistryTest {
         assertEquals(1, lifecycle.trackedRequestStats().encoderRequests());
         assertEquals(1, lifecycle.trackedRequestCount(RequestPhase.ENCODER));
         assertEquals(1, lifecycle.trackedRequestCount(RequestPhase.GENERATION));
-        assertEquals(RequestState.Phase.QUEUED,
+        assertEquals(
+                RequestState.Phase.QUEUED,
                 lifecycle.getRequestState("106", 0L, RequestPhase.ENCODER).state());
-        assertEquals(RequestState.Phase.QUEUED,
-                lifecycle.getRequestState("106", 0L).state());
+        assertEquals(RequestState.Phase.QUEUED, lifecycle.getRequestState("106", 0L).state());
 
         lifecycle.cancelRequest("106", 0L, CancelReason.CLIENT_CANCELLED, RequestPhase.ENCODER);
 
-        assertEquals(RequestState.Phase.CANCELLED,
+        assertEquals(
+                RequestState.Phase.CANCELLED,
                 lifecycle.getRequestState("106", 0L, RequestPhase.ENCODER).state());
-        assertEquals(RequestState.Phase.QUEUED,
-                lifecycle.getRequestState("106", 0L).state());
+        assertEquals(RequestState.Phase.QUEUED, lifecycle.getRequestState("106", 0L).state());
         assertFalse(generationFuture.isDone());
         assertEquals(0, lifecycle.trackedRequestCount(RequestPhase.ENCODER));
         assertEquals(0, lifecycle.trackedRequestStats().encoderRequests());
@@ -179,15 +179,20 @@ class RequestRegistryTest {
         CompletableFuture<Response> encoderFuture = lifecycle.register(encoder);
         CompletableFuture<Response> generationFuture = lifecycle.register(context(111L));
 
-        assertTrue(lifecycle.publishDecisionResponseAsync("111", encoderFuture,
-                Response.error(StrategyErrorType.NO_ENCODER_WORKER), RequestPhase.ENCODER));
+        assertTrue(
+                lifecycle.publishDecisionResponseAsync(
+                        "111",
+                        encoderFuture,
+                        Response.error(StrategyErrorType.NO_ENCODER_WORKER),
+                        RequestPhase.ENCODER));
 
-        assertEquals(StrategyErrorType.NO_ENCODER_WORKER.getErrorCode(),
+        assertEquals(
+                StrategyErrorType.NO_ENCODER_WORKER.getErrorCode(),
                 encoderFuture.get(5, TimeUnit.SECONDS).getCode());
-        assertEquals(RequestState.Phase.FAILED,
+        assertEquals(
+                RequestState.Phase.FAILED,
                 lifecycle.getRequestState("111", 0L, RequestPhase.ENCODER).state());
-        assertEquals(RequestState.Phase.QUEUED,
-                lifecycle.getRequestState("111", 0L).state());
+        assertEquals(RequestState.Phase.QUEUED, lifecycle.getRequestState("111", 0L).state());
         assertFalse(generationFuture.isDone());
     }
 
@@ -197,7 +202,8 @@ class RequestRegistryTest {
         context.setRequestPhase(RequestPhase.ENCODER);
         CompletableFuture<Response> future = lifecycle.register(context);
         WorkerStatus worker = mock(WorkerStatus.class);
-        EncoderEndpoint endpoint = new EncoderEndpoint(worker, new EndpointEventProjector(lifecycle));
+        EncoderEndpoint endpoint =
+                new EncoderEndpoint(worker, new EndpointEventProjector(lifecycle));
         Response route = new Response();
         route.setSuccess(true);
 
@@ -206,12 +212,14 @@ class RequestRegistryTest {
         }
         assertEquals(1, endpoint.pendingEncoderRequestCount());
         assertFalse(future.isDone());
-        assertEquals(RequestState.Phase.DISPATCHING,
+        assertEquals(
+                RequestState.Phase.DISPATCHING,
                 lifecycle.getRequestState("107", 0L, RequestPhase.ENCODER).state());
 
         assertTrue(lifecycle.publishEncoderRoute("107", future, route));
         assertTrue(future.get(5, TimeUnit.SECONDS).isSuccess());
-        assertEquals(RequestState.Phase.ACKNOWLEDGED,
+        assertEquals(
+                RequestState.Phase.ACKNOWLEDGED,
                 lifecycle.getRequestState("107", 0L, RequestPhase.ENCODER).state());
 
         WorkerStatus.TaskObservation task = mock(WorkerStatus.TaskObservation.class);
@@ -222,7 +230,8 @@ class RequestRegistryTest {
         endpoint.observeStatusHeartbeat(worker, running).run();
 
         assertEquals(0, endpoint.pendingEncoderRequestCount());
-        assertEquals(RequestState.Phase.ACKNOWLEDGED,
+        assertEquals(
+                RequestState.Phase.ACKNOWLEDGED,
                 lifecycle.getRequestState("107", 0L, RequestPhase.ENCODER).state());
 
         WorkerStatus.StatusObservation finished = mock(WorkerStatus.StatusObservation.class);
@@ -233,7 +242,8 @@ class RequestRegistryTest {
         when(prepared.observation()).thenReturn(finished);
         endpoint.applyPreparedStatus(worker, prepared).run();
 
-        assertEquals(RequestState.Phase.COMPLETED,
+        assertEquals(
+                RequestState.Phase.COMPLETED,
                 lifecycle.getRequestState("107", 0L, RequestPhase.ENCODER).state());
         assertEquals(0, endpoint.pendingEncoderRequestCount());
     }
@@ -249,7 +259,8 @@ class RequestRegistryTest {
         WorkerStatus.EngineObservation engine = mock(WorkerStatus.EngineObservation.class);
         when(worker.committedEngineObservation()).thenReturn(engine);
         when(engine.runningTaskList()).thenReturn(Map.of());
-        EncoderEndpoint endpoint = new EncoderEndpoint(worker, new EndpointEventProjector(lifecycle));
+        EncoderEndpoint endpoint =
+                new EncoderEndpoint(worker, new EndpointEventProjector(lifecycle));
 
         try (var pin = endpoint.tryPinGeneration()) {
             assertTrue(lifecycle.claimEncoderRoute("109", future, pin));
@@ -290,7 +301,8 @@ class RequestRegistryTest {
         WorkerStatus.EngineObservation engine = mock(WorkerStatus.EngineObservation.class);
         when(worker.committedEngineObservation()).thenReturn(engine);
         when(engine.runningTaskList()).thenReturn(Map.of());
-        EncoderEndpoint endpoint = new EncoderEndpoint(worker, new EndpointEventProjector(lifecycle));
+        EncoderEndpoint endpoint =
+                new EncoderEndpoint(worker, new EndpointEventProjector(lifecycle));
 
         try (var pin = endpoint.tryPinGeneration()) {
             assertTrue(lifecycle.claimEncoderRoute("110", future, pin));
@@ -309,24 +321,28 @@ class RequestRegistryTest {
         endpoint.applyPreparedStatus(worker, prepared).run();
 
         assertEquals(0L, endpoint.inflightUncachedTokenEstimate());
-        assertEquals(RequestState.Phase.COMPLETED,
+        assertEquals(
+                RequestState.Phase.COMPLETED,
                 lifecycle.getRequestState("110", 0L, RequestPhase.ENCODER).state());
     }
 
     @Test
     void concurrentEncoderSelectionsKeepEveryPendingRequest() throws Exception {
-        EncoderEndpoint endpoint = new EncoderEndpoint(mock(WorkerStatus.class),
-                new EndpointEventProjector(lifecycle));
+        EncoderEndpoint endpoint =
+                new EncoderEndpoint(
+                        mock(WorkerStatus.class), new EndpointEventProjector(lifecycle));
         int requestCount = 32;
         CountDownLatch start = new CountDownLatch(1);
         try (var executor = Executors.newFixedThreadPool(8)) {
             List<Future<Boolean>> selected = new ArrayList<>();
             for (int index = 0; index < requestCount; index++) {
                 String requestId = "encoder-" + index;
-                selected.add(executor.submit(() -> {
-                    start.await();
-                    return endpoint.trackSelectedRequest(requestId, 0L);
-                }));
+                selected.add(
+                        executor.submit(
+                                () -> {
+                                    start.await();
+                                    return endpoint.trackSelectedRequest(requestId, 0L);
+                                }));
             }
             start.countDown();
             for (Future<Boolean> result : selected) {
@@ -344,7 +360,8 @@ class RequestRegistryTest {
     @Test
     void encoderStatusAndCleanupRaceCannotDoubleReleasePendingRequest() throws Exception {
         WorkerStatus worker = mock(WorkerStatus.class);
-        EncoderEndpoint endpoint = new EncoderEndpoint(worker, new EndpointEventProjector(lifecycle));
+        EncoderEndpoint endpoint =
+                new EncoderEndpoint(worker, new EndpointEventProjector(lifecycle));
         try (var executor = Executors.newFixedThreadPool(2)) {
             for (int index = 0; index < 32; index++) {
                 String requestId = "encoder-race-" + index;
@@ -355,16 +372,20 @@ class RequestRegistryTest {
                 when(status.owner()).thenReturn(worker);
                 when(status.activeTasks()).thenReturn(Map.of(requestId, task));
                 CountDownLatch start = new CountDownLatch(1);
-                Future<?> observed = executor.submit(() -> {
-                    start.await();
-                    endpoint.observeStatusHeartbeat(worker, status).run();
-                    return null;
-                });
-                Future<?> forgotten = executor.submit(() -> {
-                    start.await();
-                    endpoint.forgetRequest(requestId);
-                    return null;
-                });
+                Future<?> observed =
+                        executor.submit(
+                                () -> {
+                                    start.await();
+                                    endpoint.observeStatusHeartbeat(worker, status).run();
+                                    return null;
+                                });
+                Future<?> forgotten =
+                        executor.submit(
+                                () -> {
+                                    start.await();
+                                    endpoint.forgetRequest(requestId);
+                                    return null;
+                                });
                 start.countDown();
                 observed.get(5, TimeUnit.SECONDS);
                 forgotten.get(5, TimeUnit.SECONDS);
@@ -380,7 +401,8 @@ class RequestRegistryTest {
         CompletableFuture<Response> encoderFuture = lifecycle.register(context);
         CompletableFuture<Response> generationFuture = lifecycle.register(context(108L));
         WorkerStatus worker = mock(WorkerStatus.class);
-        EncoderEndpoint endpoint = new EncoderEndpoint(worker, new EndpointEventProjector(lifecycle));
+        EncoderEndpoint endpoint =
+                new EncoderEndpoint(worker, new EndpointEventProjector(lifecycle));
         Response route = new Response();
         route.setSuccess(true);
         try (var pin = endpoint.tryPinGeneration()) {
@@ -391,10 +413,10 @@ class RequestRegistryTest {
         endpoint.close();
         endpoint.awaitRetirement();
 
-        assertEquals(RequestState.Phase.FAILED,
+        assertEquals(
+                RequestState.Phase.FAILED,
                 lifecycle.getRequestState("108", 0L, RequestPhase.ENCODER).state());
-        assertEquals(RequestState.Phase.QUEUED,
-                lifecycle.getRequestState("108", 0L).state());
+        assertEquals(RequestState.Phase.QUEUED, lifecycle.getRequestState("108", 0L).state());
         assertEquals(0, endpoint.pendingEncoderRequestCount());
         assertFalse(generationFuture.isDone());
     }
@@ -405,7 +427,8 @@ class RequestRegistryTest {
         failedContext.setRequestPhase(RequestPhase.ENCODER);
         CompletableFuture<Response> failedFuture = lifecycle.register(failedContext);
         WorkerStatus failedWorker = mock(WorkerStatus.class);
-        EncoderEndpoint failedEndpoint = new EncoderEndpoint(failedWorker, new EndpointEventProjector(lifecycle));
+        EncoderEndpoint failedEndpoint =
+                new EncoderEndpoint(failedWorker, new EndpointEventProjector(lifecycle));
         Response route = new Response();
         route.setSuccess(true);
         try (var pin = failedEndpoint.tryPinGeneration()) {
@@ -423,7 +446,8 @@ class RequestRegistryTest {
         WorkerStatus.PreparedStatus prepared = mock(WorkerStatus.PreparedStatus.class);
         when(prepared.observation()).thenReturn(failed);
         failedEndpoint.applyPreparedStatus(failedWorker, prepared).run();
-        assertEquals(RequestState.Phase.FAILED,
+        assertEquals(
+                RequestState.Phase.FAILED,
                 lifecycle.getRequestState("109", 0L, RequestPhase.ENCODER).state());
         assertEquals(0, failedEndpoint.pendingEncoderRequestCount());
 
@@ -431,14 +455,17 @@ class RequestRegistryTest {
         inactiveContext.setRequestPhase(RequestPhase.ENCODER);
         CompletableFuture<Response> inactiveFuture = lifecycle.register(inactiveContext);
         WorkerStatus inactiveWorker = mock(WorkerStatus.class);
-        EncoderEndpoint inactiveEndpoint = new EncoderEndpoint(inactiveWorker, new EndpointEventProjector(lifecycle));
+        EncoderEndpoint inactiveEndpoint =
+                new EncoderEndpoint(inactiveWorker, new EndpointEventProjector(lifecycle));
         try (var pin = inactiveEndpoint.tryPinGeneration()) {
             assertTrue(lifecycle.claimEncoderRoute("110", inactiveFuture, pin));
         }
         assertTrue(lifecycle.publishEncoderRoute("110", inactiveFuture, route));
         inactiveFuture.get(5, TimeUnit.SECONDS);
-        lifecycle.expireInactiveRequest(lifecycle.requestSlot("110", RequestPhase.ENCODER), Long.MAX_VALUE);
-        assertEquals(RequestState.Phase.TIMED_OUT,
+        lifecycle.expireInactiveRequest(
+                lifecycle.requestSlot("110", RequestPhase.ENCODER), Long.MAX_VALUE);
+        assertEquals(
+                RequestState.Phase.TIMED_OUT,
                 lifecycle.getRequestState("110", 0L, RequestPhase.ENCODER).state());
         assertEquals(0, inactiveEndpoint.pendingEncoderRequestCount());
     }
@@ -449,7 +476,8 @@ class RequestRegistryTest {
         context.setRequestPhase(RequestPhase.ENCODER);
         CompletableFuture<Response> future = lifecycle.register(context);
         WorkerStatus worker = mock(WorkerStatus.class);
-        EncoderEndpoint endpoint = new EncoderEndpoint(worker, new EndpointEventProjector(lifecycle));
+        EncoderEndpoint endpoint =
+                new EncoderEndpoint(worker, new EndpointEventProjector(lifecycle));
         Response route = new Response();
         route.setSuccess(true);
         try (var pin = endpoint.tryPinGeneration()) {
@@ -461,7 +489,8 @@ class RequestRegistryTest {
 
         lifecycle.cancelRequest("112", 0L, CancelReason.CLIENT_CANCELLED, RequestPhase.ENCODER);
 
-        assertEquals(RequestState.Phase.CANCELLED,
+        assertEquals(
+                RequestState.Phase.CANCELLED,
                 lifecycle.getRequestState("112", 0L, RequestPhase.ENCODER).state());
         assertEquals(0, endpoint.pendingEncoderRequestCount());
     }
@@ -471,12 +500,14 @@ class RequestRegistryTest {
         BalanceContext context = context(113L);
         context.setRequestPhase(RequestPhase.ENCODER);
         CompletableFuture<Response> future = lifecycle.register(context);
-        EncoderEndpoint endpoint = new EncoderEndpoint(mock(WorkerStatus.class),
-                new EndpointEventProjector(lifecycle));
+        EncoderEndpoint endpoint =
+                new EncoderEndpoint(
+                        mock(WorkerStatus.class), new EndpointEventProjector(lifecycle));
         try (var pin = endpoint.tryPinGeneration()) {
             assertTrue(lifecycle.claimEncoderRoute("113", future, pin));
         }
-        assertEquals(RequestState.Phase.DISPATCHING,
+        assertEquals(
+                RequestState.Phase.DISPATCHING,
                 lifecycle.getRequestState("113", 0L, RequestPhase.ENCODER).state());
         assertEquals(1, endpoint.pendingEncoderRequestCount());
 
@@ -485,9 +516,11 @@ class RequestRegistryTest {
         Response route = new Response();
         route.setSuccess(true);
         assertFalse(lifecycle.publishEncoderRoute("113", future, route));
-        assertEquals(StrategyErrorType.REQUEST_CANCELLED.getErrorCode(),
+        assertEquals(
+                StrategyErrorType.REQUEST_CANCELLED.getErrorCode(),
                 future.get(5, TimeUnit.SECONDS).getCode());
-        assertEquals(RequestState.Phase.CANCELLED,
+        assertEquals(
+                RequestState.Phase.CANCELLED,
                 lifecycle.getRequestState("113", 0L, RequestPhase.ENCODER).state());
         assertEquals(0, endpoint.pendingEncoderRequestCount());
     }
@@ -503,9 +536,12 @@ class RequestRegistryTest {
             Thread.sleep(50L);
         }
 
-        assertTrue(contextReference.refersTo(null), "terminal identity must not retain the request payload");
+        assertTrue(
+                contextReference.refersTo(null),
+                "terminal identity must not retain the request payload");
         assertSame(terminal, lifecycle.requestSlot("103"));
-        assertEquals(StrategyErrorType.INVALID_REQUEST.getErrorCode(),
+        assertEquals(
+                StrategyErrorType.INVALID_REQUEST.getErrorCode(),
                 lifecycle.register(context(103L)).join().getCode());
     }
 
@@ -521,7 +557,8 @@ class RequestRegistryTest {
         }
         assertFalse(waiting.isDone(), "higher priority arrivals must not evict waiting requests");
         assertEquals(1001, lifecycle.trackedRequestCount());
-        assertEquals(StrategyErrorType.INVALID_REQUEST.getErrorCode(),
+        assertEquals(
+                StrategyErrorType.INVALID_REQUEST.getErrorCode(),
                 lifecycle.register(context(1L)).join().getCode());
         for (long id = 1; id <= 1001; id++) {
             lifecycle.cancelRequest(Long.toString(id), 0L, CancelReason.CLIENT_CANCELLED);
@@ -536,9 +573,15 @@ class RequestRegistryTest {
         assertNull(slot.activeItem());
         assertTrue(slot.isOpen());
         assertTrue(slot.isLiveGeneration());
-        IllegalStateException failure = assertThrows(IllegalStateException.class,
-                () -> org.springframework.test.util.ReflectionTestUtils.invokeMethod(
-                        slot, "recordCancellationLocked", CancelReason.CLIENT_CANCELLED, "client cancelled"));
+        IllegalStateException failure =
+                assertThrows(
+                        IllegalStateException.class,
+                        () ->
+                                org.springframework.test.util.ReflectionTestUtils.invokeMethod(
+                                        slot,
+                                        "recordCancellationLocked",
+                                        CancelReason.CLIENT_CANCELLED,
+                                        "client cancelled"));
         assertTrue(failure.getMessage().contains("requires slot lock"));
         assertEquals(RequestState.Phase.QUEUED, slot.snapshot().state());
     }
@@ -547,10 +590,10 @@ class RequestRegistryTest {
     void deliveredRequestsHaveNoExtraGlobalQuantityGate() {
         for (long id = 201; id <= 401; id++) {
             Registered registered = registerItem(id);
-            assertEquals(PlacementResult.Status.SUCCESS,
-                    commitRoute(lifecycle, registered));
-            assertNotNull(RequestLifecycleTestSupport.claimRoute(
-                    lifecycle, registered.item(), () -> true));
+            assertEquals(PlacementResult.Status.SUCCESS, commitRoute(lifecycle, registered));
+            assertNotNull(
+                    RequestLifecycleTestSupport.claimRoute(
+                            lifecycle, registered.item(), () -> true));
         }
         assertEquals(201, lifecycle.trackedRequestCount());
     }
@@ -558,23 +601,19 @@ class RequestRegistryTest {
     @Test
     void admissionHandleDefersCancellationUntilItsExactCapabilityCloses() {
         CompletableFuture<Response> future = lifecycle.register(context(301L));
-        AdmissionHandle scope =
-                lifecycle.claimAdmissionHandle("301", future);
+        AdmissionHandle scope = lifecycle.claimAdmissionHandle("301", future);
         assertNotNull(scope);
 
-        RequestState requested = lifecycle.cancelRequest(
-                "301", 0L, CancelReason.CLIENT_CANCELLED);
+        RequestState requested = lifecycle.cancelRequest("301", 0L, CancelReason.CLIENT_CANCELLED);
 
         assertEquals(RequestState.Phase.CANCEL_REQUESTED, requested.state());
-        assertFalse(future.isDone(),
-                "the admission mutation still owns rollback and terminal cleanup");
+        assertFalse(
+                future.isDone(), "the admission mutation still owns rollback and terminal cleanup");
 
         scope.close();
 
-        assertEquals(StrategyErrorType.REQUEST_CANCELLED.getErrorCode(),
-                future.join().getCode());
-        assertEquals(RequestState.Phase.CANCELLED,
-                lifecycle.getRequestState("301", 0L).state());
+        assertEquals(StrategyErrorType.REQUEST_CANCELLED.getErrorCode(), future.join().getCode());
+        assertEquals(RequestState.Phase.CANCELLED, lifecycle.getRequestState("301", 0L).state());
     }
 
     @Test
@@ -589,10 +628,10 @@ class RequestRegistryTest {
 
         admission.close();
 
-        assertEquals(StrategyErrorType.REQUEST_CANCELLED.getErrorCode(),
+        assertEquals(
+                StrategyErrorType.REQUEST_CANCELLED.getErrorCode(),
                 future.get(5, TimeUnit.SECONDS).getCode());
-        assertEquals(RequestState.Phase.CANCELLED,
-                lifecycle.getRequestState("303", 0L).state());
+        assertEquals(RequestState.Phase.CANCELLED, lifecycle.getRequestState("303", 0L).state());
         assertEquals(0, lifecycle.trackedRequestCount());
     }
 
@@ -606,10 +645,10 @@ class RequestRegistryTest {
         admission.terminate(Response.error(StrategyErrorType.RESOURCE_EXHAUSTED));
         admission.close();
 
-        assertEquals(StrategyErrorType.REQUEST_CANCELLED.getErrorCode(),
+        assertEquals(
+                StrategyErrorType.REQUEST_CANCELLED.getErrorCode(),
                 future.get(5, TimeUnit.SECONDS).getCode());
-        assertEquals(RequestState.Phase.CANCELLED,
-                lifecycle.getRequestState("304", 0L).state());
+        assertEquals(RequestState.Phase.CANCELLED, lifecycle.getRequestState("304", 0L).state());
         assertEquals(0, lifecycle.trackedRequestCount());
     }
 
@@ -618,47 +657,46 @@ class RequestRegistryTest {
         CompletableFuture<Response> future = lifecycle.register(context(302L));
         CountDownLatch published = new CountDownLatch(1);
         AtomicReference<String> callbackThread = new AtomicReference<>();
-        future.thenAccept(response -> {
-            callbackThread.set(Thread.currentThread().getName());
-            published.countDown();
-        });
+        future.thenAccept(
+                response -> {
+                    callbackThread.set(Thread.currentThread().getName());
+                    published.countDown();
+                });
 
         Response rejection = Response.error(StrategyErrorType.RESOURCE_EXHAUSTED);
-        assertTrue(lifecycle.publishDecisionResponseAsync(
-                "302", future, rejection));
+        assertTrue(lifecycle.publishDecisionResponseAsync("302", future, rejection));
         assertTrue(published.await(5, TimeUnit.SECONDS));
         assertNotEquals(Thread.currentThread().getName(), callbackThread.get());
-        assertEquals(StrategyErrorType.RESOURCE_EXHAUSTED.getErrorCode(),
+        assertEquals(
+                StrategyErrorType.RESOURCE_EXHAUSTED.getErrorCode(),
                 future.get(5, TimeUnit.SECONDS).getCode());
     }
 
     @Test
-    void shutdownGateWaitsForTheExactAdmissionHandleAndRejectsNewWork()
-            throws Exception {
-        CompletableFuture<Response> heldFuture =
-                lifecycle.register(context(401L));
-        AdmissionHandle held =
-                lifecycle.claimAdmissionHandle("401", heldFuture);
+    void shutdownGateWaitsForTheExactAdmissionHandleAndRejectsNewWork() throws Exception {
+        CompletableFuture<Response> heldFuture = lifecycle.register(context(401L));
+        AdmissionHandle held = lifecycle.claimAdmissionHandle("401", heldFuture);
         assertNotNull(held);
         ExecutorService executor = Executors.newSingleThreadExecutor();
         try {
             Future<Boolean> shutdownOwner =
                     executor.submit(lifecycle::closeAdmissionAndAwaitMutations);
             awaitCondition(lifecycle::isShuttingDown);
-            assertFalse(shutdownOwner.isDone(),
+            assertFalse(
+                    shutdownOwner.isDone(),
                     "shutdown must not overtake an exact admission mutation");
 
-            CompletableFuture<Response> rejected =
-                    lifecycle.register(context(402L));
-            assertEquals(StrategyErrorType.DISPATCH_FAILED.getErrorCode(),
-                    rejected.join().getCode());
+            CompletableFuture<Response> rejected = lifecycle.register(context(402L));
+            assertEquals(
+                    StrategyErrorType.DISPATCH_FAILED.getErrorCode(), rejected.join().getCode());
 
             held.close();
             assertTrue(shutdownOwner.get(5, TimeUnit.SECONDS));
             lifecycle.closeOutstandingAndTerminalize();
             lifecycle.closeExpiration();
             lifecycle.closePublisher();
-            assertEquals(StrategyErrorType.DISPATCH_FAILED.getErrorCode(),
+            assertEquals(
+                    StrategyErrorType.DISPATCH_FAILED.getErrorCode(),
                     heldFuture.get(5, TimeUnit.SECONDS).getCode());
         } finally {
             executor.shutdownNow();
@@ -669,44 +707,48 @@ class RequestRegistryTest {
     void cancelRequiresTheExpectedBatchGenerationAndUnknownIdsStayAbsent() {
         CompletableFuture<Response> future = lifecycle.register(context(501L));
 
-        assertNull(lifecycle.cancelRequest(
-                "999", 0L, CancelReason.CLIENT_CANCELLED));
-        assertNull(lifecycle.cancelRequest(
-                "501", 91L, CancelReason.CLIENT_CANCELLED));
+        assertNull(lifecycle.cancelRequest("999", 0L, CancelReason.CLIENT_CANCELLED));
+        assertNull(lifecycle.cancelRequest("501", 91L, CancelReason.CLIENT_CANCELLED));
         assertFalse(future.isDone());
 
-        RequestState exact = lifecycle.cancelRequest(
-                "501", 0L, CancelReason.CLIENT_CANCELLED);
+        RequestState exact = lifecycle.cancelRequest("501", 0L, CancelReason.CLIENT_CANCELLED);
         assertNotNull(exact);
-        assertEquals(StrategyErrorType.REQUEST_CANCELLED.getErrorCode(),
-                future.join().getCode());
+        assertEquals(StrategyErrorType.REQUEST_CANCELLED.getErrorCode(), future.join().getCode());
     }
 
     @Test
     void publishedQueueDeadlineReleasesLocalReservationWithoutEngineCancel() {
         Registered registered = registerItem(602L);
-        assertEquals(PlacementResult.Status.SUCCESS,
-                commitRoute(lifecycle, registered));
+        assertEquals(PlacementResult.Status.SUCCESS, commitRoute(lifecycle, registered));
         RequestSlot slot = lifecycle.requestSlot("602");
         synchronized (slot) {
-            org.springframework.test.util.ReflectionTestUtils.<RequestSlot.EngineObservation>invokeMethod(slot, "applyPrefillStatusLocked", registered.item().prefillEp(), org.flexlb.dao.route.RoleType.PREFILL,
-                    org.flexlb.balance.endpoint.PrefillState.WorkerStatusFact.active(registered.item()), System.currentTimeMillis());
+            org.springframework.test.util.ReflectionTestUtils
+                    .<RequestSlot.EngineObservation>invokeMethod(
+                            slot,
+                            "applyPrefillStatusLocked",
+                            registered.item().prefillEp(),
+                            org.flexlb.dao.route.RoleType.PREFILL,
+                            org.flexlb.balance.endpoint.PrefillState.WorkerStatusFact.active(
+                                    registered.item()),
+                            System.currentTimeMillis());
         }
         lifecycle.cancelRequest("602", 0L, CancelReason.DEADLINE_EXCEEDED);
-        assertEquals(RequestState.Phase.TIMED_OUT,
-                lifecycle.getRequestState("602", 0L).state());
-        verify(registered.item().decodeEp()).release(
-                registered.item().decodeReservation(),
-                DecodeEndpoint.ReleaseReason.COUNTERPART_FINISHED);
+        assertEquals(RequestState.Phase.TIMED_OUT, lifecycle.getRequestState("602", 0L).state());
+        verify(registered.item().decodeEp())
+                .release(
+                        registered.item().decodeReservation(),
+                        DecodeEndpoint.ReleaseReason.COUNTERPART_FINISHED);
     }
 
     @Test
     void expiredArrivalDoesNotDisturbTheWaitingRequests() throws Exception {
         var low = lifecycle.register(context(1));
         var expired = context(2);
-        expired.setSchedulingMetadata(SchedulingMetadata.explicit(90, System.currentTimeMillis() - 1L));
+        expired.setSchedulingMetadata(
+                SchedulingMetadata.explicit(90, System.currentTimeMillis() - 1L));
         // QUEUE expiry before placement is admission capacity exhaustion (8431).
-        assertEquals(StrategyErrorType.RESOURCE_EXHAUSTED.getErrorCode(),
+        assertEquals(
+                StrategyErrorType.RESOURCE_EXHAUSTED.getErrorCode(),
                 lifecycle.register(expired).get(5, TimeUnit.SECONDS).getCode());
         assertFalse(low.isDone());
         assertEquals(1, lifecycle.trackedRequestCount());
@@ -732,9 +774,12 @@ class RequestRegistryTest {
         Registered registered = registerItem(703L);
         assertEquals(PlacementResult.Status.SUCCESS, commitRoute(lifecycle, registered));
         RequestSlot old = lifecycle.requestSlot("703");
-        DeliveryClaim delivery = RequestLifecycleTestSupport.claimBatchWithoutPrediction(lifecycle, registered.item(), 17L, () -> true);
+        DeliveryClaim delivery =
+                RequestLifecycleTestSupport.claimBatchWithoutPrediction(
+                        lifecycle, registered.item(), 17L, () -> true);
         assertNotNull(delivery);
-        PreemptionRegistration preemption = lifecycle.tryClaim("703", 1L, 19L, "victim").orElseThrow();
+        PreemptionRegistration preemption =
+                lifecycle.tryClaim("703", 1L, 19L, "victim").orElseThrow();
 
         old.expireInactiveRequest(
                 RequestLifecycleTestSupport.<Long>inspect(old, "inactivityExpiresAtMsLocked"));
@@ -757,31 +802,43 @@ class RequestRegistryTest {
         var transaction = mock(BatchDeliveryStrategy.BatchTransaction.class);
         when(transaction.batchId()).thenReturn(0L);
 
-        assertThrows(IllegalArgumentException.class,
+        assertThrows(
+                IllegalArgumentException.class,
                 () -> lifecycle.claimBatchDelivery(registered.item(), transaction));
 
-        org.mockito.Mockito.verify(transaction, org.mockito.Mockito.never()).transferToEndpoint(registered.item());
+        org.mockito.Mockito.verify(transaction, org.mockito.Mockito.never())
+                .transferToEndpoint(registered.item());
         assertEquals(RequestState.Phase.QUEUED, lifecycle.getRequestState("704", 0L).state());
         assertFalse(registered.future().isDone());
     }
 
     @Test
-    void invalidResultDoesNotConsumeDeliveryAndDuplicateResultCannotChangeItsOutcome() throws Exception {
+    void invalidResultDoesNotConsumeDeliveryAndDuplicateResultCannotChangeItsOutcome()
+            throws Exception {
         Registered registered = registerItem(705L);
         assertEquals(PlacementResult.Status.SUCCESS, commitRoute(lifecycle, registered));
-        DeliveryClaim claim = RequestLifecycleTestSupport.claimBatch(lifecycle, registered.item(), 23L, () -> true);
+        DeliveryClaim claim =
+                RequestLifecycleTestSupport.claimBatch(
+                        lifecycle, registered.item(), 23L, () -> true);
         assertNotNull(claim);
 
         assertThrows(NullPointerException.class, () -> claim.complete(null));
         assertEquals(RequestState.Phase.DISPATCHING, lifecycle.getRequestState("705", 23L).state());
         claim.complete(org.flexlb.balance.delivery.DeliveryResult.delivered());
         assertTrue(registered.future().get(5, TimeUnit.SECONDS).isSuccess());
-        assertThrows(IllegalStateException.class, () -> claim.complete(
-                org.flexlb.balance.delivery.DeliveryResult.notSent(new IllegalStateException("duplicate failure"))));
+        assertThrows(
+                IllegalStateException.class,
+                () ->
+                        claim.complete(
+                                org.flexlb.balance.delivery.DeliveryResult.notSent(
+                                        new IllegalStateException("duplicate failure"))));
 
-        assertEquals(RequestState.Phase.ACKNOWLEDGED, lifecycle.getRequestState("705", 23L).state());
+        assertEquals(
+                RequestState.Phase.ACKNOWLEDGED, lifecycle.getRequestState("705", 23L).state());
         org.mockito.Mockito.verify(registered.item().decodeEp(), org.mockito.Mockito.never())
-                .release(registered.item().decodeReservation(), DecodeEndpoint.ReleaseReason.NOT_SENT);
+                .release(
+                        registered.item().decodeReservation(),
+                        DecodeEndpoint.ReleaseReason.NOT_SENT);
     }
 
     private WeakReference<BalanceContext> cancelAndReferenceContext(long requestId) {

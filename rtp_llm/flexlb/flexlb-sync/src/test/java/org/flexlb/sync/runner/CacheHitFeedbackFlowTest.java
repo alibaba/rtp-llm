@@ -74,7 +74,8 @@ import static org.mockito.Mockito.when;
 class CacheHitFeedbackFlowTest {
     private final ListAppender<ILoggingEvent> pv = new ListAppender<>();
     private final FlexMonitor monitor = mock(FlexMonitor.class);
-    private final LocalStandbyCacheMatchProvider standby = mock(LocalStandbyCacheMatchProvider.class);
+    private final LocalStandbyCacheMatchProvider standby =
+            mock(LocalStandbyCacheMatchProvider.class);
     private final CacheMatchFailoverManager failover = mock(CacheMatchFailoverManager.class);
     private EndpointRegistry registry;
     private WorkerDirectory directory;
@@ -89,20 +90,29 @@ class CacheHitFeedbackFlowTest {
     void setUp() {
         config = new FlexlbConfig();
         config.setDispatcher(DispatcherConfig.nonBatch());
-        config.getRouter().getRoles().getPrefill().getExecutionTimeEstimator().setExpression("sum(computeTokens)");
+        config.getRouter()
+                .getRoles()
+                .getPrefill()
+                .getExecutionTimeEstimator()
+                .setExpression("sum(computeTokens)");
         var affinity = new RoutingConfig.CacheAffinityConfig();
         affinity.setRemoteDiscount(0.5);
         config.getRouter().getRoles().getPrefill().setCacheAffinity(affinity);
         ConfigService configs = mock(ConfigService.class);
         when(configs.loadBalanceConfig()).thenReturn(config);
-        registry = new EndpointRegistry(configs, RunnerTestSupport.eventSink(),
-                mock(org.flexlb.service.monitor.BatchSchedulerReporter.class),
-                new org.flexlb.balance.scheduler.RouteDeliveryStrategy(
-                        mock(org.flexlb.balance.scheduler.RequestRegistry.class),
-                        mock(org.flexlb.balance.delivery.DeliveryMetrics.class)),
-                new org.flexlb.balance.scheduler.PlacementAvailability());
+        registry =
+                new EndpointRegistry(
+                        configs,
+                        RunnerTestSupport.eventSink(),
+                        mock(org.flexlb.service.monitor.BatchSchedulerReporter.class),
+                        new org.flexlb.balance.scheduler.RouteDeliveryStrategy(
+                                mock(org.flexlb.balance.scheduler.RequestRegistry.class),
+                                mock(org.flexlb.balance.delivery.DeliveryMetrics.class)),
+                        new org.flexlb.balance.scheduler.PlacementAvailability());
         directory = new WorkerDirectory(registry);
-        worker = RunnerTestSupport.discovered(RoleType.PREFILL, "group", "10.0.0.1", 8080, 8081, "test");
+        worker =
+                RunnerTestSupport.discovered(
+                        RoleType.PREFILL, "group", "10.0.0.1", 8080, 8081, "test");
         directory.currentOrDiscover(RoleType.PREFILL, worker.getLogicalIpPort(), () -> worker);
         publish(worker);
         CacheMatchConfiguration cacheConfig = mock(CacheMatchConfiguration.class);
@@ -110,25 +120,43 @@ class CacheHitFeedbackFlowTest {
         when(cacheConfig.isLocalStandbyEnabled()).thenReturn(true);
         when(cacheConfig.getLocalStandbyConfig()).thenReturn(new LocalStandbyConfig());
         cacheMetrics = mock(CacheMetricsReporter.class);
-        LocalStandbyComparisonService comparison = new LocalStandbyComparisonService(cacheConfig, standby, cacheMetrics);
-        when(standby.asyncLocalStandbyMatch(any())).thenReturn(CompletableFuture.completedFuture(
-                new CacheMatchResult(Map.of(worker.getLogicalIpPort(), HostCacheMatch.local(3)),
-                        CacheMatchSource.LOCAL_STANDBY, 1, 100)));
+        LocalStandbyComparisonService comparison =
+                new LocalStandbyComparisonService(cacheConfig, standby, cacheMetrics);
+        when(standby.asyncLocalStandbyMatch(any()))
+                .thenReturn(
+                        CompletableFuture.completedFuture(
+                                new CacheMatchResult(
+                                        Map.of(worker.getLogicalIpPort(), HostCacheMatch.local(3)),
+                                        CacheMatchSource.LOCAL_STANDBY,
+                                        1,
+                                        100)));
         KvcmCacheMatchProvider kvcm = mock(KvcmCacheMatchProvider.class);
         when(kvcm.findMatchingEngines(anyString(), anyList(), anyLong(), any(), anyString()))
                 .thenReturn(Map.of(worker.getLogicalIpPort(), new HostCacheMatch(2, 6)));
         when(failover.activeSource()).thenReturn(CacheMatchSource.KVCM);
-        var query = new CacheMatchQueryOrchestrator(mock(LocalSyncCacheMatchProvider.class), kvcm, standby,
-                mock(LocalStandbyCacheManager.class), failover, comparison, cacheMetrics, cacheConfig);
-        cache = new CacheAwareService(cacheMetrics, query, comparison,
-                mock(CacheMetadataUpdateOrchestrator.class));
+        var query =
+                new CacheMatchQueryOrchestrator(
+                        mock(LocalSyncCacheMatchProvider.class),
+                        kvcm,
+                        standby,
+                        mock(LocalStandbyCacheManager.class),
+                        failover,
+                        comparison,
+                        cacheMetrics,
+                        cacheConfig);
+        cache =
+                new CacheAwareService(
+                        cacheMetrics,
+                        query,
+                        comparison,
+                        mock(CacheMetadataUpdateOrchestrator.class));
         EngineGrpcClient engineClient = mock(EngineGrpcClient.class);
         LoopResources loops = mock(LoopResources.class);
-        when(engineClient.getEventLoopGroup()).thenReturn(mock(io.netty.channel.EventLoopGroup.class));
+        when(engineClient.getEventLoopGroup())
+                .thenReturn(mock(io.netty.channel.EventLoopGroup.class));
         when(loops.onServer(true)).thenReturn(mock(io.netty.channel.EventLoopGroup.class));
         when(loops.onServerSelect(true)).thenReturn(mock(io.netty.channel.EventLoopGroup.class));
-        reporter = new EngineHealthReporter(
-                monitor, cacheMetrics, engineClient, loops, directory);
+        reporter = new EngineHealthReporter(monitor, cacheMetrics, engineClient, loops, directory);
         strategy = new CostBasedPrefillStrategy(directory, cache, reporter);
         pv.start();
         ((ch.qos.logback.classic.Logger) LoggerFactory.getLogger("pvLogger")).addAppender(pv);
@@ -144,10 +172,15 @@ class CacheHitFeedbackFlowTest {
     @Test
     void realSelectionAndStatusPollingEmitComparisonPvAndMetricsExactlyOnce() throws Exception {
         select("req-cache-feedback-p-001");
-        verify(cacheMetrics).reportKvcmPrediction(RoleType.PREFILL, worker.getMetricIpPort(), 400, 1000);
-        verify(cacheMetrics).reportLocalStandbyPrediction(RoleType.PREFILL, worker.getMetricIpPort(), 300, 1000);
+        verify(cacheMetrics)
+                .reportKvcmPrediction(RoleType.PREFILL, worker.getMetricIpPort(), 400, 1000);
+        verify(cacheMetrics)
+                .reportLocalStandbyPrediction(
+                        RoleType.PREFILL, worker.getMetricIpPort(), 300, 1000);
         poll(worker, task("req-cache-feedback-p-001", false, 0), false, 2);
-        assertTrue(events("cache_hit_comparison").isEmpty(), "missing validity must not mean zero cache hit");
+        assertTrue(
+                events("cache_hit_comparison").isEmpty(),
+                "missing validity must not mean zero cache hit");
         poll(worker, task("req-cache-feedback-p-001", true, 500), false, 3);
         poll(worker, task("req-cache-feedback-p-001", true, 500), true, 4);
         poll(worker, task("req-cache-feedback-p-001", true, 500), true, 4);
@@ -157,17 +190,26 @@ class CacheHitFeedbackFlowTest {
         assertEquals(500, comparison.path("actualHitTokens").asLong());
         assertEquals(400, comparison.path("kvcmPrediction").path("predictedHitTokens").asLong());
         assertEquals(200, comparison.path("kvcmPrediction").path("localPredictionTokens").asLong());
-        assertEquals(600, comparison.path("kvcmPrediction").path("globalPredictionTokens").asLong());
-        assertEquals(300, comparison.path("localStandbyPrediction").path("predictedHitTokens").asLong());
-        assertEquals(-1, comparison.path("localStandbyPrediction").path("localPredictionTokens").asLong());
-        assertEquals(-1, comparison.path("localStandbyPrediction").path("globalPredictionTokens").asLong());
+        assertEquals(
+                600, comparison.path("kvcmPrediction").path("globalPredictionTokens").asLong());
+        assertEquals(
+                300, comparison.path("localStandbyPrediction").path("predictedHitTokens").asLong());
+        assertEquals(
+                -1,
+                comparison.path("localStandbyPrediction").path("localPredictionTokens").asLong());
+        assertEquals(
+                -1,
+                comparison.path("localStandbyPrediction").path("globalPredictionTokens").asLong());
         verify(monitor, times(1)).report(eq(CACHE_HIT_COMPARISON_DELTA_TOKENS), any(), eq(100.0));
-        verify(monitor, times(1)).report(eq(CACHE_HIT_COMPARISON_LOCAL_STANDBY_DELTA_TOKENS), any(), eq(200.0));
-        verify(monitor, times(1)).report(eq(CACHE_HIT_COMPARISON_LOCAL_STANDBY_DELTA_RATIO), any(), eq(0.2));
+        verify(monitor, times(1))
+                .report(eq(CACHE_HIT_COMPARISON_LOCAL_STANDBY_DELTA_TOKENS), any(), eq(200.0));
+        verify(monitor, times(1))
+                .report(eq(CACHE_HIT_COMPARISON_LOCAL_STANDBY_DELTA_RATIO), any(), eq(0.2));
         verify(monitor, times(1)).report(eq(CACHE_HIT_COMPARISON_ACTUAL_TOKENS), any(), eq(500.0));
         verify(monitor, times(1)).report(eq(CACHE_HIT_COMPARISON_INPUT_TOKENS), any(), eq(1000.0));
-        verify(cacheMetrics, times(1)).reportLocalStandbyPrediction(
-                eq(RoleType.PREFILL), anyString(), eq(300L), eq(1000L));
+        verify(cacheMetrics, times(1))
+                .reportLocalStandbyPrediction(
+                        eq(RoleType.PREFILL), anyString(), eq(300L), eq(1000L));
         JsonNode status = events("prefill_worker_status").getFirst();
         assertEquals(1, events("prefill_worker_status").size());
         assertEquals(200, status.path("hbmLocalMatchTokens").asLong());
@@ -180,7 +222,8 @@ class CacheHitFeedbackFlowTest {
     @Test
     void truncatedPrefillLengthPreservesLogicalDenominatorAndReportsOnce() throws Exception {
         select("1002");
-        EngineRpcService.TaskInfoPB feedback = task("1002", true, 500).toBuilder().setInputLength(996).build();
+        EngineRpcService.TaskInfoPB feedback =
+                task("1002", true, 500).toBuilder().setInputLength(996).build();
         poll(worker, feedback, false, 2);
         poll(worker, feedback, true, 3);
         assertEquals(1, events("cache_hit_comparison").size());
@@ -188,8 +231,8 @@ class CacheHitFeedbackFlowTest {
         assertEquals(1000, comparison.path("inputTokens").asLong());
         assertEquals(500, comparison.path("actualHitTokens").asLong());
         verify(monitor, times(1)).report(eq(CACHE_HIT_COMPARISON_ACTUAL_RATIO), any(), eq(0.5));
-        verify(monitor).report(eq("app.engine.worker.status.running.to.first.token.ms"),
-                any(), eq(100.0));
+        verify(monitor)
+                .report(eq("app.engine.worker.status.running.to.first.token.ms"), any(), eq(100.0));
         assertEquals(1, events("prefill_worker_status").size());
         JsonNode status = events("prefill_worker_status").getFirst();
         assertEquals(1000, status.path("inputTokens").asLong());
@@ -215,15 +258,18 @@ class CacheHitFeedbackFlowTest {
 
     @Test
     void failedStandbyDoesNotSuppressKvcmComparison() throws Exception {
-        when(standby.asyncLocalStandbyMatch(any())).thenReturn(CompletableFuture.failedFuture(
-                new IllegalStateException("standby unavailable")));
+        when(standby.asyncLocalStandbyMatch(any()))
+                .thenReturn(
+                        CompletableFuture.failedFuture(
+                                new IllegalStateException("standby unavailable")));
         select("1004");
         poll(worker, task("1004", true, 500), true, 2);
         JsonNode event = events("cache_hit_comparison").getFirst();
         assertTrue(event.hasNonNull("kvcmPrediction"));
         assertFalse(event.hasNonNull("localStandbyPrediction"));
         verify(monitor).report(eq(CACHE_HIT_COMPARISON_DELTA_TOKENS), any(), eq(100.0));
-        verify(cacheMetrics, never()).reportLocalStandbyPrediction(any(), anyString(), anyLong(), anyLong());
+        verify(cacheMetrics, never())
+                .reportLocalStandbyPrediction(any(), anyString(), anyLong(), anyLong());
     }
 
     @Test
@@ -237,8 +283,12 @@ class CacheHitFeedbackFlowTest {
         assertNotNull(lease, "comparison must not retain the poll lease");
         lease.close();
         assertTrue(events("cache_hit_comparison").isEmpty());
-        delayed.complete(new CacheMatchResult(Map.of(worker.getLogicalIpPort(), HostCacheMatch.local(3)),
-                CacheMatchSource.LOCAL_STANDBY, 1, 100));
+        delayed.complete(
+                new CacheMatchResult(
+                        Map.of(worker.getLogicalIpPort(), HostCacheMatch.local(3)),
+                        CacheMatchSource.LOCAL_STANDBY,
+                        1,
+                        100));
         assertEquals(1, events("cache_hit_comparison").size());
         verify(monitor, times(1)).report(eq(CACHE_HIT_COMPARISON_DELTA_TOKENS), any(), eq(100.0));
     }
@@ -248,7 +298,8 @@ class CacheHitFeedbackFlowTest {
         when(standby.asyncLocalStandbyMatch(any())).thenReturn(new CompletableFuture<>());
         select("1006");
         poll(worker, task("1006", true, 500), true, 2);
-        verify(monitor, timeout(3000).times(1)).report(eq(CACHE_HIT_COMPARISON_DELTA_TOKENS), any(), eq(100.0));
+        verify(monitor, timeout(3000).times(1))
+                .report(eq(CACHE_HIT_COMPARISON_DELTA_TOKENS), any(), eq(100.0));
         JsonNode event = events("cache_hit_comparison").getFirst();
         assertEquals(500, event.path("actualHitTokens").asLong());
         assertFalse(event.hasNonNull("localStandbyPrediction"));
@@ -272,9 +323,12 @@ class CacheHitFeedbackFlowTest {
     @Test
     void anotherGenerationCannotConsumeSelectedWorkersPrediction() throws Exception {
         select("1009");
-        WorkerStatus replacement = RunnerTestSupport.discovered(RoleType.PREFILL, "group", "10.0.0.1", 8080, 8081, "test");
-        var observation = org.flexlb.service.grpc.EngineStatusConverter.convertToStatusObservation(replacement,
-                response(task("1009", true, 500), true, 2));
+        WorkerStatus replacement =
+                RunnerTestSupport.discovered(
+                        RoleType.PREFILL, "group", "10.0.0.1", 8080, 8081, "test");
+        var observation =
+                org.flexlb.service.grpc.EngineStatusConverter.convertToStatusObservation(
+                        replacement, response(task("1009", true, 500), true, 2));
         assertTrue(cache.observeCacheHitFeedback(replacement, observation).isEmpty());
         assertTrue(events("cache_hit_comparison").isEmpty());
         poll(worker, task("1009", true, 500), true, 2);
@@ -283,21 +337,29 @@ class CacheHitFeedbackFlowTest {
 
     @Test
     void feedbackPreservesLogicalEngineIdentityAndExactCachePrediction() throws Exception {
-        WorkerStatus engine = WorkerStatus.createDiscovered(RoleType.PREFILL, "group", "10.0.0.1",
-                8080, 8081, "test", null, 1, 2);
-        CacheMatchResult matches = new CacheMatchResult(Map.of(
-                "10.0.0.1:8080@0", HostCacheMatch.local(1),
-                "10.0.0.1:8080@1", HostCacheMatch.local(4)), CacheMatchSource.KVCM, 1, 100);
+        WorkerStatus engine =
+                WorkerStatus.createDiscovered(
+                        RoleType.PREFILL, "group", "10.0.0.1", 8080, 8081, "test", null, 1, 2);
+        CacheMatchResult matches =
+                new CacheMatchResult(
+                        Map.of(
+                                "10.0.0.1:8080@0", HostCacheMatch.local(1),
+                                "10.0.0.1:8080@1", HostCacheMatch.local(4)),
+                        CacheMatchSource.KVCM,
+                        1,
+                        100);
         cache.trackRoutingPrediction("1010", RoleType.PREFILL, "group", engine, 1000, 400, matches);
-        var observation = org.flexlb.service.grpc.EngineStatusConverter.convertToStatusObservation(engine,
-                response(task("1010", true, 500), true, 2));
+        var observation =
+                org.flexlb.service.grpc.EngineStatusConverter.convertToStatusObservation(
+                        engine, response(task("1010", true, 500), true, 2));
         var results = cache.observeCacheHitFeedback(engine, observation);
         assertEquals(1, results.size());
         var comparison = results.getFirst().get();
         assertEquals("10.0.0.1:8080@1", comparison.worker());
         assertEquals(400, comparison.kvcmPrediction().localPredictionTokens());
-        assertEquals(100, comparison.actualHitTokens()
-                - comparison.kvcmPrediction().localPredictionTokens());
+        assertEquals(
+                100,
+                comparison.actualHitTokens() - comparison.kvcmPrediction().localPredictionTokens());
         assertTrue(cache.observeCacheHitFeedback(engine, observation).isEmpty());
         JsonNode status = events("prefill_worker_status").getFirst();
         assertEquals("10.0.0.1:8080@1", status.path("worker").asText());
@@ -314,7 +376,8 @@ class CacheHitFeedbackFlowTest {
         request.setBlockCacheKeys(List.of(1L));
         BalanceContext context = new BalanceContext(config);
         context.setRequest(request);
-        context.setSchedulingMetadata(SchedulingMetadata.explicit(50, System.currentTimeMillis() + 60_000));
+        context.setSchedulingMetadata(
+                SchedulingMetadata.explicit(50, System.currentTimeMillis() + 60_000));
         var selected = strategy.select(context, RoleType.PREFILL, "group");
         assertEquals(PlacementResult.Status.SUCCESS, selected.status());
         selected.value().close();
@@ -324,7 +387,10 @@ class CacheHitFeedbackFlowTest {
         var value = RunnerTestSupport.response(status, true, 1, 1_000_000, 1_000_000, 1, Map.of());
         status.lock.lock();
         try {
-            registry.publishPreparedEndpoint(status.getLogicalIpPort(), status, status.prepareNewStatus(status.freezeStatusResponse(value)));
+            registry.publishPreparedEndpoint(
+                    status.getLogicalIpPort(),
+                    status,
+                    status.prepareNewStatus(status.freezeStatusResponse(value)));
             status.recordSuccessfulPoll(true);
         } finally {
             status.lock.unlock();
@@ -332,21 +398,37 @@ class CacheHitFeedbackFlowTest {
     }
 
     private EngineRpcService.TaskInfoPB task(String id, boolean valid, long hit) {
-        var task = EngineRpcService.TaskInfoPB.newBuilder().setRequestIdStr(id).setInputLength(1000)
-                .setPrefixLength(hit).setPrefixLengthValid(valid).setPhase(EngineRpcService.TaskPhase.TASK_PHASE_RUNNING);
+        var task =
+                EngineRpcService.TaskInfoPB.newBuilder()
+                        .setRequestIdStr(id)
+                        .setInputLength(1000)
+                        .setPrefixLength(hit)
+                        .setPrefixLengthValid(valid)
+                        .setPhase(EngineRpcService.TaskPhase.TASK_PHASE_RUNNING);
         if (valid) {
-            task.setRequestReceivedTimeMs(990).setInputQueueEnqueueTimeMs(1000).setInputQueueDrainTimeMs(1010)
-                    .setWaitingEnteredTimeMs(1020).setRunningEnteredTimeMs(1100).setRemoteKvWaitMs(10)
-                    .setFirstTokenTimeMs(1200).setHbmLocalMatchTokens(hit == 0 ? 0 : 200)
+            task.setRequestReceivedTimeMs(990)
+                    .setInputQueueEnqueueTimeMs(1000)
+                    .setInputQueueDrainTimeMs(1010)
+                    .setWaitingEnteredTimeMs(1020)
+                    .setRunningEnteredTimeMs(1100)
+                    .setRemoteKvWaitMs(10)
+                    .setFirstTokenTimeMs(1200)
+                    .setHbmLocalMatchTokens(hit == 0 ? 0 : 200)
                     .setRemoteKvAddedMatchTokens(hit == 0 ? 0 : 300);
         }
         return task.build();
     }
 
-    private EngineRpcService.WorkerStatusPB response(EngineRpcService.TaskInfoPB task, boolean finished, long version) {
-        var result = EngineRpcService.WorkerStatusPB.newBuilder().setRole(RoleType.PREFILL.getCode())
-                .setRoleType(EngineRpcService.RoleTypePB.ROLE_TYPE_PREFILL).setAlive(true).setStatusVersion(version)
-                .setAvailableKvCache(1_000_000).setTotalKvCache(1_000_000);
+    private EngineRpcService.WorkerStatusPB response(
+            EngineRpcService.TaskInfoPB task, boolean finished, long version) {
+        var result =
+                EngineRpcService.WorkerStatusPB.newBuilder()
+                        .setRole(RoleType.PREFILL.getCode())
+                        .setRoleType(EngineRpcService.RoleTypePB.ROLE_TYPE_PREFILL)
+                        .setAlive(true)
+                        .setStatusVersion(version)
+                        .setAvailableKvCache(1_000_000)
+                        .setTotalKvCache(1_000_000);
         if (finished) {
             result.addFinishedTaskList(task);
         } else {
@@ -355,14 +437,28 @@ class CacheHitFeedbackFlowTest {
         return result.build();
     }
 
-    private void poll(WorkerStatus status, EngineRpcService.TaskInfoPB task, boolean finished, long version) {
+    private void poll(
+            WorkerStatus status, EngineRpcService.TaskInfoPB task, boolean finished, long version) {
         EngineGrpcService grpc = mock(EngineGrpcService.class);
         when(grpc.getWorkerStatusAsync(anyString(), anyInt(), anyLong(), anyLong(), any()))
                 .thenReturn(CompletableFuture.completedFuture(response(task, finished, version)));
         var lease = status.tryBeginStatusPoll();
         assertNotNull(lease);
-        new GrpcWorkerStatusRunner("model", status.getLogicalIpPort(), "test", RoleType.PREFILL, "group",
-                status, lease, directory, reporter, grpc, 5000, cache, Runnable::run).run();
+        new GrpcWorkerStatusRunner(
+                        "model",
+                        status.getLogicalIpPort(),
+                        "test",
+                        RoleType.PREFILL,
+                        "group",
+                        status,
+                        lease,
+                        directory,
+                        reporter,
+                        grpc,
+                        5000,
+                        cache,
+                        Runnable::run)
+                .run();
     }
 
     private List<JsonNode> events(String event) throws Exception {

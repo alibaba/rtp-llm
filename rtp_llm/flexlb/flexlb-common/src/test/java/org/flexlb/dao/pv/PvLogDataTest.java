@@ -23,10 +23,24 @@ class PvLogDataTest {
     void keepsCacheSelectionWhenSelectedCandidateHasNoEndpoint() {
         BalanceContext context = new BalanceContext();
         context.recordCacheSelection(RoleType.PREFILL, "10.0.0.2", 512L);
-        context.recordRoutingDecision(new RoutingDecision(RoleType.PREFILL, "default", "CostBasedPrefill",
-                "CACHE_LEADER", 1600L, 1, "10.0.0.2:8080", 1, 1, false, Map.of(), List.of(
-                        new RoutingDecision.Candidate(null, true, 90L, 20L, 70L, 512L, 512L,
-                                1L, null, null, null, "MODELED", 1L)), null));
+        context.recordRoutingDecision(
+                new RoutingDecision(
+                        RoleType.PREFILL,
+                        "default",
+                        "CostBasedPrefill",
+                        "CACHE_LEADER",
+                        1600L,
+                        1,
+                        "10.0.0.2:8080",
+                        1,
+                        1,
+                        false,
+                        Map.of(),
+                        List.of(
+                                new RoutingDecision.Candidate(
+                                        null, true, 90L, 20L, 70L, 512L, 512L, 1L, null, null, null,
+                                        "MODELED", 1L)),
+                        null));
 
         PvLogData data = new PvLogData(context);
 
@@ -42,8 +56,9 @@ class PvLogDataTest {
         request.setRequestId("shared-id");
         context.setRequest(request);
 
-        var json = new com.fasterxml.jackson.databind.ObjectMapper()
-                .readTree(JsonUtils.toStringOrEmpty(new PvLogData(context)));
+        var json =
+                new com.fasterxml.jackson.databind.ObjectMapper()
+                        .readTree(JsonUtils.toStringOrEmpty(new PvLogData(context)));
 
         assertEquals("shared-id", json.path("requestId").asText());
         assertEquals("ENCODER", json.path("phase").asText());
@@ -69,14 +84,26 @@ class PvLogDataTest {
     @Test
     void terminalResponseUsesFinalOutcomeWithoutMutatingRoutingResponse() throws Exception {
         BalanceContext context = new BalanceContext();
-        Response routed = Response.error(org.flexlb.dao.loadbalance.StrategyErrorType.REQUEST_CANCELLED);
+        Response routed =
+                Response.error(org.flexlb.dao.loadbalance.StrategyErrorType.REQUEST_CANCELLED);
         context.setResponse(routed);
         context.setSuccess(false);
         context.setErrorMessage("Schedule RPC deadline exceeded");
-        int deadlineCode = org.flexlb.dao.loadbalance.StrategyErrorType.BATCH_SLO_EXPIRED.getErrorCode();
-        PvLogData data = new PvLogData(context, deadlineCode, null, "LOCAL_MASTER", 0,
-                "REQUEST_STATE_TIMED_OUT", null, System.currentTimeMillis());
-        var json = new com.fasterxml.jackson.databind.ObjectMapper().readTree(JsonUtils.toStringOrEmpty(data));
+        int deadlineCode =
+                org.flexlb.dao.loadbalance.StrategyErrorType.BATCH_SLO_EXPIRED.getErrorCode();
+        PvLogData data =
+                new PvLogData(
+                        context,
+                        deadlineCode,
+                        null,
+                        "LOCAL_MASTER",
+                        0,
+                        "REQUEST_STATE_TIMED_OUT",
+                        null,
+                        System.currentTimeMillis());
+        var json =
+                new com.fasterxml.jackson.databind.ObjectMapper()
+                        .readTree(JsonUtils.toStringOrEmpty(data));
         assertEquals(deadlineCode, json.path("code").asInt());
         assertFalse(json.path("response").has("code"));
         assertEquals("Schedule RPC deadline exceeded", json.path("error").asText());
@@ -86,7 +113,9 @@ class PvLogDataTest {
         assertFalse(json.path("response").has("real_master_host"));
         assertFalse(json.has("admissionRejectReason"));
         assertFalse(json.path("response").has("admission_reject_reason"));
-        assertEquals(org.flexlb.dao.loadbalance.StrategyErrorType.REQUEST_CANCELLED.getErrorCode(), routed.getCode());
+        assertEquals(
+                org.flexlb.dao.loadbalance.StrategyErrorType.REQUEST_CANCELLED.getErrorCode(),
+                routed.getCode());
     }
 
     @Test
@@ -95,7 +124,8 @@ class PvLogDataTest {
         Request request = new Request();
         request.setRequestId("compact");
         context.setRequest(request);
-        org.flexlb.dao.loadbalance.ServerStatus worker = new org.flexlb.dao.loadbalance.ServerStatus();
+        org.flexlb.dao.loadbalance.ServerStatus worker =
+                new org.flexlb.dao.loadbalance.ServerStatus();
         worker.setRequestId("compact");
         worker.setPrefillTime(42);
         worker.setDebugInfo(new org.flexlb.dao.loadbalance.DebugInfo());
@@ -103,20 +133,47 @@ class PvLogDataTest {
         Response response = new Response();
         response.setServerStatus(List.of(worker));
         context.setResponse(response);
-        context.setDecisionGroup(new DecisionGroup("group", "FIXED_WINDOW", "NON_BATCH", "10.0.0.1",
-                2, "batch_full", 1234, 10));
-        RoutingDecision.PrefillPolicy policy = new RoutingDecision.PrefillPolicy(100, "BEST_ONLY", 10L,
-                0.2, 20, 1, 0L, 15.0, 0.0, 50000L, 0, 50, 3.0, 3.0);
-        context.recordRoutingDecision(new RoutingDecision(RoleType.PREFILL, "default", "CostBasedPrefill",
-                "BEST_ONLY", 1234, 1, "10.0.0.1:8080", 1, 1, false, java.util.Map.of(), List.of(), policy));
+        context.setDecisionGroup(
+                new DecisionGroup(
+                        "group",
+                        "FIXED_WINDOW",
+                        "NON_BATCH",
+                        "10.0.0.1",
+                        2,
+                        "batch_full",
+                        1234,
+                        10));
+        RoutingDecision.PrefillPolicy policy =
+                new RoutingDecision.PrefillPolicy(
+                        100, "BEST_ONLY", 10L, 0.2, 20, 1, 0L, 15.0, 0.0, 50000L, 0, 50, 3.0, 3.0);
+        context.recordRoutingDecision(
+                new RoutingDecision(
+                        RoleType.PREFILL,
+                        "default",
+                        "CostBasedPrefill",
+                        "BEST_ONLY",
+                        1234,
+                        1,
+                        "10.0.0.1:8080",
+                        1,
+                        1,
+                        false,
+                        java.util.Map.of(),
+                        List.of(),
+                        policy));
         var mapper = new com.fasterxml.jackson.databind.ObjectMapper();
         var json = mapper.readTree(JsonUtils.toStringOrEmpty(new PvLogData(context)));
         assertEquals("compact", json.path("requestId").asText());
         assertFalse(json.path("response").path("server_status").get(0).has("request_id"));
         assertFalse(json.path("response").path("server_status").get(0).has("prefill_time"));
         assertFalse(json.path("response").path("server_status").get(0).has("debug_info"));
-        assertEquals("compact", mapper.readTree(JsonUtils.toStringOrEmpty(response))
-                .path("server_status").get(0).path("request_id").asText());
+        assertEquals(
+                "compact",
+                mapper.readTree(JsonUtils.toStringOrEmpty(response))
+                        .path("server_status")
+                        .get(0)
+                        .path("request_id")
+                        .asText());
         assertFalse(json.path("routingDecisions").get(0).has("prefillPolicy"));
         var group = json.path("decisionGroup");
         assertEquals(5, group.size());
@@ -133,22 +190,25 @@ class PvLogDataTest {
         Request request = new Request();
         request.setRequestId("incoming");
         context.setRequest(request);
-        org.flexlb.dao.loadbalance.ServerStatus decode = new org.flexlb.dao.loadbalance.ServerStatus();
+        org.flexlb.dao.loadbalance.ServerStatus decode =
+                new org.flexlb.dao.loadbalance.ServerStatus();
         decode.setRole(RoleType.DECODE);
         decode.setServerIp("10.0.0.3");
         decode.setRequestId("decode-internal");
         decode.setPrefillTime(7);
         decode.setDebugInfo(new org.flexlb.dao.loadbalance.DebugInfo());
         decode.setPreemptRequestIds(List.of("victim-a", "victim-b"));
-        org.flexlb.dao.loadbalance.ServerStatus prefill = new org.flexlb.dao.loadbalance.ServerStatus();
+        org.flexlb.dao.loadbalance.ServerStatus prefill =
+                new org.flexlb.dao.loadbalance.ServerStatus();
         prefill.setRole(RoleType.PREFILL);
         prefill.setServerIp("10.0.0.1");
         Response response = new Response();
         response.setServerStatus(List.of(decode, prefill));
         context.setResponse(response);
 
-        var json = new com.fasterxml.jackson.databind.ObjectMapper()
-                .readTree(JsonUtils.toStringOrEmpty(new PvLogData(context)));
+        var json =
+                new com.fasterxml.jackson.databind.ObjectMapper()
+                        .readTree(JsonUtils.toStringOrEmpty(new PvLogData(context)));
 
         var statuses = json.path("response").path("server_status");
         var decodeIds = statuses.get(0).path("preempt_request_ids");
@@ -207,9 +267,35 @@ class PvLogDataTest {
         context.recordCacheQuery("KVCM", 10);
         context.recordCacheSelection(RoleType.DECODE, "10.0.0.3", 128);
         context.recordSelectionReason(RoleType.PREFILL, "CACHE_LEADER");
-        context.recordRoutingDecision(new RoutingDecision(RoleType.PREFILL, "default", "CostBasedPrefill",
-                "CACHE_LEADER", 1600L, 1, "10.0.0.2:8080", 2, 1, false, java.util.Map.of(), List.of(
-                        new RoutingDecision.Candidate("10.0.0.2:8080", true, 90L, 20L, 70L, 512L, 512L, 1L, null, null, null, "MODELED", 1L)), null));
+        context.recordRoutingDecision(
+                new RoutingDecision(
+                        RoleType.PREFILL,
+                        "default",
+                        "CostBasedPrefill",
+                        "CACHE_LEADER",
+                        1600L,
+                        1,
+                        "10.0.0.2:8080",
+                        2,
+                        1,
+                        false,
+                        java.util.Map.of(),
+                        List.of(
+                                new RoutingDecision.Candidate(
+                                        "10.0.0.2:8080",
+                                        true,
+                                        90L,
+                                        20L,
+                                        70L,
+                                        512L,
+                                        512L,
+                                        1L,
+                                        null,
+                                        null,
+                                        null,
+                                        "MODELED",
+                                        1L)),
+                        null));
         context.finishRequestTiming();
 
         PvLogData data = new PvLogData(context);
@@ -286,28 +372,45 @@ class PvLogDataTest {
         assertTrue(json.contains("\"requestBodyBytes\":5242881"));
         assertTrue(json.contains("\"success\":false"));
     }
+
     @Test
     void retainedPvSnapshotDoesNotChangeAfterSequentialRoutingUpdates() throws Exception {
         BalanceContext context = new BalanceContext();
         var published = new java.util.concurrent.CountDownLatch(1);
         var resume = new java.util.concurrent.CountDownLatch(1);
         try (var executor = java.util.concurrent.Executors.newSingleThreadExecutor()) {
-            var writer = executor.submit(() -> {
-                for (int attempt = 0; attempt < 1_000; attempt++) {
-                    context.beginRoutingAttempt(RoleType.PREFILL);
-                    context.recordCacheQuery("LOCAL_SYNC", 2);
-                    context.recordRoutingDecision(new RoutingDecision(RoleType.PREFILL, "default",
-                            "CostBasedPrefill", "attempt-" + attempt, attempt, attempt + 1, "worker:8080",
-                            1, 0, false, java.util.Map.of(), List.of(), null));
-                    if (attempt == 0) {
-                        published.countDown();
-                        if (!resume.await(5, java.util.concurrent.TimeUnit.SECONDS)) {
-                            throw new AssertionError("PV reader did not resume the route writer");
-                        }
-                    }
-                }
-                return null;
-            });
+            var writer =
+                    executor.submit(
+                            () -> {
+                                for (int attempt = 0; attempt < 1_000; attempt++) {
+                                    context.beginRoutingAttempt(RoleType.PREFILL);
+                                    context.recordCacheQuery("LOCAL_SYNC", 2);
+                                    context.recordRoutingDecision(
+                                            new RoutingDecision(
+                                                    RoleType.PREFILL,
+                                                    "default",
+                                                    "CostBasedPrefill",
+                                                    "attempt-" + attempt,
+                                                    attempt,
+                                                    attempt + 1,
+                                                    "worker:8080",
+                                                    1,
+                                                    0,
+                                                    false,
+                                                    java.util.Map.of(),
+                                                    List.of(),
+                                                    null));
+                                    if (attempt == 0) {
+                                        published.countDown();
+                                        if (!resume.await(
+                                                5, java.util.concurrent.TimeUnit.SECONDS)) {
+                                            throw new AssertionError(
+                                                    "PV reader did not resume the route writer");
+                                        }
+                                    }
+                                }
+                                return null;
+                            });
             try {
                 assertTrue(published.await(5, java.util.concurrent.TimeUnit.SECONDS));
                 PvLogData terminalPv = new PvLogData(context);
@@ -336,11 +439,13 @@ class PvLogDataTest {
     void completedProcessingPublishesTimingFieldsToFinalReader() throws Exception {
         BalanceContext context = new BalanceContext();
         try (var executor = java.util.concurrent.Executors.newSingleThreadExecutor()) {
-            executor.submit(() -> {
-                for (int i = 1; i <= 5_000; i++) {
-                    context.recordCacheQuery("KVCM", 2);
-                }
-            }).get(5, java.util.concurrent.TimeUnit.SECONDS);
+            executor.submit(
+                            () -> {
+                                for (int i = 1; i <= 5_000; i++) {
+                                    context.recordCacheQuery("KVCM", 2);
+                                }
+                            })
+                    .get(5, java.util.concurrent.TimeUnit.SECONDS);
         }
         PvLogData result = new PvLogData(context);
         assertEquals(5_000, result.getCacheMatchCount());
@@ -351,8 +456,10 @@ class PvLogDataTest {
     void rejectedSelectionReasonCannotCorruptLaterPvSnapshot() {
         BalanceContext context = new BalanceContext();
         context.recordSelectionReason(RoleType.PREFILL, "BEST_ONLY");
-        assertThrows(NullPointerException.class, () -> context.recordSelectionReason(RoleType.PREFILL, null));
-        assertEquals("BEST_ONLY", new PvLogData(context).getSelectionReasons().get(RoleType.PREFILL));
+        assertThrows(
+                NullPointerException.class,
+                () -> context.recordSelectionReason(RoleType.PREFILL, null));
+        assertEquals(
+                "BEST_ONLY", new PvLogData(context).getSelectionReasons().get(RoleType.PREFILL));
     }
-
 }

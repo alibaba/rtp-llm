@@ -19,8 +19,8 @@ class GroupPlannerTwinWorkloadTest {
     @Test
     void identicalRequestsProduceFullBatchesOrSingletonTimeoutsDependingOnArrival() {
         Constraints limits = new Constraints(8, 1_000_000L, 22_000_000L, 0L, 400L);
-        List<Item> burst = LongStream.rangeClosed(1, 16)
-                .mapToObj(id -> item(id, 0L, 128L)).toList();
+        List<Item> burst =
+                LongStream.rangeClosed(1, 16).mapToObj(id -> item(id, 0L, 128L)).toList();
         Plan<Item> first = plan(burst, limits, 0L);
         Plan<Item> second = plan(burst.subList(8, 16), limits, 0L);
         assertEquals("batch_full", first.reason());
@@ -38,14 +38,18 @@ class GroupPlannerTwinWorkloadTest {
             assertEquals(1, timeout.items().size());
             sparseDispatched.add(timeout.items().getFirst().requestId());
         }
-        assertEquals(burst.stream().map(Item::requestId).toList(), sparseDispatched,
+        assertEquals(
+                burst.stream().map(Item::requestId).toList(),
+                sparseDispatched,
                 "both arrival profiles must dispatch the same 16 request IDs exactly once");
     }
 
     @Test
     void increasingDecisionGroupLimitChangesFullTriggerWithoutChangingRequests() {
-        List<Item> arrivals = LongStream.rangeClosed(1, 8)
-                .mapToObj(id -> item(id, (id - 1) * 50L, 128L)).toList();
+        List<Item> arrivals =
+                LongStream.rangeClosed(1, 8)
+                        .mapToObj(id -> item(id, (id - 1) * 50L, 128L))
+                        .toList();
         Constraints small = new Constraints(8, 1_000_000L, 22_000_000L, 0L, 400L);
         Constraints large = new Constraints(32, 1_000_000L, 22_000_000L, 0L, 400L);
 
@@ -61,8 +65,7 @@ class GroupPlannerTwinWorkloadTest {
     void lowKvUsageMustNotAllowHeterogeneousPrefillBatchToExceedPaddedComputeBudget() {
         // Sum(tokens)=1,100 fits easily, but a three-row padded batch costs
         // 900*3=2,700 tokens and exceeds the 2,000-token compute limit.
-        List<Item> arrivals = List.of(
-                item(1L, 0L, 100L), item(2L, 0L, 900L), item(3L, 0L, 100L));
+        List<Item> arrivals = List.of(item(1L, 0L, 100L), item(2L, 0L, 900L), item(3L, 0L, 100L));
         Constraints limits = new Constraints(8, 2_000L, 22_000_000L, 0L, 400L);
         Plan<Item> result = plan(arrivals, limits, 400L);
 

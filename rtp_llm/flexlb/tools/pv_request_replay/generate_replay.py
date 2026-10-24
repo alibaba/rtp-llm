@@ -18,7 +18,6 @@ from build_html import build_html
 from build_workbook import PvSource, _instance_from_path, build_workbook
 from collect_pv_log import collect_logs
 
-
 LOCAL_TZ = ZoneInfo("Asia/Shanghai")
 ROOT = Path(__file__).resolve().parent
 DEFAULT_WORKSPACE = os.environ.get("FLEXLB_REPLAY_WORKSPACE", "ai-lab-test")
@@ -76,7 +75,9 @@ def default_output_dir(deployment: str, start: datetime, end: datetime) -> Path:
 
 def validate_window(start: datetime, end: datetime) -> None:
     if end <= start:
-        raise ValueError(f"end must be later than start: {time_text(start)} >= {time_text(end)}")
+        raise ValueError(
+            f"end must be later than start: {time_text(start)} >= {time_text(end)}"
+        )
 
 
 def json_default(value: Any) -> str:
@@ -128,8 +129,12 @@ def snapshot_sources(input_path: Path) -> tuple[list[PvSource], dict[str, Any] |
         path = Path(entry["path"])
         if not path.is_absolute():
             path = manifest_path.parent / path
-        instance = (entry.get("instance") or entry.get("pod")
-                    or entry.get("instance_id") or _instance_from_path(path))
+        instance = (
+            entry.get("instance")
+            or entry.get("pod")
+            or entry.get("instance_id")
+            or _instance_from_path(path)
+        )
         sources.append(PvSource(path.resolve(), str(instance)))
     if not sources:
         raise ValueError(f"no snapshots recorded in {manifest_path}")
@@ -139,10 +144,14 @@ def snapshot_sources(input_path: Path) -> tuple[list[PvSource], dict[str, Any] |
     return sources, manifest
 
 
-def manifest_window(manifest: dict[str, Any] | None) -> tuple[datetime | None, datetime | None]:
+def manifest_window(
+    manifest: dict[str, Any] | None
+) -> tuple[datetime | None, datetime | None]:
     if not manifest:
         return None, None
-    requested = manifest.get("requested_window") or manifest.get("requestedWindow") or {}
+    requested = (
+        manifest.get("requested_window") or manifest.get("requestedWindow") or {}
+    )
     if not isinstance(requested, dict):
         return None, None
     start = parse_time(str(requested["start"])) if requested.get("start") else None
@@ -186,7 +195,9 @@ def run_build(
     start = start or manifest_start
     end = end or manifest_end
     if start is None or end is None:
-        raise ValueError("--start and --end are required when the input has no collection manifest")
+        raise ValueError(
+            "--start and --end are required when the input has no collection manifest"
+        )
     validate_window(start, end)
 
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -268,7 +279,9 @@ def run_build(
     return manifest
 
 
-def add_window_arguments(parser: argparse.ArgumentParser, required: bool = True) -> None:
+def add_window_arguments(
+    parser: argparse.ArgumentParser, required: bool = True
+) -> None:
     parser.add_argument("--start", type=parse_time, required=required)
     parser.add_argument("--end", type=parse_time, required=required)
 
@@ -286,8 +299,12 @@ def add_collect_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--output-dir", type=Path)
     parser.add_argument("--log-dir", default="/home/admin/logs")
     parser.add_argument("--log-name", default="pv.log")
-    parser.add_argument("--lead-grace", type=parse_duration, default=timedelta(minutes=5))
-    parser.add_argument("--tail-grace", type=parse_duration, default=timedelta(minutes=10))
+    parser.add_argument(
+        "--lead-grace", type=parse_duration, default=timedelta(minutes=5)
+    )
+    parser.add_argument(
+        "--tail-grace", type=parse_duration, default=timedelta(minutes=10)
+    )
     parser.add_argument("--page-lines", type=int, default=100)
     parser.add_argument("--workers", type=int, default=4)
     parser.add_argument(
@@ -308,7 +325,9 @@ def build_parser() -> argparse.ArgumentParser:
     add_collect_arguments(all_parser)
     all_parser.add_argument("--template", type=Path, default=DEFAULT_TEMPLATE)
 
-    build_parser_ = subparsers.add_parser("build", help="build XLSX + HTML from collected logs")
+    build_parser_ = subparsers.add_parser(
+        "build", help="build XLSX + HTML from collected logs"
+    )
     build_parser_.add_argument("--input", type=Path, required=True)
     add_window_arguments(build_parser_, required=False)
     build_parser_.add_argument("--output-dir", type=Path)
@@ -319,7 +338,9 @@ def build_parser() -> argparse.ArgumentParser:
         help="fail when any route lacks complete cache/WorkerStatus first-token telemetry",
     )
 
-    html_parser = subparsers.add_parser("html", help="build only HTML from an XLSX workbook")
+    html_parser = subparsers.add_parser(
+        "html", help="build only HTML from an XLSX workbook"
+    )
     html_parser.add_argument("--input-xlsx", type=Path, required=True)
     html_parser.add_argument("--output-html", type=Path, required=True)
     html_parser.add_argument("--template", type=Path, default=DEFAULT_TEMPLATE)
@@ -336,7 +357,9 @@ def main() -> int:
                 template_path=args.template,
                 output_path=args.output_html,
             )
-            print(json.dumps(summary, ensure_ascii=False, indent=2, default=json_default))
+            print(
+                json.dumps(summary, ensure_ascii=False, indent=2, default=json_default)
+            )
             return 0
 
         if args.command == "build":
@@ -346,9 +369,13 @@ def main() -> int:
             start = args.start or manifest_start
             end = args.end or manifest_end
             if start is None or end is None:
-                raise ValueError("--start and --end are required for a raw PV log input")
+                raise ValueError(
+                    "--start and --end are required for a raw PV log input"
+                )
             output_dir = args.output_dir or (
-                args.input if args.input.is_dir() else args.input.parent / "replay-output"
+                args.input
+                if args.input.is_dir()
+                else args.input.parent / "replay-output"
             )
             manifest = run_build(
                 args.input,
@@ -358,7 +385,9 @@ def main() -> int:
                 args.template,
                 strict=args.strict,
             )
-            print(json.dumps(manifest, ensure_ascii=False, indent=2, default=json_default))
+            print(
+                json.dumps(manifest, ensure_ascii=False, indent=2, default=json_default)
+            )
             if manifest["status"] != "complete":
                 print(
                     "WARNING: report was built from incomplete collection or joins; "
@@ -376,7 +405,11 @@ def main() -> int:
         )
         collect_manifest = run_collect(args, output_dir)
         if args.command == "collect":
-            print(json.dumps(collect_manifest, ensure_ascii=False, indent=2, default=json_default))
+            print(
+                json.dumps(
+                    collect_manifest, ensure_ascii=False, indent=2, default=json_default
+                )
+            )
             print(f"Collected PV logs under {output_dir}")
             return 0 if collect_manifest.get("status") == "complete" else 1
 

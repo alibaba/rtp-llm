@@ -45,19 +45,23 @@ import static org.mockito.Mockito.verifyNoInteractions;
 
 class UniConfigConfigSourceTest {
 
-    private static final String CONFIG_PATH = "/v2/configs/modelstudio.spectrum.deployment."
-            + "df4a7748.flexlb-test-wlcb.runtime.meta";
-    private static final String INITIAL_CONFIG = """
+    private static final String CONFIG_PATH =
+            "/v2/configs/modelstudio.spectrum.deployment."
+                    + "df4a7748.flexlb-test-wlcb.runtime.meta";
+    private static final String INITIAL_CONFIG =
+            """
             {"schemaVersion":3,"requestLifecycle":{"request":{"timeoutMs":60000}},"consistency":{"type":"NONE"},
             "fallbackBatchTokenCapacity":1048585}
             """;
-    private static final String UPDATED_CONFIG = """
+    private static final String UPDATED_CONFIG =
+            """
             {"schemaVersion":3,"requestLifecycle":{"request":{"timeoutMs":60000}},"consistency":{"type":"NONE"},
             "fallbackBatchTokenCapacity":1048586}
             """;
 
     private final ScheduledExecutorService executor = mock(ScheduledExecutorService.class);
-    private final AtomicReference<Response> response = new AtomicReference<>(new Response(200, INITIAL_CONFIG));
+    private final AtomicReference<Response> response =
+            new AtomicReference<>(new Response(200, INITIAL_CONFIG));
     private final AtomicInteger requests = new AtomicInteger();
     private final AtomicReference<String> requestPath = new AtomicReference<>();
     private final AtomicReference<String> requestMethod = new AtomicReference<>();
@@ -73,18 +77,21 @@ class UniConfigConfigSourceTest {
 
     private void startAgent(InetSocketAddress address) throws IOException {
         server = HttpServer.create(address, 0);
-        server.createContext("/", exchange -> {
-            requests.incrementAndGet();
-            requestPath.set(exchange.getRequestURI().getRawPath());
-            requestMethod.set(exchange.getRequestMethod());
-            Response current = response.get();
-            byte[] body = current.body().getBytes(StandardCharsets.UTF_8);
-            try (exchange) {
-                exchange.getResponseHeaders().set("Content-Type", "application/json; charset=utf-8");
-                exchange.sendResponseHeaders(current.status(), body.length);
-                exchange.getResponseBody().write(body);
-            }
-        });
+        server.createContext(
+                "/",
+                exchange -> {
+                    requests.incrementAndGet();
+                    requestPath.set(exchange.getRequestURI().getRawPath());
+                    requestMethod.set(exchange.getRequestMethod());
+                    Response current = response.get();
+                    byte[] body = current.body().getBytes(StandardCharsets.UTF_8);
+                    try (exchange) {
+                        exchange.getResponseHeaders()
+                                .set("Content-Type", "application/json; charset=utf-8");
+                        exchange.sendResponseHeaders(current.status(), body.length);
+                        exchange.getResponseBody().write(body);
+                    }
+                });
         server.start();
     }
 
@@ -101,8 +108,9 @@ class UniConfigConfigSourceTest {
 
     @Test
     void fetchesRawDocumentsAndHotUpdatesThroughBothExistingParsers() throws Exception {
-        String legacyConfig = "{\"schemaVersion\":0,\"enableQueueing\":true,"
-                + "\"flexlbSyncConsistencyConfig\":{\"needConsistency\":false}}";
+        String legacyConfig =
+                "{\"schemaVersion\":0,\"enableQueueing\":true,"
+                        + "\"flexlbSyncConsistencyConfig\":{\"needConsistency\":false}}";
         response.set(new Response(200, legacyConfig));
         initializeSource();
         initializeConfigService();
@@ -121,7 +129,8 @@ class UniConfigConfigSourceTest {
 
         assertThat(configService.loadBalanceConfig()).isSameAs(original);
         assertThat(updates).hasValue(1);
-        String currentConfig = """
+        String currentConfig =
+                """
                 {"schemaVersion":3,"requestLifecycle":{"request":{"timeoutMs":60000}},"scheduler":{"type":"DIRECT"},
                 "dispatcher":{"type":"NON_BATCH"},"consistency":{"type":"NONE"},
                 "fallbackBatchTokenCapacity":1048585}
@@ -131,7 +140,8 @@ class UniConfigConfigSourceTest {
 
         assertThat(source.load()).isEqualTo(currentConfig);
         assertThat(configService.loadBalanceConfig().isQueue()).isTrue();
-        assertThat(configService.loadBalanceConfig().getDispatcher().typeName()).isEqualTo(startupDispatcherType);
+        assertThat(configService.loadBalanceConfig().getDispatcher().typeName())
+                .isEqualTo(startupDispatcherType);
         assertThat(configService.loadBalanceConfig().getFallbackBatchTokenCapacity())
                 .isEqualTo(1048585L);
         assertThat(updates).hasValue(2);
@@ -147,26 +157,30 @@ class UniConfigConfigSourceTest {
 
     @ParameterizedTest
     @ValueSource(strings = {"not-json", "{\"schemaVersion\":1,\"enableFallback\":true}"})
-    void uniConfigExcludesNacosAndEnvironmentBehaviorButPreservesModelTopology(String environmentConfig)
-            throws Exception {
+    void uniConfigExcludesNacosAndEnvironmentBehaviorButPreservesModelTopology(
+            String environmentConfig) throws Exception {
         com.alibaba.nacos.api.config.ConfigService nacosClient =
                 mock(com.alibaba.nacos.api.config.ConfigService.class);
         spectrumEnvironment()
                 .set("FLEXLB_UNICONF_ENABLE", " TrUe ")
                 .set(NACOS_SERVER_ADDR, "unreachable-nacos:8848")
                 .set("FLEXLB_CONFIG", environmentConfig)
-                .set("MODEL_SERVICE_CONFIG", "{\"service_id\":\"test-model\",\"role_endpoints\":[]}")
-                .execute(() -> {
-                    DeploymentIdentity identity = new DeploymentIdentity();
-                    EnvironmentConfigSource environmentSource = new EnvironmentConfigSource();
-                    environmentSource.initialize();
-                    NacosConfigSource nacosSource = new NacosConfigSource(identity);
-                    ReflectionTestUtils.setField(nacosSource, "client", nacosClient);
-                    nacosSource.initialize();
-                    prepareSource(new UniConfigConfigSource(identity));
-                    source.initialize();
-                    initializeConfigService();
-                });
+                .set(
+                        "MODEL_SERVICE_CONFIG",
+                        "{\"service_id\":\"test-model\",\"role_endpoints\":[]}")
+                .execute(
+                        () -> {
+                            DeploymentIdentity identity = new DeploymentIdentity();
+                            EnvironmentConfigSource environmentSource =
+                                    new EnvironmentConfigSource();
+                            environmentSource.initialize();
+                            NacosConfigSource nacosSource = new NacosConfigSource(identity);
+                            ReflectionTestUtils.setField(nacosSource, "client", nacosClient);
+                            nacosSource.initialize();
+                            prepareSource(new UniConfigConfigSource(identity));
+                            source.initialize();
+                            initializeConfigService();
+                        });
 
         assertThat(configService.loadBalanceConfig().getFallbackBatchTokenCapacity())
                 .isEqualTo(1048585L);
@@ -177,14 +191,22 @@ class UniConfigConfigSourceTest {
 
     @Test
     void disabledSourceDoesNotRequireSpectrumOrContactAgent() throws Exception {
-        source = new EnvironmentVariables("FLEXLB_UNICONF_ENABLE", "false",
-                WHALE_BIZ_NAME, "dash_pd", WHALE_DEPLOYMENT_NAME, "test-deployment", WHALE_ZONE_NAME, "master")
-                .set("UNICONF_ENABLE", "true")
-                .remove(SPECTRUM_WORKSPACE_ID)
-                .remove(SPECTRUM_APPLICATION_NAME)
-                .remove(SPECTRUM_DEPLOYMENT_NAME)
-                .remove(NACOS_SERVER_ADDR)
-                .execute(() -> new UniConfigConfigSource(new DeploymentIdentity()));
+        source =
+                new EnvironmentVariables(
+                                "FLEXLB_UNICONF_ENABLE",
+                                "false",
+                                WHALE_BIZ_NAME,
+                                "dash_pd",
+                                WHALE_DEPLOYMENT_NAME,
+                                "test-deployment",
+                                WHALE_ZONE_NAME,
+                                "master")
+                        .set("UNICONF_ENABLE", "true")
+                        .remove(SPECTRUM_WORKSPACE_ID)
+                        .remove(SPECTRUM_APPLICATION_NAME)
+                        .remove(SPECTRUM_DEPLOYMENT_NAME)
+                        .remove(NACOS_SERVER_ADDR)
+                        .execute(() -> new UniConfigConfigSource(new DeploymentIdentity()));
 
         source.initialize();
 
@@ -195,13 +217,24 @@ class UniConfigConfigSourceTest {
 
     @Test
     void enabledSourceRequiresSpectrumIdentity() {
-        EnvironmentVariables environment = new EnvironmentVariables("FLEXLB_UNICONF_ENABLE", "true",
-                WHALE_BIZ_NAME, "dash_pd", WHALE_DEPLOYMENT_NAME, "test-deployment", WHALE_ZONE_NAME, "master")
-                .remove(SPECTRUM_WORKSPACE_ID)
-                .remove(SPECTRUM_APPLICATION_NAME)
-                .remove(SPECTRUM_DEPLOYMENT_NAME);
+        EnvironmentVariables environment =
+                new EnvironmentVariables(
+                                "FLEXLB_UNICONF_ENABLE",
+                                "true",
+                                WHALE_BIZ_NAME,
+                                "dash_pd",
+                                WHALE_DEPLOYMENT_NAME,
+                                "test-deployment",
+                                WHALE_ZONE_NAME,
+                                "master")
+                        .remove(SPECTRUM_WORKSPACE_ID)
+                        .remove(SPECTRUM_APPLICATION_NAME)
+                        .remove(SPECTRUM_DEPLOYMENT_NAME);
 
-        assertThatThrownBy(() -> environment.execute(() -> new UniConfigConfigSource(new DeploymentIdentity())))
+        assertThatThrownBy(
+                        () ->
+                                environment.execute(
+                                        () -> new UniConfigConfigSource(new DeploymentIdentity())))
                 .isInstanceOf(IllegalStateException.class)
                 .hasMessageContaining("UniConfig requires a Spectrum deployment identity");
     }
@@ -211,10 +244,13 @@ class UniConfigConfigSourceTest {
     void retriesHttpErrorsUntilConfigurationBecomesAvailable(int status) throws Exception {
         response.set(new Response(status, "{\"error\":\"config unavailable\"}"));
         prepareRetryingSource();
-        doAnswer(invocation -> {
-            response.set(new Response(200, INITIAL_CONFIG));
-            return null;
-        }).when(source).waitForStartupRetry();
+        doAnswer(
+                        invocation -> {
+                            response.set(new Response(200, INITIAL_CONFIG));
+                            return null;
+                        })
+                .when(source)
+                .waitForStartupRetry();
 
         source.initialize();
 
@@ -227,10 +263,13 @@ class UniConfigConfigSourceTest {
     void waitsForAgentToStartBeforeLoadingInitialConfiguration() throws Exception {
         InetSocketAddress address = server.getAddress();
         prepareUnavailableAgent();
-        doAnswer(invocation -> {
-            startAgent(address);
-            return null;
-        }).when(source).waitForStartupRetry();
+        doAnswer(
+                        invocation -> {
+                            startAgent(address);
+                            return null;
+                        })
+                .when(source)
+                .waitForStartupRetry();
 
         source.initialize();
         initializeConfigService();
@@ -246,12 +285,15 @@ class UniConfigConfigSourceTest {
         InetSocketAddress address = server.getAddress();
         prepareUnavailableAgent();
         AtomicInteger waits = new AtomicInteger();
-        doAnswer(invocation -> {
-            if (waits.incrementAndGet() == 31) {
-                startAgent(address);
-            }
-            return null;
-        }).when(source).waitForStartupRetry();
+        doAnswer(
+                        invocation -> {
+                            if (waits.incrementAndGet() == 31) {
+                                startAgent(address);
+                            }
+                            return null;
+                        })
+                .when(source)
+                .waitForStartupRetry();
 
         source.initialize();
 
@@ -279,13 +321,17 @@ class UniConfigConfigSourceTest {
 
     @ParameterizedTest
     @ValueSource(strings = {"not-json", "[]", "{}", "{\"schemaVersion\":1,\"unknown\":true}"})
-    void retriesInvalidOrIncompleteDocumentsUntilConfigurationBecomesAvailable(String invalidConfig) throws Exception {
+    void retriesInvalidOrIncompleteDocumentsUntilConfigurationBecomesAvailable(String invalidConfig)
+            throws Exception {
         response.set(new Response(200, invalidConfig));
         prepareRetryingSource();
-        doAnswer(invocation -> {
-            response.set(new Response(200, INITIAL_CONFIG));
-            return null;
-        }).when(source).waitForStartupRetry();
+        doAnswer(
+                        invocation -> {
+                            response.set(new Response(200, INITIAL_CONFIG));
+                            return null;
+                        })
+                .when(source)
+                .waitForStartupRetry();
 
         source.initialize();
 
@@ -313,8 +359,12 @@ class UniConfigConfigSourceTest {
     }
 
     @ParameterizedTest
-    @ValueSource(strings = {"{", "{\"schemaVersion\":3,\"unknown\":true}",
-            "{\"schemaVersion\":3,\"scheduler\":{\"type\":\"DIRECT\"},\"dispatcher\":{\"type\":\"BATCH\"}}"})
+    @ValueSource(
+            strings = {
+                "{",
+                "{\"schemaVersion\":3,\"unknown\":true}",
+                "{\"schemaVersion\":3,\"scheduler\":{\"type\":\"DIRECT\"},\"dispatcher\":{\"type\":\"BATCH\"}}"
+            })
     void retainsLastGoodConfigOnInvalidUpdatesAndRecovers(String invalidConfig) throws Exception {
         initializeSource();
         initializeConfigService();
@@ -332,10 +382,14 @@ class UniConfigConfigSourceTest {
 
     private EnvironmentVariables spectrumEnvironment() {
         return new EnvironmentVariables(
-                "FLEXLB_UNICONF_ENABLE", "true",
-                SPECTRUM_WORKSPACE_ID, "df4a7748",
-                SPECTRUM_APPLICATION_NAME, "flexlb-test",
-                SPECTRUM_DEPLOYMENT_NAME, "flexlb-test-wlcb")
+                        "FLEXLB_UNICONF_ENABLE",
+                        "true",
+                        SPECTRUM_WORKSPACE_ID,
+                        "df4a7748",
+                        SPECTRUM_APPLICATION_NAME,
+                        "flexlb-test",
+                        SPECTRUM_DEPLOYMENT_NAME,
+                        "flexlb-test-wlcb")
                 .set(NACOS_SERVER_ADDR, null)
                 .set("FLEXLB_CONFIG", null)
                 .set("MODEL_SERVICE_CONFIG", null);
@@ -343,17 +397,23 @@ class UniConfigConfigSourceTest {
 
     private void prepareSource(UniConfigConfigSource newSource) {
         source = newSource;
-        assertThat(source).extracting("configUri").isEqualTo(URI.create("http://127.0.0.1:18080" + CONFIG_PATH));
-        ReflectionTestUtils.setField(source, "configUri",
+        assertThat(source)
+                .extracting("configUri")
+                .isEqualTo(URI.create("http://127.0.0.1:18080" + CONFIG_PATH));
+        ReflectionTestUtils.setField(
+                source,
+                "configUri",
                 URI.create("http://127.0.0.1:" + server.getAddress().getPort() + CONFIG_PATH));
         ReflectionTestUtils.setField(source, "pollExecutor", executor);
     }
 
     private void initializeSource() throws Exception {
-        spectrumEnvironment().execute(() -> {
-            prepareSource(new UniConfigConfigSource(new DeploymentIdentity()));
-            source.initialize();
-        });
+        spectrumEnvironment()
+                .execute(
+                        () -> {
+                            prepareSource(new UniConfigConfigSource(new DeploymentIdentity()));
+                            source.initialize();
+                        });
     }
 
     private void prepareUnavailableAgent() throws Exception {
@@ -363,13 +423,21 @@ class UniConfigConfigSourceTest {
     }
 
     private void prepareRetryingSource() throws Exception {
-        spectrumEnvironment().execute(() -> prepareSource(spy(new UniConfigConfigSource(new DeploymentIdentity()))));
+        spectrumEnvironment()
+                .execute(
+                        () ->
+                                prepareSource(
+                                        spy(new UniConfigConfigSource(new DeploymentIdentity()))));
     }
 
     private void initializeConfigService() {
-        configService = new ConfigService(List.of(new StandardConfigDocumentParser(), new V0ConfigDocumentParser()));
+        configService =
+                new ConfigService(
+                        List.of(new StandardConfigDocumentParser(), new V0ConfigDocumentParser()));
         ArgumentCaptor<Runnable> pollCaptor = ArgumentCaptor.forClass(Runnable.class);
-        verify(executor).scheduleWithFixedDelay(pollCaptor.capture(), eq(30L), eq(30L), eq(TimeUnit.SECONDS));
+        verify(executor)
+                .scheduleWithFixedDelay(
+                        pollCaptor.capture(), eq(30L), eq(30L), eq(TimeUnit.SECONDS));
         poll = pollCaptor.getValue();
     }
 

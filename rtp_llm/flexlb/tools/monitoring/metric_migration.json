@@ -13,9 +13,7 @@
       "newName": "app.cache.total.kv.cache.tokens",
       "type": "GAUGE",
       "note": "Worker 上报的 KV 总容量，保留裸 IP 的 engineIp 标签。同 IP 多实例共用标签，Gauge 为逐样本值，不能当作该 IP 下所有实例的容量合计。多个 Master 的同一标签观察需去重。",
-      "removeLabels": [
-        "model"
-      ]
+      "removeLabels": ["model"]
     },
     {
       "oldName": "app.cache.hit.count",
@@ -28,18 +26,14 @@
       "newName": "app.cache.theory.hit.count",
       "type": "COUNTER",
       "note": "理论命中 Tokens 是 Counter，与理论输入 Tokens 的同窗口增量计算加权命中率。",
-      "aliases": [
-        "app.cache.recent.key.hit.count"
-      ]
+      "aliases": ["app.cache.recent.key.hit.count"]
     },
     {
       "oldName": "app.cache.theory.total.count",
       "newName": "app.cache.theory.total.count",
       "type": "COUNTER",
       "note": "理论输入 Tokens 是 Counter，不能沿用旧瞬时值的 avg 查询。",
-      "aliases": [
-        "app.cache.recent.key.total.count"
-      ]
+      "aliases": ["app.cache.recent.key.total.count"]
     },
     {
       "oldName": "app.engine.balancing.master.select.detail",
@@ -52,45 +46,35 @@
       "newName": "app.engine.worker.info.step.latency.var",
       "type": "GAUGE",
       "note": "同一 role 的逻辑 Worker step latency 方差，单位为 ms²；用 BIZ_NAME 定位部署，不再按旧 model 标签筛选。",
-      "removeLabels": [
-        "model"
-      ]
+      "removeLabels": ["model"]
     },
     {
       "oldName": "app.engine.worker.info.running.query.len.var",
       "newName": "app.engine.worker.info.running.query.len.var",
       "type": "GAUGE",
       "note": "同一 role 的逻辑 endpoint 负载方差；Prefill 单位为 work-ms²，Decode/状态角色为 count²，不跨角色混算。保留原名，通过面板说明实际口径。",
-      "removeLabels": [
-        "model"
-      ]
+      "removeLabels": ["model"]
     },
     {
       "oldName": "app.engine.health.check.engine.prefill.worker.number",
       "newName": "app.engine.health.check.engine.prefill.worker.number",
       "type": "GAUGE",
       "note": "已发现的逻辑 Prefill Worker 数量；使用 BIZ_NAME/host，不含 model；不代表服务发现原始 Host 数。",
-      "removeLabels": [
-        "model"
-      ]
+      "removeLabels": ["model"]
     },
     {
       "oldName": "app.engine.health.check.engine.decode.worker.number",
       "newName": "app.engine.health.check.engine.decode.worker.number",
       "type": "GAUGE",
       "note": "已发现的逻辑 Decode Worker 数量；使用 BIZ_NAME/host，不含 model；不代表服务发现原始 Host 数。",
-      "removeLabels": [
-        "model"
-      ]
+      "removeLabels": ["model"]
     },
     {
       "oldName": "app.engine.health.check.engine.encoder.worker.number",
       "newName": "app.engine.health.check.engine.encoder.worker.number",
       "type": "GAUGE",
       "note": "已发现的逻辑 Encoder Worker 数量；使用 BIZ_NAME/host，不含 model；不代表服务发现原始 Host 数。",
-      "removeLabels": [
-        "model"
-      ]
+      "removeLabels": ["model"]
     },
     {
       "oldName": "app.flexlb.decode.inflight.kv.reserved.tokens",
@@ -122,9 +106,7 @@
       "oldName": "app.cache.block.size",
       "newName": "app.cache.block.size",
       "type": "GAUGE",
-      "removeLabels": [
-        "model"
-      ],
+      "removeLabels": ["model"],
       "note": "同一角色 Block Size 一致，取首个有效 Worker；按 BIZ_NAME、role 展示，覆盖 Prefill、Decode、PDFusion、Encoder，不增加 engineIp。"
     },
     {

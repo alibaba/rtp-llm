@@ -24,20 +24,27 @@ class FlexlbLoggingStartupTest {
 
     @Test
     void startsLogManagerWithPackagedApplicationConfiguration(@TempDir Path logDirectory) {
-        try (var context = new SpringApplicationBuilder(LoggingConfiguration.class)
-                .web(WebApplicationType.NONE)
-                .bannerMode(Banner.Mode.OFF)
-                .logStartupInfo(false)
-                .run("--spring.config.location=classpath:/application.yml", "--spring.main.web-application-type=none",
-                        "--flexlb.log.path=" + logDirectory, "--flexlb.log.app-path=" + logDirectory)) {
+        try (var context =
+                new SpringApplicationBuilder(LoggingConfiguration.class)
+                        .web(WebApplicationType.NONE)
+                        .bannerMode(Banner.Mode.OFF)
+                        .logStartupInfo(false)
+                        .run(
+                                "--spring.config.location=classpath:/application.yml",
+                                "--spring.main.web-application-type=none",
+                                "--flexlb.log.path=" + logDirectory,
+                                "--flexlb.log.app-path=" + logDirectory)) {
             context.getBean(FlexlbLogManager.class).setLogLevel(LogLevel.DEBUG);
 
             LoggingSystem loggingSystem = context.getBean(LoggingSystem.class);
-            var groupMembers = context.getBean(LoggerGroups.class)
-                    .get(FlexlbLogManager.LOG_GROUP_NAME).getMembers();
+            var groupMembers =
+                    context.getBean(LoggerGroups.class)
+                            .get(FlexlbLogManager.LOG_GROUP_NAME)
+                            .getMembers();
             assertTrue(!groupMembers.isEmpty());
             for (String loggerName : groupMembers) {
-                assertEquals(org.springframework.boot.logging.LogLevel.DEBUG,
+                assertEquals(
+                        org.springframework.boot.logging.LogLevel.DEBUG,
                         loggingSystem.getLoggerConfiguration(loggerName).getConfiguredLevel());
             }
             assertTrue(Files.exists(logDirectory.resolve("application.log")));

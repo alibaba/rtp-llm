@@ -31,12 +31,12 @@ import java.util.function.Supplier;
 @Component
 public final class WorkerDirectory implements WorkerStatusProvider {
 
-    private final Map<RoleType, ConcurrentHashMap<String, WorkerStatus>> statusesByRole = new EnumMap<>(RoleType.class);
+    private final Map<RoleType, ConcurrentHashMap<String, WorkerStatus>> statusesByRole =
+            new EnumMap<>(RoleType.class);
     private final EndpointRegistry endpointRegistry;
 
     public WorkerDirectory(EndpointRegistry endpointRegistry) {
-        this.endpointRegistry = Objects.requireNonNull(
-                endpointRegistry, "endpointRegistry");
+        this.endpointRegistry = Objects.requireNonNull(endpointRegistry, "endpointRegistry");
         for (RoleType role : RoleType.values()) {
             statusesByRole.put(role, new ConcurrentHashMap<>());
         }
@@ -55,20 +55,18 @@ public final class WorkerDirectory implements WorkerStatusProvider {
         if (role == null) {
             return List.of();
         }
-        List<WorkerStatus> statuses = List.copyOf(
-                statusSnapshot(role).values());
+        List<WorkerStatus> statuses = List.copyOf(statusSnapshot(role).values());
         if (group == null) {
             return statuses;
         }
-        return statuses.stream()
-                .filter(status -> group.equals(status.getGroup()))
-                .toList();
+        return statuses.stream().filter(status -> group.equals(status.getGroup())).toList();
     }
 
     /** Identity check used by asynchronous callbacks under the status lock. */
-    public boolean isCurrentStatus(
-            RoleType role, String address, WorkerStatus expected) {
-        return expected != null && role != null && address != null
+    public boolean isCurrentStatus(RoleType role, String address, WorkerStatus expected) {
+        return expected != null
+                && role != null
+                && address != null
                 && statusesByRole.get(role).get(address) == expected;
     }
 
@@ -78,22 +76,25 @@ public final class WorkerDirectory implements WorkerStatusProvider {
      * WorkerStatus response commits.
      */
     public WorkerStatus currentOrDiscover(
-            RoleType role,
-            String address,
-            Supplier<WorkerStatus> discoveredFactory) {
+            RoleType role, String address, Supplier<WorkerStatus> discoveredFactory) {
         Objects.requireNonNull(role, "role");
         Objects.requireNonNull(address, "address");
         Objects.requireNonNull(discoveredFactory, "discoveredFactory");
-        return statusesByRole.get(role).computeIfAbsent(address, ignored -> {
-            WorkerStatus discovered = Objects.requireNonNull(
-                    discoveredFactory.get(), "discovered status");
-            if (discovered.getRole() != role
-                    || !address.equals(discovered.getLogicalIpPort())) {
-                throw new IllegalArgumentException(
-                        "Discovered WorkerStatus identity does not match directory key");
-            }
-            return discovered;
-        });
+        return statusesByRole
+                .get(role)
+                .computeIfAbsent(
+                        address,
+                        ignored -> {
+                            WorkerStatus discovered =
+                                    Objects.requireNonNull(
+                                            discoveredFactory.get(), "discovered status");
+                            if (discovered.getRole() != role
+                                    || !address.equals(discovered.getLogicalIpPort())) {
+                                throw new IllegalArgumentException(
+                                        "Discovered WorkerStatus identity does not match directory key");
+                            }
+                            return discovered;
+                        });
     }
 
     public int discoveredCount(RoleType role) {
@@ -121,11 +122,8 @@ public final class WorkerDirectory implements WorkerStatusProvider {
 
     /** Publish the first endpoint for one exact discovered generation. */
     public EndpointRegistry.EndpointPublication publishPreparedEndpoint(
-            String address,
-            WorkerStatus status,
-            WorkerStatus.PreparedStatus prepared) {
-        return endpointRegistry.publishPreparedEndpoint(
-                address, status, prepared);
+            String address, WorkerStatus status, WorkerStatus.PreparedStatus prepared) {
+        return endpointRegistry.publishPreparedEndpoint(address, status, prepared);
     }
 
     /**
@@ -133,31 +131,30 @@ public final class WorkerDirectory implements WorkerStatusProvider {
      * The caller must hold the matching {@link WorkerStatus#lock}.
      */
     public EndpointRegistry.DetachedGeneration beginRetirement(
-            RoleType role,
-            String address,
-            WorkerStatus status) {
+            RoleType role, String address, WorkerStatus status) {
         Objects.requireNonNull(status, "status");
         Objects.requireNonNull(role, "role");
         Objects.requireNonNull(address, "address");
         status.requireGenerationLock();
         status.requireActiveGeneration();
 
-        WorkerEndpoint expected = endpointRegistry.get(
-                role, address, status);
+        WorkerEndpoint expected = endpointRegistry.get(role, address, status);
         EndpointRegistry.DetachedGeneration detached =
-                endpointRegistry.detachAndBeginRetirement(
-                        role, address, status);
+                endpointRegistry.detachAndBeginRetirement(role, address, status);
         if ((detached == null) != (expected == null)
                 || detached != null && !detached.ownsEndpoint(expected)) {
             throw new IllegalStateException(
                     "Exact endpoint detach invariant failed for "
-                            + address + "#" + status.getGenerationId());
+                            + address
+                            + "#"
+                            + status.getGenerationId());
         }
-        if (detached == null
-                && !status.beginRetirementAfterEndpointGateClosed()) {
+        if (detached == null && !status.beginRetirementAfterEndpointGateClosed()) {
             throw new IllegalStateException(
                     "WorkerStatus generation changed while its lock was held: "
-                            + address + "#" + status.getGenerationId());
+                            + address
+                            + "#"
+                            + status.getGenerationId());
         }
         return detached;
     }
@@ -187,13 +184,14 @@ public final class WorkerDirectory implements WorkerStatusProvider {
         } catch (Throwable retirementFailure) {
             cleanupFailure = retirementFailure;
         } finally {
-            finalizeRetirement(
-                    role, address, status, cacheAwareService, logger);
+            finalizeRetirement(role, address, status, cacheAwareService, logger);
         }
         if (cleanupFailure != null) {
             logger.error(
                     "Endpoint cleanup failed after retiring generation {} for {}",
-                    status.getGenerationId(), address, cleanupFailure);
+                    status.getGenerationId(),
+                    address,
+                    cleanupFailure);
         }
     }
 
@@ -210,7 +208,8 @@ public final class WorkerDirectory implements WorkerStatusProvider {
             if (statuses.get(address) != status) {
                 logger.error(
                         "Status identity changed before retirement finalized for {}#{}",
-                        address, status.getGenerationId());
+                        address,
+                        status.getGenerationId());
                 return;
             }
             try {
@@ -220,17 +219,22 @@ public final class WorkerDirectory implements WorkerStatusProvider {
             } catch (Throwable cacheCleanupFailure) {
                 logger.error(
                         "Cache cleanup failed while retiring generation {} for {}",
-                        status.getGenerationId(), address, cacheCleanupFailure);
+                        status.getGenerationId(),
+                        address,
+                        cacheCleanupFailure);
             }
             if (!statuses.remove(address, status)) {
                 logger.error(
                         "Exact status removal failed while its generation lock was held for {}#{}",
-                        address, status.getGenerationId());
+                        address,
+                        status.getGenerationId());
             }
         } catch (Throwable finalizationFailure) {
             logger.error(
                     "Status retirement finalization failed for {}#{}",
-                    address, status.getGenerationId(), finalizationFailure);
+                    address,
+                    status.getGenerationId(),
+                    finalizationFailure);
         } finally {
             status.lock.unlock();
         }
@@ -245,27 +249,22 @@ public final class WorkerDirectory implements WorkerStatusProvider {
      * Immutable, non-owning Prefill generations for one routing traversal.
      * The winning address must still be captured and identity-checked.
      */
-    public List<EndpointRegistry.PrefillRoutingEntry> prefillRoutingSnapshot(
-            RoleType role) {
+    public List<EndpointRegistry.PrefillRoutingEntry> prefillRoutingSnapshot(RoleType role) {
         return endpointRegistry.prefillRoutingSnapshot(role);
     }
 
     /** Capture one exact currently published endpoint generation by address. */
-    public WorkerEndpoint.GenerationPin captureEndpoint(
-            RoleType role, String ipPort) {
+    public WorkerEndpoint.GenerationPin captureEndpoint(RoleType role, String ipPort) {
         return endpointRegistry.capture(role, ipPort);
     }
 
     /** Immutable Decode routing values for one group. */
-    public List<DecodeEndpoint.DecodeRoutingView> decodeRoutingSnapshot(
-            String group) {
-        List<DecodeEndpoint.DecodeRoutingView> snapshots =
-                endpointRegistry.decodeRoutingSnapshot();
+    public List<DecodeEndpoint.DecodeRoutingView> decodeRoutingSnapshot(String group) {
+        List<DecodeEndpoint.DecodeRoutingView> snapshots = endpointRegistry.decodeRoutingSnapshot();
         if (group == null || snapshots.isEmpty()) {
             return snapshots;
         }
-        ArrayList<DecodeEndpoint.DecodeRoutingView> matching =
-                new ArrayList<>(snapshots.size());
+        ArrayList<DecodeEndpoint.DecodeRoutingView> matching = new ArrayList<>(snapshots.size());
         for (DecodeEndpoint.DecodeRoutingView snapshot : snapshots) {
             if (group.equals(snapshot.topology().group())) {
                 matching.add(snapshot);
@@ -281,11 +280,9 @@ public final class WorkerDirectory implements WorkerStatusProvider {
     }
 
     /** Capture exact endpoint generations for one routing decision. */
-    public List<WorkerEndpoint.GenerationPin> captureEndpoints(
-            RoleType role, String group) {
+    public List<WorkerEndpoint.GenerationPin> captureEndpoints(RoleType role, String group) {
         List<WorkerEndpoint.GenerationPin> captured = endpointRegistry.capture(role);
-        List<WorkerEndpoint.GenerationPin> matching =
-                new ArrayList<>(captured.size());
+        List<WorkerEndpoint.GenerationPin> matching = new ArrayList<>(captured.size());
         try {
             for (int index = 0; index < captured.size(); index++) {
                 WorkerEndpoint.GenerationPin pin = captured.get(index);
@@ -328,5 +325,4 @@ public final class WorkerDirectory implements WorkerStatusProvider {
             }
         }
     }
-
 }

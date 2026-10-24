@@ -34,7 +34,8 @@ class LocalStandbyCacheIndex {
     private final long minimumTtlNanos;
     private final double ttlReductionStartRatio;
     private final boolean automaticCleanupEnabled;
-    private final ConcurrentHashMap<Long, ConcurrentHashMap<String, Long>> blockToEnginesMap = new ConcurrentHashMap<>();
+    private final ConcurrentHashMap<Long, ConcurrentHashMap<String, Long>> blockToEnginesMap =
+            new ConcurrentHashMap<>();
     // Prevent duplicate request-triggered full scans from being queued or run concurrently.
     private final AtomicBoolean highWatermarkCleanupTriggered = new AtomicBoolean();
     private final AtomicBoolean cleanupStopped = new AtomicBoolean();
@@ -45,17 +46,19 @@ class LocalStandbyCacheIndex {
     private Iterator<Long> cleanupIterator;
     private int checksSinceLastCleanup;
 
-    LocalStandbyCacheIndex(long ttlMs,
-                           long minimumTtlMs,
-                           double ttlReductionStartRatio,
-                           long maximumEntries,
-                           boolean enabled) {
+    LocalStandbyCacheIndex(
+            long ttlMs,
+            long minimumTtlMs,
+            double ttlReductionStartRatio,
+            long maximumEntries,
+            boolean enabled) {
         if (minimumTtlMs <= 0 || minimumTtlMs > ttlMs) {
             throw new IllegalArgumentException(
                     "Local Standby TTL must satisfy 0 < minimumTtlMs <= ttlMs");
         }
         if (!Double.isFinite(ttlReductionStartRatio)
-                || ttlReductionStartRatio < 0 || ttlReductionStartRatio > 1) {
+                || ttlReductionStartRatio < 0
+                || ttlReductionStartRatio > 1) {
             throw new IllegalArgumentException(
                     "Local Standby ttlReductionStartRatio must be between 0 and 1");
         }
@@ -68,11 +71,13 @@ class LocalStandbyCacheIndex {
             this.cleanupExecutor = null;
             return;
         }
-        this.cleanupExecutor = Executors.newSingleThreadScheduledExecutor(runnable -> {
-            Thread thread = new Thread(runnable, "local-standby-cache-cleaner");
-            thread.setDaemon(true);
-            return thread;
-        });
+        this.cleanupExecutor =
+                Executors.newSingleThreadScheduledExecutor(
+                        runnable -> {
+                            Thread thread = new Thread(runnable, "local-standby-cache-cleaner");
+                            thread.setDaemon(true);
+                            return thread;
+                        });
         cleanupExecutor.scheduleWithFixedDelay(
                 this::runCleanupCheck,
                 CLEANUP_CHECK_INTERVAL_MS,
@@ -88,7 +93,10 @@ class LocalStandbyCacheIndex {
      * @return number of mappings rejected by the capacity limit
      */
     int addWorkerBlockMappings(String workerIpPort, List<Long> blockCacheKeys) {
-        if (workerIpPort == null || workerIpPort.isEmpty() || blockCacheKeys == null || blockCacheKeys.isEmpty()) {
+        if (workerIpPort == null
+                || workerIpPort.isEmpty()
+                || blockCacheKeys == null
+                || blockCacheKeys.isEmpty()) {
             return 0;
         }
 
@@ -102,26 +110,29 @@ class LocalStandbyCacheIndex {
             // Refreshing a popular mapping avoids outer-map compute(), which serializes updates
             // for the same block hash.
             ConcurrentHashMap<String, Long> existingWorkers = blockToEnginesMap.get(blockCacheKey);
-            if (existingWorkers != null && existingWorkers.replace(workerIpPort, lastUpdatedNanos) != null) {
+            if (existingWorkers != null
+                    && existingWorkers.replace(workerIpPort, lastUpdatedNanos) != null) {
                 continue;
             }
 
-            blockToEnginesMap.compute(blockCacheKey, (blockHash, mappedWorkers) -> {
-                ConcurrentHashMap<String, Long> currentWorkers = mappedWorkers;
-                if (currentWorkers == null) {
-                    currentWorkers = new ConcurrentHashMap<>();
-                }
+            blockToEnginesMap.compute(
+                    blockCacheKey,
+                    (blockHash, mappedWorkers) -> {
+                        ConcurrentHashMap<String, Long> currentWorkers = mappedWorkers;
+                        if (currentWorkers == null) {
+                            currentWorkers = new ConcurrentHashMap<>();
+                        }
 
-                if (currentWorkers.replace(workerIpPort, lastUpdatedNanos) != null) {
-                    return currentWorkers;
-                }
-                if (!incrementMappingCountIfBelowLimit()) {
-                    rejectedMappings[0]++;
-                    return currentWorkers.isEmpty() ? null : currentWorkers;
-                }
-                currentWorkers.put(workerIpPort, lastUpdatedNanos);
-                return currentWorkers;
-            });
+                        if (currentWorkers.replace(workerIpPort, lastUpdatedNanos) != null) {
+                            return currentWorkers;
+                        }
+                        if (!incrementMappingCountIfBelowLimit()) {
+                            rejectedMappings[0]++;
+                            return currentWorkers.isEmpty() ? null : currentWorkers;
+                        }
+                        currentWorkers.put(workerIpPort, lastUpdatedNanos);
+                        return currentWorkers;
+                    });
         }
         requestHighWatermarkCleanupIfNeeded();
         return rejectedMappings[0];
@@ -140,7 +151,8 @@ class LocalStandbyCacheIndex {
         long effectiveTtlNanos = effectiveTtlNanos();
         for (Long lastUpdatedNanos : workers.values()) {
             if (isExpired(lastUpdatedNanos, queryTimeNanos, effectiveTtlNanos)) {
-                return removeExpiredWorkerMappings(blockCacheKey, queryTimeNanos, effectiveTtlNanos);
+                return removeExpiredWorkerMappings(
+                        blockCacheKey, queryTimeNanos, effectiveTtlNanos);
             }
         }
         return workers;
@@ -200,7 +212,8 @@ class LocalStandbyCacheIndex {
             }
             cleanupIterator = null;
             long mappingsAfterCleanup = mappingCount.get();
-            log.info("Completed high-watermark Local Standby cache full scan, "
+            log.info(
+                    "Completed high-watermark Local Standby cache full scan, "
                             + "before={}, after={}, expiredRemoved={}",
                     mappingsBeforeCleanup,
                     mappingsAfterCleanup,
@@ -208,8 +221,8 @@ class LocalStandbyCacheIndex {
         } catch (RuntimeException e) {
             log.warn("Failed to run high-watermark Local Standby cache full scan", e);
         } finally {
-            nextHighWatermarkScanTimeNanos = System.nanoTime()
-                    + TimeUnit.MILLISECONDS.toNanos(CLEANUP_CHECK_INTERVAL_MS);
+            nextHighWatermarkScanTimeNanos =
+                    System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(CLEANUP_CHECK_INTERVAL_MS);
         }
     }
 
@@ -248,11 +261,12 @@ class LocalStandbyCacheIndex {
              * Normal cleanup scans about 10% of block hashes. After the configured pressure
              * threshold, each pass scans about 20%.
              */
-            int batchDivisor = capacityUsageRatio() >= ttlReductionStartRatio
-                    ? PRESSURE_CLEANUP_BATCH_DIVISOR
-                    : NORMAL_CLEANUP_BATCH_DIVISOR;
-            int blockBatchSize = Math.max(1, (blockToEnginesMap.size() + batchDivisor - 1)
-                    / batchDivisor);
+            int batchDivisor =
+                    capacityUsageRatio() >= ttlReductionStartRatio
+                            ? PRESSURE_CLEANUP_BATCH_DIVISOR
+                            : NORMAL_CLEANUP_BATCH_DIVISOR;
+            int blockBatchSize =
+                    Math.max(1, (blockToEnginesMap.size() + batchDivisor - 1) / batchDivisor);
             if (cleanupIterator == null || !cleanupIterator.hasNext()) {
                 cleanupIterator = blockToEnginesMap.keySet().iterator();
             }
@@ -264,7 +278,8 @@ class LocalStandbyCacheIndex {
                 if (cleanupShouldStop()) {
                     return;
                 }
-                removeExpiredWorkerMappings(cleanupIterator.next(), cleanupTimeNanos, effectiveTtlNanos);
+                removeExpiredWorkerMappings(
+                        cleanupIterator.next(), cleanupTimeNanos, effectiveTtlNanos);
                 scannedBlocks++;
             }
             if (!cleanupIterator.hasNext()) {
@@ -275,18 +290,20 @@ class LocalStandbyCacheIndex {
         }
     }
 
-    private Map<String, Long> removeExpiredWorkerMappings(Long blockCacheKey, long cleanupTimeNanos,
-                                                          long effectiveTtlNanos) {
-        return blockToEnginesMap.computeIfPresent(blockCacheKey, (blockHash, workers) -> {
-            for (Map.Entry<String, Long> workerEntry : workers.entrySet()) {
-                Long lastUpdatedNanos = workerEntry.getValue();
-                if (isExpired(lastUpdatedNanos, cleanupTimeNanos, effectiveTtlNanos)
-                        && workers.remove(workerEntry.getKey(), lastUpdatedNanos)) {
-                    mappingCount.decrementAndGet();
-                }
-            }
-            return workers.isEmpty() ? null : workers;
-        });
+    private Map<String, Long> removeExpiredWorkerMappings(
+            Long blockCacheKey, long cleanupTimeNanos, long effectiveTtlNanos) {
+        return blockToEnginesMap.computeIfPresent(
+                blockCacheKey,
+                (blockHash, workers) -> {
+                    for (Map.Entry<String, Long> workerEntry : workers.entrySet()) {
+                        Long lastUpdatedNanos = workerEntry.getValue();
+                        if (isExpired(lastUpdatedNanos, cleanupTimeNanos, effectiveTtlNanos)
+                                && workers.remove(workerEntry.getKey(), lastUpdatedNanos)) {
+                            mappingCount.decrementAndGet();
+                        }
+                    }
+                    return workers.isEmpty() ? null : workers;
+                });
     }
 
     private void removeExpiredMappingsFullScan() {
@@ -313,7 +330,8 @@ class LocalStandbyCacheIndex {
     }
 
     private void requestHighWatermarkCleanupIfNeeded() {
-        if (!automaticCleanupEnabled || cleanupStopped.get()
+        if (!automaticCleanupEnabled
+                || cleanupStopped.get()
                 || capacityUsageRatio() < FULL_SCAN_TRIGGER_RATIO
                 || System.nanoTime() - nextHighWatermarkScanTimeNanos < 0) {
             return;
@@ -322,13 +340,14 @@ class LocalStandbyCacheIndex {
             return;
         }
         try {
-            cleanupExecutor.execute(() -> {
-                try {
-                    runCleanupCheck();
-                } finally {
-                    highWatermarkCleanupTriggered.set(false);
-                }
-            });
+            cleanupExecutor.execute(
+                    () -> {
+                        try {
+                            runCleanupCheck();
+                        } finally {
+                            highWatermarkCleanupTriggered.set(false);
+                        }
+                    });
         } catch (RejectedExecutionException e) {
             highWatermarkCleanupTriggered.set(false);
             if (!cleanupExecutor.isShutdown()) {
@@ -341,7 +360,8 @@ class LocalStandbyCacheIndex {
         return cleanupStopped.get() || Thread.currentThread().isInterrupted();
     }
 
-    private boolean isExpired(long lastUpdatedNanos, long currentTimeNanos, long effectiveTtlNanos) {
+    private boolean isExpired(
+            long lastUpdatedNanos, long currentTimeNanos, long effectiveTtlNanos) {
         return currentTimeNanos - lastUpdatedNanos >= effectiveTtlNanos;
     }
 

@@ -37,7 +37,8 @@ public class RecentCacheKeyWindow {
             throw new IllegalArgumentException("timeWindowMs must be positive");
         }
         if (maxCacheKeys <= 0L || maxCacheKeys > Integer.MAX_VALUE) {
-            throw new IllegalArgumentException("maxCacheKeys must be between 1 and " + Integer.MAX_VALUE);
+            throw new IllegalArgumentException(
+                    "maxCacheKeys must be between 1 and " + Integer.MAX_VALUE);
         }
         this.timeWindowMs = timeWindowMs;
         this.maxCacheKeys = Math.toIntExact(maxCacheKeys);
@@ -51,8 +52,11 @@ public class RecentCacheKeyWindow {
         this.tableStates = new byte[hashTableCapacity];
         this.expirationHeapSlots = new int[this.maxCacheKeys];
 
-        log.info("Recent cache-key pool config: timeWindowMs={}, maxCacheKeys={}, hashTableCapacity={}",
-                this.timeWindowMs, this.maxCacheKeys, hashTableCapacity);
+        log.info(
+                "Recent cache-key pool config: timeWindowMs={}, maxCacheKeys={}, hashTableCapacity={}",
+                this.timeWindowMs,
+                this.maxCacheKeys,
+                hashTableCapacity);
     }
 
     public Snapshot record(List<Long> cacheKeys) {
@@ -162,7 +166,8 @@ public class RecentCacheKeyWindow {
             int smallestChildIndex = leftChildIndex;
             int rightChildIndex = leftChildIndex + 1;
             if (rightChildIndex < uniqueSize
-                    && timestampAtHeapIndex(rightChildIndex) < timestampAtHeapIndex(leftChildIndex)) {
+                    && timestampAtHeapIndex(rightChildIndex)
+                            < timestampAtHeapIndex(leftChildIndex)) {
                 smallestChildIndex = rightChildIndex;
             }
             if (timestampAtHeapIndex(currentIndex) <= timestampAtHeapIndex(smallestChildIndex)) {
@@ -228,14 +233,25 @@ public class RecentCacheKeyWindow {
     }
 
     private void logRequest(long nowMs, long requestOccurrences, long requestHitOccurrences) {
-        double hitRatio = requestOccurrences > 0L ? requestHitOccurrences / (double) requestOccurrences : 0.0D;
-        log.debug("Recent cache-key request: nowMs={}, requestCacheKeys={}, hitCacheKeys={}, hitRatio={}, "
+        double hitRatio =
+                requestOccurrences > 0L
+                        ? requestHitOccurrences / (double) requestOccurrences
+                        : 0.0D;
+        log.debug(
+                "Recent cache-key request: nowMs={}, requestCacheKeys={}, hitCacheKeys={}, hitRatio={}, "
                         + "poolUniqueCacheKeys={}, maxCacheKeys={}, timeWindowMs={}",
-                nowMs, requestOccurrences, requestHitOccurrences, hitRatio, uniqueSize, maxCacheKeys, timeWindowMs);
+                nowMs,
+                requestOccurrences,
+                requestHitOccurrences,
+                hitRatio,
+                uniqueSize,
+                maxCacheKeys,
+                timeWindowMs);
     }
 
     private static int hashTableCapacityFor(int maxCacheKeys) {
-        long needed = Math.max(MIN_HASH_TABLE_SIZE, (long) Math.ceil(maxCacheKeys / HASH_LOAD_FACTOR));
+        long needed =
+                Math.max(MIN_HASH_TABLE_SIZE, (long) Math.ceil(maxCacheKeys / HASH_LOAD_FACTOR));
         int capacity = MIN_HASH_TABLE_SIZE;
         while (capacity < needed && capacity < (1 << 30)) {
             capacity <<= 1;

@@ -16,7 +16,6 @@ from zoneinfo import ZoneInfo
 
 from openpyxl import load_workbook
 
-
 SHANGHAI = ZoneInfo("Asia/Shanghai")
 REQUESTS_SHEET = "Requests"
 CANDIDATES_SHEET = "Decision Snapshot Top5"
@@ -88,9 +87,7 @@ def read_table(worksheet: Any, header_row: int | None = None) -> list[dict[str, 
             return []
     headers = [
         cell.value
-        for cell in next(
-            worksheet.iter_rows(min_row=header_row, max_row=header_row)
-        )
+        for cell in next(worksheet.iter_rows(min_row=header_row, max_row=header_row))
     ]
     records: list[dict[str, Any]] = []
     for row in worksheet.iter_rows(min_row=header_row + 1, values_only=True):
@@ -135,9 +132,12 @@ def compact_request(row: dict[str, Any]) -> dict[str, Any] | None:
         "selectedRank": number("selected snapshot TTFT rank"),
         "selectedSnapshotHitRate": number("selected snapshot hit rate"),
         "selectedSnapshotUncache": number("selected snapshot request uncache"),
-        "effectiveUncache": (max(0, number("input_tokens") - number("selected effective hit tokens"))
-                             if number("input_tokens") is not None and number("selected effective hit tokens") is not None
-                             else None),
+        "effectiveUncache": (
+            max(0, number("input_tokens") - number("selected effective hit tokens"))
+            if number("input_tokens") is not None
+            and number("selected effective hit tokens") is not None
+            else None
+        ),
         "selectedQueueWork": number("selected snapshot queue work"),
         "selectedEstimatedTtft": number("selected snapshot estimated TTFT"),
         "selectedOutstanding": number("selected outstanding uncache"),
@@ -170,12 +170,26 @@ def compact_request(row: dict[str, Any]) -> dict[str, Any] | None:
         "hitDeltaPp": number("actual_minus_predicted_pp"),
         "predictedHit": number("predicted_hit_tokens"),
         "actualHit": number("actual_hit_tokens"),
-        "cacheComparison": {"source": row.get("cache comparison source"),
-                            "kvcm": {"hit": number("kvcm_hit_tokens"), "delta": number("kvcm_delta_tokens")},
-                            "kvcm_local": {"hit": number("kvcm_local_hit_tokens"), "delta": number("kvcm_local_delta_tokens")},
-                            "kvcm_global": {"hit": number("kvcm_global_hit_tokens"), "delta": number("kvcm_global_delta_tokens")},
-                            "local_standby": {"hit": number("local_standby_hit_tokens"), "delta": number("local_standby_delta_tokens")},
-                            "kvcmMinusStandby": number("kvcm_minus_standby_tokens")},
+        "cacheComparison": {
+            "source": row.get("cache comparison source"),
+            "kvcm": {
+                "hit": number("kvcm_hit_tokens"),
+                "delta": number("kvcm_delta_tokens"),
+            },
+            "kvcm_local": {
+                "hit": number("kvcm_local_hit_tokens"),
+                "delta": number("kvcm_local_delta_tokens"),
+            },
+            "kvcm_global": {
+                "hit": number("kvcm_global_hit_tokens"),
+                "delta": number("kvcm_global_delta_tokens"),
+            },
+            "local_standby": {
+                "hit": number("local_standby_hit_tokens"),
+                "delta": number("local_standby_delta_tokens"),
+            },
+            "kvcmMinusStandby": number("kvcm_minus_standby_tokens"),
+        },
         "cacheState": row.get("cache_state") or "",
         "workerStatusEvent": timestamp_ms(row.get("worker_status_event_time")),
     }
@@ -194,9 +208,7 @@ def compact_candidate(row: dict[str, Any]) -> dict[str, Any] | None:
         "cacheLeader": cell_bool(row.get("cache_leader")),
         "shortest": cell_bool(row.get("shortest_TTFT")),
         "eligible": (
-            None
-            if eligible_value in (None, "")
-            else cell_bool(eligible_value)
+            None if eligible_value in (None, "") else cell_bool(eligible_value)
         ),
         "hitRate": number("request_hit_rate_pct"),
         "hitTokens": number("request_hit_cache_tokens"),
@@ -222,23 +234,45 @@ def compact_current_candidate(row: dict[str, Any]) -> dict[str, Any] | None:
     endpoint = str(row.get("endpoint") or "")
     physical_endpoint, engine_separator, engine_index = endpoint.partition("@")
     host, separator, port = physical_endpoint.rpartition(":")
-    fields = ("projectedTtftMs", "projectedDrainMs", "incomingPrefillMs", "effectiveHitTokens",
-              "routingMatchTokens", "pendingRequests", "usedKvTokens", "availableKvTokens", "logWeight",
-              "ownershipVersion", "routingAttempt", "totalWorkerCount", "candidateWorkerCount")
+    fields = (
+        "projectedTtftMs",
+        "projectedDrainMs",
+        "incomingPrefillMs",
+        "effectiveHitTokens",
+        "routingMatchTokens",
+        "pendingRequests",
+        "usedKvTokens",
+        "availableKvTokens",
+        "logWeight",
+        "ownershipVersion",
+        "routingAttempt",
+        "totalWorkerCount",
+        "candidateWorkerCount",
+    )
     return {
         **{key: cell_number(row.get(key)) for key in fields},
-        "schema": "routingDecisions", "rank": None,
+        "schema": "routingDecisions",
+        "rank": None,
         "endpoint": endpoint,
         "engineIndex": cell_number(engine_index) if engine_separator else None,
         "host": host.strip("[]") if separator else endpoint or "unknown",
         "port": cell_number(port) if separator else None,
         "selected": cell_bool(row.get("selected")),
-        "role": row.get("role"), "strategy": row.get("strategy"),
-        "selectionReason": row.get("selectionReason"), "predictionState": row.get("predictionState"),
+        "role": row.get("role"),
+        "strategy": row.get("strategy"),
+        "selectionReason": row.get("selectionReason"),
+        "predictionState": row.get("predictionState"),
         "snapshotTruncated": cell_bool(row.get("snapshotTruncated")),
-        "policy": {key.removeprefix("policy."): value for key, value in row.items() if key.startswith("policy.")},
-        "decisionGroup": {key.removeprefix("decisionGroup."): value for key, value in row.items()
-                          if key.startswith("decisionGroup.")},
+        "policy": {
+            key.removeprefix("policy."): value
+            for key, value in row.items()
+            if key.startswith("policy.")
+        },
+        "decisionGroup": {
+            key.removeprefix("decisionGroup."): value
+            for key, value in row.items()
+            if key.startswith("decisionGroup.")
+        },
         "rejections": row.get("rejections") or "{}",
     }
 
@@ -281,9 +315,7 @@ def _build_replay(input_path: Path) -> dict[str, Any]:
         workbook.close()
 
     hosts = sorted({request["host"] for request in requests})
-    terminal_times = [
-        request["firstToken"] or request["route"] for request in requests
-    ]
+    terminal_times = [request["firstToken"] or request["route"] for request in requests]
     return {
         "meta": {
             "source": input_path.name,

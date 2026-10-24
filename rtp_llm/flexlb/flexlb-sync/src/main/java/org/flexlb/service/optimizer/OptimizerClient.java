@@ -46,18 +46,18 @@ public class OptimizerClient {
     private final Object discoveryLifecycleLock = new Object();
 
     @Autowired
-    public OptimizerClient(GeneralHttpNettyService httpService,
-                           ServiceDiscovery serviceDiscovery,
-                           ModelMetaConfig modelMetaConfig,
-                           ConfigService configService,
-                           KvcmWorkerMetadataResolver workerMetadataResolver,
-                           FlexMonitor monitor) {
+    public OptimizerClient(
+            GeneralHttpNettyService httpService,
+            ServiceDiscovery serviceDiscovery,
+            ModelMetaConfig modelMetaConfig,
+            ConfigService configService,
+            KvcmWorkerMetadataResolver workerMetadataResolver,
+            FlexMonitor monitor) {
         this.httpService = httpService;
         this.workerMetadataResolver = workerMetadataResolver;
         this.monitor = monitor;
 
-        OptimizerRuntimeConfig runtimeConfig =
-                configService.loadBalanceConfig().getOptimizer();
+        OptimizerRuntimeConfig runtimeConfig = configService.loadBalanceConfig().getOptimizer();
         OptimizerConfig optimizerConfig = resolveOptimizerConfig(modelMetaConfig);
         this.enabled = runtimeConfig.isEnabled();
         if (!enabled) {
@@ -98,8 +98,14 @@ public class OptimizerClient {
 
     @PostConstruct
     public void init() {
-        monitor.register(MetricConstant.OPTIMIZER_TRACE_QUERY_SKIPPED_QPS, FlexMetricType.QPS, FlexPriorityType.PRECISE);
-        monitor.register(MetricConstant.OPTIMIZER_TRACE_QUERY_FAILED_QPS, FlexMetricType.QPS, FlexPriorityType.PRECISE);
+        monitor.register(
+                MetricConstant.OPTIMIZER_TRACE_QUERY_SKIPPED_QPS,
+                FlexMetricType.QPS,
+                FlexPriorityType.PRECISE);
+        monitor.register(
+                MetricConstant.OPTIMIZER_TRACE_QUERY_FAILED_QPS,
+                FlexMetricType.QPS,
+                FlexPriorityType.PRECISE);
     }
 
     public void traceQuery(Request request, ServerStatus selectedWorker) {
@@ -110,7 +116,9 @@ public class OptimizerClient {
             reportSkipped("shutdown");
             return;
         }
-        if (request == null || request.getBlockCacheKeys() == null || request.getBlockCacheKeys().isEmpty()) {
+        if (request == null
+                || request.getBlockCacheKeys() == null
+                || request.getBlockCacheKeys().isEmpty()) {
             reportSkipped("empty_block_keys");
             return;
         }
@@ -139,13 +147,19 @@ public class OptimizerClient {
             traceQueryRequest.setInputTokenLen(request.getSeqLen());
 
             URI uri = URI.create("http://" + addresses.getFirst());
-            httpService.request(traceQueryRequest, uri, basePath + PATH_TRACE_QUERY,
+            httpService
+                    .request(
+                            traceQueryRequest,
+                            uri,
+                            basePath + PATH_TRACE_QUERY,
                             OptimizerTraceQueryResponse.class)
                     .subscribe(
                             this::handleTraceQueryResponse,
-                            error -> reportFailed("http_error", request.getRequestId(), uri, error));
+                            error ->
+                                    reportFailed("http_error", request.getRequestId(), uri, error));
         } catch (Exception e) {
-            reportFailed("dispatch_error", request == null ? null : request.getRequestId(), null, e);
+            reportFailed(
+                    "dispatch_error", request == null ? null : request.getRequestId(), null, e);
         }
     }
 
@@ -179,8 +193,12 @@ public class OptimizerClient {
 
     private void reportFailed(String reason, String requestId, URI uri, Throwable error) {
         reportMetric(MetricConstant.OPTIMIZER_TRACE_QUERY_FAILED_QPS, reason);
-        log.warn("Optimizer trace query failed: reason={}, requestId={}, uri={}",
-                reason, requestId, uri, error);
+        log.warn(
+                "Optimizer trace query failed: reason={}, requestId={}, uri={}",
+                reason,
+                requestId,
+                uri,
+                error);
     }
 
     private void reportMetric(String metric, String reason) {
@@ -192,7 +210,9 @@ public class OptimizerClient {
     }
 
     private String resolveInstanceId(Request request, ServerStatus selectedWorker) {
-        if (selectedWorker == null || selectedWorker.getRole() == null || request.getBlockSize() <= 0) {
+        if (selectedWorker == null
+                || selectedWorker.getRole() == null
+                || request.getBlockSize() <= 0) {
             return null;
         }
         return workerMetadataResolver.resolveNamespace(

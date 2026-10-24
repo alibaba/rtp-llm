@@ -33,10 +33,11 @@ public class LBStatusConsistencyService implements MasterElectService {
     private String roleId;
     private String localHostIp;
 
-    public LBStatusConsistencyService(ZookeeperMasterElectService zookeeperMasterElectService,
-                                      Environment environment,
-                                      ConfigService configService,
-                                      DeploymentIdentity deploymentIdentity) {
+    public LBStatusConsistencyService(
+            ZookeeperMasterElectService zookeeperMasterElectService,
+            Environment environment,
+            ConfigService configService,
+            DeploymentIdentity deploymentIdentity) {
         this.zookeeperMasterElectService = zookeeperMasterElectService;
         this.environment = environment;
         this.consistencyConfig = configService.loadBalanceConfig().getConsistency();
@@ -64,7 +65,6 @@ public class LBStatusConsistencyService implements MasterElectService {
         }
         roleId = deploymentIdentity.getDeploymentId();
         log.info("start init ZookeeperMasterElectService.");
-
     }
 
     @Override

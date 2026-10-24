@@ -22,6 +22,7 @@ public class ServerStatus {
     @JsonProperty("worker_generation")
     @JsonInclude(JsonInclude.Include.NON_DEFAULT)
     private long workerGeneration;
+
     @JsonProperty("role")
     private RoleType role;
 

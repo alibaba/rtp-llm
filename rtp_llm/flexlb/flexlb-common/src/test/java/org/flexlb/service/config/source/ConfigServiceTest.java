@@ -40,14 +40,18 @@ class ConfigServiceTest {
 
     @Test
     void loadsEnabledConfigSourcesByPriority() {
-        EnvironmentConfigSource environmentSource = environmentSource(Map.of(
-                "FLEXLB_CONFIG", """
+        EnvironmentConfigSource environmentSource =
+                environmentSource(
+                        Map.of(
+                                "FLEXLB_CONFIG",
+                                """
                         {"schemaVersion":3,"requestLifecycle":{"request":{"timeoutMs":60000}},"observability":{"logging":{"level":"error"}}}
                         """));
-        FakeConfigSource nacosSource = new FakeConfigSource(
-                "Nacos",
-                200,
-                """
+        FakeConfigSource nacosSource =
+                new FakeConfigSource(
+                        "Nacos",
+                        200,
+                        """
                         {
                           "schemaVersion":3,"requestLifecycle":{"request":{"timeoutMs":60000}},
                           "scheduler":{"type":"DIRECT"},
@@ -59,16 +63,17 @@ class ConfigServiceTest {
         ConfigService service = createService(List.of(nacosSource, environmentSource));
 
         assertThat(service.loadBalanceConfig().isDirect()).isTrue();
-        assertThat(service.loadBalanceConfig().getObservability()
-                .getLogging().getLevel()).isEqualTo(LogLevel.WARN);
+        assertThat(service.loadBalanceConfig().getObservability().getLogging().getLevel())
+                .isEqualTo(LogLevel.WARN);
     }
 
     @Test
     void doesNotLoadUnregisteredConfigSources() {
-        FakeConfigSource unregisteredSource = new FakeConfigSource(
-                "unregistered",
-                200,
-                """
+        FakeConfigSource unregisteredSource =
+                new FakeConfigSource(
+                        "unregistered",
+                        200,
+                        """
                         {"schemaVersion":3,"requestLifecycle":{"request":{"timeoutMs":60000}},"scheduler":{"type":"DIRECT"},"dispatcher":{"type":"NON_BATCH"}}
                         """);
 
@@ -80,14 +85,10 @@ class ConfigServiceTest {
 
     @Test
     void failsFastWhenInitialSourceReadFails() {
-        FakeConfigSource source = new FakeConfigSource(
-                "Nacos",
-                200,
-                new IllegalStateException("Nacos unavailable"));
+        FakeConfigSource source =
+                new FakeConfigSource("Nacos", 200, new IllegalStateException("Nacos unavailable"));
 
-        assertThatThrownBy(() -> createService(List.of(
-                environmentSource(Map.of()),
-                source)))
+        assertThatThrownBy(() -> createService(List.of(environmentSource(Map.of()), source)))
                 .isInstanceOf(IllegalStateException.class)
                 .hasMessageContaining("Failed to initialize FlexLB configuration from Nacos")
                 .hasRootCauseMessage("Nacos unavailable");
@@ -121,64 +122,65 @@ class ConfigServiceTest {
     @Test
     void rejectsUnknownSourceFields() {
         assertInvalidInitialContent(
-                "{\"schemaVersion\":3,\"unknownField\":1}",
-                "Unrecognized field");
+                "{\"schemaVersion\":3,\"unknownField\":1}", "Unrecognized field");
     }
 
     @Test
     void rejectsScalarCoercionInSourceFields() {
         assertInvalidInitialContent(
-                "{\"schemaVersion\":\"2\"}",
-                "schemaVersion must be an integer");
+                "{\"schemaVersion\":\"2\"}", "schemaVersion must be an integer");
     }
 
     @Test
     void mergesNestedConfigurationWithoutResettingSiblingFields() {
-        FakeConfigSource source = new FakeConfigSource(
-                "Nacos",
-                200,
-                "{\"schemaVersion\":3,\"observability\":{\"logging\":{\"level\":\"warn\"}}}");
+        FakeConfigSource source =
+                new FakeConfigSource(
+                        "Nacos",
+                        200,
+                        "{\"schemaVersion\":3,\"observability\":{\"logging\":{\"level\":\"warn\"}}}");
 
-        ConfigService service = createService(List.of(
-                environmentSource(Map.of()),
-                source));
+        ConfigService service = createService(List.of(environmentSource(Map.of()), source));
 
-        assertThat(service.loadBalanceConfig().getObservability()
-                .getLogging().getLevel()).isEqualTo(LogLevel.WARN);
+        assertThat(service.loadBalanceConfig().getObservability().getLogging().getLevel())
+                .isEqualTo(LogLevel.WARN);
         assertThat(service.loadBalanceConfig().getRouter().getRoles()).isNotNull();
     }
 
     @Test
     void keepsModelServiceConfigIndependentFromDynamicFlexlbSources() throws Exception {
-        ConfigService service = new EnvironmentVariables(Map.of(
-                "MODEL_SERVICE_CONFIG",
-                "{\"service_id\":\"environment-service\",\"role_endpoints\":[]}",
-                "FLEXLB_CONFIG",
-                "{\"schemaVersion\":3,\"observability\":{\"logging\":{\"level\":\"error\"}}}"))
-                .execute(() -> {
-                    EnvironmentConfigSource environmentSource =
-                            new EnvironmentConfigSource();
-                    environmentSource.initialize();
-                    ConfigService.register(new FakeConfigSource(
-                            "Nacos",
-                            200,
-                            "{\"schemaVersion\":3,\"observability\":{\"logging\":{\"level\":\"warn\"}}}"));
-                    return new ConfigService();
-                });
+        ConfigService service =
+                new EnvironmentVariables(
+                                Map.of(
+                                        "MODEL_SERVICE_CONFIG",
+                                        "{\"service_id\":\"environment-service\",\"role_endpoints\":[]}",
+                                        "FLEXLB_CONFIG",
+                                        "{\"schemaVersion\":3,\"observability\":{\"logging\":{\"level\":\"error\"}}}"))
+                        .execute(
+                                () -> {
+                                    EnvironmentConfigSource environmentSource =
+                                            new EnvironmentConfigSource();
+                                    environmentSource.initialize();
+                                    ConfigService.register(
+                                            new FakeConfigSource(
+                                                    "Nacos",
+                                                    200,
+                                                    "{\"schemaVersion\":3,\"observability\":{\"logging\":{\"level\":\"warn\"}}}"));
+                                    return new ConfigService();
+                                });
         configService = service;
 
-        assertThat(service.modelServiceConfig().getServiceId())
-                .isEqualTo("environment-service");
-        assertThat(service.loadBalanceConfig().getObservability()
-                .getLogging().getLevel()).isEqualTo(LogLevel.WARN);
+        assertThat(service.modelServiceConfig().getServiceId()).isEqualTo("environment-service");
+        assertThat(service.loadBalanceConfig().getObservability().getLogging().getLevel())
+                .isEqualTo(LogLevel.WARN);
     }
 
     @Test
     void runtimeUpdatesKeepMissingFieldsAndReplaceSnapshot() {
-        FakeConfigSource source = new FakeConfigSource(
-                "Nacos",
-                200,
-                """
+        FakeConfigSource source =
+                new FakeConfigSource(
+                        "Nacos",
+                        200,
+                        """
                         {
                           "schemaVersion":3,"requestLifecycle":{"request":{"timeoutMs":60000}},
                           "observability":{
@@ -187,23 +189,19 @@ class ConfigServiceTest {
                           }
                         }
                         """);
-        ConfigService service = createService(List.of(
-                environmentSource(Map.of()),
-                source));
+        ConfigService service = createService(List.of(environmentSource(Map.of()), source));
 
         FlexlbConfig initialSnapshot = service.loadBalanceConfig();
-        source.emit("{\"schemaVersion\":3,\"observability\":{\"cacheHit\":{\"metricsEnabled\":false}}}");
+        source.emit(
+                "{\"schemaVersion\":3,\"observability\":{\"cacheHit\":{\"metricsEnabled\":false}}}");
         FlexlbConfig updatedSnapshot = service.loadBalanceConfig();
 
         assertThat(updatedSnapshot).isNotSameAs(initialSnapshot);
-        assertThat(initialSnapshot.getObservability().getCacheHit()
-                .isMetricsEnabled()).isTrue();
-        assertThat(updatedSnapshot.getObservability().getCacheHit()
-                .isMetricsEnabled()).isFalse();
+        assertThat(initialSnapshot.getObservability().getCacheHit().isMetricsEnabled()).isTrue();
+        assertThat(updatedSnapshot.getObservability().getCacheHit().isMetricsEnabled()).isFalse();
         assertThat(updatedSnapshot.getObservability().getLogging().getLevel())
                 .isEqualTo(LogLevel.WARN);
-        assertThat(updatedSnapshot.getObservability().getLogging()
-                .isStdoutEnabled()).isTrue();
+        assertThat(updatedSnapshot.getObservability().getLogging().isStdoutEnabled()).isTrue();
     }
 
     @Test
@@ -214,18 +212,25 @@ class ConfigServiceTest {
         appender.start();
         logger.addAppender(appender);
         try {
-            FakeConfigSource source = new FakeConfigSource("Nacos", 200, "{\"schemaVersion\":0,\"enableQueueing\":true}");
+            FakeConfigSource source =
+                    new FakeConfigSource(
+                            "Nacos", 200, "{\"schemaVersion\":0,\"enableQueueing\":true}");
             createService(List.of(environmentSource(Map.of()), source));
             assertThat(appender.list)
                     .extracting(ILoggingEvent::getFormattedMessage)
-                    .anyMatch(message -> message.startsWith("FlexLB config loaded: schemaVersion=0,"));
+                    .anyMatch(
+                            message ->
+                                    message.startsWith("FlexLB config loaded: schemaVersion=0,"));
 
             appender.list.clear();
-            source.emit("{\"schemaVersion\":3,\"scheduler\":{\"type\":\"QUEUE\"},\"dispatcher\":{\"type\":\"NON_BATCH\"}}");
+            source.emit(
+                    "{\"schemaVersion\":3,\"scheduler\":{\"type\":\"QUEUE\"},\"dispatcher\":{\"type\":\"NON_BATCH\"}}");
 
             assertThat(appender.list)
                     .extracting(ILoggingEvent::getFormattedMessage)
-                    .anyMatch(message -> message.startsWith("FlexLB config loaded: schemaVersion=3,"));
+                    .anyMatch(
+                            message ->
+                                    message.startsWith("FlexLB config loaded: schemaVersion=3,"));
         } finally {
             logger.detachAppender(appender);
             appender.stop();
@@ -234,10 +239,11 @@ class ConfigServiceTest {
 
     @Test
     void taggedUnionTypeChangesReplaceTheWholeBranch() {
-        FakeConfigSource source = new FakeConfigSource(
-                "Nacos",
-                200,
-                """
+        FakeConfigSource source =
+                new FakeConfigSource(
+                        "Nacos",
+                        200,
+                        """
                         {
                           "schemaVersion":3,"requestLifecycle":{"request":{"timeoutMs":60000}},
                           "cacheMatching": {
@@ -247,13 +253,11 @@ class ConfigServiceTest {
                           }
                         }
                         """);
-        ConfigService service = createService(List.of(
-                environmentSource(Map.of()),
-                source));
+        ConfigService service = createService(List.of(environmentSource(Map.of()), source));
 
         source.emit("{\"schemaVersion\":3,\"cacheMatching\":{\"requestTimeoutMs\":750}}");
-        KvcmCacheMatchingConfig patched = (KvcmCacheMatchingConfig)
-                service.loadBalanceConfig().getCacheMatching();
+        KvcmCacheMatchingConfig patched =
+                (KvcmCacheMatchingConfig) service.loadBalanceConfig().getCacheMatching();
         assertThat(patched.getRequestTimeoutMs()).isEqualTo(750);
         assertThat(patched.getLeaderRefreshIntervalMs()).isEqualTo(20_000);
 
@@ -262,8 +266,8 @@ class ConfigServiceTest {
                 .isInstanceOf(LocalSyncCacheMatchingConfig.class);
 
         source.emit("{\"schemaVersion\":3,\"cacheMatching\":{\"type\":\"KVCM\"}}");
-        KvcmCacheMatchingConfig replaced = (KvcmCacheMatchingConfig)
-                service.loadBalanceConfig().getCacheMatching();
+        KvcmCacheMatchingConfig replaced =
+                (KvcmCacheMatchingConfig) service.loadBalanceConfig().getCacheMatching();
         assertThat(replaced.getRequestTimeoutMs())
                 .isEqualTo(KvcmCacheMatchingConfig.DEFAULT_REQUEST_TIMEOUT_MS);
         assertThat(replaced.getLeaderRefreshIntervalMs())
@@ -272,13 +276,15 @@ class ConfigServiceTest {
 
     @Test
     void ordinaryTypeChangesKeepConfiguredSiblingFields() {
-        FlexlbConfig base = FlexlbConfigMerger.mergeWithDefaults("""
+        FlexlbConfig base =
+                FlexlbConfigMerger.mergeWithDefaults(
+                        """
                 {"schemaVersion":3,"requestLifecycle":{"request":{"timeoutMs":60000}},
                  "dispatcher":{"type":"BATCH","maxInflightPerPrefillWorker":7,"fetchAttachTimeoutMs":1500}}
                 """);
 
-        FlexlbConfig merged = FlexlbConfigMerger.merge(base,
-                "{\"dispatcher\":{\"type\":\"NON_BATCH\"}}", "test");
+        FlexlbConfig merged =
+                FlexlbConfigMerger.merge(base, "{\"dispatcher\":{\"type\":\"NON_BATCH\"}}", "test");
 
         assertThat(merged.isBatchDispatch()).isFalse();
         assertThat(merged.getDispatcher().getMaxInflightPerPrefillWorker()).isEqualTo(7);
@@ -287,12 +293,20 @@ class ConfigServiceTest {
 
     @Test
     void laterInitialSourceCanReplacePriorityOrderingWithFifo() {
-        EnvironmentConfigSource environment = environmentSource(Map.of("FLEXLB_CONFIG", """
+        EnvironmentConfigSource environment =
+                environmentSource(
+                        Map.of(
+                                "FLEXLB_CONFIG",
+                                """
                 {"schemaVersion":3,"requestLifecycle":{"request":{"timeoutMs":60000}},
                  "scheduler":{"queueTimeoutMs":5000,"ordering":{"type":"PRIORITY","defaultPriority":70}},
                  "dispatcher":{"maxInflightPerPrefillWorker":7}}
                 """));
-        FakeConfigSource nacos = new FakeConfigSource("Nacos", 200, """
+        FakeConfigSource nacos =
+                new FakeConfigSource(
+                        "Nacos",
+                        200,
+                        """
                 {"schemaVersion":3,"scheduler":{"ordering":{"type":"FIFO"}}}
                 """);
 
@@ -300,20 +314,30 @@ class ConfigServiceTest {
 
         assertThat(service.loadBalanceConfig().getScheduler().getOrdering().getType())
                 .isEqualTo(QueueOrderingConfig.Type.FIFO);
-        assertThat(service.loadBalanceConfig().getScheduler().getOrdering().getPreemption()).isNull();
+        assertThat(service.loadBalanceConfig().getScheduler().getOrdering().getPreemption())
+                .isNull();
         assertThat(service.loadBalanceConfig().getScheduler().getQueueTimeoutMs()).isEqualTo(5000);
-        assertThat(service.loadBalanceConfig().getDispatcher().getMaxInflightPerPrefillWorker()).isEqualTo(7);
+        assertThat(service.loadBalanceConfig().getDispatcher().getMaxInflightPerPrefillWorker())
+                .isEqualTo(7);
     }
 
     @Test
     void laterInitialSourceCanReplaceConfiguredWindowWithSingleDecision() {
-        EnvironmentConfigSource environment = environmentSource(Map.of("FLEXLB_CONFIG", """
+        EnvironmentConfigSource environment =
+                environmentSource(
+                        Map.of(
+                                "FLEXLB_CONFIG",
+                                """
                 {"schemaVersion":3,"requestLifecycle":{"request":{"timeoutMs":60000}},
                  "scheduler":{"decision":{"type":"FIXED_WINDOW","maxRequests":32,
                                           "maxCollectionWaitMs":75,"maxPredictedExecutionMs":500}},
                  "dispatcher":{"maxInflightPerPrefillWorker":7}}
                 """));
-        FakeConfigSource nacos = new FakeConfigSource("Nacos", 200, """
+        FakeConfigSource nacos =
+                new FakeConfigSource(
+                        "Nacos",
+                        200,
+                        """
                 {"schemaVersion":3,"scheduler":{"decision":{"type":"SINGLE"}}}
                 """);
 
@@ -325,27 +349,35 @@ class ConfigServiceTest {
         assertThat(decision.getMaxCollectionWaitMs())
                 .isEqualTo(DecisionPolicyConfig.DEFAULT_MAX_COLLECTION_WAIT_MS);
         assertThat(decision.getMaxPredictedExecutionMs()).isNull();
-        assertThat(service.loadBalanceConfig().getDispatcher().getMaxInflightPerPrefillWorker()).isEqualTo(7);
+        assertThat(service.loadBalanceConfig().getDispatcher().getMaxInflightPerPrefillWorker())
+                .isEqualTo(7);
     }
 
     @Test
     void runtimeUpdatesKeepStartupModesAndApplyNumericFields() {
-        FakeConfigSource source = new FakeConfigSource("Nacos", 200, """
+        FakeConfigSource source =
+                new FakeConfigSource(
+                        "Nacos",
+                        200,
+                        """
                 {"schemaVersion":3,"requestLifecycle":{"request":{"timeoutMs":60000}},
                  "scheduler":{"type":"QUEUE"},
                  "dispatcher":{"type":"BATCH","maxInflightPerPrefillWorker":7,"fetchAttachTimeoutMs":1500}}
                 """);
         ConfigService service = createService(List.of(environmentSource(Map.of()), source));
 
-        source.emit("""
+        source.emit(
+                """
                 {"schemaVersion":3,"scheduler":{"type":"DIRECT"},
                  "dispatcher":{"type":"NON_BATCH","maxInflightPerPrefillWorker":9}}
                 """);
 
         assertThat(service.loadBalanceConfig().isQueue()).isTrue();
         assertThat(service.loadBalanceConfig().isBatchDispatch()).isTrue();
-        assertThat(service.loadBalanceConfig().getDispatcher().getMaxInflightPerPrefillWorker()).isEqualTo(9);
-        assertThat(service.loadBalanceConfig().getDispatcher().getFetchAttachTimeoutMs()).isEqualTo(1500);
+        assertThat(service.loadBalanceConfig().getDispatcher().getMaxInflightPerPrefillWorker())
+                .isEqualTo(9);
+        assertThat(service.loadBalanceConfig().getDispatcher().getFetchAttachTimeoutMs())
+                .isEqualTo(1500);
         FlexlbConfig previous = service.loadBalanceConfig();
         source.emit("{\"schemaVersion\":3,\"dispatcher\":{\"type\":\"INVALID\"}}");
         assertThat(service.loadBalanceConfig()).isSameAs(previous);
@@ -353,10 +385,11 @@ class ConfigServiceTest {
 
     @Test
     void arraysReplaceAsAWholeAndJsonNullIsRejected() {
-        FakeConfigSource source = new FakeConfigSource(
-                "Nacos",
-                200,
-                """
+        FakeConfigSource source =
+                new FakeConfigSource(
+                        "Nacos",
+                        200,
+                        """
                         {
                           "schemaVersion":3,"requestLifecycle":{"request":{"timeoutMs":60000}},
                           "scheduler": {
@@ -374,11 +407,10 @@ class ConfigServiceTest {
                           "dispatcher": {"type": "NON_BATCH"}
                         }
                         """);
-        ConfigService service = createService(List.of(
-                environmentSource(Map.of()),
-                source));
+        ConfigService service = createService(List.of(environmentSource(Map.of()), source));
 
-        source.emit("""
+        source.emit(
+                """
                 {
                   "schemaVersion":3,"requestLifecycle":{"request":{"timeoutMs":60000}},
                   "scheduler": {
@@ -390,8 +422,11 @@ class ConfigServiceTest {
                   }
                 }
                 """);
-        assertThat(service.loadBalanceConfig().priorityOrdering()
-                .getPreemption().getAllowedVictimStages())
+        assertThat(
+                        service.loadBalanceConfig()
+                                .priorityOrdering()
+                                .getPreemption()
+                                .getAllowedVictimStages())
                 .containsExactly(VictimStage.PREFILL_QUEUED);
 
         FlexlbConfig lastKnownGood = service.loadBalanceConfig();
@@ -401,17 +436,16 @@ class ConfigServiceTest {
 
     @Test
     void notifiesListenerWithCurrentAndRuntimeConfigurations() {
-        FakeConfigSource source = new FakeConfigSource(
-                "Nacos",
-                200,
-                "{\"schemaVersion\":3,\"observability\":{\"logging\":{\"level\":\"warn\"}}}");
-        ConfigService service = createService(List.of(
-                environmentSource(Map.of()),
-                source));
+        FakeConfigSource source =
+                new FakeConfigSource(
+                        "Nacos",
+                        200,
+                        "{\"schemaVersion\":3,\"observability\":{\"logging\":{\"level\":\"warn\"}}}");
+        ConfigService service = createService(List.of(environmentSource(Map.of()), source));
         List<LogLevel> updates = new ArrayList<>();
 
-        service.addUpdateListener(config -> updates.add(
-                config.getObservability().getLogging().getLevel()));
+        service.addUpdateListener(
+                config -> updates.add(config.getObservability().getLogging().getLevel()));
         source.emit("{\"schemaVersion\":3,\"observability\":{\"logging\":{\"level\":\"error\"}}}");
 
         assertThat(updates).containsExactly(LogLevel.WARN, LogLevel.ERROR);
@@ -419,13 +453,12 @@ class ConfigServiceTest {
 
     @Test
     void rejectsBlankAndInvalidRuntimeUpdates() {
-        FakeConfigSource source = new FakeConfigSource(
-                "Nacos",
-                200,
-                "{\"schemaVersion\":3,\"observability\":{\"logging\":{\"level\":\"warn\"}}}");
-        ConfigService service = createService(List.of(
-                environmentSource(Map.of()),
-                source));
+        FakeConfigSource source =
+                new FakeConfigSource(
+                        "Nacos",
+                        200,
+                        "{\"schemaVersion\":3,\"observability\":{\"logging\":{\"level\":\"warn\"}}}");
+        ConfigService service = createService(List.of(environmentSource(Map.of()), source));
         FlexlbConfig lastKnownGood = service.loadBalanceConfig();
 
         source.emit("");
@@ -436,16 +469,15 @@ class ConfigServiceTest {
 
     @Test
     void doesNotNotifyListenersForBlankRuntimeUpdates() {
-        FakeConfigSource source = new FakeConfigSource(
-                "Nacos",
-                200,
-                "{\"schemaVersion\":3,\"observability\":{\"logging\":{\"level\":\"warn\"}}}");
-        ConfigService service = createService(List.of(
-                environmentSource(Map.of()),
-                source));
+        FakeConfigSource source =
+                new FakeConfigSource(
+                        "Nacos",
+                        200,
+                        "{\"schemaVersion\":3,\"observability\":{\"logging\":{\"level\":\"warn\"}}}");
+        ConfigService service = createService(List.of(environmentSource(Map.of()), source));
         List<LogLevel> updates = new ArrayList<>();
-        service.addUpdateListener(config -> updates.add(
-                config.getObservability().getLogging().getLevel()));
+        service.addUpdateListener(
+                config -> updates.add(config.getObservability().getLogging().getLevel()));
 
         source.emit("");
 
@@ -454,13 +486,12 @@ class ConfigServiceTest {
 
     @Test
     void closesRegisteredConfigSources() {
-        FakeConfigSource source = new FakeConfigSource(
-                "Nacos",
-                200,
-                "{\"schemaVersion\":3,\"observability\":{\"logging\":{\"level\":\"warn\"}}}");
-        ConfigService service = createService(List.of(
-                environmentSource(Map.of()),
-                source));
+        FakeConfigSource source =
+                new FakeConfigSource(
+                        "Nacos",
+                        200,
+                        "{\"schemaVersion\":3,\"observability\":{\"logging\":{\"level\":\"warn\"}}}");
+        ConfigService service = createService(List.of(environmentSource(Map.of()), source));
 
         service.close();
 
@@ -473,17 +504,21 @@ class ConfigServiceTest {
                 ConfigService.register(source);
             }
         }
-        configService = new ConfigService(List.of(new StandardConfigDocumentParser(), new V0ConfigDocumentParser()));
+        configService =
+                new ConfigService(
+                        List.of(new StandardConfigDocumentParser(), new V0ConfigDocumentParser()));
         return configService;
     }
 
     private EnvironmentConfigSource environmentSource(Map<String, String> environment) {
         try {
-            return new EnvironmentVariables(environment).execute(() -> {
-                EnvironmentConfigSource source = new EnvironmentConfigSource();
-                source.initialize();
-                return source;
-            });
+            return new EnvironmentVariables(environment)
+                    .execute(
+                            () -> {
+                                EnvironmentConfigSource source = new EnvironmentConfigSource();
+                                source.initialize();
+                                return source;
+                            });
         } catch (Exception error) {
             throw new IllegalStateException(error);
         }
@@ -492,9 +527,7 @@ class ConfigServiceTest {
     private void assertInvalidInitialContent(String content, String expectedMessage) {
         FakeConfigSource source = new FakeConfigSource("Nacos", 200, content);
 
-        assertThatThrownBy(() -> createService(List.of(
-                environmentSource(Map.of()),
-                source)))
+        assertThatThrownBy(() -> createService(List.of(environmentSource(Map.of()), source)))
                 .isInstanceOf(IllegalStateException.class)
                 .hasStackTraceContaining(expectedMessage);
         assertThat(source.closed).isTrue();
@@ -518,10 +551,7 @@ class ConfigServiceTest {
         }
 
         private FakeConfigSource(
-                String name,
-                int priority,
-                String initialContent,
-                Exception loadException) {
+                String name, int priority, String initialContent, Exception loadException) {
             this.name = name;
             this.priority = priority;
             this.initialContent = initialContent;

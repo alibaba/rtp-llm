@@ -34,8 +34,14 @@ final class EnvironmentConfigSource implements ConfigSource {
     @PostConstruct
     void initialize() {
         ConfigSourceSelection selection = ConfigSourceSelection.fromEnvironment();
-        configContent = selection == ConfigSourceSelection.ENVIRONMENT ? System.getenv(FLEXLB_CONFIG_ENV) : null;
-        log.info("Selected FlexLB configuration source: {}; environment document configured={}", selection, configContent != null);
+        configContent =
+                selection == ConfigSourceSelection.ENVIRONMENT
+                        ? System.getenv(FLEXLB_CONFIG_ENV)
+                        : null;
+        log.info(
+                "Selected FlexLB configuration source: {}; environment document configured={}",
+                selection,
+                configContent != null);
         // Model topology remains an independent startup document for every behavior source.
         modelServiceConfigContent = System.getenv(MODEL_SERVICE_CONFIG_ENV);
         ConfigService.register(this);
@@ -47,7 +53,8 @@ final class EnvironmentConfigSource implements ConfigSource {
     @Override
     public String load() {
         if (configContent != null && configContent.isBlank()) {
-            throw new IllegalArgumentException(FLEXLB_CONFIG_ENV + " must not be blank when configured");
+            throw new IllegalArgumentException(
+                    FLEXLB_CONFIG_ENV + " must not be blank when configured");
         }
         return configContent;
     }
@@ -56,7 +63,8 @@ final class EnvironmentConfigSource implements ConfigSource {
     public NormalizedConfig loadConfig() {
         String rawFlexlbConfig = load();
         return rawFlexlbConfig == null
-                ? new NormalizedConfig(null, modelServiceConfigContent, ConfigSchemaVersion.V0_COMPATIBILITY)
+                ? new NormalizedConfig(
+                        null, modelServiceConfigContent, ConfigSchemaVersion.V0_COMPATIBILITY)
                 : normalize(rawFlexlbConfig);
     }
 
@@ -64,5 +72,4 @@ final class EnvironmentConfigSource implements ConfigSource {
     public String loadModelServiceConfig() {
         return modelServiceConfigContent;
     }
-
 }

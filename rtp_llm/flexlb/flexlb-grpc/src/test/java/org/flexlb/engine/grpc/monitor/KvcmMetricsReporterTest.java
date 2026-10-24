@@ -19,7 +19,11 @@ class KvcmMetricsReporterTest {
         reporter.init();
         reporter.reportQueryFailure();
 
-        verify(monitor).register("app.cache.kvcm.query.failure.qps", FlexMetricType.QPS, FlexPriorityType.PRECISE);
+        verify(monitor)
+                .register(
+                        "app.cache.kvcm.query.failure.qps",
+                        FlexMetricType.QPS,
+                        FlexPriorityType.PRECISE);
         verify(monitor).report("app.cache.kvcm.query.failure.qps", FlexMetricTags.of(), 1.0);
     }
 }

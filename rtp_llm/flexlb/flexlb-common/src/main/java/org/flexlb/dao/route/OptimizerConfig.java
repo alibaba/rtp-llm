@@ -36,5 +36,4 @@ public class OptimizerConfig {
         endpoint.setDiscovery(discovery);
         return endpoint;
     }
-
 }

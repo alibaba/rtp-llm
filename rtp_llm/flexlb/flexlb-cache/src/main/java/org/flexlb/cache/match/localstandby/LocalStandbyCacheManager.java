@@ -44,57 +44,62 @@ public class LocalStandbyCacheManager {
     private final LocalStandbyCacheIndex cacheIndex;
     private final AtomicLong nextCapacityWarningNanos = new AtomicLong(Long.MIN_VALUE);
 
-    public LocalStandbyCacheManager(CacheMatchConfiguration configuration,
-                                    WorkerStatusProvider workerStatusProvider,
-                                    CacheMetricsReporter cacheMetricsReporter) {
+    public LocalStandbyCacheManager(
+            CacheMatchConfiguration configuration,
+            WorkerStatusProvider workerStatusProvider,
+            CacheMetricsReporter cacheMetricsReporter) {
         LocalStandbyConfig config = configuration.getLocalStandbyConfig();
         this.enabled = configuration.isLocalStandbyEnabled();
         this.workerStatusProvider = workerStatusProvider;
         this.cacheMetricsReporter = cacheMetricsReporter;
         this.serviceRoutes = configuration.getServiceRoutes();
-        this.configuredMaximumEntries = enabled
-                ? config.getMaximumEntries()
-                : LocalStandbyConfig.DEFAULT_MAXIMUM_ENTRIES;
-        this.capacityMultiplier = enabled
-                ? config.getCapacityMultiplier()
-                : LocalStandbyConfig.DEFAULT_CAPACITY_MULTIPLIER;
-        long ttlMs = enabled
-                ? config.getTtlMs()
-                : LocalStandbyConfig.DEFAULT_TTL_MS;
-        long minimumTtlMs = enabled
-                ? config.getMinimumTtlMs()
-                : LocalStandbyConfig.DEFAULT_MINIMUM_TTL_MS;
-        double ttlReductionStartRatio = enabled
-                ? config.getTtlReductionStartRatio()
-                : LocalStandbyConfig.DEFAULT_TTL_REDUCTION_START_RATIO;
-        this.cacheIndex = new LocalStandbyCacheIndex(
-                ttlMs,
-                minimumTtlMs,
-                ttlReductionStartRatio,
-                configuredMaximumEntries,
-                enabled);
+        this.configuredMaximumEntries =
+                enabled ? config.getMaximumEntries() : LocalStandbyConfig.DEFAULT_MAXIMUM_ENTRIES;
+        this.capacityMultiplier =
+                enabled
+                        ? config.getCapacityMultiplier()
+                        : LocalStandbyConfig.DEFAULT_CAPACITY_MULTIPLIER;
+        long ttlMs = enabled ? config.getTtlMs() : LocalStandbyConfig.DEFAULT_TTL_MS;
+        long minimumTtlMs =
+                enabled ? config.getMinimumTtlMs() : LocalStandbyConfig.DEFAULT_MINIMUM_TTL_MS;
+        double ttlReductionStartRatio =
+                enabled
+                        ? config.getTtlReductionStartRatio()
+                        : LocalStandbyConfig.DEFAULT_TTL_REDUCTION_START_RATIO;
+        this.cacheIndex =
+                new LocalStandbyCacheIndex(
+                        ttlMs,
+                        minimumTtlMs,
+                        ttlReductionStartRatio,
+                        configuredMaximumEntries,
+                        enabled);
     }
 
     /**
      * Finds prefix matches keyed by logical worker identity in
      * {@code ip:port@engineIndex} format.
      */
-    public Map<String, Integer> findMatchingEngines(List<Long> blockCacheKeys, RoleType roleType, String group) {
+    public Map<String, Integer> findMatchingEngines(
+            List<Long> blockCacheKeys, RoleType roleType, String group) {
         if (!enabled || blockCacheKeys == null || blockCacheKeys.isEmpty()) {
             return Collections.emptyMap();
         }
 
-        Collection<WorkerStatus> workerStatuses = workerStatusProvider.getWorkerStatuses(roleType, group);
+        Collection<WorkerStatus> workerStatuses =
+                workerStatusProvider.getWorkerStatuses(roleType, group);
         if (workerStatuses == null || workerStatuses.isEmpty()) {
             return Collections.emptyMap();
         }
-        Map<String, Integer> prefixMatches = calculatePrefixMatchBlockCounts(blockCacheKeys, workerStatuses);
+        Map<String, Integer> prefixMatches =
+                calculatePrefixMatchBlockCounts(blockCacheKeys, workerStatuses);
         applyCacheMatchRollback(prefixMatches, workerStatuses);
         return prefixMatches;
     }
 
-    private Map<String, Integer> calculatePrefixMatchBlockCounts(List<Long> blockCacheKeys, Collection<WorkerStatus> workerStatuses) {
-        // A worker remains a candidate until the first block it does not own or whose mapping has expired.
+    private Map<String, Integer> calculatePrefixMatchBlockCounts(
+            List<Long> blockCacheKeys, Collection<WorkerStatus> workerStatuses) {
+        // A worker remains a candidate until the first block it does not own or whose mapping has
+        // expired.
         Set<String> candidateWorkers = new LinkedHashSet<>(workerStatuses.size());
         for (WorkerStatus workerStatus : workerStatuses) {
             if (workerStatus == null) {
@@ -114,7 +119,8 @@ public class LocalStandbyCacheManager {
         // Check blocks in order because a miss interrupts the worker's contiguous prefix match.
         for (int blockIndex = 0; blockIndex < blockCacheKeys.size(); blockIndex++) {
             Long blockCacheKey = blockCacheKeys.get(blockIndex);
-            Map<String, Long> blockOwners = cacheIndex.getUnexpiredEnginesForBlock(blockCacheKey, queryTimeNanos);
+            Map<String, Long> blockOwners =
+                    cacheIndex.getUnexpiredEnginesForBlock(blockCacheKey, queryTimeNanos);
 
             var candidateIterator = candidateWorkers.iterator();
             while (candidateIterator.hasNext()) {
@@ -146,8 +152,8 @@ public class LocalStandbyCacheManager {
         return prefixMatches;
     }
 
-    private void applyCacheMatchRollback(Map<String, Integer> prefixMatches,
-                                         Collection<WorkerStatus> workerStatuses) {
+    private void applyCacheMatchRollback(
+            Map<String, Integer> prefixMatches, Collection<WorkerStatus> workerStatuses) {
         for (WorkerStatus workerStatus : workerStatuses) {
             if (workerStatus == null || workerStatus.getCacheMatchRollbackBlocks() <= 0) {
                 continue;
@@ -155,7 +161,8 @@ public class LocalStandbyCacheManager {
             String workerIpPort = workerStatus.getLogicalIpPort();
             Integer matchedBlocks = prefixMatches.get(workerIpPort);
             if (matchedBlocks != null) {
-                prefixMatches.put(workerIpPort,
+                prefixMatches.put(
+                        workerIpPort,
                         Math.max(matchedBlocks - workerStatus.getCacheMatchRollbackBlocks(), 0));
             }
         }
@@ -179,8 +186,10 @@ public class LocalStandbyCacheManager {
         long now = System.nanoTime();
         long nextWarning = nextCapacityWarningNanos.get();
         if (now >= nextWarning
-                && nextCapacityWarningNanos.compareAndSet(nextWarning, now + CAPACITY_WARNING_INTERVAL_NANOS)) {
-            log.warn("Local Standby cache reached its capacity limit; rejected {} new "
+                && nextCapacityWarningNanos.compareAndSet(
+                        nextWarning, now + CAPACITY_WARNING_INTERVAL_NANOS)) {
+            log.warn(
+                    "Local Standby cache reached its capacity limit; rejected {} new "
                             + "mappings while existing mappings remain refreshable, "
                             + "currentMappings={}, maximumEntries={}",
                     rejectedMappings,
@@ -220,7 +229,8 @@ public class LocalStandbyCacheManager {
             long previousMaximum = cacheIndex.maximumEntryCount();
             cacheIndex.updateMaximumEntries(newMaximumEntries);
             if (newMaximumEntries != previousMaximum) {
-                log.info("Updated Local Standby cache capacity from {} to {} entries "
+                log.info(
+                        "Updated Local Standby cache capacity from {} to {} entries "
                                 + "(estimatedHbmBlocks={}, multiplier={}, configuredMaximum={})",
                         previousMaximum,
                         newMaximumEntries,
@@ -229,7 +239,10 @@ public class LocalStandbyCacheManager {
                         configuredMaximumEntries);
             }
         } catch (RuntimeException e) {
-            log.warn("Failed to update local standby cache capacity; keeping {} entries", cacheIndex.maximumEntryCount(), e);
+            log.warn(
+                    "Failed to update local standby cache capacity; keeping {} entries",
+                    cacheIndex.maximumEntryCount(),
+                    e);
         }
     }
 
@@ -250,7 +263,8 @@ public class LocalStandbyCacheManager {
                 continue;
             }
             String group = StringUtils.defaultString(endpointWithGroup.getLeft());
-            Collection<WorkerStatus> workerStatuses = workerStatusProvider.getWorkerStatuses(roleType, group);
+            Collection<WorkerStatus> workerStatuses =
+                    workerStatusProvider.getWorkerStatuses(roleType, group);
             if (workerStatuses == null) {
                 continue;
             }
@@ -275,7 +289,9 @@ public class LocalStandbyCacheManager {
     }
 
     private long calculateWorkerBlockCapacity(WorkerStatus workerStatus) {
-        if (workerStatus == null || !workerStatus.isAlive() || workerStatus.getCacheStatus() == null) {
+        if (workerStatus == null
+                || !workerStatus.isAlive()
+                || workerStatus.getCacheStatus() == null) {
             return 0;
         }
 

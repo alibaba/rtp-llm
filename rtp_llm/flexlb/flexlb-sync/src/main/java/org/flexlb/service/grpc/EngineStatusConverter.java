@@ -27,32 +27,33 @@ public class EngineStatusConverter {
      * Convert one protobuf response into an immutable observation, retaining all
      * active task phases from {@code running_task_info}.
      */
-    public static StatusObservation convertToStatusObservation(WorkerStatus owner,
-                                                               EngineRpcService.WorkerStatusPB workerStatusPB) {
-        Map<String, TaskObservation> activeTasks = convertTasks(
-                workerStatusPB.getRunningTaskInfoList());
-        Map<String, TaskObservation> finishedTasks = convertTasks(
-                workerStatusPB.getFinishedTaskListList());
-        EngineObservation engine = new EngineObservation(
-                RoleTypeProtoConverter.fromWorkerStatus(workerStatusPB),
-                (long) workerStatusPB.getAvailableConcurrency(),
-                workerStatusPB.getAvailableKvCache(),
-                workerStatusPB.getTotalKvCache(),
-                activeTasks,
-                workerStatusPB.getStepLatencyMs(),
-                workerStatusPB.getIterateCount(),
-                workerStatusPB.getDpSize(),
-                workerStatusPB.getTpSize(),
-                workerStatusPB.getDpRank(),
-                workerStatusPB.getBlockSize(),
-                workerStatusPB.getBlockHashLookaheadTokens(),
-                workerStatusPB.getCacheMatchRollbackBlocks(),
-                convertKvCacheGroupMode(workerStatusPB.getKvCacheGroupMode()),
-                workerStatusPB.getMaxSeqLen(),
-                workerStatusPB.getMaxBatchTokensSize(),
-                workerStatusPB.getRunningQueryLen(),
-                workerStatusPB.getWaitingQueryLen(),
-                convertStepMetrics(workerStatusPB));
+    public static StatusObservation convertToStatusObservation(
+            WorkerStatus owner, EngineRpcService.WorkerStatusPB workerStatusPB) {
+        Map<String, TaskObservation> activeTasks =
+                convertTasks(workerStatusPB.getRunningTaskInfoList());
+        Map<String, TaskObservation> finishedTasks =
+                convertTasks(workerStatusPB.getFinishedTaskListList());
+        EngineObservation engine =
+                new EngineObservation(
+                        RoleTypeProtoConverter.fromWorkerStatus(workerStatusPB),
+                        (long) workerStatusPB.getAvailableConcurrency(),
+                        workerStatusPB.getAvailableKvCache(),
+                        workerStatusPB.getTotalKvCache(),
+                        activeTasks,
+                        workerStatusPB.getStepLatencyMs(),
+                        workerStatusPB.getIterateCount(),
+                        workerStatusPB.getDpSize(),
+                        workerStatusPB.getTpSize(),
+                        workerStatusPB.getDpRank(),
+                        workerStatusPB.getBlockSize(),
+                        workerStatusPB.getBlockHashLookaheadTokens(),
+                        workerStatusPB.getCacheMatchRollbackBlocks(),
+                        convertKvCacheGroupMode(workerStatusPB.getKvCacheGroupMode()),
+                        workerStatusPB.getMaxSeqLen(),
+                        workerStatusPB.getMaxBatchTokensSize(),
+                        workerStatusPB.getRunningQueryLen(),
+                        workerStatusPB.getWaitingQueryLen(),
+                        convertStepMetrics(workerStatusPB));
         return owner.bindStatusObservation(
                 engine,
                 workerStatusPB.getAlive(),
@@ -61,14 +62,20 @@ public class EngineStatusConverter {
                 finishedTasks);
     }
 
-    private static WorkerStatus.StepMetrics convertStepMetrics(EngineRpcService.WorkerStatusPB status) {
+    private static WorkerStatus.StepMetrics convertStepMetrics(
+            EngineRpcService.WorkerStatusPB status) {
         if (!status.hasLastStepMetrics()) {
             return null;
         }
         EngineRpcService.WorkerStepMetricsPB step = status.getLastStepMetrics();
-        return new WorkerStatus.StepMetrics(step.getStepId(), step.getCompletedTimeMs(),
-                step.getTotalScheduledTokens(), step.getPrefillRequestCount(), step.getPrefillTokens(),
-                step.getTokenBudget(), step.getBudgetFillRatio());
+        return new WorkerStatus.StepMetrics(
+                step.getStepId(),
+                step.getCompletedTimeMs(),
+                step.getTotalScheduledTokens(),
+                step.getPrefillRequestCount(),
+                step.getPrefillTokens(),
+                step.getTokenBudget(),
+                step.getBudgetFillRatio());
     }
 
     private static KvCacheGroupMode convertKvCacheGroupMode(
@@ -102,62 +109,69 @@ public class EngineStatusConverter {
     /**
      * Convert protobuf task values directly into immutable observations.
      */
-    private static Map<String, TaskObservation> convertTasks(List<EngineRpcService.TaskInfoPB> taskInfoPBList) {
+    private static Map<String, TaskObservation> convertTasks(
+            List<EngineRpcService.TaskInfoPB> taskInfoPBList) {
         if (taskInfoPBList == null || taskInfoPBList.isEmpty()) {
             return Map.of();
         }
-        Map<String, TaskObservation> tasks = new HashMap<>(
-                taskInfoPBList.size());
+        Map<String, TaskObservation> tasks = new HashMap<>(taskInfoPBList.size());
 
         for (EngineRpcService.TaskInfoPB task : taskInfoPBList) {
-            long errorCode = task.hasErrorInfo()
-                    ? task.getErrorInfo().getErrorCode() : 0L;
-            String errorMessage = errorCode == 0L
-                    ? null : task.getErrorInfo().getErrorMessage();
-            TaskObservation observation = new TaskObservation(
-                    RequestId.parse(task),
-                    task.getPrefixLength(),
-                    0L,
-                    task.getInputLength(),
-                    task.getWaitingTimeMs(),
-                    task.getIterateCount(),
-                    task.getEndTimeMs(),
-                    task.getDpRank(),
-                    errorCode,
-                    errorMessage,
-                    task.getBatchId(),
-                    resolvePhase(task),
-                    task.getExecutionTimeMs(),
-                    switch (task.getPriorityPreemptionProgress()) {
-                        case PRIORITY_PREEMPTION_CANCELING ->
-                                PriorityPreemptionProgress.CANCELING;
-                        case PRIORITY_PREEMPTION_CANCELED ->
-                                PriorityPreemptionProgress.CANCELED;
-                        case PRIORITY_PREEMPTION_NONE, UNRECOGNIZED ->
-                                PriorityPreemptionProgress.NONE;
-                    },
-                    new WorkerStatus.TaskTelemetry(task.getPrefixLengthValid(),
-                            task.getRequestReceivedTimeMs(),
-                            task.getInputQueueEnqueueTimeMs(),
-                            task.getInputQueueDrainTimeMs(),
-                            task.getWaitingEnteredTimeMs(),
-                            task.getRunningEnteredTimeMs(),
-                            task.getRemoteKvWaitMs(),
-                            task.getFirstTokenTimeMs(),
-                            task.getHbmLocalMatchTokens(),
-                            task.getRemoteKvAddedMatchTokens(),
-                            task.getFirstPrefillStepId(),
-                            task.getLastPrefillStepId(),
-                            task.getPrefillStepCount(),
-                            task.getPrefillNonfinalChunkTokensMin(),
-                            task.getPrefillNonfinalChunkTokensMax(),
-                            task.hasCompletedPrefillTokens() ? task.getCompletedPrefillTokens() : null,
-                            task.hasRemainingPrefillTokens() ? task.getRemainingPrefillTokens() : null,
-                            task.hasLastCompletedPrefillStepId() ? task.getLastCompletedPrefillStepId() : null));
+            long errorCode = task.hasErrorInfo() ? task.getErrorInfo().getErrorCode() : 0L;
+            String errorMessage = errorCode == 0L ? null : task.getErrorInfo().getErrorMessage();
+            TaskObservation observation =
+                    new TaskObservation(
+                            RequestId.parse(task),
+                            task.getPrefixLength(),
+                            0L,
+                            task.getInputLength(),
+                            task.getWaitingTimeMs(),
+                            task.getIterateCount(),
+                            task.getEndTimeMs(),
+                            task.getDpRank(),
+                            errorCode,
+                            errorMessage,
+                            task.getBatchId(),
+                            resolvePhase(task),
+                            task.getExecutionTimeMs(),
+                            switch (task.getPriorityPreemptionProgress()) {
+                                case PRIORITY_PREEMPTION_CANCELING ->
+                                        PriorityPreemptionProgress.CANCELING;
+                                case PRIORITY_PREEMPTION_CANCELED ->
+                                        PriorityPreemptionProgress.CANCELED;
+                                case PRIORITY_PREEMPTION_NONE, UNRECOGNIZED ->
+                                        PriorityPreemptionProgress.NONE;
+                            },
+                            new WorkerStatus.TaskTelemetry(
+                                    task.getPrefixLengthValid(),
+                                    task.getRequestReceivedTimeMs(),
+                                    task.getInputQueueEnqueueTimeMs(),
+                                    task.getInputQueueDrainTimeMs(),
+                                    task.getWaitingEnteredTimeMs(),
+                                    task.getRunningEnteredTimeMs(),
+                                    task.getRemoteKvWaitMs(),
+                                    task.getFirstTokenTimeMs(),
+                                    task.getHbmLocalMatchTokens(),
+                                    task.getRemoteKvAddedMatchTokens(),
+                                    task.getFirstPrefillStepId(),
+                                    task.getLastPrefillStepId(),
+                                    task.getPrefillStepCount(),
+                                    task.getPrefillNonfinalChunkTokensMin(),
+                                    task.getPrefillNonfinalChunkTokensMax(),
+                                    task.hasCompletedPrefillTokens()
+                                            ? task.getCompletedPrefillTokens()
+                                            : null,
+                                    task.hasRemainingPrefillTokens()
+                                            ? task.getRemainingPrefillTokens()
+                                            : null,
+                                    task.hasLastCompletedPrefillStepId()
+                                            ? task.getLastCompletedPrefillStepId()
+                                            : null));
             tasks.put(observation.requestId(), observation);
         }
         return Map.copyOf(tasks);
     }
+
     private static TaskPhase resolvePhase(EngineRpcService.TaskInfoPB task) {
         if (task.getPhase() != EngineRpcService.TaskPhase.TASK_PHASE_PENDING) {
             // phase was added after the legacy is_waiting flag and is the

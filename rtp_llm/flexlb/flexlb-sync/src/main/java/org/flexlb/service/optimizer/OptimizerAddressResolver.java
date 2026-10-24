@@ -43,20 +43,19 @@ public class OptimizerAddressResolver {
     private final AtomicBoolean shutdown = new AtomicBoolean(false);
     private volatile List<String> resolvedAddresses = Collections.emptyList();
 
-    public OptimizerAddressResolver(ServiceDiscovery serviceDiscovery, Endpoint endpoint, int port) {
+    public OptimizerAddressResolver(
+            ServiceDiscovery serviceDiscovery, Endpoint endpoint, int port) {
         this(serviceDiscovery, endpoint, port, 1000L);
     }
 
     public OptimizerAddressResolver(
-            ServiceDiscovery serviceDiscovery,
-            Endpoint endpoint,
-            int port,
-            long pollIntervalMs) {
+            ServiceDiscovery serviceDiscovery, Endpoint endpoint, int port, long pollIntervalMs) {
         this.serviceDiscovery = serviceDiscovery;
         this.endpoint = endpoint;
         if (endpoint.getDiscovery() == null || endpoint.getDiscovery().getType() == null) {
             throw new IllegalArgumentException(
-                    "Optimizer discovery type must be configured for address: " + endpoint.getAddress());
+                    "Optimizer discovery type must be configured for address: "
+                            + endpoint.getAddress());
         }
         this.address = endpoint.getAddress();
         this.port = port;
@@ -74,21 +73,22 @@ public class OptimizerAddressResolver {
         if (isDynamicDiscovery()) {
             try {
                 refreshScheduler.scheduleWithFixedDelay(
-                        this::refreshSafely,
-                        0,
-                        pollIntervalMs,
-                        TimeUnit.MILLISECONDS);
+                        this::refreshSafely, 0, pollIntervalMs, TimeUnit.MILLISECONDS);
             } catch (RejectedExecutionException e) {
                 started.set(false);
-                log.warn("Service discovery refresh scheduling failed, address={}, msg={}",
-                        address, e.getMessage());
+                log.warn(
+                        "Service discovery refresh scheduling failed, address={}, msg={}",
+                        address,
+                        e.getMessage());
                 return;
             }
         } else {
             refreshSafely();
         }
-        log.info("OptimizerAddressResolver started: address={}, initialCount={}",
-                address, resolvedAddresses.size());
+        log.info(
+                "OptimizerAddressResolver started: address={}, initialCount={}",
+                address,
+                resolvedAddresses.size());
     }
 
     private void refreshSafely() {
@@ -98,7 +98,10 @@ public class OptimizerAddressResolver {
         try {
             updateFromHosts(serviceDiscovery.getHosts(endpoint));
         } catch (Throwable t) {
-            log.warn("ServiceDiscovery.getHosts failed, address={}, msg={}", address, t.getMessage());
+            log.warn(
+                    "ServiceDiscovery.getHosts failed, address={}, msg={}",
+                    address,
+                    t.getMessage());
         }
     }
 
@@ -116,25 +119,25 @@ public class OptimizerAddressResolver {
         List<String> addresses = new ArrayList<>(hosts.size());
         for (WorkerHost host : hosts) {
             String ip = host == null ? null : host.getIp();
-            if (ip == null
-                    || ip.isBlank()
-                    || ip.indexOf(':') >= 0
-                    || port <= 0
-                    || port > 65535) {
+            if (ip == null || ip.isBlank() || ip.indexOf(':') >= 0 || port <= 0 || port > 65535) {
                 log.warn("Ignoring invalid discovered optimizer host: {}", host);
                 continue;
             }
             addresses.add(ip + ":" + port);
         }
         if (addresses.isEmpty()) {
-            log.warn("OptimizerAddressResolver found no valid hosts, keeping previous snapshot: {}",
+            log.warn(
+                    "OptimizerAddressResolver found no valid hosts, keeping previous snapshot: {}",
                     address);
             return;
         }
         List<String> snapshot = Collections.unmodifiableList(addresses);
         if (!snapshot.equals(resolvedAddresses)) {
             this.resolvedAddresses = snapshot;
-            log.info("OptimizerAddressResolver updated, address={}, count={}", address, addresses.size());
+            log.info(
+                    "OptimizerAddressResolver updated, address={}, count={}",
+                    address,
+                    addresses.size());
         }
     }
 
@@ -151,5 +154,4 @@ public class OptimizerAddressResolver {
         ServiceDiscoveryType type = endpoint.getDiscovery().getType();
         return type == ServiceDiscoveryType.DASHSCOPE || type == ServiceDiscoveryType.VIPSERVER;
     }
-
 }

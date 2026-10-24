@@ -68,8 +68,7 @@ class CrashAfterTest {
 
     private static final AtomicInteger PORT_ALLOCATOR = new AtomicInteger(63300);
 
-    @TempDir
-    Path tempDir;
+    @TempDir Path tempDir;
 
     private ScheduledExecutorService scheduler;
     private EventLoopGroup bossGroup;
@@ -99,30 +98,49 @@ class CrashAfterTest {
             // executions finish, the keys land in the LRU — exactly the KV
             // memory the crash must wipe (stop_engine would keep it).
             for (int i = 1; i <= 2; i++) {
-                EngineRpcService.EnqueueBatchResponsePB response = enqueue(prefill,
-                        batch(3000 + i, slot(0,
-                                inputWithBlockKeys(i, 10, List.of(100L + i, 200L + i)))));
-                assertEquals(1, response.getSuccessesCount(),
+                EngineRpcService.EnqueueBatchResponsePB response =
+                        enqueue(
+                                prefill,
+                                batch(
+                                        3000 + i,
+                                        slot(
+                                                0,
+                                                inputWithBlockKeys(
+                                                        i, 10, List.of(100L + i, 200L + i)))));
+                assertEquals(
+                        1,
+                        response.getSuccessesCount(),
                         "request " + i + " should succeed pre-crash");
             }
             awaitInflightZero(prefill, 2_000);
             Map<String, Object> before = prefill.getSnapshot();
-            assertFalse(((List<?>) before.get("cache_key_set")).isEmpty(),
+            assertFalse(
+                    ((List<?>) before.get("cache_key_set")).isEmpty(),
                     "pre-crash sanity: completed requests' keys must sit in the LRU");
 
             // Arm the crash on the 3rd EnqueueBatch and deliver it.
-            httpPost(controlServer.getPort(), "/inject",
-                    "{\"port\":" + prefillPort
+            httpPost(
+                    controlServer.getPort(),
+                    "/inject",
+                    "{\"port\":"
+                            + prefillPort
                             + ",\"type\":\"crash_after\",\"enabled\":true,\"n\":3}");
             assertEquals(3, prefill.getFaultConfig().getCrashAfterNRequests());
 
-            EngineRpcService.EnqueueBatchResponsePB crashAck = enqueue(prefill,
-                    batch(3003, slot(0, inputWithBlockKeys(3, 10, List.of(103L)))));
-            assertEquals(0, crashAck.getSuccessesCount(),
+            EngineRpcService.EnqueueBatchResponsePB crashAck =
+                    enqueue(
+                            prefill,
+                            batch(3003, slot(0, inputWithBlockKeys(3, 10, List.of(103L)))));
+            assertEquals(
+                    0,
+                    crashAck.getSuccessesCount(),
                     "crash-triggering ack must carry NO successes (empty ack)");
-            assertEquals(0, crashAck.getErrorsCount(),
+            assertEquals(
+                    0,
+                    crashAck.getErrorsCount(),
                     "crash-triggering ack must carry NO errors either (uncertain fence)");
-            assertTrue(prefill.isStopped(), "engine must be stopped (crashed) after the 3rd enqueue");
+            assertTrue(
+                    prefill.isStopped(), "engine must be stopped (crashed) after the 3rd enqueue");
 
             // Memory wipe: no running tasks, no inflight, no held blocks,
             // empty LRU, fresh-process counters. Snapshot BEFORE the probe
@@ -132,19 +150,23 @@ class CrashAfterTest {
             assertEquals(0, intField(wiped, "running"), "crash wipes running tasks");
             assertEquals(0, intField(wiped, "inflight"), "crash wipes inflight");
             assertEquals(0, intField(wiped, "held_blocks"), "crash wipes held blocks");
-            assertTrue(((List<?>) wiped.get("cache_key_set")).isEmpty(),
+            assertTrue(
+                    ((List<?>) wiped.get("cache_key_set")).isEmpty(),
                     "crash wipes the KV LRU (completed keys gone — the stop_engine contrast)");
-            assertEquals(0, intField(wiped, "accepted"),
+            assertEquals(
+                    0,
+                    intField(wiped, "accepted"),
                     "crash resets the accept counter (fresh process)");
-            assertEquals(0, intField(wiped, "completed"),
+            assertEquals(
+                    0,
+                    intField(wiped, "completed"),
                     "crash resets the completed counter (fresh process)");
-            assertEquals(0, rpcEnqueue(wiped),
-                    "crash resets the rpc counters");
+            assertEquals(0, rpcEnqueue(wiped), "crash resets the rpc counters");
             assertEquals(0, intField(wiped, "waiting"), "crash wipes the wait queues");
 
             // The 4th in-process request sees the stopped rejection: empty ack.
-            EngineRpcService.EnqueueBatchResponsePB fourth = enqueue(prefill,
-                    batch(3004, slot(0, input(4, 10))));
+            EngineRpcService.EnqueueBatchResponsePB fourth =
+                    enqueue(prefill, batch(3004, slot(0, input(4, 10))));
             assertEquals(0, fourth.getSuccessesCount());
             assertEquals(0, fourth.getErrorsCount());
 
@@ -152,30 +174,31 @@ class CrashAfterTest {
             // channel gets connection-refused (UNAVAILABLE) — the master's
             // health poller sees the same dead port.
             Thread.sleep(JavaMockEngineCluster.FastRpcService.CRASH_PORT_KILL_DELAY_MS + 400);
-            assertTrue(portRefusesGrpc(prefillPort),
+            assertTrue(
+                    portRefusesGrpc(prefillPort),
                     "gRPC port must refuse connections after the crash");
 
             // Recovery: /start_engine rebuilds the gRPC server on CLEAN state
             // (also disarms the fault config and resets the enqueue counter).
-            httpPost(controlServer.getPort(), "/start_engine",
-                    "{\"port\":" + prefillPort + "}");
+            httpPost(controlServer.getPort(), "/start_engine", "{\"port\":" + prefillPort + "}");
             assertFalse(prefill.isStopped(), "engine must run again after /start_engine");
-            assertEquals(0, prefill.getFaultConfig().getCrashAfterNRequests(),
+            assertEquals(
+                    0,
+                    prefill.getFaultConfig().getCrashAfterNRequests(),
                     "start_engine disarms the crash_after fault config");
 
             Map<String, Object> recovered = prefill.getSnapshot();
             assertEquals(0, intField(recovered, "running"));
             assertEquals(0, intField(recovered, "inflight"));
-            assertTrue(((List<?>) recovered.get("cache_key_set")).isEmpty(),
+            assertTrue(
+                    ((List<?>) recovered.get("cache_key_set")).isEmpty(),
                     "recovered engine starts from an EMPTY cache (reboot, not resume)");
 
             // Fresh traffic flows — through the rebuilt port too.
-            EngineRpcService.EnqueueBatchResponsePB after = enqueue(prefill,
-                    batch(3999, slot(0, input(99, 10))));
-            assertEquals(1, after.getSuccessesCount(),
-                    "enqueue must succeed after recovery");
-            assertTrue(portServesGrpc(prefillPort),
-                    "rebuilt gRPC port must serve traffic");
+            EngineRpcService.EnqueueBatchResponsePB after =
+                    enqueue(prefill, batch(3999, slot(0, input(99, 10))));
+            assertEquals(1, after.getSuccessesCount(), "enqueue must succeed after recovery");
+            assertTrue(portServesGrpc(prefillPort), "rebuilt gRPC port must serve traffic");
         } finally {
             cleanupCluster();
         }
@@ -197,46 +220,64 @@ class CrashAfterTest {
 
         try {
             for (int i = 1; i <= 2; i++) {
-                EngineRpcService.EnqueueBatchResponsePB response = enqueue(prefill,
-                        batch(4000 + i, slot(0,
-                                inputWithBlockKeys(i, 10, List.of(300L + i)))));
-                assertEquals(1, response.getSuccessesCount(),
+                EngineRpcService.EnqueueBatchResponsePB response =
+                        enqueue(
+                                prefill,
+                                batch(
+                                        4000 + i,
+                                        slot(0, inputWithBlockKeys(i, 10, List.of(300L + i)))));
+                assertEquals(
+                        1,
+                        response.getSuccessesCount(),
                         "request " + i + " should be admitted pre-crash");
             }
 
             // Arm + trigger while both 300ms executions are still running.
-            httpPost(controlServer.getPort(), "/inject",
-                    "{\"port\":" + prefillPort
+            httpPost(
+                    controlServer.getPort(),
+                    "/inject",
+                    "{\"port\":"
+                            + prefillPort
                             + ",\"type\":\"crash_after\",\"enabled\":true,\"n\":3}");
-            EngineRpcService.EnqueueBatchResponsePB crashAck = enqueue(prefill,
-                    batch(4003, slot(0, input(3, 10))));
+            EngineRpcService.EnqueueBatchResponsePB crashAck =
+                    enqueue(prefill, batch(4003, slot(0, input(3, 10))));
             assertEquals(0, crashAck.getSuccessesCount());
             assertTrue(prefill.isStopped());
 
             // The wipe is IMMEDIATE, mid-execution: both running requests
             // vanish (a real process death takes the scheduler state with it).
             Map<String, Object> wiped = prefill.getSnapshot();
-            assertEquals(0, intField(wiped, "running"),
-                    "mid-execution crash wipes the running tasks");
-            assertEquals(0, intField(wiped, "inflight"),
+            assertEquals(
+                    0, intField(wiped, "running"), "mid-execution crash wipes the running tasks");
+            assertEquals(
+                    0,
+                    intField(wiped, "inflight"),
                     "mid-execution crash wipes inflight bookkeeping");
-            assertEquals(0, intField(wiped, "held_blocks"),
+            assertEquals(
+                    0,
+                    intField(wiped, "held_blocks"),
                     "mid-execution crash releases held blocks to nothing");
 
             // Wait PAST the 300ms execution window: the late completion
             // callbacks must NOT resurrect anything (epoch fence).
             Thread.sleep(900);
             Map<String, Object> after = prefill.getSnapshot();
-            assertEquals(0, intField(after, "running"),
+            assertEquals(
+                    0,
+                    intField(after, "running"),
                     "late completion callback must not re-add running tasks");
-            assertEquals(0, intField(after, "inflight"),
+            assertEquals(
+                    0,
+                    intField(after, "inflight"),
                     "late completion callback must not touch inflight");
-            assertTrue(((List<?>) after.get("cache_key_set")).isEmpty(),
+            assertTrue(
+                    ((List<?>) after.get("cache_key_set")).isEmpty(),
                     "late completion callback must not hand blocks to the LRU");
-            assertEquals(0, intField(after, "completed"),
+            assertEquals(
+                    0,
+                    intField(after, "completed"),
                     "late completion callback must not publish completions");
-            assertEquals(0, intField(after, "accepted"),
-                    "counters stay at the fresh-process zero");
+            assertEquals(0, intField(after, "accepted"), "counters stay at the fresh-process zero");
         } finally {
             cleanupCluster();
         }
@@ -255,35 +296,46 @@ class CrashAfterTest {
      */
     private int startPrefillClusterWithGrpc(MockPerformanceModel model) throws IOException {
         int port = allocatePortBlock(1);
-        scheduler = Executors.newScheduledThreadPool(4, r -> {
-            Thread t = new Thread(r, "crash-after-test-scheduler");
-            t.setDaemon(true);
-            return t;
-        });
+        scheduler =
+                Executors.newScheduledThreadPool(
+                        4,
+                        r -> {
+                            Thread t = new Thread(r, "crash-after-test-scheduler");
+                            t.setDaemon(true);
+                            return t;
+                        });
         bossGroup = new NioEventLoopGroup(1);
         workerGroup = new NioEventLoopGroup(4);
         services = new ConcurrentHashMap<>();
         serversByPort = new ConcurrentHashMap<>();
 
-        JavaMockEngineCluster.FastRpcService service = new JavaMockEngineCluster.FastRpcService(
-                "prefill", EngineRpcService.RoleTypePB.ROLE_TYPE_PREFILL,
-                port, services, scheduler, model, 6_144,
-                new JavaMockEngineCluster.ClusterStats());
+        JavaMockEngineCluster.FastRpcService service =
+                new JavaMockEngineCluster.FastRpcService(
+                        "prefill",
+                        EngineRpcService.RoleTypePB.ROLE_TYPE_PREFILL,
+                        port,
+                        services,
+                        scheduler,
+                        model,
+                        6_144,
+                        new JavaMockEngineCluster.ClusterStats());
         services.put(port, service);
-        Server server = NettyServerBuilder.forPort(port)
-                .bossEventLoopGroup(bossGroup)
-                .workerEventLoopGroup(workerGroup)
-                .channelType(NioServerSocketChannel.class)
-                .directExecutor()
-                .maxInboundMessageSize(16 * 1024 * 1024)
-                .addService(service)
-                .build()
-                .start();
+        Server server =
+                NettyServerBuilder.forPort(port)
+                        .bossEventLoopGroup(bossGroup)
+                        .workerEventLoopGroup(workerGroup)
+                        .channelType(NioServerSocketChannel.class)
+                        .directExecutor()
+                        .maxInboundMessageSize(16 * 1024 * 1024)
+                        .addService(service)
+                        .build()
+                        .start();
         serversByPort.put(port, server);
         service.setGrpcServer(server);
 
-        controlServer = new MockControlServer(
-                services, serversByPort, bossGroup, workerGroup, "127.0.0.1", 0);
+        controlServer =
+                new MockControlServer(
+                        services, serversByPort, bossGroup, workerGroup, "127.0.0.1", 0);
         controlServer.start();
         return port;
     }
@@ -339,8 +391,9 @@ class CrashAfterTest {
         return -1;
     }
 
-    private static void awaitInflightZero(JavaMockEngineCluster.FastRpcService service,
-                                          long timeoutMs) throws InterruptedException {
+    private static void awaitInflightZero(
+            JavaMockEngineCluster.FastRpcService service, long timeoutMs)
+            throws InterruptedException {
         long deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(timeoutMs);
         while (System.nanoTime() < deadline) {
             if (service.getInflightCount() == 0) {
@@ -376,15 +429,13 @@ class CrashAfterTest {
 
     /** True when the port refuses a REAL gRPC call (UNAVAILABLE / refused). */
     private static boolean portRefusesGrpc(int port) {
-        ManagedChannel channel = ManagedChannelBuilder.forAddress("127.0.0.1", port)
-                .usePlaintext()
-                .build();
+        ManagedChannel channel =
+                ManagedChannelBuilder.forAddress("127.0.0.1", port).usePlaintext().build();
         try {
-            RpcServiceGrpc.RpcServiceBlockingStub stub = RpcServiceGrpc.newBlockingStub(channel)
-                    .withDeadlineAfter(2, TimeUnit.SECONDS);
-            stub.enqueueBatch(EngineRpcService.EnqueueBatchRequestPB.newBuilder()
-                    .setBatchId(1L)
-                    .build());
+            RpcServiceGrpc.RpcServiceBlockingStub stub =
+                    RpcServiceGrpc.newBlockingStub(channel).withDeadlineAfter(2, TimeUnit.SECONDS);
+            stub.enqueueBatch(
+                    EngineRpcService.EnqueueBatchRequestPB.newBuilder().setBatchId(1L).build());
             return false; // the call went through — the port is still alive
         } catch (StatusRuntimeException e) {
             return e.getStatus().getCode() == Status.Code.UNAVAILABLE;
@@ -395,16 +446,16 @@ class CrashAfterTest {
 
     /** True when the port serves a REAL gRPC call. */
     private static boolean portServesGrpc(int port) {
-        ManagedChannel channel = ManagedChannelBuilder.forAddress("127.0.0.1", port)
-                .usePlaintext()
-                .build();
+        ManagedChannel channel =
+                ManagedChannelBuilder.forAddress("127.0.0.1", port).usePlaintext().build();
         try {
-            RpcServiceGrpc.RpcServiceBlockingStub stub = RpcServiceGrpc.newBlockingStub(channel)
-                    .withDeadlineAfter(2, TimeUnit.SECONDS);
-            EngineRpcService.EnqueueBatchResponsePB response = stub.enqueueBatch(
-                    EngineRpcService.EnqueueBatchRequestPB.newBuilder()
-                            .setBatchId(2L)
-                            .build());
+            RpcServiceGrpc.RpcServiceBlockingStub stub =
+                    RpcServiceGrpc.newBlockingStub(channel).withDeadlineAfter(2, TimeUnit.SECONDS);
+            EngineRpcService.EnqueueBatchResponsePB response =
+                    stub.enqueueBatch(
+                            EngineRpcService.EnqueueBatchRequestPB.newBuilder()
+                                    .setBatchId(2L)
+                                    .build());
             return response != null; // stopped engines answer empty acks — still "serving"
         } catch (StatusRuntimeException e) {
             return false;

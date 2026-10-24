@@ -67,15 +67,16 @@ public class KvcmGrpcClient {
     private final AtomicLong lastHeartbeatFailureTimeMs = new AtomicLong();
     private final AtomicReference<String> lastStateChangeReason =
             new AtomicReference<>(INITIAL_HEALTH_REASON);
-    private volatile Consumer<KvcmHealthSnapshot> healthSnapshotListener = ignored -> { };
+    private volatile Consumer<KvcmHealthSnapshot> healthSnapshotListener = ignored -> {};
 
-    public KvcmGrpcClient(CacheMatchConfiguration configuration,
-                          KvcmMetaServiceClient metaServiceClient,
-                          KvcmLeaderResolver leaderResolver,
-                          KvcmWorkerMetadataResolver workerMetadataResolver,
-                          ApplicationWarmupState applicationWarmupState,
-                          GrpcReporter grpcReporter,
-                          KvcmMetricsReporter metricsReporter) {
+    public KvcmGrpcClient(
+            CacheMatchConfiguration configuration,
+            KvcmMetaServiceClient metaServiceClient,
+            KvcmLeaderResolver leaderResolver,
+            KvcmWorkerMetadataResolver workerMetadataResolver,
+            ApplicationWarmupState applicationWarmupState,
+            GrpcReporter grpcReporter,
+            KvcmMetricsReporter metricsReporter) {
         this.configuration = configuration;
         this.metaServiceClient = metaServiceClient;
         this.leaderResolver = leaderResolver;
@@ -92,19 +93,23 @@ public class KvcmGrpcClient {
         }
 
         KvcmCacheMatchingConfig startupConfig = configuration.getKvcmRuntimeConfig();
-        this.refreshExecutor = Executors.newSingleThreadScheduledExecutor(runnable -> {
-            Thread thread = new Thread(runnable, "kvcm-service-state-refresher");
-            thread.setDaemon(true);
-            return thread;
-        });
+        this.refreshExecutor =
+                Executors.newSingleThreadScheduledExecutor(
+                        runnable -> {
+                            Thread thread = new Thread(runnable, "kvcm-service-state-refresher");
+                            thread.setDaemon(true);
+                            return thread;
+                        });
         this.refreshExecutor.scheduleWithFixedDelay(
                 this::refreshKvcmServiceStateSafely,
                 0,
                 startupConfig.getLeaderRefreshIntervalMs(),
                 TimeUnit.MILLISECONDS);
-        log.info("Started KVCM client, address={}, bootstrapPort={}, "
+        log.info(
+                "Started KVCM client, address={}, bootstrapPort={}, "
                         + "leaderRefreshIntervalMs={}, maxQueryRetryCount={}, namespaceSource={}",
-                topologyConfig.getAddress(), topologyConfig.getPort(),
+                topologyConfig.getAddress(),
+                topologyConfig.getPort(),
                 startupConfig.getLeaderRefreshIntervalMs(),
                 startupConfig.getMaxQueryRetryCount(),
                 workerMetadataResolver.usesConfiguredNamespace()
@@ -131,11 +136,10 @@ public class KvcmGrpcClient {
             requestImmediateRefresh();
             recordQueryFailure();
             metricsReporter.reportQueryFailure();
-            throw new KvcmQueryException("KVCM worker metadata unavailable for role=" + roleType
-                    + ", group=" + group);
+            throw new KvcmQueryException(
+                    "KVCM worker metadata unavailable for role=" + roleType + ", group=" + group);
         }
-        return queryWithRetry(
-                requestId, blockCacheKeys, namespace, queryType, roleType, group);
+        return queryWithRetry(requestId, blockCacheKeys, namespace, queryType, roleType, group);
     }
 
     private Map<String, org.flexlb.dao.cache.HostCacheMatch> queryWithRetry(
@@ -148,15 +152,24 @@ public class KvcmGrpcClient {
         // One snapshot per query keeps the wire parameters of every attempt consistent.
         KvcmCacheMatchingConfig config = configuration.getKvcmRuntimeConfig();
         int maxQueryRetryCount = Math.max(0, config.getMaxQueryRetryCount());
-        Deadline queryDeadline = Deadline.after(config.getRequestTimeoutMs(), TimeUnit.MILLISECONDS);
+        Deadline queryDeadline =
+                Deadline.after(config.getRequestTimeoutMs(), TimeUnit.MILLISECONDS);
         for (int attemptIndex = 0; ; attemptIndex++) {
             try {
                 if (queryDeadline.isExpired()) {
                     throw new KvcmQueryException("KVCM cache query timed out");
                 }
-                Map<String, org.flexlb.dao.cache.HostCacheMatch> result = queryOnce(
-                        config, queryDeadline, requestId, blockCacheKeys, namespace, queryType,
-                        roleType, group, attemptIndex > 0);
+                Map<String, org.flexlb.dao.cache.HostCacheMatch> result =
+                        queryOnce(
+                                config,
+                                queryDeadline,
+                                requestId,
+                                blockCacheKeys,
+                                namespace,
+                                queryType,
+                                roleType,
+                                group,
+                                attemptIndex > 0);
                 recordQuerySuccess();
                 return result;
             } catch (RuntimeException failure) {
@@ -166,9 +179,13 @@ public class KvcmGrpcClient {
                     throw failure;
                 }
                 metricsReporter.reportQueryRetry(attemptIndex + 1);
-                log.debug("KVCM cache query failed; retrying, requestId={}, "
+                log.debug(
+                        "KVCM cache query failed; retrying, requestId={}, "
                                 + "attempt={}, maxRetryCount={}",
-                        requestId, attemptIndex + 1, maxQueryRetryCount, failure);
+                        requestId,
+                        attemptIndex + 1,
+                        maxQueryRetryCount,
+                        failure);
             }
         }
     }
@@ -189,27 +206,26 @@ public class KvcmGrpcClient {
             throw new KvcmQueryException("KVCM leader is unavailable");
         }
 
-        GetHostCacheStateRequest request = GetHostCacheStateRequest.newBuilder()
-                .setTraceId(requestId)
-                .setInstanceId(namespace)
-                .setQueryType(queryType)
-                .addAllBlockCacheKeys(blockCacheKeys)
-                .addAllMedium(config.getMedium())
-                .setGlobalKvsHostCount(Math.max(0, config.getGlobalKvsHostCount()))
-                .setEnableP2P(config.isEnableP2p())
-                .build();
+        GetHostCacheStateRequest request =
+                GetHostCacheStateRequest.newBuilder()
+                        .setTraceId(requestId)
+                        .setInstanceId(namespace)
+                        .setQueryType(queryType)
+                        .addAllBlockCacheKeys(blockCacheKeys)
+                        .addAllMedium(config.getMedium())
+                        .setGlobalKvsHostCount(Math.max(0, config.getGlobalKvsHostCount()))
+                        .setEnableP2P(config.isEnableP2p())
+                        .build();
 
         long startTimeNanos = System.nanoTime();
         int responseBytes = 0;
         GetHostCacheStateResponse response;
         try {
-            response = metaServiceClient.getHostCacheState(
-                    currentLeader, request, queryDeadline);
+            response = metaServiceClient.getHostCacheState(currentLeader, request, queryDeadline);
             responseBytes = response.getSerializedSize();
         } catch (StatusRuntimeException error) {
             requestImmediateRefresh();
-            throw new KvcmQueryException(
-                    "KVCM GetHostCacheState gRPC request failed", error);
+            throw new KvcmQueryException("KVCM GetHostCacheState gRPC request failed", error);
         } finally {
             try {
                 grpcReporter.reportCallMetrics(
@@ -225,7 +241,8 @@ public class KvcmGrpcClient {
         if (code != ErrorCode.OK) {
             requestImmediateRefresh();
             throw new KvcmQueryException(
-                    "KVCM GetHostCacheState failed, code=" + code
+                    "KVCM GetHostCacheState failed, code="
+                            + code
                             + ", message="
                             + response.getHeader().getStatus().getMessage());
         }
@@ -250,7 +267,7 @@ public class KvcmGrpcClient {
     }
 
     public void setHealthSnapshotListener(Consumer<KvcmHealthSnapshot> listener) {
-        this.healthSnapshotListener = listener == null ? ignored -> { } : listener;
+        this.healthSnapshotListener = listener == null ? ignored -> {} : listener;
     }
 
     public KvcmHealthSnapshot healthSnapshot() {
@@ -340,10 +357,14 @@ public class KvcmGrpcClient {
         lastStateChangeReason.set(reason);
         KvcmHealthSnapshot snapshot = healthSnapshot();
         if (snapshot.isHealthy()) {
-            log.info("KVCM health recovered, reason={}, consecutiveHeartbeatSuccesses={}, consecutiveQuerySuccesses={}",
-                    reason, snapshot.consecutiveHeartbeatSuccesses(), consecutiveQuerySuccesses.get());
+            log.info(
+                    "KVCM health recovered, reason={}, consecutiveHeartbeatSuccesses={}, consecutiveQuerySuccesses={}",
+                    reason,
+                    snapshot.consecutiveHeartbeatSuccesses(),
+                    consecutiveQuerySuccesses.get());
         } else {
-            log.warn("KVCM marked unhealthy, reason={}, consecutiveHeartbeatFailures={}, "
+            log.warn(
+                    "KVCM marked unhealthy, reason={}, consecutiveHeartbeatFailures={}, "
                             + "consecutiveQueryFailures={}",
                     reason,
                     snapshot.consecutiveHeartbeatFailures(),
@@ -367,13 +388,14 @@ public class KvcmGrpcClient {
             if (StringUtils.isBlank(match.getHostIpPort())) {
                 continue;
             }
-            org.flexlb.dao.cache.HostCacheMatch previous = result.put(
-                    match.getHostIpPort(),
-                    new org.flexlb.dao.cache.HostCacheMatch(
-                            match.getLocal(),
-                            match.getGlobal()));
+            org.flexlb.dao.cache.HostCacheMatch previous =
+                    result.put(
+                            match.getHostIpPort(),
+                            new org.flexlb.dao.cache.HostCacheMatch(
+                                    match.getLocal(), match.getGlobal()));
             if (previous != null) {
-                log.warn("KVCM returned duplicate cache matches for host {}; keeping the last record",
+                log.warn(
+                        "KVCM returned duplicate cache matches for host {}; keeping the last record",
                         match.getHostIpPort());
             }
         }
@@ -395,13 +417,14 @@ public class KvcmGrpcClient {
         }
         lastImmediateRefreshScheduledNs.set(nowNs);
         try {
-            refreshExecutor.execute(() -> {
-                try {
-                    refreshKvcmServiceStateSafely();
-                } finally {
-                    immediateRefreshQueued.set(false);
-                }
-            });
+            refreshExecutor.execute(
+                    () -> {
+                        try {
+                            refreshKvcmServiceStateSafely();
+                        } finally {
+                            immediateRefreshQueued.set(false);
+                        }
+                    });
         } catch (RejectedExecutionException error) {
             immediateRefreshQueued.set(false);
         }

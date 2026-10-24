@@ -21,13 +21,18 @@ public class PvLogData {
     // Identifiers may be absent when entry parsing fails.
     @JsonInclude(JsonInclude.Include.NON_NULL)
     private String requestId;
+
     private RequestPhase phase;
+
     @JsonInclude(JsonInclude.Include.NON_NULL)
     private Long seqLen;
+
     @JsonInclude(JsonInclude.Include.NON_NULL)
     private Long encoderCacheHitLen;
+
     @JsonInclude(JsonInclude.Include.NON_NULL)
     private Long requestBodyBytes;
+
     @JsonInclude(JsonInclude.Include.NON_NULL)
     private Long requestTimeMs;
 
@@ -45,22 +50,28 @@ public class PvLogData {
     private long batchId;
     private String requestState;
     private String realMasterHost;
+
     @JsonInclude(JsonInclude.Include.NON_EMPTY)
     private Map<String, Object> schedulingDiagnostics;
 
     private long totalUs;
     private Long arrivalMs;
     private Long reqParseUs;
+
     @JsonIgnoreProperties({"policy", "dispatcher", "worker"})
     private DecisionGroup decisionGroup;
+
     @JsonInclude(JsonInclude.Include.NON_EMPTY)
     @JsonIgnoreProperties("prefillPolicy")
     private List<RoutingDecision> routingDecisions;
+
     private String cacheMatchSource;
     private long cacheMatchUs;
     private int cacheMatchCount;
+
     @JsonInclude(JsonInclude.Include.NON_EMPTY)
     private List<BalanceContext.CacheMatchSelection> cacheMatchSelections;
+
     @JsonInclude(JsonInclude.Include.NON_EMPTY)
     private Map<RoleType, String> selectionReasons;
 
@@ -68,14 +79,15 @@ public class PvLogData {
         populateCommonFields(ctx);
     }
 
-    public PvLogData(BalanceContext ctx,
-                     int code,
-                     String admissionRejectReason,
-                     String scheduleOrigin,
-                     long batchId,
-                     String requestState,
-                     String realMasterHost,
-                     long completedAtMs) {
+    public PvLogData(
+            BalanceContext ctx,
+            int code,
+            String admissionRejectReason,
+            String scheduleOrigin,
+            long batchId,
+            String requestState,
+            String realMasterHost,
+            long completedAtMs) {
         populateCommonFields(ctx);
         this.code = code;
         this.admissionRejectReason = admissionRejectReason;
@@ -100,8 +112,11 @@ public class PvLogData {
         }
         this.requestBodyBytes = ctx.getRequestBodyBytes();
         this.decisionGroup = ctx.getDecisionGroup();
-        this.routingDecisions = telemetry.routingDecisions().entrySet().stream()
-                .sorted(Map.Entry.comparingByKey()).map(Map.Entry::getValue).toList();
+        this.routingDecisions =
+                telemetry.routingDecisions().entrySet().stream()
+                        .sorted(Map.Entry.comparingByKey())
+                        .map(Map.Entry::getValue)
+                        .toList();
         if (ctx.getResponse() != null) {
             Response source = ctx.getResponse();
             Response projected = new PvResponse();
@@ -123,28 +138,51 @@ public class PvLogData {
         this.cacheMatchSource = telemetry.cacheSource();
         this.cacheMatchUs = telemetry.cacheQueryUs();
         this.cacheMatchCount = telemetry.cacheQueryCount();
-        this.cacheMatchSelections = telemetry.cacheSelections().entrySet().stream()
-                .sorted(Map.Entry.comparingByKey()).map(Map.Entry::getValue)
-                .filter(selection -> !hasRecordedCacheSelection(selection)).toList();
-        this.selectionReasons = telemetry.selectionReasons().entrySet().stream()
-                .filter(entry -> {
-                    RoutingDecision decision = telemetry.routingDecisions().get(entry.getKey());
-                    return decision == null || !java.util.Objects.equals(decision.selectionReason(), entry.getValue());
-                })
-                .collect(java.util.stream.Collectors.toMap(Map.Entry::getKey, Map.Entry::getValue));
+        this.cacheMatchSelections =
+                telemetry.cacheSelections().entrySet().stream()
+                        .sorted(Map.Entry.comparingByKey())
+                        .map(Map.Entry::getValue)
+                        .filter(selection -> !hasRecordedCacheSelection(selection))
+                        .toList();
+        this.selectionReasons =
+                telemetry.selectionReasons().entrySet().stream()
+                        .filter(
+                                entry -> {
+                                    RoutingDecision decision =
+                                            telemetry.routingDecisions().get(entry.getKey());
+                                    return decision == null
+                                            || !java.util.Objects.equals(
+                                                    decision.selectionReason(), entry.getValue());
+                                })
+                        .collect(
+                                java.util.stream.Collectors.toMap(
+                                        Map.Entry::getKey, Map.Entry::getValue));
     }
 
     private boolean hasRecordedCacheSelection(BalanceContext.CacheMatchSelection selection) {
-        return routingDecisions.stream().filter(decision -> decision.role() == selection.role())
+        return routingDecisions.stream()
+                .filter(decision -> decision.role() == selection.role())
                 .flatMap(decision -> decision.candidates().stream())
-                .anyMatch(candidate -> candidate.selected()
-                        && candidate.endpoint() != null
-                        && candidate.endpoint().startsWith(selection.selectedIp() + ":")
-                        && java.util.Objects.equals(candidate.routingMatchTokens(), selection.hitCacheTokens()));
+                .anyMatch(
+                        candidate ->
+                                candidate.selected()
+                                        && candidate.endpoint() != null
+                                        && candidate
+                                                .endpoint()
+                                                .startsWith(selection.selectedIp() + ":")
+                                        && java.util.Objects.equals(
+                                                candidate.routingMatchTokens(),
+                                                selection.hitCacheTokens()));
     }
 
-    @JsonIgnoreProperties({"success", "code", "error_message", "admission_reject_reason",
-            "ready", "enqueued_by_master"})
+    @JsonIgnoreProperties({
+        "success",
+        "code",
+        "error_message",
+        "admission_reject_reason",
+        "ready",
+        "enqueued_by_master"
+    })
     private static class PvResponse extends Response {
         @Override
         @JsonProperty("server_status")
@@ -153,5 +191,4 @@ public class PvLogData {
             return super.getServerStatus();
         }
     }
-
 }

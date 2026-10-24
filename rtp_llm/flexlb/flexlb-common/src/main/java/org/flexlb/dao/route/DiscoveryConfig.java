@@ -35,9 +35,7 @@ public class DiscoveryConfig {
     @JsonProperty("hosts")
     private List<String> hosts = new ArrayList<>();
 
-    @JsonIgnore
-    @EqualsAndHashCode.Exclude
-    @ToString.Exclude
+    @JsonIgnore @EqualsAndHashCode.Exclude @ToString.Exclude
     private transient Supplier<ServiceDiscoveryRuntimeConfig> runtimeConfigSupplier =
             () -> DEFAULT_RUNTIME_CONFIG;
 
@@ -46,8 +44,7 @@ public class DiscoveryConfig {
      * MODEL_SERVICE_CONFIG while preserving the provider-facing accessors.
      */
     @JsonIgnore
-    public void bindRuntimeConfig(
-            Supplier<ServiceDiscoveryRuntimeConfig> runtimeConfigSupplier) {
+    public void bindRuntimeConfig(Supplier<ServiceDiscoveryRuntimeConfig> runtimeConfigSupplier) {
         this.runtimeConfigSupplier = Objects.requireNonNull(runtimeConfigSupplier);
     }
 

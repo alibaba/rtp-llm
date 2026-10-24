@@ -26,15 +26,16 @@ import static org.mockito.Mockito.when;
 class DeploymentIdentityConsistencyTest {
 
     @ParameterizedTest
-    @ValueSource(strings = {"spectrum:workspace:application:deployment", "dash_pd:deployment:master"})
+    @ValueSource(
+            strings = {"spectrum:workspace:application:deployment", "dash_pd:deployment:master"})
     void uses_deployment_identity_for_master_change_notifications(String deploymentId) {
         DeploymentIdentity identity = mock(DeploymentIdentity.class);
         when(identity.getDeploymentId()).thenReturn(deploymentId);
         ZookeeperMasterElectService electionService = mock(ZookeeperMasterElectService.class);
 
-        LBStatusConsistencyService service = new LBStatusConsistencyService(
-                electionService, mock(Environment.class),
-                configService(true), identity);
+        LBStatusConsistencyService service =
+                new LBStatusConsistencyService(
+                        electionService, mock(Environment.class), configService(true), identity);
         MasterChangeNotifyReq request = new MasterChangeNotifyReq();
         request.setRoleId(deploymentId);
 
@@ -50,8 +51,9 @@ class DeploymentIdentityConsistencyTest {
     void disabledConsistencyRejectsMasterChangeNotifications(String notifiedRoleId) {
         DeploymentIdentity identity = mock(DeploymentIdentity.class);
         ZookeeperMasterElectService electionService = mock(ZookeeperMasterElectService.class);
-        LBStatusConsistencyService service = new LBStatusConsistencyService(
-                electionService, mock(Environment.class), configService(false), identity);
+        LBStatusConsistencyService service =
+                new LBStatusConsistencyService(
+                        electionService, mock(Environment.class), configService(false), identity);
         MasterChangeNotifyReq request = new MasterChangeNotifyReq();
         request.setRoleId(notifiedRoleId);
 
@@ -68,8 +70,9 @@ class DeploymentIdentityConsistencyTest {
         DeploymentIdentity identity = mock(DeploymentIdentity.class);
         when(identity.getDeploymentId()).thenReturn("current-deployment");
         ZookeeperMasterElectService electionService = mock(ZookeeperMasterElectService.class);
-        LBStatusConsistencyService service = new LBStatusConsistencyService(
-                electionService, mock(Environment.class), configService(true), identity);
+        LBStatusConsistencyService service =
+                new LBStatusConsistencyService(
+                        electionService, mock(Environment.class), configService(true), identity);
         MasterChangeNotifyReq request = new MasterChangeNotifyReq();
         request.setRoleId(notifiedRoleId);
 
@@ -80,18 +83,22 @@ class DeploymentIdentityConsistencyTest {
     }
 
     @ParameterizedTest
-    @ValueSource(strings = {"spectrum:workspace:application:deployment", "dash_pd:deployment:master"})
+    @ValueSource(
+            strings = {"spectrum:workspace:application:deployment", "dash_pd:deployment:master"})
     void uses_deployment_identity_for_zookeeper_election_path(String deploymentId) {
         DeploymentIdentity identity = mock(DeploymentIdentity.class);
         when(identity.getDeploymentId()).thenReturn(deploymentId);
-        ZookeeperMasterElectService service = new ZookeeperMasterElectService(
-                mock(GeneralHttpNettyService.class), mock(EngineHealthReporter.class),
-                mock(Environment.class), configService(false), identity);
+        ZookeeperMasterElectService service =
+                new ZookeeperMasterElectService(
+                        mock(GeneralHttpNettyService.class),
+                        mock(EngineHealthReporter.class),
+                        mock(Environment.class),
+                        configService(false),
+                        identity);
 
         ReflectionTestUtils.invokeMethod(service, "initializeRoleId");
 
-        assertThat(ReflectionTestUtils.getField(service, "roleId"))
-                .isEqualTo(deploymentId);
+        assertThat(ReflectionTestUtils.getField(service, "roleId")).isEqualTo(deploymentId);
     }
 
     @Test
@@ -99,8 +106,10 @@ class DeploymentIdentityConsistencyTest {
         DeploymentIdentity identity = mock(DeploymentIdentity.class);
 
         new LBStatusConsistencyService(
-                mock(ZookeeperMasterElectService.class), mock(Environment.class),
-                configService(false), identity);
+                mock(ZookeeperMasterElectService.class),
+                mock(Environment.class),
+                configService(false),
+                identity);
 
         verifyNoInteractions(identity);
     }
@@ -108,14 +117,24 @@ class DeploymentIdentityConsistencyTest {
     @Test
     void closingSpringContextDestroysZookeeperElection() {
         CuratorFramework curatorClient = mock(CuratorFramework.class);
-        ZookeeperMasterElectService electionService = new ZookeeperMasterElectService(
-                mock(GeneralHttpNettyService.class), mock(EngineHealthReporter.class),
-                mock(Environment.class), configService(false), mock(DeploymentIdentity.class));
+        ZookeeperMasterElectService electionService =
+                new ZookeeperMasterElectService(
+                        mock(GeneralHttpNettyService.class),
+                        mock(EngineHealthReporter.class),
+                        mock(Environment.class),
+                        configService(false),
+                        mock(DeploymentIdentity.class));
         ReflectionTestUtils.setField(electionService, "client", curatorClient);
-        try (AnnotationConfigApplicationContext context = new AnnotationConfigApplicationContext()) {
-            context.registerBean(LBStatusConsistencyService.class,
-                    () -> new LBStatusConsistencyService(electionService, mock(Environment.class),
-                            configService(true), mock(DeploymentIdentity.class)));
+        try (AnnotationConfigApplicationContext context =
+                new AnnotationConfigApplicationContext()) {
+            context.registerBean(
+                    LBStatusConsistencyService.class,
+                    () ->
+                            new LBStatusConsistencyService(
+                                    electionService,
+                                    mock(Environment.class),
+                                    configService(true),
+                                    mock(DeploymentIdentity.class)));
             context.refresh();
             verifyNoInteractions(curatorClient);
         }

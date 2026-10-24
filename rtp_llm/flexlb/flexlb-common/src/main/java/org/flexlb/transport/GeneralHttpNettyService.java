@@ -49,42 +49,59 @@ public class GeneralHttpNettyService {
     private final Scheduler httpRequestScheduler;
     private final ThreadPoolExecutor httpRequestExecutor;
 
-    public GeneralHttpNettyService(HttpNettyClientHandler nettyClient, ConfigService configService) {
+    public GeneralHttpNettyService(
+            HttpNettyClientHandler nettyClient, ConfigService configService) {
         this.nettyClient = nettyClient;
         FlexlbConfig config = configService.loadBalanceConfig();
-        httpRequestExecutor = new ThreadPoolExecutor(
-                config.getInternalRuntime().getHttpRequestExecutorThreads(),
-                config.getInternalRuntime().getHttpRequestExecutorThreads(),
-                60L, TimeUnit.SECONDS,
-                new LinkedBlockingQueue<>(
-                        config.getInternalRuntime().getHttpRequestExecutorQueueCapacity()),
-                new NamedThreadFactory("req-thread"),
-                // Rejection policy: execute by submitting thread when queue is full (avoid task loss)
-                new ThreadPoolExecutor.CallerRunsPolicy());
+        httpRequestExecutor =
+                new ThreadPoolExecutor(
+                        config.getInternalRuntime().getHttpRequestExecutorThreads(),
+                        config.getInternalRuntime().getHttpRequestExecutorThreads(),
+                        60L,
+                        TimeUnit.SECONDS,
+                        new LinkedBlockingQueue<>(
+                                config.getInternalRuntime().getHttpRequestExecutorQueueCapacity()),
+                        new NamedThreadFactory("req-thread"),
+                        // Rejection policy: execute by submitting thread when queue is full (avoid
+                        // task loss)
+                        new ThreadPoolExecutor.CallerRunsPolicy());
         httpRequestScheduler = Schedulers.fromExecutor(httpRequestExecutor);
     }
 
-    public <Request, Result> Mono<Result> request(Request request, URI uri, String path, Class<Result> responseClz) {
+    public <Request, Result> Mono<Result> request(
+            Request request, URI uri, String path, Class<Result> responseClz) {
         return this.doRequest(request, uri, path, null, responseClz);
     }
 
-    public <Request, Result> Mono<Result> doRequest(Request request, URI uri, String path, HttpHeaders headers, Class<Result> responseClz) {
+    public <Request, Result> Mono<Result> doRequest(
+            Request request, URI uri, String path, HttpHeaders headers, Class<Result> responseClz) {
         return Mono.just(request)
-                .map(ctx -> HttpNettyChannelContext.<Result>builder()
-                        .request(request)
-                        .readCallback((resultHttpNettyChannelContext, httpObject)
-                                -> handleNettyMessage(resultHttpNettyChannelContext, httpObject, responseClz))
-                        .errorCallback(this::handlerNettyError)
-                        .byteDataList(new ArrayList<>(1 << 4))
-                        .byteDataSize(new LongAdder())
-                        .build())
-                .flatMap(nettyCtx -> connectBackend(nettyCtx, uri, path).publishOn(httpRequestScheduler)
-                        .flatMap(nettyContext -> executeHttpRequest(nettyContext, uri, path, headers
-                        )));
+                .map(
+                        ctx ->
+                                HttpNettyChannelContext.<Result>builder()
+                                        .request(request)
+                                        .readCallback(
+                                                (resultHttpNettyChannelContext, httpObject) ->
+                                                        handleNettyMessage(
+                                                                resultHttpNettyChannelContext,
+                                                                httpObject,
+                                                                responseClz))
+                                        .errorCallback(this::handlerNettyError)
+                                        .byteDataList(new ArrayList<>(1 << 4))
+                                        .byteDataSize(new LongAdder())
+                                        .build())
+                .flatMap(
+                        nettyCtx ->
+                                connectBackend(nettyCtx, uri, path)
+                                        .publishOn(httpRequestScheduler)
+                                        .flatMap(
+                                                nettyContext ->
+                                                        executeHttpRequest(
+                                                                nettyContext, uri, path, headers)));
     }
 
-    private <Result> Mono<HttpNettyChannelContext<Result>> connectBackend(HttpNettyChannelContext<Result> nettyCtx,
-                                                                          URI uri, String path) {
+    private <Result> Mono<HttpNettyChannelContext<Result>> connectBackend(
+            HttpNettyChannelContext<Result> nettyCtx, URI uri, String path) {
         // Initiate connection
         int defaultPort = "http".equalsIgnoreCase(uri.getScheme()) ? 80 : 443;
         int port = uri.getPort() == -1 ? defaultPort : uri.getPort();
@@ -97,30 +114,47 @@ public class GeneralHttpNettyService {
 
         // Handle future and return Mono.fromFuture
         CompletableFuture<HttpNettyChannelContext<Result>> future = new CompletableFuture<>();
-        channelFuture.addListener((ChannelFutureListener) cf -> {
-            try {
-                if (cf.isSuccess()) {
-                    future.complete(nettyCtx);
-                } else {
-                    future.completeExceptionally(StatusEnum.INTERNAL_ERROR.toException("failed to connect, uri=" + uri + ", path=" + path, cf.cause()));
-                }
-            } catch (Exception e) {
-                future.completeExceptionally(StatusEnum.INTERNAL_ERROR.toException("failed to connect, uri=" + uri + ", path=" + path, e));
-            }
-        });
+        channelFuture.addListener(
+                (ChannelFutureListener)
+                        cf -> {
+                            try {
+                                if (cf.isSuccess()) {
+                                    future.complete(nettyCtx);
+                                } else {
+                                    future.completeExceptionally(
+                                            StatusEnum.INTERNAL_ERROR.toException(
+                                                    "failed to connect, uri="
+                                                            + uri
+                                                            + ", path="
+                                                            + path,
+                                                    cf.cause()));
+                                }
+                            } catch (Exception e) {
+                                future.completeExceptionally(
+                                        StatusEnum.INTERNAL_ERROR.toException(
+                                                "failed to connect, uri=" + uri + ", path=" + path,
+                                                e));
+                            }
+                        });
         return Mono.fromFuture(future);
     }
 
-    private <Result> Mono<Result> executeHttpRequest(HttpNettyChannelContext<Result> nettyCtx, URI uri, String path, HttpHeaders headers) {
-        return Flux.<Result>create(sink -> {
-            nettyCtx.setSink(sink);
-            DefaultFullHttpRequest request = buildRequest(nettyCtx, uri, path, headers);
-            nettyCtx.getChannel().writeAndFlush(request);
-        }).last();
+    private <Result> Mono<Result> executeHttpRequest(
+            HttpNettyChannelContext<Result> nettyCtx, URI uri, String path, HttpHeaders headers) {
+        return Flux.<Result>create(
+                        sink -> {
+                            nettyCtx.setSink(sink);
+                            DefaultFullHttpRequest request =
+                                    buildRequest(nettyCtx, uri, path, headers);
+                            nettyCtx.getChannel().writeAndFlush(request);
+                        })
+                .last();
     }
 
-    private <Result> DefaultFullHttpRequest buildRequest(HttpNettyChannelContext<Result> nettyCtx, URI uri, String path, HttpHeaders headers) {
-        DefaultFullHttpRequest request = new DefaultFullHttpRequest(HttpVersion.HTTP_1_1, HttpMethod.POST, path);
+    private <Result> DefaultFullHttpRequest buildRequest(
+            HttpNettyChannelContext<Result> nettyCtx, URI uri, String path, HttpHeaders headers) {
+        DefaultFullHttpRequest request =
+                new DefaultFullHttpRequest(HttpVersion.HTTP_1_1, HttpMethod.POST, path);
 
         String body = JsonUtils.toStringOrEmpty(nettyCtx.getRequest());
         request.content().writeBytes(body.getBytes(StandardCharsets.UTF_8));
@@ -129,7 +163,8 @@ public class GeneralHttpNettyService {
             request.headers().set(HttpHeaderNames.HOST, uri.getHost());
             request.headers().set(HttpHeaderNames.CONNECTION, HttpHeaderValues.KEEP_ALIVE);
             request.headers().set(HttpHeaderNames.CONTENT_TYPE, "application/json");
-            request.headers().set(HttpHeaderNames.CONTENT_LENGTH, request.content().readableBytes());
+            request.headers()
+                    .set(HttpHeaderNames.CONTENT_LENGTH, request.content().readableBytes());
         } else {
             request.headers().setAll(headers);
         }
@@ -141,14 +176,18 @@ public class GeneralHttpNettyService {
             nettyCtx.getSink().error(StatusEnum.READ_TIME_OUT.toException());
         } else {
             nettyCtx.getSink()
-                    .error(StatusEnum.NETTY_CATCH_ERROR.toException("sync load balance unexpected netty " + "error " + "happened, exception: ",
-                            e));
+                    .error(
+                            StatusEnum.NETTY_CATCH_ERROR.toException(
+                                    "sync load balance unexpected netty "
+                                            + "error "
+                                            + "happened, exception: ",
+                                    e));
         }
         nettyCtx.getChannel().close();
     }
 
-    private <Result> void handleNettyMessage(HttpNettyChannelContext<Result> nettyCtx, HttpObject obj,
-                                             Class<Result> responseClz) {
+    private <Result> void handleNettyMessage(
+            HttpNettyChannelContext<Result> nettyCtx, HttpObject obj, Class<Result> responseClz) {
         if (nettyCtx.getSink().isCancelled()) {
             NettyUtils.finish(nettyCtx);
             log.error("sink canceled, finish netty");
@@ -167,18 +206,21 @@ public class GeneralHttpNettyService {
         }
     }
 
-    private <Result> void handleNettyChunk(HttpNettyChannelContext<Result> nettyCtx, HttpObject obj,
-                                           Class<Result> responseClz) {
+    private <Result> void handleNettyChunk(
+            HttpNettyChannelContext<Result> nettyCtx, HttpObject obj, Class<Result> responseClz) {
 
-        // Check if current HTTP response status is 200; if not 200, indicates abnormal situation, parse chunk and return error
+        // Check if current HTTP response status is 200; if not 200, indicates abnormal situation,
+        // parse chunk and return error
         int httpStatusCode = NettyUtils.getHttpStatusCode(nettyCtx);
 
         // If status code is not 200, indicates abnormal situation, parse chunk and return error
         if (httpStatusCode != StatusEnum.SUCCESS.getCode()) {
             NettyUtils.cacheBuffer(nettyCtx, obj);
             String body = NettyUtils.readBody(nettyCtx);
-            NettyUtils.finishNettyWithException(nettyCtx,
-                    new RuntimeException("http error, httpStatusCode=" + httpStatusCode + ", body=" + body));
+            NettyUtils.finishNettyWithException(
+                    nettyCtx,
+                    new RuntimeException(
+                            "http error, httpStatusCode=" + httpStatusCode + ", body=" + body));
             return;
         }
 
@@ -197,7 +239,8 @@ public class GeneralHttpNettyService {
 
             // For non-streaming calls, ignore if data is empty
             // Normally bodyBytes should not be empty
-            // Currently only occurs when engine disconnects abnormally, due to HttpObjectAggregator aggregation, returns a FullResponse with empty body
+            // Currently only occurs when engine disconnects abnormally, due to HttpObjectAggregator
+            // aggregation, returns a FullResponse with empty body
             if (bodyBytes.length == 0) {
                 return;
             }

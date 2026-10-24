@@ -22,10 +22,13 @@ class TokenIdsTest {
     void indexedViewReadsLazily() {
         int[] values = {11, 22, 33};
         AtomicInteger reads = new AtomicInteger();
-        TokenIds tokenIds = TokenIds.wrap(values.length, index -> {
-            reads.incrementAndGet();
-            return values[index];
-        });
+        TokenIds tokenIds =
+                TokenIds.wrap(
+                        values.length,
+                        index -> {
+                            reads.incrementAndGet();
+                            return values[index];
+                        });
 
         assertEquals(3, tokenIds.size());
         assertEquals(0, reads.get());

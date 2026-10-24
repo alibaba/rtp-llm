@@ -34,15 +34,17 @@ public class GrpcChannelPool<K> {
         if (current != null && current.isUsable()) {
             return current;
         }
-        return channels.compute(key, (ignored, existing) -> {
-            if (existing != null && existing.isUsable()) {
-                return existing;
-            }
-            if (existing != null) {
-                existing.shutdown();
-            }
-            return create(key);
-        });
+        return channels.compute(
+                key,
+                (ignored, existing) -> {
+                    if (existing != null && existing.isUsable()) {
+                        return existing;
+                    }
+                    if (existing != null) {
+                        existing.shutdown();
+                    }
+                    return create(key);
+                });
     }
 
     public PooledChannel replace(K key, PooledChannel old) {
@@ -78,8 +80,7 @@ public class GrpcChannelPool<K> {
      * keys in an active group are retained.
      */
     public <G> void removeChannelsForInactiveGroups(
-            Collection<G> activeGroupKeys,
-            Function<K, G> groupKeyExtractor) {
+            Collection<G> activeGroupKeys, Function<K, G> groupKeyExtractor) {
         Set<G> activeGroupKeySet = new HashSet<>(activeGroupKeys);
         for (Map.Entry<K, PooledChannel> entry : channels.entrySet()) {
             if (!activeGroupKeySet.contains(groupKeyExtractor.apply(entry.getKey()))
@@ -110,20 +111,18 @@ public class GrpcChannelPool<K> {
     }
 
     private PooledChannel create(K key) {
-        ManagedChannel channel = Objects.requireNonNull(
-                channelFactory.apply(key), "channelFactory returned null");
+        ManagedChannel channel =
+                Objects.requireNonNull(channelFactory.apply(key), "channelFactory returned null");
         return new PooledChannel(String.valueOf(key), channel);
     }
 
     public static final class PooledChannel {
 
         private final String description;
-        @Getter
-        private final ManagedChannel channel;
+        @Getter private final ManagedChannel channel;
         private final long createTimeUs;
         private final AtomicBoolean shutdown = new AtomicBoolean();
-        @Getter
-        private volatile long lastUsedTimeUs;
+        @Getter private volatile long lastUsedTimeUs;
         private volatile long expireTimeUs;
 
         private PooledChannel(String description, ManagedChannel channel) {
@@ -138,7 +137,8 @@ public class GrpcChannelPool<K> {
                 return false;
             }
             ConnectivityState state = channel.getState(true);
-            return state != ConnectivityState.SHUTDOWN && state != ConnectivityState.TRANSIENT_FAILURE;
+            return state != ConnectivityState.SHUTDOWN
+                    && state != ConnectivityState.TRANSIENT_FAILURE;
         }
 
         public void markUsed() {

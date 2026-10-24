@@ -38,19 +38,23 @@ public final class V0ConfigDocumentParser implements ConfigDocumentParser {
     @Override
     public NormalizedConfig parse(String rawFlexlbConfig, String rawModelServiceConfig) {
         if (rawFlexlbConfig == null || rawFlexlbConfig.isBlank()) {
-            throw new IllegalArgumentException("V0 compatibility configuration document must not be null or blank");
+            throw new IllegalArgumentException(
+                    "V0 compatibility configuration document must not be null or blank");
         }
         try {
             ObjectNode document = parseV0Document(rawFlexlbConfig);
             NormalizedConfig converted = convertV0Document(document);
-            return rawModelServiceConfig == null || rawModelServiceConfig.isBlank() ? converted
-                    : new NormalizedConfig(converted.flexlbConfig(), rawModelServiceConfig, schemaVersion());
+            return rawModelServiceConfig == null || rawModelServiceConfig.isBlank()
+                    ? converted
+                    : new NormalizedConfig(
+                            converted.flexlbConfig(), rawModelServiceConfig, schemaVersion());
         } catch (JsonProcessingException error) {
             throw new IllegalArgumentException("Invalid V0 configuration document", error);
         }
     }
 
-    private static ObjectNode parseV0Document(String v0ConfigDocument) throws JsonProcessingException {
+    private static ObjectNode parseV0Document(String v0ConfigDocument)
+            throws JsonProcessingException {
         JsonNode parsed = MAPPER.readTree(v0ConfigDocument);
         if (!(parsed instanceof ObjectNode document)) {
             throw new IllegalArgumentException("V0 configuration must be a JSON object");
@@ -58,14 +62,18 @@ public final class V0ConfigDocumentParser implements ConfigDocumentParser {
         return document;
     }
 
-    private static NormalizedConfig convertV0Document(ObjectNode v0Config) throws JsonProcessingException {
+    private static NormalizedConfig convertV0Document(ObjectNode v0Config)
+            throws JsonProcessingException {
         ObjectNode flexlbConfig = convertFlexlbConfig(v0Config);
         String modelServiceConfig = convertModelServiceConfig(v0Config);
         List<String> unmappedFields = collectUnsupportedFields(v0Config);
         if (!unmappedFields.isEmpty()) {
             log.warn("V0 configuration contains unmapped compatibility fields: {}", unmappedFields);
         }
-        return new NormalizedConfig(MAPPER.writeValueAsString(flexlbConfig), modelServiceConfig, ConfigSchemaVersion.V0_COMPATIBILITY);
+        return new NormalizedConfig(
+                MAPPER.writeValueAsString(flexlbConfig),
+                modelServiceConfig,
+                ConfigSchemaVersion.V0_COMPATIBILITY);
     }
 
     private static ObjectNode convertFlexlbConfig(ObjectNode v0Config) {
@@ -91,20 +99,26 @@ public final class V0ConfigDocumentParser implements ConfigDocumentParser {
     }
 
     private static void configureRouting(ObjectNode v0Config, ObjectNode flexlbConfig) {
-        ObjectNode prefill = flexlbConfig.putObject("router").putObject("roles").putObject("prefill");
+        ObjectNode prefill =
+                flexlbConfig.putObject("router").putObject("roles").putObject("prefill");
         configureCacheAffinity(v0Config, prefill);
     }
 
     private static void configureCacheAffinity(ObjectNode v0Config, ObjectNode prefill) {
-        boolean configured = "CACHE_AFFINITY_FIRST".equals(v0Config.path("loadBalanceStrategy").asText())
-                || v0Config.has("cacheAffinityFirstMinHitRate")
-                || v0Config.has("cacheAffinityFirstOutstandingUncachedTokensThreshold");
+        boolean configured =
+                "CACHE_AFFINITY_FIRST".equals(v0Config.path("loadBalanceStrategy").asText())
+                        || v0Config.has("cacheAffinityFirstMinHitRate")
+                        || v0Config.has("cacheAffinityFirstOutstandingUncachedTokensThreshold");
         if (!configured) {
             return;
         }
         ObjectNode cacheAffinity = prefill.putObject("cacheAffinity");
         copyField(v0Config, cacheAffinity, "cacheAffinityFirstMinHitRate", "minPrefixHitPercent");
-        copyField(v0Config, cacheAffinity, "cacheAffinityFirstOutstandingUncachedTokensThreshold", "maxOutstandingUncachedTokens");
+        copyField(
+                v0Config,
+                cacheAffinity,
+                "cacheAffinityFirstOutstandingUncachedTokensThreshold",
+                "maxOutstandingUncachedTokens");
     }
 
     private static void configureWorkerHealth(ObjectNode v0Config, ObjectNode flexlbConfig) {
@@ -135,11 +149,13 @@ public final class V0ConfigDocumentParser implements ConfigDocumentParser {
             return;
         }
         if (!"ZOOKEEPER".equals(consistencyConfig.path("masterElectType").asText())) {
-            throw new IllegalArgumentException("V0 configuration supports only ZOOKEEPER master election");
+            throw new IllegalArgumentException(
+                    "V0 configuration supports only ZOOKEEPER master election");
         }
         ObjectNode zookeeperConfig = objectAt(consistencyConfig, "zookeeperConfig");
         if (zookeeperConfig == null || !zookeeperConfig.has("zkHost")) {
-            throw new IllegalArgumentException("V0 ZOOKEEPER configuration requires zookeeperConfig.zkHost");
+            throw new IllegalArgumentException(
+                    "V0 ZOOKEEPER configuration requires zookeeperConfig.zkHost");
         }
         ObjectNode consistency = flexlbConfig.putObject("consistency");
         consistency.put("type", "ZOOKEEPER");
@@ -172,25 +188,31 @@ public final class V0ConfigDocumentParser implements ConfigDocumentParser {
 
     private static void configureOptimizer(ObjectNode flexlbConfig, ObjectNode optimizerConfig) {
         if (optimizerConfig != null && optimizerConfig.has("enabled")) {
-            flexlbConfig.putObject("optimizer").set("enabled", optimizerConfig.get("enabled").deepCopy());
+            flexlbConfig
+                    .putObject("optimizer")
+                    .set("enabled", optimizerConfig.get("enabled").deepCopy());
         }
     }
 
     private static List<String> collectUnsupportedFields(ObjectNode v0Config) {
         List<String> unmappedFields = new ArrayList<>();
         if (v0Config.has("cacheAffinityFirstMaxExtraWorkTokens")) {
-            unmappedFields.add("cacheAffinityFirstMaxExtraWorkTokens (tokens cannot be converted to cacheAffinity.maxExtraTtftMs)");
+            unmappedFields.add(
+                    "cacheAffinityFirstMaxExtraWorkTokens (tokens cannot be converted to cacheAffinity.maxExtraTtftMs)");
         }
         if (v0Config.has("scheduleWorkerSize")) {
-            unmappedFields.add("scheduleWorkerSize (runtime worker sizing is no longer public configuration)");
+            unmappedFields.add(
+                    "scheduleWorkerSize (runtime worker sizing is no longer public configuration)");
         }
         if (v0Config.has("fixedScheduleWorkerPermits")) {
-            unmappedFields.add("fixedScheduleWorkerPermits (no equivalent in the current scheduler)");
+            unmappedFields.add(
+                    "fixedScheduleWorkerPermits (no equivalent in the current scheduler)");
         }
         return unmappedFields;
     }
 
-    private static String convertModelServiceConfig(ObjectNode v0Config) throws JsonProcessingException {
+    private static String convertModelServiceConfig(ObjectNode v0Config)
+            throws JsonProcessingException {
         ObjectNode modelService = objectAt(v0Config, "modelServiceConfig");
         if (modelService == null) {
             return null;
@@ -215,7 +237,11 @@ public final class V0ConfigDocumentParser implements ConfigDocumentParser {
     }
 
     private static void copySnakeCaseFields(ObjectNode source, ObjectNode target) {
-        source.fields().forEachRemaining(entry -> target.set(toCamelCase(entry.getKey()), entry.getValue().deepCopy()));
+        source.fields()
+                .forEachRemaining(
+                        entry ->
+                                target.set(
+                                        toCamelCase(entry.getKey()), entry.getValue().deepCopy()));
     }
 
     private static String toCamelCase(String name) {
@@ -239,10 +265,10 @@ public final class V0ConfigDocumentParser implements ConfigDocumentParser {
         copyField(source, target, fieldName, fieldName);
     }
 
-    private static void copyField(ObjectNode source, ObjectNode target, String sourceFieldName, String targetFieldName) {
+    private static void copyField(
+            ObjectNode source, ObjectNode target, String sourceFieldName, String targetFieldName) {
         if (source.has(sourceFieldName)) {
             target.set(targetFieldName, source.get(sourceFieldName).deepCopy());
         }
     }
-
 }

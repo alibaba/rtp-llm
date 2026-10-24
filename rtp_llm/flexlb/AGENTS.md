@@ -44,15 +44,15 @@ management).
 架构设计文档在 [docs/architecture/](docs/architecture/00-overview.md)（稳态架构文档，
 描述当前代码长什么样；架构变了必须同步更新）：
 
-| 文档 | 内容 |
-|---|---|
-| [00-overview](docs/architecture/00-overview.md) | 模块划分、技术栈、请求主链路、核心不变量 |
-| [01-routing-and-balancing](docs/architecture/01-routing-and-balancing.md) | Router / LoadBalancer、角色多阶段路由、回滚、策略 |
-| [02-queue-scheduling](docs/architecture/02-queue-scheduling.md) | PriorityScheduler / WorkerBatcher 调度、请求生命周期 |
-| [03-resource-management](docs/architecture/03-resource-management.md) | EndpointRegistry、worker 可用性与本地资源预留 |
-| [04-worker-sync-and-cache](docs/architecture/04-worker-sync-and-cache.md) | Worker 状态同步、KV cache 索引 |
-| [05-lifecycle-and-consistency](docs/architecture/05-lifecycle-and-consistency.md) | 优雅上下线 Hook、ZooKeeper 主选举 |
-| [06-configuration-and-observability](docs/architecture/06-configuration-and-observability.md) | 环境变量配置、HTTP 端点、监控指标 |
+| 文档                                                                                          | 内容                                                 |
+| --------------------------------------------------------------------------------------------- | ---------------------------------------------------- |
+| [00-overview](docs/architecture/00-overview.md)                                               | 模块划分、技术栈、请求主链路、核心不变量             |
+| [01-routing-and-balancing](docs/architecture/01-routing-and-balancing.md)                     | Router / LoadBalancer、角色多阶段路由、回滚、策略    |
+| [02-queue-scheduling](docs/architecture/02-queue-scheduling.md)                               | PriorityScheduler / WorkerBatcher 调度、请求生命周期 |
+| [03-resource-management](docs/architecture/03-resource-management.md)                         | EndpointRegistry、worker 可用性与本地资源预留        |
+| [04-worker-sync-and-cache](docs/architecture/04-worker-sync-and-cache.md)                     | Worker 状态同步、KV cache 索引                       |
+| [05-lifecycle-and-consistency](docs/architecture/05-lifecycle-and-consistency.md)             | 优雅上下线 Hook、ZooKeeper 主选举                    |
+| [06-configuration-and-observability](docs/architecture/06-configuration-and-observability.md) | 环境变量配置、HTTP 端点、监控指标                    |
 
 ## Build Commands
 
@@ -130,7 +130,7 @@ Types: `feat`, `fix`, `docs`, `style`, `refactor`, `perf`, `test`, `chore`
 ## Java Javadoc 格式
 
 新增或修改 Javadoc 时，统一使用多行格式，即使只有一句说明也不压缩成单行。
-`/**` 和 `*/` 各自独占一行，说明文字放在中间以 ` * ` 开头的行上。
+`/**` 和 `*/` 各自独占一行，说明文字放在中间以 `*` 开头的行上。
 
 ```java
 /**
@@ -152,7 +152,7 @@ Types: `feat`, `fix`, `docs`, `style`, `refactor`, `perf`, `test`, `chore`
    Do not repeatedly read the same file multiple times — once you have sufficient context,
    proceed to edit directly.
 3. Always prefer editing existing files over creating new ones.
-4. Do not proactively create documentation files (*.md) or README files unless explicitly
+4. Do not proactively create documentation files (\*.md) or README files unless explicitly
    requested.
 5. When fixing issues in code, make the code appear as if the problem never existed in the
    first place. Do not write comments explaining why a solution was used to fix a problem —
@@ -162,6 +162,7 @@ Types: `feat`, `fix`, `docs`, `style`, `refactor`, `perf`, `test`, `chore`
    // Request queue (using configured capacity parameter to control queue size, avoiding race conditions)
    private final BlockingDeque<BalanceContext> queue;
    ```
+
 6. Before considering any code change complete, run the full-repository
    `./mvnw spotless:check -Pspotless-check` from `rtp_llm/flexlb` and ensure the entire
    Maven reactor passes. A module-only Spotless result is not sufficient.

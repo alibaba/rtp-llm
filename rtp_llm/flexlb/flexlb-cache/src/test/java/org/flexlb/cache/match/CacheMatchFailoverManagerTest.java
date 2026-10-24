@@ -33,10 +33,10 @@ class CacheMatchFailoverManagerTest {
     void manualFallbackRecordsOperatorActionWhenAlreadyOnStandby() {
         KvcmGrpcClient client = mock(KvcmGrpcClient.class);
         CacheMetricsReporter metricsReporter = mock(CacheMetricsReporter.class);
-        when(client.healthSnapshot()).thenReturn(
-                health(KvcmHealthState.UNHEALTHY, 3, 0, 0, "heartbeat failure"));
-        CacheMatchFailoverManager manager = new CacheMatchFailoverManager(
-                configuration(true), client, metricsReporter);
+        when(client.healthSnapshot())
+                .thenReturn(health(KvcmHealthState.UNHEALTHY, 3, 0, 0, "heartbeat failure"));
+        CacheMatchFailoverManager manager =
+                new CacheMatchFailoverManager(configuration(true), client, metricsReporter);
         assertEquals(CacheMatchSource.LOCAL_STANDBY, manager.activeSource());
         long automaticFailoverTimeMs = manager.lastFailoverTimeMs();
 
@@ -44,33 +44,38 @@ class CacheMatchFailoverManagerTest {
 
         assertEquals("manual failover activated", manager.lastFailoverReason());
         assertTrue(manager.lastFailoverTimeMs() >= automaticFailoverTimeMs);
-        verify(metricsReporter, times(1)).reportCacheMatchSourceChange(
-                CacheMatchSource.KVCM, CacheMatchSource.LOCAL_STANDBY);
+        verify(metricsReporter, times(1))
+                .reportCacheMatchSourceChange(
+                        CacheMatchSource.KVCM, CacheMatchSource.LOCAL_STANDBY);
     }
 
     @Test
     void manualRecoveryUsesValidatedHealthBeforeLaterNotifications() {
-        for (boolean autoSwitch : new boolean[]{true, false}) {
+        for (boolean autoSwitch : new boolean[] {true, false}) {
             KvcmGrpcClient client = mock(KvcmGrpcClient.class);
-            KvcmHealthSnapshot unhealthy = health(KvcmHealthState.UNHEALTHY, 3, 0, 0, "heartbeat failure");
-            when(client.healthSnapshot()).thenReturn(
-                    health(KvcmHealthState.HEALTHY, 0, 0, 0, "initial"),
-                    health(KvcmHealthState.HEALTHY, 0, 3, 0, "recovered"),
-                    unhealthy);
+            KvcmHealthSnapshot unhealthy =
+                    health(KvcmHealthState.UNHEALTHY, 3, 0, 0, "heartbeat failure");
+            when(client.healthSnapshot())
+                    .thenReturn(
+                            health(KvcmHealthState.HEALTHY, 0, 0, 0, "initial"),
+                            health(KvcmHealthState.HEALTHY, 0, 3, 0, "recovered"),
+                            unhealthy);
             CacheMetricsReporter reporter = mock(CacheMetricsReporter.class);
-            CacheMatchFailoverManager manager = new CacheMatchFailoverManager(
-                    configuration(autoSwitch), client, reporter);
+            CacheMatchFailoverManager manager =
+                    new CacheMatchFailoverManager(configuration(autoSwitch), client, reporter);
             manager.activateFallbackManually();
 
             manager.recoverPrimaryManually();
 
             assertEquals(CacheMatchSource.KVCM, manager.activeSource());
             verify(client, times(2)).healthSnapshot();
-            verify(reporter).reportCacheMatchSourceChange(
-                    CacheMatchSource.LOCAL_STANDBY, CacheMatchSource.KVCM);
+            verify(reporter)
+                    .reportCacheMatchSourceChange(
+                            CacheMatchSource.LOCAL_STANDBY, CacheMatchSource.KVCM);
 
             healthSnapshotListener(client).accept(unhealthy);
-            assertEquals(autoSwitch ? CacheMatchSource.LOCAL_STANDBY : CacheMatchSource.KVCM,
+            assertEquals(
+                    autoSwitch ? CacheMatchSource.LOCAL_STANDBY : CacheMatchSource.KVCM,
                     manager.activeSource());
         }
     }
@@ -78,13 +83,14 @@ class CacheMatchFailoverManagerTest {
     @Test
     void lateHealthCallbackDoesNotOverrideNewerClientState() {
         KvcmGrpcClient client = mock(KvcmGrpcClient.class);
-        when(client.healthSnapshot()).thenReturn(
-                health(KvcmHealthState.HEALTHY, 0, 3, 0, "recovered"));
-        CacheMatchFailoverManager manager = new CacheMatchFailoverManager(
-                configuration(true), client, mock(CacheMetricsReporter.class));
+        when(client.healthSnapshot())
+                .thenReturn(health(KvcmHealthState.HEALTHY, 0, 3, 0, "recovered"));
+        CacheMatchFailoverManager manager =
+                new CacheMatchFailoverManager(
+                        configuration(true), client, mock(CacheMetricsReporter.class));
 
-        healthSnapshotListener(client).accept(
-                health(KvcmHealthState.UNHEALTHY, 3, 0, 0, "outdated heartbeat"));
+        healthSnapshotListener(client)
+                .accept(health(KvcmHealthState.UNHEALTHY, 3, 0, 0, "outdated heartbeat"));
 
         assertEquals(CacheMatchSource.KVCM, manager.activeSource());
     }
@@ -93,12 +99,11 @@ class CacheMatchFailoverManagerTest {
     void automaticallyFollowsKvcmClientHealth() {
         KvcmGrpcClient client = mock(KvcmGrpcClient.class);
         CacheMetricsReporter metricsReporter = mock(CacheMetricsReporter.class);
-        AtomicReference<KvcmHealthSnapshot> currentHealth = new AtomicReference<>(
-                health(KvcmHealthState.HEALTHY, 0, 0, 0, "initial"));
+        AtomicReference<KvcmHealthSnapshot> currentHealth =
+                new AtomicReference<>(health(KvcmHealthState.HEALTHY, 0, 0, 0, "initial"));
         when(client.healthSnapshot()).thenAnswer(ignored -> currentHealth.get());
         CacheMatchFailoverManager manager =
-                new CacheMatchFailoverManager(
-                        configuration(true), client, metricsReporter);
+                new CacheMatchFailoverManager(configuration(true), client, metricsReporter);
         Consumer<KvcmHealthSnapshot> healthSnapshotListener = healthSnapshotListener(client);
 
         currentHealth.set(health(KvcmHealthState.UNHEALTHY, 3, 0, 0, "heartbeat failure"));
@@ -110,17 +115,19 @@ class CacheMatchFailoverManagerTest {
         healthSnapshotListener.accept(currentHealth.get());
         assertEquals(CacheMatchSource.KVCM, manager.activeSource());
         assertEquals("KVCM health recovered", manager.lastFailoverReason());
-        verify(metricsReporter).reportCacheMatchSourceChange(
-                CacheMatchSource.KVCM, CacheMatchSource.LOCAL_STANDBY);
-        verify(metricsReporter).reportCacheMatchSourceChange(
-                CacheMatchSource.LOCAL_STANDBY, CacheMatchSource.KVCM);
+        verify(metricsReporter)
+                .reportCacheMatchSourceChange(
+                        CacheMatchSource.KVCM, CacheMatchSource.LOCAL_STANDBY);
+        verify(metricsReporter)
+                .reportCacheMatchSourceChange(
+                        CacheMatchSource.LOCAL_STANDBY, CacheMatchSource.KVCM);
     }
 
     @Test
     void keepsKvcmActiveUntilManualFailoverWhenAutoSwitchIsDisabled() {
         KvcmGrpcClient client = mock(KvcmGrpcClient.class);
-        AtomicReference<KvcmHealthSnapshot> currentHealth = new AtomicReference<>(
-                health(KvcmHealthState.UNHEALTHY, 3, 0, 10, "query failure"));
+        AtomicReference<KvcmHealthSnapshot> currentHealth =
+                new AtomicReference<>(health(KvcmHealthState.UNHEALTHY, 3, 0, 10, "query failure"));
         when(client.healthSnapshot()).thenAnswer(ignored -> currentHealth.get());
         CacheMatchFailoverManager manager =
                 new CacheMatchFailoverManager(
@@ -135,8 +142,7 @@ class CacheMatchFailoverManagerTest {
         assertThrows(IllegalStateException.class, manager::recoverPrimaryManually);
         assertEquals(CacheMatchSource.LOCAL_STANDBY, manager.activeSource());
 
-        currentHealth.set(
-                health(KvcmHealthState.HEALTHY, 0, 3, 0, "heartbeat recovery"));
+        currentHealth.set(health(KvcmHealthState.HEALTHY, 0, 3, 0, "heartbeat recovery"));
         healthSnapshotListener.accept(currentHealth.get());
         assertEquals(CacheMatchSource.LOCAL_STANDBY, manager.activeSource());
 
@@ -147,16 +153,19 @@ class CacheMatchFailoverManagerTest {
     @Test
     void warnsOncePerUnhealthyPeriodWhenManualFailoverIsRequired() {
         KvcmGrpcClient client = mock(KvcmGrpcClient.class);
-        AtomicReference<KvcmHealthSnapshot> currentHealth = new AtomicReference<>(
-                health(KvcmHealthState.HEALTHY, 0, 0, 0, "initial"));
+        AtomicReference<KvcmHealthSnapshot> currentHealth =
+                new AtomicReference<>(health(KvcmHealthState.HEALTHY, 0, 0, 0, "initial"));
         when(client.healthSnapshot()).thenAnswer(ignored -> currentHealth.get());
-        var logger = (ch.qos.logback.classic.Logger) LoggerFactory.getLogger(CacheMatchFailoverManager.class);
+        var logger =
+                (ch.qos.logback.classic.Logger)
+                        LoggerFactory.getLogger(CacheMatchFailoverManager.class);
         ListAppender<ILoggingEvent> appender = new ListAppender<>();
         appender.start();
         logger.addAppender(appender);
         try {
-            CacheMatchFailoverManager manager = new CacheMatchFailoverManager(
-                    configuration(false), client, mock(CacheMetricsReporter.class));
+            CacheMatchFailoverManager manager =
+                    new CacheMatchFailoverManager(
+                            configuration(false), client, mock(CacheMetricsReporter.class));
             Consumer<KvcmHealthSnapshot> listener = healthSnapshotListener(client);
 
             currentHealth.set(health(KvcmHealthState.UNHEALTHY, 3, 0, 1, "first failure"));
@@ -180,7 +189,9 @@ class CacheMatchFailoverManagerTest {
 
     private long manualFailoverWarnings(ListAppender<ILoggingEvent> appender) {
         return appender.list.stream()
-                .filter(event -> event.getFormattedMessage().contains("manual failover is required"))
+                .filter(
+                        event ->
+                                event.getFormattedMessage().contains("manual failover is required"))
                 .count();
     }
 
@@ -204,8 +215,9 @@ class CacheMatchFailoverManagerTest {
     @Test
     void rejectsManualRecoveryForUnhealthyKvcmWhenAutoSwitchIsEnabled() {
         KvcmGrpcClient client = mock(KvcmGrpcClient.class);
-        AtomicReference<KvcmHealthSnapshot> currentHealth = new AtomicReference<>(
-                health(KvcmHealthState.UNHEALTHY, 3, 0, 0, "heartbeat failure"));
+        AtomicReference<KvcmHealthSnapshot> currentHealth =
+                new AtomicReference<>(
+                        health(KvcmHealthState.UNHEALTHY, 3, 0, 0, "heartbeat failure"));
         when(client.healthSnapshot()).thenAnswer(ignored -> currentHealth.get());
         CacheMatchFailoverManager manager =
                 new CacheMatchFailoverManager(
@@ -216,8 +228,7 @@ class CacheMatchFailoverManagerTest {
         assertThrows(IllegalStateException.class, manager::recoverPrimaryManually);
         assertEquals(CacheMatchSource.LOCAL_STANDBY, manager.activeSource());
 
-        currentHealth.set(
-                health(KvcmHealthState.HEALTHY, 0, 3, 0, "heartbeat recovery"));
+        currentHealth.set(health(KvcmHealthState.HEALTHY, 0, 3, 0, "heartbeat recovery"));
         healthSnapshotListener.accept(currentHealth.get());
         assertEquals(CacheMatchSource.LOCAL_STANDBY, manager.activeSource());
 
@@ -233,15 +244,14 @@ class CacheMatchFailoverManagerTest {
         return captor.getValue();
     }
 
-    private KvcmHealthSnapshot health(KvcmHealthState state, int heartbeatFailures, int heartbeatSuccesses, int queryFailures, String reason) {
+    private KvcmHealthSnapshot health(
+            KvcmHealthState state,
+            int heartbeatFailures,
+            int heartbeatSuccesses,
+            int queryFailures,
+            String reason) {
         return new KvcmHealthSnapshot(
-                state,
-                heartbeatFailures,
-                heartbeatSuccesses,
-                queryFailures,
-                100,
-                0,
-                reason);
+                state, heartbeatFailures, heartbeatSuccesses, queryFailures, 100, 0, reason);
     }
 
     private CacheMatchConfiguration configuration(boolean autoSwitch) {
@@ -253,7 +263,6 @@ class CacheMatchFailoverManagerTest {
 
         ModelMetaConfig config = new ModelMetaConfig();
         config.putServiceRoute(route.getServiceId(), route);
-        return kvcm(config,
-                runtime -> runtime.getLocalStandby().setAutoSwitch(autoSwitch));
+        return kvcm(config, runtime -> runtime.getLocalStandby().setAutoSwitch(autoSwitch));
     }
 }

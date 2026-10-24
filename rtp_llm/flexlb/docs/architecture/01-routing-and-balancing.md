@@ -50,12 +50,12 @@ ENCODER→`NO_ENCODER_WORKER`(8408)，均可重试。
 
 映射不在 `RoleType` 上，而在 `FlexlbConfig`（`flexlb-common/.../config/FlexlbConfig.java`）：
 
-| RoleType | 策略（可配） | 默认策略 | 资源指标（硬编码） |
-|---|---|---|---|
-| PDFUSION / PREFILL | `loadBalanceStrategy` | `SHORTEST_TTFT` | `WAIT_TIME` |
-| DECODE | `decodeLoadBalanceStrategy` | `WEIGHTED_CACHE` | `REMAINING_KV_CACHE` |
-| VIT | `vitLoadBalanceStrategy` | `RANDOM` | `WAIT_TIME` |
-| ENCODER | 独立 `EncoderStrategy` | 提供命中长度时最少编码工作量，否则最少并发 | 在途预测／实际输入长度、`running + waiting + 本地待观察请求` |
+| RoleType           | 策略（可配）                | 默认策略                                   | 资源指标（硬编码）                                           |
+| ------------------ | --------------------------- | ------------------------------------------ | ------------------------------------------------------------ |
+| PDFUSION / PREFILL | `loadBalanceStrategy`       | `SHORTEST_TTFT`                            | `WAIT_TIME`                                                  |
+| DECODE             | `decodeLoadBalanceStrategy` | `WEIGHTED_CACHE`                           | `REMAINING_KV_CACHE`                                         |
+| VIT                | `vitLoadBalanceStrategy`    | `RANDOM`                                   | `WAIT_TIME`                                                  |
+| ENCODER            | 独立 `EncoderStrategy`      | 提供命中长度时最少编码工作量，否则最少并发 | 在途预测／实际输入长度、`running + waiting + 本地待观察请求` |
 
 ### gRPC Schedule 响应
 
@@ -155,7 +155,7 @@ PDFUSION 的 cost-based 路径也遵循 [04-worker-sync-and-cache](04-worker-syn
    总权重非正或全相等时退化为均匀随机；轮盘赌选择。
 3. **cache 匹配只做记账**：选中后再查 `findMatchingEngines()`，得到
    `prefixLength = blockSize × 匹配块数`，用于 TaskInfo 的 KV 预扣精度（`inputLength −
-   prefixLength`），不影响选谁。
+prefixLength`），不影响选谁。
 4. `putLocalTask()` 记账。
 
 ## BalanceContext 路由相关字段

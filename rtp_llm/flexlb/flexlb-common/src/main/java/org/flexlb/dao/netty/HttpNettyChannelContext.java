@@ -29,18 +29,22 @@ public class HttpNettyChannelContext<T> {
      * Client custom request
      */
     private Object request;
+
     /**
      * Channel connected to model service, used for communication
      */
     private Channel channel;
+
     /**
      * Emitter for interaction with user in streaming calls
      */
     private FluxSink<T> sink;
+
     /**
      * HTTP response from model service
      */
     private HttpResponse httpResp;
+
     /**
      * Cache model service SSE response in streaming calls until end of event
      */
@@ -54,18 +58,22 @@ public class HttpNettyChannelContext<T> {
      * Callback function invoked when netty triggers read event
      */
     private BiConsumer<HttpNettyChannelContext<T>, HttpObject> readCallback;
+
     /**
      * Callback function invoked when netty channel disconnects
      */
     private Consumer<HttpNettyChannelContext<T>> channelInactiveCallback;
+
     /**
      * Callback function invoked when exception is thrown during netty interaction
      */
     private BiConsumer<HttpNettyChannelContext<T>, Throwable> errorCallback;
+
     /**
      * Netty channel enhancement processing callback
      */
     private Consumer<HttpNettyChannelContext<T>> channelEnhanceCallback;
+
     /**
      * Processing completion flag
      */

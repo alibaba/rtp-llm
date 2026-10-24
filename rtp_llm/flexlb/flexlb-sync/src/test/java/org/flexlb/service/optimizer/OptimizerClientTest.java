@@ -59,7 +59,8 @@ class OptimizerClientTest {
     @ValueSource(booleans = {false, true})
     void metricFailureDoesNotEscapeSkippedOrFailedQueries(boolean stopped) {
         doThrow(new IllegalStateException("metrics unavailable"))
-                .when(monitor).report(anyString(), any(), eq(1.0));
+                .when(monitor)
+                .report(anyString(), any(), eq(1.0));
         if (stopped) {
             client.shutdown();
         }
@@ -69,23 +70,24 @@ class OptimizerClientTest {
         verify(httpService, never()).request(any(), any(URI.class), any(), any());
     }
 
-    @Mock
-    private GeneralHttpNettyService httpService;
+    @Mock private GeneralHttpNettyService httpService;
 
-    @Mock
-    private OptimizerAddressResolver addressResolver;
+    @Mock private OptimizerAddressResolver addressResolver;
 
-    @Mock
-    private FlexMonitor monitor;
-    @Mock
-    private KvcmWorkerMetadataResolver workerMetadataResolver;
+    @Mock private FlexMonitor monitor;
+    @Mock private KvcmWorkerMetadataResolver workerMetadataResolver;
 
     private OptimizerClient client;
 
     @BeforeEach
     void setUp() {
-        client = new OptimizerClient(
-                httpService, addressResolver, workerMetadataResolver, "/api/optimizer", monitor);
+        client =
+                new OptimizerClient(
+                        httpService,
+                        addressResolver,
+                        workerMetadataResolver,
+                        "/api/optimizer",
+                        monitor);
     }
 
     @AfterEach
@@ -97,16 +99,23 @@ class OptimizerClientTest {
     void dispatchesTraceQueryUsingResolvedKvcmNamespace() {
         resolvesTestInstanceId();
         when(addressResolver.getAddresses()).thenReturn(List.of("10.0.0.1:8082"));
-        when(httpService.request(any(), any(URI.class), eq("/api/optimizer/traceQuery"),
-                eq(OptimizerTraceQueryResponse.class)))
+        when(httpService.request(
+                        any(),
+                        any(URI.class),
+                        eq("/api/optimizer/traceQuery"),
+                        eq(OptimizerTraceQueryResponse.class)))
                 .thenReturn(Mono.just(traceResponse(OptimizerErrorCode.OK)));
 
         client.traceQuery(traceRequest(List.of(1L, 2L, 3L)), selectedWorker());
 
         ArgumentCaptor<OptimizerTraceQueryRequest> requestCaptor =
                 ArgumentCaptor.forClass(OptimizerTraceQueryRequest.class);
-        verify(httpService).request(requestCaptor.capture(), any(URI.class),
-                eq("/api/optimizer/traceQuery"), eq(OptimizerTraceQueryResponse.class));
+        verify(httpService)
+                .request(
+                        requestCaptor.capture(),
+                        any(URI.class),
+                        eq("/api/optimizer/traceQuery"),
+                        eq(OptimizerTraceQueryResponse.class));
         assertEquals("1", requestCaptor.getValue().getTraceId());
         assertEquals("test-instance", requestCaptor.getValue().getInstanceId());
         assertEquals(List.of(1L, 2L, 3L), requestCaptor.getValue().getBlockKeys());
@@ -129,7 +138,8 @@ class OptimizerClientTest {
         endpoint.setAddress("optimizer-service");
         endpoint.setDiscovery(discoveryConfig);
         ServiceDiscovery discovery = mock(ServiceDiscovery.class);
-        OptimizerAddressResolver resolver = new OptimizerAddressResolver(discovery, endpoint, 8082, 1000L);
+        OptimizerAddressResolver resolver =
+                new OptimizerAddressResolver(discovery, endpoint, 8082, 1000L);
         var scheduler = mock(ScheduledExecutorService.class);
         ReflectionTestUtils.setField(resolver, "refreshScheduler", scheduler);
         client = new OptimizerClient(httpService, resolver, workerMetadataResolver, "", monitor);
@@ -140,12 +150,12 @@ class OptimizerClientTest {
         client.traceQuery(traceRequest(List.of(1L)), selectedWorker());
         client.traceQuery(traceRequest(List.of(2L)), selectedWorker());
 
-        verify(scheduler).scheduleWithFixedDelay(any(), eq(0L), eq(1000L),
-                eq(TimeUnit.MILLISECONDS));
+        verify(scheduler)
+                .scheduleWithFixedDelay(any(), eq(0L), eq(1000L), eq(TimeUnit.MILLISECONDS));
         client.shutdown();
         client.traceQuery(traceRequest(List.of(3L)), selectedWorker());
-        verify(scheduler).scheduleWithFixedDelay(any(), eq(0L), eq(1000L),
-                eq(TimeUnit.MILLISECONDS));
+        verify(scheduler)
+                .scheduleWithFixedDelay(any(), eq(0L), eq(1000L), eq(TimeUnit.MILLISECONDS));
         verify(scheduler).shutdownNow();
         verify(discovery, never()).shutdown();
     }
@@ -153,16 +163,21 @@ class OptimizerClientTest {
     @Test
     void resolverStartFailureDoesNotEscapeAndNextQueryCanRetry() {
         resolvesTestInstanceId();
-        doThrow(new IllegalStateException("start unavailable")).doNothing()
-                .when(addressResolver).start();
+        doThrow(new IllegalStateException("start unavailable"))
+                .doNothing()
+                .when(addressResolver)
+                .start();
 
         assertDoesNotThrow(() -> client.traceQuery(traceRequest(List.of(1L)), selectedWorker()));
         assertDoesNotThrow(() -> client.traceQuery(traceRequest(List.of(2L)), selectedWorker()));
 
         verify(addressResolver, times(2)).start();
         verify(httpService, never()).request(any(), any(URI.class), any(), any());
-        verify(monitor).report(OPTIMIZER_TRACE_QUERY_FAILED_QPS,
-                FlexMetricTags.of("reason", "dispatch_error"), 1.0);
+        verify(monitor)
+                .report(
+                        OPTIMIZER_TRACE_QUERY_FAILED_QPS,
+                        FlexMetricTags.of("reason", "dispatch_error"),
+                        1.0);
     }
 
     @Test
@@ -170,10 +185,11 @@ class OptimizerClientTest {
         client.traceQuery(traceRequest(List.of()), selectedWorker());
 
         verify(httpService, never()).request(any(), any(URI.class), any(), any());
-        verify(monitor).report(
-                OPTIMIZER_TRACE_QUERY_SKIPPED_QPS,
-                FlexMetricTags.of("reason", "empty_block_keys"),
-                1.0);
+        verify(monitor)
+                .report(
+                        OPTIMIZER_TRACE_QUERY_SKIPPED_QPS,
+                        FlexMetricTags.of("reason", "empty_block_keys"),
+                        1.0);
         verify(addressResolver, never()).start();
     }
 
@@ -185,23 +201,25 @@ class OptimizerClientTest {
         client.traceQuery(traceRequest(List.of(1L)), selectedWorker());
 
         verify(httpService, never()).request(any(), any(URI.class), any(), any());
-        verify(monitor).report(
-                OPTIMIZER_TRACE_QUERY_SKIPPED_QPS,
-                FlexMetricTags.of("reason", "no_available_address"),
-                1.0);
+        verify(monitor)
+                .report(
+                        OPTIMIZER_TRACE_QUERY_SKIPPED_QPS,
+                        FlexMetricTags.of("reason", "no_available_address"),
+                        1.0);
     }
 
     @Test
     void skipsTraceQueryWhenOptimizerIsDisabled() {
         ConfigService configService = mock(ConfigService.class);
         when(configService.loadBalanceConfig()).thenReturn(new FlexlbConfig());
-        OptimizerClient disabledClient = new OptimizerClient(
-                httpService,
-                mock(ServiceDiscovery.class),
-                new ModelMetaConfig(),
-                configService,
-                workerMetadataResolver,
-                monitor);
+        OptimizerClient disabledClient =
+                new OptimizerClient(
+                        httpService,
+                        mock(ServiceDiscovery.class),
+                        new ModelMetaConfig(),
+                        configService,
+                        workerMetadataResolver,
+                        monitor);
         disabledClient.shutdown();
 
         disabledClient.traceQuery(traceRequest(List.of(1L)), selectedWorker());
@@ -219,100 +237,125 @@ class OptimizerClientTest {
         verify(httpService, never()).request(any(), any(URI.class), any(), any());
         verify(workerMetadataResolver, never()).resolveNamespace(any(), anyString(), anyLong());
         verify(addressResolver, never()).start();
-        verify(monitor).report(
-                OPTIMIZER_TRACE_QUERY_SKIPPED_QPS,
-                FlexMetricTags.of("reason", "shutdown"),
-                1.0);
+        verify(monitor)
+                .report(
+                        OPTIMIZER_TRACE_QUERY_SKIPPED_QPS,
+                        FlexMetricTags.of("reason", "shutdown"),
+                        1.0);
     }
 
     @Test
     void reportsFailureWhenTraceQueryRequestFails() {
         resolvesTestInstanceId();
         when(addressResolver.getAddresses()).thenReturn(List.of("10.0.0.1:8082"));
-        when(httpService.request(any(), any(URI.class), eq("/api/optimizer/traceQuery"),
-                eq(OptimizerTraceQueryResponse.class)))
+        when(httpService.request(
+                        any(),
+                        any(URI.class),
+                        eq("/api/optimizer/traceQuery"),
+                        eq(OptimizerTraceQueryResponse.class)))
                 .thenReturn(Mono.error(new IllegalStateException("optimizer unavailable")));
 
         assertDoesNotThrow(() -> client.traceQuery(traceRequest(List.of(1L)), selectedWorker()));
 
-        verify(monitor).report(
-                OPTIMIZER_TRACE_QUERY_FAILED_QPS,
-                FlexMetricTags.of("reason", "http_error"),
-                1.0);
+        verify(monitor)
+                .report(
+                        OPTIMIZER_TRACE_QUERY_FAILED_QPS,
+                        FlexMetricTags.of("reason", "http_error"),
+                        1.0);
     }
 
     @Test
     void reportsDispatchFailureWhenHttpRequestThrowsSynchronously() {
         resolvesTestInstanceId();
         when(addressResolver.getAddresses()).thenReturn(List.of("10.0.0.1:8082"));
-        when(httpService.request(any(), any(URI.class), eq("/api/optimizer/traceQuery"),
-                eq(OptimizerTraceQueryResponse.class)))
+        when(httpService.request(
+                        any(),
+                        any(URI.class),
+                        eq("/api/optimizer/traceQuery"),
+                        eq(OptimizerTraceQueryResponse.class)))
                 .thenThrow(new IllegalStateException("request construction failed"));
 
         assertDoesNotThrow(() -> client.traceQuery(traceRequest(List.of(1L)), selectedWorker()));
 
-        verify(monitor).report(
-                OPTIMIZER_TRACE_QUERY_FAILED_QPS,
-                FlexMetricTags.of("reason", "dispatch_error"),
-                1.0);
+        verify(monitor)
+                .report(
+                        OPTIMIZER_TRACE_QUERY_FAILED_QPS,
+                        FlexMetricTags.of("reason", "dispatch_error"),
+                        1.0);
     }
 
     @Test
     void doesNotWaitForTraceQueryResponse() {
         resolvesTestInstanceId();
         when(addressResolver.getAddresses()).thenReturn(List.of("10.0.0.1:8082"));
-        when(httpService.request(any(), any(URI.class), eq("/api/optimizer/traceQuery"),
-                eq(OptimizerTraceQueryResponse.class)))
+        when(httpService.request(
+                        any(),
+                        any(URI.class),
+                        eq("/api/optimizer/traceQuery"),
+                        eq(OptimizerTraceQueryResponse.class)))
                 .thenReturn(Mono.never());
 
         assertTimeoutPreemptively(
                 Duration.ofSeconds(1),
                 () -> client.traceQuery(traceRequest(List.of(1L)), selectedWorker()));
 
-        verify(httpService).request(any(), any(URI.class),
-                eq("/api/optimizer/traceQuery"), eq(OptimizerTraceQueryResponse.class));
+        verify(httpService)
+                .request(
+                        any(),
+                        any(URI.class),
+                        eq("/api/optimizer/traceQuery"),
+                        eq(OptimizerTraceQueryResponse.class));
     }
 
     @Test
     void reportsFailureForNonOkTraceQueryResponse() {
         resolvesTestInstanceId();
         when(addressResolver.getAddresses()).thenReturn(List.of("10.0.0.1:8082"));
-        when(httpService.request(any(), any(URI.class), eq("/api/optimizer/traceQuery"),
-                eq(OptimizerTraceQueryResponse.class)))
+        when(httpService.request(
+                        any(),
+                        any(URI.class),
+                        eq("/api/optimizer/traceQuery"),
+                        eq(OptimizerTraceQueryResponse.class)))
                 .thenReturn(Mono.just(traceResponse(OptimizerErrorCode.UNKNOWN_ERROR)));
 
         client.traceQuery(traceRequest(List.of(1L)), selectedWorker());
 
-        verify(monitor).report(
-                OPTIMIZER_TRACE_QUERY_FAILED_QPS,
-                FlexMetricTags.of("reason", "status_UNKNOWN_ERROR"),
-                1.0);
+        verify(monitor)
+                .report(
+                        OPTIMIZER_TRACE_QUERY_FAILED_QPS,
+                        FlexMetricTags.of("reason", "status_UNKNOWN_ERROR"),
+                        1.0);
     }
 
     @Test
     void reportsMissingStatusWhenResponseHeaderIsMissing() {
         resolvesTestInstanceId();
         when(addressResolver.getAddresses()).thenReturn(List.of("10.0.0.1:8082"));
-        when(httpService.request(any(), any(URI.class), eq("/api/optimizer/traceQuery"),
-                eq(OptimizerTraceQueryResponse.class)))
+        when(httpService.request(
+                        any(),
+                        any(URI.class),
+                        eq("/api/optimizer/traceQuery"),
+                        eq(OptimizerTraceQueryResponse.class)))
                 .thenReturn(Mono.just(new OptimizerTraceQueryResponse()));
 
         client.traceQuery(traceRequest(List.of(1L)), selectedWorker());
 
-        verify(monitor).report(
-                OPTIMIZER_TRACE_QUERY_FAILED_QPS,
-                FlexMetricTags.of("reason", "status_MISSING"),
-                1.0);
+        verify(monitor)
+                .report(
+                        OPTIMIZER_TRACE_QUERY_FAILED_QPS,
+                        FlexMetricTags.of("reason", "status_MISSING"),
+                        1.0);
     }
 
     @Test
     void reportsMissingStatusWhenResponseIsNull() {
         client.handleTraceQueryResponse(null);
 
-        verify(monitor).report(
-                OPTIMIZER_TRACE_QUERY_FAILED_QPS,
-                FlexMetricTags.of("reason", "status_MISSING"),
-                1.0);
+        verify(monitor)
+                .report(
+                        OPTIMIZER_TRACE_QUERY_FAILED_QPS,
+                        FlexMetricTags.of("reason", "status_MISSING"),
+                        1.0);
     }
 
     @Test
@@ -324,15 +367,17 @@ class OptimizerClientTest {
 
     @Test
     void skipsTraceQueryWhenKvcmNamespaceIsUnavailable() {
-        when(workerMetadataResolver.resolveNamespace(RoleType.PREFILL, "default", 16L)).thenReturn(null);
+        when(workerMetadataResolver.resolveNamespace(RoleType.PREFILL, "default", 16L))
+                .thenReturn(null);
 
         client.traceQuery(traceRequest(List.of(1L)), selectedWorker());
 
         verify(httpService, never()).request(any(), any(URI.class), any(), any());
-        verify(monitor).report(
-                OPTIMIZER_TRACE_QUERY_SKIPPED_QPS,
-                FlexMetricTags.of("reason", "instance_id_unavailable"),
-                1.0);
+        verify(monitor)
+                .report(
+                        OPTIMIZER_TRACE_QUERY_SKIPPED_QPS,
+                        FlexMetricTags.of("reason", "instance_id_unavailable"),
+                        1.0);
     }
 
     private static Request traceRequest(List<Long> blockCacheKeys) {
@@ -345,7 +390,8 @@ class OptimizerClientTest {
     }
 
     private void resolvesTestInstanceId() {
-        when(workerMetadataResolver.resolveNamespace(any(), any(), anyLong())).thenReturn("test-instance");
+        when(workerMetadataResolver.resolveNamespace(any(), any(), anyLong()))
+                .thenReturn("test-instance");
     }
 
     private static ServerStatus selectedWorker() {

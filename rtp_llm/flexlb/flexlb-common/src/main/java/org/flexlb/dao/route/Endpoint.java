@@ -39,6 +39,5 @@ public class Endpoint {
     @JsonProperty("discovery")
     private DiscoveryConfig discovery;
 
-    @JsonIgnore
-    private String group = "";
+    @JsonIgnore private String group = "";
 }

@@ -44,12 +44,17 @@ final class UniConfigConfigSource implements ConfigSource {
             return;
         }
         if (!deploymentIdentity.isSpectrum()) {
-            throw new IllegalStateException("UniConfig requires a Spectrum deployment identity: "
-                    + "SPECTRUM_WORKSPACE_ID, SPECTRUM_APPLICATION_NAME and SPECTRUM_DEPLOYMENT_NAME");
+            throw new IllegalStateException(
+                    "UniConfig requires a Spectrum deployment identity: "
+                            + "SPECTRUM_WORKSPACE_ID, SPECTRUM_APPLICATION_NAME and SPECTRUM_DEPLOYMENT_NAME");
         }
-        configUri = URI.create("http://127.0.0.1:18080/v2/configs/modelstudio.spectrum.deployment."
-                + deploymentIdentity.getSpectrumWorkspaceId() + "." + deploymentIdentity.getSpectrumDeploymentName()
-                + ".runtime.meta");
+        configUri =
+                URI.create(
+                        "http://127.0.0.1:18080/v2/configs/modelstudio.spectrum.deployment."
+                                + deploymentIdentity.getSpectrumWorkspaceId()
+                                + "."
+                                + deploymentIdentity.getSpectrumDeploymentName()
+                                + ".runtime.meta");
     }
 
     @Override
@@ -71,18 +76,21 @@ final class UniConfigConfigSource implements ConfigSource {
         try {
             configContent = fetchInitialConfig();
             if (pollExecutor == null) {
-                pollExecutor = Executors.newSingleThreadScheduledExecutor(task -> {
-                    Thread thread = new Thread(task, "flexlb-uniconfig-poll");
-                    thread.setDaemon(true);
-                    return thread;
-                });
+                pollExecutor =
+                        Executors.newSingleThreadScheduledExecutor(
+                                task -> {
+                                    Thread thread = new Thread(task, "flexlb-uniconfig-poll");
+                                    thread.setDaemon(true);
+                                    return thread;
+                                });
             }
-            pollExecutor.scheduleWithFixedDelay(this::poll, POLL_INTERVAL_SECONDS,
-                    POLL_INTERVAL_SECONDS, TimeUnit.SECONDS);
+            pollExecutor.scheduleWithFixedDelay(
+                    this::poll, POLL_INTERVAL_SECONDS, POLL_INTERVAL_SECONDS, TimeUnit.SECONDS);
             ConfigService.register(this);
         } catch (Exception error) {
             close();
-            throw new IllegalStateException("Failed to initialize UniConfig configuration source", error);
+            throw new IllegalStateException(
+                    "Failed to initialize UniConfig configuration source", error);
         }
     }
 
@@ -114,13 +122,16 @@ final class UniConfigConfigSource implements ConfigSource {
             try {
                 return fetchConfig();
             } catch (IOException error) {
-                log.warn("UniConfig configuration is not ready; retrying startup (attempt {}): {}",
-                        attempt, error.toString());
+                log.warn(
+                        "UniConfig configuration is not ready; retrying startup (attempt {}): {}",
+                        attempt,
+                        error.toString());
                 try {
                     waitForStartupRetry();
                 } catch (InterruptedException interrupted) {
                     Thread.currentThread().interrupt();
-                    throw new IOException("Interrupted while waiting for the UniConfig agent", interrupted);
+                    throw new IOException(
+                            "Interrupted while waiting for the UniConfig agent", interrupted);
                 }
             }
         }
@@ -131,7 +142,8 @@ final class UniConfigConfigSource implements ConfigSource {
     }
 
     private String fetchConfig() throws IOException {
-        HttpURLConnection connection = (HttpURLConnection) configUri.toURL().openConnection(Proxy.NO_PROXY);
+        HttpURLConnection connection =
+                (HttpURLConnection) configUri.toURL().openConnection(Proxy.NO_PROXY);
         try {
             connection.setConnectTimeout(CONFIG_READ_TIMEOUT_MS);
             connection.setReadTimeout(CONFIG_READ_TIMEOUT_MS);
@@ -162,7 +174,8 @@ final class UniConfigConfigSource implements ConfigSource {
             throw new IOException("UniConfig configuration must be a JSON object");
         }
         if (!document.has("consistency") && !document.has("flexlbSyncConsistencyConfig")) {
-            throw new IOException("UniConfig configuration must contain consistency or flexlbSyncConsistencyConfig");
+            throw new IOException(
+                    "UniConfig configuration must contain consistency or flexlbSyncConsistencyConfig");
         }
     }
 
@@ -182,7 +195,8 @@ final class UniConfigConfigSource implements ConfigSource {
             }
         } catch (Exception error) {
             if (!closed) {
-                log.warn("Failed to refresh UniConfig configuration; keeping last-known-good configuration: {}",
+                log.warn(
+                        "Failed to refresh UniConfig configuration; keeping last-known-good configuration: {}",
                         error.toString());
             }
         }

@@ -9,25 +9,31 @@ class EngineGrpcClientRetryPolicyTest {
 
     @Test
     void enqueueBatchDoesNotRetryAmbiguousBrokenConnection() {
-        assertFalse(EngineGrpcClient.retriesBrokenConnections(
-                EngineGrpcClient.ServiceType.BATCH_ENQUEUE));
+        assertFalse(
+                EngineGrpcClient.retriesBrokenConnections(
+                        EngineGrpcClient.ServiceType.BATCH_ENQUEUE));
     }
 
     @Test
     void retryPolicyChangeDoesNotDisableReadOnlyRpcRetries() {
-        assertTrue(EngineGrpcClient.retriesBrokenConnections(
-                EngineGrpcClient.ServiceType.WORKER_STATUS));
-        assertTrue(EngineGrpcClient.retriesBrokenConnections(
-                EngineGrpcClient.ServiceType.CACHE_STATUS));
-        assertTrue(EngineGrpcClient.retriesBrokenConnections(
-                EngineGrpcClient.ServiceType.MULTIMODAL_WORKER_STATUS));
-        assertTrue(EngineGrpcClient.retriesBrokenConnections(
-                EngineGrpcClient.ServiceType.MULTIMODAL_CACHE_STATUS));
+        assertTrue(
+                EngineGrpcClient.retriesBrokenConnections(
+                        EngineGrpcClient.ServiceType.WORKER_STATUS));
+        assertTrue(
+                EngineGrpcClient.retriesBrokenConnections(
+                        EngineGrpcClient.ServiceType.CACHE_STATUS));
+        assertTrue(
+                EngineGrpcClient.retriesBrokenConnections(
+                        EngineGrpcClient.ServiceType.MULTIMODAL_WORKER_STATUS));
+        assertTrue(
+                EngineGrpcClient.retriesBrokenConnections(
+                        EngineGrpcClient.ServiceType.MULTIMODAL_CACHE_STATUS));
     }
 
     @Test
     void cancelKeepsItsExistingSingleShotPolicy() {
-        assertFalse(EngineGrpcClient.retriesBrokenConnections(
-                EngineGrpcClient.ServiceType.ENGINE_CANCEL));
+        assertFalse(
+                EngineGrpcClient.retriesBrokenConnections(
+                        EngineGrpcClient.ServiceType.ENGINE_CANCEL));
     }
 }

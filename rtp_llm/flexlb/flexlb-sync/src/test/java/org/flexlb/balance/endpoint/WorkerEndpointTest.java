@@ -30,25 +30,25 @@ class WorkerEndpointTest {
 
     @BeforeEach
     void setUp() {
-        status = EndpointTestSupport.workerStatus(
-                RoleType.PREFILL,
-                "group-x",
-                "10.0.0.1",
-                8080,
-                8081,
-                "site-x");
+        status =
+                EndpointTestSupport.workerStatus(
+                        RoleType.PREFILL, "group-x", "10.0.0.1", 8080, 8081, "site-x");
         FlexlbConfig config = org.flexlb.balance.scheduler.SchedulingTestConfig.newConfig();
-        config.getRouter().getRoles().getPrefill().getExecutionTimeEstimator()
+        config.getRouter()
+                .getRoles()
+                .getPrefill()
+                .getExecutionTimeEstimator()
                 .setExpression("sum(computeTokens)");
         EndpointTestSupport.TestRequestRuntime requestRuntime =
                 EndpointTestSupport.requestRuntime();
-        endpoint = new PrefillEndpoint(
-                status,
-                () -> config,
-                EndpointTestSupport.routeStrategy(requestRuntime),
-                requestRuntime.events(),
-                Mockito.mock(BatchSchedulerReporter.class),
-                new org.flexlb.balance.scheduler.PlacementAvailability());
+        endpoint =
+                new PrefillEndpoint(
+                        status,
+                        () -> config,
+                        EndpointTestSupport.routeStrategy(requestRuntime),
+                        requestRuntime.events(),
+                        Mockito.mock(BatchSchedulerReporter.class),
+                        new org.flexlb.balance.scheduler.PlacementAvailability());
         endpoint.startGeneration();
     }
 
@@ -59,12 +59,10 @@ class WorkerEndpointTest {
 
     @Test
     void commitBatch_increasesCommittedWork() {
-        registerBatch(1L, 500,
-                item(100L, 1000));
+        registerBatch(1L, 500, item(100L, 1000));
         assertCommittedWorkNear(500);
 
-        registerBatch(2L, 300,
-                item(101L, 500));
+        registerBatch(2L, 300, item(101L, 500));
         assertCommittedWorkNear(800);
     }
 
@@ -99,14 +97,14 @@ class WorkerEndpointTest {
 
     private void assertCommittedWorkNear(long expectedMs) {
         long actualMs = endpoint.getLoadMetric().orElseThrow();
-        assertTrue(actualMs <= expectedMs && actualMs >= expectedMs - 50,
+        assertTrue(
+                actualMs <= expectedMs && actualMs >= expectedMs - 50,
                 "Expected committed work near " + expectedMs + "ms but got " + actualMs + "ms");
     }
 
     @Test
     void calibrate_noInflight_resetsToZero() {
-        registerBatch(1L, 500,
-                item(100L, 1000));
+        registerBatch(1L, 500, item(100L, 1000));
 
         TaskInfo finished = task("100", 1000, 0, 1L);
         finished.setErrorCode(0);
@@ -118,8 +116,7 @@ class WorkerEndpointTest {
 
     @Test
     void calibrate_finishedBatch_removedFromInflight() {
-        registerBatch(5L, 9999,
-                item(100L, 1000), item(101L, 2000));
+        registerBatch(5L, 9999, item(100L, 1000), item(101L, 2000));
 
         TaskInfo t1 = task("100", 1000, 0, 5L);
         t1.setErrorCode(0);
@@ -133,8 +130,7 @@ class WorkerEndpointTest {
 
     @Test
     void calibrate_partialBatchFailure_repacks() {
-        registerBatch(5L, 9999,
-                item(100L, 1000), item(101L, 2000));
+        registerBatch(5L, 9999, item(100L, 1000), item(101L, 2000));
 
         TaskInfo failed = task("100", 1000, 0, 5L);
         failed.setErrorCode(1);
@@ -149,10 +145,8 @@ class WorkerEndpointTest {
 
     @Test
     void calibrate_inflightUnconfirmedBatchesSurvive() {
-        registerBatch(5L, 1000,
-                item(100L, 500));
-        registerBatch(7L, 2000,
-                item(200L, 1000));
+        registerBatch(5L, 1000, item(100L, 500));
+        registerBatch(7L, 2000, item(200L, 1000));
 
         TaskInfo finished = task("100", 500, 0, 5L);
         finished.setErrorCode(0);
@@ -160,7 +154,8 @@ class WorkerEndpointTest {
 
         assertEquals(1, endpoint.getInflightBatchCount());
         // Remaining work is predicted duration minus elapsed running time.
-        assertTrue(Math.abs(endpoint.getLoadMetric().orElseThrow() - 2000) < 50,
+        assertTrue(
+                Math.abs(endpoint.getLoadMetric().orElseThrow() - 2000) < 50,
                 "Expected ~2000ms but got " + endpoint.getLoadMetric().orElseThrow());
     }
 
@@ -196,8 +191,7 @@ class WorkerEndpointTest {
 
         CompletableFuture.runAsync(pin::close).join();
 
-        assertThrows(IllegalArgumentException.class,
-                () -> endpoint.requirePinnedGeneration(pin));
+        assertThrows(IllegalArgumentException.class, () -> endpoint.requirePinnedGeneration(pin));
     }
 
     // ==================== getStatus() returns live reference ====================
@@ -239,16 +233,14 @@ class WorkerEndpointTest {
         WorkerStatus.PreparedStatus prepared;
         status.lock.lock();
         try {
-            prepared = status.prepareNewStatus(
-                    status.freezeStatusResponse(resp));
+            prepared = status.prepareNewStatus(status.freezeStatusResponse(resp));
         } finally {
             status.lock.unlock();
         }
 
         assertEquals(RoleType.PREFILL, status.getRole());
         assertEquals(-1L, status.appliedStatusCursor().statusVersion());
-        assertEquals(-1L,
-                status.appliedStatusCursor().latestFinishedTaskVersion());
+        assertEquals(-1L, status.appliedStatusCursor().latestFinishedTaskVersion());
 
         status.lock.lock();
         try {
@@ -269,16 +261,13 @@ class WorkerEndpointTest {
         assertEquals(262144L, status.getMaxBatchTokensSize());
         assertEquals(10000L, status.getAvailableKvCacheTokens());
         assertEquals(5L, status.appliedStatusCursor().statusVersion());
-        assertEquals(3L,
-                status.appliedStatusCursor().latestFinishedTaskVersion());
+        assertEquals(3L, status.appliedStatusCursor().latestFinishedTaskVersion());
     }
 
     @Test
     void nullStatusResponseIsRejectedBeforeMutation() {
-        WorkerStatus.CommittedWorkerStatus before =
-                status.committedWorkerStatus();
-        assertThrows(NullPointerException.class,
-                () -> status.freezeStatusResponse(null));
+        WorkerStatus.CommittedWorkerStatus before = status.committedWorkerStatus();
+        assertThrows(NullPointerException.class, () -> status.freezeStatusResponse(null));
         assertSame(before, status.committedWorkerStatus());
     }
 
@@ -290,14 +279,15 @@ class WorkerEndpointTest {
         resp.setRole(RoleType.PREFILL);
         resp.setStatusVersion(1L);
         resp.setLatestFinishedVersion(0L);
-        WorkerStatus newStatus = EndpointTestSupport.workerStatus(
-                RoleType.PREFILL, "group-b", "10.0.0.2",
-                8082, 8083, "site-a");
+        WorkerStatus newStatus =
+                EndpointTestSupport.workerStatus(
+                        RoleType.PREFILL, "group-b", "10.0.0.2", 8082, 8083, "site-a");
         newStatus.lock.lock();
         try {
-            WorkerStatus.PreparedStatus prepared = newStatus.prepareNewStatus(
-                    newStatus.freezeStatusResponse(resp));
-            assertThrows(IllegalArgumentException.class,
+            WorkerStatus.PreparedStatus prepared =
+                    newStatus.prepareNewStatus(newStatus.freezeStatusResponse(resp));
+            assertThrows(
+                    IllegalArgumentException.class,
                     () -> endpoint.applyPreparedStatus(newStatus, prepared));
         } finally {
             newStatus.lock.unlock();
@@ -336,19 +326,14 @@ class WorkerEndpointTest {
         EndpointTestSupport.applyStatus(endpoint, response);
     }
 
-    private void registerBatch(
-            long batchId,
-            long predictedMs,
-            ScheduledRequest... items) {
+    private void registerBatch(long batchId, long predictedMs, ScheduledRequest... items) {
         for (ScheduledRequest item : items) {
             if (!EndpointTestSupport.offer(endpoint, item)) {
-                throw new IllegalStateException(
-                        "test item could not be offered to endpoint queue");
+                throw new IllegalStateException("test item could not be offered to endpoint queue");
             }
         }
         try (PrefillState.CommittedHandoff ignored =
-                     EndpointTestSupport.commitBatch(
-                             endpoint, batchId, predictedMs, List.of(items))) {
+                EndpointTestSupport.commitBatch(endpoint, batchId, predictedMs, List.of(items))) {
             // Closing transfers only the generation handoff. The ledger keeps
             // the exact committed item identities until status/terminal facts.
         }
@@ -371,7 +356,8 @@ class WorkerEndpointTest {
         Request req = new Request();
         req.setRequestId(requestId);
         req.setSeqLen(seqLen);
-        BalanceContext ctx = new BalanceContext(org.flexlb.balance.scheduler.SchedulingTestConfig.newConfig());
+        BalanceContext ctx =
+                new BalanceContext(org.flexlb.balance.scheduler.SchedulingTestConfig.newConfig());
         ctx.setRequest(req);
         return ctx;
     }

@@ -34,9 +34,10 @@ public final class EncoderStrategy {
      */
     public SelectedRole select(BalanceContext context, String group) {
         context.beginRoutingAttempt(RoleType.ENCODER);
-        int maxInflightPerWorker = context.getConfig().isQueue()
-                ? context.getConfig().getDispatcher().getMaxInflightPerEncoderWorker()
-                : Integer.MAX_VALUE;
+        int maxInflightPerWorker =
+                context.getConfig().isQueue()
+                        ? context.getConfig().getDispatcher().getMaxInflightPerEncoderWorker()
+                        : Integer.MAX_VALUE;
         WorkerEndpoint.GenerationPin winner = null;
         WorkerStatus.TopologySnapshot winnerTopology = null;
         WorkerStatus.EngineObservation winnerEngine = null;
@@ -45,7 +46,8 @@ public final class EncoderStrategy {
         long fewestRequests = Long.MAX_VALUE;
         try {
             for (String address : workerDirectory.endpointAddressSnapshot(RoleType.ENCODER)) {
-                WorkerEndpoint.GenerationPin candidate = workerDirectory.captureEndpoint(RoleType.ENCODER, address);
+                WorkerEndpoint.GenerationPin candidate =
+                        workerDirectory.captureEndpoint(RoleType.ENCODER, address);
                 if (candidate == null) {
                     continue;
                 }
@@ -54,19 +56,20 @@ public final class EncoderStrategy {
                     WorkerStatus status = endpoint.getStatus();
                     WorkerStatus.TopologySnapshot topology = status.topologySnapshot();
                     WorkerStatus.EngineObservation engine = status.committedEngineObservation();
-                    if (!status.isAlive()
-                            || group != null && !group.equals(topology.group())) {
+                    if (!status.isAlive() || group != null && !group.equals(topology.group())) {
                         continue;
                     }
-                    long requests = Math.max(0, engine.runningQueryLen())
-                            + Math.max(0, engine.waitingQueryLen())
-                            + endpoint.pendingEncoderRequestCount();
+                    long requests =
+                            Math.max(0, engine.runningQueryLen())
+                                    + Math.max(0, engine.waitingQueryLen())
+                                    + endpoint.pendingEncoderRequestCount();
                     if (requests >= maxInflightPerWorker) {
                         continue;
                     }
                     long uncachedTokens = weighted ? endpoint.inflightUncachedTokenEstimate() : 0L;
                     if (uncachedTokens > leastUncachedTokens
-                            || uncachedTokens == leastUncachedTokens && requests >= fewestRequests) {
+                            || uncachedTokens == leastUncachedTokens
+                                    && requests >= fewestRequests) {
                         continue;
                     }
                     if (winner != null) {
@@ -96,8 +99,10 @@ public final class EncoderStrategy {
             result.setHttpPort(winnerTopology.port());
             result.setGrpcPort(CommonUtils.toGrpcPort(winnerTopology.port()));
             result.setDpRank(winnerEngine.dpRank());
-            result.setSelectedEngineIndex(winnerTopology.engineIndex(), winnerTopology.multiEngineNum());
-            context.recordSelectionReason(RoleType.ENCODER,
+            result.setSelectedEngineIndex(
+                    winnerTopology.engineIndex(), winnerTopology.multiEngineNum());
+            context.recordSelectionReason(
+                    RoleType.ENCODER,
                     weighted ? "LEAST_UNCACHED_TOKENS_CONCURRENCY" : "LEAST_CONCURRENT");
             SelectedRole selected = SelectedRole.stateless(winner, result);
             winner = null;

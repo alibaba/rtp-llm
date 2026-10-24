@@ -10,15 +10,17 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 class ServiceDiscoveryConfigurationTest {
 
-    private final ApplicationContextRunner contextRunner = new ApplicationContextRunner()
-            .withUserConfiguration(ServiceDiscoveryConfiguration.class);
+    private final ApplicationContextRunner contextRunner =
+            new ApplicationContextRunner()
+                    .withUserConfiguration(ServiceDiscoveryConfiguration.class);
 
     @Test
     void createsRouterAndStaticProviderWithoutGlobalStrategy() {
-        contextRunner.run(context -> {
-            assertThat(context).hasSingleBean(ServiceDiscovery.class);
-            assertThat(context).hasSingleBean(RoutingServiceDiscovery.class);
-            assertThat(context).hasSingleBean(StaticServiceDiscoveryProvider.class);
-        });
+        contextRunner.run(
+                context -> {
+                    assertThat(context).hasSingleBean(ServiceDiscovery.class);
+                    assertThat(context).hasSingleBean(RoutingServiceDiscovery.class);
+                    assertThat(context).hasSingleBean(StaticServiceDiscoveryProvider.class);
+                });
     }
 }

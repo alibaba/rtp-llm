@@ -63,28 +63,51 @@ class EvictionPlannerDecodeContractTest {
 
     private static DecodeRequestView accepted(long id, int priority, long kvTokens) {
         return new DecodeRequestView(
-                Long.toString(id), priority, kvTokens, kvTokens,
+                Long.toString(id),
+                priority,
+                kvTokens,
+                kvTokens,
                 DecodeTaskPhase.ACCEPTED_NOT_RUNNING,
-                true, 0L, false, false);
+                true,
+                0L,
+                false,
+                false);
     }
 
     private static DecodeEndpointSnapshot endpoint(
-            long realKvAvailable, long realKvTotal,
-            int engineLoad, long concurrencyLimit,
+            long realKvAvailable,
+            long realKvTotal,
+            int engineLoad,
+            long concurrencyLimit,
             List<DecodeRequestView> accepted) {
         return new DecodeEndpointSnapshot(
-                null, "decode-a", new DecodeEndpoint.AdmissionCapacity(concurrencyLimit, 100L),
+                null,
+                "decode-a",
+                new DecodeEndpoint.AdmissionCapacity(concurrencyLimit, 100L),
                 new DecodeEndpoint.CapacityUsage(
-                        engineLoad, realKvTotal, realKvAvailable, 0L,
+                        engineLoad,
+                        realKvTotal,
+                        realKvAvailable,
+                        0L,
                         Math.max(0L, realKvTotal - realKvAvailable)),
-                List.of(), accepted, List.of());
+                List.of(),
+                accepted,
+                List.of());
     }
 
     private static DecodeEvictionProposal plan(
-            int priority, long requiredKvTokens, DecodeEndpointSnapshot ep,
+            int priority,
+            long requiredKvTokens,
+            DecodeEndpointSnapshot ep,
             Map<String, String> failures) {
         return EvictionPlanner.planDecode(
-                priority, requiredKvTokens, requiredKvTokens, List.of(ep), engineOwned(), SUPPORTING_CHANNEL, failures);
+                priority,
+                requiredKvTokens,
+                requiredKvTokens,
+                List.of(ep),
+                engineOwned(),
+                SUPPORTING_CHANNEL,
+                failures);
     }
 
     private static List<String> victimIds(DecodeEvictionProposal p) {
@@ -101,8 +124,7 @@ class EvictionPlannerDecodeContractTest {
         void sufficientCapacityReportsNoDeficit() {
             // slotDeficit = max(0, 2+1-4) = 0; kvDeficit = 200 < 500 → 0.
             Map<String, String> f = new HashMap<>();
-            assertNull(plan(70, 200L,
-                    endpoint(500L, 1000L, 2, 4L, List.of()), f));
+            assertNull(plan(70, 200L, endpoint(500L, 1000L, 2, 4L, List.of()), f));
             assertEquals("decode_capacity_sufficient", f.get("decode-a"));
         }
     }
@@ -117,8 +139,8 @@ class EvictionPlannerDecodeContractTest {
         void oneSlotDeficitEvictsExactlyOneLowerPriorityAccepted() {
             // slotDeficit = max(0, 1+1-1) = 1; kvDeficit = 0 (realKvTotal=0).
             Map<String, String> f = new HashMap<>();
-            DecodeEvictionProposal p = plan(70, 0L,
-                    endpoint(1000L, 0L, 1, 1L, List.of(accepted(1L, 30, 128L))), f);
+            DecodeEvictionProposal p =
+                    plan(70, 0L, endpoint(1000L, 0L, 1, 1L, List.of(accepted(1L, 30, 128L))), f);
             assertEquals(List.of("1"), victimIds(p));
             assertEquals(DecodeEvictionProposal.CASE_SLOT, p.evictionCase());
             // cost = H_SLOT * f(30) * g(ACCEPTED) = 4 * 1 * 16 = 64
@@ -129,16 +151,15 @@ class EvictionPlannerDecodeContractTest {
         @Test
         void equalPriorityCandidateNeverYields() {
             Map<String, String> f = new HashMap<>();
-            assertNull(plan(70, 0L,
-                    endpoint(1000L, 0L, 1, 1L, List.of(accepted(1L, 70, 128L))), f));
+            assertNull(
+                    plan(70, 0L, endpoint(1000L, 0L, 1, 1L, List.of(accepted(1L, 70, 128L))), f));
             assertEquals("insufficient_lower_priority_candidates", f.get("decode-a"));
         }
 
         @Test
         void noPriorityCandidateNeverYields() {
             Map<String, String> f = new HashMap<>();
-            assertNull(plan(70, 0L,
-                    endpoint(1000L, 0L, 1, 1L, List.of(accepted(1L, 0, 128L))), f));
+            assertNull(plan(70, 0L, endpoint(1000L, 0L, 1, 1L, List.of(accepted(1L, 0, 128L))), f));
             assertEquals("insufficient_lower_priority_candidates", f.get("decode-a"));
         }
     }
@@ -155,9 +176,17 @@ class EvictionPlannerDecodeContractTest {
             // Two victims: kv2048(bucket2) and kv512(bucket1). Largest bucket first;
             // 2048 alone covers 200 → sole victim.
             Map<String, String> f = new HashMap<>();
-            DecodeEvictionProposal p = plan(70, 300L,
-                    endpoint(100L, 1000L, 0, 0L,
-                            List.of(accepted(1L, 30, 2048L), accepted(2L, 30, 512L))), f);
+            DecodeEvictionProposal p =
+                    plan(
+                            70,
+                            300L,
+                            endpoint(
+                                    100L,
+                                    1000L,
+                                    0,
+                                    0L,
+                                    List.of(accepted(1L, 30, 2048L), accepted(2L, 30, 512L))),
+                            f);
             assertEquals(List.of("1"), victimIds(p));
             assertEquals(DecodeEvictionProposal.CASE_KV, p.evictionCase());
             // cost = H_KV * f(30) * g(ACCEPTED) * lengthWasteCost(2048)
@@ -172,9 +201,17 @@ class EvictionPlannerDecodeContractTest {
             // kvDeficit = 700 - 100 = 600. Victims: kv512 + kv512 = 1024 >= 600.
             // But greedy takes one by one. First 512 < 600, so adds second.
             Map<String, String> f = new HashMap<>();
-            DecodeEvictionProposal p = plan(70, 700L,
-                    endpoint(100L, 1000L, 0, 0L,
-                            List.of(accepted(1L, 30, 512L), accepted(2L, 30, 512L))), f);
+            DecodeEvictionProposal p =
+                    plan(
+                            70,
+                            700L,
+                            endpoint(
+                                    100L,
+                                    1000L,
+                                    0,
+                                    0L,
+                                    List.of(accepted(1L, 30, 512L), accepted(2L, 30, 512L))),
+                            f);
             assertEquals(2, p.victims().size());
             assertEquals(1024L, p.freedKvTokens());
         }
@@ -183,8 +220,12 @@ class EvictionPlannerDecodeContractTest {
         void insufficientReleasableKvIsInfeasible() {
             // kvDeficit = 100000 - 100 = 99900. Only 128 releasable.
             Map<String, String> f = new HashMap<>();
-            assertNull(plan(70, 100_000L,
-                    endpoint(100L, 1000L, 0, 0L, List.of(accepted(1L, 30, 128L))), f));
+            assertNull(
+                    plan(
+                            70,
+                            100_000L,
+                            endpoint(100L, 1000L, 0, 0L, List.of(accepted(1L, 30, 128L))),
+                            f));
             assertEquals("insufficient_releasable_kv", f.get("decode-a"));
         }
     }

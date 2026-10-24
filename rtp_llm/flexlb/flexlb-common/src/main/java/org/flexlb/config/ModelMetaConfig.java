@@ -18,12 +18,13 @@ import java.util.concurrent.ConcurrentHashMap;
 
 public class ModelMetaConfig {
 
-    private static final List<RoleType> ROUTING_ORDER = List.of(
-            RoleType.PDFUSION,
-            RoleType.DECODE,
-            RoleType.PREFILL,
-            RoleType.VIT,
-            RoleType.ENCODER);
+    private static final List<RoleType> ROUTING_ORDER =
+            List.of(
+                    RoleType.PDFUSION,
+                    RoleType.DECODE,
+                    RoleType.PREFILL,
+                    RoleType.VIT,
+                    RoleType.ENCODER);
 
     private final ConcurrentHashMap<String, ServiceRoute> modelServiceRoute =
             new ConcurrentHashMap<>();
@@ -32,8 +33,7 @@ public class ModelMetaConfig {
     private volatile String modelName = "";
     private volatile List<RoleType> requiredRoles = List.of();
 
-    public ModelMetaConfig() {
-    }
+    public ModelMetaConfig() {}
 
     public ModelMetaConfig(String document) {
         ServiceRoute route = ModelServiceConfigParser.parse(document);
@@ -76,12 +76,11 @@ public class ModelMetaConfig {
             return List.of();
         }
         List<RoleType> parsedRoles = serviceRoute.getAllRoleTypes();
-        Set<RoleType> configured = parsedRoles.isEmpty()
-                ? EnumSet.noneOf(RoleType.class)
-                : EnumSet.copyOf(parsedRoles);
-        return ROUTING_ORDER.stream()
-                .filter(configured::contains)
-                .toList();
+        Set<RoleType> configured =
+                parsedRoles.isEmpty()
+                        ? EnumSet.noneOf(RoleType.class)
+                        : EnumSet.copyOf(parsedRoles);
+        return ROUTING_ORDER.stream().filter(configured::contains).toList();
     }
 
     private static String modelNameFromServiceId(String serviceId) {
@@ -89,8 +88,7 @@ public class ModelMetaConfig {
             return "";
         }
         String servicePrefix = CommonConstants.FUNCTION + ".";
-        if (serviceId.startsWith(servicePrefix)
-                && serviceId.length() > servicePrefix.length()) {
+        if (serviceId.startsWith(servicePrefix) && serviceId.length() > servicePrefix.length()) {
             return IdUtils.getModelNameByServiceId(serviceId);
         }
         return serviceId;
@@ -107,8 +105,7 @@ public class ModelMetaConfig {
 
     /** Return a fresh structural list for the single configured service. */
     public List<Pair<String, Endpoint>> endpointsWithGroup(
-            String requestedModelName,
-            RoleType role) {
+            String requestedModelName, RoleType role) {
         if (requestedModelName == null || role == null) {
             return Collections.emptyList();
         }
@@ -120,8 +117,8 @@ public class ModelMetaConfig {
             String routeServiceId = route.getServiceId();
             String routeModelName = modelNameFromServiceId(routeServiceId);
             if ((requestedModelName.equals(routeModelName)
-                    || requestedModelName.equals(routeServiceId)
-                    || requestedModelName.equals(entry.getKey()))
+                            || requestedModelName.equals(routeServiceId)
+                            || requestedModelName.equals(entry.getKey()))
                     && route.getAllRoleTypes().contains(role)) {
                 return route.getAllEndpointsWithGroup(role);
             }

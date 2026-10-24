@@ -27,8 +27,8 @@ class TheoryCacheKeyHistoryTest {
         config.getObservability().getCacheHit().getRecentKeyWindow().setMaxKeyOccurrences(100L);
         ConfigService configService = mock(ConfigService.class);
         when(configService.loadBalanceConfig()).thenReturn(config);
-        TheoryCacheKeyHistory window = new TheoryCacheKeyHistory(
-                configService, prefillCapacity(100L, 100L));
+        TheoryCacheKeyHistory window =
+                new TheoryCacheKeyHistory(configService, prefillCapacity(100L, 100L));
         window.record(List.of(1L, 2L, 3L, 4L, 5L));
         window.record(List.of(6L, 7L, 8L, 9L, 10L));
         window.record(List.of(11L));
@@ -44,8 +44,16 @@ class TheoryCacheKeyHistoryTest {
         when(provider.getWorkerStatuses(RoleType.PREFILL, null)).thenReturn(List.of());
         TheoryCacheKeyHistory window = new TheoryCacheKeyHistory(configService, provider);
         assertNull(window.record(List.of(11L)));
-        when(provider.getWorkerStatuses(RoleType.PREFILL, null)).thenReturn(List.of(
-                WorkerStatus.createDiscovered(RoleType.PREFILL, null, "10.0.0.1", 8080, 8081, "test-site")));
+        when(provider.getWorkerStatuses(RoleType.PREFILL, null))
+                .thenReturn(
+                        List.of(
+                                WorkerStatus.createDiscovered(
+                                        RoleType.PREFILL,
+                                        null,
+                                        "10.0.0.1",
+                                        8080,
+                                        8081,
+                                        "test-site")));
         assertNull(window.record(List.of(11L)));
         WorkerStatusProvider ready = prefillCapacity(100L, 100L);
         var readyWorkers = ready.getWorkerStatuses(RoleType.PREFILL, null);
@@ -76,11 +84,12 @@ class TheoryCacheKeyHistoryTest {
         verifyNoInteractions(secondWorker);
     }
 
-    private static TheoryCacheKeyHistory historyWithWindow(long durationMs, long maxKeys, LongSupplier clock)
-            throws Exception {
+    private static TheoryCacheKeyHistory historyWithWindow(
+            long durationMs, long maxKeys, LongSupplier clock) throws Exception {
         ConfigService configService = mock(ConfigService.class);
         when(configService.loadBalanceConfig()).thenReturn(new FlexlbConfig());
-        TheoryCacheKeyHistory history = new TheoryCacheKeyHistory(configService, mock(WorkerStatusProvider.class));
+        TheoryCacheKeyHistory history =
+                new TheoryCacheKeyHistory(configService, mock(WorkerStatusProvider.class));
         Field window = TheoryCacheKeyHistory.class.getDeclaredField("historyWindow");
         window.setAccessible(true);
         window.set(history, new RecentCacheKeyWindow(durationMs, maxKeys, clock));
@@ -104,13 +113,15 @@ class TheoryCacheKeyHistoryTest {
         config.getObservability().getCacheHit().getRecentKeyWindow().setMaxKeyOccurrences(2L);
         ConfigService configService = mock(ConfigService.class);
         when(configService.loadBalanceConfig()).thenReturn(config);
-        TheoryCacheKeyHistory small = new TheoryCacheKeyHistory(configService, prefillCapacity(1000L, 100L));
+        TheoryCacheKeyHistory small =
+                new TheoryCacheKeyHistory(configService, prefillCapacity(1000L, 100L));
         small.record(List.of(11L, 22L));
         small.record(List.of(33L));
         assertEquals(0L, small.record(List.of(11L)).getRequestHitOccurrences());
 
         config.getObservability().getCacheHit().getRecentKeyWindow().setMaxKeyOccurrences(4L);
-        TheoryCacheKeyHistory restarted = new TheoryCacheKeyHistory(configService, prefillCapacity(1000L, 100L));
+        TheoryCacheKeyHistory restarted =
+                new TheoryCacheKeyHistory(configService, prefillCapacity(1000L, 100L));
         restarted.record(List.of(11L, 22L));
         restarted.record(List.of(33L));
         assertEquals(1L, restarted.record(List.of(11L)).getRequestHitOccurrences());
@@ -119,8 +130,7 @@ class TheoryCacheKeyHistoryTest {
     @Test
     void should_count_hits_across_requests() throws Exception {
         AtomicLong now = new AtomicLong(0L);
-        TheoryCacheKeyHistory window =
-                historyWithWindow(1000L, 320L, now::get);
+        TheoryCacheKeyHistory window = historyWithWindow(1000L, 320L, now::get);
 
         RecentCacheKeyWindow.Snapshot first = window.record(List.of(11L, 22L, 33L));
         assertEquals(0L, first.getRequestHitOccurrences());
@@ -134,13 +144,11 @@ class TheoryCacheKeyHistoryTest {
     @Test
     void should_count_all_request_occurrences() throws Exception {
         AtomicLong now = new AtomicLong(0L);
-        TheoryCacheKeyHistory window =
-                historyWithWindow(1000L, 40L, now::get);
+        TheoryCacheKeyHistory window = historyWithWindow(1000L, 40L, now::get);
 
         window.record(List.of(1L, 2L, 3L, 4L, 5L));
         now.set(10L);
-        RecentCacheKeyWindow.Snapshot snapshot =
-                window.record(List.of(1L, 2L, 3L, 4L, 5L, 6L));
+        RecentCacheKeyWindow.Snapshot snapshot = window.record(List.of(1L, 2L, 3L, 4L, 5L, 6L));
 
         assertEquals(6L, snapshot.getRequestOccurrences());
         assertEquals(5L, snapshot.getRequestHitOccurrences());
@@ -149,8 +157,7 @@ class TheoryCacheKeyHistoryTest {
     @Test
     void should_expire_shared_history_before_matching() throws Exception {
         AtomicLong now = new AtomicLong(0L);
-        TheoryCacheKeyHistory window =
-                historyWithWindow(1000L, 40L, now::get);
+        TheoryCacheKeyHistory window = historyWithWindow(1000L, 40L, now::get);
 
         window.record(List.of(11L));
         now.set(999L);
@@ -161,14 +168,11 @@ class TheoryCacheKeyHistoryTest {
 
     @Test
     void should_apply_capacity_to_the_global_history() throws Exception {
-        TheoryCacheKeyHistory window =
-                historyWithWindow(1000L, 4L, () -> 0L);
+        TheoryCacheKeyHistory window = historyWithWindow(1000L, 4L, () -> 0L);
 
         window.record(List.of(11L, 22L));
         window.record(List.of(33L, 44L));
         assertEquals(1L, window.record(List.of(33L)).getRequestHitOccurrences());
-        assertEquals(4L, window.record(List.of(11L, 22L, 33L, 44L))
-                .getRequestHitOccurrences());
+        assertEquals(4L, window.record(List.of(11L, 22L, 33L, 44L)).getRequestHitOccurrences());
     }
-
 }

@@ -16,10 +16,11 @@ import java.util.concurrent.atomic.AtomicInteger;
  */
 public final class EncoderEndpoint extends WorkerEndpoint {
 
-    private record RequestObservation(boolean seenInWorker, long estimatedUncachedTokens) { }
+    private record RequestObservation(boolean seenInWorker, long estimatedUncachedTokens) {}
 
     private final EndpointEventProjector endpointEvents;
-    private final ConcurrentMap<String, RequestObservation> requestObservations = new ConcurrentHashMap<>();
+    private final ConcurrentMap<String, RequestObservation> requestObservations =
+            new ConcurrentHashMap<>();
     private final AtomicInteger pendingRequestCount = new AtomicInteger();
 
     /**
@@ -36,14 +37,20 @@ public final class EncoderEndpoint extends WorkerEndpoint {
      */
     public boolean trackSelectedRequest(String requestId, long estimatedUncachedTokens) {
         try (EndpointGenerationLifecycle.HandoffPermit handoff = tryAcquireGenerationHandoff()) {
-            if (handoff == null) { return false; }
+            if (handoff == null) {
+                return false;
+            }
             AtomicBoolean added = new AtomicBoolean();
-            requestObservations.compute(requestId, (id, current) -> {
-                if (current != null) { return current; }
-                pendingRequestCount.incrementAndGet();
-                added.set(true);
-                return new RequestObservation(false, Math.max(0L, estimatedUncachedTokens));
-            });
+            requestObservations.compute(
+                    requestId,
+                    (id, current) -> {
+                        if (current != null) {
+                            return current;
+                        }
+                        pendingRequestCount.incrementAndGet();
+                        added.set(true);
+                        return new RequestObservation(false, Math.max(0L, estimatedUncachedTokens));
+                    });
             return added.get();
         }
     }
@@ -59,7 +66,9 @@ public final class EncoderEndpoint extends WorkerEndpoint {
 
     private boolean removeRequestObservation(String requestId) {
         RequestObservation removed = requestObservations.remove(requestId);
-        if (removed == null) { return false; }
+        if (removed == null) {
+            return false;
+        }
         if (!removed.seenInWorker()) {
             pendingRequestCount.decrementAndGet();
         }
@@ -99,21 +108,26 @@ public final class EncoderEndpoint extends WorkerEndpoint {
     public Runnable applyPreparedStatus(WorkerStatus ws, WorkerStatus.PreparedStatus prepared) {
         requireStatusGeneration(ws);
         WorkerStatus.StatusObservation observation = prepared.observation();
-        if (!observation.alive()) { beginRetirement(); }
+        if (!observation.alive()) {
+            beginRetirement();
+        }
         ws.publishPreparedStatus(prepared);
         return projectStatus(observation, true);
     }
 
     @Override
-    public Runnable observeStatusHeartbeat(WorkerStatus ws, WorkerStatus.StatusObservation observation) {
+    public Runnable observeStatusHeartbeat(
+            WorkerStatus ws, WorkerStatus.StatusObservation observation) {
         requireStatusGeneration(ws);
         if (observation.owner() != ws) {
-            throw new IllegalArgumentException("Status observation belongs to another WorkerStatus generation");
+            throw new IllegalArgumentException(
+                    "Status observation belongs to another WorkerStatus generation");
         }
         return projectStatus(observation, false);
     }
 
-    private Runnable projectStatus(WorkerStatus.StatusObservation observation, boolean includeFinished) {
+    private Runnable projectStatus(
+            WorkerStatus.StatusObservation observation, boolean includeFinished) {
         List<WorkerStatus.TaskObservation> running = new ArrayList<>();
         List<WorkerStatus.TaskObservation> finished = new ArrayList<>();
         for (WorkerStatus.TaskObservation task : observation.activeTasks().values()) {
@@ -132,12 +146,15 @@ public final class EncoderEndpoint extends WorkerEndpoint {
     }
 
     private boolean markObserved(String requestId) {
-        return requestObservations.computeIfPresent(requestId, (id, current) -> {
-            if (!current.seenInWorker()) {
-                pendingRequestCount.decrementAndGet();
-            }
-            return new RequestObservation(true, current.estimatedUncachedTokens());
-        }) != null;
+        return requestObservations.computeIfPresent(
+                        requestId,
+                        (id, current) -> {
+                            if (!current.seenInWorker()) {
+                                pendingRequestCount.decrementAndGet();
+                            }
+                            return new RequestObservation(true, current.estimatedUncachedTokens());
+                        })
+                != null;
     }
 
     @Override

@@ -41,13 +41,23 @@ class LocalStandbyCacheMatchProviderTest {
     @Test
     void disabledLocalStandbyDoesNotAllocateExecutors() {
         LocalStandbyCacheManager cacheManager = mock(LocalStandbyCacheManager.class);
-        LocalStandbyCacheMatchProvider provider = new LocalStandbyCacheMatchProvider(
-                localSync(modelMetaConfig()), cacheManager, reporter);
+        LocalStandbyCacheMatchProvider provider =
+                new LocalStandbyCacheMatchProvider(
+                        localSync(modelMetaConfig()), cacheManager, reporter);
         try {
             assertNull(ReflectionTestUtils.getField(provider, "asyncMatchExecutor"));
             assertNull(ReflectionTestUtils.getField(provider, "updateExecutor"));
-            assertTrue(provider.asyncLocalStandbyMatch(new CacheMatchQuery(
-                    "request-disabled", List.of(11L), 2192L, RoleType.PREFILL, "default")).join().hostMatches().isEmpty());
+            assertTrue(
+                    provider.asyncLocalStandbyMatch(
+                                    new CacheMatchQuery(
+                                            "request-disabled",
+                                            List.of(11L),
+                                            2192L,
+                                            RoleType.PREFILL,
+                                            "default"))
+                            .join()
+                            .hostMatches()
+                            .isEmpty());
             verifyNoInteractions(cacheManager);
         } finally {
             provider.shutdown();
@@ -56,12 +66,19 @@ class LocalStandbyCacheMatchProviderTest {
 
     @Test
     void rejectsInvalidQueueCapacityWhenEnabled() {
-        for (int capacity : new int[]{0, -1}) {
-            var configuration = kvcm(modelMetaConfig(),
-                    runtime -> runtime.getLocalStandby().setAsyncQueueCapacity(capacity));
-            IllegalArgumentException error = assertThrows(IllegalArgumentException.class,
-                    () -> new LocalStandbyCacheMatchProvider(
-                            configuration, mock(LocalStandbyCacheManager.class), reporter));
+        for (int capacity : new int[] {0, -1}) {
+            var configuration =
+                    kvcm(
+                            modelMetaConfig(),
+                            runtime -> runtime.getLocalStandby().setAsyncQueueCapacity(capacity));
+            IllegalArgumentException error =
+                    assertThrows(
+                            IllegalArgumentException.class,
+                            () ->
+                                    new LocalStandbyCacheMatchProvider(
+                                            configuration,
+                                            mock(LocalStandbyCacheManager.class),
+                                            reporter));
             assertTrue(error.getMessage().contains("asyncQueueCapacity"));
         }
     }
@@ -69,15 +86,16 @@ class LocalStandbyCacheMatchProviderTest {
     @Test
     void matchesClientProvidedKeysWithClientBlockSize() throws Exception {
         LocalStandbyCacheManager cacheManager = mock(LocalStandbyCacheManager.class);
-        LocalStandbyCacheMatchProvider provider = new LocalStandbyCacheMatchProvider(
-                kvcm(modelMetaConfig()), cacheManager, reporter);
-        CacheMatchQuery query = new CacheMatchQuery(
-                "request-1", List.of(11L), 2192, RoleType.PREFILL, "default");
+        LocalStandbyCacheMatchProvider provider =
+                new LocalStandbyCacheMatchProvider(kvcm(modelMetaConfig()), cacheManager, reporter);
+        CacheMatchQuery query =
+                new CacheMatchQuery("request-1", List.of(11L), 2192, RoleType.PREFILL, "default");
         when(cacheManager.findMatchingEngines(List.of(11L), RoleType.PREFILL, "default"))
                 .thenReturn(Map.of("10.0.0.1:8080@0", 1));
 
         try {
-            CacheMatchResult result = provider.asyncLocalStandbyMatch(query).get(1, TimeUnit.SECONDS);
+            CacheMatchResult result =
+                    provider.asyncLocalStandbyMatch(query).get(1, TimeUnit.SECONDS);
             assertEquals(1, result.exactHostMatch("10.0.0.1:8080@0").localMatchBlocks());
             assertEquals(2192, result.blockSize());
             verify(reporter).reportLocalStandbyBlockSize(RoleType.PREFILL, 2192L);
@@ -90,12 +108,13 @@ class LocalStandbyCacheMatchProviderTest {
     @Test
     void emptyClientKeysAreAValidZeroMatch() throws Exception {
         LocalStandbyCacheManager cacheManager = mock(LocalStandbyCacheManager.class);
-        LocalStandbyCacheMatchProvider provider = new LocalStandbyCacheMatchProvider(
-                kvcm(modelMetaConfig()), cacheManager, reporter);
-        CacheMatchQuery query = new CacheMatchQuery(
-                "short-request", List.of(), 4096, RoleType.PREFILL, "default");
+        LocalStandbyCacheMatchProvider provider =
+                new LocalStandbyCacheMatchProvider(kvcm(modelMetaConfig()), cacheManager, reporter);
+        CacheMatchQuery query =
+                new CacheMatchQuery("short-request", List.of(), 4096, RoleType.PREFILL, "default");
         try {
-            CacheMatchResult result = provider.asyncLocalStandbyMatch(query).get(1, TimeUnit.SECONDS);
+            CacheMatchResult result =
+                    provider.asyncLocalStandbyMatch(query).get(1, TimeUnit.SECONDS);
             assertEquals(4096, result.blockSize());
             assertEquals(Map.of(), result.hostMatches());
             verifyNoInteractions(cacheManager);
@@ -107,27 +126,30 @@ class LocalStandbyCacheMatchProviderTest {
     @Test
     void unavailableMatchExecutorReturnsFailedPrediction() throws Exception {
         LocalStandbyCacheManager cacheManager = mock(LocalStandbyCacheManager.class);
-        LocalStandbyCacheMatchProvider provider = new LocalStandbyCacheMatchProvider(
-                kvcm(modelMetaConfig()), cacheManager, reporter);
+        LocalStandbyCacheMatchProvider provider =
+                new LocalStandbyCacheMatchProvider(kvcm(modelMetaConfig()), cacheManager, reporter);
         provider.shutdown();
-        CacheMatchQuery query = new CacheMatchQuery(
-                "request-1", List.of(11L), 4096, RoleType.PREFILL, "default");
-        assertFalse(provider.asyncLocalStandbyMatch(query).get(1, TimeUnit.SECONDS).querySucceeded());
+        CacheMatchQuery query =
+                new CacheMatchQuery("request-1", List.of(11L), 4096, RoleType.PREFILL, "default");
+        assertFalse(
+                provider.asyncLocalStandbyMatch(query).get(1, TimeUnit.SECONDS).querySucceeded());
         verifyNoInteractions(cacheManager);
     }
 
     @ParameterizedTest
     @CsvSource({"0, 1, 10.0.0.1:8080@0", "1, 2, 10.0.0.1:8080@1"})
-    void updatesIndexWithClientProvidedKeys(int engineIndex, int multiEngineNum, String logicalIpPort) {
+    void updatesIndexWithClientProvidedKeys(
+            int engineIndex, int multiEngineNum, String logicalIpPort) {
         LocalStandbyCacheManager cacheManager = mock(LocalStandbyCacheManager.class);
-        LocalStandbyCacheMatchProvider provider = new LocalStandbyCacheMatchProvider(
-                kvcm(modelMetaConfig()), cacheManager, reporter);
+        LocalStandbyCacheMatchProvider provider =
+                new LocalStandbyCacheMatchProvider(kvcm(modelMetaConfig()), cacheManager, reporter);
         Request request = request();
         ServerStatus selectedWorker = worker(RoleType.PREFILL);
         selectedWorker.setSelectedEngineIndex(engineIndex, multiEngineNum);
         try {
             provider.updateFromRoutedRequest(request, List.of(selectedWorker));
-            verify(cacheManager, timeout(1_000)).addRoutedRequestBlocks(logicalIpPort, List.of(11L, 22L));
+            verify(cacheManager, timeout(1_000))
+                    .addRoutedRequestBlocks(logicalIpPort, List.of(11L, 22L));
         } finally {
             provider.shutdown();
         }
@@ -136,8 +158,8 @@ class LocalStandbyCacheMatchProviderTest {
     @Test
     void ignoresCacheMetadataForNonPrefillWorkers() {
         LocalStandbyCacheManager cacheManager = mock(LocalStandbyCacheManager.class);
-        LocalStandbyCacheMatchProvider provider = new LocalStandbyCacheMatchProvider(
-                kvcm(modelMetaConfig()), cacheManager, reporter);
+        LocalStandbyCacheMatchProvider provider =
+                new LocalStandbyCacheMatchProvider(kvcm(modelMetaConfig()), cacheManager, reporter);
         try {
             provider.updateFromRoutedRequest(request(), List.of(worker(RoleType.DECODE)));
         } finally {
@@ -149,8 +171,8 @@ class LocalStandbyCacheMatchProviderTest {
     @Test
     void missingClientKeysOrSelectedWorkersDoNotPopulateIndex() {
         LocalStandbyCacheManager cacheManager = mock(LocalStandbyCacheManager.class);
-        LocalStandbyCacheMatchProvider provider = new LocalStandbyCacheMatchProvider(
-                kvcm(modelMetaConfig()), cacheManager, reporter);
+        LocalStandbyCacheMatchProvider provider =
+                new LocalStandbyCacheMatchProvider(kvcm(modelMetaConfig()), cacheManager, reporter);
         Request request = request();
         request.setBlockCacheKeys(null);
         try {

@@ -41,8 +41,7 @@ import static org.mockito.Mockito.verifyNoInteractions;
 @ExtendWith(MockitoExtension.class)
 class CacheMetricsReporterTest {
 
-    @Mock
-    private FlexMonitor monitor;
+    @Mock private FlexMonitor monitor;
 
     private CacheMetricsReporter reporter;
 
@@ -86,13 +85,13 @@ class CacheMetricsReporterTest {
 
     @Test
     void should_report_cache_affinity_decision() {
-        reporter.reportCacheAffinityDecision(
-                RoleType.PREFILL, "10.0.0.1", "CACHE_LEADER");
+        reporter.reportCacheAffinityDecision(RoleType.PREFILL, "10.0.0.1", "CACHE_LEADER");
 
-        FlexMetricTags tags = FlexMetricTags.of(
-                "role", "PREFILL",
-                "engineIp", "10.0.0.1",
-                "decision", "CACHE_LEADER");
+        FlexMetricTags tags =
+                FlexMetricTags.of(
+                        "role", "PREFILL",
+                        "engineIp", "10.0.0.1",
+                        "decision", "CACHE_LEADER");
         verify(monitor).report(CACHE_AFFINITY_DECISION, tags, 1.0);
     }
 
@@ -137,9 +136,14 @@ class CacheMetricsReporterTest {
         reporter.reportLocalStandbyPrediction(RoleType.PREFILL, "10.0.0.1:8080@0", 0, 100);
 
         FlexMetricTags tags = FlexMetricTags.of("role", "PREFILL", "engineIp", "10.0.0.1:8080@0");
-        verify(monitor).register(CACHE_KVCM_PREDICTED_RATIO, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
-        verify(monitor).register(CACHE_LOCAL_STANDBY_PREDICTED_RATIO,
-                FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
+        verify(monitor)
+                .register(
+                        CACHE_KVCM_PREDICTED_RATIO, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
+        verify(monitor)
+                .register(
+                        CACHE_LOCAL_STANDBY_PREDICTED_RATIO,
+                        FlexMetricType.GAUGE,
+                        FlexPriorityType.PRECISE);
         verify(monitor).report(CACHE_KVCM_PREDICTED_TOKENS, tags, 0L);
         verify(monitor).report(CACHE_KVCM_PREDICTED_RATIO, tags, 0.0);
         verify(monitor).report(CACHE_LOCAL_STANDBY_PREDICTED_TOKENS, tags, 0L);
@@ -147,7 +151,8 @@ class CacheMetricsReporterTest {
     }
 
     @Test
-    void token_counters_accumulate_across_requests_instead_of_averaging_request_ratios() throws Exception {
+    void token_counters_accumulate_across_requests_instead_of_averaging_request_ratios()
+            throws Exception {
         SimpleMeterRegistry registry = new SimpleMeterRegistry();
         try {
             Field monitorField = CacheMetricsReporter.class.getDeclaredField("monitor");
@@ -158,10 +163,16 @@ class CacheMetricsReporterTest {
             reporter.reportCacheHitMetrics(RoleType.PREFILL, "10.0.0.1:8080", 20L, 100L, 0.2);
             reporter.reportCacheHitMetrics(RoleType.PREFILL, "10.0.0.1:8080", 0L, 200L, 0.0);
 
-            double hitTokens = registry.get("flexlb.app.cache.hit.count")
-                    .tags("role", "PREFILL", "engineIp", "10.0.0.1:8080").counter().count();
-            double inputTokens = registry.get("flexlb.app.cache.input.tokens")
-                    .tags("role", "PREFILL", "engineIp", "10.0.0.1:8080").counter().count();
+            double hitTokens =
+                    registry.get("flexlb.app.cache.hit.count")
+                            .tags("role", "PREFILL", "engineIp", "10.0.0.1:8080")
+                            .counter()
+                            .count();
+            double inputTokens =
+                    registry.get("flexlb.app.cache.input.tokens")
+                            .tags("role", "PREFILL", "engineIp", "10.0.0.1:8080")
+                            .counter()
+                            .count();
             assertEquals(20.0, hitTokens);
             assertEquals(300.0, inputTokens);
             assertEquals(20.0 / 300.0, hitTokens / inputTokens);

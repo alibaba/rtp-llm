@@ -30,7 +30,7 @@ import java.util.concurrent.CompletableFuture;
 @ToString
 public class BalanceContext {
 
-    //======================== Basic =======================//
+    // ======================== Basic =======================//
 
     private final FlexlbConfig config;
 
@@ -43,18 +43,16 @@ public class BalanceContext {
 
     private Response response;
 
-    @ToString.Exclude
-    private ByteString generateInputPb;
+    @ToString.Exclude private ByteString generateInputPb;
 
     /** Captured at RPC entry and carried through asynchronous scheduling. */
-    @ToString.Exclude
-    private Context traceContext;
+    @ToString.Exclude private Context traceContext;
 
-    //======================== Queue ========================//
+    // ======================== Queue ========================//
 
     private CompletableFuture<Response> future;
 
-    //======================== Meters =======================//
+    // ======================== Meters =======================//
 
     private long startTime = System.currentTimeMillis();
 
@@ -95,6 +93,7 @@ public class BalanceContext {
 
     /** Stable worker-queue age and tie-breaker across local route withdrawals. */
     private long firstWorkerEnqueueTime;
+
     private long workerEnqueueSequence;
 
     /**
@@ -115,7 +114,7 @@ public class BalanceContext {
     /** Failure-time scheduling evidence exported in the completed PV log. */
     private volatile Map<String, Object> schedulingDiagnostics;
 
-    //===================== Scheduling =================//
+    // ===================== Scheduling =================//
 
     /**
      * Immutable per-request scheduling metadata. The expiration is an
@@ -146,7 +145,7 @@ public class BalanceContext {
     /** Victims preempted to place this request; 0 for normal placement. */
     private int victimCount;
 
-    //===================== Method ===================//
+    // ===================== Method ===================//
 
     public BalanceContext() {
         this(new FlexlbConfig());
@@ -226,8 +225,7 @@ public class BalanceContext {
     public void recordRoutingDecision(RoutingDecision decision) {
         Objects.requireNonNull(decision.role(), "role");
         Objects.requireNonNull(decision.selectionReason(), "selectionReason");
-        routingTelemetryState.selectionReasons.put(
-                decision.role(), decision.selectionReason());
+        routingTelemetryState.selectionReasons.put(decision.role(), decision.selectionReason());
         routingTelemetryState.routingDecisions.put(decision.role(), decision);
     }
 
@@ -261,12 +259,10 @@ public class BalanceContext {
         private int cacheQueryCount;
         private final EnumMap<RoleType, CacheMatchSelection> cacheSelections =
                 new EnumMap<>(RoleType.class);
-        private final EnumMap<RoleType, String> selectionReasons =
-                new EnumMap<>(RoleType.class);
+        private final EnumMap<RoleType, String> selectionReasons = new EnumMap<>(RoleType.class);
         private final EnumMap<RoleType, RoutingDecision> routingDecisions =
                 new EnumMap<>(RoleType.class);
-        private final EnumMap<RoleType, Integer> routingAttempts =
-                new EnumMap<>(RoleType.class);
+        private final EnumMap<RoleType, Integer> routingAttempts = new EnumMap<>(RoleType.class);
     }
 
     public record RoutingTelemetry(
@@ -285,8 +281,5 @@ public class BalanceContext {
         }
     }
 
-    public record CacheMatchSelection(
-            RoleType role, String selectedIp, long hitCacheTokens) {
-    }
-
+    public record CacheMatchSelection(RoleType role, String selectedIp, long hitCacheTokens) {}
 }

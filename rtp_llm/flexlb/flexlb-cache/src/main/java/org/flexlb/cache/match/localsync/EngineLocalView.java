@@ -33,13 +33,13 @@ public class EngineLocalView {
      * Custom ForkJoin thread pool for parallel computation
      */
     private volatile ForkJoinPool customPool;
+
     private volatile boolean closed;
 
     /**
      * Dynamic sync interval manager
      */
-    @Autowired
-    private DynamicCacheIntervalService dynamicIntervalManager;
+    @Autowired private DynamicCacheIntervalService dynamicIntervalManager;
 
     private ForkJoinPool diffPool() {
         if (closed) {
@@ -54,7 +54,8 @@ public class EngineLocalView {
                 throw new IllegalStateException("Engine local view is closed");
             }
             if (customPool == null) {
-                customPool = new ForkJoinPool(Math.min(Runtime.getRuntime().availableProcessors(), 8));
+                customPool =
+                        new ForkJoinPool(Math.min(Runtime.getRuntime().availableProcessors(), 8));
             }
             return customPool;
         }
@@ -90,17 +91,23 @@ public class EngineLocalView {
         ForkJoinPool pool = diffPool();
         ForkJoinTask<?> addedTask = null;
         try {
-            addedTask = pool.submit(() ->
-                newCacheBlocks.parallelStream()
-                     .filter(blockCacheKey -> !oldCacheBlocks.contains(blockCacheKey))
-                     .forEach(addedBlocks::add)
-            );
+            addedTask =
+                    pool.submit(
+                            () ->
+                                    newCacheBlocks.parallelStream()
+                                            .filter(
+                                                    blockCacheKey ->
+                                                            !oldCacheBlocks.contains(blockCacheKey))
+                                            .forEach(addedBlocks::add));
 
-            ForkJoinTask<?> removedTask = pool.submit(() ->
-                oldCacheBlocks.parallelStream()
-                    .filter(blockCacheKey -> !newCacheBlocks.contains(blockCacheKey))
-                    .forEach(removedBlocks::add)
-            );
+            ForkJoinTask<?> removedTask =
+                    pool.submit(
+                            () ->
+                                    oldCacheBlocks.parallelStream()
+                                            .filter(
+                                                    blockCacheKey ->
+                                                            !newCacheBlocks.contains(blockCacheKey))
+                                            .forEach(removedBlocks::add));
 
             addedTask.join();
             removedTask.join();
@@ -121,12 +128,11 @@ public class EngineLocalView {
         dynamicIntervalManager.updateDiffStatistics(diffSize);
 
         return DiffResult.builder()
-            .engineIp(engineIPort)
-            .addedBlocks(addedBlocks)
-            .removedBlocks(removedBlocks)
-            .version("1.0.0")
-            .build();
-
+                .engineIp(engineIPort)
+                .addedBlocks(addedBlocks)
+                .removedBlocks(removedBlocks)
+                .version("1.0.0")
+                .build();
     }
 
     /**
@@ -137,10 +143,14 @@ public class EngineLocalView {
      */
     public void addOrUpdateCacheBlock(String engineIPort, Long blockCacheKey) {
         if (engineIPort == null || blockCacheKey == null) {
-            log.warn("Invalid parameters: engineIPort={}, blockCacheKey={}", engineIPort, blockCacheKey);
+            log.warn(
+                    "Invalid parameters: engineIPort={}, blockCacheKey={}",
+                    engineIPort,
+                    blockCacheKey);
             return;
         }
-        Set<Long> engineCache = engineViews.computeIfAbsent(engineIPort, k -> ConcurrentHashMap.newKeySet());
+        Set<Long> engineCache =
+                engineViews.computeIfAbsent(engineIPort, k -> ConcurrentHashMap.newKeySet());
 
         engineCache.add(blockCacheKey);
     }
@@ -210,7 +220,6 @@ public class EngineLocalView {
 
         engineViews.clear();
         log.info("Cleared engine local view");
-
     }
 
     public int size(String engineIpPort) {

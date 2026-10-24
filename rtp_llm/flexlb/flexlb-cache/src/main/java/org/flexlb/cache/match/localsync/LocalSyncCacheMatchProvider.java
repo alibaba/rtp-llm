@@ -24,7 +24,8 @@ import java.util.Set;
  */
 @Slf4j
 @Component
-public class LocalSyncCacheMatchProvider implements CacheMatchProvider, EngineAddressResolver.Listener {
+public class LocalSyncCacheMatchProvider
+        implements CacheMatchProvider, EngineAddressResolver.Listener {
 
     private final KvCacheManager kvCacheManager;
     private final CacheMetricsReporter cacheMetricsReporter;
@@ -41,7 +42,8 @@ public class LocalSyncCacheMatchProvider implements CacheMatchProvider, EngineAd
         }
     }
 
-    public LocalSyncCacheMatchProvider(KvCacheManager kvCacheManager, CacheMetricsReporter cacheMetricsReporter) {
+    public LocalSyncCacheMatchProvider(
+            KvCacheManager kvCacheManager, CacheMetricsReporter cacheMetricsReporter) {
         this.kvCacheManager = kvCacheManager;
         this.cacheMetricsReporter = cacheMetricsReporter;
     }
@@ -52,8 +54,7 @@ public class LocalSyncCacheMatchProvider implements CacheMatchProvider, EngineAd
             log.warn("Ignoring null engine address update for local cache cleanup");
             return;
         }
-        kvCacheManager.removeStaleEngineCaches(
-                hosts.stream().map(WorkerHost::getIpPort).toList());
+        kvCacheManager.removeStaleEngineCaches(hosts.stream().map(WorkerHost::getIpPort).toList());
     }
 
     @Override
@@ -68,7 +69,8 @@ public class LocalSyncCacheMatchProvider implements CacheMatchProvider, EngineAd
             long blockSize,
             RoleType roleType,
             String group) {
-        return HostCacheMatch.fromLocalMatches(kvCacheManager.findMatchingEngines(blockCacheKeys, roleType, group));
+        return HostCacheMatch.fromLocalMatches(
+                kvCacheManager.findMatchingEngines(blockCacheKeys, roleType, group));
     }
 
     public WorkerCacheUpdateResult updateFromWorkerStatus(WorkerStatus workerStatus) {
@@ -80,15 +82,19 @@ public class LocalSyncCacheMatchProvider implements CacheMatchProvider, EngineAd
         try {
             CacheStatus cacheStatus = workerStatus.getCacheStatus();
             if (cacheStatus == null) {
-                WorkerCacheUpdateResult result = buildFailureResult(logicalIpPort, "Worker Cache Status is null");
-                cacheMetricsReporter.reportUpdateEngineBlockCacheRT(metricIpPort, role, startTime, "0");
+                WorkerCacheUpdateResult result =
+                        buildFailureResult(logicalIpPort, "Worker Cache Status is null");
+                cacheMetricsReporter.reportUpdateEngineBlockCacheRT(
+                        metricIpPort, role, startTime, "0");
                 return result;
             }
 
             Set<Long> cachedKeys = cacheStatus.getCachedKeys();
             if (cachedKeys == null) {
-                WorkerCacheUpdateResult result = buildFailureResult(logicalIpPort, "Worker Cached Keys is null");
-                cacheMetricsReporter.reportUpdateEngineBlockCacheRT(metricIpPort, role, startTime, "0");
+                WorkerCacheUpdateResult result =
+                        buildFailureResult(logicalIpPort, "Worker Cached Keys is null");
+                cacheMetricsReporter.reportUpdateEngineBlockCacheRT(
+                        metricIpPort, role, startTime, "0");
                 return result;
             }
 
@@ -108,7 +114,8 @@ public class LocalSyncCacheMatchProvider implements CacheMatchProvider, EngineAd
         kvCacheManager.removeEngineCache(engineIpPort);
     }
 
-    private WorkerCacheUpdateResult buildSuccessResult(WorkerStatus workerStatus, CacheStatus cacheStatus) {
+    private WorkerCacheUpdateResult buildSuccessResult(
+            WorkerStatus workerStatus, CacheStatus cacheStatus) {
         return WorkerCacheUpdateResult.builder()
                 .success(true)
                 .logicalIpPort(workerStatus.getLogicalIpPort())

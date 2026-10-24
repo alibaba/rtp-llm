@@ -61,5 +61,4 @@ public interface TokenIds {
             return accessor.applyAsInt(index);
         }
     }
-
 }

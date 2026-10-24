@@ -30,12 +30,14 @@ final class EncoderQueueCoordinator implements AutoCloseable {
     private final OrderedRequestQueue queue;
     private final ReentrantLock lock = new ReentrantLock();
     private final Condition changed = lock.newCondition();
-    private final Set<GlobalQueueEntry> blocked = Collections.newSetFromMap(new IdentityHashMap<>());
+    private final Set<GlobalQueueEntry> blocked =
+            Collections.newSetFromMap(new IdentityHashMap<>());
     private final Thread decisionThread;
     private boolean closed;
     private long capacityVersion;
 
-    EncoderQueueCoordinator(DefaultRouter router, RequestRegistry requests, boolean priorityOrdering) {
+    EncoderQueueCoordinator(
+            DefaultRouter router, RequestRegistry requests, boolean priorityOrdering) {
         this.router = Objects.requireNonNull(router, "router");
         this.requests = Objects.requireNonNull(requests, "requests");
         this.queue = new OrderedRequestQueue(priorityOrdering);
@@ -46,9 +48,13 @@ final class EncoderQueueCoordinator implements AutoCloseable {
     }
 
     boolean offer(BalanceContext context, CompletableFuture<Response> future) {
-        GlobalQueueEntry entry = new GlobalQueueEntry(context, future,
-                PriorityNormalizer.isValid(context.getPriority())
-                        ? context.getPriority() : PriorityNormalizer.DEFAULT_PRIORITY);
+        GlobalQueueEntry entry =
+                new GlobalQueueEntry(
+                        context,
+                        future,
+                        PriorityNormalizer.isValid(context.getPriority())
+                                ? context.getPriority()
+                                : PriorityNormalizer.DEFAULT_PRIORITY);
         lock.lock();
         try {
             if (closed) {
@@ -115,9 +121,14 @@ final class EncoderQueueCoordinator implements AutoCloseable {
         lock.lock();
         try {
             while (!closed) {
-                List<GlobalQueueEntry> ready = queue.scanForPlanningCandidates(1,
-                        Math.max(1, queue.size()), entry -> !entry.removed && !entry.future.isDone()
-                                && !blocked.contains(entry));
+                List<GlobalQueueEntry> ready =
+                        queue.scanForPlanningCandidates(
+                                1,
+                                Math.max(1, queue.size()),
+                                entry ->
+                                        !entry.removed
+                                                && !entry.future.isDone()
+                                                && !blocked.contains(entry));
                 if (!ready.isEmpty()) {
                     return ready.getFirst();
                 }
@@ -138,14 +149,18 @@ final class EncoderQueueCoordinator implements AutoCloseable {
             return;
         }
         if (entry.context.requestExpired(System.currentTimeMillis())) {
-            requests.cancelRequest(entry.context.getRequestId(), 0L,
-                    CancelReason.DEADLINE_EXCEEDED, RequestPhase.ENCODER);
+            requests.cancelRequest(
+                    entry.context.getRequestId(),
+                    0L,
+                    CancelReason.DEADLINE_EXCEEDED,
+                    RequestPhase.ENCODER);
             remove(entry);
             return;
         }
         try {
             long observedCapacityVersion = capacityVersion();
-            PlacementResult<SelectedRole, PlacementKey> selection = router.selectEncoder(entry.context);
+            PlacementResult<SelectedRole, PlacementKey> selection =
+                    router.selectEncoder(entry.context);
             entry.context.setSchedulingDiagnostics(selection.diagnostics());
             switch (selection.status()) {
                 case SUCCESS -> publishRoute(entry, selection.value());
@@ -154,18 +169,23 @@ final class EncoderQueueCoordinator implements AutoCloseable {
                 case CLOSED -> fail(entry, Response.error(StrategyErrorType.REQUEST_CANCELLED));
             }
         } catch (RuntimeException failure) {
-            Logger.warn("Encoder QUEUE admission failed: request_id={}", entry.context.getRequestId(), failure);
+            Logger.warn(
+                    "Encoder QUEUE admission failed: request_id={}",
+                    entry.context.getRequestId(),
+                    failure);
             fail(entry, Response.error(StrategyErrorType.DISPATCH_FAILED));
         }
     }
 
     private void publishRoute(GlobalQueueEntry entry, SelectedRole selected) {
-        try (selected; var pin = selected.takeGenerationPin()) {
+        try (selected;
+                var pin = selected.takeGenerationPin()) {
             Response response = new Response();
             response.setSuccess(true);
             response.setServerStatus(List.of(selected.serverStatus()));
             if (!requests.claimEncoderRoute(entry.context.getRequestId(), entry.future, pin)
-                    || !requests.publishEncoderRoute(entry.context.getRequestId(), entry.future, response)) {
+                    || !requests.publishEncoderRoute(
+                            entry.context.getRequestId(), entry.future, response)) {
                 fail(entry, Response.error(StrategyErrorType.REQUEST_CANCELLED));
             }
         }
@@ -197,8 +217,8 @@ final class EncoderQueueCoordinator implements AutoCloseable {
     }
 
     private void fail(GlobalQueueEntry entry, Response response) {
-        if (!requests.publishDecisionResponseAsync(entry.context.getRequestId(), entry.future,
-                response, RequestPhase.ENCODER)) {
+        if (!requests.publishDecisionResponseAsync(
+                entry.context.getRequestId(), entry.future, response, RequestPhase.ENCODER)) {
             remove(entry);
         }
     }
@@ -230,8 +250,11 @@ final class EncoderQueueCoordinator implements AutoCloseable {
             lock.unlock();
         }
         for (GlobalQueueEntry entry : abandoned) {
-            fail(entry, Response.buildErrorResponse(StrategyErrorType.DISPATCH_FAILED,
-                    "request scheduler is shutting down"));
+            fail(
+                    entry,
+                    Response.buildErrorResponse(
+                            StrategyErrorType.DISPATCH_FAILED,
+                            "request scheduler is shutting down"));
         }
         if (Thread.currentThread() != decisionThread) {
             try {

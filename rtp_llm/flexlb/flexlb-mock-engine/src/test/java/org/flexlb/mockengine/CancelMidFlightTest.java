@@ -33,8 +33,7 @@ class CancelMidFlightTest {
 
     private static final int BASE_PORT = 62300;
 
-    @TempDir
-    Path tempDir;
+    @TempDir Path tempDir;
 
     private MockEngineTestCluster cluster;
     private Map<Integer, JavaMockEngineCluster.FastRpcService> services;
@@ -64,10 +63,8 @@ class CancelMidFlightTest {
                 enqueue(prefillServices.get(0), batch(7000, slot(0, inputs)));
 
         // Error count should be 0 (no fault injection)
-        assertEquals(0, response.getErrorsCount(),
-                "enqueue should have 0 errors");
-        assertEquals(n, response.getSuccessesCount(),
-                "enqueue should have " + n + " successes");
+        assertEquals(0, response.getErrorsCount(), "enqueue should have 0 errors");
+        assertEquals(n, response.getSuccessesCount(), "enqueue should have " + n + " successes");
 
         // Wait for at least 1 request to be in-flight before cancelling
         awaitInflight(prefillServices.get(0), 1, 1_000);
@@ -87,7 +84,8 @@ class CancelMidFlightTest {
 
         // Assert no leak detected on any engine
         for (JavaMockEngineCluster.FastRpcService service : services.values()) {
-            assertFalse(service.isLeakDetected(),
+            assertFalse(
+                    service.isLeakDetected(),
                     "no leak should be detected on port " + service.getGrpcPort());
         }
 
@@ -96,8 +94,11 @@ class CancelMidFlightTest {
             for (JavaMockEngineCluster.FastRpcService service : services.values()) {
                 String state = service.getRequestStates().get(requestId);
                 if (state != null) {
-                    assertNotEquals("running", state,
-                            "cancelled request " + requestId
+                    assertNotEquals(
+                            "running",
+                            state,
+                            "cancelled request "
+                                    + requestId
                                     + " should not be 'running' on port "
                                     + service.getGrpcPort());
                 }
@@ -114,22 +115,25 @@ class CancelMidFlightTest {
                     break;
                 }
             }
-            assertTrue(found,
-                    "non-cancelled request " + requestId + " should be 'completed'");
+            assertTrue(found, "non-cancelled request " + requestId + " should be 'completed'");
         }
 
         // Assert cancelled count on prefill engine is 5
-        assertEquals(5, prefillServices.get(0).getCancelledCount(),
+        assertEquals(
+                5,
+                prefillServices.get(0).getCancelledCount(),
                 "prefill engine should have 5 cancelled requests");
 
         // Assert HTTP snapshot shows inflight == 0 and leak_detected == false
         JsonNode snapshot = snapshot();
         assertEquals(services.size(), snapshot.size());
         for (JsonNode engine : snapshot) {
-            assertEquals(0, engine.get("inflight").asInt(),
-                    "snapshot inflight should be 0 for port "
-                            + engine.get("port").asInt());
-            assertFalse(engine.get("leak_detected").asBoolean(),
+            assertEquals(
+                    0,
+                    engine.get("inflight").asInt(),
+                    "snapshot inflight should be 0 for port " + engine.get("port").asInt());
+            assertFalse(
+                    engine.get("leak_detected").asBoolean(),
                     "snapshot leak_detected should be false for port "
                             + engine.get("port").asInt());
         }
@@ -147,8 +151,9 @@ class CancelMidFlightTest {
 
     // ──────────── Polling helpers ────────────
 
-    private void awaitInflight(JavaMockEngineCluster.FastRpcService service,
-                               int min, long timeoutMs) throws InterruptedException {
+    private void awaitInflight(
+            JavaMockEngineCluster.FastRpcService service, int min, long timeoutMs)
+            throws InterruptedException {
         cluster.awaitInflight(service, min, timeoutMs);
     }
 
@@ -171,5 +176,4 @@ class CancelMidFlightTest {
     private MockPerformanceModel model(String formula) throws Exception {
         return MockEngineTestSupport.performanceModel(tempDir, formula);
     }
-
 }

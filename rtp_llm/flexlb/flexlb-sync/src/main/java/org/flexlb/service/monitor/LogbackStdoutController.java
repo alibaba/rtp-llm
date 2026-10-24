@@ -24,7 +24,8 @@ final class LogbackStdoutController {
         this.consoleAppender = requireConsoleAppender(rootLogger);
     }
 
-    LogbackStdoutController(Logger rootLogger, Logger pvLogger, Appender<ILoggingEvent> consoleAppender) {
+    LogbackStdoutController(
+            Logger rootLogger, Logger pvLogger, Appender<ILoggingEvent> consoleAppender) {
         this.rootLogger = rootLogger;
         this.pvLogger = pvLogger;
         this.consoleAppender = consoleAppender;
@@ -42,6 +43,7 @@ final class LogbackStdoutController {
 
     private Appender<ILoggingEvent> requireConsoleAppender(Logger rootLogger) {
         return Objects.requireNonNull(
-                rootLogger.getAppender(CONSOLE_APPENDER), "Logback appender 'CONSOLE-async' is not configured");
+                rootLogger.getAppender(CONSOLE_APPENDER),
+                "Logback appender 'CONSOLE-async' is not configured");
     }
 }

@@ -137,7 +137,11 @@ class ProfileFilteredListingTest(unittest.TestCase):
         ]
         with mock.patch.object(parallel_runner, "_list_rows", return_value=rows):
             self.assertEqual(
-                [("cancel_basic", "cancel"), ("kv_prefix", "kv"), ("kv_capacity", "kv")],
+                [
+                    ("cancel_basic", "cancel"),
+                    ("kv_prefix", "kv"),
+                    ("kv_capacity", "kv"),
+                ],
                 parallel_runner.list_case_pairs("window-nonbatch"),
             )
             self.assertEqual(

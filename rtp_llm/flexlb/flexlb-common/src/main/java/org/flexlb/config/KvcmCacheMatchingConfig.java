@@ -21,27 +21,33 @@ public final class KvcmCacheMatchingConfig implements CacheMatchingConfig {
      * Total cache-query budget, including retries; also bounds each cluster-info RPC.
      */
     private long requestTimeoutMs = DEFAULT_REQUEST_TIMEOUT_MS;
+
     /**
      * Fixed when the KVCM client starts; a runtime update requires a restart.
      */
     private long leaderRefreshIntervalMs = DEFAULT_LEADER_REFRESH_INTERVAL_MS;
+
     private int heartbeatFailureThreshold = DEFAULT_HEARTBEAT_FAILURE_THRESHOLD;
     private int queryFailureThreshold = DEFAULT_QUERY_FAILURE_THRESHOLD;
     private int maxQueryRetryCount = DEFAULT_MAX_QUERY_RETRY_COUNT;
     private int recoverySuccessThreshold = DEFAULT_RECOVERY_SUCCESS_THRESHOLD;
+
     /**
      * Storage media to match; empty means all media.
      */
     private List<String> medium = List.of();
+
     /**
      * Logical engines with the longest local match to compute remote hits for.
      * Zero requests local matches only.
      */
     private int globalKvsHostCount = DEFAULT_GLOBAL_KVS_HOST_COUNT;
+
     /**
      * Enables P2P matches in the combined global prefix hit count.
      */
     private boolean enableP2p;
+
     private LocalStandbyConfig localStandby = new LocalStandbyConfig();
 
     public void setMedium(List<String> medium) {

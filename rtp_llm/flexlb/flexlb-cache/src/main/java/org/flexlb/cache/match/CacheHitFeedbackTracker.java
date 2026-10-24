@@ -31,80 +31,134 @@ import java.util.function.Function;
 final class CacheHitFeedbackTracker {
     private static final Logger LOG = LoggerFactory.getLogger(CacheHitFeedbackTracker.class);
     private static final Logger PV = LoggerFactory.getLogger("pvLogger");
-    private final Cache<Key, Prediction> predictions = Caffeine.newBuilder()
-            .maximumSize(100_000).expireAfterWrite(Duration.ofHours(1)).build();
+    private final Cache<Key, Prediction> predictions =
+            Caffeine.newBuilder()
+                    .maximumSize(100_000)
+                    .expireAfterWrite(Duration.ofHours(1))
+                    .build();
     private final LocalStandbyComparisonService comparisonService;
 
     CacheHitFeedbackTracker(LocalStandbyComparisonService comparisonService) {
         this.comparisonService = comparisonService;
     }
 
-    void track(String requestId,
-               RoleType role,
-               String group,
-               WorkerStatus worker,
-               long inputTokens,
-               long predictedHitTokens,
-               CacheMatchResult result) {
+    void track(
+            String requestId,
+            RoleType role,
+            String group,
+            WorkerStatus worker,
+            long inputTokens,
+            long predictedHitTokens,
+            CacheMatchResult result) {
         HostCacheMatch match = result.hostMatch(worker);
         long blockSize = result.blockSize();
         boolean kvcm = result.source() == CacheMatchSource.KVCM && result.querySucceeded();
-        CacheHitFeedback seed = new CacheHitFeedback("cache_hit_comparison", requestId, result.source().name(),
-                role.name(), group, worker.getWorkerIdentity(), null, inputTokens, blockSize, predictedHitTokens,
-                kvcm, match == null ? 0 : CacheMatchResult.matchedTokens(match.localMatchBlocks(), blockSize, inputTokens),
-                match == null ? 0 : CacheMatchResult.matchedTokens(match.globalMatchBlocks(), blockSize, inputTokens), 0, 0);
-        predictions.put(new Key(worker.getGenerationId(), role, requestId), new Prediction(seed,
-                comparisonService.captureComparison(requestId, role), result.querySucceeded()));
+        CacheHitFeedback seed =
+                new CacheHitFeedback(
+                        "cache_hit_comparison",
+                        requestId,
+                        result.source().name(),
+                        role.name(),
+                        group,
+                        worker.getWorkerIdentity(),
+                        null,
+                        inputTokens,
+                        blockSize,
+                        predictedHitTokens,
+                        kvcm,
+                        match == null
+                                ? 0
+                                : CacheMatchResult.matchedTokens(
+                                        match.localMatchBlocks(), blockSize, inputTokens),
+                        match == null
+                                ? 0
+                                : CacheMatchResult.matchedTokens(
+                                        match.globalMatchBlocks(), blockSize, inputTokens),
+                        0,
+                        0);
+        predictions.put(
+                new Key(worker.getGenerationId(), role, requestId),
+                new Prediction(
+                        seed,
+                        comparisonService.captureComparison(requestId, role),
+                        result.querySucceeded()));
     }
 
-    List<CompletableFuture<CacheHitComparisonResult>> observe(WorkerStatus worker,
-                                                             WorkerStatus.StatusObservation status) {
+    List<CompletableFuture<CacheHitComparisonResult>> observe(
+            WorkerStatus worker, WorkerStatus.StatusObservation status) {
         List<CompletableFuture<CacheHitComparisonResult>> results = new ArrayList<>();
         // Prefer terminal telemetry if the Engine includes the task in both lists.
-        status.finishedTasks().values().forEach(task -> observeTaskBestEffort(worker, status.role(), task, true, results));
-        status.activeTasks().values().forEach(task -> observeTaskBestEffort(worker, status.role(), task, false, results));
+        status.finishedTasks()
+                .values()
+                .forEach(task -> observeTaskBestEffort(worker, status.role(), task, true, results));
+        status.activeTasks()
+                .values()
+                .forEach(
+                        task -> observeTaskBestEffort(worker, status.role(), task, false, results));
         return results;
     }
 
-    private void observeTaskBestEffort(WorkerStatus worker,
-                                       RoleType role,
-                                       WorkerStatus.TaskObservation task,
-                                       boolean finished,
-                                       List<CompletableFuture<CacheHitComparisonResult>> results) {
+    private void observeTaskBestEffort(
+            WorkerStatus worker,
+            RoleType role,
+            WorkerStatus.TaskObservation task,
+            boolean finished,
+            List<CompletableFuture<CacheHitComparisonResult>> results) {
         try {
             observeTask(worker, role, task, finished, results);
         } catch (RuntimeException error) {
-            LOG.warn("Failed to record cache-hit feedback for task: requestId={}, role={}",
-                    task == null ? null : task.requestId(), role, error);
+            LOG.warn(
+                    "Failed to record cache-hit feedback for task: requestId={}, role={}",
+                    task == null ? null : task.requestId(),
+                    role,
+                    error);
         }
     }
 
-    private void observeTask(WorkerStatus worker,
-                             RoleType role,
-                             WorkerStatus.TaskObservation task,
-                             boolean finished,
-                             List<CompletableFuture<CacheHitComparisonResult>> results) {
-        Prediction prediction = predictions.getIfPresent(new Key(worker.getGenerationId(), role, task.requestId()));
+    private void observeTask(
+            WorkerStatus worker,
+            RoleType role,
+            WorkerStatus.TaskObservation task,
+            boolean finished,
+            List<CompletableFuture<CacheHitComparisonResult>> results) {
+        Prediction prediction =
+                predictions.getIfPresent(new Key(worker.getGenerationId(), role, task.requestId()));
         if (prediction == null || task.telemetry() == null) {
             return;
         }
         WorkerStatus.TaskTelemetry telemetry = task.telemetry();
         CacheHitFeedback seed = prediction.seed;
-        String state = finished ? "FINISHED" : task.phase() == null ? "UNKNOWN" : task.phase().name();
-        if (telemetry.prefixLengthValid() && (finished || task.phase() == TaskPhase.RUNNING)
-                && task.prefixLength() >= 0 && task.prefixLength() <= seed.inputTokens()) {
+        String state =
+                finished ? "FINISHED" : task.phase() == null ? "UNKNOWN" : task.phase().name();
+        if (telemetry.prefixLengthValid()
+                && (finished || task.phase() == TaskPhase.RUNNING)
+                && task.prefixLength() >= 0
+                && task.prefixLength() <= seed.inputTokens()) {
             Function<CacheHitFeedback, CompletableFuture<CacheHitComparisonResult>> comparison =
                     prediction.comparison.getAndSet(null);
             if (comparison != null && prediction.predictionAvailable) {
-                CacheHitFeedback feedback = new CacheHitFeedback(seed.eventType(), seed.requestId(),
-                        seed.cacheMatchSource(), seed.role(), seed.group(), seed.workerIdentity(), state,
-                        seed.inputTokens(), seed.blockSize(), seed.predictedHitTokens(), seed.kvcmMatchAvailable(),
-                        seed.kvcmLocalMatchTokens(), seed.kvcmGlobalMatchTokens(),
-                        task.prefixLength(), task.prefixLength() - seed.predictedHitTokens());
+                CacheHitFeedback feedback =
+                        new CacheHitFeedback(
+                                seed.eventType(),
+                                seed.requestId(),
+                                seed.cacheMatchSource(),
+                                seed.role(),
+                                seed.group(),
+                                seed.workerIdentity(),
+                                state,
+                                seed.inputTokens(),
+                                seed.blockSize(),
+                                seed.predictedHitTokens(),
+                                seed.kvcmMatchAvailable(),
+                                seed.kvcmLocalMatchTokens(),
+                                seed.kvcmGlobalMatchTokens(),
+                                task.prefixLength(),
+                                task.prefixLength() - seed.predictedHitTokens());
                 results.add(comparison.apply(feedback));
             }
         }
-        if ((finished || telemetry.firstTokenTimeMs() > 0) && prediction.statusLogged.compareAndSet(false, true)) {
+        if ((finished || telemetry.firstTokenTimeMs() > 0)
+                && prediction.statusLogged.compareAndSet(false, true)) {
             Map<String, Object> pv = new LinkedHashMap<>(32);
             pv.put("event", "prefill_worker_status");
             pv.put("requestId", task.requestId());
@@ -116,7 +170,9 @@ final class CacheHitFeedbackTracker {
             pv.put("state", state);
             pv.put("inputTokens", seed.inputTokens());
             pv.put("engineInputTokens", positive(task.inputLength()));
-            pv.put("inputTokensDelta", task.inputLength() > 0 ? task.inputLength() - seed.inputTokens() : null);
+            pv.put(
+                    "inputTokensDelta",
+                    task.inputLength() > 0 ? task.inputLength() - seed.inputTokens() : null);
             pv.put("batchId", task.batchId());
             pv.put("errorCode", task.errorCode());
             pv.put("prefixLengthValid", telemetry.prefixLengthValid());
@@ -125,25 +181,41 @@ final class CacheHitFeedbackTracker {
             pv.put("inputQueueEnqueueTimeMs", positive(telemetry.inputQueueEnqueueTimeMs()));
             pv.put("inputQueueDrainTimeMs", positive(telemetry.inputQueueDrainTimeMs()));
             pv.put("firstTokenTimeMs", positive(telemetry.firstTokenTimeMs()));
-            pv.put("inputQueueWaitMs", elapsed(telemetry.inputQueueDrainTimeMs(), telemetry.inputQueueEnqueueTimeMs()));
-            Long schedulerToRunning = elapsed(telemetry.runningEnteredTimeMs(), telemetry.waitingEnteredTimeMs());
+            pv.put(
+                    "inputQueueWaitMs",
+                    elapsed(
+                            telemetry.inputQueueDrainTimeMs(),
+                            telemetry.inputQueueEnqueueTimeMs()));
+            Long schedulerToRunning =
+                    elapsed(telemetry.runningEnteredTimeMs(), telemetry.waitingEnteredTimeMs());
             pv.put("schedulerToRunningMs", schedulerToRunning);
-            pv.put("remoteKvWaitMs", schedulerToRunning == null ? null : telemetry.remoteKvWaitMs());
-            pv.put("schedulerWaitMs", schedulerToRunning == null || schedulerToRunning < telemetry.remoteKvWaitMs()
-                    ? null : schedulerToRunning - telemetry.remoteKvWaitMs());
-            pv.put("runningToFirstTokenMs", elapsed(telemetry.firstTokenTimeMs(), telemetry.runningEnteredTimeMs()));
+            pv.put(
+                    "remoteKvWaitMs",
+                    schedulerToRunning == null ? null : telemetry.remoteKvWaitMs());
+            pv.put(
+                    "schedulerWaitMs",
+                    schedulerToRunning == null || schedulerToRunning < telemetry.remoteKvWaitMs()
+                            ? null
+                            : schedulerToRunning - telemetry.remoteKvWaitMs());
+            pv.put(
+                    "runningToFirstTokenMs",
+                    elapsed(telemetry.firstTokenTimeMs(), telemetry.runningEnteredTimeMs()));
             if (telemetry.prefixLengthValid()
-                    && telemetry.hbmLocalMatchTokens() + telemetry.remoteKvAddedMatchTokens() == task.prefixLength()) {
+                    && telemetry.hbmLocalMatchTokens() + telemetry.remoteKvAddedMatchTokens()
+                            == task.prefixLength()) {
                 pv.put("hbmLocalMatchTokens", telemetry.hbmLocalMatchTokens());
                 pv.put("remoteKvAddedMatchTokens", telemetry.remoteKvAddedMatchTokens());
             }
             pv.put("firstPrefillStepId", positive(telemetry.firstPrefillStepId()));
             pv.put("lastPrefillStepId", positive(telemetry.lastPrefillStepId()));
             pv.put("prefillStepCount", positive(telemetry.prefillStepCount()));
-            pv.put("prefillNonfinalChunkTokensMin", positive(telemetry.prefillNonfinalChunkTokensMin()));
-            pv.put("prefillNonfinalChunkTokensMax", positive(telemetry.prefillNonfinalChunkTokensMax()));
+            pv.put(
+                    "prefillNonfinalChunkTokensMin",
+                    positive(telemetry.prefillNonfinalChunkTokensMin()));
+            pv.put(
+                    "prefillNonfinalChunkTokensMax",
+                    positive(telemetry.prefillNonfinalChunkTokensMax()));
             PV.info(JsonUtils.toStringOrEmpty(pv));
-
         }
     }
 
@@ -155,18 +227,20 @@ final class CacheHitFeedbackTracker {
         return start > 0 && end >= start ? end - start : null;
     }
 
-    private record Key(long generation, RoleType role, String requestId) {
-    }
+    private record Key(long generation, RoleType role, String requestId) {}
 
     private static final class Prediction {
         private final CacheHitFeedback seed;
         private final boolean predictionAvailable;
-        private final AtomicReference<Function<CacheHitFeedback, CompletableFuture<CacheHitComparisonResult>>> comparison;
+        private final AtomicReference<
+                        Function<CacheHitFeedback, CompletableFuture<CacheHitComparisonResult>>>
+                comparison;
         private final AtomicBoolean statusLogged = new AtomicBoolean();
 
-        private Prediction(CacheHitFeedback seed,
-                           Function<CacheHitFeedback, CompletableFuture<CacheHitComparisonResult>> comparison,
-                           boolean predictionAvailable) {
+        private Prediction(
+                CacheHitFeedback seed,
+                Function<CacheHitFeedback, CompletableFuture<CacheHitComparisonResult>> comparison,
+                boolean predictionAvailable) {
             this.seed = seed;
             this.comparison = new AtomicReference<>(comparison);
             this.predictionAvailable = predictionAvailable;

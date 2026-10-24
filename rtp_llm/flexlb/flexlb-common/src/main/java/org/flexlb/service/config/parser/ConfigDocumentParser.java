@@ -12,5 +12,4 @@ public interface ConfigDocumentParser {
     int schemaVersion();
 
     NormalizedConfig parse(String rawFlexlbConfig, String rawModelServiceConfig);
-
 }

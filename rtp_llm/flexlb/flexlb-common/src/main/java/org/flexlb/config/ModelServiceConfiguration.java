@@ -22,7 +22,8 @@ public class ModelServiceConfiguration {
     private static final int MAX_TCP_PORT = 65_535;
 
     @Bean
-    public ModelMetaConfig modelMetaConfig(ConfigService configService, RoutingServiceDiscovery serviceDiscovery) {
+    public ModelMetaConfig modelMetaConfig(
+            ConfigService configService, RoutingServiceDiscovery serviceDiscovery) {
         ServiceRoute serviceRoute = configService.modelServiceConfig();
         if (serviceRoute == null) {
             throw new IllegalStateException(MODEL_SERVICE_CONFIG + " must not be blank");
@@ -32,22 +33,27 @@ public class ModelServiceConfiguration {
 
         ModelMetaConfig modelMetaConfig = new ModelMetaConfig();
         modelMetaConfig.putServiceRoute(serviceRoute.getServiceId(), serviceRoute);
-        log.info("Loaded model service route: serviceId={}, endpoints={}",
-                serviceRoute.getServiceId(), serviceRoute.getAllEndpoints().size());
+        log.info(
+                "Loaded model service route: serviceId={}, endpoints={}",
+                serviceRoute.getServiceId(),
+                serviceRoute.getAllEndpoints().size());
         return modelMetaConfig;
     }
 
-    private void validateServiceRoute(ServiceRoute serviceRoute, RoutingServiceDiscovery serviceDiscovery) {
+    private void validateServiceRoute(
+            ServiceRoute serviceRoute, RoutingServiceDiscovery serviceDiscovery) {
         if (StringUtils.isBlank(serviceRoute.getServiceId())) {
             throw new IllegalArgumentException("MODEL_SERVICE_CONFIG service_id must not be blank");
         }
         if (CollectionUtils.isEmpty(serviceRoute.getRoleEndpoints())) {
-            throw new IllegalArgumentException("MODEL_SERVICE_CONFIG role_endpoints must not be empty");
+            throw new IllegalArgumentException(
+                    "MODEL_SERVICE_CONFIG role_endpoints must not be empty");
         }
 
         var endpoints = serviceRoute.getAllEndpoints();
         if (CollectionUtils.isEmpty(endpoints)) {
-            throw new IllegalArgumentException("MODEL_SERVICE_CONFIG must contain at least one role endpoint");
+            throw new IllegalArgumentException(
+                    "MODEL_SERVICE_CONFIG must contain at least one role endpoint");
         }
         for (Endpoint endpoint : endpoints) {
             validateEngineEndpointConfiguration(endpoint);
@@ -69,7 +75,8 @@ public class ModelServiceConfiguration {
         if (workerStatusPort != null && (workerStatusPort < 1 || workerStatusPort > MAX_TCP_PORT)) {
             throw new IllegalArgumentException(
                     "MODEL_SERVICE_CONFIG endpoint worker_status_port must be between 1 and "
-                            + MAX_TCP_PORT + ": "
+                            + MAX_TCP_PORT
+                            + ": "
                             + endpoint.getAddress());
         }
         if (multiEngineNum == 1) {
@@ -78,12 +85,14 @@ public class ModelServiceConfiguration {
         if (workerStatusPort == null) {
             throw new IllegalArgumentException(
                     "MODEL_SERVICE_CONFIG endpoint worker_status_port must be configured "
-                            + "when multi_engine_num is greater than one: " + endpoint.getAddress());
+                            + "when multi_engine_num is greater than one: "
+                            + endpoint.getAddress());
         }
         if ((long) workerStatusPort + multiEngineNum - 1 > MAX_TCP_PORT) {
             throw new IllegalArgumentException(
                     "MODEL_SERVICE_CONFIG endpoint worker_status_port range exceeds "
-                            + MAX_TCP_PORT + ": "
+                            + MAX_TCP_PORT
+                            + ": "
                             + endpoint.getAddress());
         }
     }
@@ -96,8 +105,7 @@ public class ModelServiceConfiguration {
     }
 
     private void validateOptimizer(
-            OptimizerConfig optimizer,
-            RoutingServiceDiscovery serviceDiscovery) {
+            OptimizerConfig optimizer, RoutingServiceDiscovery serviceDiscovery) {
         if (optimizer == null) {
             return;
         }

@@ -28,10 +28,11 @@ public class CacheAwareService {
     private final LocalStandbyComparisonService comparisonService;
     private final CacheMetadataUpdateOrchestrator updateOrchestrator;
 
-    public CacheAwareService(CacheMetricsReporter cacheMetricsReporter,
-                             CacheMatchQueryOrchestrator queryOrchestrator,
-                             LocalStandbyComparisonService comparisonService,
-                             CacheMetadataUpdateOrchestrator updateOrchestrator) {
+    public CacheAwareService(
+            CacheMetricsReporter cacheMetricsReporter,
+            CacheMatchQueryOrchestrator queryOrchestrator,
+            LocalStandbyComparisonService comparisonService,
+            CacheMetadataUpdateOrchestrator updateOrchestrator) {
         this.cacheMetricsReporter = cacheMetricsReporter;
         this.queryOrchestrator = queryOrchestrator;
         this.comparisonService = comparisonService;
@@ -49,10 +50,12 @@ public class CacheAwareService {
         } catch (RuntimeException error) {
             CacheMatchSource source = queryOrchestrator.effectiveSource();
             long queryTimeUs = System.nanoTime() / 1_000 - startTimeUs;
-            cacheMetricsReporter.reportFindMatchingEnginesRT(
-                    query.roleType(), startTimeUs, "1");
-            log.error("Error finding matching engines, requestId={}, role={}",
-                    query.requestId(), query.roleType(), error);
+            cacheMetricsReporter.reportFindMatchingEnginesRT(query.roleType(), startTimeUs, "1");
+            log.error(
+                    "Error finding matching engines, requestId={}, role={}",
+                    query.requestId(),
+                    query.roleType(),
+                    error);
             return CacheMatchResult.failed(source, queryTimeUs);
         }
     }
@@ -65,28 +68,34 @@ public class CacheAwareService {
         updateOrchestrator.removeEngineBlockCache(engineIpPort);
     }
 
-    public void updateFromRoutedRequest(
-            Request request, List<ServerStatus> selectedWorkers) {
+    public void updateFromRoutedRequest(Request request, List<ServerStatus> selectedWorkers) {
         updateOrchestrator.updateFromRoutedRequest(request, selectedWorkers);
     }
 
-    public void trackRoutingPrediction(String requestId,
-                                       RoleType role,
-                                       String group,
-                                       WorkerStatus worker,
-                                       long inputTokens,
-                                       long predictedHitTokens,
-                                       CacheMatchResult result) {
+    public void trackRoutingPrediction(
+            String requestId,
+            RoleType role,
+            String group,
+            WorkerStatus worker,
+            long inputTokens,
+            long predictedHitTokens,
+            CacheMatchResult result) {
         reportSelectedPredictions(requestId, role, worker, inputTokens, predictedHitTokens, result);
         try {
-            feedbackTracker.track(requestId, role, group, worker, inputTokens, predictedHitTokens, result);
+            feedbackTracker.track(
+                    requestId, role, group, worker, inputTokens, predictedHitTokens, result);
         } catch (RuntimeException error) {
             log.warn("Cache prediction telemetry failed, requestId={}", requestId, error);
         }
     }
 
-    private void reportSelectedPredictions(String requestId, RoleType role, WorkerStatus worker,
-                                           long inputTokens, long predictedHitTokens, CacheMatchResult result) {
+    private void reportSelectedPredictions(
+            String requestId,
+            RoleType role,
+            WorkerStatus worker,
+            long inputTokens,
+            long predictedHitTokens,
+            CacheMatchResult result) {
         if (result.source() == CacheMatchSource.KVCM && result.querySucceeded()) {
             try {
                 cacheMetricsReporter.reportKvcmPrediction(
@@ -102,8 +111,8 @@ public class CacheAwareService {
         }
     }
 
-    public List<CompletableFuture<CacheHitComparisonResult>> observeCacheHitFeedback(WorkerStatus worker,
-                                                                                     WorkerStatus.StatusObservation status) {
+    public List<CompletableFuture<CacheHitComparisonResult>> observeCacheHitFeedback(
+            WorkerStatus worker, WorkerStatus.StatusObservation status) {
         return feedbackTracker.observe(worker, status);
     }
 }

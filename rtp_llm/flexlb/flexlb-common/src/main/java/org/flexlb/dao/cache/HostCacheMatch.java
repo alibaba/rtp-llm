@@ -10,9 +10,7 @@ import java.util.stream.Collectors;
  * remote-source hits. Both fields are the raw KVCM response; routing strategies apply
  * their own remote policy when scoring a worker.
  */
-public record HostCacheMatch(
-        long localMatchBlocks,
-        long globalMatchBlocks) {
+public record HostCacheMatch(long localMatchBlocks, long globalMatchBlocks) {
 
     public static HostCacheMatch local(long matchBlocks) {
         return new HostCacheMatch(matchBlocks, matchBlocks);
@@ -22,8 +20,7 @@ public record HostCacheMatch(
      * Converts local match counts while preserving logical {@code ip:port@engineIndex} keys.
      */
     public static Map<String, HostCacheMatch> fromLocalMatches(Map<String, Integer> localMatches) {
-        return localMatches.entrySet().stream().collect(Collectors.toMap(
-                Map.Entry::getKey,
-                entry -> local(entry.getValue())));
+        return localMatches.entrySet().stream()
+                .collect(Collectors.toMap(Map.Entry::getKey, entry -> local(entry.getValue())));
     }
 }

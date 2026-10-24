@@ -1,4 +1,3 @@
-
 package org.flexlb.config;
 
 import io.micrometer.core.instrument.MeterRegistry;
@@ -25,7 +24,10 @@ public class MonitorClientConfig {
      * are exposed via the {@code /prometheus} actuator endpoint without kmonitor.
      */
     @Bean
-    @ConditionalOnProperty(name = "flexlb.monitor.enabled", havingValue = "true", matchIfMissing = true)
+    @ConditionalOnProperty(
+            name = "flexlb.monitor.enabled",
+            havingValue = "true",
+            matchIfMissing = true)
     @ConditionalOnMissingBean(FlexMonitor.class)
     @ConditionalOnClass(name = "io.micrometer.core.instrument.MeterRegistry")
     @ConditionalOnMissingClass("com.taobao.kmonitor.KMonitor")

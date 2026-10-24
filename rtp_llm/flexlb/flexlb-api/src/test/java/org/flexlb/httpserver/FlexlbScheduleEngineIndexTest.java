@@ -37,8 +37,7 @@ class FlexlbScheduleEngineIndexTest {
     @BeforeEach
     void setUp() {
         routeService = mock(RouteService.class);
-        LBStatusConsistencyService consistencyService =
-                mock(LBStatusConsistencyService.class);
+        LBStatusConsistencyService consistencyService = mock(LBStatusConsistencyService.class);
         when(consistencyService.isNeedConsistency()).thenReturn(false);
 
         ConfigService configService = mock(ConfigService.class);
@@ -48,29 +47,29 @@ class FlexlbScheduleEngineIndexTest {
 
         CacheAwareService cacheAwareService = mock(CacheAwareService.class);
 
-        service = new FlexlbServiceImpl(
-                routeService,
-                consistencyService,
-                mock(EngineHealthReporter.class),
-                mock(FlexlbGrpcForwarder.class),
-                configService,
-                mock(BatchSchedulerReporter.class),
-                mock(ServerScheduleLatencyRecorder.class),
-                mock(RequestSchedulerReporter.class),
-                cacheAwareService);
+        service =
+                new FlexlbServiceImpl(
+                        routeService,
+                        consistencyService,
+                        mock(EngineHealthReporter.class),
+                        mock(FlexlbGrpcForwarder.class),
+                        configService,
+                        mock(BatchSchedulerReporter.class),
+                        mock(ServerScheduleLatencyRecorder.class),
+                        mock(RequestSchedulerReporter.class),
+                        cacheAwareService);
     }
 
     @Test
     void scheduleIncludesEngineIndexForMultiEngineWorker() {
-        when(routeService.route(any(BalanceContext.class))).thenReturn(
-                CompletableFuture.completedFuture(response(serverStatus(1, 2))));
+        when(routeService.route(any(BalanceContext.class)))
+                .thenReturn(CompletableFuture.completedFuture(response(serverStatus(1, 2))));
 
         FlexlbScheduleProtocol.FlexlbScheduleResponsePB response = schedule();
 
         assertTrue(response.getSuccess());
         assertEquals(1, response.getServerStatusCount());
-        FlexlbScheduleProtocol.FlexlbServerStatusPB selected =
-                response.getServerStatus(0);
+        FlexlbScheduleProtocol.FlexlbServerStatusPB selected = response.getServerStatus(0);
         assertEquals("127.0.0.1", selected.getServerIp());
         assertEquals(8080, selected.getHttpPort());
         assertEquals(8081, selected.getGrpcPort());
@@ -80,11 +79,11 @@ class FlexlbScheduleEngineIndexTest {
 
     @Test
     void scheduleIncludesZeroEngineIndexForMultiEngineWorker() throws Exception {
-        when(routeService.route(any(BalanceContext.class))).thenReturn(
-                CompletableFuture.completedFuture(response(serverStatus(0, 2))));
+        when(routeService.route(any(BalanceContext.class)))
+                .thenReturn(CompletableFuture.completedFuture(response(serverStatus(0, 2))));
 
-        var result = FlexlbScheduleProtocol.FlexlbScheduleResponsePB.parseFrom(
-                schedule().toByteArray());
+        var result =
+                FlexlbScheduleProtocol.FlexlbScheduleResponsePB.parseFrom(schedule().toByteArray());
 
         assertTrue(result.getSuccess());
         assertTrue(result.getServerStatus(0).hasEngineIndex());
@@ -93,8 +92,8 @@ class FlexlbScheduleEngineIndexTest {
 
     @Test
     void scheduleOmitsEngineIndexForSingleEngineWorker() {
-        when(routeService.route(any(BalanceContext.class))).thenReturn(
-                CompletableFuture.completedFuture(response(serverStatus(0, 1))));
+        when(routeService.route(any(BalanceContext.class)))
+                .thenReturn(CompletableFuture.completedFuture(response(serverStatus(0, 1))));
 
         FlexlbScheduleProtocol.FlexlbScheduleResponsePB response = schedule();
 
@@ -106,14 +105,16 @@ class FlexlbScheduleEngineIndexTest {
     private FlexlbScheduleProtocol.FlexlbScheduleResponsePB schedule() {
         StreamObserver<FlexlbScheduleProtocol.FlexlbScheduleResponsePB> observer =
                 mock(StreamObserver.class);
-        service.schedule(FlexlbScheduleProtocol.FlexlbScheduleRequestPB.newBuilder()
-                .setRequestId(5001).setRequestIdStr("5001")
-                .setSeqLen(16)
-                .build(), observer);
+        service.schedule(
+                FlexlbScheduleProtocol.FlexlbScheduleRequestPB.newBuilder()
+                        .setRequestId(5001)
+                        .setRequestIdStr("5001")
+                        .setSeqLen(16)
+                        .build(),
+                observer);
 
         ArgumentCaptor<FlexlbScheduleProtocol.FlexlbScheduleResponsePB> captor =
-                ArgumentCaptor.forClass(
-                        FlexlbScheduleProtocol.FlexlbScheduleResponsePB.class);
+                ArgumentCaptor.forClass(FlexlbScheduleProtocol.FlexlbScheduleResponsePB.class);
         org.mockito.Mockito.verify(observer).onNext(captor.capture());
         org.mockito.Mockito.verify(observer).onCompleted();
         return captor.getValue();
