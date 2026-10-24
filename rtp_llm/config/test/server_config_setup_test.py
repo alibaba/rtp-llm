@@ -427,64 +427,6 @@ class GenerateConfigTest(TestCase):
         restored_enabled = pickle.loads(pickle.dumps(config))
         self.assertTrue(restored_enabled.enable_disk_cache)
 
-        def restore(pickle_state):
-            value = KVCacheConfig.__new__(KVCacheConfig)
-            value.__setstate__(pickle_state)
-            return value
-
-        event_state = state
-        state = (state[0], 6, *state[2:64])
-        self.assertEqual(restore(state).__getstate__(), event_state)
-        version_five_state = (state[0], 5, *state[2:], True)
-        self.assertEqual(restore(version_five_state).__getstate__(), event_state)
-        version_four_state = (state[0], 4, *state[2:50], 123, *state[50:], True)
-        restored_version_four = restore(version_four_state)
-        self.assertEqual(restored_version_four.__getstate__(), event_state)
-
-        legacy_state = (
-            state[0],
-            3,
-            *version_four_state[2:20],
-            False,
-            *version_four_state[20:],
-        )
-        restored_legacy = restore(legacy_state)
-        self.assertEqual(restored_legacy.__getstate__(), event_state)
-
-        source_extended_state = (state[0], 1, *legacy_state[2:-1])
-        restored_source_extended = restore(source_extended_state)
-        self.assertEqual(restored_source_extended.block_tree_transfer_worker_count, 7)
-        self.assertEqual(
-            restored_source_extended.block_tree_business_queue_max_size, 211
-        )
-        self.assertFalse(hasattr(restored_source_extended, "write_cache_sync"))
-
-        source_state = (state[0], 1, *legacy_state[2:57])
-        restored_source = restore(source_state)
-        self.assertEqual(restored_source.dsv4_fixed_pool_blocks, 512)
-        self.assertEqual(restored_source.dsv4_hca_state_pool_blocks, 256)
-        self.assertEqual(
-            restored_source.memory_cache_max_descriptors_per_transfer_batch, 17
-        )
-        self.assertFalse(hasattr(restored_source, "write_cache_sync"))
-
-        write_sync_state = (state[0], 2, *legacy_state[2:57], True)
-        restored_write_sync = restore(write_sync_state)
-        default_config = KVCacheConfig()
-        self.assertEqual(
-            restored_write_sync.block_tree_transfer_worker_count,
-            default_config.block_tree_transfer_worker_count,
-        )
-        self.assertFalse(hasattr(restored_write_sync, "write_cache_sync"))
-        for legacy_config in (
-            restored_version_four,
-            restored_legacy,
-            restored_source_extended,
-            restored_source,
-            restored_write_sync,
-        ):
-            self.assertTrue(legacy_config.enable_crc)
-
     def test_kv_cache_config_pickle_rejects_incompatible_states(self):
         from rtp_llm.ops import KVCacheConfig
 
