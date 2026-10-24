@@ -1,5 +1,6 @@
-package org.flexlb.balance.queue;
+package org.flexlb.balance.queue.dispatch;
 
+import org.flexlb.balance.queue.ProcessQueueResult;
 /**
  * 每一轮从队列里选出要交付的请求并交给 {@link GroupCommitter} 交付。
  * <p>

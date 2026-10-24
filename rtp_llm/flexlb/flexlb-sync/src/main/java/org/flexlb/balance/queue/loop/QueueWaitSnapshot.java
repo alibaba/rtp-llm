@@ -1,4 +1,4 @@
-package org.flexlb.balance.queue;
+package org.flexlb.balance.queue.loop;
 
 import org.flexlb.balance.endpoint.DecodeEndpoint.DecodeRoutingView;
 

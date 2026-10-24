@@ -1,7 +1,9 @@
-package org.flexlb.balance.queue;
+package org.flexlb.balance.queue.loop;
 
 import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.endpoint.PrefillState;
+import org.flexlb.balance.queue.CapacityBlockedHead;
+import org.flexlb.balance.queue.QueueState;
 import org.flexlb.balance.scheduler.EndpointEventHandler;
 import org.flexlb.balance.scheduler.QueueCapacity;
 import org.flexlb.balance.scheduler.ScheduledRequest;

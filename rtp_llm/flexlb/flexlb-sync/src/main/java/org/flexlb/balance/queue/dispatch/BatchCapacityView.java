@@ -1,4 +1,4 @@
-package org.flexlb.balance.queue;
+package org.flexlb.balance.queue.dispatch;
 
 import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.planner.GroupPlanner;

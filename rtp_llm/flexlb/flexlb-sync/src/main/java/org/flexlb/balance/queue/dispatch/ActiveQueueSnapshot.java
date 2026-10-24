@@ -1,4 +1,4 @@
-package org.flexlb.balance.queue;
+package org.flexlb.balance.queue.dispatch;
 
 import org.flexlb.balance.scheduler.ScheduledRequest;
 

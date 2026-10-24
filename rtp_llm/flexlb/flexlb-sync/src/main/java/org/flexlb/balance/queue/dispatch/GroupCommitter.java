@@ -1,4 +1,4 @@
-package org.flexlb.balance.queue;
+package org.flexlb.balance.queue.dispatch;
 
 import org.flexlb.balance.delivery.BlockedRequest;
 import org.flexlb.balance.delivery.DeliveryBlockReason;
@@ -9,6 +9,10 @@ import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.estimate.WorkView;
 import org.flexlb.balance.prediction.InvalidPrefillPredictionException;
 import org.flexlb.balance.prediction.PrefillTimePredictor;
+import org.flexlb.balance.queue.CapacityBlockedHead;
+import org.flexlb.balance.queue.ProcessQueueResult;
+import org.flexlb.balance.queue.QueueState;
+import org.flexlb.balance.queue.QueuedRequestRemover;
 import org.flexlb.balance.scheduler.EndpointEventHandler;
 import org.flexlb.balance.scheduler.EndpointRetiredException;
 import org.flexlb.balance.scheduler.QueueCapacity;
