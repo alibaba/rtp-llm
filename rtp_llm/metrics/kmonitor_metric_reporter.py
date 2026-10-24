@@ -1,10 +1,16 @@
 import logging
+import os
+import threading
+import time
 from enum import Enum
-from typing import Any, Dict, Union
+from typing import Any, Dict, Optional, Union
 
 # Auto-TPM QoS priority header conveyed by the DashScope gateway; the same
 # value the engine forwards to FlexLB as ``Schedule.priority``.
 QOS_PRIORITY_HEADER = "x-dashscope-inner-qos-level"
+SERVICE_STATUS_TAG = "is_serving"
+SERVICE_STATUS_METRIC = "rtp_llm_service_status"
+STARTUP_WARMUP_HEALTH_GATE_FILE_ENV = "RTP_LLM_STARTUP_WARMUP_HEALTH_GATE_FILE"
 
 
 def qos_priority_tag(qos_level: Any) -> str:
@@ -48,6 +54,18 @@ class AccMetrics(Enum):
     RECENT_CACHE_KEY_EMPTY_REQUEST_COUNT_METRIC = (
         "py_rtp_recent_cache_key_empty_request_count"
     )
+    FRONTEND_RECENT_CACHE_KEY_HIT_COUNT_METRIC = (
+        "py_rtp_frontend_recent_cache_key_hit_count"
+    )
+    FRONTEND_RECENT_CACHE_KEY_TOTAL_COUNT_METRIC = (
+        "py_rtp_frontend_recent_cache_key_total_count"
+    )
+    FRONTEND_RECENT_CACHE_KEY_REQUEST_COUNT_METRIC = (
+        "py_rtp_frontend_recent_cache_key_request_count"
+    )
+    FRONTEND_RECENT_CACHE_KEY_EMPTY_REQUEST_COUNT_METRIC = (
+        "py_rtp_frontend_recent_cache_key_empty_request_count"
+    )
 
     # igraph
     IGRAPH_QPS_METRIC = "py_rtp_igraph_qps"
@@ -84,6 +102,7 @@ class AccMetrics(Enum):
 
 
 class GaugeMetrics(Enum):
+    SERVICE_STATUS_METRIC = SERVICE_STATUS_METRIC
     RESPONSE_FIRST_TOKEN_RT_METRIC = "py_rtp_response_first_token_rt"
     RESPONSE_ITER_RT_METRIC = "py_rtp_response_iterate_rt"
     RESPONSE_ITERATE_COUNT = "py_rtp_response_iterate_count"
@@ -109,6 +128,9 @@ class GaugeMetrics(Enum):
     MASTER_QUEUE_LENGTH_METRIC = "py_rtp_master_queue_length"
     MASTER_HOST_METRIC = "py_rtp_master_host"
     RECENT_CACHE_KEY_HIT_RATIO_METRIC = "py_rtp_recent_cache_key_hit_ratio"
+    FRONTEND_RECENT_CACHE_KEY_HIT_RATIO_METRIC = (
+        "py_rtp_frontend_recent_cache_key_hit_ratio"
+    )
 
     # igraph
     IGRAPH_RT_METRIC = "py_rtp_igraph_rt"
@@ -171,37 +193,157 @@ class GaugeMetrics(Enum):
     VIT_EMBEDDING_CACHE_TOKENS_METRIC = "py_rtp_vit_embedding_cache_tokens"
     VIT_EMBEDDING_CACHE_BYTES_METRIC = "py_rtp_vit_embedding_cache_bytes"
 
+    # Request-lifecycle metrics emitted by the Python frontend after rendering.
+    FRONTEND_INPUT_LENGTH_METRIC = "py_rtp_frontend_input_length"
+    FRONTEND_OUTPUT_LENGTH_METRIC = "py_rtp_frontend_output_length"
+    FRONTEND_CACHED_TOKEN_LENGTH_METRIC = "py_rtp_frontend_cached_token_length"
+    FRONTEND_CACHE_HIT_RATIO_METRIC = "py_rtp_frontend_cache_hit_ratio"
+    FRONTEND_CONCURRENCY_METRIC = "py_rtp_frontend_concurrency"
+    FRONTEND_TTFT_MS_METRIC = "py_rtp_frontend_ttft_ms"
+    FRONTEND_TPOT_MS_METRIC = "py_rtp_frontend_tpot_ms"
+    FRONTEND_REQUEST_RT_MS_METRIC = "py_rtp_frontend_request_rt_ms"
+    FRONTEND_SPECULATIVE_ACCEPT_RATE_METRIC = "py_rtp_frontend_speculative_accept_rate"
+    FRONTEND_SPECULATIVE_AVG_ACCEPT_LENGTH_METRIC = (
+        "py_rtp_frontend_speculative_avg_accept_length"
+    )
+    FRONTEND_STREAM_FIRST_OUTPUT_TOKEN_LENGTH_METRIC = (
+        "py_rtp_frontend_stream_first_output_token_length"
+    )
+    # Frontend token throughput. Input TPS is normalized by backend execution
+    # time; output TPS is normalized by the elapsed reporting-window time.
+    FRONTEND_INPUT_TOKEN_TPS_METRIC = "py_rtp_frontend_input_token_tps"
+    FRONTEND_OUTPUT_TOKEN_TPS_METRIC = "py_rtp_frontend_output_token_tps"
+    FRONTEND_NONCACHE_INPUT_TOKEN_TPS_METRIC = (
+        "py_rtp_frontend_noncache_input_token_tps"
+    )
+    FRONTEND_NONCACHE_OUTPUT_TOKEN_TPS_METRIC = (
+        "py_rtp_frontend_noncache_output_token_tps"
+    )
+
+
+class ServiceState(Enum):
+    STARTING = "starting"
+    WAITING_FOR_WARMUP = "waiting_for_warmup"
+    SERVING = "serving"
+    DRAINING = "draining"
+    STOPPED = "stopped"
+
 
 class MetricReporter(object):
     def __init__(self, kmonitor: Any):
         self._kmon = kmonitor
         self._matic_map: Dict[str, Any] = {}
         self._inited = False
+        self._state_lock = threading.RLock()
+        self._state = ServiceState.STARTING
+        self._gate_file = ""
+        self._reporting_start_time: Optional[float] = None
+        self._service_draining = None
+        self._kmon.report_worker.before_report = self._report_service_status
+
+    def bind_service_draining(self, event) -> None:
+        self._service_draining = event
 
     def report(
         self,
         metric: Union[AccMetrics, GaugeMetrics],
         value: float = 1,
-        tags: Dict[str, Any] = {},
+        tags: Optional[Dict[str, Any]] = None,
     ):
-        kmon_metric = self._matic_map.get(metric.value, None)
-        if kmon_metric is None:
-            logging.warning(f"no metric named {metric.name}")
-            return
-        kmon_metric.report(value, tags)
+        with self._state_lock:
+            if self._state not in (ServiceState.SERVING, ServiceState.DRAINING):
+                return
+            kmon_metric = self._matic_map.get(metric.value)
+            if kmon_metric is None:
+                logging.warning(f"no metric named {metric.name}")
+                return
+            kmon_metric.report(value, dict(tags or {}))
 
     def flush(self) -> None:
-        self._kmon.flush()
+        try:
+            self._kmon.flush()
+        except Exception:
+            # Monitoring transport failures must not abort startup or draining.
+            logging.exception("kmonitor flush failed")
 
     def init(self):
-        if not self._inited:
-            self._inited = True
+        with self._state_lock:
+            if self._inited:
+                return
             for metric in AccMetrics:
                 self._matic_map[metric.value] = self._kmon.register_acc_metric(
                     metric.value
                 )
-
             for metric in GaugeMetrics:
                 self._matic_map[metric.value] = self._kmon.register_gauge_metric(
                     metric.value
                 )
+            self._inited = True
+
+    def start_serving_when_ready(self) -> None:
+        with self._state_lock:
+            if not self._inited or self._state != ServiceState.STARTING:
+                return
+            self._gate_file = os.environ.get(
+                STARTUP_WARMUP_HEALTH_GATE_FILE_ENV, ""
+            ).strip()
+            self._state = ServiceState.WAITING_FOR_WARMUP
+        self.flush()
+
+    def set_serving(self, serving: bool) -> None:
+        if serving:
+            self.start_serving_when_ready()
+            return
+        if self._service_draining is not None:
+            self._service_draining.set()
+        with self._state_lock:
+            # Shutdown is terminal, including when it precedes init/readiness.
+            if self._state in (ServiceState.DRAINING, ServiceState.STOPPED):
+                return
+            self._state = (
+                ServiceState.DRAINING
+                if self._state == ServiceState.SERVING
+                else ServiceState.STOPPED
+            )
+        # This path is also reached from Python signal handlers. Never flush
+        # here: a signal may have interrupted the same thread inside a metric
+        # lock. The next worker cycle publishes the new state within one second.
+
+    def _report_service_status(self) -> Optional[Dict[str, str]]:
+        # Reuse the worker's reporting cycle for both readiness and heartbeat.
+        # Checking the gate and committing readiness share the shutdown lock.
+        with self._state_lock:
+            if self._service_draining is not None and self._service_draining.is_set():
+                if self._state not in (ServiceState.DRAINING, ServiceState.STOPPED):
+                    self._state = (
+                        ServiceState.DRAINING
+                        if self._state == ServiceState.SERVING
+                        else ServiceState.STOPPED
+                    )
+            if self._state == ServiceState.WAITING_FOR_WARMUP and (
+                not self._gate_file or os.path.exists(self._gate_file)
+            ):
+                # Reset accumulator clocks before accepting the first real sample.
+                self._kmon.report_worker.get_report_events()
+                self._reporting_start_time = time.monotonic()
+                self._state = ServiceState.SERVING
+            if self._state not in (ServiceState.SERVING, ServiceState.DRAINING):
+                return None
+            self.report(GaugeMetrics.SERVICE_STATUS_METRIC, float(self.is_serving))
+            return {SERVICE_STATUS_TAG: str(self.is_serving).lower()}
+
+    @property
+    def is_serving(self) -> bool:
+        with self._state_lock:
+            return self._state == ServiceState.SERVING
+
+    @property
+    def is_reporting_enabled(self) -> bool:
+        with self._state_lock:
+            return self._state in (ServiceState.SERVING, ServiceState.DRAINING)
+
+    @property
+    def reporting_start_time(self) -> Optional[float]:
+        """Monotonic seconds when warmup ended; None until reporting is enabled."""
+        with self._state_lock:
+            return self._reporting_start_time

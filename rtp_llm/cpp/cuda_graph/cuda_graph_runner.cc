@@ -1,3 +1,4 @@
+#include "rtp_llm/cpp/metrics/ServiceStatus.h"
 #include "rtp_llm/cpp/cuda_graph/cuda_graph_runner.h"
 #include "rtp_llm/cpp/cache/CacheTopology.h"
 #include "rtp_llm/cpp/cuda_graph/combo_position_ids_validation.h"
@@ -1969,8 +1970,8 @@ void CudaGraphRunner::replayGraph(int key) {
                                     is_target_verify_,
                                     exception.what());
                 if (metrics_reporter_) {
-                    metrics_reporter_->report(
-                        1, "rtp_llm_cuda_graph_replay_oom_retry_qps", kmonitor::MetricType::QPS, nullptr, true);
+                    reportKmonMetric(
+                        metrics_reporter_, 1, "rtp_llm_cuda_graph_replay_oom_retry_qps", kmonitor::MetricType::QPS);
                 }
                 cuda_graph::graphEmptyCache();
             });

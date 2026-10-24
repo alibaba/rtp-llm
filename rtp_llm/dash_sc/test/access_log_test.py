@@ -445,6 +445,131 @@ class CorrelationHeaderTest(TestCase):
 
 
 class BuildRecordTest(TestCase):
+    def test_private_zero_is_authoritative_and_bad_counters_are_ignored(self) -> None:
+        rec = _make_record()
+        rec.record_frontend_backend_output(
+            SimpleNamespace(
+                frontend_generate_token_num=0,
+                aux_info=SimpleNamespace(input_len=10, output_len=9, reuse_len=2),
+            )
+        )
+        self.assertEqual(rec.frontend_combined_metric_counters.generate_token_num, 0)
+        counters = dict(rec.frontend_backend_metric_counters)
+        rec.record_frontend_backend_output(
+            SimpleNamespace(frontend_speculative_verify_rounds=float("inf"))
+        )
+        self.assertEqual(rec.frontend_backend_metric_counters, counters)
+
+    def test_acceptance_logging_preserves_request_state_on_error(self) -> None:
+        rec = _make_record(status="CANCELLED", finish_reason=10)
+        rec.record_frontend_backend_output(
+            SimpleNamespace(
+                frontend_speculative_verify_rounds=2,
+                frontend_speculative_accepted_token_num=6,
+                frontend_speculative_proposed_draft_tokens=8,
+            )
+        )
+        counters = dict(rec.frontend_backend_metric_counters)
+        for _ in range(2):
+            payload = rec.build_record(server_id=1, rank_id=0)
+            self.assertEqual(payload["status"], "CANCELLED")
+            self.assertEqual(payload["finish_reason"], 10)
+            self.assertEqual(payload["speculative_accept_rate"], 0.5)
+            self.assertEqual(rec.frontend_backend_metric_counters, counters)
+
+    def test_non_speculative_request_omits_acceptance_fields(self) -> None:
+        rec = _make_record()
+        rec.record_frontend_backend_output(SimpleNamespace(output_len=10))
+        payload = rec.build_record(server_id=1, rank_id=0)
+        self.assertFalse(any(key.startswith("speculative_") for key in payload))
+
+    def test_speculative_acceptance_handles_missing_denominators(self) -> None:
+        for rounds, accepted, proposed, avg_length, rate in (
+            (2, 4, 0, 2.0, None),
+            (0, 0, 8, None, 0.0),
+            (2, 1, 8, 0.5, 0.0),
+            (2, 20, 8, 10.0, 1.0),
+        ):
+            with self.subTest(rounds=rounds, accepted=accepted, proposed=proposed):
+                rec = _make_record()
+                rec.record_frontend_backend_output(
+                    SimpleNamespace(
+                        frontend_speculative_verify_rounds=rounds,
+                        frontend_speculative_accepted_token_num=accepted,
+                        frontend_speculative_proposed_draft_tokens=proposed,
+                    )
+                )
+                payload = rec.build_record(server_id=1, rank_id=0)
+                self.assertEqual(payload["speculative_avg_accept_length"], avg_length)
+                self.assertEqual(payload["speculative_accept_rate"], rate)
+
+    def test_frontend_old_backend_falls_back_only_to_public_lengths(self) -> None:
+        rec = _make_record()
+        rec.record_frontend_backend_output(
+            SimpleNamespace(
+                generate_outputs=[
+                    SimpleNamespace(
+                        aux_info=SimpleNamespace(
+                            input_len=10,
+                            reuse_len=2,
+                            output_len=6,
+                            # These fields were never part of public AuxInfo and
+                            # must not be mistaken for a rolling-upgrade path.
+                            context_execute_time_us=999,
+                            speculative_verify_rounds=999,
+                        )
+                    )
+                ]
+            )
+        )
+
+        counters = rec.frontend_combined_metric_counters
+        self.assertEqual(counters.input_len, 10)
+        self.assertEqual(counters.reuse_len, 2)
+        self.assertEqual(counters.generate_token_num, 5)
+        self.assertEqual(counters.context_execute_time_us, 0)
+        self.assertEqual(counters.speculative_verify_rounds, 0)
+
+    def test_frontend_mtp_generate_tokens_match_backend_tps_numerator(self) -> None:
+        rec = _make_record()
+        rec.record_frontend_backend_output(
+            SimpleNamespace(
+                frontend_speculative_verify_rounds=4,
+                frontend_speculative_accepted_token_num=7,
+                frontend_speculative_proposed_draft_tokens=12,
+                frontend_context_execute_time_us=100,
+                frontend_context_execute_time_with_cache_us=100,
+                frontend_generate_execute_time_us=200,
+                frontend_generate_token_num=7,
+                frontend_input_len=10,
+                generate_outputs=[
+                    SimpleNamespace(aux_info=SimpleNamespace(reuse_len=2, output_len=6))
+                ],
+            )
+        )
+
+        self.assertEqual(rec.frontend_combined_metric_counters[-1], 7)
+
+    def test_frontend_normal_generate_tokens_exclude_first_token(self) -> None:
+        rec = _make_record()
+        rec.record_frontend_backend_output(
+            SimpleNamespace(
+                frontend_speculative_verify_rounds=0,
+                frontend_speculative_accepted_token_num=0,
+                frontend_speculative_proposed_draft_tokens=0,
+                frontend_context_execute_time_us=100,
+                frontend_context_execute_time_with_cache_us=100,
+                frontend_generate_execute_time_us=200,
+                frontend_generate_token_num=5,
+                frontend_input_len=10,
+                generate_outputs=[
+                    SimpleNamespace(aux_info=SimpleNamespace(reuse_len=2, output_len=6))
+                ],
+            )
+        )
+
+        self.assertEqual(rec.frontend_combined_metric_counters[-1], 5)
+
     def test_struct_mode_token_accounting(self) -> None:
         rec = _make_record()
         rec.capture_structured_request(
@@ -723,6 +848,38 @@ class BuildRecordTest(TestCase):
 
 
 class EmitLogTest(TestCase):
+    def test_access_log_correlates_cumulative_acceptance_with_request(self) -> None:
+        rec = _make_record(upstream_request_id="dashscope-glm53-123")
+        rec.record_request_frame(_make_infer_request(request_id="glm53-123"))
+        # Each phase reports cumulative counters. The second phase1 frame
+        # replaces its first snapshot, while a new backend phase adds to it.
+        for phase, rounds, accepted, proposed in (
+            ("phase1", 1, 3, 4),
+            ("phase1", 2, 6, 8),
+            ("phase2", 1, 4, 4),
+        ):
+            rec.record_frontend_backend_output(
+                SimpleNamespace(
+                    frontend_speculative_verify_rounds=rounds,
+                    frontend_speculative_accepted_token_num=accepted,
+                    frontend_speculative_proposed_draft_tokens=proposed,
+                ),
+                phase=phase,
+            )
+        with patch.object(
+            logging.getLogger(DASH_SC_GRPC_ACCESS_LOGGER_NAME), "info"
+        ) as info:
+            emit_access_log(rec, rank_id=0, server_id=1)
+        info.assert_called_once()
+        payload = json.loads(info.call_args.args[0])
+        self.assertEqual(payload["request_id"], "glm53-123")
+        self.assertEqual(payload["upstream_request_id"], "dashscope-glm53-123")
+        self.assertEqual(payload["speculative_verify_rounds"], 3)
+        self.assertEqual(payload["speculative_accepted_token_num"], 10)
+        self.assertEqual(payload["speculative_proposed_draft_tokens"], 12)
+        self.assertAlmostEqual(payload["speculative_avg_accept_length"], 10 / 3)
+        self.assertAlmostEqual(payload["speculative_accept_rate"], 7 / 12)
+
     def test_query_log_arrival_breadcrumb(self) -> None:
         rec = _make_record(
             upstream_request_id="corr-xyz",

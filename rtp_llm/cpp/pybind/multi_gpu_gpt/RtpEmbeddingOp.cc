@@ -96,6 +96,7 @@ void RtpEmbeddingOp::init(py::object model,
             auto kmon_tags = kmonitor::MetricsTags();
             kmon_tags.AddTag("dp_rank", std::to_string(parallelism_config.dp_rank));
             params.metrics_reporter.reset(new kmonitor::MetricsReporter("", "", kmon_tags));
+            startKmonServiceStatus(params.metrics_reporter);
         }
         embedding_engine_.reset(new EmbeddingEngine(params, py_handler));
         if (!mm_process_engine.is_none()) {
@@ -172,6 +173,7 @@ void RtpEmbeddingOp::initGrpcServer(int64_t                              embeddi
 }
 
 void RtpEmbeddingOp::stop() {
+    setKmonServiceServing(false);
     if (embedding_rpc_service_) {
         embedding_rpc_service_->stop();
         embedding_rpc_service_.reset();
@@ -191,6 +193,10 @@ void RtpEmbeddingOp::stop() {
     }
     embedding_grpc_service_.reset();
     stopKmonitorFactory();
+}
+
+void RtpEmbeddingOp::setServing(bool serving) {
+    setKmonServiceServing(serving);
 }
 
 void RtpEmbeddingOp::startHttpServer(std::shared_ptr<EmbeddingEngine>     embedding_engine,
@@ -276,6 +282,7 @@ void registerRtpEmbeddingOp(const py::module& m) {
              py::arg("vit_config"),
              py::arg("mm_process_engine"))
         .def("stop", &RtpEmbeddingOp::stop)
+        .def("set_serving", &RtpEmbeddingOp::setServing)
         .def("decode",
              &RtpEmbeddingOp::decode,
              py::call_guard<py::gil_scoped_release>(),
