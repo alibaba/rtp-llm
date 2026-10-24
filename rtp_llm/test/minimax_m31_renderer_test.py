@@ -136,6 +136,20 @@ class MiniMaxM31VLRendererTest(unittest.TestCase):
                     rendered.input_ids, list(rendered.rendered_prompt.encode())
                 )
 
+            without_generation_prompt = renderer.render_chat(
+                ChatCompletionRequest.model_validate(
+                    {
+                        **base,
+                        "chat_template_kwargs": {
+                            "thinking_mode": "disabled",
+                            "add_generation_prompt": False,
+                        },
+                    }
+                )
+            )
+            self.assertEqual(
+                without_generation_prompt.rendered_prompt, adaptive.rendered_prompt
+            )
             budget_zero = renderer.render_chat(
                 ChatCompletionRequest.model_validate({**base, "thinking_budget": 0})
             )

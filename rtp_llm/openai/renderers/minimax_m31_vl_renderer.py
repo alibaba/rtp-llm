@@ -91,7 +91,7 @@ class MiniMaxM31Renderer(BasicRenderer, ReasoningToolBaseRenderer):
         ):
             render_args.update(request.extra_configs.chat_template_kwargs)
         prompt = self._get_template(request).render(**render_args)
-        if self.add_generation_prompt:
+        if render_args["add_generation_prompt"]:
             thinking_mode = self.resolve_thinking_mode(request)
             if thinking_mode == ThinkingMode.DISABLED:
                 prompt += "</mm:think>"
