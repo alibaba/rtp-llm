@@ -16,11 +16,6 @@ sources:
       - role
       - engine_name
       - engine_incarnation
-      measurement:
-        method: raw_scrape
-        population: mock_selector
-        accuracy: sampled
-        requires_request_identity: false
       exported_metrics:
       - rtp_llm_context_tps
     rtp_llm_context_tps_with_cache:
@@ -32,11 +27,6 @@ sources:
       - role
       - engine_name
       - engine_incarnation
-      measurement:
-        method: raw_scrape
-        population: mock_selector
-        accuracy: sampled
-        requires_request_identity: false
       exported_metrics:
       - rtp_llm_context_tps_with_cache
     mock_decode_wall_tps:
@@ -48,11 +38,6 @@ sources:
       - role
       - engine_name
       - engine_incarnation
-      measurement:
-        method: raw_scrape
-        population: mock_selector
-        accuracy: sampled
-        requires_request_identity: false
       exported_metrics:
       - mock_decode_wall_tps
 produced:
@@ -61,7 +46,6 @@ produced:
     source_type: client_journal
     unit: ms
     value_kind: gauge
-    labels: []
     calculation:
       calculator: quantile
       window: traffic
@@ -76,106 +60,88 @@ produced:
     source_type: client_journal
     unit: requests
     value_kind: scalar
-    labels: []
   performance_gate/error_rate:
     producer: performance_requests
     source_type: client_journal
     unit: ratio
     value_kind: scalar
-    labels: []
   performance_gate/slo_fraction:
     producer: performance_requests
     source_type: client_journal
     unit: ratio
     value_kind: scalar
-    labels: []
   performance_gate/goodput_rps:
     producer: performance_requests
     source_type: client_journal
     unit: requests/s
     value_kind: scalar
-    labels: []
   performance_gate/input_tps:
     producer: performance_requests
     source_type: client_journal
     unit: tokens/s
     value_kind: scalar
-    labels: []
   performance_gate/output_tps:
     producer: performance_requests
     source_type: client_journal
     unit: tokens/s
     value_kind: scalar
-    labels: []
   performance_gate/ttft_p99_ms:
     producer: performance_requests
     source_type: client_journal
     unit: ms
     value_kind: scalar
-    labels: []
   performance_gate/e2e_p99_ms:
     producer: performance_requests
     source_type: client_journal
     unit: ms
     value_kind: scalar
-    labels: []
   performance_gate/tpot_p99_ms:
     producer: performance_requests
     source_type: client_journal
     unit: ms
     value_kind: scalar
-    labels: []
   performance_gate/inflight_growth_rps:
     producer: performance_requests
     source_type: client_journal
     unit: requests/s
     value_kind: scalar
-    labels: []
   performance_gate/rtp_llm_context_tps_scrape_engine_mean:
     producer: performance_requests
     source_type: prometheus
     unit: tokens/s
     value_kind: scalar
-    labels: []
   performance_gate/rtp_llm_context_tps_with_cache_scrape_engine_mean:
     producer: performance_requests
     source_type: prometheus
     unit: tokens/s
     value_kind: scalar
-    labels: []
   performance_gate/mock_decode_wall_tps_scrape_engine_mean:
     producer: performance_requests
     source_type: prometheus
     unit: tokens/s
     value_kind: scalar
-    labels: []
   performance_gate/rtp_llm_context_tps_engine_count:
     producer: performance_requests
     source_type: prometheus
     unit: engines
     value_kind: scalar
-    labels: []
   performance_gate/rtp_llm_context_tps_with_cache_engine_count:
     producer: performance_requests
     source_type: prometheus
     unit: engines
     value_kind: scalar
-    labels: []
   performance_gate/mock_decode_wall_tps_engine_count:
     producer: performance_requests
     source_type: prometheus
     unit: engines
     value_kind: scalar
-    labels: []
   performance_gate/offered_qps_deviation:
     producer: performance_requests
     source_type: client_journal
     unit: ratio
     value_kind: scalar
-    labels: []
   performance_gate/pacing_lag_max_ms:
     producer: performance_requests
     source_type: client_journal
     unit: ms
     value_kind: scalar
-    labels: []

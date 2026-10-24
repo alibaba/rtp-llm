@@ -85,8 +85,10 @@ class CurvePresentation:
     labels: tuple[tuple[str, str], ...] | None = None
 
     @classmethod
-    def read(cls, value):
+    def read(cls, value, *, curve_id=None):
         mapping(value, {'name', 'group', 'axis'}, {field.name for field in fields(cls)}, 'invalid metric presentation')
+        if curve_id is not None:
+            value = dict(value, metric_id=value.get('metric_id', curve_id), labels=value.get('labels', {}))
         if not all(text(value[key]) for key in ('name', 'group', 'axis')):
             raise ValueError('invalid metric labels')
         if any(type(value[key]) is not str for key in ('source_unit', 'unit', 'color') if key in value):
@@ -353,7 +355,7 @@ class ViewDefinition:
             metrics=MetricSelection(data['metrics']['query_plan'], tuple(data['metrics'].get('diagnostic_only', [])))
                     if 'metrics' in data else None,
             charts=ChartDefinition(
-                curves={key: CurvePresentation.read(value) for key, value in charts.get('curves', {}).items()},
+                curves={key: CurvePresentation.read(value, curve_id=key) for key, value in charts.get('curves', {}).items()},
                 panels=tuple(PanelPresentation.read(value) for value in charts.get('panels', [])),
                 events=copy.deepcopy(charts.get('events', {})), event_ids=tuple(charts.get('event_ids', [])),
                 detail_labels=tuple(charts.get('detail_labels', [])), summaries=tuple(charts.get('summaries', [])),

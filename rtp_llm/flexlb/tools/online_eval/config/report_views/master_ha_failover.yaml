@@ -40,59 +40,41 @@ charts:
   - restart_b
   curves:
     ha/sent:
-      metric_id: ha/sent
-      labels: {}
       name: 发出
       group: 请求
       unit: requests/s
       axis: qps
       color: '#2f54eb'
-      hidden: false
     ha/success:
-      metric_id: ha/success
-      labels: {}
       name: 成功
       group: 请求
       unit: requests/s
       axis: qps
       color: '#52c41a'
-      hidden: false
     ha/failed:
-      metric_id: ha/failed
-      labels: {}
       name: 失败
       group: 请求
       unit: requests/s
       axis: qps
       color: '#f5222d'
-      hidden: false
     ha/prefill_peak_qps:
-      metric_id: ha/prefill_peak_qps
-      labels: {}
       name: 最热 Prefill
       group: Prefill 分配
       unit: requests/s
       axis: qps
       color: '#f5222d'
-      hidden: false
     ha/prefill_mean_qps:
-      metric_id: ha/prefill_mean_qps
-      labels: {}
       name: 全体 Prefill 平均
       group: Prefill 分配
       unit: requests/s
       axis: qps
       color: '#52c41a'
-      hidden: false
     ha/prefill_skew:
-      metric_id: ha/prefill_skew
-      labels: {}
       name: 最热 / 平均
       group: Prefill 分配
       unit: ratio
       axis: skew
       color: '#13c2c2'
-      hidden: false
     ha/http_up/A:
       metric_id: ha/http_up
       labels:
@@ -102,7 +84,6 @@ charts:
       unit: boolean
       axis: up
       color: '#1677ff80'
-      hidden: false
     ha/http_up/B:
       metric_id: ha/http_up
       labels:
@@ -112,7 +93,6 @@ charts:
       unit: boolean
       axis: up
       color: '#722ed180'
-      hidden: false
     ha/scheduler_inflight/A:
       metric_id: ha/scheduler_inflight
       labels:
@@ -122,7 +102,6 @@ charts:
       unit: requests
       axis: count
       color: '#1677ff'
-      hidden: false
     ha/scheduler_inflight/B:
       metric_id: ha/scheduler_inflight
       labels:
@@ -132,7 +111,6 @@ charts:
       unit: requests
       axis: count
       color: '#722ed1'
-      hidden: false
     ha/prefill_inflight_requests/A:
       metric_id: ha/prefill_inflight_requests
       labels:
@@ -142,7 +120,6 @@ charts:
       unit: requests
       axis: count
       color: '#13c2c2'
-      hidden: false
     ha/prefill_inflight_requests/B:
       metric_id: ha/prefill_inflight_requests
       labels:
@@ -152,7 +129,6 @@ charts:
       unit: requests
       axis: count
       color: '#eb2f96'
-      hidden: false
     ha/decode_master_queued/A:
       metric_id: ha/decode_master_queued
       labels:
@@ -162,7 +138,6 @@ charts:
       unit: requests
       axis: count
       color: '#fa8c16'
-      hidden: false
     ha/decode_master_queued/B:
       metric_id: ha/decode_master_queued
       labels:
@@ -172,7 +147,6 @@ charts:
       unit: requests
       axis: count
       color: '#faad14'
-      hidden: false
     ha/decode_confirmed_running/A:
       metric_id: ha/decode_confirmed_running
       labels:
@@ -182,7 +156,6 @@ charts:
       unit: requests
       axis: count
       color: '#52c41a'
-      hidden: false
     ha/decode_confirmed_running/B:
       metric_id: ha/decode_confirmed_running
       labels:
@@ -192,7 +165,6 @@ charts:
       unit: requests
       axis: count
       color: '#a0d911'
-      hidden: false
   panels:
   - id: request_qps
     title: 请求发出 / 成功 / 失败 QPS · Master HTTP 状态

@@ -52,8 +52,10 @@ def test_retired_ha_capabilities_fail_instead_of_returning_zero(name):
 def test_performance_public_scalars_have_checks_or_coverage_consumers():
     scenario = yaml.safe_load((ROOT/'config/scenarios/master_performance.yaml').read_text())
     checks = scenario['parameters']['checks']
-    consumed = {criterion['metric'] for key, criterion in checks.items() if key != 'engine_tps'}
-    consumed |= {criterion['metric'] for criterion in checks['engine_tps'].values()}
+    from scenario.program_compiler import configure_program
+    variant = configure_program(scenario, 'performance.yaml').variants[0]
+    consumed = {identity for identity in variant.monitoring_query_plan['definition']['demand']['gate']
+                if identity.startswith('performance_gate/')}
     # Observed incarnation counts explain coverage; they are not business floors.
     coverage = {'performance_gate/'+metric+'_engine_count' for metric in checks['engine_tps']}
     produced = load_plan('master_performance.yaml')['produced']

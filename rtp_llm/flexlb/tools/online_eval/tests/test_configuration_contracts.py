@@ -213,3 +213,47 @@ def test_metric_bindings_cannot_select_a_reader_backend(name, input_group):
     data['parameters']['observation']['inputs'][input_group]['source'] = 'metric_store'
     with pytest.raises(ValueError, match='program owns the reader'):
         configure_program(data, 'case.yaml')
+
+
+@pytest.mark.parametrize('name', ['master_performance', 'cache_scale_in'])
+def test_compact_fixed_checks_compile_to_the_explicit_contract(name):
+    from importlib import import_module
+    data = config(name)
+    compact = configure_program(data, 'case.yaml')
+    data['program'] = 'default'
+    for key, (_, metric, op, unit, windows) in import_module('cases.' + name + '.inputs').RULES.items():
+        data['parameters']['checks'][key].update(
+            metric=('performance_gate/' if name == 'master_performance' else 'cache_gate/') + metric,
+            op=op, unit=unit, windows=list(windows))
+    if name == 'master_performance':
+        for key, criterion in data['parameters']['checks']['engine_tps'].items():
+            criterion.update(metric='performance_gate/' + key + '_scrape_engine_mean',
+                             op='ge', unit='tokens/s', windows=['measurement'])
+    assert configure_program(data, 'case.yaml').variants == compact.variants
+
+
+@pytest.mark.parametrize('program', [None, '', 'recovery'])
+def test_omitted_base_program_does_not_accept_invalid_explicit_values(program):
+    data = config('request_completion')
+    data['program'] = program
+    with pytest.raises(ScenarioError, match='base case program'):
+        configure_program(data, 'case.yaml')
+
+
+@pytest.mark.parametrize('mode,method', [('scrape', 'raw_scrape'), ('evaluated', 'promql_evaluation')])
+def test_query_defaults_freeze_the_same_measurement_and_labels(mode, method):
+    raw = dict(metric_plan_schema_version=5, sources=dict(mock=dict(
+        temperature=dict(promql='temperature${selector}', mode=mode, unit='K',
+                         value_kind='gauge', exported_metrics=['temperature']))))
+    with patch('monitoring.query_plan.load_document', return_value=raw):
+        compact = load_plan('temperature.yaml')
+        spec = raw['sources']['mock']['temperature']
+        assert 'labels' not in spec and 'measurement' not in spec
+        spec.update(labels=[], measurement=dict(method=method, population='mock_selector',
+                    accuracy='sampled', requires_request_identity=False))
+        assert load_plan('temperature.yaml') == compact
+        spec['measurement']['accuracy'] = 'histogram_estimate'
+        assert load_plan('temperature.yaml')['sources']['mock']['temperature']['measurement']['accuracy'] == 'histogram_estimate'
+        del spec['measurement']['population']
+        with pytest.raises(ScenarioError, match='measurement'):
+            load_plan('temperature.yaml')

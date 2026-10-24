@@ -1,6 +1,5 @@
 case_schema_version: 2
 case: cache_scale_in
-program: default
 metadata:
   kind: workload
   description: Shared healthy warmup and fixed scale-in control with a cache-affinity
@@ -177,41 +176,14 @@ parameters:
       sustain_s: 30
   checks:
     offered_load:
-      metric: cache_gate/offered_qps_deviation
-      windows:
-      - baseline
-      - post
-      unit: ratio
-      op: le
       expected: 0.1
     baseline_hit:
-      metric: cache_gate/baseline_min_half_hit
-      windows:
-      - baseline
-      unit: ratio
-      op: ge
       expected: 0.46
     baseline_stability:
-      metric: cache_gate/baseline_half_spread
-      windows:
-      - baseline
-      unit: ratio
-      op: le
       expected: 0.05
     completed:
-      metric: cache_gate/min_window_completed
-      windows:
-      - baseline
-      - post
-      unit: requests
-      op: ge
       expected: 20
     collapse:
-      metric: cache_gate/collapse_detected
-      windows:
-      - post
-      unit: boolean
-      op: eq
       expected: 0
 data_archives:
   default: deepseek

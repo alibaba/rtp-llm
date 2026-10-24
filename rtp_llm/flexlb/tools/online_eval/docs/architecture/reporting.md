@@ -16,7 +16,7 @@
 
 `sections.<id>` 只包含 `title`、`opened` 和表格的 `columns`。`checks` 表示专属门禁说明，`monitoring`、`validity`、`metrics`、`sources` 表示相应诊断；case 专属附录由注册的 Python 校验器声明。每个 case 校验附录 ID 集合及表格列数，不能依赖生产时的 KeyError。表格和详情使用相同开合组件，Python 决定内容和顺序，YAML 只控制展示。公共骨架使用稳定的 `run.checks`、`run.validity` 区块 ID 和 `run.execution`、`run.validity` KPI ID；视图附录使用 `case.<id>`。结构去重只比较 ID，不比较标题或展示文字。公共组件生成标准 KPI 与检查表，case 提供专属面板和附录；运行报告不重复展示 case 的另一份检查表。
 
-曲线通过 `charts.curves.<curve_id>.metric_id` 与 `labels` 选择冻结指标，面板通过 `charts.panels[].curve_ids` 选择曲线；展示名不参与判定或身份匹配。`reporting/catalog.py` 只提供通用调色板和 UI 主题，不按指标名称推断单位、分组或业务含义。全量诊断视图按冻结指标的 `unit` 标注坐标轴，保留原始指标身份。
+曲线通过 `charts.curves.<curve_id>.metric_id` 与 `labels` 选择冻结指标，面板通过 `charts.panels[].curve_ids` 选择曲线；省略 `metric_id` 时使用曲线键，省略 `labels` 时不附加标签过滤，`hidden` 默认为 false；别名和角色投影仍显式绑定。展示名不参与判定或身份匹配。`reporting/catalog.py` 只提供通用调色板和 UI 主题，不按指标名称推断单位、分组或业务含义。全量诊断视图按冻结指标的 `unit` 标注坐标轴，保留原始指标身份。
 
 视图不声明运行元信息，不用固定字符串宣称采样或来源；运行信息由归档的 `run_meta` 提供，曲线来源由冻结的 provenance 提供。新增展示项放入相应块并同时补充 Python 字段合同，不保留旧扁平字段或转换适配器。
 

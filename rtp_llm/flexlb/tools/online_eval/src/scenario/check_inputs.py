@@ -7,13 +7,15 @@ from scenario.windows import check_windows
 
 def metric_criterion(case, spec, *, metric, unit, windows, op, path,
                      profiles=False, dimensions=None):
-    fields(spec, {"metric", "unit", "windows", "op", "expected"}, path,
-           optional={"expected_by_profile"} if profiles else ())
-    check_windows(spec["windows"], available=windows, path=path + ".windows")
-    if (spec["metric"] != metric or spec["unit"] != unit
-            or set(spec["windows"]) != set(windows) or spec["op"] != op):
+    binding = dict(metric=metric, unit=unit, windows=list(windows), op=op)
+    fields(spec, {"expected"}, path,
+           optional=set(binding) | ({"expected_by_profile"} if profiles else set()))
+    declared = {**binding, **spec}
+    check_windows(declared["windows"], available=windows, path=path + ".windows")
+    if (declared["metric"] != metric or declared["unit"] != unit
+            or set(declared["windows"]) != set(windows) or declared["op"] != op):
         raise ValueError(path + ": metric, unit, windows or comparison does not match the measurement contract")
-    validate_comparison(spec["op"], spec["expected"])
+    validate_comparison(op, spec["expected"])
     if type(spec["expected"]) not in (int, float):
         raise ValueError(path + ": metric threshold must be numeric")
     case.metric(metric, unit=unit)

@@ -61,7 +61,6 @@ CASE = CaseDefinition(
 ```yaml
 case_schema_version: 2
 case: protocol_terminal
-program: default
 metadata:
   kind: functional
   description: 验证提交的请求终态没有流错误
@@ -128,7 +127,7 @@ python3 tools/online_eval/scripts/commands/format_configs.py
 
 唯一的字段排序表在 `scripts/pipeline/config_order.py`。命令只移动已有字段块，不补默认值、改标量或重排列表，并在写入前检查解析值不变。新业务参数按其输入含义组织，不为了格式工具另建 YAML schema。
 
-每个 case 顶层必须声明 `program: default`，Python 必须注册 `default` builder。首个变体身份缺省为 `default`，可用 `default_variant` 指定名字；`variants` 只追加额外测试点，不能与首个变体重名。`metadata.kind` 为 functional 或 workload，`execution.collection` 为 aggregate、request 或 diagnostic；性质、说明和采集档位必须完整。CI 必跑项显式登记到 `config/suites.yaml`，不从 category 或目录位置推断。
+case 顶层省略 `program` 时使用 `default`，Python 必须注册 `default` builder；显式填写时也只能为 `default`。首个变体身份缺省为 `default`，可用 `default_variant` 指定名字；`variants` 只追加额外测试点，不能与首个变体重名。`metadata.kind` 为 functional 或 workload，`execution.collection` 为 aggregate、request 或 diagnostic；性质、说明和采集档位必须完整。CI 必跑项显式登记到 `config/suites.yaml`，不从 category 或目录位置推断。
 
 ## 数据、运行策略与参数约束
 
@@ -155,7 +154,7 @@ program 用 `InputSchema(...)` 声明输入分组和字段，再通过 `case.con
 - 跨阶段窗口使用 `stage`、`field: epoch_s` 和可选 `offset_s`，经 `ObservationWindow` 编译成有类型的输出引用。`procedure` 中的 `wait_s` 控制现场流程实际等待；窗口引用完成后记录的时间戳，有效时长由实际边界之差计算，不能把操作的 `timeout_s` 当成窗口长度，也不再另写同义的窗口时长。
 - 单次观测内的窗口使用 `event` 和显式 `offset_s`，测量能力验证允许的锚点及边界方向，并从边界推导预热、测量时长和采集截止时间。偏移量定义取证区间；改变边界也可能改变观测执行时长，并非只改变报告显示。
 
-两种形式遵守同一规则：流程等待、操作超时与取证区间是不同输入，不相互冒充，也不重复声明同一个窗口长度。无条件等待属于 `procedure`；观测能力为等待指标就绪或覆盖达标设置的有界预算属于 `observation`。program 选择当前流程可用的窗口。`checks.<id>.windows` 使用非空、无重复的窗口名列表；不存在或当前流程不可用的窗口报错。单窗口检查也使用列表；仅支持单窗口的测量能力拒绝多窗口，不能隐式拼接数据。多个窗口的切分和归约由 Python 测量契约决定，列表不定义算法。`full_run` 等整体范围及阶段输出窗口由 program 显式声明，不用组合字符串代替窗口引用。YAML 不能借此定义步骤顺序或分支。
+两种形式遵守同一规则：流程等待、操作超时与取证区间是不同输入，不相互冒充，也不重复声明同一个窗口长度。无条件等待属于 `procedure`；观测能力为等待指标就绪或覆盖达标设置的有界预算属于 `observation`。program 选择当前流程可用的窗口。固定门禁通过 `CheckSet` 或 `metric_criterion` 声明指标、单位、窗口和比较符，YAML 只需填写 `expected` 及支持的阈值覆盖；完整绑定仍可显式填写，但必须与 Python 契约一致。可选择指标或窗口的检查保留这些配置。显式填写的 `checks.<id>.windows` 使用非空、无重复的窗口名列表；不存在或当前流程不可用的窗口报错。单窗口检查也使用列表；仅支持单窗口的测量能力拒绝多窗口，不能隐式拼接数据。多个窗口的切分和归约由 Python 测量契约决定，列表不定义算法。`full_run` 等整体范围及阶段输出窗口由 program 显式声明，不用组合字符串代替窗口引用。YAML 不能借此定义步骤顺序或分支。
 
 运行身份使用 `case::variant::profile`，配置、制品和实际流量用冻结的 SHA 与运行配置追溯。观测参数不另声明手工实验身份；性能证据必须保留实例身份、配置 SHA、制品和流量 SHA，缺失或损坏的证据不能通过门禁。
 

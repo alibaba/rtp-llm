@@ -32,7 +32,7 @@ def configure_program(config, source) -> ProgramPlan:
     name = config.case
     module = program_module(name, source)
     if config.program != "default":
-        raise ScenarioError(f"{source}: every case must declare program: default")
+        raise ScenarioError(f"{source}: base case program must be default")
     from scenario.validation import identifier
     from scenario.environment_config import environment as validate_environment
     identifier(config.identity, source + ".id")

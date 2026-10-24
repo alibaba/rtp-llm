@@ -114,3 +114,27 @@ def test_report_title_cannot_override_runtime_identity(filename):
     with patch('reporting.view_config.load_document', return_value=data):
         with pytest.raises(ScenarioError, match='invalid report fields'):
             view(filename)
+
+
+@pytest.mark.parametrize('filename', [name for name in VIEWS if name != 'default.yaml'])
+def test_compact_curve_defaults_preserve_explicit_view_bindings(filename):
+    from copy import deepcopy
+    expected = view(filename).to_dict()
+    compact = deepcopy(expected)
+    for key, style in compact['charts']['curves'].items():
+        if style['metric_id'] == key:
+            del style['metric_id']
+        if style['labels'] == {}:
+            del style['labels']
+        if not style['hidden']:
+            del style['hidden']
+    with patch('reporting.view_config.load_document', return_value=compact):
+        assert view(filename).to_dict() == expected
+    key = next(iter(compact['charts']['curves']))
+    compact['charts']['curves'][key]['hidden'] = True
+    with patch('reporting.view_config.load_document', return_value=compact):
+        assert view(filename).charts.curves[key].hidden is True
+    compact['charts']['curves'][key]['metric_id'] = 'mock/undeclared'
+    with patch('reporting.view_config.load_document', return_value=compact):
+        with pytest.raises(ScenarioError, match='declared metric'):
+            view(filename)

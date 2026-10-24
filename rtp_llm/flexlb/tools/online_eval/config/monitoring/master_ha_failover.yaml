@@ -23,37 +23,31 @@ produced:
     source_type: client_journal
     unit: requests/s
     value_kind: gauge
-    labels: []
   ha/success:
     producer: ha_evidence
     source_type: client_journal
     unit: requests/s
     value_kind: gauge
-    labels: []
   ha/failed:
     producer: ha_evidence
     source_type: client_journal
     unit: requests/s
     value_kind: gauge
-    labels: []
   ha/prefill_peak_qps:
     producer: ha_evidence
     source_type: client_journal
     unit: requests/s
     value_kind: gauge
-    labels: []
   ha/prefill_mean_qps:
     producer: ha_evidence
     source_type: client_journal
     unit: requests/s
     value_kind: gauge
-    labels: []
   ha/prefill_skew:
     producer: ha_evidence
     source_type: client_journal
     unit: ratio
     value_kind: gauge
-    labels: []
   ha/http_up:
     producer: ha_evidence
     source_type: debug_api

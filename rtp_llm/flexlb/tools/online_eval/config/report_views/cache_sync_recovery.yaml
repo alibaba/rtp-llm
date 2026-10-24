@@ -20,23 +20,17 @@ metrics:
 charts:
   curves:
     cache_stability/healthy_age_s:
-      metric_id: cache_stability/healthy_age_s
-      labels: {}
       name: 未参与撤出的 Worker 最长未更新时长
       group: recovery
       unit: s
       axis: value
       color: '#1677ff'
-      hidden: false
     cache_stability/visible_workers:
-      metric_id: cache_stability/visible_workers
-      labels: {}
       name: 未参与撤出的 Worker 数量（Master 可见）
       group: recovery
       unit: workers
       axis: value
       color: '#1677ff'
-      hidden: false
   panels:
   - id: steady-healthy_age_s
     title: steady · 未参与撤出的 Worker 最长未更新时长

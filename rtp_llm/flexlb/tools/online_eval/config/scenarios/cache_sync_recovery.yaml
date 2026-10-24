@@ -1,6 +1,5 @@
 case_schema_version: 2
 case: cache_sync_recovery
-program: default
 default_variant: steady
 metadata:
   kind: workload

@@ -320,7 +320,7 @@ class CaseConfigTest(unittest.TestCase):
         for source, _ in documents:
             config = load_document(source)
             self.assertEqual(config["case_schema_version"], 2)
-            self.assertEqual(config["program"], "default")
+            self.assertEqual(config.get("program", "default"), "default")
             self.assertNotIn("default", [v["id"] for v in config.get("variants", [])])
             self.assertNotIn('"$ref"', json.dumps(config))
             self.assertNotIn('"stages"', json.dumps(config))

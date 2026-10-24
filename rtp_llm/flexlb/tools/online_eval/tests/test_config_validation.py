@@ -27,11 +27,8 @@ def test_invalid_metric_binding_reports_configuration_error(filename, metric_id)
     data = view(filename).to_dict()
     identity = next(iter(data['charts']['curves']))
     style = data['charts']['curves'][identity]
-    if metric_id is None:
-        del style['metric_id']
-    else:
-        style['metric_id'] = metric_id
-    message = 'metric_id must be a string' if isinstance(metric_id, (list, dict)) else 'curve must bind'
+    style['metric_id'] = metric_id
+    message = 'metric_id must be a string' if metric_id is None or isinstance(metric_id, (list, dict)) else 'curve must bind'
     with patch('reporting.view_config.load_document', return_value=data):
         with pytest.raises(ScenarioError, match=message):
             view(filename)
@@ -47,6 +44,8 @@ def test_curves_require_an_explicit_plan():
 
 @pytest.mark.parametrize('change, message', [
     ({'hidden': 1}, 'invalid metric visibility'),
+    ({'labels': None}, 'invalid metric labels binding'),
+    ({'labels': []}, 'invalid metric labels binding'),
     ({'scale': True}, 'invalid metric scale'),
     ({'scale': 0}, 'invalid metric scale'),
     ({'scale': 2, 'source_unit': None}, 'invalid metric unit or color'),
@@ -117,3 +116,13 @@ def test_bad_panel_identity_or_binding_has_configuration_error(filename):
         with patch('reporting.view_config.load_document', return_value=broken):
             with pytest.raises(ScenarioError, match=message):
                 view(filename)
+
+
+@pytest.mark.parametrize('style', [None, []])
+def test_curve_defaults_reject_non_mapping_declarations(style):
+    data = view('cache_scale_in.yaml').to_dict()
+    key = next(iter(data['charts']['curves']))
+    data['charts']['curves'][key] = style
+    with patch('reporting.view_config.load_document', return_value=data):
+        with pytest.raises(ScenarioError, match='invalid metric presentation'):
+            view('cache_scale_in.yaml')

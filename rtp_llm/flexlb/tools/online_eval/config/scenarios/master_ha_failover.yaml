@@ -1,6 +1,5 @@
 case_schema_version: 2
 case: master_ha_failover
-program: default
 metadata:
   kind: workload
   description: One real frontend prefix-lineage replay across a selectable dual-master

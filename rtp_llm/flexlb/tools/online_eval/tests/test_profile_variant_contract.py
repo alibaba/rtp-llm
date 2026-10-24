@@ -52,15 +52,21 @@ def test_no_variants_matches_internal_default_without_inheritance():
 
 
 @pytest.mark.parametrize('program', [None, 'immediate', 'rolling'])
-def test_every_case_requires_root_default_even_with_variants(program):
+def test_explicit_base_program_must_be_default_even_with_variants(program):
     data = config()
-    if program is None:
-        del data['program']
-    else:
-        data['program'] = program
+    data['program'] = program
     data['variants'] = [{'id': 'two', 'parameters': {'traffic': {'count': 2}}}]
-    with pytest.raises(ScenarioError, match='every case must declare program: default'):
+    with pytest.raises(ScenarioError, match='base case program must be default'):
         configure_program(data, 'case.yaml')
+
+
+def test_omitted_base_program_uses_default_for_all_variants():
+    data = config()
+    data['variants'] = [{'id': 'two', 'parameters': {'traffic': {'count': 2}}}]
+    implicit = configure_program(data, 'case.yaml')
+    data['program'] = 'default'
+    assert configure_program(data, 'case.yaml').variants == implicit.variants
+    assert [variant.id for variant in implicit.variants] == ['default', 'two']
 
 
 def test_variants_cannot_replace_a_missing_python_default(monkeypatch):

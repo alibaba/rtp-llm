@@ -1,6 +1,5 @@
 case_schema_version: 2
 case: request_completion
-program: default
 metadata:
   kind: functional
   description: Submitted requests reach a business terminal without stream errors.

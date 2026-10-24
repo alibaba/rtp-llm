@@ -6,11 +6,6 @@ sources:
       unit: percent
       value_kind: gauge
       labels: [application]
-      measurement:
-        method: promql_evaluation
-        population: master_selector
-        accuracy: sampled
-        requires_request_identity: false
       exported_metrics: [process_cpu_usage]
       required: true
     system_cpu_usage_percent:
@@ -18,11 +13,6 @@ sources:
       unit: percent
       value_kind: gauge
       labels: [application]
-      measurement:
-        method: promql_evaluation
-        population: master_selector
-        accuracy: sampled
-        requires_request_identity: false
       exported_metrics: [system_cpu_usage]
       required: true
     cpu_available_processors:
@@ -31,10 +21,5 @@ sources:
       unit: processors
       value_kind: gauge
       labels: [application]
-      measurement:
-        method: raw_scrape
-        population: master_selector
-        accuracy: sampled
-        requires_request_identity: false
       exported_metrics: [system_cpu_count]
       required: true

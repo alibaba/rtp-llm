@@ -15,10 +15,10 @@ def validate_monitoring_policy(path, data, plan, fail):
         fail(path, "selected views must classify diagnostic_only metrics explicitly")
     metrics = data["charts"]["curves"]
     if any(
-        not {"unit", "color", "hidden"} <= set(style)
+        not {"unit", "color"} <= set(style)
         for style in metrics.values()
     ):
-        fail(path, "classified monitoring styles require unit, color and hidden")
+        fail(path, "classified monitoring styles require unit and color")
     diagnostic = policy.get("diagnostic_only", [])
 
     known = {identity: definition for identity, definition in query_plan.definitions(plan).items()

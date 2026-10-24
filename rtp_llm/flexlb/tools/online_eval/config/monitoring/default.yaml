@@ -7,11 +7,6 @@ sources:
       value_kind: gauge
       labels:
       - role
-      measurement:
-        method: promql_evaluation
-        population: mock_selector
-        accuracy: sampled
-        requires_request_identity: false
       exported_metrics:
       - rtp_llm_running_stream_size
     running_avg:
@@ -20,11 +15,6 @@ sources:
       value_kind: gauge
       labels:
       - role
-      measurement:
-        method: promql_evaluation
-        population: mock_selector
-        accuracy: sampled
-        requires_request_identity: false
       exported_metrics:
       - rtp_llm_running_stream_size
       required: true
@@ -34,11 +24,6 @@ sources:
       value_kind: gauge
       labels:
       - role
-      measurement:
-        method: promql_evaluation
-        population: mock_selector
-        accuracy: sampled
-        requires_request_identity: false
       exported_metrics:
       - rtp_llm_running_stream_size
     waiting_sum:
@@ -47,11 +32,6 @@ sources:
       value_kind: gauge
       labels:
       - role
-      measurement:
-        method: promql_evaluation
-        population: mock_selector
-        accuracy: sampled
-        requires_request_identity: false
       exported_metrics:
       - rtp_llm_wait_stream_size
     waiting_avg:
@@ -60,11 +40,6 @@ sources:
       value_kind: gauge
       labels:
       - role
-      measurement:
-        method: promql_evaluation
-        population: mock_selector
-        accuracy: sampled
-        requires_request_identity: false
       exported_metrics:
       - rtp_llm_wait_stream_size
       required: true
@@ -74,11 +49,6 @@ sources:
       value_kind: gauge
       labels:
       - role
-      measurement:
-        method: promql_evaluation
-        population: mock_selector
-        accuracy: sampled
-        requires_request_identity: false
       exported_metrics:
       - rtp_llm_wait_stream_size
     engine_count:
@@ -87,11 +57,6 @@ sources:
       value_kind: gauge
       labels:
       - role
-      measurement:
-        method: promql_evaluation
-        population: mock_selector
-        accuracy: sampled
-        requires_request_identity: false
       exported_metrics:
       - rtp_llm_running_stream_size
     context_wall_tps:
@@ -100,11 +65,6 @@ sources:
       value_kind: gauge
       labels:
       - role
-      measurement:
-        method: promql_evaluation
-        population: mock_selector
-        accuracy: sampled
-        requires_request_identity: false
       exported_metrics:
       - mock_context_tokens_total
     context_completed_qps:
@@ -113,11 +73,6 @@ sources:
       value_kind: gauge
       labels:
       - role
-      measurement:
-        method: promql_evaluation
-        population: mock_selector
-        accuracy: sampled
-        requires_request_identity: false
       exported_metrics:
       - mock_context_requests_total
     cache_hit_ratio:
@@ -126,11 +81,6 @@ sources:
       value_kind: gauge
       labels:
       - role
-      measurement:
-        method: promql_evaluation
-        population: mock_selector
-        accuracy: sampled
-        requires_request_identity: false
       exported_metrics:
       - mock_context_tokens_total
       - mock_hit_tokens_total
@@ -140,11 +90,6 @@ sources:
       value_kind: gauge
       labels:
       - role
-      measurement:
-        method: promql_evaluation
-        population: mock_selector
-        accuracy: sampled
-        requires_request_identity: false
       exported_metrics:
       - mock_prefill_batch_size_count
       - mock_prefill_batch_size_sum
@@ -195,11 +140,6 @@ sources:
       - role
       - engine_name
       - engine_incarnation
-      measurement:
-        method: promql_evaluation
-        population: mock_selector
-        accuracy: sampled
-        requires_request_identity: false
       exported_metrics:
       - rtp_llm_context_tps
     rtp_llm_context_tps_engine_mean:
@@ -208,11 +148,6 @@ sources:
       value_kind: gauge
       labels:
       - role
-      measurement:
-        method: promql_evaluation
-        population: mock_selector
-        accuracy: sampled
-        requires_request_identity: false
       exported_metrics:
       - rtp_llm_context_tps
     rtp_llm_context_tps_with_cache_per_engine:
@@ -223,11 +158,6 @@ sources:
       - role
       - engine_name
       - engine_incarnation
-      measurement:
-        method: promql_evaluation
-        population: mock_selector
-        accuracy: sampled
-        requires_request_identity: false
       exported_metrics:
       - rtp_llm_context_tps_with_cache
     rtp_llm_context_tps_with_cache_engine_mean:
@@ -236,11 +166,6 @@ sources:
       value_kind: gauge
       labels:
       - role
-      measurement:
-        method: promql_evaluation
-        population: mock_selector
-        accuracy: sampled
-        requires_request_identity: false
       exported_metrics:
       - rtp_llm_context_tps_with_cache
     mock_decode_wall_tps_engine_mean:
@@ -249,11 +174,6 @@ sources:
       value_kind: gauge
       labels:
       - role
-      measurement:
-        method: promql_evaluation
-        population: mock_selector
-        accuracy: sampled
-        requires_request_identity: false
       exported_metrics:
       - mock_decode_wall_tps
     context_execution_tps_avg:
@@ -262,11 +182,6 @@ sources:
       value_kind: gauge
       labels:
       - role
-      measurement:
-        method: promql_evaluation
-        population: mock_selector
-        accuracy: sampled
-        requires_request_identity: false
       exported_metrics:
       - rtp_llm_context_tps
     context_execution_tps_with_cache_avg:
@@ -275,11 +190,6 @@ sources:
       value_kind: gauge
       labels:
       - role
-      measurement:
-        method: promql_evaluation
-        population: mock_selector
-        accuracy: sampled
-        requires_request_identity: false
       exported_metrics:
       - rtp_llm_context_tps_with_cache
     simulated_prefill_ms_avg:
@@ -288,11 +198,6 @@ sources:
       value_kind: gauge
       labels:
       - role
-      measurement:
-        method: promql_evaluation
-        population: mock_selector
-        accuracy: sampled
-        requires_request_identity: false
       exported_metrics:
       - mock_engine_prefill_ms_avg
     simulated_decode_ms_avg:
@@ -301,11 +206,6 @@ sources:
       value_kind: gauge
       labels:
       - role
-      measurement:
-        method: promql_evaluation
-        population: mock_selector
-        accuracy: sampled
-        requires_request_identity: false
       exported_metrics:
       - mock_engine_decode_ms_avg
     rtp_llm_kv_cache_total_blocks:
@@ -314,11 +214,6 @@ sources:
       value_kind: gauge
       labels:
       - role
-      measurement:
-        method: promql_evaluation
-        population: mock_selector
-        accuracy: sampled
-        requires_request_identity: false
       exported_metrics:
       - rtp_llm_kv_cache_total_blocks
     rtp_llm_kv_cache_available_blocks:
@@ -327,11 +222,6 @@ sources:
       value_kind: gauge
       labels:
       - role
-      measurement:
-        method: promql_evaluation
-        population: mock_selector
-        accuracy: sampled
-        requires_request_identity: false
       exported_metrics:
       - rtp_llm_kv_cache_available_blocks
     mock_engine_held_blocks:
@@ -340,11 +230,6 @@ sources:
       value_kind: gauge
       labels:
       - role
-      measurement:
-        method: promql_evaluation
-        population: mock_selector
-        accuracy: sampled
-        requires_request_identity: false
       exported_metrics:
       - mock_engine_held_blocks
     mock_engine_referenced_blocks:
@@ -353,11 +238,6 @@ sources:
       value_kind: gauge
       labels:
       - role
-      measurement:
-        method: promql_evaluation
-        population: mock_selector
-        accuracy: sampled
-        requires_request_identity: false
       exported_metrics:
       - mock_engine_referenced_blocks
     completed_qps:
@@ -366,11 +246,6 @@ sources:
       value_kind: gauge
       labels:
       - role
-      measurement:
-        method: promql_evaluation
-        population: mock_selector
-        accuracy: sampled
-        requires_request_identity: false
       exported_metrics:
       - mock_engine_completed_total
     accepted_qps:
@@ -379,11 +254,6 @@ sources:
       value_kind: gauge
       labels:
       - role
-      measurement:
-        method: promql_evaluation
-        population: mock_selector
-        accuracy: sampled
-        requires_request_identity: false
       exported_metrics:
       - mock_engine_accepted_total
     output_wall_tps:
@@ -392,11 +262,6 @@ sources:
       value_kind: gauge
       labels:
       - role
-      measurement:
-        method: promql_evaluation
-        population: mock_selector
-        accuracy: sampled
-        requires_request_identity: false
       exported_metrics:
       - mock_generate_tokens_total
   client:
@@ -404,55 +269,30 @@ sources:
       promql: sum(rate(flexlb_client_actual_send_total${selector}[${window_ms}ms]))
       unit: requests/s
       value_kind: gauge
-      labels: []
-      measurement:
-        method: promql_evaluation
-        population: client_selector
-        accuracy: sampled
-        requires_request_identity: false
       exported_metrics:
       - flexlb_client_actual_send_total
     success_qps:
       promql: sum(rate(flexlb_client_success_total${selector}[${window_ms}ms]))
       unit: requests/s
       value_kind: gauge
-      labels: []
-      measurement:
-        method: promql_evaluation
-        population: client_selector
-        accuracy: sampled
-        requires_request_identity: false
       exported_metrics:
       - flexlb_client_success_total
     error_qps:
       promql: sum(rate(flexlb_client_error_total${selector}[${window_ms}ms]))
       unit: requests/s
       value_kind: gauge
-      labels: []
-      measurement:
-        method: promql_evaluation
-        population: client_selector
-        accuracy: sampled
-        requires_request_identity: false
       exported_metrics:
       - flexlb_client_error_total
     completed_qps:
       promql: sum(rate(flexlb_client_completed_total${selector}[${window_ms}ms]))
       unit: requests/s
       value_kind: gauge
-      labels: []
-      measurement:
-        method: promql_evaluation
-        population: client_selector
-        accuracy: sampled
-        requires_request_identity: false
       exported_metrics:
       - flexlb_client_completed_total
     ttft_p99_seconds:
       promql: histogram_quantile(0.99, sum by (le) (rate(flexlb_client_ttft_seconds_bucket${selector}[${window_ms}ms])))
       unit: s
       value_kind: gauge
-      labels: []
       measurement:
         method: promql_evaluation
         population: client_selector
@@ -464,7 +304,6 @@ sources:
       promql: histogram_quantile(0.99, sum by (le) (rate(flexlb_client_total_seconds_bucket${selector}[${window_ms}ms])))
       unit: s
       value_kind: gauge
-      labels: []
       measurement:
         method: promql_evaluation
         population: client_selector
@@ -476,7 +315,6 @@ sources:
       promql: histogram_quantile(0.99, sum by (le) (rate(flexlb_client_schedule_seconds_bucket${selector}[${window_ms}ms])))
       unit: s
       value_kind: gauge
-      labels: []
       measurement:
         method: promql_evaluation
         population: client_selector
@@ -491,11 +329,6 @@ sources:
       value_kind: gauge
       labels:
       - priority
-      measurement:
-        method: promql_evaluation
-        population: master_selector
-        accuracy: sampled
-        requires_request_identity: false
       exported_metrics:
       - flexlb_auto_tpm_request_count_total
     schedule_responses_qps:
@@ -504,11 +337,6 @@ sources:
       value_kind: gauge
       labels:
       - result
-      measurement:
-        method: promql_evaluation
-        population: master_selector
-        accuracy: sampled
-        requires_request_identity: false
       exported_metrics:
       - flexlb_auto_tpm_schedule_latency_ms_seconds_count
     dispatch_qps:
@@ -517,70 +345,35 @@ sources:
       value_kind: gauge
       labels:
       - reason
-      measurement:
-        method: promql_evaluation
-        population: master_selector
-        accuracy: sampled
-        requires_request_identity: false
       exported_metrics:
       - flexlb_app_engine_balancing_master_dispatch_reason_total
     flexlb_app_flexlb_batcher_queue_size:
       promql: sum(flexlb_app_flexlb_batcher_queue_size${selector})
       unit: requests
       value_kind: gauge
-      labels: []
-      measurement:
-        method: promql_evaluation
-        population: master_selector
-        accuracy: sampled
-        requires_request_identity: false
       exported_metrics:
       - flexlb_app_flexlb_batcher_queue_size
     flexlb_app_flexlb_scheduler_inflight_size:
       promql: sum(flexlb_app_flexlb_scheduler_inflight_size${selector})
       unit: requests
       value_kind: gauge
-      labels: []
-      measurement:
-        method: promql_evaluation
-        population: master_selector
-        accuracy: sampled
-        requires_request_identity: false
       exported_metrics:
       - flexlb_app_flexlb_scheduler_inflight_size
     flexlb_app_flexlb_inflight_request_count:
       promql: sum(flexlb_app_flexlb_inflight_request_count${selector})
       unit: requests
       value_kind: gauge
-      labels: []
-      measurement:
-        method: promql_evaluation
-        population: master_selector
-        accuracy: sampled
-        requires_request_identity: false
       exported_metrics:
       - flexlb_app_flexlb_inflight_request_count
     flexlb_auto_tpm_decode_reserved_count:
       promql: sum(flexlb_auto_tpm_decode_reserved_count${selector})
       unit: requests
       value_kind: gauge
-      labels: []
-      measurement:
-        method: promql_evaluation
-        population: master_selector
-        accuracy: sampled
-        requires_request_identity: false
       exported_metrics:
       - flexlb_auto_tpm_decode_reserved_count
     flexlb_auto_tpm_decode_running_count:
       promql: sum(flexlb_auto_tpm_decode_running_count${selector})
       unit: requests
       value_kind: gauge
-      labels: []
-      measurement:
-        method: promql_evaluation
-        population: master_selector
-        accuracy: sampled
-        requires_request_identity: false
       exported_metrics:
       - flexlb_auto_tpm_decode_running_count

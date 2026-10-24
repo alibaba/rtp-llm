@@ -53,7 +53,7 @@ sources:
       exported_metrics: [rtp_llm_wait_stream_size]
 ```
 
-上例的指标 ID 是 `mock/queue_depth`。`sources` 支持 `mock`、`client`、`master`；采集器仅注入 `${selector}` 和 `${window_ms}`，运算使用 PromQL 原文。默认 `mode: evaluated`；需要原始抓取时间的门禁声明 `mode: scrape`，此时 PromQL 只接受原始指标名加 `${selector}`。`labels` 声明每条结果必须携带的身份标签，`required: true` 表示缺失该查询会使监控归档失败。
+上例的指标 ID 是 `mock/queue_depth`。`sources` 支持 `mock`、`client`、`master`；采集器仅注入 `${selector}` 和 `${window_ms}`，运算使用 PromQL 原文。默认 `mode: evaluated`；需要原始抓取时间的门禁声明 `mode: scrape`，此时 PromQL 只接受原始指标名加 `${selector}`。`labels` 省略时为空列表；非空时声明每条结果必须携带的身份标签，`required: true` 表示缺失该查询会使监控归档失败。
 
 控制轮询与测量完整性分开：需要完整计数器窗口的门禁，从已声明的 `scrape` 指标读取实际抓取时间及身份标签，并沿用流程已经冻结的窗口和阈值。轮询完成时间不能替代 scrape 时间，在线查询变慢也不能被当作底层指标缺失。控制记录单独冻结用于流程与延迟诊断；真实缺口、身份变化、counter reset 和查询失败仍须拒绝，不插值、不补零，也不回退到控制快照产生成功判定。
 
@@ -73,6 +73,8 @@ sources:
 `include` 合并集合，`exclude` 按完整指标 ID 显式删除。重复定义、循环引用和删除不存在的指标均失败；本契约不支持同 ID 覆盖，要调整口径时修改所属集合，或新增不同 ID 并排除旧指标。展开后的定义及 SHA 写入编译产物与运行归档。
 
 难以用 PromQL 表达的请求归因、阶段统计由case 的普通 Python 指标函数实现，在 `produced` 声明输出 ID、`producer`、`source_type`、`unit`、`value_kind` 和 `labels`。请求窗口计算额外声明 `calculation`；专属计算由 producer 的输出契约提供。`source_type` 记录实际来源：`prometheus`、`client_journal`、`debug_api` 或 `process_log`；计算后的数值仍保留原始来源，不用 `derived` 代替来源。`producer` 保留为指标来源标识；执行由当前 case 的指标模块及已选择的定义决定，与来源标签无关。产物记录模块、源码 SHA、计算口径和证据引用；原始证据不能作为缺失 Prometheus 指标的自动替代。
+
+标准 Prometheus 查询省略 `measurement` 时，加载器按 `mode` 冻结 `raw_scrape` 或 `promql_evaluation`，统计群体为来源种类的 selector，精度为 `sampled`，不要求请求身份。直方图估计等特殊口径仍显式声明完整 `measurement`，不从 PromQL 文本推断。`produced.labels` 省略时为空列表；非空身份维度仍须声明。
 
 `measurement` 将来源与统计语义分开：
 

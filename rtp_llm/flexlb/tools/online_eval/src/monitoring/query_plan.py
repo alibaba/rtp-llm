@@ -80,13 +80,15 @@ def _add_sources(sources, own, path):
                 raise ScenarioError(f"{path}: invalid query id {kind}/{metric}")
             if metric in sources[kind]:
                 raise ScenarioError(f"{path}: duplicate metric id {kind}/{metric}")
-            _validate_query(spec, kind, metric, path)
-            sources[kind][metric] = spec
+            sources[kind][metric] = _validate_query(spec, kind, metric, path)
 
 
 def _validate_query(spec, kind, metric, path):
     if not isinstance(spec, dict) or set(spec) - {"promql", "required", "unit", "value_kind", "labels", "mode", "measurement", "exported_metrics"}:
         raise ScenarioError(f"{path}: invalid query definition {kind}/{metric}")
+    spec = dict(spec, labels=spec.get("labels", []), measurement=spec.get("measurement", dict(
+        method="raw_scrape" if spec.get("mode") == "scrape" else "promql_evaluation",
+        population=kind + "_selector", accuracy="sampled", requires_request_identity=False)))
     expression = spec.get("promql")
     if not isinstance(expression, str) or not expression.strip():
         raise ScenarioError(f"{path}: missing PromQL for {kind}/{metric}")
@@ -106,6 +108,7 @@ def _validate_query(spec, kind, metric, path):
         raise ScenarioError(f"{path}: scrape mode requires a raw metric selector")
     if spec.get("mode") == "scrape" and spec["exported_metrics"] != [expression.removesuffix("${selector}")]:
         raise ScenarioError(f"{path}: raw metric dependency mismatch: {kind}/{metric}")
+    return spec
 
 
 def _add_produced(produced, own, path):
@@ -118,6 +121,8 @@ def _add_produced(produced, own, path):
 
 
 def _validate_produced(spec, metric, path):
+    if isinstance(spec, dict):
+        spec = dict(spec, labels=spec.get("labels", []))
     if (type(metric) is not str or not METRIC_ID.fullmatch(metric)
             or not isinstance(spec, dict)
             or not {"producer", "source_type", "unit", "value_kind", "labels"} <= set(spec)

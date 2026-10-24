@@ -138,7 +138,7 @@ class CaseDeclaration:
         reports = value.get('reports')
         if reports is not None and not isinstance(reports, list):
             raise ScenarioError(source + '.reports: expected list')
-        return cls(value.get('case'), value.get('id', value.get('case')), value.get('program'),
+        return cls(value.get('case'), value.get('id', value.get('case')), value.get('program', 'default'),
                    tuple(profiles), **groups, metadata=metadata, execution=execution,
                    variants=tuple(VariantDeclaration.read(row, source + '.variants') for row in variants),
                    default_variant=value.get("default_variant", "default"),

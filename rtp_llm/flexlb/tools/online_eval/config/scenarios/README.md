@@ -1,6 +1,6 @@
 # 场景配置
 
-本目录按 case 名平铺 schema v2 YAML。每个 case 声明 `program: default`；`variants` 只增加额外测试点。运行清单由 `profiles`、变体和 `config/suites.yaml` 决定，以 `list_cases.py` 输出为准。
+本目录按 case 名平铺 schema v2 YAML。case 默认使用 Python 的 `default` builder；`variants` 只增加额外测试点。运行清单由 `profiles`、变体和 `config/suites.yaml` 决定，以 `list_cases.py` 输出为准。
 
 字段顺序、配置覆盖和新增流程见[新增 case](../../docs/development/adding-cases.md)。执行方式见[运行测试](../../docs/development/running.md)。
 

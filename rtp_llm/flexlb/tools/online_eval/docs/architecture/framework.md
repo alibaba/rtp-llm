@@ -44,7 +44,7 @@ case analysis/report     明确判定后装配 HTML bundle
 | 实验归档 manifest / 请求计划 manifest | `archive_manifest_schema_version` / `request_plan_manifest_schema_version` | 1 |
 | Master 模板 / 流量保真度分析 | `master_template_schema_version` / `traffic_fidelity_schema_version` | 1 |
 
-case YAML 通过 `program: default` 调用 Python 构建器，生成 `ProgramPlan`、`VariantPlan` 和 `StageDefinition`。编译器校验引用与资源约束，直接生成 `CompiledInstance` 和 `StagePlan`；内存程序对象不定义文件格式或版本。落盘读取方校验本格式的版本字段及整数类型，拒绝其他格式或旧通用版本字段，不能根据文件名或版本数字猜测格式。报告生产器组装的内存图表可以暂不带版本字段，由 bundle 写入器明确标记；落盘文件和离线读取必须带有相应字段。
+case YAML 默认调用 Python 的 `default` 构建器，生成 `ProgramPlan`、`VariantPlan` 和 `StageDefinition`。编译器校验引用与资源约束，直接生成 `CompiledInstance` 和 `StagePlan`；内存程序对象不定义文件格式或版本。落盘读取方校验本格式的版本字段及整数类型，拒绝其他格式或旧通用版本字段，不能根据文件名或版本数字猜测格式。报告生产器组装的内存图表可以暂不带版本字段，由 bundle 写入器明确标记；落盘文件和离线读取必须带有相应字段。
 
 真实采集输入、固定合成流量 profile 及 Java 共享性能 / 流控协议保留它们原有的 `schema_version`，由相应协议读取器校验，不进入 case、执行计划、指标和报告的读取边界。它们的语义与准入见[数据目录](../../data/README.md)。调整这类字段需要同步固定输入及协议双方。
 
