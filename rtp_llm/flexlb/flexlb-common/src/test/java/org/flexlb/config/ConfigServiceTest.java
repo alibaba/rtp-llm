@@ -512,7 +512,6 @@ class ConfigServiceTest {
                 Map.entry("router.roles.prefill.candidateChoice.pool.minimumWorkers", "1"),
                 Map.entry("router.roles.prefill.candidateChoice.pool.workers", "1"),
                 Map.entry("router.roles.prefill.candidateChoice.outlierRejection.maxPendingVsAverageMultiplier", "3"),
-                Map.entry("router.roles.prefill.candidateChoice.outlierRejection.maxProjectedDrainVsAverageMultiplier", "3"),
                 Map.entry("router.roles.decode.kvReservation.maxOutputTokensForEstimate", "1000"),
                 Map.entry("router.roles.decode.decayPerToken", "0.001"),
                 Map.entry("router.roles.decode.loadDecayPerRequest", "1"),
