@@ -2,6 +2,7 @@
 #include <chrono>
 #include <condition_variable>
 #include <cstddef>
+#include <limits>
 #include <memory>
 #include <typeinfo>
 #include <ATen/Generator.h>
@@ -19,6 +20,7 @@
 #include "rtp_llm/cpp/models/logits_processor/LogitsProcessorFactory.h"
 #include "rtp_llm/cpp/models/logits_processor/MultiSeqLogitsProcessor.h"
 #include "rtp_llm/cpp/utils/LinearBlocksUtil.h"
+#include "rtp_llm/cpp/cache/CacheTopology.h"
 
 using namespace std;
 
@@ -1154,26 +1156,46 @@ void GenerateStream::specUpdate(const StreamSpecUpdateInfo& update_info) {
 
     // for spec-decode linear attention, we need to adjust cache blocks
     if (accept_token_num > 1 && stream_cache_resource_) {
-        int seq_size_per_block = seqSizePerBlock();
+        const auto& topology = stream_cache_resource_->resourceContext().cache_manager->cacheConfig().topology();
+        for (const auto& group : topology.groups()) {
+            if (group.policy.group_type != CacheGroupType::LINEAR) {
+                continue;
+            }
+            // Calculate the two swaps in this LINEAR group's block-table coordinates.
+            const auto span = group.seqSizePerBlock();
+            RTP_LLM_CHECK_WITH_INFO(span > 0 && span <= static_cast<size_t>(std::numeric_limits<int>::max()),
+                                    "invalid LINEAR group %s token span %zu", group.tag.c_str(), span);
+            const auto [cached_src, cached_dst] =
+                getCachedTokenBlockSwapIdx(cur_cached_len, nxt_cached_len, static_cast<int>(span));
+            const auto [final_src, final_dst] =
+                getFinalTokenBlockSwapIdx(cur_cached_len, nxt_cached_len, static_cast<int>(span));
+            const auto block_num = stream_cache_resource_->kvCacheMutable().blocks(0, group.tag).size();
+            const auto valid_swap = [block_num](int src, int dst) {
+                return src == dst || (src >= 0 && dst >= 0 && static_cast<size_t>(src) < block_num
+                                      && static_cast<size_t>(dst) < block_num);
+            };
+            RTP_LLM_CHECK_WITH_INFO(valid_swap(cached_src, cached_dst) && valid_swap(final_src, final_dst),
+                                    "LINEAR group %s span %zu table size %zu cannot commit %d -> %d: "
+                                    "swaps (%d,%d), (%d,%d)",
+                                    group.tag.c_str(), span, block_num, cur_cached_len, nxt_cached_len,
+                                    cached_src, cached_dst, final_src, final_dst);
+            if (cached_src != cached_dst) {
+                stream_cache_resource_->kvCacheMutable().swapBlocks(0, group.tag, cached_src, cached_dst);
+            }
+            if (final_src != final_dst) {
+                stream_cache_resource_->kvCacheMutable().swapBlocks(0, group.tag, final_src, final_dst);
+            }
 
-        // 1. swap cache blocks of accept tokens to corresponding blocks
-        auto [cached_src_block_idx, cached_des_block_idx] =
-            getCachedTokenBlockSwapIdx(cur_cached_len, nxt_cached_len, seq_size_per_block);
-        stream_cache_resource_->swapLinearBlocks(0, cached_src_block_idx, cached_des_block_idx);
-
-        // 2. swap final block of accept tokens to the next sequence block
-        auto [src_block_idx, des_block_idx] =
-            getFinalTokenBlockSwapIdx(cur_cached_len, nxt_cached_len, seq_size_per_block);
-        stream_cache_resource_->swapLinearBlocks(0, src_block_idx, des_block_idx);
-
-        RTP_LLM_LOG_DEBUG("[stream %s (%d -> %d)] swap cache blocks: %d -> %d, %d -> %d",
-                          streamLogTag().c_str(),
-                          cur_cached_len + 1,
-                          nxt_cached_len + 1,
-                          cached_src_block_idx,
-                          cached_des_block_idx,
-                          src_block_idx,
-                          des_block_idx);
+            RTP_LLM_LOG_DEBUG("[stream %s (%d -> %d)] group %s swap cache blocks: %d -> %d, %d -> %d",
+                              streamLogTag().c_str(),
+                              cur_cached_len + 1,
+                              nxt_cached_len + 1,
+                              group.tag.c_str(),
+                              cached_src,
+                              cached_dst,
+                              final_src,
+                              final_dst);
+        }
     } else {
         RTP_LLM_LOG_DEBUG("[stream %s (%d -> %d)] no swap cache blocks",
                           streamLogTag().c_str(),

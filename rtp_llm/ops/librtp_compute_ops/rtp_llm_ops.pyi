@@ -9,7 +9,7 @@ import librtp_compute_ops
 import libth_transformer_config
 import torch
 import typing
-__all__: list[str] = ['FlashInferMlaAttnParams', 'GroupTopKOp', 'SelectTopkOp', 'SparseMlaParams', 'allocate_shared_buffer', 'concat_and_cache_mla', 'cp_gather_and_upconvert_fp8_kv_cache', 'cp_gather_indexer_k_quant_cache', 'cublas_gemm_bf16_bf16_fp32', 'cuda_graph_copy_large2small', 'cuda_graph_copy_small2large', 'debug_kernel', 'dispose_communicator', 'dsv4_top_k_per_row_prefill', 'embedding', 'embedding_bert', 'fast_topk_transform_fused', 'fast_topk_transform_ragged_fused', 'fast_topk_v2', 'fast_topk_v2_variable', 'fill_mla_params', 'fused_add_layernorm', 'fused_qk_rmsnorm', 'indexer_k_quant_and_cache', 'init_communicator', 'layernorm', 'mla_k_merge', 'moe_post_reorder', 'moe_pre_reorder', 'moe_topk_softmax', 'open_ipc_handle', 'per_tensor_quant_fp8', 'per_token_group_quant_fp8', 'per_token_group_quant_fp8_v2', 'per_token_group_quant_int8', 'per_token_quant_fp8', 'prepare_sparse_mla_params', 'register_buffer_to_communicator', 'reuse_kv_cache_indexed_batched', 'scaled_fp4_experts_quant', 'silu_and_mul_scaled_fp4_experts_quant', 'trt_fp8_quantize_128', 'trt_fp8_quantize_128_inplace', 'userbuffers_recv', 'userbuffers_ring_all_gather', 'userbuffers_send']
+__all__: list[str] = ['FlashInferMlaAttnParams', 'GroupTopKOp', 'SelectTopkOp', 'SparseMlaParams', 'allocate_shared_buffer', 'attn_res', 'concat_and_cache_mla', 'cp_gather_and_upconvert_fp8_kv_cache', 'cp_gather_indexer_k_quant_cache', 'cublas_gemm_bf16_bf16_fp32', 'cuda_graph_copy_large2small', 'cuda_graph_copy_small2large', 'custom_all_gather_fp8_staging', 'custom_all_gather_staging', 'debug_kernel', 'dispose_communicator', 'dsv4_top_k_per_row_prefill', 'embedding', 'embedding_bert', 'fast_topk_transform_fused', 'fast_topk_transform_ragged_fused', 'fast_topk_v2', 'fast_topk_v2_variable', 'fill_mla_params', 'fused_add_layernorm', 'fused_qk_rmsnorm', 'indexer_k_quant_and_cache', 'init_communicator', 'is_cuda_fabric_allocation', 'layernorm', 'mla_decode_q_concat_cache_insert', 'mla_k_merge', 'moe_post_reorder', 'moe_pre_reorder', 'moe_topk_softmax', 'open_ipc_handle', 'per_tensor_quant_fp8', 'per_token_group_quant_fp8', 'per_token_group_quant_fp8_v2', 'per_token_group_quant_int8', 'per_token_quant_fp8', 'prepare_sparse_mla_params', 'register_buffer_to_communicator', 'reuse_kv_cache_indexed_batched', 'scaled_fp4_experts_quant', 'silu_and_mul_scaled_fp4_experts_quant', 'trt_fp8_quantize_128', 'trt_fp8_quantize_128_inplace', 'userbuffers_recv', 'userbuffers_ring_all_gather', 'userbuffers_send']
 
 
 class FlashInferMlaAttnParams(librtp_compute_ops.ParamsBase):
@@ -138,6 +138,8 @@ class GroupTopKOp:
     def __init__(self) -> None:
         ...
     def forward(self, topk_values: torch.Tensor, topk_indices: torch.Tensor, scores: torch.Tensor, scores_with_bias: torch.Tensor, n_group: int, topk_group: int, topk: int, renormalize: bool, routed_scaling_factor: float) -> None:
+        ...
+    def forward_fused_sigmoid(self, topk_values: torch.Tensor, topk_indices: torch.Tensor, router_logits: torch.Tensor, correction_bias: torch.Tensor, topk: int, renormalize: bool, routed_scaling_factor: float) -> None:
         ...
 class SelectTopkOp:
     def __init__(self, model_config: libth_transformer_config.ModelConfig) -> None:
@@ -381,3 +383,41 @@ class TrtllmArFusionHandle:
         """
         AllReduce kernel
         """
+
+def mla_decode_q_concat_cache_insert(
+    q_latent: torch.Tensor, q_pe: torch.Tensor, kv_c: torch.Tensor,
+    k_pe: torch.Tensor, q_out: torch.Tensor, kv_cache: torch.Tensor,
+    slot_mapping: torch.Tensor,
+) -> None: ...
+
+
+def is_cuda_fabric_allocation(tensor: torch.Tensor) -> bool: ...
+
+
+def custom_all_gather_staging(
+    input: torch.Tensor, output: torch.Tensor, workspace: torch.Tensor,
+    counters: torch.Tensor, workspace_mc_ptr: int, rank: int, blocks: int, threads: int,
+) -> None: ...
+
+
+def custom_all_gather_fp8_staging(
+    values: torch.Tensor, scales: torch.Tensor, output_values: torch.Tensor,
+    output_scales: torch.Tensor, workspace: torch.Tensor, counters: torch.Tensor,
+    workspace_mc_ptr: int, rank: int, blocks: int, threads: int,
+) -> None: ...
+
+
+
+def attn_res(
+    prefix: torch.Tensor,
+    delta: typing.Optional[torch.Tensor],
+    blocks: torch.Tensor,
+    norm_weight: torch.Tensor,
+    qk_weight: torch.Tensor,
+    output_norm_weight: typing.Optional[torch.Tensor],
+    output: torch.Tensor,
+    num_blocks: int,
+    block_write_idx: int,
+    eps: float,
+    output_norm_eps: float,
+) -> None: ...
