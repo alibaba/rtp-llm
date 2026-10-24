@@ -116,6 +116,8 @@ void registerPyModuleOps(py::module& rtp_ops_m) {
                   py::arg("batch_size"),
                   py::arg("window"),
                   py::arg("max_start"));
+    py::class_<rtp_llm::Dsv41DecodeReplayMetadataPlan, std::shared_ptr<rtp_llm::Dsv41DecodeReplayMetadataPlan>>(
+        rtp_ops_m, "Dsv41DecodeReplayMetadataPlan");
     registerBaseCudaBindings(rtp_ops_m);
     registerAttnOpBindings(rtp_ops_m);
 }
