@@ -164,6 +164,7 @@ class MoE(nn.Module):
         max_tokens_per_rank: int = 8192,
         is_decode_role: bool = False,
         strategy: Optional[str] = None,
+        n_physical_experts: Optional[int] = None,
     ):
         """``layer_weights`` is the framework's per-layer dict
         (``ModelWeights.weights[layer_id]``) keyed by ``W.v4_*`` enum.
@@ -183,11 +184,25 @@ class MoE(nn.Module):
         self._is_decode_role = bool(is_decode_role)
         self.ep_size = ep_size
         self.ep_rank = ep_rank
-        self.n_local_experts = n_routed_experts // max(ep_size, 1)
+        self.n_physical_experts = (
+            n_routed_experts if n_physical_experts is None else n_physical_experts
+        )
+        if self.n_physical_experts < n_routed_experts or self.n_physical_experts % max(
+            ep_size, 1
+        ):
+            raise ValueError(
+                "Physical experts must cover logical experts and divide evenly over EP"
+            )
+        self.n_local_experts = self.n_physical_experts // max(ep_size, 1)
         self.local_expert_start = ep_rank * self.n_local_experts
         self.local_expert_end = self.local_expert_start + self.n_local_experts
         from rtp_llm.utils.model_weight import W
 
+        logical_to_physical = resolved_layer_weights.get(W.log2phy)
+        logical_count = resolved_layer_weights.get(W.logic_expert_cnt)
+        if (logical_to_physical is None) != (logical_count is None):
+            raise ValueError("EPLB requires both log2phy and logic_expert_cnt")
+        self.eplb_layer = None
         shared_weight = resolved_layer_weights[W.v4_shared_w13_w]
         shared_scale = resolved_layer_weights[W.v4_shared_w13_s]
         shared_fp8_block_size = (
@@ -215,6 +230,7 @@ class MoE(nn.Module):
             dim=dim,
             moe_inter_dim=moe_inter_dim,
             n_routed_experts=n_routed_experts,
+            n_physical_experts=self.n_physical_experts,
             n_activated_experts=n_activated_experts,
             swiglu_limit=swiglu_limit,
             ep_size=ep_size,
@@ -254,13 +270,25 @@ class MoE(nn.Module):
             self._shared_executor.prepare(self.shared_experts)
         self._final_out: torch.Tensor | None = None
         self._strategy = strategy_cls(cfg)
-        self._gate_pack_static = os.environ.get(
-            "MOEDBG", "0"
-        ) == "0" and self._strategy.can_use_gate_pack_static(self.gate)
+        self._gate_pack_static = (
+            logical_to_physical is None
+            and os.environ.get("MOEDBG", "0") == "0"
+            and self._strategy.can_use_gate_pack_static(self.gate)
+        )
         self._has_visual_tokens = False
         self._strategy._gate_pack_warmup_enabled = self._gate_pack_static
         self._strategy._gate_pack_route_scale = float(self.gate.route_scale)
         self._strategy.setup_weights(resolved_layer_weights)
+        if logical_to_physical is not None:
+            from rtp_llm.eplb.runtime import EplbLayer
+
+            self.eplb_layer = EplbLayer(
+                layer_id,
+                logical_to_physical,
+                logical_count,
+                self._strategy.get_eplb_weights(),
+                ep_rank=ep_rank,
+            )
         self._strategy.setup_runtime()
 
     def _should_chunk(self, tokens: int) -> bool:
@@ -312,6 +340,8 @@ class MoE(nn.Module):
             return
         with record_function_range("dsv4.moe.gate"):
             weights, indices = self.gate(x, input_ids)
+        if self.eplb_layer is not None:
+            indices = self.eplb_layer.map_ids(indices)
         if self._routed_includes_shared:
             with record_function_range("dsv4.moe.routed_experts"):
                 routed = self._strategy(x, weights, indices, expert_load=expert_load)
@@ -454,6 +484,8 @@ class MoE(nn.Module):
                     f"L{self.layer_id:02d}_moe_topk_indices_{dbg_pos_name}",
                     indices[dbg_pos_mask].contiguous(),
                 )
+        if self.eplb_layer is not None:
+            indices = self.eplb_layer.map_ids(indices)
         if self._routed_includes_shared:
             with record_function_range("dsv4.moe.routed_experts"):
                 y = self._strategy(x, weights, indices, expert_load=expert_load)

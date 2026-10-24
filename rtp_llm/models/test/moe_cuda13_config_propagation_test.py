@@ -472,6 +472,101 @@ class Dsv4MoeConfigTest(unittest.TestCase):
         self.assertEqual(runtime.local_expert_start, 21)
         self.assertEqual(runtime.local_expert_end, 24)
 
+    def test_v41_physical_capacity_reaches_private_moe(self):
+        from rtp_llm.models_py.model_desc.deepseek_v41_base_model import (
+            _args_from_model_config as v41_args_from_config,
+        )
+        from rtp_llm.models_py.modules.dsv41.block import Block as V41Block
+        from rtp_llm.models_py.modules.dsv41.transformer import (
+            _block_kwargs as v41_block_kwargs,
+        )
+        from rtp_llm.ops import EplbMode
+        from rtp_llm.utils.model_weight import W
+
+        class DummyModule(nn.Module):
+            def __init__(self, *args, **kwargs):
+                super().__init__()
+
+        for mode, redundant in (
+            (EplbMode.NONE, 0),
+            (EplbMode.NONE, 8),
+            (EplbMode.STATS, 8),
+            (EplbMode.ALL, 8),
+        ):
+            with self.subTest(mode=mode, redundant=redundant):
+                config = self._load_minimal_model_config(1)
+                config.eplb_config.eplb_mode = mode
+                config.eplb_config.redundant_expert = redundant
+                args = v41_args_from_config(config)
+                args.ep_size, args.ep_rank = 8, 7
+                weights = {
+                    key: torch.ones(1)
+                    for key in (
+                        W.v4_attn_norm,
+                        W.v4_ffn_norm,
+                        W.v4_hc_attn_fn,
+                        W.v4_hc_attn_base,
+                        W.v4_hc_attn_scale,
+                        W.v4_hc_ffn_fn,
+                        W.v4_hc_ffn_base,
+                        W.v4_hc_ffn_scale,
+                    )
+                }
+                kwargs = v41_block_kwargs(0, args, weights)
+                with (
+                    patch(
+                        "rtp_llm.models_py.modules.dsv41.block.AttentionFP8",
+                        DummyModule,
+                    ),
+                    patch(
+                        "rtp_llm.models_py.modules.dsv41.block.RMSNorm",
+                        DummyModule,
+                    ),
+                    patch(
+                        "rtp_llm.models_py.modules.dsv41.block.build_hc_unit",
+                        side_effect=lambda *args, **kwargs: DummyModule(),
+                    ),
+                    patch.object(
+                        V41Block,
+                        "_resolve_prefill_fast_hc_impls",
+                        return_value=(lambda: None,) * 4,
+                    ),
+                    patch(
+                        "rtp_llm.models_py.modules.dsv41.block.MoE", autospec=True
+                    ) as moe,
+                ):
+                    V41Block(**kwargs)
+
+                self.assertEqual(args.n_routed_experts, 16)
+                self.assertEqual(args.n_physical_experts, 16 + redundant)
+                self.assertEqual(moe.call_args.kwargs["n_routed_experts"], 16)
+                self.assertEqual(
+                    moe.call_args.kwargs["n_physical_experts"], 16 + redundant
+                )
+                self.assertEqual(moe.call_args.kwargs["ep_size"], 8)
+                self.assertEqual(moe.call_args.kwargs["ep_rank"], 7)
+
+    def test_v41_model_exposes_private_moe_runtime_layers(self):
+        from rtp_llm.eplb.runtime import EplbLayer
+        from rtp_llm.models_py.model_desc.deepseek_v41_model import DeepSeekV41Model
+
+        layer = EplbLayer(
+            0,
+            torch.tensor([[0], [1]], dtype=torch.int32),
+            torch.ones(2, dtype=torch.int32),
+            (torch.zeros(2, 4),),
+        )
+        model = DeepSeekV41Model.__new__(DeepSeekV41Model)
+        nn.Module.__init__(model)
+        model.v4 = SimpleNamespace(
+            layers=[
+                SimpleNamespace(ffn=SimpleNamespace(eplb_layer=layer)),
+                SimpleNamespace(ffn=None),
+            ]
+        )
+
+        self.assertEqual(model.get_eplb_layers(), [layer])
+
     def test_zero_routed_expert_width_fails_fast(self):
         model_config = self._load_minimal_model_config(0)
         model_config.moe_inter_size = 0

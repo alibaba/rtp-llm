@@ -1,4 +1,5 @@
 load("@pip_dsv4_test//:requirements.bzl", test_requirement = "requirement")
+load("//rtp_llm/models_py/modules/dsv4/test:defs.bzl", "dsv4_sm100_py_test")
 
 package(default_visibility = ["//visibility:public"])
 
@@ -62,4 +63,26 @@ py_test(
         "@//:using_cuda13_arm": [],
         "//conditions:default": ["@platforms//:incompatible"],
     }),
+)
+
+
+dsv4_sm100_py_test(
+    name = "test_eplb_contract",
+    gpu_count = 0,
+    tags = ["dsv41_cuda13"],
+    deps = [
+        "//rtp_llm:testlib",
+        "//rtp_llm/models_py:modules",
+    ],
+)
+
+dsv4_sm100_py_test(
+    name = "test_eplb_mega",
+    gpu_count = 2,
+    tags = ["dsv41_cuda13"],
+    extra_srcs = ["//rtp_llm/models_py/modules/factory/fused_moe/impl/cuda/executors/test:mega_moe_routed_only_execution_test.py"],
+    deps = [
+        "//rtp_llm:testlib",
+        "//rtp_llm/models_py:modules",
+    ],
 )

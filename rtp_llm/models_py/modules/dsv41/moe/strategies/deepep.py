@@ -76,6 +76,9 @@ class DeepEPStrategy(RoutedExpertsStrategy):
             torch.cat([weights, pad_w], dim=-1),
         )
 
+    def get_eplb_weights(self) -> tuple[torch.Tensor, ...]:
+        return self._local.get_eplb_weights()
+
     def forward(
         self,
         x: torch.Tensor,  # [N, D] local rank's tokens (BF16)
@@ -103,7 +106,7 @@ class DeepEPStrategy(RoutedExpertsStrategy):
             num_tokens_per_expert,
             is_token_in_rank,
             _,
-        ) = buf.get_dispatch_layout(indices_p, cfg.n_routed_experts)
+        ) = buf.get_dispatch_layout(indices_p, cfg.physical_expert_num)
 
         # 2. Dispatch the BF16 tokens + topk scaffolding.
         (
