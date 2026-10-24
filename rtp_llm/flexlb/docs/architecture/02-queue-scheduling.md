@@ -49,7 +49,8 @@ QUEUE 模式下，`ordering.type` 和 `dispatcher.type` 是两个正交维度：
    新请求直接返回 `QUEUE_FULL_LOW_PRIORITY_REJECTED`（8433）。
    达到阈值的新请求只从全局队列中选择优先级严格低于自己的可抢占请求，先选择优先级最低的
    一档；如果这一档有多个请求，就抢占最晚入队的一个，保留更早入队的请求。
-   被挤出队列的请求返回 `QUEUED_REQUEST_PREEMPTED`（8435）。没有可抢占请求时，高优新请求返回
+   被挤出队列的请求按自己的优先级返回错误码：低于阈值返回 `QUEUE_FULL_LOW_PRIORITY_REJECTED`（8433），
+   达到阈值返回 `QUEUE_FULL_HIGH_PRIORITY_REJECTED`（8434）。没有可抢占请求时，高优新请求返回
    `QUEUE_FULL_HIGH_PRIORITY_REJECTED`（8434）；FIFO 模式满队列时返回 `QUEUE_FULL`（8502）。
    调度器已选中、正在选 worker
    或处理选路结果的请求仍占队列名额，处理结束前不参与队列抢占；因资源不足继续排队的
@@ -88,7 +89,7 @@ QUEUE + NON_BATCH 完成 Decode 排队预留和 Prefill 子队列入队后，请
 再在选中 Prefill 的子队列抢占另一个低优请求。
 QUEUE + BATCH 完成 Decode 排队预留和 Prefill 子队列入队后，按批次上限准备交付。
 DIRECT 没有子队列，选中的 Prefill 和 Decode 在路由提交时检查容量，容量不足则返回错误。
-Prefill 待交付队列中的请求被高优新请求替换时，也返回 `QUEUED_REQUEST_PREEMPTED`（8435）。
+Prefill 待交付队列中的请求被高优新请求替换时，同样按被替换请求自己的优先级返回 8433 或 8434。
 
 Worker 下线停止子队列时，尚未完成 dispatch 交接的请求释放旧 Prefill 路由预留和 Decode 预留，
 回到原 global 队列条目重新选路，保留请求 future、优先级、排队顺序和截止时间。

@@ -7,6 +7,7 @@ import org.flexlb.balance.scheduler.RequestSlot.AdmissionHandle;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.BalanceContext;
+import org.flexlb.dao.SchedulingMetadata;
 import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
@@ -42,6 +43,7 @@ class RequestAdmissionResourceLeakTest {
     @BeforeEach
     void setUp() {
         config = SchedulingTestConfig.batchConfig();
+        SchedulingTestConfig.usePriorityQueue(config);
         ConfigService service = mock(ConfigService.class);
         when(service.loadBalanceConfig()).thenReturn(config);
         lifecycle = new RequestRegistry(service, mock(BatchSchedulerReporter.class),
@@ -157,13 +159,30 @@ class RequestAdmissionResourceLeakTest {
     }
 
     @Test
-    void queuedPrefillPreemptionReturnsQueuePreemptedAndReleasesDecodeOnce() throws Exception {
+    void queuedPrefillPreemptionOfLowPriorityRequestReturnsLowPriorityRejection() throws Exception {
+        BalanceContext context = RequestLifecycleTestSupport.context(config, 71L);
+        context.setSchedulingMetadata(SchedulingMetadata.explicit(
+                40, System.currentTimeMillis() + TimeUnit.MINUTES.toMillis(1)));
+        var future = lifecycle.register(context);
+        DecodeEndpoint decode = mock(DecodeEndpoint.class);
+        var reservation = new DecodeEndpoint.ReservationHandle(1L, "71", 1L);
+        ScheduledRequest victim = new ScheduledRequest(context, future, new Response(), null, null,
+                null, decode, reservation, System.currentTimeMillis());
+        RequestLifecycleTestSupport.bindRoute(lifecycle, new Registered(victim, future));
+        Registered incoming = registerItem(72L);
+        lifecycle.onQueuedItemPreempted(victim, incoming.item());
+        assertEquals(StrategyErrorType.QUEUE_FULL_LOW_PRIORITY_REJECTED.getErrorCode(),
+                future.get(5, TimeUnit.SECONDS).getCode());
+    }
+
+    @Test
+    void queuedPrefillPreemptionOfHighPriorityRequestReturnsHighPriorityRejectionAndReleasesDecodeOnce() throws Exception {
         Registered victim = registerItem(61L);
         Registered incoming = registerItem(62L);
         RequestLifecycleTestSupport.bindRoute(lifecycle, victim);
         lifecycle.onQueuedItemPreempted(victim.item(), incoming.item());
         Response response = victim.future().get(5, TimeUnit.SECONDS);
-        assertEquals(StrategyErrorType.QUEUED_REQUEST_PREEMPTED.getErrorCode(), response.getCode());
+        assertEquals(StrategyErrorType.QUEUE_FULL_HIGH_PRIORITY_REJECTED.getErrorCode(), response.getCode());
         assertEquals(RequestRegistry.PREEMPTED_BY_HIGHER_PRIORITY_MESSAGE + " 62", response.getErrorMessage());
         lifecycle.onQueuedItemPreempted(victim.item(), incoming.item());
         lifecycle.cancelRequest("61", 0L, CancelReason.CLIENT_CANCELLED);

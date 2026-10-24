@@ -81,7 +81,6 @@ public final class FlexlbTrace {
             StrategyErrorType.QUEUE_FULL.getErrorCode(),
             StrategyErrorType.QUEUE_FULL_LOW_PRIORITY_REJECTED.getErrorCode(),
             StrategyErrorType.QUEUE_FULL_HIGH_PRIORITY_REJECTED.getErrorCode(),
-            StrategyErrorType.QUEUED_REQUEST_PREEMPTED.getErrorCode(),
             StrategyErrorType.PRIORITY_PREEMPTED.getErrorCode(),
             StrategyErrorType.INVALID_REQUEST.getErrorCode(),
             StrategyErrorType.PRIORITY_ADMISSION_REJECTED.getErrorCode(),

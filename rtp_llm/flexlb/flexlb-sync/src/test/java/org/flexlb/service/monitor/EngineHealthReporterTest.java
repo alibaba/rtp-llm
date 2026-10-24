@@ -243,7 +243,7 @@ class EngineHealthReporterTest {
     }
 
     @ParameterizedTest
-    @ValueSource(ints = {200, 8431, 8433, 8434, 8435})
+    @ValueSource(ints = {200, 8431, 8433, 8434})
     void shouldReportScheduleOutcomeWithRequestPriorityWithoutSelectedWorkers(int code) {
         Request request = new Request();
         request.setPriority(20);

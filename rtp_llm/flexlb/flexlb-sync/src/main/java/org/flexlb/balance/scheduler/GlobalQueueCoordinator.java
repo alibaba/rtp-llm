@@ -162,6 +162,7 @@ final class GlobalQueueCoordinator implements AutoCloseable {
         GlobalQueueEntry entry = new GlobalQueueEntry(context, future, normalizePriority(priority),
                 router.resolvePolicyGroup(context));
         GlobalQueueEntry victim = null;
+        int highPriorityThreshold = 0;
         lock.lock();
         try {
             if (closed.get()) {
@@ -175,7 +176,8 @@ final class GlobalQueueCoordinator implements AutoCloseable {
                 if (!priorityOrdering) {
                     return OfferResult.QUEUE_FULL;
                 }
-                if (entry.priority < config.priorityOrdering().getHighPriorityThreshold()) {
+                highPriorityThreshold = config.priorityOrdering().getHighPriorityThreshold();
+                if (entry.priority < highPriorityThreshold) {
                     return OfferResult.QUEUE_FULL_LOW_PRIORITY_REJECTED;
                 }
                 victim = orderedQueue.findQueuedRequestToPreempt(entry.priority, inFlight);
@@ -197,7 +199,8 @@ final class GlobalQueueCoordinator implements AutoCloseable {
             lock.unlock();
         }
         if (victim != null) {
-            completeDecisionResponse(victim, error(StrategyErrorType.QUEUED_REQUEST_PREEMPTED,
+            completeDecisionResponse(victim, error(
+                    StrategyErrorType.queueRejectionFor(victim.priority, highPriorityThreshold),
                     QUEUE_FULL_REJECTION_MESSAGE));
         }
         return OfferResult.ENQUEUED;

@@ -19,7 +19,6 @@ public enum StrategyErrorType {
     QUEUE_FULL(8502, false),
     QUEUE_FULL_LOW_PRIORITY_REJECTED(8433, false),
     QUEUE_FULL_HIGH_PRIORITY_REJECTED(8434, false),
-    QUEUED_REQUEST_PREEMPTED(8435, false),
     QUEUE_TIMEOUT(8503, false, "GatewayTimeout"),
     REQUEST_CANCELLED(8504, false),
 
@@ -91,6 +90,16 @@ public enum StrategyErrorType {
         String escaped = safeDetail.replace("\\", "\\\\").replace("\"", "\\\"");
         return "{\"status_name\":\"" + statusName
                 + "\",\"detail\":\"" + escaped + "\"}";
+    }
+
+    /**
+     * Error type for a request rejected or replaced in a full queue, chosen by that
+     * request's own priority: below the threshold is low priority, otherwise high priority.
+     */
+    public static StrategyErrorType queueRejectionFor(int priority, int highPriorityThreshold) {
+        return priority < highPriorityThreshold
+                ? QUEUE_FULL_LOW_PRIORITY_REJECTED
+                : QUEUE_FULL_HIGH_PRIORITY_REJECTED;
     }
 
     public boolean acceptsAdmissionRejectReason(AdmissionRejectReason reason) {

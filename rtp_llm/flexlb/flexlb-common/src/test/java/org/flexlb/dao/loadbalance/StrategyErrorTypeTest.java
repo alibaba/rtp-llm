@@ -71,6 +71,12 @@ class StrategyErrorTypeTest {
         assertEquals(8502, Response.buildErrorResponse(StrategyErrorType.QUEUE_FULL, "queue full").getCode());
         assertEquals(8433, StrategyErrorType.QUEUE_FULL_LOW_PRIORITY_REJECTED.getErrorCode());
         assertEquals(8434, StrategyErrorType.QUEUE_FULL_HIGH_PRIORITY_REJECTED.getErrorCode());
-        assertEquals(8435, StrategyErrorType.QUEUED_REQUEST_PREEMPTED.getErrorCode());
+    }
+
+    @Test
+    void queueRejectionIsChosenByPriorityThreshold() {
+        assertEquals(StrategyErrorType.QUEUE_FULL_LOW_PRIORITY_REJECTED, StrategyErrorType.queueRejectionFor(40, 50));
+        assertEquals(StrategyErrorType.QUEUE_FULL_HIGH_PRIORITY_REJECTED, StrategyErrorType.queueRejectionFor(50, 50));
+        assertEquals(StrategyErrorType.QUEUE_FULL_HIGH_PRIORITY_REJECTED, StrategyErrorType.queueRejectionFor(60, 50));
     }
 }

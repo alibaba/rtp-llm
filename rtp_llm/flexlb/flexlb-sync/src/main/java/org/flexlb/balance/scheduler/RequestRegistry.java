@@ -66,6 +66,7 @@ public class RequestRegistry {
     private volatile EncoderQueueCoordinator encoderQueue;
 
     private final Object registrationLock = new Object();
+    private final ConfigService configService;
     private final BatchSchedulerReporter reporter;
     private final RequestSchedulerReporter requestReporter;
 
@@ -81,6 +82,7 @@ public class RequestRegistry {
     public RequestRegistry(ConfigService configService,
                             BatchSchedulerReporter reporter,
                             RequestSchedulerReporter requestReporter) {
+        this.configService = Objects.requireNonNull(configService, "configService");
         this.reporter = Objects.requireNonNull(reporter, "reporter");
         this.requestReporter = Objects.requireNonNull(requestReporter);
         this.expirationTimer = new ExpirationTimer(
@@ -519,9 +521,10 @@ public class RequestRegistry {
     }
 
     public void finishYielded(ScheduledRequest victim, String detail) {
+        int threshold = configService.loadBalanceConfig().priorityOrdering().getHighPriorityThreshold();
         finishVictim(
                 victim,
-                StrategyErrorType.QUEUED_REQUEST_PREEMPTED,
+                StrategyErrorType.queueRejectionFor(victim.priority(), threshold),
                 detail);
     }
 
