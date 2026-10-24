@@ -4,11 +4,12 @@ import logging
 import os
 import shlex
 import shutil
+import socket
 import subprocess
 import time
 import urllib.request
 from pathlib import Path
-from typing import Dict, List, Union
+from typing import Any, Dict, List, Union
 
 from smoke.case_runner import CaseRunner
 from smoke.task_info import TaskInfo, TaskStates
@@ -55,6 +56,49 @@ def _build_local_dp_addresses(base_port, world_size, tp_size, worker_info_port_n
         f"127.0.0.1:{int(base_port) + rank * worker_info_port_num}"
         for rank in range(0, world_size, max(1, tp_size))
     ]
+
+
+# Bounded wait for a role's model RPC listener.  `MagaServerManager` health
+# checks only prove the HTTP frontend is up; ``ServerConfig.rpc_server_port``
+# (``start_port + rank * worker_info_port_num + 1``) can start listening later,
+# and a query issued in that window fails with CONNECT_FAILED (8202) on the
+# frontend side or a bare curl error on the client side.
+SMOKE_ROLE_RPC_READY_TIMEOUT_S = 600.0
+
+
+def _wait_tcp_port_ready(
+    host: str, port: int, timeout_s: float, description: str
+) -> None:
+    """Block until ``host:port`` accepts a TCP connection, or raise TimeoutError."""
+    deadline = time.monotonic() + timeout_s
+    last_error = None
+    while True:
+        try:
+            with socket.create_connection((host, int(port)), timeout=2.0):
+                logging.info(
+                    "%s %s:%s is accepting connections", description, host, port
+                )
+                return
+        except OSError as exc:
+            last_error = exc
+            if time.monotonic() >= deadline:
+                raise TimeoutError(
+                    f"{description} {host}:{port} did not accept connections within "
+                    f"{timeout_s:.0f}s"
+                ) from last_error
+            time.sleep(1.0)
+
+
+
+def _dump_manager_logs(managers, max_lines: int = 200) -> None:
+    """Best-effort process-log dump for managers whose run failed mid-flight."""
+    for manager in managers:
+        if manager is None:
+            continue
+        try:
+            manager.print_process_log(max_lines=max_lines)
+        except Exception:  # noqa: BLE001 - diagnostics must never mask the failure
+            logging.warning("failed to dump process log for %r", manager, exc_info=True)
 
 
 class SeparatedCaseRunner(CaseRunner):
@@ -298,6 +342,43 @@ class SeparatedCaseRunner(CaseRunner):
             owners[0],
         )
 
+    def _wait_model_rpc_ports(self, configs) -> None:
+        """Wait until each serving role's per-rank model RPC listener is up.
+
+        ``MagaServerManager`` health-checks the HTTP frontend only; the model
+        RPC listeners (base port + 1, ``--worker_info_port_num`` stride) come up
+        later and are outside that probe, so the first query used to race them
+        (symptom: VISIT_FAILED with CONNECT_FAILED/8202).  The PD suites run
+        through this runner, so the wait lives here; DpSeperationCaseRunner does
+        not inherit this class and keeps its own copy.
+        """
+        for config in configs:
+            role_name = config.get("role_name")
+            if role_name not in (
+                PREFILL_ROLE_NAME,
+                DECODE_ROLE_NAME,
+                LLM_ROLE_NAME,
+            ):
+                continue
+            env_dict = config.get("env_dict") or {}
+            args = config.get("smoke_args_str") or ""
+            base_port = int(config["port"])
+            world_size = _extract_int_arg(
+                args, "--world_size", int(env_dict.get("WORLD_SIZE", 1))
+            )
+            info_port_num = _extract_int_arg(
+                args,
+                "--worker_info_port_num",
+                int(env_dict.get("WORKER_INFO_PORT_NUM", MIN_WORKER_INFO_PORT_NUM)),
+            )
+            for rank in range(int(world_size)):
+                _wait_tcp_port_ready(
+                    "127.0.0.1",
+                    base_port + rank * int(info_port_num) + 1,
+                    SMOKE_ROLE_RPC_READY_TIMEOUT_S,
+                    f"{role_name} rank {rank} model rpc",
+                )
+
     def _run_impl(self):
         has_pd = PREFILL_ROLE_NAME in self.env_args
         backend_roles = (
@@ -520,6 +601,11 @@ class SeparatedCaseRunner(CaseRunner):
                 return self._keep_servers_alive(
                     managers, enable_remote_cache=enable_remote_cache
                 )
+            # Both roles report healthy HTTP frontends, but the peer model RPC
+            # listeners are outside the health probe: wait for them before
+            # curling so the first query cannot land while an upstream rpc port
+            # is still closed (VISIT_FAILED with CONNECT_FAILED/8202).
+            self._wait_model_rpc_ports(configs)
             curl_role = (
                 FRONTEND_ROLE_NAME
                 if frontend_envs is not None
@@ -702,65 +788,120 @@ class DpSeperationCaseRunner(CaseRunner):
         ]
 
         # start decode and prefill servers in parallel
-        server_managers, task_states_list = self.start_servers_parallel(server_configs)
-
-        decode_server_manager, decode_task_states = (
-            server_managers[0],
-            task_states_list[0],
-        )
-        prefill_server_manager, prefill_task_states = (
-            server_managers[1],
-            task_states_list[1],
-        )
-
-        # check decode server start result
-        if decode_task_states.ret != True:
-            decode_task_states.err_msg = (
-                "decode server start failed, " + decode_task_states.err_msg
-            )
-            return decode_task_states
-        assert (
-            decode_server_manager is not None
-        ), "decode server manager should not be None"
-
-        # check prefill server start result
-        if prefill_task_states.ret != True:
-            prefill_task_states.err_msg = (
-                "prefill server start failed, " + prefill_task_states.err_msg
-            )
-            decode_server_manager.stop_server()
-            return prefill_task_states
-        assert (
-            prefill_server_manager is not None
-        ), "prefill server manager should not be None"
-
-        curl_server_mgr = (
-            decode_server_manager
-            if frontend_server_manager is None
-            else frontend_server_manager
-        )
-
-        if str_to_bool(os.environ.get("SMOKE_KEEP_SERVER_ALIVE", "False")):
-            servers = {
-                "prefill": prefill_server_manager,
-                "decode": decode_server_manager,
-            }
-            if frontend_server_manager is not None:
-                servers["frontend"] = frontend_server_manager
-            return self._keep_servers_alive(
-                servers, enable_remote_cache=enable_remote_cache
-            )
-
-        task_states = self.curl_server(curl_server_mgr)
-        prefill_server_manager.stop_server()
-        decode_server_manager.stop_server()
-
+        started: List[Any] = []
         if frontend_server_manager is not None:
-            frontend_server_manager.stop_server()
+            started.append(frontend_server_manager)
         if enable_remote_cache and self.remote_kvcm_server is not None:
-            self.remote_kvcm_server.stop_server()
-            self.remote_kvcm_server.copy_logs()
-        return task_states
+            started.append(self.remote_kvcm_server)
+        try:
+            server_managers, task_states_list = self.start_servers_parallel(server_configs)
+            started.extend(m for m in server_managers if m is not None)
+
+            decode_server_manager, decode_task_states = (
+                server_managers[0],
+                task_states_list[0],
+            )
+            prefill_server_manager, prefill_task_states = (
+                server_managers[1],
+                task_states_list[1],
+            )
+
+            # check decode server start result
+            if decode_task_states.ret != True:
+                decode_task_states.err_msg = (
+                    "decode server start failed, " + decode_task_states.err_msg
+                )
+                return decode_task_states
+            assert (
+                decode_server_manager is not None
+            ), "decode server manager should not be None"
+
+            # check prefill server start result
+            if prefill_task_states.ret != True:
+                prefill_task_states.err_msg = (
+                    "prefill server start failed, " + prefill_task_states.err_msg
+                )
+                decode_server_manager.stop_server()
+                return prefill_task_states
+            assert (
+                prefill_server_manager is not None
+            ), "prefill server manager should not be None"
+
+            # Both roles report healthy HTTP frontends, but the peer model RPC
+            # listeners are outside the health probe: wait for them before curling so
+            # the first query cannot land while an upstream rpc port is still closed
+            # (symptom: VISIT_FAILED with CONNECT_FAILED/8202 or curl_error).
+            prefill_info_port_num = _extract_int_arg(
+                prefill_args,
+                "--worker_info_port_num",
+                int(prefill_envs.get("WORKER_INFO_PORT_NUM", MIN_WORKER_INFO_PORT_NUM)),
+            )
+            decode_info_port_num = _extract_int_arg(
+                decode_args,
+                "--worker_info_port_num",
+                int(decode_envs.get("WORKER_INFO_PORT_NUM", MIN_WORKER_INFO_PORT_NUM)),
+            )
+            for role_name, base_port, world_size, info_port_num in (
+                ("prefill", prefill_port, prefill_gpu_size, prefill_info_port_num),
+                ("decode", decode_port, decode_gpu_size, decode_info_port_num),
+            ):
+                for rank in range(int(world_size)):
+                    _wait_tcp_port_ready(
+                        "127.0.0.1",
+                        int(base_port) + rank * int(info_port_num) + 1,
+                        SMOKE_ROLE_RPC_READY_TIMEOUT_S,
+                        f"{role_name} rank {rank} model rpc",
+                    )
+            if frontend_server_manager is not None:
+                _wait_tcp_port_ready(
+                    "127.0.0.1",
+                    int(frontend_port),
+                    SMOKE_ROLE_RPC_READY_TIMEOUT_S,
+                    "frontend http",
+                )
+
+            curl_server_mgr = (
+                decode_server_manager
+                if frontend_server_manager is None
+                else frontend_server_manager
+            )
+
+            if str_to_bool(os.environ.get("SMOKE_KEEP_SERVER_ALIVE", "False")):
+                servers = {
+                    "prefill": prefill_server_manager,
+                    "decode": decode_server_manager,
+                }
+                if frontend_server_manager is not None:
+                    servers["frontend"] = frontend_server_manager
+                return self._keep_servers_alive(
+                    servers, enable_remote_cache=enable_remote_cache
+                )
+
+            task_states = self.curl_server(curl_server_mgr)
+            prefill_server_manager.stop_server()
+            decode_server_manager.stop_server()
+
+            if frontend_server_manager is not None:
+                frontend_server_manager.stop_server()
+            if enable_remote_cache and self.remote_kvcm_server is not None:
+                self.remote_kvcm_server.stop_server()
+                self.remote_kvcm_server.copy_logs()
+            return task_states
+        except Exception:
+            _dump_manager_logs(started)
+            raise
+        finally:
+            # stop_server() is idempotent: the happy path stops the managers
+            # explicitly (and KEEP_SERVER_ALIVE hands them over), but a raised
+            # readiness/curl error used to leak every started worker — orphan
+            # processes then hold the GPU for the next test on this host.
+            for manager in reversed(started):
+                try:
+                    manager.stop_server()
+                except Exception:  # noqa: BLE001 - cleanup must not mask the failure
+                    logging.warning(
+                        "failed to stop %r during cleanup", manager, exc_info=True
+                    )
 
 
 class FrontAppSeperationCaseRunner(CaseRunner):
@@ -804,49 +945,68 @@ class FrontAppSeperationCaseRunner(CaseRunner):
         frontend_envs["MODEL_SERVICE_CONFIG"] = service_route.model_dump_json()
 
         # start frontend server first since pdfusion depends on it for MODEL_SERVICE_CONFIG
-        task_states = TaskStates()
-        frontend_server_manager = self.start_server(
-            frontend_envs,
-            task_states,
-            self.task_info,
-            port=frontend_port,
-            role_name="frontend",
-        )
-        if task_states.ret != True:
-            task_states.err_msg = "frontend server start failed, " + task_states.err_msg
-            return task_states
-        assert (
-            frontend_server_manager is not None
-        ), "frontend server manager should not be None"
-
-        # start PDFUSION server after frontend is ready
-        pd_fusion_envs["CUDA_VISIBLE_DEVICES"] = ",".join(gpu_ids[:gpu_size])
-        pd_fusion_envs["REMOTE_RPC_SERVER_IP"] = "localhost"
-        pd_fusion_envs["REMOTE_SERVER_PORT"] = pd_fusion_port
-        task_states = TaskStates()
-        server_manager = self.start_server(
-            pd_fusion_envs,
-            task_states,
-            self.task_info,
-            port=pd_fusion_port,
-            role_name="pd_fusion",  # Fixed: use "pd_fusion" to match BUILD file key
-        )
-        if task_states.ret != True:
-            task_states.err_msg = "PDFUSION server start failed, " + task_states.err_msg
-            return task_states
-        assert server_manager is not None, "PDFUSION server manager should not be None"
-
-        if str_to_bool(os.environ.get("SMOKE_KEEP_SERVER_ALIVE", "False")):
-            return self._keep_servers_alive(
-                {"pd_fusion": server_manager, "frontend": frontend_server_manager}
+        server_manager = None
+        try:
+            task_states = TaskStates()
+            frontend_server_manager = self.start_server(
+                frontend_envs,
+                task_states,
+                self.task_info,
+                port=frontend_port,
+                role_name="frontend",
             )
+            if task_states.ret != True:
+                task_states.err_msg = "frontend server start failed, " + task_states.err_msg
+                return task_states
+            assert (
+                frontend_server_manager is not None
+            ), "frontend server manager should not be None"
 
-        task_states = self.curl_server(frontend_server_manager)
-        server_manager.stop_server()
+            # start PDFUSION server after frontend is ready
+            pd_fusion_envs["CUDA_VISIBLE_DEVICES"] = ",".join(gpu_ids[:gpu_size])
+            pd_fusion_envs["REMOTE_RPC_SERVER_IP"] = "localhost"
+            pd_fusion_envs["REMOTE_SERVER_PORT"] = pd_fusion_port
+            task_states = TaskStates()
+            server_manager = self.start_server(
+                pd_fusion_envs,
+                task_states,
+                self.task_info,
+                port=pd_fusion_port,
+                role_name="pd_fusion",  # Fixed: use "pd_fusion" to match BUILD file key
+            )
+            if task_states.ret != True:
+                task_states.err_msg = "PDFUSION server start failed, " + task_states.err_msg
+                return task_states
+            assert server_manager is not None, "PDFUSION server manager should not be None"
 
-        if frontend_server_manager is not None:
-            frontend_server_manager.stop_server()
-        return task_states
+            if str_to_bool(os.environ.get("SMOKE_KEEP_SERVER_ALIVE", "False")):
+                return self._keep_servers_alive(
+                    {"pd_fusion": server_manager, "frontend": frontend_server_manager}
+                )
+
+            task_states = self.curl_server(frontend_server_manager)
+            server_manager.stop_server()
+
+            if frontend_server_manager is not None:
+                frontend_server_manager.stop_server()
+            return task_states
+        except Exception:
+            _dump_manager_logs(
+                [m for m in (frontend_server_manager, server_manager) if m is not None]
+            )
+            raise
+        finally:
+            # See DpSeperationCaseRunner: the stop is idempotent, and the
+            # early-return paths used to leak the already-started frontend.
+            for manager in reversed(
+                [m for m in (frontend_server_manager, server_manager) if m is not None]
+            ):
+                try:
+                    manager.stop_server()
+                except Exception:  # noqa: BLE001 - cleanup must not mask the failure
+                    logging.warning(
+                        "failed to stop %r during cleanup", manager, exc_info=True
+                    )
 
 
 class LocalTwoPartPdfusionCaseRunner(CaseRunner):

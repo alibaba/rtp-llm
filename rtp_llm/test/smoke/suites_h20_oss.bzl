@@ -38,6 +38,10 @@ def h20_oss_suites():
                 envs = [],
                 gpu_type = ["H20_CU13"],
             ),
+            # Cold start (--warm_up 0) plus DeepEP init can exceed the default
+            # 5s KV load deadline (load_cache_timeout_ms); the first PD request
+            # then fails with CACHE_STORE_LOAD_BUFFER_TIMEOUT. Use the same 120s
+            # deadline as next_pd instead of hiding the cold start via warm-up.
             smoke_test(
                 name = "mla_cp_pd",
                 task_info = "data/model/glm5/glm_5_fp8_q_r_h20_cp.json",
@@ -46,8 +50,8 @@ def h20_oss_suites():
                     "decode": [],
                 },
                 smoke_args = {
-                    "prefill": "--fp8_kv_cache 1 --act_type BF16 --cache_store_rdma_mode 0 --use_local 1 --reserver_runtime_mem_mb 8192 --role_type PREFILL --seq_size_per_block 64 --dp_size 1 --tp_size 2 --ep_size 2 --world_size 2 --warm_up 0 --use_deepep_moe 1 --use_deepep_low_latency 0 --cp_rotate_method ALL_GATHER --use_all_gather=0",
-                    "decode": "--fp8_kv_cache 1 --act_type BF16 --cache_store_rdma_mode 0 --use_local 1 --reserver_runtime_mem_mb 8192 --role_type DECODE --seq_size_per_block 64 --ep_size 2 --dp_size 2 --world_size 2 --warm_up 0 --use_deepep_moe 1 --use_deepep_low_latency 1 --cp_rotate_method PREFILL_CP --use_all_gather=0",
+                    "prefill": "--fp8_kv_cache 1 --act_type BF16 --cache_store_rdma_mode 0 --use_local 1 --load_cache_timeout_ms 120000 --reserver_runtime_mem_mb 8192 --role_type PREFILL --seq_size_per_block 64 --dp_size 1 --tp_size 2 --ep_size 2 --world_size 2 --warm_up 0 --use_deepep_moe 1 --use_deepep_low_latency 0 --cp_rotate_method ALL_GATHER --use_all_gather=0",
+                    "decode": "--fp8_kv_cache 1 --act_type BF16 --cache_store_rdma_mode 0 --use_local 1 --load_cache_timeout_ms 120000 --reserver_runtime_mem_mb 8192 --role_type DECODE --seq_size_per_block 64 --ep_size 2 --dp_size 2 --world_size 2 --warm_up 0 --use_deepep_moe 1 --use_deepep_low_latency 1 --cp_rotate_method PREFILL_CP --use_all_gather=0",
                 },
                 gpu_type = ["H20_CU13"],
             ),
@@ -59,8 +63,8 @@ def h20_oss_suites():
                     "decode": [],
                 },
                 smoke_args = {
-                    "prefill": "--fp8_kv_cache 1 --act_type BF16 --cache_store_rdma_mode 0 --use_local 1 --reserver_runtime_mem_mb 8192 --role_type PREFILL --seq_size_per_block 64 --dp_size 1 --tp_size 2 --ep_size 2 --world_size 2 --warm_up 0 --use_deepep_moe 0 --use_all_gather 1 --moe_strategy fp8_per_block_pure_cp --cp_rotate_method ALL_GATHER",
-                    "decode": "--fp8_kv_cache 1 --act_type BF16 --cache_store_rdma_mode 0 --use_local 1 --reserver_runtime_mem_mb 8192 --role_type DECODE --seq_size_per_block 64 --ep_size 2 --dp_size 2 --world_size 2 --warm_up 0 --use_deepep_moe 1 --use_deepep_low_latency 1 --cp_rotate_method PREFILL_CP --use_all_gather 0",
+                    "prefill": "--fp8_kv_cache 1 --act_type BF16 --cache_store_rdma_mode 0 --use_local 1 --load_cache_timeout_ms 120000 --reserver_runtime_mem_mb 8192 --role_type PREFILL --seq_size_per_block 64 --dp_size 1 --tp_size 2 --ep_size 2 --world_size 2 --warm_up 0 --use_deepep_moe 0 --use_all_gather 1 --moe_strategy fp8_per_block_pure_cp --cp_rotate_method ALL_GATHER",
+                    "decode": "--fp8_kv_cache 1 --act_type BF16 --cache_store_rdma_mode 0 --use_local 1 --load_cache_timeout_ms 120000 --reserver_runtime_mem_mb 8192 --role_type DECODE --seq_size_per_block 64 --ep_size 2 --dp_size 2 --world_size 2 --warm_up 0 --use_deepep_moe 1 --use_deepep_low_latency 1 --cp_rotate_method PREFILL_CP --use_all_gather 0",
                 },
                 gpu_type = ["H20_CU13"],
             ),
@@ -145,8 +149,8 @@ def h20_oss_suites():
                     "decode": [],
                 },
                 smoke_args = {
-                    "prefill": "--act_type BF16 --cache_store_rdma_mode 0 --use_local 1 --reserver_runtime_mem_mb 8192 --role_type PREFILL --seq_size_per_block 64 --dp_size 1 --tp_size 2 --ep_size 2 --world_size 2 --warm_up 0 --use_deepep_moe 1 --use_deepep_low_latency 0 --cp_rotate_method ALL_GATHER",
-                    "decode": "--act_type BF16 --cache_store_rdma_mode 0 --use_local 1 --reserver_runtime_mem_mb 8192 --role_type DECODE --seq_size_per_block 64 --ep_size 2 --dp_size 2 --world_size 2 --warm_up 0 --use_deepep_moe 1 --use_deepep_low_latency 1 --cp_rotate_method PREFILL_CP",
+                    "prefill": "--act_type BF16 --cache_store_rdma_mode 0 --use_local 1 --load_cache_timeout_ms 120000 --reserver_runtime_mem_mb 8192 --role_type PREFILL --seq_size_per_block 64 --dp_size 1 --tp_size 2 --ep_size 2 --world_size 2 --warm_up 0 --use_deepep_moe 1 --use_deepep_low_latency 0 --cp_rotate_method ALL_GATHER",
+                    "decode": "--act_type BF16 --cache_store_rdma_mode 0 --use_local 1 --load_cache_timeout_ms 120000 --reserver_runtime_mem_mb 8192 --role_type DECODE --seq_size_per_block 64 --ep_size 2 --dp_size 2 --world_size 2 --warm_up 0 --use_deepep_moe 1 --use_deepep_low_latency 1 --cp_rotate_method PREFILL_CP",
                 },
                 gpu_type = ["H20_CU13"],
             ),
@@ -392,8 +396,8 @@ def h20_oss_suites():
                     "decode": [],
                 },
                 smoke_args = {
-                    "prefill": "--warm_up 0 --role_type PREFILL --cache_store_rdma_mode 0 --use_local 1 --tp_size 2 --dp_size 2 --world_size 4 --act_type BF16 --seq_size_per_block 2048 --reserver_runtime_mem_mb 12000 --use_deepep_moe 1 --use_deepep_low_latency 1",
-                    "decode": "--warm_up 0 --role_type DECODE --cache_store_rdma_mode 0 --use_local 1 --tp_size 2 --dp_size 2 --world_size 4 --act_type BF16 --seq_size_per_block 2048 --reserver_runtime_mem_mb 12000 --use_deepep_moe 1 --use_deepep_low_latency 1",
+                    "prefill": "--warm_up 0 --role_type PREFILL --cache_store_rdma_mode 0 --use_local 1 --load_cache_timeout_ms 120000 --tp_size 2 --dp_size 2 --world_size 4 --act_type BF16 --seq_size_per_block 2048 --reserver_runtime_mem_mb 12000 --use_deepep_moe 1 --use_deepep_low_latency 1",
+                    "decode": "--warm_up 0 --role_type DECODE --cache_store_rdma_mode 0 --use_local 1 --load_cache_timeout_ms 120000 --tp_size 2 --dp_size 2 --world_size 4 --act_type BF16 --seq_size_per_block 2048 --reserver_runtime_mem_mb 12000 --use_deepep_moe 1 --use_deepep_low_latency 1",
                 },
                 gpu_type = ["H20_CU13"],
             ),
@@ -640,8 +644,8 @@ def h20_oss_suites():
                 name = "qwen35_moe_vl_fp8",
                 task_info = "data/model/qwen35/q_r_35b_moe_vl_fp8.json",
                 smoke_args = {
-                    "prefill": "--use_local 1 --role_type PREFILL --tp_size 2 --act_type BF16 --seq_size_per_block 2048 --max_seq_len 8192 --enable_cuda_graph 0 --warm_up 0 --concurrency_limit 8 --reserver_runtime_mem_mb 8192",
-                    "decode": "--use_local 1 --role_type DECODE  --tp_size 2 --act_type BF16 --seq_size_per_block 2048 --max_seq_len 8192 --enable_cuda_graph 1 --warm_up 0 --concurrency_limit 8 --reserver_runtime_mem_mb 8192 --use_deepep_moe 1 --use_deepep_low_latency 1",
+                    "prefill": "--use_local 1 --load_cache_timeout_ms 120000 --role_type PREFILL --tp_size 2 --act_type BF16 --seq_size_per_block 2048 --max_seq_len 8192 --enable_cuda_graph 0 --warm_up 0 --concurrency_limit 8 --reserver_runtime_mem_mb 8192",
+                    "decode": "--use_local 1 --load_cache_timeout_ms 120000 --role_type DECODE  --tp_size 2 --act_type BF16 --seq_size_per_block 2048 --max_seq_len 8192 --enable_cuda_graph 1 --warm_up 0 --concurrency_limit 8 --reserver_runtime_mem_mb 8192 --use_deepep_moe 1 --use_deepep_low_latency 1",
                 },
                 envs = {
                     # Pin the FP8 per-token-group quant to the legacy kernel: the
