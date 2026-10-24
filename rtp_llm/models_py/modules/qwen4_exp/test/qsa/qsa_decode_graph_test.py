@@ -91,6 +91,94 @@ class Qwen4ExpQSADecodeGraphTest(TestCase):
             is_mtp_draft=draft,
         )
 
+    @skipUnless(torch.version.hip is not None, "ROCm ordinary-decode contract")
+    def test_rocm_actual_owner_batch1_16_page_replay(self):
+        for batch in (1, 16):
+            with self.subTest(batch=batch):
+                self.lengths = torch.full((batch,), 131, dtype=torch.int32).pin_memory()
+                self.lengths_device = (self.lengths + 1).cuda()
+                self.input_lengths = torch.ones(batch, dtype=torch.int32).pin_memory()
+                self.positions = torch.full(
+                    (batch * 3,), 131, dtype=torch.int32, device="cuda"
+                )
+                self.kv_table = torch.arange(
+                    1, batch * 2 + 1, dtype=torch.int32, device="cuda"
+                ).view(batch, 2)
+                self.state_table = self.kv_table.clone()
+                self.kv = (
+                    torch.randn(
+                        batch * 2 + 1, 32, 128, dtype=torch.bfloat16, device="cuda"
+                    )
+                    .view(torch.uint8)
+                    .reshape(batch * 2 + 1, -1)
+                )
+                self.state = torch.randn(
+                    batch * 2 + 1, 8 * 128, dtype=torch.float32, device="cuda"
+                )
+                self.q = torch.randn(batch, 4, 128, dtype=torch.bfloat16, device="cuda")
+                self.raw = torch.randn(batch, 128, dtype=torch.bfloat16, device="cuda")
+                self.indexer.token_budget = 2048
+                context = self._context(True)
+                original_kv, original_state = self.kv.clone(), self.state.clone()
+                # No mocked writer/score/topk: exercise the actual owner and
+                # its HIP Torch snapshot/topk fallbacks through capture.
+                context.select_decode_tokens(
+                    self.q, self.raw, indexer=self.indexer, rope_config=self.rope
+                )
+                context.finalize_side_cache()
+                self.kv.copy_(original_kv)
+                self.state.copy_(original_state)
+                graph = torch.cuda.CUDAGraph()
+                with torch.cuda.graph(graph):
+                    selected = context.select_decode_tokens(
+                        self.q, self.raw, indexer=self.indexer, rope_config=self.rope
+                    )
+                undo = context._side_cache_undo
+                context.finalize_side_cache()
+                # Capture capacity covers all replay lengths; real inputs,
+                # physical pages and the group-completion branch still change.
+                for length in (127, 128, 131):
+                    self.kv.copy_(original_kv)
+                    self.state.copy_(original_state)
+                    self.lengths.fill_(length)
+                    self.lengths_device.fill_(length + 1)
+                    self.positions.fill_(length)
+                    self.raw.normal_()
+                    self.q.normal_()
+                    self.kv_table.copy_(self.kv_table.flip(1))
+                    self.state_table.copy_(self.state_table.flip(1))
+                    graph.replay()
+                    expected_kv, expected_state = (
+                        original_kv.clone(),
+                        original_state.clone(),
+                    )
+                    eager = self._context(False, expected_kv, expected_state)
+                    expected = eager.select_decode_tokens(
+                        self.q, self.raw, indexer=self.indexer, rope_config=self.rope
+                    )
+                    # All completed blocks fit within the budget. Equal-score
+                    # order may differ with captured/eager score widths; the
+                    # selected token set and cache bytes must be identical.
+                    torch.testing.assert_close(
+                        selected.sort(-1).values,
+                        expected.sort(-1).values,
+                        rtol=0,
+                        atol=0,
+                    )
+                    torch.testing.assert_close(self.kv, expected_kv, rtol=0, atol=0)
+                    torch.testing.assert_close(
+                        self.state, expected_state, rtol=0, atol=0
+                    )
+                    from rtp_llm.models_py.modules.qwen4_exp.qsa.indexer_compressor import (
+                        restore_indexer_cache,
+                    )
+
+                    restore_indexer_cache(undo)
+                    torch.testing.assert_close(self.kv, original_kv, rtol=0, atol=0)
+                    torch.testing.assert_close(
+                        self.state, original_state, rtol=0, atol=0
+                    )
+
     def test_draft_graph_replays_engine_positions_and_side_cache(self):
         self._check_draft_graph_replay(False)
 

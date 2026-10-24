@@ -28,10 +28,21 @@ def is_supported(
     state_tokens_per_block: int,
     ratio: int,
 ) -> bool:
-    if not raw_keys.is_cuda or torch.version.hip is not None:
+    if not raw_keys.is_cuda:
         return False
     batch = int(raw_keys.shape[0]) if raw_keys.dim() == 2 else -1
     device = raw_keys.device
+    if torch.version.hip is not None:
+        # The single-token kernel uses portable Triton operations. Qualify only
+        # the MI308 layout validated with the real QSA graph owner; leave other
+        # ROCm architectures/pages and multi-token entry points on fallback.
+        arch = getattr(torch.cuda.get_device_properties(device), "gcnArchName", "")
+        if not (
+            arch.split(":", 1)[0] == "gfx942"
+            and kv_tokens_per_block == state_tokens_per_block == 128
+            and 1 <= batch <= 16
+        ):
+            return False
     tensors = (
         positions,
         rope_cos,
@@ -282,7 +293,7 @@ def write_target_window_with_undo_(
         raise ValueError("QSA target writer requires one RoPE row per packed token")
     entries_per_page = int(kv_pool.shape[1]) if kv_pool.dim() == 3 else 0
     page_size = entries_per_page * 4
-    if not is_supported(
+    if torch.version.hip is not None or not is_supported(
         raw_keys[:batch].contiguous(),
         prefixes,
         rope_cos[:batch].contiguous(),
@@ -421,7 +432,7 @@ def write_draft_window_with_undo_(
         raise ValueError("QSA draft writer requires packed one-to-four-row geometry")
     entries_per_page = int(kv_pool.shape[1]) if kv_pool.dim() == 3 else 0
     page_size = entries_per_page * 4
-    if not is_supported(
+    if torch.version.hip is not None or not is_supported(
         raw_keys[:batch].contiguous(),
         prefixes,
         rope_cos[:batch].contiguous(),
