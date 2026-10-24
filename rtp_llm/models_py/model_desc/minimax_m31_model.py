@@ -117,16 +117,19 @@ class MiniMaxM31Model(GenericMoeModel):
         hidden_states = self.embedding(inputs)
         residual = torch.zeros_like(hidden_states)
         capture = self.capture_context(inputs.capture_hidden_states)
-        if hidden_states.is_cuda and torch.cuda.is_current_stream_capturing():
-            # Graph Decode has a fixed, capacity-bounded row count. Keep the
-            # dynamic cross-rank Prefill plan outside capture and replay.
-            plan = None
-        else:
+        main_inputs = attention_inputs[MAIN_KV_TAG]
+        if (
+            main_inputs.is_prefill
+            and not main_inputs.is_target_verify
+            and not (hidden_states.is_cuda and torch.cuda.is_current_stream_capturing())
+        ):
             plan = prepare_m31_prefill_chunks(
                 self.layers[: self.layer_num],
                 hidden_states.shape[0],
                 hidden_states.device,
             )
+        else:
+            plan = None
         token = _PREFILL_CHUNK_PLAN.set(plan)
         capture_aux_hidden = bool(self._mtp_aux_capture_layer_ids)
         if capture_aux_hidden:

@@ -12,6 +12,10 @@ from torch import nn
 from rtp_llm.models_py.model_desc.generic_moe import GenericMoeLayer
 from rtp_llm.models_py.model_desc.minimax_m31_mlp import M31DenseMLP
 from rtp_llm.models_py.model_desc.minimax_m31_moe_pack import pack_m31_nvfp4_inputs
+from rtp_llm.models_py.model_desc.minimax_m31_prefill_router import (
+    expand_fp32_router_weight,
+    minimax_m31_prefill_router_logits,
+)
 from rtp_llm.models_py.modules.factory.fused_moe.defs.fused_moe import (
     CombineForwardPayload,
     FusedMoe,
@@ -32,6 +36,7 @@ from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.routers.fp8_fp4_route
 from rtp_llm.models_py.modules.factory.fused_moe.utils.mega_moe.buffer import (
     _get_or_create_mega_output,
 )
+from rtp_llm.ops import RoleType
 from rtp_llm.utils.model_weight import W
 
 _NVFP4_BUFFERS = {}
@@ -277,18 +282,36 @@ class M31NVFP4MegaExecutor(Fp8Fp4ExecutorBase):
 
 
 class _M31Fp32Router(nn.Module):
-    def __init__(self, linear):
+    def __init__(self, linear, prepare_prefill=False):
         super().__init__()
         self.linear = linear
+        if prepare_prefill:
+            for name, part in zip(
+                ("_prefill_high", "_prefill_middle", "_prefill_low"),
+                expand_fp32_router_weight(linear.weight),
+            ):
+                self.register_buffer(name, part, persistent=False)
 
     def forward(self, hidden_states):
+        if _PREFILL_CHUNK_PLAN.get() is not None and hasattr(self, "_prefill_high"):
+            return minimax_m31_prefill_router_logits(
+                hidden_states.contiguous(),
+                (self._prefill_high, self._prefill_middle, self._prefill_low),
+            )
         return self.linear(hidden_states.float())
 
 
 class M31MoeLayer(GenericMoeLayer):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        self.gate = _M31Fp32Router(self.gate)
+        weight = self.gate.weight
+        prepare_prefill = (
+            self.parallelism_config.role_type == RoleType.PREFILL
+            and weight.is_cuda
+            and weight.dtype == torch.float32
+            and torch.cuda.get_device_capability(weight.device) == (10, 3)
+        )
+        self.gate = _M31Fp32Router(self.gate, prepare_prefill)
 
     def _run_fused_moe(
         self,

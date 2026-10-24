@@ -92,7 +92,7 @@ class MiniMaxM31KVCacheTest(unittest.TestCase):
             return_value=None,
         ) as prepare_chunks:
             output = model.forward(inputs)
-        prepare_chunks.assert_called_once()
+        prepare_chunks.assert_not_called()
         self.assertEqual(output.mtp_target_hidden_states.shape, (2, 6))
         self.assertEqual(
             output.mtp_target_hidden_states[0].tolist(), [12, 12, 12, 34, 34, 34]
@@ -102,6 +102,17 @@ class MiniMaxM31KVCacheTest(unittest.TestCase):
             output.mtp_target_hidden_states.data_ptr(),
             model.get_mtp_target_hidden_states(2).data_ptr(),
         )
+        inputs.attention_inputs[MAIN_KV_TAG].is_prefill = True
+        inputs.attention_inputs[MAIN_KV_TAG].is_target_verify = False
+        inputs.attention_inputs[INDEXER_KV_TAG].is_prefill = True
+        with patch.object(
+            MiniMaxM31Model, "embedding", lambda self, _: inputs.embedded
+        ), patch(
+            "rtp_llm.models_py.model_desc.minimax_m31_model.prepare_m31_prefill_chunks",
+            return_value=None,
+        ) as prepare_chunks:
+            model.forward(inputs)
+        prepare_chunks.assert_called_once()
         if torch.cuda.is_available():
             inputs.embedded = inputs.embedded.cuda()
             with patch.object(
