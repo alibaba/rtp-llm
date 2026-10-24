@@ -220,6 +220,48 @@ class K3ProducerIdentityTest(JitCacheTestBase):
 
 
 class WrapperCacheSetupTest(JitCacheTestBase):
+
+    def test_flashinfer_workspace_separates_ffi_abis_and_retains_old_cache(self):
+        versions = {"torch": "2.11.0+cu130", "tvm_ffi": "0.1.13"}
+
+        def info(name):
+            return (
+                versions[name],
+                f"/runfiles/pip_gpu_cuda13_torch_{name}/site-packages/{name}",
+            )
+
+        with mock.patch.object(
+            wrapper_cache, "get_package_info", side_effect=info
+        ), mock.patch.object(wrapper_cache.Path, "home", return_value=self.root):
+            wrapper_cache.setup_jit_cache(packages=[])
+            old = Path(os.environ.pop("FLASHINFER_WORKSPACE_BASE"))
+            cached_op = old / ".cache/flashinfer/op.so"
+            cached_op.write_bytes(b"FFI 0.1.13 native op")
+            versions["tvm_ffi"] = "0.1.12"
+            wrapper_cache.setup_jit_cache(packages=[])
+            current = Path(os.environ["FLASHINFER_WORKSPACE_BASE"])
+        self.assertNotEqual(old, current)
+        self.assertEqual(cached_op.read_bytes(), b"FFI 0.1.13 native op")
+        self.assertFalse((current / ".cache/flashinfer/op.so").exists())
+
+    def test_flashinfer_workspace_reuses_relocated_runfiles_build(self):
+        with mock.patch.object(wrapper_cache, "get_package_info") as info:
+            info.side_effect = lambda name: (
+                "1.0",
+                f"/first/pip_cuda13_{name}/site-packages/{name}",
+            )
+            original = wrapper_cache._flashinfer_cache_scope()
+            info.side_effect = lambda name: (
+                "1.0",
+                f"/second/pip_cuda13_{name}/site-packages/{name}",
+            )
+            self.assertEqual(original, wrapper_cache._flashinfer_cache_scope())
+            info.side_effect = lambda name: (
+                "1.0",
+                f"/second/pip_arm_{name}/site-packages/{name}",
+            )
+            self.assertNotEqual(original, wrapper_cache._flashinfer_cache_scope())
+
     def test_local_fallback_does_not_use_remote_snapshot_root(self):
         os.environ["REMOTE_JIT_DIR"] = str(self.root / "remote")
         self.assertEqual(
@@ -676,6 +718,24 @@ class StoreTest(JitCacheTestBase):
 
 @requires_shared_acl
 class ScopeTest(JitCacheTestBase):
+
+    def test_native_consumers_track_ffi_with_ffi_cache_opted_out(self):
+        os.environ["TVM_FFI_CACHE_DIR"] = str(self.root / "explicit-ffi")
+        versions = {"apache-tvm-ffi": "0.1.13"}
+
+        def version(name):
+            return versions.get(name, "1.0")
+
+        with _fake_probes(pkg=version):
+            first = jit.resolve_scope(self.root)
+            versions["apache-tvm-ffi"] = "0.1.12"
+            second = jit.resolve_scope(self.root)
+        self.assertNotEqual(first.scope_id, second.scope_id)
+        self.assertNotIn("tvm_ffi", {item.name for item in first.components})
+        self.assertLessEqual(
+            {"flashinfer", "tilelang"}, {item.name for item in second.components}
+        )
+
     def resolve(self, root=None, **overrides):
         with _fake_probes(**overrides):
             scope = jit.resolve_scope(root or self.root)
