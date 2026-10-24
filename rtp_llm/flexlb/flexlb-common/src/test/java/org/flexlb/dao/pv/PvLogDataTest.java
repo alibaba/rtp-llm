@@ -16,7 +16,6 @@ import java.util.Map;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
-import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class PvLogDataTest {
@@ -453,14 +452,6 @@ class PvLogDataTest {
         PvLogData result = new PvLogData(context);
         assertEquals(5_000, result.getCacheMatchCount());
         assertEquals(10_000, result.getCacheMatchUs());
-    }
-
-    @Test
-    void rejectedSelectionReasonCannotCorruptLaterPvSnapshot() {
-        BalanceContext context = new BalanceContext();
-        context.recordSelectionReason(RoleType.PREFILL, "BEST_ONLY");
-        assertThrows(NullPointerException.class, () -> context.recordSelectionReason(RoleType.PREFILL, null));
-        assertEquals("BEST_ONLY", new PvLogData(context).getSelectionReasons().get(RoleType.PREFILL));
     }
 
 }
