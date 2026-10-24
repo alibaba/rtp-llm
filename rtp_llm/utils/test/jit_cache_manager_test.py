@@ -120,6 +120,40 @@ class JitCacheTestBase(unittest.TestCase):
 
 
 class WrapperCacheSetupTest(JitCacheTestBase):
+    def test_deep_gemm_wheel_patch_does_not_reuse_staged_package(self):
+        site = self.root / "pip_cuda13_deep_gemm" / "site-packages"
+        package = site / "deep_gemm"
+        header = package / "include/deep_gemm/kernel.cuh"
+        header.parent.mkdir(parents=True)
+        header.write_text("original")
+        cache = self.root / "packages"
+        cache.mkdir()
+        with mock.patch.object(
+            wrapper_cache, "get_package_info", return_value=("2.8.2", str(package))
+        ):
+            before = wrapper_cache.copy_package_with_lock("deep_gemm", cache)
+            header.write_text("patched")
+            after = wrapper_cache.copy_package_with_lock("deep_gemm", cache)
+            self.assertNotEqual(before, after)
+            self.assertEqual(
+                (Path(before) / "deep_gemm/include/deep_gemm/kernel.cuh").read_text(),
+                "original",
+            )
+            self.assertEqual(
+                (Path(after) / "deep_gemm/include/deep_gemm/kernel.cuh").read_text(),
+                "patched",
+            )
+            self.assertEqual(
+                wrapper_cache.copy_package_with_lock("deep_gemm", cache), after
+            )
+
+    def test_deep_gemm_without_headers_keeps_existing_cache_key(self):
+        source = self.root / "pip_cuda13_deep_gemm" / "site-packages" / "deep_gemm"
+        self.assertEqual(
+            wrapper_cache._cache_key("deep_gemm", "2.8.2", source),
+            "deep_gemm_python-2.8.2__pip_cuda13_deep_gemm",
+        )
+
     def test_local_fallback_does_not_use_remote_snapshot_root(self):
         os.environ["REMOTE_JIT_DIR"] = str(self.root / "remote")
         self.assertEqual(

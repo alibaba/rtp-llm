@@ -1,0 +1,13 @@
+diff --git a/deep_gemm/include/deep_gemm/impls/sm100_fp8_fp4_gemm_1d1d.cuh b/deep_gemm/include/deep_gemm/impls/sm100_fp8_fp4_gemm_1d1d.cuh
+--- a/deep_gemm/include/deep_gemm/impls/sm100_fp8_fp4_gemm_1d1d.cuh
++++ b/deep_gemm/include/deep_gemm/impls/sm100_fp8_fp4_gemm_1d1d.cuh
+@@ -194,3 +194,9 @@
++#ifndef DG_GEMM_DEVICE_ENTRY
++    // Consumers may prepare independent inputs, then wait before reading C/D.
++    if constexpr (kGemmType == GemmType::Normal)
++        cudaTriggerProgrammaticLaunchCompletion();
++#endif
++
+     // Block scheduler
+     uint32_t m_block_idx, n_block_idx;
+     auto scheduler = sched::Scheduler<kGemmType, BLOCK_M, BLOCK_N, kNumGroups, kNumMulticast, kIsMulticastOnA, kNumSMs, kEnsureZeroPadding, kKAlignment, kGranKA * 4>(
