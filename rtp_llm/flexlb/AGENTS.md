@@ -34,6 +34,8 @@ This file provides guidance to agents when working with code in this repository.
 - **控制流代码分行写。** 新增或修改 Java 代码时，`if`、`for`、`while` 等控制流的条件、
   执行语句和闭合花括号分别占行；即使只有一条 `return` 或 `continue`，也不写成
   `if (condition) { return value; }`。审核当前改动时清除这种单行分支，不批量重排无关代码。
+- **内部契约不写 `Objects.requireNonNull`。** 内部调用方之间的必需参数和字段由设计保证非空，
+  直接使用；空值出现时同样会抛出 NPE，额外包一层只会降低可读性。只在真实的外部输入边界校验。
 - **审核时逐项检查可读性。** 对新增或修改的名称、状态和方法，检查读者能否仅根据命名及
   附近代码准确判断用途和影响。需要反复追问“这个变量是干什么的”或“这个方法到底清掉什么”
   才能理解时，应调整命名或结构后再提交审核。规则适用于当前改动，不要求顺带重构无关代码。
@@ -136,6 +138,29 @@ Types: `feat`, `fix`, `docs`, `style`, `refactor`, `perf`, `test`, `chore`
 - `feat(router): add cache-aware routing strategy`
 - `fix(grpc): handle connection timeout gracefully`
 - `refactor(LoadBalancer): rename method getLoadBalanceStrategy to getLoadBalancer`
+
+## Java 代码格式
+
+`tools/format-changed-lines/format-changed-lines.sh` 按 `eclipse-java-formatter.xml` 格式化 Java 文件中
+相对 `HEAD` 改动的行；未改动的存量代码保持原样，`HEAD` 中不存在的新文件整体格式化。改动行会扩展到所在的
+完整语句或声明头（含所在方法的签名），使换行参数和条件整体对齐；改动的单行 Javadoc 展开为多行。
+不带参数时处理 `rtp_llm/flexlb` 下所有改动和未跟踪的 Java 文件，也可以传入指定文件。
+
+提交时 `tools/format-changed-lines/git-pre-commit.sh` 对暂存的 FlexLB Java 文件执行上述格式化并重新暂存；
+暂存文件同时有未暂存修改时终止提交，需先全部暂存或 stash。在 git `pre-commit` hook 中调用该脚本即可启用。
+
+主要规则：
+
+- 每行最多 120 列；换行后的内容放得下一行时合并回一行。
+- 方法和构造函数参数需要换行时，第一个参数紧跟 `(`，其余参数各占一行并与第一个参数同列对齐：
+
+```java
+public static DecodeSelection of(ServerStatus status,
+                                 DecodeEndpoint endpoint,
+                                 DecodeEndpoint.ReservationHandle reservation) {
+```
+
+- `if` / `else` 的执行语句不与条件写在同一行。
 
 ## Java Javadoc 格式
 
