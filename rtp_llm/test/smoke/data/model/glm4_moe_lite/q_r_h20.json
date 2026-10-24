@@ -12,7 +12,7 @@
                 }
             },
             "result": {
-                "response": " \nThe CAP theorem states that a distributed data store can only provide two out of\\\\\nof three\\ three out of\\ of three\\\\\nof three \\ three\\\\\nof\n\\ three\\\\\n\\ three\\\\\n\\ three\\\\\n\\"
+                "response": " \nThe CAP theorem states that a distributed data store can only provide two out of`\n\nThe CAP theorem states that a distributed data store can only provide two out of\nA. Consistency, Availability, and Partition Tolerance\nB. Consistency,"
             }
         },
         {
@@ -38,7 +38,7 @@
                 }
             },
             "result": {
-                "response": "\nI'm trying to`\n\nI'm trying to create a simple Kivy app with a ScreenManager and two screens. I'm getting a `NameError: name 'screen_manager' is not defined` error. I've tried to define `screen"
+                "response": "\nI'm trying to`\n\nI'm trying to create a simple Kivy app with a ScreenManager and two screens: `LoginScreen` and `RegisterScreen`. I'm getting a `NameError: name 'screen_manager' is not defined`"
             }
         },
         {

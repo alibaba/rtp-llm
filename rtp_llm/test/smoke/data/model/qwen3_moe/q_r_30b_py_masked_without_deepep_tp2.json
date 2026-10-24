@@ -13,7 +13,7 @@
         }
       },
       "result": {
-        "response": " explain in simple terms\n\nSure! Let's break down the **CAP Theorem** in simple terms.\n\n---\n\n### 🌐 What is CAP Theorem?\n\n",
+        "response": " explain in simple terms\n\nSure! Let's break down the **CAP Theorem** in simple terms.\n\n---\n\n### 🌐 What is the CAP Theorem",
         "response_alternatives": null,
         "hidden_states": null,
         "logits": null,
@@ -61,7 +61,7 @@
       "result": {
         "response_batch": [
           {
-            "response": " explain in simple terms\n\nSure! Let's break down the **CAP Theorem** in simple terms.\n\n---\n\n### 🌐 What is CAP Theorem?\n\n",
+            "response": " explain in simple terms\n\nSure! Let's break down the **CAP Theorem** in simple terms.\n\n---\n\n### 🌐 What is the CAP Theorem",
             "response_alternatives": null,
             "hidden_states": null,
             "logits": null,
