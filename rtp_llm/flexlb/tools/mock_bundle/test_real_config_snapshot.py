@@ -14,28 +14,18 @@ from pathlib import Path
 from types import SimpleNamespace as NS
 from unittest.mock import patch
 
-from rtp_llm.config.effective_config import (
-    merge,
-    snapshot,
-    vit_snapshot,
-    write_snapshot,
-)
+from real_config_snapshot import merge, snapshot, vit_snapshot, write_snapshot
 
-ROOT = Path(__file__).resolve().parents[3]
+ROOT = Path(__file__).resolve().parents[4]
 
 
 def definitions(path, names, namespace):
     tree = ast.parse((ROOT / path).read_text())
-    selected = [
-        node
-        for node in tree.body
-        if isinstance(node, (ast.FunctionDef, ast.ClassDef)) and node.name in names
-    ]
+    selected = [node for node in tree.body if isinstance(node, (ast.FunctionDef, ast.ClassDef)) and node.name in names]
     if len(selected) != len(names):
         raise AssertionError(f"missing owning definitions: {names}")
     exec(  # noqa: S102 - execute selected owning definitions without GPU imports
-        compile(ast.Module(body=selected, type_ignores=[]), str(path), "exec"),
-        namespace,
+        compile(ast.Module(body=selected, type_ignores=[]), str(path), "exec"), namespace
     )
 
 
@@ -43,19 +33,9 @@ class EffectiveConfigTest(unittest.TestCase):
     def parser(self):
         ns = dict(vars(typing), argparse=argparse, logging=logging, os=os, sys=sys)
         definitions("rtp_llm/server/server_args/util.py", {"str2bool"}, ns)
-        definitions(
-            "rtp_llm/server/server_args/server_args.py",
-            {"ConfigBinding", "EnvArgumentGroup", "EnvArgumentParser"},
-            ns,
-        )
-        definitions(
-            "rtp_llm/server/server_args/fifo_scheduler_group_args.py",
-            {"init_fifo_scheduler_group_args"},
-            ns,
-        )
-        definitions(
-            "rtp_llm/config/engine_config.py", {"finalize_scheduler_config"}, ns
-        )
+        definitions("rtp_llm/server/server_args/server_args.py", {"ConfigBinding", "EnvArgumentGroup", "EnvArgumentParser"}, ns)
+        definitions("rtp_llm/server/server_args/fifo_scheduler_group_args.py", {"init_fifo_scheduler_group_args"}, ns)
+        definitions("rtp_llm/config/engine_config.py", {"finalize_scheduler_config"}, ns)
         config = NS()
         parser = ns["EnvArgumentParser"]()
         parser.set_root_config(config)
@@ -64,11 +44,7 @@ class EffectiveConfigTest(unittest.TestCase):
 
     def test_real_cli_env_default_and_derived_zero_semantics(self):
         parser, config, finalize = self.parser()
-        with patch.dict(
-            os.environ,
-            {"MAX_CONTEXT_BATCH_SIZE": "3", "MAX_BATCH_TOKENS_SIZE": "99"},
-            clear=True,
-        ):
+        with patch.dict(os.environ, {"MAX_CONTEXT_BATCH_SIZE": "3", "MAX_BATCH_TOKENS_SIZE": "99"}, clear=True):
             parser.parse_args(["--max_batch_tokens_size=0"])
         self.assertEqual(config.max_context_batch_size, 3)
         self.assertEqual(config.max_batch_tokens_size, 0)
@@ -93,11 +69,7 @@ class EffectiveConfigTest(unittest.TestCase):
             parser.parse_args([])
         finalize(fifo, 4096)
         engine = NS(
-            runtime_config=NS(
-                fifo_scheduler_config=fifo,
-                max_generate_batch_size=32,
-                use_batch_decode_scheduler=False,
-            ),
+            runtime_config=NS(fifo_scheduler_config=fifo, max_generate_batch_size=32, use_batch_decode_scheduler=False),
             pd_sep_config=NS(
                 role_type=NS(name="PREFILL"),
                 prefill_retry_times=0,
@@ -112,9 +84,7 @@ class EffectiveConfigTest(unittest.TestCase):
                 decode_retry_timeout_ms=100,
             ),
             concurrency_config=NS(concurrency_limit=32),
-            parallelism_config=NS(
-                tp_size=8, dp_size=1, prefill_cp_config=NS(is_enabled=lambda: True)
-            ),
+            parallelism_config=NS(tp_size=8, dp_size=1, prefill_cp_config=NS(is_enabled=lambda: True)),
             kv_cache_config=NS(
                 seq_size_per_block=64,
                 reuse_cache=False,
@@ -150,25 +120,11 @@ class EffectiveConfigTest(unittest.TestCase):
 
     def test_vit_exports_resolved_scheduler_not_raw_knobs(self):
         tree = ast.parse((ROOT / "rtp_llm/config/py_config_modules.py").read_text())
-        cls = next(
-            node
-            for node in tree.body
-            if isinstance(node, ast.ClassDef) and node.name == "VitConfig"
-        )
-        method = next(
-            node
-            for node in cls.body
-            if isinstance(node, ast.FunctionDef)
-            and node.name == "embedding_scheduler_args"
-        )
+        cls = next(node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == "VitConfig")
+        method = next(node for node in cls.body if isinstance(node, ast.FunctionDef) and node.name == "embedding_scheduler_args")
         namespace = dict(vars(typing), sys=sys)
         exec(  # noqa: S102 - execute selected owning definitions without GPU imports
-            compile(
-                ast.Module(body=[method], type_ignores=[]),
-                "VitConfig.embedding_scheduler_args",
-                "exec",
-            ),
-            namespace,
+            compile(ast.Module(body=[method], type_ignores=[]), "VitConfig.embedding_scheduler_args", "exec"), namespace
         )
         vit = NS(
             vit_concurrency=0,
@@ -190,9 +146,7 @@ class EffectiveConfigTest(unittest.TestCase):
             download_headers="",
             output_transport=NS(mode="grpc"),
         )
-        vit.embedding_scheduler_args = types.MethodType(
-            namespace["embedding_scheduler_args"], vit
-        )
+        vit.embedding_scheduler_args = types.MethodType(namespace["embedding_scheduler_args"], vit)
         result = vit_snapshot(vit, revision="fixture")["roles"]["vit"]
         self.assertEqual(result["gpu_batch_wait_ms"], 0)
         self.assertEqual(result["gpu_max_batch_images"], sys.maxsize)
@@ -203,30 +157,16 @@ class EffectiveConfigTest(unittest.TestCase):
         self.assertFalse(result["greennet_enabled"])
         self.assertTrue(vit_snapshot(vit, revision="fixture", greennet_enabled=True)["roles"]["vit"]["greennet_enabled"])
         accounting = {"tensor_object_bytes": 80}
-        self.assertEqual(vit_snapshot(vit, revision="fixture", hash_cache_accounting=accounting)["roles"]["vit"]["hash_cache_accounting"], accounting)
-        budget = NS(
-            input_patches=8,
-            output_tokens=16,
-            estimated_workspace_bytes=32,
-            max_attention_segment=4,
-            attention_work=64,
+        self.assertEqual(
+            vit_snapshot(vit, revision="fixture", hash_cache_accounting=accounting)["roles"]["vit"]["hash_cache_accounting"], accounting
         )
-        actual = vit_snapshot(vit, revision="fixture", work_budget=budget)["roles"][
-            "vit"
-        ]
+        budget = NS(input_patches=8, output_tokens=16, estimated_workspace_bytes=32, max_attention_segment=4, attention_work=64)
+        actual = vit_snapshot(vit, revision="fixture", work_budget=budget)["roles"]["vit"]
         self.assertEqual(actual["work_budget"], vars(budget))
 
     def test_merge_rejects_revision_drift_and_duplicate_roles(self):
-        one = {
-            "schema_version": 1,
-            "source": {"kind": "real", "revision": "a"},
-            "roles": {"prefill": {}},
-        }
-        two = {
-            "schema_version": 1,
-            "source": {"kind": "real", "revision": "b"},
-            "roles": {"decode": {}},
-        }
+        one = {"schema_version": 1, "source": {"kind": "real", "revision": "a"}, "roles": {"prefill": {}}}
+        two = {"schema_version": 1, "source": {"kind": "real", "revision": "b"}, "roles": {"decode": {}}}
         with self.assertRaises(ValueError):
             merge([one, two])
         with self.assertRaises(ValueError):

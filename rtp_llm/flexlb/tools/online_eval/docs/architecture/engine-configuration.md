@@ -17,29 +17,19 @@ Mock 的行为配置消费 real 完成解析和推导后的值，不再维护另
 `/set_perf` 仅接受 `prefill_fixed_ms`、`decode_scale` 和引擎定位字段，不能修改行为门禁。
 故障仍由显式故障接口配置。
 
-## 从 real 导出
+## 获取 real 配置
 
-在 real 的正常启动环境中设置以下输出前缀和真实源码版本：
+本分支不修改 real 引擎或 Master 的生产代码，不提供 real 启动时自动导出配置的环境变量。
+Mock 工具 `rtp_llm/flexlb/tools/mock_bundle/real_config_snapshot.py` 提供 `snapshot` 和
+`vit_snapshot`，可由独立采集脚本对已经完成解析、推导的 real 配置对象生成快照。
+工具不会自行启动模型或取得生产进程中的对象，也不会自动记录 CLI/环境变量来源。
 
-```text
-RTP_LLM_SOURCE_REVISION=<完整源码 Git SHA>
-RTP_LLM_EFFECTIVE_CONFIG_OUTPUT=<输出目录>/effective
-RTP_LLM_KV_CAPACITY_OUTPUT=<输出目录>/capacity
-```
-
-Python 在模型配置完成、scheduler 配额已经 finalize 后导出 P/D；V 在模型及 `MMScheduler` 初始化后导出
-VitConfig 与实际 work budget。输出文件使用 `<前缀>.<角色>.rank<TP rank>.dp<DP rank>.json`。
-V 的 rank 是该 Pod 内 server ID。目录由调用方准备，输出前缀应属于本次启动。
-
-C++ 在真实 allocator 初始化后导出容量与 reserve step，包括实际 block 数、
-实际 reserve block 数、最终 block size 和首次 Decode 分配的复用策略。
-它不从配置的显存 MB 推测 block 容量。每个角色选择匹配 rank 的观测文件；
-rank 间异构容量需要分别建立 Mock 配置，不能选择较大值替代。
-
-用纯 Python 工具合并角色和容量观测，无需加载 Torch：
+allocator 容量仍需从真实运行环境独立观测并提供，不能从显存 MB 推算 block 数。
+每个角色选择匹配 rank 的观测；异构 rank 需要分别建立 Mock 配置。
+取得快照与容量文件后，用 Mock 工具合并：
 
 ```bash
-python3 -m rtp_llm.config.effective_config \
+python3 rtp_llm/flexlb/tools/mock_bundle/real_config_snapshot.py \
   --snapshot <Prefill 有效配置文件> \
   --snapshot <Decode 有效配置文件> \
   --snapshot <ViT 有效配置文件> \
@@ -52,6 +42,9 @@ python3 -m rtp_llm.config.effective_config \
 没有容量观测的 P/D 快照不能启动 Mock。合成实验显式使用 `source.kind=synthetic`
 和 `capacity.kind=synthetic`，说明实验来源并给出容量，不能标为 real。
 测试场景只允许覆盖 synthetic 容量，不得覆盖真实 allocator 观测。
+
+Master 保持原有状态归并实现；本分支不再包含针对同 request/batch 的历史成功完成记录与
+活跃 CANCELING overlay 并存时延迟结算的修复，相关 real 端到端竞态仍需独立验收。
 
 ## 支持范围
 
@@ -192,7 +185,7 @@ Hash 按总计费先驱逐，池分配仍失败则直接旁路该项。
 单项超过 GPU 容量尝试存 CPU，连 CPU 也放不下则不保留。CPU 读取恢复失败是请求错误；
 恢复成功后的缓存提升失败只放弃驻留，已恢复的请求结果仍可用。
 
-`hash_cache_accounting` 从 real `MMHashKeyCache.accounting()` 导出 Python 字符串、列表、tensor wrapper、
+`hash_cache_accounting` 由 Mock 测试工具 `vit_cache_reference.py` 只读测量 real 运行时的 Python 字符串、列表、tensor wrapper、
 记录及字典项的计费布局，Mock 必须显式导入，不能使用 JVM 对象大小或固定常数猜测。
 Hash 查询元数据不刷新 LRU；消费且 generation 一致才刷新。超大替换删除自身旧 generation，不冲掉无关记录。
 URL 原始字节 LRU 独立于 embedding 字节预算。local preprocess 使用当前进程的 `url_cache_item_num`；
@@ -267,7 +260,7 @@ Mock 的公共入口是 `MockEngineConfig`、`MockVitServer` 和 `JavaMockEngine
 | `mm_timeout_ms` | 同名 V 字段 | embedding 阶段预算；媒体级正值覆盖默认，仍受原请求剩余期限约束，不替代 RPC deadline |
 | `mm_image_max_file_size_kb` | 同名 V 字段 | 文件限制为 KB×1024；不再从性能校准文件提供输入文件容量 |
 | `mm_cache_gpu_max_bytes`、`mm_cache_cpu_max_bytes`、`mm_hash_key_cache_max_bytes` | 同名 V 字段 | 三个独立预算；固定逻辑池、连续空间及 pending 回收，GPU 淘汰下放 CPU；不模拟物理分配/搬运耗时 |
-| `MMHashKeyCache.accounting()` | `hash_cache_accounting` | real 运行时派生的 Python 元数据布局，必填；不是新的 VitConfig 调参项 |
+| Mock 工具对 real Hash cache 运行时的只读测量 | `hash_cache_accounting` | Python 元数据布局，必填；不要求修改 real cache 类 |
 | `url_cache_item_num`、`mm_cache_item_num` | 同名 V 字段 | URL 原始数据按条数 LRU，local/spawn 作用域见上文；旧 embedding 条数配置保留给模型内部 |
 | real provider `is_enabled()` | `greennet_enabled` | 最终能力状态，必填；检查开启时 Mock 拒绝启动 |
 | `get_batch_work_budget()` 初始化结果 | `vit.work_budget` | 不是 VitConfig 原生字段；从实际 scheduler 导出的派生值。当前具体模型均为 None |

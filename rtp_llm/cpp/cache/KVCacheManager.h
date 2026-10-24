@@ -53,7 +53,6 @@ public:
     }
 
     const CacheConfig& cacheConfig() const;
-    void exportCapacity(const std::string& path, size_t reserve_step) const;
     const CacheConfig& getMTPModuleCacheConfig(int mtp_module_id) const;
 
     // 显存管理和缓存分配

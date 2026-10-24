@@ -52,8 +52,18 @@ def hash_trace():
     return dict(capacity=1100, operations=operations, expected=result)
 
 
+def hash_accounting():
+    """Measure the owning cache's runtime layout without modifying real code."""
+    return dict(entry_overhead=MMHashKeyCache._ENTRY_OVERHEAD,
+                ascii_base=sys.getsizeof(""), latin1_base=sys.getsizeof("é") - 1,
+                bmp_base=sys.getsizeof("中") - 2, ucs4_base=sys.getsizeof("🙂") - 4,
+                hash_list_bytes=sys.getsizeof([item for item in (None,)]),
+                tensor_object_bytes=sys.getsizeof(torch.empty(0, dtype=torch.int32)),
+                record_bytes=sys.getsizeof((None, None, 0, [], False)), integer_bytes=sys.getsizeof(0))
+
+
 def main():
-    document = dict(hash_cache_accounting=MMHashKeyCache.accounting(),
+    document = dict(hash_cache_accounting=hash_accounting(),
         embedding=[embedding_trace(32, [['put', k, 8] for k in 'abcd'] +
                     [['remove', 'b'], ['remove', 'd'], ['put', 'large', 16]]),
                    embedding_trace(32, [['put', 'small', 16], ['put', 'large', 80]]),

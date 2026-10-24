@@ -1,4 +1,4 @@
-"""Portable engine behavior snapshot, exported after real configuration finalization.
+"""Mock-side engine behavior snapshot helpers for finalized real configuration objects.
 
 This module deliberately imports neither Torch nor rtp_llm.ops. Capacity is a
 separate observation: a configured memory budget is not an allocator result.
@@ -45,8 +45,7 @@ def snapshot(engine, model, *, revision, capacity=None):
             "type": "batch_decode"
             if runtime.use_batch_decode_scheduler
             else "ratio"
-            if role == "pdfusion"
-            and fifo.pdfusion_scheduler_mode.strip().lower() == "ratio"
+            if role == "pdfusion" and fifo.pdfusion_scheduler_mode.strip().lower() == "ratio"
             else "fifo",
             "max_generate_batch_size": runtime.max_generate_batch_size,
             "max_batch_tokens_size": fifo.max_batch_tokens_size,
@@ -90,16 +89,10 @@ def snapshot(engine, model, *, revision, capacity=None):
     for section in ("scheduler", "model", "kv_cache", "pd_sep"):
         for key, value in values[section].items():
             parsed = provenance.get(key)
-            values["provenance"][section + "." + key] = (
-                parsed["source"] if parsed and parsed["value"] == value else "derived"
-            )
+            values["provenance"][section + "." + key] = parsed["source"] if parsed and parsed["value"] == value else "derived"
     if capacity is not None:
         values["capacity"] = capacity
-    return {
-        "schema_version": SCHEMA_VERSION,
-        "source": {"kind": "real", "revision": revision},
-        "roles": {role: values},
-    }
+    return {"schema_version": SCHEMA_VERSION, "source": {"kind": "real", "revision": revision}, "roles": {role: values}}
 
 
 def vit_snapshot(vit, *, revision, work_budget=None, hash_cache_accounting=None, greennet_enabled=False):
@@ -134,13 +127,7 @@ def vit_snapshot(vit, *, revision, work_budget=None, hash_cache_accounting=None,
                 if work_budget is None
                 else {
                     name: getattr(work_budget, name)
-                    for name in (
-                        "input_patches",
-                        "output_tokens",
-                        "estimated_workspace_bytes",
-                        "max_attention_segment",
-                        "attention_work",
-                    )
+                    for name in ("input_patches", "output_tokens", "estimated_workspace_bytes", "max_attention_segment", "attention_work")
                 },
                 "mm_transport_mode": vit.output_transport.mode,
                 "hash_cache_accounting": hash_cache_accounting,
@@ -167,16 +154,9 @@ def write_snapshot(path, document):
 def merge(documents):
     if not documents:
         raise ValueError("at least one snapshot is required")
-    result = {
-        "schema_version": SCHEMA_VERSION,
-        "source": documents[0]["source"],
-        "roles": {},
-    }
+    result = {"schema_version": SCHEMA_VERSION, "source": documents[0]["source"], "roles": {}}
     for document in documents:
-        if (
-            document["schema_version"] != SCHEMA_VERSION
-            or document["source"] != result["source"]
-        ):
+        if document["schema_version"] != SCHEMA_VERSION or document["source"] != result["source"]:
             raise ValueError("snapshots must use the same schema and source revision")
         for role, values in document["roles"].items():
             if role in result["roles"]:
@@ -185,47 +165,21 @@ def merge(documents):
     return result
 
 
-def export_requested(document_factory, *, rank=0, dp_rank=0):
-    import os
-
-    output = os.environ.get("RTP_LLM_EFFECTIVE_CONFIG_OUTPUT")
-    if output:
-        revision = os.environ.get("RTP_LLM_SOURCE_REVISION")
-        if not revision:
-            raise ValueError(
-                "RTP_LLM_SOURCE_REVISION is required when exporting effective config"
-            )
-        document = document_factory(revision)
-        role = next(iter(document["roles"]))
-        write_snapshot(f"{output}.{role}.rank{rank}.dp{dp_rank}.json", document)
-
-
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--snapshot", action="append", required=True, type=Path)
     parser.add_argument(
-        "--capacity",
-        action="append",
-        type=Path,
-        default=[],
-        help="role -> allocator observation; explicit kind=real or synthetic",
+        "--capacity", action="append", type=Path, default=[], help="role -> allocator observation; explicit kind=real or synthetic"
     )
     parser.add_argument("--output", required=True, type=Path)
     args = parser.parse_args()
     document = merge([json.loads(path.read_text()) for path in args.snapshot])
     for capacity_path in args.capacity:
         for role, capacity in json.loads(capacity_path.read_text()).items():
-            if capacity.get("kind") not in {"real", "synthetic"} or not capacity.get(
-                "source"
-            ):
+            if capacity.get("kind") not in {"real", "synthetic"} or not capacity.get("source"):
                 raise ValueError("capacity requires kind and observation source")
-            if (
-                capacity["kind"] == "real"
-                and capacity.get("source_revision") != document["source"]["revision"]
-            ):
-                raise ValueError(
-                    "allocator observation and effective config use different source revisions"
-                )
+            if capacity["kind"] == "real" and capacity.get("source_revision") != document["source"]["revision"]:
+                raise ValueError("allocator observation and effective config use different source revisions")
             if "capacity" in document["roles"][role]:
                 raise ValueError(f"capacity already provided for {role}")
             document["roles"][role]["capacity"] = capacity

@@ -540,20 +540,6 @@ def setup_args(args: Optional[Sequence[str]] = None) -> PyEnvConfigs:
 
     # 解析参数（会自动应用所有配置绑定）
     parsed_args = parser.parse_args(args)
-    py_env_configs.config_provenance = {
-        action.dest: {
-            "value": getattr(parsed_args, action.dest),
-            "source": (
-                "cli"
-                if action.dest in getattr(parser, "_cli_provided_args", set())
-                else "env:" + parser._env_mappings[action.dest]
-                if parser._env_mappings.get(action.dest) in os.environ
-                else "default"
-            ),
-        }
-        for action in parser._actions
-        if hasattr(parsed_args, action.dest)
-    }
     py_env_configs.ft_disable_custom_ar_override = parsed_args.ft_disable_custom_ar
     py_env_configs.server_config.validate_allocator_dump_config()
 

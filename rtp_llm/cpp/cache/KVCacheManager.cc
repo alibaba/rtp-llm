@@ -2,10 +2,6 @@
 #include "rtp_llm/cpp/cache/events/KVCMPublisher.h"
 
 #include <algorithm>
-#include <fstream>
-#include <cstdio>
-#include <cctype>
-#include <cstdlib>
 #include <stdexcept>
 #include <chrono>
 #include <limits>
@@ -362,42 +358,6 @@ std::shared_ptr<BroadcastManager> KVCacheManager::createMultiRankBlockTransferMa
         return nullptr;
     }
     return broadcast_manager;
-}
-
-// Opt-in observation of initialized physical pools; never estimates capacity from MB.
-void KVCacheManager::exportCapacity(const std::string& path, size_t reserve_step) const {
-    const char* revision = std::getenv("RTP_LLM_SOURCE_REVISION");
-    if (!revision || std::string(revision).size() != 40
-        || !std::all_of(revision, revision + 40, [](unsigned char c) { return std::isxdigit(c); }))
-        throw std::runtime_error("RTP_LLM_SOURCE_REVISION must be a full Git SHA for capacity export");
-    const auto pools = coordinator_manager_->poolMetricsSnapshots();
-    size_t host_blocks = 0;
-    for (const auto& pool : block_tree_cache_->poolMetricsSnapshots()) {
-        if (pool.tier == Tier::HOST) host_blocks += pool.total_blocks;
-    }
-    const auto& groups = config_.topology().groups();
-    const bool supported = groups.size() == 1 && config_.mtp_sub_configs.empty() && pools.size() == 1
-        && groups.front().policy.group_type == CacheGroupType::FULL
-        && groups.front().cacheKeyTokenStride() == config_.seq_size_per_block
-        && kv_cache_config_.device_eviction_policy == "lru" && kv_cache_config_.memory_eviction_policy == "lru";
-    const auto role = pd_sep_config_.role_type == RoleType::PREFILL ? "prefill" : "decode";
-    const auto output = path + "." + role + ".rank" + std::to_string(parallelism_config_.tp_rank)
-        + ".dp" + std::to_string(parallelism_config_.dp_rank) + ".json";
-    const auto temporary = output + ".tmp";
-    std::ofstream file(temporary);
-    file << "{\"" << role << "\":{\"kind\":\"real\",\"source\":\"KVCacheManager initialized pools\","
-         << "\"source_revision\":\"" << revision << "\","
-         << "\"layout\":\"" << (supported ? "single_pool" : "unsupported_topology") << "\","
-         << "\"device_blocks\":" << (pools.empty() ? 0 : pools.front().total_blocks) << ","
-         << "\"reserve_blocks\":" << (pools.empty() ? 0 : pools.front().reserve_blocks) << ","
-         << "\"seq_size_per_block\":" << config_.seq_size_per_block << ","
-         << "\"memory_blocks\":" << host_blocks << ",\"reserve_step\":" << reserve_step << ","
-         << "\"disable_decode_first_malloc_device_reuse\":"
-         << (config_.disable_decode_first_malloc_device_reuse ? "true" : "false") << ","
-         << "\"enable_gpu_prefix_tree\":true,\"enable_memory_prefix_tree\":true}}\n";
-    file.close();
-    if (!file || std::rename(temporary.c_str(), output.c_str()) != 0)
-        throw std::runtime_error("cannot export KV allocator capacity: " + output);
 }
 
 const CacheConfig& KVCacheManager::cacheConfig() const {

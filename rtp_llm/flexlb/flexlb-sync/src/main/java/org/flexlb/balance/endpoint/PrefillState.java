@@ -1477,8 +1477,10 @@ public final class PrefillState {
             long nowMs = clock.getAsLong();
             IdentityHashMap<BatchWork, BatchReduction> reductions =
                     batchReductionsUnderLock();
-            Map<String, WorkerStatus.TaskObservation> activeTasks = engine.runningTaskList();
-            Map<Long, TerminalObservation> terminals = terminalObservationsUnderLock(finishedTasks, activeTasks);
+            Map<Long, TerminalObservation> terminals = terminalObservationsUnderLock(
+                    finishedTasks);
+            Map<String, WorkerStatus.TaskObservation> activeTasks =
+                    engine.runningTaskList();
             IdentityHashMap<RequestEntry, TerminalObservation> settlements =
                     new IdentityHashMap<>(terminals.size());
             Set<BatchReduction> changedBatches = java.util.Collections.newSetFromMap(
@@ -2034,27 +2036,12 @@ public final class PrefillState {
     }
 
     private Map<Long, TerminalObservation> terminalObservationsUnderLock(
-            Map<String, WorkerStatus.TaskObservation> finishedTasks,
-            Map<String, WorkerStatus.TaskObservation> activeTasks) {
+            Map<String, WorkerStatus.TaskObservation> finishedTasks) {
         requireLock();
-        Map<Long, Long> cancelingBatches = new HashMap<>();
-        for (WorkerStatus.TaskObservation active : activeTasks.values()) {
-            if (active.priorityPreemptionProgress() == PriorityPreemptionProgress.CANCELING) {
-                cancelingBatches.put(active.requestId(), active.batchId());
-            }
-        }
         Map<Long, TerminalObservation> terminals = new HashMap<>();
         for (WorkerStatus.TaskObservation task : finishedTasks.values()) {
             RequestEntry entry = requests.get(task.requestId());
             if (entry == null || !matchesObservedBatch(entry, task.batchId())) {
-                continue;
-            }
-            // Real may return a retained P execution completion beside its
-            // live CANCELING control overlay. Keep the exact owner until the
-            // priority finalizer publishes CANCELED; otherwise that later fact
-            // cannot settle the request after the status cursor advances.
-            if (task.errorCode() == 0L
-                    && Objects.equals(cancelingBatches.get(task.requestId()), task.batchId())) {
                 continue;
             }
             TerminalObservation terminal = TerminalObservation.from(

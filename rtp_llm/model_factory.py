@@ -430,14 +430,6 @@ class ModelFactory:
 
         # Set model_name to engine_config.runtime_config.model_name (for backward compatibility)
         engine_config.runtime_config.model_name = model_config.model_name
-        from rtp_llm.config.effective_config import export_requested, snapshot
-
-        if engine_config.pd_sep_config.role_type.name != "VIT":
-            export_requested(
-                lambda revision: snapshot(engine_config, model_config, revision=revision),
-                rank=engine_config.parallelism_config.tp_rank,
-                dp_rank=engine_config.parallelism_config.dp_rank,
-            )
 
     @staticmethod
     def create_propose_model_config(
