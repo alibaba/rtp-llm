@@ -365,7 +365,7 @@
         ['路由策略', request ? strategyLabel(request.reason) : '—', request ? `策略标识：${request.reason} · 所选机器：${request.host}` : '—'],
         ['引擎首 Token 分位', request ? (request.percentile || '—') : '—', '按本批请求的引擎首 Token 耗时排名'],
         selected?.schema === 'routingDecisions'
-          ? ['所选机器的预测首 Token 耗时', milliseconds(selected.projectedTtftMs), `预测排空 ${milliseconds(selected.projectedDrainMs)} · pending ${number(selected.pendingRequests)}`]
+          ? ['所选机器的预测首 Token 耗时', milliseconds(selected.estimatedTtftMs), `预测排空 ${milliseconds(selected.projectedDrainMs)} · pending ${number(selected.pendingRequests)}`]
           : ['所选机器的预测首 Token 前工作量（Token）', selected ? tokenWork(selected.estimatedTtft) : '—', selected ? `候选第 ${selected.rank} 名 · 路由前排队工作 ${tokenWork(selected.queueWork)}` : '—'],
       ];
       $('#summary').innerHTML = cards.map(([label, value, note], index) => `<div class="metric ${index === 3 ? 'selection' : ''}"><div class="label">${escaped(label)}</div><div class="value">${escaped(value)}</div><div class="note">${escaped(note)}</div></div>`).join('');
@@ -408,7 +408,7 @@
       const decode = candidate.role === 'DECODE';
       const metrics = decode
         ? [['KV 已用 Token', tokenWork(candidate.usedKvTokens)], ['KV 可用 Token', tokenWork(candidate.availableKvTokens)], ['采样 logWeight', candidate.logWeight == null ? '—' : Number(candidate.logWeight).toPrecision(6)]]
-        : [['预测首 Token 耗时', milliseconds(candidate.projectedTtftMs)], ['预测排空耗时', milliseconds(candidate.projectedDrainMs)], ['本请求 Prefill 耗时', milliseconds(candidate.incomingPrefillMs)]];
+        : [['预测首 Token 耗时', milliseconds(candidate.estimatedTtftMs)], ['预测排空耗时', milliseconds(candidate.projectedDrainMs)], ['本请求 Prefill 耗时', milliseconds(candidate.incomingPrefillMs)]];
       const extra = decode ? [] : [['有效命中 Token', tokenWork(candidate.effectiveHitTokens)], ['路由匹配 Token', tokenWork(candidate.routingMatchTokens)], ['预测状态', escaped(candidate.predictionState)]];
       const details = decode ? '' : `<div class="muted">最短 TTFT ${milliseconds(policy.minimumTtftMs)} · 选择方式 ${escaped(policy.candidateChoice)} · 缓存亲和额外耗时上限 ${milliseconds(policy.cacheAffinityMaxExtraTtftMs)} · 最低命中率 ${pct(policy.cacheAffinityMinPrefixHitPercent)}</div>`;
       return `<div class="candidate ${candidate.selected ? 'selected' : ''}" data-candidate-host="${escaped(candidate.host)}">

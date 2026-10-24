@@ -114,7 +114,7 @@ class CostBasedPrefillSelectionMetricTest {
                 assertEquals(1, decision.candidates().size());
                 assertTrue(decision.candidates().getFirst().selected());
                 assertEquals(selected.serverStatus().getPrefillTime(),
-                        decision.candidates().getFirst().projectedTtftMs());
+                        decision.candidates().getFirst().estimatedTtftMs());
                 assertEquals(decision.selectionReason(), context.getRoutingTelemetry().selectionReasons().get(RoleType.PREFILL));
             }
         }
@@ -697,7 +697,7 @@ class CostBasedPrefillSelectionMetricTest {
         try (SelectedRole selected = result.value()) {
             assertEquals("10.0.0.1", selected.serverStatus().getServerIp());
             assertEquals(1000L, context.getRoutingTelemetry().routingDecisions()
-                    .get(RoleType.PREFILL).candidates().getFirst().projectedTtftMs());
+                    .get(RoleType.PREFILL).candidates().getFirst().estimatedTtftMs());
         }
     }
 
@@ -725,7 +725,7 @@ class CostBasedPrefillSelectionMetricTest {
             assertEquals("10.0.0.2", selected.serverStatus().getServerIp());
             var decision = context.getRoutingTelemetry().routingDecisions().get(RoleType.PREFILL);
             assertEquals("CACHE_LEADER", decision.cacheAffinityDecision());
-            assertEquals(1500L, decision.candidates().getFirst().projectedTtftMs());
+            assertEquals(1500L, decision.candidates().getFirst().estimatedTtftMs());
         }
     }
 

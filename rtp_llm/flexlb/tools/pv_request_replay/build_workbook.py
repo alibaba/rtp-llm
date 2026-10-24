@@ -695,7 +695,7 @@ def build_rows(sources: Sequence[PvSource], start: datetime | str | None = None,
             "selection_reason": selection_reason,
             "decision_snapshot_status": ("COST_BASED" if decision.get("schema") == "routingDecisions"
                                          else "TOP5" if decision_workers else "NOT_RECORDED"),
-            "selected_projected_ttft_ms": as_number(selected_snapshot.get("projectedTtftMs")),
+            "selected_projected_ttft_ms": as_number(selected_snapshot.get("estimatedTtftMs")),
             "selected_projected_drain_ms": as_number(selected_snapshot.get("projectedDrainMs")),
             "selected_incoming_prefill_ms": as_number(selected_snapshot.get("incomingPrefillMs")),
             "selected_effective_hit_tokens": as_number(selected_snapshot.get("effectiveHitTokens")),
@@ -783,7 +783,7 @@ def build_rows(sources: Sequence[PvSource], start: datetime | str | None = None,
             "flexlb_hash_wait_us": non_negative(route.get("hashWaitUs") if route else None),
             "flexlb_hash_us": non_negative(route.get("hashUs") if route else None),
             "flexlb_cache_match_us": non_negative(route.get("cacheMatchUs") if route else None),
-            "flexlb_predicted_prefill_time": (as_number(selected_snapshot.get("projectedTtftMs"))
+            "flexlb_predicted_prefill_time": (as_number(selected_snapshot.get("estimatedTtftMs"))
                                               if decision.get("schema") == "routingDecisions" else
                                               as_number(server_status.get("prefill_time") if server_status else None)),
             "_decision_workers": decision_workers,
@@ -1152,7 +1152,7 @@ def write_routing_decisions_sheet(workbook: xlsxwriter.Workbook, rows: list[dict
     worksheet = workbook.add_worksheet("Routing Decisions")
     common = ["request_id", "flexlb_instance", "role", "group", "strategy", "selectionReason", "decisionTimeMs", "routingAttempt",
               "selectedEndpoint", "totalWorkerCount", "candidateWorkerCount", "snapshotTruncated"]
-    fields = ["endpoint", "selected", "predictionState", "projectedTtftMs", "projectedDrainMs",
+    fields = ["endpoint", "selected", "predictionState", "estimatedTtftMs", "projectedDrainMs",
               "incomingPrefillMs", "effectiveHitTokens", "routingMatchTokens", "pendingRequests",
               "usedKvTokens", "availableKvTokens", "logWeight", "ownershipVersion"]
     policy_fields = ["requestInputTokens", "candidateChoice", "minimumTtftMs", "relativeTolerance",

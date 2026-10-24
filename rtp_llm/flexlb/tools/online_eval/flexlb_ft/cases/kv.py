@@ -1471,7 +1471,7 @@ def kv_capacity_conflict_overflow(ctx: CaseContext):
     ~2.06s predicted ledger keeps e1 hot, and a 5-request same-prefix
     wave fires through the live ledger (two-phase, 0.12s spacing).
     Behaviour: the affinity-vs-capacity conflict — every wave request
-    is full-hit on e1, but e1's projected TTFT sits ~2s above e2
+    is full-hit on e1, but e1's estimated TTFT sits ~2s above e2
     (>> maxExtraTtftMs).  Expected (contract): OVER_CAP overflow — the
     affinity gate steps aside and the wave spills onto the
     non-matching engine (hot_share < 1, P5); short requests stay

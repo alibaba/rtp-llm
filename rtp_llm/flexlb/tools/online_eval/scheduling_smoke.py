@@ -609,7 +609,7 @@ class SchedulingSmokeTest(FlexLBSmokeBase):
     async def test_ttft_sorting(self) -> ScenarioResult:
         """S8: Lower prefill delay on prefill-0 should bias requests toward it.
 
-        SHORTEST_TTFT scores each endpoint by projected TTFT. Setting
+        SHORTEST_TTFT scores each endpoint by estimated TTFT. Setting
         prefill-0 to 10ms and prefill-1 to 500ms should route most
         requests to prefill-0. Candidate-pool LRU may distribute requests when
         endpoint projections are close enough to share the pool.

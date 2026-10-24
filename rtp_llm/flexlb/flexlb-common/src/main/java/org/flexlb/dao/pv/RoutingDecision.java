@@ -76,7 +76,7 @@ public record RoutingDecision(RoleType role,
 
     public record Candidate(String endpoint,
                             boolean selected,
-                            Long projectedTtftMs,
+                            Long estimatedTtftMs,
                             Long projectedDrainMs,
                             Long incomingPrefillMs,
                             Long effectiveHitTokens,

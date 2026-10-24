@@ -185,7 +185,7 @@ class CurrentRoutingDecisionTest(unittest.TestCase):
         route.pop("shortestTtftDecisions", None)
         route["routingDecisions"] = [{"role": "PREFILL", "selectionReason": "CACHE_LEADER",
             "candidates": [{"endpoint": "10.0.0.8:8001@1", "selected": True,
-                            "routingMatchTokens": 512, "projectedTtftMs": 20}]}]
+                            "routingMatchTokens": 512, "estimatedTtftMs": 20}]}]
         self.assertTrue(workbook_module.route_success(route))
         self.assertEqual(workbook_module.get_route_cache_selection(route)["hitCacheTokens"], 512)
         with tempfile.TemporaryDirectory() as directory:
@@ -210,7 +210,7 @@ class CurrentRoutingDecisionTest(unittest.TestCase):
             route = route_record("same-id", epoch_ms(1, 45), "10.0.0.8")
             del route["shortestTtftDecisions"]
             route["routingDecisions"] = [{"role": "PREFILL", "strategy": "CostBasedPrefill", "candidates": [
-                {"endpoint": "10.0.0.8:8001@1", "selected": True, "projectedTtftMs": 20}]}]
+                {"endpoint": "10.0.0.8:8001@1", "selected": True, "estimatedTtftMs": 20}]}]
             source = Path(directory) / "pv.log"
             source.write_text(pv_line("2026-08-11 01:45:00.010", route))
             destination = Path(directory) / "analysis.xlsx"
@@ -237,7 +237,7 @@ class CurrentRoutingDecisionTest(unittest.TestCase):
                      "selectedEndpoint": "10.0.0.8:8001", "snapshotTruncated": True,
                      "candidateWorkerCount": 40, "prefillPolicy": {"minimumTtftMs": 12},
                      "rejections": {"OUTLIER": 2}, "candidates": [
-                         {"endpoint": "10.0.0.8:8001", "selected": True, "projectedTtftMs": 12,
+                         {"endpoint": "10.0.0.8:8001", "selected": True, "estimatedTtftMs": 12,
                           "projectedDrainMs": 3, "incomingPrefillMs": 9, "effectiveHitTokens": 100,
                           "pendingRequests": 0},
                          {"endpoint": "10.0.0.9:8001", "selected": False,
@@ -258,9 +258,9 @@ class CurrentRoutingDecisionTest(unittest.TestCase):
                 headers = [cell.value for cell in sheet[1]]
                 records = [dict(zip(headers, values)) for values in sheet.iter_rows(min_row=2, values_only=True)]
                 self.assertEqual(len(records), 3)
-                self.assertEqual(records[0]["projectedTtftMs"], 12)
+                self.assertEqual(records[0]["estimatedTtftMs"], 12)
                 self.assertEqual(records[0]["pendingRequests"], 0)
-                self.assertIsNone(records[1]["projectedTtftMs"])
+                self.assertIsNone(records[1]["estimatedTtftMs"])
                 self.assertIsNone(records[1]["pendingRequests"])
                 self.assertEqual(records[2]["role"], "DECODE")
                 self.assertEqual(records[2]["usedKvTokens"], 55)
@@ -282,7 +282,7 @@ class CurrentRoutingDecisionTest(unittest.TestCase):
                 self.assertEqual(len(candidates), 3)
                 self.assertEqual(candidates[0]["schema"], "routingDecisions")
                 prefill = next(item for item in candidates if item["role"] == "PREFILL" and item["selected"])
-                self.assertEqual(prefill["projectedTtftMs"], 12)
+                self.assertEqual(prefill["estimatedTtftMs"], 12)
                 self.assertNotIn("estimatedTtft", prefill)
                 self.assertEqual(prefill["decisionGroup"]["id"], "group-1")
                 self.assertEqual(summary["candidate_count"], 4 if mixed else 3)

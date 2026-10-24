@@ -347,7 +347,7 @@ class PvLogDataTest {
         assertFalse(json.contains("\"selectionReasons\""));
         assertTrue(json.contains("\"routingDecisions\":[{\"role\":\"PREFILL\""));
         assertTrue(json.contains("\"strategy\":\"CostBasedPrefill\""));
-        assertTrue(json.contains("\"projectedTtftMs\":90"));
+        assertTrue(json.contains("\"estimatedTtftMs\":90"));
         assertFalse(json.contains("trackedTasks"));
         assertFalse(json.contains("waitingTasks"));
         assertFalse(json.contains("runningTasks"));
