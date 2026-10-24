@@ -221,6 +221,34 @@ class K3ProducerIdentityTest(JitCacheTestBase):
 
 class WrapperCacheSetupTest(JitCacheTestBase):
 
+    def test_default_cubin_headers_survive_runfiles_removal(self):
+        runfiles = self.root / "action.runfiles"
+        source = runfiles / "pip_cuda13_flashinfer_cubin/site-packages/flashinfer_cubin"
+        source.mkdir(parents=True)
+        (source / "__init__.py").write_text("# cubin provider\n")
+        payload = runfiles / "flashInferMetaInfo.h"
+        payload.write_text("#define META_INFO 1\n")
+        header = source / "cubins/fmha/include/flashInferMetaInfo.h"
+        header.parent.mkdir(parents=True)
+        header.symlink_to(payload)
+
+        def info(name):
+            return (
+                ("0.6.9", str(source)) if name == "flashinfer_cubin" else (None, None)
+            )
+
+        with mock.patch.object(
+            wrapper_cache, "get_package_info", side_effect=info
+        ), mock.patch.object(wrapper_cache.Path, "home", return_value=self.root):
+            wrapper_cache.setup_jit_cache(cache_dir=self.root / "packages")
+        staged = Path(os.environ["_JIT_CACHE_PATHS"]) / "flashinfer_cubin"
+        shutil.rmtree(runfiles)
+        self.assertEqual(
+            (staged / "cubins/fmha/include/flashInferMetaInfo.h").read_text(),
+            "#define META_INFO 1\n",
+        )
+        self.assertNotIn(".runfiles", str(staged))
+
     def test_same_version_flashinfer_patch_replaces_cached_python_payload(self):
         source = self.root / "pip_cuda13_flashinfer/site-packages/flashinfer"
         source.mkdir(parents=True)
@@ -746,6 +774,14 @@ class StoreTest(JitCacheTestBase):
 
 @requires_shared_acl
 class ScopeTest(JitCacheTestBase):
+
+    def test_flashinfer_snapshots_track_the_cubin_provider(self):
+        versions = {"flashinfer-cubin": "0.6.9"}
+        with _fake_probes(pkg=lambda name: versions.get(name, "1.0")):
+            first = jit.resolve_scope(self.root)
+            versions["flashinfer-cubin"] = "0.6.10"
+            second = jit.resolve_scope(self.root)
+        self.assertNotEqual(first.scope_id, second.scope_id)
 
     def test_native_consumers_track_ffi_with_ffi_cache_opted_out(self):
         os.environ["TVM_FFI_CACHE_DIR"] = str(self.root / "explicit-ffi")
