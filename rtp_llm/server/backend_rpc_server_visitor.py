@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import os
+import secrets
 from dataclasses import replace
 from typing import TYPE_CHECKING, AsyncGenerator, Callable, List, Optional, Set
 
@@ -228,6 +229,22 @@ class BackendRPCServerVisitor:
         self.request_id_factory = factory
 
     @staticmethod
+    def _vit_probe_request_id(request_id: int) -> int:
+        # A probe is a separate scheduler RPC, not a new inference request.
+        # Keep the inference/correlation IDs unchanged and use a positive int64
+        # for this RPC, including each stale-worker reselection. Older masters
+        # can register probes in the same namespace as inference requests.
+        probe_id = request_id
+        while probe_id == request_id:
+            probe_id = secrets.randbelow((1 << 63) - 1) + 1
+        route_logger.info(
+            "ViT route probe, request_id=%s, probe_request_id=%s",
+            request_id,
+            probe_id,
+        )
+        return probe_id
+
+    @staticmethod
     def get_backend_role_list(
         pd_sep_config,
         host_args: HostServiceArgs,
@@ -299,7 +316,7 @@ class BackendRPCServerVisitor:
                     block_cache_keys=[],
                     cache_key_block_size=self._cache_key_block_size(),
                     input=input,
-                    request_id=input.request_id,
+                    request_id=self._vit_probe_request_id(input.request_id),
                     cache_affinity_keys=keys,
                     vit_only=True,
                 )
@@ -436,7 +453,7 @@ class BackendRPCServerVisitor:
                     block_cache_keys=[],
                     cache_key_block_size=self._cache_key_block_size(),
                     input=input,
-                    request_id=input.request_id,
+                    request_id=self._vit_probe_request_id(input.request_id),
                     cache_affinity_keys=keys,
                     vit_only=True,
                     **route_args,

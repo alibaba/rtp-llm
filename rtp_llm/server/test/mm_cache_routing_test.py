@@ -77,6 +77,19 @@ def hash_response(keys, hashes):
 
 
 class MMCacheRoutingTest(unittest.TestCase):
+    def test_vit_probe_id_excludes_parent_and_fits_signed_int64(self):
+        with patch(
+            "rtp_llm.server.backend_rpc_server_visitor.secrets.randbelow",
+            side_effect=[122, (1 << 63) - 2],
+        ) as random_id:
+            probe_id = BackendRPCServerVisitor._vit_probe_request_id(123)
+        self.assertEqual(random_id.call_count, 2)
+        wire = FlexlbScheduleRequestPB(request_id=probe_id)
+        self.assertEqual(
+            FlexlbScheduleRequestPB.FromString(wire.SerializeToString()).request_id,
+            (1 << 63) - 1,
+        )
+
     def test_affinity_keys_preserve_legacy_wire_encoding(self):
         # Fields 16 (media_keys="image") and 18 (vit_route_only=true).
         legacy_wire = b"\x82\x01\x05image\x90\x01\x01"
@@ -347,10 +360,25 @@ class MMCacheRoutingIntegrationTest(unittest.IsolatedAsyncioTestCase):
             self.prefill,
             self.status,
         )
+        request.headers = {"x-request-id": "upstream-image-request"}
         await visitor.get_master_route_addrs(request)
         calls = visitor.master_client.get_backend_role_addrs.call_args_list
         self.assertEqual(len(calls), 2)
         self.assertTrue(calls[0].kwargs["vit_only"])
+        probe_id = calls[0].kwargs["request_id"]
+        # Exercise the real wire type: a string suffix passes mocked routing
+        # but fails before the first schedule RPC can be sent.
+        wire_probe = FlexlbScheduleRequestPB(request_id=probe_id, vit_route_only=True)
+        self.assertEqual(
+            FlexlbScheduleRequestPB.FromString(
+                wire_probe.SerializeToString()
+            ).request_id,
+            probe_id,
+        )
+        self.assertGreater(probe_id, 0)
+        self.assertNotEqual(probe_id, request.request_id)
+        self.assertEqual(calls[1].kwargs["request_id"], 123)
+        self.assertEqual(request.request_id, 123)
         self.assertEqual(calls[1].kwargs["seq_len"], 4)
         self.assertEqual(calls[1].kwargs["selected_vit"], status)
         self.assertEqual(request.generate_config.role_addrs, [prefill, vit])
@@ -363,6 +391,8 @@ class MMCacheRoutingIntegrationTest(unittest.IsolatedAsyncioTestCase):
             get_block_cache_keys([1, -10, 11, 2], 2),
         )
         wire = GenerateInputPB.FromString(route["input_pb"].SerializeToString())
+        self.assertEqual(wire.request_id, 123)
+        self.assertEqual(wire.request_info.request_id, "upstream-image-request")
         self.assertEqual(list(wire.token_ids), [1, 99, 2])
         self.assertEqual(len(wire.multimodal_inputs), 1)
         self.assertEqual(
@@ -655,6 +685,22 @@ class MMCacheRoutingIntegrationTest(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(await self.visitor.get_master_route_addrs(self.request))
         retry = self.visitor.master_client.get_backend_role_addrs.call_args_list[2]
         self.assertTrue(retry.kwargs["vit_only"])
+        calls = self.visitor.master_client.get_backend_role_addrs.call_args_list
+        probe_ids = [calls[index].kwargs["request_id"] for index in (0, 2)]
+        for probe_id in probe_ids:
+            wire_probe = FlexlbScheduleRequestPB(request_id=probe_id)
+            self.assertEqual(
+                FlexlbScheduleRequestPB.FromString(
+                    wire_probe.SerializeToString()
+                ).request_id,
+                probe_id,
+            )
+            self.assertNotEqual(probe_id, self.request.request_id)
+        self.assertNotEqual(probe_ids[0], probe_ids[1])
+        self.assertEqual(
+            [calls[index].kwargs["request_id"] for index in (1, 3)], [123, 123]
+        )
+        self.assertEqual(self.request.request_id, 123)
         self.assertNotIn("seq_len", retry.kwargs)
         last = self.visitor.master_client.get_backend_role_addrs.call_args.kwargs
         self.assertEqual(last["selected_vit"], new_status)
@@ -678,7 +724,8 @@ class MMCacheRoutingIntegrationTest(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(self.request.token_ids.tolist(), [1, 99, 2])
         wire = trans_input(self.request)
-        self.assertEqual(list(wire.token_ids), [1, 31, 32, 33, 34, 2])
+        # Hash expansion is for routing only; the backend owns media expansion.
+        self.assertEqual(list(wire.token_ids), [1, 99, 2])
         self.assertEqual(len(wire.multimodal_inputs), 1)
         self.assertEqual(
             wire.multimodal_inputs[0].multimodal_url,
