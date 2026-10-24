@@ -44,9 +44,9 @@ class MiniMaxM31Renderer(BasicRenderer, ReasoningToolBaseRenderer):
         )
 
     def resolve_thinking_mode(self, request):
-        # The released template always leaves generation in adaptive mode.
-        # Parse emitted think tags even when a request asks for a fixed mode.
-        return ThinkingMode.ADAPTIVE
+        # The released template defaults to adaptive, while explicit request
+        # modes follow main's request contract.
+        return request.resolve_thinking_mode(ThinkingMode.ADAPTIVE)
 
     def _create_detector(self, request):
         return MiniMaxM31Detector() if request.tools else None

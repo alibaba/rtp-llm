@@ -75,8 +75,16 @@ class MiniMaxM31VLRendererTest(unittest.TestCase):
             update={"chat_template_kwargs": {"thinking_mode": "disabled"}}
         )
         self.assertEqual(
-            renderer.resolve_thinking_mode(disabled), ThinkingMode.ADAPTIVE
+            renderer.resolve_thinking_mode(disabled), ThinkingMode.DISABLED
         )
+        budget_zero = request.model_copy(update={"thinking_budget": 0})
+        self.assertEqual(
+            renderer.resolve_thinking_mode(budget_zero), ThinkingMode.DISABLED
+        )
+        enabled = request.model_copy(
+            update={"chat_template_kwargs": {"thinking_mode": "enabled"}}
+        )
+        self.assertEqual(renderer.resolve_thinking_mode(enabled), ThinkingMode.ENABLED)
         status = ThinkStatus(thinking_mode=ThinkingMode.ADAPTIVE, decision_made=False)
 
         def packet(text):
