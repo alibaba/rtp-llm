@@ -1700,12 +1700,12 @@ TEST_F(MtpBatchStreamProcessorTest, testUpdatePrefillPostDraftModelInputShiftsCo
     ProfilingDebugLoggingConfig profiling_debug_logging_config;
     CacheConfig                 cache_config = makeProcessorCacheConfig();
     SpeculativeExecutionConfig  sp_config;
-    model_config.max_seq_len                           = 2048;
-    model_config.vocab_size                            = 4;
-    model_config.num_layers                            = 1;
+    model_config.max_seq_len                          = 2048;
+    model_config.vocab_size                           = 4;
+    model_config.num_layers                           = 1;
     model_config.mm_model_config.mm_position_ids_style = MROPE;
     model_config.attn_config.rope_config.index_factor  = 3;
-    sp_config.gen_num_per_cycle                        = 2;
+    sp_config.gen_num_per_cycle                       = 2;
     MtpBatchStreamProcessor processor(
         model_config, pd_sep_config, profiling_debug_logging_config, cache_config, sp_config, false);
     RuntimeConfig   runtime_config;
@@ -1982,6 +1982,42 @@ TEST_F(MtpBatchStreamProcessorTest, testUpdateDecodeDraftModelInputAdvancesCombo
         EXPECT_EQ((vector<int>{6, 7, 8, 11, 12, 13}), toVec<int>(model_input.combo_position_ids));
         EXPECT_EQ((vector<int>{5, 7}), toVec<int>(previous_lengths));
         EXPECT_EQ((vector<int>{5, 6, 7, 10, 11, 12}), toVec<int>(previous_positions));
+    }
+}
+
+TEST_F(MtpBatchStreamProcessorTest, testExpandTargetVerifyPositionIdsFromDecodeKeepsPinnedHostOutput) {
+    ModelConfig                 model_config;
+    PDSepConfig                 pd_sep_config;
+    ProfilingDebugLoggingConfig profiling_debug_logging_config;
+    CacheConfig                 cache_config = makeProcessorCacheConfig();
+    SpeculativeExecutionConfig  sp_config;
+
+    model_config.max_seq_len                           = 2048;
+    model_config.vocab_size                            = 4;
+    model_config.num_layers                            = 1;
+    model_config.mm_model_config.mm_position_ids_style = MROPE;
+    model_config.attn_config.rope_config.index_factor  = 3;
+    sp_config.gen_num_per_cycle                        = 2;
+
+    MtpBatchStreamProcessor processor(
+        model_config, pd_sep_config, profiling_debug_logging_config, cache_config, sp_config, false);
+
+    for (const auto device : {torch::kCPU, torch::kCUDA}) {
+        GptModelInputs model_input;
+        model_input.input_lengths = torch::tensor({3, 3}, torch::kInt32);
+        model_input.combo_position_ids = torch::tensor({5, 6, 7, 10, 11, 12}, torch::kInt32).pin_memory().to(device);
+        const auto original_positions = model_input.combo_position_ids;
+
+        processor.expandTargetVerifyPositionIdsFromDecode(model_input);
+
+        EXPECT_EQ(device, model_input.combo_position_ids.device().type());
+        EXPECT_TRUE(model_input.combo_position_ids.is_contiguous());
+        if (device == torch::kCPU) {
+            EXPECT_TRUE(model_input.combo_position_ids.is_pinned());
+        }
+        EXPECT_EQ((vector<int>{5, 6, 7, 6, 7, 8, 7, 8, 9, 10, 11, 12, 11, 12, 13, 12, 13, 14}),
+                  toVec<int>(model_input.combo_position_ids));
+        EXPECT_EQ((vector<int>{5, 6, 7, 10, 11, 12}), toVec<int>(original_positions));
     }
 }
 

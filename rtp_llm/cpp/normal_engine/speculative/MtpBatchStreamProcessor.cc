@@ -427,9 +427,14 @@ void MtpBatchStreamProcessor::expandTargetVerifyPositionIdsFromDecode(GptModelIn
                             "target prepare position bases must have one row per request");
     // The bases have already been TP-broadcast. Do not consult mutable stream
     // state, or fabricate zero positions on non-driver ranks.
-    auto bases                     = model_input.combo_position_ids.reshape({batch, 1, factor});
-    auto offsets                   = torch::arange(width, bases.options()).reshape({1, width, 1});
-    model_input.combo_position_ids = (bases + offsets).reshape({-1}).contiguous();
+    auto bases   = model_input.combo_position_ids.reshape({batch, 1, factor});
+    auto offsets = torch::arange(width, bases.options()).reshape({1, width, 1});
+    // CPU arithmetic does not inherit the input's pinned allocator. Write
+    // directly into pinned storage for PyWrappedModel's deferred fused H2D copy.
+    auto options            = bases.is_cuda() ? bases.options() : bases.options().pinned_memory(true);
+    auto expanded_positions = torch::empty({batch, width, factor}, options);
+    torch::add_out(expanded_positions, bases, offsets);
+    model_input.combo_position_ids = expanded_positions.reshape({-1});
 }
 
 void MtpBatchStreamProcessor::expandTargetVerifyPositionIds(const StreamGroups& stream_groups,
