@@ -238,7 +238,7 @@ class CurrentRoutingDecisionTest(unittest.TestCase):
                      "candidateWorkerCount": 40, "prefillPolicy": {"minimumTtftMs": 12},
                      "rejections": {"OUTLIER": 2}, "candidates": [
                          {"endpoint": "10.0.0.8:8001", "selected": True, "estimatedTtftMs": 12,
-                          "projectedDrainMs": 3, "incomingPrefillMs": 9, "effectiveHitTokens": 100,
+                          "estimatedDrainMs": 3, "incomingPrefillMs": 9, "effectiveHitTokens": 100,
                           "pendingRequests": 0},
                          {"endpoint": "10.0.0.9:8001", "selected": False,
                           "predictionState": "UNMODELED_ENGINE_WORK"}]},
@@ -270,7 +270,7 @@ class CurrentRoutingDecisionTest(unittest.TestCase):
                 columns = [cell.value for cell in requests[1]]
                 request_rows = [dict(zip(columns, values)) for values in requests.iter_rows(min_row=2, values_only=True)]
                 row = next(item for item in request_rows if item.get("request_id") == "current")
-                self.assertEqual(row["selected projected TTFT ms"], 12)
+                self.assertEqual(row["selected estimated TTFT ms"], 12)
                 self.assertIsNone(row.get("selected snapshot estimated TTFT"))
                 self.assertEqual(row["decision_snapshot_status"], "COST_BASED")
                 workbook.close()

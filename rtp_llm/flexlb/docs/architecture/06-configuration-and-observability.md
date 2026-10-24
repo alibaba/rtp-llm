@@ -343,7 +343,7 @@ worker、committedSize、reason、提交时间及请求等待时长；提交组�
 Engine 的 `batchId` 标识交付批次。
 
 `routingDecisions` 记录 CostBased 的实际候选值。每个角色最多记录 5 个候选并标注截断，
-Prefill 包含选中、最短 TTFT、最高有效缓存命中候选。`estimatedTtftMs`、`projectedDrainMs`、
+Prefill 包含选中、最短 TTFT、最高有效缓存命中候选。`estimatedTtftMs`、`estimatedDrainMs`、
 `incomingPrefillMs` 的单位为毫秒；无法建模的估计省略。Prefill 记录策略参数、缓存亲和阈值、
 候选总体最小/最大命中、pending 和 ownershipVersion；Decode 记录 KV 用量、可用量与采样 logWeight。
 

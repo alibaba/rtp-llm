@@ -173,7 +173,7 @@ class BuildHtmlTest(unittest.TestCase):
         helpers = template[template.index("    function escaped("):template.index("    function renderDecisionMicroscope(")]
         script = "\n".join(declarations) + helpers + "\n" + '''
         const prefill = currentDecisionCard({role: 'PREFILL', host: 'worker', port: 8001,
-          estimatedTtftMs: 12, projectedDrainMs: 0, incomingPrefillMs: null,
+          estimatedTtftMs: 12, estimatedDrainMs: 0, incomingPrefillMs: null,
           policy: {minimumTtftMs: 12}, pendingRequests: 0});
         const decode = currentDecisionCard({role: 'DECODE', host: 'worker', logWeight: -0.25});
         if (!prefill.includes('12 ms') || !prefill.includes('0 ms') || !prefill.includes('本请求 Prefill 耗时<b>—</b>'))

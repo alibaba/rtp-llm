@@ -695,8 +695,8 @@ def build_rows(sources: Sequence[PvSource], start: datetime | str | None = None,
             "selection_reason": selection_reason,
             "decision_snapshot_status": ("COST_BASED" if decision.get("schema") == "routingDecisions"
                                          else "TOP5" if decision_workers else "NOT_RECORDED"),
-            "selected_projected_ttft_ms": as_number(selected_snapshot.get("estimatedTtftMs")),
-            "selected_projected_drain_ms": as_number(selected_snapshot.get("projectedDrainMs")),
+            "selected_estimated_ttft_ms": as_number(selected_snapshot.get("estimatedTtftMs")),
+            "selected_estimated_drain_ms": as_number(selected_snapshot.get("estimatedDrainMs")),
             "selected_incoming_prefill_ms": as_number(selected_snapshot.get("incomingPrefillMs")),
             "selected_effective_hit_tokens": as_number(selected_snapshot.get("effectiveHitTokens")),
             "selected_pending_requests": as_number(selected_snapshot.get("pendingRequests")),
@@ -841,8 +841,8 @@ LEFT_COLUMNS = [
     Column("route_log_time", "route_log_time (decision)", 24),
     Column("selection_reason", "selection_reason", 20),
     Column("decision_snapshot_status", "decision_snapshot_status", 18),
-    Column("selected_projected_ttft_ms", "selected projected TTFT ms", 28, "ms"),
-    Column("selected_projected_drain_ms", "selected projected drain ms", 28, "ms"),
+    Column("selected_estimated_ttft_ms", "selected estimated TTFT ms", 28, "ms"),
+    Column("selected_estimated_drain_ms", "selected estimated drain ms", 28, "ms"),
     Column("selected_incoming_prefill_ms", "selected incoming prefill ms", 28, "ms"),
     Column("selected_effective_hit_tokens", "selected effective hit tokens", 28, "integer"),
     Column("selected_pending_requests", "selected pending requests", 28, "integer"),
@@ -1005,7 +1005,7 @@ def formats(workbook: xlsxwriter.Workbook) -> dict[str, xlsxwriter.format.Format
 def write_requests_sheet(workbook: xlsxwriter.Workbook, rows: list[dict[str, Any]], threshold: dict[str, float | None]) -> None:
     columns = ALL_COLUMNS
     if any(row.get("_routing_decisions") for row in rows):
-        promoted = {"selected_projected_ttft_ms", "selected_projected_drain_ms", "selected_incoming_prefill_ms",
+        promoted = {"selected_estimated_ttft_ms", "selected_estimated_drain_ms", "selected_incoming_prefill_ms",
                     "selected_effective_hit_tokens", "selected_pending_requests"}
         has_legacy = any(row.get("decision_snapshot_status") == "TOP5" for row in rows)
         columns = [column for column in columns if has_legacy or not (
@@ -1152,7 +1152,7 @@ def write_routing_decisions_sheet(workbook: xlsxwriter.Workbook, rows: list[dict
     worksheet = workbook.add_worksheet("Routing Decisions")
     common = ["request_id", "flexlb_instance", "role", "group", "strategy", "selectionReason", "decisionTimeMs", "routingAttempt",
               "selectedEndpoint", "totalWorkerCount", "candidateWorkerCount", "snapshotTruncated"]
-    fields = ["endpoint", "selected", "predictionState", "estimatedTtftMs", "projectedDrainMs",
+    fields = ["endpoint", "selected", "predictionState", "estimatedTtftMs", "estimatedDrainMs",
               "incomingPrefillMs", "effectiveHitTokens", "routingMatchTokens", "pendingRequests",
               "usedKvTokens", "availableKvTokens", "logWeight", "ownershipVersion"]
     policy_fields = ["requestInputTokens", "candidateChoice", "minimumTtftMs", "relativeTolerance",
