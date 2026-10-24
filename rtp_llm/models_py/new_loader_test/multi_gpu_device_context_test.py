@@ -1,11 +1,12 @@
 import unittest
 from unittest import mock
 
+import flashinfer.activation
+import flashinfer.norm
 import torch
 
-from rtp_llm.models_py.layers import activation
+from rtp_llm.models_py.layers import activation, norm
 from rtp_llm.models_py.layers.norm import RMSNorm, RMSResNorm
-from rtp_llm.ops.compute_ops import rtp_llm_ops
 
 
 class MultiGpuDeviceContextTest(unittest.TestCase):
@@ -32,7 +33,9 @@ class MultiGpuDeviceContextTest(unittest.TestCase):
         with mock.patch.object(
             activation, "_SILU_FUSED_ENABLED", True
         ), mock.patch.object(
-            rtp_llm_ops, "silu_and_mul", wraps=rtp_llm_ops.silu_and_mul
+            flashinfer.activation,
+            "silu_and_mul",
+            wraps=flashinfer.activation.silu_and_mul,
         ) as fused_op:
             output = activation.silu_and_mul(gate_up)
         fused_op.assert_called_once()
@@ -56,8 +59,8 @@ class MultiGpuDeviceContextTest(unittest.TestCase):
         ).to(inputs.dtype)
         torch.cuda.set_device(self.original_device)
 
-        with mock.patch.object(
-            rtp_llm_ops, "rmsnorm", wraps=rtp_llm_ops.rmsnorm
+        with mock.patch.object(norm, "_RMSNORM_FUSED_ENABLED", True), mock.patch.object(
+            flashinfer.norm, "rmsnorm", wraps=flashinfer.norm.rmsnorm
         ) as fused_op:
             output = layer(inputs)
         fused_op.assert_called_once()
@@ -80,10 +83,10 @@ class MultiGpuDeviceContextTest(unittest.TestCase):
         ).to(hidden_states.dtype)
         torch.cuda.set_device(self.original_device)
 
-        with mock.patch.object(
-            rtp_llm_ops,
+        with mock.patch.object(norm, "_RMSNORM_FUSED_ENABLED", True), mock.patch.object(
+            flashinfer.norm,
             "fused_add_rmsnorm",
-            wraps=rtp_llm_ops.fused_add_rmsnorm,
+            wraps=flashinfer.norm.fused_add_rmsnorm,
         ) as fused_op:
             output, residual_out = layer(hidden_states, residual)
         fused_op.assert_called_once()

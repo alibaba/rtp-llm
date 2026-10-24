@@ -88,7 +88,6 @@ def pip_deps():
 
     pip_parse(
         name = "pip_gpu_cuda12_9_torch",
-        annotations = FLASHINFER_069_ANNOTATIONS,
         requirements_lock = "@rtp_pip_deps//:requirements_lock_torch_gpu_cuda12_9.txt",
         python_interpreter = "/opt/conda310/bin/python3",
         extra_pip_args = PIP_EXTRA_ARGS + PIP_INDEX_ARGS + ["--quiet"],
@@ -98,11 +97,12 @@ def pip_deps():
         # Regenerate optional wheel repositories in pre-warmed CI hubs created
         # before these dependencies entered the lock. Existing unrelated wheels
         # stay cached.
-        annotations = {
-            "watchdog": package_annotation(),
-            "xgrammar": package_annotation(),
-            "zstandard": package_annotation(),
-        },
+        annotations = dict(
+            FLASHINFER_069_ANNOTATIONS,
+            watchdog = package_annotation(),
+            xgrammar = package_annotation(),
+            zstandard = package_annotation(),
+        ),
     )
 
     pip_parse(

@@ -499,15 +499,16 @@ class Qwen2ForCausalLM(GptModelBase):
             "lm_head": self.lm_head.weight,
         }
 
+    def word_embedding(self, inputs: PyModelInputs) -> torch.Tensor:
+        """Text embedding hook, overridden by multimodal language runtimes."""
+        return self.embed_tokens(inputs.input_ids)
+
     def forward(self, inputs: PyModelInputs, fmha_impl: Any = None) -> PyModelOutputs:
-        input_ids = inputs.input_ids
-        hidden_states = self.embed_tokens(input_ids)
+        hidden_states = self.word_embedding(inputs)
         if fmha_impl is None:
             fmha_impl = self.prepare_fmha_impl(inputs)
         for i, layer in enumerate(self.layers):
-            layer_fmha_impl = select_fmha_impl_for_layer(
-                fmha_impl, self.kv_cache, i
-            )
+            layer_fmha_impl = select_fmha_impl_for_layer(fmha_impl, self.kv_cache, i)
             hidden_states = layer(
                 hidden_states,
                 layer_fmha_impl,

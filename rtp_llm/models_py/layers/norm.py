@@ -78,6 +78,7 @@ class RMSNorm(RtpModule):
             if getattr(torch.version, "hip", None) is not None:
                 try:
                     from aiter import rms_norm, rmsnorm2d_fwd_opus
+
                     from rtp_llm.models_py.modules.base.rocm.norm import (
                         _requires_opus_rmsnorm,
                     )
@@ -93,21 +94,17 @@ class RMSNorm(RtpModule):
                     return output.reshape(original_shape)
             else:
                 try:
-                    from rtp_llm.ops.compute_ops import rtp_llm_ops
+                    from flashinfer.norm import rmsnorm
                 except (ImportError, OSError, RuntimeError) as exc:
                     _disable_fused_rmsnorm(exc)
                 else:
                     output = torch.empty_like(input_2d)
                     with torch.cuda.device(input_2d.device):
-                        stream_id = torch.cuda.current_stream(
-                            input_2d.device
-                        ).cuda_stream
-                        rtp_llm_ops.rmsnorm(
-                            output,
+                        rmsnorm(
                             input_2d,
                             self.weight.data,
-                            self.eps,
-                            stream_id,
+                            eps=self.eps,
+                            out=output,
                         )
                     return output.reshape(original_shape)
 
@@ -181,6 +178,7 @@ class RMSResNorm(RtpModule):
                         rmsnorm2d_fwd_with_add,
                         rmsnorm2d_fwd_with_add_opus,
                     )
+
                     from rtp_llm.models_py.modules.base.rocm.norm import (
                         _requires_opus_rmsnorm,
                     )
@@ -214,20 +212,16 @@ class RMSResNorm(RtpModule):
 
             else:
                 try:
-                    from rtp_llm.ops.compute_ops import rtp_llm_ops
-                except (ImportError, OSError) as exc:
+                    from flashinfer.norm import fused_add_rmsnorm
+                except (ImportError, OSError, RuntimeError) as exc:
                     _disable_fused_rmsnorm(exc)
                 else:
                     with torch.cuda.device(hidden_states.device):
-                        stream_id = torch.cuda.current_stream(
-                            hidden_states.device
-                        ).cuda_stream
-                        rtp_llm_ops.fused_add_rmsnorm(
+                        fused_add_rmsnorm(
                             hidden_states,
                             residual,
                             self.weight.data,
-                            self.eps,
-                            stream_id,
+                            eps=self.eps,
                         )
                     return hidden_states, residual
 

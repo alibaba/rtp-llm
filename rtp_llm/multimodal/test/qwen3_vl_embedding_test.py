@@ -35,9 +35,6 @@ class Qwen3VLEmbeddingTest(TestCase):
             "rtp_llm.multimodal.multimodal_mixins.qwen3_vl_mixin.AutoProcessor.from_pretrained",
             return_value=Mock(),
         ), patch(
-            "rtp_llm.multimodal.multimodal_mixins.qwen3_vl_mixin.Qwen2VLImageProcessor.from_pretrained",
-            return_value=Mock(),
-        ), patch(
             "rtp_llm.multimodal.multimodal_mixins.qwen3_vl_mixin.Qwen3VLConfig.from_pretrained",
             return_value=SimpleNamespace(vision_config=config),
         ), patch(

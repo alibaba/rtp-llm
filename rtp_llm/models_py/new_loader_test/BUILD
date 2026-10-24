@@ -10,6 +10,24 @@ py_test(
 )
 
 py_test(
+    name = "model_base_contract_test",
+    srcs = ["model_base_contract_test.py"],
+    # Deliberately do not depend on :models or :new_weight_loader: the shared
+    # base must declare its own imports, including hidden_state_capture.
+    deps = [
+        "//rtp_llm/models_py:model_desc_base",
+        "//rtp_llm/models_py:new_loader_core",
+        "//rtp_llm:safetensors",
+        "//rtp_llm:torch",
+    ],
+    data = [
+        "//:rtp_compute_ops",
+        "//:th_transformer",
+        "//:th_transformer_config",
+    ],
+)
+
+py_test(
     name = "quantization_exclusion_test",
     srcs = ["quantization_exclusion_test.py"],
     deps = [

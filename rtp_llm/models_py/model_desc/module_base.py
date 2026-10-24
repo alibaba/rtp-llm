@@ -3,7 +3,6 @@ from collections.abc import Mapping
 from typing import Any, Optional
 
 import torch
-from torch import nn
 
 from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.device.device_type import DeviceType, get_device_type
@@ -12,12 +11,11 @@ from rtp_llm.models_py.model_desc.block_map import (
     get_attention_inputs_value,
     select_attention_inputs_for_tag,
 )
-from rtp_llm.models_py.module_base import RtpModule
-
 from rtp_llm.models_py.model_desc.hidden_state_capture import (
     CanonicalHiddenHook,
     CaptureContext,
 )
+from rtp_llm.models_py.module_base import RtpModule
 from rtp_llm.models_py.modules import AttnImplFactory
 from rtp_llm.models_py.modules.factory.attention.attn_factory import AttentionImpl
 from rtp_llm.ops.compute_ops import (
@@ -29,13 +27,30 @@ from rtp_llm.ops.compute_ops import (
 from rtp_llm.utils.model_weight import W
 
 
-class GptModelBase(nn.Module):
+def required_config_value(config: Any, *names: str) -> Any:
+    """Read a required setting from a service config or an HF mapping.
+
+    Aliases are tried in order. Only missing/None values are absent: zero and
+    False must reach the caller's own validation unchanged.
+    """
+    for name in names:
+        value = (
+            config.get(name)
+            if isinstance(config, Mapping)
+            else getattr(config, name, None)
+        )
+        if value is not None:
+            return value
+    raise ValueError(f"Missing required config value: {' or '.join(names)}")
+
+
+class GptModelBase(RtpModule):
     def __init__(
         self,
         config: ModelConfig,
         parallelism_config,
-        weight: ModelWeights,
-        max_generate_batch_size: int,
+        weight: Optional[ModelWeights] = None,
+        max_generate_batch_size: int = 0,
         fmha_config=None,  # Optional FMHAConfig
         py_hw_kernel_config=None,  # Optional HWKernelConfig
     ) -> None:
@@ -51,8 +66,10 @@ class GptModelBase(nn.Module):
             and getattr(py_hw_kernel_config, "enable_decode_cascade_attention", False)
             else 0
         )
-        self.layer_num: int = config.num_layers
-        self.vocab_size: int = config.vocab_size
+        self.layer_num: int = required_config_value(
+            config, "num_layers", "num_hidden_layers"
+        )
+        self.vocab_size: int = required_config_value(config, "vocab_size")
 
         self.kv_cache: Optional[KVCache] = None
         self.device_type: DeviceType = get_device_type()

@@ -31,10 +31,10 @@ class DeepJitCacheTest(unittest.TestCase):
         source = self.root / "source"
         files = deepjit.deepjit_snapshot_files(source)
         self.assertEqual(len(files), 4)
-        archive = self.root / "snapshot.zst"
-        store.pack_zstd_tar(archive, files)
+        archive = self.root / f"snapshot{store.SNAPSHOT_SUFFIX}"
+        store.pack_snapshot(archive, files)
         target = self.root / "restored"
-        store.extract_zstd_tar(archive, target)
+        store.extract_snapshot(archive, target)
         self.assertEqual(
             deepjit.deepjit_checksums(target),
             {

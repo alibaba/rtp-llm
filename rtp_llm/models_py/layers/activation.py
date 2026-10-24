@@ -14,22 +14,24 @@ def silu_and_mul(gate_up: torch.Tensor) -> torch.Tensor:
         raise ValueError(
             f"SwiGLU input width must be positive and even, got " f"{gate_up.shape[-1]}"
         )
-    if gate_up.is_cuda and _SILU_FUSED_ENABLED:
+    is_rocm = torch.version.hip is not None
+    # The pinned FlashInfer kernel requires 16-byte aligned half rows. Preserve
+    # eager support for widths such as the Qwen2.5-VL intermediate size 3420.
+    aligned = (gate_up.shape[-1] // 2 * gate_up.element_size()) % 16 == 0
+    if gate_up.is_cuda and _SILU_FUSED_ENABLED and (is_rocm or aligned):
         output = torch.empty(
             gate_up.shape[:-1] + (gate_up.shape[-1] // 2,),
             dtype=gate_up.dtype,
             device=gate_up.device,
         )
         try:
-            if getattr(torch.version, "hip", None) is not None:
+            if is_rocm:
                 import aiter
 
                 fused_op = aiter.silu_and_mul
             else:
-                from rtp_llm.ops.compute_ops import rtp_llm_ops
-
-                fused_op = rtp_llm_ops.silu_and_mul
-        except (ImportError, AttributeError) as exc:
+                from flashinfer.activation import silu_and_mul as fused_op
+        except (ImportError, AttributeError, OSError) as exc:
             _SILU_FUSED_ENABLED = False
             logger.warning(
                 "Fused silu_and_mul is unavailable; disabling it and using eager "
@@ -37,16 +39,14 @@ def silu_and_mul(gate_up: torch.Tensor) -> torch.Tensor:
                 exc,
             )
         else:
-            if getattr(torch.version, "hip", None) is not None:
+            if is_rocm:
                 fused_op(output, gate_up)
             else:
                 # The caller may keep a different CUDA device current while
-                # loading or executing multiple model replicas. Native kernels
-                # must launch in the input device context and receive the
-                # stream that owns the input tensor.
+                # loading or executing multiple model replicas. FlashInfer must
+                # obtain the current stream in the input device context.
                 with torch.cuda.device(gate_up.device):
-                    stream_id = torch.cuda.current_stream(gate_up.device).cuda_stream
-                    fused_op(output, gate_up, stream_id)
+                    fused_op(gate_up, out=output)
             return output
 
     gate, up = gate_up.chunk(2, dim=-1)

@@ -188,6 +188,12 @@ py_test(
 )
 
 py_test(
+    name = "qwen35_embedding_test",
+    srcs = ["qwen35_embedding_test.py"],
+    deps = ["//rtp_llm:testlib"],
+)
+
+py_test(
     name = "deepseek_v41_processor_test",
     srcs = ["deepseek_v41_processor_test.py"],
     deps = ["//rtp_llm:testlib"],

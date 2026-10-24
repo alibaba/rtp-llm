@@ -10,6 +10,7 @@ from rtp_llm.models_py.model_loader import NewLoaderConfig, NewModelLoader
 from rtp_llm.models_py.new_models.qwen2_vl.model import Qwen2VLForCausalLM
 from rtp_llm.models_py.new_models.qwen2_vl.vision import Qwen2VLForVisionEmbedding
 from rtp_llm.models_py.quant_methods import QuantizationConfig
+from rtp_llm.ops.compute_ops import PyEmbeddingInputs, PyModelInputs, PyMultimodalInputs
 
 
 def _parallelism():
@@ -174,6 +175,174 @@ def _manual_vision_forward(model, pixel_values):
 
 
 class Qwen2VLNewLoaderTest(unittest.TestCase):
+    @staticmethod
+    def _inputs(input_ids, features=(), locations=None, mask=None):
+        embedding = PyEmbeddingInputs()
+        if mask is not None:
+            embedding.text_tokens_mask = mask
+        multimodal = PyMultimodalInputs()
+        multimodal.multimodal_features = list(features)
+        if locations is not None:
+            multimodal.mm_features_locs = locations
+        return PyModelInputs(
+            input_ids=input_ids,
+            embedding_inputs=embedding,
+            multimodal_inputs=multimodal,
+        )
+
+    @staticmethod
+    def _reference_language(weights, embedded):
+        def norm(x, key):
+            return (
+                x * torch.rsqrt(x.square().mean(-1, keepdim=True) + 1e-6) * weights[key]
+            )
+
+        prefix = "model.layers.0."
+        hidden = norm(embedded, prefix + "input_layernorm.weight")
+        projections = [
+            F.linear(
+                hidden,
+                weights[prefix + f"self_attn.{part}_proj.weight"],
+                weights[prefix + f"self_attn.{part}_proj.bias"],
+            )
+            for part in ("q", "k", "v")
+        ]
+        q, k, v = [
+            value.reshape(len(hidden), -1, 2).transpose(0, 1) for value in projections
+        ]
+        k, v = k.repeat_interleave(2, dim=0), v.repeat_interleave(2, dim=0)
+        scores = q @ k.transpose(-1, -2) / (2**0.5)
+        causal_mask = torch.ones(len(hidden), len(hidden), dtype=torch.bool).tril()
+        scores = scores.masked_fill(~causal_mask, float("-inf"))
+        attention = (scores.softmax(-1) @ v).transpose(0, 1).reshape(-1, 4)
+        hidden = embedded + F.linear(
+            attention, weights[prefix + "self_attn.o_proj.weight"]
+        )
+        residual = hidden
+        hidden = norm(hidden, prefix + "post_attention_layernorm.weight")
+        gate = F.linear(hidden, weights[prefix + "mlp.gate_proj.weight"])
+        up = F.linear(hidden, weights[prefix + "mlp.up_proj.weight"])
+        hidden = residual + F.linear(
+            F.silu(gate) * up, weights[prefix + "mlp.down_proj.weight"]
+        )
+        return norm(hidden, "model.norm.weight")
+
+    def test_loaded_vision_features_reach_language_forward_and_change_logits(self):
+        # Use a real checkpoint, ViT, embedding injector and decoder. CPU SDPA
+        # supplies attention only; CUDA/ROCm attention and MRoPE require
+        # separate device-suite and multimodal smoke validation.
+        vision_config = _vision_model_config()
+        vision_config["vision_config"]["hidden_size"] = 4
+        with torch.random.fork_rng(devices=[]):
+            torch.manual_seed(17)
+            source_vision = Qwen2VLForVisionEmbedding(
+                vision_config, _load_config()
+            ).eval()
+        generator = torch.Generator().manual_seed(23)
+        weights = {
+            name: (
+                torch.randn(value.shape, generator=generator) * 0.1
+                if value.ndim == 2
+                else value
+            )
+            for name, value in _language_weights().items()
+        }
+        all_weights = dict(weights)
+        all_weights.update(
+            {
+                name: value.detach().clone()
+                for name, value in source_vision.state_dict().items()
+            }
+        )
+        with tempfile.TemporaryDirectory() as model_path:
+            save_file(all_weights, f"{model_path}/model.safetensors")
+            model = NewModelLoader(
+                _language_config(), _load_config(), model_path=model_path
+            ).load()
+            vision = NewModelLoader(
+                vision_config, _load_config(), model_path=model_path
+            ).load()
+
+        class TorchCausalGqa:
+            def forward(self, qkv, kv_cache, layer_idx):
+                q, k, v = qkv.split((4, 2, 2), dim=-1)
+                q, k, v = [
+                    part.reshape(-1, heads, 2).transpose(0, 1)
+                    for part, heads in ((q, 2), (k, 1), (v, 1))
+                ]
+                output = F.scaled_dot_product_attention(
+                    q,
+                    k.repeat_interleave(2, dim=0),
+                    v.repeat_interleave(2, dim=0),
+                    is_causal=True,
+                )
+                return output.transpose(0, 1).reshape(-1, 4)
+
+        input_ids = torch.tensor([0, 100001, 3, 5, 100002, 7], dtype=torch.int32)
+        mask = torch.tensor([1, 0, 1, 1, 0, 1], dtype=torch.int32)
+        locations = torch.tensor([1, 4], dtype=torch.int32)
+        pixels = torch.arange(32, dtype=torch.float32).reshape(8, 4) / 31
+        grid = torch.tensor([[1, 2, 2], [1, 2, 2]], dtype=torch.int64)
+        with torch.inference_mode():
+            features = list(vision(pixels, grid).split(1))
+            inputs = self._inputs(input_ids, features, locations, mask)
+            embedded = model.word_embedding(inputs)
+            expected_embedding = F.embedding(
+                torch.where(mask.bool(), input_ids, 0).long(),
+                weights["model.embed_tokens.weight"],
+            )
+            expected_embedding[1] = features[0][0]
+            expected_embedding[4] = features[1][0]
+            torch.testing.assert_close(embedded, expected_embedding)
+            outputs = model(inputs, fmha_impl=TorchCausalGqa())
+            expected_hidden = self._reference_language(weights, expected_embedding)
+            torch.testing.assert_close(outputs.hidden_states, expected_hidden)
+            logits = model.lm_head(outputs.hidden_states)
+            torch.testing.assert_close(
+                logits, F.linear(expected_hidden, weights["model.embed_tokens.weight"])
+            )
+
+            changed_features = [
+                features[0] + torch.tensor([[1.0, -2.0, 3.0, -4.0]]),
+                features[1],
+            ]
+            changed = model(
+                self._inputs(input_ids, changed_features, locations, mask),
+                fmha_impl=TorchCausalGqa(),
+            )
+            self.assertFalse(
+                torch.allclose(logits, model.lm_head(changed.hidden_states))
+            )
+
+            text_ids = torch.tensor([0, 3, 7], dtype=torch.int32)
+            text_inputs = self._inputs(text_ids)
+            text_output = model(text_inputs, fmha_impl=TorchCausalGqa())
+            text_embedding = F.embedding(
+                text_ids.long(), weights["model.embed_tokens.weight"]
+            )
+            torch.testing.assert_close(
+                model.word_embedding(text_inputs), text_embedding
+            )
+            torch.testing.assert_close(
+                text_output.hidden_states,
+                self._reference_language(weights, text_embedding),
+            )
+
+    def test_language_rejects_missing_or_inconsistent_visual_metadata(self):
+        model = Qwen2VLForCausalLM(_language_config(), _load_config()).eval()
+        ids = torch.tensor([0, 100001], dtype=torch.int32)
+        features = [torch.ones(1, 4)]
+        mask = torch.tensor([1, 0], dtype=torch.int32)
+        cases = (
+            (None, mask, "mm_features_locs"),
+            (torch.tensor([1]), None, "text_tokens_mask"),
+            (torch.tensor([1]), torch.ones(1), "must match"),
+            (torch.empty(0, dtype=torch.int32), mask, "entries"),
+        )
+        for locations, text_mask, error in cases:
+            with self.subTest(error=error), self.assertRaisesRegex(ValueError, error):
+                model.word_embedding(self._inputs(ids, features, locations, text_mask))
+
     def test_language_loader_filters_visual_tensors_before_dispatch(self):
         weights = _language_weights()
         weights["visual.not_a_language_weight"] = torch.ones(3)

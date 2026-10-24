@@ -315,6 +315,7 @@ py_library(
     name = "model_desc_base",
     srcs = [
         "model_desc/block_map.py",
+        "model_desc/hidden_state_capture.py",
         "model_desc/module_base.py",
     ],
     deps = [
@@ -323,6 +324,9 @@ py_library(
         "//rtp_llm:config",
         "//rtp_llm:device",
         "//rtp_llm:ops",
+        "//rtp_llm:torch",
+        "//rtp_llm:utils",
+        "//rtp_llm/model_loader:loader",
     ],
     visibility = ["//visibility:public"],
 )
@@ -449,6 +453,7 @@ py_library(
         "speculative/*.py",
     ], exclude = [
         "model_desc/block_map.py",
+        "model_desc/hidden_state_capture.py",
         "model_desc/module_base.py",
     ]) + select({
         "@//:using_ppu": glob(["model_desc/deepseek_v4_ppu/**/*.py"]),

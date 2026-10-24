@@ -250,7 +250,8 @@ class Qwen3BaseModelIntegrationTest(unittest.TestCase):
         self.assertFalse(model._use_new_loader())
 
         config.use_new_loader = True
-        self.assertTrue(model._use_new_loader())
+        with self.assertRaisesRegex(ValueError, "not divisible"):
+            model._use_new_loader()
         with self.assertRaisesRegex(ValueError, "not divisible"):
             model._load_with_new_loader()
 
@@ -266,7 +267,8 @@ class Qwen3BaseModelIntegrationTest(unittest.TestCase):
 
         self.assertFalse(model._use_new_loader())
         model.model_config.use_new_loader = True
-        self.assertTrue(model._use_new_loader())
+        with self.assertRaisesRegex(ValueError, "unsupported test configuration"):
+            model._use_new_loader()
 
     def test_load_initializes_custom_module_before_loader_routing(self):
         model = _base_model(_model_config())
@@ -300,7 +302,8 @@ class Qwen3BaseModelIntegrationTest(unittest.TestCase):
         self.assertFalse(model._use_new_loader())
 
         config.use_new_loader = True
-        self.assertTrue(model._use_new_loader())
+        with self.assertRaisesRegex(ValueError, "fastsafetensors is not supported"):
+            model._use_new_loader()
         with self.assertRaisesRegex(ValueError, "fastsafetensors is not supported"):
             model._load_with_new_loader()
 
@@ -335,7 +338,10 @@ class Qwen3BaseModelIntegrationTest(unittest.TestCase):
         self.assertFalse(model._use_new_loader())
 
         config.use_new_loader = True
-        self.assertTrue(model._use_new_loader())
+        with self.assertRaisesRegex(
+            ValueError, "does not support downstream custom weights"
+        ):
+            model._use_new_loader()
         with self.assertRaisesRegex(
             ValueError, "does not support downstream custom weights"
         ):
@@ -484,7 +490,8 @@ class Qwen3BaseModelIntegrationTest(unittest.TestCase):
                 self.assertFalse(model._use_new_loader())
 
                 config.use_new_loader = True
-                self.assertTrue(model._use_new_loader())
+                with self.assertRaisesRegex(ValueError, "quantization config"):
+                    model._use_new_loader()
                 with self.assertRaisesRegex(ValueError, "quantization config"):
                     model._load_with_new_loader()
                 config.use_new_loader = None
@@ -507,7 +514,8 @@ class Qwen3BaseModelIntegrationTest(unittest.TestCase):
         self.assertFalse(model._use_new_loader())
 
         config.use_new_loader = True
-        self.assertTrue(model._use_new_loader())
+        with self.assertRaisesRegex(ValueError, "static-activation per-tensor FP8 MoE"):
+            model._use_new_loader()
         with self.assertRaisesRegex(ValueError, "static-activation per-tensor FP8 MoE"):
             model._load_with_new_loader()
 
@@ -551,7 +559,8 @@ class Qwen3BaseModelIntegrationTest(unittest.TestCase):
                         self.assertFalse(model._use_new_loader())
 
                         config.use_new_loader = True
-                        self.assertTrue(model._use_new_loader())
+                        with self.assertRaisesRegex(ValueError, "FP8_PER_CHANNEL"):
+                            model._use_new_loader()
                         with self.assertRaisesRegex(ValueError, "FP8_PER_CHANNEL"):
                             model._load_with_new_loader()
                         config.use_new_loader = None
@@ -578,7 +587,8 @@ class Qwen3BaseModelIntegrationTest(unittest.TestCase):
                     self.assertFalse(model._use_new_loader())
 
                     config.use_new_loader = True
-                    self.assertTrue(model._use_new_loader())
+                    with self.assertRaisesRegex(ValueError, "ROCm"):
+                        model._use_new_loader()
                     with self.assertRaisesRegex(ValueError, "ROCm"):
                         model._load_with_new_loader()
                     config.use_new_loader = None
@@ -621,7 +631,8 @@ class Qwen3BaseModelIntegrationTest(unittest.TestCase):
             self.assertFalse(model._use_new_loader())
 
             config.use_new_loader = True
-            self.assertTrue(model._use_new_loader())
+            with self.assertRaisesRegex(ValueError, "DeepEP low-latency MoE"):
+                model._use_new_loader()
             with self.assertRaisesRegex(ValueError, "DeepEP low-latency MoE"):
                 model._load_with_new_loader()
 
@@ -646,7 +657,8 @@ class Qwen3BaseModelIntegrationTest(unittest.TestCase):
 
         self.assertFalse(model._use_new_loader())
         config.use_new_loader = True
-        self.assertTrue(model._use_new_loader())
+        with self.assertRaisesRegex(ValueError, "online UpdateWeights is required"):
+            model._use_new_loader()
         with self.assertRaisesRegex(ValueError, "online UpdateWeights is required"):
             model._load_with_new_loader()
 
