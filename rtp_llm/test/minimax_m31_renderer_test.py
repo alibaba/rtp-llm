@@ -100,6 +100,37 @@ class MiniMaxM31VLRendererTest(unittest.TestCase):
         self.assertEqual(first.content, "")
         self.assertEqual(second.content, "Answer")
 
+    def test_explicit_thinking_modes_set_generation_prefix(self):
+        for renderer_type in (MiniMaxM31Renderer, MiniMaxM31VLRenderer):
+            renderer = _renderer(renderer_type)
+            base = {
+                "model": "minimax_m31",
+                "messages": [{"role": "user", "content": "hello"}],
+            }
+            adaptive = renderer.render_chat(ChatCompletionRequest.model_validate(base))
+            self.assertEqual(adaptive.rendered_prompt, "user:hello;")
+            for mode, suffix in (
+                ("disabled", "</mm:think>"),
+                ("enabled", "<mm:think>"),
+            ):
+                request = ChatCompletionRequest.model_validate(
+                    {**base, "chat_template_kwargs": {"thinking_mode": mode}}
+                )
+                rendered = renderer.render_chat(request)
+                self.assertEqual(
+                    rendered.rendered_prompt, adaptive.rendered_prompt + suffix
+                )
+                self.assertEqual(
+                    rendered.input_ids, list(rendered.rendered_prompt.encode())
+                )
+
+            budget_zero = renderer.render_chat(
+                ChatCompletionRequest.model_validate({**base, "thinking_budget": 0})
+            )
+            self.assertEqual(
+                budget_zero.rendered_prompt, adaptive.rendered_prompt + "</mm:think>"
+            )
+
     def test_tool_output_schema_and_streaming(self):
         tool = Tool(
             type="function",
